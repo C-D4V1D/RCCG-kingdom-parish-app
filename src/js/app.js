@@ -51,9 +51,6 @@ const INCOME_TYPES = [
   { key:'childrenOffering',label:"Children's Offering",    natl:0.35, local:0.65 }
 ];
 
-const TG_SPLIT = { national:0.75, area:0.05, pastor:0.10, ministers:0.09, seed:0.01 };
-const PROVINCE_REBATE = 0.20;
-
 const EXPENSE_CATS = [
   { key:'power',      label:'Power & Energy',          color:'#EF9F27', icon:'⚡' },
   { key:'facility',   label:'Facility & Cleaning',     color:'#1D9E75', icon:'🧹' },
@@ -71,7 +68,36 @@ const EXPENSE_CATS = [
   { key:'events',     label:'Events & Departments',    color:'#534AB7', icon:'🎉' }
 ];
 
+const EXPENSE_SUBCATS = {
+  power:       ['Fuel for the church generator','Generator engine oil','Prepaid electricity meter recharge (NEPA/Disco bills)','Others...'],
+  hospitality: ['Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)','Hosting expenses (feeding & accommodating visiting senior pastors)','Drinking water for altar & workers','Others...'],
+  facility:    ['Cleaning supplies','Waste disposal fees','Others...'],
+  welfare:     ["Financial support for members' weddings","Financial support for members' burials","Assistance for severe medical emergencies (hospital bills for a worker)",'Approved special pastoral support','Urgent financial lifelines for the pastoral family or dedicated workers','Others...'],
+  sound:       ['Microphone batteries','Sound cables, extension boxes, and connectors','Cable TV subscriptions','Repairs for speakers or amplifiers','Others...'],
+  repairs:     ['Generator mechanical repairs and routine servicing','Minor electrical fixes','Plumbing repairs','Others...'],
+  comms:       ['Airtime for making official church calls','Internet Data for church phones or computers','Bulk SMS for announcements or reminders to members','Others...'],
+  office:      ['Stationery','Offering, Tithe, and Thanksgiving envelopes','Printing and photocopying','Others...'],
+  bank:        ['POS terminal charges','SMS alert fees from the bank','Money transfer charges','Monthly account maintenance fees','Cheque book issuance charges','Other bank charges','Others...'],
+  transport:   ['Transport and accommodation for the Pastor or Ministers attending Provincial, Regional, or National church programs','Transport fares for workers running official church errands','Transport stipends for guest ministers','Moving costs (paying to transport rented chairs or equipment for special programs)','Others...'],
+  rccg_proj:   ["Let's Go A-Fishing contributions",'Financial demands for ongoing Provincial, Regional, or National building projects','Special emergency offerings or project support requested by RCCG higher authorities','Others...'],
+  property:    ['Annual land or building rent','Building construction and renovations','Buying major equipment','Others...'],
+  events:      ['Flyers, banners, and posters for special programs','Church decorations for special events or festive seasons','Teaching materials and snacks for the Children\'s department','Purchasing Sunday School manuals for the parish','Others...'],
+  security:    ['Monthly salary or allowance for the night security guard','Security supplies','Occasional tips or relations with local police or community vigilantes','Others...']
+};
+
 const DEFAULT_QUOTAS = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000, goFishing:10000 };
+
+const DEFAULT_REMITTANCE_RATES = {
+  membersTithe:    { natl:0.58, local:0.42 },
+  ministersTithe:  { natl:0.62, local:0.38 },
+  sundaySchool:    { natl:1.00, local:0.00 },
+  slo:             { natl:0.30, local:0.70 },
+  crm:             { natl:0.60, local:0.40 },
+  workersOffering: { natl:0.25, local:0.75 },
+  childrenOffering:{ natl:0.35, local:0.65 },
+  tgNational:0.75, tgArea:0.05, tgPastor:0.10, tgMinisters:0.09, tgSeed:0.01,
+  provinceRebate:0.20
+};
 
 // ──────────────────────────────────────────
 // 2. DATA LAYER
@@ -79,7 +105,8 @@ const DEFAULT_QUOTAS = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, vo
 const DB = {
   KEYS: { users:'kp_users', income:'kp_income', remittances:'kp_remittances',
           expenses:'kp_expenses', petty:'kp_petty', audit:'kp_audit',
-          settings:'kp_settings', notifications:'kp_notifs' },
+          settings:'kp_settings', notifications:'kp_notifs',
+          cashTx:'kp_cash_transactions' },
 
   load(k){ try{ return JSON.parse(localStorage.getItem(k)||'null') }catch(e){ return null } },
   save(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)) }catch(e){} },
@@ -139,8 +166,19 @@ const DB = {
     this.save(this.KEYS.audit, arr);
   },
 
-  getSettings(){ return this.load(this.KEYS.settings) || { quotas: DEFAULT_QUOTAS, pettyMax:50000, churchName:'RCCG Kingdom Parish, Aguleri', bankName:'', accountNo:'' } },
+  getSettings(){ return this.load(this.KEYS.settings) || { quotas: DEFAULT_QUOTAS, remittanceRates: DEFAULT_REMITTANCE_RATES, pettyMax:50000, churchName:'RCCG Kingdom Parish, Aguleri', bankName:'', accountNo:'' } },
   saveSettings(v){ this.save(this.KEYS.settings, v) },
+
+  getCashTransactions(){ return this.load(this.KEYS.cashTx) || [] },
+  addCashTransaction(rec){
+    const arr = this.getCashTransactions();
+    rec.id = 'CTX-' + Date.now();
+    rec.createdAt = new Date().toISOString();
+    arr.unshift(rec);
+    this.save(this.KEYS.cashTx, arr);
+    this.addAudit('cash_transaction', `${rec.type}: ${fmt(rec.amount)} — ${rec.description||''}`, state.user?.name);
+    return rec;
+  },
 
   getNotifications(){ return this.load(this.KEYS.notifications) || [] },
   addNotification(title, body, type='info'){
@@ -188,25 +226,41 @@ function filterByMonth(arr){
 }
 
 // Remittance engine
+function getRemRates(){
+  const s = DB.getSettings();
+  const r = s.remittanceRates || DEFAULT_REMITTANCE_RATES;
+  return {
+    rates: r,
+    tgNational:  r.tgNational   ?? DEFAULT_REMITTANCE_RATES.tgNational,
+    tgArea:      r.tgArea       ?? DEFAULT_REMITTANCE_RATES.tgArea,
+    tgPastor:    r.tgPastor     ?? DEFAULT_REMITTANCE_RATES.tgPastor,
+    tgMinisters: r.tgMinisters  ?? DEFAULT_REMITTANCE_RATES.tgMinisters,
+    tgSeed:      r.tgSeed       ?? DEFAULT_REMITTANCE_RATES.tgSeed,
+    provinceRebate: r.provinceRebate ?? DEFAULT_REMITTANCE_RATES.provinceRebate
+  };
+}
+
 function calcRemittances(income){
+  const rr = getRemRates();
   const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, localBefore:0, provinceRebate:0, netLocal:0 };
   INCOME_TYPES.forEach(t=>{
     const amt = income[t.key]||0;
     if(!amt) return;
     if(t.special==='tg'){
-      const line = { label:t.label, total:amt, national: amt*TG_SPLIT.national, area: amt*TG_SPLIT.area,
-        pastor: amt*TG_SPLIT.pastor, ministers: amt*TG_SPLIT.ministers, seed: amt*TG_SPLIT.seed, local:0 };
+      const line = { label:t.label, total:amt, national: amt*rr.tgNational, area: amt*rr.tgArea,
+        pastor: amt*rr.tgPastor, ministers: amt*rr.tgMinisters, seed: amt*rr.tgSeed, local:0 };
       res.lines.push(line);
       res.totalNatl+=line.national; res.totalArea+=line.area;
       res.totalPastor+=line.pastor; res.totalMinisters+=line.ministers;
     } else {
-      const local = amt*(t.local||0);
-      const natl = amt*(t.natl||0);
+      const rateEntry = (rr.rates[t.key]) || { natl: t.natl||0, local: t.local||0 };
+      const local = amt*(rateEntry.local);
+      const natl  = amt*(rateEntry.natl);
       res.lines.push({ label:t.label, total:amt, national:natl, local });
       res.totalNatl+=natl; res.localBefore+=local;
     }
   });
-  res.provinceRebate = res.localBefore * PROVINCE_REBATE;
+  res.provinceRebate = res.localBefore * rr.provinceRebate;
   res.netLocal = res.localBefore - res.provinceRebate;
   return res;
 }
@@ -393,6 +447,26 @@ function renderPage(page){
 }
 
 // ── DASHBOARD ────────────────────────────
+function calcChurchBalance(){
+  const allIncome = DB.getIncome();
+  const allExpenses = DB.getExpenses();
+  const allRemittances = DB.getRemittances();
+  const cashTx = DB.getCashTransactions();
+  const petty = DB.getPetty();
+
+  // Cash at hand = income records not yet deposited
+  const cashAtHand = allIncome.filter(r=>!r.depositConfirmed).reduce((s,r)=>s+(r.totalCollection||0),0);
+
+  // Bank = deposited income - bank-paid expenses - paid remittances - bank withdrawals + bank to petty reversals
+  const deposited = allIncome.filter(r=>r.depositConfirmed).reduce((s,r)=>s+(r.totalCollection||0),0);
+  const bankExpenses = allExpenses.filter(e=>e.paymentMethod==='bank_transfer').reduce((s,e)=>s+(e.amount||0),0);
+  const paidRems = allRemittances.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
+  const bankWithdrawals = cashTx.filter(t=>t.type==='withdrawal').reduce((s,t)=>s+(t.amount||0),0);
+  const bankBalance = deposited - bankExpenses - paidRems - bankWithdrawals;
+
+  return { cashAtHand, bankBalance, pettyFloat: petty.float, total: cashAtHand + bankBalance + petty.float };
+}
+
 function renderDashboard(){
   const income = filterByMonth(DB.getIncome());
   const expenses = filterByMonth(DB.getExpenses());
@@ -405,14 +479,14 @@ function renderDashboard(){
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
   const remittances = calcRemittancesFromRecords(income);
   const netLocal = remittances.netLocal;
-  const bankBalance = totalIncome - totalExpenses - remittances.totalNatl - remittances.totalArea - remittances.provinceRebate;
+  const churchBal = calcChurchBalance();
   const pendingPetty = getPettyCashPendingCount();
   const overdueRems = DB.getRemittances().filter(r=>r.status==='overdue').length;
 
   // Feed items
   const recentIncome = allIncome.slice(0,3);
   const recentExp = allExpenses.slice(0,3);
-  const feedItems = [...recentIncome.map(r=>({type:'income',date:r.date,desc:`Sunday collections deposited`,amt:r.totalCollection,icon:'📥',color:'#E1F5EE'})),
+  const feedItems = [...recentIncome.map(r=>({type:'income',date:r.date,desc:`Sunday collections ${r.depositConfirmed?'deposited':'collected (cash)'}`,amt:r.totalCollection,icon:'📥',color:'#E1F5EE'})),
     ...recentExp.map(r=>({type:'expense',date:r.date||r.createdAt,desc:r.description,amt:r.amount,icon:'💸',color:'#FAEEDA'}))]
     .sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,6);
 
@@ -425,7 +499,7 @@ function renderDashboard(){
   let alerts='';
   if(overdueRems>0) alerts+=`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span>${overdueRems} remittance(s) are <strong>overdue</strong>. Please process immediately.</span></div>`;
   if(pendingPetty>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span>${pendingPetty} petty cash request(s) awaiting approval. <button class="btn btn-sm" onclick="App.navigate('petty_cash')" style="margin-left:8px">Review</button></span></div>`;
-  if(bankBalance<50000 && bankBalance>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Bank balance is running low. Consider notifying the KPSC if remittances cannot be covered.</span></div>`;
+  if(churchBal.bankBalance<50000 && churchBal.bankBalance>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Bank balance is running low. Consider notifying the KPSC if remittances cannot be covered.</span></div>`;
 
   // Monthly trend (last 4 months)
   const trendData = [];
@@ -464,13 +538,31 @@ function renderDashboard(){
         <div class="kpi-val">${fmt(netLocal)}</div>
         <div class="kpi-delta up">After province rebate</div>
       </div>
-      <div class="kpi">
-        <div class="kpi-icon" style="background:#EAF3DE">💰</div>
-        <div class="kpi-label">Petty Cash Float</div>
-        <div class="kpi-val">${fmt(petty.float)}</div>
-        <div class="kpi-delta ${petty.float<10000?'down':'up'}">of ${fmt(petty.max)} max float</div>
+      <div class="kpi kpi-balance" style="grid-column:span 1">
+        <div class="kpi-icon" style="background:#EAF3DE">🏛️</div>
+        <div class="kpi-label">Total Church Balance</div>
+        <div class="kpi-val" style="color:${churchBal.total<0?'var(--danger)':'var(--primary)'}">${fmt(churchBal.total)}</div>
+        <div style="margin-top:6px;font-size:11px;color:var(--text3);line-height:1.6">
+          <span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:4px"></span>Bank: ${fmt(churchBal.bankBalance)}<br>
+          <span style="display:inline-block;width:8px;height:8px;background:#BA7517;border-radius:50%;margin-right:4px"></span>Cash at Hand: ${fmt(churchBal.cashAtHand)}<br>
+          <span style="display:inline-block;width:8px;height:8px;background:#1D9E75;border-radius:50%;margin-right:4px"></span>Petty Cash: ${fmt(churchBal.pettyFloat)}
+        </div>
       </div>
     </div>
+
+    ${can('income','expenses','petty_request','reports')?`
+    <div class="card">
+      <div class="card-header"><span class="card-title">Quick Actions</span></div>
+      <div class="qa-grid">
+        ${can('income')?`<button class="qa-btn" onclick="App.navigate('income')"><div class="qa-icon" style="background:#E1F5EE">📥</div><div class="qa-label">Record Collections</div><div class="qa-sub">Log Sunday income</div></button>`:''}
+        ${can('remittances','remittances_view')?`<button class="qa-btn" onclick="App.navigate('remittances')"><div class="qa-icon" style="background:#FCEBEB">📤</div><div class="qa-label">Remittances</div><div class="qa-sub">Calculate & pay HQ</div></button>`:''}
+        ${can('expenses')?`<button class="qa-btn" onclick="App.navigate('expenses')"><div class="qa-icon" style="background:#FAEEDA">💸</div><div class="qa-label">Log Expense</div><div class="qa-sub">Record spending</div></button>`:''}
+        ${can('petty_request','petty_view')?`<button class="qa-btn" onclick="App.navigate('petty_cash')"><div class="qa-icon" style="background:#EAF3DE">💳</div><div class="qa-label">Petty Cash</div><div class="qa-sub">${pendingPetty>0?pendingPetty+' pending':'Request / Approve'}</div></button>`:''}
+        ${can('income')?`<button class="qa-btn" onclick="App.showBankWithdrawal()"><div class="qa-icon" style="background:#E6F1FB">🏦</div><div class="qa-label">Bank Withdrawal</div><div class="qa-sub">Record a bank debit</div></button>`:''}
+        ${can('reports')?`<button class="qa-btn" onclick="App.navigate('reports')"><div class="qa-icon" style="background:#EEEDFE">📊</div><div class="qa-label">Reports</div><div class="qa-sub">Generate statements</div></button>`:''}
+        <button class="qa-btn" onclick="App.showKPSCAlert()"><div class="qa-icon" style="background:#FAEEDA">🔔</div><div class="qa-label">Alert KPSC</div><div class="qa-sub">Emergency support</div></button>
+      </div>
+    </div>`:''}
 
     <div class="grid-6040">
       <div>
@@ -511,24 +603,11 @@ function renderDashboard(){
           <div class="status-row"><div><div class="status-row-label">National HQ</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalNatl)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Area</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalArea)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Pastor's Share (TG)</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalPastor)}</div></div></div>
-          <div class="status-row"><div><div class="status-row-label">Province Rebate (20%)</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.provinceRebate)}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">Province Rebate (${Math.round((getRemRates().provinceRebate)*100)}%)</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.provinceRebate)}</div></div></div>
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Net Local Retained</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(remittances.netLocal)}</div></div></div>
         </div>
       </div>
-    </div>
-
-    ${can('income','expenses','petty_request','reports')?`
-    <div class="card">
-      <div class="card-header"><span class="card-title">Quick Actions</span></div>
-      <div class="qa-grid">
-        ${can('income')?`<button class="qa-btn" onclick="App.navigate('income')"><div class="qa-icon" style="background:#E1F5EE">📥</div><div class="qa-label">Record Collections</div><div class="qa-sub">Log Sunday income</div></button>`:''}
-        ${can('remittances','remittances_view')?`<button class="qa-btn" onclick="App.navigate('remittances')"><div class="qa-icon" style="background:#FCEBEB">📤</div><div class="qa-label">Remittances</div><div class="qa-sub">Calculate & pay HQ</div></button>`:''}
-        ${can('expenses')?`<button class="qa-btn" onclick="App.navigate('expenses')"><div class="qa-icon" style="background:#FAEEDA">💸</div><div class="qa-label">Log Expense</div><div class="qa-sub">Record spending</div></button>`:''}
-        ${can('petty_request','petty_view')?`<button class="qa-btn" onclick="App.navigate('petty_cash')"><div class="qa-icon" style="background:#EAF3DE">💳</div><div class="qa-label">Petty Cash</div><div class="qa-sub">${pendingPetty>0?pendingPetty+' pending':'Request / Approve'}</div></button>`:''}
-        ${can('reports')?`<button class="qa-btn" onclick="App.navigate('reports')"><div class="qa-icon" style="background:#EEEDFE">📊</div><div class="qa-label">Reports</div><div class="qa-sub">Generate statements</div></button>`:''}
-        <button class="qa-btn" onclick="App.showKPSCAlert()"><div class="qa-icon" style="background:#FAEEDA">🔔</div><div class="qa-label">Alert KPSC</div><div class="qa-sub">Emergency support</div></button>
-      </div>
-    </div>`:''}`;
+    </div>`;
 }
 
 function calcRemittancesFromRecords(records){
@@ -597,7 +676,7 @@ function renderIncomeSummary(records){
             <div class="status-row-amt td-red">${fmt(l.national||0)}</div>
           </div>`).join('')}
         <div class="status-row" style="background:var(--amber-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
-          <div class="status-row-label">Province Rebate (20%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div>
+          <div class="status-row-label">Province Rebate (${Math.round(getRemRates().provinceRebate*100)}%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div>
         </div>
         <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(rem.netLocal)}</div></div>
       </div>
@@ -668,7 +747,7 @@ function viewIncome(id){
     <hr class="divider">
     <p class="card-title">Remittances Due</p>
     ${rem.lines.map(l=>`<div class="status-row"><div class="status-row-label">${l.label} → HQ</div><div class="status-row-amt td-red">${fmt(l.national||0)}</div></div>`).join('')}
-    <div class="status-row"><div class="status-row-label">Province Rebate (20%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div></div>
+    <div class="status-row"><div class="status-row-label">Province Rebate (${Math.round(getRemRates().provinceRebate*100)}%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div></div>
     <div class="status-row" style="border-top:2px solid var(--border)"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt td-green" style="font-size:15px">${fmt(rem.netLocal)}</div></div>
     <hr class="divider">
     <div class="fs-12 text-muted">Recorded by: ${r.recordedBy||'—'} · Counted with: ${r.usher||'—'}</div>
@@ -698,13 +777,14 @@ function renderRemittances(){
   const quotas = settings.quotas||DEFAULT_QUOTAS;
   const totalPaid = paidRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
 
+  const rr = getRemRates();
   const lines = [
     ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0, type:'percentage' })),
-    { label:'Area (Thanksgiving 5%)', amount:rem.totalArea, type:'percentage' },
-    { label:"Pastor's Share (TG 10%)", amount:rem.totalPastor, type:'percentage' },
-    { label:"Ministers' Share (TG 9%)", amount:rem.totalMinisters, type:'percentage' },
-    { label:"Pastors' Seed (TG 1%)", amount:rem.totalMinisters/9, type:'percentage' },
-    { label:'Province Rebate (20% of local)', amount:rem.provinceRebate, type:'percentage' },
+    { label:`Area (Thanksgiving ${Math.round(rr.tgArea*100)}%)`, amount:rem.totalArea, type:'percentage' },
+    { label:`Pastor's Share (TG ${Math.round(rr.tgPastor*100)}%)`, amount:rem.totalPastor, type:'percentage' },
+    { label:`Ministers' Share (TG ${Math.round(rr.tgMinisters*100)}%)`, amount:rem.totalMinisters, type:'percentage' },
+    { label:`Pastors' Seed (TG ${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalMinisters>0?rem.totalMinisters*(rr.tgSeed/rr.tgMinisters):0, type:'percentage' },
+    { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of local)`, amount:rem.provinceRebate, type:'percentage' },
     { label:'Go-A-Fishing', amount:quotas.goFishing||0, type:'quota' },
     { label:'RMF (Camp Clearing)', amount:quotas.rmf||0, type:'quota' },
     { label:'CSR (Christian Social Responsibility)', amount:quotas.csr||0, type:'quota' },
@@ -778,7 +858,7 @@ function markRemittancePaid(){
   const quotas = settings.quotas||DEFAULT_QUOTAS;
   const lines=[
     ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0 })),
-    { label:'Province Rebate (20% of local)', amount:rem.provinceRebate },
+    { label:`Province Rebate (${Math.round(getRemRates().provinceRebate*100)}% of local)`, amount:rem.provinceRebate },
     ...Object.entries(quotas).map(([k,v])=>({label:k.replace(/([A-Z])/g,' $1').replace(/^./,s=>s.toUpperCase()), amount:v}))
   ].filter(l=>l.amount>0);
 
@@ -847,17 +927,43 @@ function renderExpenses(){
     <div class="card">
       <div class="card-header"><span class="card-title">Expense Log</span></div>
       ${expenses.length?`<div class="table-wrap"><table>
-        <tr><th>Date</th><th>Category</th><th>Description</th><th class="td-right">Amount</th><th>Recorded By</th><th>Receipt</th></tr>
+        <tr><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th class="td-right">Amount</th><th>Method</th><th>Recorded By</th><th>Receipt</th></tr>
         ${expenses.map(e=>{const c=EXPENSE_CATS.find(x=>x.key===e.category)||{};return`<tr>
           <td>${fmtDate(e.date||e.createdAt)}</td>
           <td><span class="badge badge-gray">${c.icon||''} ${c.label||e.category}</span></td>
-          <td>${e.description}</td>
+          <td style="font-size:12px;color:var(--text2)">${e.subCategory||'—'}</td>
+          <td>${e.description||'—'}</td>
           <td class="td-right td-red td-bold">${fmt(e.amount)}</td>
+          <td class="td-muted" style="font-size:11px">${e.paymentMethod?.replace('_',' ')||'—'}</td>
           <td class="td-muted">${e.recordedBy||'—'}</td>
-          <td class="td-muted">${e.receiptNo||'—'}</td>
+          <td class="td-muted">${e.receiptImage?`<button class="btn btn-sm" onclick="App.viewExpenseReceipt('${e.id}')">View</button>`:e.receiptNo||'—'}</td>
         </tr>`}).join('')}
       </table></div>`:'<div class="empty-table">No expenses recorded this month.</div>'}
     </div>`;
+}
+
+function updateExpenseSubcats(){
+  const cat = document.getElementById('exp_cat')?.value;
+  const subcats = cat ? (EXPENSE_SUBCATS[cat]||['Others...']) : [];
+  const subDiv = document.getElementById('exp_subcat_group');
+  if(!subDiv) return;
+  if(!cat){ subDiv.style.display='none'; return }
+  subDiv.style.display='block';
+  const sel = document.getElementById('exp_subcat');
+  sel.innerHTML = `<option value="">— Select sub-category —</option>` +
+    subcats.map(s=>`<option value="${s}">${s}</option>`).join('');
+  updateExpenseDescRequired();
+}
+
+function updateExpenseDescRequired(){
+  const subcat = document.getElementById('exp_subcat')?.value;
+  const label = document.getElementById('exp_desc_label');
+  const input = document.getElementById('exp_desc');
+  const hint  = document.getElementById('exp_desc_hint');
+  const isOthers = subcat === 'Others...';
+  if(label) label.textContent = isOthers ? 'Description *' : 'Description (optional)';
+  if(input) input.placeholder = isOthers ? 'Required: describe what this is for' : 'What was purchased / paid for?';
+  if(hint)  hint.style.display = isOthers ? 'block' : 'none';
 }
 
 function showExpenseForm(){
@@ -866,34 +972,109 @@ function showExpenseForm(){
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">💸 Log Expense</div>
     <div class="form-group"><label class="form-label">Date</label><input type="date" id="exp_date" class="form-input" value="${today}" max="${today}" /></div>
-    <div class="form-group"><label class="form-label">Category</label>
-      <select id="exp_cat" class="form-select">
+    <div class="form-group"><label class="form-label">Category *</label>
+      <select id="exp_cat" class="form-select" onchange="App.updateExpenseSubcats()">
         <option value="">— Select category —</option>
         ${EXPENSE_CATS.map(c=>`<option value="${c.key}">${c.icon} ${c.label}</option>`).join('')}
       </select>
     </div>
-    <div class="form-group"><label class="form-label">Description</label><input type="text" id="exp_desc" class="form-input" placeholder="What was purchased / paid for?" /></div>
-    <div class="form-group"><label class="form-label">Amount (₦)</label><input type="number" id="exp_amt" class="form-input" placeholder="0" min="0" /></div>
-    <div class="form-row">
-      <div class="form-group"><label class="form-label">Receipt / Invoice No.</label><input type="text" id="exp_receipt" class="form-input" placeholder="Optional" /></div>
-      <div class="form-group"><label class="form-label">Payment Method</label>
-        <select id="exp_method" class="form-select"><option value="petty_cash">Petty Cash</option><option value="bank_transfer">Bank Transfer</option></select>
-      </div>
+    <div class="form-group" id="exp_subcat_group" style="display:none"><label class="form-label">Sub-category *</label>
+      <select id="exp_subcat" class="form-select" onchange="App.updateExpenseDescRequired()">
+        <option value="">— Select sub-category —</option>
+      </select>
     </div>
-    <div class="form-group"><label class="form-label">Notes</label><textarea id="exp_notes" class="form-textarea" placeholder="Additional details..."></textarea></div>
+    <div class="form-group"><label class="form-label" id="exp_desc_label">Description (optional)</label>
+      <input type="text" id="exp_desc" class="form-input" placeholder="What was purchased / paid for?" />
+      <div id="exp_desc_hint" class="form-hint" style="display:none;color:var(--danger);font-size:11px;margin-top:4px">Description is required when "Others..." is selected.</div>
+    </div>
+    <div class="form-group"><label class="form-label">Amount (₦) *</label><input type="number" id="exp_amt" class="form-input" placeholder="0" min="0" /></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Payment Method</label>
+        <select id="exp_method" class="form-select"><option value="petty_cash">Petty Cash</option><option value="bank_transfer">Bank Transfer</option><option value="cash">Cash (Accountant)</option></select>
+      </div>
+      <div class="form-group"><label class="form-label">Receipt / Invoice No. (optional)</label><input type="text" id="exp_receipt" class="form-input" placeholder="Optional" /></div>
+    </div>
+    <div class="form-group"><label class="form-label">Upload Receipt Image (optional)</label>
+      <input type="file" id="exp_receipt_file" class="form-input" accept="image/*,application/pdf" style="padding:6px" />
+    </div>
+    <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="exp_notes" class="form-textarea" placeholder="Additional details..."></textarea></div>
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitExpense()">Save Expense</button></div>`);
 }
 
 function submitExpense(){
   const date=document.getElementById('exp_date')?.value;
   const category=document.getElementById('exp_cat')?.value;
+  const subCategory=document.getElementById('exp_subcat')?.value;
   const description=document.getElementById('exp_desc')?.value?.trim();
   const amount=parseFloat(document.getElementById('exp_amt')?.value)||0;
-  if(!date||!category||!description||!amount){ alert('Please fill all required fields.'); return }
-  DB.addExpense({ date, category, description, amount, receiptNo:document.getElementById('exp_receipt')?.value, paymentMethod:document.getElementById('exp_method')?.value, notes:document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
+  const isOthers = subCategory==='Others...';
+  if(!date||!category){ alert('Please select a date and category.'); return }
+  if(!subCategory){ alert('Please select a sub-category.'); return }
+  if(isOthers && !description){ alert('Description is required when "Others..." is selected.'); return }
+  if(!amount){ alert('Please enter an amount.'); return }
+
+  const fileEl = document.getElementById('exp_receipt_file');
+  const file = fileEl?.files?.[0];
+
+  function saveExpenseRecord(receiptDataUrl, receiptFileName){
+    DB.addExpense({ date, category, subCategory, description: description || subCategory, amount,
+      receiptNo: document.getElementById('exp_receipt')?.value,
+      receiptImage: receiptDataUrl||null, receiptFileName: receiptFileName||null,
+      paymentMethod: document.getElementById('exp_method')?.value,
+      notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
+    closeModal();
+    showAlert('Expense logged successfully!','success');
+    renderExpenses();
+  }
+
+  if(file){
+    const reader = new FileReader();
+    reader.onload = ev => saveExpenseRecord(ev.target.result, file.name);
+    reader.onerror = () => saveExpenseRecord(null, null);
+    reader.readAsDataURL(file);
+  } else {
+    saveExpenseRecord(null, null);
+  }
+}
+
+function viewExpenseReceipt(id){
+  const exp = DB.getExpenses().find(e=>e.id===id);
+  if(!exp||!exp.receiptImage) return;
+  const isImg = exp.receiptImage.startsWith('data:image');
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🧾 Receipt — ${exp.description||exp.subCategory||'Expense'}</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:8px">${exp.receiptFileName||''} · ${fmtDate(exp.date||exp.createdAt)}</p>
+    ${isImg?`<img src="${exp.receiptImage}" style="width:100%;border-radius:var(--r);max-height:70vh;object-fit:contain" alt="Receipt" />`:
+      `<a href="${exp.receiptImage}" target="_blank" class="btn btn-primary" download="${exp.receiptFileName||'receipt'}">Download Receipt PDF</a>`}
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
+}
+
+function showBankWithdrawal(){
+  const today=new Date().toISOString().split('T')[0];
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🏦 Record Bank Withdrawal</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Use this to record cash withdrawn from the church bank account. This affects the Total Church Balance calculation.</span></div>
+    <div class="form-group"><label class="form-label">Date *</label><input type="date" id="wd_date" class="form-input" value="${today}" max="${today}" /></div>
+    <div class="form-group"><label class="form-label">Amount Withdrawn (₦) *</label><input type="number" id="wd_amt" class="form-input" placeholder="0" min="0" /></div>
+    <div class="form-group"><label class="form-label">Purpose / Description *</label><input type="text" id="wd_desc" class="form-input" placeholder="e.g. Petty cash refill, Expense payment, etc." /></div>
+    <div class="form-group"><label class="form-label">Bank Reference / Teller No.</label><input type="text" id="wd_ref" class="form-input" placeholder="Optional reference number" /></div>
+    <div class="form-group"><label class="form-label">Authorized By</label><input type="text" id="wd_auth" class="form-input" placeholder="Signatory names" value="${state.user?.name||''}" /></div>
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankWithdrawal()">Record Withdrawal</button></div>`);
+}
+
+function submitBankWithdrawal(){
+  const date=document.getElementById('wd_date')?.value;
+  const amount=parseFloat(document.getElementById('wd_amt')?.value)||0;
+  const description=document.getElementById('wd_desc')?.value?.trim();
+  const reference=document.getElementById('wd_ref')?.value;
+  const auth=document.getElementById('wd_auth')?.value;
+  if(!date||!amount||!description){ alert('Please fill all required fields.'); return }
+  DB.addCashTransaction({ type:'withdrawal', date, amount, description, reference, authorizedBy:auth, recordedBy:state.user?.name });
   closeModal();
-  showAlert('Expense logged successfully!','success');
-  renderExpenses();
+  showAlert(`Bank withdrawal of ${fmt(amount)} recorded.`,'success');
+  navigate(state.page);
 }
 
 // ── PETTY CASH ────────────────────────────
@@ -1030,10 +1211,16 @@ function showPettyRefill(){
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">↺ Refill Petty Cash Float</div>
-    <div class="alert alert-warn"><span class="alert-icon">⚠</span><span>Only refill the exact amount of receipts submitted. Signatories must authorize the bank transfer first.</span></div>
+    <div class="alert alert-warn"><span class="alert-icon">⚠</span><span>Only refill the exact amount of receipts submitted. If refilling from bank, signatories must authorize the transfer first.</span></div>
     <div class="form-group"><label class="form-label">Refill Amount (₦)</label><input type="number" id="ref_amt" class="form-input" placeholder="0" /></div>
-    <div class="form-group"><label class="form-label">Bank Transfer Reference</label><input type="text" id="ref_ref" class="form-input" placeholder="Reference number" /></div>
-    <div class="form-group"><label class="form-label">Authorized By</label><input type="text" id="ref_auth" class="form-input" placeholder="Signatory names" /></div>
+    <div class="form-group"><label class="form-label">Source of Funds</label>
+      <select id="ref_source" class="form-select">
+        <option value="bank_transfer">Bank Transfer</option>
+        <option value="cash">Cash (from Accountant)</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Reference / Description</label><input type="text" id="ref_ref" class="form-input" placeholder="Bank transfer reference or cash handover note" /></div>
+    <div class="form-group"><label class="form-label">Authorized By</label><input type="text" id="ref_auth" class="form-input" placeholder="Signatory or Accountant names" /></div>
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitRefill()">Refill Float</button></div>`);
 }
 
@@ -1041,14 +1228,15 @@ function submitRefill(){
   const amt=parseFloat(document.getElementById('ref_amt')?.value)||0;
   const ref=document.getElementById('ref_ref')?.value;
   const auth=document.getElementById('ref_auth')?.value;
+  const source=document.getElementById('ref_source')?.value||'bank_transfer';
   if(!amt||!auth){ alert('Please enter amount and authorizing signatory.'); return }
   const petty=DB.getPetty();
   petty.float=Math.min(petty.float+amt, petty.max);
-  petty.history.unshift({ id:'RF-'+Date.now(), type:'refill', amount:amt, reference:ref, authorizedBy:auth, requestedBy:state.user?.name, status:'settled', createdAt:new Date().toISOString(), purpose:'Float Refill' });
+  petty.history.unshift({ id:'RF-'+Date.now(), type:'refill', amount:amt, reference:ref, source, authorizedBy:auth, requestedBy:state.user?.name, status:'settled', createdAt:new Date().toISOString(), purpose:'Float Refill' });
   DB.savePetty(petty);
-  DB.addAudit('petty_refilled',`Float refilled: ${fmt(amt)}`,state.user?.name);
+  DB.addAudit('petty_refilled',`Float refilled: ${fmt(amt)} via ${source}`,state.user?.name);
   closeModal();
-  showAlert(`Float refilled by ${fmt(amt)}. New balance: ${fmt(petty.float)}`,'success');
+  showAlert(`Float refilled by ${fmt(amt)} (${source.replace('_',' ')}). New balance: ${fmt(petty.float)}`,'success');
   renderPettyCash();
 }
 
@@ -1101,7 +1289,7 @@ function generateMonthlyReport(){
       <div class="table-wrap"><table class="print-table">
         <tr><th>Description</th><th class="td-right">Amount Due</th></tr>
         ${rem.lines.map(l=>`<tr><td>${l.label}</td><td class="td-right">${fmt(l.national||0)}</td></tr>`).join('')}
-        <tr><td>Province Rebate (20%)</td><td class="td-right">${fmt(rem.provinceRebate)}</td></tr>
+        <tr><td>Province Rebate (${Math.round(getRemRates().provinceRebate*100)}%)</td><td class="td-right">${fmt(rem.provinceRebate)}</td></tr>
         <tr style="font-weight:700"><td>TOTAL REMITTANCES</td><td class="td-right">${fmt(rem.totalNatl+rem.totalArea+rem.provinceRebate)}</td></tr>
         <tr style="font-weight:700;color:var(--primary)"><td>NET LOCAL RETAINED</td><td class="td-right">${fmt(rem.netLocal)}</td></tr>
       </table></div>
@@ -1225,9 +1413,10 @@ function renderAdmin(){
       <button class="tab ${tab==='users'?'active':''}" onclick="App.setAdminTab('users')">Users & Roles</button>
       <button class="tab ${tab==='settings'?'active':''}" onclick="App.setAdminTab('settings')">Church Settings</button>
       <button class="tab ${tab==='quotas'?'active':''}" onclick="App.setAdminTab('quotas')">Monthly Quotas</button>
+      <button class="tab ${tab==='rates'?'active':''}" onclick="App.setAdminTab('rates')">Remittance Rates</button>
       <button class="tab ${tab==='backup'?'active':''}" onclick="App.setAdminTab('backup')">Backup & Restore</button>
     </div>
-    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settings):tab==='quotas'?renderAdminQuotas(settings):renderAdminBackup()}`;
+    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settings):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):renderAdminBackup()}`;
 }
 
 function setAdminTab(t){ state.adminTab=t; renderAdmin() }
@@ -1267,6 +1456,57 @@ function renderAdminQuotas(s){
     ${Object.entries(q).map(([k,v])=>`<div class="form-group"><label class="form-label">${k.replace(/([A-Z])/g,' $1').replace(/^./,s=>s.toUpperCase())}</label><input type="number" id="q_${k}" class="form-input" value="${v}" /></div>`).join('')}
     <button class="btn btn-primary" onclick="App.saveQuotas()">Save Quotas</button>
   </div>`;
+}
+
+function renderAdminRates(s){
+  const r = s.remittanceRates || DEFAULT_REMITTANCE_RATES;
+  const pct = v => Math.round((v??0)*1000)/10; // display as percentage with 1 decimal
+  const rateRow = (label, key, subKey) => {
+    const val = subKey ? (r[key]?.[subKey] ?? DEFAULT_REMITTANCE_RATES[key]?.[subKey] ?? 0) : (r[key] ?? DEFAULT_REMITTANCE_RATES[key] ?? 0);
+    const id = subKey ? `rate_${key}_${subKey}` : `rate_${key}`;
+    return `<div class="form-row" style="align-items:center">
+      <div class="form-group" style="flex:2"><label class="form-label">${label}</label></div>
+      <div class="form-group" style="flex:1"><input type="number" id="${id}" class="form-input" value="${pct(val)}" min="0" max="100" step="0.1" placeholder="%" /></div>
+      <div style="font-size:12px;color:var(--text3);padding-top:6px">%</div>
+    </div>`;
+  };
+  return `<div class="card">
+    <div class="modal-title" style="font-size:15px;margin-bottom:8px">Remittance Percentage Rates</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">Configure what percentage of each income type goes to National HQ and what stays local. Changes take effect immediately for all new calculations.</p>
+    <div class="modal-title" style="font-size:13px;margin-bottom:8px;color:var(--text2)">Standard Income Types — National HQ %</div>
+    ${INCOME_TYPES.filter(t=>!t.special).map(t=>rateRow(`${t.label} → National HQ`, t.key, 'natl')).join('')}
+    ${INCOME_TYPES.filter(t=>!t.special).map(t=>rateRow(`${t.label} → Local Retained`, t.key, 'local')).join('')}
+    <hr class="divider">
+    <div class="modal-title" style="font-size:13px;margin-bottom:8px;color:var(--text2)">Thanksgiving (TG) Split</div>
+    ${rateRow('TG → National HQ','tgNational')}
+    ${rateRow('TG → Area','tgArea')}
+    ${rateRow("TG → Pastor's Share",'tgPastor')}
+    ${rateRow("TG → Ministers' Share",'tgMinisters')}
+    ${rateRow("TG → Seed (Carried Forward)",'tgSeed')}
+    <hr class="divider">
+    ${rateRow('Province Rebate (% of local)','provinceRebate')}
+    <button class="btn btn-primary" onclick="App.saveRates()">Save Remittance Rates</button>
+  </div>`;
+}
+
+function saveRates(){
+  const s = DB.getSettings();
+  const r = s.remittanceRates || {};
+  const pct2dec = id => { const el=document.getElementById(id); return el ? parseFloat(el.value||0)/100 : null; };
+  INCOME_TYPES.filter(t=>!t.special).forEach(t=>{
+    if(!r[t.key]) r[t.key]={};
+    const natl = pct2dec(`rate_${t.key}_natl`);
+    const local = pct2dec(`rate_${t.key}_local`);
+    if(natl!==null) r[t.key].natl = natl;
+    if(local!==null) r[t.key].local = local;
+  });
+  ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed','provinceRebate'].forEach(k=>{
+    const v = pct2dec(`rate_${k}`);
+    if(v!==null) r[k] = v;
+  });
+  s.remittanceRates = r;
+  DB.saveSettings(s);
+  showAlert('Remittance rates updated successfully!','success');
 }
 
 function renderAdminBackup(){
@@ -1372,7 +1612,7 @@ function deleteUser(id){
 }
 
 function exportData(){
-  const data={ users:DB.getUsers(), income:DB.getIncome(), remittances:DB.getRemittances(), expenses:DB.getExpenses(), petty:DB.getPetty(), audit:DB.getAudit(), settings:DB.getSettings(), exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
+  const data={ users:DB.getUsers(), income:DB.getIncome(), remittances:DB.getRemittances(), expenses:DB.getExpenses(), petty:DB.getPetty(), audit:DB.getAudit(), settings:DB.getSettings(), cashTransactions:DB.getCashTransactions(), exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   a.download=`rccg-backup-${new Date().toISOString().split('T')[0]}.json`;
@@ -1396,6 +1636,7 @@ function importData(){
         if(data.expenses) DB.save(DB.KEYS.expenses,data.expenses);
         if(data.petty) DB.save(DB.KEYS.petty,data.petty);
         if(data.settings) DB.save(DB.KEYS.settings,data.settings);
+        if(data.cashTransactions) DB.save(DB.KEYS.cashTx,data.cashTransactions);
         DB.addAudit('data_imported','Data restored from backup',state.user?.name);
         showAlert('Data restored successfully! Please refresh.','success');
       }catch(e){ alert('Invalid backup file. Please use a valid JSON backup.') }
@@ -1461,11 +1702,14 @@ return {
   onRoleChange, login, logout, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, submitIncome,
   viewIncome, confirmDeposit, markRemittancePaid, setRemAmt, submitRemittance,
-  showExpenseForm, submitExpense, renderPettyCash, showPettyRequest, submitPettyRequest,
+  updateExpenseSubcats, updateExpenseDescRequired,
+  showExpenseForm, submitExpense, viewExpenseReceipt,
+  showBankWithdrawal, submitBankWithdrawal,
+  renderPettyCash, showPettyRequest, submitPettyRequest,
   approvePetty, rejectPetty, submitPettyReceipt, showPettyRefill, submitRefill,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
-  setAdminTab, saveSettings, saveQuotas, showAddUser, addUser, editUser,
+  setAdminTab, saveSettings, saveQuotas, saveRates, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearAllData,
   showKPSCAlert, submitKPSCAlert, closeModal: closeModal
 };
