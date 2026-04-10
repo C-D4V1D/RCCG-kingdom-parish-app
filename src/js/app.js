@@ -870,7 +870,7 @@ function submitIncome(){
     const petty = DB.getPetty();
     const newFloat = Math.min(petty.float + directPettyCash, petty.max);
     petty.history.unshift({ id:'RF-'+Date.now(), type:'refill', amount:directPettyCash, source:'collection_cash',
-      reference:`From Sunday collection ${fmtDate(date)}`, authorizedBy:usher,
+      reference:`From Sunday collection ${fmtDate(date)}`, authorizedBy:state.user?.name,
       requestedBy:state.user?.name, status:'settled', createdAt:new Date().toISOString(),
       purpose:`Cash from Sunday collection (${fmtDate(date)}) → Admin Officer Petty Cash`, incomeRef:saved.id });
     petty.float = newFloat;
@@ -1041,12 +1041,11 @@ function submitOtherIncome(){
     directPettyCash: 0,
     depositConfirmed: method==='bank_transfer'
   };
-  // Map income category to the right income type field if applicable
+  // Map income category to the right income type field if applicable (drives remittance splits)
   if(category && category !== 'local_only'){
     rec[category] = amount;
-  } else {
-    rec.otherDonation = amount;
   }
+  // local_only donations have no remittance split; they appear in income totals but not in remittance calculations
 
   DB.addIncome(rec);
   DB.addNotification('Other Income Recorded',`${fmt(amount)} recorded (${source}) from ${donorName||'unnamed'}`,'success');
@@ -1246,10 +1245,14 @@ function updateExpenseSubcats(){
   if(methodSel){
     if(cat === 'bank'){
       methodSel.value = 'bank_transfer';
-      methodSel.disabled = true;
+      methodSel.style.opacity = '0.6';
+      methodSel.style.pointerEvents = 'none';
+      methodSel.setAttribute('aria-readonly','true');
       methodSel.title = 'Bank charges are automatically deducted from the bank balance';
     } else {
-      methodSel.disabled = false;
+      methodSel.style.opacity = '';
+      methodSel.style.pointerEvents = '';
+      methodSel.removeAttribute('aria-readonly');
       methodSel.title = '';
     }
   }
