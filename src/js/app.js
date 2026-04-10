@@ -169,6 +169,8 @@ const DB = {
   getSettings(){ return this.load(this.KEYS.settings) || { quotas: DEFAULT_QUOTAS, remittanceRates: DEFAULT_REMITTANCE_RATES, pettyMax:50000, churchName:'RCCG Kingdom Parish, Aguleri', bankName:'', accountNo:'' } },
   saveSettings(v){ this.save(this.KEYS.settings, v) },
 
+  // Records a cash/bank transaction. rec should include: { type, date, amount, description, reference, authorizedBy, recordedBy }
+  // type: 'withdrawal' (bank debit for payments/petty cash)
   getCashTransactions(){ return this.load(this.KEYS.cashTx) || [] },
   addCashTransaction(rec){
     const arr = this.getCashTransactions();
@@ -1036,7 +1038,7 @@ function submitExpense(){
   if(file){
     const reader = new FileReader();
     reader.onload = ev => saveExpenseRecord(ev.target.result, file.name);
-    reader.onerror = () => saveExpenseRecord(null, null);
+    reader.onerror = () => { showAlert('Failed to read receipt file. Saving expense without image.','warn'); saveExpenseRecord(null, null); };
     reader.readAsDataURL(file);
   } else {
     saveExpenseRecord(null, null);
