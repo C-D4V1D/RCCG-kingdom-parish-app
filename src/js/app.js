@@ -242,7 +242,7 @@ function getRemRates(){
 
 function calcRemittances(income){
   const rr = getRemRates();
-  const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, localBefore:0, provinceRebate:0, netLocal:0 };
+  const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, totalSeed:0, localBefore:0, provinceRebate:0, netLocal:0 };
   INCOME_TYPES.forEach(t=>{
     const amt = income[t.key]||0;
     if(!amt) return;
@@ -251,7 +251,7 @@ function calcRemittances(income){
         pastor: amt*rr.tgPastor, ministers: amt*rr.tgMinisters, seed: amt*rr.tgSeed, local:0 };
       res.lines.push(line);
       res.totalNatl+=line.national; res.totalArea+=line.area;
-      res.totalPastor+=line.pastor; res.totalMinisters+=line.ministers;
+      res.totalPastor+=line.pastor; res.totalMinisters+=line.ministers; res.totalSeed+=line.seed;
     } else {
       const rateEntry = (rr.rates[t.key]) || { natl: t.natl||0, local: t.local||0 };
       const local = amt*(rateEntry.local);
@@ -267,7 +267,13 @@ function calcRemittances(income){
 
 function showModal(html){ const o=document.createElement('div'); o.className='modal-overlay'; o.id='modalOverlay'; o.innerHTML=`<div class="modal">${html}</div>`; document.body.appendChild(o) }
 function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
-function showAlert(msg,type='success'){ const a=document.createElement('div'); a.className=`alert alert-${type}`; a.innerHTML=`<span class="alert-icon">${type==='success'?'✓':type==='danger'?'✕':'⚠'}</span><span>${msg}</span>`; const pc=document.getElementById('pageContent'); if(pc){ pc.insertBefore(a,pc.firstChild); setTimeout(()=>a.remove(),4000) } }
+function showAlert(msg,type='success'){
+  const a=document.createElement('div'); a.className=`alert alert-${type}`;
+  const icon=document.createElement('span'); icon.className='alert-icon'; icon.textContent=type==='success'?'✓':type==='danger'?'✕':'⚠';
+  const txt=document.createElement('span'); txt.textContent=msg;
+  a.appendChild(icon); a.appendChild(txt);
+  const pc=document.getElementById('pageContent'); if(pc){ pc.insertBefore(a,pc.firstChild); setTimeout(()=>a.remove(),4000) }
+}
 function updateNotifBadge(){ const notifs=DB.getNotifications(); const unread=notifs.filter(n=>!n.read).length; const el=document.getElementById('notifCount'); if(el){ el.textContent=unread; el.style.display=unread?'flex':'none' } }
 
 // ──────────────────────────────────────────
@@ -783,7 +789,7 @@ function renderRemittances(){
     { label:`Area (Thanksgiving ${Math.round(rr.tgArea*100)}%)`, amount:rem.totalArea, type:'percentage' },
     { label:`Pastor's Share (TG ${Math.round(rr.tgPastor*100)}%)`, amount:rem.totalPastor, type:'percentage' },
     { label:`Ministers' Share (TG ${Math.round(rr.tgMinisters*100)}%)`, amount:rem.totalMinisters, type:'percentage' },
-    { label:`Pastors' Seed (TG ${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalMinisters>0?rem.totalMinisters*(rr.tgSeed/rr.tgMinisters):0, type:'percentage' },
+    { label:`Pastors' Seed (TG ${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0, type:'percentage' },
     { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of local)`, amount:rem.provinceRebate, type:'percentage' },
     { label:'Go-A-Fishing', amount:quotas.goFishing||0, type:'quota' },
     { label:'RMF (Camp Clearing)', amount:quotas.rmf||0, type:'quota' },
@@ -1460,31 +1466,37 @@ function renderAdminQuotas(s){
 
 function renderAdminRates(s){
   const r = s.remittanceRates || DEFAULT_REMITTANCE_RATES;
-  const pct = v => Math.round((v??0)*1000)/10; // display as percentage with 1 decimal
-  const rateRow = (label, key, subKey) => {
-    const val = subKey ? (r[key]?.[subKey] ?? DEFAULT_REMITTANCE_RATES[key]?.[subKey] ?? 0) : (r[key] ?? DEFAULT_REMITTANCE_RATES[key] ?? 0);
-    const id = subKey ? `rate_${key}_${subKey}` : `rate_${key}`;
-    return `<div class="form-row" style="align-items:center">
-      <div class="form-group" style="flex:2"><label class="form-label">${label}</label></div>
-      <div class="form-group" style="flex:1"><input type="number" id="${id}" class="form-input" value="${pct(val)}" min="0" max="100" step="0.1" placeholder="%" /></div>
-      <div style="font-size:12px;color:var(--text3);padding-top:6px">%</div>
-    </div>`;
-  };
+  const decToPct = v => Math.round((v??0)*1000)/10;
+  const rateInput = (id, val) =>
+    `<input type="number" id="${id}" class="form-input" value="${decToPct(val)}" min="0" max="100" step="0.1" style="width:80px;display:inline-block" /> %`;
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Remittance Percentage Rates</div>
-    <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">Configure what percentage of each income type goes to National HQ and what stays local. Changes take effect immediately for all new calculations.</p>
-    <div class="modal-title" style="font-size:13px;margin-bottom:8px;color:var(--text2)">Standard Income Types — National HQ %</div>
-    ${INCOME_TYPES.filter(t=>!t.special).map(t=>rateRow(`${t.label} → National HQ`, t.key, 'natl')).join('')}
-    ${INCOME_TYPES.filter(t=>!t.special).map(t=>rateRow(`${t.label} → Local Retained`, t.key, 'local')).join('')}
+    <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">Configure what percentage of each income type goes to National HQ and what stays local. National + Local should sum to 100%. Changes take effect immediately for all new calculations.</p>
+    <div class="table-wrap"><table>
+      <tr><th>Income Type</th><th>→ National HQ %</th><th>→ Local Retained %</th></tr>
+      ${INCOME_TYPES.filter(t=>!t.special).map(t=>{
+        const rd = r[t.key] || DEFAULT_REMITTANCE_RATES[t.key] || { natl:0, local:0 };
+        return `<tr><td>${t.label}</td>
+          <td>${rateInput(`rate_${t.key}_natl`, rd.natl)}</td>
+          <td>${rateInput(`rate_${t.key}_local`, rd.local)}</td></tr>`;
+      }).join('')}
+    </table></div>
     <hr class="divider">
     <div class="modal-title" style="font-size:13px;margin-bottom:8px;color:var(--text2)">Thanksgiving (TG) Split</div>
-    ${rateRow('TG → National HQ','tgNational')}
-    ${rateRow('TG → Area','tgArea')}
-    ${rateRow("TG → Pastor's Share",'tgPastor')}
-    ${rateRow("TG → Ministers' Share",'tgMinisters')}
-    ${rateRow("TG → Seed (Carried Forward)",'tgSeed')}
+    <div class="table-wrap"><table>
+      <tr><th>Recipient</th><th>Percentage</th></tr>
+      <tr><td>TG → National HQ</td><td>${rateInput('rate_tgNational', r.tgNational ?? DEFAULT_REMITTANCE_RATES.tgNational)}</td></tr>
+      <tr><td>TG → Area</td><td>${rateInput('rate_tgArea', r.tgArea ?? DEFAULT_REMITTANCE_RATES.tgArea)}</td></tr>
+      <tr><td>TG → Pastor's Share</td><td>${rateInput('rate_tgPastor', r.tgPastor ?? DEFAULT_REMITTANCE_RATES.tgPastor)}</td></tr>
+      <tr><td>TG → Ministers' Share</td><td>${rateInput('rate_tgMinisters', r.tgMinisters ?? DEFAULT_REMITTANCE_RATES.tgMinisters)}</td></tr>
+      <tr><td>TG → Seed (Carried Forward)</td><td>${rateInput('rate_tgSeed', r.tgSeed ?? DEFAULT_REMITTANCE_RATES.tgSeed)}</td></tr>
+    </table></div>
     <hr class="divider">
-    ${rateRow('Province Rebate (% of local)','provinceRebate')}
+    <div class="form-row" style="align-items:center;gap:12px">
+      <label class="form-label" style="margin:0;flex:1">Province Rebate (% of local):</label>
+      ${rateInput('rate_provinceRebate', r.provinceRebate ?? DEFAULT_REMITTANCE_RATES.provinceRebate)}
+    </div>
+    <br>
     <button class="btn btn-primary" onclick="App.saveRates()">Save Remittance Rates</button>
   </div>`;
 }
