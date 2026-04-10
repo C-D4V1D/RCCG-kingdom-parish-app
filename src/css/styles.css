@@ -1,0 +1,152 @@
+/* RCCG Kingdom Parish — Global Styles */
+/* Color palette: Deep Teal + Amber accent */
+
+:root {
+  --primary: #0F6E56;
+  --primary-light: #E1F5EE;
+  --primary-mid: #1D9E75;
+  --amber: #BA7517;
+  --amber-light: #FAEEDA;
+  --danger: #A32D2D;
+  --danger-light: #FCEBEB;
+  --success: #3B6D11;
+  --success-light: #EAF3DE;
+  --info: #185FA5;
+  --info-light: #E6F1FB;
+  --text-primary: #1a1a1a;
+  --text-secondary: #6b6b6b;
+  --text-muted: #9b9b9b;
+  --border: rgba(0,0,0,0.1);
+  --border-strong: rgba(0,0,0,0.2);
+  --bg-page: #f5f5f3;
+  --bg-card: #ffffff;
+  --bg-surface: #f8f8f6;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* Header */
+.app-header {
+  background: var(--bg-card);
+  border-bottom: 0.5px solid var(--border);
+  padding: 0.875rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.header-left { display: flex; align-items: center; gap: 12px; }
+.church-logo {
+  width: 40px; height: 40px; border-radius: 50%;
+  background: var(--primary); color: #9FE1CB;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 600; font-size: 13px; flex-shrink: 0;
+}
+.church-name { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.church-sub { font-size: 12px; color: var(--text-secondary); }
+.header-right { display: flex; align-items: center; gap: 10px; }
+.role-badge {
+  background: var(--primary-light); color: var(--primary);
+  font-size: 12px; font-weight: 500;
+  padding: 4px 12px; border-radius: var(--radius-md);
+}
+.month-select {
+  font-size: 13px; padding: 6px 10px;
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-primary); cursor: pointer;
+}
+
+/* Navigation */
+.app-nav {
+  background: var(--bg-card);
+  border-bottom: 0.5px solid var(--border);
+  padding: 0 1.5rem;
+  display: flex; gap: 0; overflow-x: auto;
+}
+.nav-item {
+  padding: 12px 16px; font-size: 13px; font-weight: 500;
+  color: var(--text-secondary); text-decoration: none;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap; transition: all 0.15s;
+}
+.nav-item:hover { color: var(--primary); }
+.nav-item.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+/* Main */
+.app-main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
+
+/* Cards */
+.card {
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1rem 1.25rem;
+}
+.card-title {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.6px;
+  text-transform: uppercase; color: var(--text-secondary);
+  margin-bottom: 1rem;
+}
+
+/* KPI Cards */
+.kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; margin-bottom: 1rem; }
+.kpi {
+  background: var(--bg-surface);
+  border-radius: var(--radius-md); padding: 1rem;
+}
+.kpi-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+.kpi-val { font-size: 22px; font-weight: 600; color: var(--text-primary); }
+.kpi-delta { font-size: 11px; margin-top: 4px; }
+.kpi-delta.up { color: var(--success); }
+.kpi-delta.down { color: var(--danger); }
+.kpi-delta.warn { color: var(--amber); }
+
+/* Grids */
+.grid-2-3 { display: grid; grid-template-columns: 3fr 2fr; gap: 12px; margin-bottom: 1rem; }
+.grid-3-2 { display: grid; grid-template-columns: 3fr 2fr; gap: 12px; margin-bottom: 1rem; }
+
+/* Status badges */
+.badge {
+  font-size: 11px; padding: 2px 8px;
+  border-radius: var(--radius-md); font-weight: 500;
+}
+.badge.paid { background: var(--success-light); color: var(--success); }
+.badge.due { background: var(--amber-light); color: var(--amber); }
+.badge.overdue { background: var(--danger-light); color: var(--danger); }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 16px; border-radius: var(--radius-md);
+  font-size: 13px; font-weight: 500; cursor: pointer;
+  border: 0.5px solid var(--border-strong);
+  background: var(--bg-card); color: var(--text-primary);
+  transition: background 0.15s;
+}
+.btn:hover { background: var(--bg-surface); }
+.btn.primary {
+  background: var(--primary); color: white; border-color: var(--primary);
+}
+.btn.primary:hover { background: #0a5440; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+  .grid-2-3, .grid-3-2 { grid-template-columns: 1fr; }
+  .app-main { padding: 1rem; }
+}

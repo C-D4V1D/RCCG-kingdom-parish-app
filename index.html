@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RCCG Kingdom Parish — Finance Portal</title>
+  <link rel="stylesheet" href="src/css/styles.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="church-logo">KP</div>
+      <div>
+        <h1 class="church-name">RCCG Kingdom Parish, Aguleri</h1>
+        <p class="church-sub">Finance &amp; Accounting Portal</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <span class="role-badge" id="roleBadge">Church Accountant</span>
+      <select id="monthSelector" class="month-select">
+        <option>April 2025</option>
+        <option>March 2025</option>
+        <option>February 2025</option>
+        <option>January 2025</option>
+      </select>
+    </div>
+  </header>
+
+  <!-- Navigation -->
+  <nav class="app-nav">
+    <a href="#dashboard" class="nav-item active" data-page="dashboard">Dashboard</a>
+    <a href="#income" class="nav-item" data-page="income">Record Income</a>
+    <a href="#remittances" class="nav-item" data-page="remittances">Remittances</a>
+    <a href="#expenses" class="nav-item" data-page="expenses">Expenses</a>
+    <a href="#petty-cash" class="nav-item" data-page="petty-cash">Petty Cash</a>
+    <a href="#reports" class="nav-item" data-page="reports">Reports</a>
+  </nav>
+
+  <!-- Main content area -->
+  <main class="app-main" id="appMain">
+    <!-- Pages load here dynamically -->
+    <div id="pageContent">
+      <p style="padding:2rem;color:#888">Loading dashboard...</p>
+    </div>
+  </main>
+
+  <script type="module" src="src/js/app.js"></script>
+
+</body>
+</html>
