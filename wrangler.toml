@@ -5,4 +5,4 @@ pages_build_output_dir = "."
 [[d1_databases]]
 binding = "DB"
 database_name = "rccg-parish-db"
-database_id = "REPLACE_WITH_YOUR_DATABASE_ID"
+database_id = "dcc63f58-6079-44ba-900c-ff58bc81c4e8"
