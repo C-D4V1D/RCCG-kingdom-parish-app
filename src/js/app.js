@@ -897,75 +897,180 @@ function submitExpense(){
 }
 
 // ── PETTY CASH ────────────────────────────
+// Helper: filter petty history by selected month (fixed — was passing object to filterByMonth)
+function pettyMonthHistory(history){
+  return (history||[]).filter(h=>{
+    const d=new Date(h.createdAt||h.date||0);
+    return d.getMonth()===state.month && d.getFullYear()===state.year;
+  });
+}
+
+// Helper: check if an approved item's receipt is overdue (>48 hours since approval)
+function isReceiptOverdue(req){
+  if(req.status!=='approved'||req.receiptNo) return false;
+  const hrs=(Date.now()-new Date(req.approvedAt||req.createdAt).getTime())/3600000;
+  return hrs>48;
+}
+
 function renderPettyCash(){
   const petty=DB.getPetty();
   const history=petty.history||[];
-  const monthHistory=history.filter(h=>{const d=new Date(h.createdAt||h.date||0);return d.getMonth()===state.month&&d.getFullYear()===state.year});
-  const pct=Math.round((petty.float/petty.max)*100);
+  // BUG FIX 1: was passing plain object to filterByMonth — now uses dedicated helper
+  const monthHistory=pettyMonthHistory(history);
+  const pct=Math.min(100,Math.round((petty.float/petty.max)*100));
+  // Pending = all unresolved requests across all months (correct — approvals aren't monthly-scoped)
   const pending=history.filter(h=>h.status==='pending_approval');
+  // BUG FIX 4: detect approved items where receipt is overdue (>48 hours)
+  const overdueReceipts=history.filter(h=>isReceiptOverdue(h));
+
+  // Reconciliation figures for current month
+  const monthDisbursed=monthHistory.filter(h=>h.type!=='refill'&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.amount||0),0);
+  const monthSettled=monthHistory.filter(h=>h.status==='settled'&&h.type!=='refill').reduce((s,h)=>s+(h.amount||0),0);
+  const monthRefilled=monthHistory.filter(h=>h.type==='refill').reduce((s,h)=>s+(h.amount||0),0);
+  const awaitingReceipts=monthHistory.filter(h=>h.status==='approved'&&!h.receiptNo&&h.type!=='refill');
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
-      <div><div class="page-title">Petty Cash (Imprest)</div><div class="page-sub">Current float balance</div></div>
+      <div><div class="page-title">Petty Cash (Imprest)</div><div class="page-sub">Current float balance — ${monthLabel()}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${can('petty_request','admin_officer')?`<button class="btn btn-primary" onclick="App.showPettyRequest()">+ Submit Request</button>`:''}
-        ${can('income','accountant')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">↺ Refill Float</button>`:''}
+        ${can('petty_request')?`<button class="btn btn-primary" onclick="App.showPettyRequest()">+ Submit Request</button>`:''}
+        ${can('income')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">↺ Refill Float</button>`:''}
+      </div>
+    </div>
+
+    ${overdueReceipts.length?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span><strong>${overdueReceipts.length} receipt(s) overdue!</strong> The following approved requests have not had receipts submitted within 48 hours: ${overdueReceipts.map(r=>r.purpose).join(', ')}. Please follow up with the Admin Officer immediately.</span></div>`:''}
+
+    <div class="kpi-grid">
+      <div class="kpi">
+        <div class="kpi-icon" style="background:${petty.float<10000?'var(--danger-light)':petty.float<20000?'var(--amber-light)':'var(--primary-light)'}">💳</div>
+        <div class="kpi-label">Available Float</div>
+        <div class="kpi-val" style="color:${petty.float<10000?'var(--danger)':petty.float<20000?'var(--amber)':'var(--primary)'}">${fmt(petty.float)}</div>
+        <div class="kpi-delta ${pct<20?'down':pct<50?'warn':'up'}">${pct}% of ${fmt(petty.max)} max</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-icon" style="background:#FCEBEB">📤</div>
+        <div class="kpi-label">Disbursed (${monthLabel().split(' ')[0]})</div>
+        <div class="kpi-val">${fmt(monthDisbursed)}</div>
+        <div class="kpi-delta warn">Cash released this month</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-icon" style="background:#EAF3DE">🧾</div>
+        <div class="kpi-label">Receipts Settled</div>
+        <div class="kpi-val">${fmt(monthSettled)}</div>
+        <div class="kpi-delta up">Accounted & linked to expenses</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-icon" style="background:#FAEEDA">⏳</div>
+        <div class="kpi-label">Awaiting Receipts</div>
+        <div class="kpi-val ${awaitingReceipts.length?'td-amber':''}">${fmt(monthDisbursed-monthSettled)}</div>
+        <div class="kpi-delta ${awaitingReceipts.length?'warn':'up'}">${awaitingReceipts.length} item(s) outstanding</div>
       </div>
     </div>
 
     <div class="grid-2">
-      <div class="card" style="text-align:center;padding:1.5rem">
-        <div class="amount-label">Available Float</div>
-        <div class="amount-display" style="font-size:32px;color:${petty.float<10000?'var(--danger)':petty.float<20000?'var(--amber)':'var(--primary)'}">${fmt(petty.float)}</div>
-        <div class="progress-bar" style="margin:12px auto;max-width:200px;height:10px">
-          <div class="progress-fill" style="width:${pct}%;background:${pct<20?'var(--danger)':pct<50?'var(--amber)':'var(--primary)'}"></div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Float Gauge</span>
+          ${can('income')?`<button class="btn btn-sm btn-amber" onclick="App.showPettyRefill()">↺ Refill</button>`:''}
         </div>
-        <div class="amount-label">${pct}% of ${fmt(petty.max)} max float</div>
-        ${petty.float<10000?`<div class="alert alert-danger" style="margin-top:12px;text-align:left"><span class="alert-icon">⚠</span><span>Float is critically low. Request a refill immediately.</span></div>`:''}
+        <div style="text-align:center;padding:0.5rem 0 1rem">
+          <div class="amount-display" style="color:${petty.float<10000?'var(--danger)':petty.float<20000?'var(--amber)':'var(--primary)'}">${fmt(petty.float)}</div>
+          <div class="progress-bar" style="margin:12px auto;max-width:240px;height:12px;border-radius:6px">
+            <div class="progress-fill" style="width:${pct}%;background:${pct<20?'var(--danger)':pct<50?'var(--amber)':'var(--primary)'};border-radius:6px"></div>
+          </div>
+          <div class="amount-label">${pct}% of ${fmt(petty.max)} approved max float</div>
+        </div>
+        ${petty.float<10000?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span>Critically low. Request refill now.</span></div>`:''}
+        <hr class="divider">
+        <div class="section-hdr"><span class="section-title">Month Reconciliation</span></div>
+        <div class="status-row"><div class="status-row-label">Cash disbursed</div><div class="status-row-amt td-red">${fmt(monthDisbursed)}</div></div>
+        <div class="status-row"><div class="status-row-label">Receipts submitted & settled</div><div class="status-row-amt td-green">${fmt(monthSettled)}</div></div>
+        <div class="status-row"><div class="status-row-label" style="font-weight:600">Unaccounted (no receipt yet)</div><div class="status-row-amt ${monthDisbursed-monthSettled>0?'td-amber':'td-green'}" style="font-weight:700">${fmt(monthDisbursed-monthSettled)}</div></div>
+        <div class="status-row"><div class="status-row-label">Float refilled this month</div><div class="status-row-amt td-green">${fmt(monthRefilled)}</div></div>
       </div>
+
       <div class="card">
         <div class="card-header"><span class="card-title">Pending Approval (${pending.length})</span></div>
         ${pending.length?pending.map(r=>`
           <div class="status-row">
-            <div><div class="status-row-label">${r.purpose}</div><div class="status-row-sub">By: ${r.requestedBy} · ${fmtDate(r.createdAt)}</div></div>
-            <div class="status-row-right">
-              <div class="status-row-amt td-amber">${fmt(r.amount)}</div>
-              ${can('income','signatory','petty_approve')?`<button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">Approve</button><button class="btn btn-sm btn-danger" onclick="App.rejectPetty('${r.id}')" style="margin-left:4px">Reject</button>`:'' }
+            <div style="flex:1;min-width:0">
+              <div class="status-row-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.purpose}</div>
+              <div class="status-row-sub">By: ${r.requestedBy} · ${fmtDate(r.createdAt)}</div>
+              ${r.notes?`<div class="status-row-sub" style="color:var(--text3)">"${r.notes}"</div>`:''}
+            </div>
+            <div class="status-row-right" style="flex-shrink:0;gap:6px">
+              <div class="status-row-amt td-amber" style="white-space:nowrap">${fmt(r.amount)}</div>
+              ${can('income','petty_approve')?`
+                <button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">Approve</button>
+                <button class="btn btn-sm btn-danger" onclick="App.rejectPetty('${r.id}')">Reject</button>`:''
+              }
             </div>
           </div>`).join(''):'<div class="empty-table">No pending requests.</div>'}
       </div>
     </div>
 
+    ${awaitingReceipts.length?`
     <div class="card">
-      <div class="card-header"><span class="card-title">Petty Cash History — ${monthLabel()}</span></div>
+      <div class="card-header"><span class="card-title">Approved — Receipt Still Outstanding (${awaitingReceipts.length})</span></div>
+      <div class="table-wrap"><table>
+        <tr><th>Approved On</th><th>Purpose</th><th>Approved By</th><th>Hours Since Approval</th><th class="td-right">Amount</th><th>Action</th></tr>
+        ${awaitingReceipts.map(r=>{
+          const hrs=Math.round((Date.now()-new Date(r.approvedAt||r.createdAt).getTime())/3600000);
+          return`<tr>
+            <td>${fmtDate(r.approvedAt||r.createdAt)}</td>
+            <td>${r.purpose}</td>
+            <td class="td-muted">${r.approvedBy||'—'}</td>
+            <td><span class="badge ${hrs>48?'badge-danger':hrs>24?'badge-warn':'badge-info'}">${hrs}h ago${hrs>48?' ⚠ OVERDUE':''}</span></td>
+            <td class="td-right td-bold td-amber">${fmt(r.amount)}</td>
+            <td><button class="btn btn-sm btn-primary" onclick="App.submitPettyReceipt('${r.id}')">Submit Receipt</button></td>
+          </tr>`;}).join('')}
+      </table></div>
+    </div>`:''}
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">Full History — ${monthLabel()}</span></div>
       ${monthHistory.length?`<div class="table-wrap"><table>
-        <tr><th>Date</th><th>Purpose</th><th>Requested By</th><th>Status</th><th class="td-right">Amount</th><th>Receipt</th></tr>
-        ${monthHistory.map(r=>`<tr>
-          <td>${fmtDate(r.createdAt)}</td>
-          <td>${r.purpose}</td>
-          <td class="td-muted">${r.requestedBy||'—'}</td>
-          <td><span class="badge ${r.status==='approved'?'badge-success':r.status==='rejected'?'badge-danger':r.status==='settled'?'badge-info':'badge-warn'}">${r.status?.replace('_',' ')||'pending'}</span></td>
-          <td class="td-right td-bold td-amber">${fmt(r.amount)}</td>
-          <td>${r.receiptNo?`<span class="badge badge-success">✓ ${r.receiptNo}</span>`:`${r.status==='approved'?`<button class="btn btn-sm" onclick="App.submitPettyReceipt('${r.id}')">Submit Receipt</button>`:'—'}`}</td>
-        </tr>`).join('')}
+        <tr><th>Date</th><th>Purpose / Type</th><th>Requested By</th><th>Approved By</th><th>Status</th><th class="td-right">Amount</th><th>Receipt / Ref</th></tr>
+        ${monthHistory.map(r=>{
+          const overdue=isReceiptOverdue(r);
+          return`<tr style="${overdue?'background:var(--danger-light)':''}">
+            <td>${fmtDate(r.createdAt)}</td>
+            <td>${r.type==='refill'?`<span class="badge badge-info">↺ Refill</span> ${r.purpose}`:r.purpose}</td>
+            <td class="td-muted">${r.requestedBy||'—'}</td>
+            <td class="td-muted">${r.approvedBy||r.authorizedBy||'—'}</td>
+            <td>
+              <span class="badge ${r.status==='settled'?'badge-success':r.status==='approved'?'badge-info':r.status==='rejected'?'badge-danger':'badge-warn'}">
+                ${r.status?.replace('_',' ')||'pending'}
+              </span>
+              ${overdue?'<span class="badge badge-danger" style="margin-left:4px">Receipt overdue</span>':''}
+            </td>
+            <td class="td-right td-bold ${r.type==='refill'?'td-green':'td-amber'}">${r.type==='refill'?'+':''}${fmt(r.amount)}</td>
+            <td>${r.receiptNo?`<span class="badge badge-success">✓ ${r.receiptNo}</span>`:r.rejectionReason?`<span class="td-muted">${r.rejectionReason}</span>`:'—'}</td>
+          </tr>`;}).join('')}
       </table></div>`:'<div class="empty-table">No petty cash activity this month.</div>'}
     </div>`;
 }
 
 function showPettyRequest(){
+  const petty=DB.getPetty();
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
-    <div class="modal-title">💳 Petty Cash Request</div>
-    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Submit your request here. The Accountant will verify funds and Signatories will approve before release.</span></div>
-    <div class="form-group"><label class="form-label">Purpose / What is it for?</label><input type="text" id="pet_purpose" class="form-input" placeholder="e.g. Diesel for generator — Sunday 27 Apr" /></div>
-    <div class="form-group"><label class="form-label">Amount Needed (₦)</label><input type="number" id="pet_amt" class="form-input" placeholder="0" min="0" /></div>
-    <div class="form-group"><label class="form-label">Category</label>
+    <div class="modal-title">💳 Submit Petty Cash Request</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Your request goes to the Accountant for verification, then to a Signatory for final approval before any cash is released. You must return a receipt within <strong>48 hours</strong> of receiving the money.</span></div>
+    <div style="background:var(--surface);border-radius:var(--r);padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:12px;color:var(--text2)">Available float</span>
+      <span style="font-size:16px;font-weight:700;color:${petty.float<10000?'var(--danger)':'var(--primary)'}">${fmt(petty.float)}</span>
+    </div>
+    <div class="form-group"><label class="form-label">Purpose — what is the money for? <span style="color:var(--danger)">*</span></label><input type="text" id="pet_purpose" class="form-input" placeholder="e.g. Diesel for generator — Sunday 27 Apr" /></div>
+    <div class="form-group"><label class="form-label">Amount Needed (₦) <span style="color:var(--danger)">*</span></label><input type="number" id="pet_amt" class="form-input" placeholder="0" min="0" /></div>
+    <div class="form-group"><label class="form-label">Category <span style="color:var(--danger)">*</span></label>
       <select id="pet_cat" class="form-select">
+        <option value="">— Select category —</option>
         ${EXPENSE_CATS.map(c=>`<option value="${c.key}">${c.icon} ${c.label}</option>`).join('')}
       </select>
     </div>
     <div class="form-group"><label class="form-label">Date Needed By</label><input type="date" id="pet_date" class="form-input" value="${new Date().toISOString().split('T')[0]}" /></div>
-    <div class="form-group"><label class="form-label">Additional Notes</label><textarea id="pet_notes" class="form-textarea" placeholder="Any details that help with approval..."></textarea></div>
+    <div class="form-group"><label class="form-label">Notes (helps with approval)</label><textarea id="pet_notes" class="form-textarea" placeholder="Any context that explains the urgency or details..."></textarea></div>
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitPettyRequest()">Submit Request</button></div>`);
 }
 
@@ -973,16 +1078,24 @@ function submitPettyRequest(){
   const purpose=document.getElementById('pet_purpose')?.value?.trim();
   const amount=parseFloat(document.getElementById('pet_amt')?.value)||0;
   const category=document.getElementById('pet_cat')?.value;
-  if(!purpose||!amount){ alert('Please fill all required fields.'); return }
+  if(!purpose||!amount||!category){ alert('Please fill in the purpose, amount, and category.'); return }
   const petty=DB.getPetty();
-  if(amount>petty.float){ if(!confirm(`Requested amount (${fmt(amount)}) exceeds current float (${fmt(petty.float)}). Submit anyway for review?`)) return }
-  const req={ id:'PC-'+Date.now(), purpose, amount, category, dateNeeded:document.getElementById('pet_date')?.value, notes:document.getElementById('pet_notes')?.value, requestedBy:state.user?.name, status:'pending_approval', createdAt:new Date().toISOString() };
+  if(amount>petty.float){
+    if(!confirm(`The requested amount (${fmt(amount)}) exceeds the current float (${fmt(petty.float)}). Submit anyway for the Accountant to review?`)) return;
+  }
+  const req={
+    id:'PC-'+Date.now(), purpose, amount, category,
+    dateNeeded:document.getElementById('pet_date')?.value,
+    notes:document.getElementById('pet_notes')?.value,
+    requestedBy:state.user?.name, status:'pending_approval',
+    createdAt:new Date().toISOString()
+  };
   petty.history.unshift(req);
   DB.savePetty(petty);
   DB.addAudit('petty_requested',`Petty cash requested: ${purpose} — ${fmt(amount)}`,state.user?.name);
-  DB.addNotification('Petty Cash Request',`${state.user?.name} requested ${fmt(amount)} for ${purpose}`,'warn');
+  DB.addNotification('Petty Cash Request',`${state.user?.name} requested ${fmt(amount)} for "${purpose}". Awaiting approval.`,'warn');
   closeModal();
-  showAlert('Request submitted! Awaiting Accountant & Signatory approval.','success');
+  showAlert('Request submitted! The Accountant and a Signatory will review and approve.','success');
   renderPettyCash();
   buildSidebar();
 }
@@ -991,64 +1104,154 @@ function approvePetty(id){
   const petty=DB.getPetty();
   const req=petty.history.find(h=>h.id===id);
   if(!req) return;
-  if(req.amount>petty.float){ alert(`Insufficient float. Current: ${fmt(petty.float)}, Required: ${fmt(req.amount)}. Please refill the float first.`); return }
-  req.status='approved'; req.approvedBy=state.user?.name; req.approvedAt=new Date().toISOString();
+  if(req.amount>petty.float){
+    alert(`Cannot approve: Insufficient float.\nRequired: ${fmt(req.amount)}\nAvailable: ${fmt(petty.float)}\n\nPlease refill the float first, then approve this request.`);
+    return;
+  }
+  // BUG FIX 5 & NEW: record approver name and approval timestamp explicitly
+  req.status='approved';
+  req.approvedBy=state.user?.name;
+  req.approvedAt=new Date().toISOString();
   petty.float-=req.amount;
   DB.savePetty(petty);
-  DB.addAudit('petty_approved',`Petty cash approved: ${req.purpose} — ${fmt(req.amount)}`,state.user?.name);
-  DB.addNotification('Petty Cash Approved',`Your request for ${fmt(req.amount)} (${req.purpose}) has been approved.`,'success');
-  showAlert('Petty cash request approved. Float updated.','success');
+  DB.addAudit('petty_approved',`Petty cash approved: "${req.purpose}" — ${fmt(req.amount)} (approved by ${state.user?.name})`,state.user?.name);
+  DB.addNotification('Petty Cash Approved',`"${req.purpose}" — ${fmt(req.amount)} approved by ${state.user?.name}. Receipt due within 48 hours.`,'success');
+  showAlert(`Approved. ${fmt(req.amount)} deducted from float. Remind ${req.requestedBy} to return receipt within 48 hours.`,'success');
   renderPettyCash();
   buildSidebar();
 }
 
 function rejectPetty(id){
-  const reason=prompt('Reason for rejection (optional):');
+  const reason=prompt('Reason for rejection (the requester will see this):');
   const petty=DB.getPetty();
   const req=petty.history.find(h=>h.id===id);
   if(!req) return;
-  req.status='rejected'; req.rejectedBy=state.user?.name; req.rejectionReason=reason||''; req.rejectedAt=new Date().toISOString();
+  req.status='rejected';
+  req.rejectedBy=state.user?.name;
+  req.rejectionReason=reason||'No reason given';
+  req.rejectedAt=new Date().toISOString();
   DB.savePetty(petty);
-  DB.addAudit('petty_rejected',`Petty cash rejected: ${req.purpose}`,state.user?.name);
-  showAlert('Request rejected.','warn');
+  DB.addAudit('petty_rejected',`Petty cash rejected: "${req.purpose}" — Reason: ${req.rejectionReason}`,state.user?.name);
+  DB.addNotification('Petty Cash Rejected',`"${req.purpose}" was rejected by ${state.user?.name}. Reason: ${req.rejectionReason}`,'warn');
+  showAlert('Request rejected and requester notified.','warn');
   renderPettyCash();
   buildSidebar();
 }
 
+// BUG FIX 2: settling a petty cash request now auto-creates a matching Expense record
+// so it appears in all expense reports and the monthly financial statement
 function submitPettyReceipt(id){
-  const no=prompt('Enter receipt number:');
-  if(!no) return;
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🧾 Submit Receipt</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Enter the receipt details below. This will mark the petty cash as settled and <strong>automatically record it as an expense</strong> in the main expense log.</span></div>
+    <div class="form-group"><label class="form-label">Receipt Number <span style="color:var(--danger)">*</span></label><input type="text" id="rc_no" class="form-input" placeholder="e.g. REC-001 or vendor receipt number" /></div>
+    <div class="form-group"><label class="form-label">Actual Amount Spent (₦)</label><input type="number" id="rc_amt" class="form-input" placeholder="Leave blank if same as requested" /></div>
+    <div class="form-group"><label class="form-label">Vendor / Purchased From</label><input type="text" id="rc_vendor" class="form-input" placeholder="e.g. Total Petrol Station, Onitsha" /></div>
+    <div class="form-group"><label class="form-label">Notes</label><textarea id="rc_notes" class="form-textarea" placeholder="Any change returned, additional detail..."></textarea></div>
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.confirmPettyReceipt('${id}')">Submit & Settle</button></div>`);
+}
+
+function confirmPettyReceipt(id){
+  const no=document.getElementById('rc_no')?.value?.trim();
+  if(!no){ alert('Please enter the receipt number.'); return }
   const petty=DB.getPetty();
   const req=petty.history.find(h=>h.id===id);
-  if(req){ req.receiptNo=no; req.status='settled'; req.settledAt=new Date().toISOString(); DB.savePetty(petty); }
-  DB.addAudit('petty_receipt',`Receipt submitted for ${id}: ${no}`,state.user?.name);
-  showAlert('Receipt recorded. Transaction settled.','success');
+  if(!req){ closeModal(); return }
+
+  const actualAmt=parseFloat(document.getElementById('rc_amt')?.value)||req.amount;
+  const vendor=document.getElementById('rc_vendor')?.value||'';
+  const notes=document.getElementById('rc_notes')?.value||'';
+
+  // Mark petty cash item as settled
+  req.receiptNo=no;
+  req.status='settled';
+  req.settledAt=new Date().toISOString();
+  req.settledBy=state.user?.name;
+  req.actualAmount=actualAmt;
+  req.vendor=vendor;
+
+  // BUG FIX 2 CORE: if actual amount differs from approved, return difference to float
+  if(actualAmt<req.amount){
+    const change=req.amount-actualAmt;
+    petty.float+=change; // return unspent change to float
+    req.changeReturned=change;
+    DB.addNotification('Petty Cash Change Returned',`${fmt(change)} returned to float from "${req.purpose}" (spent ${fmt(actualAmt)} of approved ${fmt(req.amount)}).`,'info');
+  }
+
+  DB.savePetty(petty);
+
+  // BUG FIX 2 CORE: auto-create expense record so it shows in expense module & reports
+  DB.addExpense({
+    date:new Date().toISOString().split('T')[0],
+    category:req.category||'power',
+    description:req.purpose+(vendor?` — ${vendor}`:''),
+    amount:actualAmt,
+    receiptNo:no,
+    paymentMethod:'petty_cash',
+    notes:`Petty cash ref: ${req.id}. ${notes}`,
+    recordedBy:state.user?.name,
+    pettyRef:req.id,
+    status:'approved'
+  });
+
+  DB.addAudit('petty_settled',`Petty cash settled: "${req.purpose}" — ${fmt(actualAmt)}, Receipt: ${no}. Expense record auto-created.`,state.user?.name);
+  closeModal();
+  showAlert(`Receipt submitted. ${fmt(actualAmt)} recorded as expense.${req.changeReturned?` ${fmt(req.changeReturned)} change returned to float.`:''}`, 'success');
   renderPettyCash();
 }
 
 function showPettyRefill(){
+  const petty=DB.getPetty();
+  // Show amount of settled-but-not-yet-refilled receipts as a suggested refill amount
+  const settled=pettyMonthHistory(petty.history).filter(h=>h.status==='settled'&&h.type!=='refill');
+  const settledTotal=settled.reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
+  const spaceInFloat=petty.max-petty.float;
+  const suggested=Math.min(settledTotal,spaceInFloat);
+
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">↺ Refill Petty Cash Float</div>
-    <div class="alert alert-warn"><span class="alert-icon">⚠</span><span>Only refill the exact amount of receipts submitted. Signatories must authorize the bank transfer first.</span></div>
-    <div class="form-group"><label class="form-label">Refill Amount (₦)</label><input type="number" id="ref_amt" class="form-input" placeholder="0" /></div>
-    <div class="form-group"><label class="form-label">Bank Transfer Reference</label><input type="text" id="ref_ref" class="form-input" placeholder="Reference number" /></div>
-    <div class="form-group"><label class="form-label">Authorized By</label><input type="text" id="ref_auth" class="form-input" placeholder="Signatory names" /></div>
+    <div class="alert alert-warn"><span class="alert-icon">⚠</span><span>Refill only the exact total of receipts submitted. Signatories must authorize the bank transfer before you process this.</span></div>
+    <div style="background:var(--surface);border-radius:var(--r);padding:10px 14px;margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="font-size:12px;color:var(--text2)">Current float</span><span style="font-weight:600">${fmt(petty.float)}</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="font-size:12px;color:var(--text2)">Max float</span><span style="font-weight:600">${fmt(petty.max)}</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="font-size:12px;color:var(--text2)">Room available</span><span style="font-weight:600;color:var(--primary)">${fmt(spaceInFloat)}</span></div>
+      ${suggested>0?`<div style="display:flex;justify-content:space-between"><span style="font-size:12px;color:var(--text2)">Suggested refill (total settled receipts)</span><span style="font-weight:600;color:var(--amber)">${fmt(suggested)}</span></div>`:''}
+    </div>
+    <div class="form-group"><label class="form-label">Refill Amount (₦) <span style="color:var(--danger)">*</span></label>
+      <input type="number" id="ref_amt" class="form-input" placeholder="0" value="${suggested||''}" max="${spaceInFloat}" />
+      <div class="form-hint">Maximum: ${fmt(spaceInFloat)} (cannot exceed max float of ${fmt(petty.max)})</div>
+    </div>
+    <div class="form-group"><label class="form-label">Bank Transfer Reference <span style="color:var(--danger)">*</span></label><input type="text" id="ref_ref" class="form-input" placeholder="Reference number from bank" /></div>
+    <div class="form-group"><label class="form-label">Authorized By (Signatory names) <span style="color:var(--danger)">*</span></label><input type="text" id="ref_auth" class="form-input" placeholder="e.g. Elder Paul Okafor + Elder James Eze" /></div>
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitRefill()">Refill Float</button></div>`);
 }
 
 function submitRefill(){
   const amt=parseFloat(document.getElementById('ref_amt')?.value)||0;
-  const ref=document.getElementById('ref_ref')?.value;
-  const auth=document.getElementById('ref_auth')?.value;
-  if(!amt||!auth){ alert('Please enter amount and authorizing signatory.'); return }
+  const ref=document.getElementById('ref_ref')?.value?.trim();
+  const auth=document.getElementById('ref_auth')?.value?.trim();
+  if(!amt||!ref||!auth){ alert('Please fill in all required fields: amount, bank reference, and authorizing signatories.'); return }
   const petty=DB.getPetty();
-  petty.float=Math.min(petty.float+amt, petty.max);
-  petty.history.unshift({ id:'RF-'+Date.now(), type:'refill', amount:amt, reference:ref, authorizedBy:auth, requestedBy:state.user?.name, status:'settled', createdAt:new Date().toISOString(), purpose:'Float Refill' });
+  const spaceAvailable=petty.max-petty.float;
+  // BUG FIX 3: warn user clearly if refill is capped — don't silently shortchange them
+  if(amt>spaceAvailable){
+    if(!confirm(`The entered amount (${fmt(amt)}) exceeds available float space (${fmt(spaceAvailable)}).\n\nOnly ${fmt(spaceAvailable)} will be added to bring the float to its maximum of ${fmt(petty.max)}.\n\nProceed?`)) return;
+  }
+  const actualAdded=Math.min(amt,spaceAvailable);
+  petty.float+=actualAdded;
+  petty.history.unshift({
+    id:'RF-'+Date.now(), type:'refill', amount:actualAdded,
+    requestedAmount:amt, reference:ref, authorizedBy:auth,
+    requestedBy:state.user?.name, status:'settled',
+    createdAt:new Date().toISOString(), purpose:'Float Refill'
+  });
   DB.savePetty(petty);
-  DB.addAudit('petty_refilled',`Float refilled: ${fmt(amt)}`,state.user?.name);
+  DB.addAudit('petty_refilled',`Float refilled: ${fmt(actualAdded)} (authorized by ${auth}, ref: ${ref})`,state.user?.name);
+  DB.addNotification('Float Refilled',`Petty cash float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float)}. Authorized by: ${auth}.`,'success');
   closeModal();
-  showAlert(`Float refilled by ${fmt(amt)}. New balance: ${fmt(petty.float)}`,'success');
+  showAlert(`Float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float)}.${actualAdded<amt?` Note: only ${fmt(actualAdded)} added (float max reached).`:''}`, 'success');
   renderPettyCash();
 }
 
@@ -1178,20 +1381,46 @@ function generateExpenseReport(){
 
 function generatePettyCashReport(){
   const petty=DB.getPetty();
-  const history=filterByMonth({filter:()=>petty.history})||petty.history.filter(h=>{const d=new Date(h.createdAt||0);return d.getMonth()===state.month&&d.getFullYear()===state.year});
+  // BUG FIX: use pettyMonthHistory() helper — old code was passing a plain object to filterByMonth(), returning ALL history instead of current month
+  const history=pettyMonthHistory(petty.history||[]);
+  const disbursed=history.filter(h=>h.type!=='refill'&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
+  const settled=history.filter(h=>h.status==='settled'&&h.type!=='refill').reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
+  const refilled=history.filter(h=>h.type==='refill').reduce((s,h)=>s+(h.amount||0),0);
+  const unaccounted=disbursed-settled;
   document.getElementById('reportOutput').innerHTML=`
     <div class="card">
       <div class="card-header"><span class="card-title">Petty Cash Reconciliation — ${monthLabel()}</span><button class="btn btn-sm btn-primary" onclick="window.print()">🖨 Print</button></div>
       <div class="kpi-grid">
-        <div class="kpi"><div class="kpi-label">Current Float</div><div class="kpi-val">${fmt(petty.float)}</div></div>
-        <div class="kpi"><div class="kpi-label">Max Float</div><div class="kpi-val">${fmt(petty.max)}</div></div>
-        <div class="kpi"><div class="kpi-label">Disbursed (Month)</div><div class="kpi-val td-red">${fmt(history.filter(h=>h.status!=='refill').reduce((s,h)=>s+(h.amount||0),0))}</div></div>
-        <div class="kpi"><div class="kpi-label">Refilled (Month)</div><div class="kpi-val td-green">${fmt(history.filter(h=>h.type==='refill').reduce((s,h)=>s+(h.amount||0),0))}</div></div>
+        <div class="kpi"><div class="kpi-label">Current Float Balance</div><div class="kpi-val">${fmt(petty.float)}</div></div>
+        <div class="kpi"><div class="kpi-label">Disbursed This Month</div><div class="kpi-val td-red">${fmt(disbursed)}</div></div>
+        <div class="kpi"><div class="kpi-label">Receipts Settled</div><div class="kpi-val td-green">${fmt(settled)}</div></div>
+        <div class="kpi"><div class="kpi-label">Unaccounted (No Receipt)</div><div class="kpi-val ${'td-amber'}">${fmt(unaccounted)}</div></div>
       </div>
+      ${unaccounted>0?'<div class="alert alert-warn"><span class="alert-icon">⚠</span><span>'+fmt(unaccounted)+' disbursed but no receipt yet. Follow up with Admin Officer.</span></div>':''}
       <div class="table-wrap"><table>
-        <tr><th>Date</th><th>Purpose</th><th>By</th><th>Status</th><th class="td-right">Amount</th><th>Receipt</th></tr>
-        ${history.map(h=>`<tr><td>${fmtDate(h.createdAt)}</td><td>${h.purpose}</td><td class="td-muted">${h.requestedBy||'—'}</td><td><span class="badge ${h.status==='settled'?'badge-success':h.status==='approved'?'badge-info':h.status==='rejected'?'badge-danger':'badge-warn'}">${h.status?.replace('_',' ')||'—'}</span></td><td class="td-right td-bold">${fmt(h.amount)}</td><td>${h.receiptNo||'—'}</td></tr>`).join('')}
+        <tr><th>Date</th><th>Purpose</th><th>Requested By</th><th>Approved By</th><th>Status</th><th class="td-right">Approved</th><th class="td-right">Actual Spent</th><th>Receipt</th></tr>
+        ${history.map(h=>`<tr>
+          <td>${fmtDate(h.createdAt)}</td>
+          <td>${h.type==='refill'?'[Float Refill]':h.purpose}</td>
+          <td class="td-muted">${h.requestedBy||'—'}</td>
+          <td class="td-muted">${h.approvedBy||h.authorizedBy||'—'}</td>
+          <td><span class="badge ${h.status==='settled'?'badge-success':h.status==='approved'?'badge-info':h.status==='rejected'?'badge-danger':'badge-warn'}">${h.status?.replace('_',' ')||'—'}</span></td>
+          <td class="td-right">${fmt(h.amount)}</td>
+          <td class="td-right td-bold">${h.actualAmount!=null?fmt(h.actualAmount):h.status==='settled'?fmt(h.amount):'—'}</td>
+          <td>${h.receiptNo||'—'}</td>
+        </tr>`).join('')}
+        <tr style="border-top:2px solid var(--border);font-weight:700">
+          <td colspan="5">TOTALS</td>
+          <td class="td-right">${fmt(history.filter(h=>h.type!=='refill').reduce((s,h)=>s+(h.amount||0),0))}</td>
+          <td class="td-right">${fmt(settled)}</td>
+          <td>${history.filter(h=>h.receiptNo).length} receipts</td>
+        </tr>
       </table></div>
+      <div class="print-signature">
+        <div class="print-sig-box">Prepared by (Accountant)<br><br><br>${state.user?.name}</div>
+        <div class="print-sig-box">Admin Officer Confirmation<br><br><br>_________________</div>
+        <div class="print-sig-box">Date<br><br><br>${fmtDate(new Date().toISOString())}</div>
+      </div>
     </div>`;
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
 }
@@ -1462,7 +1691,7 @@ return {
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, submitIncome,
   viewIncome, confirmDeposit, markRemittancePaid, setRemAmt, submitRemittance,
   showExpenseForm, submitExpense, renderPettyCash, showPettyRequest, submitPettyRequest,
-  approvePetty, rejectPetty, submitPettyReceipt, showPettyRefill, submitRefill,
+  approvePetty, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
   setAdminTab, saveSettings, saveQuotas, showAddUser, addUser, editUser,
