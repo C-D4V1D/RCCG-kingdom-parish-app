@@ -1,71 +1,116 @@
 # RCCG Kingdom Parish, Aguleri — Finance & Accounting App
 
-A comprehensive church accounting and reporting system built for the RCCG Kingdom Parish Admin Team.
+A comprehensive church accounting and reporting system for the RCCG Kingdom Parish Admin Team.
 
-## Features
+## Tech Stack
 
-- **Income Recording** — Log all Sunday collections (Tithes, Thanksgiving, SLO, CRM, Workers' Offering, Sunday School, Children's Offering)
-- **RCCG Remittance Calculator** — Auto-computes all HQ percentages and fixed quotas
-- **Petty Cash / Imprest System** — Admin Officer requests, Accountant verifies, Signatories approve
-- **Expense Tracking** — Categorised by Power, Facility, Repairs, Transport, Communication, etc.
-- **Monthly Reports** — Auto-generated statements for the Pastor to submit to RCCG authorities
-- **Role-Based Access** — Parish Pastor, Church Accountant, Admin Officer, Bank Signatories
+- **Frontend:** Vanilla HTML / CSS / JavaScript (single-page app)
+- **Backend:** Cloudflare Pages Functions
+- **Database:** Cloudflare D1 (SQLite)
+- **Hosting:** Cloudflare Pages
 
-## Roles
+---
 
-| Role | Access |
-|------|--------|
-| Parish Pastor | Full view, report sign-off, final approvals |
-| Church Accountant | Record income, calculate remittances, manage ledger |
-| Admin Officer | Submit petty cash requests, view operational budget |
-| Bank Signatories | Approve and authorise transactions |
+## One-Time Setup After Deployment
 
-## Project Structure
+After deploying to Cloudflare Pages, visit this URL once in your browser to create all database tables:
 
 ```
-rccg-kingdom-parish-app/
-├── index.html          # App entry point
-├── src/
-│   ├── css/
-│   │   └── styles.css  # Global styles
-│   ├── js/
-│   │   ├── app.js      # Main app logic
-│   │   ├── remittance.js  # RCCG remittance calculations
-│   │   └── reports.js  # Report generation
-│   └── pages/
-│       ├── dashboard.html
-│       ├── income.html
-│       ├── expenses.html
-│       ├── remittances.html
-│       └── reports.html
-└── README.md
+https://your-app.pages.dev/api/init
 ```
 
-## RCCG Remittance Reference
+You should see: `{"success":true,"message":"Database initialised successfully."}`
+
+That's it — the app is live and ready.
+
+---
+
+## Default Login PINs
+
+| Role | PIN |
+|---|---|
+| IT Administrator | 0000 |
+| Parish Pastor | 1111 |
+| Church Accountant | 2222 |
+| Admin Officer | 3333 |
+| Bank Signatory (Elder) | 4444 |
+| Read-Only Viewer | 9999 |
+
+**Change all PINs after first login** via IT Admin → Users & Roles.
+
+---
+
+## App Modules
+
+| Module | Who Can Access |
+|---|---|
+| Dashboard | All roles |
+| Record Income | IT Admin, Accountant |
+| Remittances | IT Admin, Pastor, Accountant, Signatory |
+| Expenses | IT Admin, Accountant, Admin Officer |
+| Petty Cash | IT Admin, Accountant, Admin Officer, Signatory |
+| Reports | IT Admin, Pastor, Accountant |
+| Audit Log | IT Admin, Pastor, Accountant |
+| IT Admin Panel | IT Admin only |
+
+---
+
+## RCCG Remittance Rates
 
 ### Tithes
-- Members' Tithe → National: 58% | Local: 42%
-- Ministers' Tithe → National: 62% | Local: 38%
-- Province Rebate → 20% of total local retained share
+| Type | National HQ | Local |
+|---|---|---|
+| Members' Tithe | 58% | 42% |
+| Ministers' Tithe | 62% | 38% |
+| Province Rebate | 20% of local retained | — |
 
-### Thanksgiving
-- National: 75% | Area: 5% | Pastor: 10% | Ministers: 9% | Pastors' Seed: 1%
+### Thanksgiving (TG) Split
+| Recipient | % |
+|---|---|
+| National | 75% |
+| Area | 5% |
+| Pastor | 10% |
+| Ministers | 9% |
+| Pastors' Seed | 1% |
 
 ### Offerings
-- Sunday Love Offering (SLO) → National: 30% | Local: 70%
-- CRM → National: 60% | Local: 40%
-- Workers' Offering → National: 25% | Local: 75%
-- Sunday School → National: 100%
-- Children's Offering → National: 35% | Local Children's Dept: 65%
+| Type | National | Local |
+|---|---|---|
+| Sunday Love Offering (SLO) | 30% | 70% |
+| CRM (Weekly Activities) | 60% | 40% |
+| Workers' Offering | 25% | 75% |
+| Sunday School | 100% | 0% |
+| Children's Offering | 35% | 65% (Children's Dept) |
+
+---
+
+## Petty Cash (Imprest) Workflow
+
+1. **Admin Officer** submits a request (purpose, amount, category)
+2. **Accountant** verifies float is sufficient
+3. **Signatory (Elder)** approves → float is deducted automatically
+4. **Admin Officer** makes the purchase
+5. **Admin Officer** submits receipt within **48 hours**
+6. **System** automatically creates a matching Expense record
+7. **Accountant** refills float (bank transfer, authorized by Signatories)
+
+---
+
+## Database Tables
+
+- `users` — roles, PINs, emails
+- `income` — Sunday collections by type
+- `expenses` — all spending by category
+- `petty_cash` — full imprest cycle
+- `petty_config` — float balance and max
+- `remittances` — HQ payments recorded
+- `audit_log` — every action timestamped
+- `settings` — church name, bank details, monthly quotas
+- `notifications` — in-app alerts
+
+---
 
 ## Branch Strategy
 
-- `main` — stable, production-ready code
-- `dev` — active development branch
-- Feature branches → PR → merge to `dev` → merge to `main`
-
-## Built With
-
-- HTML5 / CSS3 / Vanilla JavaScript
-- Chart.js for data visualisation
-- Google Gemini API (AI features via Google AI Studio)
+- `main` — production (auto-deploys to Cloudflare Pages)
+- `dev` — active development

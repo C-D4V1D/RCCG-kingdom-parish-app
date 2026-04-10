@@ -74,84 +74,76 @@ const EXPENSE_CATS = [
 const DEFAULT_QUOTAS = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000, goFishing:10000 };
 
 // ──────────────────────────────────────────
-// 2. DATA LAYER
+// 2. DATA LAYER — Cloudflare D1 via API
+// All methods are async (fetch to /api/*)
 // ──────────────────────────────────────────
+
+// In-memory cache so we don't re-fetch on every render within a session
+const cache = {};
+
+async function apiFetch(path, method='GET', body=null){
+  const opts = { method, headers:{'Content-Type':'application/json'} };
+  if(body) opts.body = JSON.stringify(body);
+  const res = await fetch('/api/'+path, opts);
+  if(!res.ok){
+    const e = await res.json().catch(()=>({error:'Network error'}));
+    throw new Error(e.error||`API error ${res.status}`);
+  }
+  return res.json();
+}
+
 const DB = {
-  KEYS: { users:'kp_users', income:'kp_income', remittances:'kp_remittances',
-          expenses:'kp_expenses', petty:'kp_petty', audit:'kp_audit',
-          settings:'kp_settings', notifications:'kp_notifs' },
+  // ── Users ──
+  async getUsers(){ return apiFetch('users') },
+  async addUser(data){ cache.users=null; return apiFetch('users','POST',data) },
+  async updateUser(id,data){ cache.users=null; return apiFetch(`users/${id}`,'PUT',data) },
+  async deleteUser(id){ cache.users=null; return apiFetch(`users/${id}`,'DELETE') },
 
-  load(k){ try{ return JSON.parse(localStorage.getItem(k)||'null') }catch(e){ return null } },
-  save(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)) }catch(e){} },
+  // ── Income ──
+  async getIncome(){ return apiFetch('income') },
+  async addIncome(rec){
+    await this.addAudit('income_recorded',`Income recorded: ${fmt(rec.totalCollection)} for ${rec.date}`,state.user?.name);
+    return apiFetch('income','POST',rec);
+  },
+  async updateIncome(id,data){ return apiFetch(`income/${id}`,'PUT',data) },
 
-  getUsers(){ return this.load(this.KEYS.users) || this.seedUsers() },
-  seedUsers(){
-    const users = [
-      { id:'u1', name:'IT Administrator',    role:'it_admin',      pin:'0000', email:'it@kpaguleri.org' },
-      { id:'u2', name:'Rev. Emmanuel Obi',   role:'pastor',        pin:'1111', email:'pastor@kpaguleri.org' },
-      { id:'u3', name:'Bro. Chukwuemeka Nze',role:'accountant',    pin:'2222', email:'accounts@kpaguleri.org' },
-      { id:'u4', name:'Sis. Adaeze Okonkwo', role:'admin_officer', pin:'3333', email:'admin@kpaguleri.org' },
-      { id:'u5', name:'Elder Paul Okafor',   role:'signatory',     pin:'4444', email:'elder1@kpaguleri.org' },
-      { id:'u6', name:'Elder James Eze',     role:'signatory',     pin:'4444', email:'elder2@kpaguleri.org' },
-      { id:'u7', name:'Visitor Access',      role:'viewer',        pin:'9999', email:'' }
-    ];
-    this.save(this.KEYS.users, users);
-    return users;
+  // ── Expenses ──
+  async getExpenses(){ return apiFetch('expenses') },
+  async addExpense(rec){
+    await this.addAudit('expense_logged',`Expense: ${rec.description} — ${fmt(rec.amount)}`,state.user?.name);
+    return apiFetch('expenses','POST',rec);
   },
 
-  getIncome(){ return this.load(this.KEYS.income) || [] },
-  saveIncome(v){ this.save(this.KEYS.income, v) },
+  // ── Petty Cash ──
+  async getPettyConfig(){ return apiFetch('petty-config') },
+  async savePettyConfig(data){ return apiFetch('petty-config','POST',data) },
+  async getPetty(){ return apiFetch('petty') },
+  async addPettyEntry(data){ return apiFetch('petty','POST',data) },
+  async updatePettyEntry(id,data){ return apiFetch(`petty/${id}`,'PUT',data) },
 
-  addIncome(rec){
-    const arr = this.getIncome();
-    rec.id = 'INC-' + Date.now();
-    rec.createdAt = new Date().toISOString();
-    arr.unshift(rec);
-    this.saveIncome(arr);
-    this.addAudit('income_recorded', `Income recorded: ${fmt(rec.totalCollection)} for ${rec.date}`, state.user?.name);
-    return rec;
+  // ── Remittances ──
+  async getRemittances(){ return apiFetch('remittances') },
+  async addRemittance(data){ return apiFetch('remittances','POST',data) },
+
+  // ── Audit ──
+  async getAudit(){ return apiFetch('audit') },
+  async addAudit(type,detail,by){
+    return apiFetch('audit','POST',{type,detail,by:by||'System'}).catch(()=>{});
   },
 
-  getRemittances(){ return this.load(this.KEYS.remittances) || [] },
-  saveRemittances(v){ this.save(this.KEYS.remittances, v) },
+  // ── Settings ──
+  async getSettings(){ return apiFetch('settings') },
+  async saveSettings(data){ return apiFetch('settings','POST',data) },
 
-  getExpenses(){ return this.load(this.KEYS.expenses) || [] },
-  saveExpenses(v){ this.save(this.KEYS.expenses, v) },
-
-  addExpense(rec){
-    const arr = this.getExpenses();
-    rec.id = 'EXP-' + Date.now();
-    rec.createdAt = new Date().toISOString();
-    arr.unshift(rec);
-    this.saveExpenses(arr);
-    this.addAudit('expense_logged', `Expense: ${rec.description} — ${fmt(rec.amount)}`, state.user?.name);
-    return rec;
-  },
-
-  getPetty(){ return this.load(this.KEYS.petty) || { float:50000, max:50000, history:[] } },
-  savePetty(v){ this.save(this.KEYS.petty, v) },
-
-  getAudit(){ return this.load(this.KEYS.audit) || [] },
-  addAudit(type, detail, by){
-    const arr = this.getAudit();
-    arr.unshift({ id:'A'+Date.now(), type, detail, by: by||'System', ts: new Date().toISOString() });
-    if(arr.length>500) arr.splice(500);
-    this.save(this.KEYS.audit, arr);
-  },
-
-  getSettings(){ return this.load(this.KEYS.settings) || { quotas: DEFAULT_QUOTAS, pettyMax:50000, churchName:'RCCG Kingdom Parish, Aguleri', bankName:'', accountNo:'' } },
-  saveSettings(v){ this.save(this.KEYS.settings, v) },
-
-  getNotifications(){ return this.load(this.KEYS.notifications) || [] },
-  addNotification(title, body, type='info'){
-    const arr = this.getNotifications();
-    arr.unshift({ id:'N'+Date.now(), title, body, type, read:false, ts:new Date().toISOString() });
-    this.save(this.KEYS.notifications, arr);
+  // ── Notifications ──
+  async getNotifications(){ return apiFetch('notifications') },
+  async addNotification(title,body,type='info'){
+    const r = await apiFetch('notifications','POST',{title,body,type}).catch(()=>{});
     updateNotifBadge();
+    return r;
   },
-  markAllRead(){
-    const arr = this.getNotifications().map(n=>({...n,read:true}));
-    this.save(this.KEYS.notifications, arr);
+  async markAllRead(){
+    await apiFetch('notifications/read','POST').catch(()=>{});
     updateNotifBadge();
   }
 };
@@ -169,18 +161,18 @@ const state = {
 // ──────────────────────────────────────────
 // 4. UTILITIES
 // ──────────────────────────────────────────
-function fmt(n){ return '₦' + Math.round(n||0).toLocaleString('en-NG') }
-function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
-function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'}) }
-function uid(){ return Date.now().toString(36) }
-function hasPermission(p){
+async function fmt(n){ return '₦' + Math.round(n||0).toLocaleString('en-NG') }
+async function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
+async function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'}) }
+async function uid(){ return Date.now().toString(36) }
+async function hasPermission(p){
   if(!state.user) return false;
   const perms = PERMISSIONS[state.user.role]||[];
   return perms.includes('all') || perms.includes(p);
 }
-function can(...ps){ return ps.some(p=>hasPermission(p)) }
-function monthLabel(){ return MONTHS[state.month]+' '+state.year }
-function filterByMonth(arr){
+async function can(...ps){ return ps.some(p=>hasPermission(p)) }
+async function monthLabel(){ return MONTHS[state.month]+' '+state.year }
+async function filterByMonth(arr){
   return (arr||[]).filter(r=>{
     const d = new Date(r.date||r.createdAt||r.ts||0);
     return d.getMonth()===state.month && d.getFullYear()===state.year;
@@ -188,7 +180,7 @@ function filterByMonth(arr){
 }
 
 // Remittance engine
-function calcRemittances(income){
+async function calcRemittances(income){
   const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, localBefore:0, provinceRebate:0, netLocal:0 };
   INCOME_TYPES.forEach(t=>{
     const amt = income[t.key]||0;
@@ -211,51 +203,81 @@ function calcRemittances(income){
   return res;
 }
 
-function showModal(html){ const o=document.createElement('div'); o.className='modal-overlay'; o.id='modalOverlay'; o.innerHTML=`<div class="modal">${html}</div>`; document.body.appendChild(o) }
-function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
-function showAlert(msg,type='success'){ const a=document.createElement('div'); a.className=`alert alert-${type}`; a.innerHTML=`<span class="alert-icon">${type==='success'?'✓':type==='danger'?'✕':'⚠'}</span><span>${msg}</span>`; const pc=document.getElementById('pageContent'); if(pc){ pc.insertBefore(a,pc.firstChild); setTimeout(()=>a.remove(),4000) } }
-function updateNotifBadge(){ const notifs=DB.getNotifications(); const unread=notifs.filter(n=>!n.read).length; const el=document.getElementById('notifCount'); if(el){ el.textContent=unread; el.style.display=unread?'flex':'none' } }
+async function showModal(html){ const o=document.createElement('div'); o.className='modal-overlay'; o.id='modalOverlay'; o.innerHTML=`<div class="modal">${html}</div>`; document.body.appendChild(o) }
+async function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
+async function showAlert(msg,type='success'){ const a=document.createElement('div'); a.className=`alert alert-${type}`; a.innerHTML=`<span class="alert-icon">${type==='success'?'✓':type==='danger'?'✕':'⚠'}</span><span>${msg}</span>`; const pc=document.getElementById('pageContent'); if(pc){ pc.insertBefore(a,pc.firstChild); setTimeout(()=>a.remove(),4000) } }
+async function updateNotifBadge(){
+  try {
+    const notifs = await DB.getNotifications();
+    const unread = notifs.filter(n=>!n.read).length;
+    const el = document.getElementById('notifCount');
+    if(el){ el.textContent=unread; el.style.display=unread?'flex':'none'; }
+  } catch(e) {}
+}
 
 // ──────────────────────────────────────────
 // 5. AUTH
 // ──────────────────────────────────────────
-function onRoleChange(){
+async function onRoleChange(){
   const role = document.getElementById('roleSelect').value;
   const wrap = document.getElementById('userSelectWrap');
   const sel = document.getElementById('userSelect');
   if(!role){ wrap.style.display='none'; return }
-  const users = DB.getUsers().filter(u=>u.role===role);
+  // Fetch users for the selector (pre-login, so fetch directly)
+  let users = [];
+  try {
+    await apiFetch('init').catch(()=>{});
+    const all = await DB.getUsers();
+    users = all.filter(u=>u.role===role);
+  } catch(e) { users = [] }
   if(users.length>1){
     wrap.style.display='block';
     sel.innerHTML = users.map(u=>`<option value="${u.id}">${u.name}</option>`).join('');
   } else { wrap.style.display='none' }
 }
 
-function login(){
+async function login(){
   const role = document.getElementById('roleSelect').value;
   const pin = document.getElementById('pinInput').value.trim();
   const errEl = document.getElementById('loginError');
   if(!role||!pin){ errEl.textContent='Please select a role and enter your PIN.'; errEl.style.display='block'; return }
-  const users = DB.getUsers().filter(u=>u.role===role);
-  let user = null;
-  if(users.length>1){
-    const uid = document.getElementById('userSelect').value;
-    user = users.find(u=>u.id===uid&&u.pin===pin);
-  } else {
-    user = users.find(u=>u.pin===pin);
+  const btn = document.querySelector('#loginScreen .btn-primary');
+  if(btn){ btn.textContent='Connecting…'; btn.disabled=true; }
+  try {
+    await apiFetch('init').catch(()=>{}); // init tables (safe to call multiple times)
+    const allUsers = await DB.getUsers();
+    state.allUsers = allUsers;
+    const users = allUsers.filter(u=>u.role===role);
+    let user = null;
+    if(users.length>1){
+      const selId = document.getElementById('userSelect').value;
+      user = users.find(u=>u.id===selId&&u.pin===pin);
+    } else {
+      user = users.find(u=>u.pin===pin);
+    }
+    if(!user){
+      errEl.textContent='Incorrect PIN. Please try again.';
+      errEl.style.display='block';
+      document.getElementById('pinInput').value='';
+      if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
+      return;
+    }
+    errEl.style.display='none';
+    state.user = user;
+    DB.addAudit('login','User logged in',user.name);
+    document.getElementById('loginScreen').style.display='none';
+    document.getElementById('appShell').style.display='flex';
+    initApp();
+  } catch(e) {
+    errEl.textContent='Cannot connect to database. Check your internet connection.';
+    errEl.style.display='block';
+    if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
   }
-  if(!user){ errEl.style.display='block'; document.getElementById('pinInput').value=''; return }
-  errEl.style.display='none';
-  state.user = user;
-  DB.addAudit('login', `User logged in`, user.name);
-  document.getElementById('loginScreen').style.display='none';
-  document.getElementById('appShell').style.display='flex';
-  initApp();
 }
 
 function logout(){
-  DB.addAudit('logout','User logged out', state.user?.name);
-  state.user=null; state.page='dashboard';
+  DB.addAudit('logout','User logged out',state.user?.name);
+  state.user=null; state.page='dashboard'; state.allUsers=[];
   document.getElementById('appShell').style.display='none';
   document.getElementById('loginScreen').style.display='flex';
   document.getElementById('roleSelect').value='';
@@ -290,13 +312,13 @@ function buildMonthSelector(){
   }
 }
 
-function onMonthChange(){
+async function onMonthChange(){
   const [y,m] = document.getElementById('globalMonth').value.split('-').map(Number);
   state.year=y; state.month=m;
   navigate(state.page);
 }
 
-function buildSidebar(){
+async function buildSidebar(){
   let sections = {};
   NAV.forEach(item=>{
     if(!item.minRole.includes('all') && !item.minRole.includes(state.user?.role)) return;
@@ -305,20 +327,21 @@ function buildSidebar(){
   });
   const nav = document.getElementById('sidebarNav');
   let html='';
-  Object.entries(sections).forEach(([sec,items])=>{
+  const pendingCount = await getPettyCashPendingCount();
+  for(const [sec,items] of Object.entries(sections)){
     html+=`<div class="nav-section">${sec}</div>`;
-    items.forEach(item=>{
-      const notifs = item.id==='petty_cash' ? getPettyCashPendingCount() : 0;
+    for(const item of items){
+      const notifs = item.id==='petty_cash' ? pendingCount : 0;
       html+=`<div class="nav-item${state.page===item.id?' active':''}" onclick="App.navigate('${item.id}')" data-page="${item.id}">
         <span class="nav-icon">${item.icon}</span>${item.label}
         ${notifs>0?`<span class="nav-badge">${notifs}</span>`:''}
       </div>`;
-    });
-  });
+    }
+  }
   nav.innerHTML=html;
 }
 
-function buildBottomNav(){
+async function buildBottomNav(){
   const items = NAV.filter(n=> n.minRole.includes('all')||n.minRole.includes(state.user?.role)).slice(0,5);
   const bn = document.getElementById('bottomNav');
   const inner = document.createElement('div');
@@ -332,7 +355,7 @@ function buildBottomNav(){
   bn.appendChild(inner);
 }
 
-function updateSidebarUser(){
+async function updateSidebarUser(){
   const u = state.user;
   if(!u) return;
   const r = ROLES[u.role];
@@ -341,7 +364,7 @@ function updateSidebarUser(){
     <span style="display:inline-block;margin-top:4px;font-size:11px;padding:2px 8px;border-radius:10px;background:${r.bg};color:${r.color};font-weight:600">${r.label}</span>`;
 }
 
-function navigate(page){
+async function navigate(page){
   state.page=page;
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
@@ -349,57 +372,65 @@ function navigate(page){
     expenses:'Expenses',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel'};
   document.getElementById('topBarTitle').textContent=titles[page]||page;
   const pc=document.getElementById('pageContent');
-  pc.innerHTML='<div style="padding:40px;text-align:center;color:var(--text3)">Loading...</div>';
-  // Close sidebar on mobile
+  pc.innerHTML='<div style="padding:48px;text-align:center;color:var(--text3)"><div style="font-size:28px;margin-bottom:8px">⏳</div>Loading…</div>';
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('sidebarOverlay').classList.remove('visible');
-  // Close notifications
   document.getElementById('notifPanel').style.display='none';
-  setTimeout(()=>{ renderPage(page) },50);
+  renderPage(page);
 }
 
-function toggleSidebar(){
+async function toggleSidebar(){
   document.getElementById('sidebar').classList.toggle('open');
   document.getElementById('sidebarOverlay').classList.toggle('visible');
 }
 
-function toggleNotifications(){
+async function toggleNotifications(){
   const panel=document.getElementById('notifPanel');
   const showing=panel.style.display==='block';
   panel.style.display=showing?'none':'block';
   if(!showing){
-    const notifs=DB.getNotifications();
     const list=document.getElementById('notifList');
-    if(!notifs.length){ list.innerHTML='<div class="notif-empty">No notifications</div>'; }
-    else{ list.innerHTML=notifs.slice(0,15).map(n=>`<div class="notif-item" style="opacity:${n.read?0.6:1}"><div class="notif-item-title">${n.title}</div><div class="notif-item-body">${n.body}</div><div class="notif-item-time">${fmtDate(n.ts)} ${fmtTime(n.ts)}</div></div>`).join('') }
-    DB.markAllRead();
+    list.innerHTML='<div class="notif-empty">Loading…</div>';
+    try {
+      const notifs = await DB.getNotifications();
+      if(!notifs.length){ list.innerHTML='<div class="notif-empty">No notifications</div>'; }
+      else { list.innerHTML=notifs.slice(0,15).map(n=>`<div class="notif-item" style="opacity:${n.read?0.6:1}"><div class="notif-item-title">${n.title}</div><div class="notif-item-body">${n.body}</div><div class="notif-item-time">${fmtDate(n.ts)} ${fmtTime(n.ts)}</div></div>`).join('') }
+      DB.markAllRead();
+    } catch(e) { list.innerHTML='<div class="notif-empty">Could not load notifications.</div>'; }
   }
 }
 
-function getPettyCashPendingCount(){
-  const p=DB.getPetty();
-  return (p.history||[]).filter(h=>h.status==='pending_approval').length;
+async function getPettyCashPendingCount(){
+  try {
+    const history = await DB.getPetty();
+    return (history||[]).filter(h=>h.status==='pending_approval').length;
+  } catch(e){ return 0; }
 }
 
 // ──────────────────────────────────────────
 // 7. PAGE RENDERERS
 // ──────────────────────────────────────────
-function renderPage(page){
+async function renderPage(page){
   const pages={dashboard:renderDashboard,income:renderIncome,remittances:renderRemittances,
     expenses:renderExpenses,petty_cash:renderPettyCash,reports:renderReports,
     audit:renderAudit,admin:renderAdmin};
-  if(pages[page]) pages[page]();
-  else document.getElementById('pageContent').innerHTML='<div class="card"><p>Page not found.</p></div>';
+  try {
+    if(pages[page]) await pages[page]();
+    else document.getElementById('pageContent').innerHTML='<div class="card"><p>Page not found.</p></div>';
+  } catch(e) {
+    document.getElementById('pageContent').innerHTML=`<div class="card"><div class="alert alert-danger"><span class="alert-icon">✕</span><span>Could not load this page: ${e.message}</span></div></div>`;
+  }
 }
 
 // ── DASHBOARD ────────────────────────────
-function renderDashboard(){
-  const income = filterByMonth(DB.getIncome());
-  const expenses = filterByMonth(DB.getExpenses());
-  const petty = DB.getPetty();
-  const settings = DB.getSettings();
-  const allIncome = DB.getIncome();
-  const allExpenses = DB.getExpenses();
+async function renderDashboard(){
+  const income = filterByMonth(await DB.getIncome());
+  const expenses = filterByMonth(await DB.getExpenses());
+  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const petty = { history: pettyHistory, ...pettyConfig };
+  const settings = await DB.getSettings();
+  const allIncome = await DB.getIncome();
+  const allExpenses = await DB.getExpenses();
 
   const totalIncome = income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
@@ -407,7 +438,8 @@ function renderDashboard(){
   const netLocal = remittances.netLocal;
   const bankBalance = totalIncome - totalExpenses - remittances.totalNatl - remittances.totalArea - remittances.provinceRebate;
   const pendingPetty = getPettyCashPendingCount();
-  const overdueRems = DB.getRemittances().filter(r=>r.status==='overdue').length;
+  const allRemittances = await DB.getRemittances();
+  const overdueRems = allRemittances.filter(r=>r.status==='overdue').length;
 
   // Feed items
   const recentIncome = allIncome.slice(0,3);
@@ -427,12 +459,12 @@ function renderDashboard(){
   if(pendingPetty>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span>${pendingPetty} petty cash request(s) awaiting approval. <button class="btn btn-sm" onclick="App.navigate('petty_cash')" style="margin-left:8px">Review</button></span></div>`;
   if(bankBalance<50000 && bankBalance>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Bank balance is running low. Consider notifying the KPSC if remittances cannot be covered.</span></div>`;
 
-  // Monthly trend (last 4 months)
+  // Monthly trend (last 4 months) — use already-fetched allIncome, no extra DB call
   const trendData = [];
   for(let i=3;i>=0;i--){
     let m=state.month-i; let y=state.year;
     if(m<0){m+=12;y--;}
-    const recs=DB.getIncome().filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    const recs=allIncome.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
     trendData.push({label:MONTHS[m].slice(0,3),total:recs.reduce((s,r)=>s+(r.totalCollection||0),0)});
   }
   const maxTrend=Math.max(...trendData.map(t=>t.total),1);
@@ -539,7 +571,7 @@ function calcRemittancesFromRecords(records){
 }
 
 // ── INCOME ────────────────────────────────
-function renderIncome(){
+async function renderIncome(){
   const records = filterByMonth(DB.getIncome());
   const tab = state.incomeTab||'list';
   document.getElementById('pageContent').innerHTML=`
@@ -572,7 +604,7 @@ function renderIncomeList(records){
   </table></div></div>`;
 }
 
-function renderIncomeSummary(records){
+async function renderIncomeSummary(records){
   const totals = {};
   INCOME_TYPES.forEach(t=>{ totals[t.key]=0 });
   records.forEach(r=>{ INCOME_TYPES.forEach(t=>{ totals[t.key]+=(r[t.key]||0) }) });
@@ -604,7 +636,7 @@ function renderIncomeSummary(records){
     </div>`;
 }
 
-function showIncomeForm(){
+async function showIncomeForm(){
   const today = new Date().toISOString().split('T')[0];
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -625,14 +657,14 @@ function showIncomeForm(){
     </div>`);
 }
 
-function updateIncomeTotal(){
+async function updateIncomeTotal(){
   let total=0;
   INCOME_TYPES.forEach(t=>{ total+=parseFloat(document.getElementById('inc_'+t.key)?.value||0)||0 });
   const el=document.getElementById('inc_total');
   if(el) el.textContent=fmt(total);
 }
 
-function submitIncome(){
+async function submitIncome(){
   const date=document.getElementById('inc_date')?.value;
   const usher=document.getElementById('inc_usher')?.value?.trim();
   if(!date){ alert('Please select a date.'); return }
@@ -643,15 +675,15 @@ function submitIncome(){
   if(!total){ alert('Please enter at least one income amount.'); return }
   rec.totalCollection=total;
   rec.notes=document.getElementById('inc_notes')?.value||'';
-  DB.addIncome(rec);
-  DB.addNotification('Income Recorded',`${fmt(total)} recorded for ${fmtDate(date)}`,'success');
+  await DB.addIncome(rec);
+  await DB.addNotification('Income Recorded',`${fmt(total)} recorded for ${fmtDate(date)}`,'success');
   closeModal();
   showAlert(`Income of ${fmt(total)} recorded successfully!`,'success');
   renderIncome();
   buildSidebar();
 }
 
-function viewIncome(id){
+async function viewIncome(id){
   const r=DB.getIncome().find(x=>x.id===id);
   if(!r) return;
   const rem=calcRemittances(r);
@@ -677,24 +709,22 @@ function viewIncome(id){
     ${can('income')&&!r.depositConfirmed?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Confirm Bank Deposit</button>`:''}</div>`);
 }
 
-function confirmDeposit(id){
+async function confirmDeposit(id){
   const teller=prompt('Enter bank teller/reference number:');
   if(!teller) return;
-  const arr=DB.getIncome();
-  const idx=arr.findIndex(r=>r.id===id);
-  if(idx>-1){ arr[idx].depositConfirmed=true; arr[idx].tellerNo=teller; arr[idx].depositedBy=state.user?.name; arr[idx].depositDate=new Date().toISOString(); DB.saveIncome(arr); }
-  DB.addAudit('deposit_confirmed',`Deposit confirmed for ${id} — Teller: ${teller}`,state.user?.name);
+  await DB.updateIncome(id, { depositConfirmed:true, tellerNo:teller, depositedBy:state.user?.name, depositDate:new Date().toISOString() });
+  await DB.addAudit('deposit_confirmed',`Deposit confirmed for ${id} — Teller: ${teller}`,state.user?.name);
   closeModal();
   showAlert('Bank deposit confirmed!','success');
   renderIncome();
 }
 
 // ── REMITTANCES ───────────────────────────
-function renderRemittances(){
-  const income = filterByMonth(DB.getIncome());
+async function renderRemittances(){
+  const income = filterByMonth(await DB.getIncome());
   const rem = calcRemittancesFromRecords(income);
-  const paidRems = filterByMonth(DB.getRemittances());
-  const settings = DB.getSettings();
+  const paidRems = filterByMonth(await DB.getRemittances());
+  const settings = await DB.getSettings();
   const quotas = settings.quotas||DEFAULT_QUOTAS;
   const totalPaid = paidRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
 
@@ -771,10 +801,10 @@ function renderRemittances(){
     </div>`;
 }
 
-function markRemittancePaid(){
-  const income = filterByMonth(DB.getIncome());
+async function markRemittancePaid(){
+  const income = filterByMonth(await DB.getIncome());
   const rem = calcRemittancesFromRecords(income);
-  const settings = DB.getSettings();
+  const settings = await DB.getSettings();
   const quotas = settings.quotas||DEFAULT_QUOTAS;
   const lines=[
     ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0 })),
@@ -799,33 +829,32 @@ function markRemittancePaid(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitRemittance()">Record Payment</button></div>`);
 }
 
-function setRemAmt(){
+async function setRemAmt(){
   const sel=document.getElementById('rem_label');
   const opt=sel.options[sel.selectedIndex];
   const amt=opt?.dataset?.amt;
   if(amt) document.getElementById('rem_amount').value=amt;
 }
 
-function submitRemittance(){
+async function submitRemittance(){
   const label=document.getElementById('rem_label')?.value;
   const amount=parseFloat(document.getElementById('rem_amount')?.value)||0;
   const date=document.getElementById('rem_date')?.value;
   const reference=document.getElementById('rem_ref')?.value;
   const auth=document.getElementById('rem_auth')?.value;
   if(!label||!amount||!date){ alert('Please fill all required fields.'); return }
-  const arr=DB.getRemittances();
-  arr.unshift({ id:'REM-'+Date.now(), label, amount, paidDate:date, reference, authorizedBy:auth, status:'paid', createdAt:new Date().toISOString() });
-  DB.saveRemittances(arr);
-  DB.addAudit('remittance_paid',`Remittance paid: ${label} — ${fmt(amount)}`,state.user?.name);
-  DB.addNotification('Remittance Recorded',`${label}: ${fmt(amount)} paid on ${fmtDate(date)}`,'success');
+  const remData = { label, amount, paidDate:date, reference, authorizedBy:auth, status:'paid' };
+  await DB.addRemittance(remData);
+  await DB.addAudit('remittance_paid',`Remittance paid: ${label} — ${fmt(amount)}`,state.user?.name);
+  await DB.addNotification('Remittance Recorded',`${label}: ${fmt(amount)} paid on ${fmtDate(date)}`,'success');
   closeModal();
   showAlert('Remittance payment recorded!','success');
   renderRemittances();
 }
 
 // ── EXPENSES ──────────────────────────────
-function renderExpenses(){
-  const expenses=filterByMonth(DB.getExpenses());
+async function renderExpenses(){
+  const expenses=filterByMonth(await DB.getExpenses());
   const total=expenses.reduce((s,r)=>s+(r.amount||0),0);
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
@@ -860,7 +889,7 @@ function renderExpenses(){
     </div>`;
 }
 
-function showExpenseForm(){
+async function showExpenseForm(){
   const today=new Date().toISOString().split('T')[0];
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -884,13 +913,13 @@ function showExpenseForm(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitExpense()">Save Expense</button></div>`);
 }
 
-function submitExpense(){
+async function submitExpense(){
   const date=document.getElementById('exp_date')?.value;
   const category=document.getElementById('exp_cat')?.value;
   const description=document.getElementById('exp_desc')?.value?.trim();
   const amount=parseFloat(document.getElementById('exp_amt')?.value)||0;
   if(!date||!category||!description||!amount){ alert('Please fill all required fields.'); return }
-  DB.addExpense({ date, category, description, amount, receiptNo:document.getElementById('exp_receipt')?.value, paymentMethod:document.getElementById('exp_method')?.value, notes:document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
+  await DB.addExpense({ date, category, description, amount, receiptNo:document.getElementById('exp_receipt')?.value, paymentMethod:document.getElementById('exp_method')?.value, notes:document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
   closeModal();
   showAlert('Expense logged successfully!','success');
   renderExpenses();
@@ -898,7 +927,7 @@ function submitExpense(){
 
 // ── PETTY CASH ────────────────────────────
 // Helper: filter petty history by selected month (fixed — was passing object to filterByMonth)
-function pettyMonthHistory(history){
+async function pettyMonthHistory(history){
   return (history||[]).filter(h=>{
     const d=new Date(h.createdAt||h.date||0);
     return d.getMonth()===state.month && d.getFullYear()===state.year;
@@ -906,14 +935,15 @@ function pettyMonthHistory(history){
 }
 
 // Helper: check if an approved item's receipt is overdue (>48 hours since approval)
-function isReceiptOverdue(req){
+async function isReceiptOverdue(req){
   if(req.status!=='approved'||req.receiptNo) return false;
   const hrs=(Date.now()-new Date(req.approvedAt||req.createdAt).getTime())/3600000;
   return hrs>48;
 }
 
-function renderPettyCash(){
-  const petty=DB.getPetty();
+async function renderPettyCash(){
+  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const petty = { history: pettyHistory, ...pettyConfig };
   const history=petty.history||[];
   // BUG FIX 1: was passing plain object to filterByMonth — now uses dedicated helper
   const monthHistory=pettyMonthHistory(history);
@@ -1051,8 +1081,8 @@ function renderPettyCash(){
     </div>`;
 }
 
-function showPettyRequest(){
-  const petty=DB.getPetty();
+async function showPettyRequest(){
+  const petty = await DB.getPettyConfig();
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">💳 Submit Petty Cash Request</div>
@@ -1074,14 +1104,14 @@ function showPettyRequest(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitPettyRequest()">Submit Request</button></div>`);
 }
 
-function submitPettyRequest(){
+async function submitPettyRequest(){
   const purpose=document.getElementById('pet_purpose')?.value?.trim();
   const amount=parseFloat(document.getElementById('pet_amt')?.value)||0;
   const category=document.getElementById('pet_cat')?.value;
   if(!purpose||!amount||!category){ alert('Please fill in the purpose, amount, and category.'); return }
-  const petty=DB.getPetty();
-  if(amount>petty.float){
-    if(!confirm(`The requested amount (${fmt(amount)}) exceeds the current float (${fmt(petty.float)}). Submit anyway for the Accountant to review?`)) return;
+  const pettyConfig = await DB.getPettyConfig();
+  if(amount>pettyConfig.float){
+    if(!confirm(`The requested amount (${fmt(amount)}) exceeds the current float (${fmt(pettyConfig.float)}). Submit anyway for the Accountant to review?`)) return;
   }
   const req={
     id:'PC-'+Date.now(), purpose, amount, category,
@@ -1090,49 +1120,43 @@ function submitPettyRequest(){
     requestedBy:state.user?.name, status:'pending_approval',
     createdAt:new Date().toISOString()
   };
-  petty.history.unshift(req);
-  DB.savePetty(petty);
-  DB.addAudit('petty_requested',`Petty cash requested: ${purpose} — ${fmt(amount)}`,state.user?.name);
-  DB.addNotification('Petty Cash Request',`${state.user?.name} requested ${fmt(amount)} for "${purpose}". Awaiting approval.`,'warn');
+  await DB.addPettyEntry(req);
+  await DB.addAudit('petty_requested',`Petty cash requested: ${purpose} — ${fmt(amount)}`,state.user?.name);
+  await DB.addNotification('Petty Cash Request',`${state.user?.name} requested ${fmt(amount)} for "${purpose}". Awaiting approval.`,'warn');
   closeModal();
   showAlert('Request submitted! The Accountant and a Signatory will review and approve.','success');
   renderPettyCash();
   buildSidebar();
 }
 
-function approvePetty(id){
-  const petty=DB.getPetty();
-  const req=petty.history.find(h=>h.id===id);
+async function approvePetty(id){
+  const [history, cfg] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const req=history.find(h=>h.id===id);
   if(!req) return;
-  if(req.amount>petty.float){
-    alert(`Cannot approve: Insufficient float.\nRequired: ${fmt(req.amount)}\nAvailable: ${fmt(petty.float)}\n\nPlease refill the float first, then approve this request.`);
+  if(req.amount>cfg.float){
+    alert(`Cannot approve: Insufficient float.\nRequired: ${fmt(req.amount)}\nAvailable: ${fmt(cfg.float)}\n\nPlease refill the float first, then approve this request.`);
     return;
   }
   // BUG FIX 5 & NEW: record approver name and approval timestamp explicitly
-  req.status='approved';
-  req.approvedBy=state.user?.name;
-  req.approvedAt=new Date().toISOString();
-  petty.float-=req.amount;
-  DB.savePetty(petty);
-  DB.addAudit('petty_approved',`Petty cash approved: "${req.purpose}" — ${fmt(req.amount)} (approved by ${state.user?.name})`,state.user?.name);
-  DB.addNotification('Petty Cash Approved',`"${req.purpose}" — ${fmt(req.amount)} approved by ${state.user?.name}. Receipt due within 48 hours.`,'success');
+  const newFloat = cfg.float - req.amount;
+  await DB.updatePettyEntry(req.id, { status:'approved', approvedBy:state.user?.name, approvedAt:new Date().toISOString() });
+  await DB.savePettyConfig({ float:newFloat, max:cfg.max });
+  await DB.addAudit('petty_approved',`Petty cash approved: "${req.purpose}" — ${fmt(req.amount)} (approved by ${state.user?.name})`,state.user?.name);
+  await DB.addNotification('Petty Cash Approved',`"${req.purpose}" — ${fmt(req.amount)} approved by ${state.user?.name}. Receipt due within 48 hours.`,'success');
   showAlert(`Approved. ${fmt(req.amount)} deducted from float. Remind ${req.requestedBy} to return receipt within 48 hours.`,'success');
   renderPettyCash();
   buildSidebar();
 }
 
-function rejectPetty(id){
+async function rejectPetty(id){
   const reason=prompt('Reason for rejection (the requester will see this):');
-  const petty=DB.getPetty();
+  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const petty = { history: pettyHistory, ...pettyConfig };
   const req=petty.history.find(h=>h.id===id);
   if(!req) return;
-  req.status='rejected';
-  req.rejectedBy=state.user?.name;
-  req.rejectionReason=reason||'No reason given';
-  req.rejectedAt=new Date().toISOString();
-  DB.savePetty(petty);
-  DB.addAudit('petty_rejected',`Petty cash rejected: "${req.purpose}" — Reason: ${req.rejectionReason}`,state.user?.name);
-  DB.addNotification('Petty Cash Rejected',`"${req.purpose}" was rejected by ${state.user?.name}. Reason: ${req.rejectionReason}`,'warn');
+  await DB.updatePettyEntry(req.id, { status:'rejected', rejectedBy:state.user?.name, rejectionReason:reason||'No reason given', rejectedAt:new Date().toISOString() });
+  await DB.addAudit('petty_rejected',`Petty cash rejected: "${req.purpose}" — Reason: ${req.rejectionReason}`,state.user?.name);
+  await DB.addNotification('Petty Cash Rejected',`"${req.purpose}" was rejected by ${state.user?.name}. Reason: ${req.rejectionReason}`,'warn');
   showAlert('Request rejected and requester notified.','warn');
   renderPettyCash();
   buildSidebar();
@@ -1140,7 +1164,7 @@ function rejectPetty(id){
 
 // BUG FIX 2: settling a petty cash request now auto-creates a matching Expense record
 // so it appears in all expense reports and the monthly financial statement
-function submitPettyReceipt(id){
+async function submitPettyReceipt(id){
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">🧾 Submit Receipt</div>
@@ -1152,11 +1176,11 @@ function submitPettyReceipt(id){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.confirmPettyReceipt('${id}')">Submit & Settle</button></div>`);
 }
 
-function confirmPettyReceipt(id){
+async function confirmPettyReceipt(id){
   const no=document.getElementById('rc_no')?.value?.trim();
   if(!no){ alert('Please enter the receipt number.'); return }
-  const petty=DB.getPetty();
-  const req=petty.history.find(h=>h.id===id);
+  const [history, cfg] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const req=history.find(h=>h.id===id);
   if(!req){ closeModal(); return }
 
   const actualAmt=parseFloat(document.getElementById('rc_amt')?.value)||req.amount;
@@ -1172,17 +1196,22 @@ function confirmPettyReceipt(id){
   req.vendor=vendor;
 
   // BUG FIX 2 CORE: if actual amount differs from approved, return difference to float
+  let newFloat = cfg.float;
   if(actualAmt<req.amount){
     const change=req.amount-actualAmt;
-    petty.float+=change; // return unspent change to float
-    req.changeReturned=change;
-    DB.addNotification('Petty Cash Change Returned',`${fmt(change)} returned to float from "${req.purpose}" (spent ${fmt(actualAmt)} of approved ${fmt(req.amount)}).`,'info');
+    newFloat += change; // return unspent change to float
+    await DB.addNotification('Petty Cash Change Returned',`${fmt(change)} returned to float from "${req.purpose}" (spent ${fmt(actualAmt)} of approved ${fmt(req.amount)}).`,'info');
   }
 
-  DB.savePetty(petty);
+  await DB.savePettyConfig({ float:newFloat, max:cfg.max });
+  await DB.updatePettyEntry(req.id, {
+    status:'settled', receiptNo:no, settledAt:new Date().toISOString(),
+    settledBy:state.user?.name, actualAmount:actualAmt,
+    changeReturned:req.amount-actualAmt>0?req.amount-actualAmt:0, vendor
+  });
 
-  // BUG FIX 2 CORE: auto-create expense record so it shows in expense module & reports
-  DB.addExpense({
+  // auto-create expense record so it shows in expense module & reports
+  await DB.addExpense({
     date:new Date().toISOString().split('T')[0],
     category:req.category||'power',
     description:req.purpose+(vendor?` — ${vendor}`:''),
@@ -1195,16 +1224,16 @@ function confirmPettyReceipt(id){
     status:'approved'
   });
 
-  DB.addAudit('petty_settled',`Petty cash settled: "${req.purpose}" — ${fmt(actualAmt)}, Receipt: ${no}. Expense record auto-created.`,state.user?.name);
+  await DB.addAudit('petty_settled',`Petty cash settled: "${req.purpose}" — ${fmt(actualAmt)}, Receipt: ${no}. Expense record auto-created.`,state.user?.name);
   closeModal();
   showAlert(`Receipt submitted. ${fmt(actualAmt)} recorded as expense.${req.changeReturned?` ${fmt(req.changeReturned)} change returned to float.`:''}`, 'success');
   renderPettyCash();
 }
 
-function showPettyRefill(){
-  const petty=DB.getPetty();
+async function showPettyRefill(){
+  const [history, petty] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
   // Show amount of settled-but-not-yet-refilled receipts as a suggested refill amount
-  const settled=pettyMonthHistory(petty.history).filter(h=>h.status==='settled'&&h.type!=='refill');
+  const settled=pettyMonthHistory(history).filter(h=>h.status==='settled'&&h.type!=='refill');
   const settledTotal=settled.reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
   const spaceInFloat=petty.max-petty.float;
   const suggested=Math.min(settledTotal,spaceInFloat);
@@ -1228,35 +1257,33 @@ function showPettyRefill(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitRefill()">Refill Float</button></div>`);
 }
 
-function submitRefill(){
+async function submitRefill(){
   const amt=parseFloat(document.getElementById('ref_amt')?.value)||0;
   const ref=document.getElementById('ref_ref')?.value?.trim();
   const auth=document.getElementById('ref_auth')?.value?.trim();
   if(!amt||!ref||!auth){ alert('Please fill in all required fields: amount, bank reference, and authorizing signatories.'); return }
-  const petty=DB.getPetty();
+  const petty = await DB.getPettyConfig();
   const spaceAvailable=petty.max-petty.float;
   // BUG FIX 3: warn user clearly if refill is capped — don't silently shortchange them
   if(amt>spaceAvailable){
     if(!confirm(`The entered amount (${fmt(amt)}) exceeds available float space (${fmt(spaceAvailable)}).\n\nOnly ${fmt(spaceAvailable)} will be added to bring the float to its maximum of ${fmt(petty.max)}.\n\nProceed?`)) return;
   }
   const actualAdded=Math.min(amt,spaceAvailable);
-  petty.float+=actualAdded;
-  petty.history.unshift({
+  await DB.savePettyConfig({ float:petty.float+actualAdded, max:petty.max });
+  await DB.addPettyEntry({
     id:'RF-'+Date.now(), type:'refill', amount:actualAdded,
-    requestedAmount:amt, reference:ref, authorizedBy:auth,
-    requestedBy:state.user?.name, status:'settled',
-    createdAt:new Date().toISOString(), purpose:'Float Refill'
+    reference:ref, authorizedBy:auth, requestedBy:state.user?.name,
+    status:'settled', purpose:'Float Refill'
   });
-  DB.savePetty(petty);
-  DB.addAudit('petty_refilled',`Float refilled: ${fmt(actualAdded)} (authorized by ${auth}, ref: ${ref})`,state.user?.name);
-  DB.addNotification('Float Refilled',`Petty cash float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float)}. Authorized by: ${auth}.`,'success');
+  await DB.addAudit('petty_refilled',`Float refilled: ${fmt(actualAdded)} (authorized by ${auth}, ref: ${ref})`,state.user?.name);
+  await DB.addNotification('Float Refilled',`Petty cash float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float)}. Authorized by: ${auth}.`,'success');
   closeModal();
   showAlert(`Float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float)}.${actualAdded<amt?` Note: only ${fmt(actualAdded)} added (float max reached).`:''}`, 'success');
   renderPettyCash();
 }
 
 // ── REPORTS ────────────────────────────────
-function renderReports(){
+async function renderReports(){
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header"><div class="page-title">Reports</div><div class="page-sub">${monthLabel()}</div></div>
     <div class="grid-3" style="margin-bottom:1rem">
@@ -1270,10 +1297,10 @@ function renderReports(){
     <div id="reportOutput"></div>`;
 }
 
-function generateMonthlyReport(){
-  const income=filterByMonth(DB.getIncome());
-  const expenses=filterByMonth(DB.getExpenses());
-  const paidRems=filterByMonth(DB.getRemittances());
+async function generateMonthlyReport(){
+  const income=filterByMonth(await DB.getIncome());
+  const expenses=filterByMonth(await DB.getExpenses());
+  const paidRems=filterByMonth(await DB.getRemittances());
   const rem=calcRemittancesFromRecords(income);
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
@@ -1324,8 +1351,8 @@ function generateMonthlyReport(){
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
 }
 
-function generateWeeklyReport(){
-  const income=filterByMonth(DB.getIncome());
+async function generateWeeklyReport(){
+  const income=filterByMonth(await DB.getIncome());
   document.getElementById('reportOutput').innerHTML=`
     <div class="card">
       <div class="card-header"><span class="card-title">Weekly Collection Summary — ${monthLabel()}</span><button class="btn btn-sm btn-primary no-print" onclick="window.print()">🖨 Print</button></div>
@@ -1337,9 +1364,9 @@ function generateWeeklyReport(){
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
 }
 
-function generateRemittanceReport(){ renderRemittances(); showAlert('Remittance report displayed above.','info') }
+async function generateRemittanceReport(){ renderRemittances(); showAlert('Remittance report displayed above.','info') }
 
-function generateQuarterlyReport(){
+async function generateQuarterlyReport(){
   let rows='';
   for(let i=2;i>=0;i--){
     let m=state.month-i; let y=state.year; if(m<0){m+=12;y--;}
@@ -1361,8 +1388,8 @@ function generateQuarterlyReport(){
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
 }
 
-function generateExpenseReport(){
-  const expenses=filterByMonth(DB.getExpenses());
+async function generateExpenseReport(){
+  const expenses=filterByMonth(await DB.getExpenses());
   const byCat={};
   EXPENSE_CATS.forEach(c=>{ byCat[c.key]={ label:c.label, icon:c.icon, total:0, count:0 } });
   expenses.forEach(e=>{ if(byCat[e.category]){ byCat[e.category].total+=e.amount||0; byCat[e.category].count++ } });
@@ -1379,10 +1406,11 @@ function generateExpenseReport(){
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
 }
 
-function generatePettyCashReport(){
-  const petty=DB.getPetty();
+async function generatePettyCashReport(){
+  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const petty = { history: pettyHistory, ...pettyConfig };
   // BUG FIX: use pettyMonthHistory() helper — old code was passing a plain object to filterByMonth(), returning ALL history instead of current month
-  const history=pettyMonthHistory(petty.history||[]);
+  const history=pettyMonthHistory(pettyAll||[]);
   const disbursed=history.filter(h=>h.type!=='refill'&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
   const settled=history.filter(h=>h.status==='settled'&&h.type!=='refill').reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
   const refilled=history.filter(h=>h.type==='refill').reduce((s,h)=>s+(h.amount||0),0);
@@ -1391,7 +1419,7 @@ function generatePettyCashReport(){
     <div class="card">
       <div class="card-header"><span class="card-title">Petty Cash Reconciliation — ${monthLabel()}</span><button class="btn btn-sm btn-primary" onclick="window.print()">🖨 Print</button></div>
       <div class="kpi-grid">
-        <div class="kpi"><div class="kpi-label">Current Float Balance</div><div class="kpi-val">${fmt(petty.float)}</div></div>
+        <div class="kpi"><div class="kpi-label">Current Float Balance</div><div class="kpi-val">${fmt(pettyC.float)}</div></div>
         <div class="kpi"><div class="kpi-label">Disbursed This Month</div><div class="kpi-val td-red">${fmt(disbursed)}</div></div>
         <div class="kpi"><div class="kpi-label">Receipts Settled</div><div class="kpi-val td-green">${fmt(settled)}</div></div>
         <div class="kpi"><div class="kpi-label">Unaccounted (No Receipt)</div><div class="kpi-val ${'td-amber'}">${fmt(unaccounted)}</div></div>
@@ -1426,8 +1454,8 @@ function generatePettyCashReport(){
 }
 
 // ── AUDIT LOG ─────────────────────────────
-function renderAudit(){
-  const log=DB.getAudit().slice(0,100);
+async function renderAudit(){
+  const log=(await DB.getAudit()).slice(0,100);
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header"><div class="page-title">Audit Log</div><div class="page-sub">Last 100 actions in the system</div></div>
     <div class="card"><div class="table-wrap"><table>
@@ -1437,18 +1465,19 @@ function renderAudit(){
 }
 
 // ── IT ADMIN ──────────────────────────────
-function renderAdmin(){
+async function renderAdmin(){
   if(state.user?.role!=='it_admin'){ document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--danger)">Access denied. IT Administrators only.</p></div>'; return }
-  const users=DB.getUsers();
+  const users=await DB.getUsers();
   const settings=DB.getSettings();
   const tab=state.adminTab||'users';
 
+  const [allIncome2, allAudit] = await Promise.all([DB.getIncome(), DB.getAudit()]);
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header"><div class="page-title">IT Admin Panel</div><div class="page-sub">System management — full access</div></div>
     <div class="admin-grid" style="margin-bottom:1rem">
       <div class="admin-stat"><div class="admin-stat-val">${users.length}</div><div class="admin-stat-label">Total Users</div></div>
-      <div class="admin-stat"><div class="admin-stat-val">${DB.getIncome().length}</div><div class="admin-stat-label">Income Records</div></div>
-      <div class="admin-stat"><div class="admin-stat-val">${DB.getAudit().length}</div><div class="admin-stat-label">Audit Events</div></div>
+      <div class="admin-stat"><div class="admin-stat-val">${allIncome2.length}</div><div class="admin-stat-label">Income Records</div></div>
+      <div class="admin-stat"><div class="admin-stat-val">${allAudit.length}</div><div class="admin-stat-label">Audit Events</div></div>
     </div>
     <div class="tabs">
       <button class="tab ${tab==='users'?'active':''}" onclick="App.setAdminTab('users')">Users & Roles</button>
@@ -1459,9 +1488,9 @@ function renderAdmin(){
     ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settings):tab==='quotas'?renderAdminQuotas(settings):renderAdminBackup()}`;
 }
 
-function setAdminTab(t){ state.adminTab=t; renderAdmin() }
+async function setAdminTab(t){ state.adminTab=t; renderAdmin() }
 
-function renderAdminUsers(users){
+async function renderAdminUsers(users){
   return `<div class="card">
     <div class="card-header"><span class="card-title">User Accounts</span><button class="btn btn-primary btn-sm" onclick="App.showAddUser()">+ Add User</button></div>
     <div class="table-wrap"><table>
@@ -1477,7 +1506,7 @@ function renderAdminUsers(users){
     </table></div></div>`;
 }
 
-function renderAdminSettings(s){
+async function renderAdminSettings(s){
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:1rem">Church Information</div>
     <div class="form-group"><label class="form-label">Church Name</label><input type="text" id="set_name" class="form-input" value="${s.churchName||''}" /></div>
@@ -1488,7 +1517,7 @@ function renderAdminSettings(s){
   </div>`;
 }
 
-function renderAdminQuotas(s){
+async function renderAdminQuotas(s){
   const q=s.quotas||DEFAULT_QUOTAS;
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Monthly Fixed Quotas</div>
@@ -1498,7 +1527,7 @@ function renderAdminQuotas(s){
   </div>`;
 }
 
-function renderAdminBackup(){
+async function renderAdminBackup(){
   return `<div class="card">
     <div class="card-header"><span class="card-title">Data Backup & Restore</span></div>
     <p style="font-size:13px;color:var(--text2);margin-bottom:1rem">Export all church financial data as a JSON backup file. Store it securely.</p>
@@ -1512,25 +1541,28 @@ function renderAdminBackup(){
   </div>`;
 }
 
-function saveSettings(){
-  const s=DB.getSettings();
-  s.churchName=document.getElementById('set_name')?.value;
-  s.bankName=document.getElementById('set_bank')?.value;
-  s.accountNo=document.getElementById('set_acct')?.value;
-  s.pettyMax=parseFloat(document.getElementById('set_petty')?.value)||50000;
-  DB.saveSettings(s);
+async function saveSettings(){
+  const s = {
+    churchName:document.getElementById('set_name')?.value||'',
+    bankName:document.getElementById('set_bank')?.value||'',
+    accountNo:document.getElementById('set_acct')?.value||'',
+    pettyMax:parseFloat(document.getElementById('set_petty')?.value)||50000
+  };
+  await DB.saveSettings(s);
+  // Also update petty max float in config
+  const pc = await DB.getPettyConfig();
+  await DB.savePettyConfig({ float:pc.float, max:s.pettyMax });
   showAlert('Settings saved!','success');
 }
 
-function saveQuotas(){
-  const s=DB.getSettings();
-  const q=s.quotas||{};
+async function saveQuotas(){
+  const q={};
   Object.keys(DEFAULT_QUOTAS).forEach(k=>{ const el=document.getElementById('q_'+k); if(el) q[k]=parseFloat(el.value)||0 });
-  s.quotas=q; DB.saveSettings(s);
+  await DB.saveSettings({ quotas:q });
   showAlert('Monthly quotas updated!','success');
 }
 
-function showAddUser(){
+async function showAddUser(){
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">Add New User</div>
@@ -1543,23 +1575,21 @@ function showAddUser(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.addUser()">Add User</button></div>`);
 }
 
-function addUser(){
+async function addUser(){
   const name=document.getElementById('nu_name')?.value?.trim();
   const role=document.getElementById('nu_role')?.value;
   const email=document.getElementById('nu_email')?.value;
   const pin=document.getElementById('nu_pin')?.value;
   if(!name||!role||!pin||pin.length<4){ alert('Please fill name, role, and PIN (min 4 digits).'); return }
-  const users=DB.getUsers();
-  users.push({ id:'u'+Date.now(), name, role, email, pin });
-  DB.save(DB.KEYS.users, users);
-  DB.addAudit('user_added',`New user added: ${name} (${role})`,state.user?.name);
+  await DB.addUser({ name, role, email, pin });
+  await DB.addAudit('user_added',`New user added: ${name} (${role})`,state.user?.name);
   closeModal();
   showAlert(`User ${name} added successfully!`,'success');
   renderAdmin();
 }
 
-function editUser(id){
-  const users=DB.getUsers();
+async function editUser(id){
+  const users=await DB.getUsers();
   const u=users.find(x=>x.id===id);
   if(!u) return;
   showModal(`
@@ -1574,59 +1604,64 @@ function editUser(id){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.updateUser('${id}')">Update</button></div>`);
 }
 
-function updateUser(id){
-  const users=DB.getUsers();
-  const idx=users.findIndex(u=>u.id===id);
-  if(idx<0) return;
-  users[idx].name=document.getElementById('eu_name')?.value||users[idx].name;
-  users[idx].role=document.getElementById('eu_role')?.value||users[idx].role;
-  users[idx].email=document.getElementById('eu_email')?.value||users[idx].email;
-  const newPin=document.getElementById('eu_pin')?.value;
-  if(newPin&&newPin.length>=4) users[idx].pin=newPin;
-  DB.save(DB.KEYS.users, users);
-  DB.addAudit('user_updated',`User updated: ${users[idx].name}`,state.user?.name);
+async function updateUser(id){
+  const updateData = {
+    name:document.getElementById('eu_name')?.value,
+    role:document.getElementById('eu_role')?.value,
+    email:document.getElementById('eu_email')?.value,
+    pin:document.getElementById('eu_pin')?.value
+  };
+  await DB.updateUser(id, updateData);
+  await DB.addAudit('user_updated',`User updated`,state.user?.name);
   closeModal();
   showAlert('User updated!','success');
   renderAdmin();
 }
 
-function deleteUser(id){
-  const users=DB.getUsers();
+async function deleteUser(id){
+  const users=await DB.getUsers();
   const u=users.find(x=>x.id===id);
   if(!u||!confirm(`Delete user "${u.name}"? This cannot be undone.`)) return;
-  DB.save(DB.KEYS.users, users.filter(x=>x.id!==id));
-  DB.addAudit('user_deleted',`User deleted: ${u.name}`,state.user?.name);
+  await DB.deleteUser(id);
+  await DB.addAudit('user_deleted',`User deleted: ${u.name}`,state.user?.name);
   showAlert('User deleted.','warn');
   renderAdmin();
 }
 
-function exportData(){
-  const data={ users:DB.getUsers(), income:DB.getIncome(), remittances:DB.getRemittances(), expenses:DB.getExpenses(), petty:DB.getPetty(), audit:DB.getAudit(), settings:DB.getSettings(), exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
+async function exportData(){
+  const [users,income,remittances,expenses,pettyH,pettyC,audit,settings] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(),DB.getPetty(),DB.getPettyConfig(),DB.getAudit(),DB.getSettings()]);
+  const data={ users,income,remittances,expenses,petty:{history:pettyH,...pettyC},audit,settings, exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   a.download=`rccg-backup-${new Date().toISOString().split('T')[0]}.json`;
   a.click(); URL.revokeObjectURL(a.href);
-  DB.addAudit('data_exported','Full data export performed',state.user?.name);
+  await DB.addAudit('data_exported','Full data export performed',state.user?.name);
   showAlert('Backup exported successfully!','success');
 }
 
-function importData(){
+async function importData(){
   const input=document.createElement('input'); input.type='file'; input.accept='.json';
-  input.onchange=e=>{
+  input.onchange=async e=>{
     const file=e.target.files[0]; if(!file) return;
     const reader=new FileReader();
-    reader.onload=ev=>{
+    reader.onload=async ev=>{
       try{
         const data=JSON.parse(ev.target.result);
-        if(!confirm('This will overwrite all existing data. Are you sure?')) return;
-        if(data.users) DB.save(DB.KEYS.users,data.users);
-        if(data.income) DB.save(DB.KEYS.income,data.income);
-        if(data.remittances) DB.save(DB.KEYS.remittances,data.remittances);
-        if(data.expenses) DB.save(DB.KEYS.expenses,data.expenses);
-        if(data.petty) DB.save(DB.KEYS.petty,data.petty);
-        if(data.settings) DB.save(DB.KEYS.settings,data.settings);
-        DB.addAudit('data_imported','Data restored from backup',state.user?.name);
-        showAlert('Data restored successfully! Please refresh.','success');
+        if(!confirm('This will restore data from the backup file. Existing records will be kept. Are you sure?')) return;
+        showAlert('Importing data — this may take a moment…','info');
+        // Restore users
+        if(data.users) for(const u of data.users){ await DB.addUser(u).catch(()=>{}) }
+        // Restore income
+        if(data.income) for(const r of data.income){ await DB.addIncome(r).catch(()=>{}) }
+        // Restore expenses
+        if(data.expenses) for(const e of data.expenses){ await DB.addExpense(e).catch(()=>{}) }
+        // Restore remittances
+        if(data.remittances) for(const r of data.remittances){ await DB.addRemittance(r).catch(()=>{}) }
+        // Restore settings
+        if(data.settings) await DB.saveSettings(data.settings).catch(()=>{});
+        await DB.addAudit('data_imported','Data restored from backup',state.user?.name);
+        showAlert('Data restored successfully!','success');
+        navigate('dashboard');
       }catch(e){ alert('Invalid backup file. Please use a valid JSON backup.') }
     };
     reader.readAsText(file);
@@ -1634,20 +1669,20 @@ function importData(){
   input.click();
 }
 
-function clearAllData(){
-  if(!confirm('⚠ This will permanently delete ALL church financial records. Type CONFIRM to proceed.')) return;
+async function clearAllData(){
+  if(!confirm('⚠ This will permanently delete ALL church financial records from the database. This cannot be undone.')) return;
   const word=prompt('Type CONFIRM to delete everything:');
   if(word!=='CONFIRM'){ alert('Cancelled.'); return }
-  Object.values(DB.KEYS).forEach(k=>localStorage.removeItem(k));
-  logout();
+  // With D1 we can't drop tables from the frontend — direct the IT admin to Cloudflare dashboard
+  alert('To clear all data, go to:\nCloudflare Dashboard → Workers & Pages → D1 → rccg-parish-db → Console\nRun: DELETE FROM income; DELETE FROM expenses; DELETE FROM petty_cash; DELETE FROM remittances; DELETE FROM audit_log; DELETE FROM notifications;\n\nThis keeps your user accounts and settings intact.');
 }
 
 // ── KPSC ALERT ────────────────────────────
-function showKPSCAlert(){
-  const income=filterByMonth(DB.getIncome());
+async function showKPSCAlert(){
+  const income=filterByMonth(await DB.getIncome());
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const rem=calcRemittancesFromRecords(income);
-  const expenses=filterByMonth(DB.getExpenses());
+  const expenses=filterByMonth(await DB.getExpenses());
   const totalExp=expenses.reduce((s,e)=>s+(e.amount||0),0);
   const balance=totalIncome-rem.totalNatl-rem.totalArea-rem.provinceRebate-totalExp;
   showModal(`
@@ -1672,13 +1707,13 @@ function showKPSCAlert(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-amber" onclick="App.submitKPSCAlert()">Send Alert to KPSC</button></div>`);
 }
 
-function submitKPSCAlert(){
+async function submitKPSCAlert(){
   const type=document.getElementById('kpsc_type')?.value;
   const amt=parseFloat(document.getElementById('kpsc_amt')?.value)||0;
   const desc=document.getElementById('kpsc_desc')?.value;
   if(!amt||!desc){ alert('Please fill all fields.'); return }
-  DB.addAudit('kpsc_alert',`KPSC Alert sent: ${type} — ${fmt(amt)}`,state.user?.name);
-  DB.addNotification('KPSC Alert Sent',`Emergency request: ${type} — ${fmt(amt)} needed`,'warn');
+  await DB.addAudit('kpsc_alert',`KPSC Alert sent: ${type} — ${fmt(amt)}`,state.user?.name);
+  await DB.addNotification('KPSC Alert Sent',`Emergency request: ${type} — ${fmt(amt)} needed`,'warn');
   closeModal();
   showAlert('KPSC alert recorded and logged. Present this request formally to the KPSC at the next available opportunity.','warn');
 }
