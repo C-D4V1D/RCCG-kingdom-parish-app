@@ -669,12 +669,20 @@ function renderIncome(){
   const sundayRecs = records.filter(r=>!r.source||r.source==='sunday_collection');
   const otherRecs  = records.filter(r=>r.source && r.source!=='sunday_collection');
   const tab = state.incomeTab||'list';
+  // Compute pending sunday records (cash not yet fully deposited)
+  const _cashTx = DB.getCashTransactions();
+  const pendingSundayCount = sundayRecs.filter(r=>{
+    const cashHeld = Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
+    const dep = _cashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+    return cashHeld>0 && dep<cashHeld;
+  }).length;
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
       <div><div class="page-title">Income Recording</div><div class="page-sub">${monthLabel()}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${can('income')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">📥 Sunday Collections</button>`:''}
         ${can('income')?`<button class="btn btn-amber" onclick="App.showOtherIncomeForm()">➕ Other Income</button>`:''}
+        ${can('income')&&pendingSundayCount>=2?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit All Pending (${pendingSundayCount})</button>`:''}
       </div>
     </div>
     <div class="tabs">
@@ -976,6 +984,74 @@ function submitCashDeposit(incomeId){
   DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank (Ref: ${ref})`,'success');
   closeModal();
   showAlert(`${fmt(amount)} deposited to bank successfully! Ref: ${ref}`, 'success');
+  renderIncome();
+}
+
+function confirmBulkDeposit(){
+  const allIncome = filterByMonth(DB.getIncome());
+  const sundayRecs = allIncome.filter(r=>!r.source||r.source==='sunday_collection');
+  const cashTx = DB.getCashTransactions();
+  const pending = sundayRecs.map(r=>{
+    const cashHeld = Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
+    const deposited = cashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+    return { id:r.id, date:r.date, cashHeld, deposited, remaining: cashHeld-deposited };
+  }).filter(p=>p.cashHeld>0 && p.remaining>0);
+  if(!pending.length){ showAlert('No pending cash deposits found.','warn'); return }
+  state._bulkDepositPending = pending;
+  const totalRemaining = pending.reduce((s,p)=>s+p.remaining,0);
+  const today = new Date().toISOString().split('T')[0];
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">💰 Deposit All Pending Cash</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>This records one bank deposit covering all ${pending.length} pending cash record${pending.length>1?'s':''}.</span></div>
+    <div class="table-wrap" style="margin-bottom:16px"><table>
+      <tr><th>Date</th><th>Cash Held</th><th>Already Deposited</th><th class="td-right">Remaining</th></tr>
+      ${pending.map(p=>`<tr>
+        <td><strong>${fmtDate(p.date)}</strong></td>
+        <td>${fmt(p.cashHeld)}</td>
+        <td>${p.deposited>0?fmt(p.deposited):'—'}</td>
+        <td class="td-right td-bold">${fmt(p.remaining)}</td>
+      </tr>`).join('')}
+      <tr style="border-top:2px solid var(--border);font-weight:700">
+        <td colspan="3">TOTAL</td>
+        <td class="td-right" style="color:var(--primary);font-size:15px">${fmt(totalRemaining)}</td>
+      </tr>
+    </table></div>
+    <div class="form-group"><label class="form-label">Deposit Method *</label>
+      <select id="bulk_dep_method" class="form-select">
+        <option value="bank_teller">Bank Cash Teller</option>
+        <option value="pos_terminal">POS Terminal</option>
+        <option value="mobile_transfer">Mobile / Internet Banking Transfer</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Teller / Reference Number *</label>
+      <input type="text" id="bulk_dep_ref" class="form-input" placeholder="Bank teller number or transaction reference" />
+    </div>
+    <div class="form-group"><label class="form-label">Date of Deposit *</label>
+      <input type="date" id="bulk_dep_date" class="form-input" value="${today}" max="${today}" />
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.submitBulkDeposit()">Confirm Deposit — ${fmt(totalRemaining)}</button>
+    </div>`);
+}
+
+function submitBulkDeposit(){
+  const pending = state._bulkDepositPending || [];
+  const method  = document.getElementById('bulk_dep_method')?.value;
+  const ref     = document.getElementById('bulk_dep_ref')?.value?.trim();
+  const date    = document.getElementById('bulk_dep_date')?.value;
+  if(!ref||!date){ alert('Please fill all required fields.'); return }
+  if(!pending.length){ closeModal(); return }
+  const totalAmount = pending.reduce((s,p)=>s+p.remaining,0);
+  pending.forEach(p=>{
+    DB.addCashTransaction({ type:'cash_deposit', incomeRef:p.id, amount:p.remaining, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
+  });
+  DB.addAudit('cash_deposited',`Bulk cash deposit: ${fmt(totalAmount)} across ${pending.length} record(s) via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
+  DB.addNotification('Bulk Cash Deposited',`${fmt(totalAmount)} deposited to bank (${pending.length} records, Ref: ${ref})`,'success');
+  delete state._bulkDepositPending;
+  closeModal();
+  showAlert(`${fmt(totalAmount)} deposited across ${pending.length} record(s). Ref: ${ref}`, 'success');
   renderIncome();
 }
 
@@ -2039,7 +2115,7 @@ return {
   onRoleChange, login, logout, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeposit, submitCashDeposit, markRemittancePaid, setRemAmt, submitRemittance,
+  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, markRemittancePaid, setRemAmt, submitRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt,
   showBankWithdrawal, submitBankWithdrawal,
