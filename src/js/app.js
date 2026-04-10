@@ -244,24 +244,46 @@ async function login(){
   const btn = document.querySelector('#loginScreen .btn-primary');
   if(btn){ btn.textContent='Connecting…'; btn.disabled=true; }
   try {
-    await apiFetch('init').catch(()=>{}); // init tables (safe to call multiple times)
+    // Init DB — creates tables and seeds users if first time
+    const initRes = await apiFetch('init').catch(e=>({ error: e.message }));
+    if(initRes?.error){ console.warn('Init warning:', initRes.error); }
+
     const allUsers = await DB.getUsers();
     state.allUsers = allUsers;
-    const users = allUsers.filter(u=>u.role===role);
-    let user = null;
-    if(users.length>1){
-      const selId = document.getElementById('userSelect').value;
-      user = users.find(u=>u.id===selId&&u.pin===pin);
-    } else {
-      user = users.find(u=>u.pin===pin);
+
+    // Debug: show count if no users found
+    if(!allUsers || allUsers.length === 0){
+      errEl.textContent = 'No users found in database. Visit /api/init to set up the database first.';
+      errEl.style.display='block';
+      if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
+      return;
     }
+
+    const users = allUsers.filter(u => u.role === role);
+    if(!users.length){
+      errEl.textContent = `No users found for role "${role}". Check IT Admin panel.`;
+      errEl.style.display='block';
+      if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
+      return;
+    }
+
+    let user = null;
+    if(users.length > 1){
+      const selId = document.getElementById('userSelect').value;
+      // Compare PIN as string, trimmed
+      user = users.find(u => u.id === selId && String(u.pin).trim() === String(pin).trim());
+    } else {
+      user = users.find(u => String(u.pin).trim() === String(pin).trim());
+    }
+
     if(!user){
-      errEl.textContent='Incorrect PIN. Please try again.';
+      errEl.textContent = `Incorrect PIN for ${role}. (${users.length} user(s) found for this role)`;
       errEl.style.display='block';
       document.getElementById('pinInput').value='';
       if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
       return;
     }
+
     errEl.style.display='none';
     state.user = user;
     DB.addAudit('login','User logged in',user.name);
@@ -269,7 +291,7 @@ async function login(){
     document.getElementById('appShell').style.display='flex';
     initApp();
   } catch(e) {
-    errEl.textContent='Cannot connect to database. Check your internet connection.';
+    errEl.textContent = 'Connection error: ' + (e.message || 'Could not reach database.');
     errEl.style.display='block';
     if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
   }
