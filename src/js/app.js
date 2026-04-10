@@ -87,6 +87,19 @@ const EXPENSE_SUBCATS = {
 
 const DEFAULT_QUOTAS = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000, goFishing:10000 };
 
+// Income source types used in the "Other Income" form
+const OTHER_INCOME_SOURCES = [
+  { key:'midweek_offering',   label:'Midweek / Programme Offering' },
+  { key:'individual_tithe',   label:'Individual Tithe (Bank Transfer)' },
+  { key:'individual_donation',label:'Personal / Individual Donation' },
+  { key:'seed',               label:'Seed Offering' },
+  { key:'special_offering',   label:'Special Offering (e.g. Naming, Wedding)' },
+  { key:'harvest',            label:'Harvest / Thanksgiving Offering' },
+  { key:'building_fund',      label:'Building / Project Fund Contribution' },
+  { key:'external_transfer',  label:'External Bank Transfer Received' },
+  { key:'other',              label:'Other (specify in notes)' }
+];
+
 const DEFAULT_REMITTANCE_RATES = {
   membersTithe:    { natl:0.58, local:0.42 },
   ministersTithe:  { natl:0.62, local:0.38 },
@@ -170,7 +183,8 @@ const DB = {
   saveSettings(v){ this.save(this.KEYS.settings, v) },
 
   // Records a cash/bank transaction. rec should include: { type, date, amount, description, reference, authorizedBy, recordedBy }
-  // type: 'withdrawal' (bank debit for payments/petty cash)
+  // type: 'withdrawal' (bank debit → destination: 'accountant_cash'|'admin_petty_cash'|'direct_expense')
+  //       'cash_deposit' (accountant deposits cash to bank → depositMethod: 'bank_teller'|'pos_terminal'|'mobile_transfer', incomeRef: optional income record id)
   getCashTransactions(){ return this.load(this.KEYS.cashTx) || [] },
   addCashTransaction(rec){
     const arr = this.getCashTransactions();
@@ -462,17 +476,41 @@ function calcChurchBalance(){
   const cashTx = DB.getCashTransactions();
   const petty = DB.getPetty();
 
-  // Cash at hand = income records not yet deposited
-  const cashAtHand = allIncome.filter(r=>!r.depositConfirmed).reduce((s,r)=>s+(r.totalCollection||0),0);
+  // --- BANK BALANCE ---
+  // 1. Income already in bank (bank-transfer portions of all income records)
+  const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
+  // 2. Cash deposited by accountant to bank
+  const cashDepositedToBank = cashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
+  // 3. Outflows from bank: expenses paid via bank_transfer (incl. bank charges)
+  const bankExpenses = allExpenses.filter(e=>e.paymentMethod==='bank_transfer').reduce((s,e) => s+(e.amount||0), 0);
+  // 4. Paid remittances (all assumed to leave the bank)
+  const paidRems = allRemittances.filter(r=>r.status==='paid').reduce((s,r) => s+(r.amount||0), 0);
+  // 5. Bank withdrawals (all types reduce bank; destination tells where money went)
+  const bankWithdrawals = cashTx.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
+  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals;
 
-  // Bank = deposited income - bank-paid expenses - paid remittances - bank withdrawals + bank to petty reversals
-  const deposited = allIncome.filter(r=>r.depositConfirmed).reduce((s,r)=>s+(r.totalCollection||0),0);
-  const bankExpenses = allExpenses.filter(e=>e.paymentMethod==='bank_transfer').reduce((s,e)=>s+(e.amount||0),0);
-  const paidRems = allRemittances.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-  const bankWithdrawals = cashTx.filter(t=>t.type==='withdrawal').reduce((s,t)=>s+(t.amount||0),0);
-  const bankBalance = deposited - bankExpenses - paidRems - bankWithdrawals;
+  // --- CASH WITH ACCOUNTANT ---
+  // Cash received = total collection - bank transfer portion - direct petty portion
+  const cashFromCollections = allIncome.reduce((s,r) => {
+    const btAmt = r.bankTransferAmount||0;
+    const dpAmt = r.directPettyCash||0;
+    return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
+  }, 0);
+  // Cash returned from bank withdrawals directed to accountant
+  const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
+  // Expenses paid from accountant's cash
+  const cashExpenses = allExpenses.filter(e=>e.paymentMethod==='cash').reduce((s,e) => s+(e.amount||0), 0);
+  const cashWithAccountant = cashFromCollections - cashDepositedToBank + bankToAccountant - cashExpenses;
 
-  return { cashAtHand, bankBalance, pettyFloat: petty.float, total: cashAtHand + bankBalance + petty.float };
+  // --- PETTY CASH (with Admin Officer) ---
+  const pettyFloat = petty.float;
+
+  return {
+    cashWithAccountant: Math.max(0, cashWithAccountant),
+    bankBalance,
+    pettyFloat,
+    total: Math.max(0, cashWithAccountant) + bankBalance + pettyFloat
+  };
 }
 
 function renderDashboard(){
@@ -552,8 +590,8 @@ function renderDashboard(){
         <div class="kpi-val" style="color:${churchBal.total<0?'var(--danger)':'var(--primary)'}">${fmt(churchBal.total)}</div>
         <div style="margin-top:6px;font-size:11px;color:var(--text3);line-height:1.6">
           <span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:4px"></span>Bank: ${fmt(churchBal.bankBalance)}<br>
-          <span style="display:inline-block;width:8px;height:8px;background:#BA7517;border-radius:50%;margin-right:4px"></span>Cash at Hand: ${fmt(churchBal.cashAtHand)}<br>
-          <span style="display:inline-block;width:8px;height:8px;background:#1D9E75;border-radius:50%;margin-right:4px"></span>Petty Cash: ${fmt(churchBal.pettyFloat)}
+          <span style="display:inline-block;width:8px;height:8px;background:#BA7517;border-radius:50%;margin-right:4px"></span>Cash with Accountant: ${fmt(churchBal.cashWithAccountant)}<br>
+          <span style="display:inline-block;width:8px;height:8px;background:#1D9E75;border-radius:50%;margin-right:4px"></span>Petty Cash (Admin Officer): ${fmt(churchBal.pettyFloat)}
         </div>
       </div>
     </div>
@@ -628,34 +666,84 @@ function calcRemittancesFromRecords(records){
 // ── INCOME ────────────────────────────────
 function renderIncome(){
   const records = filterByMonth(DB.getIncome());
+  const sundayRecs = records.filter(r=>!r.source||r.source==='sunday_collection');
+  const otherRecs  = records.filter(r=>r.source && r.source!=='sunday_collection');
   const tab = state.incomeTab||'list';
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
       <div><div class="page-title">Income Recording</div><div class="page-sub">${monthLabel()}</div></div>
-      ${can('income')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">+ Record Sunday Collections</button>`:''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${can('income')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">📥 Sunday Collections</button>`:''}
+        ${can('income')?`<button class="btn btn-amber" onclick="App.showOtherIncomeForm()">➕ Other Income</button>`:''}
+      </div>
     </div>
     <div class="tabs">
-      <button class="tab ${tab==='list'?'active':''}" onclick="App.setIncomeTab('list')">Collection History</button>
+      <button class="tab ${tab==='list'?'active':''}" onclick="App.setIncomeTab('list')">Sunday Collections (${sundayRecs.length})</button>
+      <button class="tab ${tab==='other'?'active':''}" onclick="App.setIncomeTab('other')">Other Income (${otherRecs.length})</button>
       <button class="tab ${tab==='summary'?'active':''}" onclick="App.setIncomeTab('summary')">Monthly Summary</button>
       <button class="tab ${tab==='all'?'active':''}" onclick="App.setIncomeTab('all')">All Records</button>
     </div>
-    ${tab==='list'?renderIncomeList(records):tab==='summary'?renderIncomeSummary(records):renderIncomeList(DB.getIncome())}`;
+    ${tab==='list'?renderIncomeList(sundayRecs):tab==='other'?renderOtherIncomeList(otherRecs):tab==='summary'?renderIncomeSummary(records):renderIncomeList(DB.getIncome())}`;
 }
 
 function setIncomeTab(t){ state.incomeTab=t; renderIncome() }
 
 function renderIncomeList(records){
-  if(!records.length) return '<div class="card"><div class="empty-table">No income records found. Click "Record Sunday Collections" to add one.</div></div>';
+  if(!records.length) return '<div class="card"><div class="empty-table">No income records found. Click "Sunday Collections" to add one.</div></div>';
   return `<div class="card"><div class="table-wrap"><table>
-    <tr><th>Date</th><th>Total Collection</th><th>Deposit Status</th><th>Recorded By</th><th>Actions</th></tr>
-    ${records.map(r=>`<tr>
-      <td><strong>${fmtDate(r.date)}</strong><div class="td-muted">${r.notes||''}</div></td>
-      <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
-      <td><span class="badge ${r.depositConfirmed?'badge-success':'badge-warn'}">${r.depositConfirmed?'Deposited':'Pending Deposit'}</span></td>
-      <td class="td-muted">${r.recordedBy||'—'}</td>
-      <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-      ${can('income')&&!r.depositConfirmed?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Confirm Deposit</button>`:''}</td>
-    </tr>`).join('')}
+    <tr><th>Date</th><th>Total Collection</th><th>Cash (Accountant)</th><th>Bank Transfer</th><th>Direct → Petty</th><th>Cash Status</th><th>Recorded By</th><th>Actions</th></tr>
+    ${records.map(r=>{
+      const btAmt = r.bankTransferAmount||0;
+      const dpAmt = r.directPettyCash||0;
+      const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
+      // determine deposit status
+      const depositedAmt = (DB.getCashTransactions().filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0));
+      const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
+      const statusBadge = cashHeld===0
+        ? `<span class="badge badge-info">No Cash (All Transfer)</span>`
+        : isFullyDeposited
+          ? `<span class="badge badge-success">Deposited</span>`
+          : depositedAmt>0
+            ? `<span class="badge badge-warn">Partial (${fmt(depositedAmt)} deposited)</span>`
+            : `<span class="badge badge-warn">Cash Pending Deposit</span>`;
+      return `<tr>
+        <td><strong>${fmtDate(r.date)}</strong><div class="td-muted">${r.notes||''}</div></td>
+        <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
+        <td class="td-muted">${cashHeld>0?fmt(cashHeld):'—'}</td>
+        <td class="td-muted">${btAmt>0?fmt(btAmt):'—'}</td>
+        <td class="td-muted">${dpAmt>0?fmt(dpAmt):'—'}</td>
+        <td>${statusBadge}</td>
+        <td class="td-muted">${r.recordedBy||'—'}</td>
+        <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
+        ${can('income')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+      </tr>`;}).join('')}
+  </table></div></div>`;
+}
+
+function renderOtherIncomeList(records){
+  if(!records.length) return '<div class="card"><div class="empty-table">No other income records found. Click "Other Income" to add one.</div></div>';
+  return `<div class="card"><div class="table-wrap"><table>
+    <tr><th>Date</th><th>Source Type</th><th>Donor / Notes</th><th>Amount</th><th>Payment Method</th><th>Status</th><th>Recorded By</th><th>Actions</th></tr>
+    ${records.map(r=>{
+      const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'};
+      const isCash = r.paymentMethod==='cash';
+      const cashDep = DB.getCashTransactions().filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+      const statusBadge = !isCash
+        ? `<span class="badge badge-info">Bank Transfer</span>`
+        : cashDep>=(r.totalCollection||0)
+          ? `<span class="badge badge-success">Deposited</span>`
+          : `<span class="badge badge-warn">Cash Pending Deposit</span>`;
+      return `<tr>
+        <td><strong>${fmtDate(r.date)}</strong></td>
+        <td><span class="badge badge-gray">${src.label}</span></td>
+        <td class="td-muted">${r.donorName||r.notes||'—'}</td>
+        <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
+        <td class="td-muted" style="font-size:11px">${(r.paymentMethod||'cash').replace('_',' ')}</td>
+        <td>${statusBadge}</td>
+        <td class="td-muted">${r.recordedBy||'—'}</td>
+        <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
+        ${can('income')&&isCash&&cashDep<(r.totalCollection||0)?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+      </tr>`;}).join('')}
   </table></div></div>`;
 }
 
@@ -705,6 +793,26 @@ function showIncomeForm(){
       <div class="amount-label">Total Collection</div>
       <div class="amount-display" id="inc_total">₦0</div>
     </div>
+    <hr class="divider">
+    <p style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">📋 Receipt Breakdown — How was this collected?</p>
+    <p style="font-size:11px;color:var(--text3);margin-bottom:12px">Specify any portion received via bank transfer or given directly to the Admin Officer. The remainder is cash with the accountant.</p>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Via Bank Transfer (₦)</label>
+        <input type="number" id="inc_bank_transfer" class="form-input" placeholder="0" min="0" oninput="App.updateIncomeCashBreakdown()" />
+        <div class="form-hint">Members who paid tithe/offerings directly into the bank account</div>
+      </div>
+      <div class="form-group"><label class="form-label">Cash → Directly to Admin Officer (₦)</label>
+        <input type="number" id="inc_direct_petty" class="form-input" placeholder="0" min="0" oninput="App.updateIncomeCashBreakdown()" />
+        <div class="form-hint">Usher delivers this portion to the Admin Officer to top up petty cash</div>
+      </div>
+    </div>
+    <div class="card" style="background:var(--surface);margin-top:4px" id="inc_breakdown_card">
+      <div style="font-size:12px;color:var(--text2);line-height:2">
+        <span style="color:var(--primary);font-weight:600">Cash with Accountant:</span> <span id="inc_cash_held">₦0</span>
+        &nbsp;·&nbsp;Bank Transfer: <span id="inc_bank_lbl">₦0</span>
+        &nbsp;·&nbsp;Direct to Petty: <span id="inc_petty_lbl">₦0</span>
+      </div>
+    </div>
     <div class="form-group mt-2"><label class="form-label">Notes (optional)</label><textarea id="inc_notes" class="form-textarea" placeholder="Special offerings, events, etc."></textarea></div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
@@ -717,6 +825,21 @@ function updateIncomeTotal(){
   INCOME_TYPES.forEach(t=>{ total+=parseFloat(document.getElementById('inc_'+t.key)?.value||0)||0 });
   const el=document.getElementById('inc_total');
   if(el) el.textContent=fmt(total);
+  updateIncomeCashBreakdown();
+}
+
+function updateIncomeCashBreakdown(){
+  let total=0;
+  INCOME_TYPES.forEach(t=>{ total+=parseFloat(document.getElementById('inc_'+t.key)?.value||0)||0 });
+  const bt = parseFloat(document.getElementById('inc_bank_transfer')?.value||0)||0;
+  const dp = parseFloat(document.getElementById('inc_direct_petty')?.value||0)||0;
+  const cash = Math.max(0, total - bt - dp);
+  const cashEl = document.getElementById('inc_cash_held');
+  const btEl   = document.getElementById('inc_bank_lbl');
+  const dpEl   = document.getElementById('inc_petty_lbl');
+  if(cashEl) cashEl.textContent = fmt(cash);
+  if(btEl)   btEl.textContent   = fmt(bt);
+  if(dpEl)   dpEl.textContent   = fmt(dp);
 }
 
 function submitIncome(){
@@ -724,16 +847,40 @@ function submitIncome(){
   const usher=document.getElementById('inc_usher')?.value?.trim();
   if(!date){ alert('Please select a date.'); return }
   if(!usher){ alert('Please enter the Head Usher name for counter-signing.'); return }
-  const rec={date,usher,recordedBy:state.user?.name,depositConfirmed:false};
+  const rec={date,usher,source:'sunday_collection',recordedBy:state.user?.name,depositConfirmed:false};
   let total=0;
   INCOME_TYPES.forEach(t=>{ const v=parseFloat(document.getElementById('inc_'+t.key)?.value||0)||0; rec[t.key]=v; total+=v });
   if(!total){ alert('Please enter at least one income amount.'); return }
   rec.totalCollection=total;
+
+  const bankTransferAmount = parseFloat(document.getElementById('inc_bank_transfer')?.value||0)||0;
+  const directPettyCash    = parseFloat(document.getElementById('inc_direct_petty')?.value||0)||0;
+  if(bankTransferAmount + directPettyCash > total){
+    alert(`Bank transfer (${fmt(bankTransferAmount)}) + direct petty cash (${fmt(directPettyCash)}) cannot exceed the total collection (${fmt(total)}).`);
+    return;
+  }
+  rec.bankTransferAmount = bankTransferAmount;
+  rec.directPettyCash    = directPettyCash;
   rec.notes=document.getElementById('inc_notes')?.value||'';
-  DB.addIncome(rec);
-  DB.addNotification('Income Recorded',`${fmt(total)} recorded for ${fmtDate(date)}`,'success');
+
+  const saved = DB.addIncome(rec);
+
+  // If some cash was given directly to the admin officer, auto-create a petty refill
+  if(directPettyCash > 0){
+    const petty = DB.getPetty();
+    const newFloat = Math.min(petty.float + directPettyCash, petty.max);
+    petty.history.unshift({ id:'RF-'+Date.now(), type:'refill', amount:directPettyCash, source:'collection_cash',
+      reference:`From Sunday collection ${fmtDate(date)}`, authorizedBy:usher,
+      requestedBy:state.user?.name, status:'settled', createdAt:new Date().toISOString(),
+      purpose:`Cash from Sunday collection (${fmtDate(date)}) → Admin Officer Petty Cash`, incomeRef:saved.id });
+    petty.float = newFloat;
+    DB.savePetty(petty);
+    DB.addAudit('petty_refilled',`${fmt(directPettyCash)} from Sunday collection credited to Admin Officer petty cash`,state.user?.name);
+  }
+
+  DB.addNotification('Income Recorded',`${fmt(total)} recorded for ${fmtDate(date)}${directPettyCash?` | ${fmt(directPettyCash)} → Petty Cash`:''}`,'success');
   closeModal();
-  showAlert(`Income of ${fmt(total)} recorded successfully!`,'success');
+  showAlert(`Income of ${fmt(total)} recorded. Cash with accountant: ${fmt(Math.max(0,total-bankTransferAmount-directPettyCash))}${bankTransferAmount?` | Bank: ${fmt(bankTransferAmount)}`:''}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
   renderIncome();
   buildSidebar();
 }
@@ -741,39 +888,172 @@ function submitIncome(){
 function viewIncome(id){
   const r=DB.getIncome().find(x=>x.id===id);
   if(!r) return;
-  const rem=calcRemittances(r);
+  const isSunday = !r.source||r.source==='sunday_collection';
+  const rem = isSunday ? calcRemittances(r) : null;
+  const btAmt = r.bankTransferAmount||0;
+  const dpAmt = r.directPettyCash||0;
+  const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
+  const deposits = DB.getCashTransactions().filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id);
+  const depositedTotal = deposits.reduce((s,t)=>s+(t.amount||0),0);
+  const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Sunday Collection'};
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">Income Details — ${fmtDate(r.date)}</div>
     <div class="grid-2">
       <div><div class="amount-label">Total Collection</div><div class="amount-display">${fmt(r.totalCollection)}</div></div>
-      <div><div class="amount-label">To National HQ</div><div class="amount-display" style="color:var(--danger)">${fmt(rem.totalNatl)}</div></div>
+      <div><div class="amount-label">Source</div><div style="font-size:14px;font-weight:600;padding-top:8px">${isSunday?'Sunday Collection':src.label}</div></div>
     </div>
     <hr class="divider">
+    <p class="card-title">Cash Breakdown</p>
+    <div class="status-row"><div class="status-row-label">💵 Cash with Accountant</div><div class="status-row-amt" style="color:var(--amber)">${fmt(cashHeld)}</div></div>
+    ${btAmt?`<div class="status-row"><div class="status-row-label">🏦 Bank Transfer (already in bank)</div><div class="status-row-amt" style="color:var(--primary)">${fmt(btAmt)}</div></div>`:''}
+    ${dpAmt?`<div class="status-row"><div class="status-row-label">💳 Direct → Admin Officer Petty Cash</div><div class="status-row-amt" style="color:var(--success)">${fmt(dpAmt)}</div></div>`:''}
+    ${deposits.length?`<div class="status-row"><div class="status-row-label">✅ Deposited to Bank so far</div><div class="status-row-amt" style="color:var(--success)">${fmt(depositedTotal)}</div></div>`:''}
+    ${cashHeld>depositedTotal?`<div class="status-row"><div class="status-row-label">⏳ Still with Accountant (undeposited)</div><div class="status-row-amt" style="color:var(--danger)">${fmt(cashHeld-depositedTotal)}</div></div>`:''}
+    ${isSunday?`<hr class="divider">
     <p class="card-title">Income Breakdown</p>
     ${INCOME_TYPES.filter(t=>r[t.key]).map(t=>`<div class="status-row"><div class="status-row-label">${t.label}</div><div class="status-row-amt">${fmt(r[t.key])}</div></div>`).join('')}
     <hr class="divider">
     <p class="card-title">Remittances Due</p>
     ${rem.lines.map(l=>`<div class="status-row"><div class="status-row-label">${l.label} → HQ</div><div class="status-row-amt td-red">${fmt(l.national||0)}</div></div>`).join('')}
     <div class="status-row"><div class="status-row-label">Province Rebate (${Math.round(getRemRates().provinceRebate*100)}%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div></div>
-    <div class="status-row" style="border-top:2px solid var(--border)"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt td-green" style="font-size:15px">${fmt(rem.netLocal)}</div></div>
+    <div class="status-row" style="border-top:2px solid var(--border)"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt td-green" style="font-size:15px">${fmt(rem.netLocal)}</div></div>`:''}
     <hr class="divider">
-    <div class="fs-12 text-muted">Recorded by: ${r.recordedBy||'—'} · Counted with: ${r.usher||'—'}</div>
-    <div class="fs-12 text-muted">Status: <span class="badge ${r.depositConfirmed?'badge-success':'badge-warn'}">${r.depositConfirmed?'Deposited ('+r.tellerNo+')':'Pending Deposit'}</span></div>
+    <div class="fs-12 text-muted">Recorded by: ${r.recordedBy||'—'} · ${isSunday?'Counted with: '+r.usher:'Donor: '+(r.donorName||'—')}</div>
+    ${deposits.length?`<div class="fs-12 text-muted">Deposit records: ${deposits.map(d=>`${fmt(d.amount)} via ${d.depositMethod?.replace('_',' ')||'—'} on ${fmtDate(d.date)} (Ref: ${d.reference||'—'})`).join('; ')}</div>`:''}
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button>
-    ${can('income')&&!r.depositConfirmed?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Confirm Bank Deposit</button>`:''}</div>`);
+    ${can('income')&&cashHeld>depositedTotal?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
 }
 
 function confirmDeposit(id){
-  const teller=prompt('Enter bank teller/reference number:');
-  if(!teller) return;
-  const arr=DB.getIncome();
-  const idx=arr.findIndex(r=>r.id===id);
-  if(idx>-1){ arr[idx].depositConfirmed=true; arr[idx].tellerNo=teller; arr[idx].depositedBy=state.user?.name; arr[idx].depositDate=new Date().toISOString(); DB.saveIncome(arr); }
-  DB.addAudit('deposit_confirmed',`Deposit confirmed for ${id} — Teller: ${teller}`,state.user?.name);
+  const r = DB.getIncome().find(x=>x.id===id);
+  if(!r) return;
+  const btAmt = r.bankTransferAmount||0;
+  const dpAmt = r.directPettyCash||0;
+  const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
+  const alreadyDeposited = DB.getCashTransactions().filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+  const remaining = Math.max(0, cashHeld - alreadyDeposited);
+  const today = new Date().toISOString().split('T')[0];
   closeModal();
-  showAlert('Bank deposit confirmed!','success');
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">💰 Record Cash Deposit — ${fmtDate(r.date)}</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Record when you physically deposit the cash collected into the church bank account.</span></div>
+    <div class="form-group"><label class="form-label">Cash Available from this Record</label>
+      <div style="font-size:20px;font-weight:700;color:var(--primary);padding:8px 0">${fmt(remaining)}</div>
+      ${alreadyDeposited?`<div class="form-hint">₦${alreadyDeposited.toLocaleString('en-NG')} already deposited previously from this record.</div>`:''}
+    </div>
+    <div class="form-group"><label class="form-label">Amount Deposited *</label>
+      <input type="number" id="dep_amount" class="form-input" value="${remaining}" min="0" max="${remaining}" />
+    </div>
+    <div class="form-group"><label class="form-label">Deposit Method *</label>
+      <select id="dep_method" class="form-select">
+        <option value="bank_teller">Bank Cash Teller</option>
+        <option value="pos_terminal">POS Terminal</option>
+        <option value="mobile_transfer">Mobile / Internet Banking Transfer</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Teller / Reference Number *</label>
+      <input type="text" id="dep_ref" class="form-input" placeholder="Bank teller number or transaction reference" />
+    </div>
+    <div class="form-group"><label class="form-label">Date of Deposit *</label>
+      <input type="date" id="dep_date" class="form-input" value="${today}" max="${today}" />
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.submitCashDeposit('${id}')">Confirm Deposit</button>
+    </div>`);
+}
+
+function submitCashDeposit(incomeId){
+  const amount  = parseFloat(document.getElementById('dep_amount')?.value)||0;
+  const method  = document.getElementById('dep_method')?.value;
+  const ref     = document.getElementById('dep_ref')?.value?.trim();
+  const date    = document.getElementById('dep_date')?.value;
+  if(!amount||!ref||!date){ alert('Please fill all required fields.'); return }
+  DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
+  DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
+  DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank (Ref: ${ref})`,'success');
+  closeModal();
+  showAlert(`${fmt(amount)} deposited to bank successfully! Ref: ${ref}`, 'success');
   renderIncome();
+}
+
+function showOtherIncomeForm(){
+  const today = new Date().toISOString().split('T')[0];
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">➕ Record Other Income</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Use this for income outside regular Sunday collections — individual donations, midweek offerings, seeds, transfers, etc.</span></div>
+    <div class="form-group"><label class="form-label">Date *</label>
+      <input type="date" id="oi_date" class="form-input" value="${today}" max="${today}" />
+    </div>
+    <div class="form-group"><label class="form-label">Income Source Type *</label>
+      <select id="oi_source" class="form-select">
+        <option value="">— Select source —</option>
+        ${OTHER_INCOME_SOURCES.map(s=>`<option value="${s.key}">${s.label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Donor / Source Name (optional)</label>
+      <input type="text" id="oi_donor" class="form-input" placeholder="Name of donor, member, or programme" />
+    </div>
+    <div class="form-group"><label class="form-label">Which income category does this belong to?</label>
+      <select id="oi_category" class="form-select">
+        <option value="local_only">Local Church Use Only (donation, etc.)</option>
+        ${INCOME_TYPES.map(t=>`<option value="${t.key}">${t.label} (affects remittance split)</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Amount (₦) *</label>
+      <input type="number" id="oi_amount" class="form-input" placeholder="0" min="0" />
+    </div>
+    <div class="form-group"><label class="form-label">Payment Method *</label>
+      <select id="oi_method" class="form-select">
+        <option value="cash">Cash (received by accountant)</option>
+        <option value="bank_transfer">Bank Transfer (already in church account)</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Notes (optional)</label>
+      <textarea id="oi_notes" class="form-textarea" placeholder="Additional details, event name, etc."></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.submitOtherIncome()">Save Income</button>
+    </div>`);
+}
+
+function submitOtherIncome(){
+  const date       = document.getElementById('oi_date')?.value;
+  const source     = document.getElementById('oi_source')?.value;
+  const donorName  = document.getElementById('oi_donor')?.value?.trim();
+  const category   = document.getElementById('oi_category')?.value;
+  const amount     = parseFloat(document.getElementById('oi_amount')?.value)||0;
+  const method     = document.getElementById('oi_method')?.value;
+  const notes      = document.getElementById('oi_notes')?.value||'';
+  if(!date||!source){ alert('Please select a date and source type.'); return }
+  if(!amount){ alert('Please enter an amount.'); return }
+
+  // Build a record compatible with the income structure
+  const rec = {
+    date, source, donorName, notes, recordedBy:state.user?.name,
+    paymentMethod: method,
+    totalCollection: amount,
+    bankTransferAmount: method==='bank_transfer' ? amount : 0,
+    directPettyCash: 0,
+    depositConfirmed: method==='bank_transfer'
+  };
+  // Map income category to the right income type field if applicable
+  if(category && category !== 'local_only'){
+    rec[category] = amount;
+  } else {
+    rec.otherDonation = amount;
+  }
+
+  DB.addIncome(rec);
+  DB.addNotification('Other Income Recorded',`${fmt(amount)} recorded (${source}) from ${donorName||'unnamed'}`,'success');
+  closeModal();
+  showAlert(`${fmt(amount)} recorded as ${OTHER_INCOME_SOURCES.find(s=>s.key===source)?.label||source}. Method: ${method.replace('_',' ')}.`,'success');
+  renderIncome();
+  buildSidebar();
 }
 
 // ── REMITTANCES ───────────────────────────
@@ -961,6 +1241,18 @@ function updateExpenseSubcats(){
   sel.innerHTML = `<option value="">— Select sub-category —</option>` +
     subcats.map(s=>`<option value="${s}">${s}</option>`).join('');
   updateExpenseDescRequired();
+  // Bank Charges must always be paid via bank transfer (auto-deducted from bank balance)
+  const methodSel = document.getElementById('exp_method');
+  if(methodSel){
+    if(cat === 'bank'){
+      methodSel.value = 'bank_transfer';
+      methodSel.disabled = true;
+      methodSel.title = 'Bank charges are automatically deducted from the bank balance';
+    } else {
+      methodSel.disabled = false;
+      methodSel.title = '';
+    }
+  }
 }
 
 function updateExpenseDescRequired(){
@@ -998,7 +1290,11 @@ function showExpenseForm(){
     <div class="form-group"><label class="form-label">Amount (₦) *</label><input type="number" id="exp_amt" class="form-input" placeholder="0" min="0" /></div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Payment Method</label>
-        <select id="exp_method" class="form-select"><option value="petty_cash">Petty Cash</option><option value="bank_transfer">Bank Transfer</option><option value="cash">Cash (Accountant)</option></select>
+        <select id="exp_method" class="form-select">
+          ${(state.user?.role==='admin_officer'||state.user?.role==='it_admin')?`<option value="petty_cash">Petty Cash (Admin Officer)</option>`:''}
+          <option value="bank_transfer">Bank Transfer</option>
+          <option value="cash">Cash (Accountant)</option>
+        </select>
       </div>
       <div class="form-group"><label class="form-label">Receipt / Invoice No. (optional)</label><input type="text" id="exp_receipt" class="form-input" placeholder="Optional" /></div>
     </div>
@@ -1063,25 +1359,49 @@ function showBankWithdrawal(){
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">🏦 Record Bank Withdrawal</div>
-    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Use this to record cash withdrawn from the church bank account. This affects the Total Church Balance calculation.</span></div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Record cash withdrawn from the church bank account. Select where the withdrawn cash is going — this determines how the church balance is updated.</span></div>
     <div class="form-group"><label class="form-label">Date *</label><input type="date" id="wd_date" class="form-input" value="${today}" max="${today}" /></div>
     <div class="form-group"><label class="form-label">Amount Withdrawn (₦) *</label><input type="number" id="wd_amt" class="form-input" placeholder="0" min="0" /></div>
-    <div class="form-group"><label class="form-label">Purpose / Description *</label><input type="text" id="wd_desc" class="form-input" placeholder="e.g. Petty cash refill, Expense payment, etc." /></div>
+    <div class="form-group"><label class="form-label">Destination of Cash *</label>
+      <select id="wd_dest" class="form-select">
+        <option value="accountant_cash">→ Accountant's Cash (for payment of expenses, etc.)</option>
+        <option value="admin_petty_cash">→ Admin Officer's Petty Cash (to refill the imprest float)</option>
+        <option value="direct_expense">→ Direct Expense Payment (e.g. vendor paid immediately)</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Purpose / Description *</label><input type="text" id="wd_desc" class="form-input" placeholder="e.g. Petty cash refill, Payment for generator repair, etc." /></div>
     <div class="form-group"><label class="form-label">Bank Reference / Teller No.</label><input type="text" id="wd_ref" class="form-input" placeholder="Optional reference number" /></div>
     <div class="form-group"><label class="form-label">Authorized By</label><input type="text" id="wd_auth" class="form-input" placeholder="Signatory names" value="${state.user?.name||''}" /></div>
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankWithdrawal()">Record Withdrawal</button></div>`);
 }
 
 function submitBankWithdrawal(){
-  const date=document.getElementById('wd_date')?.value;
-  const amount=parseFloat(document.getElementById('wd_amt')?.value)||0;
-  const description=document.getElementById('wd_desc')?.value?.trim();
-  const reference=document.getElementById('wd_ref')?.value;
-  const auth=document.getElementById('wd_auth')?.value;
+  const date        = document.getElementById('wd_date')?.value;
+  const amount      = parseFloat(document.getElementById('wd_amt')?.value)||0;
+  const destination = document.getElementById('wd_dest')?.value||'accountant_cash';
+  const description = document.getElementById('wd_desc')?.value?.trim();
+  const reference   = document.getElementById('wd_ref')?.value;
+  const auth        = document.getElementById('wd_auth')?.value;
   if(!date||!amount||!description){ alert('Please fill all required fields.'); return }
-  DB.addCashTransaction({ type:'withdrawal', date, amount, description, reference, authorizedBy:auth, recordedBy:state.user?.name });
-  closeModal();
-  showAlert(`Bank withdrawal of ${fmt(amount)} recorded.`,'success');
+
+  DB.addCashTransaction({ type:'withdrawal', destination, date, amount, description, reference, authorizedBy:auth, recordedBy:state.user?.name });
+
+  // If withdrawn to admin officer petty cash, auto-create a petty refill
+  if(destination === 'admin_petty_cash'){
+    const petty = DB.getPetty();
+    const newFloat = Math.min(petty.float + amount, petty.max);
+    petty.history.unshift({ id:'RF-'+Date.now(), type:'refill', amount, source:'bank_withdrawal',
+      reference, authorizedBy:auth, requestedBy:state.user?.name, status:'settled',
+      createdAt:new Date().toISOString(), purpose:`Bank withdrawal → Admin Officer Petty Cash: ${description}` });
+    petty.float = newFloat;
+    DB.savePetty(petty);
+    DB.addAudit('petty_refilled',`${fmt(amount)} from bank withdrawal credited to Admin Officer petty cash (${description})`,state.user?.name);
+    closeModal();
+    showAlert(`${fmt(amount)} withdrawn from bank and credited to Admin Officer petty cash. New float: ${fmt(newFloat)}.`,'success');
+  } else {
+    closeModal();
+    showAlert(`Bank withdrawal of ${fmt(amount)} recorded. Destination: ${destination.replace(/_/g,' ')}.`,'success');
+  }
   navigate(state.page);
 }
 
@@ -1714,8 +2034,9 @@ function submitKPSCAlert(){
 // ──────────────────────────────────────────
 return {
   onRoleChange, login, logout, navigate, toggleSidebar, toggleNotifications,
-  onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, submitIncome,
-  viewIncome, confirmDeposit, markRemittancePaid, setRemAmt, submitRemittance,
+  onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
+  showOtherIncomeForm, submitOtherIncome,
+  viewIncome, confirmDeposit, submitCashDeposit, markRemittancePaid, setRemAmt, submitRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt,
   showBankWithdrawal, submitBankWithdrawal,
