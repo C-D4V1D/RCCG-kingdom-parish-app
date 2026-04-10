@@ -232,15 +232,15 @@ async function initDB(DB) {
   // Step 2: NOW safe to query users — seed default users only if table is empty
   try {
     const row = await DB.prepare('SELECT COUNT(*) as c FROM users').first();
-    if (!row || row.c === 0) {
+    if (true) { // Always re-seed to fix any corrupted PIN records
       const seeds = [
-        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u1','IT Administrator','it_admin','0000','it@kpaguleri.org')",
-        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u2','Rev. Emmanuel Obi','pastor','1111','pastor@kpaguleri.org')",
-        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u3','Bro. Chukwuemeka Nze','accountant','2222','accounts@kpaguleri.org')",
-        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u4','Sis. Adaeze Okonkwo','admin_officer','3333','admin@kpaguleri.org')",
-        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u5','Elder Paul Okafor','signatory','4444','elder1@kpaguleri.org')",
-        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u6','Elder James Eze','signatory','4444','elder2@kpaguleri.org')",
-        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u7','Visitor Access','viewer','9999','')",
+        "INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES ('u1','IT Administrator','it_admin','0000','it@kpaguleri.org')",
+        "INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES ('u2','Rev. Emmanuel Obi','pastor','1111','pastor@kpaguleri.org')",
+        "INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES ('u3','Bro. Chukwuemeka Nze','accountant','2222','accounts@kpaguleri.org')",
+        "INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES ('u4','Sis. Adaeze Okonkwo','admin_officer','3333','admin@kpaguleri.org')",
+        "INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES ('u5','Elder Paul Okafor','signatory','4444','elder1@kpaguleri.org')",
+        "INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES ('u6','Elder James Eze','signatory','4444','elder2@kpaguleri.org')",
+        "INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES ('u7','Visitor Access','viewer','9999','')",
       ];
       for (const sql of seeds) {
         try { await DB.prepare(sql).run(); } catch(e) { console.error('Seed error:', e.message); }
