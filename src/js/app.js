@@ -669,10 +669,13 @@ function renderIncome(){
   const sundayRecs = records.filter(r=>!r.source||r.source==='sunday_collection');
   const otherRecs  = records.filter(r=>r.source && r.source!=='sunday_collection');
   const tab = state.incomeTab||'list';
-  // Compute pending sunday records (cash not yet fully deposited)
+  // Compute pending records (cash not yet fully deposited) across ALL income types
   const _cashTx = DB.getCashTransactions();
-  const pendingSundayCount = sundayRecs.filter(r=>{
-    const cashHeld = Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
+  const pendingCount = records.filter(r=>{
+    const isSunday = !r.source||r.source==='sunday_collection';
+    const cashHeld = isSunday
+      ? Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0))
+      : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
     const dep = _cashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
     return cashHeld>0 && dep<cashHeld;
   }).length;
@@ -682,7 +685,7 @@ function renderIncome(){
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${can('income')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">📥 Sunday Collections</button>`:''}
         ${can('income')?`<button class="btn btn-amber" onclick="App.showOtherIncomeForm()">➕ Other Income</button>`:''}
-        ${can('income')&&pendingSundayCount>=2?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit All Pending (${pendingSundayCount})</button>`:''}
+        ${can('income')&&pendingCount>=2?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit All Pending (${pendingCount})</button>`:''}
       </div>
     </div>
     <div class="tabs">
@@ -989,12 +992,15 @@ function submitCashDeposit(incomeId){
 
 function confirmBulkDeposit(){
   const allIncome = filterByMonth(DB.getIncome());
-  const sundayRecs = allIncome.filter(r=>!r.source||r.source==='sunday_collection');
   const cashTx = DB.getCashTransactions();
-  const pending = sundayRecs.map(r=>{
-    const cashHeld = Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
+  const pending = allIncome.map(r=>{
+    const isSunday = !r.source||r.source==='sunday_collection';
+    const cashHeld = isSunday
+      ? Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0))
+      : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
     const deposited = cashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-    return { id:r.id, date:r.date, cashHeld, deposited, remaining: cashHeld-deposited };
+    const srcLabel = isSunday ? 'Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
+    return { id:r.id, date:r.date, cashHeld, deposited, remaining:cashHeld-deposited, source:srcLabel };
   }).filter(p=>p.cashHeld>0 && p.remaining>0);
   if(!pending.length){ showAlert('No pending cash deposits found.','warn'); return }
   state._bulkDepositPending = pending;
@@ -1005,15 +1011,16 @@ function confirmBulkDeposit(){
     <div class="modal-title">💰 Deposit All Pending Cash</div>
     <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>This records one bank deposit covering all ${pending.length} pending cash record${pending.length>1?'s':''}.</span></div>
     <div class="table-wrap" style="margin-bottom:16px"><table>
-      <tr><th>Date</th><th>Cash Held</th><th>Already Deposited</th><th class="td-right">Remaining</th></tr>
+      <tr><th>Date</th><th>Source</th><th>Cash Held</th><th>Already Deposited</th><th class="td-right">Remaining</th></tr>
       ${pending.map(p=>`<tr>
         <td><strong>${fmtDate(p.date)}</strong></td>
+        <td class="td-muted">${p.source}</td>
         <td>${fmt(p.cashHeld)}</td>
         <td>${p.deposited>0?fmt(p.deposited):'—'}</td>
         <td class="td-right td-bold">${fmt(p.remaining)}</td>
       </tr>`).join('')}
       <tr style="border-top:2px solid var(--border);font-weight:700">
-        <td colspan="3">TOTAL</td>
+        <td colspan="4">TOTAL</td>
         <td class="td-right" style="color:var(--primary);font-size:15px">${fmt(totalRemaining)}</td>
       </tr>
     </table></div>
