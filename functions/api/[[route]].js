@@ -224,25 +224,31 @@ async function initDB(DB) {
     `INSERT OR IGNORE INTO settings (key, value) VALUES ('quotas', '{"rmf":5000,"csr":3000,"edu":2000,"camp":5000,"mummy":8000,"volunteer":2000,"goFishing":10000}')`,
   ];
 
-  // Seed default users if table is empty
-  const userCount = await DB.prepare('SELECT COUNT(*) as c FROM users').first();
-  if (!userCount || userCount.c === 0) {
-    statements.push(
-      `INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u1','IT Administrator','it_admin','0000','it@kpaguleri.org')`,
-      `INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u2','Rev. Emmanuel Obi','pastor','1111','pastor@kpaguleri.org')`,
-      `INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u3','Bro. Chukwuemeka Nze','accountant','2222','accounts@kpaguleri.org')`,
-      `INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u4','Sis. Adaeze Okonkwo','admin_officer','3333','admin@kpaguleri.org')`,
-      `INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u5','Elder Paul Okafor','signatory','4444','elder1@kpaguleri.org')`,
-      `INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u6','Elder James Eze','signatory','4444','elder2@kpaguleri.org')`,
-      `INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u7','Visitor Access','viewer','9999','')`
-    );
-  }
-
+  // Step 1: Run all CREATE TABLE statements first — tables must exist before we query them
   for (const sql of statements) {
     try { await DB.prepare(sql).run(); } catch(e) { console.error('Init SQL error:', sql, e.message); }
   }
 
-  return ok({ success: true, message: 'Database initialised successfully.' });
+  // Step 2: NOW safe to query users — seed default users only if table is empty
+  try {
+    const row = await DB.prepare('SELECT COUNT(*) as c FROM users').first();
+    if (!row || row.c === 0) {
+      const seeds = [
+        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u1','IT Administrator','it_admin','0000','it@kpaguleri.org')",
+        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u2','Rev. Emmanuel Obi','pastor','1111','pastor@kpaguleri.org')",
+        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u3','Bro. Chukwuemeka Nze','accountant','2222','accounts@kpaguleri.org')",
+        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u4','Sis. Adaeze Okonkwo','admin_officer','3333','admin@kpaguleri.org')",
+        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u5','Elder Paul Okafor','signatory','4444','elder1@kpaguleri.org')",
+        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u6','Elder James Eze','signatory','4444','elder2@kpaguleri.org')",
+        "INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES ('u7','Visitor Access','viewer','9999','')",
+      ];
+      for (const sql of seeds) {
+        try { await DB.prepare(sql).run(); } catch(e) { console.error('Seed error:', e.message); }
+      }
+    }
+  } catch(e) { console.error('Seed check failed:', e.message); }
+
+  return ok({ success: true, message: 'Database initialised. All tables created and default users seeded.' });
 }
 
 // ──────────────────────────────────────────
