@@ -1402,7 +1402,7 @@ async function submitExpense(){
       }
       closeModal();
       showAlert('Expense logged successfully!','success');
-      renderExpenses();
+      await renderExpenses();
     } catch(err) {
       showAlert(`Failed to save expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
     }
