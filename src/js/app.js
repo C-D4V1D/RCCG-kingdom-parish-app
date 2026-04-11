@@ -762,37 +762,51 @@ async function renderIncome(){
   const tab = state.incomeTab||'list';
   // Compute pending records (cash not yet fully deposited) across ALL income types
   const _cashTx = await DB.getCashTransactions();
-  const pendingCount = records.filter(r=>{
+  const pendingItems = records.map(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
       ? Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0))
       : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
     const dep = _cashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-    return cashHeld>0 && dep<cashHeld;
-  }).length;
+    return { cashHeld, dep };
+  }).filter(p=>p.cashHeld>0 && p.dep<p.cashHeld);
+  const pendingCount = pendingItems.length;
+  const pendingCashTotal = pendingItems.reduce((s,p)=>s+(p.cashHeld-p.dep),0);
+  const totalCollected = records.reduce((s,r)=>s+(r.totalCollection||0),0);
+  // Only count deposits linked to this month's income records (scoped correctly to the month view)
+  const currentMonthRecordIds = new Set(records.map(r=>r.id));
+  const totalDeposited = _cashTx.filter(t=>t.type==='cash_deposit'&&currentMonthRecordIds.has(t.incomeRef)).reduce((s,t)=>s+(t.amount||0),0)
+    + records.reduce((s,r)=>s+(r.bankTransferAmount||0),0);
+
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
       <div><div class="page-title">Income Recording</div><div class="page-sub">${monthLabel()}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${can('income')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">📥 Sunday Collections</button>`:''}
         ${can('income')?`<button class="btn btn-amber" onclick="App.showOtherIncomeForm()">➕ Other Income</button>`:''}
-        ${can('income')&&pendingCount>=2?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit All Pending (${pendingCount})</button>`:''}
+        ${can('income')&&pendingCount>=1?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${pendingCount} pending)</button>`:''}
       </div>
     </div>
+    <div class="kpi-grid" style="margin-bottom:16px">
+      <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">📥</div><div class="kpi-label">Total Collected</div><div class="kpi-val">${fmt(totalCollected)}</div><div class="kpi-delta up">${records.length} record(s)</div></div>
+      <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">💵</div><div class="kpi-label">Cash Pending Deposit</div><div class="kpi-val" style="color:${pendingCashTotal>0?'var(--amber)':'var(--primary)'}">${fmt(pendingCashTotal)}</div><div class="kpi-delta ${pendingCashTotal>0?'warn':'up'}">${pendingCount>0?pendingCount+' record(s) awaiting deposit':'All cash deposited ✓'}</div></div>
+      <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">🏦</div><div class="kpi-label">In Bank (this month)</div><div class="kpi-val">${fmt(totalDeposited)}</div><div class="kpi-delta up">Transfers + deposits</div></div>
+    </div>
+    ${pendingCount>0&&can('income')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>${pendingCount} cash record(s)</strong> totalling <strong>${fmt(pendingCashTotal)}</strong> still held by accountant and not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
     <div class="tabs">
       <button class="tab ${tab==='list'?'active':''}" onclick="App.setIncomeTab('list')">Sunday Collections (${sundayRecs.length})</button>
       <button class="tab ${tab==='other'?'active':''}" onclick="App.setIncomeTab('other')">Other Income (${otherRecs.length})</button>
       <button class="tab ${tab==='summary'?'active':''}" onclick="App.setIncomeTab('summary')">Monthly Summary</button>
       <button class="tab ${tab==='all'?'active':''}" onclick="App.setIncomeTab('all')">All Records</button>
     </div>
-    ${await (tab==='list'?renderIncomeList(sundayRecs):tab==='other'?renderOtherIncomeList(otherRecs):tab==='summary'?renderIncomeSummary(records):renderIncomeList(allIncomeRecs))}`;
+    ${await (tab==='list'?renderIncomeList(sundayRecs):tab==='other'?renderOtherIncomeList(otherRecs):tab==='summary'?renderIncomeSummary(records):renderAllIncomeList(allIncomeRecs, _cashTx))}`;
 }
 
 function setIncomeTab(t){ state.incomeTab=t; renderIncome() }
 
-async function renderIncomeList(records){
-  if(!records.length) return '<div class="card"><div class="empty-table">No income records found. Click "Sunday Collections" to add one.</div></div>';
-  const allCashTxList = await DB.getCashTransactions();
+async function renderIncomeList(records, cashTxOverride){
+  if(!records.length) return '<div class="card"><div class="empty-table">No Sunday collection records found for this month. Click "📥 Sunday Collections" above to add one.</div></div>';
+  const allCashTxList = cashTxOverride || await DB.getCashTransactions();
   return `<div class="card"><div class="table-wrap"><table>
     <tr><th>Date</th><th>Total Collection</th><th>Cash (Accountant)</th><th>Bank Transfer</th><th>Direct → Petty</th><th>Cash Status</th><th>Recorded By</th><th>Actions</th></tr>
     ${records.map(r=>{
@@ -801,15 +815,16 @@ async function renderIncomeList(records){
       const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
       const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
       const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
+      const remaining = cashHeld - depositedAmt;
       const statusBadge = cashHeld===0
         ? `<span class="badge badge-info">No Cash (All Transfer)</span>`
         : isFullyDeposited
-          ? `<span class="badge badge-success">Deposited</span>`
+          ? `<span class="badge badge-success">✓ Deposited</span>`
           : depositedAmt>0
-            ? `<span class="badge badge-warn">Partial (${fmt(depositedAmt)} deposited)</span>`
-            : `<span class="badge badge-warn">Cash Pending Deposit</span>`;
+            ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} still pending</span>`
+            : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
       return `<tr>
-        <td><strong>${fmtDate(r.date)}</strong><div class="td-muted">${r.notes||''}</div></td>
+        <td><strong>${fmtDate(r.date)}</strong>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
         <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
         <td class="td-muted">${cashHeld>0?fmt(cashHeld):'—'}</td>
         <td class="td-muted">${btAmt>0?fmt(btAmt):'—'}</td>
@@ -823,18 +838,22 @@ async function renderIncomeList(records){
 }
 
 async function renderOtherIncomeList(records){
-  if(!records.length) return '<div class="card"><div class="empty-table">No other income records found. Click "Other Income" to add one.</div></div>';
+  if(!records.length) return '<div class="card"><div class="empty-table">No other income records found for this month. Click "➕ Other Income" above to add one.</div></div>';
+  const allCashTxList = await DB.getCashTransactions();
   return `<div class="card"><div class="table-wrap"><table>
     <tr><th>Date</th><th>Source Type</th><th>Donor / Notes</th><th>Amount</th><th>Payment Method</th><th>Status</th><th>Recorded By</th><th>Actions</th></tr>
     ${records.map(r=>{
       const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'};
       const isCash = r.paymentMethod==='cash';
       const cashDep = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+      const remaining = Math.max(0,(r.totalCollection||0) - cashDep);
       const statusBadge = !isCash
-        ? `<span class="badge badge-info">Bank Transfer</span>`
+        ? `<span class="badge badge-info">🏦 Bank Transfer</span>`
         : cashDep>=(r.totalCollection||0)
-          ? `<span class="badge badge-success">Deposited</span>`
-          : `<span class="badge badge-warn">Cash Pending Deposit</span>`;
+          ? `<span class="badge badge-success">✓ Deposited</span>`
+          : cashDep>0
+            ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} pending</span>`
+            : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
       return `<tr>
         <td><strong>${fmtDate(r.date)}</strong></td>
         <td><span class="badge badge-gray">${src.label}</span></td>
@@ -850,35 +869,80 @@ async function renderOtherIncomeList(records){
 }
 
 async function renderIncomeSummary(records){
+  const sundayRecs = records.filter(r=>!r.source||r.source==='sunday_collection');
+  const otherRecs  = records.filter(r=>r.source && r.source!=='sunday_collection');
   const totals = {};
   INCOME_TYPES.forEach(t=>{ totals[t.key]=0 });
-  records.forEach(r=>{ INCOME_TYPES.forEach(t=>{ totals[t.key]+=(r[t.key]||0) }) });
-  const grand = Object.values(totals).reduce((a,b)=>a+b,0);
+  sundayRecs.forEach(r=>{ INCOME_TYPES.forEach(t=>{ totals[t.key]+=(r[t.key]||0) }) });
+  const sundayGrand = Object.values(totals).reduce((a,b)=>a+b,0);
+  const otherTotal  = otherRecs.reduce((s,r)=>s+(r.totalCollection||0),0);
+  const grand = sundayGrand + otherTotal;
   const rem = await calcRemittances(totals);
   return `
     <div class="grid-2">
       <div class="card">
-        <div class="card-header"><span class="card-title">Income by Type</span></div>
+        <div class="card-header"><span class="card-title">Income by Type (Sunday Collections)</span></div>
         ${INCOME_TYPES.map(t=>`
           <div class="status-row">
             <div class="status-row-label">${t.label}</div>
-            <div class="status-row-amt">${fmt(totals[t.key])}</div>
+            <div class="status-row-amt">${totals[t.key]>0?fmt(totals[t.key]):'—'}</div>
           </div>`).join('')}
-        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Grand Total</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(grand)}</div></div>
+        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Sunday Sub-total</div><div class="status-row-amt" style="color:var(--primary)">${fmt(sundayGrand)}</div></div>
+        ${otherTotal>0?`<div class="status-row" style="margin-top:8px"><div class="status-row-label">Other Income (donations, midweek, etc.)</div><div class="status-row-amt" style="color:var(--primary)">${fmt(otherTotal)}</div></div>`:''}
+        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">${otherTotal>0?'Grand Total (All Income)':'Grand Total'}</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(grand)}</div></div>
       </div>
       <div class="card">
-        <div class="card-header"><span class="card-title">Remittance Breakdown</span></div>
-        ${rem.lines.map(l=>`
+        <div class="card-header"><span class="card-title">Remittance Breakdown</span><span style="font-size:11px;color:var(--text3)">Applies to Sunday collections only</span></div>
+        ${rem.lines.length?rem.lines.map(l=>`
           <div class="status-row">
             <div><div class="status-row-label">${l.label} → HQ</div><div class="status-row-sub">From ${fmt(l.total)}</div></div>
             <div class="status-row-amt td-red">${fmt(l.national||0)}</div>
-          </div>`).join('')}
+          </div>`).join(''):'<div class="empty-table">No Sunday collections recorded yet.</div>'}
+        ${rem.lines.length?`
         <div class="status-row" style="background:var(--amber-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
           <div class="status-row-label">Province Rebate (20%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div>
         </div>
-        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(rem.netLocal)}</div></div>
+        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(rem.netLocal)}</div></div>`:''}
       </div>
     </div>`;
+}
+
+async function renderAllIncomeList(records, cashTxOverride){
+  if(!records.length) return '<div class="card"><div class="empty-table">No income records found across all months.</div></div>';
+  const allCashTxList = cashTxOverride || await DB.getCashTransactions();
+  const sorted = [...records].sort((a,b)=> new Date(b.date||b.createdAt||0) - new Date(a.date||a.createdAt||0));
+  return `<div class="card"><div class="table-wrap"><table>
+    <tr><th>Date</th><th>Source / Type</th><th>Amount</th><th>Cash (Accountant)</th><th>Bank Transfer</th><th>Cash Status</th><th>Recorded By</th><th>Actions</th></tr>
+    ${sorted.map(r=>{
+      const isSunday = !r.source||r.source==='sunday_collection';
+      const btAmt = r.bankTransferAmount||0;
+      const dpAmt = r.directPettyCash||0;
+      const cashHeld = isSunday
+        ? Math.max(0,(r.totalCollection||0) - btAmt - dpAmt)
+        : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
+      const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+      const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
+      const remaining = cashHeld - depositedAmt;
+      const statusBadge = cashHeld===0
+        ? `<span class="badge badge-info">No Cash</span>`
+        : isFullyDeposited
+          ? `<span class="badge badge-success">✓ Deposited</span>`
+          : depositedAmt>0
+            ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} pending</span>`
+            : `<span class="badge badge-warn">⏳ Pending</span>`;
+      const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
+      return `<tr>
+        <td><strong>${fmtDate(r.date)}</strong>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
+        <td><span class="badge badge-gray" style="font-size:11px">${srcLabel}</span>${r.donorName?`<div class="td-muted">${r.donorName}</div>`:''}</td>
+        <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
+        <td class="td-muted">${cashHeld>0?fmt(cashHeld):'—'}</td>
+        <td class="td-muted">${btAmt>0?fmt(btAmt):'—'}</td>
+        <td>${statusBadge}</td>
+        <td class="td-muted">${r.recordedBy||'—'}</td>
+        <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
+        ${can('income')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+      </tr>`;}).join('')}
+  </table></div></div>`;
 }
 
 function showIncomeForm(){
@@ -887,35 +951,36 @@ function showIncomeForm(){
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">📥 Record Sunday Collections</div>
     <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Count cash together with the Head Usher before entering figures. Both must sign off.</span></div>
-    <div class="form-group"><label class="form-label">Collection Date</label><input type="date" id="inc_date" class="form-input" value="${today}" max="${today}" /></div>
-    <div class="form-group"><label class="form-label">Counted Together With (Usher Name)</label><input type="text" id="inc_usher" class="form-input" placeholder="Head Usher's name" /></div>
-    <hr class="divider"><p style="font-size:12px;color:var(--text3);margin-bottom:12px">Enter amounts collected for each category (leave blank if nil):</p>
+    <div class="form-group"><label class="form-label">Collection Date *</label><input type="date" id="inc_date" class="form-input" value="${today}" max="${today}" /></div>
+    <div class="form-group"><label class="form-label">Counted Together With (Head Usher Name) *</label><input type="text" id="inc_usher" class="form-input" placeholder="e.g. Bro. Emmanuel Okafor" /></div>
+    <hr class="divider"><p style="font-size:12px;color:var(--text3);margin-bottom:12px">Enter the amount counted for each collection category. Leave blank if none was collected.</p>
     ${INCOME_TYPES.map(t=>`<div class="form-group"><label class="form-label">${t.label}</label><input type="number" id="inc_${t.key}" class="form-input" placeholder="₦0" min="0" oninput="App.updateIncomeTotal()" /></div>`).join('')}
     <div class="card" style="background:var(--primary-light);border-color:var(--primary-mid);margin-top:8px">
       <div class="amount-label">Total Collection</div>
       <div class="amount-display" id="inc_total">₦0</div>
     </div>
     <hr class="divider">
-    <p style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">📋 Receipt Breakdown — How was this collected?</p>
-    <p style="font-size:11px;color:var(--text3);margin-bottom:12px">Specify any portion received via bank transfer or given directly to the Admin Officer. The remainder is cash with the accountant.</p>
+    <p style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px">📋 How was this money received?</p>
+    <p style="font-size:11px;color:var(--text3);margin-bottom:12px">If part of the total was paid directly to the bank or given to the Admin Officer, record those portions below. The rest is cash held by the accountant awaiting deposit.</p>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Via Bank Transfer (₦)</label>
+      <div class="form-group"><label class="form-label">Paid via Bank Transfer (₦)</label>
         <input type="number" id="inc_bank_transfer" class="form-input" placeholder="0" min="0" oninput="App.updateIncomeCashBreakdown()" />
-        <div class="form-hint">Members who paid tithe/offerings directly into the bank account</div>
+        <div class="form-hint">Members who transferred tithe/offerings directly to the church bank account</div>
       </div>
-      <div class="form-group"><label class="form-label">Cash → Directly to Admin Officer (₦)</label>
+      <div class="form-group"><label class="form-label">Given Directly to Admin Officer (₦)</label>
         <input type="number" id="inc_direct_petty" class="form-input" placeholder="0" min="0" oninput="App.updateIncomeCashBreakdown()" />
-        <div class="form-hint">Usher delivers this portion to the Admin Officer to top up petty cash</div>
+        <div class="form-hint">Cash handed to the Admin Officer to top up petty cash float</div>
       </div>
     </div>
-    <div class="card" style="background:var(--surface);margin-top:4px" id="inc_breakdown_card">
+    <div id="inc_breakdown_card" class="card" style="background:var(--surface);margin-top:4px">
       <div style="font-size:12px;color:var(--text2);line-height:2">
-        <span style="color:var(--primary);font-weight:600">Cash with Accountant:</span> <span id="inc_cash_held">₦0</span>
-        &nbsp;·&nbsp;Bank Transfer: <span id="inc_bank_lbl">₦0</span>
-        &nbsp;·&nbsp;Direct to Petty: <span id="inc_petty_lbl">₦0</span>
+        <span style="color:var(--primary);font-weight:600">💵 Cash with Accountant (to deposit):</span> <span id="inc_cash_held">₦0</span>
+        &nbsp;·&nbsp; 🏦 Bank Transfer: <span id="inc_bank_lbl">₦0</span>
+        &nbsp;·&nbsp; 💳 To Petty Cash: <span id="inc_petty_lbl">₦0</span>
       </div>
+      <div id="inc_overalloc_warn" style="display:none;color:var(--danger);font-size:12px;margin-top:4px;font-weight:600">⚠ Bank transfer + petty cash amount exceeds the total collection. Please check the figures.</div>
     </div>
-    <div class="form-group mt-2"><label class="form-label">Notes (optional)</label><textarea id="inc_notes" class="form-textarea" placeholder="Special offerings, events, etc."></textarea></div>
+    <div class="form-group mt-2"><label class="form-label">Notes (optional)</label><textarea id="inc_notes" class="form-textarea" placeholder="e.g. Special thanksgiving offering, harvest Sunday, etc."></textarea></div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="App.submitIncome()">Save & Calculate Remittances</button>
@@ -935,13 +1000,20 @@ function updateIncomeCashBreakdown(){
   INCOME_TYPES.forEach(t=>{ total+=parseFloat(document.getElementById('inc_'+t.key)?.value||0)||0 });
   const bt = parseFloat(document.getElementById('inc_bank_transfer')?.value||0)||0;
   const dp = parseFloat(document.getElementById('inc_direct_petty')?.value||0)||0;
+  const overalloc = bt + dp > total && total > 0;
   const cash = Math.max(0, total - bt - dp);
   const cashEl = document.getElementById('inc_cash_held');
   const btEl   = document.getElementById('inc_bank_lbl');
   const dpEl   = document.getElementById('inc_petty_lbl');
+  const warnEl = document.getElementById('inc_overalloc_warn');
   if(cashEl) cashEl.textContent = fmt(cash);
   if(btEl)   btEl.textContent   = fmt(bt);
   if(dpEl)   dpEl.textContent   = fmt(dp);
+  if(warnEl) warnEl.style.display = overalloc ? 'block' : 'none';
+  const btInput = document.getElementById('inc_bank_transfer');
+  const dpInput = document.getElementById('inc_direct_petty');
+  if(btInput) btInput.style.borderColor = overalloc ? 'var(--danger)' : '';
+  if(dpInput) dpInput.style.borderColor = overalloc ? 'var(--danger)' : '';
 }
 
 async function submitIncome(){
@@ -966,6 +1038,8 @@ async function submitIncome(){
   rec.notes=document.getElementById('inc_notes')?.value||'';
 
   const saved = await DB.addIncome(rec);
+  const cashWithAccountant = Math.max(0, total - bankTransferAmount - directPettyCash);
+  DB.addAudit('income_recorded',`Sunday collection ${fmt(total)} for ${fmtDate(date)} — Cash: ${fmt(cashWithAccountant)}, Bank Transfer: ${fmt(bankTransferAmount)}, Direct Petty: ${fmt(directPettyCash)}. Counted with: ${usher}`,state.user?.name);
 
   // If some cash was given directly to the admin officer, auto-create a petty refill
   if(directPettyCash > 0){
@@ -981,7 +1055,7 @@ async function submitIncome(){
 
   DB.addNotification('Income Recorded',`${fmt(total)} recorded for ${fmtDate(date)}${directPettyCash?` | ${fmt(directPettyCash)} → Petty Cash`:''}`,'success');
   closeModal();
-  showAlert(`Income of ${fmt(total)} recorded. Cash with accountant: ${fmt(Math.max(0,total-bankTransferAmount-directPettyCash))}${bankTransferAmount?` | Bank: ${fmt(bankTransferAmount)}`:''}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
+  showAlert(`Income of ${fmt(total)} recorded. Cash with accountant: ${fmt(cashWithAccountant)}${bankTransferAmount?` | Bank: ${fmt(bankTransferAmount)}`:''}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
   renderIncome();
   buildSidebar();
 }
@@ -1085,7 +1159,7 @@ async function submitCashDeposit(incomeId){
 }
 
 async function confirmBulkDeposit(){
-  const allIncome = filterByMonth(await DB.getIncome());
+  const allIncome = await DB.getIncome(); // all months — accountant may have old pending cash
   const cashTx = await DB.getCashTransactions();
   const pending = allIncome.map(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
@@ -1093,29 +1167,35 @@ async function confirmBulkDeposit(){
       ? Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0))
       : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
     const deposited = cashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-    const srcLabel = isSunday ? 'Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
+    const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
     return { id:r.id, date:r.date, cashHeld, deposited, remaining:cashHeld-deposited, source:srcLabel };
-  }).filter(p=>p.cashHeld>0 && p.remaining>0);
+  }).filter(p=>p.cashHeld>0 && p.remaining>0).sort((a,b)=>new Date(a.date)-new Date(b.date));
   if(!pending.length){ showAlert('No pending cash deposits found.','warn'); return }
   state._bulkDepositPending = pending;
   const totalRemaining = pending.reduce((s,p)=>s+p.remaining,0);
   const today = new Date().toISOString().split('T')[0];
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
-    <div class="modal-title">💰 Deposit All Pending Cash</div>
-    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>This records one bank deposit covering all ${pending.length} pending cash record${pending.length>1?'s':''}.</span></div>
+    <div class="modal-title">💰 Record Cash Deposit</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Tick the records you are depositing in this single trip to the bank. You can deposit all at once or just some of them.</span></div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <span style="font-size:13px;font-weight:600;color:var(--text2)">${pending.length} record(s) with outstanding cash:</span>
+      <button class="btn btn-sm" onclick="App.toggleBulkSelectAll(true)" style="margin-left:auto">Select All</button>
+      <button class="btn btn-sm" onclick="App.toggleBulkSelectAll(false)">Deselect All</button>
+    </div>
     <div class="table-wrap" style="margin-bottom:16px"><table>
-      <tr><th>Date</th><th>Source</th><th>Cash Held</th><th>Already Deposited</th><th class="td-right">Remaining</th></tr>
-      ${pending.map(p=>`<tr>
+      <tr><th style="width:36px;text-align:center">✓</th><th>Date</th><th>Source</th><th>Cash Held</th><th>Prev. Deposited</th><th class="td-right">Remaining</th></tr>
+      ${pending.map((p,i)=>`<tr>
+        <td style="text-align:center"><input type="checkbox" id="bulk_chk_${i}" data-remaining="${p.remaining}" checked onchange="App.updateBulkDepositTotal()" style="width:16px;height:16px;cursor:pointer;accent-color:var(--primary)" /></td>
         <td><strong>${fmtDate(p.date)}</strong></td>
-        <td class="td-muted">${p.source}</td>
+        <td class="td-muted" style="font-size:12px">${p.source}</td>
         <td>${fmt(p.cashHeld)}</td>
         <td>${p.deposited>0?fmt(p.deposited):'—'}</td>
         <td class="td-right td-bold">${fmt(p.remaining)}</td>
       </tr>`).join('')}
-      <tr style="border-top:2px solid var(--border);font-weight:700">
-        <td colspan="4">TOTAL</td>
-        <td class="td-right" style="color:var(--primary);font-size:15px">${fmt(totalRemaining)}</td>
+      <tr style="border-top:2px solid var(--border);background:var(--primary-light)">
+        <td colspan="5" style="font-weight:700;padding:8px 10px">SELECTED TOTAL TO DEPOSIT</td>
+        <td class="td-right" id="bulk_selected_total" style="color:var(--primary);font-size:15px;font-weight:700;padding:8px 10px">${fmt(totalRemaining)}</td>
       </tr>
     </table></div>
     <div class="form-group"><label class="form-label">Deposit Method *</label>
@@ -1133,8 +1213,28 @@ async function confirmBulkDeposit(){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitBulkDeposit()">Confirm Deposit — ${fmt(totalRemaining)}</button>
+      <button class="btn btn-primary" id="bulk_confirm_btn" onclick="App.submitBulkDeposit()">Confirm Deposit — ${fmt(totalRemaining)}</button>
     </div>`);
+}
+
+function updateBulkDepositTotal(){
+  const pending = state._bulkDepositPending || [];
+  let total = 0;
+  pending.forEach((_,i)=>{
+    const chk = document.getElementById(`bulk_chk_${i}`);
+    if(chk?.checked) total += pending[i].remaining;
+  });
+  const el  = document.getElementById('bulk_selected_total');
+  const btn = document.getElementById('bulk_confirm_btn');
+  if(el)  el.textContent = fmt(total);
+  if(btn) btn.textContent = `Confirm Deposit — ${fmt(total)}`;
+  if(btn) btn.disabled = total <= 0;
+}
+
+function toggleBulkSelectAll(checked){
+  const pending = state._bulkDepositPending || [];
+  pending.forEach((_,i)=>{ const c=document.getElementById(`bulk_chk_${i}`); if(c) c.checked=checked; });
+  updateBulkDepositTotal();
 }
 
 async function submitBulkDeposit(){
@@ -1142,17 +1242,18 @@ async function submitBulkDeposit(){
   const method  = document.getElementById('bulk_dep_method')?.value;
   const ref     = document.getElementById('bulk_dep_ref')?.value?.trim();
   const date    = document.getElementById('bulk_dep_date')?.value;
-  if(!ref||!date){ alert('Please fill all required fields.'); return }
-  if(!pending.length){ closeModal(); return }
-  const totalAmount = pending.reduce((s,p)=>s+p.remaining,0);
-  for(const p of pending){
+  if(!ref||!date){ alert('Please fill all required fields (reference number and deposit date).'); return }
+  const selected = pending.filter((_,i)=>{ const c=document.getElementById(`bulk_chk_${i}`); return c?.checked; });
+  if(!selected.length){ alert('Please tick at least one record to deposit.'); return }
+  const totalAmount = selected.reduce((s,p)=>s+p.remaining,0);
+  for(const p of selected){
     await DB.addCashTransaction({ type:'cash_deposit', incomeRef:p.id, amount:p.remaining, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
   }
-  DB.addAudit('cash_deposited',`Bulk cash deposit: ${fmt(totalAmount)} across ${pending.length} record(s) via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
-  DB.addNotification('Bulk Cash Deposited',`${fmt(totalAmount)} deposited to bank (${pending.length} records, Ref: ${ref})`,'success');
+  DB.addAudit('cash_deposited',`Bulk cash deposit: ${fmt(totalAmount)} across ${selected.length} record(s) via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
+  DB.addNotification('Cash Deposited',`${fmt(totalAmount)} deposited to bank (${selected.length} record(s), Ref: ${ref})`,'success');
   delete state._bulkDepositPending;
   closeModal();
-  showAlert(`${fmt(totalAmount)} deposited across ${pending.length} record(s). Ref: ${ref}`, 'success');
+  showAlert(`${fmt(totalAmount)} deposited across ${selected.length} record(s). Bank ref: ${ref}`, 'success');
   renderIncome();
 }
 
@@ -2688,7 +2789,7 @@ return {
   onRoleChange, login, logout, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, markRemittancePaid, setRemAmt, submitRemittance,
+  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, markRemittancePaid, setRemAmt, submitRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt,
   showBankWithdrawal, submitBankWithdrawal,
