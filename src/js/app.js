@@ -234,8 +234,16 @@ function filterByDateRange(arr, fromDate, toDate){
   });
 }
 
-/** Strip legacy / unknown quota keys (e.g. goFishing) — only keep keys present in QUOTA_LABELS */
-function getActiveQuotas(q){ return Object.fromEntries(Object.entries(q||{}).filter(([k])=>k in QUOTA_LABELS)) }
+/** Return the quota list as an array of {label, amount} objects.
+ *  Migrates legacy settings.quotas key-value map to the new settings.quotaList array format. */
+function getQuotaList(s){
+  if(Array.isArray(s?.quotaList)) return s.quotaList;
+  // Migrate legacy object format
+  const legacy=s?.quotas||DEFAULT_QUOTAS;
+  return Object.entries(legacy)
+    .filter(([k])=>k in QUOTA_LABELS)
+    .map(([k,v])=>({ label:QUOTA_LABELS[k], amount:v||0 }));
+}
 
 /** Escape special HTML characters to prevent XSS when inserting user data into innerHTML */
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') }
@@ -1369,7 +1377,7 @@ async function renderRemittances(){
   const [allIncome, allRems, settings, allUsers] = await Promise.all([
     DB.getIncome(), DB.getRemittances(), DB.getSettings(), DB.getUsers()
   ]);
-  const quotas = getActiveQuotas(settings.quotas);
+  const quotas = getQuotaList(settings);
   const rr = await getRemRates();
 
   // --- Determine period defaults ---
@@ -1415,9 +1423,9 @@ async function renderRemittances(){
     { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`, amount:rem.provinceRebate, section:'province' }
   ]:[];
 
-  const activeQuotas=getActiveQuotas(quotas);
-  const quotaLines=Object.entries(activeQuotas)
-    .map(([k,v])=>({ label:QUOTA_LABELS[k], amount:v||0, section:'quota' }))
+  const activeQuotas=quotas;
+  const quotaLines=activeQuotas
+    .map(q=>({ label:q.label, amount:q.amount||0, section:'quota' }))
     .filter(l=>l.amount>0);
 
   const allLines=[...incomeLines,...tgLines,...provinceLines,...quotaLines];
@@ -1616,7 +1624,7 @@ async function renderRemittances(){
 
 async function showRemittancePaymentModal(){
   const [allIncome, settings, allUsers] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getUsers()]);
-  const quotas=getActiveQuotas(settings.quotas);
+  const quotas=getQuotaList(settings);
   const fromDate=state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
   const toDate=state.remToDate||new Date().toISOString().split('T')[0];
   const income=filterByDateRange(allIncome, fromDate, toDate);
@@ -1630,7 +1638,7 @@ async function showRemittancePaymentModal(){
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters },
     { label:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0 },
     { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`, amount:rem.provinceRebate },
-    ...Object.entries(quotas).map(([k,v])=>({ label:QUOTA_LABELS[k], amount:v||0 }))
+    ...quotas.map(q=>({ label:q.label, amount:q.amount||0 }))
   ].filter(l=>l.amount>0);
 
   const totalDue=lines.reduce((s,l)=>s+l.amount,0);
@@ -1800,7 +1808,7 @@ function onRemDatesChange(){
 
 async function printRemittanceReport(fromOverride, toOverride){
   const [allIncome, settings] = await Promise.all([DB.getIncome(), DB.getSettings()]);
-  const quotas=getActiveQuotas(settings.quotas);
+  const quotas=getQuotaList(settings);
   const fromDate=fromOverride||state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
   const toDate=toOverride||state.remToDate||new Date().toISOString().split('T')[0];
   const income=filterByDateRange(allIncome, fromDate, toDate);
@@ -1858,7 +1866,7 @@ async function printRemittanceReport(fromOverride, toOverride){
     },
     {
       title:'Fixed Monthly Quotas',
-      rows:Object.entries(quotas).map(([k,v])=>({ desc:QUOTA_LABELS[k], type:'Fixed', amount:v||0 })).filter(r=>r.amount>0)
+      rows:quotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 })).filter(r=>r.amount>0)
     }
   ].filter(s=>s.rows.length>0);
 
@@ -3027,11 +3035,18 @@ function renderAdminSettings(s){
 }
 
 function renderAdminQuotas(s){
-  const q=getActiveQuotas(s.quotas||DEFAULT_QUOTAS);
+  const list=getQuotaList(s);
+  const rows=list.map((q,i)=>`
+    <div class="form-group" style="display:flex;gap:8px;align-items:flex-end" id="quota-row-${i}">
+      <div style="flex:2"><label class="form-label">Label</label><input type="text" class="form-input" id="ql_${i}" value="${esc(q.label)}" placeholder="e.g. Building Fund" /></div>
+      <div style="flex:1"><label class="form-label">Amount (₦)</label><input type="number" class="form-input" id="qa_${i}" value="${q.amount||0}" min="0" /></div>
+      <button class="btn" style="padding:8px 10px;color:var(--danger);margin-bottom:0" onclick="App.removeQuotaRow(${i})" title="Remove">✕</button>
+    </div>`).join('');
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Monthly Fixed Quotas</div>
     <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">These flat amounts are remitted monthly regardless of income fluctuations. They are included in the bulk remittance payment each month.</p>
-    ${Object.keys(DEFAULT_QUOTAS).map(k=>`<div class="form-group"><label class="form-label">${QUOTA_LABELS[k]}</label><input type="number" id="q_${k}" class="form-input" value="${q[k]??DEFAULT_QUOTAS[k]}" /></div>`).join('')}
+    <div id="quota-rows-container">${rows}</div>
+    <button class="btn" style="margin-top:4px;margin-bottom:12px" onclick="App.addQuotaRow()">➕ Add Quota</button><br/>
     <button class="btn btn-primary" onclick="App.saveQuotas()">Save Quotas</button>
   </div>`;
 }
@@ -3117,11 +3132,37 @@ async function saveSettings(){
   showAlert('Settings saved!','success');
 }
 
+function addQuotaRow(){
+  const container=document.getElementById('quota-rows-container');
+  if(!container) return;
+  const i=container.querySelectorAll('.form-group').length;
+  const div=document.createElement('div');
+  div.className='form-group';
+  div.id=`quota-row-${i}`;
+  div.style.cssText='display:flex;gap:8px;align-items:flex-end';
+  div.innerHTML=`<div style="flex:2"><label class="form-label">Label</label><input type="text" class="form-input" id="ql_${i}" value="" placeholder="e.g. Building Fund" /></div><div style="flex:1"><label class="form-label">Amount (₦)</label><input type="number" class="form-input" id="qa_${i}" value="0" min="0" /></div><button class="btn" style="padding:8px 10px;color:var(--danger);margin-bottom:0" onclick="App.removeQuotaRow(${i})" title="Remove">✕</button>`;
+  container.appendChild(div);
+}
+
+function removeQuotaRow(i){
+  const row=document.getElementById(`quota-row-${i}`);
+  if(row) row.remove();
+}
+
 async function saveQuotas(){
+  const container=document.getElementById('quota-rows-container');
+  const list=[];
+  if(container){
+    container.querySelectorAll('.form-group').forEach((row,i)=>{
+      const label=(document.getElementById(`ql_${i}`)?.value||'').trim();
+      const amount=parseFloat(document.getElementById(`qa_${i}`)?.value)||0;
+      if(label) list.push({ label, amount });
+    });
+  }
   const s=await DB.getSettings();
-  const q=s.quotas||{};
-  Object.keys(DEFAULT_QUOTAS).forEach(k=>{ const el=document.getElementById('q_'+k); if(el) q[k]=parseFloat(el.value)||0 });
-  s.quotas=q; await DB.saveSettings(s);
+  s.quotaList=list;
+  delete s.quotas; // remove legacy format
+  await DB.saveSettings(s);
   showAlert('Monthly quotas updated!','success');
 }
 
@@ -3287,7 +3328,7 @@ return {
   approvePetty, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
-  setAdminTab, saveSettings, saveQuotas, saveRates, showAddUser, addUser, editUser,
+  setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearAllData,
   showKPSCAlert, submitKPSCAlert, closeModal: closeModal
 };
