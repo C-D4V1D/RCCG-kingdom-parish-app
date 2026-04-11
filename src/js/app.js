@@ -860,7 +860,7 @@ async function submitIncome(){
   if(directPettyCash > 0){
     const pettyConfigSI = await DB.getPettyConfig();
     const newFloat = Math.min(pettyConfigSI.float + directPettyCash, pettyConfigSI.max);
-    await DB.addPettyEntry({ id:'RF-'+Date.now(), type:'refill', amount:directPettyCash, source:'collection_cash',
+    await DB.addPettyEntry({ type:'refill', amount:directPettyCash, source:'collection_cash',
       reference:`From Sunday collection ${fmtDate(date)}`, authorizedBy:state.user?.name,
       requestedBy:state.user?.name, status:'settled', createdAt:new Date().toISOString(),
       purpose:`Cash from Sunday collection (${fmtDate(date)}) → Admin Officer Petty Cash` });
@@ -1459,7 +1459,7 @@ async function submitBankWithdrawal(){
   if(destination === 'admin_petty_cash'){
     const pettyConfigBW = await DB.getPettyConfig();
     const newFloat = Math.min(pettyConfigBW.float + amount, pettyConfigBW.max);
-    await DB.addPettyEntry({ id:'RF-'+Date.now(), type:'refill', amount, source:'bank_withdrawal',
+    await DB.addPettyEntry({ type:'refill', amount, source:'bank_withdrawal',
       reference, authorizedBy:auth, requestedBy:state.user?.name, status:'settled',
       createdAt:new Date().toISOString(), purpose:`Bank withdrawal → Admin Officer Petty Cash: ${description}` });
     await DB.savePettyConfig({ float: newFloat, max: pettyConfigBW.max });
@@ -1811,7 +1811,7 @@ async function submitRefill(){
   const actualAdded=Math.min(amt,spaceAvailable);
   const newFloat=pettyConfig.float+actualAdded;
   await DB.addPettyEntry({
-    id:'RF-'+Date.now(), type:'refill', amount:actualAdded,
+    type:'refill', amount:actualAdded,
     requestedBy:state.user?.name, status:'settled',
     createdAt:new Date().toISOString(), purpose:'Float Refill',
     reference:ref, authorizedBy:auth
@@ -2203,7 +2203,7 @@ async function editUser(id){
 async function updateUser(id){
   const updateData = { name:document.getElementById('eu_name')?.value, role:document.getElementById('eu_role')?.value, email:document.getElementById('eu_email')?.value, pin:document.getElementById('eu_pin')?.value };
   await DB.updateUser(id, updateData);
-  DB.addAudit('user_updated',`User updated: ${users[idx].name}`,state.user?.name);
+  DB.addAudit('user_updated',`User updated: ${updateData.name}`,state.user?.name);
   closeModal();
   showAlert('User updated!','success');
   renderAdmin();
