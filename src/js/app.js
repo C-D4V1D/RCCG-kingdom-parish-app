@@ -1389,20 +1389,29 @@ async function submitExpense(){
   const file = fileEl?.files?.[0];
 
   async function saveExpenseRecord(receiptDataUrl, receiptFileName){
-    await DB.addExpense({ date, category, subCategory, description: description || subCategory, amount,
-      receiptNo: document.getElementById('exp_receipt')?.value,
-      receiptImage: receiptDataUrl||null, receiptFileName: receiptFileName||null,
-      paymentMethod: document.getElementById('exp_method')?.value,
-      notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
-    closeModal();
-    showAlert('Expense logged successfully!','success');
-    renderExpenses();
+    const paymentMethod = document.getElementById('exp_method')?.value || 'cash';
+    try {
+      await DB.addExpense({ date, category, subCategory, description: description || subCategory, amount,
+        receiptNo: document.getElementById('exp_receipt')?.value,
+        receiptImage: receiptDataUrl||null, receiptFileName: receiptFileName||null,
+        paymentMethod,
+        notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
+      if(paymentMethod === 'petty_cash'){
+        const pettyCfg = await DB.getPettyConfig();
+        await DB.savePettyConfig({ float: Math.max(0, pettyCfg.float - amount), max: pettyCfg.max });
+      }
+      closeModal();
+      showAlert('Expense logged successfully!','success');
+      renderExpenses();
+    } catch(err) {
+      showAlert(`Failed to save expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
+    }
   }
 
   if(file){
     const reader = new FileReader();
     reader.onload = async ev => { await saveExpenseRecord(ev.target.result, file.name); };
-    reader.onerror = () => { showAlert('Failed to read receipt file. Saving expense without image.','warn'); saveExpenseRecord(null, null); };
+    reader.onerror = async () => { showAlert('Failed to read receipt file. Saving expense without image.','warn'); await saveExpenseRecord(null, null); };
     reader.readAsDataURL(file);
   } else {
     await saveExpenseRecord(null, null);

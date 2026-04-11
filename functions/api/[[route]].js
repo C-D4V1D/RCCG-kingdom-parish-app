@@ -133,40 +133,45 @@ async function handleInit(DB) {
       created_at  TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS income (
-      id                  TEXT PRIMARY KEY,
-      date                TEXT NOT NULL,
-      members_tithe       REAL DEFAULT 0,
-      ministers_tithe     REAL DEFAULT 0,
-      thanksgiving        REAL DEFAULT 0,
-      sunday_school       REAL DEFAULT 0,
-      slo                 REAL DEFAULT 0,
-      crm                 REAL DEFAULT 0,
-      workers_offering    REAL DEFAULT 0,
-      children_offering   REAL DEFAULT 0,
-      total_collection    REAL DEFAULT 0,
-      usher               TEXT DEFAULT '',
-      recorded_by         TEXT DEFAULT '',
-      deposit_confirmed   INTEGER DEFAULT 0,
-      teller_no           TEXT DEFAULT '',
-      deposited_by        TEXT DEFAULT '',
-      deposit_date        TEXT DEFAULT '',
-      notes               TEXT DEFAULT '',
-      created_at          TEXT DEFAULT (datetime('now'))
+      id                    TEXT PRIMARY KEY,
+      date                  TEXT NOT NULL,
+      members_tithe         REAL DEFAULT 0,
+      ministers_tithe       REAL DEFAULT 0,
+      thanksgiving          REAL DEFAULT 0,
+      sunday_school         REAL DEFAULT 0,
+      slo                   REAL DEFAULT 0,
+      crm                   REAL DEFAULT 0,
+      workers_offering      REAL DEFAULT 0,
+      children_offering     REAL DEFAULT 0,
+      total_collection      REAL DEFAULT 0,
+      bank_transfer_amount  REAL DEFAULT 0,
+      direct_petty_cash     REAL DEFAULT 0,
+      source                TEXT DEFAULT 'sunday_collection',
+      usher                 TEXT DEFAULT '',
+      recorded_by           TEXT DEFAULT '',
+      deposit_confirmed     INTEGER DEFAULT 0,
+      teller_no             TEXT DEFAULT '',
+      deposited_by          TEXT DEFAULT '',
+      deposit_date          TEXT DEFAULT '',
+      notes                 TEXT DEFAULT '',
+      created_at            TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS expenses (
-      id              TEXT PRIMARY KEY,
-      date            TEXT NOT NULL,
-      category        TEXT NOT NULL DEFAULT '',
-      subcategory     TEXT DEFAULT '',
-      description     TEXT NOT NULL DEFAULT '',
-      amount          REAL DEFAULT 0,
-      receipt_no      TEXT DEFAULT '',
-      payment_method  TEXT DEFAULT 'petty_cash',
-      notes           TEXT DEFAULT '',
-      recorded_by     TEXT DEFAULT '',
-      petty_ref       TEXT DEFAULT '',
-      status          TEXT DEFAULT 'approved',
-      created_at      TEXT DEFAULT (datetime('now'))
+      id               TEXT PRIMARY KEY,
+      date             TEXT NOT NULL,
+      category         TEXT NOT NULL DEFAULT '',
+      subcategory      TEXT DEFAULT '',
+      description      TEXT NOT NULL DEFAULT '',
+      amount           REAL DEFAULT 0,
+      receipt_no       TEXT DEFAULT '',
+      receipt_image    TEXT DEFAULT '',
+      receipt_file_name TEXT DEFAULT '',
+      payment_method   TEXT DEFAULT 'petty_cash',
+      notes            TEXT DEFAULT '',
+      recorded_by      TEXT DEFAULT '',
+      petty_ref        TEXT DEFAULT '',
+      status           TEXT DEFAULT 'approved',
+      created_at       TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS petty_cash (
       id                TEXT PRIMARY KEY,
@@ -246,6 +251,19 @@ async function handleInit(DB) {
   // Run all CREATE TABLE statements first
   for (const sql of createTables) {
     await DB.prepare(sql).run();
+  }
+
+  // Migrate existing databases: add columns that may be missing from older schema versions.
+  // ALTER TABLE throws if the column already exists — catch and ignore those errors.
+  const migrations = [
+    `ALTER TABLE income ADD COLUMN bank_transfer_amount REAL DEFAULT 0`,
+    `ALTER TABLE income ADD COLUMN direct_petty_cash REAL DEFAULT 0`,
+    `ALTER TABLE income ADD COLUMN source TEXT DEFAULT 'sunday_collection'`,
+    `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
+    `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
+  ];
+  for (const sql of migrations) {
+    try { await DB.prepare(sql).run(); } catch { /* column already exists — safe to ignore */ }
   }
 
   // Seed petty config (once)
@@ -335,25 +353,28 @@ async function deleteUser(DB, id) {
 async function getIncome(DB) {
   const { results } = await DB.prepare(`SELECT * FROM income ORDER BY date DESC, created_at DESC`).all();
   return ok((results || []).map(row => ({
-    id:               row.id,
-    date:             row.date,
-    membersTithe:     row.members_tithe,
-    ministersTithe:   row.ministers_tithe,
-    thanksgiving:     row.thanksgiving,
-    sundaySchool:     row.sunday_school,
-    slo:              row.slo,
-    crm:              row.crm,
-    workersOffering:  row.workers_offering,
-    childrenOffering: row.children_offering,
-    totalCollection:  row.total_collection,
-    usher:            row.usher,
-    recordedBy:       row.recorded_by,
-    depositConfirmed: row.deposit_confirmed === 1,
-    tellerNo:         row.teller_no,
-    depositedBy:      row.deposited_by,
-    depositDate:      row.deposit_date,
-    notes:            row.notes,
-    createdAt:        row.created_at,
+    id:                  row.id,
+    date:                row.date,
+    membersTithe:        row.members_tithe,
+    ministersTithe:      row.ministers_tithe,
+    thanksgiving:        row.thanksgiving,
+    sundaySchool:        row.sunday_school,
+    slo:                 row.slo,
+    crm:                 row.crm,
+    workersOffering:     row.workers_offering,
+    childrenOffering:    row.children_offering,
+    totalCollection:     row.total_collection,
+    bankTransferAmount:  row.bank_transfer_amount,
+    directPettyCash:     row.direct_petty_cash,
+    source:              row.source,
+    usher:               row.usher,
+    recordedBy:          row.recorded_by,
+    depositConfirmed:    row.deposit_confirmed === 1,
+    tellerNo:            row.teller_no,
+    depositedBy:         row.deposited_by,
+    depositDate:         row.deposit_date,
+    notes:               row.notes,
+    createdAt:           row.created_at,
   })));
 }
 
@@ -363,23 +384,27 @@ async function createIncome(DB, data) {
     INSERT INTO income
       (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
        slo,crm,workers_offering,children_offering,total_collection,
+       bank_transfer_amount,direct_petty_cash,source,
        usher,recorded_by,notes)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
-    data.date || new Date().toISOString().split('T')[0],
-    data.membersTithe    || 0,
-    data.ministersTithe  || 0,
-    data.thanksgiving    || 0,
-    data.sundaySchool    || 0,
-    data.slo             || 0,
-    data.crm             || 0,
-    data.workersOffering || 0,
-    data.childrenOffering|| 0,
-    data.totalCollection || 0,
-    data.usher           || '',
-    data.recordedBy      || '',
-    data.notes           || '',
+    data.date                 || new Date().toISOString().split('T')[0],
+    data.membersTithe         || 0,
+    data.ministersTithe       || 0,
+    data.thanksgiving         || 0,
+    data.sundaySchool         || 0,
+    data.slo                  || 0,
+    data.crm                  || 0,
+    data.workersOffering      || 0,
+    data.childrenOffering     || 0,
+    data.totalCollection      || 0,
+    data.bankTransferAmount   || 0,
+    data.directPettyCash      || 0,
+    data.source               || 'sunday_collection',
+    data.usher                || '',
+    data.recordedBy           || '',
+    data.notes                || '',
   ).run();
   return ok({ ...data, id });
 }
@@ -404,19 +429,21 @@ async function updateIncome(DB, id, data) {
 async function getExpenses(DB) {
   const { results } = await DB.prepare(`SELECT * FROM expenses ORDER BY date DESC, created_at DESC`).all();
   return ok((results || []).map(row => ({
-    id:            row.id,
-    date:          row.date,
-    category:      row.category,
-    subcategory:   row.subcategory,
-    description:   row.description,
-    amount:        row.amount,
-    receiptNo:     row.receipt_no,
-    paymentMethod: row.payment_method,
-    notes:         row.notes,
-    recordedBy:    row.recorded_by,
-    pettyRef:      row.petty_ref,
-    status:        row.status,
-    createdAt:     row.created_at,
+    id:              row.id,
+    date:            row.date,
+    category:        row.category,
+    subCategory:     row.subcategory,
+    description:     row.description,
+    amount:          row.amount,
+    receiptNo:       row.receipt_no,
+    receiptImage:    row.receipt_image,
+    receiptFileName: row.receipt_file_name,
+    paymentMethod:   row.payment_method,
+    notes:           row.notes,
+    recordedBy:      row.recorded_by,
+    pettyRef:        row.petty_ref,
+    status:          row.status,
+    createdAt:       row.created_at,
   })));
 }
 
@@ -424,21 +451,23 @@ async function createExpense(DB, data) {
   const id = data.id || newId('EXP-');
   await DB.prepare(`
     INSERT INTO expenses
-      (id,date,category,subcategory,description,amount,receipt_no,payment_method,notes,recorded_by,petty_ref,status)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      (id,date,category,subcategory,description,amount,receipt_no,receipt_image,receipt_file_name,payment_method,notes,recorded_by,petty_ref,status)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
-    data.date          || new Date().toISOString().split('T')[0],
-    data.category      || '',
-    data.subcategory   || '',
-    data.description   || '',
-    data.amount        || 0,
-    data.receiptNo     || '',
-    data.paymentMethod || 'petty_cash',
-    data.notes         || '',
-    data.recordedBy    || '',
-    data.pettyRef      || '',
-    data.status        || 'approved',
+    data.date             || new Date().toISOString().split('T')[0],
+    data.category         || '',
+    data.subCategory      || '',
+    data.description      || '',
+    data.amount           || 0,
+    data.receiptNo        || '',
+    data.receiptImage     || '',
+    data.receiptFileName  || '',
+    data.paymentMethod    || 'petty_cash',
+    data.notes            || '',
+    data.recordedBy       || '',
+    data.pettyRef         || '',
+    data.status           || 'approved',
   ).run();
   return ok({ ...data, id });
 }
