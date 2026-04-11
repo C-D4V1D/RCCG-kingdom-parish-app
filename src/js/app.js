@@ -858,15 +858,13 @@ async function submitIncome(){
 
   // If some cash was given directly to the admin officer, auto-create a petty refill
   if(directPettyCash > 0){
-    const pettyHistSI = await DB.getPetty();
-    const petty = { history: pettyHistSI, float: 50000, max: 50000 };
-    const newFloat = Math.min(petty.float + directPettyCash, petty.max);
-    petty.history.unshift({ id:'RF-'+Date.now(), type:'refill', amount:directPettyCash, source:'collection_cash',
+    const pettyConfigSI = await DB.getPettyConfig();
+    const newFloat = Math.min(pettyConfigSI.float + directPettyCash, pettyConfigSI.max);
+    await DB.addPettyEntry({ id:'RF-'+Date.now(), type:'refill', amount:directPettyCash, source:'collection_cash',
       reference:`From Sunday collection ${fmtDate(date)}`, authorizedBy:state.user?.name,
       requestedBy:state.user?.name, status:'settled', createdAt:new Date().toISOString(),
-      purpose:`Cash from Sunday collection (${fmtDate(date)}) → Admin Officer Petty Cash`, incomeRef:saved.id });
-    petty.float = newFloat;
-    await DB.savePettyConfig({ float: petty.float, max: petty.max });
+      purpose:`Cash from Sunday collection (${fmtDate(date)}) → Admin Officer Petty Cash` });
+    await DB.savePettyConfig({ float: newFloat, max: pettyConfigSI.max });
     DB.addAudit('petty_refilled',`${fmt(directPettyCash)} from Sunday collection credited to Admin Officer petty cash`,state.user?.name);
   }
 
@@ -1459,14 +1457,12 @@ async function submitBankWithdrawal(){
 
   // If withdrawn to admin officer petty cash, auto-create a petty refill
   if(destination === 'admin_petty_cash'){
-    const pettyHistSI = await DB.getPetty();
-    const petty = { history: pettyHistSI, float: 50000, max: 50000 };
-    const newFloat = Math.min(petty.float + amount, petty.max);
-    petty.history.unshift({ id:'RF-'+Date.now(), type:'refill', amount, source:'bank_withdrawal',
+    const pettyConfigBW = await DB.getPettyConfig();
+    const newFloat = Math.min(pettyConfigBW.float + amount, pettyConfigBW.max);
+    await DB.addPettyEntry({ id:'RF-'+Date.now(), type:'refill', amount, source:'bank_withdrawal',
       reference, authorizedBy:auth, requestedBy:state.user?.name, status:'settled',
       createdAt:new Date().toISOString(), purpose:`Bank withdrawal → Admin Officer Petty Cash: ${description}` });
-    petty.float = newFloat;
-    await DB.savePettyConfig({ float: petty.float, max: petty.max });
+    await DB.savePettyConfig({ float: newFloat, max: pettyConfigBW.max });
     DB.addAudit('petty_refilled',`${fmt(amount)} from bank withdrawal credited to Admin Officer petty cash (${description})`,state.user?.name);
     closeModal();
     showAlert(`${fmt(amount)} withdrawn from bank and credited to Admin Officer petty cash. New float: ${fmt(newFloat)}.`,'success');
@@ -1688,15 +1684,12 @@ async function approvePetty(id){
   const req=pettyHistory.find(h=>h.id===id);
   if(!req) return;
   if(req.amount>pettyConfig.float){
-    alert(`Cannot approve: Insufficient float.\nRequired: ${fmt(req.amount)}\nAvailable: ${fmt(petty.float)}\n\nPlease refill the float first, then approve this request.`);
+    alert(`Cannot approve: Insufficient float.\nRequired: ${fmt(req.amount)}\nAvailable: ${fmt(pettyConfig.float)}\n\nPlease refill the float first, then approve this request.`);
     return;
   }
-  // BUG FIX 5 & NEW: record approver name and approval timestamp explicitly
-  req.status='approved';
-  req.approvedBy=state.user?.name;
-  req.approvedAt=new Date().toISOString();
-  petty.float-=req.amount;
-  DB.savePetty(petty);
+  const approvedAt=new Date().toISOString();
+  await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
+  await DB.savePettyConfig({ float: pettyConfig.float - req.amount, max: pettyConfig.max });
   DB.addAudit('petty_approved',`Petty cash approved: "${req.purpose}" — ${fmt(req.amount)} (approved by ${state.user?.name})`,state.user?.name);
   DB.addNotification('Petty Cash Approved',`"${req.purpose}" — ${fmt(req.amount)} approved by ${state.user?.name}. Receipt due within 48 hours.`,'success');
   showAlert(`Approved. ${fmt(req.amount)} deducted from float. Remind ${req.requestedBy} to return receipt within 48 hours.`,'success');
@@ -1704,18 +1697,15 @@ async function approvePetty(id){
   buildSidebar();
 }
 
-function rejectPetty(id){
+async function rejectPetty(id){
   const reason=prompt('Reason for rejection (the requester will see this):');
-  const petty=DB.getPetty();
-  const req=petty.history.find(h=>h.id===id);
+  const pettyHistory=await DB.getPetty();
+  const req=pettyHistory.find(h=>h.id===id);
   if(!req) return;
-  req.status='rejected';
-  req.rejectedBy=state.user?.name;
-  req.rejectionReason=reason||'No reason given';
-  req.rejectedAt=new Date().toISOString();
-  DB.savePetty(petty);
-  DB.addAudit('petty_rejected',`Petty cash rejected: "${req.purpose}" — Reason: ${req.rejectionReason}`,state.user?.name);
-  DB.addNotification('Petty Cash Rejected',`"${req.purpose}" was rejected by ${state.user?.name}. Reason: ${req.rejectionReason}`,'warn');
+  const rejectionReason=reason||'No reason given';
+  await DB.updatePettyEntry(id, { status:'rejected', rejectedBy:state.user?.name, rejectionReason, rejectedAt:new Date().toISOString() });
+  DB.addAudit('petty_rejected',`Petty cash rejected: "${req.purpose}" — Reason: ${rejectionReason}`,state.user?.name);
+  DB.addNotification('Petty Cash Rejected',`"${req.purpose}" was rejected by ${state.user?.name}. Reason: ${rejectionReason}`,'warn');
   showAlert('Request rejected and requester notified.','warn');
   renderPettyCash();
   buildSidebar();
@@ -1735,11 +1725,11 @@ function submitPettyReceipt(id){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.confirmPettyReceipt('${id}')">Submit & Settle</button></div>`);
 }
 
-function confirmPettyReceipt(id){
+async function confirmPettyReceipt(id){
   const no=document.getElementById('rc_no')?.value?.trim();
   if(!no){ alert('Please enter the receipt number.'); return }
-  const petty=DB.getPetty();
-  const req=petty.history.find(h=>h.id===id);
+  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const req=pettyHistory.find(h=>h.id===id);
   if(!req){ closeModal(); return }
 
   const actualAmt=parseFloat(document.getElementById('rc_amt')?.value)||req.amount;
@@ -1747,25 +1737,21 @@ function confirmPettyReceipt(id){
   const notes=document.getElementById('rc_notes')?.value||'';
 
   // Mark petty cash item as settled
-  req.receiptNo=no;
-  req.status='settled';
-  req.settledAt=new Date().toISOString();
-  req.settledBy=state.user?.name;
-  req.actualAmount=actualAmt;
-  req.vendor=vendor;
+  const updateData = { receiptNo:no, status:'settled', settledAt:new Date().toISOString(), settledBy:state.user?.name, actualAmount:actualAmt, vendor };
 
-  // BUG FIX 2 CORE: if actual amount differs from approved, return difference to float
+  // If actual amount differs from approved, return difference to float
+  let changeReturned=0;
   if(actualAmt<req.amount){
-    const change=req.amount-actualAmt;
-    petty.float+=change; // return unspent change to float
-    req.changeReturned=change;
-    DB.addNotification('Petty Cash Change Returned',`${fmt(change)} returned to float from "${req.purpose}" (spent ${fmt(actualAmt)} of approved ${fmt(req.amount)}).`,'info');
+    changeReturned=req.amount-actualAmt;
+    updateData.changeReturned=changeReturned;
+    await DB.savePettyConfig({ float: pettyConfig.float + changeReturned, max: pettyConfig.max });
+    DB.addNotification('Petty Cash Change Returned',`${fmt(changeReturned)} returned to float from "${req.purpose}" (spent ${fmt(actualAmt)} of approved ${fmt(req.amount)}).`,'info');
   }
 
-  DB.savePetty(petty);
+  await DB.updatePettyEntry(id, updateData);
 
-  // BUG FIX 2 CORE: auto-create expense record so it shows in expense module & reports
-  DB.addExpense({
+  // Auto-create expense record so it shows in expense module & reports
+  await DB.addExpense({
     date:new Date().toISOString().split('T')[0],
     category:req.category||'power',
     description:req.purpose+(vendor?` — ${vendor}`:''),
@@ -1780,7 +1766,7 @@ function confirmPettyReceipt(id){
 
   DB.addAudit('petty_settled',`Petty cash settled: "${req.purpose}" — ${fmt(actualAmt)}, Receipt: ${no}. Expense record auto-created.`,state.user?.name);
   closeModal();
-  showAlert(`Receipt submitted. ${fmt(actualAmt)} recorded as expense.${req.changeReturned?` ${fmt(req.changeReturned)} change returned to float.`:''}`, 'success');
+  showAlert(`Receipt submitted. ${fmt(actualAmt)} recorded as expense.${changeReturned?` ${fmt(changeReturned)} change returned to float.`:''}`, 'success');
   renderPettyCash();
 }
 
@@ -1812,30 +1798,29 @@ async function showPettyRefill(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitRefill()">Refill Float</button></div>`);
 }
 
-function submitRefill(){
+async function submitRefill(){
   const amt=parseFloat(document.getElementById('ref_amt')?.value)||0;
   const ref=document.getElementById('ref_ref')?.value?.trim();
   const auth=document.getElementById('ref_auth')?.value?.trim();
   if(!amt||!ref||!auth){ alert('Please fill in all required fields: amount, bank reference, and authorizing signatories.'); return }
-  const petty=DB.getPetty();
-  const spaceAvailable=petty.max-petty.float;
-  // BUG FIX 3: warn user clearly if refill is capped — don't silently shortchange them
+  const pettyConfig=await DB.getPettyConfig();
+  const spaceAvailable=pettyConfig.max-pettyConfig.float;
   if(amt>spaceAvailable){
-    if(!confirm(`The entered amount (${fmt(amt)}) exceeds available float space (${fmt(spaceAvailable)}).\n\nOnly ${fmt(spaceAvailable)} will be added to bring the float to its maximum of ${fmt(petty.max)}.\n\nProceed?`)) return;
+    if(!confirm(`The entered amount (${fmt(amt)}) exceeds available float space (${fmt(spaceAvailable)}).\n\nOnly ${fmt(spaceAvailable)} will be added to bring the float to its maximum of ${fmt(pettyConfig.max)}.\n\nProceed?`)) return;
   }
   const actualAdded=Math.min(amt,spaceAvailable);
-  petty.float+=actualAdded;
-  petty.history.unshift({
+  const newFloat=pettyConfig.float+actualAdded;
+  await DB.addPettyEntry({
     id:'RF-'+Date.now(), type:'refill', amount:actualAdded,
-    requestedAmount:amt, reference:ref, authorizedBy:auth,
     requestedBy:state.user?.name, status:'settled',
-    createdAt:new Date().toISOString(), purpose:'Float Refill'
+    createdAt:new Date().toISOString(), purpose:'Float Refill',
+    reference:ref, authorizedBy:auth
   });
-  DB.savePetty(petty);
+  await DB.savePettyConfig({ float: newFloat, max: pettyConfig.max });
   DB.addAudit('petty_refilled',`Float refilled: ${fmt(actualAdded)} (authorized by ${auth}, ref: ${ref})`,state.user?.name);
-  DB.addNotification('Float Refilled',`Petty cash float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float)}. Authorized by: ${auth}.`,'success');
+  DB.addNotification('Float Refilled',`Petty cash float refilled by ${fmt(actualAdded)}. New balance: ${fmt(newFloat)}. Authorized by: ${auth}.`,'success');
   closeModal();
-  showAlert(`Float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float)}.${actualAdded<amt?` Note: only ${fmt(actualAdded)} added (float max reached).`:''}`, 'success');
+  showAlert(`Float refilled by ${fmt(actualAdded)}. New balance: ${fmt(newFloat)}.${actualAdded<amt?` Note: only ${fmt(actualAdded)} added (float max reached).`:''}`, 'success');
   renderPettyCash();
 }
 
@@ -1909,7 +1894,7 @@ async function generateMonthlyReport(){
 }
 
 async function generateWeeklyReport(){
-  const income=filterByMonth(DB.getIncome());
+  const income=filterByMonth(await DB.getIncome());
   document.getElementById('reportOutput').innerHTML=`
     <div class="card">
       <div class="card-header"><span class="card-title">Weekly Collection Summary — ${monthLabel()}</span><button class="btn btn-sm btn-primary no-print" onclick="window.print()">🖨 Print</button></div>
@@ -1964,9 +1949,9 @@ async function generateExpenseReport(){
 }
 
 async function generatePettyCashReport(){
-  const petty=DB.getPetty();
+  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
   // BUG FIX: use pettyMonthHistory() helper — old code was passing a plain object to filterByMonth(), returning ALL history instead of current month
-  const history=pettyMonthHistory(petty.history||[]);
+  const history=pettyMonthHistory(pettyHistory);
   const disbursed=history.filter(h=>h.type!=='refill'&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
   const settled=history.filter(h=>h.status==='settled'&&h.type!=='refill').reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
   const refilled=history.filter(h=>h.type==='refill').reduce((s,h)=>s+(h.amount||0),0);
@@ -1975,7 +1960,7 @@ async function generatePettyCashReport(){
     <div class="card">
       <div class="card-header"><span class="card-title">Petty Cash Reconciliation — ${monthLabel()}</span><button class="btn btn-sm btn-primary" onclick="window.print()">🖨 Print</button></div>
       <div class="kpi-grid">
-        <div class="kpi"><div class="kpi-label">Current Float Balance</div><div class="kpi-val">${fmt(petty.float)}</div></div>
+        <div class="kpi"><div class="kpi-label">Current Float Balance</div><div class="kpi-val">${fmt(pettyConfig.float)}</div></div>
         <div class="kpi"><div class="kpi-label">Disbursed This Month</div><div class="kpi-val td-red">${fmt(disbursed)}</div></div>
         <div class="kpi"><div class="kpi-label">Receipts Settled</div><div class="kpi-val td-green">${fmt(settled)}</div></div>
         <div class="kpi"><div class="kpi-label">Unaccounted (No Receipt)</div><div class="kpi-val ${'td-amber'}">${fmt(unaccounted)}</div></div>
@@ -2023,8 +2008,9 @@ async function renderAudit(){
 // ── IT ADMIN ──────────────────────────────
 async function renderAdmin(){
   if(state.user?.role!=='it_admin'){ document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--danger)">Access denied. IT Administrators only.</p></div>'; return }
-  const users=DB.getUsers();
-  const settings=DB.getSettings();
+  const users=await DB.getUsers();
+  const settings=await DB.getSettings();
+  const auditLog=await DB.getAudit();
   const tab=state.adminTab||'users';
 
   document.getElementById('pageContent').innerHTML=`
@@ -2032,7 +2018,7 @@ async function renderAdmin(){
     <div class="admin-grid" style="margin-bottom:1rem">
       <div class="admin-stat"><div class="admin-stat-val">${users.length}</div><div class="admin-stat-label">Total Users</div></div>
       <div class="admin-stat"><div class="admin-stat-val">${(await DB.getIncome()).length}</div><div class="admin-stat-label">Income Records</div></div>
-      <div class="admin-stat"><div class="admin-stat-val">${DB.getAudit().length}</div><div class="admin-stat-label">Audit Events</div></div>
+      <div class="admin-stat"><div class="admin-stat-val">${auditLog.length}</div><div class="admin-stat-label">Audit Events</div></div>
     </div>
     <div class="tabs">
       <button class="tab ${tab==='users'?'active':''}" onclick="App.setAdminTab('users')">Users & Roles</button>
@@ -2168,7 +2154,7 @@ async function saveQuotas(){
   const s=await DB.getSettings();
   const q=s.quotas||{};
   Object.keys(DEFAULT_QUOTAS).forEach(k=>{ const el=document.getElementById('q_'+k); if(el) q[k]=parseFloat(el.value)||0 });
-  s.quotas=q; DB.saveSettings(s);
+  s.quotas=q; await DB.saveSettings(s);
   showAlert('Monthly quotas updated!','success');
 }
 
