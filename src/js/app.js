@@ -167,18 +167,18 @@ const state = {
 // ──────────────────────────────────────────
 // 4. UTILITIES
 // ──────────────────────────────────────────
-async function fmt(n){ return '₦' + Math.round(n||0).toLocaleString('en-NG') }
-async function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
-async function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'}) }
-async function uid(){ return Date.now().toString(36) }
-async function hasPermission(p){
+function fmt(n){ return '₦' + Math.round(n||0).toLocaleString('en-NG') }
+function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
+function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'}) }
+function uid(){ return Date.now().toString(36) }
+function hasPermission(p){
   if(!state.user) return false;
   const perms = PERMISSIONS[state.user.role]||[];
   return perms.includes('all') || perms.includes(p);
 }
-async function can(...ps){ return ps.some(p=>hasPermission(p)) }
-async function monthLabel(){ return MONTHS[state.month]+' '+state.year }
-async function filterByMonth(arr){
+function can(...ps){ return ps.some(p=>hasPermission(p)) }
+function monthLabel(){ return MONTHS[state.month]+' '+state.year }
+function filterByMonth(arr){
   return (arr||[]).filter(r=>{
     const d = new Date(r.date||r.createdAt||r.ts||0);
     return d.getMonth()===state.month && d.getFullYear()===state.year;
@@ -186,7 +186,7 @@ async function filterByMonth(arr){
 }
 
 // Remittance engine
-async function calcRemittances(income){
+function calcRemittances(income){
   const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, localBefore:0, provinceRebate:0, netLocal:0 };
   INCOME_TYPES.forEach(t=>{
     const amt = income[t.key]||0;
@@ -209,9 +209,9 @@ async function calcRemittances(income){
   return res;
 }
 
-async function showModal(html){ const o=document.createElement('div'); o.className='modal-overlay'; o.id='modalOverlay'; o.innerHTML=`<div class="modal">${html}</div>`; document.body.appendChild(o) }
-async function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
-async function showAlert(msg,type='success'){ const a=document.createElement('div'); a.className=`alert alert-${type}`; a.innerHTML=`<span class="alert-icon">${type==='success'?'✓':type==='danger'?'✕':'⚠'}</span><span>${msg}</span>`; const pc=document.getElementById('pageContent'); if(pc){ pc.insertBefore(a,pc.firstChild); setTimeout(()=>a.remove(),4000) } }
+function showModal(html){ const o=document.createElement('div'); o.className='modal-overlay'; o.id='modalOverlay'; o.innerHTML=`<div class="modal">${html}</div>`; document.body.appendChild(o) }
+function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
+function showAlert(msg,type='success'){ const a=document.createElement('div'); a.className=`alert alert-${type}`; a.innerHTML=`<span class="alert-icon">${type==='success'?'✓':type==='danger'?'✕':'⚠'}</span><span>${msg}</span>`; const pc=document.getElementById('pageContent'); if(pc){ pc.insertBefore(a,pc.firstChild); setTimeout(()=>a.remove(),4000) } }
 async function updateNotifBadge(){
   try {
     const notifs = await DB.getNotifications();
