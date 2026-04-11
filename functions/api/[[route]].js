@@ -98,6 +98,7 @@ export async function onRequest(context) {
     if (route === 'remittances') {
       if (method === 'GET'  && !param) return await getRemittances(DB);
       if (method === 'POST' && !param) return await createRemittance(DB, body);
+      if (method === 'PUT'  &&  param) return await updateRemittance(DB, param, body);
     }
 
     // ── /api/cash-transactions ─────────────────────────────────
@@ -274,10 +275,30 @@ async function handleInit(DB) {
     `ALTER TABLE income ADD COLUMN source TEXT DEFAULT 'sunday_collection'`,
     `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
     `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
+    // Remittance enhancements
+    `ALTER TABLE remittances ADD COLUMN period_from TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN period_to TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN payment_method TEXT DEFAULT 'bank_transfer'`,
+    `ALTER TABLE remittances ADD COLUMN notes TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN submitted_by TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN approved_by TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN approved_at TEXT DEFAULT ''`,
   ];
   for (const sql of migrations) {
     try { await DB.prepare(sql).run(); } catch { /* column already exists — safe to ignore */ }
   }
+
+  // Migrate legacy: remove goFishing from saved quotas setting
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='quotas'`).first();
+    if (row) {
+      const q = JSON.parse(row.value || '{}');
+      if ('goFishing' in q) {
+        delete q.goFishing;
+        await DB.prepare(`UPDATE settings SET value=? WHERE key='quotas'`).bind(JSON.stringify(q)).run();
+      }
+    }
+  } catch { /* safe to skip */ }
 
   // Seed petty config (once)
   await DB.prepare(
@@ -290,7 +311,7 @@ async function handleInit(DB) {
     bankName:         '',
     accountNo:        '',
     pettyMax:         '50000',
-    quotas:           JSON.stringify({ rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000, goFishing:10000 }),
+    quotas:           JSON.stringify({ rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000 }),
     remittanceRates:  JSON.stringify({
       membersTithe:    { natl:0.58, local:0.42 },
       ministersTithe:  { natl:0.62, local:0.38 },
@@ -632,32 +653,59 @@ async function updatePettyEntry(DB, id, data) {
 async function getRemittances(DB) {
   const { results } = await DB.prepare(`SELECT * FROM remittances ORDER BY paid_date DESC, created_at DESC`).all();
   return ok((results || []).map(row => ({
-    id:           row.id,
-    label:        row.label,
-    amount:       row.amount,
-    paidDate:     row.paid_date,
-    reference:    row.reference,
-    authorizedBy: row.authorized_by,
-    status:       row.status,
-    createdAt:    row.created_at,
+    id:            row.id,
+    label:         row.label,
+    amount:        row.amount,
+    paidDate:      row.paid_date,
+    reference:     row.reference,
+    authorizedBy:  row.authorized_by,
+    status:        row.status,
+    periodFrom:    row.period_from  || '',
+    periodTo:      row.period_to    || '',
+    paymentMethod: row.payment_method || 'bank_transfer',
+    notes:         row.notes        || '',
+    submittedBy:   row.submitted_by || '',
+    approvedBy:    row.approved_by  || '',
+    approvedAt:    row.approved_at  || '',
+    createdAt:     row.created_at,
   })));
 }
 
 async function createRemittance(DB, data) {
   const id = newId('REM-');
   await DB.prepare(`
-    INSERT INTO remittances (id,label,amount,paid_date,reference,authorized_by,status)
-    VALUES (?,?,?,?,?,?,?)
+    INSERT INTO remittances
+      (id, label, amount, paid_date, reference, authorized_by, status,
+       period_from, period_to, payment_method, notes, submitted_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
-    data.label        || '',
-    data.amount       || 0,
-    data.paidDate     || '',
-    data.reference    || '',
-    data.authorizedBy || '',
-    data.status       || 'paid',
+    data.label         || '',
+    data.amount        || 0,
+    data.paidDate      || '',
+    data.reference     || '',
+    data.authorizedBy  || '',
+    data.status        || 'pending_approval',
+    data.periodFrom    || '',
+    data.periodTo      || '',
+    data.paymentMethod || 'bank_transfer',
+    data.notes         || '',
+    data.submittedBy   || '',
   ).run();
   return ok({ ...data, id });
+}
+
+async function updateRemittance(DB, id, data) {
+  const row = await DB.prepare(`SELECT * FROM remittances WHERE id=?`).bind(id).first();
+  if (!row) return err('Remittance not found', 404);
+  const status      = data.status      || row.status;
+  const approvedBy  = data.approvedBy  || row.approved_by  || '';
+  const approvedAt  = data.approvedAt  || row.approved_at  || '';
+  const notes       = data.notes       !== undefined ? data.notes : (row.notes || '');
+  await DB.prepare(
+    `UPDATE remittances SET status=?, approved_by=?, approved_at=?, notes=? WHERE id=?`
+  ).bind(status, approvedBy, approvedAt, notes, id).run();
+  return ok({ id, status, approvedBy, approvedAt });
 }
 
 // ── CASH TRANSACTIONS ─────────────────────────────────────────────
@@ -729,7 +777,9 @@ async function getSettings(DB) {
     catch { out[row.key] = row.value; }
   }
   // Ensure defaults are always present
-  if (!out.quotas)          out.quotas          = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000, goFishing:10000 };
+  if (!out.quotas)          out.quotas          = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000 };
+  // Migrate: remove legacy goFishing from saved quotas
+  if (out.quotas && 'goFishing' in out.quotas) { delete out.quotas.goFishing; }
   if (!out.remittanceRates) out.remittanceRates = null; // frontend uses DEFAULT_REMITTANCE_RATES as fallback
   return ok(out);
 }
