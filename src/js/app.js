@@ -513,7 +513,7 @@ async function renderDashboard(){
   const recentIncome = allIncome.slice(0,4);
   const recentExp = allExpenses.slice(0,4);
   const recentRems = allRemsDash.filter(r=>r.status==='paid').slice(0,3);
-  const recentPetty = pettyHistDash.filter(h=>h.type==='disbursement'||h.status==='approved').slice(0,2);
+  const recentPetty = pettyHistDash.filter(h=>h.type==='disbursement'&&h.status==='approved').slice(0,2);
   const feedItems = [
     ...recentIncome.map(r=>{
       const deposited = r.depositConfirmed;
@@ -629,7 +629,7 @@ async function renderDashboard(){
         <div class="card" style="background:#1a1f1e;border-color:#2a302e">
           <div class="card-header"><span class="card-title" style="color:#999;font-size:12px;letter-spacing:1px">RECENT TRANSACTIONS</span><button class="btn btn-sm" style="background:#2a302e;color:#ccc;border-color:#3a403e" onclick="App.navigate('income')">See all ↗</button></div>
           ${feedItems.length?feedItems.map(f=>{
-            const amtColor = f.type==='income'?'#1D9E75':f.type==='remittance'?'#A32D2D':'#A32D2D';
+            const amtColor = f.type==='income'?'#1D9E75':'#A32D2D';
             const prefix = f.type==='income'?'+':'−';
             return `<div class="feed-item" style="border-color:#2a302e;padding:12px 0">
               <div class="feed-dot" style="background:${f.bg};color:${f.color};font-size:16px">${f.icon}</div>
