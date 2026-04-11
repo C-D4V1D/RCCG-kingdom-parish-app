@@ -380,32 +380,64 @@ async function getIncome(DB) {
 
 async function createIncome(DB, data) {
   const id = data.id || newId('INC-');
-  await DB.prepare(`
-    INSERT INTO income
-      (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
-       slo,crm,workers_offering,children_offering,total_collection,
-       bank_transfer_amount,direct_petty_cash,source,
-       usher,recorded_by,notes)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-  `).bind(
-    id,
-    data.date                 || new Date().toISOString().split('T')[0],
-    data.membersTithe         || 0,
-    data.ministersTithe       || 0,
-    data.thanksgiving         || 0,
-    data.sundaySchool         || 0,
-    data.slo                  || 0,
-    data.crm                  || 0,
-    data.workersOffering      || 0,
-    data.childrenOffering     || 0,
-    data.totalCollection      || 0,
-    data.bankTransferAmount   || 0,
-    data.directPettyCash      || 0,
-    data.source               || 'sunday_collection',
-    data.usher                || '',
-    data.recordedBy           || '',
-    data.notes                || '',
-  ).run();
+  try {
+    await DB.prepare(`
+      INSERT INTO income
+        (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
+         slo,crm,workers_offering,children_offering,total_collection,
+         bank_transfer_amount,direct_petty_cash,source,
+         usher,recorded_by,notes)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id,
+      data.date                 || new Date().toISOString().split('T')[0],
+      data.membersTithe         || 0,
+      data.ministersTithe       || 0,
+      data.thanksgiving         || 0,
+      data.sundaySchool         || 0,
+      data.slo                  || 0,
+      data.crm                  || 0,
+      data.workersOffering      || 0,
+      data.childrenOffering     || 0,
+      data.totalCollection      || 0,
+      data.bankTransferAmount   || 0,
+      data.directPettyCash      || 0,
+      data.source               || 'sunday_collection',
+      data.usher                || '',
+      data.recordedBy           || '',
+      data.notes                || '',
+    ).run();
+  } catch (e) {
+    const msg = (e?.message || '').toLowerCase();
+    if (!msg.includes('no column named bank_transfer_amount') &&
+        !msg.includes('no column named direct_petty_cash') &&
+        !msg.includes('no column named source')) {
+      throw e;
+    }
+    // Backward-compatible fallback for databases that haven't run /api/init migration yet.
+    await DB.prepare(`
+      INSERT INTO income
+        (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
+         slo,crm,workers_offering,children_offering,total_collection,
+         usher,recorded_by,notes)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id,
+      data.date || new Date().toISOString().split('T')[0],
+      data.membersTithe    || 0,
+      data.ministersTithe  || 0,
+      data.thanksgiving    || 0,
+      data.sundaySchool    || 0,
+      data.slo             || 0,
+      data.crm             || 0,
+      data.workersOffering || 0,
+      data.childrenOffering|| 0,
+      data.totalCollection || 0,
+      data.usher           || '',
+      data.recordedBy      || '',
+      data.notes           || '',
+    ).run();
+  }
   return ok({ ...data, id });
 }
 
@@ -449,26 +481,53 @@ async function getExpenses(DB) {
 
 async function createExpense(DB, data) {
   const id = data.id || newId('EXP-');
-  await DB.prepare(`
-    INSERT INTO expenses
-      (id,date,category,subcategory,description,amount,receipt_no,receipt_image,receipt_file_name,payment_method,notes,recorded_by,petty_ref,status)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-  `).bind(
-    id,
-    data.date             || new Date().toISOString().split('T')[0],
-    data.category         || '',
-    data.subCategory      || '',
-    data.description      || '',
-    data.amount           || 0,
-    data.receiptNo        || '',
-    data.receiptImage     || '',
-    data.receiptFileName  || '',
-    data.paymentMethod    || 'petty_cash',
-    data.notes            || '',
-    data.recordedBy       || '',
-    data.pettyRef         || '',
-    data.status           || 'approved',
-  ).run();
+  try {
+    await DB.prepare(`
+      INSERT INTO expenses
+        (id,date,category,subcategory,description,amount,receipt_no,receipt_image,receipt_file_name,payment_method,notes,recorded_by,petty_ref,status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id,
+      data.date             || new Date().toISOString().split('T')[0],
+      data.category         || '',
+      data.subCategory      || '',
+      data.description      || '',
+      data.amount           || 0,
+      data.receiptNo        || '',
+      data.receiptImage     || '',
+      data.receiptFileName  || '',
+      data.paymentMethod    || 'petty_cash',
+      data.notes            || '',
+      data.recordedBy       || '',
+      data.pettyRef         || '',
+      data.status           || 'approved',
+    ).run();
+  } catch (e) {
+    const msg = (e?.message || '').toLowerCase();
+    if (!msg.includes('no column named receipt_image') &&
+        !msg.includes('no column named receipt_file_name')) {
+      throw e;
+    }
+    // Backward-compatible fallback for databases that haven't run /api/init migration yet.
+    await DB.prepare(`
+      INSERT INTO expenses
+        (id,date,category,subcategory,description,amount,receipt_no,payment_method,notes,recorded_by,petty_ref,status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id,
+      data.date          || new Date().toISOString().split('T')[0],
+      data.category      || '',
+      data.subCategory   || '',
+      data.description   || '',
+      data.amount        || 0,
+      data.receiptNo     || '',
+      data.paymentMethod || 'petty_cash',
+      data.notes         || '',
+      data.recordedBy    || '',
+      data.pettyRef      || '',
+      data.status        || 'approved',
+    ).run();
+  }
   return ok({ ...data, id });
 }
 
