@@ -358,7 +358,7 @@ async function buildSidebar(){
   nav.innerHTML=html;
 }
 
-async function buildBottomNav(){
+function buildBottomNav(){
   const items = NAV.filter(n=> n.minRole.includes('all')||n.minRole.includes(state.user?.role)).slice(0,5);
   const bn = document.getElementById('bottomNav');
   const inner = document.createElement('div');
@@ -372,7 +372,7 @@ async function buildBottomNav(){
   bn.appendChild(inner);
 }
 
-async function updateSidebarUser(){
+function updateSidebarUser(){
   const u = state.user;
   if(!u) return;
   const r = ROLES[u.role];
@@ -396,7 +396,7 @@ async function navigate(page){
   renderPage(page);
 }
 
-async function toggleSidebar(){
+function toggleSidebar(){
   document.getElementById('sidebar').classList.toggle('open');
   document.getElementById('sidebarOverlay').classList.toggle('visible');
 }
@@ -848,7 +848,7 @@ async function markRemittancePaid(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitRemittance()">Record Payment</button></div>`);
 }
 
-async function setRemAmt(){
+function setRemAmt(){
   const sel=document.getElementById('rem_label');
   const opt=sel.options[sel.selectedIndex];
   const amt=opt?.dataset?.amt;
@@ -1383,7 +1383,7 @@ async function generateWeeklyReport(){
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
 }
 
-async function generateRemittanceReport(){ renderRemittances(); showAlert('Remittance report displayed above.','info') }
+function generateRemittanceReport(){ renderRemittances(); showAlert('Remittance report displayed above.','info') }
 
 async function generateQuarterlyReport(){
   const allIncome = await DB.getIncome();
