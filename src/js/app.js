@@ -1916,6 +1916,8 @@ async function printRemittanceReport(fromOverride, toOverride){
   .subtotal-row td{background:#f5f5f5;font-weight:700;border-top:1.5px solid #aaa;padding:7px 10px;font-size:12px}
   .total-row td{border-top:2.5px solid #333;font-weight:700;font-size:13px;padding:9px 10px;background:#fff}
   .balance-row td{background:#e8f4f0;font-size:11px;color:#0F6E56;padding:6px 10px;font-style:italic}
+  .deduct-row td{background:#fef9f9;padding:5px 10px;border-bottom:1px solid #f5c6c6}
+  .net-local-row td{background:#e8f4f0;font-weight:700;font-size:13px;padding:9px 10px;border-top:2px solid #0F6E56;color:#0F6E56}
   .local-row td{color:#0F6E56;font-weight:700;padding:8px 10px;font-size:13px;border-top:1px solid #0F6E56}
   .td-r{text-align:right;font-weight:600}
   .td-c{text-align:center}
@@ -1962,7 +1964,30 @@ async function printRemittanceReport(fromOverride, toOverride){
       <td></td>
       <td class="td-r grn">${fmt(totalParishLocal)}</td>
     </tr>
-    ${tgDistributed>0?`<tr class="balance-row"><td colspan="6">✓ Balance check: ₦${fmt(totalCollected)} collected = ₦${fmt(totalToHQ)} to RCCG HQ + ₦${fmt(tgDistributed)} TG distributed externally + ₦${fmt(totalParishLocal)} parish retained (before deductions)</td></tr>`:''}
+    ${rem.provinceRebate>0?`<tr class="deduct-row">
+      <td style="padding-left:22px;color:#555;font-style:italic">less: Province Rebate</td>
+      <td></td>
+      <td class="td-c" style="color:#555;font-size:11px">${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes</td>
+      <td></td>
+      <td></td>
+      <td class="td-r danger">− ${fmt(rem.provinceRebate)}</td>
+    </tr>`:''}
+    ${quotasTotal>0?`<tr class="deduct-row">
+      <td style="padding-left:22px;color:#555;font-style:italic">less: Total Fixed Quotas</td>
+      <td></td>
+      <td class="td-c" style="color:#555;font-size:11px">${rccgQuotas.length + mummyQuotas.length} quota item(s)</td>
+      <td></td>
+      <td></td>
+      <td class="td-r danger">− ${fmt(quotasTotal)}</td>
+    </tr>`:''}
+    <tr class="net-local-row">
+      <td><strong>NET LOCAL RETAINED</strong></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td class="td-r grn"><strong>${fmt(trueNetLocal)}</strong></td>
+    </tr>
   </table>
 
   <h3>Remittances &amp; Disbursements Due</h3>
