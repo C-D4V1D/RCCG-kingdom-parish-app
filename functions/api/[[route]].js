@@ -212,9 +212,11 @@ async function initDB(DB) {
       title TEXT NOT NULL,
       body TEXT NOT NULL,
       type TEXT DEFAULT 'info',
-      is_read INTEGER DEFAULT 0,
+      read INTEGER DEFAULT 0,
       ts TEXT DEFAULT (datetime('now'))
     )`,
+    // Backward-compatible migration for older DBs that used is_read
+    `ALTER TABLE notifications ADD COLUMN read INTEGER DEFAULT 0`,
     // Seed default petty config if not exists
     `INSERT OR IGNORE INTO petty_config (id, float_amount, max_float) VALUES ('main', 50000, 50000)`,
     // Seed default settings
@@ -498,7 +500,7 @@ async function getNotifications(DB) {
   const { results } = await DB.prepare('SELECT * FROM notifications ORDER BY ts DESC LIMIT 50').all();
   return ok((results||[]).map(r => ({
     id: r.id, title: r.title, body: r.body,
-    type: r.type, read: !!r.is_read, ts: r.ts
+    type: r.type, read: !!(r.read ?? r.is_read), ts: r.ts
   })));
 }
 
@@ -510,6 +512,7 @@ async function addNotification(DB, data) {
 }
 
 async function markNotificationsRead(DB) {
-  await DB.prepare('UPDATE notifications SET is_read=1 WHERE is_read=0').run();
+  await DB.prepare('UPDATE notifications SET read=1 WHERE COALESCE(read,0)=0').run();
+  await DB.prepare('UPDATE notifications SET is_read=1 WHERE COALESCE(is_read,0)=0').run().catch(()=>{});
   return ok({ marked: true });
 }

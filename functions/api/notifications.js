@@ -11,7 +11,7 @@ export async function onRequest({ request, env }) {
     ).all();
     return json(results.map(r => ({
       id: r.id, title: r.title, body: r.body,
-      type: r.type, read: r.read === 1, ts: r.ts
+      type: r.type, read: (r.read ?? r.is_read) === 1, ts: r.ts
     })));
   }
 
@@ -19,6 +19,7 @@ export async function onRequest({ request, env }) {
     const b = await request.json();
     if (b.action === 'mark_read') {
       await DB.prepare('UPDATE notifications SET read = 1').run();
+      await DB.prepare('UPDATE notifications SET is_read = 1').run().catch(() => {});
       return ok();
     }
     await DB.prepare(

@@ -161,18 +161,18 @@ const state = {
 // ──────────────────────────────────────────
 // 4. UTILITIES
 // ──────────────────────────────────────────
-async function fmt(n){ return '₦' + Math.round(n||0).toLocaleString('en-NG') }
-async function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
-async function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'}) }
-async function uid(){ return Date.now().toString(36) }
-async function hasPermission(p){
+function fmt(n){ return '₦' + Math.round(n||0).toLocaleString('en-NG') }
+function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
+function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'}) }
+function uid(){ return Date.now().toString(36) }
+function hasPermission(p){
   if(!state.user) return false;
   const perms = PERMISSIONS[state.user.role]||[];
   return perms.includes('all') || perms.includes(p);
 }
-async function can(...ps){ return ps.some(p=>hasPermission(p)) }
-async function monthLabel(){ return MONTHS[state.month]+' '+state.year }
-async function filterByMonth(arr){
+function can(...ps){ return ps.some(p=>hasPermission(p)) }
+function monthLabel(){ return MONTHS[state.month]+' '+state.year }
+function filterByMonth(arr){
   return (arr||[]).filter(r=>{
     const d = new Date(r.date||r.createdAt||r.ts||0);
     return d.getMonth()===state.month && d.getFullYear()===state.year;
@@ -227,7 +227,7 @@ async function onRoleChange(){
   let users = [];
   try {
     await apiFetch('init').catch(()=>{});
-    const all = await DB.getUsers();
+    const all = await apiFetch('auth');
     users = all.filter(u=>u.role===role);
   } catch(e) { users = [] }
   if(users.length>1){
@@ -248,41 +248,15 @@ async function login(){
     const initRes = await apiFetch('init').catch(e=>({ error: e.message }));
     if(initRes?.error){ console.warn('Init warning:', initRes.error); }
 
-    const allUsers = await DB.getUsers();
-    state.allUsers = allUsers;
+    const selWrap = document.getElementById('userSelectWrap');
+    const selId = selWrap && selWrap.style.display !== 'none'
+      ? document.getElementById('userSelect').value
+      : undefined;
+    const authRes = await apiFetch('auth','POST',{ role, userId: selId, pin });
+    const user = authRes?.user;
+    if(!user) throw new Error('Authentication failed.');
 
-    // Debug: show count if no users found
-    if(!allUsers || allUsers.length === 0){
-      errEl.textContent = 'No users found in database. Visit /api/init to set up the database first.';
-      errEl.style.display='block';
-      if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
-      return;
-    }
-
-    const users = allUsers.filter(u => u.role === role);
-    if(!users.length){
-      errEl.textContent = `No users found for role "${role}". Check IT Admin panel.`;
-      errEl.style.display='block';
-      if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
-      return;
-    }
-
-    let user = null;
-    if(users.length > 1){
-      const selId = document.getElementById('userSelect').value;
-      // Compare PIN as string, trimmed
-      user = users.find(u => u.id === selId && String(u.pin).trim() === String(pin).trim());
-    } else {
-      user = users.find(u => String(u.pin).trim() === String(pin).trim());
-    }
-
-    if(!user){
-      errEl.textContent = `Incorrect PIN for ${role}. (${users.length} user(s) found for this role)`;
-      errEl.style.display='block';
-      document.getElementById('pinInput').value='';
-      if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
-      return;
-    }
+    state.allUsers = await DB.getUsers().catch(()=>[]);
 
     errEl.style.display='none';
     state.user = user;
@@ -816,7 +790,7 @@ async function renderRemittances(){
 
         <div class="card">
           <div class="card-header"><span class="card-title">Monthly Quotas</span></div>
-          ${can('it_admin')?`<p style="font-size:12px;color:var(--text3);margin-bottom:10px">Edit quotas in IT Admin → Settings</p>`:''}
+          ${state.user?.role==='it_admin'?`<p style="font-size:12px;color:var(--text3);margin-bottom:10px">Edit quotas in IT Admin → Settings</p>`:''}
           ${Object.entries(quotas).map(([k,v])=>`<div class="status-row"><div class="status-row-label">${k.replace(/([A-Z])/g,' $1').replace(/^./,s=>s.toUpperCase())}</div><div class="status-row-amt">${fmt(v)}</div></div>`).join('')}
         </div>
       </div>
