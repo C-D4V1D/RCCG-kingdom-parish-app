@@ -183,7 +183,19 @@ const state = {
 // 4. UTILITIES
 // ──────────────────────────────────────────
 function fmt(n){ return '₦' + Math.round(n||0).toLocaleString('en-NG') }
-function fmtShort(n){ if(!n) return '₦0'; const abs=Math.abs(n); if(abs>=1000000) return '₦'+(n/1000000).toFixed(1).replace(/\.0$/,'')+'M'; if(abs>=1000) return '₦'+(n/1000).toFixed(abs>=10000?0:1).replace(/\.0$/,'')+'k'; return '₦'+Math.round(n) }
+function fmtShort(n){
+  if(!n) return '₦0';
+  const abs = Math.abs(n);
+  if(abs >= 1000000) return '₦' + (n/1000000).toFixed(1).replace(/\.0$/,'') + 'M';
+  if(abs >= 1000) return '₦' + (n/1000).toFixed(abs >= 10000 ? 0 : 1).replace(/\.0$/,'') + 'k';
+  return '₦' + Math.round(n);
+}
+function countSundaysInMonth(year, month){
+  let count = 0;
+  const d = new Date(year, month, 1);
+  while(d.getMonth() === month){ if(d.getDay() === 0) count++; d.setDate(d.getDate()+1); }
+  return count;
+}
 function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
 function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'}) }
 function uid(){ return Date.now().toString(36) }
@@ -527,7 +539,7 @@ async function renderDashboard(){
       const c=EXPENSE_CATS.find(x=>x.key===r.category)||{label:r.category||'Expense',icon:'💸'};
       return {type:'expense',date:r.date||r.createdAt,
         title: `${c.label} – ${r.subCategory||r.description||'expense'}`,
-        sub: `${fmtDate(r.date||r.createdAt)} · ${r.recordedBy||'Admin'} · ${r.receiptNo?'Receipt #'+r.receiptNo:''}`,
+        sub: `${fmtDate(r.date||r.createdAt)} · ${r.recordedBy||'Admin'}${r.receiptNo?' · Receipt #'+r.receiptNo:''}`,
         amt:r.amount, icon:c.icon||'💸', color:'#A32D2D', bg:'rgba(163,45,45,0.12)'};
     }),
     ...recentRems.map(r=>({type:'remittance',date:r.date||r.createdAt,
@@ -557,7 +569,7 @@ async function renderDashboard(){
     if(othersTotal>0) displayIncomeCats.push(['_others',othersTotal]);
   }
   const maxIncomeCat = displayIncomeCats[0]?.[1]||1;
-  const sundayCount = (()=>{let count=0;const d=new Date(state.year,state.month,1);while(d.getMonth()===state.month){if(d.getDay()===0)count++;d.setDate(d.getDate()+1);}return count})();
+  const sundayCount = countSundaysInMonth(state.year, state.month);
 
   const expByCat = {};
   expenses.forEach(e=>{ expByCat[e.category]=(expByCat[e.category]||0)+(e.amount||0) });
