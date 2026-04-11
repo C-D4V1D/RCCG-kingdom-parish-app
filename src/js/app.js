@@ -1857,7 +1857,7 @@ async function printRemittanceReport(fromOverride, toOverride){
 
   const tgDistNote=tgDistributed>0
     ?`<tr style="background:#fff8e1"><td colspan="6" style="font-size:11px;color:#7a5200;padding:5px 10px">
-        <sup style="color:#c0392b">†</sup> TG balance ₦${fmt(tgDistributed)} (${100-Math.round(rr.tgNational*100)}%) distributed — Area/Zonal: ₦${fmt(rem.totalArea)} · Pastor: ₦${fmt(rem.totalPastor)} · Ministers: ₦${fmt(rem.totalMinisters)} · Seed: ₦${fmt(rem.totalSeed||0)} — shown in Part B
+        <sup style="color:#c0392b">†</sup> TG balance ${fmt(tgDistributed)} (${100-Math.round(rr.tgNational*100)}%) distributed — Area/Zonal: ${fmt(rem.totalArea)} · Pastor: ${fmt(rem.totalPastor)} · Ministers: ${fmt(rem.totalMinisters)} · Seed: ${fmt(rem.totalSeed||0)} — shown in Part B
       </td></tr>`:'';
 
   const quotasTotal=quotas.reduce((s,q)=>s+(q.amount||0),0);
@@ -1874,7 +1874,7 @@ async function printRemittanceReport(fromOverride, toOverride){
     })).filter(r=>r.amount>0),
     // Province Rebate (% of local retained tithes)
     ...(rem.provinceRebate>0?[{
-      desc:`Province Rebate — ${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes (Members' + Ministers' Tithe: ₦${fmt(rem.localTithe)})`,
+      desc:`Province Rebate — ${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes (Members' + Ministers' Tithe: ${fmt(rem.localTithe)})`,
       type:'% Based', amount:rem.provinceRebate
     }]:[]),
     // Fixed RCCG quotas (excluding pastoral Zonal Mummy Stipend)
@@ -1938,10 +1938,7 @@ async function printRemittanceReport(fromOverride, toOverride){
     <h2>RCCG Monthly Remittance Report</h2>
     <p><strong>Period Covered:</strong> ${fmtDate(fromDate)} — ${fmtDate(toDate)}</p>
     <p><strong>Prepared by:</strong> ${esc(state.user?.name||'—')} &nbsp;|&nbsp; <strong>Date Prepared:</strong> ${fmtDate(new Date().toISOString().split('T')[0])}</p>
-    <p>Based on <strong>${income.length}</strong> income record(s) totalling <strong>₦${fmt(totalCollected)}</strong> in this period</p>
-  </div>
-  <div class="note">
-    ℹ️ Remittances are paid as a <strong>single bulk payment</strong> on remittance day (typically the last Sunday of each month). Please attach the bank transfer teller/receipt to this report before submission to RCCG authorities.
+    <p>Based on <strong>${income.length}</strong> income record(s) totalling <strong>${fmt(totalCollected)}</strong> in this period</p>
   </div>
 
   <h3>Collections Summary <span>— Period: ${fmtDate(fromDate)} to ${fmtDate(toDate)}</span></h3>
@@ -2008,7 +2005,7 @@ async function printRemittanceReport(fromOverride, toOverride){
 
     <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE &nbsp;<span style="font-size:11px;font-weight:normal;color:#666">(A + B)</span></td><td class="td-r danger">${fmt(totalDue)}</td></tr>
     <tr class="local-row"><td colspan="2">Net Local Retained &nbsp;<span style="font-size:11px;font-weight:normal;color:#555">(after Province Rebate &amp; Quotas)</span></td><td class="td-r grn">${fmt(trueNetLocal)}</td></tr>
-    <tr class="balance-row"><td colspan="3">✓ Balance: ₦${fmt(totalCollected)} Total Collected = ₦${fmt(totalDue)} Remittances Due + ₦${fmt(trueNetLocal)} Net Local Retained</td></tr>
+    <tr class="balance-row"><td colspan="3">✓ Balance: ${fmt(totalCollected)} Total Collected = ${fmt(totalDue)} Remittances Due + ${fmt(trueNetLocal)} Net Local Retained</td></tr>
   </table>
 
   <div class="sig">
