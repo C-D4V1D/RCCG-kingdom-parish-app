@@ -47,8 +47,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .btn-icon{width:34px;height:34px;padding:0;justify-content:center;border-radius:var(--r)}
 .btn-logout{width:100%;padding:8px;background:none;border:1px solid var(--border2);border-radius:var(--r);color:var(--text2);cursor:pointer;font-size:13px;transition:all 0.15s;font-family:inherit}
 .btn-logout:hover{background:var(--danger-light);color:var(--danger);border-color:var(--danger)}
-.btn-logout-mobile{display:none;padding:6px 12px;background:none;border:1px solid var(--border2);border-radius:var(--r);color:var(--text2);cursor:pointer;font-size:12px;font-family:inherit;white-space:nowrap}
-.btn-logout-mobile:hover{background:var(--danger-light);color:var(--danger);border-color:var(--danger)}
+.btn-logout-icon{display:flex;align-items:center;justify-content:center;padding:7px;background:none;border:1px solid var(--border2);border-radius:var(--r);color:var(--text3);cursor:pointer;flex-shrink:0;transition:all 0.15s}
+.btn-logout-icon:hover{background:var(--danger-light);color:var(--danger);border-color:var(--danger)}
 
 /* APP SHELL */
 .app-shell{display:flex;min-height:100vh;position:relative}
@@ -70,8 +70,9 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .nav-item.active .nav-icon{opacity:1}
 .nav-badge{margin-left:auto;background:var(--danger);color:#fff;font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;min-width:18px;text-align:center}
 .sidebar-footer{padding:1rem;border-top:1px solid var(--border);flex-shrink:0}
-.sidebar-user{font-size:12px;color:var(--text2);margin-bottom:8px}
-.sidebar-user strong{display:block;font-size:13px;color:var(--text)}
+.sidebar-user-row{display:flex;align-items:center;gap:8px}
+.sidebar-user{flex:1;font-size:12px;color:var(--text2);min-width:0}
+.sidebar-user strong{display:block;font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:199}
 
 /* MAIN WRAP */
@@ -251,7 +252,6 @@ tr:hover td{background:var(--surface)}
   .sidebar-overlay.visible{display:block}
   .main-wrap{margin-left:0;padding-bottom:56px}
   .hamburger{display:flex}
-  .btn-logout-mobile{display:inline-flex}
   .bottom-nav{display:block}
   .kpi-grid{grid-template-columns:repeat(2,1fr)}
   .qa-grid{grid-template-columns:repeat(2,1fr)}

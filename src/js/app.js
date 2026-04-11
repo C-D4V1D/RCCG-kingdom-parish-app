@@ -191,9 +191,13 @@ function fmtShort(n){
   return '₦' + Math.round(n);
 }
 function countSundaysInMonth(year, month){
+  const today = new Date();
+  // For past months count all Sundays; for the current month count only up to today
+  const isCurrentMonth = today.getFullYear() === year && today.getMonth() === month;
+  const limit = isCurrentMonth ? today.getDate() : 31;
   let count = 0;
   const d = new Date(year, month, 1);
-  while(d.getMonth() === month){ if(d.getDay() === 0) count++; d.setDate(d.getDate()+1); }
+  while(d.getMonth() === month && d.getDate() <= limit){ if(d.getDay() === 0) count++; d.setDate(d.getDate()+1); }
   return count;
 }
 function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
@@ -321,6 +325,7 @@ async function login(){
 function logout(){
   DB.addAudit('logout','User logged out', state.user?.name);
   state.user=null; state.page='dashboard';
+  history.replaceState(null,'',window.location.pathname);
   document.getElementById('appShell').style.display='none';
   document.getElementById('loginScreen').style.display='flex';
   document.getElementById('roleSelect').value='';
@@ -331,14 +336,25 @@ function logout(){
 // ──────────────────────────────────────────
 // 6. NAVIGATION & ROUTER
 // ──────────────────────────────────────────
+const VALID_PAGES = ['dashboard','income','remittances','expenses','bank','petty_cash','reports','audit','admin'];
+
 function initApp(){
   buildMonthSelector();
   buildSidebar();
   buildBottomNav();
   updateSidebarUser();
   updateNotifBadge();
-  navigate('dashboard');
+  // Read page from URL hash if present
+  const hashPage = window.location.hash.replace('#','').replace(/\//,'');
+  const startPage = VALID_PAGES.includes(hashPage) ? hashPage : 'dashboard';
+  navigate(startPage);
 }
+
+window.addEventListener('hashchange', ()=>{
+  if(!state.user) return;
+  const hashPage = window.location.hash.replace('#','').replace(/\//,'');
+  if(VALID_PAGES.includes(hashPage) && hashPage !== state.page) navigate(hashPage);
+});
 
 function buildMonthSelector(){
   const sel = document.getElementById('globalMonth');
@@ -409,6 +425,9 @@ function updateSidebarUser(){
 
 function navigate(page){
   state.page=page;
+  // Update URL hash without triggering another hashchange loop
+  const newHash = '#' + page;
+  if(window.location.hash !== newHash) history.replaceState(null,'',newHash);
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   const titles={dashboard:'Dashboard',income:'Record Income',remittances:'Remittances',
@@ -698,7 +717,7 @@ async function renderDashboard(){
               <div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;color:var(--text)">${t.label}</div></div>
               <div style="text-align:right;flex-shrink:0;margin-left:12px"><div style="font-size:13px;font-weight:600;color:var(--text)">${fmt(amt)}</div><div style="font-size:11px;color:var(--text3)">${pct}%</div></div>
             </div>`;
-          }).join('')+'<div style="display:flex;justify-content:space-between;padding-top:10px;margin-top:4px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total income</span><span style="font-size:16px;font-weight:700;color:var(--primary)">${fmt(totalIncome)}</span></div>'
+          }).join('')+`<div style="display:flex;justify-content:space-between;padding-top:10px;margin-top:4px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total income</span><span style="font-size:16px;font-weight:700;color:var(--primary)">${fmt(totalIncome)}</span></div>`
           :'<div class="empty-table">No income recorded this month.</div>'}
         </div>
 
@@ -707,7 +726,7 @@ async function renderDashboard(){
           ${topCats.length?topCats.map(([cat,amt])=>{
             const c=EXPENSE_CATS.find(e=>e.key===cat)||{label:cat,color:'#888',icon:''};
             return `<div class="exp-row"><div class="exp-label">${c.icon||''} ${c.label}</div><div class="progress-bar"><div class="progress-fill" style="width:${Math.round(amt/maxCat*100)}%;background:${c.color}"></div></div><div class="exp-val">${fmt(amt)}</div></div>`;
-          }).join('')+'<div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:10px;margin-top:4px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total expenses</span><span style="font-size:16px;font-weight:700;color:var(--danger)">${fmt(totalExpenses)}</span></div>'
+          }).join('')+`<div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:10px;margin-top:4px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total expenses</span><span style="font-size:16px;font-weight:700;color:var(--danger)">${fmt(totalExpenses)}</span></div>`
           :'<div class="empty-table">No expenses recorded this month.</div>'}
         </div>
 
