@@ -1816,11 +1816,33 @@ async function printRemittanceReport(fromOverride, toOverride){
   const rr=await getRemRates();
   const churchName=settings.churchName||'RCCG Kingdom Parish, Aguleri';
 
-  // ─── SECTION 1: Collections Summary (total collected + split) ──────
+  // Separate "Zonal Mummy Stipend" (pastoral stipend) from RCCG-authority quotas
+  const rccgQuotas=quotas.filter(q=>!q.label.toLowerCase().includes('mummy'));
+  const mummyQuotas=quotas.filter(q=>q.label.toLowerCase().includes('mummy'));
+
+  // ─── COLLECTIONS SUMMARY ─────────────────────────────────────────
   const totalCollected=rem.lines.reduce((s,l)=>s+(l.total||0),0);
+  const tgLine=rem.lines.find(l=>l.isTg);
+  const tgTotal=tgLine?.total||0;
+  const tgNatlAmt=tgLine?.national||0;
+  const tgDistributed=tgTotal-tgNatlAmt; // area+pastor+ministers+seed
+  const totalToHQ=rem.lines.reduce((s,l)=>s+(l.national||0),0); // incl. TG national
+  const totalParishLocal=rem.lines.filter(l=>!l.isTg).reduce((s,l)=>s+(l.local||0),0);
 
   const collectionRowsHTML=rem.lines.map(l=>{
-    if(l.isTg||(!l.total)) return '';
+    if(!l.total) return '';
+    if(l.isTg){
+      const natlPct=Math.round(rr.tgNational*100);
+      const distPct=100-natlPct;
+      return `<tr>
+        <td>Thanksgiving (TG) <sup style="color:#c0392b">†</sup></td>
+        <td class="td-r">${fmt(l.total)}</td>
+        <td class="td-c">${natlPct}%</td>
+        <td class="td-r">${fmt(l.national)}</td>
+        <td class="td-c" style="color:#888">${distPct}%</td>
+        <td class="td-r" style="color:#888;font-style:italic">0</td>
+      </tr>`;
+    }
     const natlPct=Math.round((l.national/l.total)*100);
     const locPct=Math.round((l.local/l.total)*100);
     return `<tr>
@@ -1833,49 +1855,47 @@ async function printRemittanceReport(fromOverride, toOverride){
     </tr>`;
   }).filter(Boolean).join('');
 
-  // Add thanksgiving row (100% distributed externally)
-  const tgLine=rem.lines.find(l=>l.isTg);
-  const tgTotal=tgLine?.total||0;
-  const tgCollRow=tgTotal?`<tr>
-    <td>Thanksgiving (TG)</td>
-    <td class="td-r">${fmt(tgTotal)}</td>
-    <td class="td-c" colspan="4" style="color:#666;font-style:italic">100% distributed (Natl 75% / Area 5% / Pastor 10% / Ministers 9% / Seed 1%)</td>
-  </tr>`:'';
+  const tgDistNote=tgDistributed>0
+    ?`<tr style="background:#fff8e1"><td colspan="6" style="font-size:11px;color:#7a5200;padding:5px 10px">
+        <sup style="color:#c0392b">†</sup> TG balance ₦${fmt(tgDistributed)} (${100-Math.round(rr.tgNational*100)}%) distributed — Area/Zonal: ₦${fmt(rem.totalArea)} · Pastor: ₦${fmt(rem.totalPastor)} · Ministers: ₦${fmt(rem.totalMinisters)} · Seed: ₦${fmt(rem.totalSeed||0)} — shown in Part B
+      </td></tr>`:'';
 
-  // ─── SECTION 2: Remittances Due breakdown ──────────────────────────
-  const remSections=[
-    {
-      title:'Income-Based Remittances (% of Collections)',
-      rows:rem.lines.filter(l=>!l.isTg).map(l=>({ desc:l.label+' → National HQ', type:'% Based', amount:l.national||0 })).filter(r=>r.amount>0)
-    },
-    {
-      title:'Thanksgiving Offering Distribution',
-      rows:[
-        { desc:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      type:'% Based', amount:rem.totalArea },
-        { desc:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,         type:'% Based', amount:rem.totalPastor },
-        { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    type:'% Based', amount:rem.totalMinisters },
-        { desc:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, type:'% Based', amount:rem.totalSeed||0 },
-      ].filter(r=>r.amount>0)
-    },
-    {
-      title:`Province Rebate — ${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes (Members' + Ministers')`,
-      rows:rem.provinceRebate>0?[{
-        desc:`Province Rebate on Local Tithes: Local Members' Tithe ${fmt(rem.lines.find(l=>l.label==="Members' Tithe")?.local||0)} + Local Ministers' Tithe ${fmt(rem.lines.find(l=>l.label==="Ministers' Tithe")?.local||0)} = ${fmt(rem.localTithe)} × ${Math.round(rr.provinceRebate*100)}%`,
-        type:'% Based', amount:rem.provinceRebate
-      }]:[]
-    },
-    {
-      title:'Fixed Monthly Quotas',
-      rows:quotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 })).filter(r=>r.amount>0)
-    }
-  ].filter(s=>s.rows.length>0);
+  const quotasTotal=quotas.reduce((s,q)=>s+(q.amount||0),0);
+  const trueNetLocal=rem.netLocal-quotasTotal;
 
-  const totalDue=remSections.flatMap(s=>s.rows).reduce((s,r)=>s+r.amount,0);
+  // ─── PART A: RCCG AUTHORITY REMITTANCES ──────────────────────────
+  const partARows=[
+    // Income-based % remittances → National HQ (all types including TG)
+    ...rem.lines.map(l=>({
+      desc: l.isTg
+        ? `Thanksgiving Offering → National HQ (${Math.round(rr.tgNational*100)}%)`
+        : `${l.label} → National HQ`,
+      type:'% Based', amount:l.national||0
+    })).filter(r=>r.amount>0),
+    // Province Rebate (% of local retained tithes)
+    ...(rem.provinceRebate>0?[{
+      desc:`Province Rebate — ${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes (Members' + Ministers' Tithe: ₦${fmt(rem.localTithe)})`,
+      type:'% Based', amount:rem.provinceRebate
+    }]:[]),
+    // Fixed RCCG quotas (excluding pastoral Zonal Mummy Stipend)
+    ...rccgQuotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 })).filter(r=>r.amount>0)
+  ];
+  const subTotalA=partARows.reduce((s,r)=>s+r.amount,0);
 
-  const sectionHTML=remSections.map(s=>`
-    <tr class="sec-row"><td colspan="3">${s.title}</td></tr>
-    ${s.rows.map(r=>`<tr><td>${r.desc}</td><td class="td-c">${r.type}</td><td class="td-r">${fmt(r.amount)}</td></tr>`).join('')}
-  `).join('');
+  // ─── PART B: OTHER DISBURSEMENTS ─────────────────────────────────
+  const partBRows=[
+    { desc:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,       type:'% Based', amount:rem.totalArea||0 },
+    { desc:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,          type:'% Based', amount:rem.totalPastor||0 },
+    { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,     type:'% Based', amount:rem.totalMinisters||0 },
+    { desc:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`,  type:'% Based', amount:rem.totalSeed||0 },
+    ...mummyQuotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 }))
+  ].filter(r=>r.amount>0);
+  const subTotalB=partBRows.reduce((s,r)=>s+r.amount,0);
+
+  const totalDue=subTotalA+subTotalB;
+
+  const partAHTML=partARows.map(r=>`<tr><td>${r.desc}</td><td class="td-c">${r.type}</td><td class="td-r">${fmt(r.amount)}</td></tr>`).join('');
+  const partBHTML=partBRows.map(r=>`<tr><td>${r.desc}</td><td class="td-c">${r.type}</td><td class="td-r">${fmt(r.amount)}</td></tr>`).join('');
 
   const html=`<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -1887,21 +1907,26 @@ async function printRemittanceReport(fromOverride, toOverride){
   .header h1{font-size:19px;color:#0F6E56;margin-bottom:4px}
   .header h2{font-size:14px;color:#333;margin-bottom:6px}
   .header p{font-size:11px;color:#666;margin-bottom:2px}
-  h3{font-size:13px;color:#0F6E56;margin:18px 0 8px;border-bottom:1px solid #ccc;padding-bottom:4px}
-  table{width:100%;border-collapse:collapse;margin-bottom:14px}
-  th{background:#0F6E56;color:#fff;padding:6px 10px;text-align:left;font-size:11px;font-weight:700}
+  h3{font-size:13px;color:#0F6E56;margin:18px 0 8px;border-bottom:2px solid #0F6E56;padding-bottom:4px}
+  h3 span{font-weight:normal;font-size:11px;color:#666;margin-left:6px}
+  table{width:100%;border-collapse:collapse;margin-bottom:6px}
+  th{background:#0F6E56;color:#fff;padding:7px 10px;text-align:left;font-size:11px;font-weight:700}
   td{padding:5px 10px;border-bottom:1px solid #eee;font-size:12px}
-  .sec-row td{background:#f0f4f0;font-weight:700;font-size:10px;color:#0F6E56;letter-spacing:0.7px;text-transform:uppercase;padding:5px 10px;border-top:1px solid #ccc}
-  .total-row td{border-top:2px solid #333;font-weight:700;font-size:13px;padding:8px 10px}
-  .local-row td{color:#0F6E56;font-weight:700;padding:6px 10px}
+  .sec-row td{background:#e8f4f0;font-weight:700;font-size:10px;color:#0F6E56;letter-spacing:0.7px;text-transform:uppercase;padding:5px 10px;border-top:1px solid #b2d8cc}
+  .subtotal-row td{background:#f5f5f5;font-weight:700;border-top:1.5px solid #aaa;padding:7px 10px;font-size:12px}
+  .total-row td{border-top:2.5px solid #333;font-weight:700;font-size:13px;padding:9px 10px;background:#fff}
+  .balance-row td{background:#e8f4f0;font-size:11px;color:#0F6E56;padding:6px 10px;font-style:italic}
+  .local-row td{color:#0F6E56;font-weight:700;padding:8px 10px;font-size:13px;border-top:1px solid #0F6E56}
   .td-r{text-align:right;font-weight:600}
   .td-c{text-align:center}
   .grn{color:#0F6E56}
   .danger{color:#c0392b}
+  .muted{color:#888;font-size:11px}
+  .spacer-row td{height:8px;background:#fff;border:none}
+  .part-label{display:inline-block;background:#0F6E56;color:#fff;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:700;margin-right:6px;letter-spacing:0.5px}
   .sig{display:flex;gap:24px;margin-top:36px}
   .sig-box{flex:1;border-top:1px solid #333;padding-top:8px;font-size:11px;line-height:1.7}
   .note{background:#fff8e1;border:1px solid #f0c040;border-radius:4px;padding:10px 12px;font-size:11px;margin-bottom:16px;color:#7a5200}
-  .info{background:#e8f4fd;border:1px solid #90caf9;border-radius:4px;padding:8px 12px;font-size:11px;margin-bottom:14px;color:#1a527a}
   @media print{body{padding:10px}.no-print{display:none}}
 </style>
 </head>
@@ -1916,39 +1941,53 @@ async function printRemittanceReport(fromOverride, toOverride){
   <div class="note">
     ℹ️ Remittances are paid as a <strong>single bulk payment</strong> on remittance day (typically the last Sunday of each month). Please attach the bank transfer teller/receipt to this report before submission to RCCG authorities.
   </div>
-  <div class="info">
-    ℹ️ <strong>Province Rebate</strong> = ${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes (Members' Tithe + Ministers' Tithe local shares only). <strong>TG Seed</strong> = ${Math.round(rr.tgSeed*100)}% of Thanksgiving, designated for the Pastor's Children.
-  </div>
 
-  <h3>Part A — Collections Summary (Period: ${fmtDate(fromDate)} — ${fmtDate(toDate)})</h3>
+  <h3>Collections Summary <span>— Period: ${fmtDate(fromDate)} to ${fmtDate(toDate)}</span></h3>
   <table>
     <tr>
-      <th style="width:28%">Income Type</th>
-      <th class="td-r" style="width:13%">Total Collected</th>
-      <th class="td-c" style="width:8%">% Remit</th>
-      <th class="td-r" style="width:13%">To Remit (₦)</th>
+      <th style="width:34%">Income Type</th>
+      <th class="td-r" style="width:14%">Total Collected</th>
+      <th class="td-c" style="width:8%">% → HQ</th>
+      <th class="td-r" style="width:14%">To RCCG HQ (₦)</th>
       <th class="td-c" style="width:8%">% Local</th>
-      <th class="td-r" style="width:13%">Local Share (₦)</th>
+      <th class="td-r" style="width:14%">Parish Retained (₦)</th>
     </tr>
     ${collectionRowsHTML}
-    ${tgCollRow}
+    ${tgDistNote}
     <tr class="total-row">
       <td>TOTAL COLLECTIONS</td>
       <td class="td-r">${fmt(totalCollected)}</td>
-      <td colspan="4"></td>
+      <td></td>
+      <td class="td-r danger">${fmt(totalToHQ)}</td>
+      <td></td>
+      <td class="td-r grn">${fmt(totalParishLocal)}</td>
     </tr>
+    ${tgDistributed>0?`<tr class="balance-row"><td colspan="6">✓ Balance check: ₦${fmt(totalCollected)} collected = ₦${fmt(totalToHQ)} to RCCG HQ + ₦${fmt(tgDistributed)} TG distributed externally + ₦${fmt(totalParishLocal)} parish retained (before deductions)</td></tr>`:''}
   </table>
 
-  <h3>Part B — Remittances Due to RCCG Authorities</h3>
+  <h3>Remittances &amp; Disbursements Due</h3>
   <table>
-    <tr><th style="width:60%">Description</th><th class="td-c" style="width:12%">Type</th><th class="td-r" style="width:28%">Amount (₦)</th></tr>
-    ${sectionHTML}
-    <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r danger">${fmt(totalDue)}</td></tr>
-    <tr class="local-row"><td colspan="2">Net Local Retained (after Province Rebate on Tithes)</td><td class="td-r">${fmt(rem.netLocal)}</td></tr>
+    <tr><th style="width:62%">Description</th><th class="td-c" style="width:10%">Type</th><th class="td-r" style="width:28%">Amount (₦)</th></tr>
+
+    <tr class="sec-row"><td colspan="3"><span class="part-label">PART A</span> Remittances to RCCG Authorities</td></tr>
+    ${partARows.length?partAHTML:'<tr><td colspan="3" class="muted" style="padding:6px 10px">No RCCG authority remittances for this period.</td></tr>'}
+    <tr class="subtotal-row"><td colspan="2">Sub-Total (A) — RCCG Authority Remittances</td><td class="td-r danger">${fmt(subTotalA)}</td></tr>
+
+    <tr class="spacer-row"><td colspan="3"></td></tr>
+
+    <tr class="sec-row"><td colspan="3"><span class="part-label">PART B</span> Thanksgiving Distributions &amp; Pastoral Stipend</td></tr>
+    ${partBRows.length?partBHTML:'<tr><td colspan="3" class="muted" style="padding:6px 10px">No TG distributions or pastoral stipend for this period.</td></tr>'}
+    <tr class="subtotal-row"><td colspan="2">Sub-Total (B) — TG Distributions &amp; Pastoral Stipend</td><td class="td-r" style="color:#8B4513">${fmt(subTotalB)}</td></tr>
+
+    <tr class="spacer-row"><td colspan="3"></td></tr>
+
+    <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE &nbsp;<span style="font-size:11px;font-weight:normal;color:#666">(A + B)</span></td><td class="td-r danger">${fmt(totalDue)}</td></tr>
+    <tr class="local-row"><td colspan="2">Net Local Retained &nbsp;<span style="font-size:11px;font-weight:normal;color:#555">(after Province Rebate &amp; Quotas)</span></td><td class="td-r grn">${fmt(trueNetLocal)}</td></tr>
+    <tr class="balance-row"><td colspan="3">✓ Balance: ₦${fmt(totalCollected)} Total Collected = ₦${fmt(totalDue)} Remittances Due + ₦${fmt(trueNetLocal)} Net Local Retained</td></tr>
   </table>
 
   <div class="sig">
-    <div class="sig-box">Prepared by (Accountant)<br><br><br>${esc(state.user?.name)||'_________________'}</div>
+    <div class="sig-box">Prepared by (Accountant)<br><br><br>${esc(state.user?.name||'_________________')}</div>
     <div class="sig-box">Reviewed &amp; Approved (Parish Pastor)<br><br><br>_________________</div>
     <div class="sig-box">Date of Payment<br><br><br>_________________</div>
     <div class="sig-box">Bank Teller / Reference No.<br><br><br>_________________</div>
