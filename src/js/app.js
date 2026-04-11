@@ -325,7 +325,7 @@ async function login(){
 function logout(){
   DB.addAudit('logout','User logged out', state.user?.name);
   state.user=null; state.page='dashboard';
-  history.replaceState(null,'',window.location.pathname);
+  history.replaceState(null,'','/');
   document.getElementById('appShell').style.display='none';
   document.getElementById('loginScreen').style.display='flex';
   document.getElementById('roleSelect').value='';
@@ -338,26 +338,24 @@ function logout(){
 // ──────────────────────────────────────────
 const VALID_PAGES = ['dashboard','income','remittances','expenses','bank','petty_cash','reports','audit','admin'];
 
+function pageFromPath(){
+  const seg = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
+  return VALID_PAGES.includes(seg) ? seg : 'dashboard';
+}
+
 function initApp(){
   buildMonthSelector();
   buildSidebar();
   buildBottomNav();
   updateSidebarUser();
   updateNotifBadge();
-  // Read page from URL hash if present
-  const startPage = pageFromHash();
-  navigate(startPage);
+  navigate(pageFromPath(), true);
 }
 
-function pageFromHash(){
-  const hash = window.location.hash.replace(/^#\/?/, '');
-  return VALID_PAGES.includes(hash) ? hash : 'dashboard';
-}
-
-window.addEventListener('hashchange', ()=>{
+// Handle browser back / forward
+window.addEventListener('popstate', ()=>{
   if(!state.user) return;
-  const hashPage = pageFromHash();
-  if(hashPage !== state.page) navigate(hashPage);
+  navigate(pageFromPath(), true);
 });
 
 function buildMonthSelector(){
@@ -427,11 +425,13 @@ function updateSidebarUser(){
     <span style="display:inline-block;margin-top:4px;font-size:11px;padding:2px 8px;border-radius:10px;background:${r.bg};color:${r.color};font-weight:600">${r.label}</span>`;
 }
 
-function navigate(page){
+function navigate(page, fromHistory){
   state.page=page;
-  // Update URL hash without triggering another hashchange loop
-  const newHash = '#' + page;
-  if(window.location.hash !== newHash) history.replaceState(null,'',newHash);
+  // Update URL — push new entry unless this was triggered by the browser's own back/forward
+  const newPath = '/' + (page === 'dashboard' ? '' : page);
+  if(!fromHistory && window.location.pathname !== '/' + page){
+    history.pushState({page}, '', newPath);
+  }
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   const titles={dashboard:'Dashboard',income:'Record Income',remittances:'Remittances',
