@@ -19,7 +19,7 @@ const REMITTANCE_RATES = {
     area: 0.05,
     pastor: 0.10,
     ministers: 0.09,
-    pastorsSeed: 0.01,
+    pastorsSeed: 0.01,   // 1% for the Pastor's Children (Seed)
     local: 0,
     label: "Thanksgiving (TG)"
   },
@@ -50,7 +50,7 @@ const REMITTANCE_RATES = {
   }
 };
 
-const PROVINCE_REBATE_RATE = 0.20; // 20% of total local retained share
+const PROVINCE_REBATE_RATE = 0.20; // 20% of local retained tithes (Members' Tithe + Ministers' Tithe) only
 
 /**
  * Calculate all remittances from a given income object
@@ -72,7 +72,7 @@ function calculateRemittances(income) {
     }
   };
 
-  // Members' Tithe
+  // Members' Tithe — tracked separately for Province Rebate calculation
   if (income.membersTithe) {
     const amt = income.membersTithe;
     result.breakdown.membersTithe = {
@@ -83,9 +83,10 @@ function calculateRemittances(income) {
     };
     result.totals.totalToNational += result.breakdown.membersTithe.national;
     result.totals.localRetainedBeforeRebate += result.breakdown.membersTithe.local;
+    result.totals.localTithe = (result.totals.localTithe || 0) + result.breakdown.membersTithe.local;
   }
 
-  // Ministers' Tithe
+  // Ministers' Tithe — tracked separately for Province Rebate calculation
   if (income.ministersTithe) {
     const amt = income.ministersTithe;
     result.breakdown.ministersTithe = {
@@ -96,6 +97,7 @@ function calculateRemittances(income) {
     };
     result.totals.totalToNational += result.breakdown.ministersTithe.national;
     result.totals.localRetainedBeforeRebate += result.breakdown.ministersTithe.local;
+    result.totals.localTithe = (result.totals.localTithe || 0) + result.breakdown.ministersTithe.local;
   }
 
   // Thanksgiving
@@ -181,8 +183,9 @@ function calculateRemittances(income) {
     result.totals.totalToNational += result.breakdown.childrenOffering.national;
   }
 
-  // Province Rebate (20% of local retained before rebate)
-  result.totals.provinceRebate = result.totals.localRetainedBeforeRebate * PROVINCE_REBATE_RATE;
+  // Province Rebate = 20% of local retained tithes ONLY (Members' Tithe + Ministers' Tithe)
+  // This is NOT applied to SLO, CRM, Workers' Offering, Children's Offering etc.
+  result.totals.provinceRebate = (result.totals.localTithe || 0) * PROVINCE_REBATE_RATE;
   result.totals.netLocalRetained = result.totals.localRetainedBeforeRebate - result.totals.provinceRebate;
 
   // Total income

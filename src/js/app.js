@@ -263,7 +263,7 @@ async function calcRemittances(income){
     const amt = income[t.key]||0;
     if(!amt) return;
     if(t.special==='tg'){
-      const line = { label:t.label, total:amt, national: amt*rr.tgNational, area: amt*rr.tgArea,
+      const line = { label:t.label, isTg:true, total:amt, national: amt*rr.tgNational, area: amt*rr.tgArea,
         pastor: amt*rr.tgPastor, ministers: amt*rr.tgMinisters, seed: amt*rr.tgSeed, local:0 };
       res.lines.push(line);
       res.totalNatl+=line.national; res.totalArea+=line.area;
@@ -1518,7 +1518,7 @@ async function renderRemittances(){
 
       <!-- RIGHT: History + Local Share -->
       <div>
-        ${pendingApprovals.length&&can('income','remittances')?`
+        ${pendingApprovals.length&&['it_admin','pastor','signatory'].includes(state.user?.role)?`
         <div class="card" style="border-left:3px solid var(--amber);margin-bottom:12px">
           <div class="card-header"><span class="card-title">⏳ Pending Approval (${pendingApprovals.length})</span></div>
           <p style="font-size:11px;color:var(--text3);margin:0 0 8px 0">These payments have been submitted and are awaiting approval by the Pastor or a Bank Signatory.</p>
@@ -1532,7 +1532,7 @@ async function renderRemittances(){
               </div>
               <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
                 <span class="td-bold td-red">${fmt(r.amount)}</span>
-                ${can('income','signoff','remittances')?`<button class="btn btn-sm btn-primary" onclick="App.approveRemittance('${r.id}')">✅ Approve</button>`:''}
+                ${['it_admin','pastor','signatory'].includes(state.user?.role)?`<button class="btn btn-sm btn-primary" onclick="App.approveRemittance('${r.id}')">✅ Approve</button>`:''}
               </div>
             </div>`).join('')}
         </div>`:''}
@@ -1786,7 +1786,7 @@ async function printRemittanceReport(fromOverride, toOverride){
   const totalCollected=rem.lines.reduce((s,l)=>s+(l.total||0),0);
 
   const collectionRowsHTML=rem.lines.map(l=>{
-    if(l.special==='tg'||(!l.total)) return '';
+    if(l.isTg||(!l.total)) return '';
     const natlPct=Math.round((l.national/l.total)*100);
     const locPct=Math.round((l.local/l.total)*100);
     return `<tr>
@@ -1800,7 +1800,7 @@ async function printRemittanceReport(fromOverride, toOverride){
   }).filter(Boolean).join('');
 
   // Add thanksgiving row (100% distributed externally)
-  const tgLine=rem.lines.find(l=>l.special==='tg'||l.label==='Thanksgiving (TG)');
+  const tgLine=rem.lines.find(l=>l.isTg);
   const tgTotal=tgLine?.total||0;
   const tgCollRow=tgTotal?`<tr>
     <td>Thanksgiving (TG)</td>
@@ -1812,7 +1812,7 @@ async function printRemittanceReport(fromOverride, toOverride){
   const remSections=[
     {
       title:'Income-Based Remittances (% of Collections)',
-      rows:rem.lines.map(l=>({ desc:l.label+' → National HQ', type:'% Based', amount:l.national||0 })).filter(r=>r.amount>0)
+      rows:rem.lines.filter(l=>!l.isTg).map(l=>({ desc:l.label+' → National HQ', type:'% Based', amount:l.national||0 })).filter(r=>r.amount>0)
     },
     {
       title:'Thanksgiving Offering Distribution',
