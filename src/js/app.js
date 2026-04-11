@@ -183,6 +183,7 @@ const state = {
 // 4. UTILITIES
 // ──────────────────────────────────────────
 function fmt(n){ return '₦' + Math.round(n||0).toLocaleString('en-NG') }
+function fmtShort(n){ if(!n) return '₦0'; const abs=Math.abs(n); if(abs>=1000000) return '₦'+(n/1000000).toFixed(1).replace(/\.0$/,'')+'M'; if(abs>=1000) return '₦'+(n/1000).toFixed(abs>=10000?0:1).replace(/\.0$/,'')+'k'; return '₦'+Math.round(n) }
 function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
 function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'}) }
 function uid(){ return Date.now().toString(36) }
@@ -536,19 +537,31 @@ async function renderDashboard(){
   ]
   .sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,6);
 
-  // Income breakdown by type
+  // Income breakdown by type (includes Sunday collection types + Other Income)
   const incomeByCat = {};
   income.forEach(r=>{
-    INCOME_TYPES.forEach(t=>{
-      if(r[t.key]) incomeByCat[t.key] = (incomeByCat[t.key]||0) + (r[t.key]||0);
-    });
+    if(!r.source || r.source==='sunday_collection'){
+      INCOME_TYPES.forEach(t=>{
+        if(r[t.key]) incomeByCat[t.key] = (incomeByCat[t.key]||0) + (r[t.key]||0);
+      });
+    } else {
+      const srcKey = r.source||'other';
+      incomeByCat[srcKey] = (incomeByCat[srcKey]||0) + (r.totalCollection||0);
+    }
   });
-  const topIncomeCats = Object.entries(incomeByCat).sort((a,b)=>b[1]-a[1]).slice(0,7);
-  const maxIncomeCat = topIncomeCats[0]?.[1]||1;
+  const allIncomeCats = Object.entries(incomeByCat).sort((a,b)=>b[1]-a[1]);
+  let displayIncomeCats = allIncomeCats;
+  if(allIncomeCats.length > 5){
+    displayIncomeCats = allIncomeCats.slice(0,4);
+    const othersTotal = allIncomeCats.slice(4).reduce((s,e)=>s+e[1],0);
+    if(othersTotal>0) displayIncomeCats.push(['_others',othersTotal]);
+  }
+  const maxIncomeCat = displayIncomeCats[0]?.[1]||1;
+  const sundayCount = (()=>{let count=0;const d=new Date(state.year,state.month,1);while(d.getMonth()===state.month){if(d.getDay()===0)count++;d.setDate(d.getDate()+1);}return count})();
 
   const expByCat = {};
   expenses.forEach(e=>{ expByCat[e.category]=(expByCat[e.category]||0)+(e.amount||0) });
-  const topCats = Object.entries(expByCat).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  const topCats = Object.entries(expByCat).sort((a,b)=>b[1]-a[1]).slice(0,7);
   const maxCat = topCats[0]?.[1]||1;
 
   // Alerts
@@ -626,16 +639,16 @@ async function renderDashboard(){
 
     <div class="grid-6040">
       <div>
-        <div class="card" style="background:#1a1f1e;border-color:#2a302e">
-          <div class="card-header"><span class="card-title" style="color:#999;font-size:12px;letter-spacing:1px">RECENT TRANSACTIONS</span><button class="btn btn-sm" style="background:#2a302e;color:#ccc;border-color:#3a403e" onclick="App.navigate('income')">See all ↗</button></div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">RECENT TRANSACTIONS</span><button class="btn btn-sm" onclick="App.navigate('income')">See all ↗</button></div>
           ${feedItems.length?feedItems.map(f=>{
-            const amtColor = f.type==='income'?'#1D9E75':'#A32D2D';
+            const amtColor = f.type==='income'?'var(--success)':'var(--danger)';
             const prefix = f.type==='income'?'+':'−';
-            return `<div class="feed-item" style="border-color:#2a302e;padding:12px 0">
+            return `<div class="feed-item" style="padding:12px 0">
               <div class="feed-dot" style="background:${f.bg};color:${f.color};font-size:16px">${f.icon}</div>
-              <div class="feed-body"><div class="feed-title" style="color:#e8e8e8;font-size:14px;font-weight:600">${f.title}</div><div class="feed-sub" style="color:#777;font-size:12px;margin-top:2px">${f.sub}</div></div>
+              <div class="feed-body"><div class="feed-title" style="font-size:14px;font-weight:600">${f.title}</div><div class="feed-sub" style="font-size:12px;margin-top:2px">${f.sub}</div></div>
               <div class="feed-right" style="color:${amtColor};font-size:14px;font-weight:600">${prefix}${fmt(f.amt)}</div>
-            </div>`}).join(''):'<div style="font-size:13px;color:#666;padding:24px 0;text-align:center">No transactions yet.</div>'}
+            </div>`}).join(''):'<div class="empty-table">No transactions yet.</div>'}
         </div>
 
         <div class="card">
@@ -644,12 +657,18 @@ async function renderDashboard(){
             <span><span style="display:inline-block;width:10px;height:10px;background:var(--primary);border-radius:2px;margin-right:4px"></span>Income</span>
             <span><span style="display:inline-block;width:10px;height:10px;background:var(--danger);border-radius:2px;margin-right:4px"></span>Expenses</span>
           </div>
-          <div style="display:flex;align-items:flex-end;gap:12px;height:110px;padding:8px 0">
+          <div style="display:flex;align-items:flex-end;gap:12px;height:130px;padding:8px 0">
             ${trendData.map(t=>`
               <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
-                <div style="display:flex;gap:3px;align-items:flex-end;width:100%;justify-content:center;height:80px">
-                  <div style="width:45%;background:var(--primary);border-radius:4px 4px 0 0;height:${Math.max(4,Math.round((t.income/maxTrend)*72)+4)}px;transition:height 0.4s" title="Income: ${fmt(t.income)}"></div>
-                  <div style="width:45%;background:var(--danger);border-radius:4px 4px 0 0;height:${Math.max(4,Math.round((t.expenses/maxTrend)*72)+4)}px;transition:height 0.4s" title="Expenses: ${fmt(t.expenses)}"></div>
+                <div style="display:flex;gap:3px;align-items:flex-end;width:100%;justify-content:center;height:100px">
+                  <div style="width:45%;display:flex;flex-direction:column;align-items:center">
+                    <div style="font-size:9px;color:var(--text3);margin-bottom:2px;white-space:nowrap">${t.income?fmtShort(t.income).replace('₦',''):'—'}</div>
+                    <div style="width:100%;background:var(--primary);border-radius:4px 4px 0 0;height:${Math.max(4,Math.round((t.income/maxTrend)*72)+4)}px;transition:height 0.4s"></div>
+                  </div>
+                  <div style="width:45%;display:flex;flex-direction:column;align-items:center">
+                    <div style="font-size:9px;color:var(--text3);margin-bottom:2px;white-space:nowrap">${t.expenses?fmtShort(t.expenses).replace('₦',''):'—'}</div>
+                    <div style="width:100%;background:var(--danger);border-radius:4px 4px 0 0;height:${Math.max(4,Math.round((t.expenses/maxTrend)*72)+4)}px;transition:height 0.4s"></div>
+                  </div>
                 </div>
                 <div style="font-size:11px;color:var(--text2)">${t.label}</div>
               </div>`).join('')}
@@ -658,33 +677,26 @@ async function renderDashboard(){
       </div>
 
       <div>
-        <div class="card" style="background:#1a1f1e;border-color:#2a302e">
-          <div class="card-header"><span class="card-title" style="color:#999;font-size:12px;letter-spacing:1px">EXPENSE CATEGORIES</span><span style="color:#777;font-size:11px">This month</span></div>
-          ${topCats.length?topCats.map(([cat,amt])=>{
-            const c=EXPENSE_CATS.find(e=>e.key===cat)||{label:cat,color:'#888'};
-            return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-              <div style="font-size:13px;color:#ccc;width:150px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.label}</div>
-              <div style="flex:1;height:6px;background:#2a302e;border-radius:3px;overflow:hidden"><div style="height:6px;border-radius:3px;background:${c.color};width:${Math.round(amt/maxCat*100)}%;transition:width 0.4s"></div></div>
-              <div style="font-size:13px;color:#ccc;width:80px;text-align:right;flex-shrink:0">₦${Math.round(amt).toLocaleString('en-NG')}</div>
-            </div>`}).join(''):'<div style="font-size:13px;color:#666;padding:20px 0;text-align:center">No expenses this month.</div>'}
-          ${topCats.length?`<div style="display:flex;justify-content:space-between;border-top:1px solid #2a302e;padding-top:10px;margin-top:4px"><span style="font-size:13px;color:#999">Total expenses</span><span style="font-size:15px;font-weight:700;color:#e8e8e8">₦${Math.round(totalExpenses).toLocaleString('en-NG')}</span></div>`:''}
+        <div class="card">
+          <div class="card-header"><span class="card-title">Income Breakdown</span><span style="color:var(--text3);font-size:11px">${MONTHS[state.month]} ${state.year} · ${sundayCount} Sunday${sundayCount!==1?'s':''}</span></div>
+          ${displayIncomeCats.length?displayIncomeCats.map(([cat,amt])=>{
+            const t = cat==='_others' ? {label:'CRM + Others'} : (INCOME_TYPES.find(e=>e.key===cat) || OTHER_INCOME_SOURCES.find(e=>e.key===cat) || {label:cat.replace(/_/g,' ')});
+            const pct = totalIncome ? Math.round(amt/totalIncome*100) : 0;
+            return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+              <div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;color:var(--text)">${t.label}</div></div>
+              <div style="text-align:right;flex-shrink:0;margin-left:12px"><div style="font-size:13px;font-weight:600;color:var(--text)">${fmt(amt)}</div><div style="font-size:11px;color:var(--text3)">${pct}%</div></div>
+            </div>`;
+          }).join('')+'<div style="display:flex;justify-content:space-between;padding-top:10px;margin-top:4px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total income</span><span style="font-size:16px;font-weight:700;color:var(--primary)">${fmt(totalIncome)}</span></div>'
+          :'<div class="empty-table">No income recorded this month.</div>'}
         </div>
 
         <div class="card">
-          <div class="card-header"><span class="card-title">Income Breakdown</span><span style="color:var(--text3);font-size:11px">This month</span></div>
-          ${topIncomeCats.length?topIncomeCats.map(([cat,amt])=>{
-            const t=INCOME_TYPES.find(e=>e.key===cat)||{label:cat};
-            return `<div class="exp-row"><div class="exp-label">${t.label}</div><div class="progress-bar"><div class="progress-fill" style="width:${Math.round(amt/maxIncomeCat*100)}%;background:var(--primary)"></div></div><div class="exp-val">${fmt(amt)}</div></div>`;
-          }).join('')+'<div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:8px;margin-top:4px"><span style="font-size:12px;color:var(--text3)">Total income</span><span style="font-size:14px;font-weight:700;color:var(--primary)">${fmt(totalIncome)}</span></div>'
-          :'<div style="font-size:13px;color:var(--text3);padding:20px 0;text-align:center">No income recorded this month.</div>'}
-        </div>
-
-        <div class="card">
-          <div class="card-header"><span class="card-title">Expense Breakdown</span></div>
+          <div class="card-header"><span class="card-title">Expense Breakdown</span><span style="color:var(--text3);font-size:11px">This month</span></div>
           ${topCats.length?topCats.map(([cat,amt])=>{
-            const c=EXPENSE_CATS.find(e=>e.key===cat)||{label:cat,color:'#888'};
+            const c=EXPENSE_CATS.find(e=>e.key===cat)||{label:cat,color:'#888',icon:''};
             return `<div class="exp-row"><div class="exp-label">${c.icon||''} ${c.label}</div><div class="progress-bar"><div class="progress-fill" style="width:${Math.round(amt/maxCat*100)}%;background:${c.color}"></div></div><div class="exp-val">${fmt(amt)}</div></div>`;
-          }).join(''):'<div style="font-size:13px;color:var(--text3);padding:20px 0;text-align:center">No expenses recorded this month.</div>'}
+          }).join('')+'<div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:10px;margin-top:4px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total expenses</span><span style="font-size:16px;font-weight:700;color:var(--danger)">${fmt(totalExpenses)}</span></div>'
+          :'<div class="empty-table">No expenses recorded this month.</div>'}
         </div>
 
         <div class="card">
