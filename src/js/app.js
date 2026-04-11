@@ -773,7 +773,9 @@ async function renderIncome(){
   const pendingCount = pendingItems.length;
   const pendingCashTotal = pendingItems.reduce((s,p)=>s+(p.cashHeld-p.dep),0);
   const totalCollected = records.reduce((s,r)=>s+(r.totalCollection||0),0);
-  const totalDeposited = _cashTx.filter(t=>t.type==='cash_deposit').reduce((s,t)=>s+(t.amount||0),0)
+  // Only count deposits linked to this month's income records (scoped correctly to the month view)
+  const currentMonthRecordIds = new Set(records.map(r=>r.id));
+  const totalDeposited = _cashTx.filter(t=>t.type==='cash_deposit'&&currentMonthRecordIds.has(t.incomeRef)).reduce((s,t)=>s+(t.amount||0),0)
     + records.reduce((s,r)=>s+(r.bankTransferAmount||0),0);
 
   document.getElementById('pageContent').innerHTML=`
@@ -886,10 +888,8 @@ async function renderIncomeSummary(records){
             <div class="status-row-amt">${totals[t.key]>0?fmt(totals[t.key]):'—'}</div>
           </div>`).join('')}
         <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Sunday Sub-total</div><div class="status-row-amt" style="color:var(--primary)">${fmt(sundayGrand)}</div></div>
-        ${otherTotal>0?`
-        <div class="status-row" style="margin-top:8px"><div class="status-row-label">Other Income (donations, midweek, etc.)</div><div class="status-row-amt" style="color:var(--primary)">${fmt(otherTotal)}</div></div>
-        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Grand Total (All Income)</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(grand)}</div></div>`:''}
-        ${!otherTotal?`<div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Grand Total</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(grand)}</div></div>`:''}
+        ${otherTotal>0?`<div class="status-row" style="margin-top:8px"><div class="status-row-label">Other Income (donations, midweek, etc.)</div><div class="status-row-amt" style="color:var(--primary)">${fmt(otherTotal)}</div></div>`:''}
+        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">${otherTotal>0?'Grand Total (All Income)':'Grand Total'}</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(grand)}</div></div>
       </div>
       <div class="card">
         <div class="card-header"><span class="card-title">Remittance Breakdown</span><span style="font-size:11px;color:var(--text3)">Applies to Sunday collections only</span></div>
@@ -1038,7 +1038,8 @@ async function submitIncome(){
   rec.notes=document.getElementById('inc_notes')?.value||'';
 
   const saved = await DB.addIncome(rec);
-  DB.addAudit('income_recorded',`Sunday collection ${fmt(total)} for ${fmtDate(date)} — Cash: ${fmt(Math.max(0,total-bankTransferAmount-directPettyCash))}, Bank Transfer: ${fmt(bankTransferAmount)}, Direct Petty: ${fmt(directPettyCash)}. Counted with: ${usher}`,state.user?.name);
+  const cashWithAccountant = Math.max(0, total - bankTransferAmount - directPettyCash);
+  DB.addAudit('income_recorded',`Sunday collection ${fmt(total)} for ${fmtDate(date)} — Cash: ${fmt(cashWithAccountant)}, Bank Transfer: ${fmt(bankTransferAmount)}, Direct Petty: ${fmt(directPettyCash)}. Counted with: ${usher}`,state.user?.name);
 
   // If some cash was given directly to the admin officer, auto-create a petty refill
   if(directPettyCash > 0){
@@ -1054,7 +1055,7 @@ async function submitIncome(){
 
   DB.addNotification('Income Recorded',`${fmt(total)} recorded for ${fmtDate(date)}${directPettyCash?` | ${fmt(directPettyCash)} → Petty Cash`:''}`,'success');
   closeModal();
-  showAlert(`Income of ${fmt(total)} recorded. Cash with accountant: ${fmt(Math.max(0,total-bankTransferAmount-directPettyCash))}${bankTransferAmount?` | Bank: ${fmt(bankTransferAmount)}`:''}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
+  showAlert(`Income of ${fmt(total)} recorded. Cash with accountant: ${fmt(cashWithAccountant)}${bankTransferAmount?` | Bank: ${fmt(bankTransferAmount)}`:''}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
   renderIncome();
   buildSidebar();
 }
