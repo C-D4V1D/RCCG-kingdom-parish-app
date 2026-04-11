@@ -86,7 +86,16 @@ const EXPENSE_SUBCATS = {
   security:    ['Monthly salary or allowance for the night security guard','Security supplies','Occasional tips or relations with local police or community vigilantes','Others...']
 };
 
-const DEFAULT_QUOTAS = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000, goFishing:10000 };
+const DEFAULT_QUOTAS = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000 };
+
+const QUOTA_LABELS = {
+  rmf:      'RMF (Camp Clearing)',
+  csr:      'CSR (Christian Social Responsibility)',
+  edu:      'Education Fund',
+  camp:     'Camp Meeting Fund',
+  mummy:    'Zonal Mummy Stipend',
+  volunteer:'Volunteer Fund'
+};
 
 // Income source types used in the "Other Income" form
 const OTHER_INCOME_SOURCES = [
@@ -214,6 +223,13 @@ function filterByMonth(arr){
   return (arr||[]).filter(r=>{
     const d = new Date(r.date||r.createdAt||r.ts||0);
     return d.getMonth()===state.month && d.getFullYear()===state.year;
+  });
+}
+
+function filterByDateRange(arr, fromDate, toDate){
+  return (arr||[]).filter(r=>{
+    const d = (r.date||r.createdAt||'').split('T')[0];
+    return d >= fromDate && d <= toDate;
   });
 }
 
@@ -376,6 +392,8 @@ function buildMonthSelector(){
 function onMonthChange(){
   const [y,m] = document.getElementById('globalMonth').value.split('-').map(Number);
   state.year=y; state.month=m;
+  // Reset remittance period so it recalculates defaults for the new month
+  state.remFromDate=null; state.remToDate=null;
   navigate(state.page);
 }
 
@@ -1335,136 +1353,385 @@ async function submitOtherIncome(){
 
 // ── REMITTANCES ───────────────────────────
 async function renderRemittances(){
-  const income = filterByMonth(await DB.getIncome());
-  const rem = await calcRemittancesFromRecords(income);
-  const [allRemsRR, settingsRR] = await Promise.all([DB.getRemittances(), DB.getSettings()]);
-  const paidRems = filterByMonth(allRemsRR);
-  const settings = settingsRR;
-  const quotas = settings.quotas||DEFAULT_QUOTAS;
-  const totalPaid = paidRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-
+  const [allIncome, allRems, settings] = await Promise.all([
+    DB.getIncome(), DB.getRemittances(), DB.getSettings()
+  ]);
+  const quotas = settings.quotas || DEFAULT_QUOTAS;
   const rr = await getRemRates();
-  const lines = [
-    ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0, type:'percentage' })),
-    { label:`Area (Thanksgiving ${Math.round(rr.tgArea*100)}%)`, amount:rem.totalArea, type:'percentage' },
-    { label:`Pastor's Share (TG ${Math.round(rr.tgPastor*100)}%)`, amount:rem.totalPastor, type:'percentage' },
-    { label:`Ministers' Share (TG ${Math.round(rr.tgMinisters*100)}%)`, amount:rem.totalMinisters, type:'percentage' },
-    { label:`Pastors' Seed (TG ${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0, type:'percentage' },
-    { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of local)`, amount:rem.provinceRebate, type:'percentage' },
-    { label:'Go-A-Fishing', amount:quotas.goFishing||0, type:'quota' },
-    { label:'RMF (Camp Clearing)', amount:quotas.rmf||0, type:'quota' },
-    { label:'CSR (Christian Social Responsibility)', amount:quotas.csr||0, type:'quota' },
-    { label:'Education Fund', amount:quotas.edu||0, type:'quota' },
-    { label:'Zonal Mummy Stipend', amount:quotas.mummy||0, type:'quota' },
-    { label:'Volunteer', amount:quotas.volunteer||0, type:'quota' },
+
+  // --- Determine period defaults ---
+  const todayStr = new Date().toISOString().split('T')[0];
+  if(!state.remFromDate){
+    // Day after last paid remittance, or start of current month
+    const lastPaid = allRems.filter(r=>r.status==='paid')
+      .sort((a,b)=>new Date(b.paidDate||b.createdAt||0)-new Date(a.paidDate||a.createdAt||0))[0];
+    if(lastPaid){
+      const d=new Date(lastPaid.paidDate||lastPaid.createdAt);
+      d.setDate(d.getDate()+1);
+      state.remFromDate=d.toISOString().split('T')[0];
+    } else {
+      state.remFromDate=new Date(state.year,state.month,1).toISOString().split('T')[0];
+    }
+  }
+  if(!state.remToDate) state.remToDate=todayStr;
+
+  const fromDate=state.remFromDate;
+  const toDate=state.remToDate;
+
+  // --- Income for selected period ---
+  const income=filterByDateRange(allIncome, fromDate, toDate);
+  const rem=await calcRemittancesFromRecords(income);
+
+  // --- Build remittance lines (no Go-A-Fishing) ---
+  const incomeLines=rem.lines.map(l=>({
+    label:l.label+' → National HQ', amount:l.national||0, section:'income', from:l
+  })).filter(l=>l.amount>0);
+
+  const tgLines=[
+    { label:`Thanksgiving → Area (${Math.round(rr.tgArea*100)}%)`,       amount:rem.totalArea,                section:'tg' },
+    { label:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,     amount:rem.totalPastor,              section:'tg' },
+    { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,amount:rem.totalMinisters,           section:'tg' },
+    { label:`Thanksgiving → Seed (${Math.round(rr.tgSeed*100)}%)`,        amount:rem.totalSeed||0,             section:'tg' },
   ].filter(l=>l.amount>0);
 
-  const totalDue = lines.reduce((s,l)=>s+l.amount,0);
-  const paidMap = {};
-  paidRems.forEach(r=>{ paidMap[r.label]=(paidMap[r.label]||0)+r.amount });
+  const provinceLines=rem.provinceRebate>0?[
+    { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of local retained)`, amount:rem.provinceRebate, section:'province' }
+  ]:[];
+
+  const quotaLines=Object.entries(quotas)
+    .map(([k,v])=>({ label:QUOTA_LABELS[k]||k, amount:v||0, section:'quota' }))
+    .filter(l=>l.amount>0);
+
+  const allLines=[...incomeLines,...tgLines,...provinceLines,...quotaLines];
+  const totalDue=allLines.reduce((s,l)=>s+l.amount,0);
+
+  // --- Check for period payment ---
+  const periodPayments=allRems.filter(r=>r.status==='paid'&&r.periodFrom===fromDate&&r.periodTo===toDate);
+  const totalPaid=periodPayments.reduce((s,r)=>s+(r.amount||0),0);
+  const isPaid=totalPaid>0&&totalPaid>=totalDue*0.99;
+  const isPartial=totalPaid>0&&!isPaid;
+
+  const allPaidRems=allRems.filter(r=>r.status==='paid')
+    .sort((a,b)=>new Date(b.paidDate||b.createdAt||0)-new Date(a.paidDate||a.createdAt||0));
+
+  const renderSection=(rows,sectionLabel)=>rows.length?`
+    <tr style="background:var(--surface)">
+      <td colspan="3" style="font-size:10px;font-weight:700;color:var(--text3);padding:5px 12px;letter-spacing:0.6px;text-transform:uppercase">${sectionLabel}</td>
+    </tr>
+    ${rows.map(l=>`<tr>
+      <td style="padding:7px 12px"><strong>${l.label}</strong></td>
+      <td style="padding:7px 8px"><span class="badge ${l.section==='quota'?'badge-info':'badge-purple'}">${l.section==='quota'?'Fixed Quota':'% Based'}</span></td>
+      <td class="td-right td-bold td-red" style="padding:7px 12px">${fmt(l.amount)}</td>
+    </tr>`).join('')}`:'';
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
-      <div><div class="page-title">Remittances</div><div class="page-sub">${monthLabel()} — All amounts due to RCCG authorities</div></div>
-      ${can('income')?`<button class="btn btn-primary" onclick="App.markRemittancePaid()">+ Record Payment</button>`:''}
+      <div>
+        <div class="page-title">Remittances</div>
+        <div class="page-sub">All amounts due to RCCG National & Provincial authorities</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${can('income')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Payment</button>`:''}
+        <button class="btn btn-amber" onclick="App.printRemittanceReport()">📄 Download Report</button>
+      </div>
     </div>
 
-    <div class="kpi-grid">
+    <!-- Period Selector -->
+    <div class="card" style="margin-bottom:12px;padding:14px 16px">
+      <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px">📅 Remittance Period</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:6px">
+          <label style="font-size:12px;color:var(--text2);white-space:nowrap">From</label>
+          <input type="date" id="remFromDate" class="form-input" value="${fromDate}" style="width:auto;padding:6px 10px;font-size:13px" onchange="App.onRemDatesChange()" />
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <label style="font-size:12px;color:var(--text2);white-space:nowrap">To</label>
+          <input type="date" id="remToDate" class="form-input" value="${toDate}" style="width:auto;padding:6px 10px;font-size:13px" onchange="App.onRemDatesChange()" />
+        </div>
+        ${isPaid?`<span class="badge badge-success" style="font-size:11px">✅ PAID for this period</span>`:isPartial?`<span class="badge badge-warn" style="font-size:11px">⏳ Partially paid</span>`:''}
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:8px">
+        ℹ️ Set <strong>From</strong> to the day after your last remittance payment, and <strong>To</strong> to the date of this month's remittance (e.g. last Sunday of the month).
+        Showing <strong>${income.length}</strong> income record(s) in this period.
+      </div>
+    </div>
+
+    <!-- KPI Summary -->
+    <div class="kpi-grid" style="margin-bottom:12px">
       <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Total Due</div><div class="kpi-val">${fmt(totalDue)}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">✓</div><div class="kpi-label">Total Paid</div><div class="kpi-val">${fmt(totalPaid)}</div></div>
-      <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">⏳</div><div class="kpi-label">Outstanding</div><div class="kpi-val">${fmt(Math.max(0,totalDue-totalPaid))}</div></div>
+      <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">⏳</div><div class="kpi-label">Outstanding</div><div class="kpi-val" style="color:${totalDue-totalPaid>0?'var(--danger)':'var(--primary)'}">${fmt(Math.max(0,totalDue-totalPaid))}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">🏠</div><div class="kpi-label">Net Local Retained</div><div class="kpi-val">${fmt(rem.netLocal)}</div></div>
     </div>
 
+    ${income.length===0?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>No income records found</strong> for the selected period (${fmtDate(fromDate)} – ${fmtDate(toDate)}). Please adjust the date range above or record income first.</span></div>`:''}
+
     <div class="grid-6040">
+      <!-- LEFT: Breakdown Table -->
       <div class="card">
-        <div class="card-header"><span class="card-title">Full Remittance Breakdown — ${monthLabel()}</span></div>
-        <div class="table-wrap"><table>
-          <tr><th>Description</th><th>Type</th><th class="td-right">Amount Due</th><th>Status</th></tr>
-          ${lines.map(l=>{
-            const paid=(paidMap[l.label]||0)>=l.amount;
-            return `<tr>
-              <td><strong>${l.label}</strong></td>
-              <td><span class="badge ${l.type==='quota'?'badge-info':'badge-purple'}">${l.type==='quota'?'Fixed Quota':'% Based'}</span></td>
-              <td class="td-right td-bold td-red">${fmt(l.amount)}</td>
-              <td><span class="badge ${paid?'badge-success':'badge-warn'}">${paid?'Paid':'Unpaid'}</span></td>
-            </tr>`;}).join('')}
+        <div class="card-header">
+          <span class="card-title">Full Remittance Breakdown</span>
+          <span style="font-size:11px;color:var(--text3)">${fmtDate(fromDate)} – ${fmtDate(toDate)}</span>
+        </div>
+        <div class="table-wrap"><table style="width:100%">
+          <tr><th>Description</th><th style="width:100px">Type</th><th class="td-right" style="width:130px">Amount Due (₦)</th></tr>
+          ${renderSection(incomeLines,'Income-Based Remittances (% of collections)')}
+          ${renderSection(tgLines,'Thanksgiving Offering Distribution')}
+          ${renderSection(provinceLines,'Province Rebate')}
+          ${renderSection(quotaLines,'Fixed Monthly Quotas')}
           <tr style="border-top:2px solid var(--border)">
-            <td colspan="2" class="td-bold">TOTAL REMITTANCES DUE</td>
-            <td class="td-right td-bold" style="font-size:15px;color:var(--danger)">${fmt(totalDue)}</td>
-            <td></td>
+            <td colspan="2" class="td-bold" style="font-size:14px;padding:10px 12px">TOTAL REMITTANCES DUE</td>
+            <td class="td-right td-bold" style="font-size:15px;color:var(--danger);padding:10px 12px">${fmt(totalDue)}</td>
+          </tr>
+          <tr>
+            <td colspan="2" style="font-size:12px;color:var(--text2);padding:6px 12px">Local Retained (after province rebate)</td>
+            <td class="td-right" style="font-size:13px;color:var(--primary);font-weight:600;padding:6px 12px">${fmt(rem.netLocal)}</td>
           </tr>
         </table></div>
+
+        <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
+          ${can('income')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Bulk Payment (${fmt(totalDue)})</button>`:''}
+          <button class="btn btn-amber" onclick="App.printRemittanceReport()">📄 Print / Download Report</button>
+        </div>
       </div>
 
+      <!-- RIGHT: History + Local Share -->
       <div>
-        <div class="card">
-          <div class="card-header"><span class="card-title">Payment History</span></div>
-          ${paidRems.length?paidRems.map(r=>`
+        ${isPaid?`
+        <div class="card" style="border-left:3px solid var(--success);margin-bottom:12px">
+          <div class="card-header"><span class="card-title">✅ Paid for this Period</span></div>
+          ${periodPayments.map(r=>`
             <div class="feed-item">
               <div class="feed-dot" style="background:var(--success-light)">✓</div>
-              <div class="feed-body"><div class="feed-title">${r.label}</div><div class="feed-sub">Ref: ${r.reference||'—'} · ${r.authorizedBy||'—'}</div><div class="feed-time">${fmtDate(r.paidDate)}</div></div>
+              <div class="feed-body">
+                <div class="feed-title">RCCG Remittance Payment</div>
+                <div class="feed-sub">Ref: ${r.reference||'—'} · ${r.authorizedBy||'—'}</div>
+                <div class="feed-time">${fmtDate(r.paidDate)}</div>
+              </div>
               <div class="feed-right td-green">${fmt(r.amount)}</div>
-            </div>`).join(''):'<div class="empty-table">No payments recorded this month.</div>'}
+            </div>`).join('')}
+        </div>`:''}
+
+        <div class="card" style="margin-bottom:12px">
+          <div class="card-header"><span class="card-title">Payment History</span></div>
+          ${allPaidRems.length?allPaidRems.slice(0,10).map(r=>`
+            <div class="feed-item">
+              <div class="feed-dot" style="background:var(--success-light)">✓</div>
+              <div class="feed-body">
+                <div class="feed-title">${r.label||'RCCG Remittance'}</div>
+                <div class="feed-sub">${r.periodFrom&&r.periodTo?`<em>Period: ${fmtDate(r.periodFrom)} – ${fmtDate(r.periodTo)}</em><br>`:''}Ref: ${r.reference||'—'} · ${r.authorizedBy||'—'}</div>
+                <div class="feed-time">${fmtDate(r.paidDate)}</div>
+              </div>
+              <div class="feed-right td-green">${fmt(r.amount)}</div>
+            </div>`).join(''):'<div class="empty-table">No remittance payments recorded yet.</div>'}
         </div>
 
         <div class="card">
-          <div class="card-header"><span class="card-title">Monthly Quotas</span></div>
-          ${can('it_admin')?`<p style="font-size:12px;color:var(--text3);margin-bottom:10px">Edit quotas in IT Admin → Settings</p>`:''}
-          ${Object.entries(quotas).map(([k,v])=>`<div class="status-row"><div class="status-row-label">${k.replace(/([A-Z])/g,' $1').replace(/^./,s=>s.toUpperCase())}</div><div class="status-row-amt">${fmt(v)}</div></div>`).join('')}
+          <div class="card-header"><span class="card-title">Local Church Share</span></div>
+          <p style="font-size:11px;color:var(--text3);margin-bottom:10px">What the parish retains from this period after all remittances.</p>
+          ${rem.lines.filter(l=>(l.local||0)>0).map(l=>`
+            <div class="status-row">
+              <div class="status-row-label">${l.label} (local ${Math.round((l.local/l.total)*100)}%)</div>
+              <div class="status-row-amt" style="color:var(--primary)">${fmt(l.local)}</div>
+            </div>`).join('')}
+          ${rem.provinceRebate>0?`
+          <div class="status-row" style="border-top:1px dashed var(--border)">
+            <div class="status-row-label" style="color:var(--amber)">Province Rebate (deducted)</div>
+            <div class="status-row-amt" style="color:var(--amber)">− ${fmt(rem.provinceRebate)}</div>
+          </div>`:''}
+          <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px">
+            <div class="status-row-label fw-bold">NET LOCAL RETAINED</div>
+            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(rem.netLocal)}</div>
+          </div>
         </div>
       </div>
     </div>`;
 }
 
-async function markRemittancePaid(){
-  const income = filterByMonth(await DB.getIncome());
-  const rem = await calcRemittancesFromRecords(income);
-  const settings = await DB.getSettings();
-  const quotas = settings.quotas||DEFAULT_QUOTAS;
+async function showRemittancePaymentModal(){
+  const [allIncome, settings] = await Promise.all([DB.getIncome(), DB.getSettings()]);
+  const quotas=settings.quotas||DEFAULT_QUOTAS;
+  const fromDate=state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
+  const toDate=state.remToDate||new Date().toISOString().split('T')[0];
+  const income=filterByDateRange(allIncome, fromDate, toDate);
+  const rem=await calcRemittancesFromRecords(income);
+  const rr=await getRemRates();
+
   const lines=[
     ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0 })),
-    { label:`Province Rebate (20% of local)`, amount:rem.provinceRebate },
-    ...Object.entries(quotas).map(([k,v])=>({label:k.replace(/([A-Z])/g,' $1').replace(/^./,s=>s.toUpperCase()), amount:v}))
+    { label:`Thanksgiving → Area (${Math.round(rr.tgArea*100)}%)`,          amount:rem.totalArea },
+    { label:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,      amount:rem.totalPastor },
+    { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`, amount:rem.totalMinisters },
+    { label:`Thanksgiving → Seed (${Math.round(rr.tgSeed*100)}%)`,           amount:rem.totalSeed||0 },
+    { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of local)`, amount:rem.provinceRebate },
+    ...Object.entries(quotas).map(([k,v])=>({ label:QUOTA_LABELS[k]||k, amount:v||0 }))
   ].filter(l=>l.amount>0);
+
+  const totalDue=lines.reduce((s,l)=>s+l.amount,0);
 
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
-    <div class="modal-title">Record Remittance Payment</div>
-    <div class="form-group"><label class="form-label">Remittance Line Item</label>
-      <select id="rem_label" class="form-select" onchange="App.setRemAmt()">
-        <option value="">— Select line —</option>
-        ${lines.map(l=>`<option value="${l.label}" data-amt="${l.amount}">${l.label} (${fmt(l.amount)})</option>`).join('')}
-        <option value="Other">Other (enter manually)</option>
-      </select>
+    <div class="modal-title">📤 Record Remittance Payment</div>
+    <div class="alert alert-info" style="margin:0 0 12px">
+      <span class="alert-icon">ℹ</span>
+      <span>Remittances are paid as <strong>one bulk payment</strong> each period. The full breakdown is listed below for your records.</span>
     </div>
-    <div class="form-group"><label class="form-label">Amount Paid (₦)</label><input type="number" id="rem_amount" class="form-input" placeholder="0" /></div>
-    <div class="form-group"><label class="form-label">Payment Date</label><input type="date" id="rem_date" class="form-input" value="${new Date().toISOString().split('T')[0]}" /></div>
-    <div class="form-group"><label class="form-label">Bank Reference / Transfer ID</label><input type="text" id="rem_ref" class="form-input" placeholder="Reference number" /></div>
-    <div class="form-group"><label class="form-label">Authorized By</label><input type="text" id="rem_auth" class="form-input" placeholder="Signatory names" value="${state.user?.name}" /></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitRemittance()">Record Payment</button></div>`);
-}
-
-function setRemAmt(){
-  const sel=document.getElementById('rem_label');
-  const opt=sel.options[sel.selectedIndex];
-  const amt=opt?.dataset?.amt;
-  if(amt) document.getElementById('rem_amount').value=amt;
+    <div style="background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:14px">
+      <div style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">
+        Period: ${fmtDate(fromDate)} — ${fmtDate(toDate)}
+      </div>
+      <div class="table-wrap" style="max-height:180px;overflow-y:auto">
+        <table style="width:100%">
+          ${lines.map(l=>`<tr><td style="font-size:12px;padding:4px 8px">${l.label}</td><td class="td-right td-bold" style="font-size:12px;padding:4px 8px">${fmt(l.amount)}</td></tr>`).join('')}
+          <tr style="border-top:2px solid var(--border)">
+            <td class="td-bold" style="padding:6px 8px">TOTAL DUE</td>
+            <td class="td-right td-bold td-red" style="font-size:14px;padding:6px 8px">${fmt(totalDue)}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Amount to Pay (₦) *</label>
+      <input type="number" id="rem_amount" class="form-input" value="${Math.round(totalDue)}" />
+      <div class="form-hint" style="font-size:11px;color:var(--text3);margin-top:3px">Total calculated: <strong>${fmt(totalDue)}</strong>. Adjust only if the actual payment differs.</div>
+    </div>
+    <div class="form-group"><label class="form-label">Payment Date *</label><input type="date" id="rem_date" class="form-input" value="${new Date().toISOString().split('T')[0]}" /></div>
+    <div class="form-group"><label class="form-label">Bank Reference / Transfer ID *</label><input type="text" id="rem_ref" class="form-input" placeholder="Enter the bank transfer reference number" /></div>
+    <div class="form-group"><label class="form-label">Authorized By (Signatories) *</label><input type="text" id="rem_auth" class="form-input" placeholder="Names of the authorizing signatories" value="${state.user?.name||''}" /></div>
+    <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="rem_notes" class="form-textarea" rows="2" placeholder="Any additional notes…"></textarea></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.submitRemittance()">✅ Confirm &amp; Record Payment</button>
+    </div>`);
 }
 
 async function submitRemittance(){
-  const label=document.getElementById('rem_label')?.value;
   const amount=parseFloat(document.getElementById('rem_amount')?.value)||0;
   const date=document.getElementById('rem_date')?.value;
-  const reference=document.getElementById('rem_ref')?.value;
-  const auth=document.getElementById('rem_auth')?.value;
-  if(!label||!amount||!date){ alert('Please fill all required fields.'); return }
-  await DB.addRemittance({ label, amount, paidDate:date, reference, authorizedBy:auth, status:'paid' });
-  DB.addAudit('remittance_paid',`Remittance paid: ${label} — ${fmt(amount)}`,state.user?.name);
-  DB.addNotification('Remittance Recorded',`${label}: ${fmt(amount)} paid on ${fmtDate(date)}`,'success');
+  const reference=(document.getElementById('rem_ref')?.value||'').trim();
+  const auth=(document.getElementById('rem_auth')?.value||'').trim();
+  const notes=(document.getElementById('rem_notes')?.value||'').trim();
+  if(!amount||!date){ alert('Please enter the amount and payment date.'); return }
+  if(!reference){ alert('Please enter the bank reference number.'); return }
+  if(!auth){ alert('Please enter the authorizing signatories.'); return }
+  const fromDate=state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
+  const toDate=state.remToDate||new Date().toISOString().split('T')[0];
+  await DB.addRemittance({
+    label:'RCCG Monthly Remittance', amount, paidDate:date,
+    reference, authorizedBy:auth, notes,
+    periodFrom:fromDate, periodTo:toDate, status:'paid'
+  });
+  DB.addAudit('remittance_paid',`Bulk remittance paid: ${fmt(amount)} — Period: ${fromDate} to ${toDate} — Ref: ${reference}`,state.user?.name);
+  DB.addNotification('Remittance Recorded',`RCCG remittance of ${fmt(amount)} recorded for period ${fmtDate(fromDate)} – ${fmtDate(toDate)}.`,'success');
   closeModal();
-  showAlert('Remittance payment recorded!','success');
+  showAlert('Remittance payment recorded successfully!','success');
+  // Reset period so defaults recalculate for next period
+  state.remFromDate=null; state.remToDate=null;
   renderRemittances();
+}
+
+function onRemDatesChange(){
+  state.remFromDate=document.getElementById('remFromDate')?.value||null;
+  state.remToDate=document.getElementById('remToDate')?.value||null;
+  renderRemittances();
+}
+
+async function printRemittanceReport(fromOverride, toOverride){
+  const [allIncome, settings] = await Promise.all([DB.getIncome(), DB.getSettings()]);
+  const quotas=settings.quotas||DEFAULT_QUOTAS;
+  const fromDate=fromOverride||state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
+  const toDate=toOverride||state.remToDate||new Date().toISOString().split('T')[0];
+  const income=filterByDateRange(allIncome, fromDate, toDate);
+  const rem=await calcRemittancesFromRecords(income);
+  const rr=await getRemRates();
+  const churchName=settings.churchName||'RCCG Kingdom Parish, Aguleri';
+
+  const sections=[
+    {
+      title:'Income-Based Remittances',
+      rows:rem.lines.map(l=>({ desc:l.label+' → National HQ', type:'% Based', amount:l.national||0 })).filter(r=>r.amount>0)
+    },
+    {
+      title:'Thanksgiving Offering Distribution',
+      rows:[
+        { desc:`Thanksgiving → Area (${Math.round(rr.tgArea*100)}%)`,          type:'% Based', amount:rem.totalArea },
+        { desc:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,      type:'% Based', amount:rem.totalPastor },
+        { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`, type:'% Based', amount:rem.totalMinisters },
+        { desc:`Thanksgiving → Seed (${Math.round(rr.tgSeed*100)}%)`,           type:'% Based', amount:rem.totalSeed||0 },
+      ].filter(r=>r.amount>0)
+    },
+    {
+      title:'Province Rebate',
+      rows:rem.provinceRebate>0?[{ desc:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of local retained)`, type:'% Based', amount:rem.provinceRebate }]:[]
+    },
+    {
+      title:'Fixed Monthly Quotas',
+      rows:Object.entries(quotas).map(([k,v])=>({ desc:QUOTA_LABELS[k]||k, type:'Fixed', amount:v||0 })).filter(r=>r.amount>0)
+    }
+  ].filter(s=>s.rows.length>0);
+
+  const totalDue=sections.flatMap(s=>s.rows).reduce((s,r)=>s+r.amount,0);
+
+  const sectionHTML=sections.map(s=>`
+    <tr class="sec-row"><td colspan="3">${s.title}</td></tr>
+    ${s.rows.map(r=>`<tr><td>${r.desc}</td><td style="text-align:center">${r.type}</td><td class="td-r">${fmt(r.amount)}</td></tr>`).join('')}
+  `).join('');
+
+  const html=`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>RCCG Remittance Report — ${fmtDate(fromDate)} to ${fmtDate(toDate)}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Arial,sans-serif;font-size:12px;color:#333;padding:24px}
+  .header{text-align:center;border-bottom:3px solid #0F6E56;padding-bottom:14px;margin-bottom:18px}
+  .header h1{font-size:19px;color:#0F6E56;margin-bottom:4px}
+  .header h2{font-size:14px;color:#333;margin-bottom:6px}
+  .header p{font-size:11px;color:#666;margin-bottom:2px}
+  table{width:100%;border-collapse:collapse;margin-bottom:18px}
+  th{background:#0F6E56;color:#fff;padding:7px 10px;text-align:left;font-size:11px;font-weight:700}
+  td{padding:5px 10px;border-bottom:1px solid #eee;font-size:12px}
+  .sec-row td{background:#f0f4f0;font-weight:700;font-size:10px;color:#0F6E56;letter-spacing:0.7px;text-transform:uppercase;padding:5px 10px;border-top:1px solid #ccc}
+  .total-row td{border-top:2px solid #333;font-weight:700;font-size:13px;padding:8px 10px}
+  .local-row td{color:#0F6E56;font-weight:700;padding:6px 10px}
+  .td-r{text-align:right;font-weight:600}
+  .danger{color:#c0392b}
+  .sig{display:flex;gap:24px;margin-top:36px}
+  .sig-box{flex:1;border-top:1px solid #333;padding-top:8px;font-size:11px;line-height:1.7}
+  .note{background:#fff8e1;border:1px solid #f0c040;border-radius:4px;padding:10px 12px;font-size:11px;margin-bottom:16px;color:#7a5200}
+  @media print{body{padding:10px}.no-print{display:none}}
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>${churchName}</h1>
+    <h2>RCCG Monthly Remittance Report</h2>
+    <p><strong>Period Covered:</strong> ${fmtDate(fromDate)} — ${fmtDate(toDate)}</p>
+    <p><strong>Prepared by:</strong> ${state.user?.name||'—'} &nbsp;|&nbsp; <strong>Date Prepared:</strong> ${fmtDate(new Date().toISOString())}</p>
+    <p>Based on <strong>${income.length}</strong> income record(s) in this period</p>
+  </div>
+  <div class="note">
+    ℹ️ This report covers all RCCG remittances payable for the period stated above. Remittances are paid as a <strong>single bulk payment</strong> on remittance day. Please attach the bank transfer receipt to this report before submission.
+  </div>
+  <table>
+    <tr><th style="width:55%">Description</th><th style="width:15%;text-align:center">Type</th><th style="width:30%;text-align:right">Amount (₦)</th></tr>
+    ${sectionHTML}
+    <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r danger">${fmt(totalDue)}</td></tr>
+    <tr class="local-row"><td colspan="2">Net Local Retained (after all remittances)</td><td class="td-r">${fmt(rem.netLocal)}</td></tr>
+  </table>
+  <div class="sig">
+    <div class="sig-box">Prepared by (Accountant)<br><br><br>${state.user?.name||'_________________'}</div>
+    <div class="sig-box">Reviewed &amp; Approved (Parish Pastor)<br><br><br>_________________</div>
+    <div class="sig-box">Date of Payment<br><br><br>_________________</div>
+    <div class="sig-box">Bank Teller / Reference No.<br><br><br>_________________</div>
+  </div>
+</body></html>`;
+
+  const w=window.open('','_blank');
+  if(!w){ alert('Pop-up blocked. Please allow pop-ups for this site to download the report.'); return }
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(()=>w.print(),400);
 }
 
 // ── EXPENSES ──────────────────────────────
@@ -2384,7 +2651,7 @@ async function generateWeeklyReport(){
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
 }
 
-function generateRemittanceReport(){ renderRemittances(); showAlert('Remittance report displayed above.','info') }
+function generateRemittanceReport(){ printRemittanceReport(); }
 
 async function generateQuarterlyReport(){
   let rows='';
@@ -2541,8 +2808,8 @@ function renderAdminQuotas(s){
   const q=s.quotas||DEFAULT_QUOTAS;
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Monthly Fixed Quotas</div>
-    <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">These flat amounts are remitted monthly regardless of income fluctuations.</p>
-    ${Object.entries(q).map(([k,v])=>`<div class="form-group"><label class="form-label">${k.replace(/([A-Z])/g,' $1').replace(/^./,s=>s.toUpperCase())}</label><input type="number" id="q_${k}" class="form-input" value="${v}" /></div>`).join('')}
+    <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">These flat amounts are remitted monthly regardless of income fluctuations. They are included in the bulk remittance payment each month.</p>
+    ${Object.keys(DEFAULT_QUOTAS).map(k=>`<div class="form-group"><label class="form-label">${QUOTA_LABELS[k]||k}</label><input type="number" id="q_${k}" class="form-input" value="${q[k]??DEFAULT_QUOTAS[k]}" /></div>`).join('')}
     <button class="btn btn-primary" onclick="App.saveQuotas()">Save Quotas</button>
   </div>`;
 }
@@ -2789,7 +3056,7 @@ return {
   onRoleChange, login, logout, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, markRemittancePaid, setRemAmt, submitRemittance,
+  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, printRemittanceReport,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt,
   showBankWithdrawal, submitBankWithdrawal,
