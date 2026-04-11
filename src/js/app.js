@@ -345,15 +345,19 @@ function initApp(){
   updateSidebarUser();
   updateNotifBadge();
   // Read page from URL hash if present
-  const hashPage = window.location.hash.replace('#','').replace(/\//,'');
-  const startPage = VALID_PAGES.includes(hashPage) ? hashPage : 'dashboard';
+  const startPage = pageFromHash();
   navigate(startPage);
+}
+
+function pageFromHash(){
+  const hash = window.location.hash.replace(/^#\/?/, '');
+  return VALID_PAGES.includes(hash) ? hash : 'dashboard';
 }
 
 window.addEventListener('hashchange', ()=>{
   if(!state.user) return;
-  const hashPage = window.location.hash.replace('#','').replace(/\//,'');
-  if(VALID_PAGES.includes(hashPage) && hashPage !== state.page) navigate(hashPage);
+  const hashPage = pageFromHash();
+  if(hashPage !== state.page) navigate(hashPage);
 });
 
 function buildMonthSelector(){
