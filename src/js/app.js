@@ -32,6 +32,7 @@ const NAV = [
   { id:'income',       label:'Record Income', icon:'📥', section:'Finance',  minRole:['it_admin','accountant'] },
   { id:'remittances',  label:'Remittances',   icon:'📤', section:'Finance',  minRole:['it_admin','pastor','accountant','signatory'] },
   { id:'expenses',     label:'Expenses',      icon:'💸', section:'Finance',  minRole:['it_admin','accountant','admin_officer'] },
+  { id:'bank',         label:'Bank',          icon:'🏦', section:'Finance',  minRole:['it_admin','accountant','signatory'] },
   { id:'petty_cash',   label:'Petty Cash',    icon:'💳', section:'Finance',  minRole:['it_admin','accountant','admin_officer','signatory'] },
   { id:'reports',      label:'Reports',       icon:'📊', section:'Reports',  minRole:['it_admin','pastor','accountant'] },
   { id:'audit',        label:'Audit Log',     icon:'📋', section:'Reports',  minRole:['it_admin','pastor','accountant'] },
@@ -398,7 +399,7 @@ function navigate(page){
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   const titles={dashboard:'Dashboard',income:'Record Income',remittances:'Remittances',
-    expenses:'Expenses',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel'};
+    expenses:'Expenses',bank:'Bank',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel'};
   document.getElementById('topBarTitle').textContent=titles[page]||page;
   const pc=document.getElementById('pageContent');
   pc.innerHTML='<div style="padding:40px;text-align:center;color:var(--text3)">Loading...</div>';
@@ -438,7 +439,7 @@ async function getPettyCashPendingCount(){
 // ──────────────────────────────────────────
 async function renderPage(page){
   const pages={dashboard:renderDashboard,income:renderIncome,remittances:renderRemittances,
-    expenses:renderExpenses,petty_cash:renderPettyCash,reports:renderReports,
+    expenses:renderExpenses,bank:renderBank,petty_cash:renderPettyCash,reports:renderReports,
     audit:renderAudit,admin:renderAdmin};
   try{
     if(pages[page]) await pages[page]();
@@ -508,12 +509,42 @@ async function renderDashboard(){
   const pendingPetty = await getPettyCashPendingCount();
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
 
-  // Feed items
-  const recentIncome = allIncome.slice(0,3);
-  const recentExp = allExpenses.slice(0,3);
-  const feedItems = [...recentIncome.map(r=>({type:'income',date:r.date,desc:`Sunday collections ${r.depositConfirmed?'deposited':'collected (cash)'}`,amt:r.totalCollection,icon:'📥',color:'#E1F5EE'})),
-    ...recentExp.map(r=>({type:'expense',date:r.date||r.createdAt,desc:r.description,amt:r.amount,icon:'💸',color:'#FAEEDA'}))]
-    .sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,6);
+  // Feed items — richer detail for Recent Transactions card
+  const recentIncome = allIncome.slice(0,4);
+  const recentExp = allExpenses.slice(0,4);
+  const recentRems = allRemsDash.filter(r=>r.status==='paid').slice(0,3);
+  const recentPetty = pettyHistDash.filter(h=>h.type==='disbursement'||h.status==='approved').slice(0,2);
+  const feedItems = [
+    ...recentIncome.map(r=>{
+      const deposited = r.depositConfirmed;
+      return {type:'income',date:r.date,
+        title: deposited ? 'Sunday collections deposited' : 'Sunday collections collected (cash)',
+        sub: `${fmtDate(r.date)} · ${deposited?'Deposited by Accountant':'Cash held by Accountant'}`,
+        amt:r.totalCollection, icon:'🏛️', color:'#1D9E75', bg:'rgba(29,158,117,0.15)'};
+    }),
+    ...recentExp.map(r=>{
+      const c=EXPENSE_CATS.find(x=>x.key===r.category)||{label:r.category||'Expense',icon:'💸'};
+      return {type:'expense',date:r.date||r.createdAt,
+        title: `${c.label} – ${r.subCategory||r.description||'expense'}`,
+        sub: `${fmtDate(r.date||r.createdAt)} · ${r.recordedBy||'Admin'} · ${r.receiptNo?'Receipt #'+r.receiptNo:''}`,
+        amt:r.amount, icon:c.icon||'💸', color:'#A32D2D', bg:'rgba(163,45,45,0.12)'};
+    }),
+    ...recentRems.map(r=>({type:'remittance',date:r.date||r.createdAt,
+      title: `HQ remittance – ${r.incomeType||'payment'}`,
+      sub: `${fmtDate(r.date||r.createdAt)} · Bank transfer · Signatories: ${r.signatories||'Pastor + Elder'}`,
+      amt:r.amount, icon:'✓', color:'#534AB7', bg:'rgba(83,74,183,0.12)'}))
+  ]
+  .sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,6);
+
+  // Income breakdown by type
+  const incomeByCat = {};
+  income.forEach(r=>{
+    INCOME_TYPES.forEach(t=>{
+      if(r[t.key]) incomeByCat[t.key] = (incomeByCat[t.key]||0) + (r[t.key]||0);
+    });
+  });
+  const topIncomeCats = Object.entries(incomeByCat).sort((a,b)=>b[1]-a[1]).slice(0,7);
+  const maxIncomeCat = topIncomeCats[0]?.[1]||1;
 
   const expByCat = {};
   expenses.forEach(e=>{ expByCat[e.category]=(expByCat[e.category]||0)+(e.amount||0) });
@@ -526,20 +557,24 @@ async function renderDashboard(){
   if(pendingPetty>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span>${pendingPetty} petty cash request(s) awaiting approval. <button class="btn btn-sm" onclick="App.navigate('petty_cash')" style="margin-left:8px">Review</button></span></div>`;
   if(churchBal.bankBalance<50000 && churchBal.bankBalance>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Bank balance is running low. Consider notifying the KPSC if remittances cannot be covered.</span></div>`;
 
-  // Monthly trend (last 4 months)
+  // Monthly trend (last 4 months) — income AND expenses
   const trendData = [];
   for(let i=3;i>=0;i--){
     let m=state.month-i; let y=state.year;
     if(m<0){m+=12;y--;}
-    const recs=(await DB.getIncome()).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
-    trendData.push({label:MONTHS[m].slice(0,3),total:recs.reduce((s,r)=>s+(r.totalCollection||0),0)});
+    const mIncome=(allIncomeDash).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    const mExpenses=(allExpensesDash).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    trendData.push({label:MONTHS[m].slice(0,3),income:mIncome.reduce((s,r)=>s+(r.totalCollection||0),0),expenses:mExpenses.reduce((s,r)=>s+(r.amount||0),0)});
   }
-  const maxTrend=Math.max(...trendData.map(t=>t.total),1);
+  const maxTrend=Math.max(...trendData.map(t=>Math.max(t.income,t.expenses)),1);
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
       <div><div class="page-title">Welcome, ${state.user?.name?.split(' ')[0]||'User'} 👋</div><div class="page-sub">${monthLabel()} Financial Overview</div></div>
-      ${can('income')?`<button class="btn btn-primary" onclick="App.navigate('income')">📥 Record Income</button>`:''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${can('income')?`<button class="btn btn-primary" onclick="App.navigate('income')">📥 Record Income</button>`:''}
+        ${!can('income')&&can('expenses')?`<button class="btn btn-primary" onclick="App.navigate('expenses')">💸 Log Expenses</button>`:''}
+      </div>
     </div>
 
     ${alerts}
@@ -547,30 +582,30 @@ async function renderDashboard(){
     <div class="kpi-grid">
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">📥</div>
-        <div class="kpi-label">Total Income</div>
+        <div class="kpi-label">Total Income (${MONTHS[state.month].slice(0,3)})</div>
         <div class="kpi-val">${fmt(totalIncome)}</div>
         <div class="kpi-delta up">↑ ${income.length} record(s) this month</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#FCEBEB">📤</div>
-        <div class="kpi-label">RCCG Remittances</div>
+        <div class="kpi-label">RCCG Remittances Due</div>
         <div class="kpi-val">${fmt(remittances.totalNatl+remittances.totalArea+remittances.provinceRebate)}</div>
         <div class="kpi-delta warn">↑ ${totalIncome?Math.round((remittances.totalNatl+remittances.totalArea+remittances.provinceRebate)/totalIncome*100):0}% of income</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
-        <div class="kpi-label">Net Local Retained</div>
+        <div class="kpi-label">Local Retained Funds</div>
         <div class="kpi-val">${fmt(netLocal)}</div>
-        <div class="kpi-delta up">After province rebate</div>
+        <div class="kpi-delta up">After all remittances</div>
       </div>
       <div class="kpi kpi-balance" style="grid-column:span 1">
         <div class="kpi-icon" style="background:#EAF3DE">🏛️</div>
         <div class="kpi-label">Total Church Balance</div>
         <div class="kpi-val" style="color:${churchBal.total<0?'var(--danger)':'var(--primary)'}">${fmt(churchBal.total)}</div>
         <div style="margin-top:6px;font-size:11px;color:var(--text3);line-height:1.6">
-          <span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:4px"></span>Bank: ${fmt(churchBal.bankBalance)}<br>
-          <span style="display:inline-block;width:8px;height:8px;background:#BA7517;border-radius:50%;margin-right:4px"></span>Cash with Accountant: ${fmt(churchBal.cashWithAccountant)}<br>
-          <span style="display:inline-block;width:8px;height:8px;background:#1D9E75;border-radius:50%;margin-right:4px"></span>Petty Cash (Admin Officer): ${fmt(churchBal.pettyFloat)}
+          <a onclick="App.navigate('bank')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:4px"></span>Bank: ${fmt(churchBal.bankBalance)}</a>
+          <a onclick="App.setIncomeTab('all');App.navigate('income')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#BA7517;border-radius:50%;margin-right:4px"></span>Cash with Accountant: ${fmt(churchBal.cashWithAccountant)}</a>
+          <a onclick="App.navigate('petty_cash')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#1D9E75;border-radius:50%;margin-right:4px"></span>Petty Cash (Admin Officer): ${fmt(churchBal.pettyFloat)}</a>
         </div>
       </div>
     </div>
@@ -591,23 +626,31 @@ async function renderDashboard(){
 
     <div class="grid-6040">
       <div>
-        <div class="card">
-          <div class="card-header"><span class="card-title">Recent Activity</span></div>
-          ${feedItems.length?feedItems.map(f=>`
-            <div class="feed-item">
-              <div class="feed-dot" style="background:${f.color}">${f.icon}</div>
-              <div class="feed-body"><div class="feed-title">${f.desc}</div><div class="feed-time">${fmtDate(f.date)}</div></div>
-              <div class="feed-right" style="color:${f.type==='income'?'var(--success)':'var(--danger)'}">${f.type==='income'?'+':'−'}${fmt(f.amt)}</div>
-            </div>`).join(''):'<div class="empty-table">No activity this month yet.</div>'}
+        <div class="card" style="background:#1a1f1e;border-color:#2a302e">
+          <div class="card-header"><span class="card-title" style="color:#999;font-size:12px;letter-spacing:1px">RECENT TRANSACTIONS</span><button class="btn btn-sm" style="background:#2a302e;color:#ccc;border-color:#3a403e" onclick="App.navigate('income')">See all ↗</button></div>
+          ${feedItems.length?feedItems.map(f=>{
+            const amtColor = f.type==='income'?'#1D9E75':f.type==='remittance'?'#A32D2D':'#A32D2D';
+            const prefix = f.type==='income'?'+':'−';
+            return `<div class="feed-item" style="border-color:#2a302e;padding:12px 0">
+              <div class="feed-dot" style="background:${f.bg};color:${f.color};font-size:16px">${f.icon}</div>
+              <div class="feed-body"><div class="feed-title" style="color:#e8e8e8;font-size:14px;font-weight:600">${f.title}</div><div class="feed-sub" style="color:#777;font-size:12px;margin-top:2px">${f.sub}</div></div>
+              <div class="feed-right" style="color:${amtColor};font-size:14px;font-weight:600">${prefix}${fmt(f.amt)}</div>
+            </div>`}).join(''):'<div style="font-size:13px;color:#666;padding:24px 0;text-align:center">No transactions yet.</div>'}
         </div>
 
         <div class="card">
-          <div class="card-header"><span class="card-title">Monthly Trend</span></div>
-          <div style="display:flex;align-items:flex-end;gap:8px;height:100px;padding:8px 0">
+          <div class="card-header"><span class="card-title">Monthly Trend (Income vs Expenses)</span></div>
+          <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px;font-size:11px;color:var(--text3)">
+            <span><span style="display:inline-block;width:10px;height:10px;background:var(--primary);border-radius:2px;margin-right:4px"></span>Income</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:var(--danger);border-radius:2px;margin-right:4px"></span>Expenses</span>
+          </div>
+          <div style="display:flex;align-items:flex-end;gap:12px;height:110px;padding:8px 0">
             ${trendData.map(t=>`
               <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
-                <div style="font-size:10px;color:var(--text3)">${t.total?fmt(t.total).replace('₦','').replace(/,\d{3}$/,'k'):'—'}</div>
-                <div style="width:100%;background:var(--primary);border-radius:4px 4px 0 0;height:${Math.round((t.total/maxTrend)*72)+8}px;min-height:4px;transition:height 0.4s"></div>
+                <div style="display:flex;gap:3px;align-items:flex-end;width:100%;justify-content:center;height:80px">
+                  <div style="width:45%;background:var(--primary);border-radius:4px 4px 0 0;height:${Math.max(4,Math.round((t.income/maxTrend)*72)+4)}px;transition:height 0.4s" title="Income: ${fmt(t.income)}"></div>
+                  <div style="width:45%;background:var(--danger);border-radius:4px 4px 0 0;height:${Math.max(4,Math.round((t.expenses/maxTrend)*72)+4)}px;transition:height 0.4s" title="Expenses: ${fmt(t.expenses)}"></div>
+                </div>
                 <div style="font-size:11px;color:var(--text2)">${t.label}</div>
               </div>`).join('')}
           </div>
@@ -615,6 +658,27 @@ async function renderDashboard(){
       </div>
 
       <div>
+        <div class="card" style="background:#1a1f1e;border-color:#2a302e">
+          <div class="card-header"><span class="card-title" style="color:#999;font-size:12px;letter-spacing:1px">EXPENSE CATEGORIES</span><span style="color:#777;font-size:11px">This month</span></div>
+          ${topCats.length?topCats.map(([cat,amt])=>{
+            const c=EXPENSE_CATS.find(e=>e.key===cat)||{label:cat,color:'#888'};
+            return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+              <div style="font-size:13px;color:#ccc;width:150px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.label}</div>
+              <div style="flex:1;height:6px;background:#2a302e;border-radius:3px;overflow:hidden"><div style="height:6px;border-radius:3px;background:${c.color};width:${Math.round(amt/maxCat*100)}%;transition:width 0.4s"></div></div>
+              <div style="font-size:13px;color:#ccc;width:80px;text-align:right;flex-shrink:0">₦${Math.round(amt).toLocaleString('en-NG')}</div>
+            </div>`}).join(''):'<div style="font-size:13px;color:#666;padding:20px 0;text-align:center">No expenses this month.</div>'}
+          ${topCats.length?`<div style="display:flex;justify-content:space-between;border-top:1px solid #2a302e;padding-top:10px;margin-top:4px"><span style="font-size:13px;color:#999">Total expenses</span><span style="font-size:15px;font-weight:700;color:#e8e8e8">₦${Math.round(totalExpenses).toLocaleString('en-NG')}</span></div>`:''}
+        </div>
+
+        <div class="card">
+          <div class="card-header"><span class="card-title">Income Breakdown</span><span style="color:var(--text3);font-size:11px">This month</span></div>
+          ${topIncomeCats.length?topIncomeCats.map(([cat,amt])=>{
+            const t=INCOME_TYPES.find(e=>e.key===cat)||{label:cat};
+            return `<div class="exp-row"><div class="exp-label">${t.label}</div><div class="progress-bar"><div class="progress-fill" style="width:${Math.round(amt/maxIncomeCat*100)}%;background:var(--primary)"></div></div><div class="exp-val">${fmt(amt)}</div></div>`;
+          }).join('')+'<div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:8px;margin-top:4px"><span style="font-size:12px;color:var(--text3)">Total income</span><span style="font-size:14px;font-weight:700;color:var(--primary)">${fmt(totalIncome)}</span></div>'
+          :'<div style="font-size:13px;color:var(--text3);padding:20px 0;text-align:center">No income recorded this month.</div>'}
+        </div>
+
         <div class="card">
           <div class="card-header"><span class="card-title">Expense Breakdown</span></div>
           ${topCats.length?topCats.map(([cat,amt])=>{
@@ -1482,6 +1546,263 @@ async function submitBankWithdrawal(){
   navigate(state.page);
 }
 
+// ── BANK ────────────────────────────────
+function setBankTab(t){ state.bankTab=t; renderBank() }
+
+async function renderBank(){
+  const [allCashTx, allExpenses, allIncome, allRemittances] = await Promise.all([
+    DB.getCashTransactions(), DB.getExpenses(), DB.getIncome(), DB.getRemittances()
+  ]);
+  const tab = state.bankTab||'overview';
+
+  // Calculate bank balance components
+  const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
+  const cashDepositedToBank = allCashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
+  const bankExpenses = allExpenses.filter(e=>e.paymentMethod==='bank_transfer').reduce((s,e) => s+(e.amount||0), 0);
+  const paidRems = allRemittances.filter(r=>r.status==='paid').reduce((s,r) => s+(r.amount||0), 0);
+  const bankWithdrawals = allCashTx.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
+  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals;
+
+  // Monthly bank charges
+  const monthlyBankCharges = filterByMonth(allExpenses).filter(e=>e.category==='bank').reduce((s,e)=>s+(e.amount||0),0);
+
+  // Monthly withdrawals
+  const monthlyWithdrawals = filterByMonth(allCashTx).filter(t=>t.type==='withdrawal');
+  const monthlyDeposits = filterByMonth(allCashTx).filter(t=>t.type==='cash_deposit');
+
+  // All bank transactions for reconciliation (combined view)
+  const bankTxAll = [
+    ...allCashTx.filter(t=>t.type==='withdrawal').map(t=>({...t, txType:'withdrawal', txLabel:'Withdrawal', txAmt: -(t.amount||0)})),
+    ...allCashTx.filter(t=>t.type==='cash_deposit').map(t=>({...t, txType:'deposit', txLabel:'Cash Deposit', txAmt: (t.amount||0)})),
+    ...allExpenses.filter(e=>e.paymentMethod==='bank_transfer').map(e=>({...e, txType:'expense', txLabel:`Expense: ${e.description||e.category}`, txAmt: -(e.amount||0), date:e.date||e.createdAt})),
+    ...allRemittances.filter(r=>r.status==='paid').map(r=>({...r, txType:'remittance', txLabel:`Remittance: ${r.incomeType||'HQ'}`, txAmt: -(r.amount||0), date:r.date||r.createdAt})),
+    ...allIncome.filter(r=>(r.bankTransferAmount||0)>0).map(r=>({...r, txType:'income', txLabel:`Income deposit (bank transfer)`, txAmt: (r.bankTransferAmount||0)}))
+  ].sort((a,b)=>new Date(b.date||b.createdAt||0)-new Date(a.date||a.createdAt||0));
+
+  const monthBankTx = bankTxAll.filter(t=>{
+    const d=new Date(t.date||t.createdAt||0);
+    return d.getMonth()===state.month && d.getFullYear()===state.year;
+  });
+
+  document.getElementById('pageContent').innerHTML=`
+    <div class="page-header">
+      <div><div class="page-title">Bank Account</div><div class="page-sub">Balance: ${fmt(bankBalance)}</div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${can('income')?`<button class="btn btn-primary" onclick="App.showBankWithdrawal()">🏦 Record Withdrawal</button>`:''}
+        ${can('expenses')?`<button class="btn btn-amber" onclick="App.showBankChargeForm()">💳 Record Bank Charge</button>`:''}
+      </div>
+    </div>
+
+    <div class="kpi-grid" style="grid-template-columns:repeat(4,minmax(0,1fr))">
+      <div class="kpi">
+        <div class="kpi-icon" style="background:#E6F1FB">🏦</div>
+        <div class="kpi-label">Bank Balance</div>
+        <div class="kpi-val" style="color:${bankBalance<0?'var(--danger)':'var(--primary)'}">${fmt(bankBalance)}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-icon" style="background:#E1F5EE">📥</div>
+        <div class="kpi-label">Total Inflows</div>
+        <div class="kpi-val">${fmt(bankTransferIncome + cashDepositedToBank)}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-icon" style="background:#FCEBEB">📤</div>
+        <div class="kpi-label">Total Outflows</div>
+        <div class="kpi-val">${fmt(bankExpenses + paidRems + bankWithdrawals)}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-icon" style="background:#FAEEDA">💳</div>
+        <div class="kpi-label">Bank Charges (${MONTHS[state.month].slice(0,3)})</div>
+        <div class="kpi-val">${fmt(monthlyBankCharges)}</div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab ${tab==='overview'?'active':''}" onclick="App.setBankTab('overview')">Overview</button>
+      <button class="tab ${tab==='withdrawals'?'active':''}" onclick="App.setBankTab('withdrawals')">Withdrawals (${monthlyWithdrawals.length})</button>
+      <button class="tab ${tab==='deposits'?'active':''}" onclick="App.setBankTab('deposits')">Deposits (${monthlyDeposits.length})</button>
+      <button class="tab ${tab==='charges'?'active':''}" onclick="App.setBankTab('charges')">Bank Charges</button>
+      <button class="tab ${tab==='reconciliation'?'active':''}" onclick="App.setBankTab('reconciliation')">Reconciliation</button>
+    </div>
+
+    ${tab==='overview'?renderBankOverview(monthBankTx,bankBalance):
+      tab==='withdrawals'?renderBankWithdrawals(monthlyWithdrawals):
+      tab==='deposits'?renderBankDeposits(monthlyDeposits):
+      tab==='charges'?renderBankCharges(filterByMonth(allExpenses).filter(e=>e.category==='bank')):
+      renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals)}`;
+}
+
+function renderBankOverview(monthBankTx,bankBalance){
+  if(!monthBankTx.length) return '<div class="card"><div class="empty-table">No bank transactions this month.</div></div>';
+  return `<div class="card">
+    <div class="card-header"><span class="card-title">Bank Transactions — ${monthLabel()}</span></div>
+    <div class="table-wrap"><table>
+      <tr><th>Date</th><th>Type</th><th>Description</th><th class="td-right">Amount</th><th>Reference</th></tr>
+      ${monthBankTx.map(t=>{
+        const isCredit = t.txAmt > 0;
+        return `<tr>
+          <td>${fmtDate(t.date||t.createdAt)}</td>
+          <td><span class="badge ${isCredit?'badge-success':'badge-danger'}">${t.txType}</span></td>
+          <td>${t.txLabel}</td>
+          <td class="td-right ${isCredit?'td-green':'td-red'} td-bold">${isCredit?'+':''}${fmt(Math.abs(t.txAmt))}</td>
+          <td class="td-muted">${t.reference||'—'}</td>
+        </tr>`}).join('')}
+    </table></div>
+  </div>`;
+}
+
+function renderBankWithdrawals(withdrawals){
+  if(!withdrawals.length) return '<div class="card"><div class="empty-table">No bank withdrawals this month.</div></div>';
+  return `<div class="card">
+    <div class="card-header"><span class="card-title">Bank Withdrawals — ${monthLabel()}</span></div>
+    <div class="table-wrap"><table>
+      <tr><th>Date</th><th>Amount</th><th>Destination</th><th>Description</th><th>Reference</th><th>Authorized By</th></tr>
+      ${withdrawals.map(t=>`<tr>
+        <td>${fmtDate(t.date)}</td>
+        <td class="td-red td-bold">${fmt(t.amount)}</td>
+        <td><span class="badge badge-info">${(t.destination||'').replace(/_/g,' ')}</span></td>
+        <td>${t.description||'—'}</td>
+        <td class="td-muted">${t.reference||'—'}</td>
+        <td class="td-muted">${t.authorizedBy||'—'}</td>
+      </tr>`).join('')}
+    </table></div>
+  </div>`;
+}
+
+function renderBankDeposits(deposits){
+  if(!deposits.length) return '<div class="card"><div class="empty-table">No cash deposits to bank this month.</div></div>';
+  return `<div class="card">
+    <div class="card-header"><span class="card-title">Cash Deposits to Bank — ${monthLabel()}</span></div>
+    <div class="table-wrap"><table>
+      <tr><th>Date</th><th>Amount</th><th>Description</th><th>Reference</th><th>Recorded By</th></tr>
+      ${deposits.map(t=>`<tr>
+        <td>${fmtDate(t.date)}</td>
+        <td class="td-green td-bold">${fmt(t.amount)}</td>
+        <td>${t.description||'Cash deposit'}</td>
+        <td class="td-muted">${t.reference||'—'}</td>
+        <td class="td-muted">${t.recordedBy||'—'}</td>
+      </tr>`).join('')}
+    </table></div>
+  </div>`;
+}
+
+function renderBankCharges(charges){
+  const total = charges.reduce((s,e)=>s+(e.amount||0),0);
+  if(!charges.length) return '<div class="card"><div class="empty-table">No bank charges recorded this month.</div></div>';
+  return `<div class="card">
+    <div class="card-header"><span class="card-title">Bank Charges — ${monthLabel()}</span><span style="font-size:13px;font-weight:600;color:var(--danger)">${fmt(total)}</span></div>
+    <div class="table-wrap"><table>
+      <tr><th>Date</th><th>Sub-category</th><th>Description</th><th class="td-right">Amount</th><th>Receipt</th></tr>
+      ${charges.map(e=>`<tr>
+        <td>${fmtDate(e.date||e.createdAt)}</td>
+        <td>${e.subCategory||'—'}</td>
+        <td>${e.description||'—'}</td>
+        <td class="td-right td-red td-bold">${fmt(e.amount)}</td>
+        <td class="td-muted">${e.receiptNo||'—'}</td>
+      </tr>`).join('')}
+    </table></div>
+  </div>`;
+}
+
+function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals){
+  return `
+    <div class="card">
+      <div class="card-header"><span class="card-title">Bank Reconciliation Summary</span></div>
+      <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>This reconciliation view shows how the computed bank balance is derived from all income, deposits, expenses, remittances, and withdrawals. Compare this with your actual bank statement.</span></div>
+
+      <div style="margin-top:12px">
+        <div class="status-row"><div><div class="status-row-label" style="color:var(--success)">+ Income received via bank transfer</div></div><div class="status-row-right"><div class="status-row-amt td-green">${fmt(bankTransferIncome)}</div></div></div>
+        <div class="status-row"><div><div class="status-row-label" style="color:var(--success)">+ Cash deposited to bank</div></div><div class="status-row-right"><div class="status-row-amt td-green">${fmt(cashDepositedToBank)}</div></div></div>
+        <div class="status-row"><div><div class="status-row-label" style="color:var(--danger)">− Expenses paid via bank transfer</div></div><div class="status-row-right"><div class="status-row-amt td-red">${fmt(bankExpenses)}</div></div></div>
+        <div class="status-row"><div><div class="status-row-label" style="color:var(--danger)">− Paid remittances</div></div><div class="status-row-right"><div class="status-row-amt td-red">${fmt(paidRems)}</div></div></div>
+        <div class="status-row"><div><div class="status-row-label" style="color:var(--danger)">− Bank withdrawals (cash out)</div></div><div class="status-row-right"><div class="status-row-amt td-red">${fmt(bankWithdrawals)}</div></div></div>
+        <div class="status-row" style="border-top:2px solid var(--border);margin-top:8px;padding-top:12px">
+          <div><div class="status-row-label fw-bold">= Computed Bank Balance</div></div>
+          <div class="status-row-right"><div class="status-row-amt" style="color:${bankBalance<0?'var(--danger)':'var(--primary)'};font-size:18px;font-weight:700">${fmt(bankBalance)}</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">Statement Entry Check</span></div>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Enter your actual bank statement balance to compare with the computed balance.</p>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Bank Statement Balance (₦)</label><input type="number" id="bank_stmt_bal" class="form-input" placeholder="Enter actual balance from bank statement" /></div>
+        <div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-primary" onclick="App.compareBankBalance()">Compare</button></div>
+      </div>
+      <div id="bankCompareResult"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">All Bank Transactions (Ledger)</span></div>
+      ${bankTxAll.length?`<div class="table-wrap"><table>
+        <tr><th>Date</th><th>Type</th><th>Description</th><th class="td-right">Debit</th><th class="td-right">Credit</th><th>Reference</th></tr>
+        ${bankTxAll.slice(0,50).map(t=>{
+          const isCredit = t.txAmt > 0;
+          return `<tr>
+            <td>${fmtDate(t.date||t.createdAt)}</td>
+            <td><span class="badge ${isCredit?'badge-success':'badge-danger'}">${t.txType}</span></td>
+            <td>${t.txLabel}</td>
+            <td class="td-right ${!isCredit?'td-red':''}">${!isCredit?fmt(Math.abs(t.txAmt)):'—'}</td>
+            <td class="td-right ${isCredit?'td-green':''}">${isCredit?fmt(t.txAmt):'—'}</td>
+            <td class="td-muted">${t.reference||'—'}</td>
+          </tr>`}).join('')}
+      </table></div>`:'<div class="empty-table">No bank transactions found.</div>'}
+    </div>`;
+}
+
+function compareBankBalance(){
+  const stmtBal = parseFloat(document.getElementById('bank_stmt_bal')?.value);
+  if(isNaN(stmtBal)){ alert('Please enter the bank statement balance.'); return }
+  calcChurchBalance().then(bal=>{
+    const diff = bal.bankBalance - stmtBal;
+    const el = document.getElementById('bankCompareResult');
+    if(!el) return;
+    if(Math.abs(diff) < 1){
+      el.innerHTML = `<div class="alert alert-success" style="margin-top:12px"><span class="alert-icon">✓</span><span><strong>Reconciled!</strong> The computed bank balance matches the bank statement.</span></div>`;
+    } else {
+      el.innerHTML = `<div class="alert ${diff>0?'alert-warn':'alert-danger'}" style="margin-top:12px"><span class="alert-icon">⚠</span><span><strong>Discrepancy: ${fmt(Math.abs(diff))}</strong><br>Computed balance: ${fmt(bal.bankBalance)}<br>Statement balance: ${fmt(stmtBal)}<br>${diff>0?'System shows more than bank statement. Check for unrecorded bank charges or debits.':'Bank statement shows more than system. Check for unrecorded deposits or credits.'}</span></div>`;
+    }
+  });
+}
+
+function showBankChargeForm(){
+  const today=new Date().toISOString().split('T')[0];
+  const bankSubcats = EXPENSE_SUBCATS.bank || ['Others...'];
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">💳 Record Bank Charge</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Record charges deducted by the bank (POS charges, SMS alerts, transfer fees, maintenance fees, etc.)</span></div>
+    <div class="form-group"><label class="form-label">Date *</label><input type="date" id="bc_date" class="form-input" value="${today}" max="${today}" /></div>
+    <div class="form-group"><label class="form-label">Type of Charge *</label>
+      <select id="bc_subcat" class="form-select">
+        ${bankSubcats.map(s=>`<option value="${s}">${s}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Description</label><input type="text" id="bc_desc" class="form-input" placeholder="Details about the charge" /></div>
+    <div class="form-group"><label class="form-label">Amount (₦) *</label><input type="number" id="bc_amt" class="form-input" placeholder="0" min="0" /></div>
+    <div class="form-group"><label class="form-label">Reference / Transaction ID</label><input type="text" id="bc_ref" class="form-input" placeholder="Optional" /></div>
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankCharge()">Save Bank Charge</button></div>`);
+}
+
+async function submitBankCharge(){
+  const date = document.getElementById('bc_date')?.value;
+  const subCategory = document.getElementById('bc_subcat')?.value;
+  const description = document.getElementById('bc_desc')?.value?.trim() || subCategory;
+  const amount = parseFloat(document.getElementById('bc_amt')?.value)||0;
+  const receiptNo = document.getElementById('bc_ref')?.value;
+  if(!date||!amount){ alert('Please fill date and amount.'); return }
+  await DB.addExpense({
+    date, category:'bank', subCategory, description, amount,
+    paymentMethod:'bank_transfer', receiptNo,
+    recordedBy: state.user?.name,
+    createdAt: new Date().toISOString()
+  });
+  DB.addAudit('bank_charge',`Bank charge: ${description} — ${fmt(amount)}`,state.user?.name);
+  closeModal();
+  showAlert(`Bank charge of ${fmt(amount)} recorded.`,'success');
+  navigate('bank');
+}
+
 // ── PETTY CASH ────────────────────────────
 // Helper: filter petty history by selected month (fixed — was passing object to filterByMonth)
 function pettyMonthHistory(history){
@@ -2324,6 +2645,7 @@ return {
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt,
   showBankWithdrawal, submitBankWithdrawal,
+  setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   renderPettyCash, showPettyRequest, submitPettyRequest,
   approvePetty, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,

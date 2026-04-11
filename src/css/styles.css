@@ -47,6 +47,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .btn-icon{width:34px;height:34px;padding:0;justify-content:center;border-radius:var(--r)}
 .btn-logout{width:100%;padding:8px;background:none;border:1px solid var(--border2);border-radius:var(--r);color:var(--text2);cursor:pointer;font-size:13px;transition:all 0.15s;font-family:inherit}
 .btn-logout:hover{background:var(--danger-light);color:var(--danger);border-color:var(--danger)}
+.btn-logout-mobile{display:none;padding:6px 12px;background:none;border:1px solid var(--border2);border-radius:var(--r);color:var(--text2);cursor:pointer;font-size:12px;font-family:inherit;white-space:nowrap}
+.btn-logout-mobile:hover{background:var(--danger-light);color:var(--danger);border-color:var(--danger)}
 
 /* APP SHELL */
 .app-shell{display:flex;min-height:100vh;position:relative}
@@ -249,6 +251,7 @@ tr:hover td{background:var(--surface)}
   .sidebar-overlay.visible{display:block}
   .main-wrap{margin-left:0;padding-bottom:56px}
   .hamburger{display:flex}
+  .btn-logout-mobile{display:inline-flex}
   .bottom-nav{display:block}
   .kpi-grid{grid-template-columns:repeat(2,1fr)}
   .qa-grid{grid-template-columns:repeat(2,1fr)}
