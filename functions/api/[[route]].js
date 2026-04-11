@@ -232,7 +232,7 @@ async function initDB(DB) {
   // Step 2: NOW safe to query users — seed default users only if table is empty
   try {
     const row = await DB.prepare('SELECT COUNT(*) as c FROM users').first();
-    if (true) { // Always re-seed to fix any corrupted PIN records
+    if ((row?.c || 0) === 0) {
       const seeds = [
         "INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES ('u1','IT Administrator','it_admin','0000','it@kpaguleri.org')",
         "INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES ('u2','Rev. Emmanuel Obi','pastor','1111','pastor@kpaguleri.org')",
