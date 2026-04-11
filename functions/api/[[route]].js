@@ -15,9 +15,16 @@ const ok  = (data)       => new Response(JSON.stringify(data),        { status: 
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
+const SCHEMA_CACHE = new Map();
+const ALLOWED_TABLES = new Set(['income', 'expenses']);
 async function tableHasColumns(DB, table, cols) {
-  const { results } = await DB.prepare(`PRAGMA table_info(${table})`).all();
-  const existing = new Set((results || []).map(r => r.name));
+  if (!ALLOWED_TABLES.has(table)) throw new Error(`Unsupported schema check table: ${table}`);
+  let existing = SCHEMA_CACHE.get(table);
+  if (!existing) {
+    const { results } = await DB.prepare(`PRAGMA table_info(${table})`).all();
+    existing = new Set((results || []).map(r => r.name));
+    SCHEMA_CACHE.set(table, existing);
+  }
   return cols.every(c => existing.has(c));
 }
 
