@@ -589,7 +589,8 @@ function calcRemittancesFromRecords(records){
 
 // ── INCOME ────────────────────────────────
 async function renderIncome(){
-  const records = filterByMonth(DB.getIncome());
+  const allRecords = await DB.getIncome();
+  const records = filterByMonth(allRecords);
   const tab = state.incomeTab||'list';
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
@@ -601,7 +602,7 @@ async function renderIncome(){
       <button class="tab ${tab==='summary'?'active':''}" onclick="App.setIncomeTab('summary')">Monthly Summary</button>
       <button class="tab ${tab==='all'?'active':''}" onclick="App.setIncomeTab('all')">All Records</button>
     </div>
-    ${tab==='list'?renderIncomeList(records):tab==='summary'?renderIncomeSummary(records):renderIncomeList(DB.getIncome())}`;
+    ${tab==='list'?renderIncomeList(records):tab==='summary'?renderIncomeSummary(records):renderIncomeList(allRecords)}`;
 }
 
 function setIncomeTab(t){ state.incomeTab=t; renderIncome() }
@@ -621,7 +622,7 @@ function renderIncomeList(records){
   </table></div></div>`;
 }
 
-async function renderIncomeSummary(records){
+function renderIncomeSummary(records){
   const totals = {};
   INCOME_TYPES.forEach(t=>{ totals[t.key]=0 });
   records.forEach(r=>{ INCOME_TYPES.forEach(t=>{ totals[t.key]+=(r[t.key]||0) }) });
@@ -701,7 +702,8 @@ async function submitIncome(){
 }
 
 async function viewIncome(id){
-  const r=DB.getIncome().find(x=>x.id===id);
+  const allIncome = await DB.getIncome();
+  const r=allIncome.find(x=>x.id===id);
   if(!r) return;
   const rem=calcRemittances(r);
   showModal(`
@@ -944,7 +946,7 @@ async function submitExpense(){
 
 // ── PETTY CASH ────────────────────────────
 // Helper: filter petty history by selected month (fixed — was passing object to filterByMonth)
-async function pettyMonthHistory(history){
+function pettyMonthHistory(history){
   return (history||[]).filter(h=>{
     const d=new Date(h.createdAt||h.date||0);
     return d.getMonth()===state.month && d.getFullYear()===state.year;
@@ -952,7 +954,7 @@ async function pettyMonthHistory(history){
 }
 
 // Helper: check if an approved item's receipt is overdue (>48 hours since approval)
-async function isReceiptOverdue(req){
+function isReceiptOverdue(req){
   if(req.status!=='approved'||req.receiptNo) return false;
   const hrs=(Date.now()-new Date(req.approvedAt||req.createdAt).getTime())/3600000;
   return hrs>48;
@@ -1322,7 +1324,7 @@ async function generateMonthlyReport(){
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
   const totalRem=paidRems.reduce((s,r)=>s+(r.amount||0),0);
-  const settings=DB.getSettings();
+  const settings=await DB.getSettings();
 
   const html=`
     <div class="card" id="printReport">
@@ -1384,11 +1386,13 @@ async function generateWeeklyReport(){
 async function generateRemittanceReport(){ renderRemittances(); showAlert('Remittance report displayed above.','info') }
 
 async function generateQuarterlyReport(){
+  const allIncome = await DB.getIncome();
+  const allExpenses = await DB.getExpenses();
   let rows='';
   for(let i=2;i>=0;i--){
     let m=state.month-i; let y=state.year; if(m<0){m+=12;y--;}
-    const recs=DB.getIncome().filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
-    const exps=DB.getExpenses().filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    const recs=allIncome.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    const exps=allExpenses.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
     const total=recs.reduce((s,r)=>s+(r.totalCollection||0),0);
     const exp=exps.reduce((s,e)=>s+(e.amount||0),0);
     const rem=calcRemittancesFromRecords(recs);
@@ -1485,7 +1489,7 @@ async function renderAudit(){
 async function renderAdmin(){
   if(state.user?.role!=='it_admin'){ document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--danger)">Access denied. IT Administrators only.</p></div>'; return }
   const users=await DB.getUsers();
-  const settings=DB.getSettings();
+  const settings=await DB.getSettings();
   const tab=state.adminTab||'users';
 
   const [allIncome2, allAudit] = await Promise.all([DB.getIncome(), DB.getAudit()]);
@@ -1505,9 +1509,9 @@ async function renderAdmin(){
     ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settings):tab==='quotas'?renderAdminQuotas(settings):renderAdminBackup()}`;
 }
 
-async function setAdminTab(t){ state.adminTab=t; renderAdmin() }
+function setAdminTab(t){ state.adminTab=t; renderAdmin() }
 
-async function renderAdminUsers(users){
+function renderAdminUsers(users){
   return `<div class="card">
     <div class="card-header"><span class="card-title">User Accounts</span><button class="btn btn-primary btn-sm" onclick="App.showAddUser()">+ Add User</button></div>
     <div class="table-wrap"><table>
@@ -1523,7 +1527,7 @@ async function renderAdminUsers(users){
     </table></div></div>`;
 }
 
-async function renderAdminSettings(s){
+function renderAdminSettings(s){
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:1rem">Church Information</div>
     <div class="form-group"><label class="form-label">Church Name</label><input type="text" id="set_name" class="form-input" value="${s.churchName||''}" /></div>
@@ -1534,7 +1538,7 @@ async function renderAdminSettings(s){
   </div>`;
 }
 
-async function renderAdminQuotas(s){
+function renderAdminQuotas(s){
   const q=s.quotas||DEFAULT_QUOTAS;
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Monthly Fixed Quotas</div>
@@ -1544,7 +1548,7 @@ async function renderAdminQuotas(s){
   </div>`;
 }
 
-async function renderAdminBackup(){
+function renderAdminBackup(){
   return `<div class="card">
     <div class="card-header"><span class="card-title">Data Backup & Restore</span></div>
     <p style="font-size:13px;color:var(--text2);margin-bottom:1rem">Export all church financial data as a JSON backup file. Store it securely.</p>
