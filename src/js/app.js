@@ -451,8 +451,8 @@ async function renderPage(page){
 
 // ── DASHBOARD ────────────────────────────
 async function calcChurchBalance(){
-  const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getRemittances(),DB.getCashTransactions(),DB.getPetty()]);
-  const petty = { history: pettyHistory };
+  const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory,pettyConfig] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getRemittances(),DB.getCashTransactions(),DB.getPetty(),DB.getPettyConfig()]);
+  const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
 
   // --- BANK BALANCE ---
   // 1. Income already in bank (bank-transfer portions of all income records)
