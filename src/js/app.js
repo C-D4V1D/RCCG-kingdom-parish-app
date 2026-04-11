@@ -1525,8 +1525,8 @@ async function renderRemittances(){
             <div class="feed-item">
               <div class="feed-dot" style="background:var(--success-light)">✓</div>
               <div class="feed-body">
-                <div class="feed-title">${esc(r.label)||'RCCG Remittance'}</div>
-                <div class="feed-sub">${r.periodFrom&&r.periodTo?`<em>Period: ${fmtDate(r.periodFrom)} – ${fmtDate(r.periodTo)}</em><br>`:''}Ref: ${esc(r.reference)||'—'} · ${esc(r.authorizedBy)||'—'}</div>
+                <div class="feed-title">${esc(r.label||'RCCG Remittance')}</div>
+                <div class="feed-sub">${r.periodFrom&&r.periodTo?`<em>Period: ${fmtDate(esc(r.periodFrom))} – ${fmtDate(esc(r.periodTo))}</em><br>`:''}Ref: ${esc(r.reference)||'—'} · ${esc(r.authorizedBy)||'—'}</div>
                 <div class="feed-time">${fmtDate(r.paidDate)}</div>
               </div>
               <div class="feed-right td-green">${fmt(r.amount)}</div>
@@ -1710,7 +1710,7 @@ async function printRemittanceReport(fromOverride, toOverride){
 </head>
 <body>
   <div class="header">
-    <h1>${churchName}</h1>
+    <h1>${esc(churchName)}</h1>
     <h2>RCCG Monthly Remittance Report</h2>
     <p><strong>Period Covered:</strong> ${fmtDate(fromDate)} — ${fmtDate(toDate)}</p>
     <p><strong>Prepared by:</strong> ${esc(state.user?.name||'—')} &nbsp;|&nbsp; <strong>Date Prepared:</strong> ${fmtDate(new Date().toISOString().split('T')[0])}</p>
