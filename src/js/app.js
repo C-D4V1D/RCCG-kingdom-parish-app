@@ -228,10 +228,13 @@ function filterByMonth(arr){
 
 function filterByDateRange(arr, fromDate, toDate){
   return (arr||[]).filter(r=>{
-    const d = (r.date||r.createdAt||'').split('T')[0];
+    const d = new Date(r.date||r.createdAt||0).toISOString().split('T')[0];
     return d >= fromDate && d <= toDate;
   });
 }
+
+/** Escape special HTML characters to prevent XSS when inserting user data into innerHTML */
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') }
 
 // Remittance engine
 async function getRemRates(){
@@ -1366,9 +1369,13 @@ async function renderRemittances(){
     const lastPaid = allRems.filter(r=>r.status==='paid')
       .sort((a,b)=>new Date(b.paidDate||b.createdAt||0)-new Date(a.paidDate||a.createdAt||0))[0];
     if(lastPaid){
-      const d=new Date(lastPaid.paidDate||lastPaid.createdAt);
-      d.setDate(d.getDate()+1);
-      state.remFromDate=d.toISOString().split('T')[0];
+      const d=new Date(lastPaid.paidDate||lastPaid.createdAt||0);
+      if(isNaN(d.getTime())){
+        state.remFromDate=new Date(state.year,state.month,1).toISOString().split('T')[0];
+      } else {
+        d.setDate(d.getDate()+1);
+        state.remFromDate=d.toISOString().split('T')[0];
+      }
     } else {
       state.remFromDate=new Date(state.year,state.month,1).toISOString().split('T')[0];
     }
@@ -1505,7 +1512,7 @@ async function renderRemittances(){
               <div class="feed-dot" style="background:var(--success-light)">✓</div>
               <div class="feed-body">
                 <div class="feed-title">RCCG Remittance Payment</div>
-                <div class="feed-sub">Ref: ${r.reference||'—'} · ${r.authorizedBy||'—'}</div>
+                <div class="feed-sub">Ref: ${esc(r.reference)||'—'} · ${esc(r.authorizedBy)||'—'}</div>
                 <div class="feed-time">${fmtDate(r.paidDate)}</div>
               </div>
               <div class="feed-right td-green">${fmt(r.amount)}</div>
@@ -1518,8 +1525,8 @@ async function renderRemittances(){
             <div class="feed-item">
               <div class="feed-dot" style="background:var(--success-light)">✓</div>
               <div class="feed-body">
-                <div class="feed-title">${r.label||'RCCG Remittance'}</div>
-                <div class="feed-sub">${r.periodFrom&&r.periodTo?`<em>Period: ${fmtDate(r.periodFrom)} – ${fmtDate(r.periodTo)}</em><br>`:''}Ref: ${r.reference||'—'} · ${r.authorizedBy||'—'}</div>
+                <div class="feed-title">${esc(r.label)||'RCCG Remittance'}</div>
+                <div class="feed-sub">${r.periodFrom&&r.periodTo?`<em>Period: ${fmtDate(r.periodFrom)} – ${fmtDate(r.periodTo)}</em><br>`:''}Ref: ${esc(r.reference)||'—'} · ${esc(r.authorizedBy)||'—'}</div>
                 <div class="feed-time">${fmtDate(r.paidDate)}</div>
               </div>
               <div class="feed-right td-green">${fmt(r.amount)}</div>
@@ -1597,7 +1604,7 @@ async function showRemittancePaymentModal(){
     </div>
     <div class="form-group"><label class="form-label">Payment Date *</label><input type="date" id="rem_date" class="form-input" value="${new Date().toISOString().split('T')[0]}" /></div>
     <div class="form-group"><label class="form-label">Bank Reference / Transfer ID *</label><input type="text" id="rem_ref" class="form-input" placeholder="Enter the bank transfer reference number" /></div>
-    <div class="form-group"><label class="form-label">Authorized By (Signatories) *</label><input type="text" id="rem_auth" class="form-input" placeholder="Names of the authorizing signatories" value="${state.user?.name||''}" /></div>
+    <div class="form-group"><label class="form-label">Authorized By (Signatories) *</label><input type="text" id="rem_auth" class="form-input" placeholder="Names of the authorizing signatories" value="${esc(state.user?.name||'')}" /></div>
     <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="rem_notes" class="form-textarea" rows="2" placeholder="Any additional notes…"></textarea></div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
@@ -1706,7 +1713,7 @@ async function printRemittanceReport(fromOverride, toOverride){
     <h1>${churchName}</h1>
     <h2>RCCG Monthly Remittance Report</h2>
     <p><strong>Period Covered:</strong> ${fmtDate(fromDate)} — ${fmtDate(toDate)}</p>
-    <p><strong>Prepared by:</strong> ${state.user?.name||'—'} &nbsp;|&nbsp; <strong>Date Prepared:</strong> ${fmtDate(new Date().toISOString())}</p>
+    <p><strong>Prepared by:</strong> ${esc(state.user?.name||'—')} &nbsp;|&nbsp; <strong>Date Prepared:</strong> ${fmtDate(new Date().toISOString().split('T')[0])}</p>
     <p>Based on <strong>${income.length}</strong> income record(s) in this period</p>
   </div>
   <div class="note">
@@ -1719,7 +1726,7 @@ async function printRemittanceReport(fromOverride, toOverride){
     <tr class="local-row"><td colspan="2">Net Local Retained (after all remittances)</td><td class="td-r">${fmt(rem.netLocal)}</td></tr>
   </table>
   <div class="sig">
-    <div class="sig-box">Prepared by (Accountant)<br><br><br>${state.user?.name||'_________________'}</div>
+    <div class="sig-box">Prepared by (Accountant)<br><br><br>${esc(state.user?.name)||'_________________'}</div>
     <div class="sig-box">Reviewed &amp; Approved (Parish Pastor)<br><br><br>_________________</div>
     <div class="sig-box">Date of Payment<br><br><br>_________________</div>
     <div class="sig-box">Bank Teller / Reference No.<br><br><br>_________________</div>
@@ -1727,10 +1734,11 @@ async function printRemittanceReport(fromOverride, toOverride){
 </body></html>`;
 
   const w=window.open('','_blank');
-  if(!w){ alert('Pop-up blocked. Please allow pop-ups for this site to download the report.'); return }
+  if(!w){ showAlert('Pop-up blocked. Please allow pop-ups for this site to download the report.','warn'); return }
   w.document.write(html);
   w.document.close();
   w.focus();
+  // Brief delay to ensure the document is fully rendered before triggering print
   setTimeout(()=>w.print(),400);
 }
 
