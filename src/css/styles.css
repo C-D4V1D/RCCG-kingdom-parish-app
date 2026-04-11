@@ -246,7 +246,7 @@ tr:hover td{background:var(--surface)}
 
 /* MOBILE RESPONSIVE */
 @media(max-width:768px){
-  .sidebar{transform:translateX(-100%)}
+  .sidebar{transform:translateX(-100%);height:calc(100vh - 56px)}
   .sidebar.open{transform:translateX(0)}
   .sidebar-close{display:flex}
   .sidebar-overlay.visible{display:block}
