@@ -1704,10 +1704,10 @@ async function approvePetty(id){
   buildSidebar();
 }
 
-function rejectPetty(id){
+async function rejectPetty(id){
   const reason=prompt('Reason for rejection (the requester will see this):');
-  const petty=DB.getPetty();
-  const req=petty.history.find(h=>h.id===id);
+  const pettyHistory = await DB.getPetty();
+  const req=pettyHistory.find(h=>h.id===id);
   if(!req) return;
   req.status='rejected';
   req.rejectedBy=state.user?.name;
@@ -1735,11 +1735,12 @@ function submitPettyReceipt(id){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.confirmPettyReceipt('${id}')">Submit & Settle</button></div>`);
 }
 
-function confirmPettyReceipt(id){
+async function confirmPettyReceipt(id){
   const no=document.getElementById('rc_no')?.value?.trim();
   if(!no){ alert('Please enter the receipt number.'); return }
-  const petty=DB.getPetty();
-  const req=petty.history.find(h=>h.id===id);
+  const [pettyHistCPR, pettyConfigCPR] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const pettyConfig = pettyConfigCPR;
+  const req=pettyHistCPR.find(h=>h.id===id);
   if(!req){ closeModal(); return }
 
   const actualAmt=parseFloat(document.getElementById('rc_amt')?.value)||req.amount;
@@ -1762,10 +1763,9 @@ function confirmPettyReceipt(id){
     DB.addNotification('Petty Cash Change Returned',`${fmt(change)} returned to float from "${req.purpose}" (spent ${fmt(actualAmt)} of approved ${fmt(req.amount)}).`,'info');
   }
 
-  DB.savePetty(petty);
 
-  // BUG FIX 2 CORE: auto-create expense record so it shows in expense module & reports
-  DB.addExpense({
+  // auto-create expense record so it shows in expense module & reports
+  await DB.addExpense({
     date:new Date().toISOString().split('T')[0],
     category:req.category||'power',
     description:req.purpose+(vendor?` — ${vendor}`:''),
@@ -1812,30 +1812,28 @@ async function showPettyRefill(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitRefill()">Refill Float</button></div>`);
 }
 
-function submitRefill(){
+async function submitRefill(){
   const amt=parseFloat(document.getElementById('ref_amt')?.value)||0;
   const ref=document.getElementById('ref_ref')?.value?.trim();
   const auth=document.getElementById('ref_auth')?.value?.trim();
   if(!amt||!ref||!auth){ alert('Please fill in all required fields: amount, bank reference, and authorizing signatories.'); return }
-  const petty=DB.getPetty();
+  const petty=await DB.getPettyConfig();
   const spaceAvailable=petty.max-petty.float;
   // BUG FIX 3: warn user clearly if refill is capped — don't silently shortchange them
   if(amt>spaceAvailable){
     if(!confirm(`The entered amount (${fmt(amt)}) exceeds available float space (${fmt(spaceAvailable)}).\n\nOnly ${fmt(spaceAvailable)} will be added to bring the float to its maximum of ${fmt(petty.max)}.\n\nProceed?`)) return;
   }
   const actualAdded=Math.min(amt,spaceAvailable);
-  petty.float+=actualAdded;
-  petty.history.unshift({
+  await DB.addPettyEntry({
     id:'RF-'+Date.now(), type:'refill', amount:actualAdded,
-    requestedAmount:amt, reference:ref, authorizedBy:auth,
-    requestedBy:state.user?.name, status:'settled',
-    createdAt:new Date().toISOString(), purpose:'Float Refill'
+    reference:ref, authorizedBy:auth,
+    requestedBy:state.user?.name, status:'settled', purpose:'Float Refill'
   });
-  DB.savePetty(petty);
+  await DB.savePettyConfig({ float: petty.float+actualAdded, max: petty.max });
   DB.addAudit('petty_refilled',`Float refilled: ${fmt(actualAdded)} (authorized by ${auth}, ref: ${ref})`,state.user?.name);
-  DB.addNotification('Float Refilled',`Petty cash float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float)}. Authorized by: ${auth}.`,'success');
+  DB.addNotification('Float Refilled',`Petty cash float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float+actualAdded)}. Authorized by: ${auth}.`,'success');
   closeModal();
-  showAlert(`Float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float)}.${actualAdded<amt?` Note: only ${fmt(actualAdded)} added (float max reached).`:''}`, 'success');
+  showAlert(`Float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float+actualAdded)}.${actualAdded<amt?` Note: only ${fmt(actualAdded)} added (float max reached).`:''}`, 'success');
   renderPettyCash();
 }
 
@@ -1909,7 +1907,7 @@ async function generateMonthlyReport(){
 }
 
 async function generateWeeklyReport(){
-  const income=filterByMonth(DB.getIncome());
+  const income=filterByMonth(await DB.getIncome());
   document.getElementById('reportOutput').innerHTML=`
     <div class="card">
       <div class="card-header"><span class="card-title">Weekly Collection Summary — ${monthLabel()}</span><button class="btn btn-sm btn-primary no-print" onclick="window.print()">🖨 Print</button></div>
@@ -1964,7 +1962,8 @@ async function generateExpenseReport(){
 }
 
 async function generatePettyCashReport(){
-  const petty=DB.getPetty();
+  const [pettyAllGPCR2, pettyConfigGPCR2] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const petty = { history: pettyAllGPCR2, float: pettyConfigGPCR2.float, max: pettyConfigGPCR2.max };
   // BUG FIX: use pettyMonthHistory() helper — old code was passing a plain object to filterByMonth(), returning ALL history instead of current month
   const history=pettyMonthHistory(petty.history||[]);
   const disbursed=history.filter(h=>h.type!=='refill'&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
@@ -2023,16 +2022,17 @@ async function renderAudit(){
 // ── IT ADMIN ──────────────────────────────
 async function renderAdmin(){
   if(state.user?.role!=='it_admin'){ document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--danger)">Access denied. IT Administrators only.</p></div>'; return }
-  const users=DB.getUsers();
-  const settings=DB.getSettings();
+  const [users, settings, allIncome, allAudit] = await Promise.all([
+    DB.getUsers(), DB.getSettings(), DB.getIncome(), DB.getAudit()
+  ]);
   const tab=state.adminTab||'users';
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header"><div class="page-title">IT Admin Panel</div><div class="page-sub">System management — full access</div></div>
     <div class="admin-grid" style="margin-bottom:1rem">
       <div class="admin-stat"><div class="admin-stat-val">${users.length}</div><div class="admin-stat-label">Total Users</div></div>
-      <div class="admin-stat"><div class="admin-stat-val">${(await DB.getIncome()).length}</div><div class="admin-stat-label">Income Records</div></div>
-      <div class="admin-stat"><div class="admin-stat-val">${DB.getAudit().length}</div><div class="admin-stat-label">Audit Events</div></div>
+      <div class="admin-stat"><div class="admin-stat-val">${allIncome.length}</div><div class="admin-stat-label">Income Records</div></div>
+      <div class="admin-stat"><div class="admin-stat-val">${allAudit.length}</div><div class="admin-stat-label">Audit Events</div></div>
     </div>
     <div class="tabs">
       <button class="tab ${tab==='users'?'active':''}" onclick="App.setAdminTab('users')">Users & Roles</button>
@@ -2168,7 +2168,7 @@ async function saveQuotas(){
   const s=await DB.getSettings();
   const q=s.quotas||{};
   Object.keys(DEFAULT_QUOTAS).forEach(k=>{ const el=document.getElementById('q_'+k); if(el) q[k]=parseFloat(el.value)||0 });
-  s.quotas=q; DB.saveSettings(s);
+  s.quotas=q; await DB.saveSettings(s);
   showAlert('Monthly quotas updated!','success');
 }
 
