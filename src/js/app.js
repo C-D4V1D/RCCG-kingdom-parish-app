@@ -1405,7 +1405,7 @@ async function renderRemittances(){
   })).filter(l=>l.amount>0);
 
   const tgLines=[
-    { label:`Thanksgiving → Area (${Math.round(rr.tgArea*100)}%)`,                     amount:rem.totalArea,     section:'tg' },
+    { label:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      amount:rem.totalArea,     section:'tg' },
     { label:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor,   section:'tg' },
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters,section:'tg' },
     { label:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0,  section:'tg' },
@@ -1584,6 +1584,32 @@ async function renderRemittances(){
             <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(rem.netLocal)}</div>
           </div>
         </div>
+
+        <!-- Pastor's Share card -->
+        ${(rem.totalPastor||0)+(rem.totalArea||0)+(rem.totalSeed||0)>0?`
+        <div class="card" style="margin-top:12px">
+          <div class="card-header"><span class="card-title">👨‍💼 Pastor's Share</span></div>
+          <p style="font-size:11px;color:var(--text3);margin-bottom:10px">Thanksgiving portions due to the Pastor (as Zonal / Area Pastor).</p>
+          ${(rem.totalArea||0)>0?`
+          <div class="status-row">
+            <div class="status-row-label">TG → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)</div>
+            <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalArea)}</div>
+          </div>`:''}
+          ${(rem.totalPastor||0)>0?`
+          <div class="status-row">
+            <div class="status-row-label">TG → Pastor's Share (${Math.round(rr.tgPastor*100)}%)</div>
+            <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalPastor)}</div>
+          </div>`:''}
+          ${(rem.totalSeed||0)>0?`
+          <div class="status-row">
+            <div class="status-row-label">TG → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)</div>
+            <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalSeed)}</div>
+          </div>`:''}
+          <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px">
+            <div class="status-row-label fw-bold">TOTAL PASTOR'S SHARE</div>
+            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt((rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalSeed||0))}</div>
+          </div>
+        </div>`:''}
       </div>
     </div>`;
 }
@@ -1599,7 +1625,7 @@ async function showRemittancePaymentModal(){
 
   const lines=[
     ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0 })),
-    { label:`Thanksgiving → Area (${Math.round(rr.tgArea*100)}%)`,                     amount:rem.totalArea },
+    { label:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      amount:rem.totalArea },
     { label:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor },
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters },
     { label:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0 },
@@ -1817,7 +1843,7 @@ async function printRemittanceReport(fromOverride, toOverride){
     {
       title:'Thanksgiving Offering Distribution',
       rows:[
-        { desc:`Thanksgiving → Area (${Math.round(rr.tgArea*100)}%)`,                     type:'% Based', amount:rem.totalArea },
+        { desc:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      type:'% Based', amount:rem.totalArea },
         { desc:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,         type:'% Based', amount:rem.totalPastor },
         { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    type:'% Based', amount:rem.totalMinisters },
         { desc:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, type:'% Based', amount:rem.totalSeed||0 },
