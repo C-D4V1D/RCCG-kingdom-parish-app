@@ -113,101 +113,59 @@ const DEFAULT_REMITTANCE_RATES = {
 };
 
 // ──────────────────────────────────────────
-// 2. DATA LAYER
+// 2. DATA LAYER — Cloudflare D1 via /api/*
 // ──────────────────────────────────────────
+async function apiFetch(path, method='GET', body=null){
+  const opts = { method, headers:{'Content-Type':'application/json'} };
+  if(body !== null) opts.body = JSON.stringify(body);
+  const res = await fetch('/api/'+path, opts);
+  const data = await res.json();
+  if(!res.ok) throw new Error(data.error || `API error ${res.status}`);
+  return data;
+}
+
 const DB = {
-  KEYS: { users:'kp_users', income:'kp_income', remittances:'kp_remittances',
-          expenses:'kp_expenses', petty:'kp_petty', audit:'kp_audit',
-          settings:'kp_settings', notifications:'kp_notifs',
-          cashTx:'kp_cash_transactions' },
+  getUsers()                   { return apiFetch('users'); },
+  addUser(d)                   { return apiFetch('users','POST',d); },
+  updateUser(id,d)             { return apiFetch(`users/${id}`,'PUT',d); },
+  deleteUser(id)               { return apiFetch(`users/${id}`,'DELETE'); },
 
-  load(k){ try{ return JSON.parse(localStorage.getItem(k)||'null') }catch(e){ return null } },
-  save(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)) }catch(e){} },
+  getIncome()                  { return apiFetch('income'); },
+  addIncome(d)                 { return apiFetch('income','POST',d); },
+  updateIncome(id,d)           { return apiFetch(`income/${id}`,'PUT',d); },
 
-  getUsers(){ return this.load(this.KEYS.users) || this.seedUsers() },
-  seedUsers(){
-    const users = [
-      { id:'u1', name:'IT Administrator',    role:'it_admin',      pin:'0000', email:'it@kpaguleri.org' },
-      { id:'u2', name:'Rev. Emmanuel Obi',   role:'pastor',        pin:'1111', email:'pastor@kpaguleri.org' },
-      { id:'u3', name:'Bro. Chukwuemeka Nze',role:'accountant',    pin:'2222', email:'accounts@kpaguleri.org' },
-      { id:'u4', name:'Sis. Adaeze Okonkwo', role:'admin_officer', pin:'3333', email:'admin@kpaguleri.org' },
-      { id:'u5', name:'Elder Paul Okafor',   role:'signatory',     pin:'4444', email:'elder1@kpaguleri.org' },
-      { id:'u6', name:'Elder James Eze',     role:'signatory',     pin:'4444', email:'elder2@kpaguleri.org' },
-      { id:'u7', name:'Visitor Access',      role:'viewer',        pin:'9999', email:'' }
-    ];
-    this.save(this.KEYS.users, users);
-    return users;
+  getExpenses()                { return apiFetch('expenses'); },
+  addExpense(d)                { return apiFetch('expenses','POST',d); },
+
+  getPetty()                   { return apiFetch('petty'); },
+  getPettyConfig()             { return apiFetch('petty-config'); },
+  savePettyConfig(d)           { return apiFetch('petty-config','POST',d); },
+  addPettyEntry(d)             { return apiFetch('petty','POST',d); },
+  updatePettyEntry(id,d)       { return apiFetch(`petty/${id}`,'PUT',d); },
+
+  getRemittances()             { return apiFetch('remittances'); },
+  addRemittance(d)             { return apiFetch('remittances','POST',d); },
+
+  getCashTransactions()        { return apiFetch('cash-transactions'); },
+  addCashTransaction(d)        { return apiFetch('cash-transactions','POST',d); },
+
+  getAudit()                   { return apiFetch('audit'); },
+  // addAudit is fire-and-forget — never blocks the UI
+  addAudit(type,detail,by){
+    apiFetch('audit','POST',{type,detail,by:by||'System'}).catch(()=>{});
   },
 
-  getIncome(){ return this.load(this.KEYS.income) || [] },
-  saveIncome(v){ this.save(this.KEYS.income, v) },
+  getSettings()                { return apiFetch('settings'); },
+  saveSettings(d)              { return apiFetch('settings','POST',d); },
 
-  addIncome(rec){
-    const arr = this.getIncome();
-    rec.id = 'INC-' + Date.now();
-    rec.createdAt = new Date().toISOString();
-    arr.unshift(rec);
-    this.saveIncome(arr);
-    this.addAudit('income_recorded', `Income recorded: ${fmt(rec.totalCollection)} for ${rec.date}`, state.user?.name);
-    return rec;
-  },
-
-  getRemittances(){ return this.load(this.KEYS.remittances) || [] },
-  saveRemittances(v){ this.save(this.KEYS.remittances, v) },
-
-  getExpenses(){ return this.load(this.KEYS.expenses) || [] },
-  saveExpenses(v){ this.save(this.KEYS.expenses, v) },
-
-  addExpense(rec){
-    const arr = this.getExpenses();
-    rec.id = 'EXP-' + Date.now();
-    rec.createdAt = new Date().toISOString();
-    arr.unshift(rec);
-    this.saveExpenses(arr);
-    this.addAudit('expense_logged', `Expense: ${rec.description} — ${fmt(rec.amount)}`, state.user?.name);
-    return rec;
-  },
-
-  getPetty(){ return this.load(this.KEYS.petty) || { float:50000, max:50000, history:[] } },
-  savePetty(v){ this.save(this.KEYS.petty, v) },
-
-  getAudit(){ return this.load(this.KEYS.audit) || [] },
-  addAudit(type, detail, by){
-    const arr = this.getAudit();
-    arr.unshift({ id:'A'+Date.now(), type, detail, by: by||'System', ts: new Date().toISOString() });
-    if(arr.length>500) arr.splice(500);
-    this.save(this.KEYS.audit, arr);
-  },
-
-  getSettings(){ return this.load(this.KEYS.settings) || { quotas: DEFAULT_QUOTAS, remittanceRates: DEFAULT_REMITTANCE_RATES, pettyMax:50000, churchName:'RCCG Kingdom Parish, Aguleri', bankName:'', accountNo:'' } },
-  saveSettings(v){ this.save(this.KEYS.settings, v) },
-
-  // Records a cash/bank transaction. rec should include: { type, date, amount, description, reference, authorizedBy, recordedBy }
-  // type: 'withdrawal' (bank debit → destination: 'accountant_cash'|'admin_petty_cash'|'direct_expense')
-  //       'cash_deposit' (accountant deposits cash to bank → depositMethod: 'bank_teller'|'pos_terminal'|'mobile_transfer', incomeRef: optional income record id)
-  getCashTransactions(){ return this.load(this.KEYS.cashTx) || [] },
-  addCashTransaction(rec){
-    const arr = this.getCashTransactions();
-    rec.id = 'CTX-' + Date.now();
-    rec.createdAt = new Date().toISOString();
-    arr.unshift(rec);
-    this.save(this.KEYS.cashTx, arr);
-    this.addAudit('cash_transaction', `${rec.type}: ${fmt(rec.amount)} — ${rec.description||''}`, state.user?.name);
-    return rec;
-  },
-
-  getNotifications(){ return this.load(this.KEYS.notifications) || [] },
-  addNotification(title, body, type='info'){
-    const arr = this.getNotifications();
-    arr.unshift({ id:'N'+Date.now(), title, body, type, read:false, ts:new Date().toISOString() });
-    this.save(this.KEYS.notifications, arr);
+  getNotifications()           { return apiFetch('notifications'); },
+  addNotification(title,body,type='info'){
+    apiFetch('notifications','POST',{title,body,type}).catch(()=>{});
     updateNotifBadge();
   },
   markAllRead(){
-    const arr = this.getNotifications().map(n=>({...n,read:true}));
-    this.save(this.KEYS.notifications, arr);
-    updateNotifBadge();
-  }
+    apiFetch('notifications/read','POST').catch(()=>{});
+  },
 };
 
 // ──────────────────────────────────────────
@@ -242,8 +200,8 @@ function filterByMonth(arr){
 }
 
 // Remittance engine
-function getRemRates(){
-  const s = DB.getSettings();
+async function getRemRates(){
+  const s = await DB.getSettings();
   const r = s.remittanceRates || DEFAULT_REMITTANCE_RATES;
   return {
     rates: r,
@@ -256,8 +214,8 @@ function getRemRates(){
   };
 }
 
-function calcRemittances(income){
-  const rr = getRemRates();
+async function calcRemittances(income){
+  const rr = await getRemRates();
   const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, totalSeed:0, localBefore:0, provinceRebate:0, netLocal:0 };
   INCOME_TYPES.forEach(t=>{
     const amt = income[t.key]||0;
@@ -290,43 +248,60 @@ function showAlert(msg,type='success'){
   a.appendChild(icon); a.appendChild(txt);
   const pc=document.getElementById('pageContent'); if(pc){ pc.insertBefore(a,pc.firstChild); setTimeout(()=>a.remove(),4000) }
 }
-function updateNotifBadge(){ const notifs=DB.getNotifications(); const unread=notifs.filter(n=>!n.read).length; const el=document.getElementById('notifCount'); if(el){ el.textContent=unread; el.style.display=unread?'flex':'none' } }
+async function updateNotifBadge(){ try{ const notifs=await DB.getNotifications(); const unread=notifs.filter(n=>!n.read).length; const el=document.getElementById('notifCount'); if(el){ el.textContent=unread; el.style.display=unread?'flex':'none' } }catch(e){} }
 
 // ──────────────────────────────────────────
 // 5. AUTH
 // ──────────────────────────────────────────
-function onRoleChange(){
+async function onRoleChange(){
   const role = document.getElementById('roleSelect').value;
   const wrap = document.getElementById('userSelectWrap');
   const sel = document.getElementById('userSelect');
   if(!role){ wrap.style.display='none'; return }
-  const users = DB.getUsers().filter(u=>u.role===role);
+  const allUsers = await DB.getUsers();
+  const users = allUsers.filter(u=>u.role===role);
   if(users.length>1){
     wrap.style.display='block';
     sel.innerHTML = users.map(u=>`<option value="${u.id}">${u.name}</option>`).join('');
   } else { wrap.style.display='none' }
 }
 
-function login(){
+async function login(){
   const role = document.getElementById('roleSelect').value;
   const pin = document.getElementById('pinInput').value.trim();
   const errEl = document.getElementById('loginError');
   if(!role||!pin){ errEl.textContent='Please select a role and enter your PIN.'; errEl.style.display='block'; return }
-  const users = DB.getUsers().filter(u=>u.role===role);
-  let user = null;
-  if(users.length>1){
-    const uid = document.getElementById('userSelect').value;
-    user = users.find(u=>u.id===uid&&u.pin===pin);
-  } else {
-    user = users.find(u=>u.pin===pin);
+  const btn = document.querySelector('#loginScreen .btn-primary');
+  if(btn){ btn.textContent='Connecting…'; btn.disabled=true; }
+  try {
+    await apiFetch('init'); // creates tables + seeds users if first run
+    const allUsers = await DB.getUsers();
+    const users = allUsers.filter(u=>u.role===role);
+    let user = null;
+    if(users.length>1){
+      const uid = document.getElementById('userSelect').value;
+      user = users.find(u=>u.id===uid && String(u.pin)===String(pin));
+    } else {
+      user = users.find(u=>String(u.pin)===String(pin));
+    }
+    if(!user){
+      errEl.textContent='Incorrect PIN. Please try again.';
+      errEl.style.display='block';
+      document.getElementById('pinInput').value='';
+      if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
+      return;
+    }
+    errEl.style.display='none';
+    state.user = user;
+    DB.addAudit('login','User logged in',user.name);
+    document.getElementById('loginScreen').style.display='none';
+    document.getElementById('appShell').style.display='flex';
+    initApp();
+  } catch(e) {
+    errEl.textContent='Cannot connect to database: '+e.message;
+    errEl.style.display='block';
+    if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
   }
-  if(!user){ errEl.style.display='block'; document.getElementById('pinInput').value=''; return }
-  errEl.style.display='none';
-  state.user = user;
-  DB.addAudit('login', `User logged in`, user.name);
-  document.getElementById('loginScreen').style.display='none';
-  document.getElementById('appShell').style.display='flex';
-  initApp();
 }
 
 function logout(){
@@ -372,19 +347,20 @@ function onMonthChange(){
   navigate(state.page);
 }
 
-function buildSidebar(){
+async function buildSidebar(){
   let sections = {};
   NAV.forEach(item=>{
     if(!item.minRole.includes('all') && !item.minRole.includes(state.user?.role)) return;
     if(!sections[item.section]) sections[item.section]=[];
     sections[item.section].push(item);
   });
+  const pendingCount = await getPettyCashPendingCount();
   const nav = document.getElementById('sidebarNav');
   let html='';
   Object.entries(sections).forEach(([sec,items])=>{
     html+=`<div class="nav-section">${sec}</div>`;
     items.forEach(item=>{
-      const notifs = item.id==='petty_cash' ? getPettyCashPendingCount() : 0;
+      const notifs = item.id==='petty_cash' ? pendingCount : 0;
       html+=`<div class="nav-item${state.page===item.id?' active':''}" onclick="App.navigate('${item.id}')" data-page="${item.id}">
         <span class="nav-icon">${item.icon}</span>${item.label}
         ${notifs>0?`<span class="nav-badge">${notifs}</span>`:''}
@@ -431,7 +407,7 @@ function navigate(page){
   document.getElementById('sidebarOverlay').classList.remove('visible');
   // Close notifications
   document.getElementById('notifPanel').style.display='none';
-  setTimeout(()=>{ renderPage(page) },50);
+  setTimeout(()=>{ renderPage(page).catch(e=>console.error(e)); },50);
 }
 
 function toggleSidebar(){
@@ -439,12 +415,12 @@ function toggleSidebar(){
   document.getElementById('sidebarOverlay').classList.toggle('visible');
 }
 
-function toggleNotifications(){
+async function toggleNotifications(){
   const panel=document.getElementById('notifPanel');
   const showing=panel.style.display==='block';
   panel.style.display=showing?'none':'block';
   if(!showing){
-    const notifs=DB.getNotifications();
+    const notifs=await DB.getNotifications();
     const list=document.getElementById('notifList');
     if(!notifs.length){ list.innerHTML='<div class="notif-empty">No notifications</div>'; }
     else{ list.innerHTML=notifs.slice(0,15).map(n=>`<div class="notif-item" style="opacity:${n.read?0.6:1}"><div class="notif-item-title">${n.title}</div><div class="notif-item-body">${n.body}</div><div class="notif-item-time">${fmtDate(n.ts)} ${fmtTime(n.ts)}</div></div>`).join('') }
@@ -452,29 +428,31 @@ function toggleNotifications(){
   }
 }
 
-function getPettyCashPendingCount(){
-  const p=DB.getPetty();
-  return (p.history||[]).filter(h=>h.status==='pending_approval').length;
+async function getPettyCashPendingCount(){
+  const history=await DB.getPetty();
+  return (history||[]).filter(h=>h.status==='pending_approval').length;
 }
 
 // ──────────────────────────────────────────
 // 7. PAGE RENDERERS
 // ──────────────────────────────────────────
-function renderPage(page){
+async function renderPage(page){
   const pages={dashboard:renderDashboard,income:renderIncome,remittances:renderRemittances,
     expenses:renderExpenses,petty_cash:renderPettyCash,reports:renderReports,
     audit:renderAudit,admin:renderAdmin};
-  if(pages[page]) pages[page]();
-  else document.getElementById('pageContent').innerHTML='<div class="card"><p>Page not found.</p></div>';
+  try{
+    if(pages[page]) await pages[page]();
+    else document.getElementById('pageContent').innerHTML='<div class="card"><p>Page not found.</p></div>';
+  }catch(e){
+    document.getElementById('pageContent').innerHTML=`<div class="card"><div class="alert alert-danger"><span class="alert-icon">✕</span><span>Error loading page: ${e.message}</span></div></div>`;
+    console.error('renderPage error:',e);
+  }
 }
 
 // ── DASHBOARD ────────────────────────────
-function calcChurchBalance(){
-  const allIncome = DB.getIncome();
-  const allExpenses = DB.getExpenses();
-  const allRemittances = DB.getRemittances();
-  const cashTx = DB.getCashTransactions();
-  const petty = DB.getPetty();
+async function calcChurchBalance(){
+  const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory,pettyConfig] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getRemittances(),DB.getCashTransactions(),DB.getPetty(),DB.getPettyConfig()]);
+  const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
 
   // --- BANK BALANCE ---
   // 1. Income already in bank (bank-transfer portions of all income records)
@@ -513,21 +491,22 @@ function calcChurchBalance(){
   };
 }
 
-function renderDashboard(){
-  const income = filterByMonth(DB.getIncome());
-  const expenses = filterByMonth(DB.getExpenses());
-  const petty = DB.getPetty();
-  const settings = DB.getSettings();
-  const allIncome = DB.getIncome();
-  const allExpenses = DB.getExpenses();
+async function renderDashboard(){
+  const [allIncomeDash,allExpensesDash,pettyHistDash,settingsDash,allRemsDash,pettyConfigDash] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getPetty(),DB.getSettings(),DB.getRemittances(),DB.getPettyConfig()]);
+  const income = filterByMonth(allIncomeDash);
+  const expenses = filterByMonth(allExpensesDash);
+  const petty = { history: pettyHistDash, float: pettyConfigDash.float, max: pettyConfigDash.max };
+  const settings = settingsDash;
+  const allIncome = allIncomeDash;
+  const allExpenses = allExpensesDash;
 
   const totalIncome = income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
-  const remittances = calcRemittancesFromRecords(income);
+  const remittances = await calcRemittancesFromRecords(income);
   const netLocal = remittances.netLocal;
-  const churchBal = calcChurchBalance();
-  const pendingPetty = getPettyCashPendingCount();
-  const overdueRems = DB.getRemittances().filter(r=>r.status==='overdue').length;
+  const churchBal = await calcChurchBalance();
+  const pendingPetty = await getPettyCashPendingCount();
+  const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
 
   // Feed items
   const recentIncome = allIncome.slice(0,3);
@@ -552,7 +531,7 @@ function renderDashboard(){
   for(let i=3;i>=0;i--){
     let m=state.month-i; let y=state.year;
     if(m<0){m+=12;y--;}
-    const recs=DB.getIncome().filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    const recs=(await DB.getIncome()).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
     trendData.push({label:MONTHS[m].slice(0,3),total:recs.reduce((s,r)=>s+(r.totalCollection||0),0)});
   }
   const maxTrend=Math.max(...trendData.map(t=>t.total),1);
@@ -649,28 +628,29 @@ function renderDashboard(){
           <div class="status-row"><div><div class="status-row-label">National HQ</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalNatl)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Area</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalArea)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Pastor's Share (TG)</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalPastor)}</div></div></div>
-          <div class="status-row"><div><div class="status-row-label">Province Rebate (${Math.round((getRemRates().provinceRebate)*100)}%)</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.provinceRebate)}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">Province Rebate (20%)</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.provinceRebate)}</div></div></div>
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Net Local Retained</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(remittances.netLocal)}</div></div></div>
         </div>
       </div>
     </div>`;
 }
 
-function calcRemittancesFromRecords(records){
+async function calcRemittancesFromRecords(records){
   const combined = {};
   INCOME_TYPES.forEach(t=>{ combined[t.key]=0 });
   records.forEach(r=>{ INCOME_TYPES.forEach(t=>{ combined[t.key]+=(r[t.key]||0) }) });
-  return calcRemittances(combined);
+  return await calcRemittances(combined);
 }
 
 // ── INCOME ────────────────────────────────
-function renderIncome(){
-  const records = filterByMonth(DB.getIncome());
+async function renderIncome(){
+  const allIncomeRecs = await DB.getIncome();
+  const records = filterByMonth(allIncomeRecs);
   const sundayRecs = records.filter(r=>!r.source||r.source==='sunday_collection');
   const otherRecs  = records.filter(r=>r.source && r.source!=='sunday_collection');
   const tab = state.incomeTab||'list';
   // Compute pending records (cash not yet fully deposited) across ALL income types
-  const _cashTx = DB.getCashTransactions();
+  const _cashTx = await DB.getCashTransactions();
   const pendingCount = records.filter(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
@@ -694,21 +674,21 @@ function renderIncome(){
       <button class="tab ${tab==='summary'?'active':''}" onclick="App.setIncomeTab('summary')">Monthly Summary</button>
       <button class="tab ${tab==='all'?'active':''}" onclick="App.setIncomeTab('all')">All Records</button>
     </div>
-    ${tab==='list'?renderIncomeList(sundayRecs):tab==='other'?renderOtherIncomeList(otherRecs):tab==='summary'?renderIncomeSummary(records):renderIncomeList(DB.getIncome())}`;
+    ${await (tab==='list'?renderIncomeList(sundayRecs):tab==='other'?renderOtherIncomeList(otherRecs):tab==='summary'?renderIncomeSummary(records):renderIncomeList(allIncomeRecs))}`;
 }
 
 function setIncomeTab(t){ state.incomeTab=t; renderIncome() }
 
-function renderIncomeList(records){
+async function renderIncomeList(records){
   if(!records.length) return '<div class="card"><div class="empty-table">No income records found. Click "Sunday Collections" to add one.</div></div>';
+  const allCashTxList = await DB.getCashTransactions();
   return `<div class="card"><div class="table-wrap"><table>
     <tr><th>Date</th><th>Total Collection</th><th>Cash (Accountant)</th><th>Bank Transfer</th><th>Direct → Petty</th><th>Cash Status</th><th>Recorded By</th><th>Actions</th></tr>
     ${records.map(r=>{
       const btAmt = r.bankTransferAmount||0;
       const dpAmt = r.directPettyCash||0;
       const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
-      // determine deposit status
-      const depositedAmt = (DB.getCashTransactions().filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0));
+      const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
       const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
       const statusBadge = cashHeld===0
         ? `<span class="badge badge-info">No Cash (All Transfer)</span>`
@@ -731,14 +711,14 @@ function renderIncomeList(records){
   </table></div></div>`;
 }
 
-function renderOtherIncomeList(records){
+async function renderOtherIncomeList(records){
   if(!records.length) return '<div class="card"><div class="empty-table">No other income records found. Click "Other Income" to add one.</div></div>';
   return `<div class="card"><div class="table-wrap"><table>
     <tr><th>Date</th><th>Source Type</th><th>Donor / Notes</th><th>Amount</th><th>Payment Method</th><th>Status</th><th>Recorded By</th><th>Actions</th></tr>
     ${records.map(r=>{
       const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'};
       const isCash = r.paymentMethod==='cash';
-      const cashDep = DB.getCashTransactions().filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+      const cashDep = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
       const statusBadge = !isCash
         ? `<span class="badge badge-info">Bank Transfer</span>`
         : cashDep>=(r.totalCollection||0)
@@ -758,12 +738,12 @@ function renderOtherIncomeList(records){
   </table></div></div>`;
 }
 
-function renderIncomeSummary(records){
+async function renderIncomeSummary(records){
   const totals = {};
   INCOME_TYPES.forEach(t=>{ totals[t.key]=0 });
   records.forEach(r=>{ INCOME_TYPES.forEach(t=>{ totals[t.key]+=(r[t.key]||0) }) });
   const grand = Object.values(totals).reduce((a,b)=>a+b,0);
-  const rem = calcRemittances(totals);
+  const rem = await calcRemittances(totals);
   return `
     <div class="grid-2">
       <div class="card">
@@ -783,7 +763,7 @@ function renderIncomeSummary(records){
             <div class="status-row-amt td-red">${fmt(l.national||0)}</div>
           </div>`).join('')}
         <div class="status-row" style="background:var(--amber-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
-          <div class="status-row-label">Province Rebate (${Math.round(getRemRates().provinceRebate*100)}%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div>
+          <div class="status-row-label">Province Rebate (20%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div>
         </div>
         <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(rem.netLocal)}</div></div>
       </div>
@@ -853,7 +833,7 @@ function updateIncomeCashBreakdown(){
   if(dpEl)   dpEl.textContent   = fmt(dp);
 }
 
-function submitIncome(){
+async function submitIncome(){
   const date=document.getElementById('inc_date')?.value;
   const usher=document.getElementById('inc_usher')?.value?.trim();
   if(!date){ alert('Please select a date.'); return }
@@ -874,18 +854,17 @@ function submitIncome(){
   rec.directPettyCash    = directPettyCash;
   rec.notes=document.getElementById('inc_notes')?.value||'';
 
-  const saved = DB.addIncome(rec);
+  const saved = await DB.addIncome(rec);
 
   // If some cash was given directly to the admin officer, auto-create a petty refill
   if(directPettyCash > 0){
-    const petty = DB.getPetty();
-    const newFloat = Math.min(petty.float + directPettyCash, petty.max);
-    petty.history.unshift({ id:'RF-'+Date.now(), type:'refill', amount:directPettyCash, source:'collection_cash',
+    const pettyConfigSI = await DB.getPettyConfig();
+    const newFloat = Math.min(pettyConfigSI.float + directPettyCash, pettyConfigSI.max);
+    await DB.addPettyEntry({ type:'refill', amount:directPettyCash, source:'collection_cash',
       reference:`From Sunday collection ${fmtDate(date)}`, authorizedBy:state.user?.name,
       requestedBy:state.user?.name, status:'settled', createdAt:new Date().toISOString(),
-      purpose:`Cash from Sunday collection (${fmtDate(date)}) → Admin Officer Petty Cash`, incomeRef:saved.id });
-    petty.float = newFloat;
-    DB.savePetty(petty);
+      purpose:`Cash from Sunday collection (${fmtDate(date)}) → Admin Officer Petty Cash` });
+    await DB.savePettyConfig({ float: newFloat, max: pettyConfigSI.max });
     DB.addAudit('petty_refilled',`${fmt(directPettyCash)} from Sunday collection credited to Admin Officer petty cash`,state.user?.name);
   }
 
@@ -896,15 +875,17 @@ function submitIncome(){
   buildSidebar();
 }
 
-function viewIncome(id){
-  const r=DB.getIncome().find(x=>x.id===id);
+async function viewIncome(id){
+  const allIncVI = await DB.getIncome();
+  const r=allIncVI.find(x=>x.id===id);
   if(!r) return;
   const isSunday = !r.source||r.source==='sunday_collection';
-  const rem = isSunday ? calcRemittances(r) : null;
+  const rem = isSunday ? await calcRemittances(r) : null;
   const btAmt = r.bankTransferAmount||0;
   const dpAmt = r.directPettyCash||0;
   const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
-  const deposits = DB.getCashTransactions().filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id);
+  const allCashVI = await DB.getCashTransactions();
+  const deposits = allCashVI.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id);
   const depositedTotal = deposits.reduce((s,t)=>s+(t.amount||0),0);
   const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Sunday Collection'};
   showModal(`
@@ -927,7 +908,7 @@ function viewIncome(id){
     <hr class="divider">
     <p class="card-title">Remittances Due</p>
     ${rem.lines.map(l=>`<div class="status-row"><div class="status-row-label">${l.label} → HQ</div><div class="status-row-amt td-red">${fmt(l.national||0)}</div></div>`).join('')}
-    <div class="status-row"><div class="status-row-label">Province Rebate (${Math.round(getRemRates().provinceRebate*100)}%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div></div>
+    <div class="status-row"><div class="status-row-label">Province Rebate (20%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div></div>
     <div class="status-row" style="border-top:2px solid var(--border)"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt td-green" style="font-size:15px">${fmt(rem.netLocal)}</div></div>`:''}
     <hr class="divider">
     <div class="fs-12 text-muted">Recorded by: ${r.recordedBy||'—'} · ${isSunday?'Counted with: '+r.usher:'Donor: '+(r.donorName||'—')}</div>
@@ -936,13 +917,15 @@ function viewIncome(id){
     ${can('income')&&cashHeld>depositedTotal?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
 }
 
-function confirmDeposit(id){
-  const r = DB.getIncome().find(x=>x.id===id);
+async function confirmDeposit(id){
+  const allIncCD = await DB.getIncome();
+  const r = allIncCD.find(x=>x.id===id);
   if(!r) return;
   const btAmt = r.bankTransferAmount||0;
   const dpAmt = r.directPettyCash||0;
   const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
-  const alreadyDeposited = DB.getCashTransactions().filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+  const allCashCD = await DB.getCashTransactions();
+  const alreadyDeposited = allCashCD.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
   const remaining = Math.max(0, cashHeld - alreadyDeposited);
   const today = new Date().toISOString().split('T')[0];
   closeModal();
@@ -976,13 +959,13 @@ function confirmDeposit(id){
     </div>`);
 }
 
-function submitCashDeposit(incomeId){
+async function submitCashDeposit(incomeId){
   const amount  = parseFloat(document.getElementById('dep_amount')?.value)||0;
   const method  = document.getElementById('dep_method')?.value;
   const ref     = document.getElementById('dep_ref')?.value?.trim();
   const date    = document.getElementById('dep_date')?.value;
   if(!amount||!ref||!date){ alert('Please fill all required fields.'); return }
-  DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
+  await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
   DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
   DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank (Ref: ${ref})`,'success');
   closeModal();
@@ -990,9 +973,9 @@ function submitCashDeposit(incomeId){
   renderIncome();
 }
 
-function confirmBulkDeposit(){
-  const allIncome = filterByMonth(DB.getIncome());
-  const cashTx = DB.getCashTransactions();
+async function confirmBulkDeposit(){
+  const allIncome = filterByMonth(await DB.getIncome());
+  const cashTx = await DB.getCashTransactions();
   const pending = allIncome.map(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
@@ -1043,7 +1026,7 @@ function confirmBulkDeposit(){
     </div>`);
 }
 
-function submitBulkDeposit(){
+async function submitBulkDeposit(){
   const pending = state._bulkDepositPending || [];
   const method  = document.getElementById('bulk_dep_method')?.value;
   const ref     = document.getElementById('bulk_dep_ref')?.value?.trim();
@@ -1051,9 +1034,9 @@ function submitBulkDeposit(){
   if(!ref||!date){ alert('Please fill all required fields.'); return }
   if(!pending.length){ closeModal(); return }
   const totalAmount = pending.reduce((s,p)=>s+p.remaining,0);
-  pending.forEach(p=>{
-    DB.addCashTransaction({ type:'cash_deposit', incomeRef:p.id, amount:p.remaining, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
-  });
+  for(const p of pending){
+    await DB.addCashTransaction({ type:'cash_deposit', incomeRef:p.id, amount:p.remaining, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
+  }
   DB.addAudit('cash_deposited',`Bulk cash deposit: ${fmt(totalAmount)} across ${pending.length} record(s) via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
   DB.addNotification('Bulk Cash Deposited',`${fmt(totalAmount)} deposited to bank (${pending.length} records, Ref: ${ref})`,'success');
   delete state._bulkDepositPending;
@@ -1104,7 +1087,7 @@ function showOtherIncomeForm(){
     </div>`);
 }
 
-function submitOtherIncome(){
+async function submitOtherIncome(){
   const date       = document.getElementById('oi_date')?.value;
   const source     = document.getElementById('oi_source')?.value;
   const donorName  = document.getElementById('oi_donor')?.value?.trim();
@@ -1130,7 +1113,7 @@ function submitOtherIncome(){
   }
   // local_only donations have no remittance split; they appear in income totals but not in remittance calculations
 
-  DB.addIncome(rec);
+  await DB.addIncome(rec);
   DB.addNotification('Other Income Recorded',`${fmt(amount)} recorded (${source}) from ${donorName||'unnamed'}`,'success');
   closeModal();
   showAlert(`${fmt(amount)} recorded as ${OTHER_INCOME_SOURCES.find(s=>s.key===source)?.label||source}. Method: ${method.replace('_',' ')}.`,'success');
@@ -1139,15 +1122,16 @@ function submitOtherIncome(){
 }
 
 // ── REMITTANCES ───────────────────────────
-function renderRemittances(){
-  const income = filterByMonth(DB.getIncome());
-  const rem = calcRemittancesFromRecords(income);
-  const paidRems = filterByMonth(DB.getRemittances());
-  const settings = DB.getSettings();
+async function renderRemittances(){
+  const income = filterByMonth(await DB.getIncome());
+  const rem = await calcRemittancesFromRecords(income);
+  const [allRemsRR, settingsRR] = await Promise.all([DB.getRemittances(), DB.getSettings()]);
+  const paidRems = filterByMonth(allRemsRR);
+  const settings = settingsRR;
   const quotas = settings.quotas||DEFAULT_QUOTAS;
   const totalPaid = paidRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
 
-  const rr = getRemRates();
+  const rr = await getRemRates();
   const lines = [
     ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0, type:'percentage' })),
     { label:`Area (Thanksgiving ${Math.round(rr.tgArea*100)}%)`, amount:rem.totalArea, type:'percentage' },
@@ -1221,14 +1205,14 @@ function renderRemittances(){
     </div>`;
 }
 
-function markRemittancePaid(){
-  const income = filterByMonth(DB.getIncome());
-  const rem = calcRemittancesFromRecords(income);
-  const settings = DB.getSettings();
+async function markRemittancePaid(){
+  const income = filterByMonth(await DB.getIncome());
+  const rem = await calcRemittancesFromRecords(income);
+  const settings = await DB.getSettings();
   const quotas = settings.quotas||DEFAULT_QUOTAS;
   const lines=[
     ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0 })),
-    { label:`Province Rebate (${Math.round(getRemRates().provinceRebate*100)}% of local)`, amount:rem.provinceRebate },
+    { label:`Province Rebate (20% of local)`, amount:rem.provinceRebate },
     ...Object.entries(quotas).map(([k,v])=>({label:k.replace(/([A-Z])/g,' $1').replace(/^./,s=>s.toUpperCase()), amount:v}))
   ].filter(l=>l.amount>0);
 
@@ -1256,16 +1240,14 @@ function setRemAmt(){
   if(amt) document.getElementById('rem_amount').value=amt;
 }
 
-function submitRemittance(){
+async function submitRemittance(){
   const label=document.getElementById('rem_label')?.value;
   const amount=parseFloat(document.getElementById('rem_amount')?.value)||0;
   const date=document.getElementById('rem_date')?.value;
   const reference=document.getElementById('rem_ref')?.value;
   const auth=document.getElementById('rem_auth')?.value;
   if(!label||!amount||!date){ alert('Please fill all required fields.'); return }
-  const arr=DB.getRemittances();
-  arr.unshift({ id:'REM-'+Date.now(), label, amount, paidDate:date, reference, authorizedBy:auth, status:'paid', createdAt:new Date().toISOString() });
-  DB.saveRemittances(arr);
+  await DB.addRemittance({ label, amount, paidDate:date, reference, authorizedBy:auth, status:'paid' });
   DB.addAudit('remittance_paid',`Remittance paid: ${label} — ${fmt(amount)}`,state.user?.name);
   DB.addNotification('Remittance Recorded',`${label}: ${fmt(amount)} paid on ${fmtDate(date)}`,'success');
   closeModal();
@@ -1274,8 +1256,8 @@ function submitRemittance(){
 }
 
 // ── EXPENSES ──────────────────────────────
-function renderExpenses(){
-  const expenses=filterByMonth(DB.getExpenses());
+async function renderExpenses(){
+  const expenses=filterByMonth(await DB.getExpenses());
   const total=expenses.reduce((s,r)=>s+(r.amount||0),0);
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
@@ -1391,7 +1373,7 @@ function showExpenseForm(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitExpense()">Save Expense</button></div>`);
 }
 
-function submitExpense(){
+async function submitExpense(){
   const date=document.getElementById('exp_date')?.value;
   const category=document.getElementById('exp_cat')?.value;
   const subCategory=document.getElementById('exp_subcat')?.value;
@@ -1406,29 +1388,39 @@ function submitExpense(){
   const fileEl = document.getElementById('exp_receipt_file');
   const file = fileEl?.files?.[0];
 
-  function saveExpenseRecord(receiptDataUrl, receiptFileName){
-    DB.addExpense({ date, category, subCategory, description: description || subCategory, amount,
-      receiptNo: document.getElementById('exp_receipt')?.value,
-      receiptImage: receiptDataUrl||null, receiptFileName: receiptFileName||null,
-      paymentMethod: document.getElementById('exp_method')?.value,
-      notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
-    closeModal();
-    showAlert('Expense logged successfully!','success');
-    renderExpenses();
+  async function saveExpenseRecord(receiptDataUrl, receiptFileName){
+    const paymentMethod = document.getElementById('exp_method')?.value || 'cash';
+    try {
+      await DB.addExpense({ date, category, subCategory, description: description || subCategory, amount,
+        receiptNo: document.getElementById('exp_receipt')?.value,
+        receiptImage: receiptDataUrl||null, receiptFileName: receiptFileName||null,
+        paymentMethod,
+        notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
+      if(paymentMethod === 'petty_cash'){
+        const pettyCfg = await DB.getPettyConfig();
+        await DB.savePettyConfig({ float: Math.max(0, pettyCfg.float - amount), max: pettyCfg.max });
+      }
+      closeModal();
+      showAlert('Expense logged successfully!','success');
+      await renderExpenses();
+    } catch(err) {
+      showAlert(`Failed to save expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
+    }
   }
 
   if(file){
     const reader = new FileReader();
-    reader.onload = ev => saveExpenseRecord(ev.target.result, file.name);
-    reader.onerror = () => { showAlert('Failed to read receipt file. Saving expense without image.','warn'); saveExpenseRecord(null, null); };
+    reader.onload = async ev => { await saveExpenseRecord(ev.target.result, file.name); };
+    reader.onerror = async () => { showAlert('Failed to read receipt file. Saving expense without image.','warn'); await saveExpenseRecord(null, null); };
     reader.readAsDataURL(file);
   } else {
-    saveExpenseRecord(null, null);
+    await saveExpenseRecord(null, null);
   }
 }
 
-function viewExpenseReceipt(id){
-  const exp = DB.getExpenses().find(e=>e.id===id);
+async function viewExpenseReceipt(id){
+  const allExpVE = await DB.getExpenses();
+  const exp = allExpVE.find(e=>e.id===id);
   if(!exp||!exp.receiptImage) return;
   const isImg = exp.receiptImage.startsWith('data:image');
   showModal(`
@@ -1461,7 +1453,7 @@ function showBankWithdrawal(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankWithdrawal()">Record Withdrawal</button></div>`);
 }
 
-function submitBankWithdrawal(){
+async function submitBankWithdrawal(){
   const date        = document.getElementById('wd_date')?.value;
   const amount      = parseFloat(document.getElementById('wd_amt')?.value)||0;
   const destination = document.getElementById('wd_dest')?.value||'accountant_cash';
@@ -1470,17 +1462,16 @@ function submitBankWithdrawal(){
   const auth        = document.getElementById('wd_auth')?.value;
   if(!date||!amount||!description){ alert('Please fill all required fields.'); return }
 
-  DB.addCashTransaction({ type:'withdrawal', destination, date, amount, description, reference, authorizedBy:auth, recordedBy:state.user?.name });
+  await DB.addCashTransaction({ type:'withdrawal', destination, date, amount, description, reference, authorizedBy:auth, recordedBy:state.user?.name });
 
   // If withdrawn to admin officer petty cash, auto-create a petty refill
   if(destination === 'admin_petty_cash'){
-    const petty = DB.getPetty();
-    const newFloat = Math.min(petty.float + amount, petty.max);
-    petty.history.unshift({ id:'RF-'+Date.now(), type:'refill', amount, source:'bank_withdrawal',
+    const pettyConfigBW = await DB.getPettyConfig();
+    const newFloat = Math.min(pettyConfigBW.float + amount, pettyConfigBW.max);
+    await DB.addPettyEntry({ type:'refill', amount, source:'bank_withdrawal',
       reference, authorizedBy:auth, requestedBy:state.user?.name, status:'settled',
       createdAt:new Date().toISOString(), purpose:`Bank withdrawal → Admin Officer Petty Cash: ${description}` });
-    petty.float = newFloat;
-    DB.savePetty(petty);
+    await DB.savePettyConfig({ float: newFloat, max: pettyConfigBW.max });
     DB.addAudit('petty_refilled',`${fmt(amount)} from bank withdrawal credited to Admin Officer petty cash (${description})`,state.user?.name);
     closeModal();
     showAlert(`${fmt(amount)} withdrawn from bank and credited to Admin Officer petty cash. New float: ${fmt(newFloat)}.`,'success');
@@ -1507,8 +1498,9 @@ function isReceiptOverdue(req){
   return hrs>48;
 }
 
-function renderPettyCash(){
-  const petty=DB.getPetty();
+async function renderPettyCash(){
+  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
   const history=petty.history||[];
   // BUG FIX 1: was passing plain object to filterByMonth — now uses dedicated helper
   const monthHistory=pettyMonthHistory(history);
@@ -1646,8 +1638,9 @@ function renderPettyCash(){
     </div>`;
 }
 
-function showPettyRequest(){
-  const petty=DB.getPetty();
+async function showPettyRequest(){
+  const pettyConfig = await DB.getPettyConfig();
+  const petty = pettyConfig;
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">💳 Submit Petty Cash Request</div>
@@ -1669,12 +1662,13 @@ function showPettyRequest(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitPettyRequest()">Submit Request</button></div>`);
 }
 
-function submitPettyRequest(){
+async function submitPettyRequest(){
   const purpose=document.getElementById('pet_purpose')?.value?.trim();
   const amount=parseFloat(document.getElementById('pet_amt')?.value)||0;
   const category=document.getElementById('pet_cat')?.value;
   if(!purpose||!amount||!category){ alert('Please fill in the purpose, amount, and category.'); return }
-  const petty=DB.getPetty();
+  const [pettyHistGPCR, pettyConfigGPCR] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const petty = { history: pettyHistGPCR, float: pettyConfigGPCR.float, max: pettyConfigGPCR.max };
   if(amount>petty.float){
     if(!confirm(`The requested amount (${fmt(amount)}) exceeds the current float (${fmt(petty.float)}). Submit anyway for the Accountant to review?`)) return;
   }
@@ -1685,8 +1679,7 @@ function submitPettyRequest(){
     requestedBy:state.user?.name, status:'pending_approval',
     createdAt:new Date().toISOString()
   };
-  petty.history.unshift(req);
-  DB.savePetty(petty);
+  await DB.addPettyEntry(req);
   DB.addAudit('petty_requested',`Petty cash requested: ${purpose} — ${fmt(amount)}`,state.user?.name);
   DB.addNotification('Petty Cash Request',`${state.user?.name} requested ${fmt(amount)} for "${purpose}". Awaiting approval.`,'warn');
   closeModal();
@@ -1695,20 +1688,17 @@ function submitPettyRequest(){
   buildSidebar();
 }
 
-function approvePetty(id){
-  const petty=DB.getPetty();
-  const req=petty.history.find(h=>h.id===id);
+async function approvePetty(id){
+  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const req=pettyHistory.find(h=>h.id===id);
   if(!req) return;
-  if(req.amount>petty.float){
-    alert(`Cannot approve: Insufficient float.\nRequired: ${fmt(req.amount)}\nAvailable: ${fmt(petty.float)}\n\nPlease refill the float first, then approve this request.`);
+  if(req.amount>pettyConfig.float){
+    alert(`Cannot approve: Insufficient float.\nRequired: ${fmt(req.amount)}\nAvailable: ${fmt(pettyConfig.float)}\n\nPlease refill the float first, then approve this request.`);
     return;
   }
-  // BUG FIX 5 & NEW: record approver name and approval timestamp explicitly
-  req.status='approved';
-  req.approvedBy=state.user?.name;
-  req.approvedAt=new Date().toISOString();
-  petty.float-=req.amount;
-  DB.savePetty(petty);
+  const approvedAt=new Date().toISOString();
+  await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
+  await DB.savePettyConfig({ float: pettyConfig.float - req.amount, max: pettyConfig.max });
   DB.addAudit('petty_approved',`Petty cash approved: "${req.purpose}" — ${fmt(req.amount)} (approved by ${state.user?.name})`,state.user?.name);
   DB.addNotification('Petty Cash Approved',`"${req.purpose}" — ${fmt(req.amount)} approved by ${state.user?.name}. Receipt due within 48 hours.`,'success');
   showAlert(`Approved. ${fmt(req.amount)} deducted from float. Remind ${req.requestedBy} to return receipt within 48 hours.`,'success');
@@ -1716,18 +1706,15 @@ function approvePetty(id){
   buildSidebar();
 }
 
-function rejectPetty(id){
+async function rejectPetty(id){
   const reason=prompt('Reason for rejection (the requester will see this):');
-  const petty=DB.getPetty();
-  const req=petty.history.find(h=>h.id===id);
+  const pettyHistory=await DB.getPetty();
+  const req=pettyHistory.find(h=>h.id===id);
   if(!req) return;
-  req.status='rejected';
-  req.rejectedBy=state.user?.name;
-  req.rejectionReason=reason||'No reason given';
-  req.rejectedAt=new Date().toISOString();
-  DB.savePetty(petty);
-  DB.addAudit('petty_rejected',`Petty cash rejected: "${req.purpose}" — Reason: ${req.rejectionReason}`,state.user?.name);
-  DB.addNotification('Petty Cash Rejected',`"${req.purpose}" was rejected by ${state.user?.name}. Reason: ${req.rejectionReason}`,'warn');
+  const rejectionReason=reason||'No reason given';
+  await DB.updatePettyEntry(id, { status:'rejected', rejectedBy:state.user?.name, rejectionReason, rejectedAt:new Date().toISOString() });
+  DB.addAudit('petty_rejected',`Petty cash rejected: "${req.purpose}" — Reason: ${rejectionReason}`,state.user?.name);
+  DB.addNotification('Petty Cash Rejected',`"${req.purpose}" was rejected by ${state.user?.name}. Reason: ${rejectionReason}`,'warn');
   showAlert('Request rejected and requester notified.','warn');
   renderPettyCash();
   buildSidebar();
@@ -1747,11 +1734,11 @@ function submitPettyReceipt(id){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.confirmPettyReceipt('${id}')">Submit & Settle</button></div>`);
 }
 
-function confirmPettyReceipt(id){
+async function confirmPettyReceipt(id){
   const no=document.getElementById('rc_no')?.value?.trim();
   if(!no){ alert('Please enter the receipt number.'); return }
-  const petty=DB.getPetty();
-  const req=petty.history.find(h=>h.id===id);
+  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const req=pettyHistory.find(h=>h.id===id);
   if(!req){ closeModal(); return }
 
   const actualAmt=parseFloat(document.getElementById('rc_amt')?.value)||req.amount;
@@ -1759,25 +1746,21 @@ function confirmPettyReceipt(id){
   const notes=document.getElementById('rc_notes')?.value||'';
 
   // Mark petty cash item as settled
-  req.receiptNo=no;
-  req.status='settled';
-  req.settledAt=new Date().toISOString();
-  req.settledBy=state.user?.name;
-  req.actualAmount=actualAmt;
-  req.vendor=vendor;
+  const updateData = { receiptNo:no, status:'settled', settledAt:new Date().toISOString(), settledBy:state.user?.name, actualAmount:actualAmt, vendor };
 
-  // BUG FIX 2 CORE: if actual amount differs from approved, return difference to float
+  // If actual amount differs from approved, return difference to float
+  let changeReturned=0;
   if(actualAmt<req.amount){
-    const change=req.amount-actualAmt;
-    petty.float+=change; // return unspent change to float
-    req.changeReturned=change;
-    DB.addNotification('Petty Cash Change Returned',`${fmt(change)} returned to float from "${req.purpose}" (spent ${fmt(actualAmt)} of approved ${fmt(req.amount)}).`,'info');
+    changeReturned=req.amount-actualAmt;
+    updateData.changeReturned=changeReturned;
+    await DB.savePettyConfig({ float: pettyConfig.float + changeReturned, max: pettyConfig.max });
+    DB.addNotification('Petty Cash Change Returned',`${fmt(changeReturned)} returned to float from "${req.purpose}" (spent ${fmt(actualAmt)} of approved ${fmt(req.amount)}).`,'info');
   }
 
-  DB.savePetty(petty);
+  await DB.updatePettyEntry(id, updateData);
 
-  // BUG FIX 2 CORE: auto-create expense record so it shows in expense module & reports
-  DB.addExpense({
+  // Auto-create expense record so it shows in expense module & reports
+  await DB.addExpense({
     date:new Date().toISOString().split('T')[0],
     category:req.category||'power',
     description:req.purpose+(vendor?` — ${vendor}`:''),
@@ -1792,12 +1775,13 @@ function confirmPettyReceipt(id){
 
   DB.addAudit('petty_settled',`Petty cash settled: "${req.purpose}" — ${fmt(actualAmt)}, Receipt: ${no}. Expense record auto-created.`,state.user?.name);
   closeModal();
-  showAlert(`Receipt submitted. ${fmt(actualAmt)} recorded as expense.${req.changeReturned?` ${fmt(req.changeReturned)} change returned to float.`:''}`, 'success');
+  showAlert(`Receipt submitted. ${fmt(actualAmt)} recorded as expense.${changeReturned?` ${fmt(changeReturned)} change returned to float.`:''}`, 'success');
   renderPettyCash();
 }
 
-function showPettyRefill(){
-  const petty=DB.getPetty();
+async function showPettyRefill(){
+  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
   // Show amount of settled-but-not-yet-refilled receipts as a suggested refill amount
   const settled=pettyMonthHistory(petty.history).filter(h=>h.status==='settled'&&h.type!=='refill');
   const settledTotal=settled.reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
@@ -1823,30 +1807,29 @@ function showPettyRefill(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitRefill()">Refill Float</button></div>`);
 }
 
-function submitRefill(){
+async function submitRefill(){
   const amt=parseFloat(document.getElementById('ref_amt')?.value)||0;
   const ref=document.getElementById('ref_ref')?.value?.trim();
   const auth=document.getElementById('ref_auth')?.value?.trim();
   if(!amt||!ref||!auth){ alert('Please fill in all required fields: amount, bank reference, and authorizing signatories.'); return }
-  const petty=DB.getPetty();
-  const spaceAvailable=petty.max-petty.float;
-  // BUG FIX 3: warn user clearly if refill is capped — don't silently shortchange them
+  const pettyConfig=await DB.getPettyConfig();
+  const spaceAvailable=pettyConfig.max-pettyConfig.float;
   if(amt>spaceAvailable){
-    if(!confirm(`The entered amount (${fmt(amt)}) exceeds available float space (${fmt(spaceAvailable)}).\n\nOnly ${fmt(spaceAvailable)} will be added to bring the float to its maximum of ${fmt(petty.max)}.\n\nProceed?`)) return;
+    if(!confirm(`The entered amount (${fmt(amt)}) exceeds available float space (${fmt(spaceAvailable)}).\n\nOnly ${fmt(spaceAvailable)} will be added to bring the float to its maximum of ${fmt(pettyConfig.max)}.\n\nProceed?`)) return;
   }
   const actualAdded=Math.min(amt,spaceAvailable);
-  petty.float+=actualAdded;
-  petty.history.unshift({
-    id:'RF-'+Date.now(), type:'refill', amount:actualAdded,
-    requestedAmount:amt, reference:ref, authorizedBy:auth,
+  const newFloat=pettyConfig.float+actualAdded;
+  await DB.addPettyEntry({
+    type:'refill', amount:actualAdded,
     requestedBy:state.user?.name, status:'settled',
-    createdAt:new Date().toISOString(), purpose:'Float Refill'
+    createdAt:new Date().toISOString(), purpose:'Float Refill',
+    reference:ref, authorizedBy:auth
   });
-  DB.savePetty(petty);
+  await DB.savePettyConfig({ float: newFloat, max: pettyConfig.max });
   DB.addAudit('petty_refilled',`Float refilled: ${fmt(actualAdded)} (authorized by ${auth}, ref: ${ref})`,state.user?.name);
-  DB.addNotification('Float Refilled',`Petty cash float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float)}. Authorized by: ${auth}.`,'success');
+  DB.addNotification('Float Refilled',`Petty cash float refilled by ${fmt(actualAdded)}. New balance: ${fmt(newFloat)}. Authorized by: ${auth}.`,'success');
   closeModal();
-  showAlert(`Float refilled by ${fmt(actualAdded)}. New balance: ${fmt(petty.float)}.${actualAdded<amt?` Note: only ${fmt(actualAdded)} added (float max reached).`:''}`, 'success');
+  showAlert(`Float refilled by ${fmt(actualAdded)}. New balance: ${fmt(newFloat)}.${actualAdded<amt?` Note: only ${fmt(actualAdded)} added (float max reached).`:''}`, 'success');
   renderPettyCash();
 }
 
@@ -1865,15 +1848,15 @@ function renderReports(){
     <div id="reportOutput"></div>`;
 }
 
-function generateMonthlyReport(){
-  const income=filterByMonth(DB.getIncome());
-  const expenses=filterByMonth(DB.getExpenses());
-  const paidRems=filterByMonth(DB.getRemittances());
-  const rem=calcRemittancesFromRecords(income);
+async function generateMonthlyReport(){
+  const income=filterByMonth(await DB.getIncome());
+  const expenses=filterByMonth(await DB.getExpenses());
+  const paidRems=filterByMonth(await DB.getRemittances());
+  const rem=await calcRemittancesFromRecords(income);
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
   const totalRem=paidRems.reduce((s,r)=>s+(r.amount||0),0);
-  const settings=DB.getSettings();
+  const settings=await DB.getSettings();
 
   const html=`
     <div class="card" id="printReport">
@@ -1899,7 +1882,7 @@ function generateMonthlyReport(){
       <div class="table-wrap"><table class="print-table">
         <tr><th>Description</th><th class="td-right">Amount Due</th></tr>
         ${rem.lines.map(l=>`<tr><td>${l.label}</td><td class="td-right">${fmt(l.national||0)}</td></tr>`).join('')}
-        <tr><td>Province Rebate (${Math.round(getRemRates().provinceRebate*100)}%)</td><td class="td-right">${fmt(rem.provinceRebate)}</td></tr>
+        <tr><td>Province Rebate (20%)</td><td class="td-right">${fmt(rem.provinceRebate)}</td></tr>
         <tr style="font-weight:700"><td>TOTAL REMITTANCES</td><td class="td-right">${fmt(rem.totalNatl+rem.totalArea+rem.provinceRebate)}</td></tr>
         <tr style="font-weight:700;color:var(--primary)"><td>NET LOCAL RETAINED</td><td class="td-right">${fmt(rem.netLocal)}</td></tr>
       </table></div>
@@ -1919,8 +1902,8 @@ function generateMonthlyReport(){
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
 }
 
-function generateWeeklyReport(){
-  const income=filterByMonth(DB.getIncome());
+async function generateWeeklyReport(){
+  const income=filterByMonth(await DB.getIncome());
   document.getElementById('reportOutput').innerHTML=`
     <div class="card">
       <div class="card-header"><span class="card-title">Weekly Collection Summary — ${monthLabel()}</span><button class="btn btn-sm btn-primary no-print" onclick="window.print()">🖨 Print</button></div>
@@ -1934,15 +1917,15 @@ function generateWeeklyReport(){
 
 function generateRemittanceReport(){ renderRemittances(); showAlert('Remittance report displayed above.','info') }
 
-function generateQuarterlyReport(){
+async function generateQuarterlyReport(){
   let rows='';
   for(let i=2;i>=0;i--){
     let m=state.month-i; let y=state.year; if(m<0){m+=12;y--;}
-    const recs=DB.getIncome().filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
-    const exps=DB.getExpenses().filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    const recs=(await DB.getIncome()).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    const exps=(await DB.getExpenses()).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
     const total=recs.reduce((s,r)=>s+(r.totalCollection||0),0);
     const exp=exps.reduce((s,e)=>s+(e.amount||0),0);
-    const rem=calcRemittancesFromRecords(recs);
+    const rem=await calcRemittancesFromRecords(recs);
     rows+=`<tr><td>${MONTHS[m]} ${y}</td><td class="td-green">${fmt(total)}</td><td class="td-red">${fmt(rem.totalNatl+rem.totalArea+rem.provinceRebate)}</td><td class="td-amber">${fmt(exp)}</td><td class="td-bold">${fmt(rem.netLocal-exp)}</td></tr>`;
   }
   document.getElementById('reportOutput').innerHTML=`
@@ -1956,8 +1939,8 @@ function generateQuarterlyReport(){
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
 }
 
-function generateExpenseReport(){
-  const expenses=filterByMonth(DB.getExpenses());
+async function generateExpenseReport(){
+  const expenses=filterByMonth(await DB.getExpenses());
   const byCat={};
   EXPENSE_CATS.forEach(c=>{ byCat[c.key]={ label:c.label, icon:c.icon, total:0, count:0 } });
   expenses.forEach(e=>{ if(byCat[e.category]){ byCat[e.category].total+=e.amount||0; byCat[e.category].count++ } });
@@ -1974,10 +1957,10 @@ function generateExpenseReport(){
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
 }
 
-function generatePettyCashReport(){
-  const petty=DB.getPetty();
+async function generatePettyCashReport(){
+  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
   // BUG FIX: use pettyMonthHistory() helper — old code was passing a plain object to filterByMonth(), returning ALL history instead of current month
-  const history=pettyMonthHistory(petty.history||[]);
+  const history=pettyMonthHistory(pettyHistory);
   const disbursed=history.filter(h=>h.type!=='refill'&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
   const settled=history.filter(h=>h.status==='settled'&&h.type!=='refill').reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
   const refilled=history.filter(h=>h.type==='refill').reduce((s,h)=>s+(h.amount||0),0);
@@ -1986,7 +1969,7 @@ function generatePettyCashReport(){
     <div class="card">
       <div class="card-header"><span class="card-title">Petty Cash Reconciliation — ${monthLabel()}</span><button class="btn btn-sm btn-primary" onclick="window.print()">🖨 Print</button></div>
       <div class="kpi-grid">
-        <div class="kpi"><div class="kpi-label">Current Float Balance</div><div class="kpi-val">${fmt(petty.float)}</div></div>
+        <div class="kpi"><div class="kpi-label">Current Float Balance</div><div class="kpi-val">${fmt(pettyConfig.float)}</div></div>
         <div class="kpi"><div class="kpi-label">Disbursed This Month</div><div class="kpi-val td-red">${fmt(disbursed)}</div></div>
         <div class="kpi"><div class="kpi-label">Receipts Settled</div><div class="kpi-val td-green">${fmt(settled)}</div></div>
         <div class="kpi"><div class="kpi-label">Unaccounted (No Receipt)</div><div class="kpi-val ${'td-amber'}">${fmt(unaccounted)}</div></div>
@@ -2021,8 +2004,8 @@ function generatePettyCashReport(){
 }
 
 // ── AUDIT LOG ─────────────────────────────
-function renderAudit(){
-  const log=DB.getAudit().slice(0,100);
+async function renderAudit(){
+  const log=(await DB.getAudit()).slice(0,100);
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header"><div class="page-title">Audit Log</div><div class="page-sub">Last 100 actions in the system</div></div>
     <div class="card"><div class="table-wrap"><table>
@@ -2032,18 +2015,19 @@ function renderAudit(){
 }
 
 // ── IT ADMIN ──────────────────────────────
-function renderAdmin(){
+async function renderAdmin(){
   if(state.user?.role!=='it_admin'){ document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--danger)">Access denied. IT Administrators only.</p></div>'; return }
-  const users=DB.getUsers();
-  const settings=DB.getSettings();
+  const users=await DB.getUsers();
+  const settings=await DB.getSettings();
+  const auditLog=await DB.getAudit();
   const tab=state.adminTab||'users';
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header"><div class="page-title">IT Admin Panel</div><div class="page-sub">System management — full access</div></div>
     <div class="admin-grid" style="margin-bottom:1rem">
       <div class="admin-stat"><div class="admin-stat-val">${users.length}</div><div class="admin-stat-label">Total Users</div></div>
-      <div class="admin-stat"><div class="admin-stat-val">${DB.getIncome().length}</div><div class="admin-stat-label">Income Records</div></div>
-      <div class="admin-stat"><div class="admin-stat-val">${DB.getAudit().length}</div><div class="admin-stat-label">Audit Events</div></div>
+      <div class="admin-stat"><div class="admin-stat-val">${(await DB.getIncome()).length}</div><div class="admin-stat-label">Income Records</div></div>
+      <div class="admin-stat"><div class="admin-stat-val">${auditLog.length}</div><div class="admin-stat-label">Audit Events</div></div>
     </div>
     <div class="tabs">
       <button class="tab ${tab==='users'?'active':''}" onclick="App.setAdminTab('users')">Users & Roles</button>
@@ -2131,8 +2115,8 @@ function renderAdminRates(s){
   </div>`;
 }
 
-function saveRates(){
-  const s = DB.getSettings();
+async function saveRates(){
+  const s = await DB.getSettings();
   const r = s.remittanceRates || {};
   const pct2dec = id => { const el=document.getElementById(id); return el ? parseFloat(el.value||0)/100 : null; };
   INCOME_TYPES.filter(t=>!t.special).forEach(t=>{
@@ -2147,7 +2131,7 @@ function saveRates(){
     if(v!==null) r[k] = v;
   });
   s.remittanceRates = r;
-  DB.saveSettings(s);
+  await DB.saveSettings(s);
   showAlert('Remittance rates updated successfully!','success');
 }
 
@@ -2165,21 +2149,21 @@ function renderAdminBackup(){
   </div>`;
 }
 
-function saveSettings(){
-  const s=DB.getSettings();
+async function saveSettings(){
+  const s=await DB.getSettings();
   s.churchName=document.getElementById('set_name')?.value;
   s.bankName=document.getElementById('set_bank')?.value;
   s.accountNo=document.getElementById('set_acct')?.value;
   s.pettyMax=parseFloat(document.getElementById('set_petty')?.value)||50000;
-  DB.saveSettings(s);
+  await DB.saveSettings(s);
   showAlert('Settings saved!','success');
 }
 
-function saveQuotas(){
-  const s=DB.getSettings();
+async function saveQuotas(){
+  const s=await DB.getSettings();
   const q=s.quotas||{};
   Object.keys(DEFAULT_QUOTAS).forEach(k=>{ const el=document.getElementById('q_'+k); if(el) q[k]=parseFloat(el.value)||0 });
-  s.quotas=q; DB.saveSettings(s);
+  s.quotas=q; await DB.saveSettings(s);
   showAlert('Monthly quotas updated!','success');
 }
 
@@ -2196,24 +2180,22 @@ function showAddUser(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.addUser()">Add User</button></div>`);
 }
 
-function addUser(){
+async function addUser(){
   const name=document.getElementById('nu_name')?.value?.trim();
   const role=document.getElementById('nu_role')?.value;
   const email=document.getElementById('nu_email')?.value;
   const pin=document.getElementById('nu_pin')?.value;
   if(!name||!role||!pin||pin.length<4){ alert('Please fill name, role, and PIN (min 4 digits).'); return }
-  const users=DB.getUsers();
-  users.push({ id:'u'+Date.now(), name, role, email, pin });
-  DB.save(DB.KEYS.users, users);
+  await DB.addUser({ name, role, email, pin });
   DB.addAudit('user_added',`New user added: ${name} (${role})`,state.user?.name);
   closeModal();
   showAlert(`User ${name} added successfully!`,'success');
   renderAdmin();
 }
 
-function editUser(id){
-  const users=DB.getUsers();
-  const u=users.find(x=>x.id===id);
+async function editUser(id){
+  const usersEU=await DB.getUsers();
+  const u=usersEU.find(x=>x.id===id);
   if(!u) return;
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -2227,34 +2209,28 @@ function editUser(id){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.updateUser('${id}')">Update</button></div>`);
 }
 
-function updateUser(id){
-  const users=DB.getUsers();
-  const idx=users.findIndex(u=>u.id===id);
-  if(idx<0) return;
-  users[idx].name=document.getElementById('eu_name')?.value||users[idx].name;
-  users[idx].role=document.getElementById('eu_role')?.value||users[idx].role;
-  users[idx].email=document.getElementById('eu_email')?.value||users[idx].email;
-  const newPin=document.getElementById('eu_pin')?.value;
-  if(newPin&&newPin.length>=4) users[idx].pin=newPin;
-  DB.save(DB.KEYS.users, users);
-  DB.addAudit('user_updated',`User updated: ${users[idx].name}`,state.user?.name);
+async function updateUser(id){
+  const updateData = { name:document.getElementById('eu_name')?.value, role:document.getElementById('eu_role')?.value, email:document.getElementById('eu_email')?.value, pin:document.getElementById('eu_pin')?.value };
+  await DB.updateUser(id, updateData);
+  DB.addAudit('user_updated',`User updated: ${updateData.name}`,state.user?.name);
   closeModal();
   showAlert('User updated!','success');
   renderAdmin();
 }
 
-function deleteUser(id){
-  const users=DB.getUsers();
-  const u=users.find(x=>x.id===id);
+async function deleteUser(id){
+  const usersDelU=await DB.getUsers();
+  const u=usersDelU.find(x=>x.id===id);
   if(!u||!confirm(`Delete user "${u.name}"? This cannot be undone.`)) return;
-  DB.save(DB.KEYS.users, users.filter(x=>x.id!==id));
+  await DB.deleteUser(id);
   DB.addAudit('user_deleted',`User deleted: ${u.name}`,state.user?.name);
   showAlert('User deleted.','warn');
   renderAdmin();
 }
 
-function exportData(){
-  const data={ users:DB.getUsers(), income:DB.getIncome(), remittances:DB.getRemittances(), expenses:DB.getExpenses(), petty:DB.getPetty(), audit:DB.getAudit(), settings:DB.getSettings(), cashTransactions:DB.getCashTransactions(), exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
+async function exportData(){
+  const [users,income,remittances,expenses,petty,auditLog,settings,cashTransactions] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(),DB.getPetty(),DB.getAudit(),DB.getSettings(),DB.getCashTransactions()]);
+  const data={ users,income,remittances,expenses,petty,audit:auditLog,settings,cashTransactions, exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   a.download=`rccg-backup-${new Date().toISOString().split('T')[0]}.json`;
@@ -2297,11 +2273,11 @@ function clearAllData(){
 }
 
 // ── KPSC ALERT ────────────────────────────
-function showKPSCAlert(){
-  const income=filterByMonth(DB.getIncome());
+async function showKPSCAlert(){
+  const income=filterByMonth(await DB.getIncome());
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
-  const rem=calcRemittancesFromRecords(income);
-  const expenses=filterByMonth(DB.getExpenses());
+  const rem=await calcRemittancesFromRecords(income);
+  const expenses=filterByMonth(await DB.getExpenses());
   const totalExp=expenses.reduce((s,e)=>s+(e.amount||0),0);
   const balance=totalIncome-rem.totalNatl-rem.totalArea-rem.provinceRebate-totalExp;
   showModal(`
