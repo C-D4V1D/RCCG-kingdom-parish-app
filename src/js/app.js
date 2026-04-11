@@ -93,6 +93,12 @@ async function apiFetch(path, method='GET', body=null){
 }
 
 const DB = {
+  // ── Auth ──
+  async getLoginUsers(){ return apiFetch('auth') },
+  async login(role, pin, userId){
+    return apiFetch('auth','POST',{ role, pin, userId: userId || '' });
+  },
+
   // ── Users ──
   async getUsers(){ return apiFetch('users') },
   async addUser(data){ cache.users=null; return apiFetch('users','POST',data) },
@@ -223,11 +229,11 @@ async function onRoleChange(){
   const wrap = document.getElementById('userSelectWrap');
   const sel = document.getElementById('userSelect');
   if(!role){ wrap.style.display='none'; return }
-  // Fetch users for the selector (pre-login, so fetch directly)
+  // Fetch users for the selector via auth endpoint (PINs are never returned)
   let users = [];
   try {
     await apiFetch('init').catch(()=>{});
-    const all = await DB.getUsers();
+    const all = await DB.getLoginUsers();
     users = all.filter(u=>u.role===role);
   } catch(e) { users = [] }
   if(users.length>1){
@@ -239,6 +245,7 @@ async function onRoleChange(){
 async function login(){
   const role = document.getElementById('roleSelect').value;
   const pin = document.getElementById('pinInput').value.trim();
+  const selectedUserId = document.getElementById('userSelect')?.value;
   const errEl = document.getElementById('loginError');
   if(!role||!pin){ errEl.textContent='Please select a role and enter your PIN.'; errEl.style.display='block'; return }
   const btn = document.querySelector('#loginScreen .btn-primary');
@@ -248,18 +255,17 @@ async function login(){
     const initRes = await apiFetch('init').catch(e=>({ error: e.message }));
     if(initRes?.error){ console.warn('Init warning:', initRes.error); }
 
-    const allUsers = await DB.getUsers();
-    state.allUsers = allUsers;
+    const loginUsers = await DB.getLoginUsers();
 
     // Debug: show count if no users found
-    if(!allUsers || allUsers.length === 0){
+    if(!loginUsers || loginUsers.length === 0){
       errEl.textContent = 'No users found in database. Visit /api/init to set up the database first.';
       errEl.style.display='block';
       if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
       return;
     }
 
-    const users = allUsers.filter(u => u.role === role);
+    const users = loginUsers.filter(u => u.role === role);
     if(!users.length){
       errEl.textContent = `No users found for role "${role}". Check IT Admin panel.`;
       errEl.style.display='block';
@@ -267,22 +273,10 @@ async function login(){
       return;
     }
 
-    let user = null;
-    if(users.length > 1){
-      const selId = document.getElementById('userSelect').value;
-      // Compare PIN as string, trimmed
-      user = users.find(u => u.id === selId && String(u.pin).trim() === String(pin).trim());
-    } else {
-      user = users.find(u => String(u.pin).trim() === String(pin).trim());
-    }
-
-    if(!user){
-      errEl.textContent = `Incorrect PIN for ${role}. (${users.length} user(s) found for this role)`;
-      errEl.style.display='block';
-      document.getElementById('pinInput').value='';
-      if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
-      return;
-    }
+    const authRes = await DB.login(role, pin, users.length > 1 ? selectedUserId : '');
+    const user = authRes?.user;
+    if(!user) throw new Error('Incorrect PIN. Please try again.');
+    state.allUsers = await DB.getUsers();
 
     errEl.style.display='none';
     state.user = user;
@@ -291,7 +285,8 @@ async function login(){
     document.getElementById('appShell').style.display='flex';
     initApp();
   } catch(e) {
-    errEl.textContent = 'Connection error: ' + (e.message || 'Could not reach database.');
+    const msg = e?.message || 'Could not reach database.';
+    errEl.textContent = /incorrect pin|required|no users/i.test(msg) ? msg : ('Connection error: ' + msg);
     errEl.style.display='block';
     if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
   }
