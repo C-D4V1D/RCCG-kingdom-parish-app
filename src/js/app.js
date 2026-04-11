@@ -429,7 +429,7 @@ function navigate(page, fromHistory){
   state.page=page;
   // Update URL — push new entry unless this was triggered by the browser's own back/forward
   const newPath = '/' + (page === 'dashboard' ? '' : page);
-  if(!fromHistory && window.location.pathname !== '/' + page){
+  if(!fromHistory && window.location.pathname !== newPath){
     history.pushState({page}, '', newPath);
   }
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
