@@ -15,6 +15,12 @@ const ok  = (data)       => new Response(JSON.stringify(data),        { status: 
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
+async function tableHasColumns(DB, table, cols) {
+  const { results } = await DB.prepare(`PRAGMA table_info(${table})`).all();
+  const existing = new Set((results || []).map(r => r.name));
+  return cols.every(c => existing.has(c));
+}
+
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
@@ -380,7 +386,8 @@ async function getIncome(DB) {
 
 async function createIncome(DB, data) {
   const id = data.id || newId('INC-');
-  try {
+  const hasSplitCols = await tableHasColumns(DB, 'income', ['bank_transfer_amount', 'direct_petty_cash', 'source']);
+  if (hasSplitCols) {
     await DB.prepare(`
       INSERT INTO income
         (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
@@ -407,14 +414,8 @@ async function createIncome(DB, data) {
       data.recordedBy           || '',
       data.notes                || '',
     ).run();
-  } catch (e) {
-    const msg = (e?.message || '').toLowerCase();
-    if (!msg.includes('no column named bank_transfer_amount') &&
-        !msg.includes('no column named direct_petty_cash') &&
-        !msg.includes('no column named source')) {
-      throw e;
-    }
-    // Backward-compatible fallback for databases that haven't run /api/init migration yet.
+  } else {
+    // Backward-compatible insert for databases that haven't run /api/init migration yet.
     await DB.prepare(`
       INSERT INTO income
         (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
@@ -481,7 +482,8 @@ async function getExpenses(DB) {
 
 async function createExpense(DB, data) {
   const id = data.id || newId('EXP-');
-  try {
+  const hasReceiptCols = await tableHasColumns(DB, 'expenses', ['receipt_image', 'receipt_file_name']);
+  if (hasReceiptCols) {
     await DB.prepare(`
       INSERT INTO expenses
         (id,date,category,subcategory,description,amount,receipt_no,receipt_image,receipt_file_name,payment_method,notes,recorded_by,petty_ref,status)
@@ -502,13 +504,8 @@ async function createExpense(DB, data) {
       data.pettyRef         || '',
       data.status           || 'approved',
     ).run();
-  } catch (e) {
-    const msg = (e?.message || '').toLowerCase();
-    if (!msg.includes('no column named receipt_image') &&
-        !msg.includes('no column named receipt_file_name')) {
-      throw e;
-    }
-    // Backward-compatible fallback for databases that haven't run /api/init migration yet.
+  } else {
+    // Backward-compatible insert for databases that haven't run /api/init migration yet.
     await DB.prepare(`
       INSERT INTO expenses
         (id,date,category,subcategory,description,amount,receipt_no,payment_method,notes,recorded_by,petty_ref,status)
