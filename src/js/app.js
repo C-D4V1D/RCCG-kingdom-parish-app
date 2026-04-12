@@ -1440,6 +1440,9 @@ async function renderRemittances(){
 
   const allLines=[...incomeLines,...tgLines,...provinceLines,...quotaLines];
   const totalDue=allLines.reduce((s,l)=>s+l.amount,0);
+  const quotasTotal=quotaLines.reduce((s,l)=>s+l.amount,0);
+  const trueNetLocal=rem.netLocal-quotasTotal;
+  const totalCollection=income.reduce((s,r)=>s+(r.totalCollection||0),0);
 
   // --- Check for period payment ---
   const periodPayments=allRems.filter(r=>r.status==='paid'&&r.periodFrom===fromDate&&r.periodTo===toDate);
@@ -1499,8 +1502,8 @@ async function renderRemittances(){
     <div class="kpi-grid" style="margin-bottom:12px">
       <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Total Due</div><div class="kpi-val">${fmt(totalDue)}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">✓</div><div class="kpi-label">Total Paid</div><div class="kpi-val">${fmt(totalPaid)}</div></div>
-      <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">⏳</div><div class="kpi-label">Outstanding</div><div class="kpi-val" style="color:${totalDue-totalPaid>0?'var(--danger)':'var(--primary)'}">${fmt(Math.max(0,totalDue-totalPaid))}</div></div>
-      <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">🏠</div><div class="kpi-label">Net Local Retained</div><div class="kpi-val">${fmt(rem.netLocal)}</div></div>
+      <div class="kpi"><div class="kpi-icon" style="background:#E8F4FD">💰</div><div class="kpi-label">Total Collection</div><div class="kpi-val">${fmt(totalCollection)}</div></div>
+      <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">🏠</div><div class="kpi-label">Net Local Retained</div><div class="kpi-val">${fmt(trueNetLocal)}</div></div>
     </div>
 
     ${income.length===0?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>No income records found</strong> for the selected period (${fmtDate(fromDate)} – ${fmtDate(toDate)}). Please adjust the date range above or record income first.</span></div>`:''}
@@ -1523,8 +1526,8 @@ async function renderRemittances(){
             <td class="td-right td-bold" style="font-size:15px;color:var(--danger);padding:10px 12px">${fmt(totalDue)}</td>
           </tr>
           <tr>
-            <td colspan="2" style="font-size:12px;color:var(--text2);padding:6px 12px">Local Retained (after Province Rebate on Tithes)</td>
-            <td class="td-right" style="font-size:13px;color:var(--primary);font-weight:600;padding:6px 12px">${fmt(rem.netLocal)}</td>
+            <td colspan="2" style="font-size:12px;color:var(--text2);padding:6px 12px">Net Local Retained (after Province Rebate &amp; Fixed Quotas)</td>
+            <td class="td-right" style="font-size:13px;color:var(--primary);font-weight:600;padding:6px 12px">${fmt(trueNetLocal)}</td>
           </tr>
         </table></div>
 
