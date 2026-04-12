@@ -1604,16 +1604,11 @@ async function renderRemittances(){
             <div class="status-row-label" style="color:var(--amber)">Province Rebate — 20% of Local Retained Tithes (deducted)</div>
             <div class="status-row-amt" style="color:var(--amber)">− ${fmt(rem.provinceRebate)}</div>
           </div>`:''}
-          ${quotaLines.length>0?`
+          ${quotasTotal>0?`
           <div class="status-row" style="border-top:1px dashed var(--border)">
-            <div class="status-row-label" style="color:var(--amber);font-weight:600">Fixed Monthly Quotas (deducted)</div>
-            <div class="status-row-amt"></div>
-          </div>
-          ${quotaLines.map(q=>`
-          <div class="status-row">
-            <div class="status-row-label" style="color:var(--amber)">${esc(q.label)}</div>
-            <div class="status-row-amt" style="color:var(--amber)">− ${fmt(q.amount)}</div>
-          </div>`).join('')}`:''}
+            <div class="status-row-label" style="color:var(--amber)">Total Fixed Monthly Quotas (deducted)</div>
+            <div class="status-row-amt" style="color:var(--amber)">− ${fmt(quotasTotal)}</div>
+          </div>`:''}
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px">
             <div class="status-row-label fw-bold">NET LOCAL RETAINED</div>
             <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(trueNetLocal)}</div>
