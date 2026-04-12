@@ -532,8 +532,14 @@ async function calcChurchBalance(){
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
 
   // --- BANK BALANCE ---
-  // 1. Income already in bank (bank-transfer portions of all income records)
-  const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
+  // 1. Income already in bank:
+  //    - Sunday collections: use bankTransferAmount field
+  //    - Other income: use full totalCollection when paymentMethod is 'bank_transfer'
+  const bankTransferIncome = allIncome.reduce((s,r) => {
+    const isSunday = !r.source || r.source === 'sunday_collection';
+    if(isSunday) return s + (r.bankTransferAmount||0);
+    return s + (r.paymentMethod === 'bank_transfer' ? (r.totalCollection||0) : 0);
+  }, 0);
   // 2. Cash deposited by accountant to bank
   const cashDepositedToBank = cashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
   // 3. Outflows from bank: expenses paid via bank_transfer (incl. bank charges)
@@ -546,10 +552,16 @@ async function calcChurchBalance(){
 
   // --- CASH WITH ACCOUNTANT ---
   // Cash received = total collection - bank transfer portion - direct petty portion
+  // Sunday collections track splits via bankTransferAmount / directPettyCash fields.
+  // Other income records use paymentMethod ('cash' or 'bank_transfer') for the whole amount.
   const cashFromCollections = allIncome.reduce((s,r) => {
-    const btAmt = r.bankTransferAmount||0;
-    const dpAmt = r.directPettyCash||0;
-    return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
+    const isSunday = !r.source || r.source === 'sunday_collection';
+    if(isSunday){
+      const btAmt = r.bankTransferAmount||0;
+      const dpAmt = r.directPettyCash||0;
+      return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
+    }
+    return s + (r.paymentMethod === 'cash' ? (r.totalCollection||0) : 0);
   }, 0);
   // Cash returned from bank withdrawals directed to accountant
   const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
@@ -826,7 +838,11 @@ async function renderIncome(){
   // Only count deposits linked to this month's income records (scoped correctly to the month view)
   const currentMonthRecordIds = new Set(records.map(r=>r.id));
   const totalDeposited = _cashTx.filter(t=>t.type==='cash_deposit'&&currentMonthRecordIds.has(t.incomeRef)).reduce((s,t)=>s+(t.amount||0),0)
-    + records.reduce((s,r)=>s+(r.bankTransferAmount||0),0);
+    + records.reduce((s,r)=>{
+        const isSunday = !r.source || r.source === 'sunday_collection';
+        if(isSunday) return s + (r.bankTransferAmount||0);
+        return s + (r.paymentMethod==='bank_transfer' ? (r.totalCollection||0) : 0);
+      }, 0);
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
