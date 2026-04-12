@@ -882,8 +882,12 @@ async function renderIncomeList(records, cashTxOverride){
       const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
       const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
       const remaining = cashHeld - depositedAmt;
+      const noCashLabel = btAmt>0&&dpAmt===0 ? '🏦 Bank Transfer'
+        : dpAmt>0&&btAmt===0 ? '💼 Direct to Petty'
+        : btAmt>0&&dpAmt>0 ? '🏦 Bank + Petty Split'
+        : '🏦 Bank Transfer';
       const statusBadge = cashHeld===0
-        ? `<span class="badge badge-info">No Cash (All Transfer)</span>`
+        ? `<span class="badge badge-info">${noCashLabel}</span>`
         : isFullyDeposited
           ? `<span class="badge badge-success">✓ Deposited</span>`
           : depositedAmt>0
@@ -981,7 +985,9 @@ async function renderAllIncomeList(records, cashTxOverride){
     <tr><th>Date</th><th>Source / Type</th><th>Amount</th><th>Cash (Accountant)</th><th>Bank Transfer</th><th>Cash Status</th><th>Recorded By</th><th>Actions</th></tr>
     ${sorted.map(r=>{
       const isSunday = !r.source||r.source==='sunday_collection';
-      const btAmt = r.bankTransferAmount||0;
+      const btAmt = isSunday
+        ? (r.bankTransferAmount||0)
+        : (r.paymentMethod==='bank_transfer' ? (r.totalCollection||0) : 0);
       const dpAmt = r.directPettyCash||0;
       const cashHeld = isSunday
         ? Math.max(0,(r.totalCollection||0) - btAmt - dpAmt)
@@ -989,8 +995,14 @@ async function renderAllIncomeList(records, cashTxOverride){
       const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
       const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
       const remaining = cashHeld - depositedAmt;
+      const noCashLabel = isSunday
+        ? (btAmt>0&&dpAmt===0 ? '🏦 Bank Transfer'
+          : dpAmt>0&&btAmt===0 ? '💼 Direct to Petty'
+          : btAmt>0&&dpAmt>0 ? '🏦 Bank + Petty Split'
+          : '🏦 Bank Transfer')
+        : '🏦 Bank Transfer';
       const statusBadge = cashHeld===0
-        ? `<span class="badge badge-info">No Cash</span>`
+        ? `<span class="badge badge-info">${noCashLabel}</span>`
         : isFullyDeposited
           ? `<span class="badge badge-success">✓ Deposited</span>`
           : depositedAmt>0
