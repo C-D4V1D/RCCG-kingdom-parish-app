@@ -6,17 +6,516 @@
   <meta name="theme-color" content="#0F6E56" />
   <title>RCCG Kingdom Parish — Finance Portal</title>
   <link rel="stylesheet" href="src/css/styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    /* ── HOMEPAGE STYLES ────────────────────────── */
+    :root {
+      --green: #0F6E56;
+      --green-dark: #085041;
+      --green-light: #E1F5EE;
+      --green-mid: #1D9E75;
+      --gold: #B8860B;
+      --gold-light: #FDF6E3;
+      --text: #1a1a1a;
+      --text2: #4a4a4a;
+      --text3: #7a7a7a;
+      --border: rgba(0,0,0,0.08);
+      --white: #ffffff;
+      --bg: #f7f6f2;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'DM Sans', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+    }
+
+    /* ── HERO ─────────────────────────────────── */
+    .hp-hero {
+      background: var(--green-dark);
+      background-image:
+        radial-gradient(ellipse at 20% 50%, rgba(29,158,117,0.25) 0%, transparent 60%),
+        radial-gradient(ellipse at 80% 20%, rgba(184,134,11,0.12) 0%, transparent 50%);
+      padding: 60px 24px 80px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hp-hero::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image: repeating-linear-gradient(
+        90deg,
+        rgba(255,255,255,0.02) 0px, rgba(255,255,255,0.02) 1px,
+        transparent 1px, transparent 48px
+      );
+    }
+
+    .hp-cross {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 52px; height: 52px;
+      border: 2px solid rgba(255,255,255,0.25);
+      border-radius: 50%;
+      margin-bottom: 20px;
+      font-size: 22px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hp-denomination {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.5);
+      margin-bottom: 10px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hp-church-name {
+      font-family: 'Lora', Georgia, serif;
+      font-size: clamp(26px, 6vw, 40px);
+      font-weight: 600;
+      color: #fff;
+      line-height: 1.2;
+      margin-bottom: 6px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hp-portal-name {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.6);
+      margin-bottom: 24px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hp-divider {
+      width: 40px; height: 2px;
+      background: var(--gold);
+      margin: 0 auto 24px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hp-tagline {
+      font-family: 'DM Sans', sans-serif;
+      font-size: clamp(14px, 3.5vw, 16px);
+      color: rgba(255,255,255,0.75);
+      max-width: 600px;
+      margin: 0 auto;
+      font-weight: 300;
+      line-height: 1.75;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* ── MAIN CONTENT ─────────────────────────── */
+    .hp-body {
+      max-width: 680px;
+      margin: 0 auto;
+      padding: 0 20px 80px;
+    }
+
+    /* ── LOGIN CARD ────────────────────────────── */
+    .hp-login-wrap {
+      margin: -40px auto 0;
+      position: relative;
+      z-index: 10;
+      max-width: 420px;
+    }
+
+    .hp-login-card {
+      background: var(--white);
+      border-radius: 16px;
+      padding: 32px 28px 24px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.14), 0 2px 8px rgba(0,0,0,0.06);
+    }
+
+    .hp-login-card .form-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: var(--text3);
+      margin-bottom: 6px;
+    }
+
+    .hp-login-card select,
+    .hp-login-card input {
+      width: 100%;
+      padding: 11px 14px;
+      border: 1.5px solid #e0e0e0;
+      border-radius: 10px;
+      font-size: 14px;
+      font-family: 'DM Sans', sans-serif;
+      color: var(--text);
+      background: #fff;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      margin-bottom: 14px;
+    }
+
+    .hp-login-card select:focus,
+    .hp-login-card input:focus {
+      border-color: var(--green);
+      box-shadow: 0 0 0 3px rgba(15,110,86,0.1);
+    }
+
+    .hp-signin-btn {
+      width: 100%;
+      padding: 13px;
+      background: var(--green);
+      color: white;
+      border: none;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 600;
+      font-family: 'DM Sans', sans-serif;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+      margin-top: 4px;
+    }
+
+    .hp-signin-btn:hover { background: var(--green-dark); }
+    .hp-signin-btn:active { transform: scale(0.98); }
+
+    .hp-login-hint {
+      font-size: 11px;
+      color: var(--text3);
+      text-align: center;
+      margin-top: 14px;
+      line-height: 1.6;
+    }
+
+    .hp-login-error {
+      background: #FCEBEB;
+      color: #A32D2D;
+      font-size: 12px;
+      padding: 9px 12px;
+      border-radius: 8px;
+      margin-bottom: 10px;
+    }
+
+    /* ── SECTION HEADERS ─────────────────────── */
+    .hp-section {
+      margin-top: 56px;
+    }
+
+    .hp-section-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--green);
+      margin-bottom: 6px;
+    }
+
+    .hp-section-title {
+      font-family: 'Lora', Georgia, serif;
+      font-size: clamp(20px, 5vw, 26px);
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 24px;
+      line-height: 1.3;
+    }
+
+    /* ── ROLE CARDS ──────────────────────────── */
+    .hp-roles {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .hp-role {
+      background: var(--white);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px 20px;
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    .hp-role:hover {
+      border-color: rgba(15,110,86,0.25);
+      box-shadow: 0 2px 12px rgba(15,110,86,0.06);
+    }
+
+    .hp-role-icon {
+      width: 40px; height: 40px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      flex-shrink: 0;
+    }
+
+    .hp-role-body {}
+
+    .hp-role-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 5px;
+    }
+
+    .hp-role-desc {
+      font-size: 13px;
+      color: var(--text2);
+      line-height: 1.65;
+    }
+
+    /* ── KPSC NOTE ───────────────────────────── */
+    .hp-note {
+      background: var(--gold-light);
+      border-left: 3px solid var(--gold);
+      border-radius: 0 10px 10px 0;
+      padding: 16px 18px;
+      margin-top: 24px;
+    }
+
+    .hp-note-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--gold);
+      margin-bottom: 6px;
+    }
+
+    .hp-note p {
+      font-size: 13px;
+      color: #5a4a00;
+      line-height: 1.65;
+    }
+
+    /* ── FAQ ─────────────────────────────────── */
+    .hp-faq-section {
+      margin-top: 44px;
+    }
+
+    .hp-faq-group {
+      margin-bottom: 32px;
+    }
+
+    .hp-faq-group-title {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--text3);
+      padding-bottom: 10px;
+      border-bottom: 1.5px solid var(--border);
+      margin-bottom: 4px;
+    }
+
+    .hp-faq-item {
+      border-bottom: 1px solid var(--border);
+    }
+
+    .hp-faq-q {
+      width: 100%;
+      background: none;
+      border: none;
+      text-align: left;
+      padding: 16px 0;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text);
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      font-family: 'DM Sans', sans-serif;
+      line-height: 1.4;
+      transition: color 0.15s;
+    }
+
+    .hp-faq-q:hover { color: var(--green); }
+
+    .hp-faq-icon {
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: var(--green-light);
+      color: var(--green);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      flex-shrink: 0;
+      transition: transform 0.25s, background 0.15s;
+      font-weight: 300;
+      line-height: 1;
+    }
+
+    .hp-faq-item.open .hp-faq-icon {
+      transform: rotate(45deg);
+      background: var(--green);
+      color: white;
+    }
+
+    .hp-faq-item.open .hp-faq-q { color: var(--green); }
+
+    .hp-faq-a {
+      display: none;
+      padding: 0 0 18px;
+      font-size: 13.5px;
+      color: var(--text2);
+      line-height: 1.75;
+    }
+
+    .hp-faq-item.open .hp-faq-a { display: block; }
+
+    .hp-faq-a p { margin-bottom: 10px; }
+    .hp-faq-a p:last-child { margin-bottom: 0; }
+
+    .hp-faq-a strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .hp-faq-a ol, .hp-faq-a ul {
+      margin: 8px 0 8px 18px;
+    }
+
+    .hp-faq-a li {
+      margin-bottom: 6px;
+      font-size: 13.5px;
+      line-height: 1.65;
+    }
+
+    .hp-faq-a .faq-condition {
+      background: var(--green-light);
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin: 10px 0;
+    }
+
+    .hp-faq-a .faq-condition p {
+      font-size: 13px;
+      color: var(--green-dark);
+      margin-bottom: 4px;
+    }
+
+    .hp-faq-a .faq-condition p:last-child { margin-bottom: 0; }
+
+    .hp-faq-a .faq-warning {
+      background: #FCEBEB;
+      border-left: 3px solid #A32D2D;
+      border-radius: 0 8px 8px 0;
+      padding: 10px 14px;
+      margin: 10px 0;
+      font-size: 13px;
+      color: #7a1a1a;
+    }
+
+    .hp-steps {
+      counter-reset: step;
+      list-style: none;
+      margin: 8px 0 !important;
+      padding: 0 !important;
+    }
+
+    .hp-steps li {
+      counter-increment: step;
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 10px !important;
+    }
+
+    .hp-steps li::before {
+      content: counter(step);
+      width: 22px; height: 22px;
+      background: var(--green);
+      color: white;
+      border-radius: 50%;
+      font-size: 11px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    /* ── FOOTER ──────────────────────────────── */
+    .hp-footer {
+      text-align: center;
+      padding: 32px 20px 48px;
+      font-size: 12px;
+      color: var(--text3);
+      border-top: 1px solid var(--border);
+    }
+
+    /* ── MOBILE ──────────────────────────────── */
+    @media (max-width: 480px) {
+      .hp-hero { padding: 48px 20px 72px; }
+      .hp-login-wrap { max-width: 100%; }
+      .hp-login-card { padding: 28px 20px 20px; border-radius: 14px; }
+    }
+
+    /* ── ANIMATIONS ──────────────────────────── */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .hp-hero > * { animation: fadeUp 0.5s ease both; }
+    .hp-cross    { animation-delay: 0.05s; }
+    .hp-denomination { animation-delay: 0.1s; }
+    .hp-church-name  { animation-delay: 0.15s; }
+    .hp-portal-name  { animation-delay: 0.2s; }
+    .hp-divider      { animation-delay: 0.25s; }
+    .hp-tagline      { animation-delay: 0.3s; }
+  </style>
 </head>
 <body>
-  <div id="loginScreen" class="login-screen">
-    <div class="login-card">
-      <div class="login-logo">KP</div>
-      <h1 class="login-title">RCCG Kingdom Parish</h1>
-      <p class="login-sub">Aguleri — Finance & Accounting Portal</p>
-      <div class="login-form">
-        <label class="form-label">Select your role</label>
-        <select id="roleSelect" class="form-select" onchange="App.onRoleChange()">
-          <option value="">— Choose role —</option>
+
+<!-- ═══════════════════════════════════════════
+     HOMEPAGE
+═══════════════════════════════════════════ -->
+<div id="loginScreen">
+
+  <!-- HERO -->
+  <div class="hp-hero">
+    <div class="hp-cross">✝</div>
+    <p class="hp-denomination">Redeemed Christian Church of God</p>
+    <h1 class="hp-church-name">Kingdom Parish, Aguleri</h1>
+    <p class="hp-portal-name">Finance &amp; Accounting Portal</p>
+    <div class="hp-divider"></div>
+    <p class="hp-tagline">This portal is the official financial management system for the RCCG Kingdom Parish, Aguleri Admin Team. It handles the recording of all church income, calculation and payment of RCCG headquarters remittances, tracking of daily expenses, petty cash management, and the generation of financial reports — so the Parish Pastor can focus entirely on spiritual leadership while the church's finances remain transparent, accurate, and accountable.</p>
+  </div>
+
+  <div class="hp-body">
+
+    <!-- LOGIN CARD -->
+    <div class="hp-login-wrap">
+      <div class="hp-login-card">
+        <div id="loginError" class="hp-login-error" style="display:none">Incorrect PIN. Please try again.</div>
+        <label class="form-label">Your Role</label>
+        <select id="roleSelect" onchange="App.onRoleChange()">
+          <option value="">— Select your role —</option>
           <option value="it_admin">IT Administrator</option>
           <option value="pastor">Parish Pastor</option>
           <option value="accountant">Church Accountant</option>
@@ -25,60 +524,373 @@
           <option value="viewer">Read-Only Viewer</option>
         </select>
         <div id="userSelectWrap" style="display:none">
-          <label class="form-label" style="margin-top:12px">Select your name</label>
-          <select id="userSelect" class="form-select"></select>
+          <label class="form-label">Your Name</label>
+          <select id="userSelect"></select>
         </div>
-        <label class="form-label" style="margin-top:12px">Enter PIN</label>
-        <input type="password" id="pinInput" class="form-input" maxlength="6" placeholder="••••" inputmode="numeric" onkeydown="if(event.key==='Enter')App.login()" />
-        <div id="loginError" class="login-error" style="display:none">Incorrect PIN. Please try again.</div>
-        <button class="btn btn-primary btn-full" style="margin-top:16px" onclick="App.login()">Sign In</button>
-        <p class="login-hint">Demo PINs: IT Admin 0000 · Pastor 1111 · Accountant 2222 · Admin Officer 3333 · Elder 4444</p>
+        <label class="form-label">PIN</label>
+        <input type="password" id="pinInput" maxlength="6" placeholder="••••••" inputmode="numeric" onkeydown="if(event.key==='Enter')App.login()" />
+        <button class="hp-signin-btn" onclick="App.login()">Sign In</button>
+        <p class="hp-login-hint">Contact the IT Administrator if you have forgotten your PIN.</p>
       </div>
     </div>
-  </div>
 
-  <div id="appShell" class="app-shell" style="display:none">
-    <aside class="sidebar" id="sidebar">
-      <div class="sidebar-header">
-        <div class="sidebar-logo">KP</div>
-        <div class="sidebar-title-wrap">
-          <span class="sidebar-title">RCCG Kingdom Parish</span>
-          <span class="sidebar-sub">Admin Team Portal</span>
-        </div>
-        <button class="sidebar-close" onclick="App.toggleSidebar()">✕</button>
-      </div>
-      <nav class="sidebar-nav" id="sidebarNav"></nav>
-      <div class="sidebar-footer">
-        <div class="sidebar-user-row">
-          <div class="sidebar-user" id="sidebarUser"></div>
-          <button class="btn-logout-icon" onclick="App.logout()" title="Sign Out">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-          </button>
-        </div>
-      </div>
-    </aside>
-    <div class="sidebar-overlay" id="sidebarOverlay" onclick="App.toggleSidebar()"></div>
-    <div class="main-wrap">
-      <header class="top-bar">
-        <button class="hamburger" onclick="App.toggleSidebar()"><span></span><span></span><span></span></button>
-        <div class="top-bar-title" id="topBarTitle">Dashboard</div>
-        <div class="top-bar-right">
-          <div class="notif-bell" onclick="App.toggleNotifications()">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-            <span class="notif-count" id="notifCount" style="display:none">0</span>
+    <!-- WHO DOES WHAT -->
+    <div class="hp-section">
+      <p class="hp-section-label">The Team</p>
+      <h2 class="hp-section-title">Who does what on this team?</h2>
+
+      <div class="hp-roles">
+
+        <div class="hp-role">
+          <div class="hp-role-icon" style="background:#E1F5EE">⛪</div>
+          <div class="hp-role-body">
+            <div class="hp-role-title">Parish Pastor</div>
+            <div class="hp-role-desc">He is the spiritual head and final authority. He receives all bank alerts, reviews all reports, and gives final approval before any money moves — but he does not do the day-to-day financial work himself. That is delegated.</div>
           </div>
-          <select id="globalMonth" class="month-select" onchange="App.onMonthChange()"></select>
         </div>
-      </header>
-      <div class="notif-panel" id="notifPanel" style="display:none">
-        <div class="notif-panel-hdr">Notifications <button onclick="App.toggleNotifications()" style="float:right;background:none;border:none;cursor:pointer;font-size:16px">✕</button></div>
-        <div id="notifList"></div>
+
+        <div class="hp-role">
+          <div class="hp-role-icon" style="background:#E6F1FB">📒</div>
+          <div class="hp-role-body">
+            <div class="hp-role-title">Church Accountant</div>
+            <div class="hp-role-desc">This person runs the numbers. They count Sunday collections alongside the Head Usher, record every naira, calculate what goes to RCCG headquarters, prepare cheques and transfer forms, and produce the weekly and monthly reports. They do not sign or authorise any payment themselves.</div>
+          </div>
+        </div>
+
+        <div class="hp-role">
+          <div class="hp-role-icon" style="background:#FAEEDA">🔧</div>
+          <div class="hp-role-body">
+            <div class="hp-role-title">Admin Officer</div>
+            <div class="hp-role-desc">This person handles the physical side of daily church operations. When the church needs fuel, cleaning supplies, or a repair, they identify the need, request the funds through this portal, make the purchase, and return the receipt to the Accountant within 48 hours. They do not touch the bank account directly.</div>
+          </div>
+        </div>
+
+        <div class="hp-role">
+          <div class="hp-role-icon" style="background:#EAF3DE">✍️</div>
+          <div class="hp-role-body">
+            <div class="hp-role-title">Bank Signatories (Elders)</div>
+            <div class="hp-role-desc">These are the two trusted Elders who co-sign all bank transactions alongside the Pastor. They review every transaction the Accountant has prepared and the Pastor has approved — then they sign. They never sign without both of those things in place. Having two Elders ensures the account never freezes if the Pastor is unavailable.</div>
+          </div>
+        </div>
+
+        <div class="hp-role">
+          <div class="hp-role-icon" style="background:#f0f0f0">👁️</div>
+          <div class="hp-role-body">
+            <div class="hp-role-title">Read-Only Viewer</div>
+            <div class="hp-role-desc">A trusted observer — such as a KPSC member or senior minister — who can see financial records but cannot make any changes.</div>
+          </div>
+        </div>
+
       </div>
-      <main class="page-content" id="pageContent"></main>
+
+      <!-- KPSC Note -->
+      <div class="hp-note">
+        <div class="hp-note-label">A note on the KPSC</div>
+        <p>The Kingdom Parish Stewardship Committee manages the church's development and welfare funds — a separate account from the one this team operates. When the main church account is strained by heavy RCCG remittances and cannot cover a local need, the Admin Officer formally requests support from the KPSC. This prevents emergency pressure on the Pastor and on the church members.</p>
+      </div>
     </div>
-    <nav class="bottom-nav" id="bottomNav"></nav>
+
+    <!-- FAQ -->
+    <div class="hp-section hp-faq-section">
+      <p class="hp-section-label">Reference</p>
+      <h2 class="hp-section-title">Common Questions About How This Team Works</h2>
+
+      <!-- GROUP 1 -->
+      <div class="hp-faq-group">
+        <div class="hp-faq-group-title">Who Does What</div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            Who receives bank alerts when money moves in or out?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p>Only the <strong>Parish Pastor</strong> and the <strong>Church Accountant</strong>. The Pastor needs full visibility as the principal overseer. The Accountant needs them to do real-time bookkeeping and verify every deposit hits the account.</p>
+            <p>The Admin Officer does not need alerts — they request funds through the Accountant and only receive what has been approved.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            Who keeps the records, and how often?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p>The <strong>Church Accountant</strong> keeps all records. Every week after Sunday service, they record the collections. Every month, they do a full reconciliation — matching the ledger to the actual bank statement.</p>
+            <p>Weekly summaries go to the Pastor and Admin Officer. Monthly reports go to the Pastor to review and submit to RCCG authorities. Every quarter, the Admin Officer gives the KPSC a high-level financial health update.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            Can the Head Usher also serve as the Accountant?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p><strong>No.</strong> The person who physically collects the money must not be the one who records and deposits it.</p>
+            <p>The correct process: the Head Usher and an Assistant Usher count the cash together after service, sign a "Cash Count Sheet," and hand both the cash and the signed sheet directly to the Accountant. The Accountant then takes full responsibility from that point. This protects the Usher just as much as the Accountant.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            Is the Head Usher part of the Admin Team?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p><strong>No.</strong> The Head Usher is the primary Collector of the church's money, while the Admin Team is the Manager and Spender of that money.</p>
+            <p>If the person in charge of gathering the physical cash is also sitting on the team that manages the bank accounts and pays the bills, you lose the natural check-and-balance. Keeping the Ushering team and the Admin Team completely separate ensures total transparency and protects the Head Usher from any suspicion if the accounts ever fail to balance.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            Should the Accountant be a Bank Signatory?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p><strong>No.</strong> The person who prepares the numbers and fills in the cheques must not be the same person who signs them.</p>
+            <p>This rule protects the Accountant. If something goes wrong, they can point clearly to the fact that they only prepared the transaction — someone else authorised it.</p>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- GROUP 2 -->
+      <div class="hp-faq-group">
+        <div class="hp-faq-group-title">How Money Moves</div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            Who deposits cash into the bank?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p>The <strong>Church Accountant</strong>. They deposit the exact amount counted and signed for by the Head Usher, and they attach the bank teller receipt to the internal counting sheet as proof that every naira arrived in the church bank account.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            Who can withdraw money from the account?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p>Only the <strong>Bank Signatories</strong> — the Pastor plus one Elder — can authorise any withdrawal or bank transfer. However, they can only do so after the Accountant has prepared the transaction.</p>
+            <p>Cash withdrawals should be avoided wherever possible. Direct bank transfers to vendors or the Admin Officer are always preferred.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            How does the Admin Officer get money for daily needs?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <ol class="hp-steps">
+              <li>The Admin Officer identifies a need (e.g. "We need ₦15,000 for petrol") and submits a request through this portal.</li>
+              <li>The Accountant confirms funds are available.</li>
+              <li>The Signatories authorise a direct bank transfer to the Admin Officer or directly to the vendor.</li>
+              <li>The Admin Officer makes the purchase.</li>
+              <li>The receipt must be returned to the Accountant within <strong>48 hours</strong>.</li>
+            </ol>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            What is the Petty Cash float and how does it work?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p>Instead of the Admin Officer raising a formal request every time they need ₦2,000 for cleaning supplies, the team approves a set monthly float (e.g. ₦50,000) called the <strong>Petty Cash Imprest</strong>.</p>
+            <p>The Admin Officer holds and uses this for small recurring purchases, keeps every receipt or proof, and presents them to the Accountant when the cash runs low. The Signatories then approve a top-up for exactly the amount covered by receipts — not a naira more.</p>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- GROUP 3 -->
+      <div class="hp-faq-group">
+        <div class="hp-faq-group-title">Boundaries &amp; Limits</div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            Can the Pastor and an Elder withdraw money without the Accountant knowing?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <div class="hp-faq-warning">No. This must never happen.</div>
+            <p>Even though they are the authorised signatories, all withdrawals must be <strong>initiated by the Accountant first</strong> — who fills in the cheque or transfer form based on an actual invoice — and then hands it to the Pastor and Elder to sign.</p>
+            <p>If money leaves without the Accountant's knowledge, the monthly books will not balance, and trust in the entire system breaks down.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            On what basis should an Elder sign a cheque?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p>Three conditions must all be satisfied before any Elder signs anything:</p>
+            <div class="faq-condition">
+              <p>✓ &nbsp;The Accountant has prepared the transaction with proof showing exactly why the money is leaving the account.</p>
+              <p>✓ &nbsp;The Pastor has reviewed and approved that specific expense.</p>
+              <p>✓ &nbsp;The Accountant has confirmed the account can cover it without leaving the church short for basic operations.</p>
+            </div>
+            <p>An Elder should <strong>never</strong> sign a blank cheque or sign simply because they were asked to without seeing these three things.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            Can two Elders sign without the Pastor?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p><strong>Generally, no.</strong> The bank mandate requires one Category A signature (Pastor) and one Category B signature (Elder).</p>
+            <p>The only exception is a genuine emergency — if the Pastor is officially incapacitated, out of the country, or has been transferred and the new Pastor has not yet been added to the mandate. Even then, documented approval from the Provincial Pastor should be obtained first.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            Can the main church account be used for the Pastor's personal needs?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p><strong>No.</strong> The main account is strictly for RCCG remittances and local operational expenses.</p>
+            <p>If the Pastor has a personal or family emergency, that request goes through the KPSC as a welfare matter, kept entirely separate. Mixing personal needs with church operations creates confusion and puts everyone under unnecessary suspicion.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            How many Elders are needed, and why two?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p><strong>Two.</strong> The bank mandate is structured so that any valid transaction requires the Pastor and at least one Elder.</p>
+            <p>Having two Elders means that if one is travelling or unwell, there is always a second available to keep things moving. When major RCCG financial demands arrive, the Pastor, Admin Officer, Accountant, and both Elders sit together as a small advisory group to review the numbers before deciding how to respond.</p>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- GROUP 4 -->
+      <div class="hp-faq-group">
+        <div class="hp-faq-group-title">When Things Go Wrong</div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            What if the account cannot cover an RCCG remittance or project demand?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p>When the Pastor receives an RCCG financial demand, he forwards it to the Admin Team for review. If the Admin Team concludes the account cannot comfortably meet it without hurting daily operations, they notify the KPSC to see if the Development &amp; Welfare Fund can provide emergency support.</p>
+            <p>If the KPSC is also unable to cover the shortfall internally, the church leadership will then make a public announcement to the congregation as a final option.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            What if a vendor brings an unexpectedly large bill — like a huge NEPA estimated charge?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p>The Admin Officer <strong>does not pay it on the spot.</strong> They bring it to the Accountant and the Pastor for review.</p>
+            <p>If paying it would strain the account, the Admin Officer triggers the KPSC emergency process. Large unexpected bills are never handled independently by one person.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            What happens when the Pastor is transferred?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p>The Admin Team manages the transition. The outgoing Pastor writes a formal handover note. Because the Elders are already co-signatories, the account does not freeze.</p>
+            <p>The Accountant accompanies the new Pastor to the bank to update the mandate. Everything continues without disruption — which is precisely why the structure is built this way.</p>
+          </div>
+        </div>
+
+        <div class="hp-faq-item">
+          <button class="hp-faq-q" onclick="toggleFaq(this)">
+            What if there are Assistants — are they necessary?
+            <span class="hp-faq-icon">+</span>
+          </button>
+          <div class="hp-faq-a">
+            <p>An <strong>Assistant Accountant</strong> is highly recommended. If the main Accountant is sick, travelling, or unavailable, church financial operations cannot stop. The assistant can also serve as the second person when counting cash with the Head Usher.</p>
+            <p>An <strong>Assistant Admin Officer</strong> is optional — useful if the physical upkeep of the facility is demanding enough to require two people.</p>
+          </div>
+        </div>
+
+      </div>
+
+    </div><!-- end FAQ -->
+
+  </div><!-- end hp-body -->
+
+  <!-- FOOTER -->
+  <div class="hp-footer">
+    <p>RCCG Kingdom Parish, Aguleri &nbsp;·&nbsp; Finance &amp; Accounting Portal</p>
+    <p style="margin-top:4px">For technical support, contact the IT Administrator.</p>
   </div>
 
-  <script src="src/js/app.js"></script>
+</div><!-- end loginScreen -->
+
+
+<!-- ═══════════════════════════════════════════
+     APP SHELL (shown after login)
+═══════════════════════════════════════════ -->
+<div id="appShell" class="app-shell" style="display:none">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-logo">KP</div>
+      <div class="sidebar-title-wrap">
+        <span class="sidebar-title">Kingdom Parish</span>
+        <span class="sidebar-sub">Finance Portal</span>
+      </div>
+      <button class="sidebar-close" onclick="App.toggleSidebar()">✕</button>
+    </div>
+    <nav class="sidebar-nav" id="sidebarNav"></nav>
+    <div class="sidebar-footer">
+      <div class="sidebar-user" id="sidebarUser"></div>
+      <button class="btn-logout" onclick="App.logout()">Sign Out</button>
+    </div>
+  </aside>
+  <div class="sidebar-overlay" id="sidebarOverlay" onclick="App.toggleSidebar()"></div>
+  <div class="main-wrap">
+    <header class="top-bar">
+      <button class="hamburger" onclick="App.toggleSidebar()"><span></span><span></span><span></span></button>
+      <div class="top-bar-title" id="topBarTitle">Dashboard</div>
+      <div class="top-bar-right">
+        <div class="notif-bell" onclick="App.toggleNotifications()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          <span class="notif-count" id="notifCount" style="display:none">0</span>
+        </div>
+        <select id="globalMonth" class="month-select" onchange="App.onMonthChange()"></select>
+      </div>
+    </header>
+    <div class="notif-panel" id="notifPanel" style="display:none">
+      <div class="notif-panel-hdr">Notifications <button onclick="App.toggleNotifications()" style="float:right;background:none;border:none;cursor:pointer;font-size:16px">✕</button></div>
+      <div id="notifList"></div>
+    </div>
+    <main class="page-content" id="pageContent"></main>
+  </div>
+  <nav class="bottom-nav" id="bottomNav"></nav>
+</div>
+
+<script>
+  function toggleFaq(btn) {
+    const item = btn.closest('.hp-faq-item');
+    const isOpen = item.classList.contains('open');
+    // Close all open items
+    document.querySelectorAll('.hp-faq-item.open').forEach(el => el.classList.remove('open'));
+    // Open clicked one if it wasn't already open
+    if (!isOpen) item.classList.add('open');
+  }
+</script>
+<script src="src/js/app.js"></script>
 </body>
 </html>
