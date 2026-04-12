@@ -15,6 +15,19 @@ const ok  = (data)       => new Response(JSON.stringify(data),        { status: 
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
+const SCHEMA_CACHE = new Map();
+const ALLOWED_TABLES = new Set(['income', 'expenses']);
+async function tableHasColumns(DB, table, cols) {
+  if (!ALLOWED_TABLES.has(table)) throw new Error(`Unsupported schema check table: ${table}`);
+  let existing = SCHEMA_CACHE.get(table);
+  if (!existing) {
+    const { results } = await DB.prepare(`PRAGMA table_info(${table})`).all();
+    existing = new Set((results || []).map(r => r.name));
+    SCHEMA_CACHE.set(table, existing);
+  }
+  return cols.every(c => existing.has(c));
+}
+
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
@@ -85,6 +98,7 @@ export async function onRequest(context) {
     if (route === 'remittances') {
       if (method === 'GET'  && !param) return await getRemittances(DB);
       if (method === 'POST' && !param) return await createRemittance(DB, body);
+      if (method === 'PUT'  &&  param) return await updateRemittance(DB, param, body);
     }
 
     // ── /api/cash-transactions ─────────────────────────────────
@@ -133,40 +147,45 @@ async function handleInit(DB) {
       created_at  TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS income (
-      id                  TEXT PRIMARY KEY,
-      date                TEXT NOT NULL,
-      members_tithe       REAL DEFAULT 0,
-      ministers_tithe     REAL DEFAULT 0,
-      thanksgiving        REAL DEFAULT 0,
-      sunday_school       REAL DEFAULT 0,
-      slo                 REAL DEFAULT 0,
-      crm                 REAL DEFAULT 0,
-      workers_offering    REAL DEFAULT 0,
-      children_offering   REAL DEFAULT 0,
-      total_collection    REAL DEFAULT 0,
-      usher               TEXT DEFAULT '',
-      recorded_by         TEXT DEFAULT '',
-      deposit_confirmed   INTEGER DEFAULT 0,
-      teller_no           TEXT DEFAULT '',
-      deposited_by        TEXT DEFAULT '',
-      deposit_date        TEXT DEFAULT '',
-      notes               TEXT DEFAULT '',
-      created_at          TEXT DEFAULT (datetime('now'))
+      id                    TEXT PRIMARY KEY,
+      date                  TEXT NOT NULL,
+      members_tithe         REAL DEFAULT 0,
+      ministers_tithe       REAL DEFAULT 0,
+      thanksgiving          REAL DEFAULT 0,
+      sunday_school         REAL DEFAULT 0,
+      slo                   REAL DEFAULT 0,
+      crm                   REAL DEFAULT 0,
+      workers_offering      REAL DEFAULT 0,
+      children_offering     REAL DEFAULT 0,
+      total_collection      REAL DEFAULT 0,
+      bank_transfer_amount  REAL DEFAULT 0,
+      direct_petty_cash     REAL DEFAULT 0,
+      source                TEXT DEFAULT 'sunday_collection',
+      usher                 TEXT DEFAULT '',
+      recorded_by           TEXT DEFAULT '',
+      deposit_confirmed     INTEGER DEFAULT 0,
+      teller_no             TEXT DEFAULT '',
+      deposited_by          TEXT DEFAULT '',
+      deposit_date          TEXT DEFAULT '',
+      notes                 TEXT DEFAULT '',
+      created_at            TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS expenses (
-      id              TEXT PRIMARY KEY,
-      date            TEXT NOT NULL,
-      category        TEXT NOT NULL DEFAULT '',
-      subcategory     TEXT DEFAULT '',
-      description     TEXT NOT NULL DEFAULT '',
-      amount          REAL DEFAULT 0,
-      receipt_no      TEXT DEFAULT '',
-      payment_method  TEXT DEFAULT 'petty_cash',
-      notes           TEXT DEFAULT '',
-      recorded_by     TEXT DEFAULT '',
-      petty_ref       TEXT DEFAULT '',
-      status          TEXT DEFAULT 'approved',
-      created_at      TEXT DEFAULT (datetime('now'))
+      id               TEXT PRIMARY KEY,
+      date             TEXT NOT NULL,
+      category         TEXT NOT NULL DEFAULT '',
+      subcategory      TEXT DEFAULT '',
+      description      TEXT NOT NULL DEFAULT '',
+      amount           REAL DEFAULT 0,
+      receipt_no       TEXT DEFAULT '',
+      receipt_image    TEXT DEFAULT '',
+      receipt_file_name TEXT DEFAULT '',
+      payment_method   TEXT DEFAULT 'petty_cash',
+      notes            TEXT DEFAULT '',
+      recorded_by      TEXT DEFAULT '',
+      petty_ref        TEXT DEFAULT '',
+      status           TEXT DEFAULT 'approved',
+      created_at       TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS petty_cash (
       id                TEXT PRIMARY KEY,
@@ -248,6 +267,39 @@ async function handleInit(DB) {
     await DB.prepare(sql).run();
   }
 
+  // Migrate existing databases: add columns that may be missing from older schema versions.
+  // ALTER TABLE throws if the column already exists — catch and ignore those errors.
+  const migrations = [
+    `ALTER TABLE income ADD COLUMN bank_transfer_amount REAL DEFAULT 0`,
+    `ALTER TABLE income ADD COLUMN direct_petty_cash REAL DEFAULT 0`,
+    `ALTER TABLE income ADD COLUMN source TEXT DEFAULT 'sunday_collection'`,
+    `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
+    `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
+    // Remittance enhancements
+    `ALTER TABLE remittances ADD COLUMN period_from TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN period_to TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN payment_method TEXT DEFAULT 'bank_transfer'`,
+    `ALTER TABLE remittances ADD COLUMN notes TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN submitted_by TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN approved_by TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN approved_at TEXT DEFAULT ''`,
+  ];
+  for (const sql of migrations) {
+    try { await DB.prepare(sql).run(); } catch { /* column already exists — safe to ignore */ }
+  }
+
+  // Migrate legacy: remove goFishing from saved quotas setting
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='quotas'`).first();
+    if (row) {
+      const q = JSON.parse(row.value || '{}');
+      if ('goFishing' in q) {
+        delete q.goFishing;
+        await DB.prepare(`UPDATE settings SET value=? WHERE key='quotas'`).bind(JSON.stringify(q)).run();
+      }
+    }
+  } catch { /* safe to skip */ }
+
   // Seed petty config (once)
   await DB.prepare(
     `INSERT OR IGNORE INTO petty_config (id, float_amount, max_float) VALUES ('main', 50000, 50000)`
@@ -259,7 +311,7 @@ async function handleInit(DB) {
     bankName:         '',
     accountNo:        '',
     pettyMax:         '50000',
-    quotas:           JSON.stringify({ rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000, goFishing:10000 }),
+    quotas:           JSON.stringify({ rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000 }),
     remittanceRates:  JSON.stringify({
       membersTithe:    { natl:0.58, local:0.42 },
       ministersTithe:  { natl:0.62, local:0.38 },
@@ -335,52 +387,86 @@ async function deleteUser(DB, id) {
 async function getIncome(DB) {
   const { results } = await DB.prepare(`SELECT * FROM income ORDER BY date DESC, created_at DESC`).all();
   return ok((results || []).map(row => ({
-    id:               row.id,
-    date:             row.date,
-    membersTithe:     row.members_tithe,
-    ministersTithe:   row.ministers_tithe,
-    thanksgiving:     row.thanksgiving,
-    sundaySchool:     row.sunday_school,
-    slo:              row.slo,
-    crm:              row.crm,
-    workersOffering:  row.workers_offering,
-    childrenOffering: row.children_offering,
-    totalCollection:  row.total_collection,
-    usher:            row.usher,
-    recordedBy:       row.recorded_by,
-    depositConfirmed: row.deposit_confirmed === 1,
-    tellerNo:         row.teller_no,
-    depositedBy:      row.deposited_by,
-    depositDate:      row.deposit_date,
-    notes:            row.notes,
-    createdAt:        row.created_at,
+    id:                  row.id,
+    date:                row.date,
+    membersTithe:        row.members_tithe,
+    ministersTithe:      row.ministers_tithe,
+    thanksgiving:        row.thanksgiving,
+    sundaySchool:        row.sunday_school,
+    slo:                 row.slo,
+    crm:                 row.crm,
+    workersOffering:     row.workers_offering,
+    childrenOffering:    row.children_offering,
+    totalCollection:     row.total_collection,
+    bankTransferAmount:  row.bank_transfer_amount,
+    directPettyCash:     row.direct_petty_cash,
+    source:              row.source,
+    usher:               row.usher,
+    recordedBy:          row.recorded_by,
+    depositConfirmed:    row.deposit_confirmed === 1,
+    tellerNo:            row.teller_no,
+    depositedBy:         row.deposited_by,
+    depositDate:         row.deposit_date,
+    notes:               row.notes,
+    createdAt:           row.created_at,
   })));
 }
 
 async function createIncome(DB, data) {
   const id = data.id || newId('INC-');
-  await DB.prepare(`
-    INSERT INTO income
-      (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
-       slo,crm,workers_offering,children_offering,total_collection,
-       usher,recorded_by,notes)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-  `).bind(
-    id,
-    data.date || new Date().toISOString().split('T')[0],
-    data.membersTithe    || 0,
-    data.ministersTithe  || 0,
-    data.thanksgiving    || 0,
-    data.sundaySchool    || 0,
-    data.slo             || 0,
-    data.crm             || 0,
-    data.workersOffering || 0,
-    data.childrenOffering|| 0,
-    data.totalCollection || 0,
-    data.usher           || '',
-    data.recordedBy      || '',
-    data.notes           || '',
-  ).run();
+  const hasSplitCols = await tableHasColumns(DB, 'income', ['bank_transfer_amount', 'direct_petty_cash', 'source']);
+  if (hasSplitCols) {
+    await DB.prepare(`
+      INSERT INTO income
+        (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
+         slo,crm,workers_offering,children_offering,total_collection,
+         bank_transfer_amount,direct_petty_cash,source,
+         usher,recorded_by,notes)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id,
+      data.date                 || new Date().toISOString().split('T')[0],
+      data.membersTithe         || 0,
+      data.ministersTithe       || 0,
+      data.thanksgiving         || 0,
+      data.sundaySchool         || 0,
+      data.slo                  || 0,
+      data.crm                  || 0,
+      data.workersOffering      || 0,
+      data.childrenOffering     || 0,
+      data.totalCollection      || 0,
+      data.bankTransferAmount   || 0,
+      data.directPettyCash      || 0,
+      data.source               || 'sunday_collection',
+      data.usher                || '',
+      data.recordedBy           || '',
+      data.notes                || '',
+    ).run();
+  } else {
+    // Backward-compatible insert for databases that haven't run /api/init migration yet.
+    await DB.prepare(`
+      INSERT INTO income
+        (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
+         slo,crm,workers_offering,children_offering,total_collection,
+         usher,recorded_by,notes)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id,
+      data.date || new Date().toISOString().split('T')[0],
+      data.membersTithe    || 0,
+      data.ministersTithe  || 0,
+      data.thanksgiving    || 0,
+      data.sundaySchool    || 0,
+      data.slo             || 0,
+      data.crm             || 0,
+      data.workersOffering || 0,
+      data.childrenOffering|| 0,
+      data.totalCollection || 0,
+      data.usher           || '',
+      data.recordedBy      || '',
+      data.notes           || '',
+    ).run();
+  }
   return ok({ ...data, id });
 }
 
@@ -404,42 +490,69 @@ async function updateIncome(DB, id, data) {
 async function getExpenses(DB) {
   const { results } = await DB.prepare(`SELECT * FROM expenses ORDER BY date DESC, created_at DESC`).all();
   return ok((results || []).map(row => ({
-    id:            row.id,
-    date:          row.date,
-    category:      row.category,
-    subcategory:   row.subcategory,
-    description:   row.description,
-    amount:        row.amount,
-    receiptNo:     row.receipt_no,
-    paymentMethod: row.payment_method,
-    notes:         row.notes,
-    recordedBy:    row.recorded_by,
-    pettyRef:      row.petty_ref,
-    status:        row.status,
-    createdAt:     row.created_at,
+    id:              row.id,
+    date:            row.date,
+    category:        row.category,
+    subCategory:     row.subcategory,
+    description:     row.description,
+    amount:          row.amount,
+    receiptNo:       row.receipt_no,
+    receiptImage:    row.receipt_image,
+    receiptFileName: row.receipt_file_name,
+    paymentMethod:   row.payment_method,
+    notes:           row.notes,
+    recordedBy:      row.recorded_by,
+    pettyRef:        row.petty_ref,
+    status:          row.status,
+    createdAt:       row.created_at,
   })));
 }
 
 async function createExpense(DB, data) {
   const id = data.id || newId('EXP-');
-  await DB.prepare(`
-    INSERT INTO expenses
-      (id,date,category,subcategory,description,amount,receipt_no,payment_method,notes,recorded_by,petty_ref,status)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-  `).bind(
-    id,
-    data.date          || new Date().toISOString().split('T')[0],
-    data.category      || '',
-    data.subcategory   || '',
-    data.description   || '',
-    data.amount        || 0,
-    data.receiptNo     || '',
-    data.paymentMethod || 'petty_cash',
-    data.notes         || '',
-    data.recordedBy    || '',
-    data.pettyRef      || '',
-    data.status        || 'approved',
-  ).run();
+  const hasReceiptCols = await tableHasColumns(DB, 'expenses', ['receipt_image', 'receipt_file_name']);
+  if (hasReceiptCols) {
+    await DB.prepare(`
+      INSERT INTO expenses
+        (id,date,category,subcategory,description,amount,receipt_no,receipt_image,receipt_file_name,payment_method,notes,recorded_by,petty_ref,status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id,
+      data.date             || new Date().toISOString().split('T')[0],
+      data.category         || '',
+      data.subCategory      || '',
+      data.description      || '',
+      data.amount           || 0,
+      data.receiptNo        || '',
+      data.receiptImage     || '',
+      data.receiptFileName  || '',
+      data.paymentMethod    || 'petty_cash',
+      data.notes            || '',
+      data.recordedBy       || '',
+      data.pettyRef         || '',
+      data.status           || 'approved',
+    ).run();
+  } else {
+    // Backward-compatible insert for databases that haven't run /api/init migration yet.
+    await DB.prepare(`
+      INSERT INTO expenses
+        (id,date,category,subcategory,description,amount,receipt_no,payment_method,notes,recorded_by,petty_ref,status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id,
+      data.date          || new Date().toISOString().split('T')[0],
+      data.category      || '',
+      data.subCategory   || '',
+      data.description   || '',
+      data.amount        || 0,
+      data.receiptNo     || '',
+      data.paymentMethod || 'petty_cash',
+      data.notes         || '',
+      data.recordedBy    || '',
+      data.pettyRef      || '',
+      data.status        || 'approved',
+    ).run();
+  }
   return ok({ ...data, id });
 }
 
@@ -540,32 +653,59 @@ async function updatePettyEntry(DB, id, data) {
 async function getRemittances(DB) {
   const { results } = await DB.prepare(`SELECT * FROM remittances ORDER BY paid_date DESC, created_at DESC`).all();
   return ok((results || []).map(row => ({
-    id:           row.id,
-    label:        row.label,
-    amount:       row.amount,
-    paidDate:     row.paid_date,
-    reference:    row.reference,
-    authorizedBy: row.authorized_by,
-    status:       row.status,
-    createdAt:    row.created_at,
+    id:            row.id,
+    label:         row.label,
+    amount:        row.amount,
+    paidDate:      row.paid_date,
+    reference:     row.reference,
+    authorizedBy:  row.authorized_by,
+    status:        row.status,
+    periodFrom:    row.period_from  || '',
+    periodTo:      row.period_to    || '',
+    paymentMethod: row.payment_method || 'bank_transfer',
+    notes:         row.notes        || '',
+    submittedBy:   row.submitted_by || '',
+    approvedBy:    row.approved_by  || '',
+    approvedAt:    row.approved_at  || '',
+    createdAt:     row.created_at,
   })));
 }
 
 async function createRemittance(DB, data) {
   const id = newId('REM-');
   await DB.prepare(`
-    INSERT INTO remittances (id,label,amount,paid_date,reference,authorized_by,status)
-    VALUES (?,?,?,?,?,?,?)
+    INSERT INTO remittances
+      (id, label, amount, paid_date, reference, authorized_by, status,
+       period_from, period_to, payment_method, notes, submitted_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
-    data.label        || '',
-    data.amount       || 0,
-    data.paidDate     || '',
-    data.reference    || '',
-    data.authorizedBy || '',
-    data.status       || 'paid',
+    data.label         || '',
+    data.amount        || 0,
+    data.paidDate      || '',
+    data.reference     || '',
+    data.authorizedBy  || '',
+    data.status        || 'pending_approval',
+    data.periodFrom    || '',
+    data.periodTo      || '',
+    data.paymentMethod || 'bank_transfer',
+    data.notes         || '',
+    data.submittedBy   || '',
   ).run();
   return ok({ ...data, id });
+}
+
+async function updateRemittance(DB, id, data) {
+  const row = await DB.prepare(`SELECT * FROM remittances WHERE id=?`).bind(id).first();
+  if (!row) return err('Remittance not found', 404);
+  const status      = data.status      || row.status;
+  const approvedBy  = data.approvedBy  || row.approved_by  || '';
+  const approvedAt  = data.approvedAt  || row.approved_at  || '';
+  const notes       = data.notes       !== undefined ? data.notes : (row.notes || '');
+  await DB.prepare(
+    `UPDATE remittances SET status=?, approved_by=?, approved_at=?, notes=? WHERE id=?`
+  ).bind(status, approvedBy, approvedAt, notes, id).run();
+  return ok({ id, status, approvedBy, approvedAt });
 }
 
 // ── CASH TRANSACTIONS ─────────────────────────────────────────────
@@ -637,7 +777,9 @@ async function getSettings(DB) {
     catch { out[row.key] = row.value; }
   }
   // Ensure defaults are always present
-  if (!out.quotas)          out.quotas          = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000, goFishing:10000 };
+  if (!out.quotas)          out.quotas          = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000 };
+  // Migrate: remove legacy goFishing from saved quotas
+  if (out.quotas && 'goFishing' in out.quotas) { delete out.quotas.goFishing; }
   if (!out.remittanceRates) out.remittanceRates = null; // frontend uses DEFAULT_REMITTANCE_RATES as fallback
   return ok(out);
 }
