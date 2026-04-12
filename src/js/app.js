@@ -297,6 +297,17 @@ async function calcRemittances(income){
 
 function showModal(html){ const o=document.createElement('div'); o.className='modal-overlay'; o.id='modalOverlay'; o.innerHTML=`<div class="modal">${html}</div>`; document.body.appendChild(o) }
 function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
+// Returns a descriptive badge label for when no cash is held by the accountant.
+// For Sunday collections, the split between bank transfer and direct petty cash determines the label.
+// For other income, the full amount went via bank transfer.
+function noCashBadgeLabel(isSunday, btAmt, dpAmt){
+  if(!isSunday) return '🏦 Bank Transfer';
+  if(btAmt>0 && dpAmt===0) return '🏦 Bank Transfer';
+  if(dpAmt>0 && btAmt===0) return '💼 Direct to Petty';
+  if(btAmt>0 && dpAmt>0)   return '🏦 Bank + Petty Split';
+  return '🏦 Bank Transfer'; // totalCollection was 0 — safe fallback
+}
+function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
 function showAlert(msg,type='success'){
   const a=document.createElement('div'); a.className=`alert alert-${type}`;
   const icon=document.createElement('span'); icon.className='alert-icon'; icon.textContent=type==='success'?'✓':type==='danger'?'✕':'⚠';
@@ -882,10 +893,7 @@ async function renderIncomeList(records, cashTxOverride){
       const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
       const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
       const remaining = cashHeld - depositedAmt;
-      const noCashLabel = btAmt>0&&dpAmt===0 ? '🏦 Bank Transfer'
-        : dpAmt>0&&btAmt===0 ? '💼 Direct to Petty'
-        : btAmt>0&&dpAmt>0 ? '🏦 Bank + Petty Split'
-        : '🏦 Bank Transfer';
+      const noCashLabel = noCashBadgeLabel(true, btAmt, dpAmt);
       const statusBadge = cashHeld===0
         ? `<span class="badge badge-info">${noCashLabel}</span>`
         : isFullyDeposited
@@ -995,12 +1003,7 @@ async function renderAllIncomeList(records, cashTxOverride){
       const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
       const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
       const remaining = cashHeld - depositedAmt;
-      const noCashLabel = isSunday
-        ? (btAmt>0&&dpAmt===0 ? '🏦 Bank Transfer'
-          : dpAmt>0&&btAmt===0 ? '💼 Direct to Petty'
-          : btAmt>0&&dpAmt>0 ? '🏦 Bank + Petty Split'
-          : '🏦 Bank Transfer')
-        : '🏦 Bank Transfer';
+      const noCashLabel = noCashBadgeLabel(isSunday, btAmt, dpAmt);
       const statusBadge = cashHeld===0
         ? `<span class="badge badge-info">${noCashLabel}</span>`
         : isFullyDeposited
