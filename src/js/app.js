@@ -580,7 +580,6 @@ async function renderDashboard(){
   const totalIncome = income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
   const remittances = await calcRemittancesFromRecords(income);
-  const netLocal = remittances.netLocal;
   const dashQuotas = getQuotaList(settings);
   const dashRegionalQuota = dashQuotas.find(q=>q.label.toLowerCase().includes('regional contribution'));
   const dashMummyQuota   = dashQuotas.find(q=>q.label.toLowerCase().includes('mummy'));
@@ -589,6 +588,8 @@ async function renderDashboard(){
   const dashNatlQuotasAmt = dashQuotas
     .filter(q=>q!==dashRegionalQuota && q!==dashMummyQuota)
     .reduce((s,q)=>s+(q.amount||0),0);
+  const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
+  const netLocal = remittances.netLocal - dashAllQuotasAmt;
   const churchBal = await calcChurchBalance();
   const pendingPetty = await getPettyCashPendingCount();
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
@@ -1442,7 +1443,10 @@ async function renderRemittances(){
   const totalDue=allLines.reduce((s,l)=>s+l.amount,0);
   const quotasTotal=quotaLines.reduce((s,l)=>s+l.amount,0);
   const trueNetLocal=rem.netLocal-quotasTotal;
-  const totalCollection=income.reduce((s,r)=>s+(r.totalCollection||0),0);
+  // Only count income that goes through the remittance split (records with INCOME_TYPES fields)
+  const totalCollection=income
+    .filter(r=>INCOME_TYPES.some(t=>(r[t.key]||0)>0))
+    .reduce((s,r)=>s+(r.totalCollection||0),0);
 
   // --- Check for period payment ---
   const periodPayments=allRems.filter(r=>r.status==='paid'&&r.periodFrom===fromDate&&r.periodTo===toDate);
@@ -1600,9 +1604,19 @@ async function renderRemittances(){
             <div class="status-row-label" style="color:var(--amber)">Province Rebate — 20% of Local Retained Tithes (deducted)</div>
             <div class="status-row-amt" style="color:var(--amber)">− ${fmt(rem.provinceRebate)}</div>
           </div>`:''}
+          ${quotaLines.length>0?`
+          <div class="status-row" style="border-top:1px dashed var(--border)">
+            <div class="status-row-label" style="color:var(--amber);font-weight:600">Fixed Monthly Quotas (deducted)</div>
+            <div class="status-row-amt"></div>
+          </div>
+          ${quotaLines.map(q=>`
+          <div class="status-row">
+            <div class="status-row-label" style="color:var(--amber)">${esc(q.label)}</div>
+            <div class="status-row-amt" style="color:var(--amber)">− ${fmt(q.amount)}</div>
+          </div>`).join('')}`:''}
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px">
             <div class="status-row-label fw-bold">NET LOCAL RETAINED</div>
-            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(rem.netLocal)}</div>
+            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(trueNetLocal)}</div>
           </div>
         </div>
 
