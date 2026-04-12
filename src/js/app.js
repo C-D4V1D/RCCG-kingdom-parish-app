@@ -86,7 +86,7 @@ const EXPENSE_SUBCATS = {
   security:    ['Monthly salary or allowance for the night security guard','Security supplies','Occasional tips or relations with local police or community vigilantes','Others...']
 };
 
-const DEFAULT_QUOTAS = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000 };
+const DEFAULT_QUOTAS = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000, regional:0 };
 
 const QUOTA_LABELS = {
   rmf:      'RMF (Camp Clearing)',
@@ -94,7 +94,8 @@ const QUOTA_LABELS = {
   edu:      'Education Fund',
   camp:     'Camp Meeting Fund',
   mummy:    'Zonal Mummy Stipend',
-  volunteer:'Volunteer Fund'
+  volunteer:'Volunteer Fund',
+  regional: 'Regional Contribution'
 };
 
 // Income source types used in the "Other Income" form
@@ -580,6 +581,11 @@ async function renderDashboard(){
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
   const remittances = await calcRemittancesFromRecords(income);
   const netLocal = remittances.netLocal;
+  const dashQuotas = getQuotaList(settings);
+  const dashRegionalQuota = dashQuotas.find(q=>q.label.toLowerCase().includes('regional contribution'));
+  const dashMummyQuota   = dashQuotas.find(q=>q.label.toLowerCase().includes('mummy'));
+  const dashRegionalAmt  = dashRegionalQuota ? (dashRegionalQuota.amount||0) : 0;
+  const dashMummyAmt     = dashMummyQuota    ? (dashMummyQuota.amount||0)    : 0;
   const churchBal = await calcChurchBalance();
   const pendingPetty = await getPettyCashPendingCount();
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
@@ -676,8 +682,8 @@ async function renderDashboard(){
       <div class="kpi">
         <div class="kpi-icon" style="background:#FCEBEB">📤</div>
         <div class="kpi-label">RCCG Remittances Due</div>
-        <div class="kpi-val">${fmt(remittances.totalNatl+remittances.totalArea+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalMinisters||0)+(remittances.totalSeed||0))}</div>
-        <div class="kpi-delta warn">↑ ${totalIncome?Math.round((remittances.totalNatl+remittances.totalArea+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalMinisters||0)+(remittances.totalSeed||0))/totalIncome*100):0}% of income</div>
+        <div class="kpi-val">${fmt(remittances.totalNatl+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))}</div>
+        <div class="kpi-delta warn">↑ ${totalIncome?Math.round((remittances.totalNatl+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))/totalIncome*100):0}% of income</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
@@ -776,9 +782,9 @@ async function renderDashboard(){
         <div class="card">
           <div class="card-header"><span class="card-title">Remittance Summary</span></div>
           <div class="status-row"><div><div class="status-row-label">National HQ</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalNatl)}</div></div></div>
-          <div class="status-row"><div><div class="status-row-label">Regional</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalArea)}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">Regional</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(dashRegionalAmt)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Provincial</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.provinceRebate)}</div></div></div>
-          <div class="status-row"><div><div class="status-row-label">Pastor Family</div></div><div class="status-row-right"><div class="status-row-amt">${fmt((remittances.totalPastor||0)+(remittances.totalSeed||0))}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">Pastor Family</div></div><div class="status-row-right"><div class="status-row-amt">${fmt((remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Ministers</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalMinisters)}</div></div></div>
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Net Local Retained</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(remittances.netLocal)}</div></div></div>
         </div>
