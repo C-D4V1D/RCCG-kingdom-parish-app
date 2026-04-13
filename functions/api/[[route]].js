@@ -161,6 +161,8 @@ async function handleInit(DB) {
       bank_transfer_amount  REAL DEFAULT 0,
       direct_petty_cash     REAL DEFAULT 0,
       source                TEXT DEFAULT 'sunday_collection',
+      payment_method        TEXT DEFAULT 'cash',
+      donor_name            TEXT DEFAULT '',
       usher                 TEXT DEFAULT '',
       recorded_by           TEXT DEFAULT '',
       deposit_confirmed     INTEGER DEFAULT 0,
@@ -273,6 +275,8 @@ async function handleInit(DB) {
     `ALTER TABLE income ADD COLUMN bank_transfer_amount REAL DEFAULT 0`,
     `ALTER TABLE income ADD COLUMN direct_petty_cash REAL DEFAULT 0`,
     `ALTER TABLE income ADD COLUMN source TEXT DEFAULT 'sunday_collection'`,
+    `ALTER TABLE income ADD COLUMN payment_method TEXT DEFAULT 'cash'`,
+    `ALTER TABLE income ADD COLUMN donor_name TEXT DEFAULT ''`,
     `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
     `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
     // Remittance enhancements
@@ -401,6 +405,8 @@ async function getIncome(DB) {
     bankTransferAmount:  row.bank_transfer_amount,
     directPettyCash:     row.direct_petty_cash,
     source:              row.source,
+    paymentMethod:       row.payment_method,
+    donorName:           row.donor_name,
     usher:               row.usher,
     recordedBy:          row.recorded_by,
     depositConfirmed:    row.deposit_confirmed === 1,
@@ -414,15 +420,16 @@ async function getIncome(DB) {
 
 async function createIncome(DB, data) {
   const id = data.id || newId('INC-');
-  const hasSplitCols = await tableHasColumns(DB, 'income', ['bank_transfer_amount', 'direct_petty_cash', 'source']);
+  const hasSplitCols = await tableHasColumns(DB, 'income', ['bank_transfer_amount', 'direct_petty_cash', 'source', 'payment_method', 'donor_name']);
   if (hasSplitCols) {
     await DB.prepare(`
       INSERT INTO income
         (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
          slo,crm,workers_offering,children_offering,total_collection,
          bank_transfer_amount,direct_petty_cash,source,
+         payment_method,donor_name,
          usher,recorded_by,notes)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).bind(
       id,
       data.date                 || new Date().toISOString().split('T')[0],
@@ -438,6 +445,8 @@ async function createIncome(DB, data) {
       data.bankTransferAmount   || 0,
       data.directPettyCash      || 0,
       data.source               || 'sunday_collection',
+      data.paymentMethod        || 'cash',
+      data.donorName            || '',
       data.usher                || '',
       data.recordedBy           || '',
       data.notes                || '',

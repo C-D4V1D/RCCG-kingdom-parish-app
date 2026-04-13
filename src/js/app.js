@@ -297,6 +297,22 @@ async function calcRemittances(income){
 
 function showModal(html){ const o=document.createElement('div'); o.className='modal-overlay'; o.id='modalOverlay'; o.innerHTML=`<div class="modal">${html}</div>`; document.body.appendChild(o) }
 function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
+// Returns a descriptive badge label for when no cash is held by the accountant.
+// For Sunday collections, the split between bank transfer and direct petty cash determines the label.
+// For other income, paymentMethod drives the label.
+// Note: paymentMethod may be undefined for legacy records — treated as cash intentionally
+// (same as the '!== bank_transfer' sentinel used throughout; the DB column default is 'cash').
+function noCashBadgeLabel(isSunday, btAmt, dpAmt, paymentMethod){
+  if(!isSunday){
+    // Other Income: cashHeld===0 only when payment was via bank transfer (zero-amount records
+    // are blocked at submission). Use paymentMethod directly; neutral fallback for edge cases.
+    return paymentMethod==='bank_transfer' ? '🏦 Bank Transfer' : '—';
+  }
+  if(btAmt>0 && dpAmt===0) return '🏦 Bank Transfer';
+  if(dpAmt>0 && btAmt===0) return '💼 Direct to Petty';
+  if(btAmt>0 && dpAmt>0)   return '🏦 Bank + Petty Split';
+  return '🏦 Bank Transfer'; // totalCollection was 0 — safe fallback
+}
 function showAlert(msg,type='success'){
   const a=document.createElement('div'); a.className=`alert alert-${type}`;
   const icon=document.createElement('span'); icon.className='alert-icon'; icon.textContent=type==='success'?'✓':type==='danger'?'✕':'⚠';
@@ -532,8 +548,14 @@ async function calcChurchBalance(){
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
 
   // --- BANK BALANCE ---
-  // 1. Income already in bank (bank-transfer portions of all income records)
-  const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
+  // 1. Income already in bank:
+  //    - Sunday collections: use bankTransferAmount field
+  //    - Other income: use full totalCollection when paymentMethod is 'bank_transfer'
+  const bankTransferIncome = allIncome.reduce((s,r) => {
+    const isSunday = !r.source || r.source === 'sunday_collection';
+    if(isSunday) return s + (r.bankTransferAmount||0);
+    return s + (r.paymentMethod === 'bank_transfer' ? (r.totalCollection||0) : 0);
+  }, 0);
   // 2. Cash deposited by accountant to bank
   const cashDepositedToBank = cashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
   // 3. Outflows from bank: expenses paid via bank_transfer (incl. bank charges)
@@ -546,12 +568,18 @@ async function calcChurchBalance(){
 
   // --- CASH WITH ACCOUNTANT ---
   // Cash received = total collection - bank transfer portion - direct petty portion
+  // Sunday collections track splits via bankTransferAmount / directPettyCash fields.
+  // Other income records use paymentMethod ('cash' or 'bank_transfer') for the whole amount.
   const cashFromCollections = allIncome.reduce((s,r) => {
-    const btAmt = r.bankTransferAmount||0;
-    const dpAmt = r.directPettyCash||0;
-    return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
-  }, 0);
-  // Cash returned from bank withdrawals directed to accountant
+    const isSunday = !r.source || r.source === 'sunday_collection';
+    if(isSunday){
+      const btAmt = r.bankTransferAmount||0;
+      const dpAmt = r.directPettyCash||0;
+      return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
+    }
+    // Sentinel: !== 'bank_transfer' intentionally treats undefined as cash (correct for legacy
+    // records saved before the payment_method column was added; DB column default is 'cash').
+    return s + (r.paymentMethod !== 'bank_transfer' ? (r.totalCollection||0) : 0);
   const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
   // Expenses paid from accountant's cash
   const cashExpenses = allExpenses.filter(e=>e.paymentMethod==='cash').reduce((s,e) => s+(e.amount||0), 0);
@@ -816,7 +844,7 @@ async function renderIncome(){
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
       ? Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0))
-      : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
+      : r.paymentMethod!=='bank_transfer' ? (r.totalCollection||0) : 0;
     const dep = _cashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
     return { cashHeld, dep };
   }).filter(p=>p.cashHeld>0 && p.dep<p.cashHeld);
@@ -826,7 +854,11 @@ async function renderIncome(){
   // Only count deposits linked to this month's income records (scoped correctly to the month view)
   const currentMonthRecordIds = new Set(records.map(r=>r.id));
   const totalDeposited = _cashTx.filter(t=>t.type==='cash_deposit'&&currentMonthRecordIds.has(t.incomeRef)).reduce((s,t)=>s+(t.amount||0),0)
-    + records.reduce((s,r)=>s+(r.bankTransferAmount||0),0);
+    + records.reduce((s,r)=>{
+        const isSunday = !r.source || r.source === 'sunday_collection';
+        if(isSunday) return s + (r.bankTransferAmount||0);
+        return s + (r.paymentMethod==='bank_transfer' ? (r.totalCollection||0) : 0);
+      }, 0);
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
@@ -866,8 +898,10 @@ async function renderIncomeList(records, cashTxOverride){
       const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
       const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
       const remaining = cashHeld - depositedAmt;
+      const isSunday = !r.source||r.source==='sunday_collection';
+      const noCashLabel = noCashBadgeLabel(isSunday, btAmt, dpAmt, r.paymentMethod);
       const statusBadge = cashHeld===0
-        ? `<span class="badge badge-info">No Cash (All Transfer)</span>`
+        ? `<span class="badge badge-info">${noCashLabel}</span>`
         : isFullyDeposited
           ? `<span class="badge badge-success">✓ Deposited</span>`
           : depositedAmt>0
@@ -894,7 +928,7 @@ async function renderOtherIncomeList(records){
     <tr><th>Date</th><th>Source Type</th><th>Donor / Notes</th><th>Amount</th><th>Payment Method</th><th>Status</th><th>Recorded By</th><th>Actions</th></tr>
     ${records.map(r=>{
       const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'};
-      const isCash = r.paymentMethod==='cash';
+      const isCash = r.paymentMethod !== 'bank_transfer';
       const cashDep = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
       const remaining = Math.max(0,(r.totalCollection||0) - cashDep);
       const statusBadge = !isCash
@@ -965,16 +999,19 @@ async function renderAllIncomeList(records, cashTxOverride){
     <tr><th>Date</th><th>Source / Type</th><th>Amount</th><th>Cash (Accountant)</th><th>Bank Transfer</th><th>Cash Status</th><th>Recorded By</th><th>Actions</th></tr>
     ${sorted.map(r=>{
       const isSunday = !r.source||r.source==='sunday_collection';
-      const btAmt = r.bankTransferAmount||0;
+      const btAmt = isSunday
+        ? (r.bankTransferAmount||0)
+        : (r.paymentMethod==='bank_transfer' ? (r.totalCollection||0) : 0);
       const dpAmt = r.directPettyCash||0;
       const cashHeld = isSunday
         ? Math.max(0,(r.totalCollection||0) - btAmt - dpAmt)
-        : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
+        : r.paymentMethod!=='bank_transfer' ? (r.totalCollection||0) : 0;
       const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
       const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
       const remaining = cashHeld - depositedAmt;
+      const noCashLabel = noCashBadgeLabel(isSunday, btAmt, dpAmt, r.paymentMethod);
       const statusBadge = cashHeld===0
-        ? `<span class="badge badge-info">No Cash</span>`
+        ? `<span class="badge badge-info">${noCashLabel}</span>`
         : isFullyDeposited
           ? `<span class="badge badge-success">✓ Deposited</span>`
           : depositedAmt>0
@@ -1215,7 +1252,7 @@ async function confirmBulkDeposit(){
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
       ? Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0))
-      : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
+      : r.paymentMethod!=='bank_transfer' ? (r.totalCollection||0) : 0;
     const deposited = cashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
     const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
     return { id:r.id, date:r.date, cashHeld, deposited, remaining:cashHeld-deposited, source:srcLabel };
