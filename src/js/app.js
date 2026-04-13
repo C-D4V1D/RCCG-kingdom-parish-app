@@ -580,6 +580,7 @@ async function calcChurchBalance(){
     // Sentinel: !== 'bank_transfer' intentionally treats undefined as cash (correct for legacy
     // records saved before the payment_method column was added; DB column default is 'cash').
     return s + (r.paymentMethod !== 'bank_transfer' ? (r.totalCollection||0) : 0);
+  }, 0);
   const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
   // Expenses paid from accountant's cash
   const cashExpenses = allExpenses.filter(e=>e.paymentMethod==='cash').reduce((s,e) => s+(e.amount||0), 0);
