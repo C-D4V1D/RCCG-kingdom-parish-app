@@ -320,6 +320,8 @@ function showAlert(msg,type='success'){
   a.appendChild(icon); a.appendChild(txt);
   const pc=document.getElementById('pageContent'); if(pc){ pc.insertBefore(a,pc.firstChild); setTimeout(()=>a.remove(),4000) }
 }
+function btnLoad(btn, text='Saving... ⌛'){ if(!btn) return; btn._origText=btn.textContent; btn.textContent=text; btn.disabled=true; }
+function btnReset(btn){ if(!btn) return; btn.disabled=false; btn.textContent=btn._origText||btn.textContent; }
 async function updateNotifBadge(){ try{ const notifs=await DB.getNotifications(); const unread=notifs.filter(n=>!n.read).length; const el=document.getElementById('notifCount'); if(el){ el.textContent=unread; el.style.display=unread?'flex':'none' } }catch(e){} }
 
 // ──────────────────────────────────────────
@@ -1071,7 +1073,7 @@ function showIncomeForm(){
     <div class="form-group mt-2"><label class="form-label">Notes (optional)</label><textarea id="inc_notes" class="form-textarea" placeholder="e.g. Special thanksgiving offering, harvest Sunday, etc."></textarea></div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitIncome()">Save & Calculate Remittances</button>
+      <button class="btn btn-primary" onclick="App.submitIncome(this)">Save & Calculate Remittances</button>
     </div>`);
 }
 
@@ -1104,7 +1106,7 @@ function updateIncomeCashBreakdown(){
   if(dpInput) dpInput.style.borderColor = overalloc ? 'var(--danger)' : '';
 }
 
-async function submitIncome(){
+async function submitIncome(btn){
   const date=document.getElementById('inc_date')?.value;
   const usher=document.getElementById('inc_usher')?.value?.trim();
   if(!date){ alert('Please select a date.'); return }
@@ -1125,6 +1127,8 @@ async function submitIncome(){
   rec.directPettyCash    = directPettyCash;
   rec.notes=document.getElementById('inc_notes')?.value||'';
 
+  btnLoad(btn);
+  try {
   const saved = await DB.addIncome(rec);
   const cashWithAccountant = Math.max(0, total - bankTransferAmount - directPettyCash);
   DB.addAudit('income_recorded',`Sunday collection ${fmt(total)} for ${fmtDate(date)} — Cash: ${fmt(cashWithAccountant)}, Bank Transfer: ${fmt(bankTransferAmount)}, Direct Petty: ${fmt(directPettyCash)}. Counted with: ${usher}`,state.user?.name);
@@ -1146,6 +1150,7 @@ async function submitIncome(){
   showAlert(`Income of ${fmt(total)} recorded. Cash with accountant: ${fmt(cashWithAccountant)}${bankTransferAmount?` | Bank: ${fmt(bankTransferAmount)}`:''}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
   renderIncome();
   buildSidebar();
+  } finally { btnReset(btn); }
 }
 
 async function viewIncome(id){
@@ -1228,22 +1233,25 @@ async function confirmDeposit(id){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitCashDeposit('${id}')">Confirm Deposit</button>
+      <button class="btn btn-primary" onclick="App.submitCashDeposit('${id}',this)">Confirm Deposit</button>
     </div>`);
 }
 
-async function submitCashDeposit(incomeId){
+async function submitCashDeposit(incomeId, btn){
   const amount  = parseFloat(document.getElementById('dep_amount')?.value)||0;
   const method  = document.getElementById('dep_method')?.value;
   const ref     = document.getElementById('dep_ref')?.value?.trim();
   const date    = document.getElementById('dep_date')?.value;
   if(!amount||!ref||!date){ alert('Please fill all required fields.'); return }
+  btnLoad(btn);
+  try {
   await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
   DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
   DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank (Ref: ${ref})`,'success');
   closeModal();
   showAlert(`${fmt(amount)} deposited to bank successfully! Ref: ${ref}`, 'success');
   renderIncome();
+  } finally { btnReset(btn); }
 }
 
 async function confirmBulkDeposit(){
@@ -1301,7 +1309,7 @@ async function confirmBulkDeposit(){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" id="bulk_confirm_btn" onclick="App.submitBulkDeposit()">Confirm Deposit — ${fmt(totalRemaining)}</button>
+      <button class="btn btn-primary" id="bulk_confirm_btn" onclick="App.submitBulkDeposit(this)">Confirm Deposit — ${fmt(totalRemaining)}</button>
     </div>`);
 }
 
@@ -1325,7 +1333,7 @@ function toggleBulkSelectAll(checked){
   updateBulkDepositTotal();
 }
 
-async function submitBulkDeposit(){
+async function submitBulkDeposit(btn){
   const pending = state._bulkDepositPending || [];
   const method  = document.getElementById('bulk_dep_method')?.value;
   const ref     = document.getElementById('bulk_dep_ref')?.value?.trim();
@@ -1334,6 +1342,8 @@ async function submitBulkDeposit(){
   const selected = pending.filter((_,i)=>{ const c=document.getElementById(`bulk_chk_${i}`); return c?.checked; });
   if(!selected.length){ alert('Please tick at least one record to deposit.'); return }
   const totalAmount = selected.reduce((s,p)=>s+p.remaining,0);
+  btnLoad(btn);
+  try {
   for(const p of selected){
     await DB.addCashTransaction({ type:'cash_deposit', incomeRef:p.id, amount:p.remaining, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
   }
@@ -1343,6 +1353,7 @@ async function submitBulkDeposit(){
   closeModal();
   showAlert(`${fmt(totalAmount)} deposited across ${selected.length} record(s). Bank ref: ${ref}`, 'success');
   renderIncome();
+  } finally { btnReset(btn); }
 }
 
 function showOtherIncomeForm(){
@@ -1383,11 +1394,11 @@ function showOtherIncomeForm(){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitOtherIncome()">Save Income</button>
+      <button class="btn btn-primary" onclick="App.submitOtherIncome(this)">Save Income</button>
     </div>`);
 }
 
-async function submitOtherIncome(){
+async function submitOtherIncome(btn){
   const date       = document.getElementById('oi_date')?.value;
   const source     = document.getElementById('oi_source')?.value;
   const donorName  = document.getElementById('oi_donor')?.value?.trim();
@@ -1413,12 +1424,15 @@ async function submitOtherIncome(){
   }
   // local_only donations have no remittance split; they appear in income totals but not in remittance calculations
 
+  btnLoad(btn);
+  try {
   await DB.addIncome(rec);
   DB.addNotification('Other Income Recorded',`${fmt(amount)} recorded (${source}) from ${donorName||'unnamed'}`,'success');
   closeModal();
   showAlert(`${fmt(amount)} recorded as ${OTHER_INCOME_SOURCES.find(s=>s.key===source)?.label||source}. Method: ${method.replace('_',' ')}.`,'success');
   renderIncome();
   buildSidebar();
+  } finally { btnReset(btn); }
 }
 
 // ── REMITTANCES ───────────────────────────
@@ -1595,7 +1609,7 @@ async function renderRemittances(){
               </div>
               <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
                 <span class="td-bold td-red">${fmt(r.amount)}</span>
-                ${['it_admin','pastor','signatory'].includes(state.user?.role)?`<button class="btn btn-sm btn-primary" onclick="App.approveRemittance('${r.id}')">✅ Approve</button>`:''}
+                ${['it_admin','pastor','signatory'].includes(state.user?.role)?`<button class="btn btn-sm btn-primary" onclick="App.approveRemittance('${r.id}',this)">✅ Approve</button>`:''}
               </div>
             </div>`).join('')}
         </div>`:''}
@@ -1782,7 +1796,7 @@ async function showRemittancePaymentModal(){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitRemittance()">📤 Submit for Approval</button>
+      <button class="btn btn-primary" onclick="App.submitRemittance(this)">📤 Submit for Approval</button>
     </div>`);
 }
 
@@ -1794,7 +1808,7 @@ function onRemMethodChange(){
   if(receiptGroup) receiptGroup.style.display=method==='bank_transfer'?'':'none';
 }
 
-async function submitRemittance(){
+async function submitRemittance(btn){
   const amount=parseFloat(document.getElementById('rem_amount')?.value)||0;
   const date=document.getElementById('rem_date')?.value;
   const method=document.querySelector('input[name="rem_method"]:checked')?.value||'bank_transfer';
@@ -1810,6 +1824,8 @@ async function submitRemittance(){
   if(method==='bank_transfer'&&!reference){ showAlert('Please enter the bank transfer reference number.','danger'); return }
   if(!auth){ showAlert('Please select or enter the authorizing signatories.','danger'); return }
 
+  btnLoad(btn);
+  try {
   // Encode receipt file if provided
   let receiptData='', receiptFileName='';
   const receiptFile=document.getElementById('rem_receipt')?.files?.[0];
@@ -1845,10 +1861,13 @@ async function submitRemittance(){
   // Reset period so defaults recalculate for next period
   state.remFromDate=null; state.remToDate=null;
   renderRemittances();
+  } finally { btnReset(btn); }
 }
 
-async function approveRemittance(id){
+async function approveRemittance(id, btn){
   if(!confirm('Approve this remittance payment?')) return;
+  btnLoad(btn, 'Approving... ⌛');
+  try {
   await DB.updateRemittance(id,{
     status:'paid',
     approvedBy:state.user?.name||'',
@@ -1858,6 +1877,7 @@ async function approveRemittance(id){
   DB.addNotification('Remittance Approved',`Remittance payment approved by ${state.user?.name||'—'} and marked as paid.`,'success');
   showAlert('Remittance approved and marked as paid!','success');
   renderRemittances();
+  } finally { btnReset(btn); }
 }
 
 function onRemDatesChange(){
@@ -2200,10 +2220,10 @@ function showExpenseForm(){
       <input type="file" id="exp_receipt_file" class="form-input" accept="image/*,application/pdf" style="padding:6px" />
     </div>
     <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="exp_notes" class="form-textarea" placeholder="Additional details..."></textarea></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitExpense()">Save Expense</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitExpense(this)">Save Expense</button></div>`);
 }
 
-async function submitExpense(){
+async function submitExpense(btn){
   const date=document.getElementById('exp_date')?.value;
   const category=document.getElementById('exp_cat')?.value;
   const subCategory=document.getElementById('exp_subcat')?.value;
@@ -2238,13 +2258,14 @@ async function submitExpense(){
     }
   }
 
+  btnLoad(btn);
   if(file){
     const reader = new FileReader();
-    reader.onload = async ev => { await saveExpenseRecord(ev.target.result, file.name); };
-    reader.onerror = async () => { showAlert('Failed to read receipt file. Saving expense without image.','warn'); await saveExpenseRecord(null, null); };
+    reader.onload = async ev => { try { await saveExpenseRecord(ev.target.result, file.name); } finally { btnReset(btn); } };
+    reader.onerror = async () => { try { showAlert('Failed to read receipt file. Saving expense without image.','warn'); await saveExpenseRecord(null, null); } finally { btnReset(btn); } };
     reader.readAsDataURL(file);
   } else {
-    await saveExpenseRecord(null, null);
+    try { await saveExpenseRecord(null, null); } finally { btnReset(btn); }
   }
 }
 
@@ -2280,10 +2301,10 @@ function showBankWithdrawal(){
     <div class="form-group"><label class="form-label">Purpose / Description *</label><input type="text" id="wd_desc" class="form-input" placeholder="e.g. Petty cash refill, Payment for generator repair, etc." /></div>
     <div class="form-group"><label class="form-label">Bank Reference / Teller No.</label><input type="text" id="wd_ref" class="form-input" placeholder="Optional reference number" /></div>
     <div class="form-group"><label class="form-label">Authorized By</label><input type="text" id="wd_auth" class="form-input" placeholder="Signatory names" value="${state.user?.name||''}" /></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankWithdrawal()">Record Withdrawal</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankWithdrawal(this)">Record Withdrawal</button></div>`);
 }
 
-async function submitBankWithdrawal(){
+async function submitBankWithdrawal(btn){
   const date        = document.getElementById('wd_date')?.value;
   const amount      = parseFloat(document.getElementById('wd_amt')?.value)||0;
   const destination = document.getElementById('wd_dest')?.value||'accountant_cash';
@@ -2292,6 +2313,8 @@ async function submitBankWithdrawal(){
   const auth        = document.getElementById('wd_auth')?.value;
   if(!date||!amount||!description){ alert('Please fill all required fields.'); return }
 
+  btnLoad(btn);
+  try {
   await DB.addCashTransaction({ type:'withdrawal', destination, date, amount, description, reference, authorizedBy:auth, recordedBy:state.user?.name });
 
   // If withdrawn to admin officer petty cash, auto-create a petty refill
@@ -2310,6 +2333,7 @@ async function submitBankWithdrawal(){
     showAlert(`Bank withdrawal of ${fmt(amount)} recorded. Destination: ${destination.replace(/_/g,' ')}.`,'success');
   }
   navigate(state.page);
+  } finally { btnReset(btn); }
 }
 
 // ── BANK ────────────────────────────────
@@ -2547,16 +2571,18 @@ function showBankChargeForm(){
     <div class="form-group"><label class="form-label">Description</label><input type="text" id="bc_desc" class="form-input" placeholder="Details about the charge" /></div>
     <div class="form-group"><label class="form-label">Amount (₦) *</label><input type="number" id="bc_amt" class="form-input" placeholder="0" min="0" /></div>
     <div class="form-group"><label class="form-label">Reference / Transaction ID</label><input type="text" id="bc_ref" class="form-input" placeholder="Optional" /></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankCharge()">Save Bank Charge</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankCharge(this)">Save Bank Charge</button></div>`);
 }
 
-async function submitBankCharge(){
+async function submitBankCharge(btn){
   const date = document.getElementById('bc_date')?.value;
   const subCategory = document.getElementById('bc_subcat')?.value;
   const description = document.getElementById('bc_desc')?.value?.trim() || subCategory;
   const amount = parseFloat(document.getElementById('bc_amt')?.value)||0;
   const receiptNo = document.getElementById('bc_ref')?.value;
   if(!date||!amount){ alert('Please fill date and amount.'); return }
+  btnLoad(btn);
+  try {
   await DB.addExpense({
     date, category:'bank', subCategory, description, amount,
     paymentMethod:'bank_transfer', receiptNo,
@@ -2567,6 +2593,7 @@ async function submitBankCharge(){
   closeModal();
   showAlert(`Bank charge of ${fmt(amount)} recorded.`,'success');
   navigate('bank');
+  } finally { btnReset(btn); }
 }
 
 // ── PETTY CASH ────────────────────────────
@@ -2675,8 +2702,8 @@ async function renderPettyCash(){
             <div class="status-row-right" style="flex-shrink:0;gap:6px">
               <div class="status-row-amt td-amber" style="white-space:nowrap">${fmt(r.amount)}</div>
               ${can('income','petty_approve')?`
-                <button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">Approve</button>
-                <button class="btn btn-sm btn-danger" onclick="App.rejectPetty('${r.id}')">Reject</button>`:''
+                <button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}',this)">Approve</button>
+                <button class="btn btn-sm btn-danger" onclick="App.rejectPetty('${r.id}',this)">Reject</button>`:''
               }
             </div>
           </div>`).join(''):'<div class="empty-table">No pending requests.</div>'}
@@ -2746,14 +2773,16 @@ async function showPettyRequest(){
     </div>
     <div class="form-group"><label class="form-label">Date Needed By</label><input type="date" id="pet_date" class="form-input" value="${new Date().toISOString().split('T')[0]}" /></div>
     <div class="form-group"><label class="form-label">Notes (helps with approval)</label><textarea id="pet_notes" class="form-textarea" placeholder="Any context that explains the urgency or details..."></textarea></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitPettyRequest()">Submit Request</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitPettyRequest(this)">Submit Request</button></div>`);
 }
 
-async function submitPettyRequest(){
+async function submitPettyRequest(btn){
   const purpose=document.getElementById('pet_purpose')?.value?.trim();
   const amount=parseFloat(document.getElementById('pet_amt')?.value)||0;
   const category=document.getElementById('pet_cat')?.value;
   if(!purpose||!amount||!category){ alert('Please fill in the purpose, amount, and category.'); return }
+  btnLoad(btn);
+  try {
   const [pettyHistGPCR, pettyConfigGPCR] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
   const petty = { history: pettyHistGPCR, float: pettyConfigGPCR.float, max: pettyConfigGPCR.max };
   if(amount>petty.float){
@@ -2773,9 +2802,10 @@ async function submitPettyRequest(){
   showAlert('Request submitted! The Accountant and a Signatory will review and approve.','success');
   renderPettyCash();
   buildSidebar();
+  } finally { btnReset(btn); }
 }
 
-async function approvePetty(id){
+async function approvePetty(id, btn){
   const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
   const req=pettyHistory.find(h=>h.id===id);
   if(!req) return;
@@ -2783,6 +2813,8 @@ async function approvePetty(id){
     alert(`Cannot approve: Insufficient float.\nRequired: ${fmt(req.amount)}\nAvailable: ${fmt(pettyConfig.float)}\n\nPlease refill the float first, then approve this request.`);
     return;
   }
+  btnLoad(btn, 'Approving... ⌛');
+  try {
   const approvedAt=new Date().toISOString();
   await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
   await DB.savePettyConfig({ float: pettyConfig.float - req.amount, max: pettyConfig.max });
@@ -2791,10 +2823,13 @@ async function approvePetty(id){
   showAlert(`Approved. ${fmt(req.amount)} deducted from float. Remind ${req.requestedBy} to return receipt within 48 hours.`,'success');
   renderPettyCash();
   buildSidebar();
+  } finally { btnReset(btn); }
 }
 
-async function rejectPetty(id){
+async function rejectPetty(id, btn){
   const reason=prompt('Reason for rejection (the requester will see this):');
+  btnLoad(btn, 'Rejecting... ⌛');
+  try {
   const pettyHistory=await DB.getPetty();
   const req=pettyHistory.find(h=>h.id===id);
   if(!req) return;
@@ -2805,6 +2840,7 @@ async function rejectPetty(id){
   showAlert('Request rejected and requester notified.','warn');
   renderPettyCash();
   buildSidebar();
+  } finally { btnReset(btn); }
 }
 
 // BUG FIX 2: settling a petty cash request now auto-creates a matching Expense record
@@ -2818,12 +2854,14 @@ function submitPettyReceipt(id){
     <div class="form-group"><label class="form-label">Actual Amount Spent (₦)</label><input type="number" id="rc_amt" class="form-input" placeholder="Leave blank if same as requested" /></div>
     <div class="form-group"><label class="form-label">Vendor / Purchased From</label><input type="text" id="rc_vendor" class="form-input" placeholder="e.g. Total Petrol Station, Onitsha" /></div>
     <div class="form-group"><label class="form-label">Notes</label><textarea id="rc_notes" class="form-textarea" placeholder="Any change returned, additional detail..."></textarea></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.confirmPettyReceipt('${id}')">Submit & Settle</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.confirmPettyReceipt('${id}',this)">Submit & Settle</button></div>`);
 }
 
-async function confirmPettyReceipt(id){
+async function confirmPettyReceipt(id, btn){
   const no=document.getElementById('rc_no')?.value?.trim();
   if(!no){ alert('Please enter the receipt number.'); return }
+  btnLoad(btn);
+  try {
   const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
   const req=pettyHistory.find(h=>h.id===id);
   if(!req){ closeModal(); return }
@@ -2864,6 +2902,7 @@ async function confirmPettyReceipt(id){
   closeModal();
   showAlert(`Receipt submitted. ${fmt(actualAmt)} recorded as expense.${changeReturned?` ${fmt(changeReturned)} change returned to float.`:''}`, 'success');
   renderPettyCash();
+  } finally { btnReset(btn); }
 }
 
 async function showPettyRefill(){
@@ -2891,14 +2930,16 @@ async function showPettyRefill(){
     </div>
     <div class="form-group"><label class="form-label">Bank Transfer Reference <span style="color:var(--danger)">*</span></label><input type="text" id="ref_ref" class="form-input" placeholder="Reference number from bank" /></div>
     <div class="form-group"><label class="form-label">Authorized By (Signatory names) <span style="color:var(--danger)">*</span></label><input type="text" id="ref_auth" class="form-input" placeholder="e.g. Elder Paul Okafor + Elder James Eze" /></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitRefill()">Refill Float</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitRefill(this)">Refill Float</button></div>`);
 }
 
-async function submitRefill(){
+async function submitRefill(btn){
   const amt=parseFloat(document.getElementById('ref_amt')?.value)||0;
   const ref=document.getElementById('ref_ref')?.value?.trim();
   const auth=document.getElementById('ref_auth')?.value?.trim();
   if(!amt||!ref||!auth){ alert('Please fill in all required fields: amount, bank reference, and authorizing signatories.'); return }
+  btnLoad(btn);
+  try {
   const pettyConfig=await DB.getPettyConfig();
   const spaceAvailable=pettyConfig.max-pettyConfig.float;
   if(amt>spaceAvailable){
@@ -2918,6 +2959,7 @@ async function submitRefill(){
   closeModal();
   showAlert(`Float refilled by ${fmt(actualAdded)}. New balance: ${fmt(newFloat)}.${actualAdded<amt?` Note: only ${fmt(actualAdded)} added (float max reached).`:''}`, 'success');
   renderPettyCash();
+  } finally { btnReset(btn); }
 }
 
 // ── REPORTS ────────────────────────────────
@@ -2925,17 +2967,19 @@ function renderReports(){
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header"><div class="page-title">Reports</div><div class="page-sub">${monthLabel()}</div></div>
     <div class="grid-3" style="margin-bottom:1rem">
-      <button class="qa-btn" onclick="App.generateWeeklyReport()"><div class="qa-icon" style="background:#E1F5EE">📋</div><div class="qa-label">Weekly Summary</div><div class="qa-sub">Sunday collections breakdown</div></button>
-      <button class="qa-btn" onclick="App.generateMonthlyReport()"><div class="qa-icon" style="background:#E6F1FB">📊</div><div class="qa-label">Monthly Statement</div><div class="qa-sub">Full income & expenses</div></button>
+      <button class="qa-btn" onclick="App.generateWeeklyReport(this)"><div class="qa-icon" style="background:#E1F5EE">📋</div><div class="qa-label">Weekly Summary</div><div class="qa-sub">Sunday collections breakdown</div></button>
+      <button class="qa-btn" onclick="App.generateMonthlyReport(this)"><div class="qa-icon" style="background:#E6F1FB">📊</div><div class="qa-label">Monthly Statement</div><div class="qa-sub">Full income & expenses</div></button>
       <button class="qa-btn" onclick="App.generateRemittanceReport()"><div class="qa-icon" style="background:#FCEBEB">📤</div><div class="qa-label">Remittance Report</div><div class="qa-sub">For RCCG submission</div></button>
-      <button class="qa-btn" onclick="App.generateQuarterlyReport()"><div class="qa-icon" style="background:#FAEEDA">📈</div><div class="qa-label">Quarterly Review</div><div class="qa-sub">3-month health check</div></button>
-      <button class="qa-btn" onclick="App.generateExpenseReport()"><div class="qa-icon" style="background:#EAF3DE">💸</div><div class="qa-label">Expense Report</div><div class="qa-sub">By category</div></button>
-      <button class="qa-btn" onclick="App.generatePettyCashReport()"><div class="qa-icon" style="background:#EEEDFE">💳</div><div class="qa-label">Petty Cash Report</div><div class="qa-sub">Imprest reconciliation</div></button>
+      <button class="qa-btn" onclick="App.generateQuarterlyReport(this)"><div class="qa-icon" style="background:#FAEEDA">📈</div><div class="qa-label">Quarterly Review</div><div class="qa-sub">3-month health check</div></button>
+      <button class="qa-btn" onclick="App.generateExpenseReport(this)"><div class="qa-icon" style="background:#EAF3DE">💸</div><div class="qa-label">Expense Report</div><div class="qa-sub">By category</div></button>
+      <button class="qa-btn" onclick="App.generatePettyCashReport(this)"><div class="qa-icon" style="background:#EEEDFE">💳</div><div class="qa-label">Petty Cash Report</div><div class="qa-sub">Imprest reconciliation</div></button>
     </div>
     <div id="reportOutput"></div>`;
 }
 
-async function generateMonthlyReport(){
+async function generateMonthlyReport(btn){
+  btnLoad(btn, 'Generating... ⌛');
+  try {
   const income=filterByMonth(await DB.getIncome());
   const expenses=filterByMonth(await DB.getExpenses());
   const paidRems=filterByMonth(await DB.getRemittances());
@@ -2987,9 +3031,12 @@ async function generateMonthlyReport(){
     </div>`;
   document.getElementById('reportOutput').innerHTML=html;
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
+  } finally { btnReset(btn); }
 }
 
-async function generateWeeklyReport(){
+async function generateWeeklyReport(btn){
+  btnLoad(btn, 'Generating... ⌛');
+  try {
   const income=filterByMonth(await DB.getIncome());
   document.getElementById('reportOutput').innerHTML=`
     <div class="card">
@@ -3000,11 +3047,14 @@ async function generateWeeklyReport(){
       </table></div>`:'<div class="empty-table">No collections this month.</div>'}
     </div>`;
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
+  } finally { btnReset(btn); }
 }
 
 function generateRemittanceReport(){ printRemittanceReport(); }
 
-async function generateQuarterlyReport(){
+async function generateQuarterlyReport(btn){
+  btnLoad(btn, 'Generating... ⌛');
+  try {
   let rows='';
   for(let i=2;i>=0;i--){
     let m=state.month-i; let y=state.year; if(m<0){m+=12;y--;}
@@ -3024,9 +3074,12 @@ async function generateQuarterlyReport(){
       </table></div>
     </div>`;
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
+  } finally { btnReset(btn); }
 }
 
-async function generateExpenseReport(){
+async function generateExpenseReport(btn){
+  btnLoad(btn, 'Generating... ⌛');
+  try {
   const expenses=filterByMonth(await DB.getExpenses());
   const byCat={};
   EXPENSE_CATS.forEach(c=>{ byCat[c.key]={ label:c.label, icon:c.icon, total:0, count:0 } });
@@ -3042,9 +3095,12 @@ async function generateExpenseReport(){
       </table></div>
     </div>`;
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
+  } finally { btnReset(btn); }
 }
 
-async function generatePettyCashReport(){
+async function generatePettyCashReport(btn){
+  btnLoad(btn, 'Generating... ⌛');
+  try {
   const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
   // BUG FIX: use pettyMonthHistory() helper — old code was passing a plain object to filterByMonth(), returning ALL history instead of current month
   const history=pettyMonthHistory(pettyHistory);
@@ -3088,9 +3144,8 @@ async function generatePettyCashReport(){
       </div>
     </div>`;
   document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
+  } finally { btnReset(btn); }
 }
-
-// ── AUDIT LOG ─────────────────────────────
 async function renderAudit(){
   const log=(await DB.getAudit()).slice(0,100);
   document.getElementById('pageContent').innerHTML=`
@@ -3139,7 +3194,7 @@ function renderAdminUsers(users){
         <td class="td-muted">${u.email||'—'}</td>
         <td class="td-muted">••••</td>
         <td><button class="btn btn-sm" onclick="App.editUser('${u.id}')">Edit</button>
-            <button class="btn btn-sm btn-danger" onclick="App.deleteUser('${u.id}')" style="margin-left:4px">Delete</button></td>
+            <button class="btn btn-sm btn-danger" onclick="App.deleteUser('${u.id}',this)" style="margin-left:4px">Delete</button></td>
       </tr>`}).join('')}
     </table></div></div>`;
 }
@@ -3151,7 +3206,7 @@ function renderAdminSettings(s){
     <div class="form-group"><label class="form-label">Bank Name</label><input type="text" id="set_bank" class="form-input" value="${s.bankName||''}" /></div>
     <div class="form-group"><label class="form-label">Account Number</label><input type="text" id="set_acct" class="form-input" value="${s.accountNo||''}" /></div>
     <div class="form-group"><label class="form-label">Petty Cash Max Float (₦)</label><input type="number" id="set_petty" class="form-input" value="${s.pettyMax||50000}" /></div>
-    <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
+    <button class="btn btn-primary" onclick="App.saveSettings(this)">Save Settings</button>
   </div>`;
 }
 
@@ -3168,7 +3223,7 @@ function renderAdminQuotas(s){
     <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">These flat amounts are remitted monthly regardless of income fluctuations. They are included in the bulk remittance payment each month.</p>
     <div id="quota-rows-container">${rows}</div>
     <button class="btn" style="margin-top:4px;margin-bottom:12px" onclick="App.addQuotaRow()">➕ Add Quota</button><br/>
-    <button class="btn btn-primary" onclick="App.saveQuotas()">Save Quotas</button>
+    <button class="btn btn-primary" onclick="App.saveQuotas(this)">Save Quotas</button>
   </div>`;
 }
 
@@ -3205,11 +3260,13 @@ function renderAdminRates(s){
       ${rateInput('rate_provinceRebate', r.provinceRebate ?? DEFAULT_REMITTANCE_RATES.provinceRebate)}
     </div>
     <br>
-    <button class="btn btn-primary" onclick="App.saveRates()">Save Remittance Rates</button>
+    <button class="btn btn-primary" onclick="App.saveRates(this)">Save Remittance Rates</button>
   </div>`;
 }
 
-async function saveRates(){
+async function saveRates(btn){
+  btnLoad(btn);
+  try {
   const s = await DB.getSettings();
   const r = s.remittanceRates || {};
   const pct2dec = id => { const el=document.getElementById(id); return el ? parseFloat(el.value||0)/100 : null; };
@@ -3227,6 +3284,7 @@ async function saveRates(){
   s.remittanceRates = r;
   await DB.saveSettings(s);
   showAlert('Remittance rates updated successfully!','success');
+  } finally { btnReset(btn); }
 }
 
 function renderAdminBackup(){
@@ -3234,7 +3292,7 @@ function renderAdminBackup(){
     <div class="card-header"><span class="card-title">Data Backup & Restore</span></div>
     <p style="font-size:13px;color:var(--text2);margin-bottom:1rem">Export all church financial data as a JSON backup file. Store it securely.</p>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
-      <button class="btn btn-primary" onclick="App.exportData()">⬇ Export Backup</button>
+      <button class="btn btn-primary" onclick="App.exportData(this)">⬇ Export Backup</button>
       <button class="btn" onclick="App.importData()">⬆ Import / Restore</button>
       <button class="btn btn-danger" onclick="App.clearAllData()">🗑 Clear All Data</button>
     </div>
@@ -3243,7 +3301,9 @@ function renderAdminBackup(){
   </div>`;
 }
 
-async function saveSettings(){
+async function saveSettings(btn){
+  btnLoad(btn);
+  try {
   const s=await DB.getSettings();
   s.churchName=document.getElementById('set_name')?.value;
   s.bankName=document.getElementById('set_bank')?.value;
@@ -3251,6 +3311,7 @@ async function saveSettings(){
   s.pettyMax=parseFloat(document.getElementById('set_petty')?.value)||50000;
   await DB.saveSettings(s);
   showAlert('Settings saved!','success');
+  } finally { btnReset(btn); }
 }
 
 function addQuotaRow(){
@@ -3270,7 +3331,9 @@ function removeQuotaRow(i){
   if(row) row.remove();
 }
 
-async function saveQuotas(){
+async function saveQuotas(btn){
+  btnLoad(btn);
+  try {
   const container=document.getElementById('quota-rows-container');
   const list=[];
   if(container){
@@ -3285,6 +3348,7 @@ async function saveQuotas(){
   delete s.quotas; // remove legacy format
   await DB.saveSettings(s);
   showAlert('Monthly quotas updated!','success');
+  } finally { btnReset(btn); }
 }
 
 function showAddUser(){
@@ -3297,20 +3361,23 @@ function showAddUser(){
     </div>
     <div class="form-group"><label class="form-label">Email (optional)</label><input type="email" id="nu_email" class="form-input" placeholder="email@example.com" /></div>
     <div class="form-group"><label class="form-label">PIN (4-6 digits)</label><input type="password" id="nu_pin" class="form-input" maxlength="6" placeholder="••••" inputmode="numeric" /></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.addUser()">Add User</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.addUser(this)">Add User</button></div>`);
 }
 
-async function addUser(){
+async function addUser(btn){
   const name=document.getElementById('nu_name')?.value?.trim();
   const role=document.getElementById('nu_role')?.value;
   const email=document.getElementById('nu_email')?.value;
   const pin=document.getElementById('nu_pin')?.value;
   if(!name||!role||!pin||pin.length<4){ alert('Please fill name, role, and PIN (min 4 digits).'); return }
+  btnLoad(btn);
+  try {
   await DB.addUser({ name, role, email, pin });
   DB.addAudit('user_added',`New user added: ${name} (${role})`,state.user?.name);
   closeModal();
   showAlert(`User ${name} added successfully!`,'success');
   renderAdmin();
+  } finally { btnReset(btn); }
 }
 
 async function editUser(id){
@@ -3326,29 +3393,37 @@ async function editUser(id){
     </div>
     <div class="form-group"><label class="form-label">Email</label><input type="email" id="eu_email" class="form-input" value="${u.email||''}" /></div>
     <div class="form-group"><label class="form-label">New PIN (leave blank to keep current)</label><input type="password" id="eu_pin" class="form-input" maxlength="6" placeholder="New PIN" inputmode="numeric" /></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.updateUser('${id}')">Update</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.updateUser('${id}',this)">Update</button></div>`);
 }
 
-async function updateUser(id){
+async function updateUser(id, btn){
   const updateData = { name:document.getElementById('eu_name')?.value, role:document.getElementById('eu_role')?.value, email:document.getElementById('eu_email')?.value, pin:document.getElementById('eu_pin')?.value };
+  btnLoad(btn);
+  try {
   await DB.updateUser(id, updateData);
   DB.addAudit('user_updated',`User updated: ${updateData.name}`,state.user?.name);
   closeModal();
   showAlert('User updated!','success');
   renderAdmin();
+  } finally { btnReset(btn); }
 }
 
-async function deleteUser(id){
+async function deleteUser(id, btn){
   const usersDelU=await DB.getUsers();
   const u=usersDelU.find(x=>x.id===id);
   if(!u||!confirm(`Delete user "${u.name}"? This cannot be undone.`)) return;
+  btnLoad(btn, 'Deleting... ⌛');
+  try {
   await DB.deleteUser(id);
   DB.addAudit('user_deleted',`User deleted: ${u.name}`,state.user?.name);
   showAlert('User deleted.','warn');
   renderAdmin();
+  } finally { btnReset(btn); }
 }
 
-async function exportData(){
+async function exportData(btn){
+  btnLoad(btn, 'Exporting... ⌛');
+  try {
   const [users,income,remittances,expenses,petty,auditLog,settings,cashTransactions] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(),DB.getPetty(),DB.getAudit(),DB.getSettings(),DB.getCashTransactions()]);
   const data={ users,income,remittances,expenses,petty,audit:auditLog,settings,cashTransactions, exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
@@ -3357,6 +3432,7 @@ async function exportData(){
   a.click(); URL.revokeObjectURL(a.href);
   DB.addAudit('data_exported','Full data export performed',state.user?.name);
   showAlert('Backup exported successfully!','success');
+  } finally { btnReset(btn); }
 }
 
 function importData(){
