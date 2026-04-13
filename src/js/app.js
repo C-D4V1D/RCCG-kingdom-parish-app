@@ -299,13 +299,14 @@ function showModal(html){ const o=document.createElement('div'); o.className='mo
 function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
 // Returns a descriptive badge label for when no cash is held by the accountant.
 // For Sunday collections, the split between bank transfer and direct petty cash determines the label.
-// For other income, paymentMethod drives the label; falls back to '🏦 Bank Transfer' if unset.
+// For other income, paymentMethod drives the label.
+// Note: paymentMethod may be undefined for legacy records — treated as cash intentionally
+// (same as the '!== bank_transfer' sentinel used throughout; the DB column default is 'cash').
 function noCashBadgeLabel(isSunday, btAmt, dpAmt, paymentMethod){
   if(!isSunday){
-    // Other Income: cashHeld===0 because payment was via bank transfer (or amount is 0).
-    // If there's an explicit btAmt or the paymentMethod is bank_transfer, show Bank Transfer.
-    // Otherwise show a neutral fallback so a zero-amount cash record isn't mislabelled.
-    return (btAmt>0 || paymentMethod==='bank_transfer') ? '🏦 Bank Transfer' : '—';
+    // Other Income: cashHeld===0 only when payment was via bank transfer (zero-amount records
+    // are blocked at submission). Use paymentMethod directly; neutral fallback for edge cases.
+    return paymentMethod==='bank_transfer' ? '🏦 Bank Transfer' : '—';
   }
   if(btAmt>0 && dpAmt===0) return '🏦 Bank Transfer';
   if(dpAmt>0 && btAmt===0) return '💼 Direct to Petty';
@@ -576,9 +577,9 @@ async function calcChurchBalance(){
       const dpAmt = r.directPettyCash||0;
       return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
     }
+    // Sentinel: !== 'bank_transfer' intentionally treats undefined as cash (correct for legacy
+    // records saved before the payment_method column was added; DB column default is 'cash').
     return s + (r.paymentMethod !== 'bank_transfer' ? (r.totalCollection||0) : 0);
-  }, 0);
-  // Cash returned from bank withdrawals directed to accountant
   const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
   // Expenses paid from accountant's cash
   const cashExpenses = allExpenses.filter(e=>e.paymentMethod==='cash').reduce((s,e) => s+(e.amount||0), 0);
