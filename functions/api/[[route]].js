@@ -126,6 +126,12 @@ export async function onRequest(context) {
       if (method === 'POST' && param === 'read') return await markAllRead(DB);
     }
 
+    // ── /api/admin ─────────────────────────────────────────────
+    if (route === 'admin') {
+      if (method === 'POST' && param === 'clear')  return await adminClear(DB);
+      if (method === 'POST' && param === 'import') return await adminImport(DB, body);
+    }
+
     return err(`Route not found: ${method} /api/${path}`, 404);
 
   } catch (e) {
@@ -185,6 +191,10 @@ async function handleInit(DB) {
       recorded_by      TEXT DEFAULT '',
       petty_ref        TEXT DEFAULT '',
       status           TEXT DEFAULT 'approved',
+      bank_amount      REAL DEFAULT 0,
+      cash_amount      REAL DEFAULT 0,
+      petty_amount     REAL DEFAULT 0,
+      no_receipt       INTEGER DEFAULT 0,
       created_at       TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS petty_cash (
@@ -210,6 +220,11 @@ async function handleInit(DB) {
       reference         TEXT DEFAULT '',
       authorized_by     TEXT DEFAULT '',
       status            TEXT DEFAULT 'pending_approval',
+      payment_method    TEXT DEFAULT '',
+      bank_amount       REAL DEFAULT 0,
+      cash_amount       REAL DEFAULT 0,
+      expense_refs      TEXT DEFAULT '',
+      no_receipt        INTEGER DEFAULT 0,
       created_at        TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS petty_config (
@@ -225,6 +240,8 @@ async function handleInit(DB) {
       reference     TEXT DEFAULT '',
       authorized_by TEXT DEFAULT '',
       status        TEXT DEFAULT 'paid',
+      bank_amount   REAL DEFAULT 0,
+      cash_amount   REAL DEFAULT 0,
       created_at    TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS cash_transactions (
@@ -265,6 +282,24 @@ async function handleInit(DB) {
   // Run all CREATE TABLE statements first
   for (const sql of createTables) {
     await DB.prepare(sql).run();
+  }
+
+  // Run migrations: add new columns to existing tables (safe — IF NOT EXISTS-like via try/catch)
+  const migrations = [
+    `ALTER TABLE expenses ADD COLUMN bank_amount REAL DEFAULT 0`,
+    `ALTER TABLE expenses ADD COLUMN cash_amount REAL DEFAULT 0`,
+    `ALTER TABLE expenses ADD COLUMN petty_amount REAL DEFAULT 0`,
+    `ALTER TABLE expenses ADD COLUMN no_receipt INTEGER DEFAULT 0`,
+    `ALTER TABLE petty_cash ADD COLUMN payment_method TEXT DEFAULT ''`,
+    `ALTER TABLE petty_cash ADD COLUMN bank_amount REAL DEFAULT 0`,
+    `ALTER TABLE petty_cash ADD COLUMN cash_amount REAL DEFAULT 0`,
+    `ALTER TABLE petty_cash ADD COLUMN expense_refs TEXT DEFAULT ''`,
+    `ALTER TABLE petty_cash ADD COLUMN no_receipt INTEGER DEFAULT 0`,
+    `ALTER TABLE remittances ADD COLUMN bank_amount REAL DEFAULT 0`,
+    `ALTER TABLE remittances ADD COLUMN cash_amount REAL DEFAULT 0`,
+  ];
+  for (const m of migrations) {
+    try { await DB.prepare(m).run(); } catch {} // silently ignore "column already exists" errors
   }
 
   // Migrate existing databases: add columns that may be missing from older schema versions.
@@ -504,55 +539,41 @@ async function getExpenses(DB) {
     recordedBy:      row.recorded_by,
     pettyRef:        row.petty_ref,
     status:          row.status,
+    bankAmount:      row.bank_amount  || 0,
+    cashAmount:      row.cash_amount  || 0,
+    pettyAmount:     row.petty_amount || 0,
+    noReceipt:       row.no_receipt === 1,
     createdAt:       row.created_at,
   })));
 }
 
 async function createExpense(DB, data) {
   const id = data.id || newId('EXP-');
-  const hasReceiptCols = await tableHasColumns(DB, 'expenses', ['receipt_image', 'receipt_file_name']);
-  if (hasReceiptCols) {
-    await DB.prepare(`
-      INSERT INTO expenses
-        (id,date,category,subcategory,description,amount,receipt_no,receipt_image,receipt_file_name,payment_method,notes,recorded_by,petty_ref,status)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).bind(
-      id,
-      data.date             || new Date().toISOString().split('T')[0],
-      data.category         || '',
-      data.subCategory      || '',
-      data.description      || '',
-      data.amount           || 0,
-      data.receiptNo        || '',
-      data.receiptImage     || '',
-      data.receiptFileName  || '',
-      data.paymentMethod    || 'petty_cash',
-      data.notes            || '',
-      data.recordedBy       || '',
-      data.pettyRef         || '',
-      data.status           || 'approved',
-    ).run();
-  } else {
-    // Backward-compatible insert for databases that haven't run /api/init migration yet.
-    await DB.prepare(`
-      INSERT INTO expenses
-        (id,date,category,subcategory,description,amount,receipt_no,payment_method,notes,recorded_by,petty_ref,status)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    `).bind(
-      id,
-      data.date          || new Date().toISOString().split('T')[0],
-      data.category      || '',
-      data.subCategory   || '',
-      data.description   || '',
-      data.amount        || 0,
-      data.receiptNo     || '',
-      data.paymentMethod || 'petty_cash',
-      data.notes         || '',
-      data.recordedBy    || '',
-      data.pettyRef      || '',
-      data.status        || 'approved',
-    ).run();
-  }
+  await DB.prepare(`
+    INSERT INTO expenses
+      (id,date,category,subcategory,description,amount,receipt_no,receipt_image,receipt_file_name,
+       payment_method,notes,recorded_by,petty_ref,status,bank_amount,cash_amount,petty_amount,no_receipt)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `).bind(
+    id,
+    data.date            || new Date().toISOString().split('T')[0],
+    data.category        || '',
+    data.subCategory     || '',
+    data.description     || '',
+    data.amount          || 0,
+    data.receiptNo       || '',
+    data.receiptImage    || '',
+    data.receiptFileName || '',
+    data.paymentMethod   || 'petty_cash',
+    data.notes           || '',
+    data.recordedBy      || '',
+    data.pettyRef        || '',
+    data.status          || 'approved',
+    data.bankAmount      || 0,
+    data.cashAmount      || 0,
+    data.pettyAmount     || 0,
+    data.noReceipt       ? 1 : 0,
+  ).run();
   return ok({ ...data, id });
 }
 
@@ -593,6 +614,11 @@ async function getPetty(DB) {
     reference:        row.reference,
     authorizedBy:     row.authorized_by,
     status:           row.status,
+    paymentMethod:    row.payment_method || '',
+    bankAmount:       row.bank_amount    || 0,
+    cashAmount:       row.cash_amount    || 0,
+    expenseRefs:      row.expense_refs ? JSON.parse(row.expense_refs) : [],
+    noReceipt:        row.no_receipt === 1,
     createdAt:        row.created_at,
   })));
 }
@@ -601,20 +627,26 @@ async function createPettyEntry(DB, data) {
   const id = data.id || newId('PC-');
   await DB.prepare(`
     INSERT INTO petty_cash
-      (id,type,purpose,amount,category,date_needed,notes,requested_by,reference,authorized_by,status)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      (id,type,purpose,amount,category,date_needed,notes,requested_by,reference,authorized_by,
+       status,payment_method,bank_amount,cash_amount,expense_refs,no_receipt)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
-    data.type        || 'request',
-    data.purpose     || '',
-    data.amount      || 0,
-    data.category    || '',
-    data.dateNeeded  || '',
-    data.notes       || '',
-    data.requestedBy || '',
-    data.reference   || '',
-    data.authorizedBy|| '',
-    data.status      || 'pending_approval',
+    data.type         || 'request',
+    data.purpose      || '',
+    data.amount       || 0,
+    data.category     || '',
+    data.dateNeeded   || '',
+    data.notes        || '',
+    data.requestedBy  || '',
+    data.reference    || '',
+    data.authorizedBy || '',
+    data.status       || 'pending_approval',
+    data.paymentMethod|| '',
+    data.bankAmount   || 0,
+    data.cashAmount   || 0,
+    data.expenseRefs  ? JSON.stringify(data.expenseRefs) : '',
+    data.noReceipt    ? 1 : 0,
   ).run();
   return ok({ ...data, id });
 }
@@ -667,6 +699,8 @@ async function getRemittances(DB) {
     submittedBy:   row.submitted_by || '',
     approvedBy:    row.approved_by  || '',
     approvedAt:    row.approved_at  || '',
+    bankAmount:    row.bank_amount   || 0,
+    cashAmount:    row.cash_amount   || 0,
     createdAt:     row.created_at,
   })));
 }
@@ -676,8 +710,8 @@ async function createRemittance(DB, data) {
   await DB.prepare(`
     INSERT INTO remittances
       (id, label, amount, paid_date, reference, authorized_by, status,
-       period_from, period_to, payment_method, notes, submitted_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+       period_from, period_to, payment_method, notes, submitted_by, bank_amount, cash_amount)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     data.label         || '',
@@ -691,6 +725,8 @@ async function createRemittance(DB, data) {
     data.paymentMethod || 'bank_transfer',
     data.notes         || '',
     data.submittedBy   || '',
+    data.bankAmount    || 0,
+    data.cashAmount    || 0,
   ).run();
   return ok({ ...data, id });
 }
@@ -810,6 +846,53 @@ async function createNotification(DB, data) {
   await DB.prepare(`INSERT INTO notifications (id,title,body,type,ts) VALUES (?,?,?,?,?)`)
     .bind(id, data.title || '', data.body || '', data.type || 'info', new Date().toISOString()).run();
   return ok({ id });
+}
+
+async function adminClear(DB) {
+  const tables = ['income','expenses','petty_cash','remittances','cash_transactions','audit_log','notifications'];
+  for (const t of tables) {
+    await DB.prepare(`DELETE FROM ${t}`).run();
+  }
+  // Reset petty config to defaults
+  await DB.prepare(`UPDATE petty_config SET float_amount=50000, max_float=50000 WHERE id='main'`).run();
+  // Clear all settings except keep structure
+  await DB.prepare(`DELETE FROM settings`).run();
+  return ok({ cleared: true });
+}
+
+async function adminImport(DB, data) {
+  if (!data || typeof data !== 'object') return err('Invalid backup data', 400);
+  // Clear first
+  await adminClear(DB);
+  // Re-seed default settings so app still works
+  await handleInit(DB);
+  // Import each record type
+  const errs = [];
+  if (Array.isArray(data.income)) {
+    for (const r of data.income) { try { await createIncome(DB, r); } catch(e) { errs.push(`income:${r.id}`); } }
+  }
+  if (Array.isArray(data.expenses)) {
+    for (const r of data.expenses) { try { await createExpense(DB, r); } catch(e) { errs.push(`expense:${r.id}`); } }
+  }
+  if (Array.isArray(data.remittances)) {
+    for (const r of data.remittances) { try { await createRemittance(DB, r); } catch(e) { errs.push(`rem:${r.id}`); } }
+  }
+  if (Array.isArray(data.petty)) {
+    for (const r of data.petty) { try { await createPettyEntry(DB, r); } catch(e) { errs.push(`petty:${r.id}`); } }
+  }
+  if (Array.isArray(data.cashTransactions)) {
+    for (const r of data.cashTransactions) { try { await createCashTransaction(DB, r); } catch(e) { errs.push(`ctx:${r.id}`); } }
+  }
+  if (data.users && Array.isArray(data.users)) {
+    for (const u of data.users) { try { await createUser(DB, u); } catch(e) { errs.push(`user:${u.id}`); } }
+  }
+  if (data.settings && typeof data.settings === 'object') {
+    await saveSettings(DB, data.settings);
+  }
+  if (data.pettyConfig) {
+    await updatePettyConfig(DB, data.pettyConfig);
+  }
+  return ok({ imported: true, errors: errs.length > 0 ? errs : undefined });
 }
 
 async function markAllRead(DB) {
