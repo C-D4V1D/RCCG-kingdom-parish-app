@@ -4093,3 +4093,6 @@ return {
 
 // Global helpers
 function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
+
+// Ensure App is accessible from inline onclick handlers in all browsers
+window.App = App;
