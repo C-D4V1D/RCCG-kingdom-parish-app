@@ -126,6 +126,12 @@ export async function onRequest(context) {
       if (method === 'POST' && param === 'read') return await markAllRead(DB);
     }
 
+    // ── /api/admin/* ───────────────────────────────────────────
+    if (route === 'admin') {
+      if (method === 'POST' && param === 'clear')  return await clearAllData(DB);
+      if (method === 'POST' && param === 'import') return await importBackupData(DB, body);
+    }
+
     return err(`Route not found: ${method} /api/${path}`, 404);
 
   } catch (e) {
@@ -275,10 +281,15 @@ async function handleInit(DB) {
     `ALTER TABLE income ADD COLUMN source TEXT DEFAULT 'sunday_collection'`,
     `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
     `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
+    `ALTER TABLE expenses ADD COLUMN bank_amount REAL DEFAULT 0`,
+    `ALTER TABLE expenses ADD COLUMN cash_amount REAL DEFAULT 0`,
+    `ALTER TABLE expenses ADD COLUMN petty_amount REAL DEFAULT 0`,
     // Remittance enhancements
     `ALTER TABLE remittances ADD COLUMN period_from TEXT DEFAULT ''`,
     `ALTER TABLE remittances ADD COLUMN period_to TEXT DEFAULT ''`,
     `ALTER TABLE remittances ADD COLUMN payment_method TEXT DEFAULT 'bank_transfer'`,
+    `ALTER TABLE remittances ADD COLUMN bank_amount REAL DEFAULT 0`,
+    `ALTER TABLE remittances ADD COLUMN cash_amount REAL DEFAULT 0`,
     `ALTER TABLE remittances ADD COLUMN notes TEXT DEFAULT ''`,
     `ALTER TABLE remittances ADD COLUMN submitted_by TEXT DEFAULT ''`,
     `ALTER TABLE remittances ADD COLUMN approved_by TEXT DEFAULT ''`,
@@ -500,6 +511,9 @@ async function getExpenses(DB) {
     receiptImage:    row.receipt_image,
     receiptFileName: row.receipt_file_name,
     paymentMethod:   row.payment_method,
+    bankAmount:      row.bank_amount || 0,
+    cashAmount:      row.cash_amount || 0,
+    pettyAmount:     row.petty_amount || 0,
     notes:           row.notes,
     recordedBy:      row.recorded_by,
     pettyRef:        row.petty_ref,
@@ -511,11 +525,12 @@ async function getExpenses(DB) {
 async function createExpense(DB, data) {
   const id = data.id || newId('EXP-');
   const hasReceiptCols = await tableHasColumns(DB, 'expenses', ['receipt_image', 'receipt_file_name']);
-  if (hasReceiptCols) {
+  const hasSplitCols = await tableHasColumns(DB, 'expenses', ['bank_amount', 'cash_amount', 'petty_amount']);
+  if (hasReceiptCols && hasSplitCols) {
     await DB.prepare(`
       INSERT INTO expenses
-        (id,date,category,subcategory,description,amount,receipt_no,receipt_image,receipt_file_name,payment_method,notes,recorded_by,petty_ref,status)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        (id,date,category,subcategory,description,amount,receipt_no,receipt_image,receipt_file_name,payment_method,bank_amount,cash_amount,petty_amount,notes,recorded_by,petty_ref,status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).bind(
       id,
       data.date             || new Date().toISOString().split('T')[0],
@@ -527,12 +542,15 @@ async function createExpense(DB, data) {
       data.receiptImage     || '',
       data.receiptFileName  || '',
       data.paymentMethod    || 'petty_cash',
+      data.bankAmount       || 0,
+      data.cashAmount       || 0,
+      data.pettyAmount      || 0,
       data.notes            || '',
       data.recordedBy       || '',
       data.pettyRef         || '',
       data.status           || 'approved',
     ).run();
-  } else {
+  } else if (hasReceiptCols) {
     // Backward-compatible insert for databases that haven't run /api/init migration yet.
     await DB.prepare(`
       INSERT INTO expenses
@@ -663,6 +681,8 @@ async function getRemittances(DB) {
     periodFrom:    row.period_from  || '',
     periodTo:      row.period_to    || '',
     paymentMethod: row.payment_method || 'bank_transfer',
+    bankAmount:    row.bank_amount || 0,
+    cashAmount:    row.cash_amount || 0,
     notes:         row.notes        || '',
     submittedBy:   row.submitted_by || '',
     approvedBy:    row.approved_by  || '',
@@ -672,12 +692,12 @@ async function getRemittances(DB) {
 }
 
 async function createRemittance(DB, data) {
-  const id = newId('REM-');
+  const id = data.id || newId('REM-');
   await DB.prepare(`
     INSERT INTO remittances
       (id, label, amount, paid_date, reference, authorized_by, status,
-       period_from, period_to, payment_method, notes, submitted_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+       period_from, period_to, payment_method, bank_amount, cash_amount, notes, submitted_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     data.label         || '',
@@ -689,10 +709,63 @@ async function createRemittance(DB, data) {
     data.periodFrom    || '',
     data.periodTo      || '',
     data.paymentMethod || 'bank_transfer',
+    data.bankAmount    || 0,
+    data.cashAmount    || 0,
     data.notes         || '',
     data.submittedBy   || '',
   ).run();
   return ok({ ...data, id });
+}
+
+async function clearAllData(DB) {
+  const tables = ['income','expenses','petty_cash','remittances','cash_transactions','audit_log','notifications','users'];
+  for (const table of tables) {
+    await DB.prepare(`DELETE FROM ${table}`).run();
+  }
+  return await handleInit(DB);
+}
+
+async function importBackupData(DB, payload) {
+  const data = payload || {};
+  await clearAllData(DB);
+
+  for (const u of (data.users || [])) {
+    await DB.prepare(
+      `INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES (?,?,?,?,?)`
+    ).bind(
+      u.id || newId('u-'),
+      u.name || '',
+      u.role || 'viewer',
+      String(u.pin || ''),
+      u.email || ''
+    ).run();
+  }
+
+  for (const i of (data.income || [])) {
+    await createIncome(DB, i);
+  }
+  for (const e of (data.expenses || [])) {
+    await createExpense(DB, e);
+  }
+  for (const p of (data.petty || [])) {
+    await createPettyEntry(DB, p);
+  }
+  for (const r of (data.remittances || [])) {
+    await createRemittance(DB, r);
+  }
+  for (const c of (data.cashTransactions || [])) {
+    await createCashTransaction(DB, c);
+  }
+  for (const a of (data.audit || [])) {
+    await createAuditEntry(DB, a);
+  }
+  for (const n of (data.notifications || [])) {
+    await createNotification(DB, n);
+  }
+  if (data.settings && typeof data.settings === 'object') {
+    await saveSettings(DB, data.settings);
+  }
+  return ok({ imported: true });
 }
 
 async function updateRemittance(DB, id, data) {

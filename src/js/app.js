@@ -178,6 +178,8 @@ const DB = {
   markAllRead(){
     apiFetch('notifications/read','POST').catch(()=>{});
   },
+  importBackup(data)            { return apiFetch('admin/import','POST',data); },
+  clearAllData()                { return apiFetch('admin/clear','POST'); },
 };
 
 // ──────────────────────────────────────────
@@ -2571,8 +2573,9 @@ async function submitExpense(){
   if(isSplit){
     pettyAmount=parseFloat(document.getElementById('exp_petty_amt')?.value)||0;
     bankAmount=parseFloat(document.getElementById('exp_bank_amt')?.value)||0;
+    const splitTotal = pettyAmount + bankAmount;
     if(!pettyAmount&&!bankAmount){ alert('Please enter at least one split amount.'); return }
-    if(pettyAmount+bankAmount>amount+0.5){ alert(`Split total (${fmt(pettyAmount+bankAmount)}) exceeds the expense amount (${fmt(amount)}). Please correct.`); return }
+    if(Math.abs(splitTotal-amount)>0.5){ alert(`Split total (${fmt(splitTotal)}) must equal the expense amount (${fmt(amount)}). Please correct.`); return }
   } else if(method==='petty_cash'){
     pettyAmount=amount;
   } else if(method==='bank_transfer'){
@@ -2592,7 +2595,7 @@ async function submitExpense(){
         paymentMethod: method,
         bankAmount: isSplit?bankAmount:method==='bank_transfer'?amount:0,
         cashAmount: isSplit?cashAmount:method==='cash'?amount:0,
-        pettyAmount: method==='petty_cash'?amount:0,
+        pettyAmount: isSplit?pettyAmount:method==='petty_cash'?amount:0,
         notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
 
       // Deduct from petty cash float for petty_cash or the petty portion of split
@@ -2695,7 +2698,11 @@ async function renderBank(){
   // Calculate bank balance components
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
   const cashDepositedToBank = allCashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
-  const bankExpenses = allExpenses.filter(e=>e.paymentMethod==='bank_transfer').reduce((s,e) => s+(e.amount||0), 0);
+  const bankExpenses = allExpenses.reduce((sum,e)=>{
+    if(e.paymentMethod==='bank_transfer') return sum+(e.amount||0);
+    if(e.paymentMethod==='split') return sum+(e.bankAmount||0);
+    return sum;
+  }, 0);
   const paidRems = allRemittances.filter(r=>r.status==='paid').reduce((s,r) => s+(r.amount||0), 0);
   const bankWithdrawals = allCashTx.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
   const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals;
@@ -2731,7 +2738,15 @@ async function renderBank(){
   const bankTxAll = [
     ...allCashTx.filter(t=>t.type==='withdrawal').map(t=>({...t, txType:'withdrawal', txLabel:'Withdrawal', txAmt: -(t.amount||0)})),
     ...allCashTx.filter(t=>t.type==='cash_deposit').map(t=>({...t, txType:'deposit', txLabel:'Cash Deposit', txAmt: (t.amount||0)})),
-    ...allExpenses.filter(e=>e.paymentMethod==='bank_transfer').map(e=>({...e, txType:'expense', txLabel:`Expense: ${e.description||e.category}`, txAmt: -(e.amount||0), date:e.date||e.createdAt})),
+    ...allExpenses
+      .filter(e=>e.paymentMethod==='bank_transfer'||(e.paymentMethod==='split'&&(e.bankAmount||0)>0))
+      .map(e=>({
+        ...e,
+        txType:'expense',
+        txLabel:`Expense: ${e.description||e.category}`,
+        txAmt: -(e.paymentMethod==='split'?(e.bankAmount||0):(e.amount||0)),
+        date:e.date||e.createdAt
+      })),
     ...allRemittances.filter(r=>r.status==='paid').map(r=>({...r, txType:'remittance', txLabel:`Remittance: ${r.incomeType||'HQ'}`, txAmt: -(r.amount||0), date:r.date||r.createdAt})),
     ...allIncome.filter(r=>(r.bankTransferAmount||0)>0).map(r=>({...r, txType:'income', txLabel:`Income deposit (bank transfer)`, txAmt: (r.bankTransferAmount||0)}))
   ].sort((a,b)=>new Date(b.date||b.createdAt||0)-new Date(a.date||a.createdAt||0));
@@ -3996,22 +4011,17 @@ async function exportData(){
 
 function importData(){
   const input=document.createElement('input'); input.type='file'; input.accept='.json';
-  input.onchange=e=>{
+  input.onchange=async e=>{
     const file=e.target.files[0]; if(!file) return;
     const reader=new FileReader();
-    reader.onload=ev=>{
+    reader.onload=async ev=>{
       try{
         const data=JSON.parse(ev.target.result);
         if(!confirm('This will overwrite all existing data. Are you sure?')) return;
-        if(data.users) DB.save(DB.KEYS.users,data.users);
-        if(data.income) DB.save(DB.KEYS.income,data.income);
-        if(data.remittances) DB.save(DB.KEYS.remittances,data.remittances);
-        if(data.expenses) DB.save(DB.KEYS.expenses,data.expenses);
-        if(data.petty) DB.save(DB.KEYS.petty,data.petty);
-        if(data.settings) DB.save(DB.KEYS.settings,data.settings);
-        if(data.cashTransactions) DB.save(DB.KEYS.cashTx,data.cashTransactions);
+        await DB.importBackup(data);
         DB.addAudit('data_imported','Data restored from backup',state.user?.name);
-        showAlert('Data restored successfully! Please refresh.','success');
+        showAlert('Data restored successfully! Reloading…','success');
+        setTimeout(()=>window.location.reload(), 600);
       }catch(e){ alert('Invalid backup file. Please use a valid JSON backup.') }
     };
     reader.readAsText(file);
@@ -4019,12 +4029,17 @@ function importData(){
   input.click();
 }
 
-function clearAllData(){
+async function clearAllData(){
   if(!confirm('⚠ This will permanently delete ALL church financial records. Type CONFIRM to proceed.')) return;
   const word=prompt('Type CONFIRM to delete everything:');
   if(word!=='CONFIRM'){ alert('Cancelled.'); return }
-  Object.values(DB.KEYS).forEach(k=>localStorage.removeItem(k));
-  logout();
+  try{
+    await DB.clearAllData();
+    showAlert('All data cleared. Reloading…','warn');
+    setTimeout(()=>window.location.reload(), 600);
+  }catch(e){
+    alert(`Failed to clear data: ${e.message||'Unknown error'}`);
+  }
 }
 
 // ── KPSC ALERT ────────────────────────────
@@ -4077,10 +4092,10 @@ return {
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
-  showExpenseForm, submitExpense, viewExpenseReceipt, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpSort, clearExpFilters, updateExpenseSubcats, updateExpenseDescRequired,
+  showExpenseForm, submitExpense, viewExpenseReceipt, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
-  renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, showAdvanceRequest, submitAdvanceRequest, setPettyRequestTab, onPettyExpPick, onReceiptToggle,
+  renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle,
   approvePetty, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
@@ -4096,3 +4111,17 @@ function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.
 
 // Ensure App is accessible from inline onclick handlers in all browsers
 window.App = App;
+
+window.onerror = function(message, source, lineno, colno, error){
+  console.error('Fatal runtime error:', { message, source, lineno, colno, error });
+  if(document.getElementById('appShell')?.style.display!=='none'){
+    showAlert('Unexpected error occurred. Please refresh the page.','danger');
+  }
+};
+
+window.onunhandledrejection = function(event){
+  console.error('Unhandled promise rejection:', event?.reason || event);
+  if(document.getElementById('appShell')?.style.display!=='none'){
+    showAlert('A background operation failed. Please retry or refresh.','danger');
+  }
+};
