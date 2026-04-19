@@ -3007,6 +3007,9 @@ async function renderPettyCash(){
   const pendingTopups = pending.filter(h=>h.type==='topup_request');
   const pendingAdvances = pending.filter(h=>h.type==='advance'||(!h.type&&h.type!=='refill'));
 
+  // Approved top-up requests awaiting payment recording
+  const approvedTopups = history.filter(h=>h.status==='approved'&&h.type==='topup_request');
+
   // Advances awaiting proof
   const advancesAwaitingProof = history.filter(h=>h.status==='approved'&&(h.type==='advance'||(!h.type&&h.type!=='refill'))&&!h.receiptNo);
   const overdueReceipts = advancesAwaitingProof.filter(h=>isReceiptOverdue(h));
@@ -3045,6 +3048,7 @@ async function renderPettyCash(){
     ${overdueReceipts.length?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span><strong>${overdueReceipts.length} advance(s) overdue!</strong> Proof of purchase not submitted within 48 hours: ${overdueReceipts.map(r=>r.purpose).join(', ')}. Follow up with the Admin Officer.</span></div>`:''}
     ${petty.float<0?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span><strong>Wallet in debt:</strong> The Admin Officer has used ${fmt(Math.abs(petty.float))} of personal funds. The church owes this and should top up immediately.</span></div>`:''}
     ${pendingTopups.length>0?`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span><strong>${pendingTopups.length} top-up request(s)</strong> awaiting approval — ${fmt(pendingTopups.reduce((s,r)=>s+(r.amount||0),0))} total.</span></div>`:''}
+    ${approvedTopups.length>0?`<div class="alert alert-info"><span class="alert-icon">✅</span><span><strong>${approvedTopups.length} top-up(s) approved</strong> and waiting for payment — ${fmt(approvedTopups.reduce((s,r)=>s+(r.amount||0),0))} total. <button class="btn btn-sm btn-primary" onclick="App.showPettyRefill()" style="margin-left:8px">Record Top-Up Payment</button></span></div>`:''}
 
     <!-- Cash Meter card -->
     <div class="card" style="margin-bottom:1rem">
@@ -3318,21 +3322,41 @@ async function showPettyRequest(){ showTopUpRequest(); }
 
 async function approvePetty(id){
   const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
-  const req=pettyHistory.find(h=>h.id===id);
+  const req = pettyHistory.find(h=>h.id===id);
   if(!req) return;
-  if(req.amount>pettyConfig.float){
-    const willOwe = pettyConfig.float - req.amount;
-    const msg = pettyConfig.float <= 0
-      ? `The float is already at ${fmt(pettyConfig.float)}.\n\nApproving will mean the church owes the Admin Officer ${fmt(Math.abs(willOwe))} of personal funds.\n\nProceed?`
-      : `Float is insufficient.\nRequired: ${fmt(req.amount)}\nAvailable: ${fmt(pettyConfig.float)}\n\nApproving will put the float at ${fmt(willOwe)}, meaning the church owes the Admin Officer ${fmt(Math.abs(willOwe))}.\n\nProceed anyway?`;
-    if(!confirm(msg)) return;
+
+  const isTopup = req.type === 'topup_request';
+  const approvedAt = new Date().toISOString();
+
+  if(isTopup){
+    // Top-Up Request: the Admin Officer has already spent the money.
+    // Approving authorises the reimbursement payment — the float does NOT
+    // change here. The actual float increase happens when the Accountant
+    // uses "Record Top-Up Payment" to send the money.
+    if(!confirm(`Approve this top-up request?\n\n${req.purpose}\nAmount: ${fmt(req.amount)}\nRequested by: ${req.requestedBy}\n\nOnce approved, use "Record Top-Up Payment" to send the money to the Admin Officer and update the cash balance.`)) return;
+
+    await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
+    DB.addAudit('topup_approved',`Top-up request approved: ${fmt(req.amount)} (by ${state.user?.name}). Payment to be recorded separately.`,state.user?.name);
+    DB.addNotification('Top-Up Approved',`Top-up of ${fmt(req.amount)} approved by ${state.user?.name}. Accountant should now record the payment using "Record Top-Up Payment".`,'success');
+    showAlert(`Top-up request approved. Now tap "Record Top-Up Payment" to send ₦${fmt(req.amount)} to the Admin Officer and update the wallet balance.`,'success');
+
+  } else {
+    // Advance Request: cash is being released from the wallet to the Admin Officer NOW.
+    // The wallet decreases — Admin Officer must return proof within 48 hours.
+    if(req.amount > pettyConfig.float){
+      const willOwe = pettyConfig.float - req.amount;
+      const msg = pettyConfig.float <= 0
+        ? `The wallet is already at ${fmt(pettyConfig.float)}.\n\nApproving means the Admin Officer will use ${fmt(Math.abs(willOwe))} of personal funds, which the church will owe them.\n\nProceed?`
+        : `Wallet balance is insufficient.\nRequested: ${fmt(req.amount)}\nAvailable: ${fmt(pettyConfig.float)}\n\nApproving means the Admin Officer will need to use ${fmt(Math.abs(willOwe))} of personal funds.\n\nProceed anyway?`;
+      if(!confirm(msg)) return;
+    }
+    await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
+    await DB.savePettyConfig({ float: pettyConfig.float - req.amount, max: pettyConfig.max });
+    DB.addAudit('advance_approved',`Advance approved: "${req.purpose}" — ${fmt(req.amount)} (approved by ${state.user?.name})`,state.user?.name);
+    DB.addNotification('Advance Approved',`"${req.purpose}" — ${fmt(req.amount)} approved. Remind ${req.requestedBy} to submit proof within 48 hours.`,'success');
+    showAlert(`Advance approved. ${fmt(req.amount)} released from wallet. ${req.requestedBy} must submit proof of purchase within 48 hours.`,'success');
   }
-  const approvedAt=new Date().toISOString();
-  await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
-  await DB.savePettyConfig({ float: pettyConfig.float - req.amount, max: pettyConfig.max });
-  DB.addAudit('petty_approved',`Petty cash approved: "${req.purpose}" — ${fmt(req.amount)} (approved by ${state.user?.name})`,state.user?.name);
-  DB.addNotification('Petty Cash Approved',`"${req.purpose}" — ${fmt(req.amount)} approved by ${state.user?.name}. Receipt due within 48 hours.`,'success');
-  showAlert(`Approved. ${fmt(req.amount)} deducted from float. Remind ${req.requestedBy} to return receipt within 48 hours.`,'success');
+
   renderPettyCash();
   buildSidebar();
 }
