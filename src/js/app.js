@@ -2623,7 +2623,7 @@ async function submitExpense(){
         notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
 
       // Deduct from petty cash float for petty_cash or the petty portion of split
-      const pettyDeduction = method==='petty_cash' ? amount : method==='split' ? pettyAmount : 0;
+      const pettyDeduction = pettyAmount;
       if(pettyDeduction>0){
         const pettyCfg = await DB.getPettyConfig();
         await DB.savePettyConfig({ float: pettyCfg.float - pettyDeduction, max: pettyCfg.max });
@@ -3206,6 +3206,7 @@ async function renderPettyCash(){
           <td>
             <div style="font-size:13px;font-weight:500">${r.purpose||'Wallet top-up'}</div>
             ${r.expenseRefs?.length?`<div style="font-size:11px;color:var(--text3)">${r.expenseRefs.length} expense(s) included</div>`:''}
+            ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--text3)">Paid so far: ${fmt(r.actualAmount||0)} · Remaining: ${fmt(r.amount||0)}</div>`:''}
           </td>
           <td class="td-muted">${r.requestedBy||'—'}</td>
           <td class="td-muted">${r.approvedBy||'—'}</td>
@@ -3838,30 +3839,52 @@ async function submitRefill(){
   }
   const methodLabel = method==='split' ? `Split — Bank: ${fmt(bankAmt)} + Cash: ${fmt(cashAmt)}` : method==='cash_accountant' ? 'Cash with Accountant' : 'Bank Transfer';
 
+  let linkedTopup = null;
+  if(topupRequestId){
+    const pettyHistory = await DB.getPetty();
+    linkedTopup = pettyHistory.find(h=>h.id===topupRequestId && h.type==='topup_request');
+    if(!linkedTopup){ alert('Linked top-up request was not found. Please refresh and try again.'); return }
+    if(linkedTopup.status!=='approved'){ alert('Only approved top-up requests can be settled from this screen.'); return }
+    const remaining = linkedTopup.amount||0;
+    if(actualAdded > remaining + 0.5){
+      alert(`Recorded payment (${fmt(actualAdded)}) cannot exceed the remaining approved balance (${fmt(remaining)}).`);
+      return;
+    }
+  }
+
   await DB.addPettyEntry({
     type:'refill', amount:actualAdded,
     requestedBy:state.user?.name, status:'settled',
     createdAt:new Date().toISOString(), purpose:'Cash Top-Up',
     reference:ref, authorizedBy:auth, paymentMethod:method, bankAmount:bankAmt, cashAmount:cashAmt
   });
-  if(topupRequestId){
+  if(linkedTopup){
+    const remainingBefore = linkedTopup.amount||0;
+    const paidSoFar = linkedTopup.actualAmount||0;
+    const newRemaining = Math.max(0, remainingBefore - actualAdded);
+    const totalPaid = paidSoFar + actualAdded;
+    const settledNow = newRemaining <= 0.5;
+    const paymentLine = `${new Date().toISOString().split('T')[0]}: ${fmt(actualAdded)} via ${methodLabel}${ref?` (ref: ${ref})`:''}`;
+    const mergedNotes = [linkedTopup.notes||'', `Payment log → ${paymentLine}`].filter(Boolean).join('\n');
     await DB.updatePettyEntry(topupRequestId, {
-      status:'settled',
-      settledAt:new Date().toISOString(),
-      settledBy:state.user?.name,
-      actualAmount: actualAdded,
-      amount: actualAdded,
+      status:settledNow ? 'settled' : 'approved',
+      settledAt:settledNow ? new Date().toISOString() : undefined,
+      settledBy:settledNow ? state.user?.name : undefined,
+      actualAmount: totalPaid,
+      amount: newRemaining,
       paymentMethod: method,
       bankAmount: bankAmt,
       cashAmount: cashAmt,
-      reference: ref
+      reference: ref,
+      notes: mergedNotes
     });
   }
   await DB.savePettyConfig({ float: newFloat, max: pettyConfig.max });
   DB.addAudit('petty_refilled',`Cash topped up: ${fmt(actualAdded)} via ${methodLabel} (authorized by ${auth}${ref?', ref: '+ref:''})`,state.user?.name);
   DB.addNotification('Petty Cash Topped Up',`${fmt(actualAdded)} added to petty cash. New balance: ${fmt(newFloat)}. Authorized by: ${auth}.`,'success');
   closeModal();
-  showAlert(`Petty cash topped up by ${fmt(actualAdded)}. New balance: ${fmt(newFloat)}.${actualAdded<amt?` (Max reached — only ${fmt(actualAdded)} added.)`:''}`,'success');
+  const remainingMsg = linkedTopup ? ` Remaining on approved request: ${fmt(Math.max(0,(linkedTopup.amount||0)-actualAdded))}.` : '';
+  showAlert(`Petty cash topped up by ${fmt(actualAdded)}. New balance: ${fmt(newFloat)}.${actualAdded<amt?` (Max reached — only ${fmt(actualAdded)} added.)`:''}${remainingMsg}`,'success');
   renderPettyCash();
 }
 
