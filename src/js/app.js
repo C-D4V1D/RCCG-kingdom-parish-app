@@ -541,8 +541,7 @@ async function calcChurchBalance(){
     if(e.paymentMethod==='bank_transfer') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.bankAmount||0);
     return s;
-  }, 0);
-  // 4. Paid remittances (all assumed to leave the bank)
+  }, 0);  // 4. Paid remittances (all assumed to leave the bank)
   const paidRems = allRemittances.filter(r=>r.status==='paid').reduce((s,r) => s+(r.amount||0), 0);
   // 5. Bank withdrawals (all types reduce bank; destination tells where money went)
   const bankWithdrawals = cashTx.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
@@ -2136,6 +2135,31 @@ async function renderExpenses(){
   const expenses = filterByMonth(allExp);
   const total = expenses.reduce((s,r)=>s+(r.amount||0),0);
 
+  // Fetch balance data for the financial position bar
+  const [churchBal, allIncome, allRems, settings] = await Promise.all([
+    calcChurchBalance(),
+    DB.getIncome(),
+    DB.getRemittances(),
+    DB.getSettings()
+  ]);
+  // Outstanding remittances = calculated due minus what's already been paid
+  const monthIncome = filterByMonth(allIncome);
+  const rem = await calcRemittancesFromRecords(monthIncome);
+  const quotaList = getQuotaList(settings);
+  const totalQuotas = quotaList.reduce((s,q)=>s+(q.amount||0),0);
+  const totalRemDue = (rem.totalNatl||0)+(rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalMinisters||0)+(rem.totalSeed||0)+(rem.provinceRebate||0)+totalQuotas;
+  const paidRems = allRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
+  const outstandingRems = Math.max(0, totalRemDue - paidRems);
+  const totalChurch = churchBal.bankBalance + Math.max(0,churchBal.cashWithAccountant) + churchBal.pettyFloat;
+  const spendable = totalChurch - outstandingRems;
+  const spendColor = spendable < 0 ? 'var(--danger)' : spendable < 20000 ? 'var(--amber)' : 'var(--success)';
+  const spendLabel = spendable < 0 ? 'Deficit — remittances exceed available funds' : spendable < 20000 ? 'Low — spend carefully' : 'Sufficient';
+
+  // Store spendable in state so the expense form modal can access it without re-fetching
+  state._spendable = spendable;
+  state._churchBal = churchBal;
+  state._outstandingRems = outstandingRems;
+
   // Category totals for breakdown
   const catTotals = {};
   EXPENSE_CATS.forEach(c=>{ catTotals[c.key]=expenses.filter(e=>e.category===c.key).reduce((s,e)=>s+(e.amount||0),0); });
@@ -2189,7 +2213,39 @@ async function renderExpenses(){
       ${can('expenses')?`<button class="btn btn-primary" onclick="App.showExpenseForm()">+ Log Expense</button>`:''}
     </div>
 
-    <!-- Category Breakdown -->
+    <!-- Financial Position Bar -->
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:var(--rl);padding:14px 16px;margin-bottom:1rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        <div style="font-size:11px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:var(--text3)">Church Financial Position</div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:11px;color:${spendColor};font-weight:600">${spendLabel}</span>
+          <span style="width:8px;height:8px;border-radius:50%;background:${spendColor};display:inline-block"></span>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr) 2px repeat(1,1fr);gap:8px;align-items:center">
+        <div style="text-align:center">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:3px">🏦 Bank</div>
+          <div style="font-size:13px;font-weight:600;color:var(--text)">${fmt(churchBal.bankBalance)}</div>
+        </div>
+        <div style="text-align:center">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:3px">💵 Accountant Cash</div>
+          <div style="font-size:13px;font-weight:600;color:var(--text)">${fmt(Math.max(0,churchBal.cashWithAccountant))}</div>
+        </div>
+        <div style="text-align:center">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:3px">💳 Petty Cash</div>
+          <div style="font-size:13px;font-weight:600;color:var(--text)">${fmt(churchBal.pettyFloat)}</div>
+        </div>
+        <div style="height:40px;width:1px;background:var(--border);justify-self:center"></div>
+        <div style="text-align:center">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:3px">✅ Spendable</div>
+          <div style="font-size:16px;font-weight:700;color:${spendColor}">${fmt(spendable)}</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:1px">After ${fmt(outstandingRems)} rem. due</div>
+        </div>
+      </div>
+      <div style="margin-top:10px;height:4px;background:var(--border);border-radius:2px;overflow:hidden">
+        <div style="height:4px;background:${spendColor};width:${Math.min(100,Math.max(0,spendable/Math.max(totalChurch,1)*100)).toFixed(1)}%;border-radius:2px;transition:width 0.4s"></div>
+      </div>
+    </div>
     <div class="card" style="margin-bottom:1rem">
       <div class="card-header">
         <span class="card-title">Category Breakdown</span>
@@ -2366,7 +2422,15 @@ function showExpenseForm(preselectedCat){
       <input type="text" id="exp_desc" class="form-input" placeholder="What was purchased / paid for?" />
       <div id="exp_desc_hint" class="form-hint" style="display:none;color:var(--danger);font-size:11px;margin-top:4px">Description is required when "Others..." is selected.</div>
     </div>
-    <div class="form-group"><label class="form-label">Total Amount (₦) *</label><input type="number" id="exp_amt" class="form-input" placeholder="0" min="0" oninput="App.onExpMethodChange()" /></div>
+    <div class="form-group"><label class="form-label">Total Amount (₦) *</label>
+      <input type="number" id="exp_amt" class="form-input" placeholder="0" min="0" oninput="App.onExpMethodChange()" />
+      ${state._spendable!=null?`<div style="margin-top:6px;padding:8px 12px;border-radius:var(--r);background:${state._spendable<0?'var(--danger-light)':state._spendable<20000?'var(--amber-light)':'var(--success-light)'};font-size:12px">
+        <span style="color:${state._spendable<0?'var(--danger)':state._spendable<20000?'var(--amber)':'var(--success)'};font-weight:600" id="exp_remaining_disp">
+          Spendable after remittances: ${fmt(state._spendable)}
+        </span>
+        <span style="color:var(--text3);margin-left:6px">(Bank ${fmt(state._churchBal?.bankBalance||0)} + Cash ${fmt(Math.max(0,state._churchBal?.cashWithAccountant||0))} + Petty ${fmt(state._churchBal?.pettyFloat||0)} − ${fmt(state._outstandingRems||0)} due)</span>
+      </div>`:''}
+    </div>
 
     <!-- Payment Method -->
     <div class="form-group">
@@ -2383,23 +2447,23 @@ function showExpenseForm(preselectedCat){
           <input type="radio" name="exp_method" value="cash" onchange="App.onExpMethodChange()" /> 💵 Cash (Accountant)
         </label>
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
-          <input type="radio" name="exp_method" value="split" onchange="App.onExpMethodChange()" /> 🏦💵 Split
+          <input type="radio" name="exp_method" value="split" onchange="App.onExpMethodChange()" /> 💳🏦 Split (Petty + Bank)
         </label>
       </div>
     </div>
 
-    <!-- Split payment fields -->
+    <!-- Split payment fields — Petty Cash + Bank Transfer -->
     <div id="exp_split_group" style="display:none">
       <div style="background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:12px">
-        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Enter how much was paid by each method. They must add up to the total amount above.</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Enter how much comes from each source. They must add up to the total amount above.</div>
         <div class="form-row">
+          <div class="form-group" style="margin-bottom:0">
+            <label class="form-label">💳 Petty Cash (₦)</label>
+            <input type="number" id="exp_petty_amt" class="form-input" placeholder="0" min="0" oninput="App.onExpSplitChange()" />
+          </div>
           <div class="form-group" style="margin-bottom:0">
             <label class="form-label">🏦 Bank Transfer (₦)</label>
             <input type="number" id="exp_bank_amt" class="form-input" placeholder="0" min="0" oninput="App.onExpSplitChange()" />
-          </div>
-          <div class="form-group" style="margin-bottom:0">
-            <label class="form-label">💵 Cash (₦)</label>
-            <input type="number" id="exp_cash_amt" class="form-input" placeholder="0" min="0" oninput="App.onExpSplitChange()" />
           </div>
         </div>
         <div id="exp_split_status" style="margin-top:10px;font-size:12px;color:var(--text3)"></div>
@@ -2433,9 +2497,9 @@ function onExpMethodChange(){
 
 function onExpSplitChange(){
   const total = parseFloat(document.getElementById('exp_amt')?.value)||0;
+  const petty = parseFloat(document.getElementById('exp_petty_amt')?.value)||0;
   const bank  = parseFloat(document.getElementById('exp_bank_amt')?.value)||0;
-  const cash  = parseFloat(document.getElementById('exp_cash_amt')?.value)||0;
-  const sum   = bank+cash;
+  const sum   = petty+bank;
   const statusEl = document.getElementById('exp_split_status');
   if(!statusEl) return;
   if(!total){ statusEl.textContent='Enter the total amount above first.'; statusEl.style.color='var(--text3)'; return; }
@@ -2463,10 +2527,10 @@ async function submitExpense(){
   // Resolve split amounts
   let bankAmount=0, cashAmount=0, pettyAmount=0;
   if(isSplit){
+    pettyAmount=parseFloat(document.getElementById('exp_petty_amt')?.value)||0;
     bankAmount=parseFloat(document.getElementById('exp_bank_amt')?.value)||0;
-    cashAmount=parseFloat(document.getElementById('exp_cash_amt')?.value)||0;
-    if(!bankAmount&&!cashAmount){ alert('Please enter at least one split amount.'); return }
-    if(bankAmount+cashAmount>amount+0.5){ alert(`Split total (${fmt(bankAmount+cashAmount)}) exceeds the expense amount (${fmt(amount)}). Please correct.`); return }
+    if(!pettyAmount&&!bankAmount){ alert('Please enter at least one split amount.'); return }
+    if(pettyAmount+bankAmount>amount+0.5){ alert(`Split total (${fmt(pettyAmount+bankAmount)}) exceeds the expense amount (${fmt(amount)}). Please correct.`); return }
   } else if(method==='petty_cash'){
     pettyAmount=amount;
   } else if(method==='bank_transfer'){
@@ -2489,13 +2553,14 @@ async function submitExpense(){
         pettyAmount: method==='petty_cash'?amount:0,
         notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
 
-      // Deduct from petty cash float if any portion is petty_cash
-      if(method==='petty_cash'){
+      // Deduct from petty cash float for petty_cash or the petty portion of split
+      const pettyDeduction = method==='petty_cash' ? amount : method==='split' ? pettyAmount : 0;
+      if(pettyDeduction>0){
         const pettyCfg = await DB.getPettyConfig();
-        await DB.savePettyConfig({ float: Math.max(0, pettyCfg.float - amount), max: pettyCfg.max });
+        await DB.savePettyConfig({ float: Math.max(0, pettyCfg.float - pettyDeduction), max: pettyCfg.max });
       }
       closeModal();
-      showAlert(`Expense of ${fmt(amount)} logged${isSplit?` (Bank: ${fmt(bankAmount)} + Cash: ${fmt(cashAmount)})`:''}.`,'success');
+      showAlert(`Expense of ${fmt(amount)} logged${isSplit?` (Petty: ${fmt(pettyAmount)} + Bank: ${fmt(bankAmount)})`:''}.`,'success');
       await renderExpenses();
     } catch(err) {
       showAlert(`Failed to save expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
