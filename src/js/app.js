@@ -2193,16 +2193,15 @@ async function renderExpenses(){
     <div class="card" style="margin-bottom:1rem">
       <div class="card-header">
         <span class="card-title">Category Breakdown</span>
-        ${activeFilter?`<button class="btn btn-sm" onclick="App.setExpCatFilter(null)">✕ Clear filter</button>`:'<span style="font-size:11px;color:var(--text3)">Tap a category to filter</span>'}
+        ${activeFilter?`<button class="btn btn-sm" onclick="App.setExpCatFilter(null)">✕ Clear filter</button>`:can('expenses')?'<span style="font-size:11px;color:var(--text3)">Tap a category to log an expense</span>':''}
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">
         ${EXPENSE_CATS.map(c=>{
           const amt  = catTotals[c.key]||0;
           const pct  = total>0 ? (amt/total*100) : 0;
-          const isActive = activeFilter===c.key;
           const hasAmt = amt>0;
           return `
-          <button onclick="App.setExpCatFilter('${c.key}')" style="
+          <button onclick="${can('expenses')?`App.showExpenseForm('${c.key}')`:``}" style="
             all:unset;display:flex;flex-direction:column;gap:6px;
             background:${isActive?'var(--primary)':'var(--surface)'};
             border:1.5px solid ${isActive?'var(--primary)':hasAmt?'var(--border2)':'var(--border)'};
@@ -2210,7 +2209,7 @@ async function renderExpenses(){
             transition:all 0.15s;opacity:${hasAmt?1:0.45};
             box-shadow:${isActive?'0 2px 8px rgba(15,110,86,0.2)':'none'};
             text-align:left;width:100%;box-sizing:border-box
-          " ${!hasAmt?'disabled':''}>
+          " >
             <div style="display:flex;justify-content:space-between;align-items:flex-start">
               <span style="font-size:22px;line-height:1">${c.icon}</span>
               ${pct>0?`<span style="font-size:11px;font-weight:700;padding:2px 6px;border-radius:10px;background:${isActive?'rgba(255,255,255,0.25)':'var(--primary-light)'};color:${isActive?'#fff':'var(--primary)'}">${pct<1?'<1':Math.round(pct)}%</span>`:''}
@@ -2346,7 +2345,7 @@ function updateExpenseDescRequired(){
   if(hint)  hint.style.display = isOthers ? 'block' : 'none';
 }
 
-function showExpenseForm(){
+function showExpenseForm(preselectedCat){
   const today=new Date().toISOString().split('T')[0];
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -2355,10 +2354,10 @@ function showExpenseForm(){
     <div class="form-group"><label class="form-label">Category *</label>
       <select id="exp_cat" class="form-select" onchange="App.updateExpenseSubcats()">
         <option value="">— Select category —</option>
-        ${EXPENSE_CATS.map(c=>`<option value="${c.key}">${c.icon} ${c.label}</option>`).join('')}
+        ${EXPENSE_CATS.map(c=>`<option value="${c.key}" ${preselectedCat===c.key?'selected':''}>${c.icon} ${c.label}</option>`).join('')}
       </select>
     </div>
-    <div class="form-group" id="exp_subcat_group" style="display:none"><label class="form-label">Sub-category *</label>
+    <div class="form-group" id="exp_subcat_group" style="display:${preselectedCat?'block':'none'}"><label class="form-label">Sub-category *</label>
       <select id="exp_subcat" class="form-select" onchange="App.updateExpenseDescRequired()">
         <option value="">— Select sub-category —</option>
       </select>
@@ -2415,6 +2414,8 @@ function showExpenseForm(){
     </div>
     <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="exp_notes" class="form-textarea" placeholder="Additional details..."></textarea></div>
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitExpense()">Save Expense</button></div>`);
+  // If a category was pre-selected, populate subcategories immediately
+  if(preselectedCat){ setTimeout(()=>App.updateExpenseSubcats(), 30); }
 }
 
 function onExpMethodChange(){
