@@ -225,6 +225,9 @@ function hasPermission(p){
 }
 function can(...ps){ return ps.some(p=>hasPermission(p)) }
 function monthLabel(){ return MONTHS[state.month]+' '+state.year }
+function defaultExpenseStatusForCurrentUser(){
+  return state.user?.role==='admin_officer' ? 'pending_approval' : 'approved';
+}
 function filterByMonth(arr){
   return (arr||[]).filter(r=>{
     const d = new Date(r.date||r.createdAt||r.ts||0);
@@ -2620,7 +2623,7 @@ async function submitExpense(){
 
   async function saveExpenseRecord(receiptDataUrl, receiptFileName){
     try {
-      const expenseStatus = state.user?.role==='admin_officer' ? 'pending_approval' : 'approved';
+      const expenseStatus = defaultExpenseStatusForCurrentUser();
       await DB.addExpense({ date, category, subCategory, description: description || subCategory, amount,
         receiptNo: document.getElementById('exp_receipt')?.value,
         receiptImage: receiptDataUrl||null, receiptFileName: receiptFileName||null,
@@ -3107,6 +3110,7 @@ async function renderPettyCash(){
       .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
   );
   const expensesSinceRefill = allExpenses.filter(e=>
+    e.status==='approved' &&
     (e.paymentMethod==='petty_cash'||(e.paymentMethod==='split'&&(e.pettyAmount||0)>0)) &&
     new Date(e.date||e.createdAt||0) > lastRefillDate &&
     !alreadyClaimedExpIds.has(e.id)
@@ -3294,6 +3298,7 @@ async function showTopUpRequest(){
       .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
   );
   const unrecovered = allExpenses.filter(e=>
+    e.status==='approved' &&
     (e.paymentMethod==='petty_cash'||(e.paymentMethod==='split'&&(e.pettyAmount||0)>0)) &&
     new Date(e.date||e.createdAt||0) > lastRefillDate &&
     !alreadyInRequest.has(e.id)
@@ -3729,7 +3734,7 @@ async function confirmPettyReceipt(id){
     notes: (noReceiptChecked ? `No receipt — ${document.getElementById('rc_reason')?.value||''}\n` : '') + `Petty cash ref: ${req.id}. ${notes}`,
     recordedBy: state.user?.name,
     pettyRef: req.id,
-    status: 'approved'
+    status: defaultExpenseStatusForCurrentUser()
   });
 
   DB.addAudit('petty_settled', `Petty cash settled: "${req.purpose}" — ${fmt(actualAmt)}${noReceiptChecked?' (no receipt)':`, Receipt: ${no}`}. Expense auto-created.`, state.user?.name);
