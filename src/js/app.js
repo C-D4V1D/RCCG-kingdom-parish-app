@@ -2687,7 +2687,25 @@ async function editExpense(id){
   if(!Number.isFinite(amount) || amount<=0){ alert('Please enter a valid amount.'); return }
   const description = prompt('Update description:', exp.description||exp.subCategory||'') ?? exp.description;
   const notes = prompt('Update notes (optional):', exp.notes||'') ?? exp.notes;
-  await DB.updateExpense(id, { amount, description, notes });
+  let newPettyAmount = exp.pettyAmount||0;
+  if(exp.paymentMethod==='petty_cash'){
+    newPettyAmount = amount;
+  } else if(exp.paymentMethod==='split' && (exp.pettyAmount||0)>0){
+    const pettyStr = prompt('Update petty-cash portion (₦):', String(exp.pettyAmount||0));
+    if(pettyStr===null) return;
+    const pettyVal = parseFloat(pettyStr);
+    if(!Number.isFinite(pettyVal) || pettyVal<0 || pettyVal>amount){ alert('Petty portion must be between 0 and total amount.'); return }
+    newPettyAmount = pettyVal;
+  }
+
+  const pettyDelta = newPettyAmount - (exp.pettyAmount||0);
+  if(Math.abs(pettyDelta)>0.001){
+    const pettyCfg = await DB.getPettyConfig();
+    await DB.savePettyConfig({ float: pettyCfg.float - pettyDelta, max: pettyCfg.max });
+    DB.addAudit('petty_adjustment',`Petty float adjusted by ${fmt(Math.abs(pettyDelta))} from expense edit (${pettyDelta>0?'deducted':'returned'})`,state.user?.name);
+  }
+
+  await DB.updateExpense(id, { amount, description, notes, pettyAmount:newPettyAmount });
   DB.addAudit('expense_updated',`Expense updated: ${exp.id} (${fmt(exp.amount)} → ${fmt(amount)})`,state.user?.name);
   showAlert('Expense updated.','success');
   renderExpenses();
@@ -2700,6 +2718,11 @@ async function deleteExpense(id){
   if(exp.status==='approved'){ alert('Approved expenses cannot be deleted.'); return }
   if(!(state.user?.role==='admin_officer' || state.user?.role==='it_admin')){ alert('You are not allowed to delete this expense.'); return }
   if(!confirm(`Delete this expense (${fmt(exp.amount)})?`)) return;
+  if((exp.pettyAmount||0)>0){
+    const pettyCfg = await DB.getPettyConfig();
+    await DB.savePettyConfig({ float: pettyCfg.float + (exp.pettyAmount||0), max: pettyCfg.max });
+    DB.addAudit('petty_adjustment',`Petty float restored by ${fmt(exp.pettyAmount||0)} from deleted pending expense (${exp.id})`,state.user?.name);
+  }
   await DB.deleteExpense(id);
   DB.addAudit('expense_deleted',`Expense deleted: ${exp.id} (${fmt(exp.amount)})`,state.user?.name);
   showAlert('Expense deleted.','warn');
@@ -3110,7 +3133,7 @@ async function renderPettyCash(){
       .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
   );
   const expensesSinceRefill = allExpenses.filter(e=>
-    e.status==='approved' &&
+    (e.status==='approved' || e.status==='pending_approval') &&
     (e.paymentMethod==='petty_cash'||(e.paymentMethod==='split'&&(e.pettyAmount||0)>0)) &&
     new Date(e.date||e.createdAt||0) > lastRefillDate &&
     !alreadyClaimedExpIds.has(e.id)
@@ -3298,7 +3321,7 @@ async function showTopUpRequest(){
       .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
   );
   const unrecovered = allExpenses.filter(e=>
-    e.status==='approved' &&
+    (e.status==='approved' || e.status==='pending_approval') &&
     (e.paymentMethod==='petty_cash'||(e.paymentMethod==='split'&&(e.pettyAmount||0)>0)) &&
     new Date(e.date||e.createdAt||0) > lastRefillDate &&
     !alreadyInRequest.has(e.id)
@@ -3314,7 +3337,10 @@ async function showTopUpRequest(){
     return `<tr>
       <td style="font-size:12px">${fmtDate(e.date||e.createdAt)}</td>
       <td><span class="badge badge-gray" style="font-size:11px">${c.icon} ${c.label}</span></td>
-      <td style="font-size:12px">${detailBits.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}</td>
+      <td style="font-size:12px">
+        ${detailBits.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}
+        ${e.status!=='approved'?`<div><span class="badge badge-warn" style="font-size:10px;margin-top:3px">Pending approval</span></div>`:''}
+      </td>
       <td class="td-right td-bold" style="font-size:13px;color:var(--danger)">${fmt(amt)}</td>
     </tr>`;
   }).join('');
@@ -3714,11 +3740,16 @@ async function confirmPettyReceipt(id){
   };
 
   let changeReturned = 0;
+  let extraSpent = 0;
   if(actualAmt < req.amount){
     changeReturned = req.amount - actualAmt;
     updateData.changeReturned = changeReturned;
     await DB.savePettyConfig({ float: pettyConfig.float + changeReturned, max: pettyConfig.max });
     DB.addNotification('Petty Cash Change Returned', `${fmt(changeReturned)} returned to cash from "${req.purpose}" (spent ${fmt(actualAmt)} of approved ${fmt(req.amount)}).`, 'info');
+  } else if(actualAmt > req.amount){
+    extraSpent = actualAmt - req.amount;
+    await DB.savePettyConfig({ float: pettyConfig.float - extraSpent, max: pettyConfig.max });
+    DB.addNotification('Petty Cash Overspend Recorded', `${fmt(extraSpent)} additional petty cash used for "${req.purpose}" (actual ${fmt(actualAmt)} vs approved ${fmt(req.amount)}).`, 'warn');
   }
 
   await DB.updatePettyEntry(id, updateData);
@@ -3739,7 +3770,7 @@ async function confirmPettyReceipt(id){
 
   DB.addAudit('petty_settled', `Petty cash settled: "${req.purpose}" — ${fmt(actualAmt)}${noReceiptChecked?' (no receipt)':`, Receipt: ${no}`}. Expense auto-created.`, state.user?.name);
   closeModal();
-  showAlert(`Settled. ${fmt(actualAmt)} recorded as expense.${changeReturned ? ` ${fmt(changeReturned)} change returned.` : ''}${noReceiptChecked ? ' (No receipt — reason recorded)' : ''}`, 'success');
+  showAlert(`Settled. ${fmt(actualAmt)} recorded as expense.${changeReturned ? ` ${fmt(changeReturned)} change returned.` : ''}${extraSpent ? ` ${fmt(extraSpent)} extra spent deducted from petty cash.` : ''}${noReceiptChecked ? ' (No receipt — reason recorded)' : ''}`, 'success');
   renderPettyCash();
 }
 
@@ -3849,7 +3880,11 @@ async function submitRefill(){
 
   const pettyConfig = await DB.getPettyConfig();
   const spaceAvailable = pettyConfig.max - pettyConfig.float;
-  const actualAdded = Math.min(amt, spaceAvailable);
+  if(spaceAvailable <= 0){
+    alert(`Petty cash is already at or above the approved max (${fmt(pettyConfig.max)}). Reduce current float before recording another top-up.`);
+    return;
+  }
+  const actualAdded = Math.max(0, Math.min(amt, spaceAvailable));
   if(amt > spaceAvailable){
     if(!confirm(`The amount (${fmt(amt)}) exceeds available space (${fmt(spaceAvailable)}).\n\nOnly ${fmt(spaceAvailable)} will be added to reach the approved max of ${fmt(pettyConfig.max)}.\n\nProceed?`)) return;
   }
