@@ -1701,33 +1701,60 @@ async function showRemittancePaymentModal(){
       <label class="form-label">Payment Method *</label>
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:4px">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
-          <input type="radio" name="rem_method" value="bank_transfer" checked onchange="App.onRemMethodChange()" /> 🏦 Bank Transfer
+          <input type="radio" name="rem_method" value="bank_transfer" checked onchange="App.onRemMethodChange()" /> 🏦 Bank Transfer only
         </label>
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
-          <input type="radio" name="rem_method" value="cash" onchange="App.onRemMethodChange()" /> 💵 Cash (paid from Accountant's cash)
+          <input type="radio" name="rem_method" value="cash" onchange="App.onRemMethodChange()" /> 💵 Cash only
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="rem_method" value="split" onchange="App.onRemMethodChange()" /> 🏦💵 Split (Bank + Cash)
         </label>
       </div>
     </div>
 
-    <div class="form-group">
+    <!-- Single amount (bank or cash only) -->
+    <div id="rem_single_amount_group" class="form-group">
       <label class="form-label">Amount to Pay (₦) *</label>
       <input type="number" id="rem_amount" class="form-input" value="${Math.round(totalDue)}" />
-      <div class="form-hint" style="font-size:11px;color:var(--text3);margin-top:3px">Calculated total: <strong>${fmt(totalDue)}</strong>. Adjust only if actual payment differs.</div>
+      <div class="form-hint">Calculated total: <strong>${fmt(totalDue)}</strong>. Adjust only if actual payment differs.</div>
     </div>
+
+    <!-- Split amounts (shown only for split method) -->
+    <div id="rem_split_group" style="display:none">
+      <div style="background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:12px">
+        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Enter the bank and cash portions — they must add up to the total due.</div>
+        <div class="form-row">
+          <div class="form-group" style="margin-bottom:0">
+            <label class="form-label">🏦 Bank Transfer Amount (₦) *</label>
+            <input type="number" id="rem_bank_amt" class="form-input" placeholder="0" min="0" oninput="App.onRemSplitChange(${Math.round(totalDue)})" />
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label class="form-label">💵 Cash Amount (₦) *</label>
+            <input type="number" id="rem_cash_amt" class="form-input" placeholder="0" min="0" oninput="App.onRemSplitChange(${Math.round(totalDue)})" />
+          </div>
+        </div>
+        <div id="rem_split_total_row" style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+          <span style="font-size:13px;color:var(--text2)">Total entered</span>
+          <span id="rem_split_total" style="font-size:15px;font-weight:700;color:var(--text)">₦0</span>
+        </div>
+        <div id="rem_split_warning" style="display:none;margin-top:8px;font-size:12px;color:var(--danger);font-weight:500"></div>
+      </div>
+    </div>
+
     <div class="form-group"><label class="form-label">Payment Date *</label><input type="date" id="rem_date" class="form-input" value="${new Date().toISOString().split('T')[0]}" /></div>
 
-    <!-- Bank reference — shown only for bank transfers -->
+    <!-- Bank reference — shown for bank transfer and split -->
     <div class="form-group" id="rem_ref_group">
       <label class="form-label">Bank Reference / Transfer ID *</label>
       <input type="text" id="rem_ref" class="form-input" placeholder="Enter the bank transfer reference / teller number" />
-      <div class="form-hint" style="font-size:11px;color:var(--text3);margin-top:3px">Please also upload the bank receipt below.</div>
+      <div class="form-hint">Please also upload the bank receipt below.</div>
     </div>
 
-    <!-- Receipt upload (Rec. #3 — attach bank receipt) -->
+    <!-- Receipt upload -->
     <div class="form-group" id="rem_receipt_group">
       <label class="form-label">Bank Receipt / Teller Scan (optional)</label>
       <input type="file" id="rem_receipt" class="form-input" accept="image/*,.pdf" style="padding:4px" />
-      <div class="form-hint" style="font-size:11px;color:var(--text3);margin-top:3px">Attach a scan or photo of the bank teller/transfer confirmation for audit purposes.</div>
+      <div class="form-hint">Attach a scan or photo of the bank teller/transfer confirmation for audit purposes.</div>
     </div>
 
     <!-- Authorized By — checklist of pastor + signatories -->
@@ -1750,16 +1777,44 @@ async function showRemittancePaymentModal(){
 
 function onRemMethodChange(){
   const method=document.querySelector('input[name="rem_method"]:checked')?.value||'bank_transfer';
+  const singleGrp=document.getElementById('rem_single_amount_group');
+  const splitGrp=document.getElementById('rem_split_group');
   const refGroup=document.getElementById('rem_ref_group');
   const receiptGroup=document.getElementById('rem_receipt_group');
-  if(refGroup) refGroup.style.display=method==='bank_transfer'?'':'none';
-  if(receiptGroup) receiptGroup.style.display=method==='bank_transfer'?'':'none';
+  const isSplit=method==='split';
+  const isBank=method==='bank_transfer'||isSplit;
+  if(singleGrp) singleGrp.style.display=isSplit?'none':'';
+  if(splitGrp)  splitGrp.style.display=isSplit?'':'none';
+  if(refGroup)  refGroup.style.display=isBank?'':'none';
+  if(receiptGroup) receiptGroup.style.display=isBank?'':'none';
+}
+
+function onRemSplitChange(totalDue){
+  const bank=parseFloat(document.getElementById('rem_bank_amt')?.value)||0;
+  const cash=parseFloat(document.getElementById('rem_cash_amt')?.value)||0;
+  const total=bank+cash;
+  const totalEl=document.getElementById('rem_split_total');
+  const warnEl=document.getElementById('rem_split_warning');
+  if(totalEl) totalEl.textContent=fmt(total);
+  if(totalEl) totalEl.style.color=Math.abs(total-totalDue)<1?'var(--success)':total>totalDue?'var(--danger)':'var(--text)';
+  if(warnEl){
+    if(total>totalDue){
+      warnEl.style.display='block';
+      warnEl.textContent=`Total entered (${fmt(total)}) exceeds the amount due (${fmt(totalDue)}) by ${fmt(total-totalDue)}.`;
+    } else if(total<totalDue && total>0){
+      warnEl.style.display='block';
+      warnEl.style.color='var(--amber)';
+      warnEl.textContent=`${fmt(totalDue-total)} still unaccounted for. This will be recorded as a partial payment.`;
+    } else {
+      warnEl.style.display='none';
+    }
+  }
 }
 
 async function submitRemittance(){
-  const amount=parseFloat(document.getElementById('rem_amount')?.value)||0;
-  const date=document.getElementById('rem_date')?.value;
   const method=document.querySelector('input[name="rem_method"]:checked')?.value||'bank_transfer';
+  const isSplit=method==='split';
+  const date=document.getElementById('rem_date')?.value;
   const reference=(document.getElementById('rem_ref')?.value||'').trim();
   const notes=(document.getElementById('rem_notes')?.value||'').trim();
 
@@ -1767,6 +1822,20 @@ async function submitRemittance(){
   const checkedBoxes=[...document.querySelectorAll('input[name="rem_sig"]:checked')].map(c=>c.value);
   const authText=(document.getElementById('rem_auth_text')?.value||'').trim();
   const auth=checkedBoxes.length>0?checkedBoxes.join(', '):authText;
+
+  // Resolve amounts
+  let amount, bankAmount, cashAmount;
+  if(isSplit){
+    bankAmount=parseFloat(document.getElementById('rem_bank_amt')?.value)||0;
+    cashAmount=parseFloat(document.getElementById('rem_cash_amt')?.value)||0;
+    amount=bankAmount+cashAmount;
+    if(!bankAmount&&!cashAmount){ showAlert('Please enter at least one payment amount.','danger'); return }
+    if(bankAmount>0&&!reference){ showAlert('Please enter the bank transfer reference number for the bank portion.','danger'); return }
+  } else {
+    amount=parseFloat(document.getElementById('rem_amount')?.value)||0;
+    bankAmount=method==='bank_transfer'?amount:0;
+    cashAmount=method==='cash'?amount:0;
+  }
 
   if(!amount||!date){ showAlert('Please enter the amount and payment date.','danger'); return }
   if(method==='bank_transfer'&&!reference){ showAlert('Please enter the bank transfer reference number.','danger'); return }
@@ -1783,28 +1852,34 @@ async function submitRemittance(){
   const fromDate=state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
   const toDate=state.remToDate||new Date().toISOString().split('T')[0];
 
-  // Accountants submit for approval; pastor/admin submits directly as paid
   const isSuperUser=['it_admin','pastor'].includes(state.user?.role);
   const status=isSuperUser?'paid':'pending_approval';
+
+  // Build a clear description of how payment was split
+  const methodLabel=isSplit
+    ? `Split — Bank: ${fmt(bankAmount)} + Cash: ${fmt(cashAmount)}`
+    : method==='bank_transfer'?'Bank Transfer':'Cash';
 
   await DB.addRemittance({
     label:'RCCG Monthly Remittance', amount, paidDate:date,
     reference, authorizedBy:auth,
     notes:(receiptFileName?`Receipt: ${receiptFileName}\n`:'')+notes,
     paymentMethod:method,
+    bankAmount, cashAmount,
     periodFrom:fromDate, periodTo:toDate,
     submittedBy:state.user?.name||'',
     status
   });
-  DB.addAudit('remittance_submitted',`Remittance ${status==='paid'?'paid':'submitted for approval'}: ${fmt(amount)} — Period: ${fromDate} to ${toDate} — Ref: ${reference||'Cash'} — Method: ${method}`,state.user?.name);
+  DB.addAudit('remittance_submitted',
+    `Remittance ${status==='paid'?'paid':'submitted for approval'}: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}`,
+    state.user?.name);
   if(status==='paid'){
-    DB.addNotification('Remittance Recorded',`RCCG remittance of ${fmt(amount)} paid for period ${fmtDate(fromDate)} – ${fmtDate(toDate)}.`,'success');
+    DB.addNotification('Remittance Recorded',`RCCG remittance of ${fmt(amount)} paid (${methodLabel}) for period ${fmtDate(fromDate)} – ${fmtDate(toDate)}.`,'success');
   } else {
     DB.addNotification('Remittance Pending Approval',`Remittance of ${fmt(amount)} submitted by ${state.user?.name||'accountant'} — awaiting Pastor/Signatory approval.`,'warn');
   }
   closeModal();
-  showAlert(status==='paid'?'Remittance recorded and marked as paid!':'Remittance submitted — pending approval by Pastor/Signatory.','success');
-  // Reset period so defaults recalculate for next period
+  showAlert(status==='paid'?`Remittance of ${fmt(amount)} recorded and marked as paid!`:'Remittance submitted — pending approval by Pastor/Signatory.','success');
   state.remFromDate=null; state.remToDate=null;
   renderRemittances();
 }
@@ -3402,7 +3477,7 @@ return {
   onRoleChange, login, logout, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, printRemittanceReport, approveRemittance,
+  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt,
   showBankWithdrawal, submitBankWithdrawal,
