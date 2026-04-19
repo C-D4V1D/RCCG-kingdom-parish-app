@@ -314,12 +314,19 @@ async function onRoleChange(){
   const wrap = document.getElementById('userSelectWrap');
   const sel = document.getElementById('userSelect');
   if(!role){ wrap.style.display='none'; return }
-  const allUsers = await DB.getUsers();
-  const users = allUsers.filter(u=>u.role===role);
-  if(users.length>1){
-    wrap.style.display='block';
-    sel.innerHTML = users.map(u=>`<option value="${u.id}">${u.name}</option>`).join('');
-  } else { wrap.style.display='none' }
+  // Only show name selector for roles known to have multiple users
+  const multiRoles = ['signatory'];
+  if(!multiRoles.includes(role)){ wrap.style.display='none'; return }
+  try {
+    const allUsers = await DB.getUsers();
+    const users = allUsers.filter(u=>u.role===role);
+    if(users.length>1){
+      wrap.style.display='block';
+      sel.innerHTML = users.map(u=>`<option value="${u.id}">${u.name}</option>`).join('');
+    } else { wrap.style.display='none'; }
+  } catch(e){
+    wrap.style.display='none'; // fail silently — login() will handle the real auth
+  }
 }
 
 async function login(){
@@ -330,7 +337,8 @@ async function login(){
   const btn = document.querySelector('#loginScreen .btn-primary');
   if(btn){ btn.textContent='Connecting…'; btn.disabled=true; }
   try {
-    await apiFetch('init'); // creates tables + seeds users if first run
+    // Ensure tables exist — silently ignore if this fails (may already be initialised)
+    try { await apiFetch('init'); } catch(initErr) { console.warn('init skipped:', initErr.message); }
     const allUsers = await DB.getUsers();
     const users = allUsers.filter(u=>u.role===role);
     let user = null;
