@@ -536,8 +536,12 @@ async function calcChurchBalance(){
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
   // 2. Cash deposited by accountant to bank
   const cashDepositedToBank = cashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
-  // 3. Outflows from bank: expenses paid via bank_transfer (incl. bank charges)
-  const bankExpenses = allExpenses.filter(e=>e.paymentMethod==='bank_transfer').reduce((s,e) => s+(e.amount||0), 0);
+  // Outflows from bank: bank_transfer expenses + bank portion of split expenses
+  const bankExpenses = allExpenses.reduce((s,e)=>{
+    if(e.paymentMethod==='bank_transfer') return s+(e.amount||0);
+    if(e.paymentMethod==='split') return s+(e.bankAmount||0);
+    return s;
+  }, 0);
   // 4. Paid remittances (all assumed to leave the bank)
   const paidRems = allRemittances.filter(r=>r.status==='paid').reduce((s,r) => s+(r.amount||0), 0);
   // 5. Bank withdrawals (all types reduce bank; destination tells where money went)
@@ -553,8 +557,12 @@ async function calcChurchBalance(){
   }, 0);
   // Cash returned from bank withdrawals directed to accountant
   const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
-  // Expenses paid from accountant's cash
-  const cashExpenses = allExpenses.filter(e=>e.paymentMethod==='cash').reduce((s,e) => s+(e.amount||0), 0);
+  // Expenses paid from accountant's cash (cash portion only)
+  const cashExpenses = allExpenses.reduce((s,e)=>{
+    if(e.paymentMethod==='cash') return s+(e.amount||0);
+    if(e.paymentMethod==='split') return s+(e.cashAmount||0);
+    return s;
+  }, 0);
   const cashWithAccountant = cashFromCollections - cashDepositedToBank + bankToAccountant - cashExpenses;
 
   // --- PETTY CASH (with Admin Officer) ---
@@ -2124,41 +2132,178 @@ async function printRemittanceReport(fromOverride, toOverride){
 
 // ── EXPENSES ──────────────────────────────
 async function renderExpenses(){
-  const expenses=filterByMonth(await DB.getExpenses());
-  const total=expenses.reduce((s,r)=>s+(r.amount||0),0);
+  const allExp = await DB.getExpenses();
+  const expenses = filterByMonth(allExp);
+  const total = expenses.reduce((s,r)=>s+(r.amount||0),0);
+
+  // Category totals for breakdown
+  const catTotals = {};
+  EXPENSE_CATS.forEach(c=>{ catTotals[c.key]=expenses.filter(e=>e.category===c.key).reduce((s,e)=>s+(e.amount||0),0); });
+
+  // Active category filter (stored on state)
+  const activeFilter = state.expCatFilter || null;
+  const searchTerm   = state.expSearch   || '';
+  const sortField    = state.expSort     || 'date';
+  const sortDir      = state.expSortDir  || 'desc';
+
+  // Apply filters to log
+  let filtered = expenses.filter(e=>{
+    if(activeFilter && e.category!==activeFilter) return false;
+    if(searchTerm){
+      const q=searchTerm.toLowerCase();
+      if(!(
+        (e.description||'').toLowerCase().includes(q) ||
+        (e.subCategory||'').toLowerCase().includes(q) ||
+        (e.category||'').toLowerCase().includes(q) ||
+        (e.recordedBy||'').toLowerCase().includes(q) ||
+        (e.receiptNo||'').toLowerCase().includes(q) ||
+        fmt(e.amount).includes(q)
+      )) return false;
+    }
+    return true;
+  });
+
+  // Sort
+  filtered.sort((a,b)=>{
+    let av, bv;
+    if(sortField==='amount'){ av=a.amount||0; bv=b.amount||0; }
+    else if(sortField==='category'){ av=(a.category||''); bv=(b.category||''); }
+    else { av=new Date(a.date||a.createdAt||0); bv=new Date(b.date||b.createdAt||0); }
+    if(av<bv) return sortDir==='asc'?-1:1;
+    if(av>bv) return sortDir==='asc'?1:-1;
+    return 0;
+  });
+
+  const activeCat = activeFilter ? EXPENSE_CATS.find(c=>c.key===activeFilter) : null;
+
+  const thStyle = (field)=> `style="cursor:pointer;user-select:none;white-space:nowrap" onclick="App.setExpSort('${field}')"`;
+  const sortIcon = (field)=> sortField===field ? (sortDir==='asc'?'↑':'↓') : '';
+
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
-      <div><div class="page-title">Expenses</div><div class="page-sub">${monthLabel()} — ${fmt(total)} spent</div></div>
+      <div>
+        <div class="page-title">Expenses</div>
+        <div class="page-sub">${monthLabel()} — <strong>${fmt(total)}</strong> total${activeFilter?` · Filtered: ${activeCat?.label||activeFilter}`:''}${searchTerm?` · Search: "${searchTerm}"`:''}
+        </div>
+      </div>
       ${can('expenses')?`<button class="btn btn-primary" onclick="App.showExpenseForm()">+ Log Expense</button>`:''}
     </div>
-    <div class="card">
-      <div class="card-header"><span class="card-title">Category Breakdown</span></div>
-      <div class="grid-3">
+
+    <!-- Category Breakdown -->
+    <div class="card" style="margin-bottom:1rem">
+      <div class="card-header">
+        <span class="card-title">Category Breakdown</span>
+        ${activeFilter?`<button class="btn btn-sm" onclick="App.setExpCatFilter(null)">✕ Clear filter</button>`:'<span style="font-size:11px;color:var(--text3)">Tap a category to filter</span>'}
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">
         ${EXPENSE_CATS.map(c=>{
-          const amt=expenses.filter(e=>e.category===c.key).reduce((s,e)=>s+(e.amount||0),0);
-          return `<div style="display:flex;align-items:center;gap:8px;padding:8px 0">
-            <span style="font-size:20px">${c.icon}</span>
-            <div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.label}</div>
-            <div style="font-size:12px;color:var(--text2)">${fmt(amt)}</div></div>
-          </div>`;}).join('')}
+          const amt  = catTotals[c.key]||0;
+          const pct  = total>0 ? (amt/total*100) : 0;
+          const isActive = activeFilter===c.key;
+          const hasAmt = amt>0;
+          return `
+          <button onclick="App.setExpCatFilter('${c.key}')" style="
+            all:unset;display:flex;flex-direction:column;gap:6px;
+            background:${isActive?'var(--primary)':'var(--surface)'};
+            border:1.5px solid ${isActive?'var(--primary)':hasAmt?'var(--border2)':'var(--border)'};
+            border-radius:var(--rl);padding:12px 14px;cursor:pointer;
+            transition:all 0.15s;opacity:${hasAmt?1:0.45};
+            box-shadow:${isActive?'0 2px 8px rgba(15,110,86,0.2)':'none'};
+            text-align:left;width:100%;box-sizing:border-box
+          " ${!hasAmt?'disabled':''}>
+            <div style="display:flex;justify-content:space-between;align-items:flex-start">
+              <span style="font-size:22px;line-height:1">${c.icon}</span>
+              ${pct>0?`<span style="font-size:11px;font-weight:700;padding:2px 6px;border-radius:10px;background:${isActive?'rgba(255,255,255,0.25)':'var(--primary-light)'};color:${isActive?'#fff':'var(--primary)'}">${pct<1?'<1':Math.round(pct)}%</span>`:''}
+            </div>
+            <div style="font-size:12px;font-weight:600;color:${isActive?'#fff':'var(--text)'};line-height:1.3;margin-top:2px">${c.label}</div>
+            <div style="font-size:13px;font-weight:700;color:${isActive?'rgba(255,255,255,0.9)':hasAmt?'var(--danger)':'var(--text3)'}">
+              ${hasAmt?fmt(amt):'—'}
+            </div>
+            ${pct>0?`<div style="height:3px;background:${isActive?'rgba(255,255,255,0.3)':'var(--border)'};border-radius:2px;overflow:hidden;margin-top:2px">
+              <div style="height:3px;width:${Math.min(100,pct)}%;background:${isActive?'#fff':'var(--primary)'};border-radius:2px"></div>
+            </div>`:''}
+          </button>`;
+        }).join('')}
       </div>
     </div>
+
+    <!-- Expense Log -->
     <div class="card">
-      <div class="card-header"><span class="card-title">Expense Log</span></div>
-      ${expenses.length?`<div class="table-wrap"><table>
-        <tr><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th class="td-right">Amount</th><th>Method</th><th>Recorded By</th><th>Receipt</th></tr>
-        ${expenses.map(e=>{const c=EXPENSE_CATS.find(x=>x.key===e.category)||{};return`<tr>
-          <td>${fmtDate(e.date||e.createdAt)}</td>
-          <td><span class="badge badge-gray">${c.icon||''} ${c.label||e.category}</span></td>
-          <td style="font-size:12px;color:var(--text2)">${e.subCategory||'—'}</td>
-          <td>${e.description||'—'}</td>
-          <td class="td-right td-red td-bold">${fmt(e.amount)}</td>
-          <td class="td-muted" style="font-size:11px">${e.paymentMethod?.replace('_',' ')||'—'}</td>
-          <td class="td-muted">${e.recordedBy||'—'}</td>
-          <td class="td-muted">${e.receiptImage?`<button class="btn btn-sm" onclick="App.viewExpenseReceipt('${e.id}')">View</button>`:e.receiptNo||'—'}</td>
-        </tr>`}).join('')}
-      </table></div>`:'<div class="empty-table">No expenses recorded this month.</div>'}
+      <div class="card-header">
+        <span class="card-title">Expense Log${filtered.length!==expenses.length?` (${filtered.length} of ${expenses.length})`:` (${expenses.length})`}</span>
+      </div>
+
+      <!-- Search + Filter bar -->
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center">
+        <div style="flex:1;min-width:160px;position:relative">
+          <span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:14px;color:var(--text3)">🔍</span>
+          <input type="text" id="exp_search_input" class="form-input"
+            placeholder="Search description, category, amount…"
+            value="${searchTerm}"
+            oninput="App.setExpSearch(this.value)"
+            style="padding-left:32px;height:36px" />
+        </div>
+        <select class="form-select" style="width:auto;height:36px;font-size:13px" onchange="App.setExpCatFilter(this.value)">
+          <option value="">All categories</option>
+          ${EXPENSE_CATS.map(c=>`<option value="${c.key}" ${activeFilter===c.key?'selected':''}>${c.icon} ${c.label}</option>`).join('')}
+        </select>
+        ${(activeFilter||searchTerm)?`<button class="btn btn-sm" onclick="App.clearExpFilters()" style="white-space:nowrap;flex-shrink:0">✕ Clear all</button>`:''}
+      </div>
+
+      ${filtered.length?`<div class="table-wrap"><table>
+        <tr>
+          <th ${thStyle('date')}>Date ${sortIcon('date')}</th>
+          <th>Category</th>
+          <th>Sub-category / Description</th>
+          <th ${thStyle('amount')} class="td-right">Amount ${sortIcon('amount')}</th>
+          <th>Method</th>
+          <th>Recorded By</th>
+          <th>Receipt</th>
+        </tr>
+        ${filtered.map(e=>{
+          const c=EXPENSE_CATS.find(x=>x.key===e.category)||{icon:'',label:e.category||'—'};
+          const methodLabel = e.paymentMethod==='petty_cash'?'💳 Petty Cash'
+            :e.paymentMethod==='bank_transfer'?'🏦 Bank'
+            :e.paymentMethod==='split'?`🏦+💵 Split`
+            :'💵 Cash';
+          const splitDetail = e.paymentMethod==='split'&&(e.bankAmount||e.cashAmount)
+            ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">Bank: ${fmt(e.bankAmount||0)} · Cash: ${fmt(e.cashAmount||0)}</div>` : '';
+          return `<tr>
+            <td style="white-space:nowrap">${fmtDate(e.date||e.createdAt)}</td>
+            <td><span class="badge badge-gray">${c.icon} ${c.label}</span></td>
+            <td>
+              <div style="font-size:13px;font-weight:500">${e.subCategory||e.description||'—'}</div>
+              ${e.subCategory&&e.description&&e.description!==e.subCategory?`<div style="font-size:11px;color:var(--text3)">${e.description}</div>`:''}
+            </td>
+            <td class="td-right td-red td-bold">${fmt(e.amount)}</td>
+            <td class="td-muted" style="font-size:12px">${methodLabel}${splitDetail}</td>
+            <td class="td-muted" style="font-size:12px">${e.recordedBy||'—'}</td>
+            <td>${e.receiptImage?`<button class="btn btn-sm" onclick="App.viewExpenseReceipt('${e.id}')">🧾 View</button>`:e.receiptNo?`<span class="badge badge-gray">#${e.receiptNo}</span>`:'<span style="color:var(--text3);font-size:12px">—</span>'}</td>
+          </tr>`;
+        }).join('')}
+      </table></div>
+      <div style="padding:10px 0 2px;font-size:12px;color:var(--text3);text-align:right">
+        Total shown: <strong style="color:var(--danger)">${fmt(filtered.reduce((s,e)=>s+(e.amount||0),0))}</strong>
+      </div>`
+      :(expenses.length?'<div class="empty-table">No expenses match your search or filter.</div>':'<div class="empty-table">No expenses recorded this month.</div>')}
     </div>`;
+}
+
+function setExpCatFilter(cat){
+  state.expCatFilter = cat||null;
+  renderExpenses();
+}
+function setExpSearch(val){
+  state.expSearch = val||'';
+  renderExpenses();
+}
+function setExpSort(field){
+  if(state.expSort===field){ state.expSortDir = state.expSortDir==='asc'?'desc':'asc'; }
+  else { state.expSort=field; state.expSortDir='desc'; }
+  renderExpenses();
+}
+function clearExpFilters(){
+  state.expCatFilter=null; state.expSearch=''; renderExpenses();
 }
 
 function updateExpenseSubcats(){
@@ -2222,15 +2367,47 @@ function showExpenseForm(){
       <input type="text" id="exp_desc" class="form-input" placeholder="What was purchased / paid for?" />
       <div id="exp_desc_hint" class="form-hint" style="display:none;color:var(--danger);font-size:11px;margin-top:4px">Description is required when "Others..." is selected.</div>
     </div>
-    <div class="form-group"><label class="form-label">Amount (₦) *</label><input type="number" id="exp_amt" class="form-input" placeholder="0" min="0" /></div>
-    <div class="form-row">
-      <div class="form-group"><label class="form-label">Payment Method</label>
-        <select id="exp_method" class="form-select">
-          ${(state.user?.role==='admin_officer'||state.user?.role==='it_admin')?`<option value="petty_cash">Petty Cash (Admin Officer)</option>`:''}
-          <option value="bank_transfer">Bank Transfer</option>
-          <option value="cash">Cash (Accountant)</option>
-        </select>
+    <div class="form-group"><label class="form-label">Total Amount (₦) *</label><input type="number" id="exp_amt" class="form-input" placeholder="0" min="0" oninput="App.onExpMethodChange()" /></div>
+
+    <!-- Payment Method -->
+    <div class="form-group">
+      <label class="form-label">Payment Method *</label>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px">
+        ${(state.user?.role==='admin_officer'||state.user?.role==='it_admin'||state.user?.role==='accountant')?`
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="exp_method" value="petty_cash" checked onchange="App.onExpMethodChange()" /> 💳 Petty Cash
+        </label>`:''}
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="exp_method" value="bank_transfer" ${state.user?.role==='pastor'||state.user?.role==='signatory'?'checked':''} onchange="App.onExpMethodChange()" /> 🏦 Bank Transfer
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="exp_method" value="cash" onchange="App.onExpMethodChange()" /> 💵 Cash (Accountant)
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="exp_method" value="split" onchange="App.onExpMethodChange()" /> 🏦💵 Split
+        </label>
       </div>
+    </div>
+
+    <!-- Split payment fields -->
+    <div id="exp_split_group" style="display:none">
+      <div style="background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:12px">
+        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Enter how much was paid by each method. They must add up to the total amount above.</div>
+        <div class="form-row">
+          <div class="form-group" style="margin-bottom:0">
+            <label class="form-label">🏦 Bank Transfer (₦)</label>
+            <input type="number" id="exp_bank_amt" class="form-input" placeholder="0" min="0" oninput="App.onExpSplitChange()" />
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label class="form-label">💵 Cash (₦)</label>
+            <input type="number" id="exp_cash_amt" class="form-input" placeholder="0" min="0" oninput="App.onExpSplitChange()" />
+          </div>
+        </div>
+        <div id="exp_split_status" style="margin-top:10px;font-size:12px;color:var(--text3)"></div>
+      </div>
+    </div>
+
+    <div class="form-row">
       <div class="form-group"><label class="form-label">Receipt / Invoice No. (optional)</label><input type="text" id="exp_receipt" class="form-input" placeholder="Optional" /></div>
     </div>
     <div class="form-group"><label class="form-label">Upload Receipt Image (optional)</label>
@@ -2238,6 +2415,33 @@ function showExpenseForm(){
     </div>
     <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="exp_notes" class="form-textarea" placeholder="Additional details..."></textarea></div>
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitExpense()">Save Expense</button></div>`);
+}
+
+function onExpMethodChange(){
+  const method = document.querySelector('input[name="exp_method"]:checked')?.value || 'petty_cash';
+  const splitGrp = document.getElementById('exp_split_group');
+  if(splitGrp) splitGrp.style.display = method==='split' ? '' : 'none';
+  if(method==='split') onExpSplitChange();
+  // Lock bank_transfer for bank category
+  const cat = document.getElementById('exp_cat')?.value;
+  if(cat==='bank'){
+    const bankRadio = document.querySelector('input[name="exp_method"][value="bank_transfer"]');
+    if(bankRadio){ bankRadio.checked=true; if(splitGrp) splitGrp.style.display='none'; }
+  }
+}
+
+function onExpSplitChange(){
+  const total = parseFloat(document.getElementById('exp_amt')?.value)||0;
+  const bank  = parseFloat(document.getElementById('exp_bank_amt')?.value)||0;
+  const cash  = parseFloat(document.getElementById('exp_cash_amt')?.value)||0;
+  const sum   = bank+cash;
+  const statusEl = document.getElementById('exp_split_status');
+  if(!statusEl) return;
+  if(!total){ statusEl.textContent='Enter the total amount above first.'; statusEl.style.color='var(--text3)'; return; }
+  if(Math.abs(sum-total)<1){ statusEl.textContent=`✓ Total matches: ${fmt(sum)}`; statusEl.style.color='var(--success)'; }
+  else if(sum>total){ statusEl.textContent=`Over by ${fmt(sum-total)}. Reduce one of the amounts.`; statusEl.style.color='var(--danger)'; }
+  else if(sum>0){ statusEl.textContent=`${fmt(total-sum)} still unaccounted for.`; statusEl.style.color='var(--amber)'; }
+  else { statusEl.textContent=''; }
 }
 
 async function submitExpense(){
@@ -2252,23 +2456,45 @@ async function submitExpense(){
   if(isOthers && !description){ alert('Description is required when "Others..." is selected.'); return }
   if(!amount){ alert('Please enter an amount.'); return }
 
+  const method = document.querySelector('input[name="exp_method"]:checked')?.value || 'petty_cash';
+  const isSplit = method==='split';
+
+  // Resolve split amounts
+  let bankAmount=0, cashAmount=0, pettyAmount=0;
+  if(isSplit){
+    bankAmount=parseFloat(document.getElementById('exp_bank_amt')?.value)||0;
+    cashAmount=parseFloat(document.getElementById('exp_cash_amt')?.value)||0;
+    if(!bankAmount&&!cashAmount){ alert('Please enter at least one split amount.'); return }
+    if(bankAmount+cashAmount>amount+0.5){ alert(`Split total (${fmt(bankAmount+cashAmount)}) exceeds the expense amount (${fmt(amount)}). Please correct.`); return }
+  } else if(method==='petty_cash'){
+    pettyAmount=amount;
+  } else if(method==='bank_transfer'){
+    bankAmount=amount;
+  } else {
+    cashAmount=amount; // cash (accountant)
+  }
+
   const fileEl = document.getElementById('exp_receipt_file');
   const file = fileEl?.files?.[0];
 
   async function saveExpenseRecord(receiptDataUrl, receiptFileName){
-    const paymentMethod = document.getElementById('exp_method')?.value || 'cash';
     try {
       await DB.addExpense({ date, category, subCategory, description: description || subCategory, amount,
         receiptNo: document.getElementById('exp_receipt')?.value,
         receiptImage: receiptDataUrl||null, receiptFileName: receiptFileName||null,
-        paymentMethod,
+        paymentMethod: method,
+        bankAmount: isSplit?bankAmount:method==='bank_transfer'?amount:0,
+        cashAmount: isSplit?cashAmount:method==='cash'?amount:0,
+        pettyAmount: method==='petty_cash'?amount:0,
         notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
-      if(paymentMethod === 'petty_cash'){
+
+      // Deduct from petty cash float if any portion is petty_cash
+      if(method==='petty_cash'){
         const pettyCfg = await DB.getPettyConfig();
         await DB.savePettyConfig({ float: Math.max(0, pettyCfg.float - amount), max: pettyCfg.max });
       }
       closeModal();
-      showAlert('Expense logged successfully!','success');
+      showAlert(`Expense of ${fmt(amount)} logged${isSplit?` (Bank: ${fmt(bankAmount)} + Cash: ${fmt(cashAmount)})`:''}.`,'success');
       await renderExpenses();
     } catch(err) {
       showAlert(`Failed to save expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
@@ -3479,7 +3705,7 @@ return {
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
-  showExpenseForm, submitExpense, viewExpenseReceipt,
+  showExpenseForm, submitExpense, viewExpenseReceipt, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpSort, clearExpFilters, updateExpenseSubcats, updateExpenseDescRequired,
   showBankWithdrawal, submitBankWithdrawal,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   renderPettyCash, showPettyRequest, submitPettyRequest,
