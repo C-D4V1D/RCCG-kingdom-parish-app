@@ -226,7 +226,7 @@ function hasPermission(p){
 function can(...ps){ return ps.some(p=>hasPermission(p)) }
 function monthLabel(){ return MONTHS[state.month]+' '+state.year }
 function defaultExpenseStatusForCurrentUser(){
-  return state.user?.role==='admin_officer' ? 'pending_approval' : 'approved';
+  return (state.user?.role==='admin_officer' || state.user?.role==='it_admin') ? 'pending_approval' : 'approved';
 }
 function filterByMonth(arr){
   return (arr||[]).filter(r=>{
