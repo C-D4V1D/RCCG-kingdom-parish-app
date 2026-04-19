@@ -609,7 +609,8 @@ async function renderDashboard(){
   const dashOutstandingRems = Math.max(0, dashTotalRemDue - dashPaidRems);
   const dashTotalFunds = churchBal.bankBalance + Math.max(0, churchBal.cashWithAccountant) + churchBal.pettyFloat;
   const dashSpendable = dashTotalFunds - dashOutstandingRems;
-  const dashSpendColor = dashSpendable < 0 ? 'var(--danger)' : dashSpendable < 20000 ? '#B8860B' : 'var(--success)';
+  const dashSpendLow = parseFloat(settingsDash?.spendableLow||0)||20000;
+  const dashSpendColor = dashSpendable < 0 ? 'var(--danger)' : dashSpendable < dashSpendLow ? '#B8860B' : 'var(--success)';
 
   // Feed items — richer detail for Recent Transactions card
   const recentIncome = allIncome.slice(0,4);
@@ -2184,13 +2185,15 @@ async function renderExpenses(){
   const outstandingRems = Math.max(0, totalRemDue - paidRems);
   const totalChurch = churchBal.bankBalance + Math.max(0,churchBal.cashWithAccountant) + churchBal.pettyFloat;
   const spendable = totalChurch - outstandingRems;
-  const spendColor = spendable < 0 ? 'var(--danger)' : spendable < 20000 ? 'var(--amber)' : 'var(--success)';
-  const spendLabel = spendable < 0 ? 'Deficit — remittances exceed available funds' : spendable < 20000 ? 'Low — spend carefully' : 'Sufficient';
+  const spendLow = parseFloat(settings?.spendableLow||0)||20000;
+  const spendColor = spendable < 0 ? 'var(--danger)' : spendable < spendLow ? 'var(--amber)' : 'var(--success)';
+  const spendLabel = spendable < 0 ? 'Deficit — remittances exceed available funds' : spendable < spendLow ? `Low — under ${fmt(spendLow)} threshold` : 'Sufficient';
 
   // Store spendable in state so the expense form modal can access it without re-fetching
   state._spendable = spendable;
   state._churchBal = churchBal;
   state._outstandingRems = outstandingRems;
+  state._spendLow = spendLow;
 
   // Category totals for breakdown
   const catTotals = {};
@@ -2693,9 +2696,29 @@ async function renderBank(){
   // Monthly bank charges
   const monthlyBankCharges = filterByMonth(allExpenses).filter(e=>e.category==='bank').reduce((s,e)=>s+(e.amount||0),0);
 
-  // Monthly withdrawals
+  // Monthly withdrawals / deposits
   const monthlyWithdrawals = filterByMonth(allCashTx).filter(t=>t.type==='withdrawal');
   const monthlyDeposits = filterByMonth(allCashTx).filter(t=>t.type==='cash_deposit');
+
+  // Pending cash deposits (income records with undeposited cash — all time)
+  const pendingDepItems = allIncome.filter(r=>{
+    const isSunday = !r.source||r.source==='sunday_collection';
+    const cashHeld = isSunday
+      ? Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0))
+      : r.paymentMethod==='cash'?(r.totalCollection||0):0;
+    if(cashHeld<=0) return false;
+    const deposited = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+    return deposited < cashHeld;
+  });
+  const pendingDepCount = pendingDepItems.length;
+  const pendingDepTotal = pendingDepItems.reduce((s,r)=>{
+    const isSunday = !r.source||r.source==='sunday_collection';
+    const cashHeld = isSunday
+      ? Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0))
+      : r.paymentMethod==='cash'?(r.totalCollection||0):0;
+    const deposited = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+    return s + Math.max(0, cashHeld - deposited);
+  }, 0);
 
   // All bank transactions for reconciliation (combined view)
   const bankTxAll = [
@@ -2715,10 +2738,12 @@ async function renderBank(){
     <div class="page-header">
       <div><div class="page-title">Bank Account</div><div class="page-sub">Balance: ${fmt(bankBalance)}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${can('income')&&pendingDepCount>0?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${pendingDepCount} pending · ${fmt(pendingDepTotal)})</button>`:''}
         ${can('income')?`<button class="btn btn-primary" onclick="App.showBankWithdrawal()">🏦 Record Withdrawal</button>`:''}
-        ${can('expenses')?`<button class="btn btn-amber" onclick="App.showBankChargeForm()">💳 Record Bank Charge</button>`:''}
+        ${can('expenses')?`<button class="btn" onclick="App.showBankChargeForm()">💳 Bank Charge</button>`:''}
       </div>
     </div>
+    ${pendingDepCount>0&&can('income')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>${pendingDepCount} income record(s)</strong> totalling <strong>${fmt(pendingDepTotal)}</strong> have cash held by the Accountant and not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
 
     <div class="kpi-grid" style="grid-template-columns:repeat(4,minmax(0,1fr))">
       <div class="kpi">
@@ -3515,6 +3540,7 @@ function renderAdminSettings(s){
     <div class="form-group"><label class="form-label">Bank Name</label><input type="text" id="set_bank" class="form-input" value="${s.bankName||''}" /></div>
     <div class="form-group"><label class="form-label">Account Number</label><input type="text" id="set_acct" class="form-input" value="${s.accountNo||''}" /></div>
     <div class="form-group"><label class="form-label">Petty Cash Max Float (₦)</label><input type="number" id="set_petty" class="form-input" value="${s.pettyMax||50000}" /></div>
+    <div class="form-group"><label class="form-label">Spendable Balance — Low Warning Threshold (₦)</label><input type="number" id="set_spendable_low" class="form-input" value="${s.spendableLow||20000}" /><div class="form-hint">Dashboard and Expenses page will show an amber warning when Spendable Balance falls below this amount. Default: ₦20,000.</div></div>
     <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
   </div>`;
 }
@@ -3613,6 +3639,7 @@ async function saveSettings(){
   s.bankName=document.getElementById('set_bank')?.value;
   s.accountNo=document.getElementById('set_acct')?.value;
   s.pettyMax=parseFloat(document.getElementById('set_petty')?.value)||50000;
+  s.spendableLow=parseFloat(document.getElementById('set_spendable_low')?.value)||20000;
   await DB.saveSettings(s);
   showAlert('Settings saved!','success');
 }
