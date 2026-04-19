@@ -565,12 +565,13 @@ async function calcChurchBalance(){
   const cashWithAccountant = cashFromCollections - cashDepositedToBank + bankToAccountant - cashExpenses;
 
   // --- PETTY CASH (with Admin Officer) ---
+  // pettyFloat can be negative — means Admin Officer spent personal money and church owes them
   const pettyFloat = petty.float;
 
   return {
     cashWithAccountant: Math.max(0, cashWithAccountant),
     bankBalance,
-    pettyFloat,
+    pettyFloat,  // intentionally NOT clamped — negative means church owes Admin Officer
     total: Math.max(0, cashWithAccountant) + bankBalance + pettyFloat
   };
 }
@@ -597,9 +598,22 @@ async function renderDashboard(){
     .reduce((s,q)=>s+(q.amount||0),0);
   const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
   const netLocal = remittances.netLocal - dashAllQuotasAmt;
+  // Outstanding remittances = what is due this month minus what has already been paid (all time)
+  const dashTotalRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)+(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
+  const dashPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
+  const dashOutstandingRems = Math.max(0, dashTotalRemDue - dashPaidRems);
   const churchBal = await calcChurchBalance();
   const pendingPetty = await getPettyCashPendingCount();
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
+
+  // Spendable = total church funds − outstanding remittances not yet paid
+  const dashTotalRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
+    +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
+  const dashPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
+  const dashOutstandingRems = Math.max(0, dashTotalRemDue - dashPaidRems);
+  const dashTotalFunds = churchBal.bankBalance + Math.max(0, churchBal.cashWithAccountant) + churchBal.pettyFloat;
+  const dashSpendable = dashTotalFunds - dashOutstandingRems;
+  const dashSpendColor = dashSpendable < 0 ? 'var(--danger)' : dashSpendable < 20000 ? '#B8860B' : 'var(--success)';
 
   // Feed items — richer detail for Recent Transactions card
   const recentIncome = allIncome.slice(0,4);
@@ -709,8 +723,35 @@ async function renderDashboard(){
         <div style="margin-top:6px;font-size:11px;color:var(--text3);line-height:1.6">
           <a onclick="App.navigate('bank')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:4px"></span>Bank: ${fmt(churchBal.bankBalance)}</a>
           <a onclick="App.setIncomeTab('all');App.navigate('income')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#BA7517;border-radius:50%;margin-right:4px"></span>Cash with Accountant (undeposited): ${fmt(churchBal.cashWithAccountant)}</a>
-          <a onclick="App.navigate('petty_cash')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#1D9E75;border-radius:50%;margin-right:4px"></span>Petty Cash (Admin Officer): ${fmt(churchBal.pettyFloat)}</a>
+          <a onclick="App.navigate('petty_cash')" style="cursor:pointer;text-decoration:none;color:inherit;display:block">
+            <span style="display:inline-block;width:8px;height:8px;background:${churchBal.pettyFloat<0?'var(--danger)':'#1D9E75'};border-radius:50%;margin-right:4px"></span>
+            ${churchBal.pettyFloat<0
+              ? `<span style="color:var(--danger);font-weight:600">Church owes Admin Officer: ${fmt(Math.abs(churchBal.pettyFloat))}</span>`
+              : `Petty Cash (Admin Officer): ${fmt(churchBal.pettyFloat)}`}
+          </a>
         </div>
+        <!-- Spendable Balance — after all outstanding remittances -->
+        ${(()=>{
+          const totalPool = churchBal.bankBalance + Math.max(0,churchBal.cashWithAccountant) + churchBal.pettyFloat;
+          const sp = totalPool - dashOutstandingRems;
+          const spColor = sp<0?'var(--danger)':sp<20000?'var(--amber)':'#1D9E75';
+          const spBg    = sp<0?'rgba(163,45,45,0.08)':sp<20000?'rgba(186,117,23,0.08)':'rgba(29,158,117,0.08)';
+          const spIcon  = sp<0?'🔴':sp<20000?'🟡':'🟢';
+          const spLabel = sp<0?'Deficit':'Safe to spend';
+          return `<div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:${spBg};border:1px solid ${spColor}20">
+            <div style="font-size:10px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:var(--text3);margin-bottom:5px">Spendable Balance</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+              <div>
+                <div style="font-size:20px;font-weight:800;color:${spColor};letter-spacing:-0.5px;line-height:1">${fmt(sp)}</div>
+                <div style="font-size:10px;color:var(--text3);margin-top:3px">After ${fmt(dashOutstandingRems)} remittances due</div>
+              </div>
+              <div style="text-align:right">
+                <div style="font-size:18px">${spIcon}</div>
+                <div style="font-size:10px;font-weight:600;color:${spColor}">${spLabel}</div>
+              </div>
+            </div>
+          </div>`;
+        })()}
       </div>
     </div>
 
@@ -2233,7 +2274,7 @@ async function renderExpenses(){
         </div>
         <div style="text-align:center">
           <div style="font-size:11px;color:var(--text3);margin-bottom:3px">💳 Petty Cash</div>
-          <div style="font-size:13px;font-weight:600;color:var(--text)">${fmt(churchBal.pettyFloat)}</div>
+          <div style="font-size:13px;font-weight:600;color:${churchBal.pettyFloat<0?'var(--danger)':'var(--text)'}">${churchBal.pettyFloat<0?'−'+fmt(Math.abs(churchBal.pettyFloat)):fmt(churchBal.pettyFloat)}</div>
         </div>
         <div style="height:40px;width:1px;background:var(--border);justify-self:center"></div>
         <div style="text-align:center">
@@ -2557,7 +2598,7 @@ async function submitExpense(){
       const pettyDeduction = method==='petty_cash' ? amount : method==='split' ? pettyAmount : 0;
       if(pettyDeduction>0){
         const pettyCfg = await DB.getPettyConfig();
-        await DB.savePettyConfig({ float: Math.max(0, pettyCfg.float - pettyDeduction), max: pettyCfg.max });
+        await DB.savePettyConfig({ float: pettyCfg.float - pettyDeduction, max: pettyCfg.max });
       }
       closeModal();
       showAlert(`Expense of ${fmt(amount)} logged${isSplit?` (Petty: ${fmt(pettyAmount)} + Bank: ${fmt(bankAmount)})`:''}.`,'success');
@@ -2945,9 +2986,9 @@ async function renderPettyCash(){
 
     <div class="kpi-grid">
       <div class="kpi">
-        <div class="kpi-icon" style="background:${petty.float<10000?'var(--danger-light)':petty.float<20000?'var(--amber-light)':'var(--primary-light)'}">💳</div>
-        <div class="kpi-label">Available Float</div>
-        <div class="kpi-val" style="color:${petty.float<10000?'var(--danger)':petty.float<20000?'var(--amber)':'var(--primary)'}">${fmt(petty.float)}</div>
+        <div class="kpi-icon" style="background:${petty.float<0?'var(--danger-light)':petty.float<10000?'var(--danger-light)':petty.float<20000?'var(--amber-light)':'var(--primary-light)'}">💳</div>
+        <div class="kpi-label">${petty.float<0?'Church Owes Admin Officer':'Available Float'}</div>
+        <div class="kpi-val" style="color:${petty.float<0?'var(--danger)':petty.float<10000?'var(--danger)':petty.float<20000?'var(--amber)':'var(--primary)'}">${petty.float<0?fmt(Math.abs(petty.float)):fmt(petty.float)}</div>
         <div class="kpi-delta ${pct<20?'down':pct<50?'warn':'up'}">${pct}% of ${fmt(petty.max)} max</div>
       </div>
       <div class="kpi">
@@ -2977,13 +3018,13 @@ async function renderPettyCash(){
           ${can('income')?`<button class="btn btn-sm btn-amber" onclick="App.showPettyRefill()">↺ Refill</button>`:''}
         </div>
         <div style="text-align:center;padding:0.5rem 0 1rem">
-          <div class="amount-display" style="color:${petty.float<10000?'var(--danger)':petty.float<20000?'var(--amber)':'var(--primary)'}">${fmt(petty.float)}</div>
+          <div class="amount-display" style="color:${petty.float<0?'var(--danger)':petty.float<10000?'var(--danger)':petty.float<20000?'var(--amber)':'var(--primary)'}">${petty.float<0?'−'+fmt(Math.abs(petty.float)):fmt(petty.float)}</div>
           <div class="progress-bar" style="margin:12px auto;max-width:240px;height:12px;border-radius:6px">
             <div class="progress-fill" style="width:${pct}%;background:${pct<20?'var(--danger)':pct<50?'var(--amber)':'var(--primary)'};border-radius:6px"></div>
           </div>
           <div class="amount-label">${pct}% of ${fmt(petty.max)} approved max float</div>
         </div>
-        ${petty.float<10000?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span>Critically low. Request refill now.</span></div>`:''}
+        ${petty.float<0?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span><strong>Negative balance:</strong> The Admin Officer has used personal funds of ${fmt(Math.abs(petty.float))}. The church owes this amount and should refill the float immediately.</span></div>`:petty.float<10000?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span>Critically low. Request refill now.</span></div>`:''}
         <hr class="divider">
         <div class="section-hdr"><span class="section-title">Month Reconciliation</span></div>
         <div class="status-row"><div class="status-row-label">Cash disbursed</div><div class="status-row-amt td-red">${fmt(monthDisbursed)}</div></div>
@@ -3063,7 +3104,7 @@ async function showPettyRequest(){
     <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Your request goes to the Accountant for verification, then to a Signatory for final approval before any cash is released. You must return a receipt within <strong>48 hours</strong> of receiving the money.</span></div>
     <div style="background:var(--surface);border-radius:var(--r);padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
       <span style="font-size:12px;color:var(--text2)">Available float</span>
-      <span style="font-size:16px;font-weight:700;color:${petty.float<10000?'var(--danger)':'var(--primary)'}">${fmt(petty.float)}</span>
+      <span style="font-size:16px;font-weight:700;color:${petty.float<0?'var(--danger)':petty.float<10000?'var(--danger)':'var(--primary)'}">${petty.float<0?'−'+fmt(Math.abs(petty.float)):fmt(petty.float)}</span>
     </div>
     <div class="form-group"><label class="form-label">Purpose — what is the money for? <span style="color:var(--danger)">*</span></label><input type="text" id="pet_purpose" class="form-input" placeholder="e.g. Diesel for generator — Sunday 27 Apr" /></div>
     <div class="form-group"><label class="form-label">Amount Needed (₦) <span style="color:var(--danger)">*</span></label><input type="number" id="pet_amt" class="form-input" placeholder="0" min="0" /></div>
@@ -3109,8 +3150,11 @@ async function approvePetty(id){
   const req=pettyHistory.find(h=>h.id===id);
   if(!req) return;
   if(req.amount>pettyConfig.float){
-    alert(`Cannot approve: Insufficient float.\nRequired: ${fmt(req.amount)}\nAvailable: ${fmt(pettyConfig.float)}\n\nPlease refill the float first, then approve this request.`);
-    return;
+    const willOwe = pettyConfig.float - req.amount;
+    const msg = pettyConfig.float <= 0
+      ? `The float is already at ${fmt(pettyConfig.float)}.\n\nApproving will mean the church owes the Admin Officer ${fmt(Math.abs(willOwe))} of personal funds.\n\nProceed?`
+      : `Float is insufficient.\nRequired: ${fmt(req.amount)}\nAvailable: ${fmt(pettyConfig.float)}\n\nApproving will put the float at ${fmt(willOwe)}, meaning the church owes the Admin Officer ${fmt(Math.abs(willOwe))}.\n\nProceed anyway?`;
+    if(!confirm(msg)) return;
   }
   const approvedAt=new Date().toISOString();
   await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
