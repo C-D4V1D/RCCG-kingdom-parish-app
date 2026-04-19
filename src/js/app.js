@@ -2203,23 +2203,23 @@ async function renderExpenses(){
           return `
           <button onclick="${can('expenses')?`App.showExpenseForm('${c.key}')`:``}" style="
             all:unset;display:flex;flex-direction:column;gap:6px;
-            background:${isActive?'var(--primary)':'var(--surface)'};
-            border:1.5px solid ${isActive?'var(--primary)':hasAmt?'var(--border2)':'var(--border)'};
+            background:var(--surface);
+            border:1.5px solid ${hasAmt?'var(--border2)':'var(--border)'};
             border-radius:var(--rl);padding:12px 14px;cursor:pointer;
             transition:all 0.15s;opacity:${hasAmt?1:0.45};
-            box-shadow:${isActive?'0 2px 8px rgba(15,110,86,0.2)':'none'};
+            box-shadow:none;
             text-align:left;width:100%;box-sizing:border-box
           " >
             <div style="display:flex;justify-content:space-between;align-items:flex-start">
               <span style="font-size:22px;line-height:1">${c.icon}</span>
-              ${pct>0?`<span style="font-size:11px;font-weight:700;padding:2px 6px;border-radius:10px;background:${isActive?'rgba(255,255,255,0.25)':'var(--primary-light)'};color:${isActive?'#fff':'var(--primary)'}">${pct<1?'<1':Math.round(pct)}%</span>`:''}
+              ${pct>0?`<span style="font-size:11px;font-weight:700;padding:2px 6px;border-radius:10px;background:var(--primary-light);color:var(--primary)">${pct<1?'<1':Math.round(pct)}%</span>`:''}
             </div>
-            <div style="font-size:12px;font-weight:600;color:${isActive?'#fff':'var(--text)'};line-height:1.3;margin-top:2px">${c.label}</div>
-            <div style="font-size:13px;font-weight:700;color:${isActive?'rgba(255,255,255,0.9)':hasAmt?'var(--danger)':'var(--text3)'}">
+            <div style="font-size:12px;font-weight:600;color:var(--text);line-height:1.3;margin-top:2px">${c.label}</div>
+            <div style="font-size:13px;font-weight:700;color:${hasAmt?'var(--danger)':'var(--text3)'}">
               ${hasAmt?fmt(amt):'—'}
             </div>
-            ${pct>0?`<div style="height:3px;background:${isActive?'rgba(255,255,255,0.3)':'var(--border)'};border-radius:2px;overflow:hidden;margin-top:2px">
-              <div style="height:3px;width:${Math.min(100,pct)}%;background:${isActive?'#fff':'var(--primary)'};border-radius:2px"></div>
+            ${pct>0?`<div style="height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:2px">
+              <div style="height:3px;width:${Math.min(100,pct)}%;background:var(--primary);border-radius:2px"></div>
             </div>`:''}
           </button>`;
         }).join('')}
