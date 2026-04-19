@@ -3119,9 +3119,14 @@ async function renderPettyCash(){
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
             <div class="status-row-amt td-amber" style="white-space:nowrap">${fmt(r.amount)}</div>
-            ${can('income','petty_approve')?`
-              <button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">Approve</button>
-              <button class="btn btn-sm btn-danger" onclick="App.rejectPetty('${r.id}')">Reject</button>`:''
+            ${isTopup
+              ? can('income','petty_approve')
+                  ? `<button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">👁 View & Approve</button>`
+                  : `<button class="btn btn-sm" onclick="App.approvePetty('${r.id}')">👁 View</button>`
+              : can('income','petty_approve')
+                  ? `<button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">Approve</button>
+                     <button class="btn btn-sm btn-danger" onclick="App.rejectPetty('${r.id}')">Reject</button>`
+                  : ''
             }
           </div>
         </div>`;
@@ -3173,12 +3178,15 @@ async function renderPettyCash(){
       ${monthHistory.length?`<div class="table-wrap"><table>
         <tr><th>Date</th><th>Type</th><th>Purpose</th><th>By</th><th>Authorized By</th><th>Status</th><th class="td-right">Amount</th><th>Proof / Ref</th></tr>
         ${monthHistory.map(r=>{
-          const isTopup=r.type==='refill';
-          const isAdvance=r.type==='advance'||(!r.type&&r.type!=='refill');
+          const isRefill=r.type==='refill';
+          const isTopupReq=r.type==='topup_request';
+          const isTopup=isRefill||isTopupReq;
           const overdue=isReceiptOverdue(r);
-          const typeTag=isTopup
-            ?`<span class="badge badge-info">↺ Top-Up</span>`
-            :`<span class="badge badge-warn">💳 Advance</span>`;
+          const typeTag=isRefill
+            ?`<span class="badge badge-success">↺ Top-Up Paid</span>`
+            :isTopupReq
+              ?`<span class="badge badge-info">↺ Top-Up Request</span>`
+              :`<span class="badge badge-warn">💳 Advance</span>`;
           return`<tr style="${overdue?'background:var(--danger-light)':''}">
             <td style="white-space:nowrap">${fmtDate(r.createdAt)}</td>
             <td>${typeTag}</td>
@@ -3198,10 +3206,16 @@ async function showTopUpRequest(){
   const lastRefill = [...allPettyRaw].reverse().find(h=>h.type==='refill');
   const lastRefillDate = lastRefill ? new Date(lastRefill.createdAt||0) : new Date(0);
 
-  // Expenses paid from petty cash since last top-up
+  // Expenses paid from petty cash since last top-up — exclude those already in a request
+  const alreadyInRequest = new Set(
+    allPettyRaw
+      .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'))
+      .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
+  );
   const unrecovered = allExpenses.filter(e=>
     (e.paymentMethod==='petty_cash'||(e.paymentMethod==='split'&&(e.pettyAmount||0)>0)) &&
-    new Date(e.date||e.createdAt||0) > lastRefillDate
+    new Date(e.date||e.createdAt||0) > lastRefillDate &&
+    !alreadyInRequest.has(e.id)
   ).sort((a,b)=>new Date(a.date||a.createdAt)-new Date(b.date||b.createdAt));
 
   const totalAmt = unrecovered.reduce((s,e)=>s+(e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)),0);
@@ -3394,11 +3408,11 @@ async function approvePetty(id){
       </div>
 
       <div id="topup_review_printable">
-        <div class="print-only" style="display:none;text-align:center;margin-bottom:16px">
-          <div style="font-size:16px;font-weight:700">${esc(churchName)}</div>
-          <div style="font-size:12px;margin-top:2px">Petty Cash Top-Up Request — ${fmtDate(req.createdAt)}</div>
-          <div style="font-size:12px">Requested by: ${req.requestedBy||'—'} &nbsp;|&nbsp; Amount: ${fmt(req.amount)}</div>
-          <hr style="margin:10px 0">
+        <style>.print-only{display:none}</style>
+        <div class="print-only" style="text-align:center;margin-bottom:20px;border-bottom:2px solid #111;padding-bottom:12px">
+          <h1 style="font-size:18px;font-weight:700;margin:0 0 4px 0">${esc(churchName)}</h1>
+          <div class="subtitle" style="font-size:12px;color:#555">Petty Cash Top-Up Request — ${fmtDate(req.createdAt)}</div>
+          <div class="meta" style="font-size:12px">Requested by: <strong>${req.requestedBy||'—'}</strong> &nbsp;|&nbsp; Amount: <strong>${fmt(req.amount)}</strong></div>
         </div>
 
         <div style="font-size:13px;font-weight:600;margin-bottom:8px">
@@ -3456,11 +3470,46 @@ async function approvePetty(id){
 }
 
 function printTopupReview(){
-  // Show the print header, print, then hide again
-  const header = document.querySelector('.print-only');
-  if(header) header.style.display='block';
-  window.print();
-  if(header) header.style.display='none';
+  const el = document.getElementById('topup_review_printable');
+  if(!el) return;
+  const content = el.innerHTML;
+  const win = window.open('','_blank','width=800,height=700');
+  if(!win){ alert('Please allow pop-ups for this site to print.'); return; }
+  win.document.write(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Petty Cash Top-Up Request</title>
+<style>
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #111; padding: 32px 40px; max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 18px; margin: 0 0 2px 0; }
+  .subtitle { font-size: 12px; color: #555; margin-bottom: 4px; }
+  .meta { font-size: 12px; margin-bottom: 20px; color: #333; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+  th { background: #f0f0f0; font-size: 11px; padding: 6px 8px; text-align: left; border: 1px solid #ccc; }
+  td { font-size: 12px; padding: 6px 8px; border: 1px solid #ddd; vertical-align: top; }
+  .total-row td { font-weight: 700; background: #f8f8f8; font-size: 13px; }
+  .amt { text-align: right; font-weight: 700; }
+  .red { color: #b00; }
+  .note { font-size: 11px; color: #666; margin-bottom: 20px; }
+  .sigs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 32px; margin-top: 48px; }
+  .sig-box { border-top: 1px solid #333; padding-top: 6px; font-size: 11px; color: #555; }
+  .print-only { display: block !important; }
+  @media print { body { padding: 16px; } }
+</style>
+</head>
+<body>
+${content}
+<div class="sigs">
+  <div class="sig-box">Prepared by (Admin Officer)</div>
+  <div class="sig-box">Verified by (Accountant)</div>
+  <div class="sig-box">Approved by (Pastor / Signatory)</div>
+</div>
+</body>
+</html>`);
+  win.document.close();
+  // Wait for content to render then print
+  win.onload = ()=>{ win.focus(); win.print(); };
 }
 
 async function confirmTopupApproval(id){
