@@ -2357,6 +2357,7 @@ async function renderExpenses(){
           <th>Category</th>
           <th>Sub-category / Description</th>
           <th ${thStyle('amount')} class="td-right">Amount ${sortIcon('amount')}</th>
+          <th>Status</th>
           <th>Method</th>
           <th>Recorded By</th>
           <th>Receipt</th>
@@ -2374,6 +2375,10 @@ async function renderExpenses(){
           const splitDetail = e.paymentMethod==='split'&&splitParts.length
             ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">${splitParts.join(' · ')}</div>` : '';
           const canEditPending = (state.user?.role==='admin_officer' || state.user?.role==='it_admin') && e.status!=='approved';
+          const canApprovePending = (state.user?.role==='accountant' || state.user?.role==='it_admin') && e.status!=='approved';
+          const statusBadge = e.status==='approved'
+            ? '<span class="badge badge-success">Approved</span>'
+            : '<span class="badge badge-warn">Pending Approval</span>';
           return `<tr>
             <td style="white-space:nowrap">${fmtDate(e.date||e.createdAt)}</td>
             <td><span class="badge badge-gray">${c.icon} ${c.label}</span></td>
@@ -2382,12 +2387,14 @@ async function renderExpenses(){
               ${e.subCategory&&e.description&&e.description!==e.subCategory?`<div style="font-size:11px;color:var(--text3)">${e.description}</div>`:''}
             </td>
             <td class="td-right td-red td-bold">${fmt(e.amount)}</td>
+            <td>${statusBadge}</td>
             <td class="td-muted" style="font-size:12px">${methodLabel}${splitDetail}</td>
             <td class="td-muted" style="font-size:12px">${e.recordedBy||'—'}</td>
             <td>
               <div style="display:flex;gap:6px;flex-wrap:wrap">
                 ${e.receiptImage?`<button class="btn btn-sm" onclick="App.viewExpenseReceipt('${e.id}')">🧾 View</button>`:e.receiptNo?`<span class="badge badge-gray">#${e.receiptNo}</span>`:'<span style="color:var(--text3);font-size:12px">—</span>'}
                 ${canEditPending?`<button class="btn btn-sm" onclick="App.editExpense('${e.id}')">✏️ Edit</button><button class="btn btn-sm btn-danger" onclick="App.deleteExpense('${e.id}')">🗑 Delete</button>`:''}
+                ${canApprovePending?`<button class="btn btn-sm btn-primary" onclick="App.approveExpense('${e.id}')">✓ Approve</button>`:''}
               </div>
             </td>
           </tr>`;
@@ -2613,6 +2620,7 @@ async function submitExpense(){
 
   async function saveExpenseRecord(receiptDataUrl, receiptFileName){
     try {
+      const expenseStatus = state.user?.role==='admin_officer' ? 'pending_approval' : 'approved';
       await DB.addExpense({ date, category, subCategory, description: description || subCategory, amount,
         receiptNo: document.getElementById('exp_receipt')?.value,
         receiptImage: receiptDataUrl||null, receiptFileName: receiptFileName||null,
@@ -2620,7 +2628,7 @@ async function submitExpense(){
         bankAmount: bankAmount,
         cashAmount: cashAmount,
         pettyAmount: pettyAmount,
-        notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
+        notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:expenseStatus });
 
       // Deduct from petty cash float for petty_cash or the petty portion of split
       const pettyDeduction = pettyAmount;
@@ -2632,7 +2640,7 @@ async function submitExpense(){
       const splitLabel = isSplit
         ? ` (${pettyAmount>0?`Petty: ${fmt(pettyAmount)} · `:''}${cashAmount>0?`Cash: ${fmt(cashAmount)} · `:''}Bank: ${fmt(bankAmount)})`
         : '';
-      showAlert(`Expense of ${fmt(amount)} logged${splitLabel}.`,'success');
+      showAlert(`Expense of ${fmt(amount)} logged${splitLabel}.${expenseStatus!=='approved'?' It is pending approval.':''}`,'success');
       await renderExpenses();
     } catch(err) {
       showAlert(`Failed to save expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
@@ -2692,6 +2700,18 @@ async function deleteExpense(id){
   await DB.deleteExpense(id);
   DB.addAudit('expense_deleted',`Expense deleted: ${exp.id} (${fmt(exp.amount)})`,state.user?.name);
   showAlert('Expense deleted.','warn');
+  renderExpenses();
+}
+
+async function approveExpense(id){
+  if(!(state.user?.role==='accountant' || state.user?.role==='it_admin')){ alert('You are not allowed to approve expenses.'); return }
+  const all = await DB.getExpenses();
+  const exp = all.find(e=>e.id===id);
+  if(!exp) return;
+  if(exp.status==='approved'){ alert('Expense is already approved.'); return }
+  await DB.updateExpense(id, { status:'approved' });
+  DB.addAudit('expense_approved',`Expense approved: ${exp.id} (${fmt(exp.amount)})`,state.user?.name);
+  showAlert('Expense approved.','success');
   renderExpenses();
 }
 
@@ -4412,7 +4432,7 @@ return {
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
-  showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpSort, clearExpFilters,
+  showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle,
