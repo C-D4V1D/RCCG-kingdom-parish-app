@@ -3021,9 +3021,16 @@ async function renderPettyCash(){
   // Petty cash expenses since the last refill (for top-up request)
   const lastRefill = [...history].reverse().find(h=>h.type==='refill');
   const lastRefillDate = lastRefill ? new Date(lastRefill.createdAt||0) : new Date(0);
+  // Exclude expenses already included in any pending or approved top-up request
+  const alreadyClaimedExpIds = new Set(
+    history
+      .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'))
+      .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
+  );
   const expensesSinceRefill = allExpenses.filter(e=>
     (e.paymentMethod==='petty_cash'||(e.paymentMethod==='split'&&(e.pettyAmount||0)>0)) &&
-    new Date(e.date||e.createdAt||0) > lastRefillDate
+    new Date(e.date||e.createdAt||0) > lastRefillDate &&
+    !alreadyClaimedExpIds.has(e.id)
   );
   const expensesSinceRefillTotal = expensesSinceRefill.reduce((s,e)=>
     s+(e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)), 0);
@@ -3048,7 +3055,6 @@ async function renderPettyCash(){
     ${overdueReceipts.length?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span><strong>${overdueReceipts.length} advance(s) overdue!</strong> Proof of purchase not submitted within 48 hours: ${overdueReceipts.map(r=>r.purpose).join(', ')}. Follow up with the Admin Officer.</span></div>`:''}
     ${petty.float<0?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span><strong>Wallet in debt:</strong> The Admin Officer has used ${fmt(Math.abs(petty.float))} of personal funds. The church owes this and should top up immediately.</span></div>`:''}
     ${pendingTopups.length>0?`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span><strong>${pendingTopups.length} top-up request(s)</strong> awaiting approval — ${fmt(pendingTopups.reduce((s,r)=>s+(r.amount||0),0))} total.</span></div>`:''}
-    ${approvedTopups.length>0?`<div class="alert alert-info"><span class="alert-icon">✅</span><span><strong>${approvedTopups.length} top-up(s) approved</strong> and waiting for payment — ${fmt(approvedTopups.reduce((s,r)=>s+(r.amount||0),0))} total. <button class="btn btn-sm btn-primary" onclick="App.showPettyRefill()" style="margin-left:8px">Record Top-Up Payment</button></span></div>`:''}
 
     <!-- Cash Meter card -->
     <div class="card" style="margin-bottom:1rem">
@@ -3121,6 +3127,28 @@ async function renderPettyCash(){
         </div>`;
       }).join('') : '<div class="empty-table">No pending requests.</div>'}
     </div>
+
+    ${approvedTopups.length?`
+    <div class="card" style="margin-bottom:1rem">
+      <div class="card-header">
+        <span class="card-title">✅ Approved Top-Ups — Awaiting Payment (${approvedTopups.length})</span>
+        <span style="font-size:11px;color:var(--text3)">Total: ${fmt(approvedTopups.reduce((s,r)=>s+(r.amount||0),0))}</span>
+      </div>
+      <div class="table-wrap"><table>
+        <tr><th>Date Approved</th><th>Request</th><th>Requested By</th><th>Approved By</th><th class="td-right">Amount</th><th>Action</th></tr>
+        ${approvedTopups.map(r=>`<tr>
+          <td style="white-space:nowrap">${fmtDate(r.approvedAt||r.createdAt)}</td>
+          <td>
+            <div style="font-size:13px;font-weight:500">${r.purpose||'Wallet top-up'}</div>
+            ${r.expenseRefs?.length?`<div style="font-size:11px;color:var(--text3)">${r.expenseRefs.length} expense(s) included</div>`:''}
+          </td>
+          <td class="td-muted">${r.requestedBy||'—'}</td>
+          <td class="td-muted">${r.approvedBy||'—'}</td>
+          <td class="td-right td-bold" style="color:var(--primary)">${fmt(r.amount)}</td>
+          <td><button class="btn btn-sm btn-primary" onclick="App.showPettyRefill(${r.amount})">📋 Record Payment</button></td>
+        </tr>`).join('')}
+      </table></div>
+    </div>`:''}
 
     ${advancesAwaitingProof.length?`
     <div class="card" style="margin-bottom:1rem">
@@ -3324,25 +3352,91 @@ async function approvePetty(id){
   const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
   const req = pettyHistory.find(h=>h.id===id);
   if(!req) return;
-
   const isTopup = req.type === 'topup_request';
-  const approvedAt = new Date().toISOString();
 
   if(isTopup){
-    // Top-Up Request: the Admin Officer has already spent the money.
-    // Approving authorises the reimbursement payment — the float does NOT
-    // change here. The actual float increase happens when the Accountant
-    // uses "Record Top-Up Payment" to send the money.
-    if(!confirm(`Approve this top-up request?\n\n${req.purpose}\nAmount: ${fmt(req.amount)}\nRequested by: ${req.requestedBy}\n\nOnce approved, use "Record Top-Up Payment" to send the money to the Admin Officer and update the cash balance.`)) return;
+    // Show full expense detail modal for review before approving
+    const allExpenses = await DB.getExpenses();
+    const requestedExpIds = new Set(Array.isArray(req.expenseRefs) ? req.expenseRefs : []);
+    const includedExpenses = requestedExpIds.size > 0
+      ? allExpenses.filter(e=>requestedExpIds.has(e.id))
+      : [];
+    const settingsRow = await DB.getSettings();
+    const churchName = settingsRow?.churchName || 'RCCG Kingdom Parish, Aguleri';
 
-    await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
-    DB.addAudit('topup_approved',`Top-up request approved: ${fmt(req.amount)} (by ${state.user?.name}). Payment to be recorded separately.`,state.user?.name);
-    DB.addNotification('Top-Up Approved',`Top-up of ${fmt(req.amount)} approved by ${state.user?.name}. Accountant should now record the payment using "Record Top-Up Payment".`,'success');
-    showAlert(`Top-up request approved. Now tap "Record Top-Up Payment" to send ₦${fmt(req.amount)} to the Admin Officer and update the wallet balance.`,'success');
+    const expRows = includedExpenses.map(e=>{
+      const c = EXPENSE_CATS.find(x=>x.key===e.category)||{icon:'💸',label:e.category||'Other'};
+      const amt = e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0);
+      const receiptCell = e.receiptNo
+        ? `<span style="color:var(--success)">✓ ${e.receiptNo}</span>`
+        : e.notes&&e.notes.includes('NO-RECEIPT')
+          ? `<span style="color:var(--amber)">No receipt</span>`
+          : '<span style="color:var(--text3)">—</span>';
+      return `<tr>
+        <td style="font-size:12px;padding:5px 8px;white-space:nowrap">${fmtDate(e.date||e.createdAt)}</td>
+        <td style="padding:5px 8px;font-size:12px">${c.icon} ${c.label}</td>
+        <td style="padding:5px 8px;font-size:12px">${esc(e.description||e.subCategory||'—')}</td>
+        <td style="padding:5px 8px;font-size:11px">${receiptCell}</td>
+        <td style="padding:5px 8px;font-size:13px;font-weight:700;color:var(--danger);text-align:right">${fmt(amt)}</td>
+      </tr>`;
+    }).join('');
+
+    showModal(`
+      <button class="modal-close" onclick="closeModal()">✕</button>
+      <div class="modal-title">📋 Review Top-Up Request</div>
+
+      <div style="background:var(--surface);border-radius:var(--r);padding:10px 14px;margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:12px;color:var(--text2)">Requested by <strong>${req.requestedBy||'—'}</strong></span>
+          <span style="font-size:12px;color:var(--text3)">${fmtDate(req.createdAt)}</span>
+        </div>
+        ${req.notes?`<div style="font-size:12px;color:var(--text3);margin-top:4px">"${esc(req.notes)}"</div>`:''}
+      </div>
+
+      <div id="topup_review_printable">
+        <div class="print-only" style="display:none;text-align:center;margin-bottom:16px">
+          <div style="font-size:16px;font-weight:700">${esc(churchName)}</div>
+          <div style="font-size:12px;margin-top:2px">Petty Cash Top-Up Request — ${fmtDate(req.createdAt)}</div>
+          <div style="font-size:12px">Requested by: ${req.requestedBy||'—'} &nbsp;|&nbsp; Amount: ${fmt(req.amount)}</div>
+          <hr style="margin:10px 0">
+        </div>
+
+        <div style="font-size:13px;font-weight:600;margin-bottom:8px">
+          Expenses included (${includedExpenses.length}) — Total: ${fmt(req.amount)}
+        </div>
+
+        ${includedExpenses.length ? `<div class="table-wrap" style="max-height:240px;overflow-y:auto;margin-bottom:4px">
+          <table style="width:100%">
+            <tr style="background:var(--surface)">
+              <th style="padding:5px 8px;font-size:11px;text-align:left">Date</th>
+              <th style="padding:5px 8px;font-size:11px;text-align:left">Category</th>
+              <th style="padding:5px 8px;font-size:11px;text-align:left">Description</th>
+              <th style="padding:5px 8px;font-size:11px;text-align:left">Receipt</th>
+              <th style="padding:5px 8px;font-size:11px;text-align:right">Amount</th>
+            </tr>
+            ${expRows}
+            <tr style="border-top:2px solid var(--border)">
+              <td colspan="4" style="font-weight:700;padding:8px;font-size:13px">Total Requested</td>
+              <td style="font-weight:800;font-size:15px;color:var(--primary);text-align:right;padding:8px">${fmt(req.amount)}</td>
+            </tr>
+          </table>
+        </div>` : `<div class="empty-table" style="margin-bottom:12px">No linked expenses found. The Admin Officer submitted this without selecting specific expenses.</div>`}
+      </div>
+
+      <div class="alert alert-info" style="margin-top:10px"><span class="alert-icon">ℹ</span><span>Approving authorises the payment. The wallet balance updates when the Accountant records the payment.</span></div>
+
+      <div class="modal-footer" style="justify-content:space-between">
+        <button class="btn" onclick="App.printTopupReview()">🖨 Print</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-danger" onclick="App.rejectPettyFromModal('${id}')">Reject</button>
+          <button class="btn btn-primary" onclick="App.confirmTopupApproval('${id}')">✓ Approve</button>
+        </div>
+      </div>`);
+    return; // actual approval done in confirmTopupApproval
 
   } else {
-    // Advance Request: cash is being released from the wallet to the Admin Officer NOW.
-    // The wallet decreases — Admin Officer must return proof within 48 hours.
+    // Advance Request: cash is released from the wallet NOW
     if(req.amount > pettyConfig.float){
       const willOwe = pettyConfig.float - req.amount;
       const msg = pettyConfig.float <= 0
@@ -3350,16 +3444,44 @@ async function approvePetty(id){
         : `Wallet balance is insufficient.\nRequested: ${fmt(req.amount)}\nAvailable: ${fmt(pettyConfig.float)}\n\nApproving means the Admin Officer will need to use ${fmt(Math.abs(willOwe))} of personal funds.\n\nProceed anyway?`;
       if(!confirm(msg)) return;
     }
+    const approvedAt = new Date().toISOString();
     await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
     await DB.savePettyConfig({ float: pettyConfig.float - req.amount, max: pettyConfig.max });
-    DB.addAudit('advance_approved',`Advance approved: "${req.purpose}" — ${fmt(req.amount)} (approved by ${state.user?.name})`,state.user?.name);
+    DB.addAudit('advance_approved',`Advance approved: "${req.purpose}" — ${fmt(req.amount)} (by ${state.user?.name})`,state.user?.name);
     DB.addNotification('Advance Approved',`"${req.purpose}" — ${fmt(req.amount)} approved. Remind ${req.requestedBy} to submit proof within 48 hours.`,'success');
     showAlert(`Advance approved. ${fmt(req.amount)} released from wallet. ${req.requestedBy} must submit proof of purchase within 48 hours.`,'success');
+    renderPettyCash();
+    buildSidebar();
   }
+}
 
+function printTopupReview(){
+  // Show the print header, print, then hide again
+  const header = document.querySelector('.print-only');
+  if(header) header.style.display='block';
+  window.print();
+  if(header) header.style.display='none';
+}
+
+async function confirmTopupApproval(id){
+  const [pettyHistory] = await Promise.all([DB.getPetty()]);
+  const req = pettyHistory.find(h=>h.id===id);
+  if(!req){ closeModal(); return; }
+  const approvedAt = new Date().toISOString();
+  await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
+  DB.addAudit('topup_approved',`Top-up approved: ${fmt(req.amount)} (by ${state.user?.name})`,state.user?.name);
+  DB.addNotification('Top-Up Approved',`Top-up of ${fmt(req.amount)} approved by ${state.user?.name}. Accountant should record the payment.`,'success');
+  closeModal();
+  showAlert(`Top-up of ${fmt(req.amount)} approved by you. The Accountant should now record the payment using "Record Top-Up Payment".`,'success');
   renderPettyCash();
   buildSidebar();
 }
+
+async function rejectPettyFromModal(id){
+  closeModal();
+  rejectPetty(id);
+}
+
 
 async function rejectPetty(id){
   const reason=prompt('Reason for rejection (the requester will see this):');
@@ -3469,13 +3591,15 @@ async function confirmPettyReceipt(id){
   renderPettyCash();
 }
 
-async function showPettyRefill(){
+async function showPettyRefill(prefillAmount){
   const [pettyHistory, pettyConfig, allUsers] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getUsers()]);
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
   const settled = pettyMonthHistory(petty.history).filter(h=>h.status==='settled'&&h.type!=='refill');
   const settledTotal = settled.reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
   const spaceInFloat = petty.max - petty.float;
-  const suggested = petty.float < 0 ? Math.min(Math.abs(petty.float)+settledTotal, petty.max) : Math.min(settledTotal, spaceInFloat);
+  const suggested = prefillAmount != null
+    ? prefillAmount   // use the pre-filled amount from an approved request
+    : petty.float < 0 ? Math.min(Math.abs(petty.float)+settledTotal, petty.max) : Math.min(settledTotal, spaceInFloat);
 
   // Build signatory checklist from app users
   const sigUsers = allUsers.filter(u=>['pastor','signatory','it_admin'].includes(u.role));
@@ -4123,7 +4247,7 @@ return {
   showBankWithdrawal, submitBankWithdrawal,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle,
-  approvePetty, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
+  approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
   setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, showAddUser, addUser, editUser,
