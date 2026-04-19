@@ -147,6 +147,8 @@ const DB = {
 
   getExpenses()                { return apiFetch('expenses'); },
   addExpense(d)                { return apiFetch('expenses','POST',d); },
+  updateExpense(id,d)          { return apiFetch(`expenses/${id}`,'PUT',d); },
+  deleteExpense(id)            { return apiFetch(`expenses/${id}`,'DELETE'); },
 
   getPetty()                   { return apiFetch('petty'); },
   getPettyConfig()             { return apiFetch('petty-config'); },
@@ -2363,10 +2365,15 @@ async function renderExpenses(){
           const c=EXPENSE_CATS.find(x=>x.key===e.category)||{icon:'',label:e.category||'—'};
           const methodLabel = e.paymentMethod==='petty_cash'?'💳 Petty Cash'
             :e.paymentMethod==='bank_transfer'?'🏦 Bank'
-            :e.paymentMethod==='split'?`🏦+💵 Split`
+            :e.paymentMethod==='split'?`🔀 Split`
             :'💵 Cash';
-          const splitDetail = e.paymentMethod==='split'&&(e.bankAmount||e.cashAmount)
-            ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">Bank: ${fmt(e.bankAmount||0)} · Cash: ${fmt(e.cashAmount||0)}</div>` : '';
+          const splitParts = [];
+          if((e.bankAmount||0)>0) splitParts.push(`Bank: ${fmt(e.bankAmount||0)}`);
+          if((e.pettyAmount||0)>0) splitParts.push(`Petty: ${fmt(e.pettyAmount||0)}`);
+          if((e.cashAmount||0)>0) splitParts.push(`Cash: ${fmt(e.cashAmount||0)}`);
+          const splitDetail = e.paymentMethod==='split'&&splitParts.length
+            ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">${splitParts.join(' · ')}</div>` : '';
+          const canEditPending = (state.user?.role==='admin_officer' || state.user?.role==='it_admin') && e.status!=='approved';
           return `<tr>
             <td style="white-space:nowrap">${fmtDate(e.date||e.createdAt)}</td>
             <td><span class="badge badge-gray">${c.icon} ${c.label}</span></td>
@@ -2377,7 +2384,12 @@ async function renderExpenses(){
             <td class="td-right td-red td-bold">${fmt(e.amount)}</td>
             <td class="td-muted" style="font-size:12px">${methodLabel}${splitDetail}</td>
             <td class="td-muted" style="font-size:12px">${e.recordedBy||'—'}</td>
-            <td>${e.receiptImage?`<button class="btn btn-sm" onclick="App.viewExpenseReceipt('${e.id}')">🧾 View</button>`:e.receiptNo?`<span class="badge badge-gray">#${e.receiptNo}</span>`:'<span style="color:var(--text3);font-size:12px">—</span>'}</td>
+            <td>
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                ${e.receiptImage?`<button class="btn btn-sm" onclick="App.viewExpenseReceipt('${e.id}')">🧾 View</button>`:e.receiptNo?`<span class="badge badge-gray">#${e.receiptNo}</span>`:'<span style="color:var(--text3);font-size:12px">—</span>'}
+                ${canEditPending?`<button class="btn btn-sm" onclick="App.editExpense('${e.id}')">✏️ Edit</button><button class="btn btn-sm btn-danger" onclick="App.deleteExpense('${e.id}')">🗑 Delete</button>`:''}
+              </div>
+            </td>
           </tr>`;
         }).join('')}
       </table></div>
@@ -2445,8 +2457,20 @@ function updateExpenseDescRequired(){
   if(hint)  hint.style.display = isOthers ? 'block' : 'none';
 }
 
+function getExpenseMethodOptionsForRole(role){
+  const options = [];
+  if(role==='admin_officer' || role==='it_admin') options.push({ value:'petty_cash', label:'💳 Petty Cash' });
+  if(role==='accountant' || role==='it_admin') options.push({ value:'cash', label:'💵 Cash (Accountant)' });
+  options.push({ value:'bank_transfer', label:'🏦 Bank Transfer' });
+  if(role==='admin_officer' || role==='it_admin') options.push({ value:'split_petty_bank', label:'💳🏦 Split (Petty + Bank)' });
+  if(role==='accountant' || role==='it_admin') options.push({ value:'split_cash_bank', label:'💵🏦 Split (Cash + Bank)' });
+  return options;
+}
+
 function showExpenseForm(preselectedCat){
   const today=new Date().toISOString().split('T')[0];
+  const methodOptions = getExpenseMethodOptionsForRole(state.user?.role);
+  const defaultMethod = methodOptions[0]?.value || 'bank_transfer';
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">💸 Log Expense</div>
@@ -2480,30 +2504,21 @@ function showExpenseForm(preselectedCat){
     <div class="form-group">
       <label class="form-label">Payment Method *</label>
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px">
-        ${(state.user?.role==='admin_officer'||state.user?.role==='it_admin'||state.user?.role==='accountant')?`
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
-          <input type="radio" name="exp_method" value="petty_cash" checked onchange="App.onExpMethodChange()" /> 💳 Petty Cash
-        </label>`:''}
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
-          <input type="radio" name="exp_method" value="bank_transfer" ${state.user?.role==='pastor'||state.user?.role==='signatory'?'checked':''} onchange="App.onExpMethodChange()" /> 🏦 Bank Transfer
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
-          <input type="radio" name="exp_method" value="cash" onchange="App.onExpMethodChange()" /> 💵 Cash (Accountant)
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
-          <input type="radio" name="exp_method" value="split" onchange="App.onExpMethodChange()" /> 💳🏦 Split (Petty + Bank)
-        </label>
+        ${methodOptions.map(m=>`
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+            <input type="radio" name="exp_method" value="${m.value}" ${m.value===defaultMethod?'checked':''} onchange="App.onExpMethodChange()" /> ${m.label}
+          </label>`).join('')}
       </div>
     </div>
 
-    <!-- Split payment fields — Petty Cash + Bank Transfer -->
+    <!-- Split payment fields -->
     <div id="exp_split_group" style="display:none">
       <div style="background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:12px">
         <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Enter how much comes from each source. They must add up to the total amount above.</div>
         <div class="form-row">
           <div class="form-group" style="margin-bottom:0">
-            <label class="form-label">💳 Petty Cash (₦)</label>
-            <input type="number" id="exp_petty_amt" class="form-input" placeholder="0" min="0" oninput="App.onExpSplitChange()" />
+            <label class="form-label" id="exp_split_secondary_label">💳 Petty Cash (₦)</label>
+            <input type="number" id="exp_secondary_amt" class="form-input" placeholder="0" min="0" oninput="App.onExpSplitChange()" />
           </div>
           <div class="form-group" style="margin-bottom:0">
             <label class="form-label">🏦 Bank Transfer (₦)</label>
@@ -2527,10 +2542,15 @@ function showExpenseForm(preselectedCat){
 }
 
 function onExpMethodChange(){
-  const method = document.querySelector('input[name="exp_method"]:checked')?.value || 'petty_cash';
+  const method = document.querySelector('input[name="exp_method"]:checked')?.value || 'bank_transfer';
   const splitGrp = document.getElementById('exp_split_group');
-  if(splitGrp) splitGrp.style.display = method==='split' ? '' : 'none';
-  if(method==='split') onExpSplitChange();
+  const splitLabel = document.getElementById('exp_split_secondary_label');
+  const isSplit = method==='split_petty_bank' || method==='split_cash_bank';
+  if(splitGrp) splitGrp.style.display = isSplit ? '' : 'none';
+  if(splitLabel){
+    splitLabel.textContent = method==='split_cash_bank' ? '💵 Cash (₦)' : '💳 Petty Cash (₦)';
+  }
+  if(isSplit) onExpSplitChange();
   // Lock bank_transfer for bank category
   const cat = document.getElementById('exp_cat')?.value;
   if(cat==='bank'){
@@ -2541,9 +2561,9 @@ function onExpMethodChange(){
 
 function onExpSplitChange(){
   const total = parseFloat(document.getElementById('exp_amt')?.value)||0;
-  const petty = parseFloat(document.getElementById('exp_petty_amt')?.value)||0;
+  const secondary = parseFloat(document.getElementById('exp_secondary_amt')?.value)||0;
   const bank  = parseFloat(document.getElementById('exp_bank_amt')?.value)||0;
-  const sum   = petty+bank;
+  const sum   = secondary+bank;
   const statusEl = document.getElementById('exp_split_status');
   if(!statusEl) return;
   if(!total){ statusEl.textContent='Enter the total amount above first.'; statusEl.style.color='var(--text3)'; return; }
@@ -2565,16 +2585,20 @@ async function submitExpense(){
   if(isOthers && !description){ alert('Description is required when "Others..." is selected.'); return }
   if(!amount){ alert('Please enter an amount.'); return }
 
-  const method = document.querySelector('input[name="exp_method"]:checked')?.value || 'petty_cash';
-  const isSplit = method==='split';
+  const method = document.querySelector('input[name="exp_method"]:checked')?.value || 'bank_transfer';
+  const isSplitPettyBank = method==='split_petty_bank';
+  const isSplitCashBank = method==='split_cash_bank';
+  const isSplit = isSplitPettyBank || isSplitCashBank;
 
   // Resolve split amounts
   let bankAmount=0, cashAmount=0, pettyAmount=0;
   if(isSplit){
-    pettyAmount=parseFloat(document.getElementById('exp_petty_amt')?.value)||0;
+    const secondaryAmount=parseFloat(document.getElementById('exp_secondary_amt')?.value)||0;
     bankAmount=parseFloat(document.getElementById('exp_bank_amt')?.value)||0;
-    const splitTotal = pettyAmount + bankAmount;
-    if(!pettyAmount&&!bankAmount){ alert('Please enter at least one split amount.'); return }
+    if(isSplitPettyBank) pettyAmount=secondaryAmount;
+    if(isSplitCashBank) cashAmount=secondaryAmount;
+    const splitTotal = secondaryAmount + bankAmount;
+    if(!secondaryAmount&&!bankAmount){ alert('Please enter at least one split amount.'); return }
     if(Math.abs(splitTotal-amount)>0.5){ alert(`Split total (${fmt(splitTotal)}) must equal the expense amount (${fmt(amount)}). Please correct.`); return }
   } else if(method==='petty_cash'){
     pettyAmount=amount;
@@ -2592,10 +2616,10 @@ async function submitExpense(){
       await DB.addExpense({ date, category, subCategory, description: description || subCategory, amount,
         receiptNo: document.getElementById('exp_receipt')?.value,
         receiptImage: receiptDataUrl||null, receiptFileName: receiptFileName||null,
-        paymentMethod: method,
-        bankAmount: isSplit?bankAmount:method==='bank_transfer'?amount:0,
-        cashAmount: isSplit?cashAmount:method==='cash'?amount:0,
-        pettyAmount: isSplit?pettyAmount:method==='petty_cash'?amount:0,
+        paymentMethod: isSplit ? 'split' : method,
+        bankAmount: bankAmount,
+        cashAmount: cashAmount,
+        pettyAmount: pettyAmount,
         notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:'approved' });
 
       // Deduct from petty cash float for petty_cash or the petty portion of split
@@ -2605,7 +2629,10 @@ async function submitExpense(){
         await DB.savePettyConfig({ float: pettyCfg.float - pettyDeduction, max: pettyCfg.max });
       }
       closeModal();
-      showAlert(`Expense of ${fmt(amount)} logged${isSplit?` (Petty: ${fmt(pettyAmount)} + Bank: ${fmt(bankAmount)})`:''}.`,'success');
+      const splitLabel = isSplit
+        ? ` (${pettyAmount>0?`Petty: ${fmt(pettyAmount)} · `:''}${cashAmount>0?`Cash: ${fmt(cashAmount)} · `:''}Bank: ${fmt(bankAmount)})`
+        : '';
+      showAlert(`Expense of ${fmt(amount)} logged${splitLabel}.`,'success');
       await renderExpenses();
     } catch(err) {
       showAlert(`Failed to save expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
@@ -2634,6 +2661,38 @@ async function viewExpenseReceipt(id){
     ${isImg?`<img src="${exp.receiptImage}" style="width:100%;border-radius:var(--r);max-height:70vh;object-fit:contain" alt="Receipt" />`:
       `<a href="${exp.receiptImage}" target="_blank" class="btn btn-primary" download="${exp.receiptFileName||'receipt'}">Download Receipt PDF</a>`}
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
+}
+
+async function editExpense(id){
+  const all = await DB.getExpenses();
+  const exp = all.find(e=>e.id===id);
+  if(!exp) return;
+  if(exp.status==='approved'){ alert('Approved expenses cannot be edited.'); return }
+  if(!(state.user?.role==='admin_officer' || state.user?.role==='it_admin')){ alert('You are not allowed to edit this expense.'); return }
+
+  const amountStr = prompt('Update amount (₦):', String(exp.amount||0));
+  if(amountStr===null) return;
+  const amount = parseFloat(amountStr);
+  if(!Number.isFinite(amount) || amount<=0){ alert('Please enter a valid amount.'); return }
+  const description = prompt('Update description:', exp.description||exp.subCategory||'') ?? exp.description;
+  const notes = prompt('Update notes (optional):', exp.notes||'') ?? exp.notes;
+  await DB.updateExpense(id, { amount, description, notes });
+  DB.addAudit('expense_updated',`Expense updated: ${exp.id} (${fmt(exp.amount)} → ${fmt(amount)})`,state.user?.name);
+  showAlert('Expense updated.','success');
+  renderExpenses();
+}
+
+async function deleteExpense(id){
+  const all = await DB.getExpenses();
+  const exp = all.find(e=>e.id===id);
+  if(!exp) return;
+  if(exp.status==='approved'){ alert('Approved expenses cannot be deleted.'); return }
+  if(!(state.user?.role==='admin_officer' || state.user?.role==='it_admin')){ alert('You are not allowed to delete this expense.'); return }
+  if(!confirm(`Delete this expense (${fmt(exp.amount)})?`)) return;
+  await DB.deleteExpense(id);
+  DB.addAudit('expense_deleted',`Expense deleted: ${exp.id} (${fmt(exp.amount)})`,state.user?.name);
+  showAlert('Expense deleted.','warn');
+  renderExpenses();
 }
 
 function showBankWithdrawal(){
@@ -3128,6 +3187,7 @@ async function renderPettyCash(){
                      <button class="btn btn-sm btn-danger" onclick="App.rejectPetty('${r.id}')">Reject</button>`
                   : ''
             }
+            ${isTopup && (state.user?.name===r.requestedBy || state.user?.role==='it_admin') ? `<button class="btn btn-sm btn-danger" onclick="App.cancelTopUpRequest('${r.id}')">Cancel</button>` : ''}
           </div>
         </div>`;
       }).join('') : '<div class="empty-table">No pending requests.</div>'}
@@ -3150,7 +3210,7 @@ async function renderPettyCash(){
           <td class="td-muted">${r.requestedBy||'—'}</td>
           <td class="td-muted">${r.approvedBy||'—'}</td>
           <td class="td-right td-bold" style="color:var(--primary)">${fmt(r.amount)}</td>
-          <td><button class="btn btn-sm btn-primary" onclick="App.showPettyRefill(${r.amount})">📋 Record Payment</button></td>
+          <td><button class="btn btn-sm btn-primary" onclick="App.showPettyRefill(${r.amount}, '${r.id}')">📋 Record Payment</button></td>
         </tr>`).join('')}
       </table></div>
     </div>`:''}
@@ -3224,10 +3284,11 @@ async function showTopUpRequest(){
   const expRows = unrecovered.map(e=>{
     const c=EXPENSE_CATS.find(x=>x.key===e.category)||{icon:'💸',label:e.category||'Other'};
     const amt = e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0);
+    const detailBits = [e.subCategory, e.description&&e.description!==e.subCategory?e.description:'', e.notes?`Notes: ${e.notes}`:''].filter(Boolean);
     return `<tr>
       <td style="font-size:12px">${fmtDate(e.date||e.createdAt)}</td>
       <td><span class="badge badge-gray" style="font-size:11px">${c.icon} ${c.label}</span></td>
-      <td style="font-size:12px">${e.description||e.subCategory||'—'}</td>
+      <td style="font-size:12px">${detailBits.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}</td>
       <td class="td-right td-bold" style="font-size:13px;color:var(--danger)">${fmt(amt)}</td>
     </tr>`;
   }).join('');
@@ -3244,7 +3305,7 @@ async function showTopUpRequest(){
     <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">Expenses to be recovered (${unrecovered.length}):</div>
     <div class="table-wrap" style="max-height:200px;overflow-y:auto;margin-bottom:12px">
       <table style="width:100%">
-        <tr><th>Date</th><th>Category</th><th>Description</th><th class="td-right">Amount</th></tr>
+        <tr><th>Date</th><th>Category</th><th>Details (Sub-category / Description / Notes)</th><th class="td-right">Amount</th></tr>
         ${expRows}
         <tr style="border-top:2px solid var(--border)">
           <td colspan="3" style="font-size:13px;font-weight:700;padding:8px">Total to recover</td>
@@ -3292,6 +3353,21 @@ async function submitTopUpRequest(){
   DB.addNotification('Top-Up Requested',`${state.user?.name} requested a wallet top-up of ${fmt(amount)}. Awaiting approval.`,'warn');
   closeModal();
   showAlert(`Top-up request of ${fmt(amount)} submitted. The Accountant will review and a Signatory will approve.`,'success');
+  renderPettyCash();
+  buildSidebar();
+}
+
+async function cancelTopUpRequest(id){
+  const pettyHistory = await DB.getPetty();
+  const req = pettyHistory.find(h=>h.id===id);
+  if(!req || req.type!=='topup_request') return;
+  if(req.status!=='pending_approval'){ alert('Only pending top-up requests can be cancelled.'); return }
+  const canCancel = state.user?.role==='it_admin' || state.user?.name===req.requestedBy;
+  if(!canCancel){ alert('You are not allowed to cancel this request.'); return }
+  if(!confirm(`Cancel top-up request of ${fmt(req.amount)}?`)) return;
+  await DB.updatePettyEntry(id, { status:'cancelled', rejectedAt:new Date().toISOString(), rejectionReason:'Cancelled by requester' });
+  DB.addAudit('topup_cancelled',`Top-up request cancelled: ${fmt(req.amount)} (${req.id})`,state.user?.name);
+  showAlert('Top-up request cancelled.','warn');
   renderPettyCash();
   buildSidebar();
 }
@@ -3381,6 +3457,7 @@ async function approvePetty(id){
     const expRows = includedExpenses.map(e=>{
       const c = EXPENSE_CATS.find(x=>x.key===e.category)||{icon:'💸',label:e.category||'Other'};
       const amt = e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0);
+      const detailBits = [e.subCategory, e.description&&e.description!==e.subCategory?e.description:'', e.notes?`Notes: ${e.notes}`:''].filter(Boolean);
       const receiptCell = e.receiptNo
         ? `<span style="color:var(--success)">✓ ${e.receiptNo}</span>`
         : e.notes&&e.notes.includes('NO-RECEIPT')
@@ -3389,7 +3466,7 @@ async function approvePetty(id){
       return `<tr>
         <td style="font-size:12px;padding:5px 8px;white-space:nowrap">${fmtDate(e.date||e.createdAt)}</td>
         <td style="padding:5px 8px;font-size:12px">${c.icon} ${c.label}</td>
-        <td style="padding:5px 8px;font-size:12px">${esc(e.description||e.subCategory||'—')}</td>
+        <td style="padding:5px 8px;font-size:12px">${detailBits.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}</td>
         <td style="padding:5px 8px;font-size:11px">${receiptCell}</td>
         <td style="padding:5px 8px;font-size:13px;font-weight:700;color:var(--danger);text-align:right">${fmt(amt)}</td>
       </tr>`;
@@ -3424,7 +3501,7 @@ async function approvePetty(id){
             <tr style="background:var(--surface)">
               <th style="padding:5px 8px;font-size:11px;text-align:left">Date</th>
               <th style="padding:5px 8px;font-size:11px;text-align:left">Category</th>
-              <th style="padding:5px 8px;font-size:11px;text-align:left">Description</th>
+              <th style="padding:5px 8px;font-size:11px;text-align:left">Details</th>
               <th style="padding:5px 8px;font-size:11px;text-align:left">Receipt</th>
               <th style="padding:5px 8px;font-size:11px;text-align:right">Amount</th>
             </tr>
@@ -3640,7 +3717,7 @@ async function confirmPettyReceipt(id){
   renderPettyCash();
 }
 
-async function showPettyRefill(prefillAmount){
+async function showPettyRefill(prefillAmount, topupRequestId=''){
   const [pettyHistory, pettyConfig, allUsers] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getUsers()]);
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
   const settled = pettyMonthHistory(petty.history).filter(h=>h.status==='settled'&&h.type!=='refill');
@@ -3671,6 +3748,7 @@ async function showPettyRefill(prefillAmount){
 
     <div class="form-group"><label class="form-label">Top-Up Amount (₦) <span style="color:var(--danger)">*</span></label>
       <input type="number" id="ref_amt" class="form-input" placeholder="0" value="${suggested||''}" />
+      <input type="hidden" id="ref_topup_id" value="${esc(topupRequestId||'')}" />
       <div class="form-hint">Max top-up: ${fmt(Math.max(0,spaceInFloat))} (total cannot exceed the approved max of ${fmt(petty.max)})</div>
     </div>
 
@@ -3733,6 +3811,7 @@ function onRefillMethodChange(){
 async function submitRefill(){
   const amt = parseFloat(document.getElementById('ref_amt')?.value)||0;
   const method = document.querySelector('input[name="ref_method"]:checked')?.value||'bank_transfer';
+  const topupRequestId = document.getElementById('ref_topup_id')?.value?.trim();
   const ref = method==='cash_accountant' ? '' : (document.getElementById('ref_ref')?.value?.trim()||'');
   const checkedSigs = [...document.querySelectorAll('input[name="ref_sig"]:checked')].map(c=>c.value);
   const authText = document.getElementById('ref_auth_text')?.value?.trim();
@@ -3752,6 +3831,11 @@ async function submitRefill(){
   const newFloat = pettyConfig.float + actualAdded;
   const bankAmt = method==='split' ? (parseFloat(document.getElementById('ref_bank_amt')?.value)||0) : method==='bank_transfer' ? actualAdded : 0;
   const cashAmt = method==='split' ? (parseFloat(document.getElementById('ref_cash_amt')?.value)||0) : method==='cash_accountant' ? actualAdded : 0;
+  if(method==='split'){
+    const splitTotal = bankAmt + cashAmt;
+    if(!bankAmt && !cashAmt){ alert('Enter split amounts for bank and cash.'); return }
+    if(Math.abs(splitTotal-actualAdded)>0.5){ alert(`Split total (${fmt(splitTotal)}) must match top-up amount (${fmt(actualAdded)}).`); return }
+  }
   const methodLabel = method==='split' ? `Split — Bank: ${fmt(bankAmt)} + Cash: ${fmt(cashAmt)}` : method==='cash_accountant' ? 'Cash with Accountant' : 'Bank Transfer';
 
   await DB.addPettyEntry({
@@ -3760,6 +3844,19 @@ async function submitRefill(){
     createdAt:new Date().toISOString(), purpose:'Cash Top-Up',
     reference:ref, authorizedBy:auth, paymentMethod:method, bankAmount:bankAmt, cashAmount:cashAmt
   });
+  if(topupRequestId){
+    await DB.updatePettyEntry(topupRequestId, {
+      status:'settled',
+      settledAt:new Date().toISOString(),
+      settledBy:state.user?.name,
+      actualAmount: actualAdded,
+      amount: actualAdded,
+      paymentMethod: method,
+      bankAmount: bankAmt,
+      cashAmount: cashAmt,
+      reference: ref
+    });
+  }
   await DB.savePettyConfig({ float: newFloat, max: pettyConfig.max });
   DB.addAudit('petty_refilled',`Cash topped up: ${fmt(actualAdded)} via ${methodLabel} (authorized by ${auth}${ref?', ref: '+ref:''})`,state.user?.name);
   DB.addNotification('Petty Cash Topped Up',`${fmt(actualAdded)} added to petty cash. New balance: ${fmt(newFloat)}. Authorized by: ${auth}.`,'success');
@@ -4292,10 +4389,10 @@ return {
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
-  showExpenseForm, submitExpense, viewExpenseReceipt, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpSort, clearExpFilters,
+  showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
-  renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle,
+  renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
