@@ -3367,12 +3367,26 @@ async function showTopUpRequest(){
     </div>
     <div class="form-group">
       <label class="form-label">Top-Up Amount (₦) *</label>
-      <input type="number" id="topup_amt" class="form-input" value="${Math.round(totalAmt)}" />
-      <div class="form-hint">Pre-filled with the total of the ${unrecovered.length} expense(s) above. Adjust only if needed.</div>
+      <input type="number" id="topup_amt" class="form-input" value="${Math.round(totalAmt)}" readonly />
+      <div class="form-hint">Auto-calculated from the selected expenses (${unrecovered.length}).</div>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;margin-top:8px">
+        <input type="checkbox" id="topup_override" onchange="App.onTopupOverrideToggle()" />
+        Override amount (requires reason)
+      </label>
+      <div id="topup_override_reason_group" style="display:none;margin-top:8px">
+        <input type="text" id="topup_override_reason" class="form-input" placeholder="Why this differs from the calculated total" />
+      </div>
     </div>` : `<div class="empty-table" style="margin-bottom:12px">No petty cash expenses found since the last top-up. If you paid for something and haven't logged it yet, go to the <strong>Expenses page</strong> first and record it there.</div>
     <div class="form-group">
       <label class="form-label">Top-Up Amount (₦) *</label>
-      <input type="number" id="topup_amt" class="form-input" placeholder="0" />
+      <input type="number" id="topup_amt" class="form-input" placeholder="0" readonly />
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;margin-top:8px">
+        <input type="checkbox" id="topup_override" onchange="App.onTopupOverrideToggle()" />
+        Override amount (requires reason)
+      </label>
+      <div id="topup_override_reason_group" style="display:none;margin-top:8px">
+        <input type="text" id="topup_override_reason" class="form-input" placeholder="Reason for manual amount" />
+      </div>
     </div>`}
     <div class="form-group"><label class="form-label">Notes for Accountant (optional)</label>
       <textarea id="topup_notes" class="form-textarea" placeholder="Any context that helps with approval..."></textarea>
@@ -3388,25 +3402,47 @@ async function showTopUpRequest(){
 async function submitTopUpRequest(){
   const expenseIds = state._topupExpenseIds || [];
   const amount = parseFloat(document.getElementById('topup_amt')?.value)||0;
+  const override = !!document.getElementById('topup_override')?.checked;
+  const overrideReason = document.getElementById('topup_override_reason')?.value?.trim()||'';
   const notes  = document.getElementById('topup_notes')?.value||'';
   if(!amount){ alert('Please enter the top-up amount.'); return }
+  if(override && !overrideReason){ alert('Please provide a reason for overriding the calculated amount.'); return }
   const pettyConfig = await DB.getPettyConfig();
   const req = {
     id:'PC-'+Date.now(), type:'topup_request',
     purpose: `Wallet top-up — ${expenseIds.length} expense(s)`,
-    amount, notes,
+    amount, notes: override ? `${notes}${notes?'\n':''}Override reason: ${overrideReason}` : notes,
     expenseRefs: expenseIds,
     requestedBy: state.user?.name,
     status:'pending_approval',
     createdAt: new Date().toISOString()
   };
   await DB.addPettyEntry(req);
-  DB.addAudit('petty_topup_requested',`Top-up requested: ${fmt(amount)} for ${expenseIds.length} expense(s)`,state.user?.name);
+  DB.addAudit('petty_topup_requested',`Top-up requested: ${fmt(amount)} for ${expenseIds.length} expense(s)${override?` [override: ${overrideReason}]`:''}`,state.user?.name);
   DB.addNotification('Top-Up Requested',`${state.user?.name} requested a wallet top-up of ${fmt(amount)}. Awaiting approval.`,'warn');
   closeModal();
   showAlert(`Top-up request of ${fmt(amount)} submitted. The Accountant will review and a Signatory will approve.`,'success');
   renderPettyCash();
   buildSidebar();
+}
+
+function onTopupOverrideToggle(){
+  const checked = !!document.getElementById('topup_override')?.checked;
+  const amtInput = document.getElementById('topup_amt');
+  const reasonGrp = document.getElementById('topup_override_reason_group');
+  if(amtInput){
+    amtInput.readOnly = !checked;
+    if(!checked && state._topupExpenseIds){
+      // Recompute from current scoped expenses if available
+      DB.getExpenses().then(all=>{
+        const expenseSet = new Set(state._topupExpenseIds||[]);
+        const total = (all||[]).filter(e=>expenseSet.has(e.id))
+          .reduce((s,e)=>s+(e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)),0);
+        amtInput.value = Math.round(total)||'';
+      }).catch(()=>{});
+    }
+  }
+  if(reasonGrp) reasonGrp.style.display = checked ? '' : 'none';
 }
 
 async function cancelTopUpRequest(id){
@@ -3647,6 +3683,14 @@ async function confirmTopupApproval(id){
   if(!req){ closeModal(); return; }
   const approvedAt = new Date().toISOString();
   await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
+  // Option B: approving a top-up request also marks linked expenses as approved
+  if(Array.isArray(req.expenseRefs) && req.expenseRefs.length){
+    const allExpenses = await DB.getExpenses();
+    const linked = allExpenses.filter(e=>req.expenseRefs.includes(e.id) && e.status!=='approved');
+    for(const exp of linked){
+      await DB.updateExpense(exp.id, { status:'approved' });
+    }
+  }
   DB.addAudit('topup_approved',`Top-up approved: ${fmt(req.amount)} (by ${state.user?.name})`,state.user?.name);
   DB.addNotification('Top-Up Approved',`Top-up of ${fmt(req.amount)} approved by ${state.user?.name}. Accountant should record the payment.`,'success');
   closeModal();
@@ -3892,10 +3936,23 @@ async function submitRefill(){
   const newFloat = pettyConfig.float + actualAdded;
   const bankAmt = method==='split' ? (parseFloat(document.getElementById('ref_bank_amt')?.value)||0) : method==='bank_transfer' ? actualAdded : 0;
   const cashAmt = method==='split' ? (parseFloat(document.getElementById('ref_cash_amt')?.value)||0) : method==='cash_accountant' ? actualAdded : 0;
+  const churchBal = await calcChurchBalance();
+  const bankBal = churchBal.bankBalance||0;
+  const cashBal = Math.max(0, churchBal.cashWithAccountant||0);
+  if(method==='bank_transfer' && bankAmt > bankBal + 0.5){
+    alert(`Bank balance is insufficient for this top-up.\nAvailable bank balance: ${fmt(bankBal)}\nRequested: ${fmt(bankAmt)}`);
+    return;
+  }
+  if(method==='cash_accountant' && cashAmt > cashBal + 0.5){
+    alert(`Cash with Accountant is insufficient for this top-up.\nAvailable cash: ${fmt(cashBal)}\nRequested: ${fmt(cashAmt)}`);
+    return;
+  }
   if(method==='split'){
     const splitTotal = bankAmt + cashAmt;
     if(!bankAmt && !cashAmt){ alert('Enter split amounts for bank and cash.'); return }
     if(Math.abs(splitTotal-actualAdded)>0.5){ alert(`Split total (${fmt(splitTotal)}) must match top-up amount (${fmt(actualAdded)}).`); return }
+    if(bankAmt > bankBal + 0.5){ alert(`Bank portion exceeds available bank balance (${fmt(bankBal)}).`); return }
+    if(cashAmt > cashBal + 0.5){ alert(`Cash portion exceeds available cash with Accountant (${fmt(cashBal)}).`); return }
   }
   const methodLabel = method==='split' ? `Split — Bank: ${fmt(bankAmt)} + Cash: ${fmt(cashAmt)}` : method==='cash_accountant' ? 'Cash with Accountant' : 'Bank Transfer';
 
@@ -4475,7 +4532,7 @@ return {
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
-  renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle,
+  renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
