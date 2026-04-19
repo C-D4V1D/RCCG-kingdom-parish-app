@@ -598,10 +598,6 @@ async function renderDashboard(){
     .reduce((s,q)=>s+(q.amount||0),0);
   const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
   const netLocal = remittances.netLocal - dashAllQuotasAmt;
-  // Outstanding remittances = what is due this month minus what has already been paid (all time)
-  const dashTotalRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)+(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
-  const dashPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-  const dashOutstandingRems = Math.max(0, dashTotalRemDue - dashPaidRems);
   const churchBal = await calcChurchBalance();
   const pendingPetty = await getPettyCashPendingCount();
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
@@ -720,38 +716,33 @@ async function renderDashboard(){
         <div class="kpi-icon" style="background:#EAF3DE">🏛️</div>
         <div class="kpi-label">Total Church Balance</div>
         <div class="kpi-val" style="color:${churchBal.total<0?'var(--danger)':'var(--primary)'}">${fmt(churchBal.total)}</div>
-        <div style="margin-top:6px;font-size:11px;color:var(--text3);line-height:1.6">
+        <div style="margin-top:6px;font-size:11px;color:var(--text3);line-height:1.8">
           <a onclick="App.navigate('bank')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:4px"></span>Bank: ${fmt(churchBal.bankBalance)}</a>
-          <a onclick="App.setIncomeTab('all');App.navigate('income')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#BA7517;border-radius:50%;margin-right:4px"></span>Cash with Accountant (undeposited): ${fmt(churchBal.cashWithAccountant)}</a>
+          <a onclick="App.setIncomeTab('all');App.navigate('income')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#BA7517;border-radius:50%;margin-right:4px"></span>Cash with Accountant: ${fmt(churchBal.cashWithAccountant)}</a>
           <a onclick="App.navigate('petty_cash')" style="cursor:pointer;text-decoration:none;color:inherit;display:block">
             <span style="display:inline-block;width:8px;height:8px;background:${churchBal.pettyFloat<0?'var(--danger)':'#1D9E75'};border-radius:50%;margin-right:4px"></span>
             ${churchBal.pettyFloat<0
-              ? `<span style="color:var(--danger);font-weight:600">Church owes Admin Officer: ${fmt(Math.abs(churchBal.pettyFloat))}</span>`
-              : `Petty Cash (Admin Officer): ${fmt(churchBal.pettyFloat)}`}
+              ? `<span style="color:var(--danger);font-weight:600">Petty Cash: ${fmt(churchBal.pettyFloat)} ⚠ Owes Admin Officer</span>`
+              : `Petty Cash: ${fmt(churchBal.pettyFloat)}`}
           </a>
         </div>
-        <!-- Spendable Balance — after all outstanding remittances -->
-        ${(()=>{
-          const totalPool = churchBal.bankBalance + Math.max(0,churchBal.cashWithAccountant) + churchBal.pettyFloat;
-          const sp = totalPool - dashOutstandingRems;
-          const spColor = sp<0?'var(--danger)':sp<20000?'var(--amber)':'#1D9E75';
-          const spBg    = sp<0?'rgba(163,45,45,0.08)':sp<20000?'rgba(186,117,23,0.08)':'rgba(29,158,117,0.08)';
-          const spIcon  = sp<0?'🔴':sp<20000?'🟡':'🟢';
-          const spLabel = sp<0?'Deficit':'Safe to spend';
-          return `<div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:${spBg};border:1px solid ${spColor}20">
-            <div style="font-size:10px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:var(--text3);margin-bottom:5px">Spendable Balance</div>
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-              <div>
-                <div style="font-size:20px;font-weight:800;color:${spColor};letter-spacing:-0.5px;line-height:1">${fmt(sp)}</div>
-                <div style="font-size:10px;color:var(--text3);margin-top:3px">After ${fmt(dashOutstandingRems)} remittances due</div>
-              </div>
-              <div style="text-align:right">
-                <div style="font-size:18px">${spIcon}</div>
-                <div style="font-size:10px;font-weight:600;color:${spColor}">${spLabel}</div>
-              </div>
+        <!-- Spendable — catchy coloured block -->
+        <div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:${dashSpendable<0?'rgba(163,45,45,0.09)':dashSpendable<20000?'rgba(186,117,23,0.09)':'rgba(29,158,117,0.09)'};border:1.5px solid ${dashSpendColor}33">
+          <div style="font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--text3);margin-bottom:6px">After Remittances</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <div>
+              <div style="font-size:22px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.5px;line-height:1">${fmt(dashSpendable)}</div>
+              <div style="font-size:10px;color:var(--text3);margin-top:3px">${fmt(dashOutstandingRems)} still due to HQ</div>
             </div>
-          </div>`;
-        })()}
+            <div style="text-align:center;flex-shrink:0">
+              <div style="font-size:22px">${dashSpendable<0?'🔴':dashSpendable<20000?'🟡':'🟢'}</div>
+              <div style="font-size:10px;font-weight:600;color:${dashSpendColor};margin-top:2px">${dashSpendable<0?'Deficit':dashSpendable<20000?'Low':'Spendable'}</div>
+            </div>
+          </div>
+          <div style="margin-top:8px;height:3px;background:${dashSpendColor}33;border-radius:2px;overflow:hidden">
+            <div style="height:3px;width:${dashTotalFunds>0?Math.min(100,Math.max(0,dashSpendable/dashTotalFunds*100)).toFixed(1):0}%;background:${dashSpendColor};border-radius:2px"></div>
+          </div>
+        </div>
       </div>
     </div>
 
