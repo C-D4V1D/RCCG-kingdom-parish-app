@@ -532,37 +532,36 @@ async function calcChurchBalance(){
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
 
   // --- BANK BALANCE ---
-  // 1. Income already in bank (bank-transfer portions of all income records)
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
-  // 2. Cash deposited by accountant to bank
   const cashDepositedToBank = cashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
-  // Outflows from bank: bank_transfer expenses + bank portion of split expenses
   const bankExpenses = allExpenses.reduce((s,e)=>{
     if(e.paymentMethod==='bank_transfer') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.bankAmount||0);
     return s;
-  }, 0);  // 4. Paid remittances (all assumed to leave the bank)
+  }, 0);
   const paidRems = allRemittances.filter(r=>r.status==='paid').reduce((s,r) => s+(r.amount||0), 0);
-  // 5. Bank withdrawals (all types reduce bank; destination tells where money went)
   const bankWithdrawals = cashTx.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
-  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals;
+  // Petty top-ups via bank transfer leave the bank account
+  const pettyBankTopups = pettyHistory.filter(h=>h.type==='refill'&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
+    .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)),0);
+  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals - pettyBankTopups;
 
   // --- CASH WITH ACCOUNTANT ---
-  // Cash received = total collection - bank transfer portion - direct petty portion
   const cashFromCollections = allIncome.reduce((s,r) => {
     const btAmt = r.bankTransferAmount||0;
     const dpAmt = r.directPettyCash||0;
     return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
   }, 0);
-  // Cash returned from bank withdrawals directed to accountant
   const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
-  // Expenses paid from accountant's cash (cash portion only)
   const cashExpenses = allExpenses.reduce((s,e)=>{
     if(e.paymentMethod==='cash') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.cashAmount||0);
     return s;
   }, 0);
-  const cashWithAccountant = cashFromCollections - cashDepositedToBank + bankToAccountant - cashExpenses;
+  // Petty top-ups via accountant's cash reduce the accountant's cash holding
+  const pettyCashTopups = pettyHistory.filter(h=>h.type==='refill'&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
+    .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.cashAmount||0):(h.amount||0)),0);
+  const cashWithAccountant = cashFromCollections - cashDepositedToBank + bankToAccountant - cashExpenses - pettyCashTopups;
 
   // --- PETTY CASH (with Admin Officer) ---
   // pettyFloat can be negative — means Admin Officer spent personal money and church owes them
@@ -571,7 +570,7 @@ async function calcChurchBalance(){
   return {
     cashWithAccountant: Math.max(0, cashWithAccountant),
     bankBalance,
-    pettyFloat,  // intentionally NOT clamped — negative means church owes Admin Officer
+    pettyFloat,
     total: Math.max(0, cashWithAccountant) + bankBalance + pettyFloat
   };
 }
@@ -2956,7 +2955,10 @@ async function submitBankCharge(){
 }
 
 // ── PETTY CASH ────────────────────────────
-// Helper: filter petty history by selected month (fixed — was passing object to filterByMonth)
+// The Admin Officer holds a cash wallet for small day-to-day church purchases.
+// They spend from it, log expenses in the Expenses page, and request a top-up when low.
+// Advance requests are for unusual or larger purchases that need approval before buying.
+
 function pettyMonthHistory(history){
   return (history||[]).filter(h=>{
     const d=new Date(h.createdAt||h.date||0);
@@ -2964,7 +2966,6 @@ function pettyMonthHistory(history){
   });
 }
 
-// Helper: check if an approved item's receipt is overdue (>48 hours since approval)
 function isReceiptOverdue(req){
   if(req.status!=='approved'||req.receiptNo) return false;
   const hrs=(Date.now()-new Date(req.approvedAt||req.createdAt).getTime())/3600000;
@@ -2972,278 +2973,322 @@ function isReceiptOverdue(req){
 }
 
 async function renderPettyCash(){
-  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
+  const [pettyHistory, pettyConfig, allExpenses] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getExpenses()]);
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
-  const history=petty.history||[];
-  // BUG FIX 1: was passing plain object to filterByMonth — now uses dedicated helper
-  const monthHistory=pettyMonthHistory(history);
-  const pct=Math.min(100,Math.round((petty.float/petty.max)*100));
-  // Pending = all unresolved requests across all months (correct — approvals aren't monthly-scoped)
-  const pending=history.filter(h=>h.status==='pending_approval');
-  // BUG FIX 4: detect approved items where receipt is overdue (>48 hours)
-  const overdueReceipts=history.filter(h=>isReceiptOverdue(h));
+  const history = petty.history||[];
+  const monthHistory = pettyMonthHistory(history);
+  const pct = petty.float <= 0 ? 0 : Math.min(100, Math.round((petty.float/petty.max)*100));
 
-  // Reconciliation figures for current month
-  const monthDisbursed=monthHistory.filter(h=>h.type!=='refill'&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.amount||0),0);
-  const monthSettled=monthHistory.filter(h=>h.status==='settled'&&h.type!=='refill').reduce((s,h)=>s+(h.amount||0),0);
-  const monthRefilled=monthHistory.filter(h=>h.type==='refill').reduce((s,h)=>s+(h.amount||0),0);
-  const awaitingReceipts=monthHistory.filter(h=>h.status==='approved'&&!h.receiptNo&&h.type!=='refill');
+  // Pending approvals (all time — not month scoped)
+  const pending = history.filter(h=>h.status==='pending_approval');
+  const pendingTopups = pending.filter(h=>h.type==='topup_request');
+  const pendingAdvances = pending.filter(h=>h.type==='advance'||(!h.type&&h.type!=='refill'));
+
+  // Advances awaiting proof
+  const advancesAwaitingProof = history.filter(h=>h.status==='approved'&&(h.type==='advance'||(!h.type&&h.type!=='refill'))&&!h.receiptNo);
+  const overdueReceipts = advancesAwaitingProof.filter(h=>isReceiptOverdue(h));
+
+  // This month stats
+  const monthTopups = monthHistory.filter(h=>h.type==='refill').reduce((s,h)=>s+(h.amount||0),0);
+  const monthAdvancesDisbursed = monthHistory.filter(h=>(h.type==='advance'||(!h.type&&h.type!=='refill'))&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.amount||0),0);
+
+  // Petty cash expenses since the last refill (for top-up request)
+  const lastRefill = [...history].reverse().find(h=>h.type==='refill');
+  const lastRefillDate = lastRefill ? new Date(lastRefill.createdAt||0) : new Date(0);
+  const expensesSinceRefill = allExpenses.filter(e=>
+    (e.paymentMethod==='petty_cash'||(e.paymentMethod==='split'&&(e.pettyAmount||0)>0)) &&
+    new Date(e.date||e.createdAt||0) > lastRefillDate
+  );
+  const expensesSinceRefillTotal = expensesSinceRefill.reduce((s,e)=>
+    s+(e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)), 0);
+
+  const pctColor = petty.float<0?'var(--danger)':pct<20?'var(--danger)':pct<50?'var(--amber)':'var(--primary)';
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
-      <div><div class="page-title">Petty Cash (Imprest)</div><div class="page-sub">Current cash balance balance — ${monthLabel()}</div></div>
+      <div>
+        <div class="page-title">Petty Cash</div>
+        <div class="page-sub">Admin Officer's cash wallet — ${monthLabel()}</div>
+      </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${can('petty_request')?`<button class="btn btn-primary" onclick="App.showPettyRequest()">+ Submit Request</button>`:''}
-        ${can('income')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">↺ Top Up Cash</button>`:''}
+        ${can('petty_request')?`
+          <button class="btn btn-primary" onclick="App.showTopUpRequest()">↺ Request Top-Up</button>
+          <button class="btn" onclick="App.showAdvanceRequest()">+ Request Advance</button>
+        `:''}
+        ${can('income')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">📋 Record Top-Up Payment</button>`:''}
       </div>
     </div>
 
-    ${overdueReceipts.length?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span><strong>${overdueReceipts.length} receipt(s) overdue!</strong> The following approved requests have not had receipts submitted within 48 hours: ${overdueReceipts.map(r=>r.purpose).join(', ')}. Please follow up with the Admin Officer immediately.</span></div>`:''}
+    ${overdueReceipts.length?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span><strong>${overdueReceipts.length} advance(s) overdue!</strong> Proof of purchase not submitted within 48 hours: ${overdueReceipts.map(r=>r.purpose).join(', ')}. Follow up with the Admin Officer.</span></div>`:''}
+    ${petty.float<0?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span><strong>Wallet in debt:</strong> The Admin Officer has used ${fmt(Math.abs(petty.float))} of personal funds. The church owes this and should top up immediately.</span></div>`:''}
+    ${pendingTopups.length>0?`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span><strong>${pendingTopups.length} top-up request(s)</strong> awaiting approval — ${fmt(pendingTopups.reduce((s,r)=>s+(r.amount||0),0))} total.</span></div>`:''}
 
-    <div class="kpi-grid">
-      <div class="kpi">
-        <div class="kpi-icon" style="background:${petty.float<0?'var(--danger-light)':petty.float<10000?'var(--danger-light)':petty.float<20000?'var(--amber-light)':'var(--primary-light)'}">💳</div>
-        <div class="kpi-label">${petty.float<0?'Church Owes Admin Officer':'Cash on Hand'}</div>
-        <div class="kpi-val" style="color:${petty.float<0?'var(--danger)':petty.float<10000?'var(--danger)':petty.float<20000?'var(--amber)':'var(--primary)'}">${petty.float<0?fmt(Math.abs(petty.float)):fmt(petty.float)}</div>
-        <div class="kpi-delta ${pct<20?'down':pct<50?'warn':'up'}">${pct}% of ${fmt(petty.max)} approved max</div>
+    <!-- Cash Meter card -->
+    <div class="card" style="margin-bottom:1rem">
+      <div class="card-header">
+        <span class="card-title">Cash Meter</span>
+        ${can('income')?`<button class="btn btn-sm btn-amber" onclick="App.showPettyRefill()">Record Top-Up Payment</button>`:''}
       </div>
-      <div class="kpi">
-        <div class="kpi-icon" style="background:#FCEBEB">📤</div>
-        <div class="kpi-label">Disbursed (${monthLabel().split(' ')[0]})</div>
-        <div class="kpi-val">${fmt(monthDisbursed)}</div>
-        <div class="kpi-delta warn">Cash released this month</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-icon" style="background:#EAF3DE">🧾</div>
-        <div class="kpi-label">Receipts Settled</div>
-        <div class="kpi-val">${fmt(monthSettled)}</div>
-        <div class="kpi-delta up">Accounted & linked to expenses</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-icon" style="background:#FAEEDA">⏳</div>
-        <div class="kpi-label">Awaiting Receipts</div>
-        <div class="kpi-val ${awaitingReceipts.length?'td-amber':''}">${fmt(monthDisbursed-monthSettled)}</div>
-        <div class="kpi-delta ${awaitingReceipts.length?'warn':'up'}">${awaitingReceipts.length} item(s) outstanding</div>
-      </div>
-    </div>
-
-    <div class="grid-2">
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">Cash Meter</span>
-          ${can('income')?`<button class="btn btn-sm btn-amber" onclick="App.showPettyRefill()">↺ Top Up</button>`:''}
-        </div>
-        <div style="text-align:center;padding:0.5rem 0 1rem">
-          <div class="amount-display" style="color:${petty.float<0?'var(--danger)':petty.float<10000?'var(--danger)':petty.float<20000?'var(--amber)':'var(--primary)'}">${petty.float<0?'−'+fmt(Math.abs(petty.float)):fmt(petty.float)}</div>
-          <div class="progress-bar" style="margin:12px auto;max-width:240px;height:12px;border-radius:6px">
-            <div class="progress-fill" style="width:${pct}%;background:${pct<20?'var(--danger)':pct<50?'var(--amber)':'var(--primary)'};border-radius:6px"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:center;padding:8px 0">
+        <div style="text-align:center">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">${petty.float<0?'Church owes Admin Officer':'Cash on Hand'}</div>
+          <div style="font-size:28px;font-weight:800;color:${pctColor};letter-spacing:-1px">${petty.float<0?'−'+fmt(Math.abs(petty.float)):fmt(petty.float)}</div>
+          <div class="progress-bar" style="margin:10px auto 6px;max-width:180px;height:10px;border-radius:5px">
+            <div class="progress-fill" style="width:${pct}%;background:${pctColor};border-radius:5px"></div>
           </div>
-          <div class="amount-label">${pct}% of ${fmt(petty.max)} approved approved max</div>
+          <div style="font-size:11px;color:var(--text3)">${pct}% of ${fmt(petty.max)} approved max</div>
         </div>
-        ${petty.float<0?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span><strong>Negative balance:</strong> The Admin Officer has used personal funds of ${fmt(Math.abs(petty.float))}. The church owes this amount and should top up the cash immediately.</span></div>`:petty.float<10000?`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span>Critically low. Request a top-up now.</span></div>`:''}
-        <hr class="divider">
-        <div class="section-hdr"><span class="section-title">Month Reconciliation</span></div>
-        <div class="status-row"><div class="status-row-label">Cash disbursed</div><div class="status-row-amt td-red">${fmt(monthDisbursed)}</div></div>
-        <div class="status-row"><div class="status-row-label">Receipts submitted & settled</div><div class="status-row-amt td-green">${fmt(monthSettled)}</div></div>
-        <div class="status-row"><div class="status-row-label" style="font-weight:600">Unaccounted (no receipt yet)</div><div class="status-row-amt ${monthDisbursed-monthSettled>0?'td-amber':'td-green'}" style="font-weight:700">${fmt(monthDisbursed-monthSettled)}</div></div>
-        <div class="status-row"><div class="status-row-label">Cash topped up this month</div><div class="status-row-amt td-green">${fmt(monthRefilled)}</div></div>
+        <div style="border-left:1px solid var(--border);padding-left:16px">
+          <div style="margin-bottom:10px">
+            <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Spent since last top-up</div>
+            <div style="font-size:16px;font-weight:700;color:var(--danger)">${fmt(expensesSinceRefillTotal)}</div>
+            <div style="font-size:11px;color:var(--text3)">${expensesSinceRefill.length} expense(s) not yet refunded</div>
+          </div>
+          <div style="margin-bottom:10px">
+            <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Topped up this month</div>
+            <div style="font-size:15px;font-weight:600;color:var(--success)">${fmt(monthTopups)}</div>
+          </div>
+          ${monthAdvancesDisbursed>0?`<div>
+            <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Advances released</div>
+            <div style="font-size:15px;font-weight:600;color:var(--amber)">${fmt(monthAdvancesDisbursed)}</div>
+          </div>`:''}
+        </div>
       </div>
-
-      <div class="card">
-        <div class="card-header"><span class="card-title">Pending Approval (${pending.length})</span></div>
-        ${pending.length?pending.map(r=>`
-          <div class="status-row">
-            <div style="flex:1;min-width:0">
-              <div class="status-row-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.purpose}</div>
-              <div class="status-row-sub">By: ${r.requestedBy} · ${fmtDate(r.createdAt)}</div>
-              ${r.notes?`<div class="status-row-sub" style="color:var(--text3)">"${r.notes}"</div>`:''}
-            </div>
-            <div class="status-row-right" style="flex-shrink:0;gap:6px">
-              <div class="status-row-amt td-amber" style="white-space:nowrap">${fmt(r.amount)}</div>
-              ${can('income','petty_approve')?`
-                <button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">Approve</button>
-                <button class="btn btn-sm btn-danger" onclick="App.rejectPetty('${r.id}')">Reject</button>`:''
-              }
-            </div>
-          </div>`).join(''):'<div class="empty-table">No pending requests.</div>'}
-      </div>
+      ${expensesSinceRefillTotal>0&&can('petty_request')?`
+      <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
+        <div style="font-size:13px;color:var(--text2);margin-bottom:8px">
+          The wallet has been used for ${fmt(expensesSinceRefillTotal)} in expenses since the last top-up.
+          ${petty.float/petty.max < 0.4 ? ' The balance is getting low — consider requesting a top-up.' : ''}
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="App.showTopUpRequest()">↺ Request Top-Up (${fmt(expensesSinceRefillTotal)})</button>
+      </div>`:''}
     </div>
 
-    ${awaitingReceipts.length?`
-    <div class="card">
-      <div class="card-header"><span class="card-title">Approved — Receipt Still Outstanding (${awaitingReceipts.length})</span></div>
+    <!-- Pending Approvals -->
+    <div class="card" style="margin-bottom:1rem">
+      <div class="card-header"><span class="card-title">Pending Approval (${pending.length})</span></div>
+      ${pending.length ? pending.map(r=>{
+        const isTopup = r.type==='topup_request';
+        const typeLabel = isTopup
+          ? `<span class="badge badge-info" style="margin-right:6px">↺ Top-Up</span>`
+          : `<span class="badge badge-warn" style="margin-right:6px">💳 Advance</span>`;
+        const expCount = r.expenseRefs?.length||0;
+        return `
+        <div class="status-row" style="flex-wrap:wrap;gap:6px">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-bottom:3px">
+              ${typeLabel}
+              <span style="font-size:13px;font-weight:600">${r.purpose}</span>
+            </div>
+            <div class="status-row-sub">By: ${r.requestedBy||'—'} · ${fmtDate(r.createdAt)}</div>
+            ${isTopup&&expCount>0?`<div class="status-row-sub" style="color:var(--text3)">${expCount} expense(s) included</div>`:''}
+            ${r.notes?`<div class="status-row-sub" style="color:var(--text3)">"${r.notes}"</div>`:''}
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+            <div class="status-row-amt td-amber" style="white-space:nowrap">${fmt(r.amount)}</div>
+            ${can('income','petty_approve')?`
+              <button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">Approve</button>
+              <button class="btn btn-sm btn-danger" onclick="App.rejectPetty('${r.id}')">Reject</button>`:''
+            }
+          </div>
+        </div>`;
+      }).join('') : '<div class="empty-table">No pending requests.</div>'}
+    </div>
+
+    ${advancesAwaitingProof.length?`
+    <div class="card" style="margin-bottom:1rem">
+      <div class="card-header"><span class="card-title">Advances — Proof of Purchase Outstanding (${advancesAwaitingProof.length})</span></div>
       <div class="table-wrap"><table>
-        <tr><th>Approved On</th><th>Purpose</th><th>Approved By</th><th>Hours Since Approval</th><th class="td-right">Amount</th><th>Action</th></tr>
-        ${awaitingReceipts.map(r=>{
+        <tr><th>When Approved</th><th>Purpose</th><th>Approved By</th><th>Time Since Approval</th><th class="td-right">Amount</th><th>Action</th></tr>
+        ${advancesAwaitingProof.map(r=>{
           const hrs=Math.round((Date.now()-new Date(r.approvedAt||r.createdAt).getTime())/3600000);
-          return`<tr>
+          return`<tr${hrs>48?' style="background:var(--danger-light)"':''}>
             <td>${fmtDate(r.approvedAt||r.createdAt)}</td>
             <td>${r.purpose}</td>
             <td class="td-muted">${r.approvedBy||'—'}</td>
-            <td><span class="badge ${hrs>48?'badge-danger':hrs>24?'badge-warn':'badge-info'}">${hrs}h ago${hrs>48?' ⚠ OVERDUE':''}</span></td>
+            <td><span class="badge ${hrs>48?'badge-danger':hrs>24?'badge-warn':'badge-info'}">${hrs}h${hrs>48?' ⚠ OVERDUE':''}</span></td>
             <td class="td-right td-bold td-amber">${fmt(r.amount)}</td>
-            <td><button class="btn btn-sm btn-primary" onclick="App.submitPettyReceipt('${r.id}')">Submit Receipt</button></td>
+            <td><button class="btn btn-sm btn-primary" onclick="App.submitPettyReceipt('${r.id}')">Submit Proof</button></td>
           </tr>`;}).join('')}
       </table></div>
     </div>`:''}
 
     <div class="card">
-      <div class="card-header"><span class="card-title">Full History — ${monthLabel()}</span></div>
+      <div class="card-header"><span class="card-title">History — ${monthLabel()}</span></div>
       ${monthHistory.length?`<div class="table-wrap"><table>
-        <tr><th>Date</th><th>Purpose / Type</th><th>Requested By</th><th>Approved By</th><th>Status</th><th class="td-right">Amount</th><th>Receipt / Ref</th></tr>
+        <tr><th>Date</th><th>Type</th><th>Purpose</th><th>By</th><th>Authorized By</th><th>Status</th><th class="td-right">Amount</th><th>Proof / Ref</th></tr>
         ${monthHistory.map(r=>{
+          const isTopup=r.type==='refill';
+          const isAdvance=r.type==='advance'||(!r.type&&r.type!=='refill');
           const overdue=isReceiptOverdue(r);
+          const typeTag=isTopup
+            ?`<span class="badge badge-info">↺ Top-Up</span>`
+            :`<span class="badge badge-warn">💳 Advance</span>`;
           return`<tr style="${overdue?'background:var(--danger-light)':''}">
-            <td>${fmtDate(r.createdAt)}</td>
-            <td>${r.type==='refill'?`<span class="badge badge-info">↺ Top Up</span> ${r.purpose}`:r.purpose}</td>
+            <td style="white-space:nowrap">${fmtDate(r.createdAt)}</td>
+            <td>${typeTag}</td>
+            <td style="font-size:13px">${r.purpose||'—'}</td>
             <td class="td-muted">${r.requestedBy||'—'}</td>
             <td class="td-muted">${r.approvedBy||r.authorizedBy||'—'}</td>
-            <td>
-              <span class="badge ${r.status==='settled'?'badge-success':r.status==='approved'?'badge-info':r.status==='rejected'?'badge-danger':'badge-warn'}">
-                ${r.status?.replace('_',' ')||'pending'}
-              </span>
-              ${overdue?'<span class="badge badge-danger" style="margin-left:4px">Receipt overdue</span>':''}
-            </td>
-            <td class="td-right td-bold ${r.type==='refill'?'td-green':'td-amber'}">${r.type==='refill'?'+':''}${fmt(r.amount)}</td>
-            <td>${r.receiptNo?`<span class="badge badge-success">✓ ${r.receiptNo}</span>`:r.rejectionReason?`<span class="td-muted">${r.rejectionReason}</span>`:'—'}</td>
+            <td><span class="badge ${r.status==='settled'?'badge-success':r.status==='approved'?'badge-info':r.status==='rejected'?'badge-danger':'badge-warn'}">${r.status?.replace('_',' ')||'pending'}</span>${overdue?'<span class="badge badge-danger" style="margin-left:4px">Overdue</span>':''}</td>
+            <td class="td-right td-bold ${isTopup?'td-green':'td-amber'}">${isTopup?'+':''}${fmt(r.amount)}</td>
+            <td style="font-size:12px">${r.receiptNo?`<span class="badge badge-success">✓ ${r.receiptNo}</span>`:r.rejectionReason?`<span class="td-muted">${r.rejectionReason}</span>`:r.reference?`<span class="badge badge-gray">Ref: ${r.reference}</span>`:'—'}</td>
           </tr>`;}).join('')}
       </table></div>`:'<div class="empty-table">No petty cash activity this month.</div>'}
     </div>`;
 }
-
-async function showPettyRequest(){
+// ── TOP-UP REQUEST (Admin Officer: wallet is low, based on expenses already logged) ──
+async function showTopUpRequest(){
   const [pettyConfig, allExpenses, allPettyRaw] = await Promise.all([DB.getPettyConfig(), DB.getExpenses(), DB.getPetty()]);
-  const claimedExpIds = new Set(allPettyRaw.filter(h=>h.expenseRef).map(h=>h.expenseRef));
-  const unclaimedPettyExp = allExpenses.filter(e=>
-    (e.paymentMethod==='petty_cash' || (e.paymentMethod==='split' && (e.pettyAmount||0)>0)) &&
-    !claimedExpIds.has(e.id)
-  ).sort((a,b)=>new Date(b.date||b.createdAt)-new Date(a.date||a.createdAt)).slice(0,20);
+  const lastRefill = [...allPettyRaw].reverse().find(h=>h.type==='refill');
+  const lastRefillDate = lastRefill ? new Date(lastRefill.createdAt||0) : new Date(0);
 
+  // Expenses paid from petty cash since last top-up
+  const unrecovered = allExpenses.filter(e=>
+    (e.paymentMethod==='petty_cash'||(e.paymentMethod==='split'&&(e.pettyAmount||0)>0)) &&
+    new Date(e.date||e.createdAt||0) > lastRefillDate
+  ).sort((a,b)=>new Date(a.date||a.createdAt)-new Date(b.date||b.createdAt));
+
+  const totalAmt = unrecovered.reduce((s,e)=>s+(e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)),0);
   const cashOnHand = pettyConfig.float;
-  const cashDisplay = cashOnHand<0
-    ? `<span style="color:var(--danger);font-weight:600">−${fmt(Math.abs(cashOnHand))} (church owes Admin Officer)</span>`
-    : `<span style="font-weight:600;color:${cashOnHand<10000?'var(--danger)':cashOnHand<20000?'var(--amber)':'var(--primary)'}">${fmt(cashOnHand)}</span>`;
 
-  const expOptions = unclaimedPettyExp.map(e=>{
-    const c = EXPENSE_CATS.find(x=>x.key===e.category)||{icon:'💸',label:e.category||''};
-    const pettyAmt = e.paymentMethod==='split' ? (e.pettyAmount||0) : (e.amount||0);
-    return `<option value="${e.id}" data-amt="${pettyAmt}" data-cat="${e.category}" data-desc="${esc(e.description||e.subCategory||'')}">
-      ${c.icon} ${e.description||e.subCategory||e.category} — ${fmt(pettyAmt)} (${fmtDate(e.date||e.createdAt)})
-    </option>`;
+  const expRows = unrecovered.map(e=>{
+    const c=EXPENSE_CATS.find(x=>x.key===e.category)||{icon:'💸',label:e.category||'Other'};
+    const amt = e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0);
+    return `<tr>
+      <td style="font-size:12px">${fmtDate(e.date||e.createdAt)}</td>
+      <td><span class="badge badge-gray" style="font-size:11px">${c.icon} ${c.label}</span></td>
+      <td style="font-size:12px">${e.description||e.subCategory||'—'}</td>
+      <td class="td-right td-bold" style="font-size:13px;color:var(--danger)">${fmt(amt)}</td>
+    </tr>`;
   }).join('');
 
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
-    <div class="modal-title">💳 Petty Cash Request</div>
+    <div class="modal-title">↺ Request Wallet Top-Up</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>This lists all petty cash expenses logged since the last top-up. The Accountant will verify these, then a Signatory approves before the cash is sent to you.</span></div>
     <div style="background:var(--surface);border-radius:var(--r);padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
-      <span style="font-size:12px;color:var(--text2)">Cash on hand</span>
-      ${cashDisplay}
+      <span style="font-size:12px;color:var(--text2)">Current wallet balance</span>
+      <span style="font-weight:700;color:${cashOnHand<0?'var(--danger)':cashOnHand<10000?'var(--amber)':'var(--primary)'}">${cashOnHand<0?'−'+fmt(Math.abs(cashOnHand)):fmt(cashOnHand)}</span>
     </div>
-    <div class="tabs" style="margin-bottom:14px">
-      <button class="tab active" id="pet_tab_already" onclick="App.setPettyRequestTab('already')">I already spent this</button>
-      <button class="tab" id="pet_tab_advance" onclick="App.setPettyRequestTab('advance')">I need cash first</button>
+    ${unrecovered.length ? `
+    <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">Expenses to be recovered (${unrecovered.length}):</div>
+    <div class="table-wrap" style="max-height:200px;overflow-y:auto;margin-bottom:12px">
+      <table style="width:100%">
+        <tr><th>Date</th><th>Category</th><th>Description</th><th class="td-right">Amount</th></tr>
+        ${expRows}
+        <tr style="border-top:2px solid var(--border)">
+          <td colspan="3" style="font-size:13px;font-weight:700;padding:8px">Total to recover</td>
+          <td class="td-right td-bold" style="font-size:15px;color:var(--primary);padding:8px">${fmt(totalAmt)}</td>
+        </tr>
+      </table>
     </div>
-    <div id="pet_panel_already">
-      <div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">ℹ</span><span>Select an expense you already paid from petty cash. The details fill in automatically. This creates a claim for the Accountant to verify and approve.</span></div>
-      ${unclaimedPettyExp.length ? `
-      <div class="form-group">
-        <label class="form-label">Select Expense to Claim <span style="color:var(--danger)">*</span></label>
-        <select id="pet_exp_pick" class="form-select" onchange="App.onPettyExpPick()">
-          <option value="">— Pick an expense —</option>
-          ${expOptions}
-        </select>
-      </div>
-      <div id="pet_already_detail" style="display:none">
-        <div class="form-group"><label class="form-label">Purpose (edit if needed)</label><input type="text" id="pet_purpose_a" class="form-input" /></div>
-        <div class="form-group"><label class="form-label">Amount (₦)</label><input type="number" id="pet_amt_a" class="form-input" readonly style="opacity:0.7" /></div>
-        <div class="form-group"><label class="form-label">Notes for Accountant</label><textarea id="pet_notes_a" class="form-textarea" placeholder="Any extra detail..."></textarea></div>
-      </div>` : `<div class="empty-table" style="margin-bottom:12px">No unclaimed petty cash expenses found. Log the expense first in the Expenses page, or use the "I need cash first" tab.</div>`}
-    </div>
-    <div id="pet_panel_advance" style="display:none">
-      <div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">ℹ</span><span>Describe what you need to buy. The Accountant verifies funds, then a Signatory approves before cash is released. Submit proof of purchase within <strong>48 hours</strong>.</span></div>
-      <div class="form-group"><label class="form-label">What do you need to buy? <span style="color:var(--danger)">*</span></label><input type="text" id="pet_purpose_b" class="form-input" placeholder="e.g. Diesel for generator — Sunday 27 Apr" /></div>
-      <div class="form-group"><label class="form-label">Amount Needed (₦) <span style="color:var(--danger)">*</span></label><input type="number" id="pet_amt_b" class="form-input" placeholder="0" min="0" /></div>
-      <div class="form-group"><label class="form-label">Category <span style="color:var(--danger)">*</span></label>
-        <select id="pet_cat_b" class="form-select">
-          <option value="">— Select category —</option>
-          ${EXPENSE_CATS.map(c=>`<option value="${c.key}">${c.icon} ${c.label}</option>`).join('')}
-        </select>
-      </div>
-      <div class="form-group"><label class="form-label">Date Needed By</label><input type="date" id="pet_date_b" class="form-input" value="${new Date().toISOString().split('T')[0]}" /></div>
-      <div class="form-group"><label class="form-label">Notes</label><textarea id="pet_notes_b" class="form-textarea" placeholder="Any context that helps with approval..."></textarea></div>
+    <div class="form-group">
+      <label class="form-label">Top-Up Amount (₦) *</label>
+      <input type="number" id="topup_amt" class="form-input" value="${Math.round(totalAmt)}" />
+      <div class="form-hint">Pre-filled with the total of the ${unrecovered.length} expense(s) above. Adjust only if needed.</div>
+    </div>` : `<div class="empty-table" style="margin-bottom:12px">No petty cash expenses found since the last top-up. If you paid for something and haven't logged it yet, go to the <strong>Expenses page</strong> first and record it there.</div>
+    <div class="form-group">
+      <label class="form-label">Top-Up Amount (₦) *</label>
+      <input type="number" id="topup_amt" class="form-input" placeholder="0" />
+    </div>`}
+    <div class="form-group"><label class="form-label">Notes for Accountant (optional)</label>
+      <textarea id="topup_notes" class="form-textarea" placeholder="Any context that helps with approval..."></textarea>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitPettyRequest()">Submit Request</button>
+      <button class="btn btn-primary" onclick="App.submitTopUpRequest(${JSON.stringify(unrecovered.map(e=>e.id))})">Submit Top-Up Request</button>
     </div>`);
 }
 
-function setPettyRequestTab(tab){
-  document.getElementById('pet_tab_already')?.classList.toggle('active', tab==='already');
-  document.getElementById('pet_tab_advance')?.classList.toggle('active', tab==='advance');
-  const already = document.getElementById('pet_panel_already');
-  const advance = document.getElementById('pet_panel_advance');
-  if(already) already.style.display = tab==='already'?'':'none';
-  if(advance) advance.style.display = tab==='advance'?'':'none';
-  state._pettyReqTab = tab;
-}
-
-function onPettyExpPick(){
-  const sel = document.getElementById('pet_exp_pick');
-  const opt = sel?.options[sel.selectedIndex];
-  const detail = document.getElementById('pet_already_detail');
-  if(!opt?.value){ if(detail) detail.style.display='none'; return }
-  const purposeEl = document.getElementById('pet_purpose_a');
-  const amtEl = document.getElementById('pet_amt_a');
-  if(purposeEl) purposeEl.value = opt.getAttribute('data-desc')||opt.text?.split('—')[0]?.trim()||'';
-  if(amtEl) amtEl.value = opt.getAttribute('data-amt')||'0';
-  if(detail) detail.style.display='';
-}
-
-async function submitPettyRequest(){
-  const tab = state._pettyReqTab || 'already';
-  let purpose, amount, category, dateNeeded, notes, expenseRef;
-
-  if(tab==='already'){
-    const sel = document.getElementById('pet_exp_pick');
-    expenseRef = sel?.value;
-    if(!expenseRef){ alert('Please select an expense to claim.'); return }
-    purpose = document.getElementById('pet_purpose_a')?.value?.trim();
-    amount = parseFloat(document.getElementById('pet_amt_a')?.value)||0;
-    category = sel?.options[sel.selectedIndex]?.getAttribute('data-cat')||'power';
-    notes = document.getElementById('pet_notes_a')?.value;
-    dateNeeded = new Date().toISOString().split('T')[0];
-    if(!purpose||!amount){ alert('Please select an expense and confirm the details.'); return }
-  } else {
-    purpose = document.getElementById('pet_purpose_b')?.value?.trim();
-    amount = parseFloat(document.getElementById('pet_amt_b')?.value)||0;
-    category = document.getElementById('pet_cat_b')?.value;
-    dateNeeded = document.getElementById('pet_date_b')?.value;
-    notes = document.getElementById('pet_notes_b')?.value;
-    if(!purpose||!amount||!category){ alert('Please fill in the purpose, amount, and category.'); return }
-  }
-
+async function submitTopUpRequest(expenseIds){
+  const amount = parseFloat(document.getElementById('topup_amt')?.value)||0;
+  const notes  = document.getElementById('topup_notes')?.value||'';
+  if(!amount){ alert('Please enter the top-up amount.'); return }
   const pettyConfig = await DB.getPettyConfig();
-  if(amount > pettyConfig.float && pettyConfig.float > 0){
-    if(!confirm(`The requested amount (${fmt(amount)}) exceeds the current cash on hand (${fmt(pettyConfig.float)}). Submit anyway for the Accountant to review?`)) return;
-  }
-
   const req = {
-    id:'PC-'+Date.now(), purpose, amount, category, dateNeeded, notes,
-    requestedBy:state.user?.name, status:'pending_approval',
-    type: tab==='already' ? 'claim' : 'advance',
-    expenseRef: expenseRef||null,
-    createdAt:new Date().toISOString()
+    id:'PC-'+Date.now(), type:'topup_request',
+    purpose: `Wallet top-up — ${expenseIds.length} expense(s)`,
+    amount, notes,
+    expenseRefs: expenseIds,
+    requestedBy: state.user?.name,
+    status:'pending_approval',
+    createdAt: new Date().toISOString()
   };
   await DB.addPettyEntry(req);
-  DB.addAudit('petty_requested',`Petty cash ${tab==='already'?'claim':'request'}: ${purpose} — ${fmt(amount)}`,state.user?.name);
-  DB.addNotification('Petty Cash Request',`${state.user?.name} submitted ${tab==='already'?'a claim':'a request'} for ${fmt(amount)}: "${purpose}". Awaiting approval.`,'warn');
+  DB.addAudit('petty_topup_requested',`Top-up requested: ${fmt(amount)} for ${expenseIds.length} expense(s)`,state.user?.name);
+  DB.addNotification('Top-Up Requested',`${state.user?.name} requested a wallet top-up of ${fmt(amount)}. Awaiting approval.`,'warn');
   closeModal();
-  showAlert(`Request submitted! ${tab==='already'?'Your claim':'Cash request'} will be reviewed and approved by the Accountant.`,'success');
+  showAlert(`Top-up request of ${fmt(amount)} submitted. The Accountant will review and a Signatory will approve.`,'success');
   renderPettyCash();
   buildSidebar();
 }
 
+// ── ADVANCE REQUEST (Admin Officer: needs cash before buying) ─────
+async function showAdvanceRequest(){
+  const pettyConfig = await DB.getPettyConfig();
+  const cashOnHand = pettyConfig.float;
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">💳 Request Cash Advance</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Use this when you need cash <strong>before</strong> making a purchase. The Accountant verifies, a Signatory approves, then cash is released. You must submit proof of purchase within <strong>48 hours</strong>.</span></div>
+    <div style="background:var(--surface);border-radius:var(--r);padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:12px;color:var(--text2)">Current wallet balance</span>
+      <span style="font-weight:700;color:${cashOnHand<0?'var(--danger)':cashOnHand<10000?'var(--amber)':'var(--primary)'}">${cashOnHand<0?'−'+fmt(Math.abs(cashOnHand)):fmt(cashOnHand)}</span>
+    </div>
+    <div class="form-group"><label class="form-label">What do you need to buy? *</label>
+      <input type="text" id="adv_purpose" class="form-input" placeholder="e.g. Diesel for generator — Sunday 27 Apr" />
+    </div>
+    <div class="form-group"><label class="form-label">Amount Needed (₦) *</label>
+      <input type="number" id="adv_amt" class="form-input" placeholder="0" min="0" />
+    </div>
+    <div class="form-group"><label class="form-label">Category *</label>
+      <select id="adv_cat" class="form-select">
+        <option value="">— Select category —</option>
+        ${EXPENSE_CATS.map(c=>`<option value="${c.key}">${c.icon} ${c.label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Date Needed By</label>
+      <input type="date" id="adv_date" class="form-input" value="${new Date().toISOString().split('T')[0]}" />
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label>
+      <textarea id="adv_notes" class="form-textarea" placeholder="Any context that helps with approval..."></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.submitAdvanceRequest()">Submit Advance Request</button>
+    </div>`);
+}
+
+async function submitAdvanceRequest(){
+  const purpose  = document.getElementById('adv_purpose')?.value?.trim();
+  const amount   = parseFloat(document.getElementById('adv_amt')?.value)||0;
+  const category = document.getElementById('adv_cat')?.value;
+  const dateNeeded = document.getElementById('adv_date')?.value;
+  const notes    = document.getElementById('adv_notes')?.value||'';
+  if(!purpose||!amount||!category){ alert('Please fill in the purpose, amount, and category.'); return }
+
+  const pettyConfig = await DB.getPettyConfig();
+  if(amount > pettyConfig.float && pettyConfig.float > 0){
+    if(!confirm(`The requested amount (${fmt(amount)}) is more than the current wallet balance (${fmt(pettyConfig.float)}). Submit anyway for the Accountant to review?`)) return;
+  }
+  const req = {
+    id:'PC-'+Date.now(), type:'advance',
+    purpose, amount, category, dateNeeded, notes,
+    requestedBy:state.user?.name, status:'pending_approval',
+    createdAt:new Date().toISOString()
+  };
+  await DB.addPettyEntry(req);
+  DB.addAudit('petty_advance_requested',`Advance requested: ${purpose} — ${fmt(amount)}`,state.user?.name);
+  DB.addNotification('Advance Request',`${state.user?.name} requested an advance of ${fmt(amount)} for "${purpose}". Awaiting approval.`,'warn');
+  closeModal();
+  showAlert('Advance request submitted. The Accountant will verify and a Signatory will approve before cash is released.','success');
+  renderPettyCash();
+  buildSidebar();
+}
+
+// Keep showPettyRequest as alias for the old tab-based form in case any links still reference it
+async function showPettyRequest(){ showTopUpRequest(); }
 
 async function approvePetty(id){
   const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
@@ -3408,18 +3453,19 @@ async function showPettyRefill(){
 
     <!-- Payment method for the top-up -->
     <div class="form-group">
-      <label class="form-label">How will the top-up be sent? *</label>
+      <label class="form-label">How is this top-up being paid? *</label>
       <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:4px">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
           <input type="radio" name="ref_method" value="bank_transfer" checked onchange="App.onRefillMethodChange()" /> 🏦 Bank Transfer
         </label>
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
-          <input type="radio" name="ref_method" value="cash" onchange="App.onRefillMethodChange()" /> 💵 Cash (given directly)
+          <input type="radio" name="ref_method" value="cash_accountant" onchange="App.onRefillMethodChange()" /> 💵 Cash with Accountant
         </label>
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
-          <input type="radio" name="ref_method" value="split" onchange="App.onRefillMethodChange()" /> 🏦💵 Split
+          <input type="radio" name="ref_method" value="split" onchange="App.onRefillMethodChange()" /> 🏦💵 Split (Bank + Cash)
         </label>
       </div>
+      <div class="form-hint" id="ref_method_hint">Money leaves the bank account and goes to the Admin Officer's wallet.</div>
     </div>
 
     <div class="form-group" id="ref_ref_group">
@@ -3448,20 +3494,29 @@ function onRefillMethodChange(){
   const method = document.querySelector('input[name="ref_method"]:checked')?.value||'bank_transfer';
   const refGroup = document.getElementById('ref_ref_group');
   const splitGroup = document.getElementById('ref_split_group');
-  if(refGroup) refGroup.style.display = method==='cash' ? 'none' : '';
+  const hint = document.getElementById('ref_method_hint');
+  const isCashOnly = method==='cash_accountant';
+  if(refGroup) refGroup.style.display = isCashOnly ? 'none' : '';
   if(splitGroup) splitGroup.style.display = method==='split' ? '' : 'none';
+  if(hint){
+    hint.textContent = isCashOnly
+      ? 'The Accountant hands cash directly to the Admin Officer from their own cash holding. Bank balance is not affected.'
+      : method==='split'
+        ? 'Part comes from the bank (reduces bank balance), part from the Accountant\'s cash holding.'
+        : 'Money leaves the bank account and goes to the Admin Officer\'s wallet.';
+  }
 }
 
 async function submitRefill(){
   const amt = parseFloat(document.getElementById('ref_amt')?.value)||0;
   const method = document.querySelector('input[name="ref_method"]:checked')?.value||'bank_transfer';
-  const ref = method==='cash' ? '' : (document.getElementById('ref_ref')?.value?.trim()||'');
+  const ref = method==='cash_accountant' ? '' : (document.getElementById('ref_ref')?.value?.trim()||'');
   const checkedSigs = [...document.querySelectorAll('input[name="ref_sig"]:checked')].map(c=>c.value);
   const authText = document.getElementById('ref_auth_text')?.value?.trim();
   const auth = checkedSigs.length>0 ? checkedSigs.join(', ') : authText;
 
   if(!amt){ alert('Please enter a top-up amount.'); return }
-  if(method!=='cash' && !ref){ alert('Please enter the bank transfer reference number.'); return }
+  if(method!=='cash_accountant' && !ref){ alert('Please enter the bank transfer reference number.'); return }
   if(!auth){ alert('Please select or enter who is authorizing this top-up.'); return }
 
   const pettyConfig = await DB.getPettyConfig();
@@ -3473,8 +3528,8 @@ async function submitRefill(){
 
   const newFloat = pettyConfig.float + actualAdded;
   const bankAmt = method==='split' ? (parseFloat(document.getElementById('ref_bank_amt')?.value)||0) : method==='bank_transfer' ? actualAdded : 0;
-  const cashAmt = method==='split' ? (parseFloat(document.getElementById('ref_cash_amt')?.value)||0) : method==='cash' ? actualAdded : 0;
-  const methodLabel = method==='split' ? `Split — Bank: ${fmt(bankAmt)} + Cash: ${fmt(cashAmt)}` : method==='cash' ? 'Cash (given directly)' : 'Bank Transfer';
+  const cashAmt = method==='split' ? (parseFloat(document.getElementById('ref_cash_amt')?.value)||0) : method==='cash_accountant' ? actualAdded : 0;
+  const methodLabel = method==='split' ? `Split — Bank: ${fmt(bankAmt)} + Cash: ${fmt(cashAmt)}` : method==='cash_accountant' ? 'Cash with Accountant' : 'Bank Transfer';
 
   await DB.addPettyEntry({
     type:'refill', amount:actualAdded,
@@ -4017,7 +4072,7 @@ return {
   showExpenseForm, submitExpense, viewExpenseReceipt, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpSort, clearExpFilters, updateExpenseSubcats, updateExpenseDescRequired,
   showBankWithdrawal, submitBankWithdrawal,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
-  renderPettyCash, showPettyRequest, submitPettyRequest, setPettyRequestTab, onPettyExpPick, onReceiptToggle,
+  renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, showAdvanceRequest, submitAdvanceRequest, setPettyRequestTab, onPettyExpPick, onReceiptToggle,
   approvePetty, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
