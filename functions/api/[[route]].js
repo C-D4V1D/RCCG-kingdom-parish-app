@@ -284,33 +284,27 @@ async function handleInit(DB) {
     await DB.prepare(sql).run();
   }
 
-  // Run migrations: add new columns to existing tables (safe — IF NOT EXISTS-like via try/catch)
+  // Run migrations: add new columns to existing tables.
+  // ALTER TABLE throws if a column already exists — catch and ignore.
   const migrations = [
+    // Income columns (added in earlier schema version)
+    `ALTER TABLE income ADD COLUMN bank_transfer_amount REAL DEFAULT 0`,
+    `ALTER TABLE income ADD COLUMN direct_petty_cash REAL DEFAULT 0`,
+    `ALTER TABLE income ADD COLUMN source TEXT DEFAULT 'sunday_collection'`,
+    // Expense columns
+    `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
+    `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
     `ALTER TABLE expenses ADD COLUMN bank_amount REAL DEFAULT 0`,
     `ALTER TABLE expenses ADD COLUMN cash_amount REAL DEFAULT 0`,
     `ALTER TABLE expenses ADD COLUMN petty_amount REAL DEFAULT 0`,
     `ALTER TABLE expenses ADD COLUMN no_receipt INTEGER DEFAULT 0`,
+    // Petty cash columns
     `ALTER TABLE petty_cash ADD COLUMN payment_method TEXT DEFAULT ''`,
     `ALTER TABLE petty_cash ADD COLUMN bank_amount REAL DEFAULT 0`,
     `ALTER TABLE petty_cash ADD COLUMN cash_amount REAL DEFAULT 0`,
     `ALTER TABLE petty_cash ADD COLUMN expense_refs TEXT DEFAULT ''`,
     `ALTER TABLE petty_cash ADD COLUMN no_receipt INTEGER DEFAULT 0`,
-    `ALTER TABLE remittances ADD COLUMN bank_amount REAL DEFAULT 0`,
-    `ALTER TABLE remittances ADD COLUMN cash_amount REAL DEFAULT 0`,
-  ];
-  for (const m of migrations) {
-    try { await DB.prepare(m).run(); } catch {} // silently ignore "column already exists" errors
-  }
-
-  // Migrate existing databases: add columns that may be missing from older schema versions.
-  // ALTER TABLE throws if the column already exists — catch and ignore those errors.
-  const migrations = [
-    `ALTER TABLE income ADD COLUMN bank_transfer_amount REAL DEFAULT 0`,
-    `ALTER TABLE income ADD COLUMN direct_petty_cash REAL DEFAULT 0`,
-    `ALTER TABLE income ADD COLUMN source TEXT DEFAULT 'sunday_collection'`,
-    `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
-    `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
-    // Remittance enhancements
+    // Remittance columns
     `ALTER TABLE remittances ADD COLUMN period_from TEXT DEFAULT ''`,
     `ALTER TABLE remittances ADD COLUMN period_to TEXT DEFAULT ''`,
     `ALTER TABLE remittances ADD COLUMN payment_method TEXT DEFAULT 'bank_transfer'`,
@@ -318,9 +312,11 @@ async function handleInit(DB) {
     `ALTER TABLE remittances ADD COLUMN submitted_by TEXT DEFAULT ''`,
     `ALTER TABLE remittances ADD COLUMN approved_by TEXT DEFAULT ''`,
     `ALTER TABLE remittances ADD COLUMN approved_at TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN bank_amount REAL DEFAULT 0`,
+    `ALTER TABLE remittances ADD COLUMN cash_amount REAL DEFAULT 0`,
   ];
-  for (const sql of migrations) {
-    try { await DB.prepare(sql).run(); } catch { /* column already exists — safe to ignore */ }
+  for (const m of migrations) {
+    try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
   }
 
   // Migrate legacy: remove goFishing from saved quotas setting
