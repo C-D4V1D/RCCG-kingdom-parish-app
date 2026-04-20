@@ -413,15 +413,13 @@ async function login(){
   const pin = document.getElementById('pinInput').value.trim();
   const errEl = document.getElementById('loginError');
   const normalizePin = v => String(v ?? '').trim();
-  const toNumericPin = v => (/^\d+$/.test(v) ? String(Number(v)) : null);
   const pinsMatch = (storedPin, enteredPin) => {
     const stored = normalizePin(storedPin);
     const entered = normalizePin(enteredPin);
     if (!stored || !entered) return false;
     if (stored === entered) return true;
-    const storedNum = toNumericPin(stored);
-    const enteredNum = toNumericPin(entered);
-    return storedNum !== null && enteredNum !== null && storedNum === enteredNum;
+    const legacyZeroPin = stored === '0' && entered === '0000';
+    return legacyZeroPin;
   };
   if(!role||!pin){ errEl.textContent='Please select a role and enter your PIN.'; errEl.style.display='block'; return }
   const btn = document.querySelector('#loginScreen .btn-primary');
