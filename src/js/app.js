@@ -568,7 +568,7 @@ async function calcChurchBalance(){
   // --- BANK BALANCE ---
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
   const cashDepositedToBank = cashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
-  const bankExpenses = allExpenses.reduce((s,e)=>{
+  const bankExpenses = allExpenses.filter(e=>e.status==='approved').reduce((s,e)=>{
     if(e.paymentMethod==='bank_transfer') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.bankAmount||0);
     return s;
@@ -3082,7 +3082,7 @@ async function renderBank(){
       <div class="kpi">
         <div class="kpi-icon" style="background:#FCEBEB">📤</div>
         <div class="kpi-label">Total Outflows</div>
-        <div class="kpi-val">${fmt(bankExpenses + paidRems + bankWithdrawals)}</div>
+        <div class="kpi-val">${fmt(bankExpenses + paidRems + bankWithdrawals + pettyBankTopups)}</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#FAEEDA">💳</div>
@@ -3269,7 +3269,7 @@ async function submitBankCharge(){
   if(!date||!amount){ alert('Please fill date and amount.'); return }
   await DB.addExpense({
     date, category:'bank', subCategory, description, amount,
-    paymentMethod:'bank_transfer', receiptNo,
+    paymentMethod:'bank_transfer', status:'approved', receiptNo,
     recordedBy: state.user?.name,
     createdAt: new Date().toISOString()
   });
