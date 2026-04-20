@@ -3126,12 +3126,14 @@ async function renderPettyCash(){
   const monthAdvancesDisbursed = monthHistory.filter(h=>(h.type==='advance'||(!h.type&&h.type!=='refill'))&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.amount||0),0);
 
   // Petty cash expenses since the last refill (for top-up request)
-  const lastRefill = [...history].reverse().find(h=>h.type==='refill');
+  // history is already newest-first from the API — find() without reverse picks the most recent
+  const lastRefill = history.find(h=>h.type==='refill');
   const lastRefillDate = lastRefill ? new Date(lastRefill.createdAt||0) : new Date(0);
   // Exclude expenses already included in any pending or approved top-up request
+  // Exclude expenses already in any active OR settled top-up request
   const alreadyClaimedExpIds = new Set(
     history
-      .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'))
+      .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'||h.status==='settled'))
       .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
   );
   const expensesSinceRefill = allExpenses.filter(e=>
@@ -3323,13 +3325,14 @@ async function renderPettyCash(){
 // ── TOP-UP REQUEST (Admin Officer: wallet is low, based on expenses already logged) ──
 async function showTopUpRequest(){
   const [pettyConfig, allExpenses, allPettyRaw] = await Promise.all([DB.getPettyConfig(), DB.getExpenses(), DB.getPetty()]);
-  const lastRefill = [...allPettyRaw].reverse().find(h=>h.type==='refill');
+  // allPettyRaw is newest-first from API — find() without reverse picks the most recent refill
+  const lastRefill = allPettyRaw.find(h=>h.type==='refill');
   const lastRefillDate = lastRefill ? new Date(lastRefill.createdAt||0) : new Date(0);
 
-  // Expenses paid from petty cash since last top-up — exclude those already in a request
+  // Expenses paid from petty cash since last top-up — exclude those already in any request (including settled)
   const alreadyInRequest = new Set(
     allPettyRaw
-      .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'))
+      .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'||h.status==='settled'))
       .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
   );
   const unrecovered = allExpenses.filter(e=>
