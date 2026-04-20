@@ -2819,7 +2819,7 @@ async function showBankWithdrawal(){
       <input type="date" id="wd_date" class="form-input" value="${today}" max="${today}" />
     </div>
     <div class="form-group"><label class="form-label">Amount Withdrawn (₦) *</label>
-      <input type="number" id="wd_amt" class="form-input" placeholder="0" min="0" oninput="App.onWdAmtChange()" />
+      <input type="number" id="wd_amt" class="form-input" placeholder="0" min="0" />
     </div>
     <div class="form-group"><label class="form-label">Destination *</label>
       <select id="wd_dest" class="form-select" onchange="App.onWdDestChange()">
@@ -2828,9 +2828,10 @@ async function showBankWithdrawal(){
         <option value="direct_expense">→ Direct Expense Payment (vendor paid immediately from bank)</option>
       </select>
     </div>
-    <!-- Purpose shown only for non-direct destinations -->
+
+    <!-- Purpose — hidden when Direct Expense is selected (expense details serve this purpose) -->
     <div class="form-group" id="wd_desc_group"><label class="form-label">Purpose / Description *</label>
-      <input type="text" id="wd_desc" class="form-input" placeholder="e.g. Petty cash top-up, Accountant float for expenses" />
+      <input type="text" id="wd_desc" class="form-input" placeholder="e.g. Petty cash top-up, Payment for hall rental" />
     </div>
 
     <!-- Direct Expense fields — shown only when Direct Expense Payment is selected -->
@@ -2843,21 +2844,23 @@ async function showBankWithdrawal(){
           ${catOptions}
         </select>
       </div>
-      <div class="form-group" id="wd_exp_subcat_group" style="display:none;margin-bottom:10px">
-        <label class="form-label">Sub-category</label>
-        <select id="wd_exp_subcat" class="form-select"></select>
+      <div class="form-group" style="margin-bottom:10px" id="wd_subcat_group">
+        <label class="form-label">Sub-category *</label>
+        <select id="wd_exp_subcat" class="form-select">
+          <option value="">— Select category first —</option>
+        </select>
       </div>
       <div class="form-group" style="margin-bottom:10px">
         <label class="form-label">Vendor / Paid To</label>
         <input type="text" id="wd_exp_vendor" class="form-input" placeholder="e.g. EEDC, Total Filling Station, Mr Emeka" />
       </div>
       <div class="form-group" style="margin-bottom:10px">
-        <label class="form-label">Description <span style="color:var(--text3);font-weight:400">(optional)</span></label>
-        <input type="text" id="wd_exp_desc" class="form-input" placeholder="Any extra detail about this payment" />
+        <label class="form-label">Description (optional)</label>
+        <input type="text" id="wd_exp_desc" class="form-input" placeholder="Additional detail about this expense" />
       </div>
       <div class="form-group" style="margin-bottom:0">
-        <label class="form-label">Receipt / Invoice Number <span style="color:var(--text3);font-weight:400">(optional)</span></label>
-        <input type="text" id="wd_exp_receipt" class="form-input" placeholder="Receipt or invoice number" />
+        <label class="form-label">Receipt / Invoice Number</label>
+        <input type="text" id="wd_exp_receipt" class="form-input" placeholder="Optional receipt or invoice number" />
       </div>
     </div>
 
@@ -2888,7 +2891,7 @@ function onWdDestChange(){
 function onWdCatChange(){
   const cat     = document.getElementById('wd_exp_cat')?.value;
   const subcats = cat ? (EXPENSE_SUBCATS[cat]||[]) : [];
-  const group   = document.getElementById('wd_exp_subcat_group');
+  const group   = document.getElementById('wd_subcat_group');
   const sel     = document.getElementById('wd_exp_subcat');
   if(!group||!sel) return;
   if(subcats.length){
@@ -2922,10 +2925,11 @@ async function submitBankWithdrawal(){
   if(!isDirect && !description){ alert('Please fill in the purpose / description.'); return }
   if(!auth){ alert('Please select at least one authorizing signatory.'); return }
   if(isDirect && !expCat){ alert('Please select an expense category.'); return }
+  if(isDirect && !expSubcat){ alert('Please select a sub-category.'); return }
 
   // Build description for the cash_transaction record
   const txDescription = isDirect
-    ? [expSubcat||EXPENSE_CATS.find(c=>c.key===expCat)?.label, expVendor, expDesc].filter(Boolean).join(' — ')
+    ? [EXPENSE_CATS.find(c=>c.key===expCat)?.label, expSubcat, expDesc, expVendor?`Paid to: ${expVendor}`:''].filter(Boolean).join(' — ')
     : description;
 
   // 1. Record the bank withdrawal
@@ -5011,7 +5015,7 @@ return {
   viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
-  showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange,
+  showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
