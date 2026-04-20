@@ -4382,12 +4382,13 @@ function openPrintableReport(title, bodyHTML){
   <div class="print-btn-bar no-print"><button class="print-btn" onclick="window.print()">🖨️ Print Report</button></div>
   ${bodyHTML}
 </body></html>`;
+  const PRINT_RENDER_DELAY_MS=500;
   const w=window.open('','_blank');
   if(!w){ showAlert('Pop-up blocked. Please allow pop-ups for this site to print the report.','warn'); return }
   w.document.write(html);
   w.document.close();
   w.focus();
-  setTimeout(()=>w.print(),500);
+  setTimeout(()=>w.print(),PRINT_RENDER_DELAY_MS);
 }
 
 /** Shared report header HTML */
@@ -4756,7 +4757,7 @@ async function generatePettyCashReport(){
       </tr>
     </table>`:'<div class="no-data">No petty cash transactions for this period.</div>'}
 
-    ${reportSignatureHTML().replace('Church Accountant','Church Accountant').replace('Reviewed &amp; Approved by:','Confirmed by (Admin Officer):')}`;
+    ${reportSignatureHTML().replace('Reviewed &amp; Approved by:','Confirmed by (Admin Officer):')}`;
 
   openPrintableReport('Petty Cash Report — '+monthLabel(), body);
 }
