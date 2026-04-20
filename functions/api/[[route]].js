@@ -496,7 +496,7 @@ async function changeUserPin(DB, data) {
   if (!userId || !currentPin || !newPin) {
     return err('userId, currentPin, and newPin are required', 400);
   }
-  if (!/^\d{4,6}$/.test(newPin)) {
+  if (!isValidPin(newPin)) {
     return err('New PIN must be 4-6 digits', 400);
   }
   const row = await DB.prepare(`SELECT id, pin FROM users WHERE id=?`).bind(userId).first();
