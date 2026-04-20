@@ -4319,173 +4319,446 @@ async function submitRefill(){
 }
 
 // ── REPORTS ────────────────────────────────
+
+/** Opens a print-friendly report in a new window (prints only the report, not the app page) */
+function openPrintableReport(title, bodyHTML){
+  const html=`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>${esc(title)}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',Arial,sans-serif;font-size:12px;color:#333;padding:30px 36px;line-height:1.5}
+  .report-header{text-align:center;border-bottom:3px double #0F6E56;padding-bottom:16px;margin-bottom:20px}
+  .report-header .church-name{font-size:20px;font-weight:700;color:#0F6E56;margin-bottom:2px;text-transform:uppercase;letter-spacing:1px}
+  .report-header .church-address{font-size:11px;color:#666;margin-bottom:8px}
+  .report-header .report-title{font-size:15px;font-weight:700;color:#333;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px}
+  .report-header .report-period{font-size:12px;color:#555}
+  .report-header .report-meta{font-size:11px;color:#777;margin-top:6px}
+  .section-title{font-size:13px;font-weight:700;color:#0F6E56;margin:20px 0 8px;padding:4px 0;border-bottom:2px solid #0F6E56;text-transform:uppercase;letter-spacing:0.5px}
+  .section-title span{font-weight:normal;font-size:11px;color:#666;margin-left:8px;text-transform:none;letter-spacing:0}
+  table{width:100%;border-collapse:collapse;margin-bottom:14px;font-size:12px}
+  th{background:#0F6E56;color:#fff;padding:7px 10px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px}
+  td{padding:6px 10px;border-bottom:1px solid #e0e0e0}
+  tr:nth-child(even) td{background:#fafafa}
+  .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:14px 0 18px;page-break-inside:avoid}
+  .summary-box{border:1.5px solid #e0e0e0;border-radius:6px;padding:12px 14px;text-align:center}
+  .summary-box .label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#777;margin-bottom:4px}
+  .summary-box .value{font-size:18px;font-weight:700;color:#333}
+  .summary-box .value.green{color:#0F6E56}
+  .summary-box .value.red{color:#c0392b}
+  .summary-box .value.amber{color:#BA7517}
+  .summary-box .value.blue{color:#185FA5}
+  .td-r{text-align:right}
+  .td-c{text-align:center}
+  .td-bold{font-weight:700}
+  .td-green{color:#0F6E56;font-weight:600}
+  .td-red{color:#c0392b;font-weight:600}
+  .td-amber{color:#BA7517;font-weight:600}
+  .total-row td{border-top:2px solid #333;font-weight:700;background:#f5f5f5!important;padding:8px 10px}
+  .subtotal-row td{border-top:1.5px solid #aaa;font-weight:600;background:#fafafa!important}
+  .note-box{background:#fff8e1;border:1px solid #f0c040;border-radius:4px;padding:10px 14px;font-size:11px;margin:12px 0;color:#7a5200;line-height:1.6}
+  .sig-section{display:grid;grid-template-columns:1fr 1fr 1fr;gap:28px;margin-top:40px;page-break-inside:avoid}
+  .sig-box{border-top:1.5px solid #333;padding-top:8px;font-size:11px;text-align:center;line-height:1.6}
+  .sig-box .sig-name{font-weight:600;margin-top:4px}
+  .footer-note{margin-top:24px;padding-top:12px;border-top:1px solid #ddd;font-size:10px;color:#999;text-align:center}
+  .badge{display:inline-block;font-size:10px;font-weight:600;padding:2px 7px;border-radius:10px}
+  .badge-success{background:#EAF3DE;color:#3B6D11}
+  .badge-warn{background:#FAEEDA;color:#BA7517}
+  .badge-danger{background:#FCEBEB;color:#A32D2D}
+  .badge-info{background:#E6F1FB;color:#185FA5}
+  .no-data{text-align:center;padding:30px;color:#999;font-style:italic}
+  @media print{
+    body{padding:15px 20px}
+    .no-print{display:none!important}
+    table{page-break-inside:auto}
+    tr{page-break-inside:avoid}
+  }
+  .print-btn-bar{text-align:center;margin-bottom:20px}
+  .print-btn{background:#0F6E56;color:#fff;border:none;padding:10px 28px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
+  .print-btn:hover{background:#085041}
+</style>
+</head>
+<body>
+  <div class="print-btn-bar no-print"><button class="print-btn" onclick="window.print()">🖨️ Print Report</button></div>
+  ${bodyHTML}
+</body></html>`;
+  const w=window.open('','_blank');
+  if(!w){ showAlert('Pop-up blocked. Please allow pop-ups for this site to print the report.','warn'); return }
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(()=>w.print(),500);
+}
+
+/** Shared report header HTML */
+function reportHeaderHTML(reportTitle, periodText, settings){
+  const churchName=settings?.churchName||'RCCG Kingdom Parish, Aguleri';
+  const address=settings?.churchAddress||'Aguleri, Anambra State, Nigeria';
+  return `<div class="report-header">
+    <div class="church-name">${esc(churchName)}</div>
+    <div class="church-address">${esc(address)}</div>
+    <div class="report-title">${esc(reportTitle)}</div>
+    <div class="report-period">${esc(periodText)}</div>
+    <div class="report-meta">Prepared by: ${esc(state.user?.name||'—')} &nbsp;|&nbsp; Date: ${fmtDate(new Date().toISOString())}</div>
+  </div>`;
+}
+
+/** Shared signature section */
+function reportSignatureHTML(){
+  return `<div class="sig-section">
+    <div class="sig-box">Prepared by:<br><br><br><div class="sig-name">${esc(state.user?.name||'________________')}</div>Church Accountant</div>
+    <div class="sig-box">Reviewed &amp; Approved by:<br><br><br><div class="sig-name">________________</div>Parish Pastor</div>
+    <div class="sig-box">Date:<br><br><br><div class="sig-name">${fmtDate(new Date().toISOString())}</div></div>
+  </div>
+  <div class="footer-note">This is a computer-generated report from the RCCG Kingdom Parish Finance Portal. For enquiries, contact the Church Accountant or Admin Officer.</div>`;
+}
+
 function renderReports(){
   document.getElementById('pageContent').innerHTML=`
-    <div class="page-header"><div class="page-title">Reports</div><div class="page-sub">${monthLabel()}</div></div>
+    <div class="page-header"><div class="page-title">📊 Reports Centre</div><div class="page-sub">Generate comprehensive financial reports for ${monthLabel()}</div></div>
+    <div class="card" style="margin-bottom:1rem;padding:1rem 1.25rem">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:0"><strong>Tip:</strong> Each report opens in a new window for clean, professional printing. Only the report content will be printed — not the web app interface.</p>
+    </div>
     <div class="grid-3" style="margin-bottom:1rem">
       <button class="qa-btn" onclick="App.generateWeeklyReport()"><div class="qa-icon" style="background:#E1F5EE">📋</div><div class="qa-label">Weekly Summary</div><div class="qa-sub">Sunday collections breakdown</div></button>
-      <button class="qa-btn" onclick="App.generateMonthlyReport()"><div class="qa-icon" style="background:#E6F1FB">📊</div><div class="qa-label">Monthly Statement</div><div class="qa-sub">Full income & expenses</div></button>
-      <button class="qa-btn" onclick="App.generateRemittanceReport()"><div class="qa-icon" style="background:#FCEBEB">📤</div><div class="qa-label">Remittance Report</div><div class="qa-sub">For RCCG submission</div></button>
-      <button class="qa-btn" onclick="App.generateQuarterlyReport()"><div class="qa-icon" style="background:#FAEEDA">📈</div><div class="qa-label">Quarterly Review</div><div class="qa-sub">3-month health check</div></button>
-      <button class="qa-btn" onclick="App.generateExpenseReport()"><div class="qa-icon" style="background:#EAF3DE">💸</div><div class="qa-label">Expense Report</div><div class="qa-sub">By category</div></button>
+      <button class="qa-btn" onclick="App.generateMonthlyReport()"><div class="qa-icon" style="background:#E6F1FB">📊</div><div class="qa-label">Monthly Financial Statement</div><div class="qa-sub">Full income, expenses & position</div></button>
+      <button class="qa-btn" onclick="App.generateRemittanceReport()"><div class="qa-icon" style="background:#FCEBEB">📤</div><div class="qa-label">Remittance Report</div><div class="qa-sub">For RCCG HQ submission</div></button>
+      <button class="qa-btn" onclick="App.generateQuarterlyReport()"><div class="qa-icon" style="background:#FAEEDA">📈</div><div class="qa-label">Quarterly Review</div><div class="qa-sub">3-month trend & health check</div></button>
+      <button class="qa-btn" onclick="App.generateExpenseReport()"><div class="qa-icon" style="background:#EAF3DE">💸</div><div class="qa-label">Expense Report</div><div class="qa-sub">Detailed by category & line item</div></button>
       <button class="qa-btn" onclick="App.generatePettyCashReport()"><div class="qa-icon" style="background:#EEEDFE">💳</div><div class="qa-label">Petty Cash Report</div><div class="qa-sub">Imprest reconciliation</div></button>
     </div>
     <div id="reportOutput"></div>`;
 }
 
 async function generateMonthlyReport(){
-  const income=filterByMonth(await DB.getIncome());
-  const expenses=filterByMonth(await DB.getExpenses());
-  const paidRems=filterByMonth(await DB.getRemittances());
+  const [allIncome, allExpenses, allRemittances, settings] = await Promise.all([
+    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings()
+  ]);
+  const income=filterByMonth(allIncome);
+  const expenses=filterByMonth(allExpenses);
+  const paidRems=filterByMonth(allRemittances);
   const rem=await calcRemittancesFromRecords(income);
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
-  const totalRem=paidRems.reduce((s,r)=>s+(r.amount||0),0);
-  const settings=await DB.getSettings();
+  const totalRemPaid=paidRems.reduce((s,r)=>s+(r.amount||0),0);
+  const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate;
+  const netPosition=totalIncome-totalExpenses-totalRemDue;
 
-  const html=`
-    <div class="card" id="printReport">
-      <div class="card-header"><span class="card-title">Monthly Financial Statement — ${monthLabel()}</span>
-        <div><button class="btn btn-primary btn-sm no-print" onclick="window.print()">🖨 Print</button></div>
-      </div>
-      <div class="print-header">
-        <h1>${settings.churchName||'RCCG Kingdom Parish, Aguleri'}</h1>
-        <p>Monthly Financial Statement — ${monthLabel()}</p>
-        <p>Prepared by: ${state.user?.name} on ${fmtDate(new Date().toISOString())}</p>
-      </div>
-      <div class="grid-2" style="margin:1rem 0">
-        <div style="background:var(--success-light);padding:1rem;border-radius:var(--r);text-align:center"><div class="amount-label">Total Income</div><div class="amount-display" style="color:var(--success)">${fmt(totalIncome)}</div></div>
-        <div style="background:var(--danger-light);padding:1rem;border-radius:var(--r);text-align:center"><div class="amount-label">Total Outflow</div><div class="amount-display" style="color:var(--danger)">${fmt(totalExpenses+totalRem)}</div></div>
-      </div>
-      <p class="card-title" style="margin-bottom:8px">Income Details</p>
-      <div class="table-wrap"><table class="print-table">
-        <tr><th>Date</th><th>Members Tithe</th><th>Ministers Tithe</th><th>Thanksgiving</th><th>SLO</th><th>Total</th><th>Deposited</th></tr>
-        ${income.map(r=>`<tr><td>${fmtDate(r.date)}</td><td>${fmt(r.membersTithe||0)}</td><td>${fmt(r.ministersTithe||0)}</td><td>${fmt(r.thanksgiving||0)}</td><td>${fmt(r.slo||0)}</td><td class="td-bold">${fmt(r.totalCollection)}</td><td>${r.depositConfirmed?'✓ '+r.tellerNo:'Pending'}</td></tr>`).join('')}
-        <tr style="font-weight:700"><td colspan="5">TOTAL</td><td>${fmt(totalIncome)}</td><td></td></tr>
-      </table></div>
-      <p class="card-title" style="margin:1rem 0 8px">Remittances</p>
-      <div class="table-wrap"><table class="print-table">
-        <tr><th>Description</th><th class="td-right">Amount Due</th></tr>
-        ${rem.lines.map(l=>`<tr><td>${l.label}</td><td class="td-right">${fmt(l.national||0)}</td></tr>`).join('')}
-        <tr><td>Province Rebate (20%)</td><td class="td-right">${fmt(rem.provinceRebate)}</td></tr>
-        <tr style="font-weight:700"><td>TOTAL REMITTANCES</td><td class="td-right">${fmt(rem.totalNatl+rem.totalArea+rem.provinceRebate)}</td></tr>
-        <tr style="font-weight:700;color:var(--primary)"><td>NET LOCAL RETAINED</td><td class="td-right">${fmt(rem.netLocal)}</td></tr>
-      </table></div>
-      <p class="card-title" style="margin:1rem 0 8px">Expenses</p>
-      <div class="table-wrap"><table class="print-table">
-        <tr><th>Date</th><th>Category</th><th>Description</th><th>Receipt</th><th class="td-right">Amount</th></tr>
-        ${expenses.map(e=>`<tr><td>${fmtDate(e.date||e.createdAt)}</td><td>${EXPENSE_CATS.find(c=>c.key===e.category)?.label||e.category}</td><td>${e.description}</td><td>${e.receiptNo||'—'}</td><td class="td-right">${fmt(e.amount)}</td></tr>`).join('')}
-        <tr style="font-weight:700"><td colspan="4">TOTAL EXPENSES</td><td class="td-right">${fmt(totalExpenses)}</td></tr>
-      </table></div>
-      <div class="print-signature">
-        <div class="print-sig-box">Prepared by (Accountant)<br><br><br>${state.user?.name}</div>
-        <div class="print-sig-box">Reviewed & Approved<br>(Parish Pastor)<br><br>_________________</div>
-        <div class="print-sig-box">Date<br><br><br>${fmtDate(new Date().toISOString())}</div>
-      </div>
-    </div>`;
-  document.getElementById('reportOutput').innerHTML=html;
-  document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
+  // Income by type summary
+  const incomeByType={};
+  INCOME_TYPES.forEach(t=>{incomeByType[t.key]={label:t.label,total:0}});
+  income.forEach(r=>{INCOME_TYPES.forEach(t=>{incomeByType[t.key].total+=(r[t.key]||0)})});
+  const incomeTypeSummary=Object.values(incomeByType).filter(t=>t.total>0);
+
+  // Expense by category summary
+  const expByCat={};
+  EXPENSE_CATS.forEach(c=>{expByCat[c.key]={label:c.label,icon:c.icon,total:0,count:0}});
+  expenses.forEach(e=>{if(expByCat[e.category]){expByCat[e.category].total+=e.amount||0;expByCat[e.category].count++}});
+  const expSorted=Object.values(expByCat).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);
+
+  const body=`
+    ${reportHeaderHTML('Monthly Financial Statement', monthLabel(), settings)}
+
+    <div class="summary-grid">
+      <div class="summary-box"><div class="label">Total Income</div><div class="value green">${fmt(totalIncome)}</div></div>
+      <div class="summary-box"><div class="label">Total Expenses</div><div class="value red">${fmt(totalExpenses)}</div></div>
+      <div class="summary-box"><div class="label">Total Remittances Due</div><div class="value red">${fmt(totalRemDue)}</div></div>
+      <div class="summary-box"><div class="label">Net Local Retained</div><div class="value green">${fmt(rem.netLocal)}</div></div>
+      <div class="summary-box"><div class="label">Net Position</div><div class="value ${netPosition>=0?'green':'red'}">${fmt(netPosition)}</div></div>
+      <div class="summary-box"><div class="label">No. of Sundays</div><div class="value blue">${income.length}</div></div>
+    </div>
+
+    <div class="section-title">Section A: Income Summary by Type</div>
+    <table>
+      <tr><th>Income Type</th><th class="td-r">Amount (₦)</th><th class="td-c">% of Total</th></tr>
+      ${incomeTypeSummary.map(t=>`<tr><td>${t.label}</td><td class="td-r">${fmt(t.total)}</td><td class="td-c">${totalIncome?Math.round(t.total/totalIncome*100):0}%</td></tr>`).join('')}
+      <tr class="total-row"><td>TOTAL INCOME</td><td class="td-r">${fmt(totalIncome)}</td><td class="td-c">100%</td></tr>
+    </table>
+
+    <div class="section-title">Section B: Weekly Collection Details</div>
+    ${income.length?`<table>
+      <tr><th>S/N</th><th>Date</th><th>Members' Tithe</th><th>Ministers' Tithe</th><th>Thanksgiving</th><th>SLO</th><th>Others</th><th class="td-r">Total</th><th>Status</th></tr>
+      ${income.map((r,i)=>{
+        const others=(r.sundaySchool||0)+(r.crm||0)+(r.workersOffering||0)+(r.childrenOffering||0);
+        return `<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td><td class="td-r">${fmt(r.membersTithe||0)}</td><td class="td-r">${fmt(r.ministersTithe||0)}</td><td class="td-r">${fmt(r.thanksgiving||0)}</td><td class="td-r">${fmt(r.slo||0)}</td><td class="td-r">${fmt(others)}</td><td class="td-r td-bold">${fmt(r.totalCollection)}</td><td>${r.depositConfirmed?'<span class="badge badge-success">Deposited</span>':'<span class="badge badge-warn">Pending</span>'}</td></tr>`;
+      }).join('')}
+      <tr class="total-row"><td colspan="7">TOTAL COLLECTIONS</td><td class="td-r">${fmt(totalIncome)}</td><td></td></tr>
+    </table>`:'<div class="no-data">No income records for this period.</div>'}
+
+    <div class="section-title">Section C: Remittances Due to RCCG Authorities</div>
+    <table>
+      <tr><th>Description</th><th class="td-c">Basis</th><th class="td-r">Amount (₦)</th></tr>
+      ${rem.lines.filter(l=>l.national>0).map(l=>`<tr><td>${l.label} → National HQ</td><td class="td-c">% Based</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
+      ${rem.provinceRebate>0?`<tr><td>Province Rebate</td><td class="td-c">% Based</td><td class="td-r">${fmt(rem.provinceRebate)}</td></tr>`:''}
+      <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${fmt(totalRemDue)}</td></tr>
+      <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">NET LOCAL RETAINED (after remittances)</td><td class="td-r td-green">${fmt(rem.netLocal)}</td></tr>
+    </table>
+
+    <div class="section-title">Section D: Expenses <span>(${expenses.length} entries totalling ${fmt(totalExpenses)})</span></div>
+    ${expenses.length?`<table>
+      <tr><th>S/N</th><th>Date</th><th>Category</th><th>Description</th><th>Receipt No.</th><th class="td-r">Amount (₦)</th></tr>
+      ${expenses.map((e,i)=>`<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${EXPENSE_CATS.find(c=>c.key===e.category)?.label||e.category}</td><td>${esc(e.description)}</td><td>${e.receiptNo||'—'}</td><td class="td-r">${fmt(e.amount)}</td></tr>`).join('')}
+      <tr class="total-row"><td colspan="5">TOTAL EXPENSES</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
+    </table>`:'<div class="no-data">No expenses recorded for this period.</div>'}
+
+    ${expSorted.length?`<div class="section-title">Section E: Expense Summary by Category</div>
+    <table>
+      <tr><th>Category</th><th class="td-c">No. of Items</th><th class="td-r">Amount (₦)</th><th class="td-c">% of Total</th></tr>
+      ${expSorted.map(c=>`<tr><td>${c.icon} ${c.label}</td><td class="td-c">${c.count}</td><td class="td-r">${fmt(c.total)}</td><td class="td-c">${totalExpenses?Math.round(c.total/totalExpenses*100):0}%</td></tr>`).join('')}
+      <tr class="total-row"><td>TOTAL</td><td class="td-c">${expSorted.reduce((s,c)=>s+c.count,0)}</td><td class="td-r">${fmt(totalExpenses)}</td><td class="td-c">100%</td></tr>
+    </table>`:''}
+
+    <div class="section-title">Section F: Financial Position Summary</div>
+    <table>
+      <tr><td style="font-weight:600">Total Income for ${monthLabel()}</td><td class="td-r td-green">${fmt(totalIncome)}</td></tr>
+      <tr><td style="padding-left:20px;color:#555">Less: Remittances Due to RCCG</td><td class="td-r td-red">− ${fmt(totalRemDue)}</td></tr>
+      <tr><td style="padding-left:20px;color:#555">Less: Local Expenses</td><td class="td-r td-red">− ${fmt(totalExpenses)}</td></tr>
+      <tr class="total-row"><td>NET PARISH BALANCE</td><td class="td-r ${netPosition>=0?'td-green':'td-red'}">${fmt(netPosition)}</td></tr>
+    </table>
+    ${netPosition<0?'<div class="note-box">⚠️ The parish is in a deficit position this month. Expenses and remittances exceed total income. Please review with the Parish Pastor.</div>':''}
+
+    ${reportSignatureHTML()}`;
+
+  openPrintableReport('Monthly Financial Statement — '+monthLabel(), body);
 }
 
 async function generateWeeklyReport(){
-  const income=filterByMonth(await DB.getIncome());
-  document.getElementById('reportOutput').innerHTML=`
-    <div class="card">
-      <div class="card-header"><span class="card-title">Weekly Collection Summary — ${monthLabel()}</span><button class="btn btn-sm btn-primary no-print" onclick="window.print()">🖨 Print</button></div>
-      ${income.length?`<div class="table-wrap"><table>
-        <tr><th>Date</th>${INCOME_TYPES.map(t=>`<th>${t.label.split(' ').slice(0,2).join(' ')}</th>`).join('')}<th>Total</th><th>Status</th></tr>
-        ${income.map(r=>`<tr><td><strong>${fmtDate(r.date)}</strong></td>${INCOME_TYPES.map(t=>`<td>${r[t.key]?fmt(r[t.key]):'—'}</td>`).join('')}<td class="td-bold td-green">${fmt(r.totalCollection)}</td><td><span class="badge ${r.depositConfirmed?'badge-success':'badge-warn'}">${r.depositConfirmed?'Deposited':'Pending'}</span></td></tr>`).join('')}
-      </table></div>`:'<div class="empty-table">No collections this month.</div>'}
-    </div>`;
-  document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
+  const [allIncome, settings] = await Promise.all([DB.getIncome(), DB.getSettings()]);
+  const income=filterByMonth(allIncome);
+
+  // Group by week
+  const weeks={};
+  income.forEach(r=>{
+    const d=new Date(r.date||r.createdAt);
+    const weekNum=Math.ceil(d.getDate()/7);
+    if(!weeks[weekNum]) weeks[weekNum]={records:[],total:0};
+    weeks[weekNum].records.push(r);
+    weeks[weekNum].total+=(r.totalCollection||0);
+  });
+
+  const totalCollected=income.reduce((s,r)=>s+(r.totalCollection||0),0);
+  const avgPerSunday=income.length?Math.round(totalCollected/income.length):0;
+  const deposited=income.filter(r=>r.depositConfirmed).length;
+  const pending=income.length-deposited;
+
+  // Highest and lowest
+  const highestRecord=income.length?income.reduce((a,b)=>(b.totalCollection||0)>(a.totalCollection||0)?b:a,income[0]):null;
+  const lowestRecord=income.length>1?income.reduce((a,b)=>(b.totalCollection||0)<(a.totalCollection||0)?b:a,income[0]):null;
+
+  const body=`
+    ${reportHeaderHTML('Weekly Collection Summary Report', monthLabel(), settings)}
+
+    <div class="summary-grid">
+      <div class="summary-box"><div class="label">Total Collections</div><div class="value green">${fmt(totalCollected)}</div></div>
+      <div class="summary-box"><div class="label">No. of Sundays</div><div class="value blue">${income.length}</div></div>
+      <div class="summary-box"><div class="label">Average per Sunday</div><div class="value">${fmt(avgPerSunday)}</div></div>
+      <div class="summary-box"><div class="label">Deposited</div><div class="value green">${deposited}</div></div>
+      <div class="summary-box"><div class="label">Pending Deposit</div><div class="value ${pending>0?'amber':'green'}">${pending}</div></div>
+      ${highestRecord?`<div class="summary-box"><div class="label">Highest Sunday</div><div class="value green">${fmt(highestRecord.totalCollection)}</div></div>`:''}
+    </div>
+
+    <div class="section-title">Detailed Weekly Breakdown</div>
+    ${income.length?`<table>
+      <tr><th>S/N</th><th>Date</th>${INCOME_TYPES.map(t=>`<th class="td-r">${t.label}</th>`).join('')}<th class="td-r">Total</th><th>Deposit Status</th></tr>
+      ${income.map((r,i)=>`<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td>${INCOME_TYPES.map(t=>`<td class="td-r">${r[t.key]?fmt(r[t.key]):'—'}</td>`).join('')}<td class="td-r td-bold">${fmt(r.totalCollection)}</td><td>${r.depositConfirmed?'<span class="badge badge-success">✓ Deposited</span>':'<span class="badge badge-warn">Pending</span>'}</td></tr>`).join('')}
+      <tr class="total-row"><td colspan="2">GRAND TOTAL</td>${INCOME_TYPES.map(t=>{const sum=income.reduce((s,r)=>s+(r[t.key]||0),0);return `<td class="td-r">${sum?fmt(sum):'—'}</td>`}).join('')}<td class="td-r">${fmt(totalCollected)}</td><td></td></tr>
+    </table>`:'<div class="no-data">No Sunday collections recorded for this period.</div>'}
+
+    ${Object.keys(weeks).length>1?`<div class="section-title">Summary by Week</div>
+    <table>
+      <tr><th>Week</th><th>Sundays</th><th class="td-r">Total Collected</th><th class="td-c">% of Month Total</th></tr>
+      ${Object.entries(weeks).sort(([a],[b])=>a-b).map(([w,data])=>`<tr><td>Week ${w}</td><td>${data.records.map(r=>fmtDate(r.date)).join(', ')}</td><td class="td-r">${fmt(data.total)}</td><td class="td-c">${totalCollected?Math.round(data.total/totalCollected*100):0}%</td></tr>`).join('')}
+      <tr class="total-row"><td colspan="2">TOTAL</td><td class="td-r">${fmt(totalCollected)}</td><td class="td-c">100%</td></tr>
+    </table>`:''}
+
+    ${pending>0?`<div class="note-box">⚠️ ${pending} collection record(s) still pending bank deposit. Please ensure all cash is deposited promptly and teller numbers recorded.</div>`:''}
+
+    ${reportSignatureHTML()}`;
+
+  openPrintableReport('Weekly Collection Summary — '+monthLabel(), body);
 }
 
 function generateRemittanceReport(){ printRemittanceReport(); }
 
 async function generateQuarterlyReport(){
-  let rows='';
+  const [allIncome, allExpenses, settings] = await Promise.all([DB.getIncome(), DB.getExpenses(), DB.getSettings()]);
+  const quarterData=[];
+  let grandIncome=0, grandExp=0, grandRem=0, grandNet=0;
+
   for(let i=2;i>=0;i--){
     let m=state.month-i; let y=state.year; if(m<0){m+=12;y--;}
-    const recs=(await DB.getIncome()).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
-    const exps=(await DB.getExpenses()).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    const recs=allIncome.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    const exps=allExpenses.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
     const total=recs.reduce((s,r)=>s+(r.totalCollection||0),0);
     const exp=exps.reduce((s,e)=>s+(e.amount||0),0);
     const rem=await calcRemittancesFromRecords(recs);
-    rows+=`<tr><td>${MONTHS[m]} ${y}</td><td class="td-green">${fmt(total)}</td><td class="td-red">${fmt(rem.totalNatl+rem.totalArea+rem.provinceRebate)}</td><td class="td-amber">${fmt(exp)}</td><td class="td-bold">${fmt(rem.netLocal-exp)}</td></tr>`;
+    const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate;
+    const netSurplus=total-totalRemDue-exp;
+    quarterData.push({month:MONTHS[m],year:y,income:total,expenses:exp,remittances:totalRemDue,netLocal:rem.netLocal,surplus:netSurplus,sundays:recs.length});
+    grandIncome+=total; grandExp+=exp; grandRem+=totalRemDue; grandNet+=netSurplus;
   }
-  document.getElementById('reportOutput').innerHTML=`
-    <div class="card">
-      <div class="card-header"><span class="card-title">Quarterly Health Report</span><button class="btn btn-sm btn-primary" onclick="window.print()">🖨 Print</button></div>
-      <div class="table-wrap"><table>
-        <tr><th>Month</th><th>Total Income</th><th>Remittances</th><th>Expenses</th><th>Net Surplus</th></tr>
-        ${rows}
-      </table></div>
-    </div>`;
-  document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
+
+  // Trend analysis
+  const trend=quarterData.length>=2?(quarterData[quarterData.length-1].income-quarterData[0].income):0;
+  const trendPct=quarterData[0].income?Math.round(trend/quarterData[0].income*100):0;
+  const avgMonthlyIncome=Math.round(grandIncome/3);
+  const avgMonthlyExp=Math.round(grandExp/3);
+
+  const periodLabel=`${quarterData[0].month} — ${quarterData[quarterData.length-1].month} ${quarterData[quarterData.length-1].year}`;
+
+  const body=`
+    ${reportHeaderHTML('Quarterly Financial Health Report', periodLabel, settings)}
+
+    <div class="summary-grid">
+      <div class="summary-box"><div class="label">Quarter Total Income</div><div class="value green">${fmt(grandIncome)}</div></div>
+      <div class="summary-box"><div class="label">Quarter Total Expenses</div><div class="value red">${fmt(grandExp)}</div></div>
+      <div class="summary-box"><div class="label">Quarter Remittances</div><div class="value red">${fmt(grandRem)}</div></div>
+      <div class="summary-box"><div class="label">Net Surplus/(Deficit)</div><div class="value ${grandNet>=0?'green':'red'}">${fmt(grandNet)}</div></div>
+      <div class="summary-box"><div class="label">Avg Monthly Income</div><div class="value">${fmt(avgMonthlyIncome)}</div></div>
+      <div class="summary-box"><div class="label">Income Trend</div><div class="value ${trendPct>=0?'green':'red'}">${trendPct>=0?'+':''}${trendPct}%</div></div>
+    </div>
+
+    <div class="section-title">Monthly Comparison</div>
+    <table>
+      <tr><th>Month</th><th class="td-c">Sundays</th><th class="td-r">Total Income</th><th class="td-r">Remittances</th><th class="td-r">Expenses</th><th class="td-r">Net Surplus/(Deficit)</th></tr>
+      ${quarterData.map(d=>`<tr><td>${d.month} ${d.year}</td><td class="td-c">${d.sundays}</td><td class="td-r td-green">${fmt(d.income)}</td><td class="td-r td-red">${fmt(d.remittances)}</td><td class="td-r td-amber">${fmt(d.expenses)}</td><td class="td-r td-bold ${d.surplus>=0?'td-green':'td-red'}">${fmt(d.surplus)}</td></tr>`).join('')}
+      <tr class="total-row"><td>QUARTER TOTAL</td><td class="td-c">${quarterData.reduce((s,d)=>s+d.sundays,0)}</td><td class="td-r">${fmt(grandIncome)}</td><td class="td-r">${fmt(grandRem)}</td><td class="td-r">${fmt(grandExp)}</td><td class="td-r ${grandNet>=0?'td-green':'td-red'}">${fmt(grandNet)}</td></tr>
+    </table>
+
+    <div class="section-title">Breakdown: Income Allocation per Month</div>
+    <table>
+      <tr><th>Month</th><th class="td-r">Gross Income</th><th class="td-r">To RCCG HQ</th><th class="td-r">To Parish (Net Local)</th><th class="td-c">% Retained</th></tr>
+      ${quarterData.map(d=>`<tr><td>${d.month} ${d.year}</td><td class="td-r">${fmt(d.income)}</td><td class="td-r td-red">${fmt(d.remittances)}</td><td class="td-r td-green">${fmt(d.netLocal)}</td><td class="td-c">${d.income?Math.round(d.netLocal/d.income*100):0}%</td></tr>`).join('')}
+      <tr class="total-row"><td>TOTAL</td><td class="td-r">${fmt(grandIncome)}</td><td class="td-r">${fmt(grandRem)}</td><td class="td-r">${fmt(quarterData.reduce((s,d)=>s+d.netLocal,0))}</td><td class="td-c">${grandIncome?Math.round(quarterData.reduce((s,d)=>s+d.netLocal,0)/grandIncome*100):0}%</td></tr>
+    </table>
+
+    <div class="section-title">Financial Health Assessment</div>
+    <table>
+      <tr><td style="font-weight:600">Average Monthly Income</td><td class="td-r">${fmt(avgMonthlyIncome)}</td></tr>
+      <tr><td style="font-weight:600">Average Monthly Expenditure</td><td class="td-r">${fmt(avgMonthlyExp)}</td></tr>
+      <tr><td style="font-weight:600">Income Trend (Month 1 → Month 3)</td><td class="td-r ${trendPct>=0?'td-green':'td-red'}">${trendPct>=0?'↑ +':'↓ '}${Math.abs(trendPct)}%</td></tr>
+      <tr><td style="font-weight:600">Overall Health Status</td><td class="td-r td-bold ${grandNet>=0?'td-green':'td-red'}">${grandNet>=0?'SURPLUS — Healthy':'DEFICIT — Needs Attention'}</td></tr>
+    </table>
+    ${grandNet<0?'<div class="note-box">⚠️ The parish has been running at a deficit over this quarter. It is recommended that the Admin Team reviews expenditure patterns and consider cost optimization measures.</div>':''}
+    ${trendPct<-10?'<div class="note-box">⚠️ Income has declined by more than 10% over the quarter. This may require pastoral attention and congregation engagement.</div>':''}
+
+    ${reportSignatureHTML()}`;
+
+  openPrintableReport('Quarterly Health Report — '+periodLabel, body);
 }
 
 async function generateExpenseReport(){
-  const expenses=filterByMonth(await DB.getExpenses());
+  const [allExpenses, settings] = await Promise.all([DB.getExpenses(), DB.getSettings()]);
+  const expenses=filterByMonth(allExpenses);
+  const totalExpenses=expenses.reduce((s,e)=>s+(e.amount||0),0);
+
+  // By category
   const byCat={};
-  EXPENSE_CATS.forEach(c=>{ byCat[c.key]={ label:c.label, icon:c.icon, total:0, count:0 } });
-  expenses.forEach(e=>{ if(byCat[e.category]){ byCat[e.category].total+=e.amount||0; byCat[e.category].count++ } });
+  EXPENSE_CATS.forEach(c=>{byCat[c.key]={label:c.label,icon:c.icon,total:0,count:0,items:[]}});
+  expenses.forEach(e=>{if(byCat[e.category]){byCat[e.category].total+=e.amount||0;byCat[e.category].count++;byCat[e.category].items.push(e)}});
   const sorted=Object.values(byCat).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);
-  document.getElementById('reportOutput').innerHTML=`
-    <div class="card">
-      <div class="card-header"><span class="card-title">Expense Report by Category — ${monthLabel()}</span><button class="btn btn-sm btn-primary" onclick="window.print()">🖨 Print</button></div>
-      <div class="table-wrap"><table>
-        <tr><th>Category</th><th>No. of Entries</th><th class="td-right">Total Spent</th></tr>
-        ${sorted.map(c=>`<tr><td>${c.icon} ${c.label}</td><td>${c.count}</td><td class="td-right td-red td-bold">${fmt(c.total)}</td></tr>`).join('')}
-        <tr style="border-top:2px solid var(--border)"><td class="td-bold">TOTAL</td><td class="td-bold">${sorted.reduce((s,c)=>s+c.count,0)}</td><td class="td-right td-bold">${fmt(sorted.reduce((s,c)=>s+c.total,0))}</td></tr>
-      </table></div>
-    </div>`;
-  document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
+
+  // Approval status
+  const approved=expenses.filter(e=>e.status==='approved').length;
+  const pending=expenses.filter(e=>e.status==='pending_approval').length;
+  const withReceipt=expenses.filter(e=>e.receiptNo).length;
+
+  const body=`
+    ${reportHeaderHTML('Expense Report', monthLabel(), settings)}
+
+    <div class="summary-grid">
+      <div class="summary-box"><div class="label">Total Expenditure</div><div class="value red">${fmt(totalExpenses)}</div></div>
+      <div class="summary-box"><div class="label">No. of Entries</div><div class="value blue">${expenses.length}</div></div>
+      <div class="summary-box"><div class="label">Categories Used</div><div class="value">${sorted.length}</div></div>
+      <div class="summary-box"><div class="label">With Receipts</div><div class="value green">${withReceipt}/${expenses.length}</div></div>
+      <div class="summary-box"><div class="label">Approved</div><div class="value green">${approved}</div></div>
+      ${pending>0?`<div class="summary-box"><div class="label">Pending Approval</div><div class="value amber">${pending}</div></div>`:''}
+    </div>
+
+    <div class="section-title">Summary by Category</div>
+    ${sorted.length?`<table>
+      <tr><th>S/N</th><th>Category</th><th class="td-c">No. of Items</th><th class="td-r">Amount (₦)</th><th class="td-c">% of Total</th></tr>
+      ${sorted.map((c,i)=>`<tr><td>${i+1}</td><td>${c.icon} ${c.label}</td><td class="td-c">${c.count}</td><td class="td-r td-bold">${fmt(c.total)}</td><td class="td-c">${Math.round(c.total/totalExpenses*100)}%</td></tr>`).join('')}
+      <tr class="total-row"><td colspan="2">GRAND TOTAL</td><td class="td-c">${sorted.reduce((s,c)=>s+c.count,0)}</td><td class="td-r">${fmt(totalExpenses)}</td><td class="td-c">100%</td></tr>
+    </table>`:'<div class="no-data">No expenses recorded.</div>'}
+
+    <div class="section-title">Detailed Line Items (All Expenses)</div>
+    ${expenses.length?`<table>
+      <tr><th>S/N</th><th>Date</th><th>Category</th><th>Description</th><th>Receipt No.</th><th>Recorded By</th><th class="td-r">Amount (₦)</th></tr>
+      ${expenses.map((e,i)=>`<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${EXPENSE_CATS.find(c=>c.key===e.category)?.label||e.category}</td><td>${esc(e.description)}</td><td>${e.receiptNo||'—'}</td><td>${esc(e.recordedBy||e.createdByName||'—')}</td><td class="td-r">${fmt(e.amount)}</td></tr>`).join('')}
+      <tr class="total-row"><td colspan="6">TOTAL EXPENDITURE</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
+    </table>`:'<div class="no-data">No expenses recorded for this period.</div>'}
+
+    ${withReceipt<expenses.length&&expenses.length>0?`<div class="note-box">⚠️ ${expenses.length-withReceipt} expense(s) do not have a receipt number attached. All expenditure should be supported by proper documentation.</div>`:''}
+
+    ${reportSignatureHTML()}`;
+
+  openPrintableReport('Expense Report — '+monthLabel(), body);
 }
 
 async function generatePettyCashReport(){
-  const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
-  // BUG FIX: use pettyMonthHistory() helper — old code was passing a plain object to filterByMonth(), returning ALL history instead of current month
+  const [pettyHistory, pettyConfig, settings] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getSettings()]);
   const history=pettyMonthHistory(pettyHistory);
-  const disbursed=history.filter(h=>h.type!=='refill'&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
+  const disbursements=history.filter(h=>h.type!=='refill'&&(h.status==='approved'||h.status==='settled'));
+  const disbursed=disbursements.reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
   const settled=history.filter(h=>h.status==='settled'&&h.type!=='refill').reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
-  const refilled=history.filter(h=>h.type==='refill').reduce((s,h)=>s+(h.amount||0),0);
+  const refills=history.filter(h=>h.type==='refill');
+  const refilled=refills.reduce((s,h)=>s+(h.amount||0),0);
   const unaccounted=disbursed-settled;
-  document.getElementById('reportOutput').innerHTML=`
-    <div class="card">
-      <div class="card-header"><span class="card-title">Petty Cash Reconciliation — ${monthLabel()}</span><button class="btn btn-sm btn-primary" onclick="window.print()">🖨 Print</button></div>
-      <div class="kpi-grid">
-        <div class="kpi"><div class="kpi-label">Current Float Balance</div><div class="kpi-val">${fmt(pettyConfig.float)}</div></div>
-        <div class="kpi"><div class="kpi-label">Disbursed This Month</div><div class="kpi-val td-red">${fmt(disbursed)}</div></div>
-        <div class="kpi"><div class="kpi-label">Receipts Settled</div><div class="kpi-val td-green">${fmt(settled)}</div></div>
-        <div class="kpi"><div class="kpi-label">Unaccounted (No Receipt)</div><div class="kpi-val ${'td-amber'}">${fmt(unaccounted)}</div></div>
-      </div>
-      ${unaccounted>0?'<div class="alert alert-warn"><span class="alert-icon">⚠</span><span>'+fmt(unaccounted)+' disbursed but no receipt yet. Follow up with Admin Officer.</span></div>':''}
-      <div class="table-wrap"><table>
-        <tr><th>Date</th><th>Purpose</th><th>Requested By</th><th>Approved By</th><th>Status</th><th class="td-right">Approved</th><th class="td-right">Actual Spent</th><th>Receipt</th></tr>
-        ${history.map(h=>`<tr>
-          <td>${fmtDate(h.createdAt)}</td>
-          <td>${h.type==='refill'?'[Cash Top-Up]':h.purpose}</td>
-          <td class="td-muted">${h.requestedBy||'—'}</td>
-          <td class="td-muted">${h.approvedBy||h.authorizedBy||'—'}</td>
-          <td><span class="badge ${h.status==='settled'?'badge-success':h.status==='approved'?'badge-info':h.status==='rejected'?'badge-danger':'badge-warn'}">${h.status?.replace('_',' ')||'—'}</span></td>
-          <td class="td-right">${fmt(h.amount)}</td>
-          <td class="td-right td-bold">${h.actualAmount!=null?fmt(h.actualAmount):h.status==='settled'?fmt(h.amount):'—'}</td>
-          <td>${h.receiptNo||'—'}</td>
-        </tr>`).join('')}
-        <tr style="border-top:2px solid var(--border);font-weight:700">
-          <td colspan="5">TOTALS</td>
-          <td class="td-right">${fmt(history.filter(h=>h.type!=='refill').reduce((s,h)=>s+(h.amount||0),0))}</td>
-          <td class="td-right">${fmt(settled)}</td>
-          <td>${history.filter(h=>h.receiptNo).length} receipts</td>
-        </tr>
-      </table></div>
-      <div class="print-signature">
-        <div class="print-sig-box">Prepared by (Accountant)<br><br><br>${state.user?.name}</div>
-        <div class="print-sig-box">Admin Officer Confirmation<br><br><br>_________________</div>
-        <div class="print-sig-box">Date<br><br><br>${fmtDate(new Date().toISOString())}</div>
-      </div>
-    </div>`;
-  document.getElementById('reportOutput').scrollIntoView({behavior:'smooth'});
+  const rejected=history.filter(h=>h.status==='rejected').length;
+  const pendingCount=history.filter(h=>h.status==='pending'||h.status==='pending_approval').length;
+
+  const body=`
+    ${reportHeaderHTML('Petty Cash Reconciliation Report', monthLabel(), settings)}
+
+    <div class="summary-grid">
+      <div class="summary-box"><div class="label">Approved Float</div><div class="value blue">${fmt(pettyConfig.float||0)}</div></div>
+      <div class="summary-box"><div class="label">Disbursed This Month</div><div class="value red">${fmt(disbursed)}</div></div>
+      <div class="summary-box"><div class="label">Receipts Accounted</div><div class="value green">${fmt(settled)}</div></div>
+      <div class="summary-box"><div class="label">Unaccounted</div><div class="value ${unaccounted>0?'amber':'green'}">${fmt(unaccounted)}</div></div>
+      <div class="summary-box"><div class="label">Refills This Month</div><div class="value blue">${fmt(refilled)}</div></div>
+      <div class="summary-box"><div class="label">Total Transactions</div><div class="value">${history.length}</div></div>
+    </div>
+
+    ${unaccounted>0?`<div class="note-box">⚠️ ${fmt(unaccounted)} has been disbursed but not yet accounted for with receipts. The Admin Officer should follow up and submit receipts within 48 hours of each disbursement.</div>`:''}
+
+    <div class="section-title">Imprest Account Status</div>
+    <table>
+      <tr><td style="font-weight:600">Approved Float Amount</td><td class="td-r">${fmt(pettyConfig.float||0)}</td></tr>
+      <tr><td style="font-weight:600">Total Disbursed (Approved + Settled)</td><td class="td-r td-red">− ${fmt(disbursed)}</td></tr>
+      <tr><td style="font-weight:600">Total Refilled</td><td class="td-r td-green">+ ${fmt(refilled)}</td></tr>
+      <tr><td style="font-weight:600">Receipts Submitted &amp; Settled</td><td class="td-r td-green">${fmt(settled)}</td></tr>
+      <tr><td style="font-weight:600">Pending Receipt Submission</td><td class="td-r ${unaccounted>0?'td-amber':'td-green'}">${fmt(unaccounted)}</td></tr>
+      ${rejected>0?`<tr><td style="font-weight:600">Rejected Requests</td><td class="td-r td-red">${rejected}</td></tr>`:''}
+      ${pendingCount>0?`<tr><td style="font-weight:600">Awaiting Approval</td><td class="td-r td-amber">${pendingCount}</td></tr>`:''}
+    </table>
+
+    <div class="section-title">Transaction Details</div>
+    ${history.length?`<table>
+      <tr><th>S/N</th><th>Date</th><th>Type</th><th>Purpose</th><th>Requested By</th><th>Approved By</th><th>Status</th><th class="td-r">Approved (₦)</th><th class="td-r">Actual (₦)</th><th>Receipt</th></tr>
+      ${history.map((h,i)=>`<tr>
+        <td>${i+1}</td>
+        <td>${fmtDate(h.createdAt)}</td>
+        <td>${h.type==='refill'?'<span class="badge badge-info">Refill</span>':h.type==='advance'?'<span class="badge badge-warn">Advance</span>':'<span class="badge badge-success">Direct</span>'}</td>
+        <td>${h.type==='refill'?'Cash Top-Up / Refill':esc(h.purpose||'—')}</td>
+        <td>${esc(h.requestedBy||'—')}</td>
+        <td>${esc(h.approvedBy||h.authorizedBy||'—')}</td>
+        <td>${h.status==='settled'?'<span class="badge badge-success">Settled</span>':h.status==='approved'?'<span class="badge badge-info">Approved</span>':h.status==='rejected'?'<span class="badge badge-danger">Rejected</span>':'<span class="badge badge-warn">Pending</span>'}</td>
+        <td class="td-r">${fmt(h.amount)}</td>
+        <td class="td-r td-bold">${h.actualAmount!=null?fmt(h.actualAmount):h.status==='settled'?fmt(h.amount):'—'}</td>
+        <td>${h.receiptNo||'—'}</td>
+      </tr>`).join('')}
+      <tr class="total-row">
+        <td colspan="7">TOTALS</td>
+        <td class="td-r">${fmt(history.filter(h=>h.type!=='refill').reduce((s,h)=>s+(h.amount||0),0))}</td>
+        <td class="td-r">${fmt(settled)}</td>
+        <td>${history.filter(h=>h.receiptNo).length} receipt(s)</td>
+      </tr>
+    </table>`:'<div class="no-data">No petty cash transactions for this period.</div>'}
+
+    ${reportSignatureHTML().replace('Church Accountant','Church Accountant').replace('Reviewed &amp; Approved by:','Confirmed by (Admin Officer):')}`;
+
+  openPrintableReport('Petty Cash Report — '+monthLabel(), body);
 }
 
 // ── AUDIT LOG ─────────────────────────────
