@@ -246,17 +246,53 @@ function hasPermission(p){
   return perms.includes('all') || perms.includes(p);
 }
 function can(...ps){ return ps.some(p=>hasPermission(p)) }
-const PAGE_PERMISSION_RULES = {
-  transactions: ['transactions'],
-  bank: ['bank'],
-  audit: ['audit']
+const ACCESS_RULES = {
+  pages: {
+    dashboard: ['dashboard'],
+    transactions: ['transactions'],
+    income: ['income'],
+    remittances: ['remittances','remittances_view'],
+    expenses: ['expenses','expenses_view'],
+    bank: ['bank'],
+    petty_cash: ['petty_request','petty_approve','petty_view'],
+    reports: ['reports'],
+    audit: ['audit'],
+    admin: ['all']
+  },
+  actions: {
+    income_record: ['income'],
+    income_deposit: ['income'],
+    remittance_record_payment: ['income'],
+    expense_log: ['expenses'],
+    bank_withdrawal: ['income'],
+    bank_charge: ['expenses'],
+    petty_request: ['petty_request'],
+    petty_topup_payment: ['income'],
+    petty_approve_or_view: ['income','petty_approve'],
+    expense_edit_pending: { roles:['admin_officer','it_admin'] },
+    expense_delete_pending: { roles:['admin_officer','it_admin'] },
+    expense_approve_pending: { roles:['accountant','it_admin'] },
+    topup_cancel: ({ request }) => !!request && (state.user?.role==='it_admin' || state.user?.name===request.requestedBy)
+  }
 };
+function evaluateAccessRule(rule, ctx={}){
+  if(!state.user || !rule) return false;
+  if(Array.isArray(rule)) return can(...rule);
+  if(typeof rule === 'function') return !!rule(ctx);
+  if(rule.roles && !rule.roles.includes(state.user.role)) return false;
+  if(rule.permissionsAny && !can(...rule.permissionsAny)) return false;
+  if(rule.permissionsAll && !rule.permissionsAll.every(hasPermission)) return false;
+  return true;
+}
+function canAction(action, ctx={}){
+  return evaluateAccessRule(ACCESS_RULES.actions[action], ctx);
+}
 function canAccessPage(page){
   if(!state.user) return false;
   const item = NAV.find(n=>n.id===page);
   if(item && !item.minRole.includes('all') && !item.minRole.includes(state.user.role)) return false;
-  const rules = PAGE_PERMISSION_RULES[page];
-  return !rules || can(...rules);
+  const rule = ACCESS_RULES.pages[page];
+  return rule ? evaluateAccessRule(rule) : false;
 }
 function monthLabel(){ return MONTHS[state.month]+' '+state.year }
 function defaultExpenseStatusForCurrentUser(){
@@ -1462,8 +1498,8 @@ async function renderDashboard(){
     <div class="page-header">
       <div><div class="page-title">Welcome, ${state.user?.name?.split(' ')[0]||'User'} 👋</div><div class="page-sub">${monthLabel()} Financial Overview</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${can('income')?`<button class="btn btn-primary" onclick="App.navigate('income')">📥 Record Income</button>`:''}
-        ${!can('income')&&can('expenses')?`<button class="btn btn-primary" onclick="App.navigate('expenses')">💸 Log Expenses</button>`:''}
+        ${canAction('income_record')?`<button class="btn btn-primary" onclick="App.navigate('income')">📥 Record Income</button>`:''}
+        ${!canAction('income_record')&&canAction('expense_log')?`<button class="btn btn-primary" onclick="App.navigate('expenses')">💸 Log Expenses</button>`:''}
       </div>
     </div>
 
@@ -1522,16 +1558,16 @@ async function renderDashboard(){
       </div>
     </div>
 
-    ${can('income','expenses','petty_request','reports')?`
+    ${(canAction('income_record')||canAction('expense_log')||canAction('petty_request')||canAccessPage('reports')||canAccessPage('remittances'))?`
     <div class="card">
       <div class="card-header"><span class="card-title">Quick Actions</span></div>
       <div class="qa-grid">
-        ${can('income')?`<button class="qa-btn" onclick="App.navigate('income')"><div class="qa-icon" style="background:#E1F5EE">📥</div><div class="qa-label">Record Collections</div><div class="qa-sub">Log Sunday income</div></button>`:''}
-        ${can('remittances','remittances_view')?`<button class="qa-btn" onclick="App.navigate('remittances')"><div class="qa-icon" style="background:#FCEBEB">📤</div><div class="qa-label">Remittances</div><div class="qa-sub">Calculate & pay HQ</div></button>`:''}
-        ${can('expenses')?`<button class="qa-btn" onclick="App.navigate('expenses')"><div class="qa-icon" style="background:#FAEEDA">💸</div><div class="qa-label">Log Expense</div><div class="qa-sub">Record spending</div></button>`:''}
-        ${can('petty_request','petty_view')?`<button class="qa-btn" onclick="App.navigate('petty_cash')"><div class="qa-icon" style="background:#EAF3DE">💳</div><div class="qa-label">Petty Cash</div><div class="qa-sub">${pendingPetty>0?pendingPetty+' pending':'Request / Approve'}</div></button>`:''}
-        ${can('income')?`<button class="qa-btn" onclick="App.showBankWithdrawal()"><div class="qa-icon" style="background:#E6F1FB">🏦</div><div class="qa-label">Bank Withdrawal</div><div class="qa-sub">Record a bank debit</div></button>`:''}
-        ${can('reports')?`<button class="qa-btn" onclick="App.navigate('reports')"><div class="qa-icon" style="background:#EEEDFE">📊</div><div class="qa-label">Reports</div><div class="qa-sub">Generate statements</div></button>`:''}
+        ${canAction('income_record')?`<button class="qa-btn" onclick="App.navigate('income')"><div class="qa-icon" style="background:#E1F5EE">📥</div><div class="qa-label">Record Collections</div><div class="qa-sub">Log Sunday income</div></button>`:''}
+        ${canAccessPage('remittances')?`<button class="qa-btn" onclick="App.navigate('remittances')"><div class="qa-icon" style="background:#FCEBEB">📤</div><div class="qa-label">Remittances</div><div class="qa-sub">Calculate & pay HQ</div></button>`:''}
+        ${canAction('expense_log')?`<button class="qa-btn" onclick="App.navigate('expenses')"><div class="qa-icon" style="background:#FAEEDA">💸</div><div class="qa-label">Log Expense</div><div class="qa-sub">Record spending</div></button>`:''}
+        ${canAccessPage('petty_cash')?`<button class="qa-btn" onclick="App.navigate('petty_cash')"><div class="qa-icon" style="background:#EAF3DE">💳</div><div class="qa-label">Petty Cash</div><div class="qa-sub">${pendingPetty>0?pendingPetty+' pending':'Request / Approve'}</div></button>`:''}
+        ${canAction('bank_withdrawal')?`<button class="qa-btn" onclick="App.showBankWithdrawal()"><div class="qa-icon" style="background:#E6F1FB">🏦</div><div class="qa-label">Bank Withdrawal</div><div class="qa-sub">Record a bank debit</div></button>`:''}
+        ${canAccessPage('reports')?`<button class="qa-btn" onclick="App.navigate('reports')"><div class="qa-icon" style="background:#EEEDFE">📊</div><div class="qa-label">Reports</div><div class="qa-sub">Generate statements</div></button>`:''}
         <button class="qa-btn" onclick="App.showKPSCAlert()"><div class="qa-icon" style="background:#FAEEDA">🔔</div><div class="qa-label">Alert KPSC</div><div class="qa-sub">Emergency support</div></button>
       </div>
     </div>`:''}
@@ -1647,9 +1683,9 @@ async function renderIncome(){
     <div class="page-header">
       <div><div class="page-title">Income Recording</div><div class="page-sub">${monthLabel()}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${can('income')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">📥 Sunday Collections</button>`:''}
-        ${can('income')?`<button class="btn btn-amber" onclick="App.showOtherIncomeForm()">➕ Other Income</button>`:''}
-        ${can('income')&&pendingCount>=1?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${pendingCount} pending)</button>`:''}
+        ${canAction('income_record')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">📥 Sunday Collections</button>`:''}
+        ${canAction('income_record')?`<button class="btn btn-amber" onclick="App.showOtherIncomeForm()">➕ Other Income</button>`:''}
+        ${canAction('income_deposit')&&pendingCount>=1?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${pendingCount} pending)</button>`:''}
       </div>
     </div>
     <div class="kpi-grid" style="margin-bottom:16px">
@@ -1657,7 +1693,7 @@ async function renderIncome(){
       <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">💵</div><div class="kpi-label">Cash Pending Deposit</div><div class="kpi-val" style="color:${pendingCashTotal>0?'var(--amber)':'var(--primary)'}">${fmt(pendingCashTotal)}</div><div class="kpi-delta ${pendingCashTotal>0?'warn':'up'}">${pendingCount>0?pendingCount+' record(s) awaiting deposit':'All cash deposited ✓'}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">🏦</div><div class="kpi-label">In Bank (this month)</div><div class="kpi-val">${fmt(totalDeposited)}</div><div class="kpi-delta up">Transfers + deposits</div></div>
     </div>
-    ${pendingCount>0&&can('income')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>${pendingCount} cash record(s)</strong> totalling <strong>${fmt(pendingCashTotal)}</strong> still held by accountant and not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
+    ${pendingCount>0&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>${pendingCount} cash record(s)</strong> totalling <strong>${fmt(pendingCashTotal)}</strong> still held by accountant and not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
     <div class="tabs">
       <button class="tab ${tab==='list'?'active':''}" onclick="App.setIncomeTab('list')">Sunday Collections (${sundayRecs.length})</button>
       <button class="tab ${tab==='other'?'active':''}" onclick="App.setIncomeTab('other')">Other Income (${otherRecs.length})</button>
@@ -1697,7 +1733,7 @@ async function renderIncomeList(records, cashTxOverride){
         <td>${statusBadge}</td>
         <td class="td-muted">${r.recordedBy||'—'}</td>
         <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-        ${can('income')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+        ${canAction('income_deposit')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
       </tr>`;}).join('')}
   </table></div></div>`;
 }
@@ -1728,7 +1764,7 @@ async function renderOtherIncomeList(records){
         <td>${statusBadge}</td>
         <td class="td-muted">${r.recordedBy||'—'}</td>
         <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-        ${can('income')&&isCash&&cashDep<(r.totalCollection||0)?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+        ${canAction('income_deposit')&&isCash&&cashDep<(r.totalCollection||0)?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
       </tr>`;}).join('')}
   </table></div></div>`;
 }
@@ -1805,12 +1841,13 @@ async function renderAllIncomeList(records, cashTxOverride){
         <td>${statusBadge}</td>
         <td class="td-muted">${r.recordedBy||'—'}</td>
         <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-        ${can('income')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+        ${canAction('income_deposit')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
       </tr>`;}).join('')}
   </table></div></div>`;
 }
 
 function showIncomeForm(){
+  if(!canAction('income_record')){ showAlert('You do not have permission to record income.','danger'); return; }
   const today = new Date().toISOString().split('T')[0];
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -1882,6 +1919,7 @@ function updateIncomeCashBreakdown(){
 }
 
 async function submitIncome(){
+  if(!canAction('income_record')){ showAlert('You do not have permission to record income.','danger'); return; }
   const date=document.getElementById('inc_date')?.value;
   const usher=document.getElementById('inc_usher')?.value?.trim();
   if(!date){ alert('Please select a date.'); return }
@@ -1964,10 +2002,11 @@ async function viewIncome(id){
     <div class="fs-12 text-muted">Recorded by: ${r.recordedBy||'—'} · ${isSunday?'Counted with: '+r.usher:'Donor: '+(r.donorName||'—')}</div>
     ${deposits.length?`<div class="fs-12 text-muted">Deposit records: ${deposits.map(d=>`${fmt(d.amount)} via ${d.depositMethod?.replace('_',' ')||'—'} on ${fmtDate(d.date)} (Ref: ${d.reference||'—'})`).join('; ')}</div>`:''}
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button>
-    ${can('income')&&cashHeld>depositedTotal?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
+    ${canAction('income_deposit')&&cashHeld>depositedTotal?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
 }
 
 async function confirmDeposit(id){
+  if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const allIncCD = await DB.getIncome();
   const r = allIncCD.find(x=>x.id===id);
   if(!r) return;
@@ -2010,6 +2049,7 @@ async function confirmDeposit(id){
 }
 
 async function submitCashDeposit(incomeId){
+  if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const amount  = parseFloat(document.getElementById('dep_amount')?.value)||0;
   const method  = document.getElementById('dep_method')?.value;
   const ref     = document.getElementById('dep_ref')?.value?.trim();
@@ -2024,6 +2064,7 @@ async function submitCashDeposit(incomeId){
 }
 
 async function confirmBulkDeposit(){
+  if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const allIncome = await DB.getIncome(); // all months — accountant may have old pending cash
   const cashTx = await DB.getCashTransactions();
   const pending = allIncome.map(r=>{
@@ -2103,6 +2144,7 @@ function toggleBulkSelectAll(checked){
 }
 
 async function submitBulkDeposit(){
+  if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const pending = state._bulkDepositPending || [];
   const method  = document.getElementById('bulk_dep_method')?.value;
   const ref     = document.getElementById('bulk_dep_ref')?.value?.trim();
@@ -2124,6 +2166,7 @@ async function submitBulkDeposit(){
 }
 
 function showOtherIncomeForm(){
+  if(!canAction('income_record')){ showAlert('You do not have permission to record income.','danger'); return; }
   const today = new Date().toISOString().split('T')[0];
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -2166,6 +2209,7 @@ function showOtherIncomeForm(){
 }
 
 async function submitOtherIncome(){
+  if(!canAction('income_record')){ showAlert('You do not have permission to record income.','danger'); return; }
   const date       = document.getElementById('oi_date')?.value;
   const source     = document.getElementById('oi_source')?.value;
   const donorName  = document.getElementById('oi_donor')?.value?.trim();
@@ -2296,7 +2340,7 @@ async function renderRemittances(){
         <div class="page-sub">All amounts due to RCCG National & Provincial authorities</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${can('income')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Payment</button>`:''}
+        ${canAction('remittance_record_payment')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Payment</button>`:''}
         <button class="btn btn-amber" onclick="App.printRemittanceReport()">📄 Download Report</button>
       </div>
     </div>
@@ -2355,7 +2399,7 @@ async function renderRemittances(){
         </table></div>
 
         <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
-          ${can('income')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Bulk Payment (${fmt(totalDue)})</button>`:''}
+          ${canAction('remittance_record_payment')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Bulk Payment (${fmt(totalDue)})</button>`:''}
           <button class="btn btn-amber" onclick="App.printRemittanceReport()">📄 Print / Download Report</button>
         </div>
       </div>
@@ -2464,6 +2508,7 @@ async function renderRemittances(){
 }
 
 async function showRemittancePaymentModal(){
+  if(!canAction('remittance_record_payment')){ showAlert('You do not have permission to record remittance payments.','danger'); return; }
   const [allIncome, settings, allUsers] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getUsers()]);
   const quotas=getQuotaList(settings);
   const fromDate=state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
@@ -2492,7 +2537,7 @@ async function showRemittancePaymentModal(){
       <span>${esc(u.name)}</span><span class="badge" style="font-size:10px;background:${ROLES[u.role]?.bg||'#eee'};color:${ROLES[u.role]?.color||'#333'}">${ROLES[u.role]?.label||u.role}</span>
     </label>`).join('');
 
-  const isCan=can('income'); // for role-aware submit label
+  const isCan=canAction('remittance_record_payment'); // for role-aware submit label
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">📤 Record Remittance Payment</div>
@@ -3031,7 +3076,7 @@ async function renderExpenses(){
         <div class="page-sub">${monthLabel()} — <strong>${fmt(total)}</strong> total${activeFilter?` · Filtered: ${activeCat?.label||activeFilter}`:''}${searchTerm?` · Search: "${searchTerm}"`:''}
         </div>
       </div>
-      ${can('expenses')?`<button class="btn btn-primary" onclick="App.showExpenseForm()">+ Log Expense</button>`:''}
+      ${canAction('expense_log')?`<button class="btn btn-primary" onclick="App.showExpenseForm()">+ Log Expense</button>`:''}
     </div>
 
     <!-- Financial Position Bar -->
@@ -3070,7 +3115,7 @@ async function renderExpenses(){
     <div class="card" style="margin-bottom:1rem">
       <div class="card-header">
         <span class="card-title">Category Breakdown</span>
-        ${activeFilter?`<button class="btn btn-sm" onclick="App.setExpCatFilter(null)">✕ Clear filter</button>`:can('expenses')?'<span style="font-size:11px;color:var(--text3)">Tap a category to log an expense</span>':''}
+        ${activeFilter?`<button class="btn btn-sm" onclick="App.setExpCatFilter(null)">✕ Clear filter</button>`:canAction('expense_log')?'<span style="font-size:11px;color:var(--text3)">Tap a category to log an expense</span>':''}
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">
         ${EXPENSE_CATS.map(c=>{
@@ -3078,7 +3123,7 @@ async function renderExpenses(){
           const pct  = total>0 ? (amt/total*100) : 0;
           const hasAmt = amt>0;
           return `
-          <button onclick="${can('expenses')?`App.showExpenseForm('${c.key}')`:``}" style="
+          <button onclick="${canAction('expense_log')?`App.showExpenseForm('${c.key}')`:``}" style="
             all:unset;display:flex;flex-direction:column;gap:6px;
             background:var(--surface);
             border:1.5px solid ${hasAmt?'var(--border2)':'var(--border)'};
@@ -3160,8 +3205,8 @@ async function renderExpenses(){
           if((e.cashAmount||0)>0) splitParts.push(`Cash: ${fmt(e.cashAmount||0)}`);
           const splitDetail = e.paymentMethod==='split'&&splitParts.length
             ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">${splitParts.join(' · ')}</div>` : '';
-          const canEditPending = (state.user?.role==='admin_officer' || state.user?.role==='it_admin') && e.status!=='approved';
-          const canApprovePending = (state.user?.role==='accountant' || state.user?.role==='it_admin') && e.status!=='approved';
+          const canEditPending = canAction('expense_edit_pending') && e.status!=='approved';
+          const canApprovePending = canAction('expense_approve_pending') && e.status!=='approved';
           const statusBadge = e.status==='approved'
             ? '<span class="badge badge-success">Approved</span>'
             : '<span class="badge badge-warn">Pending Approval</span>';
@@ -3276,6 +3321,7 @@ function getExpenseMethodOptionsForRole(role){
 }
 
 function showExpenseForm(preselectedCat){
+  if(!canAction('expense_log')){ showAlert('You do not have permission to log expenses.','danger'); return; }
   const today=new Date().toISOString().split('T')[0];
   const methodOptions = getExpenseMethodOptionsForRole(state.user?.role);
   const defaultMethod = methodOptions[0]?.value || 'bank_transfer';
@@ -3382,6 +3428,7 @@ function onExpSplitChange(){
 }
 
 async function submitExpense(){
+  if(!canAction('expense_log')){ showAlert('You do not have permission to log expenses.','danger'); return; }
   const date=document.getElementById('exp_date')?.value;
   const category=document.getElementById('exp_cat')?.value;
   const subCategory=document.getElementById('exp_subcat')?.value;
@@ -3477,7 +3524,7 @@ async function editExpense(id){
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
   if(exp.status==='approved'){ alert('Approved expenses cannot be edited.'); return }
-  if(!(state.user?.role==='admin_officer' || state.user?.role==='it_admin')){ alert('You are not allowed to edit this expense.'); return }
+  if(!canAction('expense_edit_pending')){ alert('You are not allowed to edit this expense.'); return }
 
   const amountStr = prompt('Update amount (₦):', String(exp.amount||0));
   if(amountStr===null) return;
@@ -3514,7 +3561,7 @@ async function deleteExpense(id){
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
   if(exp.status==='approved'){ alert('Approved expenses cannot be deleted.'); return }
-  if(!(state.user?.role==='admin_officer' || state.user?.role==='it_admin')){ alert('You are not allowed to delete this expense.'); return }
+  if(!canAction('expense_delete_pending')){ alert('You are not allowed to delete this expense.'); return }
   if(!confirm(`Delete this expense (${fmt(exp.amount)})?`)) return;
   if((exp.pettyAmount||0)>0){
     const pettyCfg = await DB.getPettyConfig();
@@ -3528,7 +3575,7 @@ async function deleteExpense(id){
 }
 
 async function approveExpense(id){
-  if(!(state.user?.role==='accountant' || state.user?.role==='it_admin')){ alert('You are not allowed to approve expenses.'); return }
+  if(!canAction('expense_approve_pending')){ alert('You are not allowed to approve expenses.'); return }
   const all = await DB.getExpenses();
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
@@ -3540,6 +3587,7 @@ async function approveExpense(id){
 }
 
 async function showBankWithdrawal(){
+  if(!canAction('bank_withdrawal')){ showAlert('You do not have permission to record bank withdrawals.','danger'); return; }
   const today = new Date().toISOString().split('T')[0];
   const allUsers = await DB.getUsers();
   const sigUsers = allUsers.filter(u=>['pastor','signatory','it_admin'].includes(u.role));
@@ -3803,12 +3851,12 @@ async function renderBank(){
     <div class="page-header">
       <div><div class="page-title">Bank Account</div><div class="page-sub">Balance: ${fmt(bankBalance)}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${can('income')&&pendingDepCount>0?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${pendingDepCount} pending · ${fmt(pendingDepTotal)})</button>`:''}
-        ${can('income')?`<button class="btn btn-primary" onclick="App.showBankWithdrawal()">🏦 Record Withdrawal</button>`:''}
-        ${can('expenses')?`<button class="btn" onclick="App.showBankChargeForm()">💳 Bank Charge</button>`:''}
+        ${canAction('income_deposit')&&pendingDepCount>0?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${pendingDepCount} pending · ${fmt(pendingDepTotal)})</button>`:''}
+        ${canAction('bank_withdrawal')?`<button class="btn btn-primary" onclick="App.showBankWithdrawal()">🏦 Record Withdrawal</button>`:''}
+        ${canAction('bank_charge')?`<button class="btn" onclick="App.showBankChargeForm()">💳 Bank Charge</button>`:''}
       </div>
     </div>
-    ${pendingDepCount>0&&can('income')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>${pendingDepCount} income record(s)</strong> totalling <strong>${fmt(pendingDepTotal)}</strong> have cash held by the Accountant and not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
+    ${pendingDepCount>0&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>${pendingDepCount} income record(s)</strong> totalling <strong>${fmt(pendingDepTotal)}</strong> have cash held by the Accountant and not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
 
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
       <div class="kpi">
@@ -3984,6 +4032,7 @@ function compareBankBalance(){
 }
 
 function showBankChargeForm(){
+  if(!canAction('bank_charge')){ showAlert('You do not have permission to record bank charges.','danger'); return; }
   const today=new Date().toISOString().split('T')[0];
   const bankSubcats = EXPENSE_SUBCATS.bank || ['Others...'];
   showModal(`
@@ -4003,6 +4052,7 @@ function showBankChargeForm(){
 }
 
 async function submitBankCharge(){
+  if(!canAction('bank_charge')){ showAlert('You do not have permission to record bank charges.','danger'); return; }
   const date = document.getElementById('bc_date')?.value;
   const subCategory = document.getElementById('bc_subcat')?.value;
   const description = document.getElementById('bc_desc')?.value?.trim() || subCategory;
@@ -4099,11 +4149,11 @@ async function renderPettyCash(){
         <div class="page-sub">Admin Officer's cash wallet — ${monthLabel()}</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${can('petty_request')?`
+        ${canAction('petty_request')?`
           <button class="btn btn-primary" onclick="App.showTopUpRequest()">↺ Request Top-Up</button>
           <button class="btn" onclick="App.showAdvanceRequest()">+ Request Advance</button>
         `:''}
-        ${can('income')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">📋 Record Top-Up Payment</button>`:''}
+        ${canAction('petty_topup_payment')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">📋 Record Top-Up Payment</button>`:''}
       </div>
     </div>
 
@@ -4115,7 +4165,7 @@ async function renderPettyCash(){
     <div class="card" style="margin-bottom:1rem">
       <div class="card-header">
         <span class="card-title">Cash Meter</span>
-        ${can('income')?`<button class="btn btn-sm btn-amber" onclick="App.showPettyRefill()">Record Top-Up Payment</button>`:''}
+        ${canAction('petty_topup_payment')?`<button class="btn btn-sm btn-amber" onclick="App.showPettyRefill()">Record Top-Up Payment</button>`:''}
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:center;padding:8px 0">
         <div style="text-align:center">
@@ -4142,7 +4192,7 @@ async function renderPettyCash(){
           </div>`:''}
         </div>
       </div>
-      ${expensesSinceRefillTotal>0&&can('petty_request')?`
+      ${expensesSinceRefillTotal>0&&canAction('petty_request')?`
       <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
         <div style="font-size:13px;color:var(--text2);margin-bottom:8px">
           The wallet has been used for ${fmt(expensesSinceRefillTotal)} in expenses since the last top-up.
@@ -4175,15 +4225,15 @@ async function renderPettyCash(){
           <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
             <div class="status-row-amt td-amber" style="white-space:nowrap">${fmt(r.amount)}</div>
             ${isTopup
-              ? can('income','petty_approve')
+              ? canAction('petty_approve_or_view')
                   ? `<button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">👁 View & Approve</button>`
                   : `<button class="btn btn-sm" onclick="App.approvePetty('${r.id}')">👁 View</button>`
-              : can('income','petty_approve')
+              : canAction('petty_approve_or_view')
                   ? `<button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">Approve</button>
                      <button class="btn btn-sm btn-danger" onclick="App.rejectPetty('${r.id}')">Reject</button>`
                   : ''
             }
-            ${isTopup && (state.user?.name===r.requestedBy || state.user?.role==='it_admin') ? `<button class="btn btn-sm btn-danger" onclick="App.cancelTopUpRequest('${r.id}')">Cancel</button>` : ''}
+            ${isTopup && canAction('topup_cancel', { request:r }) ? `<button class="btn btn-sm btn-danger" onclick="App.cancelTopUpRequest('${r.id}')">Cancel</button>` : ''}
           </div>
         </div>`;
       }).join('') : '<div class="empty-table">No pending requests.</div>'}
@@ -4360,6 +4410,7 @@ async function renderPettyCash(){
 }
 // ── TOP-UP REQUEST (Admin Officer: wallet is low, based on expenses already logged) ──
 async function showTopUpRequest(){
+  if(!canAction('petty_request')){ showAlert('You do not have permission to request petty cash top-up.','danger'); return; }
   const [pettyConfig, allExpenses, allPettyRaw] = await Promise.all([DB.getPettyConfig(), DB.getExpenses(), DB.getPetty()]);
   // allPettyRaw is newest-first from API — find() without reverse picks the most recent refill
   const lastRefill = allPettyRaw.find(h=>h.type==='refill');
@@ -4452,6 +4503,7 @@ async function showTopUpRequest(){
 }
 
 async function submitTopUpRequest(){
+  if(!canAction('petty_request')){ showAlert('You do not have permission to request petty cash top-up.','danger'); return; }
   const expenseIds = state._topupExpenseIds || [];
   const amount = parseFloat(document.getElementById('topup_amt')?.value)||0;
   const override = !!document.getElementById('topup_override')?.checked;
@@ -4502,7 +4554,7 @@ async function cancelTopUpRequest(id){
   const req = pettyHistory.find(h=>h.id===id);
   if(!req || req.type!=='topup_request') return;
   if(req.status!=='pending_approval'){ alert('Only pending top-up requests can be cancelled.'); return }
-  const canCancel = state.user?.role==='it_admin' || state.user?.name===req.requestedBy;
+  const canCancel = canAction('topup_cancel', { request:req });
   if(!canCancel){ alert('You are not allowed to cancel this request.'); return }
   if(!confirm(`Cancel top-up request of ${fmt(req.amount)}?`)) return;
   await DB.updatePettyEntry(id, { status:'cancelled', rejectedAt:new Date().toISOString(), rejectionReason:'Cancelled by requester' });
@@ -4514,6 +4566,7 @@ async function cancelTopUpRequest(id){
 
 // ── ADVANCE REQUEST (Admin Officer: needs cash before buying) ─────
 async function showAdvanceRequest(){
+  if(!canAction('petty_request')){ showAlert('You do not have permission to request cash advances.','danger'); return; }
   const pettyConfig = await DB.getPettyConfig();
   const cashOnHand = pettyConfig.float;
   showModal(`
@@ -4549,6 +4602,7 @@ async function showAdvanceRequest(){
 }
 
 async function submitAdvanceRequest(){
+  if(!canAction('petty_request')){ showAlert('You do not have permission to request cash advances.','danger'); return; }
   const purpose  = document.getElementById('adv_purpose')?.value?.trim();
   const amount   = parseFloat(document.getElementById('adv_amt')?.value)||0;
   const category = document.getElementById('adv_cat')?.value;
@@ -4579,6 +4633,7 @@ async function submitAdvanceRequest(){
 async function showPettyRequest(){ showTopUpRequest(); }
 
 async function approvePetty(id){
+  if(!canAction('petty_approve_or_view')){ showAlert('You do not have permission to approve petty cash requests.','danger'); return; }
   const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
   const req = pettyHistory.find(h=>h.id===id);
   if(!req) return;
@@ -4730,6 +4785,7 @@ ${content}
 }
 
 async function confirmTopupApproval(id){
+  if(!canAction('petty_approve_or_view')){ showAlert('You do not have permission to approve petty cash requests.','danger'); return; }
   const [pettyHistory] = await Promise.all([DB.getPetty()]);
   const req = pettyHistory.find(h=>h.id===id);
   if(!req){ closeModal(); return; }
@@ -4752,12 +4808,14 @@ async function confirmTopupApproval(id){
 }
 
 async function rejectPettyFromModal(id){
+  if(!canAction('petty_approve_or_view')){ showAlert('You do not have permission to reject petty cash requests.','danger'); return; }
   closeModal();
   rejectPetty(id);
 }
 
 
 async function rejectPetty(id){
+  if(!canAction('petty_approve_or_view')){ showAlert('You do not have permission to reject petty cash requests.','danger'); return; }
   const reason=prompt('Reason for rejection (the requester will see this):');
   const pettyHistory=await DB.getPetty();
   const req=pettyHistory.find(h=>h.id===id);
@@ -4871,6 +4929,7 @@ async function confirmPettyReceipt(id){
 }
 
 async function showPettyRefill(prefillAmount, topupRequestId=''){
+  if(!canAction('petty_topup_payment')){ showAlert('You do not have permission to record petty cash top-up payments.','danger'); return; }
   const [pettyHistory, pettyConfig, allUsers] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getUsers()]);
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
   const settled = pettyMonthHistory(petty.history).filter(h=>h.status==='settled'&&h.type!=='refill');
@@ -4962,6 +5021,7 @@ function onRefillMethodChange(){
 }
 
 async function submitRefill(){
+  if(!canAction('petty_topup_payment')){ showAlert('You do not have permission to record petty cash top-up payments.','danger'); return; }
   const amt = parseFloat(document.getElementById('ref_amt')?.value)||0;
   const method = document.querySelector('input[name="ref_method"]:checked')?.value||'bank_transfer';
   const topupRequestId = document.getElementById('ref_topup_id')?.value?.trim();
