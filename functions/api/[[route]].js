@@ -169,6 +169,8 @@ async function handleInit(DB) {
       bank_transfer_amount  REAL DEFAULT 0,
       direct_petty_cash     REAL DEFAULT 0,
       source                TEXT DEFAULT 'sunday_collection',
+      payment_method        TEXT DEFAULT '',
+      donor_name            TEXT DEFAULT '',
       usher                 TEXT DEFAULT '',
       recorded_by           TEXT DEFAULT '',
       deposit_confirmed     INTEGER DEFAULT 0,
@@ -294,6 +296,8 @@ async function handleInit(DB) {
     `ALTER TABLE income ADD COLUMN bank_transfer_amount REAL DEFAULT 0`,
     `ALTER TABLE income ADD COLUMN direct_petty_cash REAL DEFAULT 0`,
     `ALTER TABLE income ADD COLUMN source TEXT DEFAULT 'sunday_collection'`,
+    `ALTER TABLE income ADD COLUMN payment_method TEXT DEFAULT ''`,
+    `ALTER TABLE income ADD COLUMN donor_name TEXT DEFAULT ''`,
     // Expense columns
     `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
     `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
@@ -418,6 +422,19 @@ async function deleteUser(DB, id) {
   return ok({ deleted: id });
 }
 
+function inferIncomePaymentMethod(row) {
+  if (row.payment_method) return row.payment_method;
+  // Backward compatibility for old rows that predate income.payment_method.
+  // Missing source values are also treated as legacy Sunday collections.
+  // Sunday uses split cash/bank fields, so there is no single payment method
+  // and we return an empty string.
+  if (!row.source || row.source === 'sunday_collection') return '';
+  const total = Number(row.total_collection || 0);
+  const bank  = Number(row.bank_transfer_amount || 0);
+  if (total <= 0) return '';
+  return bank >= total ? 'bank_transfer' : 'cash';
+}
+
 // ── INCOME ────────────────────────────────────────────────────────
 async function getIncome(DB) {
   const { results } = await DB.prepare(`SELECT * FROM income ORDER BY date DESC, created_at DESC`).all();
@@ -444,13 +461,45 @@ async function getIncome(DB) {
     depositDate:         row.deposit_date,
     notes:               row.notes,
     createdAt:           row.created_at,
+    paymentMethod:       inferIncomePaymentMethod(row),
+    donorName:           row.donor_name || '',
   })));
 }
 
 async function createIncome(DB, data) {
   const id = data.id || newId('INC-');
   const hasSplitCols = await tableHasColumns(DB, 'income', ['bank_transfer_amount', 'direct_petty_cash', 'source']);
-  if (hasSplitCols) {
+  const hasMetaCols  = await tableHasColumns(DB, 'income', ['payment_method', 'donor_name']);
+  if (hasSplitCols && hasMetaCols) {
+    await DB.prepare(`
+      INSERT INTO income
+        (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
+         slo,crm,workers_offering,children_offering,total_collection,
+         bank_transfer_amount,direct_petty_cash,source,payment_method,donor_name,
+         usher,recorded_by,notes)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id,
+      data.date                 || new Date().toISOString().split('T')[0],
+      data.membersTithe         || 0,
+      data.ministersTithe       || 0,
+      data.thanksgiving         || 0,
+      data.sundaySchool         || 0,
+      data.slo                  || 0,
+      data.crm                  || 0,
+      data.workersOffering      || 0,
+      data.childrenOffering     || 0,
+      data.totalCollection      || 0,
+      data.bankTransferAmount   || 0,
+      data.directPettyCash      || 0,
+      data.source               || 'sunday_collection',
+      data.paymentMethod        || '',
+      data.donorName            || '',
+      data.usher                || '',
+      data.recordedBy           || '',
+      data.notes                || '',
+    ).run();
+  } else if (hasSplitCols) {
     await DB.prepare(`
       INSERT INTO income
         (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,

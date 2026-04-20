@@ -1432,6 +1432,7 @@ async function submitOtherIncome(){
   const notes      = document.getElementById('oi_notes')?.value||'';
   if(!date||!source){ alert('Please select a date and source type.'); return }
   if(!amount){ alert('Please enter an amount.'); return }
+  if(!method){ alert('Please select a payment method.'); return }
 
   // Build a record compatible with the income structure
   const rec = {
@@ -1449,9 +1450,11 @@ async function submitOtherIncome(){
   // local_only donations have no remittance split; they appear in income totals but not in remittance calculations
 
   await DB.addIncome(rec);
-  DB.addNotification('Other Income Recorded',`${fmt(amount)} recorded (${source}) from ${donorName||'unnamed'}`,'success');
+  const sourceLabel = OTHER_INCOME_SOURCES.find(s=>s.key===source)?.label || source;
+  DB.addAudit('income_recorded',`Other income ${fmt(amount)} (${sourceLabel}) via ${method.replace(/_/g,' ')} from ${donorName||'unnamed donor'} on ${fmtDate(date)}`,state.user?.name);
+  DB.addNotification('Other Income Recorded',`${fmt(amount)} recorded (${sourceLabel}) from ${donorName||'unnamed'}`,'success');
   closeModal();
-  showAlert(`${fmt(amount)} recorded as ${OTHER_INCOME_SOURCES.find(s=>s.key===source)?.label||source}. Method: ${method.replace('_',' ')}.`,'success');
+  showAlert(`${fmt(amount)} recorded as ${sourceLabel}. Method: ${method.replace(/_/g,' ')}.`,'success');
   renderIncome();
   buildSidebar();
 }
