@@ -2808,26 +2808,73 @@ async function showBankWithdrawal(){
       <span class="badge" style="font-size:10px;background:${ROLES[u.role]?.bg||'#eee'};color:${ROLES[u.role]?.color||'#333'}">${ROLES[u.role]?.label||u.role}</span>
     </label>`).join('');
 
+  const catOptions = EXPENSE_CATS.map(c=>`<option value="${c.key}">${c.icon} ${c.label}</option>`).join('');
+
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">🏦 Record Bank Withdrawal</div>
-    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Record cash withdrawn from the church bank account. Select where the withdrawn cash is going — this determines how the balance is updated.</span></div>
-    <div class="form-group"><label class="form-label">Date *</label><input type="date" id="wd_date" class="form-input" value="${today}" max="${today}" /></div>
-    <div class="form-group"><label class="form-label">Amount Withdrawn (₦) *</label><input type="number" id="wd_amt" class="form-input" placeholder="0" min="0" /></div>
-    <div class="form-group"><label class="form-label">Destination of Cash *</label>
-      <select id="wd_dest" class="form-select">
-        <option value="accountant_cash">→ Accountant's Cash (for payment of expenses, etc.)</option>
-        <option value="admin_petty_cash">→ Admin Officer's Petty Cash (to top up the imprest wallet)</option>
-        <option value="direct_expense">→ Direct Expense Payment (e.g. vendor paid immediately)</option>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Record cash withdrawn from the church bank account. Choose where the cash is going — this keeps the balance accurate.</span></div>
+
+    <div class="form-group"><label class="form-label">Date *</label>
+      <input type="date" id="wd_date" class="form-input" value="${today}" max="${today}" />
+    </div>
+    <div class="form-group"><label class="form-label">Amount Withdrawn (₦) *</label>
+      <input type="number" id="wd_amt" class="form-input" placeholder="0" min="0" oninput="App.onWdAmtChange()" />
+    </div>
+    <div class="form-group"><label class="form-label">Destination *</label>
+      <select id="wd_dest" class="form-select" onchange="App.onWdDestChange()">
+        <option value="accountant_cash">→ Accountant's Cash (for expenses, remittances, etc.)</option>
+        <option value="admin_petty_cash">→ Admin Officer's Petty Cash (top up the imprest wallet)</option>
+        <option value="direct_expense">→ Direct Expense Payment (vendor paid immediately from bank)</option>
       </select>
     </div>
-    <div class="form-group"><label class="form-label">Purpose / Description *</label><input type="text" id="wd_desc" class="form-input" placeholder="e.g. Generator repair, Petty cash top-up" /></div>
-    <div class="form-group"><label class="form-label">Bank Reference / Teller No.</label><input type="text" id="wd_ref" class="form-input" placeholder="Optional reference number" /></div>
+    <div class="form-group"><label class="form-label">Purpose / Description *</label>
+      <input type="text" id="wd_desc" class="form-input" placeholder="e.g. Generator repair, Church van fuel" />
+    </div>
+
+    <!-- Direct Expense fields — shown only when Direct Expense Payment is selected -->
+    <div id="wd_expense_section" style="display:none;background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:14px;border-left:3px solid var(--primary)">
+      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--primary);margin-bottom:10px">📋 Expense Details</div>
+      <div class="form-group" style="margin-bottom:10px">
+        <label class="form-label">Expense Category *</label>
+        <select id="wd_exp_cat" class="form-select">${catOptions}</select>
+      </div>
+      <div class="form-group" style="margin-bottom:10px">
+        <label class="form-label">Vendor / Paid To</label>
+        <input type="text" id="wd_exp_vendor" class="form-input" placeholder="e.g. EEDC, Total Filling Station, Mr Emeka" />
+      </div>
+      <div class="form-group" style="margin-bottom:0">
+        <label class="form-label">Receipt / Invoice Number</label>
+        <input type="text" id="wd_exp_receipt" class="form-input" placeholder="Optional receipt or invoice number" />
+      </div>
+    </div>
+
+    <div class="form-group"><label class="form-label">Bank Reference / Teller No.</label>
+      <input type="text" id="wd_ref" class="form-input" placeholder="Optional bank reference number" />
+    </div>
     <div class="form-group">
       <label class="form-label">Authorized By * <span style="font-size:11px;color:var(--text3)">(select all who approved this withdrawal)</span></label>
       ${sigChecks || `<input type="text" id="wd_auth_text" class="form-input" placeholder="Signatory names" />`}
     </div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankWithdrawal()">Record Withdrawal</button></div>`);
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="wd_submit_btn" onclick="App.submitBankWithdrawal()">Record Withdrawal</button>
+    </div>`);
+}
+
+function onWdDestChange(){
+  const dest = document.getElementById('wd_dest')?.value;
+  const section = document.getElementById('wd_expense_section');
+  const btn = document.getElementById('wd_submit_btn');
+  if(section) section.style.display = dest==='direct_expense' ? '' : 'none';
+  if(btn) btn.textContent = dest==='direct_expense' ? 'Record Withdrawal & Log Expense' : 'Record Withdrawal';
+}
+
+function onWdAmtChange(){
+  // Keep expense amount in sync with withdrawal amount for direct expenses
+  const amt = document.getElementById('wd_amt')?.value;
+  const desc = document.getElementById('wd_desc')?.value;
+  // Nothing to sync to a field — amounts are the same, handled in submit
 }
 
 async function submitBankWithdrawal(){
@@ -2835,33 +2882,65 @@ async function submitBankWithdrawal(){
   const amount      = parseFloat(document.getElementById('wd_amt')?.value)||0;
   const destination = document.getElementById('wd_dest')?.value||'accountant_cash';
   const description = document.getElementById('wd_desc')?.value?.trim();
-  const reference   = document.getElementById('wd_ref')?.value;
+  const reference   = document.getElementById('wd_ref')?.value?.trim();
   const checkedSigs = [...document.querySelectorAll('input[name="wd_sig"]:checked')].map(c=>c.value);
   const authText    = document.getElementById('wd_auth_text')?.value?.trim();
   const auth        = checkedSigs.length>0 ? checkedSigs.join(', ') : authText;
-  if(!date||!amount||!description){ alert('Please fill all required fields (date, amount, description).'); return }
+
+  if(!date||!amount||!description){ alert('Please fill in the date, amount, and description.'); return }
   if(!auth){ alert('Please select at least one authorizing signatory.'); return }
 
-  await DB.addCashTransaction({ type:'withdrawal', destination, date, amount, description, reference, authorizedBy:auth, recordedBy:state.user?.name });
+  // For direct expenses, validate category is selected
+  const isDirect = destination==='direct_expense';
+  const expCat  = document.getElementById('wd_exp_cat')?.value;
+  const vendor  = document.getElementById('wd_exp_vendor')?.value?.trim();
+  const receipt = document.getElementById('wd_exp_receipt')?.value?.trim();
+  if(isDirect && !expCat){ alert('Please select an expense category.'); return }
 
-  // If withdrawn to admin officer petty cash, auto-create a petty refill
+  // 1. Record the bank withdrawal
+  await DB.addCashTransaction({ type:'withdrawal', destination, date, amount, description, reference, authorizedBy:auth, recordedBy:state.user?.name });
+  DB.addAudit('bank_withdrawal',`Bank withdrawal: ${fmt(amount)} to ${destination.replace(/_/g,' ')} — "${description}"${auth?` (auth: ${auth})`:''}`,state.user?.name);
+
+  // 2. Handle destination-specific side effects
   if(destination === 'admin_petty_cash'){
     const pettyConfigBW = await DB.getPettyConfig();
     const newFloat = Math.min(pettyConfigBW.float + amount, pettyConfigBW.max);
-    await DB.addPettyEntry({ type:'refill', amount, source:'bank_withdrawal',
+    await DB.addPettyEntry({
+      type:'refill', amount, source:'bank_withdrawal',
       reference, authorizedBy:auth, requestedBy:state.user?.name, status:'settled',
-      createdAt:new Date().toISOString(), purpose:`Bank withdrawal → Admin Officer Petty Cash: ${description}` });
+      createdAt:new Date().toISOString(),
+      purpose:`Bank withdrawal → Admin Officer Petty Cash: ${description}`
+    });
     await DB.savePettyConfig({ float: newFloat, max: pettyConfigBW.max });
-    DB.addAudit('petty_refilled',`${fmt(amount)} from bank withdrawal credited to Admin Officer petty cash (${description})`,state.user?.name);
+    DB.addAudit('petty_refilled',`${fmt(amount)} from bank withdrawal credited to petty cash (${description})`,state.user?.name);
     closeModal();
-    showAlert(`${fmt(amount)} withdrawn from bank and credited to Admin Officer petty cash. New float: ${fmt(newFloat)}.`,'success');
+    showAlert(`${fmt(amount)} withdrawn and credited to Admin Officer's petty cash. New wallet balance: ${fmt(newFloat)}.`,'success');
+
+  } else if(isDirect){
+    // Auto-create the expense record
+    const expDesc = vendor ? `${description} — ${vendor}` : description;
+    await DB.addExpense({
+      date, category:expCat,
+      subCategory: EXPENSE_CATS.find(c=>c.key===expCat)?.label||expCat,
+      description: expDesc,
+      amount,
+      paymentMethod:'bank_transfer',
+      bankAmount: amount,
+      receiptNo: receipt||'',
+      notes: `Direct bank withdrawal. Ref: ${reference||'—'}. Authorized by: ${auth}.`,
+      recordedBy: state.user?.name,
+      status:'approved'
+    });
+    DB.addAudit('expense_recorded',`Direct expense from bank withdrawal: ${fmt(amount)} — "${expDesc}" (${expCat})`,state.user?.name);
+    DB.addNotification('Direct Expense Logged',`${fmt(amount)} withdrawn and logged as expense: "${description}".`,'info');
+    closeModal();
+    showAlert(`${fmt(amount)} withdrawn and logged as an expense under "${EXPENSE_CATS.find(c=>c.key===expCat)?.label||expCat}". Ref: ${reference||'—'}.`,'success');
+
   } else {
     closeModal();
-    const destMsg = destination==='direct_expense'
-      ? `${fmt(amount)} withdrawn for direct expense payment. Please also log the expense in the Expenses page so the category and payee are recorded.`
-      : `Bank withdrawal of ${fmt(amount)} recorded. Destination: ${destination.replace(/_/g,' ')}.`;
-    showAlert(destMsg,'success');
+    showAlert(`Bank withdrawal of ${fmt(amount)} recorded. Destination: ${destination.replace(/_/g,' ')}.`,'success');
   }
+
   navigate(state.page);
 }
 
@@ -4901,7 +4980,7 @@ return {
   viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
-  showBankWithdrawal, submitBankWithdrawal,
+  showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
