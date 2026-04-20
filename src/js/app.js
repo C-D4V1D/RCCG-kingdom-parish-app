@@ -420,7 +420,6 @@ async function submitChangePin(){
   if(!currentPin || !newPin || !confirmPin){ showAlert('Please fill all PIN fields.','danger'); return; }
   if(!/^\d{4,6}$/.test(newPin)){ showAlert('New PIN must be 4-6 digits.','danger'); return; }
   if(newPin !== confirmPin){ showAlert('New PIN and confirmation do not match.','danger'); return; }
-  if(newPin === currentPin){ showAlert('New PIN must be different from current PIN.','danger'); return; }
   try{
     const res = await DB.changePin({ userId: state.user.id, currentPin, newPin });
     if(!res?.success) throw new Error('PIN update failed.');

@@ -52,6 +52,15 @@ async function verifyPin(storedPin, inputPin) {
   return stored === inputHash;
 }
 
+function publicUser(userRow) {
+  return {
+    id: userRow.id,
+    name: userRow.name,
+    role: userRow.role,
+    email: userRow.email || '',
+  };
+}
+
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
@@ -435,7 +444,7 @@ async function createUser(DB, data) {
   const hashedPin = await hashPin(pin);
   await DB.prepare(`INSERT INTO users (id,name,role,pin,email) VALUES (?,?,?,?,?)`)
     .bind(id, name, role, hashedPin, email).run();
-  return ok({ id, name, role, email });
+  return ok(publicUser({ id, name, role, email }));
 }
 
 async function updateUser(DB, id, data) {
@@ -447,7 +456,7 @@ async function updateUser(DB, id, data) {
   const pin   = (data.pin && isValidPin(data.pin)) ? await hashPin(data.pin) : row.pin;
   await DB.prepare(`UPDATE users SET name=?,role=?,email=?,pin=? WHERE id=?`)
     .bind(name, role, email, pin, id).run();
-  return ok({ id, name, role, email });
+  return ok(publicUser({ id, name, role, email }));
 }
 
 async function loginUser(DB, data) {
@@ -472,7 +481,7 @@ async function loginUser(DB, data) {
   if (!isHashedPin(row.pin)) {
     await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(pin), row.id).run();
   }
-  return ok({ id: row.id, name: row.name, role: row.role, email: row.email || '' });
+  return ok(publicUser(row));
 }
 
 async function deleteUser(DB, id) {
@@ -490,13 +499,12 @@ async function changeUserPin(DB, data) {
   if (!/^\d{4,6}$/.test(newPin)) {
     return err('newPin must be 4-6 digits', 400);
   }
-  if (currentPin === newPin) {
-    return err('newPin must be different from currentPin', 400);
-  }
   const row = await DB.prepare(`SELECT id, pin FROM users WHERE id=?`).bind(userId).first();
   if (!row) return err('User not found', 404);
   const validCurrentPin = await verifyPin(row.pin, currentPin);
   if (!validCurrentPin) return err('Current PIN is incorrect', 401);
+  const sameAsCurrent = await verifyPin(row.pin, newPin);
+  if (sameAsCurrent) return err('newPin must be different from currentPin', 400);
   await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(newPin), userId).run();
   return ok({ success: true, id: userId });
 }
