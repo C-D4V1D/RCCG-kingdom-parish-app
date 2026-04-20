@@ -932,7 +932,8 @@ async function adminImport(DB, data) {
   if (data.users && Array.isArray(data.users)) {
     for (const u of data.users) {
       try {
-        if (!u.id || !u.name || !u.role || !u.pin) { errs.push(`user:${u.id||'?'}`); continue; }
+        const pinStr = String(u.pin || '');
+        if (!u.id || !u.name || !u.role || !pinStr || !/^\d{4,6}$/.test(pinStr)) { errs.push(`user:${u.id||'?'}`); continue; }
         await DB.prepare(
           `INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES (?,?,?,?,?)`
         ).bind(u.id, u.name, u.role, String(u.pin), u.email || '').run();

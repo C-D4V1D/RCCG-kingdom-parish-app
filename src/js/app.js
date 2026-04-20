@@ -4459,8 +4459,9 @@ async function saveRates(){
     const local = pct2dec(`rate_${t.key}_local`);
     if(natl!==null) r[t.key].natl = natl;
     if(local!==null) r[t.key].local = local;
-    if(natl!==null && local!==null && Math.round((natl+local)*100) !== 100){
-      badRows.push(`${t.label} (${Math.round((natl+local)*100)}%)`);
+    if(natl!==null && local!==null){
+      const totalPct = Math.round((natl+local)*100);
+      if(totalPct !== 100) badRows.push(`${t.label} (${totalPct}%)`);
     }
   });
   if(badRows.length){
