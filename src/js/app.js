@@ -138,6 +138,7 @@ const DEFAULT_REMITTANCE_RATES = {
   tgNational:0.75, tgArea:0.05, tgPastor:0.10, tgMinisters:0.09, tgSeed:0.01,
   provinceRebate:0.20
 };
+const PIN_REGEX = /^\d{4,6}$/;
 
 // ──────────────────────────────────────────
 // 2. DATA LAYER — Cloudflare D1 via /api/*
@@ -152,10 +153,12 @@ async function apiFetch(path, method='GET', body=null){
 }
 
 const DB = {
+  login(d)                     { return apiFetch('auth/login','POST',d); },
   getUsers()                   { return apiFetch('users'); },
   addUser(d)                   { return apiFetch('users','POST',d); },
   updateUser(id,d)             { return apiFetch(`users/${id}`,'PUT',d); },
   deleteUser(id)               { return apiFetch(`users/${id}`,'DELETE'); },
+  changePin(d)                 { return apiFetch('change-pin','POST',d); },
 
   getIncome()                  { return apiFetch('income'); },
   addIncome(d)                 { return apiFetch('income','POST',d); },
@@ -365,22 +368,8 @@ async function login(){
   try {
     // Ensure tables exist — silently ignore if this fails (may already be initialised)
     try { await apiFetch('init'); } catch(initErr) { console.warn('init skipped:', initErr.message); }
-    const allUsers = await DB.getUsers();
-    const users = allUsers.filter(u=>u.role===role);
-    let user = null;
-    if(users.length>1){
-      const uid = document.getElementById('userSelect').value;
-      user = users.find(u=>u.id===uid && String(u.pin)===String(pin));
-    } else {
-      user = users.find(u=>String(u.pin)===String(pin));
-    }
-    if(!user){
-      errEl.textContent='Incorrect PIN. Please try again.';
-      errEl.style.display='block';
-      document.getElementById('pinInput').value='';
-      if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
-      return;
-    }
+    const uid = role==='signatory' ? (document.getElementById('userSelect')?.value || '') : '';
+    const user = await DB.login({ role, pin, userId: uid || undefined });
     errEl.style.display='none';
     state.user = user;
     DB.addAudit('login','User logged in',user.name);
@@ -388,7 +377,15 @@ async function login(){
     document.getElementById('appShell').style.display='flex';
     DB.getSettings().then(s=>{ state.rolePermissions = s.rolePermissions||null; initApp(); });
   } catch(e) {
-    errEl.textContent='Cannot connect to database: '+e.message;
+    const msg = String(e?.message || '');
+    if(msg.toLowerCase().includes('invalid credentials')){
+      errEl.textContent='Incorrect PIN. Please try again.';
+      document.getElementById('pinInput').value='';
+    } else if(msg.toLowerCase().includes('please select your name')){
+      errEl.textContent='Please select your name before signing in.';
+    } else {
+      errEl.textContent='Cannot connect to database: '+msg;
+    }
     errEl.style.display='block';
     if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
   }
@@ -403,6 +400,36 @@ function logout(){
   document.getElementById('roleSelect').value='';
   document.getElementById('pinInput').value='';
   document.getElementById('userSelectWrap').style.display='none';
+}
+
+function showChangePinModal(){
+  if(!state.user) return;
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">Change My PIN</div>
+    <div class="form-group"><label class="form-label">Current PIN</label><input type="password" id="cp_current" class="form-input" maxlength="6" placeholder="Current PIN" inputmode="numeric" /></div>
+    <div class="form-group"><label class="form-label">New PIN (4-6 digits)</label><input type="password" id="cp_new" class="form-input" maxlength="6" placeholder="New PIN" inputmode="numeric" /></div>
+    <div class="form-group"><label class="form-label">Confirm New PIN</label><input type="password" id="cp_confirm" class="form-input" maxlength="6" placeholder="Confirm PIN" inputmode="numeric" /></div>
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitChangePin()">Update PIN</button></div>`);
+}
+
+async function submitChangePin(){
+  if(!state.user) return;
+  const currentPin = document.getElementById('cp_current')?.value?.trim() || '';
+  const newPin = document.getElementById('cp_new')?.value?.trim() || '';
+  const confirmPin = document.getElementById('cp_confirm')?.value?.trim() || '';
+  if(!currentPin || !newPin || !confirmPin){ showAlert('Please fill all PIN fields.','danger'); return; }
+  if(!PIN_REGEX.test(newPin)){ showAlert('New PIN must be 4-6 digits.','danger'); return; }
+  if(newPin !== confirmPin){ showAlert('New PIN and confirmation do not match.','danger'); return; }
+  try{
+    const res = await DB.changePin({ userId: state.user.id, currentPin, newPin });
+    if(!res?.success) throw new Error('PIN update failed.');
+    DB.addAudit('pin_changed','User changed own PIN',state.user?.name);
+    closeModal();
+    showAlert('PIN changed successfully. Use the new PIN at next sign in.','success');
+  }catch(e){
+    showAlert(e.message || 'Failed to change PIN. Please try again.','danger');
+  }
 }
 
 // ──────────────────────────────────────────
@@ -474,6 +501,8 @@ async function buildSidebar(){
     });
   });
   nav.innerHTML=html;
+  // Append Change PIN action as the last item — available to all logged-in users
+  nav.innerHTML += `<div class="nav-section">Account</div><div class="nav-item" onclick="App.showChangePinModal()"><span class="nav-icon">🔑</span>Change PIN</div>`;
 }
 
 function buildBottomNav(){
@@ -5285,7 +5314,7 @@ function submitKPSCAlert(){
 // 8. PUBLIC API
 // ──────────────────────────────────────────
 return {
-  onRoleChange, login, logout, navigate, toggleSidebar, toggleNotifications,
+  onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
