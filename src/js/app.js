@@ -858,7 +858,7 @@ async function renderTransactions(){
   const mobileRows = rows.map(t=>{
     const d = txDirectionMeta(t.direction);
     return `
-    <tr class="tx-mobile-row" onclick="App.showTxDetail('${esc(t.id)}')" style="cursor:pointer" title="Tap to see full details">
+    <tr class="tx-mobile-row" onclick="App.showTxDetail('${esc(t.id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.showTxDetail('${esc(t.id)}')}" tabindex="0" style="cursor:pointer" title="Tap to see full details" role="button" aria-label="${esc(t.description||'Transaction')} — ${d.symbol}${fmt(t.amount||0)}">${''/* mobile row */}
       <td>
         <div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(t.date)}</div>
         <div class="td-muted" style="font-size:11px">${fmtTime(t.date)}</div>
@@ -1218,7 +1218,7 @@ async function exportTxPDF(){
   <div class="kpi"><div class="kpi-label">Total</div><div class="kpi-val">${filtered.length}</div></div>
   <div class="kpi"><div class="kpi-label">Credits</div><div class="kpi-val cr">&#x20A6;${Math.round(totals.credit).toLocaleString('en-NG')}</div></div>
   <div class="kpi"><div class="kpi-label">Debits</div><div class="kpi-val dr">&#x20A6;${Math.round(totals.debit).toLocaleString('en-NG')}</div></div>
-  <div class="kpi"><div class="kpi-label">Net Flow</div><div class="kpi-val" style="color:${net>=0?'#0F6E56':'#c0392b'}">&#x20A6;${Math.round(net).toLocaleString('en-NG')}</div></div>
+  <div class="kpi"><div class="kpi-label">Difference (In − Out)</div><div class="kpi-val" style="color:${net>=0?'#0F6E56':'#c0392b'}">&#x20A6;${Math.round(net).toLocaleString('en-NG')}</div></div>
 </div>
 <table>
   <tr><th>Date</th><th>Type</th><th>Module</th><th>Description / Notes</th><th class="td-r">Amount</th><th>Method</th><th>Status</th><th>Reference</th><th>By</th></tr>
