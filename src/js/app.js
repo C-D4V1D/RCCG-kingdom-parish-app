@@ -577,16 +577,50 @@ function txMethodLabel(method){
 
 function txStatusBadge(status){
   const s = String(status||'recorded').toLowerCase();
-  if(s==='paid' || s==='approved' || s==='settled' || s==='deposited') return '<span class="badge badge-success">Completed</span>';
-  if(s==='pending' || s==='pending_approval') return '<span class="badge badge-warn">Pending</span>';
-  if(s==='rejected') return '<span class="badge badge-danger">Rejected</span>';
+  if(s==='paid' || s==='approved' || s==='settled' || s==='deposited') return '<span class="badge badge-success">✅ Done</span>';
+  if(s==='pending' || s==='pending_approval') return '<span class="badge badge-warn">⏳ Pending</span>';
+  if(s==='rejected') return '<span class="badge badge-danger">❌ Rejected</span>';
   return `<span class="badge badge-gray">${esc(status||'Recorded')}</span>`;
 }
 
+function txStatusLabel(status){
+  const s = String(status||'recorded').toLowerCase();
+  if(s==='paid' || s==='approved' || s==='settled' || s==='deposited') return '✅ Done — this transaction has been completed and confirmed.';
+  if(s==='pending' || s==='pending_approval') return '⏳ Pending — waiting for someone to review or approve it.';
+  if(s==='rejected') return '❌ Rejected — this transaction was declined and will not be processed.';
+  return 'Recorded — saved in the system.';
+}
+
 function txDirectionMeta(direction){
-  if(direction==='credit') return { symbol:'+', label:'Credit transaction', cls:'td-green' };
-  if(direction==='debit') return { symbol:'−', label:'Debit transaction', cls:'td-red' };
-  return { symbol:'↔', label:'Transfer transaction', cls:'' };
+  if(direction==='credit') return { symbol:'+', label:'Money received (coming in)', cls:'td-green' };
+  if(direction==='debit') return { symbol:'−', label:'Money paid out (going out)', cls:'td-red' };
+  return { symbol:'↔', label:'Internal transfer (moving money between accounts)', cls:'' };
+}
+
+function txKindLabel(kind){
+  const map = {
+    income:'Sunday / Other Income',
+    expense:'Expense',
+    remittance:'RCCG Remittance',
+    cash_deposit:'Cash Deposit to Bank',
+    cash_withdrawal:'Bank Withdrawal',
+    topup_request:'Petty Cash Top-Up Request',
+    advance:'Petty Cash Advance',
+    refill:'Petty Cash Refill',
+    petty:'Petty Cash'
+  };
+  return map[kind] || String(kind||'').replace(/_/g,' ');
+}
+
+function txModuleLabel(module){
+  const map = {
+    income:'Income',
+    expenses:'Expenses',
+    remittances:'Remittances',
+    cash:'Cash / Bank',
+    petty_cash:'Petty Cash'
+  };
+  return map[module] || String(module||'').replace(/_/g,' ');
 }
 
 function txCurrentMonthDefaults(){
@@ -769,6 +803,7 @@ async function renderTransactions(){
   }
 
   const all = await buildTransactionsLedger();
+  state._txAll = all; // cache for showTxDetail lookups
 
   const search = (state.txSearch||'').trim().toLowerCase();
   const typeFilter = state.txTypeFilter||'';
@@ -802,78 +837,208 @@ async function renderTransactions(){
 
   const savedViews = getTxSavedViews();
 
+  // ── Desktop rows (hidden on mobile via CSS) ───────────────────────
+  const desktopRows = rows.map(t=>{
+    const d = txDirectionMeta(t.direction);
+    return `
+    <tr class="tx-desktop-row">
+      <td style="white-space:nowrap">${fmtDate(t.date)}<div class="td-muted">${fmtTime(t.date)}</div></td>
+      <td><span class="badge badge-gray">${esc(txKindLabel(t.kind))}</span></td>
+      <td class="td-muted">${esc(txModuleLabel(t.module))}</td>
+      <td><div style="font-size:13px;font-weight:500">${esc(t.description||'—')}</div>${t.notes?`<div class="td-muted" style="font-size:11px">${esc(t.notes)}</div>`:''}</td>
+      <td class="td-right ${d.cls}" title="${d.label}" aria-label="${d.label}: ${fmt(t.amount||0)}">${d.symbol}${fmt(t.amount||0)}</td>
+      <td class="td-muted">${esc(txMethodLabel(t.method))}</td>
+      <td>${txStatusBadge(t.status)}</td>
+      <td class="td-muted">${esc(t.reference||'—')}</td>
+      <td class="td-muted">${esc(t.actor||'—')}</td>
+    </tr>`;
+  }).join('');
+
+  // ── Mobile rows (hidden on desktop via CSS) ───────────────────────
+  const mobileRows = rows.map(t=>{
+    const d = txDirectionMeta(t.direction);
+    return `
+    <tr class="tx-mobile-row" onclick="App.showTxDetail('${esc(t.id)}')" style="cursor:pointer" title="Tap to see full details">
+      <td>
+        <div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(t.date)}</div>
+        <div class="td-muted" style="font-size:11px">${fmtTime(t.date)}</div>
+      </td>
+      <td style="max-width:0;width:60%">
+        <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.description||'—')}</div>
+        <div class="td-muted" style="font-size:11px">${esc(txModuleLabel(t.module))}</div>
+      </td>
+      <td class="td-right ${d.cls}" style="white-space:nowrap">${d.symbol}${fmt(t.amount||0)}</td>
+    </tr>`;
+  }).join('');
+
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
-      <div><div class="page-title">Transactions Ledger</div><div class="page-sub">Unified view across income, expenses, remittances, petty cash, and bank/cash movements</div></div>
+      <div>
+        <div class="page-title">Money Records</div>
+        <div class="page-sub">All income, expenses, remittances, petty cash and bank movements in one place</div>
+      </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         ${savedViews.length ? `
-          <select id="txViewSelect" class="form-select" style="width:auto" onchange="if(this.value!=='') App.loadTxView(this.value)" aria-label="Load saved view">
-            <option value="">📋 Saved Views</option>
+          <select id="txViewSelect" class="form-select" style="width:auto" onchange="if(this.value!=='') App.loadTxView(this.value)" aria-label="Load a saved filter view">
+            <option value="">📋 My Saved Filters</option>
             ${savedViews.map((v,i)=>`<option value="${i}">${esc(v.name)}</option>`).join('')}
           </select>
-          <button class="btn btn-sm btn-danger" title="Delete selected saved view" onclick="const s=document.getElementById('txViewSelect');if(s&&s.value!=='')App.deleteTxView(s.value)">🗑</button>
+          <button class="btn btn-sm btn-danger" title="Delete the selected saved filter" onclick="const s=document.getElementById('txViewSelect');if(s&&s.value!=='')App.deleteTxView(s.value)">🗑</button>
         ` : ''}
-        <button class="btn btn-sm" onclick="App.saveTxView()">💾 Save View</button>
-        <button class="btn btn-sm" onclick="App.exportTxCSV()">📥 CSV</button>
-        <button class="btn btn-sm" onclick="App.exportTxPDF()">🖨 PDF</button>
-        <button class="btn btn-sm" onclick="App.clearTxFilters()">✕ Clear Filters</button>
+        <button class="btn btn-sm" title="Save the current filters so you can quickly reload them later" onclick="App.saveTxView()">💾 Save Filters</button>
+        <button class="btn btn-sm" title="Download these results as a spreadsheet file" onclick="App.exportTxCSV()">📥 Spreadsheet</button>
+        <button class="btn btn-sm" title="Open a print-friendly version you can save as PDF" onclick="App.exportTxPDF()">🖨 Print / PDF</button>
+        <button class="btn btn-sm" title="Clear all filters and go back to this month's records" onclick="App.clearTxFilters()">✕ Reset Filters</button>
       </div>
     </div>
 
     <div class="kpi-grid" style="margin-bottom:12px">
-      <div class="kpi"><div class="kpi-label">Total Matching Transactions</div><div class="kpi-val">${filtered.length}</div><div class="kpi-delta">${all.length} total in ledger</div></div>
-      <div class="kpi"><div class="kpi-label">Credits (Shown)</div><div class="kpi-val" style="color:var(--success)">${fmt(totals.credit)}</div><div class="kpi-delta up">Money in</div></div>
-      <div class="kpi"><div class="kpi-label">Debits (Shown)</div><div class="kpi-val" style="color:var(--danger)">${fmt(totals.debit)}</div><div class="kpi-delta down">Money out</div></div>
-      <div class="kpi"><div class="kpi-label">Net Flow (Shown)</div><div class="kpi-val" style="color:${(totals.credit-totals.debit)>=0?'var(--success)':'var(--danger)'}">${fmt(totals.credit-totals.debit)}</div><div class="kpi-delta">Based on current filters</div></div>
+      <div class="kpi" title="How many transactions match your current search and filters">
+        <div class="kpi-label">Transactions Found</div>
+        <div class="kpi-val">${filtered.length}</div>
+        <div class="kpi-delta">${all.length} total on record</div>
+      </div>
+      <div class="kpi" title="Total money that came INTO the church (e.g. tithes, offerings, income)">
+        <div class="kpi-label">Money Received</div>
+        <div class="kpi-val" style="color:var(--success)">${fmt(totals.credit)}</div>
+        <div class="kpi-delta up">Coming in</div>
+      </div>
+      <div class="kpi" title="Total money that went OUT of the church (e.g. expenses, remittances)">
+        <div class="kpi-label">Money Paid Out</div>
+        <div class="kpi-val" style="color:var(--danger)">${fmt(totals.debit)}</div>
+        <div class="kpi-delta down">Going out</div>
+      </div>
+      <div class="kpi" title="Money Received minus Money Paid Out. A positive number means you received more than you spent in this period.">
+        <div class="kpi-label">Difference (In − Out)</div>
+        <div class="kpi-val" style="color:${(totals.credit-totals.debit)>=0?'var(--success)':'var(--danger)'}">${fmt(totals.credit-totals.debit)}</div>
+        <div class="kpi-delta">Based on current filters</div>
+      </div>
     </div>
 
     <div class="card">
-      <div class="card-header"><span class="card-title">Search / Filter / Sort</span></div>
+      <div class="card-header">
+        <span class="card-title">Search &amp; Filter</span>
+        <span class="td-muted" style="font-size:11px">Use these to narrow down the list</span>
+      </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;align-items:end">
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">Search</label><input class="form-input" value="${esc(state.txSearch||'')}" placeholder="Search description, ref, user, notes..." oninput="App.setTxFilter('search',this.value)" /></div>
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">Type</label><select class="form-select" onchange="App.setTxFilter('type',this.value)"><option value="">All</option>${typeOptions.map(v=>`<option value="${esc(v)}" ${typeFilter===v?'selected':''}>${esc(v.replace(/_/g,' '))}</option>`).join('')}</select></div>
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">Module</label><select class="form-select" onchange="App.setTxFilter('module',this.value)"><option value="">All</option>${moduleOptions.map(v=>`<option value="${esc(v)}" ${moduleFilter===v?'selected':''}>${esc(v.replace(/_/g,' '))}</option>`).join('')}</select></div>
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">Status</label><select class="form-select" onchange="App.setTxFilter('status',this.value)"><option value="">All</option>${statusOptions.map(v=>`<option value="${esc(v)}" ${statusFilter===v?'selected':''}>${esc(v.replace(/_/g,' '))}</option>`).join('')}</select></div>
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">Method</label><select class="form-select" onchange="App.setTxFilter('method',this.value)"><option value="">All</option>${methodOptions.map(v=>`<option value="${esc(v)}" ${methodFilter===v?'selected':''}>${esc(txMethodLabel(v))}</option>`).join('')}</select></div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Type any word to search — e.g. a name, amount, or description">🔍 Search</label>
+          <input class="form-input" value="${esc(state.txSearch||'')}" placeholder="e.g. Sunday, offering, tithe…" oninput="App.setTxFilter('search',this.value)" />
+          <div class="form-hint">Search by description, reference, or name</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Filter by what kind of transaction this is — e.g. income, expense, remittance">Transaction Type</label>
+          <select class="form-select" onchange="App.setTxFilter('type',this.value)">
+            <option value="">All Types</option>
+            ${typeOptions.map(v=>`<option value="${esc(v)}" ${typeFilter===v?'selected':''}>${esc(txKindLabel(v))}</option>`).join('')}
+          </select>
+          <div class="form-hint">What kind of money movement is it?</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Filter by which part of the app the transaction came from">Section / Area</label>
+          <select class="form-select" onchange="App.setTxFilter('module',this.value)">
+            <option value="">All Sections</option>
+            ${moduleOptions.map(v=>`<option value="${esc(v)}" ${moduleFilter===v?'selected':''}>${esc(txModuleLabel(v))}</option>`).join('')}
+          </select>
+          <div class="form-hint">Which area of the app recorded it?</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Filter by whether the transaction has been completed, is still waiting, or was rejected">Status</label>
+          <select class="form-select" onchange="App.setTxFilter('status',this.value)">
+            <option value="">All Statuses</option>
+            ${statusOptions.map(v=>`<option value="${esc(v)}" ${statusFilter===v?'selected':''}>${esc(v.replace(/_/g,' '))}</option>`).join('')}
+          </select>
+          <div class="form-hint">Is it done, pending, or rejected?</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Filter by how the money was paid — e.g. bank transfer, cash, petty cash">Payment Method</label>
+          <select class="form-select" onchange="App.setTxFilter('method',this.value)">
+            <option value="">All Methods</option>
+            ${methodOptions.map(v=>`<option value="${esc(v)}" ${methodFilter===v?'selected':''}>${esc(txMethodLabel(v))}</option>`).join('')}
+          </select>
+          <div class="form-hint">How was the money paid or received?</div>
+        </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;align-items:end;margin-top:8px">
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">From Date</label><input type="date" class="form-input" value="${esc(fromDate)}" onchange="App.setTxFilter('fromDate',this.value)" /></div>
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">To Date</label><input type="date" class="form-input" value="${esc(toDate)}" onchange="App.setTxFilter('toDate',this.value)" /></div>
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">Min Amount (absolute)</label><input type="number" min="0" class="form-input" value="${state.txMinAmount??''}" oninput="App.setTxFilter('minAmount',this.value)" /></div>
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">Max Amount (absolute)</label><input type="number" min="0" class="form-input" value="${state.txMaxAmount??''}" oninput="App.setTxFilter('maxAmount',this.value)" /></div>
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">Sort By</label><select class="form-select" onchange="App.setTxFilter('sortField',this.value)"><option value="date" ${sortField==='date'?'selected':''}>Date</option><option value="amount" ${sortField==='amount'?'selected':''}>Amount</option><option value="type" ${sortField==='type'?'selected':''}>Type</option><option value="module" ${sortField==='module'?'selected':''}>Module</option><option value="status" ${sortField==='status'?'selected':''}>Status</option></select></div>
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">Sort Direction</label><select class="form-select" onchange="App.setTxFilter('sortDir',this.value)"><option value="desc" ${sortDir==='desc'?'selected':''}>Descending</option><option value="asc" ${sortDir==='asc'?'selected':''}>Ascending</option></select></div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Show only transactions on or after this date">From Date</label>
+          <input type="date" class="form-input" value="${esc(fromDate)}" onchange="App.setTxFilter('fromDate',this.value)" />
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Show only transactions on or before this date">To Date</label>
+          <input type="date" class="form-input" value="${esc(toDate)}" onchange="App.setTxFilter('toDate',this.value)" />
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Hide transactions below this amount">Smallest Amount (₦)</label>
+          <input type="number" min="0" class="form-input" value="${state.txMinAmount??''}" placeholder="e.g. 1000" oninput="App.setTxFilter('minAmount',this.value)" />
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Hide transactions above this amount">Largest Amount (₦)</label>
+          <input type="number" min="0" class="form-input" value="${state.txMaxAmount??''}" placeholder="e.g. 500000" oninput="App.setTxFilter('maxAmount',this.value)" />
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Choose which column to sort the list by">Sort By</label>
+          <select class="form-select" onchange="App.setTxFilter('sortField',this.value)">
+            <option value="date" ${sortField==='date'?'selected':''}>Date</option>
+            <option value="amount" ${sortField==='amount'?'selected':''}>Amount</option>
+            <option value="type" ${sortField==='type'?'selected':''}>Type</option>
+            <option value="module" ${sortField==='module'?'selected':''}>Section</option>
+            <option value="status" ${sortField==='status'?'selected':''}>Status</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Newest first (Descending) or oldest first (Ascending)">Order</label>
+          <select class="form-select" onchange="App.setTxFilter('sortDir',this.value)">
+            <option value="desc" ${sortDir==='desc'?'selected':''}>Newest First</option>
+            <option value="asc" ${sortDir==='asc'?'selected':''}>Oldest First</option>
+          </select>
+        </div>
       </div>
     </div>
 
     <div class="card">
-      <div class="card-header"><span class="card-title">Transactions Table</span></div>
-      ${rows.length?`<div class="table-wrap"><table>
-        <tr><th>Date</th><th>Type</th><th>Module</th><th>Description</th><th class="td-right">Amount</th><th>Method</th><th>Status</th><th>Reference</th><th>By</th></tr>
-        ${rows.map(t=>{
-          const d = txDirectionMeta(t.direction);
-          return `
-          <tr>
-            <td style="white-space:nowrap">${fmtDate(t.date)}<div class="td-muted">${fmtTime(t.date)}</div></td>
-            <td><span class="badge badge-gray">${esc(String(t.kind||'').replace(/_/g,' '))}</span></td>
-            <td>${esc(String(t.module||'').replace(/_/g,' '))}</td>
-            <td><div style="font-size:13px;font-weight:500">${esc(t.description||'—')}</div>${t.notes?`<div class="td-muted" style="font-size:11px">${esc(t.notes)}</div>`:''}</td>
-            <td class="td-right ${d.cls}" title="${d.label}" aria-label="${d.label}: ${fmt(t.amount||0)}">${d.symbol}${fmt(t.amount||0)}</td>
-            <td class="td-muted">${esc(txMethodLabel(t.method))}</td>
-            <td>${txStatusBadge(t.status)}</td>
-            <td class="td-muted">${esc(t.reference||'—')}</td>
-            <td class="td-muted">${esc(t.actor||'—')}</td>
-          </tr>`}).join('')}
-      </table></div>`:'<div class="empty-table">No transactions match the current search/filter selection.</div>'}
+      <div class="card-header">
+        <span class="card-title">Transaction List</span>
+        <span class="td-muted tx-mobile-hint" style="font-size:11px">Tap any row to see full details</span>
+      </div>
+
+      ${rows.length ? `
+        <div class="table-wrap">
+          <table class="tx-desktop-table">
+            <tr>
+              <th title="When this transaction was recorded">Date &amp; Time</th>
+              <th title="What kind of transaction this is">Type</th>
+              <th title="Which section of the app recorded this">Section</th>
+              <th title="What the transaction is about">Description</th>
+              <th class="td-right" title="The amount of money involved. + means money came in, − means money went out">Amount</th>
+              <th title="How the money was paid or received">Payment Method</th>
+              <th title="Whether this has been completed, is waiting, or was rejected">Status</th>
+              <th title="A receipt number, teller number, or other reference code">Reference No.</th>
+              <th title="Who recorded or approved this transaction">Recorded By</th>
+            </tr>
+            ${desktopRows}
+          </table>
+          <table class="tx-mobile-table">
+            <tr>
+              <th>Date &amp; Time</th>
+              <th>Description</th>
+              <th class="td-right">Amount</th>
+            </tr>
+            ${mobileRows}
+          </table>
+        </div>
+      ` : '<div class="empty-table">No transactions found for the current filters. Try widening your date range or clearing the filters.</div>'}
 
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap">
-        <div style="font-size:12px;color:var(--text3)">Showing ${filtered.length?start+1:0} - ${Math.min(start+pageSize, filtered.length)} of ${filtered.length}</div>
-        <div style="display:flex;gap:8px;align-items:center">
-          <label class="form-label" style="margin:0">Rows</label>
+        <div style="font-size:12px;color:var(--text3)">
+          Showing ${filtered.length ? start+1 : 0}–${Math.min(start+pageSize, filtered.length)} of ${filtered.length} record${filtered.length!==1?'s':''}
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <label class="form-label" style="margin:0" title="How many rows to show per page">Rows per page</label>
           <select class="form-select" style="width:auto" onchange="App.setTxPageSize(this.value)">
             ${[10,20,50,100].map(n=>`<option value="${n}" ${pageSize===n?'selected':''}>${n}</option>`).join('')}
           </select>
-          <button class="btn btn-sm" ${page<=1?'disabled':''} onclick="App.setTxPage(${page-1})">← Prev</button>
+          <button class="btn btn-sm" ${page<=1?'disabled':''} onclick="App.setTxPage(${page-1})">← Previous</button>
           <span style="font-size:12px;color:var(--text2)">Page ${filtered.length?page:0} of ${filtered.length?totalPages:0}</span>
           <button class="btn btn-sm" ${page>=totalPages?'disabled':''} onclick="App.setTxPage(${page+1})">Next →</button>
         </div>
@@ -923,6 +1088,44 @@ function clearTxFilters(){
   state.txSortDir='desc';
   state.txPage=1;
   renderTransactions();
+}
+
+function showTxDetail(id){
+  const all = state._txAll || [];
+  const t = all.find(x=>x.id===id);
+  if(!t){ return; }
+  const d = txDirectionMeta(t.direction);
+  const dirLabel = t.direction==='credit'
+    ? '➕ Money Received (came in)'
+    : t.direction==='debit'
+    ? '➖ Money Paid Out (went out)'
+    : '↔ Internal Transfer';
+  const rows = [
+    ['Date &amp; Time',    `${fmtDate(t.date)} at ${fmtTime(t.date)}`],
+    ['Type',               txKindLabel(t.kind)],
+    ['Section',            txModuleLabel(t.module)],
+    ['Description',        t.description||'—'],
+    ['Notes / Purpose',    t.notes||'—'],
+    ['Amount',             `<span class="${d.cls}" style="font-size:16px;font-weight:700">${d.symbol}${fmt(t.amount||0)}</span>`],
+    ['Direction',          dirLabel],
+    ['Payment Method',     txMethodLabel(t.method)||'—'],
+    ['Status',             txStatusBadge(t.status) + `<div class="form-hint" style="margin-top:4px">${txStatusLabel(t.status)}</div>`],
+    ['Reference / Receipt No.', t.reference||'—'],
+    ['Recorded By',        t.actor||'—']
+  ];
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🧾 Transaction Details</div>
+    <table style="width:100%;border-collapse:collapse">
+      ${rows.map(([label,val])=>`
+        <tr>
+          <td style="padding:8px 0 8px 0;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.4px;width:38%;vertical-align:top">${label}</td>
+          <td style="padding:8px 0 8px 8px;font-size:13px;color:var(--text);vertical-align:top">${val}</td>
+        </tr>`).join('')}
+    </table>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Close</button>
+    </div>`);
 }
 
 async function exportTxCSV(){
@@ -5809,7 +6012,7 @@ return {
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
-  setTxFilter, setTxPage, setTxPageSize, clearTxFilters, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
+  setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,

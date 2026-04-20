@@ -144,6 +144,11 @@ tr:hover td{background:var(--surface)}
 .td-amber{color:var(--amber);font-weight:600}
 .empty-table{padding:40px;text-align:center;color:var(--text3);font-size:13px}
 
+/* TRANSACTIONS — responsive dual table */
+.tx-desktop-table{display:table}
+.tx-mobile-table{display:none}
+.tx-mobile-hint{display:none}
+
 /* BADGES */
 .badge{display:inline-flex;align-items:center;font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;white-space:nowrap}
 .badge-success{background:var(--success-light);color:var(--success)}
@@ -266,6 +271,11 @@ tr:hover td{background:var(--surface)}
   .notif-panel{right:0;left:0;width:auto;border-radius:0}
   .modal{margin:0;border-radius:var(--rl) var(--rl) 0 0;max-height:85vh}
   .modal-overlay{align-items:flex-end;padding:0}
+  /* Transactions — show compact mobile list, hide wide desktop table */
+  .tx-desktop-table{display:none}
+  .tx-mobile-table{display:table}
+  .tx-mobile-hint{display:inline}
+  .tx-mobile-row:active td{background:var(--primary-light)}
 }
 @media(max-width:400px){
   .kpi-grid{grid-template-columns:1fr}
