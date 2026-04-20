@@ -27,6 +27,22 @@ const PERMISSIONS = {
   viewer:        ['dashboard','income_view','remittances_view','expenses_view','petty_view']
 };
 
+// All available permission keys with human-readable labels, grouped for the UI
+const PERMISSION_DEFS = [
+  { key:'dashboard',        label:'Dashboard',              group:'General'    },
+  { key:'income',           label:'Record Income',          group:'Finance'    },
+  { key:'income_view',      label:'View Income Records',    group:'Finance'    },
+  { key:'remittances',      label:'Manage Remittances',     group:'Finance'    },
+  { key:'remittances_view', label:'View Remittances',       group:'Finance'    },
+  { key:'expenses',         label:'Log Expenses',           group:'Finance'    },
+  { key:'expenses_view',    label:'View Expenses',          group:'Finance'    },
+  { key:'petty_request',    label:'Request Petty Cash',     group:'Petty Cash' },
+  { key:'petty_approve',    label:'Approve Petty Cash',     group:'Petty Cash' },
+  { key:'petty_view',       label:'View Petty Cash',        group:'Petty Cash' },
+  { key:'reports',          label:'Generate Reports',       group:'Reports'    },
+  { key:'signoff',          label:'Sign Off Remittances',   group:'Reports'    },
+];
+
 const NAV = [
   { id:'dashboard',    label:'Dashboard',     icon:'🏠', section:'Main',     minRole:['all'] },
   { id:'income',       label:'Record Income', icon:'📥', section:'Finance',  minRole:['it_admin','accountant'] },
@@ -220,7 +236,8 @@ function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLoca
 function uid(){ return Date.now().toString(36) }
 function hasPermission(p){
   if(!state.user) return false;
-  const perms = PERMISSIONS[state.user.role]||[];
+  const rp = state.rolePermissions?.[state.user.role];
+  const perms = rp || PERMISSIONS[state.user.role] || [];
   return perms.includes('all') || perms.includes(p);
 }
 function can(...ps){ return ps.some(p=>hasPermission(p)) }
@@ -369,7 +386,7 @@ async function login(){
     DB.addAudit('login','User logged in',user.name);
     document.getElementById('loginScreen').style.display='none';
     document.getElementById('appShell').style.display='flex';
-    initApp();
+    DB.getSettings().then(s=>{ state.rolePermissions = s.rolePermissions||null; initApp(); });
   } catch(e) {
     errEl.textContent='Cannot connect to database: '+e.message;
     errEl.style.display='block';
@@ -1415,6 +1432,7 @@ async function submitOtherIncome(){
   const notes      = document.getElementById('oi_notes')?.value||'';
   if(!date||!source){ alert('Please select a date and source type.'); return }
   if(!amount){ alert('Please enter an amount.'); return }
+  if(!method){ alert('Please select a payment method.'); return }
 
   // Build a record compatible with the income structure
   const rec = {
@@ -1432,9 +1450,11 @@ async function submitOtherIncome(){
   // local_only donations have no remittance split; they appear in income totals but not in remittance calculations
 
   await DB.addIncome(rec);
-  DB.addNotification('Other Income Recorded',`${fmt(amount)} recorded (${source}) from ${donorName||'unnamed'}`,'success');
+  const sourceLabel = OTHER_INCOME_SOURCES.find(s=>s.key===source)?.label || source;
+  DB.addAudit('income_recorded',`Other income ${fmt(amount)} (${sourceLabel}) via ${method.replace(/_/g,' ')} from ${donorName||'unnamed donor'} on ${fmtDate(date)}`,state.user?.name);
+  DB.addNotification('Other Income Recorded',`${fmt(amount)} recorded (${sourceLabel}) from ${donorName||'unnamed'}`,'success');
   closeModal();
-  showAlert(`${fmt(amount)} recorded as ${OTHER_INCOME_SOURCES.find(s=>s.key===source)?.label||source}. Method: ${method.replace('_',' ')}.`,'success');
+  showAlert(`${fmt(amount)} recorded as ${sourceLabel}. Method: ${method.replace(/_/g,' ')}.`,'success');
   renderIncome();
   buildSidebar();
 }
@@ -4359,23 +4379,32 @@ async function renderAdmin(){
       <button class="tab ${tab==='settings'?'active':''}" onclick="App.setAdminTab('settings')">Church Settings</button>
       <button class="tab ${tab==='quotas'?'active':''}" onclick="App.setAdminTab('quotas')">Monthly Quotas</button>
       <button class="tab ${tab==='rates'?'active':''}" onclick="App.setAdminTab('rates')">Remittance Rates</button>
+      <button class="tab ${tab==='perms'?'active':''}" onclick="App.setAdminTab('perms')">Role Permissions</button>
       <button class="tab ${tab==='backup'?'active':''}" onclick="App.setAdminTab('backup')">Backup & Restore</button>
     </div>
-    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settings):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):renderAdminBackup()}`;
+    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settings):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
+  if(tab==='quotas') initQuotaDnd();
 }
 
 function setAdminTab(t){ state.adminTab=t; renderAdmin() }
 
 function renderAdminUsers(users){
+  function permSummary(role){
+    const rp = state.rolePermissions?.[role];
+    const perms = rp || PERMISSIONS[role] || [];
+    if(perms.includes('all')) return '<span class="badge" style="background:#EEEDFE;color:#534AB7">Full Access</span>';
+    const labels = PERMISSION_DEFS.filter(d=>perms.includes(d.key)).map(d=>`<span class="badge" style="background:#f0f0f0;color:#444;font-size:10px;margin:1px">${d.label}</span>`);
+    return labels.length ? labels.join(' ') : '<span style="color:var(--text3);font-size:12px">No permissions</span>';
+  }
   return `<div class="card">
     <div class="card-header"><span class="card-title">User Accounts</span><button class="btn btn-primary btn-sm" onclick="App.showAddUser()">+ Add User</button></div>
     <div class="table-wrap"><table>
-      <tr><th>Name</th><th>Role</th><th>Email</th><th>PIN</th><th>Actions</th></tr>
+      <tr><th>Name</th><th>Role</th><th>Access / Permissions</th><th>Email</th><th>Actions</th></tr>
       ${users.map(u=>{const r=ROLES[u.role]||{}; return`<tr>
         <td><strong>${u.name}</strong></td>
         <td><span class="badge" style="background:${r.bg};color:${r.color}">${r.label||u.role}</span></td>
+        <td style="max-width:260px;white-space:normal;line-height:1.6">${permSummary(u.role)}</td>
         <td class="td-muted">${u.email||'—'}</td>
-        <td class="td-muted">••••</td>
         <td><button class="btn btn-sm" onclick="App.editUser('${u.id}')">Edit</button>
             <button class="btn btn-sm btn-danger" onclick="App.deleteUser('${u.id}')" style="margin-left:4px">Delete</button></td>
       </tr>`}).join('')}
@@ -4396,11 +4425,12 @@ function renderAdminSettings(s){
 
 function renderAdminQuotas(s){
   const list=getQuotaList(s);
-  const rows=list.map((q,i)=>`
-    <div class="form-group" style="display:flex;gap:8px;align-items:flex-end" id="quota-row-${i}">
-      <div style="flex:2"><label class="form-label">Label</label><input type="text" class="form-input" id="ql_${i}" value="${esc(q.label)}" placeholder="e.g. Building Fund" /></div>
-      <div style="flex:1"><label class="form-label">Amount (₦)</label><input type="number" class="form-input" id="qa_${i}" value="${q.amount||0}" min="0" /></div>
-      <button class="btn" style="padding:8px 10px;color:var(--danger);margin-bottom:0" onclick="App.removeQuotaRow(${i})" title="Remove">✕</button>
+  const rows=list.map((q)=>`
+    <div class="quota-row" draggable="true">
+      <span class="dnd-handle" title="Drag to reorder">⠿</span>
+      <div style="flex:2"><label class="form-label">Label</label><input type="text" class="form-input" value="${esc(q.label)}" placeholder="e.g. Building Fund" /></div>
+      <div style="flex:1"><label class="form-label">Amount (₦)</label><input type="number" class="form-input" value="${q.amount||0}" min="0" /></div>
+      <button class="btn" style="padding:8px 10px;color:var(--danger);flex-shrink:0" onclick="App.removeQuotaRow(this)" title="Remove">✕</button>
     </div>`).join('');
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Monthly Fixed Quotas</div>
@@ -4452,13 +4482,22 @@ async function saveRates(){
   const s = await DB.getSettings();
   const r = s.remittanceRates || {};
   const pct2dec = id => { const el=document.getElementById(id); return el ? parseFloat(el.value||0)/100 : null; };
+  const badRows = [];
   INCOME_TYPES.filter(t=>!t.special).forEach(t=>{
     if(!r[t.key]) r[t.key]={};
     const natl = pct2dec(`rate_${t.key}_natl`);
     const local = pct2dec(`rate_${t.key}_local`);
     if(natl!==null) r[t.key].natl = natl;
     if(local!==null) r[t.key].local = local;
+    if(natl!==null && local!==null){
+      const totalPct = Math.round((natl+local)*100);
+      if(totalPct !== 100) badRows.push(`${t.label} (${totalPct}%)`);
+    }
   });
+  if(badRows.length){
+    showAlert(`National + Local must equal 100% for: ${badRows.join(', ')}. Please correct before saving.`,'danger');
+    return;
+  }
   ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed','provinceRebate'].forEach(k=>{
     const v = pct2dec(`rate_${k}`);
     if(v!==null) r[k] = v;
@@ -4466,6 +4505,68 @@ async function saveRates(){
   s.remittanceRates = r;
   await DB.saveSettings(s);
   showAlert('Remittance rates updated successfully!','success');
+}
+
+function renderAdminPerms(s){
+  const savedPerms = s.rolePermissions || {};
+  const groups = [...new Set(PERMISSION_DEFS.map(d=>d.group))];
+  const editableRoles = Object.keys(ROLES).filter(r=>r!=='it_admin');
+
+  const colHeaders = editableRoles.map(r=>{
+    const ro=ROLES[r];
+    return `<th style="text-align:center;min-width:90px"><span class="badge" style="background:${ro.bg};color:${ro.color};white-space:normal;line-height:1.3">${ro.label}</span></th>`;
+  }).join('');
+
+  const rows = groups.map(g=>{
+    const defs = PERMISSION_DEFS.filter(d=>d.group===g);
+    const groupHeader = `<tr><td colspan="${editableRoles.length+1}" style="padding:6px 8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);background:var(--surface)">${g}</td></tr>`;
+    const permRows = defs.map(d=>{
+      const cells = editableRoles.map(r=>{
+        const rp = savedPerms[r] || PERMISSIONS[r] || [];
+        const checked = rp.includes(d.key) ? 'checked' : '';
+        return `<td style="text-align:center"><input type="checkbox" id="perm_${r}_${d.key}" ${checked} style="width:16px;height:16px;cursor:pointer" /></td>`;
+      }).join('');
+      return `<tr><td style="padding:7px 8px;font-size:13px">${d.label}</td>${cells}</tr>`;
+    }).join('');
+    return groupHeader + permRows;
+  }).join('');
+
+  return `<div class="card">
+    <div class="modal-title" style="font-size:15px;margin-bottom:8px">Role Permissions</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">Control which features each role can access. <strong>IT Administrator</strong> always has full access and cannot be restricted. Changes take effect immediately for users who log in after saving.</p>
+    <div class="table-wrap"><table>
+      <tr><th>Permission</th>${colHeaders}</tr>
+      ${rows}
+    </table></div>
+    <br>
+    <button class="btn btn-primary" onclick="App.saveRolePermissions()">Save Permissions</button>
+    <button class="btn" style="margin-left:8px" onclick="App.resetRolePermissions()">Reset to Defaults</button>
+  </div>`;
+}
+
+async function saveRolePermissions(){
+  const s = await DB.getSettings();
+  const saved = {};
+  Object.keys(ROLES).filter(r=>r!=='it_admin').forEach(r=>{
+    saved[r] = PERMISSION_DEFS.map(d=>d.key).filter(k=>document.getElementById(`perm_${r}_${k}`)?.checked);
+  });
+  s.rolePermissions = saved;
+  await DB.saveSettings(s);
+  state.rolePermissions = saved;
+  DB.addAudit('perms_updated','Role permissions updated',state.user?.name);
+  showAlert('Role permissions saved! Active sessions will use the new settings on next login.','success');
+  renderAdmin();
+}
+
+async function resetRolePermissions(){
+  if(!confirm('Reset all role permissions to factory defaults?')) return;
+  const s = await DB.getSettings();
+  delete s.rolePermissions;
+  await DB.saveSettings(s);
+  state.rolePermissions = null;
+  DB.addAudit('perms_reset','Role permissions reset to defaults',state.user?.name);
+  showAlert('Permissions reset to defaults.','success');
+  renderAdmin();
 }
 
 function renderAdminBackup(){
@@ -4496,27 +4597,118 @@ async function saveSettings(){
 function addQuotaRow(){
   const container=document.getElementById('quota-rows-container');
   if(!container) return;
-  const i=container.querySelectorAll('.form-group').length;
   const div=document.createElement('div');
-  div.className='form-group';
-  div.id=`quota-row-${i}`;
-  div.style.cssText='display:flex;gap:8px;align-items:flex-end';
-  div.innerHTML=`<div style="flex:2"><label class="form-label">Label</label><input type="text" class="form-input" id="ql_${i}" value="" placeholder="e.g. Building Fund" /></div><div style="flex:1"><label class="form-label">Amount (₦)</label><input type="number" class="form-input" id="qa_${i}" value="0" min="0" /></div><button class="btn" style="padding:8px 10px;color:var(--danger);margin-bottom:0" onclick="App.removeQuotaRow(${i})" title="Remove">✕</button>`;
+  div.className='quota-row';
+  div.draggable=true;
+  div.innerHTML=`<span class="dnd-handle" title="Drag to reorder">⠿</span><div style="flex:2"><label class="form-label">Label</label><input type="text" class="form-input" value="" placeholder="e.g. Building Fund" /></div><div style="flex:1"><label class="form-label">Amount (₦)</label><input type="number" class="form-input" value="0" min="0" /></div><button class="btn" style="padding:8px 10px;color:var(--danger);flex-shrink:0" onclick="App.removeQuotaRow(this)" title="Remove">✕</button>`;
   container.appendChild(div);
 }
 
-function removeQuotaRow(i){
-  const row=document.getElementById(`quota-row-${i}`);
+function removeQuotaRow(btn){
+  const row=btn.closest('.quota-row');
   if(row) row.remove();
+}
+
+function initQuotaDnd(){
+  const container=document.getElementById('quota-rows-container');
+  if(!container) return;
+
+  // ── HTML5 Drag & Drop (desktop / pointer-capable devices) ─────────────────
+  let dragSrc=null;
+  container.addEventListener('dragstart',e=>{
+    dragSrc=e.target.closest('.quota-row');
+    if(!dragSrc) return;
+    e.dataTransfer.effectAllowed='move';
+    setTimeout(()=>{ if(dragSrc) dragSrc.style.opacity='0.4'; },0);
+  });
+  container.addEventListener('dragend',()=>{
+    if(dragSrc) dragSrc.style.opacity='';
+    dragSrc=null;
+    container.querySelectorAll('.quota-row.drag-over').forEach(r=>r.classList.remove('drag-over'));
+  });
+  container.addEventListener('dragover',e=>{
+    e.preventDefault();
+    e.dataTransfer.dropEffect='move';
+    const target=e.target.closest('.quota-row');
+    if(!target||target===dragSrc) return;
+    container.querySelectorAll('.quota-row.drag-over').forEach(r=>r.classList.remove('drag-over'));
+    target.classList.add('drag-over');
+  });
+  container.addEventListener('drop',e=>{
+    e.preventDefault();
+    const target=e.target.closest('.quota-row');
+    if(!target||!dragSrc||target===dragSrc) return;
+    const rows=[...container.querySelectorAll('.quota-row')];
+    if(rows.indexOf(dragSrc)<rows.indexOf(target)){
+      container.insertBefore(dragSrc,target.nextSibling);
+    } else {
+      container.insertBefore(dragSrc,target);
+    }
+    container.querySelectorAll('.quota-row.drag-over').forEach(r=>r.classList.remove('drag-over'));
+  });
+
+  // ── Touch drag (mobile) — initiated from the ⠿ handle only ───────────────
+  let touchSrc=null, touchClone=null;
+  container.addEventListener('touchstart',e=>{
+    const handle=e.target.closest('.dnd-handle');
+    if(!handle) return;
+    touchSrc=handle.closest('.quota-row');
+    if(!touchSrc) return;
+    e.preventDefault();
+    const rect=touchSrc.getBoundingClientRect();
+    touchClone=touchSrc.cloneNode(true);
+    Object.assign(touchClone.style,{
+      position:'fixed',left:rect.left+'px',top:rect.top+'px',
+      width:rect.width+'px',opacity:'0.85',pointerEvents:'none',
+      zIndex:'9999',background:'var(--card)',boxShadow:'0 4px 20px rgba(0,0,0,0.2)',
+      borderRadius:'var(--rl)',transform:'scale(1.02)'
+    });
+    document.body.appendChild(touchClone);
+    touchSrc.style.opacity='0.25';
+  },{passive:false});
+  container.addEventListener('touchmove',e=>{
+    if(!touchSrc||!touchClone) return;
+    e.preventDefault();
+    const y=e.touches[0].clientY;
+    touchClone.style.top=(y-touchClone.getBoundingClientRect().height/2)+'px';
+    container.querySelectorAll('.quota-row.drag-over').forEach(r=>r.classList.remove('drag-over'));
+    [...container.querySelectorAll('.quota-row')].filter(r=>r!==touchSrc).forEach(row=>{
+      const {top,bottom}=row.getBoundingClientRect();
+      if(y>=top&&y<=bottom) row.classList.add('drag-over');
+    });
+  },{passive:false});
+  container.addEventListener('touchend',e=>{
+    if(!touchSrc) return;
+    if(touchClone){ document.body.removeChild(touchClone); touchClone=null; }
+    const y=e.changedTouches[0].clientY;
+    const rows=[...container.querySelectorAll('.quota-row')];
+    for(const row of rows){
+      if(row===touchSrc) continue;
+      const {top,bottom}=row.getBoundingClientRect();
+      if(y>=top&&y<=bottom){
+        if(rows.indexOf(touchSrc)<rows.indexOf(row)){
+          container.insertBefore(touchSrc,row.nextSibling);
+        } else {
+          container.insertBefore(touchSrc,row);
+        }
+        break;
+      }
+    }
+    touchSrc.style.opacity='';
+    container.querySelectorAll('.quota-row.drag-over').forEach(r=>r.classList.remove('drag-over'));
+    touchSrc=null;
+  });
 }
 
 async function saveQuotas(){
   const container=document.getElementById('quota-rows-container');
   const list=[];
   if(container){
-    container.querySelectorAll('.form-group').forEach((row,i)=>{
-      const label=(document.getElementById(`ql_${i}`)?.value||'').trim();
-      const amount=parseFloat(document.getElementById(`qa_${i}`)?.value)||0;
+    container.querySelectorAll('.quota-row').forEach((row)=>{
+      const labelEl=row.querySelector('input[type="text"]');
+      const amountEl=row.querySelector('input[type="number"]');
+      const label=(labelEl?.value||'').trim();
+      const amount=parseFloat(amountEl?.value)||0;
       if(label) list.push({ label, amount });
     });
   }
@@ -4607,7 +4799,7 @@ function importData(){
     reader.onload=async ev=>{
       try{
         const data=JSON.parse(ev.target.result);
-        if(!confirm('This will overwrite all existing data. Are you sure?')) return;
+        if(!confirm('This will overwrite all existing financial records (income, expenses, remittances, petty cash) with data from the backup.\n\nUser accounts and PINs will NOT be changed — any names or PINs you have updated will be preserved.\n\nAre you sure you want to proceed?')) return;
         await DB.importBackup(data);
         DB.addAudit('data_imported','Data restored from backup',state.user?.name);
         showAlert('Data restored successfully! Reloading…','success');
@@ -4689,7 +4881,7 @@ return {
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
-  setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, showAddUser, addUser, editUser,
+  setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearAllData,
   showKPSCAlert, submitKPSCAlert, closeModal: closeModal
 };
