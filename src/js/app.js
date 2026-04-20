@@ -60,7 +60,7 @@ const NAV = [
 ];
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-const MAX_VIEW_NAME_LENGTH = 60;
+const MAX_SAVED_VIEW_NAME_LENGTH = 60;
 
 const INCOME_TYPES = [
   { key:'membersTithe',    label:"Members' Tithe",         natl:0.58, local:0.42 },
@@ -1256,7 +1256,10 @@ async function exportTxPDF(){
 
 function saveTxView(){
   const raw = (prompt('Enter a name for this saved view:','')||'').trim();
-  const name = raw.slice(0, MAX_VIEW_NAME_LENGTH);
+  if(raw.length > MAX_SAVED_VIEW_NAME_LENGTH){
+    showAlert(`View name too long. It has been shortened to ${MAX_SAVED_VIEW_NAME_LENGTH} characters.`,'warn');
+  }
+  const name = raw.slice(0, MAX_SAVED_VIEW_NAME_LENGTH);
   if(!name) return;
   const key = txSavedViewsKey();
   if(!key){ showAlert('Cannot save views — role not recognised.','warn'); return; }
