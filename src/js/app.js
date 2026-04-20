@@ -600,7 +600,6 @@ async function buildTransactionsLedger(){
       kind:'income',
       date:r.date||r.createdAt||'',
       amount:r.totalCollection||0,
-      signedAmount:Math.abs(r.totalCollection||0),
       direction:'credit',
       method:r.paymentMethod || ((r.bankTransferAmount||0)>0&&cashHeld>0?'split':(r.bankTransferAmount||0)>0?'bank_transfer':'cash'),
       status:r.depositConfirmed ? 'deposited' : 'recorded',
@@ -618,7 +617,6 @@ async function buildTransactionsLedger(){
       kind:'expense',
       date:e.date||e.createdAt||'',
       amount:e.amount||0,
-      signedAmount:-(Math.abs(e.amount||0)),
       direction:'debit',
       method:e.paymentMethod||'',
       status:e.status||'approved',
@@ -636,7 +634,6 @@ async function buildTransactionsLedger(){
       kind:'remittance',
       date:r.paidDate||r.createdAt||'',
       amount:r.amount||0,
-      signedAmount:-(Math.abs(r.amount||0)),
       direction:'debit',
       method:r.paymentMethod||'bank_transfer',
       status:r.status||'paid',
@@ -655,7 +652,6 @@ async function buildTransactionsLedger(){
       kind:isDeposit?'cash_deposit':'cash_withdrawal',
       date:c.date||c.createdAt||'',
       amount:c.amount||0,
-      signedAmount:0,
       direction:'transfer',
       method:c.depositMethod||'',
       status:'recorded',
@@ -673,7 +669,6 @@ async function buildTransactionsLedger(){
       kind:p.type||'petty',
       date:p.createdAt||p.dateNeeded||'',
       amount:p.actualAmount||p.amount||0,
-      signedAmount:(p.type==='refill'?0:-(Math.abs(p.actualAmount||p.amount||0))),
       direction:p.type==='refill'?'transfer':'debit',
       method:p.paymentMethod||'',
       status:p.status||'pending_approval',
@@ -763,7 +758,7 @@ async function renderTransactions(){
       <div class="kpi"><div class="kpi-label">Total Matching Transactions</div><div class="kpi-val">${filtered.length}</div><div class="kpi-delta">${all.length} total in ledger</div></div>
       <div class="kpi"><div class="kpi-label">Credits (Shown)</div><div class="kpi-val" style="color:var(--success)">${fmt(totals.credit)}</div><div class="kpi-delta up">Money in</div></div>
       <div class="kpi"><div class="kpi-label">Debits (Shown)</div><div class="kpi-val" style="color:var(--danger)">${fmt(totals.debit)}</div><div class="kpi-delta down">Money out</div></div>
-      <div class="kpi"><div class="kpi-label">Net Flow (Shown)</div><div class="kpi-val" style="color:${(totals.credit-totals.debit)>=0?'var(--success)':'var(--danger)'}">${fmt(totals.credit-totals.debit)}</div><div class="kpi-delta">${monthLabel()}</div></div>
+      <div class="kpi"><div class="kpi-label">Net Flow (Shown)</div><div class="kpi-val" style="color:${(totals.credit-totals.debit)>=0?'var(--success)':'var(--danger)'}">${fmt(totals.credit-totals.debit)}</div><div class="kpi-delta">Based on current filters</div></div>
     </div>
 
     <div class="card">
@@ -778,8 +773,8 @@ async function renderTransactions(){
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;align-items:end;margin-top:8px">
         <div class="form-group" style="margin-bottom:0"><label class="form-label">From Date</label><input type="date" class="form-input" value="${esc(fromDate)}" onchange="App.setTxFilter('fromDate',this.value)" /></div>
         <div class="form-group" style="margin-bottom:0"><label class="form-label">To Date</label><input type="date" class="form-input" value="${esc(toDate)}" onchange="App.setTxFilter('toDate',this.value)" /></div>
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">Min Amount</label><input type="number" min="0" class="form-input" value="${state.txMinAmount??''}" oninput="App.setTxFilter('minAmount',this.value)" /></div>
-        <div class="form-group" style="margin-bottom:0"><label class="form-label">Max Amount</label><input type="number" min="0" class="form-input" value="${state.txMaxAmount??''}" oninput="App.setTxFilter('maxAmount',this.value)" /></div>
+        <div class="form-group" style="margin-bottom:0"><label class="form-label">Min Amount (absolute)</label><input type="number" min="0" class="form-input" value="${state.txMinAmount??''}" oninput="App.setTxFilter('minAmount',this.value)" /></div>
+        <div class="form-group" style="margin-bottom:0"><label class="form-label">Max Amount (absolute)</label><input type="number" min="0" class="form-input" value="${state.txMaxAmount??''}" oninput="App.setTxFilter('maxAmount',this.value)" /></div>
         <div class="form-group" style="margin-bottom:0"><label class="form-label">Sort By</label><select class="form-select" onchange="App.setTxFilter('sortField',this.value)"><option value="date" ${sortField==='date'?'selected':''}>Date</option><option value="amount" ${sortField==='amount'?'selected':''}>Amount</option><option value="type" ${sortField==='type'?'selected':''}>Type</option><option value="module" ${sortField==='module'?'selected':''}>Module</option><option value="status" ${sortField==='status'?'selected':''}>Status</option></select></div>
         <div class="form-group" style="margin-bottom:0"><label class="form-label">Sort Direction</label><select class="form-select" onchange="App.setTxFilter('sortDir',this.value)"><option value="desc" ${sortDir==='desc'?'selected':''}>Descending</option><option value="asc" ${sortDir==='asc'?'selected':''}>Ascending</option></select></div>
       </div>
@@ -795,7 +790,7 @@ async function renderTransactions(){
             <td><span class="badge badge-gray">${esc(String(t.kind||'').replace(/_/g,' '))}</span></td>
             <td>${esc(String(t.module||'').replace(/_/g,' '))}</td>
             <td><div style="font-size:13px;font-weight:500">${esc(t.description||'—')}</div>${t.notes?`<div class="td-muted" style="font-size:11px">${esc(t.notes)}</div>`:''}</td>
-            <td class="td-right ${t.direction==='credit'?'td-green':t.direction==='debit'?'td-red':''}">${t.direction==='credit'?'+':t.direction==='debit'?'−':'↔'}${fmt(t.amount||0)}</td>
+            <td class="td-right ${t.direction==='credit'?'td-green':t.direction==='debit'?'td-red':''}" title="${t.direction==='credit'?'Credit transaction':t.direction==='debit'?'Debit transaction':'Transfer transaction'}" aria-label="${t.direction==='credit'?'Credit transaction':t.direction==='debit'?'Debit transaction':'Transfer transaction'}">${t.direction==='credit'?'+':t.direction==='debit'?'−':'↔'}${fmt(t.amount||0)}</td>
             <td class="td-muted">${esc(txMethodLabel(t.method))}</td>
             <td>${txStatusBadge(t.status)}</td>
             <td class="td-muted">${esc(t.reference||'—')}</td>
