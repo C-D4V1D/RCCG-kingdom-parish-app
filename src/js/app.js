@@ -422,18 +422,17 @@ async function submitChangePin(){
   const currentPin = document.getElementById('cp_current')?.value?.trim() || '';
   const newPin = document.getElementById('cp_new')?.value?.trim() || '';
   const confirmPin = document.getElementById('cp_confirm')?.value?.trim() || '';
-  if(!currentPin || !newPin || !confirmPin){ alert('Please fill all PIN fields.'); return; }
-  if(!/^\d{4,6}$/.test(newPin)){ alert('New PIN must be 4-6 digits.'); return; }
-  if(newPin !== confirmPin){ alert('New PIN and confirmation do not match.'); return; }
-  if(newPin === currentPin){ alert('New PIN must be different from current PIN.'); return; }
+  if(!currentPin || !newPin || !confirmPin){ showAlert('Please fill all PIN fields.','danger'); return; }
+  if(!/^\d{4,6}$/.test(newPin)){ showAlert('New PIN must be 4-6 digits.','danger'); return; }
+  if(newPin !== confirmPin){ showAlert('New PIN and confirmation do not match.','danger'); return; }
+  if(newPin === currentPin){ showAlert('New PIN must be different from current PIN.','danger'); return; }
   try{
     await DB.changePin({ userId: state.user.id, currentPin, newPin });
-    state.user.pin = newPin;
     DB.addAudit('pin_changed','User changed own PIN',state.user?.name);
     closeModal();
     showAlert('PIN changed successfully. Use the new PIN at next sign in.','success');
   }catch(e){
-    alert(e.message || 'Failed to change PIN. Please try again.');
+    showAlert(e.message || 'Failed to change PIN. Please try again.','danger');
   }
 }
 
