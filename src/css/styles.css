@@ -274,10 +274,17 @@ tr:hover td{background:var(--surface)}
 
 /* PRINT */
 @media print{
-  .sidebar,.top-bar,.bottom-nav,.no-print,.btn,.tabs{display:none!important}
+  .sidebar,.top-bar,.bottom-nav,.no-print,.btn,.tabs,.page-header,.grid-3,.qa-btn,.qa-grid,.kpi-grid,.kpi{display:none!important}
   .main-wrap{margin-left:0}
   .page-content{padding:0}
-  .card{border:1px solid #ccc;box-shadow:none}
+  .card{border:1px solid #ccc;box-shadow:none;page-break-inside:avoid}
+  #reportOutput{display:block!important}
+  #reportOutput .card{border:none;padding:0}
+  .print-header{display:block!important}
+  .print-signature,.print-sig-box{page-break-inside:avoid}
+  body{font-size:12px;background:#fff}
+  table{page-break-inside:auto}
+  tr{page-break-inside:avoid}
 }
 
 /* UTILS */
