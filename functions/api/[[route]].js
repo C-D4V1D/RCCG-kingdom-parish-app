@@ -930,12 +930,15 @@ async function adminImport(DB, data) {
     for (const r of data.cashTransactions) { try { await createCashTransaction(DB, r); } catch(e) { errs.push(`ctx:${r.id}`); } }
   }
   if (data.users && Array.isArray(data.users)) {
+    // INSERT OR IGNORE: restore users that are missing from the DB (e.g. after a wipe),
+    // but never overwrite users that already exist — this preserves any name/PIN/role
+    // changes an admin made after the backup was taken.
     for (const u of data.users) {
       try {
         const pinStr = String(u.pin || '');
         if (!u.id || !u.name || !u.role || !pinStr || !/^\d{4,6}$/.test(pinStr)) { errs.push(`user:${u.id||'?'}`); continue; }
         await DB.prepare(
-          `INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES (?,?,?,?,?)`
+          `INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES (?,?,?,?,?)`
         ).bind(u.id, u.name, u.role, String(u.pin), u.email || '').run();
       } catch(e) { errs.push(`user:${u.id}`); }
     }

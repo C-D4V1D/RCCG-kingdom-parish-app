@@ -4796,7 +4796,7 @@ function importData(){
     reader.onload=async ev=>{
       try{
         const data=JSON.parse(ev.target.result);
-        if(!confirm('This will overwrite all existing data. Are you sure?')) return;
+        if(!confirm('This will overwrite all existing financial records (income, expenses, remittances, petty cash) with data from the backup.\n\nUser accounts and PINs will NOT be changed — any names or PINs you have updated will be preserved.\n\nAre you sure you want to proceed?')) return;
         await DB.importBackup(data);
         DB.addAudit('data_imported','Data restored from backup',state.user?.name);
         showAlert('Data restored successfully! Reloading…','success');
