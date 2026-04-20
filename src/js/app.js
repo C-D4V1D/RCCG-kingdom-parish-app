@@ -246,6 +246,9 @@ function hasPermission(p){
   return perms.includes('all') || perms.includes(p);
 }
 function can(...ps){ return ps.some(p=>hasPermission(p)) }
+function canCancelTopupRequest(request){
+  return !!request && (state.user?.role==='it_admin' || state.user?.name===request.requestedBy);
+}
 const ACCESS_RULES = {
   pages: {
     dashboard: { permissionsAny:['dashboard'] },
@@ -272,7 +275,7 @@ const ACCESS_RULES = {
     expense_edit_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_pending: { roles:['admin_officer','it_admin'] },
     expense_approve_pending: { roles:['accountant','it_admin'] },
-    topup_cancel: ({ request }) => !!request && (state.user?.role==='it_admin' || state.user?.name===request.requestedBy)
+    topup_cancel: ({ request }) => canCancelTopupRequest(request)
   }
 };
 function evaluateAccessRule(rule, ctx={}){
