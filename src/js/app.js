@@ -3173,12 +3173,16 @@ async function renderPettyCash(){
       .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'||h.status==='settled'))
       .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
   );
-  const expensesSinceRefill = allExpenses.filter(e=>
-    (e.status==='approved' || e.status==='pending_approval') &&
-    (e.paymentMethod==='petty_cash'||(e.paymentMethod==='split'&&(e.pettyAmount||0)>0)) &&
-    new Date(e.date||e.createdAt||0) > lastRefillDate &&
-    !alreadyClaimedExpIds.has(e.id)
-  );
+  const expensesSinceRefill = allExpenses.filter(e=>{
+    if(e.status!=='approved' && e.status!=='pending_approval') return false;
+    if(e.paymentMethod!=='petty_cash' && !(e.paymentMethod==='split' && (e.pettyAmount||0)>0)) return false;
+    if(alreadyClaimedExpIds.has(e.id)) return false;
+    // Use createdAt (record timestamp) for the refill cutoff — e.date is date-only
+    // and would parse to midnight UTC, wrongly excluding same-day expenses logged
+    // after a refill earlier in the day.
+    const expTime = new Date(e.createdAt || e.date || 0);
+    return expTime > lastRefillDate;
+  });
   const expensesSinceRefillTotal = expensesSinceRefill.reduce((s,e)=>
     s+(e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)), 0);
 
@@ -3463,12 +3467,13 @@ async function showTopUpRequest(){
       .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'||h.status==='settled'))
       .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
   );
-  const unrecovered = allExpenses.filter(e=>
-    (e.status==='approved' || e.status==='pending_approval') &&
-    (e.paymentMethod==='petty_cash'||(e.paymentMethod==='split'&&(e.pettyAmount||0)>0)) &&
-    new Date(e.date||e.createdAt||0) > lastRefillDate &&
-    !alreadyInRequest.has(e.id)
-  ).sort((a,b)=>new Date(a.date||a.createdAt)-new Date(b.date||b.createdAt));
+  const unrecovered = allExpenses.filter(e=>{
+    if(e.status!=='approved' && e.status!=='pending_approval') return false;
+    if(e.paymentMethod!=='petty_cash' && !(e.paymentMethod==='split' && (e.pettyAmount||0)>0)) return false;
+    if(alreadyInRequest.has(e.id)) return false;
+    const expTime = new Date(e.createdAt || e.date || 0);
+    return expTime > lastRefillDate;
+  }).sort((a,b)=>new Date(a.createdAt||a.date||0)-new Date(b.createdAt||b.date||0));
 
   const totalAmt = unrecovered.reduce((s,e)=>s+(e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)),0);
   const cashOnHand = pettyConfig.float;
