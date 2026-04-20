@@ -412,6 +412,17 @@ async function login(){
   const role = document.getElementById('roleSelect').value;
   const pin = document.getElementById('pinInput').value.trim();
   const errEl = document.getElementById('loginError');
+  const normalizePin = v => String(v ?? '').trim();
+  const toNumericPin = v => (/^\d+$/.test(v) ? String(Number(v)) : null);
+  const pinsMatch = (storedPin, enteredPin) => {
+    const stored = normalizePin(storedPin);
+    const entered = normalizePin(enteredPin);
+    if (!stored || !entered) return false;
+    if (stored === entered) return true;
+    const storedNum = toNumericPin(stored);
+    const enteredNum = toNumericPin(entered);
+    return storedNum !== null && enteredNum !== null && storedNum === enteredNum;
+  };
   if(!role||!pin){ errEl.textContent='Please select a role and enter your PIN.'; errEl.style.display='block'; return }
   const btn = document.querySelector('#loginScreen .btn-primary');
   if(btn){ btn.textContent='Connecting…'; btn.disabled=true; }
@@ -423,9 +434,9 @@ async function login(){
     let user = null;
     if(users.length>1){
       const uid = document.getElementById('userSelect').value;
-      user = users.find(u=>u.id===uid && String(u.pin)===String(pin));
+      user = users.find(u=>u.id===uid && pinsMatch(u.pin, pin));
     } else {
-      user = users.find(u=>String(u.pin)===String(pin));
+      user = users.find(u=>pinsMatch(u.pin, pin));
     }
     if(!user){
       errEl.textContent='Incorrect PIN. Please try again.';
