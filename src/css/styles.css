@@ -31,6 +31,10 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .form-row-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
 .form-group{margin-bottom:14px}
+.quota-row{display:flex;gap:8px;align-items:flex-end;margin-bottom:14px;border-radius:var(--r);transition:background 0.1s}
+.quota-row.drag-over{background:var(--primary-light,#e8f5f0);outline:2px dashed var(--primary)}
+.dnd-handle{cursor:grab;color:var(--text3);font-size:20px;line-height:1;padding:0 4px;user-select:none;touch-action:none;flex-shrink:0;align-self:center;margin-bottom:2px}
+.dnd-handle:active{cursor:grabbing}
 .form-hint{font-size:11px;color:var(--text3);margin-top:4px}
 .form-error{font-size:11px;color:var(--danger);margin-top:4px}
 
