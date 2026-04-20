@@ -422,20 +422,23 @@ async function deleteUser(DB, id) {
   return ok({ deleted: id });
 }
 
+function inferIncomePaymentMethod(row) {
+  if (row.payment_method) return row.payment_method;
+  // Backward compatibility for old rows that predate income.payment_method.
+  // Missing source values are also treated as legacy Sunday collections.
+  // Sunday uses split cash/bank fields, so there is no single payment method
+  // and we return an empty string.
+  if (!row.source || row.source === 'sunday_collection') return '';
+  const total = Number(row.total_collection || 0);
+  const bank  = Number(row.bank_transfer_amount || 0);
+  if (total <= 0) return '';
+  return bank >= total ? 'bank_transfer' : 'cash';
+}
+
 // ── INCOME ────────────────────────────────────────────────────────
 async function getIncome(DB) {
   const { results } = await DB.prepare(`SELECT * FROM income ORDER BY date DESC, created_at DESC`).all();
   return ok((results || []).map(row => ({
-    // Backward compatibility: infer non-Sunday income payment method for older rows
-    // that predate the payment_method column/mapping.
-    // Sunday collections intentionally remain blank because they are split into
-    // bank transfer + direct petty + cash-held workflow.
-    paymentMethod:       row.payment_method || (
-      row.source && row.source !== 'sunday_collection'
-        ? ((Number(row.bank_transfer_amount || 0) >= Number(row.total_collection || 0) && Number(row.total_collection || 0) > 0) ? 'bank_transfer' : 'cash')
-        : ''
-    ),
-    donorName:           row.donor_name || '',
     id:                  row.id,
     date:                row.date,
     membersTithe:        row.members_tithe,
@@ -458,6 +461,8 @@ async function getIncome(DB) {
     depositDate:         row.deposit_date,
     notes:               row.notes,
     createdAt:           row.created_at,
+    paymentMethod:       inferIncomePaymentMethod(row),
+    donorName:           row.donor_name || '',
   })));
 }
 
