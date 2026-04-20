@@ -79,6 +79,8 @@ export async function onRequest(context) {
     if (route === 'expenses') {
       if (method === 'GET'  && !param) return await getExpenses(DB);
       if (method === 'POST' && !param) return await createExpense(DB, body);
+      if (method === 'PUT'  &&  param) return await updateExpense(DB, param, body);
+      if (method === 'DELETE' && param) return await deleteExpense(DB, param);
     }
 
     // ── /api/petty ─────────────────────────────────────────────
@@ -573,6 +575,45 @@ async function createExpense(DB, data) {
   return ok({ ...data, id });
 }
 
+async function updateExpense(DB, id, data) {
+  const fieldMap = {
+    date:            'date',
+    category:        'category',
+    subCategory:     'subcategory',
+    description:     'description',
+    amount:          'amount',
+    receiptNo:       'receipt_no',
+    receiptImage:    'receipt_image',
+    receiptFileName: 'receipt_file_name',
+    paymentMethod:   'payment_method',
+    notes:           'notes',
+    recordedBy:      'recorded_by',
+    pettyRef:        'petty_ref',
+    status:          'status',
+    bankAmount:      'bank_amount',
+    cashAmount:      'cash_amount',
+    pettyAmount:     'petty_amount',
+    noReceipt:       'no_receipt'
+  };
+  const sets = [];
+  const vals = [];
+  for (const [jsKey, dbCol] of Object.entries(fieldMap)) {
+    if (data[jsKey] !== undefined && data[jsKey] !== null) {
+      sets.push(`${dbCol}=?`);
+      vals.push(jsKey === 'noReceipt' ? (data[jsKey] ? 1 : 0) : data[jsKey]);
+    }
+  }
+  if (sets.length === 0) return ok({ id, updated: false, reason: 'No fields to update' });
+  vals.push(id);
+  await DB.prepare(`UPDATE expenses SET ${sets.join(',')} WHERE id=?`).bind(...vals).run();
+  return ok({ id, updated: true });
+}
+
+async function deleteExpense(DB, id) {
+  await DB.prepare(`DELETE FROM expenses WHERE id=?`).bind(id).run();
+  return ok({ id, deleted: true });
+}
+
 // ── PETTY CASH ────────────────────────────────────────────────────
 async function getPettyConfig(DB) {
   const row = await DB.prepare(`SELECT * FROM petty_config WHERE id='main'`).first();
@@ -651,6 +692,11 @@ async function updatePettyEntry(DB, id, data) {
   // Build SET clause dynamically — only update fields that are provided
   const fieldMap = {
     status:           'status',
+    amount:           'amount',
+    notes:            'notes',
+    paymentMethod:    'payment_method',
+    bankAmount:       'bank_amount',
+    cashAmount:       'cash_amount',
     approvedBy:       'approved_by',
     approvedAt:       'approved_at',
     rejectedBy:       'rejected_by',
@@ -660,6 +706,7 @@ async function updatePettyEntry(DB, id, data) {
     settledAt:        'settled_at',
     settledBy:        'settled_by',
     actualAmount:     'actual_amount',
+    reference:        'reference',
     changeReturned:   'change_returned',
     vendor:           'vendor',
   };
