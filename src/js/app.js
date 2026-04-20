@@ -501,6 +501,8 @@ async function buildSidebar(){
     });
   });
   nav.innerHTML=html;
+  // Append Change PIN action as the last item — available to all logged-in users
+  nav.innerHTML += `<div class="nav-section">Account</div><div class="nav-item" onclick="App.showChangePinModal()"><span class="nav-icon">🔑</span>Change PIN</div>`;
 }
 
 function buildBottomNav(){
