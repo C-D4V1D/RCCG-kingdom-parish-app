@@ -4362,6 +4362,7 @@ async function renderAdmin(){
       <button class="tab ${tab==='backup'?'active':''}" onclick="App.setAdminTab('backup')">Backup & Restore</button>
     </div>
     ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settings):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):renderAdminBackup()}`;
+  if(tab==='quotas') initQuotaDnd();
 }
 
 function setAdminTab(t){ state.adminTab=t; renderAdmin() }
@@ -4396,11 +4397,12 @@ function renderAdminSettings(s){
 
 function renderAdminQuotas(s){
   const list=getQuotaList(s);
-  const rows=list.map((q,i)=>`
-    <div class="form-group" style="display:flex;gap:8px;align-items:flex-end" id="quota-row-${i}">
-      <div style="flex:2"><label class="form-label">Label</label><input type="text" class="form-input" id="ql_${i}" value="${esc(q.label)}" placeholder="e.g. Building Fund" /></div>
-      <div style="flex:1"><label class="form-label">Amount (₦)</label><input type="number" class="form-input" id="qa_${i}" value="${q.amount||0}" min="0" /></div>
-      <button class="btn" style="padding:8px 10px;color:var(--danger);margin-bottom:0" onclick="App.removeQuotaRow(${i})" title="Remove">✕</button>
+  const rows=list.map((q)=>`
+    <div class="quota-row" draggable="true">
+      <span class="dnd-handle" title="Drag to reorder">⠿</span>
+      <div style="flex:2"><label class="form-label">Label</label><input type="text" class="form-input" value="${esc(q.label)}" placeholder="e.g. Building Fund" /></div>
+      <div style="flex:1"><label class="form-label">Amount (₦)</label><input type="number" class="form-input" value="${q.amount||0}" min="0" /></div>
+      <button class="btn" style="padding:8px 10px;color:var(--danger);flex-shrink:0" onclick="App.removeQuotaRow(this)" title="Remove">✕</button>
     </div>`).join('');
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Monthly Fixed Quotas</div>
@@ -4505,25 +4507,114 @@ async function saveSettings(){
 function addQuotaRow(){
   const container=document.getElementById('quota-rows-container');
   if(!container) return;
-  const i=container.querySelectorAll('.form-group').length;
   const div=document.createElement('div');
-  div.className='form-group';
-  div.id=`quota-row-${i}`;
-  div.style.cssText='display:flex;gap:8px;align-items:flex-end';
-  div.innerHTML=`<div style="flex:2"><label class="form-label">Label</label><input type="text" class="form-input" id="ql_${i}" value="" placeholder="e.g. Building Fund" /></div><div style="flex:1"><label class="form-label">Amount (₦)</label><input type="number" class="form-input" id="qa_${i}" value="0" min="0" /></div><button class="btn" style="padding:8px 10px;color:var(--danger);margin-bottom:0" onclick="App.removeQuotaRow(${i})" title="Remove">✕</button>`;
+  div.className='quota-row';
+  div.draggable=true;
+  div.innerHTML=`<span class="dnd-handle" title="Drag to reorder">⠿</span><div style="flex:2"><label class="form-label">Label</label><input type="text" class="form-input" value="" placeholder="e.g. Building Fund" /></div><div style="flex:1"><label class="form-label">Amount (₦)</label><input type="number" class="form-input" value="0" min="0" /></div><button class="btn" style="padding:8px 10px;color:var(--danger);flex-shrink:0" onclick="App.removeQuotaRow(this)" title="Remove">✕</button>`;
   container.appendChild(div);
 }
 
-function removeQuotaRow(i){
-  const row=document.getElementById(`quota-row-${i}`);
+function removeQuotaRow(btn){
+  const row=btn.closest('.quota-row');
   if(row) row.remove();
+}
+
+function initQuotaDnd(){
+  const container=document.getElementById('quota-rows-container');
+  if(!container) return;
+
+  // ── HTML5 Drag & Drop (desktop / pointer-capable devices) ─────────────────
+  let dragSrc=null;
+  container.addEventListener('dragstart',e=>{
+    dragSrc=e.target.closest('.quota-row');
+    if(!dragSrc) return;
+    e.dataTransfer.effectAllowed='move';
+    setTimeout(()=>{ if(dragSrc) dragSrc.style.opacity='0.4'; },0);
+  });
+  container.addEventListener('dragend',()=>{
+    if(dragSrc) dragSrc.style.opacity='';
+    dragSrc=null;
+    container.querySelectorAll('.quota-row.drag-over').forEach(r=>r.classList.remove('drag-over'));
+  });
+  container.addEventListener('dragover',e=>{
+    e.preventDefault();
+    e.dataTransfer.dropEffect='move';
+    const target=e.target.closest('.quota-row');
+    if(!target||target===dragSrc) return;
+    container.querySelectorAll('.quota-row.drag-over').forEach(r=>r.classList.remove('drag-over'));
+    target.classList.add('drag-over');
+  });
+  container.addEventListener('drop',e=>{
+    e.preventDefault();
+    const target=e.target.closest('.quota-row');
+    if(!target||!dragSrc||target===dragSrc) return;
+    const rows=[...container.querySelectorAll('.quota-row')];
+    if(rows.indexOf(dragSrc)<rows.indexOf(target)){
+      container.insertBefore(dragSrc,target.nextSibling);
+    } else {
+      container.insertBefore(dragSrc,target);
+    }
+    container.querySelectorAll('.quota-row.drag-over').forEach(r=>r.classList.remove('drag-over'));
+  });
+
+  // ── Touch drag (mobile) — initiated from the ⠿ handle only ───────────────
+  let touchSrc=null, touchClone=null;
+  container.addEventListener('touchstart',e=>{
+    const handle=e.target.closest('.dnd-handle');
+    if(!handle) return;
+    touchSrc=handle.closest('.quota-row');
+    if(!touchSrc) return;
+    e.preventDefault();
+    const rect=touchSrc.getBoundingClientRect();
+    touchClone=touchSrc.cloneNode(true);
+    Object.assign(touchClone.style,{
+      position:'fixed',left:rect.left+'px',top:rect.top+'px',
+      width:rect.width+'px',opacity:'0.85',pointerEvents:'none',
+      zIndex:'9999',background:'var(--card)',boxShadow:'0 4px 20px rgba(0,0,0,0.2)',
+      borderRadius:'var(--rl)',transform:'scale(1.02)'
+    });
+    document.body.appendChild(touchClone);
+    touchSrc.style.opacity='0.25';
+  },{passive:false});
+  container.addEventListener('touchmove',e=>{
+    if(!touchSrc||!touchClone) return;
+    e.preventDefault();
+    const y=e.touches[0].clientY;
+    touchClone.style.top=(y-touchClone.getBoundingClientRect().height/2)+'px';
+    container.querySelectorAll('.quota-row.drag-over').forEach(r=>r.classList.remove('drag-over'));
+    [...container.querySelectorAll('.quota-row')].filter(r=>r!==touchSrc).forEach(row=>{
+      const {top,bottom}=row.getBoundingClientRect();
+      if(y>=top&&y<=bottom) row.classList.add('drag-over');
+    });
+  },{passive:false});
+  container.addEventListener('touchend',e=>{
+    if(!touchSrc) return;
+    if(touchClone){ document.body.removeChild(touchClone); touchClone=null; }
+    const y=e.changedTouches[0].clientY;
+    const rows=[...container.querySelectorAll('.quota-row')];
+    for(const row of rows){
+      if(row===touchSrc) continue;
+      const {top,bottom}=row.getBoundingClientRect();
+      if(y>=top&&y<=bottom){
+        if(rows.indexOf(touchSrc)<rows.indexOf(row)){
+          container.insertBefore(touchSrc,row.nextSibling);
+        } else {
+          container.insertBefore(touchSrc,row);
+        }
+        break;
+      }
+    }
+    touchSrc.style.opacity='';
+    container.querySelectorAll('.quota-row.drag-over').forEach(r=>r.classList.remove('drag-over'));
+    touchSrc=null;
+  });
 }
 
 async function saveQuotas(){
   const container=document.getElementById('quota-rows-container');
   const list=[];
   if(container){
-    container.querySelectorAll('.form-group').forEach((row)=>{
+    container.querySelectorAll('.quota-row').forEach((row)=>{
       const labelEl=row.querySelector('input[type="text"]');
       const amountEl=row.querySelector('input[type="number"]');
       const label=(labelEl?.value||'').trim();
