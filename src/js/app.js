@@ -776,7 +776,7 @@ async function buildTransactionsLedger(){
       kind:p.type||'petty',
       date:p.createdAt||p.dateNeeded||'',
       amount:p.actualAmount||p.amount||0,
-      direction:p.type==='refill'?'transfer':'debit',
+      direction:(p.type==='refill'||p.type==='topup_request')?'transfer':'debit',
       method:p.paymentMethod||'',
       status:p.status||'pending_approval',
       description:`Petty Cash — ${p.type==='topup_request'?'Top-Up Request':p.type==='advance'?'Advance':p.type==='refill'?'Refill':'Disbursement'}`,
