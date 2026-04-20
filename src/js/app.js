@@ -152,6 +152,7 @@ async function apiFetch(path, method='GET', body=null){
 }
 
 const DB = {
+  login(d)                     { return apiFetch('auth/login','POST',d); },
   getUsers()                   { return apiFetch('users'); },
   addUser(d)                   { return apiFetch('users','POST',d); },
   updateUser(id,d)             { return apiFetch(`users/${id}`,'PUT',d); },
@@ -366,22 +367,8 @@ async function login(){
   try {
     // Ensure tables exist — silently ignore if this fails (may already be initialised)
     try { await apiFetch('init'); } catch(initErr) { console.warn('init skipped:', initErr.message); }
-    const allUsers = await DB.getUsers();
-    const users = allUsers.filter(u=>u.role===role);
-    let user = null;
-    if(users.length>1){
-      const uid = document.getElementById('userSelect').value;
-      user = users.find(u=>u.id===uid && String(u.pin)===String(pin));
-    } else {
-      user = users.find(u=>String(u.pin)===String(pin));
-    }
-    if(!user){
-      errEl.textContent='Incorrect PIN. Please try again.';
-      errEl.style.display='block';
-      document.getElementById('pinInput').value='';
-      if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
-      return;
-    }
+    const uid = document.getElementById('userSelectWrap').style.display==='block' ? document.getElementById('userSelect').value : '';
+    const user = await DB.login({ role, pin, userId: uid || undefined });
     errEl.style.display='none';
     state.user = user;
     DB.addAudit('login','User logged in',user.name);
@@ -389,7 +376,15 @@ async function login(){
     document.getElementById('appShell').style.display='flex';
     DB.getSettings().then(s=>{ state.rolePermissions = s.rolePermissions||null; initApp(); });
   } catch(e) {
-    errEl.textContent='Cannot connect to database: '+e.message;
+    const msg = String(e?.message || '');
+    if(msg.toLowerCase().includes('invalid credentials')){
+      errEl.textContent='Incorrect PIN. Please try again.';
+      document.getElementById('pinInput').value='';
+    } else if(msg.toLowerCase().includes('please select your name')){
+      errEl.textContent='Please select your name before signing in.';
+    } else {
+      errEl.textContent='Cannot connect to database: '+msg;
+    }
     errEl.style.display='block';
     if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
   }
@@ -427,7 +422,8 @@ async function submitChangePin(){
   if(newPin !== confirmPin){ showAlert('New PIN and confirmation do not match.','danger'); return; }
   if(newPin === currentPin){ showAlert('New PIN must be different from current PIN.','danger'); return; }
   try{
-    await DB.changePin({ userId: state.user.id, currentPin, newPin });
+    const res = await DB.changePin({ userId: state.user.id, currentPin, newPin });
+    if(!res?.success) throw new Error('PIN update failed.');
     DB.addAudit('pin_changed','User changed own PIN',state.user?.name);
     closeModal();
     showAlert('PIN changed successfully. Use the new PIN at next sign in.','success');

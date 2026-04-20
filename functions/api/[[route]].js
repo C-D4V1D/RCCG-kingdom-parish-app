@@ -28,6 +28,30 @@ async function tableHasColumns(DB, table, cols) {
   return cols.every(c => existing.has(c));
 }
 
+function isValidPin(pin) {
+  return /^\d{4,6}$/.test(String(pin || ''));
+}
+
+function isHashedPin(storedPin) {
+  return String(storedPin || '').startsWith('sha256$');
+}
+
+async function hashPin(pin) {
+  const data = new TextEncoder().encode(String(pin));
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  const hex = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return `sha256$${hex}`;
+}
+
+async function verifyPin(storedPin, inputPin) {
+  const stored = String(storedPin || '');
+  const input = String(inputPin || '');
+  if (!stored) return false;
+  if (!isHashedPin(stored)) return stored === input;
+  const inputHash = await hashPin(input);
+  return stored === inputHash;
+}
+
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
@@ -66,6 +90,9 @@ export async function onRequest(context) {
       if (method === 'POST'   && !param) return await createUser(DB, body);
       if (method === 'PUT'    &&  param) return await updateUser(DB, param, body);
       if (method === 'DELETE' &&  param) return await deleteUser(DB, param);
+    }
+    if (route === 'auth') {
+      if (method === 'POST' && param === 'login') return await loginUser(DB, body);
     }
     if (route === 'change-pin' && method === 'POST') {
       return await changeUserPin(DB, body);
@@ -381,9 +408,10 @@ async function handleInit(DB) {
     { id:'u7', name:'Visitor Access',       role:'viewer',        pin:'9999', email:'' },
   ];
   for (const u of defaultUsers) {
+    const hashedPin = await hashPin(u.pin);
     await DB.prepare(
       `INSERT OR IGNORE INTO users (id, name, role, pin, email) VALUES (?, ?, ?, ?, ?)`
-    ).bind(u.id, u.name, u.role, u.pin, u.email).run();
+    ).bind(u.id, u.name, u.role, hashedPin, u.email).run();
   }
 
   return ok({
@@ -395,17 +423,19 @@ async function handleInit(DB) {
 
 // ── USERS ─────────────────────────────────────────────────────────
 async function getUsers(DB) {
-  const { results } = await DB.prepare(`SELECT * FROM users ORDER BY role, name`).all();
+  const { results } = await DB.prepare(`SELECT id,name,role,email,pin,created_at FROM users ORDER BY role, name`).all();
   return ok(results || []);
 }
 
 async function createUser(DB, data) {
   const { name, role, pin, email = '' } = data;
   if (!name || !role || !pin) return err('name, role, and pin are required', 400);
+  if (!isValidPin(pin)) return err('pin must be 4-6 digits', 400);
   const id = newId('u');
+  const hashedPin = await hashPin(pin);
   await DB.prepare(`INSERT INTO users (id,name,role,pin,email) VALUES (?,?,?,?,?)`)
-    .bind(id, name, role, String(pin), email).run();
-  return ok({ id, name, role, pin, email });
+    .bind(id, name, role, hashedPin, email).run();
+  return ok({ id, name, role, email });
 }
 
 async function updateUser(DB, id, data) {
@@ -414,10 +444,35 @@ async function updateUser(DB, id, data) {
   const name  = data.name  || row.name;
   const role  = data.role  || row.role;
   const email = data.email ?? row.email;
-  const pin   = (data.pin && String(data.pin).length >= 4) ? String(data.pin) : row.pin;
+  const pin   = (data.pin && isValidPin(data.pin)) ? await hashPin(data.pin) : row.pin;
   await DB.prepare(`UPDATE users SET name=?,role=?,email=?,pin=? WHERE id=?`)
     .bind(name, role, email, pin, id).run();
   return ok({ id, name, role, email });
+}
+
+async function loginUser(DB, data) {
+  const role = String(data?.role || '').trim();
+  const pin = String(data?.pin || '').trim();
+  const userId = String(data?.userId || '').trim();
+  if (!role || !pin) return err('role and pin are required', 400);
+
+  let row = null;
+  if (userId) {
+    row = await DB.prepare(`SELECT id,name,role,email,pin FROM users WHERE id=? AND role=?`).bind(userId, role).first();
+  } else {
+    const { results } = await DB.prepare(`SELECT id,name,role,email,pin FROM users WHERE role=? ORDER BY name`).bind(role).all();
+    const users = results || [];
+    if (users.length > 1) return err('Please select your name', 400);
+    row = users[0] || null;
+  }
+
+  if (!row) return err('Invalid credentials', 401);
+  const validPin = await verifyPin(row.pin, pin);
+  if (!validPin) return err('Invalid credentials', 401);
+  if (!isHashedPin(row.pin)) {
+    await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(pin), row.id).run();
+  }
+  return ok({ id: row.id, name: row.name, role: row.role, email: row.email || '' });
 }
 
 async function deleteUser(DB, id) {
@@ -440,8 +495,9 @@ async function changeUserPin(DB, data) {
   }
   const row = await DB.prepare(`SELECT id, pin FROM users WHERE id=?`).bind(userId).first();
   if (!row) return err('User not found', 404);
-  if (String(row.pin) !== currentPin) return err('Current PIN is incorrect', 401);
-  await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(newPin, userId).run();
+  const validCurrentPin = await verifyPin(row.pin, currentPin);
+  if (!validCurrentPin) return err('Current PIN is incorrect', 401);
+  await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(newPin), userId).run();
   return ok({ success: true, id: userId });
 }
 
@@ -1008,10 +1064,12 @@ async function adminImport(DB, data) {
     for (const u of data.users) {
       try {
         const pinStr = String(u.pin || '');
-        if (!u.id || !u.name || !u.role || !pinStr || !/^\d{4,6}$/.test(pinStr)) { errs.push(`user:${u.id||'?'}`); continue; }
+        if (!u.id || !u.name || !u.role || !pinStr) { errs.push(`user:${u.id||'?'}`); continue; }
+        const pinValue = isHashedPin(pinStr) ? pinStr : (isValidPin(pinStr) ? await hashPin(pinStr) : '');
+        if (!pinValue) { errs.push(`user:${u.id||'?'}`); continue; }
         await DB.prepare(
           `INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES (?,?,?,?,?)`
-        ).bind(u.id, u.name, u.role, String(u.pin), u.email || '').run();
+        ).bind(u.id, u.name, u.role, pinValue, u.email || '').run();
       } catch(e) { errs.push(`user:${u.id}`); }
     }
   }
