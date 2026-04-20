@@ -363,7 +363,7 @@ async function handleInit(DB) {
     await DB.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).bind(key, value).run();
   }
 
-  // Seed default users — INSERT OR REPLACE ensures correct PINs even if table existed before
+  // Seed default users — INSERT OR IGNORE preserves any PINs already set by the admin
   const defaultUsers = [
     { id:'u1', name:'IT Administrator',     role:'it_admin',      pin:'0000', email:'it@kpaguleri.org' },
     { id:'u2', name:'Rev. Emmanuel Obi',    role:'pastor',        pin:'1111', email:'pastor@kpaguleri.org' },
@@ -375,7 +375,7 @@ async function handleInit(DB) {
   ];
   for (const u of defaultUsers) {
     await DB.prepare(
-      `INSERT OR REPLACE INTO users (id, name, role, pin, email) VALUES (?, ?, ?, ?, ?)`
+      `INSERT OR IGNORE INTO users (id, name, role, pin, email) VALUES (?, ?, ?, ?, ?)`
     ).bind(u.id, u.name, u.role, u.pin, u.email).run();
   }
 
@@ -930,7 +930,14 @@ async function adminImport(DB, data) {
     for (const r of data.cashTransactions) { try { await createCashTransaction(DB, r); } catch(e) { errs.push(`ctx:${r.id}`); } }
   }
   if (data.users && Array.isArray(data.users)) {
-    for (const u of data.users) { try { await createUser(DB, u); } catch(e) { errs.push(`user:${u.id}`); } }
+    for (const u of data.users) {
+      try {
+        if (!u.id || !u.name || !u.role || !u.pin) { errs.push(`user:${u.id||'?'}`); continue; }
+        await DB.prepare(
+          `INSERT OR REPLACE INTO users (id,name,role,pin,email) VALUES (?,?,?,?,?)`
+        ).bind(u.id, u.name, u.role, String(u.pin), u.email || '').run();
+      } catch(e) { errs.push(`user:${u.id}`); }
+    }
   }
   if (data.settings && typeof data.settings === 'object') {
     await saveSettings(DB, data.settings);

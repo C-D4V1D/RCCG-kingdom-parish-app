@@ -4452,13 +4452,21 @@ async function saveRates(){
   const s = await DB.getSettings();
   const r = s.remittanceRates || {};
   const pct2dec = id => { const el=document.getElementById(id); return el ? parseFloat(el.value||0)/100 : null; };
+  const badRows = [];
   INCOME_TYPES.filter(t=>!t.special).forEach(t=>{
     if(!r[t.key]) r[t.key]={};
     const natl = pct2dec(`rate_${t.key}_natl`);
     const local = pct2dec(`rate_${t.key}_local`);
     if(natl!==null) r[t.key].natl = natl;
     if(local!==null) r[t.key].local = local;
+    if(natl!==null && local!==null && Math.round((natl+local)*100) !== 100){
+      badRows.push(`${t.label} (${Math.round((natl+local)*100)}%)`);
+    }
   });
+  if(badRows.length){
+    showAlert(`National + Local must equal 100% for: ${badRows.join(', ')}. Please correct before saving.`,'danger');
+    return;
+  }
   ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed','provinceRebate'].forEach(k=>{
     const v = pct2dec(`rate_${k}`);
     if(v!==null) r[k] = v;
@@ -4514,9 +4522,11 @@ async function saveQuotas(){
   const container=document.getElementById('quota-rows-container');
   const list=[];
   if(container){
-    container.querySelectorAll('.form-group').forEach((row,i)=>{
-      const label=(document.getElementById(`ql_${i}`)?.value||'').trim();
-      const amount=parseFloat(document.getElementById(`qa_${i}`)?.value)||0;
+    container.querySelectorAll('.form-group').forEach((row)=>{
+      const labelEl=row.querySelector('input[type="text"]');
+      const amountEl=row.querySelector('input[type="number"]');
+      const label=(labelEl?.value||'').trim();
+      const amount=parseFloat(amountEl?.value)||0;
       if(label) list.push({ label, amount });
     });
   }
