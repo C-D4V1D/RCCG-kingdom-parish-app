@@ -20,26 +20,29 @@ const ROLES = {
 
 const PERMISSIONS = {
   it_admin:      ['all'],
-  pastor:        ['dashboard','income_view','remittances','expenses_view','petty_view','reports','signoff'],
-  accountant:    ['dashboard','income','income_view','remittances','expenses','petty_view','reports'],
-  admin_officer: ['dashboard','expenses','petty_request','petty_view','income_view'],
-  signatory:     ['dashboard','income_view','remittances_view','petty_approve','expenses_view'],
-  viewer:        ['dashboard','income_view','remittances_view','expenses_view','petty_view']
+  pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','petty_view','reports','audit','signoff'],
+  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit'],
+  admin_officer: ['dashboard','transactions','expenses','petty_request','petty_view','income_view'],
+  signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','bank','petty_approve'],
+  viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','petty_view']
 };
 
 // All available permission keys with human-readable labels, grouped for the UI
 const PERMISSION_DEFS = [
   { key:'dashboard',        label:'Dashboard',              group:'General'    },
+  { key:'transactions',     label:'Transactions',           group:'General'    },
   { key:'income',           label:'Record Income',          group:'Finance'    },
   { key:'income_view',      label:'View Income Records',    group:'Finance'    },
   { key:'remittances',      label:'Manage Remittances',     group:'Finance'    },
   { key:'remittances_view', label:'View Remittances',       group:'Finance'    },
   { key:'expenses',         label:'Log Expenses',           group:'Finance'    },
   { key:'expenses_view',    label:'View Expenses',          group:'Finance'    },
+  { key:'bank',             label:'Bank',                   group:'Finance'    },
   { key:'petty_request',    label:'Request Petty Cash',     group:'Petty Cash' },
   { key:'petty_approve',    label:'Approve Petty Cash',     group:'Petty Cash' },
   { key:'petty_view',       label:'View Petty Cash',        group:'Petty Cash' },
   { key:'reports',          label:'Generate Reports',       group:'Reports'    },
+  { key:'audit',            label:'View Audit Log',         group:'Reports'    },
   { key:'signoff',          label:'Sign Off Remittances',   group:'Reports'    },
 ];
 
@@ -242,6 +245,18 @@ function hasPermission(p){
   return perms.includes('all') || perms.includes(p);
 }
 function can(...ps){ return ps.some(p=>hasPermission(p)) }
+const PAGE_PERMISSION_RULES = {
+  transactions: ['transactions'],
+  bank: ['bank'],
+  audit: ['audit']
+};
+function canAccessPage(page){
+  if(!state.user) return false;
+  const item = NAV.find(n=>n.id===page);
+  if(item && !item.minRole.includes('all') && !item.minRole.includes(state.user.role)) return false;
+  const rules = PAGE_PERMISSION_RULES[page];
+  return !rules || can(...rules);
+}
 function monthLabel(){ return MONTHS[state.month]+' '+state.year }
 function defaultExpenseStatusForCurrentUser(){
   // Only the Admin Officer's expenses need Accountant verification
@@ -457,7 +472,7 @@ function onMonthChange(){
 async function buildSidebar(){
   let sections = {};
   NAV.forEach(item=>{
-    if(!item.minRole.includes('all') && !item.minRole.includes(state.user?.role)) return;
+    if(!canAccessPage(item.id)) return;
     if(!sections[item.section]) sections[item.section]=[];
     sections[item.section].push(item);
   });
@@ -478,7 +493,7 @@ async function buildSidebar(){
 }
 
 function buildBottomNav(){
-  const items = NAV.filter(n=> n.minRole.includes('all')||n.minRole.includes(state.user?.role)).slice(0,5);
+  const items = NAV.filter(n=>canAccessPage(n.id)).slice(0,5);
   const bn = document.getElementById('bottomNav');
   const inner = document.createElement('div');
   inner.className='bottom-nav-inner';
@@ -501,6 +516,10 @@ function updateSidebarUser(){
 }
 
 function navigate(page, fromHistory){
+  if(!canAccessPage(page)){
+    if(page!=='dashboard') showAlert('You do not have permission to access that page.','danger');
+    page='dashboard';
+  }
   state.page=page;
   // Update URL — push new entry unless this was triggered by the browser's own back/forward
   const newPath = '/' + (page === 'dashboard' ? '' : page);
