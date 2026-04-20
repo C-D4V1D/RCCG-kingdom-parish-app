@@ -3255,12 +3255,16 @@ async function renderPettyCash(){
           <td>
             <div style="font-size:13px;font-weight:500">${r.purpose||'Wallet top-up'}</div>
             ${r.expenseRefs?.length?`<div style="font-size:11px;color:var(--text3)">${r.expenseRefs.length} expense(s) included</div>`:''}
-            ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--text3)">Paid so far: ${fmt(r.actualAmount||0)} · Remaining: ${fmt(r.amount||0)}</div>`:''}
+            ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--text3)">Paid so far: ${fmt(r.actualAmount||0)} · Remaining: ${fmt(Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0)))}</div>`:''}
           </td>
           <td class="td-muted">${r.requestedBy||'—'}</td>
           <td class="td-muted">${r.approvedBy||'—'}</td>
-          <td class="td-right td-bold" style="color:var(--primary)">${fmt(r.amount)}</td>
-          <td><button class="btn btn-sm btn-primary" onclick="App.showPettyRefill(${r.amount}, '${r.id}')">📋 Record Payment</button></td>
+          <td class="td-right td-bold" style="color:var(--primary)">
+            <div>${fmt(r.originalAmount||r.amount)}</div>
+            ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--success)">Paid: ${fmt(r.actualAmount)}</div>`:''}
+            ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--amber)">Due: ${fmt(Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0)))}</div>`:''}
+          </td>
+          <td><button class="btn btn-sm btn-primary" onclick="App.showPettyRefill(${Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0))}, '${r.id}')">📋 Record Payment</button></td>
         </tr>`).join('')}
       </table></div>
     </div>`:''}
@@ -3304,7 +3308,13 @@ async function renderPettyCash(){
             <td class="td-muted">${r.requestedBy||'—'}</td>
             <td class="td-muted">${r.approvedBy||r.authorizedBy||'—'}</td>
             <td><span class="badge ${r.status==='settled'?'badge-success':r.status==='approved'?'badge-info':r.status==='rejected'?'badge-danger':'badge-warn'}">${r.status?.replace('_',' ')||'pending'}</span>${overdue?'<span class="badge badge-danger" style="margin-left:4px">Overdue</span>':''}</td>
-            <td class="td-right td-bold ${isTopup?'td-green':'td-amber'}">${isTopup?'+':''}${fmt(r.amount)}</td>
+            <td class="td-right td-bold ${isRefill?'td-green':isTopupReq?'td-muted':'td-amber'}" style="white-space:nowrap">
+              ${isRefill?`<span style="color:var(--success);font-weight:700">+${fmt(r.amount)}</span>`
+                :isTopupReq
+                  // Bug 1 fix: show originalAmount (amount before any payments) if available
+                  ?`<span style="color:var(--text2)">${fmt(r.originalAmount||r.amount)}</span>`
+                  :`<span style="color:var(--amber);font-weight:700">−${fmt(r.amount)}</span>`}
+            </td>
             <td style="font-size:12px">${r.receiptNo?`<span class="badge badge-success">✓ ${r.receiptNo}</span>`:r.rejectionReason?`<span class="td-muted">${r.rejectionReason}</span>`:r.reference?`<span class="badge badge-gray">Ref: ${r.reference}</span>`:'—'}</td>
           </tr>`;}).join('')}
       </table></div>`:'<div class="empty-table">No petty cash activity this month.</div>'}
@@ -3978,19 +3988,21 @@ async function submitRefill(){
     reference:ref, authorizedBy:auth, paymentMethod:method, bankAmount:bankAmt, cashAmount:cashAmt
   });
   if(linkedTopup){
-    const remainingBefore = linkedTopup.amount||0;
-    const paidSoFar = linkedTopup.actualAmount||0;
-    const newRemaining = Math.max(0, remainingBefore - actualAdded);
+    // Preserve original amount — do NOT mutate it. Track paid via actualAmount.
+    const originalAmt = linkedTopup.originalAmount || linkedTopup.amount || 0;
+    const paidSoFar = linkedTopup.actualAmount || 0;
     const totalPaid = paidSoFar + actualAdded;
-    const settledNow = newRemaining <= 0.5;
+    const remaining = Math.max(0, originalAmt - totalPaid);
+    const settledNow = remaining <= 0.5;
     const paymentLine = `${new Date().toISOString().split('T')[0]}: ${fmt(actualAdded)} via ${methodLabel}${ref?` (ref: ${ref})`:''}`;
     const mergedNotes = [linkedTopup.notes||'', `Payment log → ${paymentLine}`].filter(Boolean).join('\n');
     await DB.updatePettyEntry(topupRequestId, {
-      status:settledNow ? 'settled' : 'approved',
-      settledAt:settledNow ? new Date().toISOString() : undefined,
-      settledBy:settledNow ? state.user?.name : undefined,
-      actualAmount: totalPaid,
-      amount: newRemaining,
+      status: settledNow ? 'settled' : 'approved',
+      settledAt: settledNow ? new Date().toISOString() : undefined,
+      settledBy: settledNow ? state.user?.name : undefined,
+      originalAmount: originalAmt,   // lock in original on first payment
+      actualAmount: totalPaid,       // running total paid
+      // DO NOT update amount — preserving original requested amount
       paymentMethod: method,
       bankAmount: bankAmt,
       cashAmount: cashAmt,
@@ -4002,7 +4014,10 @@ async function submitRefill(){
   DB.addAudit('petty_refilled',`Cash topped up: ${fmt(actualAdded)} via ${methodLabel} (authorized by ${auth}${ref?', ref: '+ref:''})`,state.user?.name);
   DB.addNotification('Petty Cash Topped Up',`${fmt(actualAdded)} added to petty cash. New balance: ${fmt(newFloat)}. Authorized by: ${auth}.`,'success');
   closeModal();
-  const remainingMsg = linkedTopup ? ` Remaining on approved request: ${fmt(Math.max(0,(linkedTopup.amount||0)-actualAdded))}.` : '';
+  const _origAmt = linkedTopup ? (linkedTopup.originalAmount || linkedTopup.amount || 0) : 0;
+  const _paidSoFar = linkedTopup ? (linkedTopup.actualAmount || 0) : 0;
+  const _remaining = linkedTopup ? Math.max(0, _origAmt - (_paidSoFar + actualAdded)) : 0;
+  const remainingMsg = linkedTopup ? (_remaining > 0.5 ? ` Remaining on approved request: ${fmt(_remaining)}.` : ' Top-up request fully settled.') : '';
   showAlert(`Petty cash topped up by ${fmt(actualAdded)}. New balance: ${fmt(newFloat)}.${actualAdded<amt?` (Max reached — only ${fmt(actualAdded)} added.)`:''}${remainingMsg}`,'success');
   renderPettyCash();
 }
