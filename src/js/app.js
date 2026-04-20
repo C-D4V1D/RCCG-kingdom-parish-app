@@ -2216,14 +2216,21 @@ async function renderExpenses(){
   EXPENSE_CATS.forEach(c=>{ catTotals[c.key]=expenses.filter(e=>e.category===c.key).reduce((s,e)=>s+(e.amount||0),0); });
 
   // Active category filter (stored on state)
-  const activeFilter = state.expCatFilter || null;
-  const searchTerm   = state.expSearch   || '';
-  const sortField    = state.expSort     || 'date';
-  const sortDir      = state.expSortDir  || 'desc';
+  const activeFilter   = state.expCatFilter    || null;
+  const searchTerm     = state.expSearch       || '';
+  const methodFilter   = state.expMethodFilter || null;
+  const recordedByFilter = state.expRecordedBy || null;
+  const sortField      = state.expSort     || 'date';
+  const sortDir        = state.expSortDir  || 'desc';
+
+  // Collect unique recordedBy values for the dropdown
+  const uniqueRecordedBy = [...new Set(expenses.map(e=>e.recordedBy||'').filter(Boolean))].sort();
 
   // Apply filters to log
   let filtered = expenses.filter(e=>{
     if(activeFilter && e.category!==activeFilter) return false;
+    if(methodFilter && e.paymentMethod!==methodFilter) return false;
+    if(recordedByFilter && (e.recordedBy||'')!==recordedByFilter) return false;
     if(searchTerm){
       const q=searchTerm.toLowerCase();
       if(!(
@@ -2353,7 +2360,18 @@ async function renderExpenses(){
           <option value="">All categories</option>
           ${EXPENSE_CATS.map(c=>`<option value="${c.key}" ${activeFilter===c.key?'selected':''}>${c.icon} ${c.label}</option>`).join('')}
         </select>
-        ${(activeFilter||searchTerm)?`<button class="btn btn-sm" onclick="App.clearExpFilters()" style="white-space:nowrap;flex-shrink:0">✕ Clear all</button>`:''}
+        <select class="form-select" style="width:auto;height:36px;font-size:13px" onchange="App.setExpMethodFilter(this.value)">
+          <option value="">All methods</option>
+          <option value="petty_cash"    ${methodFilter==='petty_cash'?'selected':''}>💳 Petty Cash</option>
+          <option value="bank_transfer" ${methodFilter==='bank_transfer'?'selected':''}>🏦 Bank Transfer</option>
+          <option value="cash"          ${methodFilter==='cash'?'selected':''}>💵 Cash</option>
+          <option value="split"         ${methodFilter==='split'?'selected':''}>🔀 Split</option>
+        </select>
+        ${uniqueRecordedBy.length>1?`<select class="form-select" style="width:auto;height:36px;font-size:13px" onchange="App.setExpRecordedBy(this.value)">
+          <option value="">All recorders</option>
+          ${uniqueRecordedBy.map(n=>`<option value="${esc(n)}" ${recordedByFilter===n?'selected':''}>${esc(n)}</option>`).join('')}
+        </select>`:''}
+        ${(activeFilter||searchTerm||methodFilter||recordedByFilter)?`<button class="btn btn-sm" onclick="App.clearExpFilters()" style="white-space:nowrap;flex-shrink:0">✕ Clear all</button>`:''}
       </div>
 
       ${filtered.length?`<div class="table-wrap"><table>
@@ -2420,14 +2438,29 @@ function setExpSearch(val){
   state.expSearch = val||'';
   renderExpenses();
 }
+function setExpMethodFilter(val){
+  state.expMethodFilter = val||null;
+  renderExpenses();
+}
+function setExpRecordedBy(val){
+  state.expRecordedBy = val||null;
+  renderExpenses();
+}
 function setExpSort(field){
   if(state.expSort===field){ state.expSortDir = state.expSortDir==='asc'?'desc':'asc'; }
   else { state.expSort=field; state.expSortDir='desc'; }
   renderExpenses();
 }
 function clearExpFilters(){
-  state.expCatFilter=null; state.expSearch=''; renderExpenses();
+  state.expCatFilter=null; state.expSearch=''; state.expMethodFilter=null; state.expRecordedBy=null; renderExpenses();
 }
+
+// ── Petty cash history filters ────────────────────────────────
+function setPettySearch(v){ state.pettySearch=v||''; renderPettyCash(); }
+function setPettyTypeFilter(v){ state.pettyTypeFilter=v||null; renderPettyCash(); }
+function setPettyStatusFilter(v){ state.pettyStatusFilter=v||null; renderPettyCash(); }
+function setPettySort(v){ state.pettySort=v||'date_desc'; renderPettyCash(); }
+function clearPettyFilters(){ state.pettySearch=''; state.pettyTypeFilter=null; state.pettyStatusFilter=null; renderPettyCash(); }
 
 function updateExpenseSubcats(){
   const cat = document.getElementById('exp_cat')?.value;
@@ -3097,6 +3130,8 @@ function pettyMonthHistory(history){
 }
 
 function isReceiptOverdue(req){
+  // Only advances (cash released before purchase) have the 48-hr receipt rule
+  if(req.type!=='advance') return false;
   if(req.status!=='approved'||req.receiptNo) return false;
   const hrs=(Date.now()-new Date(req.approvedAt||req.createdAt).getTime())/3600000;
   return hrs>48;
@@ -3112,18 +3147,20 @@ async function renderPettyCash(){
   // Pending approvals (all time — not month scoped)
   const pending = history.filter(h=>h.status==='pending_approval');
   const pendingTopups = pending.filter(h=>h.type==='topup_request');
-  const pendingAdvances = pending.filter(h=>h.type==='advance'||(!h.type&&h.type!=='refill'));
+  const pendingAdvances = pending.filter(h=>h.type==='advance');
 
   // Approved top-up requests awaiting payment recording
-  const approvedTopups = history.filter(h=>h.status==='approved'&&h.type==='topup_request');
+  // Approved top-up requests awaiting payment — only show those with remaining balance
+  const approvedTopups = history.filter(h=>h.status==='approved'&&h.type==='topup_request'&&
+    Math.max(0,(h.originalAmount||h.amount||0)-(h.actualAmount||0))>0.5);
 
   // Advances awaiting proof
-  const advancesAwaitingProof = history.filter(h=>h.status==='approved'&&(h.type==='advance'||(!h.type&&h.type!=='refill'))&&!h.receiptNo);
+  const advancesAwaitingProof = history.filter(h=>h.status==='approved'&&h.type==='advance'&&!h.receiptNo);
   const overdueReceipts = advancesAwaitingProof.filter(h=>isReceiptOverdue(h));
 
   // This month stats
   const monthTopups = monthHistory.filter(h=>h.type==='refill').reduce((s,h)=>s+(h.amount||0),0);
-  const monthAdvancesDisbursed = monthHistory.filter(h=>(h.type==='advance'||(!h.type&&h.type!=='refill'))&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.amount||0),0);
+  const monthAdvancesDisbursed = monthHistory.filter(h=>h.type==='advance'&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.amount||0),0);
 
   // Petty cash expenses since the last refill (for top-up request)
   // history is already newest-first from the API — find() without reverse picks the most recent
@@ -3290,36 +3327,127 @@ async function renderPettyCash(){
     </div>`:''}
 
     <div class="card">
-      <div class="card-header"><span class="card-title">History — ${monthLabel()}</span></div>
-      ${monthHistory.length?`<div class="table-wrap"><table>
-        <tr><th>Date</th><th>Type</th><th>Purpose</th><th>By</th><th>Authorized By</th><th>Status</th><th class="td-right">Amount</th><th>Proof / Ref</th></tr>
-        ${monthHistory.map(r=>{
-          const isRefill=r.type==='refill';
-          const isTopupReq=r.type==='topup_request';
-          const isTopup=isRefill||isTopupReq;
-          const overdue=isReceiptOverdue(r);
-          const typeTag=isRefill
-            ?`<span class="badge badge-success">↺ Top-Up Paid</span>`
-            :isTopupReq
-              ?`<span class="badge badge-info">↺ Top-Up Request</span>`
-              :`<span class="badge badge-warn">💳 Advance</span>`;
-          return`<tr style="${overdue?'background:var(--danger-light)':''}">
-            <td style="white-space:nowrap">${fmtDate(r.createdAt)}</td>
-            <td>${typeTag}</td>
-            <td style="font-size:13px">${r.purpose||'—'}</td>
-            <td class="td-muted">${r.requestedBy||'—'}</td>
-            <td class="td-muted">${r.approvedBy||r.authorizedBy||'—'}</td>
-            <td><span class="badge ${r.status==='settled'?'badge-success':r.status==='approved'?'badge-info':r.status==='rejected'?'badge-danger':'badge-warn'}">${r.status?.replace('_',' ')||'pending'}</span>${overdue?'<span class="badge badge-danger" style="margin-left:4px">Overdue</span>':''}</td>
-            <td class="td-right td-bold ${isRefill?'td-green':isTopupReq?'td-muted':'td-amber'}" style="white-space:nowrap">
-              ${isRefill?`<span style="color:var(--success);font-weight:700">+${fmt(r.amount)}</span>`
-                :isTopupReq
-                  // Bug 1 fix: show originalAmount (amount before any payments) if available
-                  ?`<span style="color:var(--text2)">${fmt(r.originalAmount||r.amount)}</span>`
-                  :`<span style="color:var(--amber);font-weight:700">−${fmt(r.amount)}</span>`}
-            </td>
-            <td style="font-size:12px">${r.receiptNo?`<span class="badge badge-success">✓ ${r.receiptNo}</span>`:r.rejectionReason?`<span class="td-muted">${r.rejectionReason}</span>`:r.reference?`<span class="badge badge-gray">Ref: ${r.reference}</span>`:'—'}</td>
-          </tr>`;}).join('')}
-      </table></div>`:'<div class="empty-table">No petty cash activity this month.</div>'}
+      <div class="card-header">
+        <span class="card-title">History</span>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;font-weight:400">
+          <input type="checkbox" id="petty_show_all" onchange="App.renderPettyCash()"
+            ${state.pettyShowAll?'checked':''} />
+          Show all months
+        </label>
+      </div>
+      <!-- Filter / sort bar -->
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
+        <div style="flex:1;min-width:140px;position:relative">
+          <span style="position:absolute;left:9px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--text3)">🔍</span>
+          <input type="text" id="petty_search" class="form-input"
+            placeholder="Search purpose, by, ref…"
+            value="${state.pettySearch||''}"
+            oninput="App.setPettySearch(this.value)"
+            style="padding-left:28px;height:34px;font-size:13px" />
+        </div>
+        <select class="form-select" style="width:auto;height:34px;font-size:13px"
+          onchange="App.setPettyTypeFilter(this.value)">
+          <option value="">All types</option>
+          <option value="topup_request" ${state.pettyTypeFilter==='topup_request'?'selected':''}>↺ Top-Up Requests</option>
+          <option value="refill"        ${state.pettyTypeFilter==='refill'?'selected':''}>↺ Top-Up Paid</option>
+          <option value="advance"       ${state.pettyTypeFilter==='advance'?'selected':''}>💳 Advances</option>
+        </select>
+        <select class="form-select" style="width:auto;height:34px;font-size:13px"
+          onchange="App.setPettyStatusFilter(this.value)">
+          <option value="">All statuses</option>
+          <option value="pending_approval" ${state.pettyStatusFilter==='pending_approval'?'selected':''}>Pending</option>
+          <option value="approved"         ${state.pettyStatusFilter==='approved'?'selected':''}>Approved</option>
+          <option value="settled"          ${state.pettyStatusFilter==='settled'?'selected':''}>Settled</option>
+          <option value="rejected"         ${state.pettyStatusFilter==='rejected'?'selected':''}>Rejected</option>
+          <option value="cancelled"        ${state.pettyStatusFilter==='cancelled'?'selected':''}>Cancelled</option>
+        </select>
+        <select class="form-select" style="width:auto;height:34px;font-size:13px"
+          onchange="App.setPettySort(this.value)">
+          <option value="date_desc"   ${(state.pettySort||'date_desc')==='date_desc'?'selected':''}>Date ↓ Newest</option>
+          <option value="date_asc"    ${state.pettySort==='date_asc'?'selected':''}>Date ↑ Oldest</option>
+          <option value="amount_desc" ${state.pettySort==='amount_desc'?'selected':''}>Amount ↓ Largest</option>
+          <option value="amount_asc"  ${state.pettySort==='amount_asc'?'selected':''}>Amount ↑ Smallest</option>
+        </select>
+        ${(state.pettySearch||state.pettyTypeFilter||state.pettyStatusFilter)?
+          `<button class="btn btn-sm" onclick="App.clearPettyFilters()" style="white-space:nowrap;flex-shrink:0">✕ Clear</button>`:''
+        }
+      </div>
+      ${(()=>{
+        // Determine source: all-time or current month
+        const source = state.pettyShowAll ? history : monthHistory;
+        // Apply search
+        const q = (state.pettySearch||'').toLowerCase();
+        let rows = source.filter(r=>{
+          if(state.pettyTypeFilter && r.type!==state.pettyTypeFilter) return false;
+          if(state.pettyStatusFilter && r.status!==state.pettyStatusFilter) return false;
+          if(q){
+            const hay = [(r.purpose||''),(r.requestedBy||''),(r.approvedBy||''),(r.authorizedBy||''),(r.reference||''),(r.notes||''), fmt(r.originalAmount||r.amount)].join(' ').toLowerCase();
+            if(!hay.includes(q)) return false;
+          }
+          return true;
+        });
+        // Sort
+        const sort = state.pettySort||'date_desc';
+        rows.sort((a,b)=>{
+          if(sort==='amount_desc') return (b.originalAmount||b.amount||0)-(a.originalAmount||a.amount||0);
+          if(sort==='amount_asc')  return (a.originalAmount||a.amount||0)-(b.originalAmount||b.amount||0);
+          if(sort==='date_asc')    return new Date(a.createdAt||0)-new Date(b.createdAt||0);
+          return new Date(b.createdAt||0)-new Date(a.createdAt||0); // date_desc default
+        });
+        if(!rows.length) return `<div class="empty-table">${source.length?'No entries match your filters.':'No petty cash activity '+(state.pettyShowAll?'yet.':'this month.')}</div>`;
+        return `<div class="table-wrap"><table>
+          <tr>
+            <th style="white-space:nowrap">Date</th>
+            <th>Type</th>
+            <th>Purpose</th>
+            <th>By</th>
+            <th>Authorized By</th>
+            <th>Status</th>
+            <th class="td-right" style="white-space:nowrap">Amount</th>
+            <th>Proof / Ref</th>
+          </tr>
+          ${rows.map(r=>{
+            const isRefill=r.type==='refill';
+            const isTopupReq=r.type==='topup_request';
+            const overdue=isReceiptOverdue(r);
+            const typeTag=isRefill
+              ?`<span class="badge badge-success">↺ Top-Up Paid</span>`
+              :isTopupReq
+                ?`<span class="badge badge-info">↺ Top-Up Request</span>`
+                :`<span class="badge badge-warn">💳 Advance</span>`;
+            const statusColor=r.status==='settled'?'badge-success':r.status==='approved'?'badge-info':r.status==='rejected'||r.status==='cancelled'?'badge-danger':'badge-warn';
+            const amtDisplay=isRefill
+              ?`<span style="color:var(--success);font-weight:700">+${fmt(r.amount)}</span>`
+              :isTopupReq
+                ?`<span style="color:var(--text2)">${fmt(r.originalAmount||r.amount)}</span>`
+                :`<span style="color:var(--amber);font-weight:700">−${fmt(r.amount)}</span>`;
+            const proofCell=r.receiptNo
+              ?`<span class="badge badge-success">✓ ${r.receiptNo}</span>`
+              :r.rejectionReason
+                ?`<span class="td-muted" style="font-size:11px">${r.rejectionReason}</span>`
+                :r.reference
+                  ?`<span class="badge badge-gray">Ref: ${r.reference}</span>`
+                  :'<span style="color:var(--text3)">—</span>';
+            return `<tr style="${overdue?'background:var(--danger-light)':''}">
+              <td style="white-space:nowrap;font-size:12px">${fmtDate(r.createdAt)}</td>
+              <td>${typeTag}</td>
+              <td style="font-size:12px">${r.purpose||'—'}</td>
+              <td class="td-muted" style="font-size:12px">${r.requestedBy||'—'}</td>
+              <td class="td-muted" style="font-size:12px">${r.approvedBy||r.authorizedBy||'—'}</td>
+              <td>
+                <span class="badge ${statusColor}">${r.status?.replace('_',' ')||'pending'}</span>
+                ${overdue?'<span class="badge badge-danger" style="margin-left:4px">Overdue</span>':''}
+              </td>
+              <td class="td-right" style="white-space:nowrap">${amtDisplay}</td>
+              <td style="font-size:12px">${proofCell}</td>
+            </tr>`;
+          }).join('')}
+        </table></div>
+        <div style="padding:8px 0 2px;font-size:12px;color:var(--text3);text-align:right">
+          ${rows.length} entr${rows.length===1?'y':'ies'}
+          ${rows.filter(r=>r.type==='refill').length>0?` · Topped up: <strong style="color:var(--success)">${fmt(rows.filter(r=>r.type==='refill').reduce((s,r)=>s+(r.amount||0),0))}</strong>`:''}
+        </div>`;
+      })()}
     </div>`;
 }
 // ── TOP-UP REQUEST (Admin Officer: wallet is low, based on expenses already logged) ──
@@ -3824,7 +3952,7 @@ async function confirmPettyReceipt(id){
     notes: (noReceiptChecked ? `No receipt — ${document.getElementById('rc_reason')?.value||''}\n` : '') + `Petty cash ref: ${req.id}. ${notes}`,
     recordedBy: state.user?.name,
     pettyRef: req.id,
-    status: defaultExpenseStatusForCurrentUser()
+    status: 'approved'  // advance was already approved before cash was released
   });
 
   DB.addAudit('petty_settled', `Petty cash settled: "${req.purpose}" — ${fmt(actualAmt)}${noReceiptChecked?' (no receipt)':`, Receipt: ${no}`}. Expense auto-created.`, state.user?.name);
@@ -4549,10 +4677,10 @@ return {
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
-  showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpSort, clearExpFilters,
+  showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
-  renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle,
+  renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
