@@ -368,7 +368,7 @@ async function login(){
   try {
     // Ensure tables exist — silently ignore if this fails (may already be initialised)
     try { await apiFetch('init'); } catch(initErr) { console.warn('init skipped:', initErr.message); }
-    const uid = document.getElementById('userSelectWrap').style.display==='block' ? document.getElementById('userSelect').value : '';
+    const uid = role==='signatory' ? (document.getElementById('userSelect')?.value || '') : '';
     const user = await DB.login({ role, pin, userId: uid || undefined });
     errEl.style.display='none';
     state.user = user;
