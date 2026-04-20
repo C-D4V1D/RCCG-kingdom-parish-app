@@ -589,6 +589,66 @@ function txDirectionMeta(direction){
   return { symbol:'↔', label:'Transfer transaction', cls:'' };
 }
 
+function txCurrentMonthDefaults(){
+  const now = new Date();
+  return {
+    from: new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0],
+    to:   new Date(now.getFullYear(), now.getMonth()+1, 0).toISOString().split('T')[0]
+  };
+}
+
+function applyTxFilters(all){
+  const search = (state.txSearch||'').trim().toLowerCase();
+  const typeFilter = state.txTypeFilter||'';
+  const statusFilter = state.txStatusFilter||'';
+  const methodFilter = state.txMethodFilter||'';
+  const moduleFilter = state.txModuleFilter||'';
+  const fromDate = state.txFromDate||'';
+  const toDate = state.txToDate||'';
+  const minAmount = parseFloat(state.txMinAmount);
+  const maxAmount = parseFloat(state.txMaxAmount);
+  const sortField = state.txSortField||'date';
+  const sortDir = state.txSortDir||'desc';
+
+  let filtered = all.filter(t=>{
+    const tDate = (t.date||'').slice(0,10);
+    if(typeFilter && t.kind!==typeFilter) return false;
+    if(statusFilter && String(t.status||'').toLowerCase()!==statusFilter) return false;
+    if(methodFilter && String(t.method||'').toLowerCase()!==methodFilter) return false;
+    if(moduleFilter && t.module!==moduleFilter) return false;
+    if(fromDate && tDate && tDate < fromDate) return false;
+    if(toDate && tDate && tDate > toDate) return false;
+    if(!Number.isNaN(minAmount) && minAmount>=0 && (t.amount||0) < minAmount) return false;
+    if(!Number.isNaN(maxAmount) && maxAmount>=0 && (t.amount||0) > maxAmount) return false;
+    if(search){
+      const hay = `${t.kind} ${t.module} ${t.description} ${t.reference} ${t.actor} ${t.notes} ${t.status} ${t.method}`.toLowerCase();
+      if(!hay.includes(search)) return false;
+    }
+    return true;
+  });
+
+  filtered.sort((a,b)=>{
+    let av, bv;
+    if(sortField==='amount'){ av=a.amount||0; bv=b.amount||0; }
+    else if(sortField==='type'){ av=a.kind||''; bv=b.kind||''; }
+    else if(sortField==='module'){ av=a.module||''; bv=b.module||''; }
+    else if(sortField==='status'){ av=a.status||''; bv=b.status||''; }
+    else { av=new Date(a.date||0).getTime(); bv=new Date(b.date||0).getTime(); }
+    if(av===bv) return 0;
+    if(typeof av==='string' || typeof bv==='string'){
+      return sortDir==='asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+    }
+    return sortDir==='asc' ? av-bv : bv-av;
+  });
+
+  return filtered;
+}
+
+function getTxSavedViews(){
+  try{ return JSON.parse(localStorage.getItem(`rccgTxViews_${state.user?.role}`)||'[]'); }
+  catch(e){ return []; }
+}
+
 async function buildTransactionsLedger(){
   const [income, expenses, remittances, cashTx, petty] = await Promise.all([
     DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getCashTransactions(), DB.getPetty()
@@ -689,6 +749,18 @@ async function buildTransactionsLedger(){
 }
 
 async function renderTransactions(){
+  // Apply current-month defaults on first visit to the page
+  if(!state.txInitialized){
+    const d = txCurrentMonthDefaults();
+    state.txFromDate = d.from;
+    state.txToDate   = d.to;
+    state.txSortField = 'date';
+    state.txSortDir   = 'desc';
+    state.txPageSize  = 20;
+    state.txPage      = 1;
+    state.txInitialized = true;
+  }
+
   const all = await buildTransactionsLedger();
 
   const search = (state.txSearch||'').trim().toLowerCase();
@@ -698,42 +770,11 @@ async function renderTransactions(){
   const moduleFilter = state.txModuleFilter||'';
   const fromDate = state.txFromDate||'';
   const toDate = state.txToDate||'';
-  const minAmount = parseFloat(state.txMinAmount);
-  const maxAmount = parseFloat(state.txMaxAmount);
   const sortField = state.txSortField||'date';
   const sortDir = state.txSortDir||'desc';
   const pageSize = parseInt(state.txPageSize||'20',10) || 20;
 
-  let filtered = all.filter(t=>{
-    const tDate = (t.date||'').slice(0,10);
-    if(typeFilter && t.kind!==typeFilter) return false;
-    if(statusFilter && String(t.status||'').toLowerCase()!==statusFilter) return false;
-    if(methodFilter && String(t.method||'').toLowerCase()!==methodFilter) return false;
-    if(moduleFilter && t.module!==moduleFilter) return false;
-    if(fromDate && tDate && tDate < fromDate) return false;
-    if(toDate && tDate && tDate > toDate) return false;
-    if(!Number.isNaN(minAmount) && minAmount>=0 && (t.amount||0) < minAmount) return false;
-    if(!Number.isNaN(maxAmount) && maxAmount>=0 && (t.amount||0) > maxAmount) return false;
-    if(search){
-      const hay = `${t.kind} ${t.module} ${t.description} ${t.reference} ${t.actor} ${t.notes} ${t.status} ${t.method}`.toLowerCase();
-      if(!hay.includes(search)) return false;
-    }
-    return true;
-  });
-
-  filtered.sort((a,b)=>{
-    let av, bv;
-    if(sortField==='amount'){ av=a.amount||0; bv=b.amount||0; }
-    else if(sortField==='type'){ av=a.kind||''; bv=b.kind||''; }
-    else if(sortField==='module'){ av=a.module||''; bv=b.module||''; }
-    else if(sortField==='status'){ av=a.status||''; bv=b.status||''; }
-    else { av=new Date(a.date||0).getTime(); bv=new Date(b.date||0).getTime(); }
-    if(av===bv) return 0;
-    if(typeof av==='string' || typeof bv==='string'){
-      return sortDir==='asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
-    }
-    return sortDir==='asc' ? av-bv : bv-av;
-  });
+  const filtered = applyTxFilters(all);
 
   const totals = filtered.reduce((acc,t)=>{
     if(t.direction==='credit') acc.credit += (t.amount||0);
@@ -752,10 +793,22 @@ async function renderTransactions(){
   const methodOptions = [...new Set(all.map(t=>String(t.method||'').toLowerCase()).filter(Boolean))].sort();
   const moduleOptions = [...new Set(all.map(t=>t.module).filter(Boolean))].sort();
 
+  const savedViews = getTxSavedViews();
+
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
       <div><div class="page-title">Transactions Ledger</div><div class="page-sub">Unified view across income, expenses, remittances, petty cash, and bank/cash movements</div></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        ${savedViews.length ? `
+          <select id="txViewSelect" class="form-select" style="width:auto" onchange="if(this.value!=='') App.loadTxView(this.value)" aria-label="Load saved view">
+            <option value="">📋 Saved Views</option>
+            ${savedViews.map((v,i)=>`<option value="${i}">${esc(v.name)}</option>`).join('')}
+          </select>
+          <button class="btn btn-sm btn-danger" title="Delete selected saved view" onclick="const s=document.getElementById('txViewSelect');if(s&&s.value!=='')App.deleteTxView(s.value)">🗑</button>
+        ` : ''}
+        <button class="btn btn-sm" onclick="App.saveTxView()">💾 Save View</button>
+        <button class="btn btn-sm" onclick="App.exportTxCSV()">📥 CSV</button>
+        <button class="btn btn-sm" onclick="App.exportTxPDF()">🖨 PDF</button>
         <button class="btn btn-sm" onclick="App.clearTxFilters()">✕ Clear Filters</button>
       </div>
     </div>
@@ -849,18 +902,163 @@ function setTxPageSize(size){
 }
 
 function clearTxFilters(){
+  const d = txCurrentMonthDefaults();
   state.txSearch='';
   state.txTypeFilter='';
   state.txStatusFilter='';
   state.txMethodFilter='';
   state.txModuleFilter='';
-  state.txFromDate='';
-  state.txToDate='';
+  state.txFromDate=d.from;
+  state.txToDate=d.to;
   state.txMinAmount='';
   state.txMaxAmount='';
   state.txSortField='date';
   state.txSortDir='desc';
   state.txPage=1;
+  renderTransactions();
+}
+
+async function exportTxCSV(){
+  const all = await buildTransactionsLedger();
+  const filtered = applyTxFilters(all);
+  const headers = ['Date','Time','Type','Module','Description','Amount (N)','Direction','Method','Status','Reference','By','Notes'];
+  const dataRows = filtered.map(t=>[
+    (t.date||'').slice(0,10),
+    (t.date||'').slice(11,16),
+    t.kind||'',
+    t.module||'',
+    t.description||'',
+    t.amount||0,
+    t.direction||'',
+    t.method||'',
+    t.status||'',
+    t.reference||'',
+    t.actor||'',
+    t.notes||''
+  ]);
+  const csv = [headers, ...dataRows].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob(['\uFEFF'+csv], { type:'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `transactions_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+async function exportTxPDF(){
+  const all = await buildTransactionsLedger();
+  const filtered = applyTxFilters(all);
+  const settings = await DB.getSettings();
+  const churchName = settings.churchName||'RCCG Kingdom Parish';
+  const fromDate = state.txFromDate||'';
+  const toDate = state.txToDate||'';
+  const totals = filtered.reduce((acc,t)=>{
+    if(t.direction==='credit') acc.credit+=(t.amount||0);
+    else if(t.direction==='debit') acc.debit+=(t.amount||0);
+    return acc;
+  },{credit:0,debit:0});
+  const net = totals.credit - totals.debit;
+
+  const tableRows = filtered.map(t=>{
+    const d = txDirectionMeta(t.direction);
+    const amtCls = d.cls==='td-green'?'cr':d.cls==='td-red'?'dr':'';
+    return `<tr>
+      <td style="white-space:nowrap">${(t.date||'').slice(0,10)}</td>
+      <td>${esc(String(t.kind||'').replace(/_/g,' '))}</td>
+      <td>${esc(String(t.module||'').replace(/_/g,' '))}</td>
+      <td>${esc(t.description||'—')}${t.notes?`<br><span style="color:#888;font-size:9px">${esc(t.notes)}</span>`:''}</td>
+      <td class="td-r ${amtCls}">${d.symbol}&#x20A6;${Math.round(t.amount||0).toLocaleString('en-NG')}</td>
+      <td>${esc(txMethodLabel(t.method))}</td>
+      <td>${esc(String(t.status||'recorded'))}</td>
+      <td>${esc(t.reference||'—')}</td>
+      <td>${esc(t.actor||'—')}</td>
+    </tr>`;
+  }).join('');
+
+  const html=`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>${esc(churchName)} — Transactions Ledger</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Arial,sans-serif;font-size:11px;color:#333;padding:20px}
+  .header{text-align:center;border-bottom:3px solid #0F6E56;padding-bottom:12px;margin-bottom:14px}
+  .header h1{font-size:17px;color:#0F6E56;margin-bottom:3px}
+  .header h2{font-size:13px;margin-bottom:4px}
+  .header p{font-size:10px;color:#666;margin-bottom:2px}
+  .kpi-row{display:flex;gap:16px;margin-bottom:12px;padding:8px 0;border-bottom:1px solid #ddd}
+  .kpi{flex:1;text-align:center}.kpi-label{font-size:9px;color:#888;text-transform:uppercase}
+  .kpi-val{font-size:13px;font-weight:700}
+  table{width:100%;border-collapse:collapse}
+  th{background:#0F6E56;color:#fff;padding:5px 7px;text-align:left;font-size:10px;font-weight:700}
+  td{padding:4px 7px;border-bottom:1px solid #eee;font-size:10px;vertical-align:top}
+  .td-r{text-align:right}.cr{color:#0F6E56;font-weight:600}.dr{color:#c0392b;font-weight:600}
+  @media print{body{padding:8px}.no-print{display:none}}
+</style></head><body>
+<div class="header">
+  <h1>${esc(churchName)}</h1>
+  <h2>Transactions Ledger</h2>
+  <p><strong>Period:</strong> ${fromDate?fmtDate(fromDate):'All'} — ${toDate?fmtDate(toDate):'Present'}</p>
+  <p><strong>Prepared by:</strong> ${esc(state.user?.name||'—')} &nbsp;|&nbsp; <strong>Date:</strong> ${fmtDate(new Date().toISOString().split('T')[0])}</p>
+  <p>${filtered.length} transaction(s) shown</p>
+</div>
+<div class="kpi-row">
+  <div class="kpi"><div class="kpi-label">Total</div><div class="kpi-val">${filtered.length}</div></div>
+  <div class="kpi"><div class="kpi-label">Credits</div><div class="kpi-val cr">&#x20A6;${Math.round(totals.credit).toLocaleString('en-NG')}</div></div>
+  <div class="kpi"><div class="kpi-label">Debits</div><div class="kpi-val dr">&#x20A6;${Math.round(totals.debit).toLocaleString('en-NG')}</div></div>
+  <div class="kpi"><div class="kpi-label">Net Flow</div><div class="kpi-val" style="color:${net>=0?'#0F6E56':'#c0392b'}">&#x20A6;${Math.round(net).toLocaleString('en-NG')}</div></div>
+</div>
+<table>
+  <tr><th>Date</th><th>Type</th><th>Module</th><th>Description / Notes</th><th class="td-r">Amount</th><th>Method</th><th>Status</th><th>Reference</th><th>By</th></tr>
+  ${tableRows||'<tr><td colspan="9" style="text-align:center;color:#888;padding:12px">No transactions match the selected filters</td></tr>'}
+</table>
+<p class="no-print" style="margin-top:14px;font-size:10px;color:#888;text-align:center">Use Ctrl+P / Cmd+P to save as PDF.</p>
+</body></html>`;
+
+  const w = window.open('','_blank','width=960,height=720');
+  if(!w){ showAlert('Pop-up blocked. Please allow pop-ups for this site.','warn'); return; }
+  w.document.write(html);
+  w.document.close();
+  setTimeout(()=>w.print(), 400);
+}
+
+function saveTxView(){
+  const name = (prompt('Enter a name for this saved view:','')||'').trim();
+  if(!name) return;
+  const views = getTxSavedViews();
+  const filters = {
+    txSearch:state.txSearch||'', txTypeFilter:state.txTypeFilter||'',
+    txStatusFilter:state.txStatusFilter||'', txMethodFilter:state.txMethodFilter||'',
+    txModuleFilter:state.txModuleFilter||'', txFromDate:state.txFromDate||'',
+    txToDate:state.txToDate||'', txMinAmount:state.txMinAmount||'',
+    txMaxAmount:state.txMaxAmount||'', txSortField:state.txSortField||'date',
+    txSortDir:state.txSortDir||'desc'
+  };
+  const existing = views.findIndex(v=>v.name===name);
+  if(existing>=0) views[existing]={ name, filters };
+  else views.push({ name, filters });
+  localStorage.setItem(`rccgTxViews_${state.user?.role}`, JSON.stringify(views));
+  showAlert(`View "${name}" saved.`,'success');
+  renderTransactions();
+}
+
+function loadTxView(idx){
+  const views = getTxSavedViews();
+  const v = views[parseInt(idx,10)];
+  if(!v) return;
+  Object.assign(state, v.filters);
+  state.txPage = 1;
+  renderTransactions();
+}
+
+function deleteTxView(idx){
+  const views = getTxSavedViews();
+  const name = views[parseInt(idx,10)]?.name;
+  if(!name || !confirm(`Delete saved view "${name}"?`)) return;
+  views.splice(parseInt(idx,10), 1);
+  localStorage.setItem(`rccgTxViews_${state.user?.role}`, JSON.stringify(views));
   renderTransactions();
 }
 
@@ -5597,7 +5795,7 @@ return {
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
-  setTxFilter, setTxPage, setTxPageSize, clearTxFilters,
+  setTxFilter, setTxPage, setTxPageSize, clearTxFilters, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
