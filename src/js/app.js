@@ -2844,7 +2844,7 @@ async function showBankWithdrawal(){
           ${catOptions}
         </select>
       </div>
-      <div class="form-group" style="margin-bottom:10px" id="wd_subcat_group">
+      <div class="form-group" style="margin-bottom:10px;display:none" id="wd_subcat_group">
         <label class="form-label">Sub-category *</label>
         <select id="wd_exp_subcat" class="form-select">
           <option value="">— Select category first —</option>
@@ -2890,16 +2890,18 @@ function onWdDestChange(){
 
 function onWdCatChange(){
   const cat     = document.getElementById('wd_exp_cat')?.value;
-  const subcats = cat ? (EXPENSE_SUBCATS[cat]||[]) : [];
+  const subcats = cat ? (EXPENSE_SUBCATS[cat]||['Others...']) : [];
   const group   = document.getElementById('wd_subcat_group');
   const sel     = document.getElementById('wd_exp_subcat');
   if(!group||!sel) return;
-  if(subcats.length){
-    sel.innerHTML = subcats.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
-    group.style.display = '';
-  } else {
+  if(!cat){
+    sel.innerHTML = '<option value="">— Select category first —</option>';
     group.style.display = 'none';
+    return;
   }
+  sel.innerHTML = `<option value="">— Select sub-category —</option>` +
+    subcats.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
+  group.style.display = '';
 }
 
 function onWdAmtChange(){}
