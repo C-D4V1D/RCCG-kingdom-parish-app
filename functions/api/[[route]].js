@@ -432,8 +432,8 @@ async function handleInit(DB) {
 
 // ── USERS ─────────────────────────────────────────────────────────
 async function getUsers(DB) {
-  const { results } = await DB.prepare(`SELECT id,name,role,email,pin,created_at FROM users ORDER BY role, name`).all();
-  return ok(results || []);
+  const { results } = await DB.prepare(`SELECT id,name,role,email FROM users ORDER BY role, name`).all();
+  return ok((results || []).map(publicUser));
 }
 
 async function createUser(DB, data) {
@@ -504,7 +504,7 @@ async function changeUserPin(DB, data) {
   const validCurrentPin = await verifyPin(row.pin, currentPin);
   if (!validCurrentPin) return err('Current PIN is incorrect', 401);
   const sameAsCurrent = await verifyPin(row.pin, newPin);
-  if (sameAsCurrent) return err('New PIN must be different from your current PIN', 400);
+  if (sameAsCurrent) return err('New PIN must be different from current PIN', 400);
   await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(newPin), userId).run();
   return ok({ success: true, id: userId });
 }

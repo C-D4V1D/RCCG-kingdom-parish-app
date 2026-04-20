@@ -138,6 +138,7 @@ const DEFAULT_REMITTANCE_RATES = {
   tgNational:0.75, tgArea:0.05, tgPastor:0.10, tgMinisters:0.09, tgSeed:0.01,
   provinceRebate:0.20
 };
+const PIN_REGEX = /^\d{4,6}$/;
 
 // ──────────────────────────────────────────
 // 2. DATA LAYER — Cloudflare D1 via /api/*
@@ -418,7 +419,7 @@ async function submitChangePin(){
   const newPin = document.getElementById('cp_new')?.value?.trim() || '';
   const confirmPin = document.getElementById('cp_confirm')?.value?.trim() || '';
   if(!currentPin || !newPin || !confirmPin){ showAlert('Please fill all PIN fields.','danger'); return; }
-  if(!/^\d{4,6}$/.test(newPin)){ showAlert('New PIN must be 4-6 digits.','danger'); return; }
+  if(!PIN_REGEX.test(newPin)){ showAlert('New PIN must be 4-6 digits.','danger'); return; }
   if(newPin !== confirmPin){ showAlert('New PIN and confirmation do not match.','danger'); return; }
   try{
     const res = await DB.changePin({ userId: state.user.id, currentPin, newPin });
