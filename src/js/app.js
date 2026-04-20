@@ -1377,7 +1377,8 @@ async function submitBulkDeposit(){
   delete state._bulkDepositPending;
   closeModal();
   showAlert(`${fmt(totalAmount)} deposited across ${selected.length} record(s). Bank ref: ${ref}`, 'success');
-  renderIncome();
+  // Navigate back to whichever page triggered the bulk deposit
+  if(state.page==='bank') renderBank(); else renderIncome();
 }
 
 function showOtherIncomeForm(){
@@ -2796,24 +2797,36 @@ async function approveExpense(id){
   renderExpenses();
 }
 
-function showBankWithdrawal(){
-  const today=new Date().toISOString().split('T')[0];
+async function showBankWithdrawal(){
+  const today = new Date().toISOString().split('T')[0];
+  const allUsers = await DB.getUsers();
+  const sigUsers = allUsers.filter(u=>['pastor','signatory','it_admin'].includes(u.role));
+  const sigChecks = sigUsers.map(u=>`
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;margin-bottom:6px">
+      <input type="checkbox" name="wd_sig" value="${esc(u.name)}" />
+      <span>${esc(u.name)}</span>
+      <span class="badge" style="font-size:10px;background:${ROLES[u.role]?.bg||'#eee'};color:${ROLES[u.role]?.color||'#333'}">${ROLES[u.role]?.label||u.role}</span>
+    </label>`).join('');
+
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">🏦 Record Bank Withdrawal</div>
-    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Record cash withdrawn from the church bank account. Select where the withdrawn cash is going — this determines how the church balance is updated.</span></div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Record cash withdrawn from the church bank account. Select where the withdrawn cash is going — this determines how the balance is updated.</span></div>
     <div class="form-group"><label class="form-label">Date *</label><input type="date" id="wd_date" class="form-input" value="${today}" max="${today}" /></div>
     <div class="form-group"><label class="form-label">Amount Withdrawn (₦) *</label><input type="number" id="wd_amt" class="form-input" placeholder="0" min="0" /></div>
     <div class="form-group"><label class="form-label">Destination of Cash *</label>
       <select id="wd_dest" class="form-select">
         <option value="accountant_cash">→ Accountant's Cash (for payment of expenses, etc.)</option>
-        <option value="admin_petty_cash">→ Admin Officer's Petty Cash (to refill the imprest float)</option>
+        <option value="admin_petty_cash">→ Admin Officer's Petty Cash (to top up the imprest wallet)</option>
         <option value="direct_expense">→ Direct Expense Payment (e.g. vendor paid immediately)</option>
       </select>
     </div>
-    <div class="form-group"><label class="form-label">Purpose / Description *</label><input type="text" id="wd_desc" class="form-input" placeholder="e.g. Petty cash refill, Payment for generator repair, etc." /></div>
+    <div class="form-group"><label class="form-label">Purpose / Description *</label><input type="text" id="wd_desc" class="form-input" placeholder="e.g. Generator repair, Petty cash top-up" /></div>
     <div class="form-group"><label class="form-label">Bank Reference / Teller No.</label><input type="text" id="wd_ref" class="form-input" placeholder="Optional reference number" /></div>
-    <div class="form-group"><label class="form-label">Authorized By</label><input type="text" id="wd_auth" class="form-input" placeholder="Signatory names" value="${state.user?.name||''}" /></div>
+    <div class="form-group">
+      <label class="form-label">Authorized By * <span style="font-size:11px;color:var(--text3)">(select all who approved this withdrawal)</span></label>
+      ${sigChecks || `<input type="text" id="wd_auth_text" class="form-input" placeholder="Signatory names" />`}
+    </div>
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankWithdrawal()">Record Withdrawal</button></div>`);
 }
 
@@ -2823,8 +2836,11 @@ async function submitBankWithdrawal(){
   const destination = document.getElementById('wd_dest')?.value||'accountant_cash';
   const description = document.getElementById('wd_desc')?.value?.trim();
   const reference   = document.getElementById('wd_ref')?.value;
-  const auth        = document.getElementById('wd_auth')?.value;
-  if(!date||!amount||!description){ alert('Please fill all required fields.'); return }
+  const checkedSigs = [...document.querySelectorAll('input[name="wd_sig"]:checked')].map(c=>c.value);
+  const authText    = document.getElementById('wd_auth_text')?.value?.trim();
+  const auth        = checkedSigs.length>0 ? checkedSigs.join(', ') : authText;
+  if(!date||!amount||!description){ alert('Please fill all required fields (date, amount, description).'); return }
+  if(!auth){ alert('Please select at least one authorizing signatory.'); return }
 
   await DB.addCashTransaction({ type:'withdrawal', destination, date, amount, description, reference, authorizedBy:auth, recordedBy:state.user?.name });
 
@@ -2841,7 +2857,10 @@ async function submitBankWithdrawal(){
     showAlert(`${fmt(amount)} withdrawn from bank and credited to Admin Officer petty cash. New float: ${fmt(newFloat)}.`,'success');
   } else {
     closeModal();
-    showAlert(`Bank withdrawal of ${fmt(amount)} recorded. Destination: ${destination.replace(/_/g,' ')}.`,'success');
+    const destMsg = destination==='direct_expense'
+      ? `${fmt(amount)} withdrawn for direct expense payment. Please also log the expense in the Expenses page so the category and payee are recorded.`
+      : `Bank withdrawal of ${fmt(amount)} recorded. Destination: ${destination.replace(/_/g,' ')}.`;
+    showAlert(destMsg,'success');
   }
   navigate(state.page);
 }
@@ -2858,14 +2877,18 @@ async function renderBank(){
   // Calculate bank balance components
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
   const cashDepositedToBank = allCashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
-  const bankExpenses = allExpenses.reduce((sum,e)=>{
+  const bankExpenses = allExpenses.filter(e=>e.status==='approved').reduce((sum,e)=>{
     if(e.paymentMethod==='bank_transfer') return sum+(e.amount||0);
     if(e.paymentMethod==='split') return sum+(e.bankAmount||0);
     return sum;
   }, 0);
   const paidRems = allRemittances.filter(r=>r.status==='paid').reduce((s,r) => s+(r.amount||0), 0);
   const bankWithdrawals = allCashTx.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
-  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals;
+  // Petty top-ups paid via bank transfer must be deducted (same as calcChurchBalance)
+  const pettyHistory = await DB.getPetty();
+  const pettyBankTopups = pettyHistory.filter(h=>h.type==='refill'&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
+    .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)),0);
+  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals - pettyBankTopups;
 
   // Monthly bank charges
   const monthlyBankCharges = filterByMonth(allExpenses).filter(e=>e.category==='bank').reduce((s,e)=>s+(e.amount||0),0);
@@ -2908,7 +2931,9 @@ async function renderBank(){
         date:e.date||e.createdAt
       })),
     ...allRemittances.filter(r=>r.status==='paid').map(r=>({...r, txType:'remittance', txLabel:`Remittance: ${r.incomeType||'HQ'}`, txAmt: -(r.amount||0), date:r.date||r.createdAt})),
-    ...allIncome.filter(r=>(r.bankTransferAmount||0)>0).map(r=>({...r, txType:'income', txLabel:`Income deposit (bank transfer)`, txAmt: (r.bankTransferAmount||0)}))
+    ...allIncome.filter(r=>(r.bankTransferAmount||0)>0).map(r=>({...r, txType:'income', txLabel:`Income deposit (bank transfer)`, txAmt: (r.bankTransferAmount||0)})),
+    ...pettyHistory.filter(h=>h.type==='refill'&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
+      .map(h=>({...h, txType:'petty-topup', txLabel:`Petty cash top-up (bank)`, txAmt:-(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0))}))
   ].sort((a,b)=>new Date(b.date||b.createdAt||0)-new Date(a.date||a.createdAt||0));
 
   const monthBankTx = bankTxAll.filter(t=>{
@@ -2962,7 +2987,7 @@ async function renderBank(){
       tab==='withdrawals'?renderBankWithdrawals(monthlyWithdrawals):
       tab==='deposits'?renderBankDeposits(monthlyDeposits):
       tab==='charges'?renderBankCharges(filterByMonth(allExpenses).filter(e=>e.category==='bank')):
-      renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals)}`;
+      renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups)}`;
 }
 
 function renderBankOverview(monthBankTx,bankBalance){
@@ -2991,7 +3016,7 @@ function renderBankWithdrawals(withdrawals){
     <div class="table-wrap"><table>
       <tr><th>Date</th><th>Amount</th><th>Destination</th><th>Description</th><th>Reference</th><th>Authorized By</th></tr>
       ${withdrawals.map(t=>`<tr>
-        <td>${fmtDate(t.date)}</td>
+        <td>${fmtDate(t.date||t.createdAt)}</td>
         <td class="td-red td-bold">${fmt(t.amount)}</td>
         <td><span class="badge badge-info">${(t.destination||'').replace(/_/g,' ')}</span></td>
         <td>${t.description||'—'}</td>
@@ -3009,7 +3034,7 @@ function renderBankDeposits(deposits){
     <div class="table-wrap"><table>
       <tr><th>Date</th><th>Amount</th><th>Description</th><th>Reference</th><th>Recorded By</th></tr>
       ${deposits.map(t=>`<tr>
-        <td>${fmtDate(t.date)}</td>
+        <td>${fmtDate(t.date||t.createdAt)}</td>
         <td class="td-green td-bold">${fmt(t.amount)}</td>
         <td>${t.description||'Cash deposit'}</td>
         <td class="td-muted">${t.reference||'—'}</td>
@@ -3037,7 +3062,7 @@ function renderBankCharges(charges){
   </div>`;
 }
 
-function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals){
+function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups=0){
   return `
     <div class="card">
       <div class="card-header"><span class="card-title">Bank Reconciliation Summary</span></div>
@@ -3049,6 +3074,7 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
         <div class="status-row"><div><div class="status-row-label" style="color:var(--danger)">− Expenses paid via bank transfer</div></div><div class="status-row-right"><div class="status-row-amt td-red">${fmt(bankExpenses)}</div></div></div>
         <div class="status-row"><div><div class="status-row-label" style="color:var(--danger)">− Paid remittances</div></div><div class="status-row-right"><div class="status-row-amt td-red">${fmt(paidRems)}</div></div></div>
         <div class="status-row"><div><div class="status-row-label" style="color:var(--danger)">− Bank withdrawals (cash out)</div></div><div class="status-row-right"><div class="status-row-amt td-red">${fmt(bankWithdrawals)}</div></div></div>
+        <div class="status-row"><div><div class="status-row-label" style="color:var(--danger)">− Petty cash top-ups via bank transfer</div></div><div class="status-row-right"><div class="status-row-amt td-red">${fmt(pettyBankTopups)}</div></div></div>
         <div class="status-row" style="border-top:2px solid var(--border);margin-top:8px;padding-top:12px">
           <div><div class="status-row-label fw-bold">= Computed Bank Balance</div></div>
           <div class="status-row-right"><div class="status-row-amt" style="color:${bankBalance<0?'var(--danger)':'var(--primary)'};font-size:18px;font-weight:700">${fmt(bankBalance)}</div></div>
@@ -3070,7 +3096,7 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
       <div class="card-header"><span class="card-title">All Bank Transactions (Ledger)</span></div>
       ${bankTxAll.length?`<div class="table-wrap"><table>
         <tr><th>Date</th><th>Type</th><th>Description</th><th class="td-right">Debit</th><th class="td-right">Credit</th><th>Reference</th></tr>
-        ${bankTxAll.slice(0,50).map(t=>{
+        ${bankTxAll.map(t=>{
           const isCredit = t.txAmt > 0;
           return `<tr>
             <td>${fmtDate(t.date||t.createdAt)}</td>
