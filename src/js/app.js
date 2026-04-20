@@ -156,6 +156,7 @@ const DB = {
   addUser(d)                   { return apiFetch('users','POST',d); },
   updateUser(id,d)             { return apiFetch(`users/${id}`,'PUT',d); },
   deleteUser(id)               { return apiFetch(`users/${id}`,'DELETE'); },
+  changePin(d)                 { return apiFetch('change-pin','POST',d); },
 
   getIncome()                  { return apiFetch('income'); },
   addIncome(d)                 { return apiFetch('income','POST',d); },
@@ -403,6 +404,37 @@ function logout(){
   document.getElementById('roleSelect').value='';
   document.getElementById('pinInput').value='';
   document.getElementById('userSelectWrap').style.display='none';
+}
+
+function showChangePinModal(){
+  if(!state.user) return;
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">Change My PIN</div>
+    <div class="form-group"><label class="form-label">Current PIN</label><input type="password" id="cp_current" class="form-input" maxlength="6" placeholder="Current PIN" inputmode="numeric" /></div>
+    <div class="form-group"><label class="form-label">New PIN (4-6 digits)</label><input type="password" id="cp_new" class="form-input" maxlength="6" placeholder="New PIN" inputmode="numeric" /></div>
+    <div class="form-group"><label class="form-label">Confirm New PIN</label><input type="password" id="cp_confirm" class="form-input" maxlength="6" placeholder="Confirm PIN" inputmode="numeric" /></div>
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitChangePin()">Update PIN</button></div>`);
+}
+
+async function submitChangePin(){
+  if(!state.user) return;
+  const currentPin = document.getElementById('cp_current')?.value?.trim() || '';
+  const newPin = document.getElementById('cp_new')?.value?.trim() || '';
+  const confirmPin = document.getElementById('cp_confirm')?.value?.trim() || '';
+  if(!currentPin || !newPin || !confirmPin){ alert('Please fill all PIN fields.'); return; }
+  if(!/^\d{4,6}$/.test(newPin)){ alert('New PIN must be 4-6 digits.'); return; }
+  if(newPin !== confirmPin){ alert('New PIN and confirmation do not match.'); return; }
+  if(newPin === currentPin){ alert('New PIN must be different from current PIN.'); return; }
+  try{
+    await DB.changePin({ userId: state.user.id, currentPin, newPin });
+    state.user.pin = newPin;
+    DB.addAudit('pin_changed','User changed own PIN',state.user?.name);
+    closeModal();
+    showAlert('PIN changed successfully. Use the new PIN at next sign in.','success');
+  }catch(e){
+    alert(e.message || 'Failed to change PIN. Please try again.');
+  }
 }
 
 // ──────────────────────────────────────────
@@ -5285,7 +5317,7 @@ function submitKPSCAlert(){
 // 8. PUBLIC API
 // ──────────────────────────────────────────
 return {
-  onRoleChange, login, logout, navigate, toggleSidebar, toggleNotifications,
+  onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,

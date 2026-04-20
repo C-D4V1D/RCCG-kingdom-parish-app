@@ -67,6 +67,9 @@ export async function onRequest(context) {
       if (method === 'PUT'    &&  param) return await updateUser(DB, param, body);
       if (method === 'DELETE' &&  param) return await deleteUser(DB, param);
     }
+    if (route === 'change-pin' && method === 'POST') {
+      return await changeUserPin(DB, body);
+    }
 
     // ── /api/income ────────────────────────────────────────────
     if (route === 'income') {
@@ -420,6 +423,26 @@ async function updateUser(DB, id, data) {
 async function deleteUser(DB, id) {
   await DB.prepare(`DELETE FROM users WHERE id=?`).bind(id).run();
   return ok({ deleted: id });
+}
+
+async function changeUserPin(DB, data) {
+  const userId = String(data?.userId || '').trim();
+  const currentPin = String(data?.currentPin || '').trim();
+  const newPin = String(data?.newPin || '').trim();
+  if (!userId || !currentPin || !newPin) {
+    return err('userId, currentPin, and newPin are required', 400);
+  }
+  if (!/^\d{4,6}$/.test(newPin)) {
+    return err('newPin must be 4-6 digits', 400);
+  }
+  if (currentPin === newPin) {
+    return err('newPin must be different from currentPin', 400);
+  }
+  const row = await DB.prepare(`SELECT id, pin FROM users WHERE id=?`).bind(userId).first();
+  if (!row) return err('User not found', 404);
+  if (String(row.pin) !== currentPin) return err('Current PIN is incorrect', 401);
+  await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(newPin, userId).run();
+  return ok({ success: true, id: userId });
 }
 
 function inferIncomePaymentMethod(row) {
