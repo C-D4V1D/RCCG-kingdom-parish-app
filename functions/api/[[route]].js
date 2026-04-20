@@ -497,14 +497,14 @@ async function changeUserPin(DB, data) {
     return err('userId, currentPin, and newPin are required', 400);
   }
   if (!/^\d{4,6}$/.test(newPin)) {
-    return err('newPin must be 4-6 digits', 400);
+    return err('New PIN must be 4-6 digits', 400);
   }
   const row = await DB.prepare(`SELECT id, pin FROM users WHERE id=?`).bind(userId).first();
   if (!row) return err('User not found', 404);
   const validCurrentPin = await verifyPin(row.pin, currentPin);
   if (!validCurrentPin) return err('Current PIN is incorrect', 401);
   const sameAsCurrent = await verifyPin(row.pin, newPin);
-  if (sameAsCurrent) return err('newPin must be different from currentPin', 400);
+  if (sameAsCurrent) return err('New PIN must be different from your current PIN', 400);
   await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(newPin), userId).run();
   return ok({ success: true, id: userId });
 }
