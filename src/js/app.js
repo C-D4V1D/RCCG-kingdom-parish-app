@@ -644,8 +644,15 @@ function applyTxFilters(all){
   return filtered;
 }
 
+function txSavedViewsKey(){
+  const role = state.user?.role;
+  return Object.keys(ROLES).includes(role) ? `rccgTxViews_${role}` : null;
+}
+
 function getTxSavedViews(){
-  try{ return JSON.parse(localStorage.getItem(`rccgTxViews_${state.user?.role}`)||'[]'); }
+  const key = txSavedViewsKey();
+  if(!key) return [];
+  try{ return JSON.parse(localStorage.getItem(key)||'[]'); }
   catch(e){ return []; }
 }
 
@@ -1025,8 +1032,11 @@ async function exportTxPDF(){
 }
 
 function saveTxView(){
-  const name = (prompt('Enter a name for this saved view:','')||'').trim();
+  const raw = (prompt('Enter a name for this saved view:','')||'').trim();
+  const name = raw.slice(0, 60); // limit to 60 chars
   if(!name) return;
+  const key = txSavedViewsKey();
+  if(!key){ showAlert('Cannot save views — role not recognised.','warn'); return; }
   const views = getTxSavedViews();
   const filters = {
     txSearch:state.txSearch||'', txTypeFilter:state.txTypeFilter||'',
@@ -1039,26 +1049,30 @@ function saveTxView(){
   const existing = views.findIndex(v=>v.name===name);
   if(existing>=0) views[existing]={ name, filters };
   else views.push({ name, filters });
-  localStorage.setItem(`rccgTxViews_${state.user?.role}`, JSON.stringify(views));
+  localStorage.setItem(key, JSON.stringify(views));
   showAlert(`View "${name}" saved.`,'success');
   renderTransactions();
 }
 
 function loadTxView(idx){
   const views = getTxSavedViews();
-  const v = views[parseInt(idx,10)];
-  if(!v) return;
-  Object.assign(state, v.filters);
+  const i = parseInt(idx,10);
+  if(Number.isNaN(i) || i<0 || i>=views.length) return;
+  Object.assign(state, views[i].filters);
   state.txPage = 1;
   renderTransactions();
 }
 
 function deleteTxView(idx){
+  const key = txSavedViewsKey();
+  if(!key) return;
   const views = getTxSavedViews();
-  const name = views[parseInt(idx,10)]?.name;
-  if(!name || !confirm(`Delete saved view "${name}"?`)) return;
-  views.splice(parseInt(idx,10), 1);
-  localStorage.setItem(`rccgTxViews_${state.user?.role}`, JSON.stringify(views));
+  const i = parseInt(idx,10);
+  if(Number.isNaN(i) || i<0 || i>=views.length) return;
+  const name = views[i].name;
+  if(!confirm(`Delete saved view "${name}"?`)) return;
+  views.splice(i, 1);
+  localStorage.setItem(key, JSON.stringify(views));
   renderTransactions();
 }
 
