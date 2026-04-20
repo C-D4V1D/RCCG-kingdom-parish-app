@@ -583,6 +583,12 @@ function txStatusBadge(status){
   return `<span class="badge badge-gray">${esc(status||'Recorded')}</span>`;
 }
 
+function txDirectionMeta(direction){
+  if(direction==='credit') return { symbol:'+', label:'Credit transaction', cls:'td-green' };
+  if(direction==='debit') return { symbol:'−', label:'Debit transaction', cls:'td-red' };
+  return { symbol:'↔', label:'Transfer transaction', cls:'' };
+}
+
 async function buildTransactionsLedger(){
   const [income, expenses, remittances, cashTx, petty] = await Promise.all([
     DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getCashTransactions(), DB.getPetty()
@@ -784,18 +790,20 @@ async function renderTransactions(){
       <div class="card-header"><span class="card-title">Transactions Table</span></div>
       ${rows.length?`<div class="table-wrap"><table>
         <tr><th>Date</th><th>Type</th><th>Module</th><th>Description</th><th class="td-right">Amount</th><th>Method</th><th>Status</th><th>Reference</th><th>By</th></tr>
-        ${rows.map(t=>`
+        ${rows.map(t=>{
+          const d = txDirectionMeta(t.direction);
+          return `
           <tr>
             <td style="white-space:nowrap">${fmtDate(t.date)}<div class="td-muted">${fmtTime(t.date)}</div></td>
             <td><span class="badge badge-gray">${esc(String(t.kind||'').replace(/_/g,' '))}</span></td>
             <td>${esc(String(t.module||'').replace(/_/g,' '))}</td>
             <td><div style="font-size:13px;font-weight:500">${esc(t.description||'—')}</div>${t.notes?`<div class="td-muted" style="font-size:11px">${esc(t.notes)}</div>`:''}</td>
-            <td class="td-right ${t.direction==='credit'?'td-green':t.direction==='debit'?'td-red':''}" title="${t.direction==='credit'?'Credit transaction':t.direction==='debit'?'Debit transaction':'Transfer transaction'}" aria-label="${t.direction==='credit'?'Credit transaction':t.direction==='debit'?'Debit transaction':'Transfer transaction'}">${t.direction==='credit'?'+':t.direction==='debit'?'−':'↔'}${fmt(t.amount||0)}</td>
+            <td class="td-right ${d.cls}" title="${d.label}" aria-label="${d.label}: ${fmt(t.amount||0)}">${d.symbol}${fmt(t.amount||0)}</td>
             <td class="td-muted">${esc(txMethodLabel(t.method))}</td>
             <td>${txStatusBadge(t.status)}</td>
             <td class="td-muted">${esc(t.reference||'—')}</td>
             <td class="td-muted">${esc(t.actor||'—')}</td>
-          </tr>`).join('')}
+          </tr>`}).join('')}
       </table></div>`:'<div class="empty-table">No transactions match the current search/filter selection.</div>'}
 
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap">
@@ -806,7 +814,7 @@ async function renderTransactions(){
             ${[10,20,50,100].map(n=>`<option value="${n}" ${pageSize===n?'selected':''}>${n}</option>`).join('')}
           </select>
           <button class="btn btn-sm" ${page<=1?'disabled':''} onclick="App.setTxPage(${page-1})">← Prev</button>
-          <span style="font-size:12px;color:var(--text2)">Page ${page} of ${totalPages}</span>
+          <span style="font-size:12px;color:var(--text2)">Page ${filtered.length?page:0} of ${filtered.length?totalPages:0}</span>
           <button class="btn btn-sm" ${page>=totalPages?'disabled':''} onclick="App.setTxPage(${page+1})">Next →</button>
         </div>
       </div>
