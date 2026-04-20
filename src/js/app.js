@@ -248,16 +248,16 @@ function hasPermission(p){
 function can(...ps){ return ps.some(p=>hasPermission(p)) }
 const ACCESS_RULES = {
   pages: {
-    dashboard: ['dashboard'],
-    transactions: ['transactions'],
-    income: ['income'],
-    remittances: ['remittances','remittances_view'],
-    expenses: ['expenses','expenses_view'],
-    bank: ['bank'],
-    petty_cash: ['petty_request','petty_approve','petty_view'],
-    reports: ['reports'],
-    audit: ['audit'],
-    admin: ['all']
+    dashboard: { permissionsAny:['dashboard'] },
+    transactions: { permissionsAny:['transactions'] },
+    income: { roles:['it_admin','accountant'], permissionsAny:['income'] },
+    remittances: { roles:['it_admin','pastor','accountant','signatory'], permissionsAny:['remittances','remittances_view'] },
+    expenses: { roles:['it_admin','accountant','admin_officer'], permissionsAny:['expenses','expenses_view'] },
+    bank: { roles:['it_admin','accountant','signatory'], permissionsAny:['bank'] },
+    petty_cash: { roles:['it_admin','accountant','admin_officer','signatory'], permissionsAny:['petty_request','petty_approve','petty_view'] },
+    reports: { roles:['it_admin','pastor','accountant'], permissionsAny:['reports'] },
+    audit: { roles:['it_admin','pastor','accountant'], permissionsAny:['audit'] },
+    admin: { roles:['it_admin'] }
   },
   actions: {
     income_record: ['income'],
@@ -288,9 +288,6 @@ function canAction(action, ctx={}){
   return evaluateAccessRule(ACCESS_RULES.actions[action], ctx);
 }
 function canAccessPage(page){
-  if(!state.user) return false;
-  const item = NAV.find(n=>n.id===page);
-  if(item && !item.minRole.includes('all') && !item.minRole.includes(state.user.role)) return false;
   const rule = ACCESS_RULES.pages[page];
   return rule ? evaluateAccessRule(rule) : false;
 }
