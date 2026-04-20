@@ -21,5 +21,8 @@ Thumbs.db
 dist/
 build/
 
+# Wrangler local development state (dev-only SQLite caches)
+.wrangler/
+
 # Logs
 *.log

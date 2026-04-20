@@ -600,7 +600,7 @@ async function toggleNotifications(){
     const notifs=await DB.getNotifications();
     const list=document.getElementById('notifList');
     if(!notifs.length){ list.innerHTML='<div class="notif-empty">No notifications</div>'; }
-    else{ list.innerHTML=notifs.slice(0,15).map(n=>`<div class="notif-item" style="opacity:${n.read?0.6:1}"><div class="notif-item-title">${n.title}</div><div class="notif-item-body">${n.body}</div><div class="notif-item-time">${fmtDate(n.ts)} ${fmtTime(n.ts)}</div></div>`).join('') }
+    else{ list.innerHTML=notifs.slice(0,15).map(n=>`<div class="notif-item" style="opacity:${n.read?0.6:1}"><div class="notif-item-title">${esc(n.title)}</div><div class="notif-item-body">${esc(n.body)}</div><div class="notif-item-time">${fmtDate(n.ts)} ${fmtTime(n.ts)}</div></div>`).join('') }
     DB.markAllRead();
   }
 }
@@ -621,7 +621,7 @@ async function renderPage(page){
     if(pages[page]) await pages[page]();
     else document.getElementById('pageContent').innerHTML='<div class="card"><p>Page not found.</p></div>';
   }catch(e){
-    document.getElementById('pageContent').innerHTML=`<div class="card"><div class="alert alert-danger"><span class="alert-icon">✕</span><span>Error loading page: ${e.message}</span></div></div>`;
+    document.getElementById('pageContent').innerHTML=`<div class="card"><div class="alert alert-danger"><span class="alert-icon">✕</span><span>Error loading page: ${esc(e.message)}</span></div></div>`;
     console.error('renderPage error:',e);
   }
 }
@@ -1329,7 +1329,13 @@ function loadTxView(idx){
   const views = getTxSavedViews();
   const i = parseInt(idx,10);
   if(Number.isNaN(i) || i<0 || i>=views.length) return;
-  Object.assign(state, views[i].filters);
+  const f = views[i].filters || {};
+  const { txSearch, txTypeFilter, txStatusFilter, txMethodFilter,
+          txModuleFilter, txFromDate, txToDate, txMinAmount, txMaxAmount,
+          txSortField, txSortDir } = f;
+  Object.assign(state, { txSearch, txTypeFilter, txStatusFilter, txMethodFilter,
+          txModuleFilter, txFromDate, txToDate, txMinAmount, txMaxAmount,
+          txSortField, txSortDir });
   state.txPage = 1;
   renderTransactions();
 }
@@ -1455,7 +1461,11 @@ async function renderDashboard(){
     ...recentRems.map(r=>({type:'remittance',date:r.date||r.createdAt,
       title: `HQ remittance – ${r.incomeType||'payment'}`,
       sub: `${fmtDate(r.date||r.createdAt)} · Bank transfer · Signatories: ${r.signatories||'Pastor + Elder'}`,
-      amt:r.amount, icon:'✓', color:'#534AB7', bg:'rgba(83,74,183,0.12)'}))
+      amt:r.amount, icon:'✓', color:'#534AB7', bg:'rgba(83,74,183,0.12)'})),
+    ...recentPetty.map(h=>({type:'petty',date:h.createdAt||h.dateNeeded,
+      title: `Petty cash – ${h.purpose||'disbursement'}`,
+      sub: `${fmtDate(h.createdAt||h.dateNeeded)} · ${h.requestedBy||'Admin'}${h.receiptNo?' · Receipt #'+h.receiptNo:''}`,
+      amt:h.actualAmount||h.amount, icon:'💳', color:'#BA7517', bg:'rgba(186,117,23,0.12)'}))
   ]
   .sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,6);
 
@@ -5582,7 +5592,7 @@ async function renderAudit(){
     <div class="page-header"><div class="page-title">Audit Log</div><div class="page-sub">Last 100 actions in the system</div></div>
     <div class="card"><div class="table-wrap"><table>
       <tr><th>Time</th><th>Action</th><th>Details</th><th>User</th></tr>
-      ${log.length?log.map(l=>`<tr><td class="td-muted" style="white-space:nowrap">${fmtDate(l.ts)} ${fmtTime(l.ts)}</td><td><span class="badge badge-gray">${l.type?.replace(/_/g,' ')}</span></td><td>${l.detail}</td><td class="td-muted">${l.by||'—'}</td></tr>`).join(''):'<tr><td colspan="4" class="empty-table">No audit entries yet.</td></tr>'}
+      ${log.length?log.map(l=>`<tr><td class="td-muted" style="white-space:nowrap">${fmtDate(l.ts)} ${fmtTime(l.ts)}</td><td><span class="badge badge-gray">${esc(l.type?.replace(/_/g,' '))}</span></td><td>${esc(l.detail)}</td><td class="td-muted">${esc(l.by||'—')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty-table">No audit entries yet.</td></tr>'}
     </table></div></div>`;
 }
 
