@@ -334,6 +334,20 @@ function getQuotaList(s){
 /** Escape special HTML characters to prevent XSS when inserting user data into innerHTML */
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') }
 
+/**
+ * Set a button into a loading state (disabled + spinner).
+ * Returns a restore function to re-enable it; the restore is also auto-called after 30 s
+ * as a safety net in case an error path forgets to restore it.
+ */
+function setBtnLoading(btn, text='Loading…'){
+  if(!btn) return ()=>{};
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<span class="btn-spinner-sm"></span> ${text}`;
+  const timer = setTimeout(()=>{ btn.disabled=false; btn.innerHTML=orig; }, 30000);
+  return function restore(){ clearTimeout(timer); btn.disabled=false; btn.innerHTML=orig; };
+}
+
 // Remittance engine
 async function getRemRates(){
   const s = await DB.getSettings();
@@ -465,10 +479,10 @@ function showChangePinModal(){
     <div class="form-group"><label class="form-label">Current PIN</label><input type="password" id="cp_current" class="form-input" maxlength="6" placeholder="Current PIN" inputmode="numeric" /></div>
     <div class="form-group"><label class="form-label">New PIN (4-6 digits)</label><input type="password" id="cp_new" class="form-input" maxlength="6" placeholder="New PIN" inputmode="numeric" /></div>
     <div class="form-group"><label class="form-label">Confirm New PIN</label><input type="password" id="cp_confirm" class="form-input" maxlength="6" placeholder="Confirm PIN" inputmode="numeric" /></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitChangePin()">Update PIN</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitChangePin(this)">Update PIN</button></div>`);
 }
 
-async function submitChangePin(){
+async function submitChangePin(btn=null){
   if(!state.user) return;
   const currentPin = document.getElementById('cp_current')?.value?.trim() || '';
   const newPin = document.getElementById('cp_new')?.value?.trim() || '';
@@ -476,6 +490,7 @@ async function submitChangePin(){
   if(!currentPin || !newPin || !confirmPin){ showAlert('Please fill all PIN fields.','danger'); return; }
   if(!PIN_REGEX.test(newPin)){ showAlert('New PIN must be 4-6 digits.','danger'); return; }
   if(newPin !== confirmPin){ showAlert('New PIN and confirmation do not match.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Updating…');
   try{
     const res = await DB.changePin({ userId: state.user.id, currentPin, newPin });
     if(!res?.success) throw new Error('PIN update failed.');
@@ -483,6 +498,7 @@ async function submitChangePin(){
     closeModal();
     showAlert('PIN changed successfully. Use the new PIN at next sign in.','success');
   }catch(e){
+    restore();
     showAlert(e.message || 'Failed to change PIN. Please try again.','danger');
   }
 }
@@ -973,8 +989,8 @@ async function renderTransactions(){
           <button class="btn btn-sm btn-danger" title="Delete the selected saved filter" onclick="const s=document.getElementById('txViewSelect');if(s&&s.value!=='')App.deleteTxView(s.value)">🗑</button>
         ` : ''}
         <button class="btn btn-sm" title="Save the current filters so you can quickly reload them later" onclick="App.saveTxView()">💾 Save Filters</button>
-        <button class="btn btn-sm" title="Download these results as a spreadsheet file" onclick="App.exportTxCSV()">📥 Spreadsheet</button>
-        <button class="btn btn-sm" title="Open a print-friendly version you can save as PDF" onclick="App.exportTxPDF()">🖨 Print / PDF</button>
+        <button class="btn btn-sm" title="Download these results as a spreadsheet file" onclick="App.exportTxCSV(this)">📥 Spreadsheet</button>
+        <button class="btn btn-sm" title="Open a print-friendly version you can save as PDF" onclick="App.exportTxPDF(this)">🖨 Print / PDF</button>
         <button class="btn btn-sm" title="Clear all filters and go back to this month's records" onclick="App.clearTxFilters()">✕ Reset Filters</button>
       </div>
     </div>
@@ -1215,49 +1231,58 @@ function showTxDetail(id){
     </div>`);
 }
 
-async function exportTxCSV(){
-  const all = await buildTransactionsLedger();
-  const filtered = applyTxFilters(all);
-  const headers = ['Date','Time','Type','Module','Description','Amount (N)','Direction','Method','Status','Reference','By','Notes'];
-  const dataRows = filtered.map(t=>[
-    (t.date||'').slice(0,10),
-    (t.date||'').slice(11,16),
-    t.kind||'',
-    t.module||'',
-    t.description||'',
-    t.amount||0,
-    t.direction||'',
-    t.method||'',
-    t.status||'',
-    t.reference||'',
-    t.actor||'',
-    t.notes||''
-  ]);
-  const csv = [headers, ...dataRows].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
-  const blob = new Blob(['\uFEFF'+csv], { type:'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `transactions_${new Date().toISOString().slice(0,10)}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+async function exportTxCSV(btn=null){
+  const restore = setBtnLoading(btn, 'Exporting…');
+  try {
+    const all = await buildTransactionsLedger();
+    const filtered = applyTxFilters(all);
+    const headers = ['Date','Time','Type','Module','Description','Amount (N)','Direction','Method','Status','Reference','By','Notes'];
+    const dataRows = filtered.map(t=>[
+      (t.date||'').slice(0,10),
+      (t.date||'').slice(11,16),
+      t.kind||'',
+      t.module||'',
+      t.description||'',
+      t.amount||0,
+      t.direction||'',
+      t.method||'',
+      t.status||'',
+      t.reference||'',
+      t.actor||'',
+      t.notes||''
+    ]);
+    const csv = [headers, ...dataRows].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+    const blob = new Blob(['\uFEFF'+csv], { type:'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `transactions_${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+    restore();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to export: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
-async function exportTxPDF(){
-  const all = await buildTransactionsLedger();
-  const filtered = applyTxFilters(all);
-  const settings = await DB.getSettings();
-  const churchName = settings.churchName||'RCCG Kingdom Parish';
-  const fromDate = state.txFromDate||'';
-  const toDate = state.txToDate||'';
-  const totals = filtered.reduce((acc,t)=>{
-    if(t.direction==='credit') acc.credit+=(t.amount||0);
-    else if(t.direction==='debit') acc.debit+=(t.amount||0);
-    return acc;
-  },{credit:0,debit:0});
-  const net = totals.credit - totals.debit;
+async function exportTxPDF(btn=null){
+  const restore = setBtnLoading(btn, 'Preparing…');
+  try {
+    const all = await buildTransactionsLedger();
+    const filtered = applyTxFilters(all);
+    const settings = await DB.getSettings();
+    const churchName = settings.churchName||'RCCG Kingdom Parish';
+    const fromDate = state.txFromDate||'';
+    const toDate = state.txToDate||'';
+    const totals = filtered.reduce((acc,t)=>{
+      if(t.direction==='credit') acc.credit+=(t.amount||0);
+      else if(t.direction==='debit') acc.debit+=(t.amount||0);
+      return acc;
+    },{credit:0,debit:0});
+    const net = totals.credit - totals.debit;
 
   const tableRows = filtered.map(t=>{
     const d = txDirectionMeta(t.direction);
@@ -1314,11 +1339,16 @@ async function exportTxPDF(){
 <p class="no-print" style="margin-top:14px;font-size:10px;color:#888;text-align:center">Use Ctrl+P / Cmd+P to save as PDF.</p>
 </body></html>`;
 
-  const w = window.open('','_blank','width=960,height=720');
-  if(!w){ showAlert('Pop-up blocked. Please allow pop-ups for this site.','warn'); return; }
-  w.document.write(html);
-  w.document.close();
-  setTimeout(()=>w.print(), 400);
+    const w = window.open('','_blank','width=960,height=720');
+    if(!w){ restore(); showAlert('Pop-up blocked. Please allow pop-ups for this site.','warn'); return; }
+    w.document.write(html);
+    w.document.close();
+    setTimeout(()=>w.print(), 400);
+    restore();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to prepare PDF: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 function saveTxView(){
@@ -1867,6 +1897,10 @@ async function renderIncomeSummary(records){
   const otherTotal  = otherRecs.reduce((s,r)=>s+(r.totalCollection||0),0);
   const grand = sundayGrand + otherTotal;
   const rem = await calcRemittances(totals);
+  const settings = await DB.getSettings();
+  const quotas = getQuotaList(settings);
+  const quotasTotal = quotas.reduce((s,q)=>s+(q.amount||0),0);
+  const trueNetLocal = rem.netLocal - quotasTotal;
   return `
     <div class="grid-2">
       <div class="card">
@@ -1882,16 +1916,34 @@ async function renderIncomeSummary(records){
       </div>
       <div class="card">
         <div class="card-header"><span class="card-title">Remittance Breakdown</span><span style="font-size:11px;color:var(--text3)">Applies to Sunday collections only</span></div>
-        ${rem.lines.length?rem.lines.map(l=>`
+        ${rem.lines.length?rem.lines.map(l=>{
+          if(l.isTg){
+            return `
+            <div class="status-row">
+              <div><div class="status-row-label">${l.label} → HQ</div><div class="status-row-sub">From ${fmt(l.total)}</div></div>
+              <div class="status-row-amt td-red">${fmt(l.national||0)}</div>
+            </div>
+            ${(l.area||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Area / Zonal</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.area)}</div></div>`:''}
+            ${(l.pastor||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Pastor's Share</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.pastor)}</div></div>`:''}
+            ${(l.ministers||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Ministers' Share</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.ministers)}</div></div>`:''}
+            ${(l.seed||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Seed (Pastor's Children)</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.seed)}</div></div>`:''}`;
+          }
+          return `
           <div class="status-row">
             <div><div class="status-row-label">${l.label} → HQ</div><div class="status-row-sub">From ${fmt(l.total)}</div></div>
             <div class="status-row-amt td-red">${fmt(l.national||0)}</div>
-          </div>`).join(''):'<div class="empty-table">No Sunday collections recorded yet.</div>'}
+          </div>`;
+        }).join(''):'<div class="empty-table">No Sunday collections recorded yet.</div>'}
         ${rem.lines.length?`
         <div class="status-row" style="background:var(--amber-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
           <div class="status-row-label">Province Rebate (20%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div>
         </div>
-        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(rem.netLocal)}</div></div>`:''}
+        ${quotas.filter(q=>(q.amount||0)>0).map(q=>`
+        <div class="status-row" style="background:var(--info-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
+          <div class="status-row-label" style="color:var(--info)">${esc(q.label)}</div>
+          <div class="status-row-amt" style="color:var(--info)">${fmt(q.amount)}</div>
+        </div>`).join('')}
+        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(trueNetLocal)}</div></div>`:''}
       </div>
     </div>`;
 }
@@ -2005,7 +2057,7 @@ function showIncomeForm(){
     <div class="form-group mt-2"><label class="form-label">Notes (optional)</label><textarea id="inc_notes" class="form-textarea" placeholder="e.g. Special thanksgiving offering, harvest Sunday, etc."></textarea></div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitIncome()">Save & Calculate Remittances</button>
+      <button class="btn btn-primary" onclick="App.submitIncome(this)">Save & Calculate Remittances</button>
     </div>`);
 }
 
@@ -2038,7 +2090,7 @@ function updateIncomeCashBreakdown(){
   if(dpInput) dpInput.style.borderColor = overalloc ? 'var(--danger)' : '';
 }
 
-async function submitIncome(){
+async function submitIncome(btn=null){
   if(!canAction('income_record')){ showAlert('You do not have permission to record income.','danger'); return; }
   const date=document.getElementById('inc_date')?.value;
   const usher=document.getElementById('inc_usher')?.value?.trim();
@@ -2060,27 +2112,33 @@ async function submitIncome(){
   rec.directPettyCash    = directPettyCash;
   rec.notes=document.getElementById('inc_notes')?.value||'';
 
-  const saved = await DB.addIncome(rec);
-  const cashWithAccountant = Math.max(0, total - bankTransferAmount - directPettyCash);
-  DB.addAudit('income_recorded',`Sunday collection ${fmt(total)} for ${fmtDate(date)} — Cash: ${fmt(cashWithAccountant)}, Bank Transfer: ${fmt(bankTransferAmount)}, Direct Petty: ${fmt(directPettyCash)}. Counted with: ${usher}`,state.user?.name);
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    const saved = await DB.addIncome(rec);
+    const cashWithAccountant = Math.max(0, total - bankTransferAmount - directPettyCash);
+    DB.addAudit('income_recorded',`Sunday collection ${fmt(total)} for ${fmtDate(date)} — Cash: ${fmt(cashWithAccountant)}, Bank Transfer: ${fmt(bankTransferAmount)}, Direct Petty: ${fmt(directPettyCash)}. Counted with: ${usher}`,state.user?.name);
 
-  // If some cash was given directly to the admin officer, auto-create a petty refill
-  if(directPettyCash > 0){
-    const pettyConfigSI = await DB.getPettyConfig();
-    const newFloat = Math.min(pettyConfigSI.float + directPettyCash, pettyConfigSI.max);
-    await DB.addPettyEntry({ type:'refill', amount:directPettyCash, source:'collection_cash',
-      reference:`From Sunday collection ${fmtDate(date)}`, authorizedBy:state.user?.name,
-      requestedBy:state.user?.name, status:'settled', createdAt:new Date().toISOString(),
-      purpose:`Cash from Sunday collection (${fmtDate(date)}) → Admin Officer Petty Cash` });
-    await DB.savePettyConfig({ float: newFloat, max: pettyConfigSI.max });
-    DB.addAudit('petty_refilled',`${fmt(directPettyCash)} from Sunday collection credited to Admin Officer petty cash`,state.user?.name);
+    // If some cash was given directly to the admin officer, auto-create a petty refill
+    if(directPettyCash > 0){
+      const pettyConfigSI = await DB.getPettyConfig();
+      const newFloat = Math.min(pettyConfigSI.float + directPettyCash, pettyConfigSI.max);
+      await DB.addPettyEntry({ type:'refill', amount:directPettyCash, source:'collection_cash',
+        reference:`From Sunday collection ${fmtDate(date)}`, authorizedBy:state.user?.name,
+        requestedBy:state.user?.name, status:'settled', createdAt:new Date().toISOString(),
+        purpose:`Cash from Sunday collection (${fmtDate(date)}) → Admin Officer Petty Cash` });
+      await DB.savePettyConfig({ float: newFloat, max: pettyConfigSI.max });
+      DB.addAudit('petty_refilled',`${fmt(directPettyCash)} from Sunday collection credited to Admin Officer petty cash`,state.user?.name);
+    }
+
+    DB.addNotification('Income Recorded',`${fmt(total)} recorded for ${fmtDate(date)}${directPettyCash?` | ${fmt(directPettyCash)} → Petty Cash`:''}`,'success');
+    closeModal();
+    showAlert(`Income of ${fmt(total)} recorded. Cash with accountant: ${fmt(cashWithAccountant)}${bankTransferAmount?` | Bank: ${fmt(bankTransferAmount)}`:''}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
+    renderIncome();
+    buildSidebar();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to save income: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
-
-  DB.addNotification('Income Recorded',`${fmt(total)} recorded for ${fmtDate(date)}${directPettyCash?` | ${fmt(directPettyCash)} → Petty Cash`:''}`,'success');
-  closeModal();
-  showAlert(`Income of ${fmt(total)} recorded. Cash with accountant: ${fmt(cashWithAccountant)}${bankTransferAmount?` | Bank: ${fmt(bankTransferAmount)}`:''}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
-  renderIncome();
-  buildSidebar();
 }
 
 async function viewIncome(id){
@@ -2164,23 +2222,29 @@ async function confirmDeposit(id){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitCashDeposit('${id}')">Confirm Deposit</button>
+      <button class="btn btn-primary" onclick="App.submitCashDeposit('${id}', this)">Confirm Deposit</button>
     </div>`);
 }
 
-async function submitCashDeposit(incomeId){
+async function submitCashDeposit(incomeId, btn=null){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const amount  = parseFloat(document.getElementById('dep_amount')?.value)||0;
   const method  = document.getElementById('dep_method')?.value;
   const ref     = document.getElementById('dep_ref')?.value?.trim();
   const date    = document.getElementById('dep_date')?.value;
   if(!amount||!ref||!date){ alert('Please fill all required fields.'); return }
-  await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
-  DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
-  DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank (Ref: ${ref})`,'success');
-  closeModal();
-  showAlert(`${fmt(amount)} deposited to bank successfully! Ref: ${ref}`, 'success');
-  renderIncome();
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
+    DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
+    DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank (Ref: ${ref})`,'success');
+    closeModal();
+    showAlert(`${fmt(amount)} deposited to bank successfully! Ref: ${ref}`, 'success');
+    renderIncome();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to record deposit: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 async function confirmBulkDeposit(){
@@ -2239,7 +2303,7 @@ async function confirmBulkDeposit(){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" id="bulk_confirm_btn" onclick="App.submitBulkDeposit()">Confirm Deposit — ${fmt(totalRemaining)}</button>
+      <button class="btn btn-primary" id="bulk_confirm_btn" onclick="App.submitBulkDeposit(this)">Confirm Deposit — ${fmt(totalRemaining)}</button>
     </div>`);
 }
 
@@ -2263,7 +2327,7 @@ function toggleBulkSelectAll(checked){
   updateBulkDepositTotal();
 }
 
-async function submitBulkDeposit(){
+async function submitBulkDeposit(btn=null){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const pending = state._bulkDepositPending || [];
   const method  = document.getElementById('bulk_dep_method')?.value;
@@ -2273,16 +2337,22 @@ async function submitBulkDeposit(){
   const selected = pending.filter((_,i)=>{ const c=document.getElementById(`bulk_chk_${i}`); return c?.checked; });
   if(!selected.length){ alert('Please tick at least one record to deposit.'); return }
   const totalAmount = selected.reduce((s,p)=>s+p.remaining,0);
-  for(const p of selected){
-    await DB.addCashTransaction({ type:'cash_deposit', incomeRef:p.id, amount:p.remaining, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    for(const p of selected){
+      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:p.id, amount:p.remaining, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
+    }
+    DB.addAudit('cash_deposited',`Bulk cash deposit: ${fmt(totalAmount)} across ${selected.length} record(s) via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
+    DB.addNotification('Cash Deposited',`${fmt(totalAmount)} deposited to bank (${selected.length} record(s), Ref: ${ref})`,'success');
+    delete state._bulkDepositPending;
+    closeModal();
+    showAlert(`${fmt(totalAmount)} deposited across ${selected.length} record(s). Bank ref: ${ref}`, 'success');
+    // Navigate back to whichever page triggered the bulk deposit
+    if(state.page==='bank') renderBank(); else renderIncome();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to record deposit: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
-  DB.addAudit('cash_deposited',`Bulk cash deposit: ${fmt(totalAmount)} across ${selected.length} record(s) via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
-  DB.addNotification('Cash Deposited',`${fmt(totalAmount)} deposited to bank (${selected.length} record(s), Ref: ${ref})`,'success');
-  delete state._bulkDepositPending;
-  closeModal();
-  showAlert(`${fmt(totalAmount)} deposited across ${selected.length} record(s). Bank ref: ${ref}`, 'success');
-  // Navigate back to whichever page triggered the bulk deposit
-  if(state.page==='bank') renderBank(); else renderIncome();
 }
 
 function showOtherIncomeForm(){
@@ -2324,11 +2394,11 @@ function showOtherIncomeForm(){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitOtherIncome()">Save Income</button>
+      <button class="btn btn-primary" onclick="App.submitOtherIncome(this)">Save Income</button>
     </div>`);
 }
 
-async function submitOtherIncome(){
+async function submitOtherIncome(btn=null){
   if(!canAction('income_record')){ showAlert('You do not have permission to record income.','danger'); return; }
   const date       = document.getElementById('oi_date')?.value;
   const source     = document.getElementById('oi_source')?.value;
@@ -2356,14 +2426,20 @@ async function submitOtherIncome(){
   }
   // local_only donations have no remittance split; they appear in income totals but not in remittance calculations
 
-  await DB.addIncome(rec);
-  const sourceLabel = OTHER_INCOME_SOURCES.find(s=>s.key===source)?.label || source;
-  DB.addAudit('income_recorded',`Other income ${fmt(amount)} (${sourceLabel}) via ${method.replace(/_/g,' ')} from ${donorName||'unnamed donor'} on ${fmtDate(date)}`,state.user?.name);
-  DB.addNotification('Other Income Recorded',`${fmt(amount)} recorded (${sourceLabel}) from ${donorName||'unnamed'}`,'success');
-  closeModal();
-  showAlert(`${fmt(amount)} recorded as ${sourceLabel}. Method: ${method.replace(/_/g,' ')}.`,'success');
-  renderIncome();
-  buildSidebar();
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.addIncome(rec);
+    const sourceLabel = OTHER_INCOME_SOURCES.find(s=>s.key===source)?.label || source;
+    DB.addAudit('income_recorded',`Other income ${fmt(amount)} (${sourceLabel}) via ${method.replace(/_/g,' ')} from ${donorName||'unnamed donor'} on ${fmtDate(date)}`,state.user?.name);
+    DB.addNotification('Other Income Recorded',`${fmt(amount)} recorded (${sourceLabel}) from ${donorName||'unnamed'}`,'success');
+    closeModal();
+    showAlert(`${fmt(amount)} recorded as ${sourceLabel}. Method: ${method.replace(/_/g,' ')}.`,'success');
+    renderIncome();
+    buildSidebar();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to save income: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 // ── REMITTANCES ───────────────────────────
@@ -2540,7 +2616,7 @@ async function renderRemittances(){
               </div>
               <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
                 <span class="td-bold td-red">${fmt(r.amount)}</span>
-                ${['it_admin','pastor','signatory'].includes(state.user?.role)?`<button class="btn btn-sm btn-primary" onclick="App.approveRemittance('${r.id}')">✅ Approve</button>`:''}
+                ${['it_admin','pastor','signatory'].includes(state.user?.role)?`<button class="btn btn-sm btn-primary" onclick="App.approveRemittance('${r.id}', this)">✅ Approve</button>`:''}
               </div>
             </div>`).join('')}
         </div>`:''}
@@ -2755,7 +2831,7 @@ async function showRemittancePaymentModal(){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitRemittance()">📤 Submit for Approval</button>
+      <button class="btn btn-primary" onclick="App.submitRemittance(this)">📤 Submit for Approval</button>
     </div>`);
 }
 
@@ -2795,7 +2871,7 @@ function onRemSplitChange(totalDue){
   }
 }
 
-async function submitRemittance(){
+async function submitRemittance(btn=null){
   const method=document.querySelector('input[name="rem_method"]:checked')?.value||'bank_transfer';
   const isSplit=method==='split';
   const date=document.getElementById('rem_date')?.value;
@@ -2841,41 +2917,53 @@ async function submitRemittance(){
     ? `Split — Bank: ${fmt(bankAmount)} + Cash: ${fmt(cashAmount)}`
     : method==='bank_transfer'?'Bank Transfer':'Cash';
 
-  await DB.addRemittance({
-    label:'RCCG Monthly Remittance', amount, paidDate:date,
-    reference, authorizedBy:auth,
-    notes:(receiptFileName?`Receipt: ${receiptFileName}\n`:'')+notes,
-    paymentMethod:method,
-    bankAmount, cashAmount,
-    periodFrom:fromDate, periodTo:toDate,
-    submittedBy:state.user?.name||'',
-    status
-  });
-  DB.addAudit('remittance_submitted',
-    `Remittance ${status==='paid'?'paid':'submitted for approval'}: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}`,
-    state.user?.name);
-  if(status==='paid'){
-    DB.addNotification('Remittance Recorded',`RCCG remittance of ${fmt(amount)} paid (${methodLabel}) for period ${fmtDate(fromDate)} – ${fmtDate(toDate)}.`,'success');
-  } else {
-    DB.addNotification('Remittance Pending Approval',`Remittance of ${fmt(amount)} submitted by ${state.user?.name||'accountant'} — awaiting Pastor/Signatory approval.`,'warn');
+  const restore = setBtnLoading(btn, 'Submitting…');
+  try {
+    await DB.addRemittance({
+      label:'RCCG Monthly Remittance', amount, paidDate:date,
+      reference, authorizedBy:auth,
+      notes:(receiptFileName?`Receipt: ${receiptFileName}\n`:'')+notes,
+      paymentMethod:method,
+      bankAmount, cashAmount,
+      periodFrom:fromDate, periodTo:toDate,
+      submittedBy:state.user?.name||'',
+      status
+    });
+    DB.addAudit('remittance_submitted',
+      `Remittance ${status==='paid'?'paid':'submitted for approval'}: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}`,
+      state.user?.name);
+    if(status==='paid'){
+      DB.addNotification('Remittance Recorded',`RCCG remittance of ${fmt(amount)} paid (${methodLabel}) for period ${fmtDate(fromDate)} – ${fmtDate(toDate)}.`,'success');
+    } else {
+      DB.addNotification('Remittance Pending Approval',`Remittance of ${fmt(amount)} submitted by ${state.user?.name||'accountant'} — awaiting Pastor/Signatory approval.`,'warn');
+    }
+    closeModal();
+    showAlert(status==='paid'?`Remittance of ${fmt(amount)} recorded and marked as paid!`:'Remittance submitted — pending approval by Pastor/Signatory.','success');
+    state.remFromDate=null; state.remToDate=null;
+    renderRemittances();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to submit remittance: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
-  closeModal();
-  showAlert(status==='paid'?`Remittance of ${fmt(amount)} recorded and marked as paid!`:'Remittance submitted — pending approval by Pastor/Signatory.','success');
-  state.remFromDate=null; state.remToDate=null;
-  renderRemittances();
 }
 
-async function approveRemittance(id){
+async function approveRemittance(id, btn=null){
   if(!confirm('Approve this remittance payment?')) return;
-  await DB.updateRemittance(id,{
-    status:'paid',
-    approvedBy:state.user?.name||'',
-    approvedAt:new Date().toISOString().split('T')[0]
-  });
-  DB.addAudit('remittance_approved',`Remittance ${id} approved by ${state.user?.name||'—'}`,state.user?.name);
-  DB.addNotification('Remittance Approved',`Remittance payment approved by ${state.user?.name||'—'} and marked as paid.`,'success');
-  showAlert('Remittance approved and marked as paid!','success');
-  renderRemittances();
+  const restore = setBtnLoading(btn, 'Approving…');
+  try {
+    await DB.updateRemittance(id,{
+      status:'paid',
+      approvedBy:state.user?.name||'',
+      approvedAt:new Date().toISOString().split('T')[0]
+    });
+    DB.addAudit('remittance_approved',`Remittance ${id} approved by ${state.user?.name||'—'}`,state.user?.name);
+    DB.addNotification('Remittance Approved',`Remittance payment approved by ${state.user?.name||'—'} and marked as paid.`,'success');
+    showAlert('Remittance approved and marked as paid!','success');
+    renderRemittances();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to approve remittance: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 function onRemDatesChange(){
@@ -3346,8 +3434,7 @@ async function renderExpenses(){
             <td>
               <div style="display:flex;gap:6px;flex-wrap:wrap">
                 ${e.receiptImage?`<button class="btn btn-sm" onclick="App.viewExpenseReceipt('${e.id}')">🧾 View</button>`:e.receiptNo?`<span class="badge badge-gray">#${e.receiptNo}</span>`:'<span style="color:var(--text3);font-size:12px">—</span>'}
-                ${canEditPending?`<button class="btn btn-sm" onclick="App.editExpense('${e.id}')">✏️ Edit</button><button class="btn btn-sm btn-danger" onclick="App.deleteExpense('${e.id}')">🗑 Delete</button>`:''}
-                ${canApprovePending?`<button class="btn btn-sm btn-primary" onclick="App.approveExpense('${e.id}')">✓ Approve</button>`:''}
+                ${canEditPending?`<button class="btn btn-sm" onclick="App.editExpense('${e.id}')">✏️ Edit</button><button class="btn btn-sm btn-danger" onclick="App.deleteExpense('${e.id}', this)">🗑 Delete</button>`:''}
               </div>
             </td>
           </tr>`;
@@ -3582,7 +3669,7 @@ function showExpenseForm(preselectedCat){
       <input type="file" id="exp_receipt_file" class="form-input" accept="image/*,application/pdf" style="padding:6px" />
     </div>
     <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="exp_notes" class="form-textarea" placeholder="Additional details..."></textarea></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitExpense()">Save Expense</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitExpense(this)">Save Expense</button></div>`);
   // If a category was pre-selected, populate subcategories immediately
   if(preselectedCat){ setTimeout(()=>App.updateExpenseSubcats(), 30); }
 }
@@ -3619,7 +3706,7 @@ function onExpSplitChange(){
   else { statusEl.textContent=''; }
 }
 
-async function submitExpense(){
+async function submitExpense(btn=null){
   if(!canAction('expense_log')){ showAlert('You do not have permission to log expenses.','danger'); return; }
   const date=document.getElementById('exp_date')?.value;
   const category=document.getElementById('exp_cat')?.value;
@@ -3657,6 +3744,7 @@ async function submitExpense(){
 
   const fileEl = document.getElementById('exp_receipt_file');
   const file = fileEl?.files?.[0];
+  const restore = setBtnLoading(btn, 'Saving…');
 
   async function saveExpenseRecord(receiptDataUrl, receiptFileName){
     try {
@@ -3683,6 +3771,7 @@ async function submitExpense(){
       showAlert(`Expense of ${fmt(amount)} logged${splitLabel}.${expenseStatus!=='approved'?' It is pending approval.':''}`,'success');
       await renderExpenses();
     } catch(err) {
+      restore();
       showAlert(`Failed to save expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
     }
   }
@@ -3748,34 +3837,46 @@ async function editExpense(id){
   renderExpenses();
 }
 
-async function deleteExpense(id){
+async function deleteExpense(id, btn=null){
   const all = await DB.getExpenses();
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
   if(exp.status==='approved'){ alert('Approved expenses cannot be deleted.'); return }
   if(!canAction('expense_delete_pending')){ alert('You are not allowed to delete this expense.'); return }
   if(!confirm(`Delete this expense (${fmt(exp.amount)})?`)) return;
-  if((exp.pettyAmount||0)>0){
-    const pettyCfg = await DB.getPettyConfig();
-    await DB.savePettyConfig({ float: pettyCfg.float + (exp.pettyAmount||0), max: pettyCfg.max });
-    DB.addAudit('petty_adjustment',`Petty float restored by ${fmt(exp.pettyAmount||0)} from deleted pending expense (${exp.id})`,state.user?.name);
+  const restore = setBtnLoading(btn, 'Deleting…');
+  try {
+    if((exp.pettyAmount||0)>0){
+      const pettyCfg = await DB.getPettyConfig();
+      await DB.savePettyConfig({ float: pettyCfg.float + (exp.pettyAmount||0), max: pettyCfg.max });
+      DB.addAudit('petty_adjustment',`Petty float restored by ${fmt(exp.pettyAmount||0)} from deleted pending expense (${exp.id})`,state.user?.name);
+    }
+    await DB.deleteExpense(id);
+    DB.addAudit('expense_deleted',`Expense deleted: ${exp.id} (${fmt(exp.amount)})`,state.user?.name);
+    showAlert('Expense deleted.','warn');
+    renderExpenses();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to delete expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
-  await DB.deleteExpense(id);
-  DB.addAudit('expense_deleted',`Expense deleted: ${exp.id} (${fmt(exp.amount)})`,state.user?.name);
-  showAlert('Expense deleted.','warn');
-  renderExpenses();
 }
 
-async function approveExpense(id){
+async function approveExpense(id, btn=null){
   if(!canAction('expense_approve_pending')){ alert('You are not allowed to approve expenses.'); return }
   const all = await DB.getExpenses();
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
   if(exp.status==='approved'){ alert('Expense is already approved.'); return }
-  await DB.updateExpense(id, { status:'approved' });
-  DB.addAudit('expense_approved',`Expense approved: ${exp.id} (${fmt(exp.amount)})`,state.user?.name);
-  showAlert('Expense approved.','success');
-  renderExpenses();
+  const restore = setBtnLoading(btn, 'Approving…');
+  try {
+    await DB.updateExpense(id, { status:'approved' });
+    DB.addAudit('expense_approved',`Expense approved: ${exp.id} (${fmt(exp.amount)})`,state.user?.name);
+    showAlert('Expense approved.','success');
+    renderExpenses();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to approve expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 async function showBankWithdrawal(){
@@ -3855,7 +3956,7 @@ async function showBankWithdrawal(){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" id="wd_submit_btn" onclick="App.submitBankWithdrawal()">Record Withdrawal</button>
+      <button class="btn btn-primary" id="wd_submit_btn" onclick="App.submitBankWithdrawal(this)">Record Withdrawal</button>
     </div>`);
 }
 
@@ -3888,7 +3989,7 @@ function onWdCatChange(){
 
 function onWdAmtChange(){}
 
-async function submitBankWithdrawal(){
+async function submitBankWithdrawal(btn=null){
   const date        = document.getElementById('wd_date')?.value;
   const amount      = parseFloat(document.getElementById('wd_amt')?.value)||0;
   const destination = document.getElementById('wd_dest')?.value||'accountant_cash';
@@ -3916,51 +4017,57 @@ async function submitBankWithdrawal(){
     ? [EXPENSE_CATS.find(c=>c.key===expCat)?.label, expSubcat, expDesc, expVendor?`Paid to: ${expVendor}`:''].filter(Boolean).join(' — ')
     : description;
 
-  // 1. Record the bank withdrawal
-  await DB.addCashTransaction({ type:'withdrawal', destination, date, amount, description:txDescription, reference, authorizedBy:auth, recordedBy:state.user?.name });
-  DB.addAudit('bank_withdrawal',`Bank withdrawal: ${fmt(amount)} to ${destination.replace(/_/g,' ')} — "${txDescription}"${auth?` (auth: ${auth})`:''}`,state.user?.name);
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    // 1. Record the bank withdrawal
+    await DB.addCashTransaction({ type:'withdrawal', destination, date, amount, description:txDescription, reference, authorizedBy:auth, recordedBy:state.user?.name });
+    DB.addAudit('bank_withdrawal',`Bank withdrawal: ${fmt(amount)} to ${destination.replace(/_/g,' ')} — "${txDescription}"${auth?` (auth: ${auth})`:''}`,state.user?.name);
 
-  // 2. Handle destination-specific side effects
-  if(destination === 'admin_petty_cash'){
-    const pettyConfigBW = await DB.getPettyConfig();
-    const newFloat = Math.min(pettyConfigBW.float + amount, pettyConfigBW.max);
-    await DB.addPettyEntry({
-      type:'refill', amount, source:'bank_withdrawal',
-      reference, authorizedBy:auth, requestedBy:state.user?.name, status:'settled',
-      createdAt:new Date().toISOString(),
-      purpose:`Bank withdrawal → Admin Officer Petty Cash: ${description}`
-    });
-    await DB.savePettyConfig({ float: newFloat, max: pettyConfigBW.max });
-    DB.addAudit('petty_refilled',`${fmt(amount)} from bank withdrawal credited to petty cash (${description})`,state.user?.name);
-    closeModal();
-    showAlert(`${fmt(amount)} withdrawn and credited to Admin Officer's petty cash. New wallet balance: ${fmt(newFloat)}.`,'success');
+    // 2. Handle destination-specific side effects
+    if(destination === 'admin_petty_cash'){
+      const pettyConfigBW = await DB.getPettyConfig();
+      const newFloat = Math.min(pettyConfigBW.float + amount, pettyConfigBW.max);
+      await DB.addPettyEntry({
+        type:'refill', amount, source:'bank_withdrawal',
+        reference, authorizedBy:auth, requestedBy:state.user?.name, status:'settled',
+        createdAt:new Date().toISOString(),
+        purpose:`Bank withdrawal → Admin Officer Petty Cash: ${description}`
+      });
+      await DB.savePettyConfig({ float: newFloat, max: pettyConfigBW.max });
+      DB.addAudit('petty_refilled',`${fmt(amount)} from bank withdrawal credited to petty cash (${description})`,state.user?.name);
+      closeModal();
+      showAlert(`${fmt(amount)} withdrawn and credited to Admin Officer's petty cash. New wallet balance: ${fmt(newFloat)}.`,'success');
 
-  } else if(isDirect){
-    const catLabel  = EXPENSE_CATS.find(c=>c.key===expCat)?.label||expCat;
-    const fullDesc  = [expVendor ? `${expSubcat||catLabel} — ${expVendor}` : (expSubcat||catLabel), expDesc].filter(Boolean).join('. ');
-    await DB.addExpense({
-      date, category:expCat,
-      subCategory: expSubcat||catLabel,
-      description: fullDesc||txDescription,
-      amount,
-      paymentMethod:'bank_transfer',
-      bankAmount: amount,
-      receiptNo: receipt||'',
-      notes:`Direct bank withdrawal. Ref: ${reference||'—'}. Authorized by: ${auth}.`,
-      recordedBy: state.user?.name,
-      status:'approved'
-    });
-    DB.addAudit('expense_recorded',`Direct expense from bank withdrawal: ${fmt(amount)} — "${fullDesc||txDescription}" (${expCat})`,state.user?.name);
-    DB.addNotification('Direct Expense Logged',`${fmt(amount)} withdrawn and logged as "${catLabel}" expense.`,'info');
-    closeModal();
-    showAlert(`${fmt(amount)} withdrawn and logged as "${catLabel}" expense. Ref: ${reference||'—'}.`,'success');
+    } else if(isDirect){
+      const catLabel  = EXPENSE_CATS.find(c=>c.key===expCat)?.label||expCat;
+      const fullDesc  = [expVendor ? `${expSubcat||catLabel} — ${expVendor}` : (expSubcat||catLabel), expDesc].filter(Boolean).join('. ');
+      await DB.addExpense({
+        date, category:expCat,
+        subCategory: expSubcat||catLabel,
+        description: fullDesc||txDescription,
+        amount,
+        paymentMethod:'bank_transfer',
+        bankAmount: amount,
+        receiptNo: receipt||'',
+        notes:`Direct bank withdrawal. Ref: ${reference||'—'}. Authorized by: ${auth}.`,
+        recordedBy: state.user?.name,
+        status:'approved'
+      });
+      DB.addAudit('expense_recorded',`Direct expense from bank withdrawal: ${fmt(amount)} — "${fullDesc||txDescription}" (${expCat})`,state.user?.name);
+      DB.addNotification('Direct Expense Logged',`${fmt(amount)} withdrawn and logged as "${catLabel}" expense.`,'info');
+      closeModal();
+      showAlert(`${fmt(amount)} withdrawn and logged as "${catLabel}" expense. Ref: ${reference||'—'}.`,'success');
 
-  } else {
-    closeModal();
-    showAlert(`Bank withdrawal of ${fmt(amount)} recorded. Destination: ${destination.replace(/_/g,' ')}.`,'success');
+    } else {
+      closeModal();
+      showAlert(`Bank withdrawal of ${fmt(amount)} recorded. Destination: ${destination.replace(/_/g,' ')}.`,'success');
+    }
+
+    navigate(state.page);
+  } catch(err) {
+    restore();
+    showAlert(`Failed to record withdrawal: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
-
-  navigate(state.page);
 }
 
 // ── BANK ────────────────────────────────
@@ -4240,10 +4347,10 @@ function showBankChargeForm(){
     <div class="form-group"><label class="form-label">Description</label><input type="text" id="bc_desc" class="form-input" placeholder="Details about the charge" /></div>
     <div class="form-group"><label class="form-label">Amount (₦) *</label><input type="number" id="bc_amt" class="form-input" placeholder="0" min="0" /></div>
     <div class="form-group"><label class="form-label">Reference / Transaction ID</label><input type="text" id="bc_ref" class="form-input" placeholder="Optional" /></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankCharge()">Save Bank Charge</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankCharge(this)">Save Bank Charge</button></div>`);
 }
 
-async function submitBankCharge(){
+async function submitBankCharge(btn=null){
   if(!canAction('bank_charge')){ showAlert('You do not have permission to record bank charges.','danger'); return; }
   const date = document.getElementById('bc_date')?.value;
   const subCategory = document.getElementById('bc_subcat')?.value;
@@ -4251,16 +4358,22 @@ async function submitBankCharge(){
   const amount = parseFloat(document.getElementById('bc_amt')?.value)||0;
   const receiptNo = document.getElementById('bc_ref')?.value;
   if(!date||!amount){ alert('Please fill date and amount.'); return }
-  await DB.addExpense({
-    date, category:'bank', subCategory, description, amount,
-    paymentMethod:'bank_transfer', status:'approved', receiptNo,
-    recordedBy: state.user?.name,
-    createdAt: new Date().toISOString()
-  });
-  DB.addAudit('bank_charge',`Bank charge: ${description} — ${fmt(amount)}`,state.user?.name);
-  closeModal();
-  showAlert(`Bank charge of ${fmt(amount)} recorded.`,'success');
-  navigate('bank');
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.addExpense({
+      date, category:'bank', subCategory, description, amount,
+      paymentMethod:'bank_transfer', status:'approved', receiptNo,
+      recordedBy: state.user?.name,
+      createdAt: new Date().toISOString()
+    });
+    DB.addAudit('bank_charge',`Bank charge: ${description} — ${fmt(amount)}`,state.user?.name);
+    closeModal();
+    showAlert(`Bank charge of ${fmt(amount)} recorded.`,'success');
+    navigate('bank');
+  } catch(err) {
+    restore();
+    showAlert(`Failed to record bank charge: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 // ── PETTY CASH ────────────────────────────
@@ -4419,14 +4532,14 @@ async function renderPettyCash(){
             <div class="status-row-amt td-amber" style="white-space:nowrap">${fmt(r.amount)}</div>
             ${isTopup
               ? canAction('petty_approve_or_view')
-                  ? `<button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">👁 View & Approve</button>`
-                  : `<button class="btn btn-sm" onclick="App.approvePetty('${r.id}')">👁 View</button>`
+                  ? `<button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}', this)">👁 View & Approve</button>`
+                  : `<button class="btn btn-sm" onclick="App.approvePetty('${r.id}', this)">👁 View</button>`
               : canAction('petty_approve_or_view')
-                  ? `<button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">Approve</button>
+                  ? `<button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}', this)">Approve</button>
                      <button class="btn btn-sm btn-danger" onclick="App.rejectPetty('${r.id}')">Reject</button>`
                   : ''
             }
-            ${isTopup && canAction('topup_cancel', { request:r }) ? `<button class="btn btn-sm btn-danger" onclick="App.cancelTopUpRequest('${r.id}')">Cancel</button>` : ''}
+            ${isTopup && canAction('topup_cancel', { request:r }) ? `<button class="btn btn-sm btn-danger" onclick="App.cancelTopUpRequest('${r.id}', this)">Cancel</button>` : ''}
           </div>
         </div>`;
       }).join('') : '<div class="empty-table">No pending requests.</div>'}
@@ -4770,13 +4883,13 @@ async function showTopUpRequest(){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitTopUpRequest()">Submit Top-Up Request</button>
+      <button class="btn btn-primary" onclick="App.submitTopUpRequest(this)">Submit Top-Up Request</button>
     </div>`);
   // Store IDs in state so submitTopUpRequest can read them without HTML attribute issues
   state._topupExpenseIds = unrecovered.map(e=>e.id);
 }
 
-async function submitTopUpRequest(){
+async function submitTopUpRequest(btn=null){
   if(!canAction('petty_request')){ showAlert('You do not have permission to request petty cash top-up.','danger'); return; }
   const expenseIds = state._topupExpenseIds || [];
   const amount = parseFloat(document.getElementById('topup_amt')?.value)||0;
@@ -4795,13 +4908,19 @@ async function submitTopUpRequest(){
     status:'pending_approval',
     createdAt: new Date().toISOString()
   };
-  await DB.addPettyEntry(req);
-  DB.addAudit('petty_topup_requested',`Top-up requested: ${fmt(amount)} for ${expenseIds.length} expense(s)${override?` [override: ${overrideReason}]`:''}`,state.user?.name);
-  DB.addNotification('Top-Up Requested',`${state.user?.name} requested a wallet top-up of ${fmt(amount)}. Awaiting approval.`,'warn');
-  closeModal();
-  showAlert(`Top-up request of ${fmt(amount)} submitted. The Accountant will review and a Signatory will approve.`,'success');
-  renderPettyCash();
-  buildSidebar();
+  const restore = setBtnLoading(btn, 'Submitting…');
+  try {
+    await DB.addPettyEntry(req);
+    DB.addAudit('petty_topup_requested',`Top-up requested: ${fmt(amount)} for ${expenseIds.length} expense(s)${override?` [override: ${overrideReason}]`:''}`,state.user?.name);
+    DB.addNotification('Top-Up Requested',`${state.user?.name} requested a wallet top-up of ${fmt(amount)}. Awaiting approval.`,'warn');
+    closeModal();
+    showAlert(`Top-up request of ${fmt(amount)} submitted. The Accountant will review and a Signatory will approve.`,'success');
+    renderPettyCash();
+    buildSidebar();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to submit request: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 function onTopupOverrideToggle(){
@@ -4823,7 +4942,7 @@ function onTopupOverrideToggle(){
   if(reasonGrp) reasonGrp.style.display = checked ? '' : 'none';
 }
 
-async function cancelTopUpRequest(id){
+async function cancelTopUpRequest(id, btn=null){
   const pettyHistory = await DB.getPetty();
   const req = pettyHistory.find(h=>h.id===id);
   if(!req || req.type!=='topup_request') return;
@@ -4831,11 +4950,17 @@ async function cancelTopUpRequest(id){
   const canCancel = canAction('topup_cancel', { request:req });
   if(!canCancel){ alert('You are not allowed to cancel this request.'); return }
   if(!confirm(`Cancel top-up request of ${fmt(req.amount)}?`)) return;
-  await DB.updatePettyEntry(id, { status:'cancelled', rejectedAt:new Date().toISOString(), rejectionReason:'Cancelled by requester' });
-  DB.addAudit('topup_cancelled',`Top-up request cancelled: ${fmt(req.amount)} (${req.id})`,state.user?.name);
-  showAlert('Top-up request cancelled.','warn');
-  renderPettyCash();
-  buildSidebar();
+  const restore = setBtnLoading(btn, 'Cancelling…');
+  try {
+    await DB.updatePettyEntry(id, { status:'cancelled', rejectedAt:new Date().toISOString(), rejectionReason:'Cancelled by requester' });
+    DB.addAudit('topup_cancelled',`Top-up request cancelled: ${fmt(req.amount)} (${req.id})`,state.user?.name);
+    showAlert('Top-up request cancelled.','warn');
+    renderPettyCash();
+    buildSidebar();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to cancel request: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 // ── ADVANCE REQUEST (Admin Officer: needs cash before buying) ─────
@@ -4871,11 +4996,11 @@ async function showAdvanceRequest(){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitAdvanceRequest()">Submit Advance Request</button>
+      <button class="btn btn-primary" onclick="App.submitAdvanceRequest(this)">Submit Advance Request</button>
     </div>`);
 }
 
-async function submitAdvanceRequest(){
+async function submitAdvanceRequest(btn=null){
   if(!canAction('petty_request')){ showAlert('You do not have permission to request cash advances.','danger'); return; }
   const purpose  = document.getElementById('adv_purpose')?.value?.trim();
   const amount   = parseFloat(document.getElementById('adv_amt')?.value)||0;
@@ -4894,26 +5019,34 @@ async function submitAdvanceRequest(){
     requestedBy:state.user?.name, status:'pending_approval',
     createdAt:new Date().toISOString()
   };
-  await DB.addPettyEntry(req);
-  DB.addAudit('petty_advance_requested',`Advance requested: ${purpose} — ${fmt(amount)}`,state.user?.name);
-  DB.addNotification('Advance Request',`${state.user?.name} requested an advance of ${fmt(amount)} for "${purpose}". Awaiting approval.`,'warn');
-  closeModal();
-  showAlert('Advance request submitted. The Accountant will verify and a Signatory will approve before cash is released.','success');
-  renderPettyCash();
-  buildSidebar();
+  const restore = setBtnLoading(btn, 'Submitting…');
+  try {
+    await DB.addPettyEntry(req);
+    DB.addAudit('petty_advance_requested',`Advance requested: ${purpose} — ${fmt(amount)}`,state.user?.name);
+    DB.addNotification('Advance Request',`${state.user?.name} requested an advance of ${fmt(amount)} for "${purpose}". Awaiting approval.`,'warn');
+    closeModal();
+    showAlert('Advance request submitted. The Accountant will verify and a Signatory will approve before cash is released.','success');
+    renderPettyCash();
+    buildSidebar();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to submit request: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 // Keep showPettyRequest as alias for the old tab-based form in case any links still reference it
 async function showPettyRequest(){ showTopUpRequest(); }
 
-async function approvePetty(id){
+async function approvePetty(id, btn=null){
   if(!canAction('petty_approve_or_view')){ showAlert('You do not have permission to approve petty cash requests.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Loading…');
   const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
   const req = pettyHistory.find(h=>h.id===id);
-  if(!req) return;
+  if(!req){ restore(); return; }
   const isTopup = req.type === 'topup_request';
 
   if(isTopup){
+    restore(); // modal takes over; restore the button immediately
     // Show full expense detail modal for review before approving
     const allExpenses = await DB.getExpenses();
     const requestedExpIds = new Set(Array.isArray(req.expenseRefs) ? req.expenseRefs : []);
@@ -4989,8 +5122,8 @@ async function approvePetty(id){
         <button class="btn" onclick="App.printTopupReview()">🖨 Print</button>
         <div style="display:flex;gap:8px">
           <button class="btn" onclick="closeModal()">Cancel</button>
-          <button class="btn btn-danger" onclick="App.rejectPettyFromModal('${id}')">Reject</button>
-          <button class="btn btn-primary" onclick="App.confirmTopupApproval('${id}')">✓ Approve</button>
+          <button class="btn btn-danger" onclick="App.rejectPettyFromModal('${id}', this)">Reject</button>
+          <button class="btn btn-primary" onclick="App.confirmTopupApproval('${id}', this)">✓ Approve</button>
         </div>
       </div>`);
     return; // actual approval done in confirmTopupApproval
@@ -5002,16 +5135,21 @@ async function approvePetty(id){
       const msg = pettyConfig.float <= 0
         ? `The wallet is already at ${fmt(pettyConfig.float)}.\n\nApproving means the Admin Officer will use ${fmt(Math.abs(willOwe))} of personal funds, which the church will owe them.\n\nProceed?`
         : `Wallet balance is insufficient.\nRequested: ${fmt(req.amount)}\nAvailable: ${fmt(pettyConfig.float)}\n\nApproving means the Admin Officer will need to use ${fmt(Math.abs(willOwe))} of personal funds.\n\nProceed anyway?`;
-      if(!confirm(msg)) return;
+      if(!confirm(msg)){ restore(); return; }
     }
-    const approvedAt = new Date().toISOString();
-    await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
-    await DB.savePettyConfig({ float: pettyConfig.float - req.amount, max: pettyConfig.max });
-    DB.addAudit('advance_approved',`Advance approved: "${req.purpose}" — ${fmt(req.amount)} (by ${state.user?.name})`,state.user?.name);
-    DB.addNotification('Advance Approved',`"${req.purpose}" — ${fmt(req.amount)} approved. Remind ${req.requestedBy} to submit proof within 48 hours.`,'success');
-    showAlert(`Advance approved. ${fmt(req.amount)} released from wallet. ${req.requestedBy} must submit proof of purchase within 48 hours.`,'success');
-    renderPettyCash();
-    buildSidebar();
+    try {
+      const approvedAt = new Date().toISOString();
+      await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
+      await DB.savePettyConfig({ float: pettyConfig.float - req.amount, max: pettyConfig.max });
+      DB.addAudit('advance_approved',`Advance approved: "${req.purpose}" — ${fmt(req.amount)} (by ${state.user?.name})`,state.user?.name);
+      DB.addNotification('Advance Approved',`"${req.purpose}" — ${fmt(req.amount)} approved. Remind ${req.requestedBy} to submit proof within 48 hours.`,'success');
+      showAlert(`Advance approved. ${fmt(req.amount)} released from wallet. ${req.requestedBy} must submit proof of purchase within 48 hours.`,'success');
+      renderPettyCash();
+      buildSidebar();
+    } catch(err) {
+      restore();
+      showAlert(`Failed to approve advance: ${err.message||'Unknown error'}. Please try again.`,'danger');
+    }
   }
 }
 
@@ -5058,30 +5196,36 @@ ${content}
   win.onload = ()=>{ win.focus(); win.print(); };
 }
 
-async function confirmTopupApproval(id){
+async function confirmTopupApproval(id, btn=null){
   if(!canAction('petty_approve_or_view')){ showAlert('You do not have permission to approve petty cash requests.','danger'); return; }
   const [pettyHistory] = await Promise.all([DB.getPetty()]);
   const req = pettyHistory.find(h=>h.id===id);
   if(!req){ closeModal(); return; }
-  const approvedAt = new Date().toISOString();
-  await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
-  // Option B: approving a top-up request also marks linked expenses as approved
-  if(Array.isArray(req.expenseRefs) && req.expenseRefs.length){
-    const allExpenses = await DB.getExpenses();
-    const linked = allExpenses.filter(e=>req.expenseRefs.includes(e.id) && e.status!=='approved');
-    for(const exp of linked){
-      await DB.updateExpense(exp.id, { status:'approved' });
+  const restore = setBtnLoading(btn, 'Approving…');
+  try {
+    const approvedAt = new Date().toISOString();
+    await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
+    // Option B: approving a top-up request also marks linked expenses as approved
+    if(Array.isArray(req.expenseRefs) && req.expenseRefs.length){
+      const allExpenses = await DB.getExpenses();
+      const linked = allExpenses.filter(e=>req.expenseRefs.includes(e.id) && e.status!=='approved');
+      for(const exp of linked){
+        await DB.updateExpense(exp.id, { status:'approved' });
+      }
     }
+    DB.addAudit('topup_approved',`Top-up approved: ${fmt(req.amount)} (by ${state.user?.name})`,state.user?.name);
+    DB.addNotification('Top-Up Approved',`Top-up of ${fmt(req.amount)} approved by ${state.user?.name}. Accountant should record the payment.`,'success');
+    closeModal();
+    showAlert(`Top-up of ${fmt(req.amount)} approved by you. The Accountant should now record the payment using "Record Top-Up Payment".`,'success');
+    renderPettyCash();
+    buildSidebar();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to approve: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
-  DB.addAudit('topup_approved',`Top-up approved: ${fmt(req.amount)} (by ${state.user?.name})`,state.user?.name);
-  DB.addNotification('Top-Up Approved',`Top-up of ${fmt(req.amount)} approved by ${state.user?.name}. Accountant should record the payment.`,'success');
-  closeModal();
-  showAlert(`Top-up of ${fmt(req.amount)} approved by you. The Accountant should now record the payment using "Record Top-Up Payment".`,'success');
-  renderPettyCash();
-  buildSidebar();
 }
 
-async function rejectPettyFromModal(id){
+async function rejectPettyFromModal(id, btn=null){
   if(!canAction('petty_approve_or_view')){ showAlert('You do not have permission to reject petty cash requests.','danger'); return; }
   closeModal();
   rejectPetty(id);
@@ -5129,7 +5273,7 @@ function submitPettyReceipt(id){
     </div>
     <div class="form-group"><label class="form-label">Vendor / Purchased From</label><input type="text" id="rc_vendor" class="form-input" placeholder="e.g. Total Petrol Station, Onitsha" /></div>
     <div class="form-group"><label class="form-label">Notes</label><textarea id="rc_notes" class="form-textarea" placeholder="Any change returned, additional detail..."></textarea></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.confirmPettyReceipt('${id}')">Submit & Settle</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.confirmPettyReceipt('${id}', this)">Submit & Settle</button></div>`);
 }
 
 function onReceiptToggle(){
@@ -5140,7 +5284,7 @@ function onReceiptToggle(){
   if(noRcGroup) noRcGroup.style.display = checked ? '' : 'none';
 }
 
-async function confirmPettyReceipt(id){
+async function confirmPettyReceipt(id, btn=null){
   const noReceiptChecked = document.getElementById('rc_no_receipt')?.checked;
   const no = noReceiptChecked
     ? ('NO-RECEIPT: ' + (document.getElementById('rc_reason')?.value?.trim() || 'No reason given'))
@@ -5167,39 +5311,45 @@ async function confirmPettyReceipt(id){
     noReceipt: noReceiptChecked || false
   };
 
-  let changeReturned = 0;
-  let extraSpent = 0;
-  if(actualAmt < req.amount){
-    changeReturned = req.amount - actualAmt;
-    updateData.changeReturned = changeReturned;
-    await DB.savePettyConfig({ float: pettyConfig.float + changeReturned, max: pettyConfig.max });
-    DB.addNotification('Petty Cash Change Returned', `${fmt(changeReturned)} returned to cash from "${req.purpose}" (spent ${fmt(actualAmt)} of approved ${fmt(req.amount)}).`, 'info');
-  } else if(actualAmt > req.amount){
-    extraSpent = actualAmt - req.amount;
-    await DB.savePettyConfig({ float: pettyConfig.float - extraSpent, max: pettyConfig.max });
-    DB.addNotification('Petty Cash Overspend Recorded', `${fmt(extraSpent)} additional petty cash used for "${req.purpose}" (actual ${fmt(actualAmt)} vs approved ${fmt(req.amount)}).`, 'warn');
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    let changeReturned = 0;
+    let extraSpent = 0;
+    if(actualAmt < req.amount){
+      changeReturned = req.amount - actualAmt;
+      updateData.changeReturned = changeReturned;
+      await DB.savePettyConfig({ float: pettyConfig.float + changeReturned, max: pettyConfig.max });
+      DB.addNotification('Petty Cash Change Returned', `${fmt(changeReturned)} returned to cash from "${req.purpose}" (spent ${fmt(actualAmt)} of approved ${fmt(req.amount)}).`, 'info');
+    } else if(actualAmt > req.amount){
+      extraSpent = actualAmt - req.amount;
+      await DB.savePettyConfig({ float: pettyConfig.float - extraSpent, max: pettyConfig.max });
+      DB.addNotification('Petty Cash Overspend Recorded', `${fmt(extraSpent)} additional petty cash used for "${req.purpose}" (actual ${fmt(actualAmt)} vs approved ${fmt(req.amount)}).`, 'warn');
+    }
+
+    await DB.updatePettyEntry(id, updateData);
+
+    await DB.addExpense({
+      date: new Date().toISOString().split('T')[0],
+      category: req.category||'power',
+      subCategory: req.purpose,
+      description: req.purpose + (vendor ? ` — ${vendor}` : ''),
+      amount: actualAmt,
+      receiptNo: noReceiptChecked ? '' : no,
+      paymentMethod: 'petty_cash',
+      notes: (noReceiptChecked ? `No receipt — ${document.getElementById('rc_reason')?.value||''}\n` : '') + `Petty cash ref: ${req.id}. ${notes}`,
+      recordedBy: state.user?.name,
+      pettyRef: req.id,
+      status: 'approved'  // advance was already approved before cash was released
+    });
+
+    DB.addAudit('petty_settled', `Petty cash settled: "${req.purpose}" — ${fmt(actualAmt)}${noReceiptChecked?' (no receipt)':`, Receipt: ${no}`}. Expense auto-created.`, state.user?.name);
+    closeModal();
+    showAlert(`Settled. ${fmt(actualAmt)} recorded as expense.${changeReturned ? ` ${fmt(changeReturned)} change returned.` : ''}${extraSpent ? ` ${fmt(extraSpent)} extra spent deducted from petty cash.` : ''}${noReceiptChecked ? ' (No receipt — reason recorded)' : ''}`, 'success');
+    renderPettyCash();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to settle receipt: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
-
-  await DB.updatePettyEntry(id, updateData);
-
-  await DB.addExpense({
-    date: new Date().toISOString().split('T')[0],
-    category: req.category||'power',
-    subCategory: req.purpose,
-    description: req.purpose + (vendor ? ` — ${vendor}` : ''),
-    amount: actualAmt,
-    receiptNo: noReceiptChecked ? '' : no,
-    paymentMethod: 'petty_cash',
-    notes: (noReceiptChecked ? `No receipt — ${document.getElementById('rc_reason')?.value||''}\n` : '') + `Petty cash ref: ${req.id}. ${notes}`,
-    recordedBy: state.user?.name,
-    pettyRef: req.id,
-    status: 'approved'  // advance was already approved before cash was released
-  });
-
-  DB.addAudit('petty_settled', `Petty cash settled: "${req.purpose}" — ${fmt(actualAmt)}${noReceiptChecked?' (no receipt)':`, Receipt: ${no}`}. Expense auto-created.`, state.user?.name);
-  closeModal();
-  showAlert(`Settled. ${fmt(actualAmt)} recorded as expense.${changeReturned ? ` ${fmt(changeReturned)} change returned.` : ''}${extraSpent ? ` ${fmt(extraSpent)} extra spent deducted from petty cash.` : ''}${noReceiptChecked ? ' (No receipt — reason recorded)' : ''}`, 'success');
-  renderPettyCash();
 }
 
 async function showPettyRefill(prefillAmount, topupRequestId=''){
@@ -5273,7 +5423,7 @@ async function showPettyRefill(prefillAmount, topupRequestId=''){
 
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitRefill()">Confirm Top-Up</button>
+      <button class="btn btn-primary" onclick="App.submitRefill(this)">Confirm Top-Up</button>
     </div>`);
 }
 
@@ -5294,7 +5444,7 @@ function onRefillMethodChange(){
   }
 }
 
-async function submitRefill(){
+async function submitRefill(btn=null){
   if(!canAction('petty_topup_payment')){ showAlert('You do not have permission to record petty cash top-up payments.','danger'); return; }
   const amt = parseFloat(document.getElementById('ref_amt')?.value)||0;
   const method = document.querySelector('input[name="ref_method"]:checked')?.value||'bank_transfer';
@@ -5355,45 +5505,51 @@ async function submitRefill(){
     }
   }
 
-  await DB.addPettyEntry({
-    type:'refill', amount:actualAdded,
-    requestedBy:state.user?.name, status:'settled',
-    createdAt:new Date().toISOString(), purpose:'Cash Top-Up',
-    reference:ref, authorizedBy:auth, paymentMethod:method, bankAmount:bankAmt, cashAmount:cashAmt
-  });
-  if(linkedTopup){
-    // Preserve original amount — do NOT mutate it. Track paid via actualAmount.
-    const originalAmt = linkedTopup.originalAmount || linkedTopup.amount || 0;
-    const paidSoFar = linkedTopup.actualAmount || 0;
-    const totalPaid = paidSoFar + actualAdded;
-    const remaining = Math.max(0, originalAmt - totalPaid);
-    const settledNow = remaining <= 0.5;
-    const paymentLine = `${new Date().toISOString().split('T')[0]}: ${fmt(actualAdded)} via ${methodLabel}${ref?` (ref: ${ref})`:''}`;
-    const mergedNotes = [linkedTopup.notes||'', `Payment log → ${paymentLine}`].filter(Boolean).join('\n');
-    await DB.updatePettyEntry(topupRequestId, {
-      status: settledNow ? 'settled' : 'approved',
-      settledAt: settledNow ? new Date().toISOString() : undefined,
-      settledBy: settledNow ? state.user?.name : undefined,
-      originalAmount: originalAmt,   // lock in original on first payment
-      actualAmount: totalPaid,       // running total paid
-      // DO NOT update amount — preserving original requested amount
-      paymentMethod: method,
-      bankAmount: bankAmt,
-      cashAmount: cashAmt,
-      reference: ref,
-      notes: mergedNotes
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.addPettyEntry({
+      type:'refill', amount:actualAdded,
+      requestedBy:state.user?.name, status:'settled',
+      createdAt:new Date().toISOString(), purpose:'Cash Top-Up',
+      reference:ref, authorizedBy:auth, paymentMethod:method, bankAmount:bankAmt, cashAmount:cashAmt
     });
+    if(linkedTopup){
+      // Preserve original amount — do NOT mutate it. Track paid via actualAmount.
+      const originalAmt = linkedTopup.originalAmount || linkedTopup.amount || 0;
+      const paidSoFar = linkedTopup.actualAmount || 0;
+      const totalPaid = paidSoFar + actualAdded;
+      const remaining = Math.max(0, originalAmt - totalPaid);
+      const settledNow = remaining <= 0.5;
+      const paymentLine = `${new Date().toISOString().split('T')[0]}: ${fmt(actualAdded)} via ${methodLabel}${ref?` (ref: ${ref})`:''}`;
+      const mergedNotes = [linkedTopup.notes||'', `Payment log → ${paymentLine}`].filter(Boolean).join('\n');
+      await DB.updatePettyEntry(topupRequestId, {
+        status: settledNow ? 'settled' : 'approved',
+        settledAt: settledNow ? new Date().toISOString() : undefined,
+        settledBy: settledNow ? state.user?.name : undefined,
+        originalAmount: originalAmt,   // lock in original on first payment
+        actualAmount: totalPaid,       // running total paid
+        // DO NOT update amount — preserving original requested amount
+        paymentMethod: method,
+        bankAmount: bankAmt,
+        cashAmount: cashAmt,
+        reference: ref,
+        notes: mergedNotes
+      });
+    }
+    await DB.savePettyConfig({ float: newFloat, max: pettyConfig.max });
+    DB.addAudit('petty_refilled',`Cash topped up: ${fmt(actualAdded)} via ${methodLabel} (authorized by ${auth}${ref?', ref: '+ref:''})`,state.user?.name);
+    DB.addNotification('Petty Cash Topped Up',`${fmt(actualAdded)} added to petty cash. New balance: ${fmt(newFloat)}. Authorized by: ${auth}.`,'success');
+    closeModal();
+    const _origAmt = linkedTopup ? (linkedTopup.originalAmount || linkedTopup.amount || 0) : 0;
+    const _paidSoFar = linkedTopup ? (linkedTopup.actualAmount || 0) : 0;
+    const _remaining = linkedTopup ? Math.max(0, _origAmt - (_paidSoFar + actualAdded)) : 0;
+    const remainingMsg = linkedTopup ? (_remaining > 0.5 ? ` Remaining on approved request: ${fmt(_remaining)}.` : ' Top-up request fully settled.') : '';
+    showAlert(`Petty cash topped up by ${fmt(actualAdded)}. New balance: ${fmt(newFloat)}.${actualAdded<amt?` (Max reached — only ${fmt(actualAdded)} added.)`:''}${remainingMsg}`,'success');
+    renderPettyCash();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to record top-up: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
-  await DB.savePettyConfig({ float: newFloat, max: pettyConfig.max });
-  DB.addAudit('petty_refilled',`Cash topped up: ${fmt(actualAdded)} via ${methodLabel} (authorized by ${auth}${ref?', ref: '+ref:''})`,state.user?.name);
-  DB.addNotification('Petty Cash Topped Up',`${fmt(actualAdded)} added to petty cash. New balance: ${fmt(newFloat)}. Authorized by: ${auth}.`,'success');
-  closeModal();
-  const _origAmt = linkedTopup ? (linkedTopup.originalAmount || linkedTopup.amount || 0) : 0;
-  const _paidSoFar = linkedTopup ? (linkedTopup.actualAmount || 0) : 0;
-  const _remaining = linkedTopup ? Math.max(0, _origAmt - (_paidSoFar + actualAdded)) : 0;
-  const remainingMsg = linkedTopup ? (_remaining > 0.5 ? ` Remaining on approved request: ${fmt(_remaining)}.` : ' Top-up request fully settled.') : '';
-  showAlert(`Petty cash topped up by ${fmt(actualAdded)}. New balance: ${fmt(newFloat)}.${actualAdded<amt?` (Max reached — only ${fmt(actualAdded)} added.)`:''}${remainingMsg}`,'success');
-  renderPettyCash();
 }
 
 // ── REPORTS ────────────────────────────────
@@ -5896,7 +6052,7 @@ function renderAdminUsers(users){
         <td style="max-width:260px;white-space:normal;line-height:1.6">${permSummary(u.role)}</td>
         <td class="td-muted">${u.email||'—'}</td>
         <td><button class="btn btn-sm" onclick="App.editUser('${u.id}')">Edit</button>
-            <button class="btn btn-sm btn-danger" onclick="App.deleteUser('${u.id}')" style="margin-left:4px">Delete</button></td>
+            <button class="btn btn-sm btn-danger" onclick="App.deleteUser('${u.id}', this)" style="margin-left:4px">Delete</button></td>
       </tr>`}).join('')}
     </table></div></div>`;
 }
@@ -5909,7 +6065,7 @@ function renderAdminSettings(s){
     <div class="form-group"><label class="form-label">Account Number</label><input type="text" id="set_acct" class="form-input" value="${s.accountNo||''}" /></div>
     <div class="form-group"><label class="form-label">Petty Cash Max Float (₦)</label><input type="number" id="set_petty" class="form-input" value="${s.pettyMax||50000}" /></div>
     <div class="form-group"><label class="form-label">Spendable Balance — Low Warning Threshold (₦)</label><input type="number" id="set_spendable_low" class="form-input" value="${s.spendableLow||20000}" /><div class="form-hint">Dashboard and Expenses page will show an amber warning when Spendable Balance falls below this amount. Default: ₦20,000.</div></div>
-    <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
+    <button class="btn btn-primary" onclick="App.saveSettings(this)">Save Settings</button>
   </div>`;
 }
 
@@ -5927,7 +6083,7 @@ function renderAdminQuotas(s){
     <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">These flat amounts are remitted monthly regardless of income fluctuations. They are included in the bulk remittance payment each month.</p>
     <div id="quota-rows-container">${rows}</div>
     <button class="btn" style="margin-top:4px;margin-bottom:12px" onclick="App.addQuotaRow()">➕ Add Quota</button><br/>
-    <button class="btn btn-primary" onclick="App.saveQuotas()">Save Quotas</button>
+    <button class="btn btn-primary" onclick="App.saveQuotas(this)">Save Quotas</button>
   </div>`;
 }
 
@@ -5964,11 +6120,11 @@ function renderAdminRates(s){
       ${rateInput('rate_provinceRebate', r.provinceRebate ?? DEFAULT_REMITTANCE_RATES.provinceRebate)}
     </div>
     <br>
-    <button class="btn btn-primary" onclick="App.saveRates()">Save Remittance Rates</button>
+    <button class="btn btn-primary" onclick="App.saveRates(this)">Save Remittance Rates</button>
   </div>`;
 }
 
-async function saveRates(){
+async function saveRates(btn=null){
   const s = await DB.getSettings();
   const r = s.remittanceRates || {};
   const pct2dec = id => { const el=document.getElementById(id); return el ? parseFloat(el.value||0)/100 : null; };
@@ -5993,8 +6149,14 @@ async function saveRates(){
     if(v!==null) r[k] = v;
   });
   s.remittanceRates = r;
-  await DB.saveSettings(s);
-  showAlert('Remittance rates updated successfully!','success');
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.saveSettings(s);
+    showAlert('Remittance rates updated successfully!','success');
+  } catch(err) {
+    restore();
+    showAlert(`Failed to save rates: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 function renderAdminPerms(s){
@@ -6029,23 +6191,29 @@ function renderAdminPerms(s){
       ${rows}
     </table></div>
     <br>
-    <button class="btn btn-primary" onclick="App.saveRolePermissions()">Save Permissions</button>
+    <button class="btn btn-primary" onclick="App.saveRolePermissions(this)">Save Permissions</button>
     <button class="btn" style="margin-left:8px" onclick="App.resetRolePermissions()">Reset to Defaults</button>
   </div>`;
 }
 
-async function saveRolePermissions(){
+async function saveRolePermissions(btn=null){
   const s = await DB.getSettings();
   const saved = {};
   Object.keys(ROLES).filter(r=>r!=='it_admin').forEach(r=>{
     saved[r] = PERMISSION_DEFS.map(d=>d.key).filter(k=>document.getElementById(`perm_${r}_${k}`)?.checked);
   });
   s.rolePermissions = saved;
-  await DB.saveSettings(s);
-  state.rolePermissions = saved;
-  DB.addAudit('perms_updated','Role permissions updated',state.user?.name);
-  showAlert('Role permissions saved! Changes apply immediately for all users.','success');
-  renderAdmin();
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.saveSettings(s);
+    state.rolePermissions = saved;
+    DB.addAudit('perms_updated','Role permissions updated',state.user?.name);
+    showAlert('Role permissions saved! Changes apply immediately for all users.','success');
+    renderAdmin();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to save permissions: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 async function resetRolePermissions(){
@@ -6064,7 +6232,7 @@ function renderAdminBackup(){
     <div class="card-header"><span class="card-title">Data Backup & Restore</span></div>
     <p style="font-size:13px;color:var(--text2);margin-bottom:1rem">Export all church financial data as a JSON backup file. Store it securely.</p>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
-      <button class="btn btn-primary" onclick="App.exportData()">⬇ Export Backup</button>
+      <button class="btn btn-primary" onclick="App.exportData(this)">⬇ Export Backup</button>
       <button class="btn" onclick="App.importData()">⬆ Import / Restore</button>
     </div>
     <hr class="divider">
@@ -6082,15 +6250,22 @@ function renderAdminBackup(){
   </div>`;
 }
 
-async function saveSettings(){
+async function saveSettings(btn=null){
   const s=await DB.getSettings();
   s.churchName=document.getElementById('set_name')?.value;
   s.bankName=document.getElementById('set_bank')?.value;
   s.accountNo=document.getElementById('set_acct')?.value;
   s.pettyMax=parseFloat(document.getElementById('set_petty')?.value)||50000;
   s.spendableLow=parseFloat(document.getElementById('set_spendable_low')?.value)||20000;
-  await DB.saveSettings(s);
-  showAlert('Settings saved!','success');
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.saveSettings(s);
+    showAlert('Settings saved!','success');
+    restore();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to save settings: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 function addQuotaRow(){
@@ -6199,7 +6374,7 @@ function initQuotaDnd(){
   });
 }
 
-async function saveQuotas(){
+async function saveQuotas(btn=null){
   const container=document.getElementById('quota-rows-container');
   const list=[];
   if(container){
@@ -6214,8 +6389,15 @@ async function saveQuotas(){
   const s=await DB.getSettings();
   s.quotaList=list;
   delete s.quotas; // remove legacy format
-  await DB.saveSettings(s);
-  showAlert('Monthly quotas updated!','success');
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.saveSettings(s);
+    showAlert('Monthly quotas updated!','success');
+    restore();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to save quotas: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 function showAddUser(){
@@ -6228,20 +6410,26 @@ function showAddUser(){
     </div>
     <div class="form-group"><label class="form-label">Email (optional)</label><input type="email" id="nu_email" class="form-input" placeholder="email@example.com" /></div>
     <div class="form-group"><label class="form-label">PIN (4-6 digits)</label><input type="password" id="nu_pin" class="form-input" maxlength="6" placeholder="••••" inputmode="numeric" /></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.addUser()">Add User</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.addUser(this)">Add User</button></div>`);
 }
 
-async function addUser(){
+async function addUser(btn=null){
   const name=document.getElementById('nu_name')?.value?.trim();
   const role=document.getElementById('nu_role')?.value;
   const email=document.getElementById('nu_email')?.value;
   const pin=document.getElementById('nu_pin')?.value;
   if(!name||!role||!pin||pin.length<4){ alert('Please fill name, role, and PIN (min 4 digits).'); return }
-  await DB.addUser({ name, role, email, pin });
-  DB.addAudit('user_added',`New user added: ${name} (${role})`,state.user?.name);
-  closeModal();
-  showAlert(`User ${name} added successfully!`,'success');
-  renderAdmin();
+  const restore = setBtnLoading(btn, 'Adding…');
+  try {
+    await DB.addUser({ name, role, email, pin });
+    DB.addAudit('user_added',`New user added: ${name} (${role})`,state.user?.name);
+    closeModal();
+    showAlert(`User ${name} added successfully!`,'success');
+    renderAdmin();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to add user: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 async function editUser(id){
@@ -6257,37 +6445,56 @@ async function editUser(id){
     </div>
     <div class="form-group"><label class="form-label">Email</label><input type="email" id="eu_email" class="form-input" value="${u.email||''}" /></div>
     <div class="form-group"><label class="form-label">New PIN (leave blank to keep current)</label><input type="password" id="eu_pin" class="form-input" maxlength="6" placeholder="New PIN" inputmode="numeric" /></div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.updateUser('${id}')">Update</button></div>`);
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.updateUser('${id}', this)">Update</button></div>`);
 }
 
-async function updateUser(id){
+async function updateUser(id, btn=null){
   const updateData = { name:document.getElementById('eu_name')?.value, role:document.getElementById('eu_role')?.value, email:document.getElementById('eu_email')?.value, pin:document.getElementById('eu_pin')?.value };
-  await DB.updateUser(id, updateData);
-  DB.addAudit('user_updated',`User updated: ${updateData.name}`,state.user?.name);
-  closeModal();
-  showAlert('User updated!','success');
-  renderAdmin();
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.updateUser(id, updateData);
+    DB.addAudit('user_updated',`User updated: ${updateData.name}`,state.user?.name);
+    closeModal();
+    showAlert('User updated!','success');
+    renderAdmin();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to update user: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
-async function deleteUser(id){
+async function deleteUser(id, btn=null){
   const usersDelU=await DB.getUsers();
   const u=usersDelU.find(x=>x.id===id);
   if(!u||!confirm(`Delete user "${u.name}"? This cannot be undone.`)) return;
-  await DB.deleteUser(id);
-  DB.addAudit('user_deleted',`User deleted: ${u.name}`,state.user?.name);
-  showAlert('User deleted.','warn');
-  renderAdmin();
+  const restore = setBtnLoading(btn, 'Deleting…');
+  try {
+    await DB.deleteUser(id);
+    DB.addAudit('user_deleted',`User deleted: ${u.name}`,state.user?.name);
+    showAlert('User deleted.','warn');
+    renderAdmin();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to delete user: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
-async function exportData(){
-  const [users,income,remittances,expenses,petty,auditLog,settings,cashTransactions] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(),DB.getPetty(),DB.getAudit(),DB.getSettings(),DB.getCashTransactions()]);
-  const data={ users,income,remittances,expenses,petty,audit:auditLog,settings,cashTransactions, exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
-  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
-  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
-  a.download=`rccg-backup-${new Date().toISOString().split('T')[0]}.json`;
-  a.click(); URL.revokeObjectURL(a.href);
-  DB.addAudit('data_exported','Full data export performed',state.user?.name);
-  showAlert('Backup exported successfully!','success');
+async function exportData(btn=null){
+  const restore = setBtnLoading(btn, 'Exporting…');
+  try {
+    const [users,income,remittances,expenses,petty,auditLog,settings,cashTransactions] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(),DB.getPetty(),DB.getAudit(),DB.getSettings(),DB.getCashTransactions()]);
+    const data={ users,income,remittances,expenses,petty,audit:auditLog,settings,cashTransactions, exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
+    const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+    a.download=`rccg-backup-${new Date().toISOString().split('T')[0]}.json`;
+    a.click(); URL.revokeObjectURL(a.href);
+    DB.addAudit('data_exported','Full data export performed',state.user?.name);
+    showAlert('Backup exported successfully!','success');
+    restore();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to export data: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 function importData(){
