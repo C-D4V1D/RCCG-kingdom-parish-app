@@ -2928,10 +2928,14 @@ async function printRemittanceReport(fromOverride, toOverride){
   .sig{display:flex;gap:24px;margin-top:36px}
   .sig-box{flex:1;border-top:1px solid #333;padding-top:8px;font-size:11px;line-height:1.7}
   .note{background:#fff8e1;border:1px solid #f0c040;border-radius:4px;padding:10px 12px;font-size:11px;margin-bottom:16px;color:#7a5200}
+  .print-btn-bar{text-align:center;margin-bottom:14px}
+  .print-btn{background:#0F6E56;color:#fff;border:none;padding:10px 24px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
+  .print-btn:hover{background:#085041}
   @media print{body{padding:10px}.no-print{display:none}}
 </style>
 </head>
 <body>
+  <div class="print-btn-bar no-print"><button class="print-btn" onclick="window.print()">🖨️ Print Report</button></div>
   <div class="header">
     <h1>${esc(churchName)}</h1>
     <h2>RCCG Monthly Remittance Report</h2>
@@ -3020,8 +3024,6 @@ async function printRemittanceReport(fromOverride, toOverride){
   w.document.write(html);
   w.document.close();
   w.focus();
-  // Brief delay to ensure the document is fully rendered before triggering print
-  setTimeout(()=>w.print(),400);
 }
 
 // ── EXPENSES ──────────────────────────────
@@ -5162,7 +5164,7 @@ async function submitRefill(){
 
 // ── REPORTS ────────────────────────────────
 
-/** Opens a print-friendly report in a new window (prints only the report, not the app page) */
+/** Opens a print-friendly report in a new window (manual print via button inside report window) */
 function openPrintableReport(title, bodyHTML){
   const html=`<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -5224,13 +5226,11 @@ function openPrintableReport(title, bodyHTML){
   <div class="print-btn-bar no-print"><button class="print-btn" onclick="window.print()">🖨️ Print Report</button></div>
   ${bodyHTML}
 </body></html>`;
-  const PRINT_RENDER_DELAY_MS=500;
   const w=window.open('','_blank');
   if(!w){ showAlert('Pop-up blocked. Please allow pop-ups for this site to print the report.','warn'); return }
   w.document.write(html);
   w.document.close();
   w.focus();
-  setTimeout(()=>w.print(),PRINT_RENDER_DELAY_MS);
 }
 
 /** Shared report header HTML */
