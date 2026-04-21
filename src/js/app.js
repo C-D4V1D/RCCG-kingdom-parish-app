@@ -581,7 +581,7 @@ function updateSidebarUser(){
     <span style="display:inline-block;margin-top:4px;font-size:11px;padding:2px 8px;border-radius:10px;background:${r.bg};color:${r.color};font-weight:600">${r.label}</span>`;
 }
 
-function navigate(page, fromHistory){
+async function navigate(page, fromHistory){
   if(!canAccessPage(page)){
     if(page!=='dashboard') showAlert('You do not have permission to access that page.','danger');
     page='dashboard';
@@ -604,8 +604,7 @@ function navigate(page, fromHistory){
   document.getElementById('sidebarOverlay').classList.remove('visible');
   // Close notifications
   document.getElementById('notifPanel').style.display='none';
-  buildSidebar();
-  updateNotifBadge();
+  await Promise.all([buildSidebar(), updateNotifBadge()]);
   setTimeout(()=>{ renderPage(page).catch(e=>console.error(e)); },50);
 }
 
@@ -6100,7 +6099,7 @@ async function saveSettings(){
   s.spendableLow=parseFloat(document.getElementById('set_spendable_low')?.value)||20000;
   await DB.saveSettings(s);
   const pettyCfg = await DB.getPettyConfig();
-  await DB.savePettyConfig({ float: pettyCfg.float, max: pettyMax });
+  await DB.savePettyConfig({ float: pettyCfg?.float ?? 0, max: pettyMax });
   showAlert('Settings saved!','success');
 }
 
