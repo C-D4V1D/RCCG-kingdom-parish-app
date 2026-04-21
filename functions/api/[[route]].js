@@ -61,39 +61,6 @@ async function tableHasColumns(DB, table, cols) {
   return cols.every(c => existing.has(c));
 }
 
-function isValidPin(pin) {
-  return /^\d{4,6}$/.test(String(pin || ''));
-}
-
-function isHashedPin(storedPin) {
-  return String(storedPin || '').startsWith('sha256$');
-}
-
-async function hashPin(pin) {
-  const data = new TextEncoder().encode(String(pin));
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  const hex = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
-  return `sha256$${hex}`;
-}
-
-async function verifyPin(storedPin, inputPin) {
-  const stored = String(storedPin || '');
-  const input = String(inputPin || '');
-  if (!stored) return false;
-  if (!isHashedPin(stored)) return stored === input;
-  const inputHash = await hashPin(input);
-  return stored === inputHash;
-}
-
-function publicUser(userRow) {
-  return {
-    id: userRow.id,
-    name: userRow.name,
-    role: userRow.role,
-    email: userRow.email || '',
-  };
-}
-
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
