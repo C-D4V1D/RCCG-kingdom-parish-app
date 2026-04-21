@@ -206,6 +206,7 @@ const DB = {
   },
   importBackup(data)            { return apiFetch('admin/import','POST',data); },
   clearAllData()                { return apiFetch('admin/clear','POST'); },
+  clearDataOnly()               { return apiFetch('admin/clear-data','POST'); },
 };
 
 // ──────────────────────────────────────────
@@ -5832,9 +5833,18 @@ function renderAdminBackup(){
     <div style="display:flex;gap:10px;flex-wrap:wrap">
       <button class="btn btn-primary" onclick="App.exportData()">⬇ Export Backup</button>
       <button class="btn" onclick="App.importData()">⬆ Import / Restore</button>
-      <button class="btn btn-danger" onclick="App.clearAllData()">🗑 Clear All Data</button>
     </div>
     <hr class="divider">
+    <div class="card" style="background:var(--surface);border:1px solid var(--border);margin-bottom:12px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:6px">🚀 Launch / Reset for Production</div>
+      <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Clears all financial records (income, expenses, remittances, petty cash, bank movements, audit log) but <strong>preserves</strong> your users, church settings, remittance rates, quotas, and role permissions. Use this when going live with a fresh start.</p>
+      <button class="btn btn-amber" onclick="App.clearDataOnly()">🗑 Clear Data — Keep Settings & Users</button>
+    </div>
+    <div class="card" style="background:var(--danger-light);border:1px solid var(--danger);opacity:0.85">
+      <div style="font-size:13px;font-weight:600;color:var(--danger);margin-bottom:6px">⚠ Full Reset (Danger Zone)</div>
+      <p style="font-size:12px;color:var(--danger);margin-bottom:10px">Wipes everything including users and settings. Only use this to start completely from scratch.</p>
+      <button class="btn btn-danger" onclick="App.clearAllData()">🗑 Clear Everything</button>
+    </div>
     <div class="alert alert-warn"><span class="alert-icon">⚠</span><span>Clearing data is irreversible. Always export a backup first.</span></div>
   </div>`;
 }
@@ -6067,6 +6077,25 @@ function importData(){
   input.click();
 }
 
+async function clearDataOnly(){
+  if(!confirm(
+    'This will permanently delete all financial records:\n\n' +
+    '• Income records\n• Expenses\n• Remittances\n• Petty cash history\n• Bank transactions\n• Audit log\n• Notifications\n\n' +
+    'Your users, church settings, remittance rates, quotas, and role permissions will be KEPT.\n\n' +
+    'Export a backup first if you need to keep the test data.\n\nProceed?'
+  )) return;
+  if(!confirm('Last confirmation — this cannot be undone. Delete all financial data now?')) return;
+  try {
+    showAlert('Clearing data…', 'info');
+    await DB.clearDataOnly();
+    showAlert('All financial data cleared. Settings and users are intact. The app is ready for live use.', 'success');
+    DB.addAudit('data_cleared', 'All financial data cleared for production launch', state.user?.name);
+    navigate('dashboard');
+  } catch(e) {
+    showAlert('Error: ' + e.message, 'danger');
+  }
+}
+
 async function clearAllData(){
   if(!confirm('⚠ This will permanently delete ALL church financial records. Type CONFIRM to proceed.')) return;
   const word=prompt('Type CONFIRM to delete everything:');
@@ -6139,7 +6168,7 @@ return {
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
   setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
-  updateUser, deleteUser, exportData, importData, clearAllData,
+  updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   showKPSCAlert, submitKPSCAlert, closeModal: closeModal
 };
 
