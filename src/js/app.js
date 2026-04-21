@@ -143,6 +143,7 @@ const DEFAULT_REMITTANCE_RATES = {
   tgNational:0.75, tgArea:0.05, tgPastor:0.10, tgMinisters:0.09, tgSeed:0.01,
   provinceRebate:0.20
 };
+const PIN_REGEX = /^\d{4,6}$/;
 
 // ──────────────────────────────────────────
 // 2. DATA LAYER — Cloudflare D1 via /api/*
@@ -158,11 +159,11 @@ async function apiFetch(path, method='GET', body=null){
 
 const DB = {
   login(d)                     { return apiFetch('auth/login','POST',d); },
-  changePin(d)                 { return apiFetch('change-pin','POST',d); },
   getUsers()                   { return apiFetch('users'); },
   addUser(d)                   { return apiFetch('users','POST',d); },
   updateUser(id,d)             { return apiFetch(`users/${id}`,'PUT',d); },
   deleteUser(id)               { return apiFetch(`users/${id}`,'DELETE'); },
+  changePin(d)                 { return apiFetch('change-pin','POST',d); },
 
   getIncome()                  { return apiFetch('income'); },
   addIncome(d)                 { return apiFetch('income','POST',d); },
@@ -418,7 +419,8 @@ async function login(){
   const btn = document.querySelector('#loginScreen .btn-primary');
   if(btn){ btn.textContent='Connecting…'; btn.disabled=true; }
   try {
-    try { await apiFetch('init'); } catch(e){ console.warn('init skipped:',e.message); }
+    // Ensure tables exist — silently ignore if this fails (may already be initialised)
+    try { await apiFetch('init'); } catch(initErr) { console.warn('init skipped:', initErr.message); }
     const uid = role==='signatory' ? (document.getElementById('userSelect')?.value || '') : '';
     const user = await DB.login({ role, pin, userId: uid || undefined });
     errEl.style.display='none';
@@ -469,7 +471,7 @@ async function submitChangePin(){
   const newPin = document.getElementById('cp_new')?.value?.trim() || '';
   const confirmPin = document.getElementById('cp_confirm')?.value?.trim() || '';
   if(!currentPin || !newPin || !confirmPin){ showAlert('Please fill all PIN fields.','danger'); return; }
-  if(!/^\d{4,6}$/.test(newPin)){ showAlert('New PIN must be 4-6 digits.','danger'); return; }
+  if(!PIN_REGEX.test(newPin)){ showAlert('New PIN must be 4-6 digits.','danger'); return; }
   if(newPin !== confirmPin){ showAlert('New PIN and confirmation do not match.','danger'); return; }
   try{
     const res = await DB.changePin({ userId: state.user.id, currentPin, newPin });

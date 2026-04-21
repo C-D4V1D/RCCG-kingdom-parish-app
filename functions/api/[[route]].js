@@ -61,6 +61,39 @@ async function tableHasColumns(DB, table, cols) {
   return cols.every(c => existing.has(c));
 }
 
+function isValidPin(pin) {
+  return /^\d{4,6}$/.test(String(pin || ''));
+}
+
+function isHashedPin(storedPin) {
+  return String(storedPin || '').startsWith('sha256$');
+}
+
+async function hashPin(pin) {
+  const data = new TextEncoder().encode(String(pin));
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  const hex = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return `sha256$${hex}`;
+}
+
+async function verifyPin(storedPin, inputPin) {
+  const stored = String(storedPin || '');
+  const input = String(inputPin || '');
+  if (!stored) return false;
+  if (!isHashedPin(stored)) return stored === input;
+  const inputHash = await hashPin(input);
+  return stored === inputHash;
+}
+
+function publicUser(userRow) {
+  return {
+    id: userRow.id,
+    name: userRow.name,
+    role: userRow.role,
+    email: userRow.email || '',
+  };
+}
+
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
@@ -99,6 +132,12 @@ export async function onRequest(context) {
       if (method === 'POST'   && !param) return await createUser(DB, body);
       if (method === 'PUT'    &&  param) return await updateUser(DB, param, body);
       if (method === 'DELETE' &&  param) return await deleteUser(DB, param);
+    }
+    if (route === 'auth') {
+      if (method === 'POST' && param === 'login') return await loginUser(DB, body);
+    }
+    if (route === 'change-pin' && method === 'POST') {
+      return await changeUserPin(DB, body);
     }
 
     // ── /api/auth ──────────────────────────────────────────────
@@ -488,6 +527,11 @@ async function loginUser(DB, data) {
   return ok(publicUser(row));
 }
 
+async function deleteUser(DB, id) {
+  await DB.prepare(`DELETE FROM users WHERE id=?`).bind(id).run();
+  return ok({ deleted: id });
+}
+
 async function changeUserPin(DB, data) {
   const userId = String(data?.userId || '').trim();
   const currentPin = String(data?.currentPin || '').trim();
@@ -504,11 +548,6 @@ async function changeUserPin(DB, data) {
   if (!validCurrentPin) return err('Current PIN is incorrect', 401);
   await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(newPin), userId).run();
   return ok({ success: true, id: userId });
-}
-
-async function deleteUser(DB, id) {
-  await DB.prepare(`DELETE FROM users WHERE id=?`).bind(id).run();
-  return ok({ deleted: id });
 }
 
 function inferIncomePaymentMethod(row) {
