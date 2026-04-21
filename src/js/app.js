@@ -3429,7 +3429,7 @@ function showExpenseDetail(id){
     ['Date',            fmtDate(e.date||e.createdAt)],
     ['Category',        `<span class="badge badge-gray">${c.icon} ${c.label}</span>`],
     ['Sub-category',    esc(e.subCategory||'—')],
-    ['Description',     esc(e.description||'—')],
+    ...(e.description && e.description!==e.subCategory ? [['Description', esc(e.description)]] : []),
     ['Amount',          `<span class="td-red td-bold" style="font-size:16px">${fmt(e.amount)}</span>`],
     ['Status',          statusBadge],
     ['Payment Method',  `${methodLabel}${splitParts.length?`<div style="font-size:11px;color:var(--text3);margin-top:3px">${splitParts.join(' · ')}</div>`:''}`],
