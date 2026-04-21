@@ -5861,7 +5861,7 @@ async function renderAdmin(){
     DB.getAudit(),
     DB.getPettyConfig()
   ]);
-  settings.pettyMax = pettyConfig?.max ?? settings.pettyMax;
+  const settingsForView = { ...settings, pettyMax: pettyConfig?.max ?? settings.pettyMax };
   const tab=state.adminTab||'users';
 
   document.getElementById('pageContent').innerHTML=`
@@ -5879,7 +5879,7 @@ async function renderAdmin(){
       <button class="tab ${tab==='perms'?'active':''}" onclick="App.setAdminTab('perms')">Role Permissions</button>
       <button class="tab ${tab==='backup'?'active':''}" onclick="App.setAdminTab('backup')">Backup & Restore</button>
     </div>
-    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settings):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
+    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settingsForView):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
   if(tab==='quotas') initQuotaDnd();
 }
 
@@ -6099,7 +6099,8 @@ async function saveSettings(){
   s.spendableLow=parseFloat(document.getElementById('set_spendable_low')?.value)||20000;
   await DB.saveSettings(s);
   const pettyCfg = await DB.getPettyConfig();
-  await DB.savePettyConfig({ float: pettyCfg?.float ?? 0, max: pettyMax });
+  const currentFloat = Number.isFinite(pettyCfg?.float) ? pettyCfg.float : 50000;
+  await DB.savePettyConfig({ float: currentFloat, max: pettyMax });
   showAlert('Settings saved!','success');
 }
 
