@@ -254,16 +254,16 @@ function canCancelTopupRequest(request){
 }
 const ACCESS_RULES = {
   pages: {
-    dashboard: { permissionsAny:['dashboard'] },
+    dashboard:    { permissionsAny:['dashboard'] },
     transactions: { permissionsAny:['transactions'] },
-    income: { roles:['it_admin','accountant'], permissionsAny:['income'] },
-    remittances: { roles:['it_admin','pastor','accountant','signatory'], permissionsAny:['remittances','remittances_view'] },
-    expenses: { roles:['it_admin','accountant','admin_officer'], permissionsAny:['expenses','expenses_view'] },
-    bank: { roles:['it_admin','accountant','signatory'], permissionsAny:['bank'] },
-    petty_cash: { roles:['it_admin','accountant','admin_officer','signatory'], permissionsAny:['petty_request','petty_approve','petty_view'] },
-    reports: { roles:['it_admin','pastor','accountant'], permissionsAny:['reports'] },
-    audit: { roles:['it_admin','pastor','accountant'], permissionsAny:['audit'] },
-    admin: { roles:['it_admin'] }
+    income:       { permissionsAny:['income','income_view'] },
+    remittances:  { permissionsAny:['remittances','remittances_view'] },
+    expenses:     { permissionsAny:['expenses','expenses_view'] },
+    bank:         { permissionsAny:['bank'] },
+    petty_cash:   { permissionsAny:['petty_request','petty_approve','petty_view'] },
+    reports:      { permissionsAny:['reports'] },
+    audit:        { permissionsAny:['audit'] },
+    admin:        { roles:['it_admin'] }  // IT Admin only — never permission-gated
   },
   actions: {
     income_record: ['income'],
@@ -5789,7 +5789,7 @@ function renderAdminPerms(s){
 
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Role Permissions</div>
-    <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">Control which features each role can access. <strong>IT Administrator</strong> always has full access and cannot be restricted. Changes take effect immediately for users who log in after saving.</p>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">Control which features each role can access. <strong>IT Administrator</strong> always has full access and cannot be restricted here. Changes take effect immediately — no logout required.</p>
     <div class="table-wrap"><table>
       <tr><th>Permission</th>${colHeaders}</tr>
       ${rows}
@@ -5810,7 +5810,7 @@ async function saveRolePermissions(){
   await DB.saveSettings(s);
   state.rolePermissions = saved;
   DB.addAudit('perms_updated','Role permissions updated',state.user?.name);
-  showAlert('Role permissions saved! Active sessions will use the new settings on next login.','success');
+  showAlert('Role permissions saved! Changes apply immediately for all users.','success');
   renderAdmin();
 }
 
