@@ -107,16 +107,6 @@ export async function onRequest(context) {
       return await changeUserPin(DB, body);
     }
 
-    // ── /api/auth ──────────────────────────────────────────────
-    if (route === 'auth') {
-      if (method === 'POST' && param === 'login') return await loginUser(DB, body);
-    }
-
-    // ── /api/change-pin ────────────────────────────────────────
-    if (route === 'change-pin' && method === 'POST') {
-      return await changeUserPin(DB, body);
-    }
-
     // ── /api/income ────────────────────────────────────────────
     if (route === 'income') {
       if (method === 'GET'  && !param) return await getIncome(DB);
@@ -802,7 +792,7 @@ async function getPetty(DB) {
     paymentMethod:    row.payment_method || '',
     bankAmount:       row.bank_amount    || 0,
     cashAmount:       row.cash_amount    || 0,
-    expenseRefs:      row.expense_refs ? JSON.parse(row.expense_refs) : [],
+    expenseRefs:      (() => { try { return row.expense_refs ? JSON.parse(row.expense_refs) : []; } catch { return []; } })(),
     noReceipt:        row.no_receipt === 1,
     createdAt:        row.created_at,
   })));
@@ -897,7 +887,7 @@ async function getRemittances(DB) {
 }
 
 async function createRemittance(DB, data) {
-  const id = newId('REM-');
+  const id = data.id || newId('REM-');
   await DB.prepare(`
     INSERT INTO remittances
       (id, label, amount, paid_date, reference, authorized_by, status,

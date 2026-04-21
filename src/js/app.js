@@ -269,7 +269,7 @@ const ACCESS_RULES = {
   actions: {
     income_record: ['income'],
     income_deposit: ['income'],
-    remittance_record_payment: ['income'],
+    remittance_record_payment: ['remittances'],
     expense_log: ['expenses'],
     bank_withdrawal: ['income'],
     bank_charge: ['expenses'],
@@ -313,7 +313,9 @@ function filterByMonth(arr){
 
 function filterByDateRange(arr, fromDate, toDate){
   return (arr||[]).filter(r=>{
-    const d = new Date(r.date||r.createdAt||0).toISOString().split('T')[0];
+    const raw = new Date(r.date||r.createdAt||0);
+    if(isNaN(raw.getTime())) return false;
+    const d = raw.toISOString().split('T')[0];
     return d >= fromDate && d <= toDate;
   });
 }
@@ -2823,13 +2825,10 @@ async function submitRemittance(){
   if(method==='bank_transfer'&&!reference){ showAlert('Please enter the bank transfer reference number.','danger'); return }
   if(!auth){ showAlert('Please select or enter the authorizing signatories.','danger'); return }
 
-  // Encode receipt file if provided
-  let receiptData='', receiptFileName='';
+  // Encode receipt file if provided — only the filename is persisted (appended to notes below).
+  // The remittances table has no receipt image column; the filename serves as the audit reference.
   const receiptFile=document.getElementById('rem_receipt')?.files?.[0];
-  if(receiptFile){
-    receiptData=await new Promise(res=>{ const fr=new FileReader(); fr.onload=e=>res(e.target.result); fr.readAsDataURL(receiptFile) });
-    receiptFileName=receiptFile.name;
-  }
+  const receiptFileName=receiptFile?.name||'';
 
   const fromDate=state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
   const toDate=state.remToDate||new Date().toISOString().split('T')[0];
@@ -6403,7 +6402,7 @@ return {
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
   setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
-  showKPSCAlert, submitKPSCAlert, closeModal: closeModal
+  showKPSCAlert, submitKPSCAlert, closeModal: closeModal, showAlert
 };
 
 })();
@@ -6417,13 +6416,13 @@ window.App = App;
 window.onerror = function(message, source, lineno, colno, error){
   console.error('Fatal runtime error:', { message, source, lineno, colno, error });
   if(document.getElementById('appShell')?.style.display!=='none'){
-    showAlert('Unexpected error occurred. Please refresh the page.','danger');
+    App.showAlert('Unexpected error occurred. Please refresh the page.','danger');
   }
 };
 
 window.onunhandledrejection = function(event){
   console.error('Unhandled promise rejection:', event?.reason || event);
   if(document.getElementById('appShell')?.style.display!=='none'){
-    showAlert('A background operation failed. Please retry or refresh.','danger');
+    App.showAlert('A background operation failed. Please retry or refresh.','danger');
   }
 };
