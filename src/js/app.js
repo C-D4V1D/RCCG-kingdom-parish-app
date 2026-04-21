@@ -313,7 +313,7 @@ function filterByMonth(arr){
 
 function filterByDateRange(arr, fromDate, toDate){
   return (arr||[]).filter(r=>{
-    const raw = new Date(r.date||r.createdAt||0);
+    const raw = new Date(r.date||r.createdAt||'');
     if(isNaN(raw.getTime())) return false;
     const d = raw.toISOString().split('T')[0];
     return d >= fromDate && d <= toDate;

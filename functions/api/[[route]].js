@@ -48,6 +48,12 @@ function publicUser(userRow) {
   };
 }
 
+/** Safely parse a JSON string and return the result, or `fallback` on error. */
+function safeJsonParse(str, fallback) {
+  if (!str) return fallback;
+  try { return JSON.parse(str); } catch { return fallback; }
+}
+
 const SCHEMA_CACHE = new Map();
 const ALLOWED_TABLES = new Set(['income', 'expenses']);
 async function tableHasColumns(DB, table, cols) {
@@ -792,7 +798,7 @@ async function getPetty(DB) {
     paymentMethod:    row.payment_method || '',
     bankAmount:       row.bank_amount    || 0,
     cashAmount:       row.cash_amount    || 0,
-    expenseRefs:      (() => { try { return row.expense_refs ? JSON.parse(row.expense_refs) : []; } catch { return []; } })(),
+    expenseRefs:      safeJsonParse(row.expense_refs, []),
     noReceipt:        row.no_receipt === 1,
     createdAt:        row.created_at,
   })));
