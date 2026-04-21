@@ -4612,7 +4612,7 @@ async function renderPettyCash(){
               :isTopupReq
                 ?`<span style="font-weight:600">${fmt(r.originalAmount||r.amount)}</span>`
                 :`<span style="color:var(--amber);font-weight:700">−${fmt(r.amount)}</span>`;
-            return `<tr class="tx-mobile-row${overdue?' ':" "}" style="cursor:pointer${overdue?';background:var(--danger-light)':''}" onclick="App.showPettyDetail('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.showPettyDetail('${r.id}')}" tabindex="0" role="button" aria-label="${esc(r.purpose||'Petty cash entry')} — ${fmt(r.originalAmount||r.amount)}">
+            return `<tr class="tx-mobile-row" style="cursor:pointer${overdue?';background:var(--danger-light)':''}" onclick="App.showPettyDetail('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.showPettyDetail('${r.id}')}" tabindex="0" role="button" aria-label="${esc(r.purpose||'Petty cash entry')} — ${fmt(r.originalAmount||r.amount)}">
               <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.createdAt)}</div></td>
               <td style="max-width:0;width:55%">
                 <div>${typeTag}${overdue?'<span class="badge badge-danger" style="margin-left:4px">Overdue</span>':''}</div>
