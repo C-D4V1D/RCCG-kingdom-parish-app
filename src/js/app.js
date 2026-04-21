@@ -452,6 +452,36 @@ function logout(){
   document.getElementById('userSelectWrap').style.display='none';
 }
 
+function showChangePinModal(){
+  if(!state.user) return;
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">Change My PIN</div>
+    <div class="form-group"><label class="form-label">Current PIN</label><input type="password" id="cp_current" class="form-input" maxlength="6" placeholder="Current PIN" inputmode="numeric" /></div>
+    <div class="form-group"><label class="form-label">New PIN (4-6 digits)</label><input type="password" id="cp_new" class="form-input" maxlength="6" placeholder="New PIN" inputmode="numeric" /></div>
+    <div class="form-group"><label class="form-label">Confirm New PIN</label><input type="password" id="cp_confirm" class="form-input" maxlength="6" placeholder="Confirm PIN" inputmode="numeric" /></div>
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitChangePin()">Update PIN</button></div>`);
+}
+
+async function submitChangePin(){
+  if(!state.user) return;
+  const currentPin = document.getElementById('cp_current')?.value?.trim() || '';
+  const newPin = document.getElementById('cp_new')?.value?.trim() || '';
+  const confirmPin = document.getElementById('cp_confirm')?.value?.trim() || '';
+  if(!currentPin || !newPin || !confirmPin){ showAlert('Please fill all PIN fields.','danger'); return; }
+  if(!/^\d{4,6}$/.test(newPin)){ showAlert('New PIN must be 4-6 digits.','danger'); return; }
+  if(newPin !== confirmPin){ showAlert('New PIN and confirmation do not match.','danger'); return; }
+  try{
+    const res = await DB.changePin({ userId: state.user.id, currentPin, newPin });
+    if(!res?.success) throw new Error('PIN update failed.');
+    DB.addAudit('pin_changed','User changed own PIN',state.user?.name);
+    closeModal();
+    showAlert('PIN changed successfully. Use the new PIN at next sign in.','success');
+  }catch(e){
+    showAlert(e.message || 'Failed to change PIN. Please try again.','danger');
+  }
+}
+
 // ──────────────────────────────────────────
 // 6. NAVIGATION & ROUTER
 // ──────────────────────────────────────────
@@ -521,6 +551,8 @@ async function buildSidebar(){
     });
   });
   nav.innerHTML=html;
+  // Append Change PIN action as the last item — available to all logged-in users
+  nav.innerHTML += `<div class="nav-section">Account</div><div class="nav-item" onclick="App.showChangePinModal()"><span class="nav-icon">🔑</span>Change PIN</div>`;
 }
 
 function buildBottomNav(){
@@ -1154,14 +1186,14 @@ function showTxDetail(id){
     ['Date &amp; Time',    `${fmtDate(t.date)} at ${fmtTime(t.date)}`],
     ['Type',               txKindLabel(t.kind)],
     ['Section',            txModuleLabel(t.module)],
-    ['Description',        t.description||'—'],
-    ['Notes / Purpose',    t.notes||'—'],
+    ['Description',        esc(t.description||'—')],
+    ['Notes / Purpose',    esc(t.notes||'—')],
     ['Amount',             `<span class="${d.cls}" style="font-size:16px;font-weight:700">${d.symbol}${fmt(t.amount||0)}</span>`],
     ['Direction',          dirLabel],
     ['Payment Method',     txMethodLabel(t.method)||'—'],
     ['Status',             txStatusBadge(t.status) + `<div class="form-hint" style="margin-top:4px">${txStatusLabel(t.status)}</div>`],
-    ['Reference / Receipt No.', t.reference||'—'],
-    ['Recorded By',        t.actor||'—']
+    ['Reference / Receipt No.', esc(t.reference||'—')],
+    ['Recorded By',        esc(t.actor||'—')]
   ];
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -6091,7 +6123,7 @@ function submitKPSCAlert(){
 // 8. PUBLIC API
 // ──────────────────────────────────────────
 return {
-  onRoleChange, login, logout, navigate, toggleSidebar, toggleNotifications,
+  onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,

@@ -1074,10 +1074,12 @@ async function adminImport(DB, data) {
     for (const u of data.users) {
       try {
         const pinStr = String(u.pin || '');
-        if (!u.id || !u.name || !u.role || !pinStr || !/^\d{4,6}$/.test(pinStr)) { errs.push(`user:${u.id||'?'}`); continue; }
+        if (!u.id || !u.name || !u.role || !pinStr) { errs.push(`user:${u.id||'?'}`); continue; }
+        const pinValue = isHashedPin(pinStr) ? pinStr : (isValidPin(pinStr) ? await hashPin(pinStr) : '');
+        if (!pinValue) { errs.push(`user:${u.id||'?'}`); continue; }
         await DB.prepare(
           `INSERT OR IGNORE INTO users (id,name,role,pin,email) VALUES (?,?,?,?,?)`
-        ).bind(u.id, u.name, u.role, String(u.pin), u.email || '').run();
+        ).bind(u.id, u.name, u.role, pinValue, u.email || '').run();
       } catch(e) { errs.push(`user:${u.id}`); }
     }
   }
