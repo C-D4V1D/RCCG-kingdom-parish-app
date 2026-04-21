@@ -202,7 +202,7 @@ const DB = {
     updateNotifBadge();
   },
   markAllRead(){
-    apiFetch('notifications/read','POST').catch(()=>{});
+    return apiFetch('notifications/read','POST').catch(()=>{});
   },
   importBackup(data)            { return apiFetch('admin/import','POST',data); },
   clearAllData()                { return apiFetch('admin/clear','POST'); },
@@ -581,7 +581,7 @@ function updateSidebarUser(){
     <span style="display:inline-block;margin-top:4px;font-size:11px;padding:2px 8px;border-radius:10px;background:${r.bg};color:${r.color};font-weight:600">${r.label}</span>`;
 }
 
-function navigate(page, fromHistory){
+async function navigate(page, fromHistory){
   if(!canAccessPage(page)){
     if(page!=='dashboard') showAlert('You do not have permission to access that page.','danger');
     page='dashboard';
@@ -604,6 +604,7 @@ function navigate(page, fromHistory){
   document.getElementById('sidebarOverlay').classList.remove('visible');
   // Close notifications
   document.getElementById('notifPanel').style.display='none';
+  await Promise.all([buildSidebar(), updateNotifBadge()]);
   setTimeout(()=>{ renderPage(page).catch(e=>console.error(e)); },50);
 }
 
@@ -621,7 +622,8 @@ async function toggleNotifications(){
     const list=document.getElementById('notifList');
     if(!notifs.length){ list.innerHTML='<div class="notif-empty">No notifications</div>'; }
     else{ list.innerHTML=notifs.slice(0,15).map(n=>`<div class="notif-item" style="opacity:${n.read?0.6:1}"><div class="notif-item-title">${esc(n.title)}</div><div class="notif-item-body">${esc(n.body)}</div><div class="notif-item-time">${fmtDate(n.ts)} ${fmtTime(n.ts)}</div></div>`).join('') }
-    DB.markAllRead();
+    await DB.markAllRead();
+    await updateNotifBadge();
   }
 }
 
@@ -5853,9 +5855,13 @@ async function renderAudit(){
 // ── IT ADMIN ──────────────────────────────
 async function renderAdmin(){
   if(state.user?.role!=='it_admin'){ document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--danger)">Access denied. IT Administrators only.</p></div>'; return }
-  const users=await DB.getUsers();
-  const settings=await DB.getSettings();
-  const auditLog=await DB.getAudit();
+  const [users, settings, auditLog, pettyConfig] = await Promise.all([
+    DB.getUsers(),
+    DB.getSettings(),
+    DB.getAudit(),
+    DB.getPettyConfig()
+  ]);
+  const settingsForView = { ...settings, pettyMax: pettyConfig?.max ?? settings.pettyMax };
   const tab=state.adminTab||'users';
 
   document.getElementById('pageContent').innerHTML=`
@@ -5873,7 +5879,7 @@ async function renderAdmin(){
       <button class="tab ${tab==='perms'?'active':''}" onclick="App.setAdminTab('perms')">Role Permissions</button>
       <button class="tab ${tab==='backup'?'active':''}" onclick="App.setAdminTab('backup')">Backup & Restore</button>
     </div>
-    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settings):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
+    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settingsForView):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
   if(tab==='quotas') initQuotaDnd();
 }
 
@@ -6088,9 +6094,13 @@ async function saveSettings(){
   s.churchName=document.getElementById('set_name')?.value;
   s.bankName=document.getElementById('set_bank')?.value;
   s.accountNo=document.getElementById('set_acct')?.value;
-  s.pettyMax=parseFloat(document.getElementById('set_petty')?.value)||50000;
+  const pettyMax = parseFloat(document.getElementById('set_petty')?.value)||50000;
+  s.pettyMax=pettyMax;
   s.spendableLow=parseFloat(document.getElementById('set_spendable_low')?.value)||20000;
   await DB.saveSettings(s);
+  const pettyCfg = await DB.getPettyConfig();
+  const currentFloat = Number.isFinite(pettyCfg?.float) ? pettyCfg.float : 50000;
+  await DB.savePettyConfig({ float: currentFloat, max: pettyMax });
   showAlert('Settings saved!','success');
 }
 
