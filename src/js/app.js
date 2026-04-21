@@ -1190,7 +1190,7 @@ function showTxDetail(id){
     ['Notes / Purpose',    esc(t.notes||'—')],
     ['Amount',             `<span class="${d.cls}" style="font-size:16px;font-weight:700">${d.symbol}${fmt(t.amount||0)}</span>`],
     ['Direction',          dirLabel],
-    ['Payment Method',     txMethodLabel(t.method)||'—'],
+    ['Payment Method',     esc(txMethodLabel(t.method)||'—')],
     ['Status',             txStatusBadge(t.status) + `<div class="form-hint" style="margin-top:4px">${txStatusLabel(t.status)}</div>`],
     ['Reference / Receipt No.', esc(t.reference||'—')],
     ['Recorded By',        esc(t.actor||'—')]
