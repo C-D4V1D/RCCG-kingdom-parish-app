@@ -2,7 +2,15 @@ name = "rccg-kingdom-parish-app"
 compatibility_date = "2024-01-01"
 pages_build_output_dir = "."
 
+# Production (main branch) — live church database
 [[d1_databases]]
 binding = "DB"
 database_name = "rccg-parish-db"
 database_id = "dcc63f58-6079-44ba-900c-ff58bc81c4e8"
+
+# Preview deployments (dev, review/*, and all other branches) — separate dev database
+[env.preview]
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "rccg-parish-db-dev"
+database_id = "eb14d315-57c2-4c13-ab9b-7115e7ae7580"

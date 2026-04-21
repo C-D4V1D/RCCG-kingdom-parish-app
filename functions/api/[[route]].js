@@ -179,7 +179,8 @@ export async function onRequest(context) {
 
     // ── /api/admin ─────────────────────────────────────────────
     if (route === 'admin') {
-      if (method === 'POST' && param === 'clear')  return await adminClear(DB);
+      if (method === 'POST' && param === 'clear')      return await adminClear(DB);
+      if (method === 'POST' && param === 'clear-data') return await adminClearDataOnly(DB);
       if (method === 'POST' && param === 'import') return await adminImport(DB, body);
     }
 
@@ -1036,6 +1037,18 @@ async function createNotification(DB, data) {
   await DB.prepare(`INSERT INTO notifications (id,title,body,type,ts) VALUES (?,?,?,?,?)`)
     .bind(id, data.title || '', data.body || '', data.type || 'info', new Date().toISOString()).run();
   return ok({ id });
+}
+
+async function adminClearDataOnly(DB) {
+  // Clears ALL transaction/financial data but preserves:
+  // users, settings (church info, rates, quotas, permissions), petty_config
+  const tables = ['income','expenses','petty_cash','remittances','cash_transactions','audit_log','notifications'];
+  for (const t of tables) {
+    await DB.prepare(`DELETE FROM ${t}`).run();
+  }
+  // Reset petty cash balance to zero (no cash on hand yet) but keep the approved max
+  await DB.prepare(`UPDATE petty_config SET float_amount=0 WHERE id='main'`).run();
+  return ok({ cleared: true, preserved: ['users','settings','petty_config max'] });
 }
 
 async function adminClear(DB) {

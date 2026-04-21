@@ -206,6 +206,7 @@ const DB = {
   },
   importBackup(data)            { return apiFetch('admin/import','POST',data); },
   clearAllData()                { return apiFetch('admin/clear','POST'); },
+  clearDataOnly()               { return apiFetch('admin/clear-data','POST'); },
 };
 
 // ──────────────────────────────────────────
@@ -254,16 +255,16 @@ function canCancelTopupRequest(request){
 }
 const ACCESS_RULES = {
   pages: {
-    dashboard: { permissionsAny:['dashboard'] },
+    dashboard:    { permissionsAny:['dashboard'] },
     transactions: { permissionsAny:['transactions'] },
-    income: { roles:['it_admin','accountant'], permissionsAny:['income'] },
-    remittances: { roles:['it_admin','pastor','accountant','signatory'], permissionsAny:['remittances','remittances_view'] },
-    expenses: { roles:['it_admin','accountant','admin_officer'], permissionsAny:['expenses','expenses_view'] },
-    bank: { roles:['it_admin','accountant','signatory'], permissionsAny:['bank'] },
-    petty_cash: { roles:['it_admin','accountant','admin_officer','signatory'], permissionsAny:['petty_request','petty_approve','petty_view'] },
-    reports: { roles:['it_admin','pastor','accountant'], permissionsAny:['reports'] },
-    audit: { roles:['it_admin','pastor','accountant'], permissionsAny:['audit'] },
-    admin: { roles:['it_admin'] }
+    income:       { permissionsAny:['income','income_view'] },
+    remittances:  { permissionsAny:['remittances','remittances_view'] },
+    expenses:     { permissionsAny:['expenses','expenses_view'] },
+    bank:         { permissionsAny:['bank'] },
+    petty_cash:   { permissionsAny:['petty_request','petty_approve','petty_view'] },
+    reports:      { permissionsAny:['reports'] },
+    audit:        { permissionsAny:['audit'] },
+    admin:        { roles:['it_admin'] }  // IT Admin only — never permission-gated
   },
   actions: {
     income_record: ['income'],
@@ -1746,65 +1747,112 @@ function setIncomeTab(t){ state.incomeTab=t; renderIncome() }
 async function renderIncomeList(records, cashTxOverride){
   if(!records.length) return '<div class="card"><div class="empty-table">No Sunday collection records found for this month. Click "📥 Sunday Collections" above to add one.</div></div>';
   const allCashTxList = cashTxOverride || await DB.getCashTransactions();
-  return `<div class="card"><div class="table-wrap"><table>
-    <tr><th>Date</th><th>Total Collection</th><th>Cash (Accountant)</th><th>Bank Transfer</th><th>Direct → Petty</th><th>Cash Status</th><th>Recorded By</th><th>Actions</th></tr>
-    ${records.map(r=>{
-      const btAmt = r.bankTransferAmount||0;
-      const dpAmt = r.directPettyCash||0;
-      const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
-      const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-      const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
-      const remaining = cashHeld - depositedAmt;
-      const statusBadge = cashHeld===0
-        ? `<span class="badge badge-info">No Cash (All Transfer)</span>`
-        : isFullyDeposited
-          ? `<span class="badge badge-success">✓ Deposited</span>`
-          : depositedAmt>0
-            ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} still pending</span>`
-            : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
-      return `<tr>
-        <td><strong>${fmtDate(r.date)}</strong>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
-        <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
-        <td class="td-muted">${cashHeld>0?fmt(cashHeld):'—'}</td>
-        <td class="td-muted">${btAmt>0?fmt(btAmt):'—'}</td>
-        <td class="td-muted">${dpAmt>0?fmt(dpAmt):'—'}</td>
-        <td>${statusBadge}</td>
-        <td class="td-muted">${r.recordedBy||'—'}</td>
-        <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-        ${canAction('income_deposit')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
-      </tr>`;}).join('')}
-  </table></div></div>`;
+  return `<div class="card">
+    <span class="td-muted tx-mobile-hint" style="font-size:11px;padding-bottom:6px">Tap any row to see full details</span>
+    <div class="table-wrap"><table class="tx-desktop-table">
+      <tr><th>Date</th><th>Total Collection</th><th>Cash (Accountant)</th><th>Bank Transfer</th><th>Direct → Petty</th><th>Cash Status</th><th>Recorded By</th><th>Actions</th></tr>
+      ${records.map(r=>{
+        const btAmt = r.bankTransferAmount||0;
+        const dpAmt = r.directPettyCash||0;
+        const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
+        const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+        const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
+        const remaining = cashHeld - depositedAmt;
+        const statusBadge = cashHeld===0
+          ? `<span class="badge badge-info">No Cash (All Transfer)</span>`
+          : isFullyDeposited
+            ? `<span class="badge badge-success">✓ Deposited</span>`
+            : depositedAmt>0
+              ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} still pending</span>`
+              : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
+        return `<tr>
+          <td><strong>${fmtDate(r.date)}</strong>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
+          <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
+          <td class="td-muted">${cashHeld>0?fmt(cashHeld):'—'}</td>
+          <td class="td-muted">${btAmt>0?fmt(btAmt):'—'}</td>
+          <td class="td-muted">${dpAmt>0?fmt(dpAmt):'—'}</td>
+          <td>${statusBadge}</td>
+          <td class="td-muted">${r.recordedBy||'—'}</td>
+          <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
+          ${canAction('income_deposit')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+        </tr>`;}).join('')}
+    </table>
+    <table class="tx-mobile-table">
+      <tr><th>Date</th><th>Details</th><th class="td-right">Amount</th></tr>
+      ${records.map(r=>{
+        const btAmt = r.bankTransferAmount||0;
+        const dpAmt = r.directPettyCash||0;
+        const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
+        const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+        const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
+        const mobileStatus = cashHeld===0
+          ? `<span class="badge badge-info">No Cash</span>`
+          : isFullyDeposited
+            ? `<span class="badge badge-success">✓ Deposited</span>`
+            : `<span class="badge badge-warn">⏳ Pending</span>`;
+        return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="Sunday Collection ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
+          <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div></td>
+          <td style="max-width:0;width:55%">
+            <div style="font-size:13px;font-weight:500">📅 Sunday Collection</div>
+            <div style="margin-top:3px">${mobileStatus}</div>
+          </td>
+          <td class="td-right td-green td-bold" style="white-space:nowrap">${fmt(r.totalCollection)}</td>
+        </tr>`;}).join('')}
+    </table></div></div>`;
 }
 
 async function renderOtherIncomeList(records){
   if(!records.length) return '<div class="card"><div class="empty-table">No other income records found for this month. Click "➕ Other Income" above to add one.</div></div>';
   const allCashTxList = await DB.getCashTransactions();
-  return `<div class="card"><div class="table-wrap"><table>
-    <tr><th>Date</th><th>Source Type</th><th>Donor / Notes</th><th>Amount</th><th>Payment Method</th><th>Status</th><th>Recorded By</th><th>Actions</th></tr>
-    ${records.map(r=>{
-      const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'};
-      const isCash = r.paymentMethod==='cash';
-      const cashDep = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-      const remaining = Math.max(0,(r.totalCollection||0) - cashDep);
-      const statusBadge = !isCash
-        ? `<span class="badge badge-info">🏦 Bank Transfer</span>`
-        : cashDep>=(r.totalCollection||0)
-          ? `<span class="badge badge-success">✓ Deposited</span>`
-          : cashDep>0
-            ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} pending</span>`
-            : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
-      return `<tr>
-        <td><strong>${fmtDate(r.date)}</strong></td>
-        <td><span class="badge badge-gray">${src.label}</span></td>
-        <td class="td-muted">${r.donorName||r.notes||'—'}</td>
-        <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
-        <td class="td-muted" style="font-size:11px">${(r.paymentMethod||'cash').replace('_',' ')}</td>
-        <td>${statusBadge}</td>
-        <td class="td-muted">${r.recordedBy||'—'}</td>
-        <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-        ${canAction('income_deposit')&&isCash&&cashDep<(r.totalCollection||0)?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
-      </tr>`;}).join('')}
-  </table></div></div>`;
+  return `<div class="card">
+    <span class="td-muted tx-mobile-hint" style="font-size:11px;padding-bottom:6px">Tap any row to see full details</span>
+    <div class="table-wrap"><table class="tx-desktop-table">
+      <tr><th>Date</th><th>Source Type</th><th>Donor / Notes</th><th>Amount</th><th>Payment Method</th><th>Status</th><th>Recorded By</th><th>Actions</th></tr>
+      ${records.map(r=>{
+        const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'};
+        const isCash = r.paymentMethod==='cash';
+        const cashDep = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+        const remaining = Math.max(0,(r.totalCollection||0) - cashDep);
+        const statusBadge = !isCash
+          ? `<span class="badge badge-info">🏦 Bank Transfer</span>`
+          : cashDep>=(r.totalCollection||0)
+            ? `<span class="badge badge-success">✓ Deposited</span>`
+            : cashDep>0
+              ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} pending</span>`
+              : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
+        return `<tr>
+          <td><strong>${fmtDate(r.date)}</strong></td>
+          <td><span class="badge badge-gray">${src.label}</span></td>
+          <td class="td-muted">${r.donorName||r.notes||'—'}</td>
+          <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
+          <td class="td-muted" style="font-size:11px">${(r.paymentMethod||'cash').replace('_',' ')}</td>
+          <td>${statusBadge}</td>
+          <td class="td-muted">${r.recordedBy||'—'}</td>
+          <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
+          ${canAction('income_deposit')&&isCash&&cashDep<(r.totalCollection||0)?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+        </tr>`;}).join('')}
+    </table>
+    <table class="tx-mobile-table">
+      <tr><th>Date</th><th>Details</th><th class="td-right">Amount</th></tr>
+      ${records.map(r=>{
+        const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'};
+        const isCash = r.paymentMethod==='cash';
+        const cashDep = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+        const mobileStatus = !isCash
+          ? `<span class="badge badge-info">🏦 Bank</span>`
+          : cashDep>=(r.totalCollection||0)
+            ? `<span class="badge badge-success">✓ Deposited</span>`
+            : `<span class="badge badge-warn">⏳ Pending</span>`;
+        return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(src.label)} ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
+          <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div></td>
+          <td style="max-width:0;width:55%">
+            <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="badge badge-gray">${esc(src.label)}</span></div>
+            <div class="td-muted" style="font-size:11px;margin-top:3px">${r.donorName||r.notes?esc(r.donorName||r.notes||''):''}</div>
+            <div style="margin-top:3px">${mobileStatus}</div>
+          </td>
+          <td class="td-right td-green td-bold" style="white-space:nowrap">${fmt(r.totalCollection)}</td>
+        </tr>`;}).join('')}
+    </table></div></div>`;
 }
 
 async function renderIncomeSummary(records){
@@ -1850,38 +1898,70 @@ async function renderAllIncomeList(records, cashTxOverride){
   if(!records.length) return '<div class="card"><div class="empty-table">No income records found across all months.</div></div>';
   const allCashTxList = cashTxOverride || await DB.getCashTransactions();
   const sorted = [...records].sort((a,b)=> new Date(b.date||b.createdAt||0) - new Date(a.date||a.createdAt||0));
-  return `<div class="card"><div class="table-wrap"><table>
-    <tr><th>Date</th><th>Source / Type</th><th>Amount</th><th>Cash (Accountant)</th><th>Bank Transfer</th><th>Cash Status</th><th>Recorded By</th><th>Actions</th></tr>
-    ${sorted.map(r=>{
-      const isSunday = !r.source||r.source==='sunday_collection';
-      const btAmt = r.bankTransferAmount||0;
-      const dpAmt = r.directPettyCash||0;
-      const cashHeld = isSunday
-        ? Math.max(0,(r.totalCollection||0) - btAmt - dpAmt)
-        : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
-      const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-      const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
-      const remaining = cashHeld - depositedAmt;
-      const statusBadge = cashHeld===0
-        ? `<span class="badge badge-info">No Cash</span>`
-        : isFullyDeposited
-          ? `<span class="badge badge-success">✓ Deposited</span>`
-          : depositedAmt>0
-            ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} pending</span>`
+  return `<div class="card">
+    <span class="td-muted tx-mobile-hint" style="font-size:11px;padding-bottom:6px">Tap any row to see full details</span>
+    <div class="table-wrap"><table class="tx-desktop-table">
+      <tr><th>Date</th><th>Source / Type</th><th>Amount</th><th>Cash (Accountant)</th><th>Bank Transfer</th><th>Cash Status</th><th>Recorded By</th><th>Actions</th></tr>
+      ${sorted.map(r=>{
+        const isSunday = !r.source||r.source==='sunday_collection';
+        const btAmt = r.bankTransferAmount||0;
+        const dpAmt = r.directPettyCash||0;
+        const cashHeld = isSunday
+          ? Math.max(0,(r.totalCollection||0) - btAmt - dpAmt)
+          : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
+        const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+        const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
+        const remaining = cashHeld - depositedAmt;
+        const statusBadge = cashHeld===0
+          ? `<span class="badge badge-info">No Cash</span>`
+          : isFullyDeposited
+            ? `<span class="badge badge-success">✓ Deposited</span>`
+            : depositedAmt>0
+              ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} pending</span>`
+              : `<span class="badge badge-warn">⏳ Pending</span>`;
+        const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
+        return `<tr>
+          <td><strong>${fmtDate(r.date)}</strong>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
+          <td><span class="badge badge-gray" style="font-size:11px">${srcLabel}</span>${r.donorName?`<div class="td-muted">${r.donorName}</div>`:''}</td>
+          <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
+          <td class="td-muted">${cashHeld>0?fmt(cashHeld):'—'}</td>
+          <td class="td-muted">${btAmt>0?fmt(btAmt):'—'}</td>
+          <td>${statusBadge}</td>
+          <td class="td-muted">${r.recordedBy||'—'}</td>
+          <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
+          ${canAction('income_deposit')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+        </tr>`;}).join('')}
+    </table>
+    <table class="tx-mobile-table">
+      <tr><th>Date</th><th>Details</th><th class="td-right">Amount</th></tr>
+      ${sorted.map(r=>{
+        const isSunday = !r.source||r.source==='sunday_collection';
+        const btAmt = r.bankTransferAmount||0;
+        const dpAmt = r.directPettyCash||0;
+        const cashHeld = isSunday
+          ? Math.max(0,(r.totalCollection||0) - btAmt - dpAmt)
+          : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
+        const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+        const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
+        const mobileStatus = cashHeld===0
+          ? `<span class="badge badge-info">No Cash</span>`
+          : isFullyDeposited
+            ? `<span class="badge badge-success">✓ Deposited</span>`
             : `<span class="badge badge-warn">⏳ Pending</span>`;
-      const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
-      return `<tr>
-        <td><strong>${fmtDate(r.date)}</strong>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
-        <td><span class="badge badge-gray" style="font-size:11px">${srcLabel}</span>${r.donorName?`<div class="td-muted">${r.donorName}</div>`:''}</td>
-        <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
-        <td class="td-muted">${cashHeld>0?fmt(cashHeld):'—'}</td>
-        <td class="td-muted">${btAmt>0?fmt(btAmt):'—'}</td>
-        <td>${statusBadge}</td>
-        <td class="td-muted">${r.recordedBy||'—'}</td>
-        <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-        ${canAction('income_deposit')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
-      </tr>`;}).join('')}
-  </table></div></div>`;
+        const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
+        return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(srcLabel)} ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
+          <td>
+            <div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div>
+            ${r.notes?`<div class="td-muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:80px">${esc(r.notes)}</div>`:''}
+          </td>
+          <td style="max-width:0;width:55%">
+            <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="badge badge-gray" style="font-size:11px">${esc(srcLabel)}</span></div>
+            ${r.donorName?`<div class="td-muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.donorName)}</div>`:''}
+            <div style="margin-top:3px">${mobileStatus}</div>
+          </td>
+          <td class="td-right td-green td-bold" style="white-space:nowrap">${fmt(r.totalCollection)}</td>
+        </tr>`;}).join('')}
+    </table></div></div>`;
 }
 
 function showIncomeForm(){
@@ -2928,10 +3008,14 @@ async function printRemittanceReport(fromOverride, toOverride){
   .sig{display:flex;gap:24px;margin-top:36px}
   .sig-box{flex:1;border-top:1px solid #333;padding-top:8px;font-size:11px;line-height:1.7}
   .note{background:#fff8e1;border:1px solid #f0c040;border-radius:4px;padding:10px 12px;font-size:11px;margin-bottom:16px;color:#7a5200}
+  .print-btn-bar{text-align:center;margin-bottom:14px}
+  .print-btn{background:#0F6E56;color:#fff;border:none;padding:10px 24px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
+  .print-btn:hover{background:#085041}
   @media print{body{padding:10px}.no-print{display:none}}
 </style>
 </head>
 <body>
+  <div class="print-btn-bar no-print"><button class="print-btn" onclick="window.print()">🖨️ Print Report</button></div>
   <div class="header">
     <h1>${esc(churchName)}</h1>
     <h2>RCCG Monthly Remittance Report</h2>
@@ -3020,13 +3104,12 @@ async function printRemittanceReport(fromOverride, toOverride){
   w.document.write(html);
   w.document.close();
   w.focus();
-  // Brief delay to ensure the document is fully rendered before triggering print
-  setTimeout(()=>w.print(),400);
 }
 
 // ── EXPENSES ──────────────────────────────
 async function renderExpenses(){
   const allExp = await DB.getExpenses();
+  state._expAll = allExp;
   const expenses = filterByMonth(allExp);
   const total = expenses.reduce((s,r)=>s+(r.amount||0),0);
 
@@ -3220,7 +3303,9 @@ async function renderExpenses(){
         ${(activeFilter||searchTerm||methodFilter||recordedByFilter)?`<button class="btn btn-sm" onclick="App.clearExpFilters()" style="white-space:nowrap;flex-shrink:0">✕ Clear all</button>`:''}
       </div>
 
-      ${filtered.length?`<div class="table-wrap"><table>
+      ${filtered.length?`
+      <span class="td-muted tx-mobile-hint" style="font-size:11px;padding-bottom:6px">Tap any row to see full details</span>
+      <div class="table-wrap"><table class="tx-desktop-table">
         <tr>
           <th ${thStyle('date')}>Date ${sortIcon('date')}</th>
           <th>Category</th>
@@ -3268,6 +3353,28 @@ async function renderExpenses(){
             </td>
           </tr>`;
         }).join('')}
+      </table>
+      <table class="tx-mobile-table">
+        <tr><th>Date</th><th>Details</th><th class="td-right">Amount</th></tr>
+        ${filtered.map(e=>{
+          const c=EXPENSE_CATS.find(x=>x.key===e.category)||{icon:'💸',label:e.category||'—'};
+          const methodLabel = e.paymentMethod==='petty_cash'?'💳 Petty'
+            :e.paymentMethod==='bank_transfer'?'🏦 Bank'
+            :e.paymentMethod==='split'?'🔀 Split'
+            :'💵 Cash';
+          const mobileStatus = e.status==='approved'
+            ? '<span class="badge badge-success">Approved</span>'
+            : '<span class="badge badge-warn">Pending</span>';
+          return `<tr class="tx-mobile-row" onclick="App.showExpenseDetail('${e.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.showExpenseDetail('${e.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(e.subCategory||e.description||'Expense')} — ${fmt(e.amount)}">
+            <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(e.date||e.createdAt)}</div></td>
+            <td style="max-width:0;width:55%">
+              <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="badge badge-gray" style="font-size:11px">${c.icon} ${c.label}</span></div>
+              <div class="td-muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">${esc(e.subCategory||e.description||'—')}</div>
+              <div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">${mobileStatus}<span class="td-muted" style="font-size:11px">${methodLabel}</span></div>
+            </td>
+            <td class="td-right td-red td-bold" style="white-space:nowrap">${fmt(e.amount)}</td>
+          </tr>`;
+        }).join('')}
       </table></div>
       <div style="padding:10px 0 2px;font-size:12px;color:var(--text3);text-align:right">
         Total shown: <strong style="color:var(--danger)">${fmt(filtered.reduce((s,e)=>s+(e.amount||0),0))}</strong>
@@ -3299,6 +3406,54 @@ function setExpSort(field){
 }
 function clearExpFilters(){
   state.expCatFilter=null; state.expSearch=''; state.expMethodFilter=null; state.expRecordedBy=null; renderExpenses();
+}
+
+function showExpenseDetail(id){
+  const all = state._expAll || [];
+  const e = all.find(x=>x.id===id);
+  if(!e) return;
+  const c = EXPENSE_CATS.find(x=>x.key===e.category)||{icon:'💸',label:e.category||'—'};
+  const methodLabel = e.paymentMethod==='petty_cash'?'💳 Petty Cash'
+    :e.paymentMethod==='bank_transfer'?'🏦 Bank Transfer'
+    :e.paymentMethod==='split'?'🔀 Split'
+    :'💵 Cash';
+  const splitParts = [];
+  if((e.bankAmount||0)>0) splitParts.push(`Bank: ${fmt(e.bankAmount)}`);
+  if((e.pettyAmount||0)>0) splitParts.push(`Petty: ${fmt(e.pettyAmount)}`);
+  if((e.cashAmount||0)>0) splitParts.push(`Cash: ${fmt(e.cashAmount)}`);
+  const statusBadge = e.status==='approved'
+    ? '<span class="badge badge-success">Approved</span>'
+    : '<span class="badge badge-warn">Pending Approval</span>';
+  const canEditPending = canAction('expense_edit_pending') && e.status!=='approved';
+  const canApprovePending = canAction('expense_approve_pending') && e.status!=='approved';
+  const rows = [
+    ['Date',            fmtDate(e.date||e.createdAt)],
+    ['Category',        `<span class="badge badge-gray">${c.icon} ${c.label}</span>`],
+    ['Sub-category',    esc(e.subCategory||'—')],
+    ...(e.description && e.description!==e.subCategory ? [['Description', esc(e.description)]] : []),
+    ['Amount',          `<span class="td-red td-bold" style="font-size:16px">${fmt(e.amount)}</span>`],
+    ['Status',          statusBadge],
+    ['Payment Method',  `${methodLabel}${splitParts.length?`<div style="font-size:11px;color:var(--text3);margin-top:3px">${splitParts.join(' · ')}</div>`:''}`],
+    ['Recorded By',     esc(e.recordedBy||'—')],
+    ['Receipt / Ref',   e.receiptNo?`#${esc(e.receiptNo)}`:(e.receiptImage?'📎 Image attached':'—')],
+  ];
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">💸 Expense Details</div>
+    <table style="width:100%;border-collapse:collapse">
+      ${rows.map(([label,val])=>`
+        <tr>
+          <td style="padding:8px 0 8px 0;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.4px;width:38%;vertical-align:top">${label}</td>
+          <td style="padding:8px 0 8px 8px;font-size:13px;color:var(--text);vertical-align:top">${val}</td>
+        </tr>`).join('')}
+    </table>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Close</button>
+      ${e.receiptImage?`<button class="btn btn-sm" onclick="closeModal();App.viewExpenseReceipt('${e.id}')">🧾 View Receipt</button>`:''}
+      ${canEditPending?`<button class="btn btn-sm" onclick="closeModal();App.editExpense('${e.id}')">✏️ Edit</button>`:''}
+      ${canEditPending?`<button class="btn btn-sm btn-danger" onclick="closeModal();App.deleteExpense('${e.id}')">🗑 Delete</button>`:''}
+      ${canApprovePending?`<button class="btn btn-primary" onclick="closeModal();App.approveExpense('${e.id}')">✓ Approve</button>`:''}
+    </div>`);
 }
 
 // ── Petty cash history filters ────────────────────────────────
@@ -4133,6 +4288,7 @@ async function renderPettyCash(){
   const [pettyHistory, pettyConfig, allExpenses] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getExpenses()]);
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
   const history = petty.history||[];
+  state._pettyAll = history;
   const monthHistory = pettyMonthHistory(history);
   const pct = petty.float <= 0 ? 0 : Math.min(100, Math.round((petty.float/petty.max)*100));
 
@@ -4391,7 +4547,8 @@ async function renderPettyCash(){
           return new Date(b.createdAt||0)-new Date(a.createdAt||0); // date_desc default
         });
         if(!rows.length) return `<div class="empty-table">${source.length?'No entries match your filters.':'No petty cash activity '+(state.pettyShowAll?'yet.':'this month.')}</div>`;
-        return `<div class="table-wrap"><table>
+        return `<span class="td-muted tx-mobile-hint" style="font-size:11px;padding-bottom:6px">Tap any row to see full details</span>
+        <div class="table-wrap"><table class="tx-desktop-table">
           <tr>
             <th style="white-space:nowrap">Date</th>
             <th>Type</th>
@@ -4438,6 +4595,34 @@ async function renderPettyCash(){
               <td style="font-size:12px">${proofCell}</td>
             </tr>`;
           }).join('')}
+        </table>
+        <table class="tx-mobile-table">
+          <tr><th>Date</th><th>Details</th><th class="td-right">Amount</th></tr>
+          ${rows.map(r=>{
+            const isRefill=r.type==='refill';
+            const isTopupReq=r.type==='topup_request';
+            const overdue=isReceiptOverdue(r);
+            const typeTag=isRefill
+              ?`<span class="badge badge-success">↺ Top-Up Paid</span>`
+              :isTopupReq
+                ?`<span class="badge badge-info">↺ Top-Up Req</span>`
+                :`<span class="badge badge-warn">💳 Advance</span>`;
+            const statusColor=r.status==='settled'?'badge-success':r.status==='approved'?'badge-info':r.status==='rejected'||r.status==='cancelled'?'badge-danger':'badge-warn';
+            const mobileAmt=isRefill
+              ?`<span style="color:var(--success);font-weight:700">+${fmt(r.amount)}</span>`
+              :isTopupReq
+                ?`<span style="font-weight:600">${fmt(r.originalAmount||r.amount)}</span>`
+                :`<span style="color:var(--amber);font-weight:700">−${fmt(r.amount)}</span>`;
+            return `<tr class="tx-mobile-row" style="cursor:pointer${overdue?';background:var(--danger-light)':''}" onclick="App.showPettyDetail('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.showPettyDetail('${r.id}')}" tabindex="0" role="button" aria-label="${esc(r.purpose||'Petty cash entry')} — ${fmt(r.originalAmount||r.amount)}">
+              <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.createdAt)}</div></td>
+              <td style="max-width:0;width:55%">
+                <div>${typeTag}${overdue?'<span class="badge badge-danger" style="margin-left:4px">Overdue</span>':''}</div>
+                <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">${esc(r.purpose||'—')}</div>
+                <div style="margin-top:3px"><span class="badge ${statusColor}" style="font-size:10px">${(r.status||'pending').replace('_',' ')}</span></div>
+              </td>
+              <td class="td-right" style="white-space:nowrap">${mobileAmt}</td>
+            </tr>`;
+          }).join('')}
         </table></div>
         <div style="padding:8px 0 2px;font-size:12px;color:var(--text3);text-align:right">
           ${rows.length} entr${rows.length===1?'y':'ies'}
@@ -4445,6 +4630,58 @@ async function renderPettyCash(){
         </div>`;
       })()}
     </div>`;
+}
+// ── PETTY CASH DETAIL MODAL ──
+function showPettyDetail(id){
+  const all = state._pettyAll || [];
+  const r = all.find(x=>x.id===id);
+  if(!r) return;
+  const isRefill = r.type==='refill';
+  const isTopupReq = r.type==='topup_request';
+  const overdue = isReceiptOverdue(r);
+  const typeBadge = isRefill
+    ? `<span class="badge badge-success">↺ Top-Up Paid</span>`
+    : isTopupReq
+      ? `<span class="badge badge-info">↺ Top-Up Request</span>`
+      : `<span class="badge badge-warn">💳 Advance</span>`;
+  const statusColor = r.status==='settled'?'badge-success':r.status==='approved'?'badge-info':r.status==='rejected'||r.status==='cancelled'?'badge-danger':'badge-warn';
+  const amtFormatted = isRefill
+    ? `<span style="color:var(--success);font-weight:700;font-size:16px">+${fmt(r.amount)}</span>`
+    : isTopupReq
+      ? `<span style="font-weight:600;font-size:16px">${fmt(r.originalAmount||r.amount)}</span>`
+      : `<span style="color:var(--amber);font-weight:700;font-size:16px">−${fmt(r.amount)}</span>`;
+  const proofVal = r.receiptNo
+    ? `<span class="badge badge-success">✓ ${esc(r.receiptNo)}</span>`
+    : r.reference
+      ? esc(r.reference)
+      : '—';
+  const extraRows = [
+    ...(r.expenseRefs?.length ? [['Expenses Included', `${r.expenseRefs.length} expense(s)`]] : []),
+    ...(r.rejectionReason ? [['Rejection Reason', esc(r.rejectionReason)]] : []),
+    ...(r.notes ? [['Notes', esc(r.notes)]] : []),
+  ];
+  const rows = [
+    ['Date',           fmtDate(r.createdAt)],
+    ['Type',           typeBadge],
+    ['Purpose',        esc(r.purpose||'—')],
+    ['Requested By',   esc(r.requestedBy||'—')],
+    ['Authorized By',  esc(r.approvedBy||r.authorizedBy||'—')],
+    ['Amount',         amtFormatted],
+    ['Status',         `<span class="badge ${statusColor}">${(r.status||'pending').replace('_',' ')}</span>${overdue?' <span class="badge badge-danger">Overdue</span>':''}`],
+    ['Proof / Ref',    proofVal],
+    ...extraRows,
+  ];
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">💳 Petty Cash Details</div>
+    <table style="width:100%;border-collapse:collapse">
+      ${rows.map(([label,val])=>`
+        <tr>
+          <td style="padding:8px 0 8px 0;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.4px;width:38%;vertical-align:top">${label}</td>
+          <td style="padding:8px 0 8px 8px;font-size:13px;color:var(--text);vertical-align:top">${val}</td>
+        </tr>`).join('')}
+    </table>
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
 }
 // ── TOP-UP REQUEST (Admin Officer: wallet is low, based on expenses already logged) ──
 async function showTopUpRequest(){
@@ -5162,7 +5399,7 @@ async function submitRefill(){
 
 // ── REPORTS ────────────────────────────────
 
-/** Opens a print-friendly report in a new window (prints only the report, not the app page) */
+/** Opens a print-friendly report in a new window (manual print via button inside report window) */
 function openPrintableReport(title, bodyHTML){
   const html=`<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -5224,13 +5461,11 @@ function openPrintableReport(title, bodyHTML){
   <div class="print-btn-bar no-print"><button class="print-btn" onclick="window.print()">🖨️ Print Report</button></div>
   ${bodyHTML}
 </body></html>`;
-  const PRINT_RENDER_DELAY_MS=500;
   const w=window.open('','_blank');
   if(!w){ showAlert('Pop-up blocked. Please allow pop-ups for this site to print the report.','warn'); return }
   w.document.write(html);
   w.document.close();
   w.focus();
-  setTimeout(()=>w.print(),PRINT_RENDER_DELAY_MS);
 }
 
 /** Shared report header HTML */
@@ -5789,7 +6024,7 @@ function renderAdminPerms(s){
 
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Role Permissions</div>
-    <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">Control which features each role can access. <strong>IT Administrator</strong> always has full access and cannot be restricted. Changes take effect immediately for users who log in after saving.</p>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">Control which features each role can access. <strong>IT Administrator</strong> always has full access and cannot be restricted here. Changes take effect immediately — no logout required.</p>
     <div class="table-wrap"><table>
       <tr><th>Permission</th>${colHeaders}</tr>
       ${rows}
@@ -5810,7 +6045,7 @@ async function saveRolePermissions(){
   await DB.saveSettings(s);
   state.rolePermissions = saved;
   DB.addAudit('perms_updated','Role permissions updated',state.user?.name);
-  showAlert('Role permissions saved! Active sessions will use the new settings on next login.','success');
+  showAlert('Role permissions saved! Changes apply immediately for all users.','success');
   renderAdmin();
 }
 
@@ -5832,9 +6067,18 @@ function renderAdminBackup(){
     <div style="display:flex;gap:10px;flex-wrap:wrap">
       <button class="btn btn-primary" onclick="App.exportData()">⬇ Export Backup</button>
       <button class="btn" onclick="App.importData()">⬆ Import / Restore</button>
-      <button class="btn btn-danger" onclick="App.clearAllData()">🗑 Clear All Data</button>
     </div>
     <hr class="divider">
+    <div class="card" style="background:var(--surface);border:1px solid var(--border);margin-bottom:12px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:6px">🚀 Launch / Reset for Production</div>
+      <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Clears all financial records (income, expenses, remittances, petty cash, bank movements, audit log) but <strong>preserves</strong> your users, church settings, remittance rates, quotas, and role permissions. Use this when going live with a fresh start.</p>
+      <button class="btn btn-amber" onclick="App.clearDataOnly()">🗑 Clear Data — Keep Settings & Users</button>
+    </div>
+    <div class="card" style="background:var(--danger-light);border:1px solid var(--danger);opacity:0.85">
+      <div style="font-size:13px;font-weight:600;color:var(--danger);margin-bottom:6px">⚠ Full Reset (Danger Zone)</div>
+      <p style="font-size:12px;color:var(--danger);margin-bottom:10px">Wipes everything including users and settings. Only use this to start completely from scratch.</p>
+      <button class="btn btn-danger" onclick="App.clearAllData()">🗑 Clear Everything</button>
+    </div>
     <div class="alert alert-warn"><span class="alert-icon">⚠</span><span>Clearing data is irreversible. Always export a backup first.</span></div>
   </div>`;
 }
@@ -6067,6 +6311,25 @@ function importData(){
   input.click();
 }
 
+async function clearDataOnly(){
+  if(!confirm(
+    'This will permanently delete all financial records:\n\n' +
+    '• Income records\n• Expenses\n• Remittances\n• Petty cash history\n• Bank transactions\n• Audit log\n• Notifications\n\n' +
+    'Your users, church settings, remittance rates, quotas, and role permissions will be KEPT.\n\n' +
+    'Export a backup first if you need to keep the test data.\n\nProceed?'
+  )) return;
+  if(!confirm('Last confirmation — this cannot be undone. Delete all financial data now?')) return;
+  try {
+    showAlert('Clearing data…', 'info');
+    await DB.clearDataOnly();
+    showAlert('All financial data cleared. Settings and users are intact. The app is ready for live use.', 'success');
+    DB.addAudit('data_cleared', 'All financial data cleared for production launch', state.user?.name);
+    navigate('dashboard');
+  } catch(e) {
+    showAlert('Error: ' + e.message, 'danger');
+  }
+}
+
 async function clearAllData(){
   if(!confirm('⚠ This will permanently delete ALL church financial records. Type CONFIRM to proceed.')) return;
   const word=prompt('Type CONFIRM to delete everything:');
@@ -6130,16 +6393,16 @@ return {
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
-  showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
+  showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
-  renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
+  renderPettyCash, showPettyDetail, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
   setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
-  updateUser, deleteUser, exportData, importData, clearAllData,
+  updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   showKPSCAlert, submitKPSCAlert, closeModal: closeModal
 };
 
