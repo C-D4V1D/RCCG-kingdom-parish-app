@@ -20,31 +20,35 @@ const ROLES = {
 
 const PERMISSIONS = {
   it_admin:      ['all'],
-  pastor:        ['dashboard','income_view','remittances','expenses_view','petty_view','reports','signoff'],
-  accountant:    ['dashboard','income','income_view','remittances','expenses','petty_view','reports'],
-  admin_officer: ['dashboard','expenses','petty_request','petty_view','income_view'],
-  signatory:     ['dashboard','income_view','remittances_view','petty_approve','expenses_view'],
-  viewer:        ['dashboard','income_view','remittances_view','expenses_view','petty_view']
+  pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','petty_view','reports','audit','signoff'],
+  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit'],
+  admin_officer: ['dashboard','transactions','expenses','petty_request','petty_view','income_view'],
+  signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','bank','petty_approve'],
+  viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','petty_view']
 };
 
 // All available permission keys with human-readable labels, grouped for the UI
 const PERMISSION_DEFS = [
   { key:'dashboard',        label:'Dashboard',              group:'General'    },
+  { key:'transactions',     label:'Transactions',           group:'General'    },
   { key:'income',           label:'Record Income',          group:'Finance'    },
   { key:'income_view',      label:'View Income Records',    group:'Finance'    },
   { key:'remittances',      label:'Manage Remittances',     group:'Finance'    },
   { key:'remittances_view', label:'View Remittances',       group:'Finance'    },
   { key:'expenses',         label:'Log Expenses',           group:'Finance'    },
   { key:'expenses_view',    label:'View Expenses',          group:'Finance'    },
+  { key:'bank',             label:'Bank',                   group:'Finance'    },
   { key:'petty_request',    label:'Request Petty Cash',     group:'Petty Cash' },
   { key:'petty_approve',    label:'Approve Petty Cash',     group:'Petty Cash' },
   { key:'petty_view',       label:'View Petty Cash',        group:'Petty Cash' },
   { key:'reports',          label:'Generate Reports',       group:'Reports'    },
+  { key:'audit',            label:'View Audit Log',         group:'Reports'    },
   { key:'signoff',          label:'Sign Off Remittances',   group:'Reports'    },
 ];
 
 const NAV = [
   { id:'dashboard',    label:'Dashboard',     icon:'🏠', section:'Main',     minRole:['all'] },
+  { id:'transactions', label:'Transactions',  icon:'🧾', section:'Main',     minRole:['all'] },
   { id:'income',       label:'Record Income', icon:'📥', section:'Finance',  minRole:['it_admin','accountant'] },
   { id:'remittances',  label:'Remittances',   icon:'📤', section:'Finance',  minRole:['it_admin','pastor','accountant','signatory'] },
   { id:'expenses',     label:'Expenses',      icon:'💸', section:'Finance',  minRole:['it_admin','accountant','admin_officer'] },
@@ -56,6 +60,7 @@ const NAV = [
 ];
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const MAX_TRANSACTION_VIEW_NAME_LENGTH = 60;
 
 const INCOME_TYPES = [
   { key:'membersTithe',    label:"Members' Tithe",         natl:0.58, local:0.42 },
@@ -244,6 +249,54 @@ function hasPermission(p){
   return perms.includes('all') || perms.includes(p);
 }
 function can(...ps){ return ps.some(p=>hasPermission(p)) }
+function canCancelTopupRequest(request){
+  return !!request && (state.user?.role==='it_admin' || state.user?.name===request.requestedBy);
+}
+const ACCESS_RULES = {
+  pages: {
+    dashboard: { permissionsAny:['dashboard'] },
+    transactions: { permissionsAny:['transactions'] },
+    income: { roles:['it_admin','accountant'], permissionsAny:['income'] },
+    remittances: { roles:['it_admin','pastor','accountant','signatory'], permissionsAny:['remittances','remittances_view'] },
+    expenses: { roles:['it_admin','accountant','admin_officer'], permissionsAny:['expenses','expenses_view'] },
+    bank: { roles:['it_admin','accountant','signatory'], permissionsAny:['bank'] },
+    petty_cash: { roles:['it_admin','accountant','admin_officer','signatory'], permissionsAny:['petty_request','petty_approve','petty_view'] },
+    reports: { roles:['it_admin','pastor','accountant'], permissionsAny:['reports'] },
+    audit: { roles:['it_admin','pastor','accountant'], permissionsAny:['audit'] },
+    admin: { roles:['it_admin'] }
+  },
+  actions: {
+    income_record: ['income'],
+    income_deposit: ['income'],
+    remittance_record_payment: ['income'],
+    expense_log: ['expenses'],
+    bank_withdrawal: ['income'],
+    bank_charge: ['expenses'],
+    petty_request: ['petty_request'],
+    petty_topup_payment: ['income'],
+    petty_approve_or_view: ['income','petty_approve'],
+    expense_edit_pending: { roles:['admin_officer','it_admin'] },
+    expense_delete_pending: { roles:['admin_officer','it_admin'] },
+    expense_approve_pending: { roles:['accountant','it_admin'] },
+    topup_cancel: ({ request }) => canCancelTopupRequest(request)
+  }
+};
+function evaluateAccessRule(rule, ctx={}){
+  if(!state.user || !rule) return false;
+  if(Array.isArray(rule)) return can(...rule);
+  if(typeof rule === 'function') return !!rule(ctx);
+  if(rule.roles && !rule.roles.includes(state.user.role)) return false;
+  if(rule.permissionsAny && !can(...rule.permissionsAny)) return false;
+  if(rule.permissionsAll && !rule.permissionsAll.every(hasPermission)) return false;
+  return true;
+}
+function canAction(action, ctx={}){
+  return evaluateAccessRule(ACCESS_RULES.actions[action], ctx);
+}
+function canAccessPage(page){
+  const rule = ACCESS_RULES.pages[page];
+  return rule ? evaluateAccessRule(rule) : false;
+}
 function monthLabel(){ return MONTHS[state.month]+' '+state.year }
 function defaultExpenseStatusForCurrentUser(){
   // Only the Admin Officer's expenses need Accountant verification
@@ -390,7 +443,6 @@ async function login(){
     if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
   }
 }
-
 function logout(){
   DB.addAudit('logout','User logged out', state.user?.name);
   state.user=null; state.page='dashboard';
@@ -435,7 +487,7 @@ async function submitChangePin(){
 // ──────────────────────────────────────────
 // 6. NAVIGATION & ROUTER
 // ──────────────────────────────────────────
-const VALID_PAGES = ['dashboard','income','remittances','expenses','bank','petty_cash','reports','audit','admin'];
+const VALID_PAGES = ['dashboard','transactions','income','remittances','expenses','bank','petty_cash','reports','audit','admin'];
 
 function pageFromPath(){
   const seg = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
@@ -483,7 +535,7 @@ function onMonthChange(){
 async function buildSidebar(){
   let sections = {};
   NAV.forEach(item=>{
-    if(!item.minRole.includes('all') && !item.minRole.includes(state.user?.role)) return;
+    if(!canAccessPage(item.id)) return;
     if(!sections[item.section]) sections[item.section]=[];
     sections[item.section].push(item);
   });
@@ -506,7 +558,7 @@ async function buildSidebar(){
 }
 
 function buildBottomNav(){
-  const items = NAV.filter(n=> n.minRole.includes('all')||n.minRole.includes(state.user?.role)).slice(0,5);
+  const items = NAV.filter(n=>canAccessPage(n.id)).slice(0,5);
   const bn = document.getElementById('bottomNav');
   const inner = document.createElement('div');
   inner.className='bottom-nav-inner';
@@ -529,6 +581,10 @@ function updateSidebarUser(){
 }
 
 function navigate(page, fromHistory){
+  if(!canAccessPage(page)){
+    if(page!=='dashboard') showAlert('You do not have permission to access that page.','danger');
+    page='dashboard';
+  }
   state.page=page;
   // Update URL — push new entry unless this was triggered by the browser's own back/forward
   const newPath = '/' + (page === 'dashboard' ? '' : page);
@@ -537,7 +593,7 @@ function navigate(page, fromHistory){
   }
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
-  const titles={dashboard:'Dashboard',income:'Record Income',remittances:'Remittances',
+  const titles={dashboard:'Dashboard',transactions:'Transactions',income:'Record Income',remittances:'Remittances',
     expenses:'Expenses',bank:'Bank',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel'};
   document.getElementById('topBarTitle').textContent=titles[page]||page;
   const pc=document.getElementById('pageContent');
@@ -563,7 +619,7 @@ async function toggleNotifications(){
     const notifs=await DB.getNotifications();
     const list=document.getElementById('notifList');
     if(!notifs.length){ list.innerHTML='<div class="notif-empty">No notifications</div>'; }
-    else{ list.innerHTML=notifs.slice(0,15).map(n=>`<div class="notif-item" style="opacity:${n.read?0.6:1}"><div class="notif-item-title">${n.title}</div><div class="notif-item-body">${n.body}</div><div class="notif-item-time">${fmtDate(n.ts)} ${fmtTime(n.ts)}</div></div>`).join('') }
+    else{ list.innerHTML=notifs.slice(0,15).map(n=>`<div class="notif-item" style="opacity:${n.read?0.6:1}"><div class="notif-item-title">${esc(n.title)}</div><div class="notif-item-body">${esc(n.body)}</div><div class="notif-item-time">${fmtDate(n.ts)} ${fmtTime(n.ts)}</div></div>`).join('') }
     DB.markAllRead();
   }
 }
@@ -577,16 +633,743 @@ async function getPettyCashPendingCount(){
 // 7. PAGE RENDERERS
 // ──────────────────────────────────────────
 async function renderPage(page){
-  const pages={dashboard:renderDashboard,income:renderIncome,remittances:renderRemittances,
+  const pages={dashboard:renderDashboard,transactions:renderTransactions,income:renderIncome,remittances:renderRemittances,
     expenses:renderExpenses,bank:renderBank,petty_cash:renderPettyCash,reports:renderReports,
     audit:renderAudit,admin:renderAdmin};
   try{
     if(pages[page]) await pages[page]();
     else document.getElementById('pageContent').innerHTML='<div class="card"><p>Page not found.</p></div>';
   }catch(e){
-    document.getElementById('pageContent').innerHTML=`<div class="card"><div class="alert alert-danger"><span class="alert-icon">✕</span><span>Error loading page: ${e.message}</span></div></div>`;
+    document.getElementById('pageContent').innerHTML=`<div class="card"><div class="alert alert-danger"><span class="alert-icon">✕</span><span>Error loading page: ${esc(e.message)}</span></div></div>`;
     console.error('renderPage error:',e);
   }
+}
+
+function txMethodLabel(method){
+  const m = String(method||'').toLowerCase();
+  if(m==='bank_transfer') return '🏦 Bank Transfer';
+  if(m==='cash') return '💵 Cash';
+  if(m==='petty_cash') return '💳 Petty Cash';
+  if(m==='split' || m==='split_petty_bank' || m==='split_cash_bank') return '🔀 Split';
+  if(m==='cash_accountant') return '💵 Cash (Accountant)';
+  if(m==='collection_cash') return '💵 Collection Cash';
+  if(m==='mobile_transfer') return '📱 Mobile Transfer';
+  if(m==='bank_teller') return '🏦 Bank Teller';
+  if(m==='pos_terminal') return '🏧 POS Terminal';
+  return method ? String(method).replace(/_/g,' ') : '—';
+}
+
+function txStatusBadge(status){
+  const s = String(status||'recorded').toLowerCase();
+  if(s==='paid' || s==='approved' || s==='settled' || s==='deposited') return '<span class="badge badge-success">✅ Done</span>';
+  if(s==='pending' || s==='pending_approval') return '<span class="badge badge-warn">⏳ Pending</span>';
+  if(s==='rejected') return '<span class="badge badge-danger">❌ Rejected</span>';
+  return `<span class="badge badge-gray">${esc(status||'Recorded')}</span>`;
+}
+
+function txStatusLabel(status){
+  const s = String(status||'recorded').toLowerCase();
+  if(s==='paid' || s==='approved' || s==='settled' || s==='deposited') return '✅ Done — this transaction has been completed and confirmed.';
+  if(s==='pending' || s==='pending_approval') return '⏳ Pending — waiting for someone to review or approve it.';
+  if(s==='rejected') return '❌ Rejected — this transaction was declined and will not be processed.';
+  return 'Recorded — saved in the system.';
+}
+
+function txDirectionMeta(direction){
+  if(direction==='credit') return { symbol:'+', label:'Money received (coming in)', cls:'td-green' };
+  if(direction==='debit') return { symbol:'−', label:'Money paid out (going out)', cls:'td-red' };
+  return { symbol:'↔', label:'Internal transfer (moving money between accounts)', cls:'' };
+}
+
+function txKindLabel(kind){
+  const map = {
+    income:'Sunday / Other Income',
+    expense:'Expense',
+    remittance:'RCCG Remittance',
+    cash_deposit:'Cash Deposit to Bank',
+    cash_withdrawal:'Bank Withdrawal',
+    topup_request:'Petty Cash Top-Up Request',
+    advance:'Petty Cash Advance',
+    refill:'Petty Cash Refill',
+    petty:'Petty Cash'
+  };
+  return map[kind] || String(kind||'').replace(/_/g,' ');
+}
+
+function txModuleLabel(module){
+  const map = {
+    income:'Income',
+    expenses:'Expenses',
+    remittances:'Remittances',
+    cash:'Cash / Bank',
+    petty_cash:'Petty Cash'
+  };
+  return map[module] || String(module||'').replace(/_/g,' ');
+}
+
+function txCurrentMonthDefaults(){
+  const now = new Date();
+  return {
+    from: new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0],
+    to:   new Date(now.getFullYear(), now.getMonth()+1, 0).toISOString().split('T')[0]
+  };
+}
+
+function applyTxFilters(all){
+  const search = (state.txSearch||'').trim().toLowerCase();
+  const typeFilter = state.txTypeFilter||'';
+  const statusFilter = state.txStatusFilter||'';
+  const methodFilter = state.txMethodFilter||'';
+  const moduleFilter = state.txModuleFilter||'';
+  const fromDate = state.txFromDate||'';
+  const toDate = state.txToDate||'';
+  const minAmount = parseFloat(state.txMinAmount);
+  const maxAmount = parseFloat(state.txMaxAmount);
+  const sortField = state.txSortField||'date';
+  const sortDir = state.txSortDir||'desc';
+
+  let filtered = all.filter(t=>{
+    const tDate = (t.date||'').slice(0,10);
+    if(typeFilter && t.kind!==typeFilter) return false;
+    if(statusFilter && String(t.status||'').toLowerCase()!==statusFilter) return false;
+    if(methodFilter && String(t.method||'').toLowerCase()!==methodFilter) return false;
+    if(moduleFilter && t.module!==moduleFilter) return false;
+    if(fromDate && tDate && tDate < fromDate) return false;
+    if(toDate && tDate && tDate > toDate) return false;
+    if(!Number.isNaN(minAmount) && minAmount>=0 && (t.amount||0) < minAmount) return false;
+    if(!Number.isNaN(maxAmount) && maxAmount>=0 && (t.amount||0) > maxAmount) return false;
+    if(search){
+      const hay = `${t.kind} ${t.module} ${t.description} ${t.reference} ${t.actor} ${t.notes} ${t.status} ${t.method}`.toLowerCase();
+      if(!hay.includes(search)) return false;
+    }
+    return true;
+  });
+
+  filtered.sort((a,b)=>{
+    let av, bv;
+    if(sortField==='amount'){ av=a.amount||0; bv=b.amount||0; }
+    else if(sortField==='type'){ av=a.kind||''; bv=b.kind||''; }
+    else if(sortField==='module'){ av=a.module||''; bv=b.module||''; }
+    else if(sortField==='status'){ av=a.status||''; bv=b.status||''; }
+    else { av=new Date(a.date||0).getTime(); bv=new Date(b.date||0).getTime(); }
+    if(av===bv) return 0;
+    if(typeof av==='string' || typeof bv==='string'){
+      return sortDir==='asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+    }
+    return sortDir==='asc' ? av-bv : bv-av;
+  });
+
+  return filtered;
+}
+
+function txSavedViewsKey(){
+  const role = state.user?.role;
+  return Object.keys(ROLES).includes(role) ? `rccgTxViews_${role}` : null;
+}
+
+function getTxSavedViews(){
+  const key = txSavedViewsKey();
+  if(!key) return [];
+  try{ return JSON.parse(localStorage.getItem(key)||'[]'); }
+  catch(e){ return []; }
+}
+
+async function buildTransactionsLedger(){
+  const [income, expenses, remittances, cashTx, petty] = await Promise.all([
+    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getCashTransactions(), DB.getPetty()
+  ]);
+
+  const tx = [];
+
+  (income||[]).forEach(r=>{
+    const sourceMeta = OTHER_INCOME_SOURCES.find(s=>s.key===r.source);
+    const isSunday = !r.source || r.source==='sunday_collection';
+    const cashHeld = Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
+    tx.push({
+      id:`income_${r.id}`,
+      module:'income',
+      kind:'income',
+      date:r.date||r.createdAt||'',
+      amount:r.totalCollection||0,
+      direction:'credit',
+      method:r.paymentMethod || ((r.bankTransferAmount||0)>0&&cashHeld>0?'split':(r.bankTransferAmount||0)>0?'bank_transfer':'cash'),
+      status:r.depositConfirmed ? 'deposited' : 'recorded',
+      description:isSunday?'Sunday Collection Received':`Other Income — ${sourceMeta?.label || r.source || 'Other'}`,
+      reference:r.tellerNo||'',
+      actor:r.recordedBy||'',
+      notes:r.notes||''
+    });
+  });
+
+  (expenses||[]).forEach(e=>{
+    tx.push({
+      id:`expense_${e.id}`,
+      module:'expenses',
+      kind:'expense',
+      date:e.date||e.createdAt||'',
+      amount:e.amount||0,
+      direction:'debit',
+      method:e.paymentMethod||'',
+      status:e.status||'approved',
+      description:`Expense — ${(EXPENSE_CATS.find(c=>c.key===e.category)?.label)||e.category||'Uncategorized'}${e.subCategory?` · ${e.subCategory}`:''}`,
+      reference:e.receiptNo||'',
+      actor:e.recordedBy||'',
+      notes:e.description||''
+    });
+  });
+
+  (remittances||[]).forEach(r=>{
+    tx.push({
+      id:`rem_${r.id}`,
+      module:'remittances',
+      kind:'remittance',
+      date:r.paidDate||r.createdAt||'',
+      amount:r.amount||0,
+      direction:'debit',
+      method:r.paymentMethod||'bank_transfer',
+      status:r.status||'paid',
+      description:r.label||'RCCG Remittance',
+      reference:r.reference||'',
+      actor:r.submittedBy||r.approvedBy||'',
+      notes:r.notes||''
+    });
+  });
+
+  (cashTx||[]).forEach(c=>{
+    const isDeposit = c.type==='cash_deposit';
+    tx.push({
+      id:`cash_${c.id}`,
+      module:'cash',
+      kind:isDeposit?'cash_deposit':'cash_withdrawal',
+      date:c.date||c.createdAt||'',
+      amount:c.amount||0,
+      direction:'transfer',
+      method:c.depositMethod||'',
+      status:'recorded',
+      description:isDeposit?'Cash Deposit to Bank':`Bank Withdrawal${c.destination==='accountant_cash'?' → Accountant Cash':''}`,
+      reference:c.reference||'',
+      actor:c.recordedBy||'',
+      notes:c.description||''
+    });
+  });
+
+  (petty||[]).forEach(p=>{
+    tx.push({
+      id:`petty_${p.id}`,
+      module:'petty_cash',
+      kind:p.type||'petty',
+      date:p.createdAt||p.dateNeeded||'',
+      amount:p.actualAmount||p.amount||0,
+      direction:(p.type==='refill'||p.type==='topup_request')?'transfer':'debit',
+      method:p.paymentMethod||'',
+      status:p.status||'pending_approval',
+      description:`Petty Cash — ${p.type==='topup_request'?'Top-Up Request':p.type==='advance'?'Advance':p.type==='refill'?'Refill':'Disbursement'}`,
+      reference:p.reference||p.receiptNo||'',
+      actor:p.requestedBy||p.approvedBy||'',
+      notes:p.purpose||p.notes||''
+    });
+  });
+
+  return tx.sort((a,b)=>new Date(b.date||0)-new Date(a.date||0));
+}
+
+async function renderTransactions(){
+  // Apply current-month defaults on first visit to the page
+  if(!state.txInitialized){
+    const d = txCurrentMonthDefaults();
+    state.txFromDate = d.from;
+    state.txToDate   = d.to;
+    state.txSortField = 'date';
+    state.txSortDir   = 'desc';
+    state.txPageSize  = 20;
+    state.txPage      = 1;
+    state.txInitialized = true;
+  }
+
+  const all = await buildTransactionsLedger();
+  state._txAll = all; // cache for showTxDetail lookups
+
+  const search = (state.txSearch||'').trim().toLowerCase();
+  const typeFilter = state.txTypeFilter||'';
+  const statusFilter = state.txStatusFilter||'';
+  const methodFilter = state.txMethodFilter||'';
+  const moduleFilter = state.txModuleFilter||'';
+  const fromDate = state.txFromDate||'';
+  const toDate = state.txToDate||'';
+  const sortField = state.txSortField||'date';
+  const sortDir = state.txSortDir||'desc';
+  const pageSize = parseInt(state.txPageSize||'20',10) || 20;
+
+  const filtered = applyTxFilters(all);
+
+  const totals = filtered.reduce((acc,t)=>{
+    if(t.direction==='credit') acc.credit += (t.amount||0);
+    else if(t.direction==='debit') acc.debit += (t.amount||0);
+    return acc;
+  },{credit:0,debit:0});
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const page = Math.min(Math.max(1, state.txPage||1), totalPages);
+  state.txPage = page;
+  const start = (page-1)*pageSize;
+  const rows = filtered.slice(start, start+pageSize);
+
+  const typeOptions = [...new Set(all.map(t=>t.kind).filter(Boolean))].sort();
+  const statusOptions = [...new Set(all.map(t=>String(t.status||'').toLowerCase()).filter(Boolean))].sort();
+  const methodOptions = [...new Set(all.map(t=>String(t.method||'').toLowerCase()).filter(Boolean))].sort();
+  const moduleOptions = [...new Set(all.map(t=>t.module).filter(Boolean))].sort();
+
+  const savedViews = getTxSavedViews();
+
+  // ── Desktop rows (hidden on mobile via CSS) ───────────────────────
+  const desktopRows = rows.map(t=>{
+    const d = txDirectionMeta(t.direction);
+    return `
+    <tr class="tx-desktop-row">
+      <td style="white-space:nowrap">${fmtDate(t.date)}<div class="td-muted">${fmtTime(t.date)}</div></td>
+      <td><span class="badge badge-gray">${esc(txKindLabel(t.kind))}</span></td>
+      <td class="td-muted">${esc(txModuleLabel(t.module))}</td>
+      <td><div style="font-size:13px;font-weight:500">${esc(t.description||'—')}</div>${t.notes?`<div class="td-muted" style="font-size:11px">${esc(t.notes)}</div>`:''}</td>
+      <td class="td-right ${d.cls}" title="${d.label}" aria-label="${d.label}: ${fmt(t.amount||0)}">${d.symbol}${fmt(t.amount||0)}</td>
+      <td class="td-muted">${esc(txMethodLabel(t.method))}</td>
+      <td>${txStatusBadge(t.status)}</td>
+      <td class="td-muted">${esc(t.reference||'—')}</td>
+      <td class="td-muted">${esc(t.actor||'—')}</td>
+    </tr>`;
+  }).join('');
+
+  // ── Mobile rows (hidden on desktop via CSS) ───────────────────────
+  const mobileRows = rows.map(t=>{
+    const d = txDirectionMeta(t.direction);
+    return `
+    <tr class="tx-mobile-row" onclick="App.showTxDetail('${esc(t.id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.showTxDetail('${esc(t.id)}')}" tabindex="0" style="cursor:pointer" title="Tap to see full details" role="button" aria-label="${esc(t.description||'Transaction')} — ${d.symbol}${fmt(t.amount||0)}">${''/* mobile row */}
+      <td>
+        <div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(t.date)}</div>
+        <div class="td-muted" style="font-size:11px">${fmtTime(t.date)}</div>
+      </td>
+      <td style="max-width:0;width:60%">
+        <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.description||'—')}</div>
+        <div class="td-muted" style="font-size:11px">${esc(txModuleLabel(t.module))}</div>
+      </td>
+      <td class="td-right ${d.cls}" style="white-space:nowrap">${d.symbol}${fmt(t.amount||0)}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('pageContent').innerHTML=`
+    <div class="page-header">
+      <div>
+        <div class="page-title">Money Records</div>
+        <div class="page-sub">All income, expenses, remittances, petty cash and bank movements in one place</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        ${savedViews.length ? `
+          <select id="txViewSelect" class="form-select" style="width:auto" onchange="if(this.value!=='') App.loadTxView(this.value)" aria-label="Load a saved filter view">
+            <option value="">📋 My Saved Filters</option>
+            ${savedViews.map((v,i)=>`<option value="${i}">${esc(v.name)}</option>`).join('')}
+          </select>
+          <button class="btn btn-sm btn-danger" title="Delete the selected saved filter" onclick="const s=document.getElementById('txViewSelect');if(s&&s.value!=='')App.deleteTxView(s.value)">🗑</button>
+        ` : ''}
+        <button class="btn btn-sm" title="Save the current filters so you can quickly reload them later" onclick="App.saveTxView()">💾 Save Filters</button>
+        <button class="btn btn-sm" title="Download these results as a spreadsheet file" onclick="App.exportTxCSV()">📥 Spreadsheet</button>
+        <button class="btn btn-sm" title="Open a print-friendly version you can save as PDF" onclick="App.exportTxPDF()">🖨 Print / PDF</button>
+        <button class="btn btn-sm" title="Clear all filters and go back to this month's records" onclick="App.clearTxFilters()">✕ Reset Filters</button>
+      </div>
+    </div>
+
+    <div class="kpi-grid" style="margin-bottom:12px">
+      <div class="kpi" title="How many transactions match your current search and filters">
+        <div class="kpi-label">Transactions Found</div>
+        <div class="kpi-val">${filtered.length}</div>
+        <div class="kpi-delta">${all.length} total on record</div>
+      </div>
+      <div class="kpi" title="Total money that came INTO the church (e.g. tithes, offerings, income)">
+        <div class="kpi-label">Money Received</div>
+        <div class="kpi-val" style="color:var(--success)">${fmt(totals.credit)}</div>
+        <div class="kpi-delta up">Coming in</div>
+      </div>
+      <div class="kpi" title="Total money that went OUT of the church (e.g. expenses, remittances)">
+        <div class="kpi-label">Money Paid Out</div>
+        <div class="kpi-val" style="color:var(--danger)">${fmt(totals.debit)}</div>
+        <div class="kpi-delta down">Going out</div>
+      </div>
+      <div class="kpi" title="Money Received minus Money Paid Out. A positive number means you received more than you spent in this period.">
+        <div class="kpi-label">Difference (In − Out)</div>
+        <div class="kpi-val" style="color:${(totals.credit-totals.debit)>=0?'var(--success)':'var(--danger)'}">${fmt(totals.credit-totals.debit)}</div>
+        <div class="kpi-delta">Based on current filters</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Search &amp; Filter</span>
+        <span class="td-muted" style="font-size:11px">Use these to narrow down the list</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;align-items:end">
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Type any word to search — e.g. a name, amount, or description">🔍 Search</label>
+          <input class="form-input" value="${esc(state.txSearch||'')}" placeholder="e.g. Sunday, offering, tithe…" oninput="App.setTxFilter('search',this.value)" />
+          <div class="form-hint">Search by description, reference, or name</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Filter by what kind of transaction this is — e.g. income, expense, remittance">Transaction Type</label>
+          <select class="form-select" onchange="App.setTxFilter('type',this.value)">
+            <option value="">All Types</option>
+            ${typeOptions.map(v=>`<option value="${esc(v)}" ${typeFilter===v?'selected':''}>${esc(txKindLabel(v))}</option>`).join('')}
+          </select>
+          <div class="form-hint">What kind of money movement is it?</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Filter by which part of the app the transaction came from">Section / Area</label>
+          <select class="form-select" onchange="App.setTxFilter('module',this.value)">
+            <option value="">All Sections</option>
+            ${moduleOptions.map(v=>`<option value="${esc(v)}" ${moduleFilter===v?'selected':''}>${esc(txModuleLabel(v))}</option>`).join('')}
+          </select>
+          <div class="form-hint">Which area of the app recorded it?</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Filter by whether the transaction has been completed, is still waiting, or was rejected">Status</label>
+          <select class="form-select" onchange="App.setTxFilter('status',this.value)">
+            <option value="">All Statuses</option>
+            ${statusOptions.map(v=>`<option value="${esc(v)}" ${statusFilter===v?'selected':''}>${esc(v.replace(/_/g,' '))}</option>`).join('')}
+          </select>
+          <div class="form-hint">Is it done, pending, or rejected?</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Filter by how the money was paid — e.g. bank transfer, cash, petty cash">Payment Method</label>
+          <select class="form-select" onchange="App.setTxFilter('method',this.value)">
+            <option value="">All Methods</option>
+            ${methodOptions.map(v=>`<option value="${esc(v)}" ${methodFilter===v?'selected':''}>${esc(txMethodLabel(v))}</option>`).join('')}
+          </select>
+          <div class="form-hint">How was the money paid or received?</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;align-items:end;margin-top:8px">
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Show only transactions on or after this date">From Date</label>
+          <input type="date" class="form-input" value="${esc(fromDate)}" onchange="App.setTxFilter('fromDate',this.value)" />
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Show only transactions on or before this date">To Date</label>
+          <input type="date" class="form-input" value="${esc(toDate)}" onchange="App.setTxFilter('toDate',this.value)" />
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Hide transactions below this amount">Smallest Amount (₦)</label>
+          <input type="number" min="0" class="form-input" value="${state.txMinAmount??''}" placeholder="e.g. 1000" oninput="App.setTxFilter('minAmount',this.value)" />
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Hide transactions above this amount">Largest Amount (₦)</label>
+          <input type="number" min="0" class="form-input" value="${state.txMaxAmount??''}" placeholder="e.g. 500000" oninput="App.setTxFilter('maxAmount',this.value)" />
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Choose which column to sort the list by">Sort By</label>
+          <select class="form-select" onchange="App.setTxFilter('sortField',this.value)">
+            <option value="date" ${sortField==='date'?'selected':''}>Date</option>
+            <option value="amount" ${sortField==='amount'?'selected':''}>Amount</option>
+            <option value="type" ${sortField==='type'?'selected':''}>Type</option>
+            <option value="module" ${sortField==='module'?'selected':''}>Section</option>
+            <option value="status" ${sortField==='status'?'selected':''}>Status</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Newest first (Descending) or oldest first (Ascending)">Order</label>
+          <select class="form-select" onchange="App.setTxFilter('sortDir',this.value)">
+            <option value="desc" ${sortDir==='desc'?'selected':''}>Newest First</option>
+            <option value="asc" ${sortDir==='asc'?'selected':''}>Oldest First</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Transaction List</span>
+        <span class="td-muted tx-mobile-hint" style="font-size:11px">Tap any row to see full details</span>
+      </div>
+
+      ${rows.length ? `
+        <div class="table-wrap">
+          <table class="tx-desktop-table">
+            <tr>
+              <th title="When this transaction was recorded">Date &amp; Time</th>
+              <th title="What kind of transaction this is">Type</th>
+              <th title="Which section of the app recorded this">Section</th>
+              <th title="What the transaction is about">Description</th>
+              <th class="td-right" title="The amount of money involved. + means money came in, − means money went out">Amount</th>
+              <th title="How the money was paid or received">Payment Method</th>
+              <th title="Whether this has been completed, is waiting, or was rejected">Status</th>
+              <th title="A receipt number, teller number, or other reference code">Reference No.</th>
+              <th title="Who recorded or approved this transaction">Recorded By</th>
+            </tr>
+            ${desktopRows}
+          </table>
+          <table class="tx-mobile-table">
+            <tr>
+              <th>Date &amp; Time</th>
+              <th>Description</th>
+              <th class="td-right">Amount</th>
+            </tr>
+            ${mobileRows}
+          </table>
+        </div>
+      ` : '<div class="empty-table">No transactions found for the current filters. Try widening your date range or clearing the filters.</div>'}
+
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap">
+        <div style="font-size:12px;color:var(--text3)">
+          Showing ${filtered.length ? start+1 : 0}–${Math.min(start+pageSize, filtered.length)} of ${filtered.length} record${filtered.length!==1?'s':''}
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <label class="form-label" style="margin:0" title="How many rows to show per page">Rows per page</label>
+          <select class="form-select" style="width:auto" onchange="App.setTxPageSize(this.value)">
+            ${[10,20,50,100].map(n=>`<option value="${n}" ${pageSize===n?'selected':''}>${n}</option>`).join('')}
+          </select>
+          <button class="btn btn-sm" ${page<=1?'disabled':''} onclick="App.setTxPage(${page-1})">← Previous</button>
+          <span style="font-size:12px;color:var(--text2)">Page ${filtered.length?page:0} of ${filtered.length?totalPages:0}</span>
+          <button class="btn btn-sm" ${page>=totalPages?'disabled':''} onclick="App.setTxPage(${page+1})">Next →</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function setTxFilter(key, value){
+  if(key==='search') state.txSearch=value||'';
+  else if(key==='type') state.txTypeFilter=value||'';
+  else if(key==='status') state.txStatusFilter=value||'';
+  else if(key==='method') state.txMethodFilter=value||'';
+  else if(key==='module') state.txModuleFilter=value||'';
+  else if(key==='fromDate') state.txFromDate=value||'';
+  else if(key==='toDate') state.txToDate=value||'';
+  else if(key==='minAmount') state.txMinAmount=value;
+  else if(key==='maxAmount') state.txMaxAmount=value;
+  else if(key==='sortField') state.txSortField=value||'date';
+  else if(key==='sortDir') state.txSortDir=value||'desc';
+  state.txPage=1;
+  renderTransactions();
+}
+
+function setTxPage(page){
+  state.txPage = Math.max(1, parseInt(page,10)||1);
+  renderTransactions();
+}
+
+function setTxPageSize(size){
+  state.txPageSize = Math.max(1, parseInt(size,10)||20);
+  state.txPage = 1;
+  renderTransactions();
+}
+
+function clearTxFilters(){
+  const d = txCurrentMonthDefaults();
+  state.txSearch='';
+  state.txTypeFilter='';
+  state.txStatusFilter='';
+  state.txMethodFilter='';
+  state.txModuleFilter='';
+  state.txFromDate=d.from;
+  state.txToDate=d.to;
+  state.txMinAmount='';
+  state.txMaxAmount='';
+  state.txSortField='date';
+  state.txSortDir='desc';
+  state.txPage=1;
+  renderTransactions();
+}
+
+function showTxDetail(id){
+  const all = state._txAll || [];
+  const t = all.find(x=>x.id===id);
+  if(!t){ return; }
+  const d = txDirectionMeta(t.direction);
+  const dirLabel = t.direction==='credit'
+    ? '➕ Money Received (came in)'
+    : t.direction==='debit'
+    ? '➖ Money Paid Out (went out)'
+    : '↔ Internal Transfer';
+  const rows = [
+    ['Date &amp; Time',    `${fmtDate(t.date)} at ${fmtTime(t.date)}`],
+    ['Type',               txKindLabel(t.kind)],
+    ['Section',            txModuleLabel(t.module)],
+    ['Description',        esc(t.description||'—')],
+    ['Notes / Purpose',    esc(t.notes||'—')],
+    ['Amount',             `<span class="${d.cls}" style="font-size:16px;font-weight:700">${d.symbol}${fmt(t.amount||0)}</span>`],
+    ['Direction',          dirLabel],
+    ['Payment Method',     esc(txMethodLabel(t.method)||'—')],
+    ['Status',             txStatusBadge(t.status) + `<div class="form-hint" style="margin-top:4px">${txStatusLabel(t.status)}</div>`],
+    ['Reference / Receipt No.', esc(t.reference||'—')],
+    ['Recorded By',        esc(t.actor||'—')]
+  ];
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🧾 Transaction Details</div>
+    <table style="width:100%;border-collapse:collapse">
+      ${rows.map(([label,val])=>`
+        <tr>
+          <td style="padding:8px 0 8px 0;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.4px;width:38%;vertical-align:top">${label}</td>
+          <td style="padding:8px 0 8px 8px;font-size:13px;color:var(--text);vertical-align:top">${val}</td>
+        </tr>`).join('')}
+    </table>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Close</button>
+    </div>`);
+}
+
+async function exportTxCSV(){
+  const all = await buildTransactionsLedger();
+  const filtered = applyTxFilters(all);
+  const headers = ['Date','Time','Type','Module','Description','Amount (N)','Direction','Method','Status','Reference','By','Notes'];
+  const dataRows = filtered.map(t=>[
+    (t.date||'').slice(0,10),
+    (t.date||'').slice(11,16),
+    t.kind||'',
+    t.module||'',
+    t.description||'',
+    t.amount||0,
+    t.direction||'',
+    t.method||'',
+    t.status||'',
+    t.reference||'',
+    t.actor||'',
+    t.notes||''
+  ]);
+  const csv = [headers, ...dataRows].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob(['\uFEFF'+csv], { type:'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `transactions_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+async function exportTxPDF(){
+  const all = await buildTransactionsLedger();
+  const filtered = applyTxFilters(all);
+  const settings = await DB.getSettings();
+  const churchName = settings.churchName||'RCCG Kingdom Parish';
+  const fromDate = state.txFromDate||'';
+  const toDate = state.txToDate||'';
+  const totals = filtered.reduce((acc,t)=>{
+    if(t.direction==='credit') acc.credit+=(t.amount||0);
+    else if(t.direction==='debit') acc.debit+=(t.amount||0);
+    return acc;
+  },{credit:0,debit:0});
+  const net = totals.credit - totals.debit;
+
+  const tableRows = filtered.map(t=>{
+    const d = txDirectionMeta(t.direction);
+    const amtCls = d.cls==='td-green'?'cr':d.cls==='td-red'?'dr':'';
+    return `<tr>
+      <td style="white-space:nowrap">${(t.date||'').slice(0,10)}</td>
+      <td>${esc(String(t.kind||'').replace(/_/g,' '))}</td>
+      <td>${esc(String(t.module||'').replace(/_/g,' '))}</td>
+      <td>${esc(t.description||'—')}${t.notes?`<br><span style="color:#888;font-size:9px">${esc(t.notes)}</span>`:''}</td>
+      <td class="td-r ${amtCls}">${d.symbol}&#x20A6;${Math.round(t.amount||0).toLocaleString('en-NG')}</td>
+      <td>${esc(txMethodLabel(t.method))}</td>
+      <td>${esc(String(t.status||'recorded'))}</td>
+      <td>${esc(t.reference||'—')}</td>
+      <td>${esc(t.actor||'—')}</td>
+    </tr>`;
+  }).join('');
+
+  const html=`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>${esc(churchName)} — Transactions Ledger</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Arial,sans-serif;font-size:11px;color:#333;padding:20px}
+  .header{text-align:center;border-bottom:3px solid #0F6E56;padding-bottom:12px;margin-bottom:14px}
+  .header h1{font-size:17px;color:#0F6E56;margin-bottom:3px}
+  .header h2{font-size:13px;margin-bottom:4px}
+  .header p{font-size:10px;color:#666;margin-bottom:2px}
+  .kpi-row{display:flex;gap:16px;margin-bottom:12px;padding:8px 0;border-bottom:1px solid #ddd}
+  .kpi{flex:1;text-align:center}.kpi-label{font-size:9px;color:#888;text-transform:uppercase}
+  .kpi-val{font-size:13px;font-weight:700}
+  table{width:100%;border-collapse:collapse}
+  th{background:#0F6E56;color:#fff;padding:5px 7px;text-align:left;font-size:10px;font-weight:700}
+  td{padding:4px 7px;border-bottom:1px solid #eee;font-size:10px;vertical-align:top}
+  .td-r{text-align:right}.cr{color:#0F6E56;font-weight:600}.dr{color:#c0392b;font-weight:600}
+  @media print{body{padding:8px}.no-print{display:none}}
+</style></head><body>
+<div class="header">
+  <h1>${esc(churchName)}</h1>
+  <h2>Transactions Ledger</h2>
+  <p><strong>Period:</strong> ${fromDate?fmtDate(fromDate):'All'} — ${toDate?fmtDate(toDate):'Present'}</p>
+  <p><strong>Prepared by:</strong> ${esc(state.user?.name||'—')} &nbsp;|&nbsp; <strong>Date:</strong> ${fmtDate(new Date().toISOString().split('T')[0])}</p>
+  <p>${filtered.length} transaction(s) shown</p>
+</div>
+<div class="kpi-row">
+  <div class="kpi"><div class="kpi-label">Total</div><div class="kpi-val">${filtered.length}</div></div>
+  <div class="kpi"><div class="kpi-label">Credits</div><div class="kpi-val cr">&#x20A6;${Math.round(totals.credit).toLocaleString('en-NG')}</div></div>
+  <div class="kpi"><div class="kpi-label">Debits</div><div class="kpi-val dr">&#x20A6;${Math.round(totals.debit).toLocaleString('en-NG')}</div></div>
+  <div class="kpi"><div class="kpi-label">Difference (In − Out)</div><div class="kpi-val" style="color:${net>=0?'#0F6E56':'#c0392b'}">&#x20A6;${Math.round(net).toLocaleString('en-NG')}</div></div>
+</div>
+<table>
+  <tr><th>Date</th><th>Type</th><th>Module</th><th>Description / Notes</th><th class="td-r">Amount</th><th>Method</th><th>Status</th><th>Reference</th><th>By</th></tr>
+  ${tableRows||'<tr><td colspan="9" style="text-align:center;color:#888;padding:12px">No transactions match the selected filters</td></tr>'}
+</table>
+<p class="no-print" style="margin-top:14px;font-size:10px;color:#888;text-align:center">Use Ctrl+P / Cmd+P to save as PDF.</p>
+</body></html>`;
+
+  const w = window.open('','_blank','width=960,height=720');
+  if(!w){ showAlert('Pop-up blocked. Please allow pop-ups for this site.','warn'); return; }
+  w.document.write(html);
+  w.document.close();
+  setTimeout(()=>w.print(), 400);
+}
+
+function saveTxView(){
+  const raw = (prompt('Enter a name for this saved view:','')||'').trim();
+  const name = raw.slice(0, MAX_TRANSACTION_VIEW_NAME_LENGTH);
+  if(raw.length > MAX_TRANSACTION_VIEW_NAME_LENGTH){
+    showAlert(`Your view name was too long and has been shortened to ${MAX_TRANSACTION_VIEW_NAME_LENGTH} characters. The saved name is: "${name}"`,'warn');
+  }
+  if(!name) return;
+  const key = txSavedViewsKey();
+  if(!key){ showAlert('Cannot save views — role not recognised.','warn'); return; }
+  const views = getTxSavedViews();
+  const filters = {
+    txSearch:state.txSearch||'', txTypeFilter:state.txTypeFilter||'',
+    txStatusFilter:state.txStatusFilter||'', txMethodFilter:state.txMethodFilter||'',
+    txModuleFilter:state.txModuleFilter||'', txFromDate:state.txFromDate||'',
+    txToDate:state.txToDate||'', txMinAmount:state.txMinAmount||'',
+    txMaxAmount:state.txMaxAmount||'', txSortField:state.txSortField||'date',
+    txSortDir:state.txSortDir||'desc'
+  };
+  const existing = views.findIndex(v=>v.name===name);
+  if(existing>=0) views[existing]={ name, filters };
+  else views.push({ name, filters });
+  localStorage.setItem(key, JSON.stringify(views));
+  showAlert(`View "${name}" saved.`,'success');
+  renderTransactions();
+}
+
+function loadTxView(idx){
+  const views = getTxSavedViews();
+  const i = parseInt(idx,10);
+  if(Number.isNaN(i) || i<0 || i>=views.length) return;
+  const f = views[i].filters || {};
+  const { txSearch, txTypeFilter, txStatusFilter, txMethodFilter,
+          txModuleFilter, txFromDate, txToDate, txMinAmount, txMaxAmount,
+          txSortField, txSortDir } = f;
+  Object.assign(state, { txSearch, txTypeFilter, txStatusFilter, txMethodFilter,
+          txModuleFilter, txFromDate, txToDate, txMinAmount, txMaxAmount,
+          txSortField, txSortDir });
+  state.txPage = 1;
+  renderTransactions();
+}
+
+function deleteTxView(idx){
+  const key = txSavedViewsKey();
+  if(!key) return;
+  const views = getTxSavedViews();
+  const i = parseInt(idx,10);
+  if(Number.isNaN(i) || i<0 || i>=views.length) return;
+  const name = views[i].name;
+  if(!confirm(`Delete saved view "${name}"?`)) return;
+  views.splice(i, 1);
+  localStorage.setItem(key, JSON.stringify(views));
+  renderTransactions();
 }
 
 // ── DASHBOARD ────────────────────────────
@@ -697,7 +1480,11 @@ async function renderDashboard(){
     ...recentRems.map(r=>({type:'remittance',date:r.date||r.createdAt,
       title: `HQ remittance – ${r.incomeType||'payment'}`,
       sub: `${fmtDate(r.date||r.createdAt)} · Bank transfer · Signatories: ${r.signatories||'Pastor + Elder'}`,
-      amt:r.amount, icon:'✓', color:'#534AB7', bg:'rgba(83,74,183,0.12)'}))
+      amt:r.amount, icon:'✓', color:'#534AB7', bg:'rgba(83,74,183,0.12)'})),
+    ...recentPetty.map(h=>({type:'petty',date:h.createdAt||h.dateNeeded,
+      title: `Petty cash – ${h.purpose||'disbursement'}`,
+      sub: `${fmtDate(h.createdAt||h.dateNeeded)} · ${h.requestedBy||'Admin'}${h.receiptNo?' · Receipt #'+h.receiptNo:''}`,
+      amt:h.actualAmount||h.amount, icon:'💳', color:'#BA7517', bg:'rgba(186,117,23,0.12)'}))
   ]
   .sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,6);
 
@@ -749,8 +1536,8 @@ async function renderDashboard(){
     <div class="page-header">
       <div><div class="page-title">Welcome, ${state.user?.name?.split(' ')[0]||'User'} 👋</div><div class="page-sub">${monthLabel()} Financial Overview</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${can('income')?`<button class="btn btn-primary" onclick="App.navigate('income')">📥 Record Income</button>`:''}
-        ${!can('income')&&can('expenses')?`<button class="btn btn-primary" onclick="App.navigate('expenses')">💸 Log Expenses</button>`:''}
+        ${canAction('income_record')?`<button class="btn btn-primary" onclick="App.navigate('income')">📥 Record Income</button>`:''}
+        ${!canAction('income_record')&&canAction('expense_log')?`<button class="btn btn-primary" onclick="App.navigate('expenses')">💸 Log Expenses</button>`:''}
       </div>
     </div>
 
@@ -809,16 +1596,16 @@ async function renderDashboard(){
       </div>
     </div>
 
-    ${can('income','expenses','petty_request','reports')?`
+    ${(canAction('income_record')||canAction('expense_log')||canAction('petty_request')||canAccessPage('reports')||canAccessPage('remittances'))?`
     <div class="card">
       <div class="card-header"><span class="card-title">Quick Actions</span></div>
       <div class="qa-grid">
-        ${can('income')?`<button class="qa-btn" onclick="App.navigate('income')"><div class="qa-icon" style="background:#E1F5EE">📥</div><div class="qa-label">Record Collections</div><div class="qa-sub">Log Sunday income</div></button>`:''}
-        ${can('remittances','remittances_view')?`<button class="qa-btn" onclick="App.navigate('remittances')"><div class="qa-icon" style="background:#FCEBEB">📤</div><div class="qa-label">Remittances</div><div class="qa-sub">Calculate & pay HQ</div></button>`:''}
-        ${can('expenses')?`<button class="qa-btn" onclick="App.navigate('expenses')"><div class="qa-icon" style="background:#FAEEDA">💸</div><div class="qa-label">Log Expense</div><div class="qa-sub">Record spending</div></button>`:''}
-        ${can('petty_request','petty_view')?`<button class="qa-btn" onclick="App.navigate('petty_cash')"><div class="qa-icon" style="background:#EAF3DE">💳</div><div class="qa-label">Petty Cash</div><div class="qa-sub">${pendingPetty>0?pendingPetty+' pending':'Request / Approve'}</div></button>`:''}
-        ${can('income')?`<button class="qa-btn" onclick="App.showBankWithdrawal()"><div class="qa-icon" style="background:#E6F1FB">🏦</div><div class="qa-label">Bank Withdrawal</div><div class="qa-sub">Record a bank debit</div></button>`:''}
-        ${can('reports')?`<button class="qa-btn" onclick="App.navigate('reports')"><div class="qa-icon" style="background:#EEEDFE">📊</div><div class="qa-label">Reports</div><div class="qa-sub">Generate statements</div></button>`:''}
+        ${canAction('income_record')?`<button class="qa-btn" onclick="App.navigate('income')"><div class="qa-icon" style="background:#E1F5EE">📥</div><div class="qa-label">Record Collections</div><div class="qa-sub">Log Sunday income</div></button>`:''}
+        ${canAccessPage('remittances')?`<button class="qa-btn" onclick="App.navigate('remittances')"><div class="qa-icon" style="background:#FCEBEB">📤</div><div class="qa-label">Remittances</div><div class="qa-sub">Calculate & pay HQ</div></button>`:''}
+        ${canAction('expense_log')?`<button class="qa-btn" onclick="App.navigate('expenses')"><div class="qa-icon" style="background:#FAEEDA">💸</div><div class="qa-label">Log Expense</div><div class="qa-sub">Record spending</div></button>`:''}
+        ${canAccessPage('petty_cash')?`<button class="qa-btn" onclick="App.navigate('petty_cash')"><div class="qa-icon" style="background:#EAF3DE">💳</div><div class="qa-label">Petty Cash</div><div class="qa-sub">${pendingPetty>0?pendingPetty+' pending':'Request / Approve'}</div></button>`:''}
+        ${canAction('bank_withdrawal')?`<button class="qa-btn" onclick="App.showBankWithdrawal()"><div class="qa-icon" style="background:#E6F1FB">🏦</div><div class="qa-label">Bank Withdrawal</div><div class="qa-sub">Record a bank debit</div></button>`:''}
+        ${canAccessPage('reports')?`<button class="qa-btn" onclick="App.navigate('reports')"><div class="qa-icon" style="background:#EEEDFE">📊</div><div class="qa-label">Reports</div><div class="qa-sub">Generate statements</div></button>`:''}
         <button class="qa-btn" onclick="App.showKPSCAlert()"><div class="qa-icon" style="background:#FAEEDA">🔔</div><div class="qa-label">Alert KPSC</div><div class="qa-sub">Emergency support</div></button>
       </div>
     </div>`:''}
@@ -826,7 +1613,7 @@ async function renderDashboard(){
     <div class="grid-6040">
       <div>
         <div class="card">
-          <div class="card-header"><span class="card-title">RECENT TRANSACTIONS</span><button class="btn btn-sm" onclick="App.navigate('income')">See all ↗</button></div>
+          <div class="card-header"><span class="card-title">RECENT TRANSACTIONS</span><button class="btn btn-sm" onclick="App.navigate('transactions')">See all ↗</button></div>
           ${feedItems.length?feedItems.map(f=>{
             const amtColor = f.type==='income'?'var(--success)':'var(--danger)';
             const prefix = f.type==='income'?'+':'−';
@@ -934,9 +1721,9 @@ async function renderIncome(){
     <div class="page-header">
       <div><div class="page-title">Income Recording</div><div class="page-sub">${monthLabel()}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${can('income')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">📥 Sunday Collections</button>`:''}
-        ${can('income')?`<button class="btn btn-amber" onclick="App.showOtherIncomeForm()">➕ Other Income</button>`:''}
-        ${can('income')&&pendingCount>=1?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${pendingCount} pending)</button>`:''}
+        ${canAction('income_record')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">📥 Sunday Collections</button>`:''}
+        ${canAction('income_record')?`<button class="btn btn-amber" onclick="App.showOtherIncomeForm()">➕ Other Income</button>`:''}
+        ${canAction('income_deposit')&&pendingCount>=1?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${pendingCount} pending)</button>`:''}
       </div>
     </div>
     <div class="kpi-grid" style="margin-bottom:16px">
@@ -944,7 +1731,7 @@ async function renderIncome(){
       <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">💵</div><div class="kpi-label">Cash Pending Deposit</div><div class="kpi-val" style="color:${pendingCashTotal>0?'var(--amber)':'var(--primary)'}">${fmt(pendingCashTotal)}</div><div class="kpi-delta ${pendingCashTotal>0?'warn':'up'}">${pendingCount>0?pendingCount+' record(s) awaiting deposit':'All cash deposited ✓'}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">🏦</div><div class="kpi-label">In Bank (this month)</div><div class="kpi-val">${fmt(totalDeposited)}</div><div class="kpi-delta up">Transfers + deposits</div></div>
     </div>
-    ${pendingCount>0&&can('income')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>${pendingCount} cash record(s)</strong> totalling <strong>${fmt(pendingCashTotal)}</strong> still held by accountant and not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
+    ${pendingCount>0&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>${pendingCount} cash record(s)</strong> totalling <strong>${fmt(pendingCashTotal)}</strong> still held by accountant and not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
     <div class="tabs">
       <button class="tab ${tab==='list'?'active':''}" onclick="App.setIncomeTab('list')">Sunday Collections (${sundayRecs.length})</button>
       <button class="tab ${tab==='other'?'active':''}" onclick="App.setIncomeTab('other')">Other Income (${otherRecs.length})</button>
@@ -984,7 +1771,7 @@ async function renderIncomeList(records, cashTxOverride){
         <td>${statusBadge}</td>
         <td class="td-muted">${r.recordedBy||'—'}</td>
         <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-        ${can('income')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+        ${canAction('income_deposit')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
       </tr>`;}).join('')}
   </table></div></div>`;
 }
@@ -1015,7 +1802,7 @@ async function renderOtherIncomeList(records){
         <td>${statusBadge}</td>
         <td class="td-muted">${r.recordedBy||'—'}</td>
         <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-        ${can('income')&&isCash&&cashDep<(r.totalCollection||0)?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+        ${canAction('income_deposit')&&isCash&&cashDep<(r.totalCollection||0)?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
       </tr>`;}).join('')}
   </table></div></div>`;
 }
@@ -1092,12 +1879,13 @@ async function renderAllIncomeList(records, cashTxOverride){
         <td>${statusBadge}</td>
         <td class="td-muted">${r.recordedBy||'—'}</td>
         <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-        ${can('income')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+        ${canAction('income_deposit')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
       </tr>`;}).join('')}
   </table></div></div>`;
 }
 
 function showIncomeForm(){
+  if(!canAction('income_record')){ showAlert('You do not have permission to record income.','danger'); return; }
   const today = new Date().toISOString().split('T')[0];
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -1169,6 +1957,7 @@ function updateIncomeCashBreakdown(){
 }
 
 async function submitIncome(){
+  if(!canAction('income_record')){ showAlert('You do not have permission to record income.','danger'); return; }
   const date=document.getElementById('inc_date')?.value;
   const usher=document.getElementById('inc_usher')?.value?.trim();
   if(!date){ alert('Please select a date.'); return }
@@ -1251,10 +2040,11 @@ async function viewIncome(id){
     <div class="fs-12 text-muted">Recorded by: ${r.recordedBy||'—'} · ${isSunday?'Counted with: '+r.usher:'Donor: '+(r.donorName||'—')}</div>
     ${deposits.length?`<div class="fs-12 text-muted">Deposit records: ${deposits.map(d=>`${fmt(d.amount)} via ${d.depositMethod?.replace('_',' ')||'—'} on ${fmtDate(d.date)} (Ref: ${d.reference||'—'})`).join('; ')}</div>`:''}
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button>
-    ${can('income')&&cashHeld>depositedTotal?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
+    ${canAction('income_deposit')&&cashHeld>depositedTotal?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
 }
 
 async function confirmDeposit(id){
+  if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const allIncCD = await DB.getIncome();
   const r = allIncCD.find(x=>x.id===id);
   if(!r) return;
@@ -1297,6 +2087,7 @@ async function confirmDeposit(id){
 }
 
 async function submitCashDeposit(incomeId){
+  if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const amount  = parseFloat(document.getElementById('dep_amount')?.value)||0;
   const method  = document.getElementById('dep_method')?.value;
   const ref     = document.getElementById('dep_ref')?.value?.trim();
@@ -1311,6 +2102,7 @@ async function submitCashDeposit(incomeId){
 }
 
 async function confirmBulkDeposit(){
+  if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const allIncome = await DB.getIncome(); // all months — accountant may have old pending cash
   const cashTx = await DB.getCashTransactions();
   const pending = allIncome.map(r=>{
@@ -1390,6 +2182,7 @@ function toggleBulkSelectAll(checked){
 }
 
 async function submitBulkDeposit(){
+  if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const pending = state._bulkDepositPending || [];
   const method  = document.getElementById('bulk_dep_method')?.value;
   const ref     = document.getElementById('bulk_dep_ref')?.value?.trim();
@@ -1411,6 +2204,7 @@ async function submitBulkDeposit(){
 }
 
 function showOtherIncomeForm(){
+  if(!canAction('income_record')){ showAlert('You do not have permission to record income.','danger'); return; }
   const today = new Date().toISOString().split('T')[0];
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -1453,6 +2247,7 @@ function showOtherIncomeForm(){
 }
 
 async function submitOtherIncome(){
+  if(!canAction('income_record')){ showAlert('You do not have permission to record income.','danger'); return; }
   const date       = document.getElementById('oi_date')?.value;
   const source     = document.getElementById('oi_source')?.value;
   const donorName  = document.getElementById('oi_donor')?.value?.trim();
@@ -1583,7 +2378,7 @@ async function renderRemittances(){
         <div class="page-sub">All amounts due to RCCG National & Provincial authorities</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${can('income')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Payment</button>`:''}
+        ${canAction('remittance_record_payment')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Payment</button>`:''}
         <button class="btn btn-amber" onclick="App.printRemittanceReport()">📄 Download Report</button>
       </div>
     </div>
@@ -1642,7 +2437,7 @@ async function renderRemittances(){
         </table></div>
 
         <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
-          ${can('income')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Bulk Payment (${fmt(totalDue)})</button>`:''}
+          ${canAction('remittance_record_payment')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Bulk Payment (${fmt(totalDue)})</button>`:''}
           <button class="btn btn-amber" onclick="App.printRemittanceReport()">📄 Print / Download Report</button>
         </div>
       </div>
@@ -1751,6 +2546,7 @@ async function renderRemittances(){
 }
 
 async function showRemittancePaymentModal(){
+  if(!canAction('remittance_record_payment')){ showAlert('You do not have permission to record remittance payments.','danger'); return; }
   const [allIncome, settings, allUsers] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getUsers()]);
   const quotas=getQuotaList(settings);
   const fromDate=state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
@@ -1779,7 +2575,7 @@ async function showRemittancePaymentModal(){
       <span>${esc(u.name)}</span><span class="badge" style="font-size:10px;background:${ROLES[u.role]?.bg||'#eee'};color:${ROLES[u.role]?.color||'#333'}">${ROLES[u.role]?.label||u.role}</span>
     </label>`).join('');
 
-  const isCan=can('income'); // for role-aware submit label
+  const isCan=canAction('remittance_record_payment'); // for role-aware submit label
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">📤 Record Remittance Payment</div>
@@ -2318,7 +3114,7 @@ async function renderExpenses(){
         <div class="page-sub">${monthLabel()} — <strong>${fmt(total)}</strong> total${activeFilter?` · Filtered: ${activeCat?.label||activeFilter}`:''}${searchTerm?` · Search: "${searchTerm}"`:''}
         </div>
       </div>
-      ${can('expenses')?`<button class="btn btn-primary" onclick="App.showExpenseForm()">+ Log Expense</button>`:''}
+      ${canAction('expense_log')?`<button class="btn btn-primary" onclick="App.showExpenseForm()">+ Log Expense</button>`:''}
     </div>
 
     <!-- Financial Position Bar -->
@@ -2357,7 +3153,7 @@ async function renderExpenses(){
     <div class="card" style="margin-bottom:1rem">
       <div class="card-header">
         <span class="card-title">Category Breakdown</span>
-        ${activeFilter?`<button class="btn btn-sm" onclick="App.setExpCatFilter(null)">✕ Clear filter</button>`:can('expenses')?'<span style="font-size:11px;color:var(--text3)">Tap a category to log an expense</span>':''}
+        ${activeFilter?`<button class="btn btn-sm" onclick="App.setExpCatFilter(null)">✕ Clear filter</button>`:canAction('expense_log')?'<span style="font-size:11px;color:var(--text3)">Tap a category to log an expense</span>':''}
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">
         ${EXPENSE_CATS.map(c=>{
@@ -2365,7 +3161,7 @@ async function renderExpenses(){
           const pct  = total>0 ? (amt/total*100) : 0;
           const hasAmt = amt>0;
           return `
-          <button onclick="${can('expenses')?`App.showExpenseForm('${c.key}')`:``}" style="
+          <button onclick="${canAction('expense_log')?`App.showExpenseForm('${c.key}')`:``}" style="
             all:unset;display:flex;flex-direction:column;gap:6px;
             background:var(--surface);
             border:1.5px solid ${hasAmt?'var(--border2)':'var(--border)'};
@@ -2447,8 +3243,8 @@ async function renderExpenses(){
           if((e.cashAmount||0)>0) splitParts.push(`Cash: ${fmt(e.cashAmount||0)}`);
           const splitDetail = e.paymentMethod==='split'&&splitParts.length
             ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">${splitParts.join(' · ')}</div>` : '';
-          const canEditPending = (state.user?.role==='admin_officer' || state.user?.role==='it_admin') && e.status!=='approved';
-          const canApprovePending = (state.user?.role==='accountant' || state.user?.role==='it_admin') && e.status!=='approved';
+          const canEditPending = canAction('expense_edit_pending') && e.status!=='approved';
+          const canApprovePending = canAction('expense_approve_pending') && e.status!=='approved';
           const statusBadge = e.status==='approved'
             ? '<span class="badge badge-success">Approved</span>'
             : '<span class="badge badge-warn">Pending Approval</span>';
@@ -2563,6 +3359,7 @@ function getExpenseMethodOptionsForRole(role){
 }
 
 function showExpenseForm(preselectedCat){
+  if(!canAction('expense_log')){ showAlert('You do not have permission to log expenses.','danger'); return; }
   const today=new Date().toISOString().split('T')[0];
   const methodOptions = getExpenseMethodOptionsForRole(state.user?.role);
   const defaultMethod = methodOptions[0]?.value || 'bank_transfer';
@@ -2669,6 +3466,7 @@ function onExpSplitChange(){
 }
 
 async function submitExpense(){
+  if(!canAction('expense_log')){ showAlert('You do not have permission to log expenses.','danger'); return; }
   const date=document.getElementById('exp_date')?.value;
   const category=document.getElementById('exp_cat')?.value;
   const subCategory=document.getElementById('exp_subcat')?.value;
@@ -2764,7 +3562,7 @@ async function editExpense(id){
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
   if(exp.status==='approved'){ alert('Approved expenses cannot be edited.'); return }
-  if(!(state.user?.role==='admin_officer' || state.user?.role==='it_admin')){ alert('You are not allowed to edit this expense.'); return }
+  if(!canAction('expense_edit_pending')){ alert('You are not allowed to edit this expense.'); return }
 
   const amountStr = prompt('Update amount (₦):', String(exp.amount||0));
   if(amountStr===null) return;
@@ -2801,7 +3599,7 @@ async function deleteExpense(id){
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
   if(exp.status==='approved'){ alert('Approved expenses cannot be deleted.'); return }
-  if(!(state.user?.role==='admin_officer' || state.user?.role==='it_admin')){ alert('You are not allowed to delete this expense.'); return }
+  if(!canAction('expense_delete_pending')){ alert('You are not allowed to delete this expense.'); return }
   if(!confirm(`Delete this expense (${fmt(exp.amount)})?`)) return;
   if((exp.pettyAmount||0)>0){
     const pettyCfg = await DB.getPettyConfig();
@@ -2815,7 +3613,7 @@ async function deleteExpense(id){
 }
 
 async function approveExpense(id){
-  if(!(state.user?.role==='accountant' || state.user?.role==='it_admin')){ alert('You are not allowed to approve expenses.'); return }
+  if(!canAction('expense_approve_pending')){ alert('You are not allowed to approve expenses.'); return }
   const all = await DB.getExpenses();
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
@@ -2827,6 +3625,7 @@ async function approveExpense(id){
 }
 
 async function showBankWithdrawal(){
+  if(!canAction('bank_withdrawal')){ showAlert('You do not have permission to record bank withdrawals.','danger'); return; }
   const today = new Date().toISOString().split('T')[0];
   const allUsers = await DB.getUsers();
   const sigUsers = allUsers.filter(u=>['pastor','signatory','it_admin'].includes(u.role));
@@ -3090,12 +3889,12 @@ async function renderBank(){
     <div class="page-header">
       <div><div class="page-title">Bank Account</div><div class="page-sub">Balance: ${fmt(bankBalance)}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${can('income')&&pendingDepCount>0?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${pendingDepCount} pending · ${fmt(pendingDepTotal)})</button>`:''}
-        ${can('income')?`<button class="btn btn-primary" onclick="App.showBankWithdrawal()">🏦 Record Withdrawal</button>`:''}
-        ${can('expenses')?`<button class="btn" onclick="App.showBankChargeForm()">💳 Bank Charge</button>`:''}
+        ${canAction('income_deposit')&&pendingDepCount>0?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${pendingDepCount} pending · ${fmt(pendingDepTotal)})</button>`:''}
+        ${canAction('bank_withdrawal')?`<button class="btn btn-primary" onclick="App.showBankWithdrawal()">🏦 Record Withdrawal</button>`:''}
+        ${canAction('bank_charge')?`<button class="btn" onclick="App.showBankChargeForm()">💳 Bank Charge</button>`:''}
       </div>
     </div>
-    ${pendingDepCount>0&&can('income')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>${pendingDepCount} income record(s)</strong> totalling <strong>${fmt(pendingDepTotal)}</strong> have cash held by the Accountant and not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
+    ${pendingDepCount>0&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>${pendingDepCount} income record(s)</strong> totalling <strong>${fmt(pendingDepTotal)}</strong> have cash held by the Accountant and not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
 
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
       <div class="kpi">
@@ -3271,6 +4070,7 @@ function compareBankBalance(){
 }
 
 function showBankChargeForm(){
+  if(!canAction('bank_charge')){ showAlert('You do not have permission to record bank charges.','danger'); return; }
   const today=new Date().toISOString().split('T')[0];
   const bankSubcats = EXPENSE_SUBCATS.bank || ['Others...'];
   showModal(`
@@ -3290,6 +4090,7 @@ function showBankChargeForm(){
 }
 
 async function submitBankCharge(){
+  if(!canAction('bank_charge')){ showAlert('You do not have permission to record bank charges.','danger'); return; }
   const date = document.getElementById('bc_date')?.value;
   const subCategory = document.getElementById('bc_subcat')?.value;
   const description = document.getElementById('bc_desc')?.value?.trim() || subCategory;
@@ -3386,11 +4187,11 @@ async function renderPettyCash(){
         <div class="page-sub">Admin Officer's cash wallet — ${monthLabel()}</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${can('petty_request')?`
+        ${canAction('petty_request')?`
           <button class="btn btn-primary" onclick="App.showTopUpRequest()">↺ Request Top-Up</button>
           <button class="btn" onclick="App.showAdvanceRequest()">+ Request Advance</button>
         `:''}
-        ${can('income')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">📋 Record Top-Up Payment</button>`:''}
+        ${canAction('petty_topup_payment')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">📋 Record Top-Up Payment</button>`:''}
       </div>
     </div>
 
@@ -3402,7 +4203,7 @@ async function renderPettyCash(){
     <div class="card" style="margin-bottom:1rem">
       <div class="card-header">
         <span class="card-title">Cash Meter</span>
-        ${can('income')?`<button class="btn btn-sm btn-amber" onclick="App.showPettyRefill()">Record Top-Up Payment</button>`:''}
+        ${canAction('petty_topup_payment')?`<button class="btn btn-sm btn-amber" onclick="App.showPettyRefill()">Record Top-Up Payment</button>`:''}
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:center;padding:8px 0">
         <div style="text-align:center">
@@ -3429,7 +4230,7 @@ async function renderPettyCash(){
           </div>`:''}
         </div>
       </div>
-      ${expensesSinceRefillTotal>0&&can('petty_request')?`
+      ${expensesSinceRefillTotal>0&&canAction('petty_request')?`
       <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
         <div style="font-size:13px;color:var(--text2);margin-bottom:8px">
           The wallet has been used for ${fmt(expensesSinceRefillTotal)} in expenses since the last top-up.
@@ -3462,15 +4263,15 @@ async function renderPettyCash(){
           <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
             <div class="status-row-amt td-amber" style="white-space:nowrap">${fmt(r.amount)}</div>
             ${isTopup
-              ? can('income','petty_approve')
+              ? canAction('petty_approve_or_view')
                   ? `<button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">👁 View & Approve</button>`
                   : `<button class="btn btn-sm" onclick="App.approvePetty('${r.id}')">👁 View</button>`
-              : can('income','petty_approve')
+              : canAction('petty_approve_or_view')
                   ? `<button class="btn btn-sm btn-primary" onclick="App.approvePetty('${r.id}')">Approve</button>
                      <button class="btn btn-sm btn-danger" onclick="App.rejectPetty('${r.id}')">Reject</button>`
                   : ''
             }
-            ${isTopup && (state.user?.name===r.requestedBy || state.user?.role==='it_admin') ? `<button class="btn btn-sm btn-danger" onclick="App.cancelTopUpRequest('${r.id}')">Cancel</button>` : ''}
+            ${isTopup && canAction('topup_cancel', { request:r }) ? `<button class="btn btn-sm btn-danger" onclick="App.cancelTopUpRequest('${r.id}')">Cancel</button>` : ''}
           </div>
         </div>`;
       }).join('') : '<div class="empty-table">No pending requests.</div>'}
@@ -3647,6 +4448,7 @@ async function renderPettyCash(){
 }
 // ── TOP-UP REQUEST (Admin Officer: wallet is low, based on expenses already logged) ──
 async function showTopUpRequest(){
+  if(!canAction('petty_request')){ showAlert('You do not have permission to request petty cash top-up.','danger'); return; }
   const [pettyConfig, allExpenses, allPettyRaw] = await Promise.all([DB.getPettyConfig(), DB.getExpenses(), DB.getPetty()]);
   // allPettyRaw is newest-first from API — find() without reverse picks the most recent refill
   const lastRefill = allPettyRaw.find(h=>h.type==='refill');
@@ -3739,6 +4541,7 @@ async function showTopUpRequest(){
 }
 
 async function submitTopUpRequest(){
+  if(!canAction('petty_request')){ showAlert('You do not have permission to request petty cash top-up.','danger'); return; }
   const expenseIds = state._topupExpenseIds || [];
   const amount = parseFloat(document.getElementById('topup_amt')?.value)||0;
   const override = !!document.getElementById('topup_override')?.checked;
@@ -3789,7 +4592,7 @@ async function cancelTopUpRequest(id){
   const req = pettyHistory.find(h=>h.id===id);
   if(!req || req.type!=='topup_request') return;
   if(req.status!=='pending_approval'){ alert('Only pending top-up requests can be cancelled.'); return }
-  const canCancel = state.user?.role==='it_admin' || state.user?.name===req.requestedBy;
+  const canCancel = canAction('topup_cancel', { request:req });
   if(!canCancel){ alert('You are not allowed to cancel this request.'); return }
   if(!confirm(`Cancel top-up request of ${fmt(req.amount)}?`)) return;
   await DB.updatePettyEntry(id, { status:'cancelled', rejectedAt:new Date().toISOString(), rejectionReason:'Cancelled by requester' });
@@ -3801,6 +4604,7 @@ async function cancelTopUpRequest(id){
 
 // ── ADVANCE REQUEST (Admin Officer: needs cash before buying) ─────
 async function showAdvanceRequest(){
+  if(!canAction('petty_request')){ showAlert('You do not have permission to request cash advances.','danger'); return; }
   const pettyConfig = await DB.getPettyConfig();
   const cashOnHand = pettyConfig.float;
   showModal(`
@@ -3836,6 +4640,7 @@ async function showAdvanceRequest(){
 }
 
 async function submitAdvanceRequest(){
+  if(!canAction('petty_request')){ showAlert('You do not have permission to request cash advances.','danger'); return; }
   const purpose  = document.getElementById('adv_purpose')?.value?.trim();
   const amount   = parseFloat(document.getElementById('adv_amt')?.value)||0;
   const category = document.getElementById('adv_cat')?.value;
@@ -3866,6 +4671,7 @@ async function submitAdvanceRequest(){
 async function showPettyRequest(){ showTopUpRequest(); }
 
 async function approvePetty(id){
+  if(!canAction('petty_approve_or_view')){ showAlert('You do not have permission to approve petty cash requests.','danger'); return; }
   const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
   const req = pettyHistory.find(h=>h.id===id);
   if(!req) return;
@@ -4017,6 +4823,7 @@ ${content}
 }
 
 async function confirmTopupApproval(id){
+  if(!canAction('petty_approve_or_view')){ showAlert('You do not have permission to approve petty cash requests.','danger'); return; }
   const [pettyHistory] = await Promise.all([DB.getPetty()]);
   const req = pettyHistory.find(h=>h.id===id);
   if(!req){ closeModal(); return; }
@@ -4039,12 +4846,14 @@ async function confirmTopupApproval(id){
 }
 
 async function rejectPettyFromModal(id){
+  if(!canAction('petty_approve_or_view')){ showAlert('You do not have permission to reject petty cash requests.','danger'); return; }
   closeModal();
   rejectPetty(id);
 }
 
 
 async function rejectPetty(id){
+  if(!canAction('petty_approve_or_view')){ showAlert('You do not have permission to reject petty cash requests.','danger'); return; }
   const reason=prompt('Reason for rejection (the requester will see this):');
   const pettyHistory=await DB.getPetty();
   const req=pettyHistory.find(h=>h.id===id);
@@ -4158,6 +4967,7 @@ async function confirmPettyReceipt(id){
 }
 
 async function showPettyRefill(prefillAmount, topupRequestId=''){
+  if(!canAction('petty_topup_payment')){ showAlert('You do not have permission to record petty cash top-up payments.','danger'); return; }
   const [pettyHistory, pettyConfig, allUsers] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getUsers()]);
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
   const settled = pettyMonthHistory(petty.history).filter(h=>h.status==='settled'&&h.type!=='refill');
@@ -4249,6 +5059,7 @@ function onRefillMethodChange(){
 }
 
 async function submitRefill(){
+  if(!canAction('petty_topup_payment')){ showAlert('You do not have permission to record petty cash top-up payments.','danger'); return; }
   const amt = parseFloat(document.getElementById('ref_amt')?.value)||0;
   const method = document.querySelector('input[name="ref_method"]:checked')?.value||'bank_transfer';
   const topupRequestId = document.getElementById('ref_topup_id')?.value?.trim();
@@ -4800,7 +5611,7 @@ async function renderAudit(){
     <div class="page-header"><div class="page-title">Audit Log</div><div class="page-sub">Last 100 actions in the system</div></div>
     <div class="card"><div class="table-wrap"><table>
       <tr><th>Time</th><th>Action</th><th>Details</th><th>User</th></tr>
-      ${log.length?log.map(l=>`<tr><td class="td-muted" style="white-space:nowrap">${fmtDate(l.ts)} ${fmtTime(l.ts)}</td><td><span class="badge badge-gray">${l.type?.replace(/_/g,' ')}</span></td><td>${l.detail}</td><td class="td-muted">${l.by||'—'}</td></tr>`).join(''):'<tr><td colspan="4" class="empty-table">No audit entries yet.</td></tr>'}
+      ${log.length?log.map(l=>`<tr><td class="td-muted" style="white-space:nowrap">${fmtDate(l.ts)} ${fmtTime(l.ts)}</td><td><span class="badge badge-gray">${esc(l.type?.replace(/_/g,' '))}</span></td><td>${esc(l.detail)}</td><td class="td-muted">${esc(l.by||'—')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty-table">No audit entries yet.</td></tr>'}
     </table></div></div>`;
 }
 
@@ -5322,6 +6133,7 @@ return {
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
+  setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
