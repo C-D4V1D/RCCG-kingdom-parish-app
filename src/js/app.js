@@ -492,14 +492,21 @@ async function submitChangePin(btn=null){
   if(newPin !== confirmPin){ showAlert('New PIN and confirmation do not match.','danger'); return; }
   const restore = setBtnLoading(btn, 'Updating…');
   try{
+    if(!state.user?.id) throw new Error('Session error — please log out and back in.');
     const res = await DB.changePin({ userId: state.user.id, currentPin, newPin });
-    if(!res?.success) throw new Error('PIN update failed.');
+    // res is { success: true, id: '...' } on success — check either field
+    if(!res?.success && !res?.id) throw new Error('PIN update returned unexpected response.');
     DB.addAudit('pin_changed','User changed own PIN',state.user?.name);
     closeModal();
-    showAlert('PIN changed successfully. Use the new PIN at next sign in.','success');
+    showAlert('PIN updated successfully! Use your new PIN next time you sign in.','success');
   }catch(e){
     restore();
-    showAlert(e.message || 'Failed to change PIN. Please try again.','danger');
+    const msg = e.message || '';
+    if(msg.toLowerCase().includes('current pin is incorrect') || msg.toLowerCase().includes('invalid credentials')){
+      showAlert('Current PIN is incorrect. Please try again.','danger');
+    } else {
+      showAlert(msg || 'Failed to update PIN. Please try again.','danger');
+    }
   }
 }
 
@@ -2460,6 +2467,133 @@ async function submitOtherIncome(btn=null){
 }
 
 // ── REMITTANCES ───────────────────────────
+// ── REMITTANCE CUT-OFF DATES ──────────────────────────────────────
+const REM_MONTHS = ['January','February','March','April','May','June',
+                    'July','August','September','October','November','December'];
+
+function getRemCutoffDates(settings){
+  // Returns array of 12 day-numbers (1-31), default null if not set
+  const saved = settings?.remCutoffDates;
+  if(saved && Array.isArray(saved.dates) && saved.dates.length===12) return saved;
+  return null;
+}
+
+function remCutoffDayForMonth(settings, monthIdx){
+  // monthIdx 0-11. Returns the cut-off day number or null.
+  const c = getRemCutoffDates(settings);
+  if(!c) return null;
+  return c.dates[monthIdx] || null;
+}
+
+function canEditRemCutoff(){
+  return ['it_admin','pastor','accountant'].includes(state.user?.role);
+}
+
+function renderRemCutoffCard(settings){
+  const c = getRemCutoffDates(settings);
+  const now = new Date();
+  const curMonth = now.getMonth(); // 0-11
+  const curYear = now.getFullYear();
+
+  const editBtn = canEditRemCutoff()
+    ? `<button class="btn btn-sm" onclick="App.showRemCutoffModal()" style="flex-shrink:0">✏️ Edit Dates</button>`
+    : '';
+
+  if(!c){
+    return `<div class="card" style="margin-bottom:12px">
+      <div class="card-header">
+        <span class="card-title">📅 Remittance Cut-Off Dates</span>
+        ${editBtn}
+      </div>
+      <div class="alert alert-info" style="margin:0"><span class="alert-icon">ℹ</span><span>No cut-off dates set for this year. ${canEditRemCutoff()?'Click <strong>Edit Dates</strong> to set the dates from the HQ memo.':'Ask the Pastor or Accountant to set the dates from the HQ annual memo.'}</span></div>
+    </div>`;
+  }
+
+  const year = c.year || curYear;
+  const rows = REM_MONTHS.map((m, i) => {
+    const day = c.dates[i];
+    const isCurrent = i === curMonth;
+    const cutoffDate = day ? new Date(year, i, day) : null;
+    const isPast = cutoffDate && cutoffDate < now;
+    const isThisMonth = isCurrent;
+    const dayLabel = day ? `${day}${['th','st','nd','rd','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th'][day-1]||'th'} ${m}` : '—';
+    const rowStyle = isThisMonth
+      ? 'background:var(--primary-light);font-weight:600'
+      : isPast ? 'color:var(--text3)' : '';
+    const badge = isThisMonth
+      ? `<span class="badge badge-info" style="margin-left:6px;font-size:10px">This month</span>`
+      : isPast ? `<span style="font-size:10px;color:var(--text3)">Passed</span>` : '';
+    return `<tr style="${rowStyle}">
+      <td style="padding:5px 10px;font-size:13px">${m}</td>
+      <td style="padding:5px 10px;font-size:13px;font-weight:${isThisMonth?700:400};color:${isPast&&!isThisMonth?'var(--text3)':'inherit'}">${dayLabel} ${badge}</td>
+    </tr>`;
+  }).join('');
+
+  return `<div class="card" style="margin-bottom:12px">
+    <div class="card-header">
+      <span class="card-title">📅 Remittance Cut-Off Dates — ${year}</span>
+      ${editBtn}
+    </div>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:8px">These are the HQ-mandated monthly deadlines for remittance payments. The highlighted row is this month.</p>
+    <div class="table-wrap"><table style="width:100%">
+      <tr style="background:var(--surface)">
+        <th style="padding:5px 10px;font-size:11px">Month</th>
+        <th style="padding:5px 10px;font-size:11px">Cut-Off Date</th>
+      </tr>
+      ${rows}
+    </table></div>
+  </div>`;
+}
+
+async function showRemCutoffModal(){
+  if(!canEditRemCutoff()){ showAlert('Only the Pastor or Accountant can edit cut-off dates.','danger'); return; }
+  const settings = await DB.getSettings();
+  const c = getRemCutoffDates(settings);
+  const year = c?.year || new Date().getFullYear();
+  const dates = c?.dates || Array(12).fill('');
+
+  const inputs = REM_MONTHS.map((m, i) => `
+    <div class="form-row" style="align-items:center;gap:10px;margin-bottom:8px">
+      <label class="form-label" style="width:110px;margin:0;flex-shrink:0">${m}</label>
+      <input type="number" id="cutoff_${i}" class="form-input" min="1" max="31"
+        value="${dates[i]||''}" placeholder="Day (1-31)"
+        style="width:100px;flex-shrink:0" />
+      <span style="font-size:12px;color:var(--text3)">${year}</span>
+    </div>`).join('');
+
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">📅 Set Remittance Cut-Off Dates</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Enter the cut-off day for each month as stated in the HQ annual memo. These dates are shown on the Remittances page as a reminder.</span></div>
+    <div class="form-group">
+      <label class="form-label">Year</label>
+      <input type="number" id="cutoff_year" class="form-input" value="${year}" min="2024" max="2099" style="width:120px" />
+    </div>
+    <div style="max-height:340px;overflow-y:auto;padding-right:4px">
+      ${inputs}
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.saveRemCutoffDates()">Save Dates</button>
+    </div>`);
+}
+
+async function saveRemCutoffDates(){
+  if(!canEditRemCutoff()){ showAlert('Only the Pastor or Accountant can edit cut-off dates.','danger'); return; }
+  const year = parseInt(document.getElementById('cutoff_year')?.value) || new Date().getFullYear();
+  const dates = Array.from({length:12}, (_,i) => {
+    const v = parseInt(document.getElementById(`cutoff_${i}`)?.value);
+    return (Number.isFinite(v) && v>=1 && v<=31) ? v : null;
+  });
+  const settings = await DB.getSettings();
+  settings.remCutoffDates = { year, dates };
+  await DB.saveSettings(settings);
+  DB.addAudit('rem_cutoff_updated', `Remittance cut-off dates set for ${year}`, state.user?.name);
+  closeModal();
+  showAlert(`Cut-off dates saved for ${year}.`, 'success');
+  renderRemittances();
+}
+
 async function renderRemittances(){
   const [allIncome, allRems, settings, allUsers] = await Promise.all([
     DB.getIncome(), DB.getRemittances(), DB.getSettings(), DB.getUsers()
@@ -2495,8 +2629,10 @@ async function renderRemittances(){
   const rem=await calcRemittancesFromRecords(income);
 
   // --- Build remittance lines (No Go-A-Fishing — not an HQ remittance) ---
-  const incomeLines=rem.lines.map(l=>({
-    label:l.label+' → National HQ', amount:l.national||0, section:'income', from:l
+  const incomeLines=rem.lines.filter(l=>!l.isTg).map(l=>({
+    label:l.label+' → National HQ',
+    pct: l.total>0 ? Math.round((l.national/l.total)*100) : null,
+    amount:l.national||0, section:'income', from:l
   })).filter(l=>l.amount>0);
 
   const tgLines=[
@@ -2541,8 +2677,13 @@ async function renderRemittances(){
       <td colspan="3" style="font-size:10px;font-weight:700;color:var(--text3);padding:5px 12px;letter-spacing:0.6px;text-transform:uppercase">${sectionLabel}</td>
     </tr>
     ${rows.map(l=>`<tr>
-      <td style="padding:7px 12px"><strong>${l.label}</strong></td>
-      <td style="padding:7px 8px"><span class="badge ${l.section==='quota'?'badge-info':'badge-purple'}">${l.section==='quota'?'Fixed Quota':'% Based'}</span></td>
+      <td style="padding:7px 12px">
+        <strong>${l.label}</strong>
+        ${l.pct!=null?`<span style="margin-left:6px;font-size:11px;color:var(--text3);font-weight:400">(${l.pct}%)</span>`:''}
+      </td>
+      <td style="padding:7px 8px">
+        <span class="badge ${l.section==='quota'?'badge-info':'badge-purple'}">${l.section==='quota'?'Fixed Quota':'% Based'}</span>
+      </td>
       <td class="td-right td-bold td-red" style="padding:7px 12px">${fmt(l.amount)}</td>
     </tr>`).join('')}`:'';
 
@@ -2577,6 +2718,8 @@ async function renderRemittances(){
         Showing <strong>${income.length}</strong> income record(s) in this period.
       </div>
     </div>
+
+    ${renderRemCutoffCard(settings)}
 
     <!-- KPI Summary -->
     <div class="kpi-grid" style="margin-bottom:12px">
