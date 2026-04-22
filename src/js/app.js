@@ -69,8 +69,8 @@ const INCOME_TYPES = [
   { key:'sundaySchool',    label:'Sunday School',          natl:1.00, local:0 },
   { key:'slo',             label:'Sunday Love Offering',   natl:0.30, local:0.70 },
   { key:'crm',             label:'CRM (Weekly Activities)',natl:0.60, local:0.40 },
-  { key:'workersOffering', label:"Workers' Offering",      natl:0.25, local:0.75 },
-  { key:'childrenOffering',label:"Children's Offering",    natl:0.35, local:0.65 }
+  { key:'workersOffering', label:"Gospel Fund (Workers' Offering)", natl:0.25, local:0.75 },
+  { key:'childrenOffering',label:"Teen/Children's Offering",        natl:0.35, local:0.65 }
 ];
 
 const EXPENSE_CATS = [
@@ -1949,7 +1949,7 @@ async function renderIncomeSummary(records){
               <div class="status-row-amt td-red">${fmt(l.national||0)}</div>
             </div>
             ${(l.area||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Area / Zonal</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.area)}</div></div>`:''}
-            ${(l.pastor||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Pastor's Share</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.pastor)}</div></div>`:''}
+            ${(l.pastor||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Pastor's Family Share</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.pastor)}</div></div>`:''}
             ${(l.ministers||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Ministers' Share</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.ministers)}</div></div>`:''}
             ${(l.seed||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Seed (Pastor's Children)</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.seed)}</div></div>`:''}`;
           }
@@ -2751,7 +2751,7 @@ async function renderRemittances(){
 
   const tgLines=[
     { label:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      amount:rem.totalArea,     section:'tg' },
-    { label:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor,   section:'tg' },
+    { label:`Thanksgiving → Pastor's Family Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor,   section:'tg' },
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters,section:'tg' },
     { label:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0,  section:'tg' },
   ].filter(l=>l.amount>0);
@@ -2955,11 +2955,11 @@ async function renderRemittances(){
           </div>
         </div>
 
-        <!-- Pastor's Share card -->
-        ${(rem.totalPastor||0)+(rem.totalArea||0)+(rem.totalSeed||0)>0?`
+        <!-- Pastor's Family Share card -->
+        ${(rem.totalPastor||0)+(rem.totalArea||0)+(rem.totalSeed||0)+(quotas.find(q=>q.label.toLowerCase().includes('mummy'))?.amount||0)>0?`
         <div class="card" style="margin-top:12px">
-          <div class="card-header"><span class="card-title">👨‍💼 Pastor's Share</span></div>
-          <p style="font-size:11px;color:var(--text3);margin-bottom:10px">Thanksgiving portions due to the Pastor (as Zonal / Area Pastor).</p>
+          <div class="card-header"><span class="card-title">👨‍💼 Pastor's Family Share</span></div>
+          <p style="font-size:11px;color:var(--text3);margin-bottom:10px">Thanksgiving portions and stipend due to the Pastor's family (as Zonal / Area Pastor).</p>
           ${(rem.totalArea||0)>0?`
           <div class="status-row">
             <div class="status-row-label">TG → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)</div>
@@ -2967,7 +2967,7 @@ async function renderRemittances(){
           </div>`:''}
           ${(rem.totalPastor||0)>0?`
           <div class="status-row">
-            <div class="status-row-label">TG → Pastor's Share (${Math.round(rr.tgPastor*100)}%)</div>
+            <div class="status-row-label">TG → Pastor's Family Share (${Math.round(rr.tgPastor*100)}%)</div>
             <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalPastor)}</div>
           </div>`:''}
           ${(rem.totalSeed||0)>0?`
@@ -2975,9 +2975,14 @@ async function renderRemittances(){
             <div class="status-row-label">TG → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)</div>
             <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalSeed)}</div>
           </div>`:''}
+          ${(()=>{ const mq=quotas.find(q=>q.label.toLowerCase().includes('mummy')); return mq&&(mq.amount||0)>0?`
+          <div class="status-row">
+            <div class="status-row-label">${mq.label} (Fixed Monthly)</div>
+            <div class="status-row-amt" style="color:var(--primary)">${fmt(mq.amount)}</div>
+          </div>`:'' })()}
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px">
-            <div class="status-row-label fw-bold">TOTAL PASTOR'S SHARE</div>
-            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt((rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalSeed||0))}</div>
+            <div class="status-row-label fw-bold">TOTAL PASTOR'S FAMILY SHARE</div>
+            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt((rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalSeed||0)+(quotas.find(q=>q.label.toLowerCase().includes('mummy'))?.amount||0))}</div>
           </div>
         </div>`:''}
       </div>
@@ -2997,7 +3002,7 @@ async function showRemittancePaymentModal(){
   const lines=[
     ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0 })),
     { label:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      amount:rem.totalArea },
-    { label:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor },
+    { label:`Thanksgiving → Pastor's Family Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor },
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters },
     { label:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0 },
     { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`, amount:rem.provinceRebate },
@@ -3332,7 +3337,7 @@ async function printRemittanceReport(fromOverride, toOverride){
   // ─── PART B: OTHER DISBURSEMENTS ─────────────────────────────────
   const partBRows=[
     { desc:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,       type:'% Based', amount:rem.totalArea||0 },
-    { desc:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,          type:'% Based', amount:rem.totalPastor||0 },
+    { desc:`Thanksgiving → Pastor's Family Share (${Math.round(rr.tgPastor*100)}%)`,          type:'% Based', amount:rem.totalPastor||0 },
     { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,     type:'% Based', amount:rem.totalMinisters||0 },
     { desc:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`,  type:'% Based', amount:rem.totalSeed||0 },
     ...mummyQuotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 }))
@@ -6395,7 +6400,7 @@ function renderAdminRates(s){
       <tr><th>Recipient</th><th>Percentage</th></tr>
       <tr><td>TG → National HQ</td><td>${rateInput('rate_tgNational', r.tgNational ?? DEFAULT_REMITTANCE_RATES.tgNational)}</td></tr>
       <tr><td>TG → Area</td><td>${rateInput('rate_tgArea', r.tgArea ?? DEFAULT_REMITTANCE_RATES.tgArea)}</td></tr>
-      <tr><td>TG → Pastor's Share</td><td>${rateInput('rate_tgPastor', r.tgPastor ?? DEFAULT_REMITTANCE_RATES.tgPastor)}</td></tr>
+      <tr><td>TG → Pastor's Family Share</td><td>${rateInput('rate_tgPastor', r.tgPastor ?? DEFAULT_REMITTANCE_RATES.tgPastor)}</td></tr>
       <tr><td>TG → Ministers' Share</td><td>${rateInput('rate_tgMinisters', r.tgMinisters ?? DEFAULT_REMITTANCE_RATES.tgMinisters)}</td></tr>
       <tr><td>TG → Seed — Pastor's Children</td><td>${rateInput('rate_tgSeed', r.tgSeed ?? DEFAULT_REMITTANCE_RATES.tgSeed)}</td></tr>
     </table></div>

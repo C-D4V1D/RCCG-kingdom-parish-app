@@ -41,12 +41,12 @@ const REMITTANCE_RATES = {
   workersOffering: {
     national: 0.25,
     local: 0.75,
-    label: "Workers' Offering"
+    label: "Gospel Fund (Workers' Offering)"
   },
   childrenOffering: {
     national: 0.35,
     localChildrensDept: 0.65,
-    label: "Children's Offering"
+    label: "Teen/Children's Offering"
   }
 };
 
@@ -184,7 +184,7 @@ function calculateRemittances(income) {
   }
 
   // Province Rebate = 20% of local retained tithes ONLY (Members' Tithe + Ministers' Tithe)
-  // This is NOT applied to SLO, CRM, Workers' Offering, Children's Offering etc.
+  // This is NOT applied to SLO, CRM, Gospel Fund (Workers' Offering), Teen/Children's Offering etc.
   result.totals.provinceRebate = (result.totals.localTithe || 0) * PROVINCE_REBATE_RATE;
   result.totals.netLocalRetained = result.totals.localRetainedBeforeRebate - result.totals.provinceRebate;
 
