@@ -1527,6 +1527,7 @@ async function renderDashboard(){
   }
   // When no cut-off is configured, fall back to full calendar month (existing behaviour).
   const remIncome = dashCutoffDay ? filterByDateRange(allIncomeDash, dashRemFromDate, dashRemToDate) : income;
+  const remIncomePeriodTotal = remIncome.reduce((s,r)=>s+(r.totalCollection||0),0);
   const remittances = await calcRemittancesFromRecords(remIncome);
   const dashQuotas = getQuotaList(settings);
   const dashRegionalQuota = dashQuotas.find(q=>q.label.toLowerCase().includes('regional contribution'));
@@ -1658,10 +1659,10 @@ async function renderDashboard(){
       <div class="kpi">
         <div class="kpi-icon" style="background:#FCEBEB">📤</div>
         <div class="kpi-label">RCCG Remittances Due</div>
-        <div class="kpi-val">${fmt(remittances.totalNatl+dashNatlQuotasAmt+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))}</div>
+        <div class="kpi-val">${fmt(dashTotalRemDueKpi)}</div>
         <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
         ${dashCutoffDay?`<div class="kpi-delta" style="color:var(--text3);font-size:11px">📋 Based on period: ${fmtDate(dashRemFromDate)} – ${fmtDate(dashRemToDate)}</div>`:''}
-        <div class="kpi-delta warn">↑ ${totalIncome?Math.round((remittances.totalNatl+dashNatlQuotasAmt+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))/(dashCutoffDay?remIncome.reduce((s,r)=>s+(r.totalCollection||0),0):totalIncome)*100):0}% of${dashCutoffDay?' period':''} income</div>
+        <div class="kpi-delta warn">↑ ${remIncomePeriodTotal?Math.round(dashTotalRemDueKpi/remIncomePeriodTotal*100):0}% of${dashCutoffDay?' period':''} income</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
