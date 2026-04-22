@@ -1501,34 +1501,7 @@ async function renderDashboard(){
 
   const totalIncome = income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
-
-  // Determine the remittance period dates the same way renderRemittances does, so the
-  // "RCCG Remittances Due" figure on the dashboard matches the Remittances page exactly.
-  // Income recorded after the cut-off date belongs to the next period and must be excluded.
-  const dashCutoffConfig = getRemCutoffDates(settings, state.year);
-  const dashCutoffYear = dashCutoffConfig ? Number(dashCutoffConfig.year) : null;
-  const dashCutoffDay = (dashCutoffConfig && dashCutoffYear === state.year && Number.isInteger(dashCutoffConfig.dates[state.month]))
-    ? dashCutoffConfig.dates[state.month] : null;
-  let dashRemFromDate, dashRemToDate;
-  if(dashCutoffDay){
-    dashRemToDate = ymdLocal(new Date(state.year, state.month, dashCutoffDay));
-    const prevMonth = state.month === 0 ? 11 : state.month - 1;
-    const prevYear  = state.month === 0 ? state.year - 1 : state.year;
-    const prevCutoffConfig = getRemCutoffDates(settings, prevYear);
-    const prevCutoffDay = (prevCutoffConfig && Number.isInteger(prevCutoffConfig.dates[prevMonth]) && Number(prevCutoffConfig.year) === prevYear)
-      ? prevCutoffConfig.dates[prevMonth] : null;
-    if(prevCutoffDay){
-      const d = new Date(prevYear, prevMonth, prevCutoffDay);
-      d.setDate(d.getDate() + 1);
-      dashRemFromDate = ymdLocal(d);
-    } else {
-      dashRemFromDate = ymdLocal(new Date(state.year, state.month, 1));
-    }
-  }
-  // When no cut-off is configured, fall back to full calendar month (existing behaviour).
-  const remIncome = dashCutoffDay ? filterByDateRange(allIncomeDash, dashRemFromDate, dashRemToDate) : income;
-  const remIncomePeriodTotal = remIncome.reduce((s,r)=>s+(r.totalCollection||0),0);
-  const remittances = await calcRemittancesFromRecords(remIncome);
+  const remittances = await calcRemittancesFromRecords(income);
   const dashQuotas = getQuotaList(settings);
   const dashRegionalQuota = dashQuotas.find(q=>q.label.toLowerCase().includes('regional contribution'));
   const dashMummyQuota   = dashQuotas.find(q=>q.label.toLowerCase().includes('mummy'));
@@ -1544,20 +1517,24 @@ async function renderDashboard(){
   const dashMonthPrefix = `${state.year}-${String(state.month+1).padStart(2,'0')}`;
   const dashMonthPaidRems = allRemsDash.filter(r=>r.status==='paid' && (r.periodTo||'').startsWith(dashMonthPrefix));
   const dashMonthPaidAmt = dashMonthPaidRems.reduce((s,r)=>s+(r.amount||0),0);
-  const dashTotalRemDueKpi = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
+  // Unpaid amounts carried over from previous periods.
+  const dashOverdueRems = allRemsDash.filter(r=>r.status==='overdue');
+  const dashOverdueUnpaidAmt = dashOverdueRems.reduce((s,r)=>s+(r.amount||0),0);
+  const dashCurrentMonthRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
     +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
-  const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashTotalRemDueKpi * PAYMENT_TOLERANCE_THRESHOLD;
+  // Total due = this month's computed remittances + any unpaid overdue from previous months.
+  const dashTotalRemDueKpi = dashCurrentMonthRemDue + dashOverdueUnpaidAmt;
+  const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashCurrentMonthRemDue * PAYMENT_TOLERANCE_THRESHOLD;
   const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
   const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
   const churchBal = await calcChurchBalance();
   const pendingPetty = await getPettyCashPendingCount();
-  const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
+  const overdueRems = dashOverdueRems.length;
 
-  // Spendable = total church funds − outstanding remittances not yet paid
-  const dashTotalRemDue = dashTotalRemDueKpi;
-  const dashPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-  const dashOutstandingRems = Math.max(0, dashTotalRemDue - dashPaidRems);
+  // Spendable = total church funds − total outstanding remittances (current month + all overdue) − already paid
+  const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
+  const dashOutstandingRems = Math.max(0, dashTotalRemDueKpi - dashAllPaidRems);
   const dashTotalFunds = churchBal.total;
   const dashSpendable = dashTotalFunds - dashOutstandingRems;
   const dashSpendLow = parseFloat(settingsDash?.spendableLow||0)||20000;
@@ -1661,8 +1638,8 @@ async function renderDashboard(){
         <div class="kpi-label">RCCG Remittances Due</div>
         <div class="kpi-val">${fmt(dashTotalRemDueKpi)}</div>
         <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
-        ${dashCutoffDay?`<div class="kpi-delta" style="color:var(--text3);font-size:11px">📋 Based on period: ${fmtDate(dashRemFromDate)} – ${fmtDate(dashRemToDate)}</div>`:''}
-        <div class="kpi-delta warn">↑ ${remIncomePeriodTotal?Math.round(dashTotalRemDueKpi/remIncomePeriodTotal*100):0}% of${dashCutoffDay?' period':''} income</div>
+        ${dashOverdueUnpaidAmt>0?`<div class="kpi-delta warn" style="font-size:11px">⚠ Includes ${fmt(dashOverdueUnpaidAmt)} unpaid from previous month(s)</div>`:''}
+        <div class="kpi-delta warn">↑ ${totalIncome?Math.round(dashTotalRemDueKpi/totalIncome*100):0}% of income</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
