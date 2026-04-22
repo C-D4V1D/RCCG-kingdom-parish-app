@@ -242,6 +242,14 @@ function countSundaysInMonth(year, month){
 }
 function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
 function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'}) }
+function ymdLocal(d){
+  const dt = d instanceof Date ? d : new Date(d);
+  if(isNaN(dt.getTime())) return '';
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth()+1).padStart(2,'0');
+  const day = String(dt.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
 function uid(){ return Date.now().toString(36) }
 function hasPermission(p){
   if(!state.user) return false;
@@ -315,7 +323,7 @@ function filterByDateRange(arr, fromDate, toDate){
   return (arr||[]).filter(r=>{
     const raw = new Date(r.date||r.createdAt||'');
     if(isNaN(raw.getTime())) return false;
-    const d = raw.toISOString().split('T')[0];
+    const d = ymdLocal(raw);
     return d >= fromDate && d <= toDate;
   });
 }
@@ -2471,10 +2479,19 @@ async function submitOtherIncome(btn=null){
 const REM_MONTHS = ['January','February','March','April','May','June',
                     'July','August','September','October','November','December'];
 
-function getRemCutoffDates(settings){
-  // Returns array of 12 day-numbers (1-31), default null if not set
+function getRemCutoffDates(settings, year=null){
+  // Returns {year, dates} where dates is an array of 12 day-numbers (1-31), else null
+  const targetYear = Number.isInteger(Number(year)) ? Number(year) : null;
+  const byYear = settings?.remCutoffDatesByYear;
+  if(targetYear && byYear && typeof byYear==='object'){
+    const fromYear = byYear[targetYear];
+    if(Array.isArray(fromYear) && fromYear.length===12) return { year: targetYear, dates: fromYear };
+  }
   const saved = settings?.remCutoffDates;
-  if(saved && Array.isArray(saved.dates) && saved.dates.length===12) return saved;
+  if(saved && Array.isArray(saved.dates) && saved.dates.length===12){
+    const savedYear = Number(saved.year);
+    if(!targetYear || savedYear===targetYear) return { year: savedYear, dates: saved.dates };
+  }
   return null;
 }
 
@@ -2503,7 +2520,7 @@ function getOrdinalSuffix(day){
 }
 
 function renderRemCutoffCard(settings){
-  const c = getRemCutoffDates(settings);
+  const c = getRemCutoffDates(settings, state.year) || getRemCutoffDates(settings);
   const now = new Date();
   const curMonth = now.getMonth(); // 0-11
   const curYear = now.getFullYear();
@@ -2582,8 +2599,9 @@ function toggleRemCutoff(){
 async function showRemCutoffModal(){
   if(!canEditRemCutoff()){ showAlert('Only IT Admin, Pastor, or Accountant can edit cut-off dates.','danger'); return; }
   const settings = await DB.getSettings();
-  const c = getRemCutoffDates(settings);
-  const year = c?.year || new Date().getFullYear();
+  const preferredYear = Number.isInteger(state.year) ? state.year : new Date().getFullYear();
+  const c = getRemCutoffDates(settings, preferredYear) || getRemCutoffDates(settings);
+  const year = c?.year || preferredYear;
   const dates = c?.dates || Array(12).fill('');
 
   const inputs = REM_MONTHS.map((m, i) => `
@@ -2633,6 +2651,10 @@ async function saveRemCutoffDates(){
     return;
   }
   const settings = await DB.getSettings();
+  if(!settings.remCutoffDatesByYear || typeof settings.remCutoffDatesByYear!=='object'){
+    settings.remCutoffDatesByYear = {};
+  }
+  settings.remCutoffDatesByYear[year] = dates;
   settings.remCutoffDates = { year, dates };
   await DB.saveSettings(settings);
   DB.addAudit('rem_cutoff_updated', `Remittance cut-off dates set for ${year}`, state.user?.name);
@@ -2649,7 +2671,7 @@ async function renderRemittances(){
   const rr = await getRemRates();
 
   // --- Cut-off date for selected month (governs To date when configured) ---
-  const cutoffConfig = getRemCutoffDates(settings);
+  const cutoffConfig = getRemCutoffDates(settings, state.year);
   const cutoffYear = cutoffConfig ? Number(cutoffConfig.year) : null;
   const cutoffDay = (cutoffConfig && cutoffYear === state.year && Number.isInteger(cutoffConfig.dates[state.month]))
     ? cutoffConfig.dates[state.month]
@@ -2657,15 +2679,15 @@ async function renderRemittances(){
   const hasCutoff = !!cutoffDay;
 
   // --- Determine period defaults ---
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = ymdLocal(new Date());
   // When cut-off dates are configured, always recalculate both From and To from the cut-off table
   if(hasCutoff){
     // To = current month's cut-off date
-    state.remToDate = new Date(state.year, state.month, cutoffDay).toISOString().split('T')[0];
+    state.remToDate = ymdLocal(new Date(state.year, state.month, cutoffDay));
     // From = day after the previous month's cut-off date (wrapping year if needed)
     const prevMonth = state.month === 0 ? 11 : state.month - 1;
     const prevYear  = state.month === 0 ? state.year - 1 : state.year;
-    const prevCutoffConfig = state.month === 0 ? null : cutoffConfig; // same config object, different month index
+    const prevCutoffConfig = getRemCutoffDates(settings, prevYear);
     const prevCutoffDay = (prevCutoffConfig && Number.isInteger(prevCutoffConfig.dates[prevMonth]) && Number(prevCutoffConfig.year) === prevYear)
       ? prevCutoffConfig.dates[prevMonth]
       : null;
@@ -2673,10 +2695,10 @@ async function renderRemittances(){
       // Day after previous month's cut-off
       const d = new Date(prevYear, prevMonth, prevCutoffDay);
       d.setDate(d.getDate() + 1);
-      state.remFromDate = d.toISOString().split('T')[0];
+      state.remFromDate = ymdLocal(d);
     } else {
       // No cut-off for previous month — fall back to first day of current month
-      state.remFromDate = new Date(state.year, state.month, 1).toISOString().split('T')[0];
+      state.remFromDate = ymdLocal(new Date(state.year, state.month, 1));
     }
   } else {
   if(!state.remFromDate){
@@ -2686,13 +2708,13 @@ async function renderRemittances(){
     if(lastPaid){
       const d=new Date(lastPaid.paidDate||lastPaid.createdAt||0);
       if(isNaN(d.getTime())){
-        state.remFromDate=new Date(state.year,state.month,1).toISOString().split('T')[0];
+        state.remFromDate=ymdLocal(new Date(state.year,state.month,1));
       } else {
         d.setDate(d.getDate()+1);
-        state.remFromDate=d.toISOString().split('T')[0];
+        state.remFromDate=ymdLocal(d);
       }
     } else {
-      state.remFromDate=new Date(state.year,state.month,1).toISOString().split('T')[0];
+      state.remFromDate=ymdLocal(new Date(state.year,state.month,1));
     }
   }
   if(!state.remToDate){
