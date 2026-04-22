@@ -1577,7 +1577,7 @@ async function renderDashboard(){
           <a onclick="App.setIncomeTab('all');App.navigate('income')" style="cursor:pointer;text-decoration:none;color:inherit;display:block">
             <span style="display:inline-block;width:8px;height:8px;background:${churchBal.cashDeficit>0?'var(--danger)':'#BA7517'};border-radius:50%;margin-right:4px"></span>
             ${churchBal.cashDeficit>0
-              ? `<span style="color:var(--danger);font-weight:600">Cash with Accountant: ₦0 ⚠ Cash deficit: ${fmt(churchBal.cashDeficit)}</span>`
+              ? `<span style="color:var(--danger);font-weight:600">🔴 Cash with Accountant: - ${fmt(churchBal.cashDeficit)} ⚠ Owes Accountant</span>`
               : `Cash with Accountant: ${fmt(churchBal.cashWithAccountant)}`}
           </a>
           <a onclick="App.navigate('petty_cash')" style="cursor:pointer;text-decoration:none;color:inherit;display:block">
