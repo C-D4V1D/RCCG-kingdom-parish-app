@@ -240,6 +240,20 @@ function countSundaysInMonth(year, month){
   while(d.getMonth() === month && d.getDate() <= limit){ if(d.getDay() === 0) count++; d.setDate(d.getDate()+1); }
   return count;
 }
+function countSundaysBetween(fromDate, toDate){
+  const start = fromDate instanceof Date ? fromDate : new Date(fromDate);
+  const end = toDate instanceof Date ? toDate : new Date(toDate);
+  if(isNaN(start.getTime()) || isNaN(end.getTime())) return 0;
+  if(start > end) return 0;
+  const d = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const limit = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+  let count = 0;
+  while(d <= limit){
+    if(d.getDay() === 0) count++;
+    d.setDate(d.getDate() + 1);
+  }
+  return count;
+}
 function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
 function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'}) }
 function ymdLocal(d){
@@ -1496,6 +1510,7 @@ async function renderDashboard(){
     .reduce((s,q)=>s+(q.amount||0),0);
   const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
   const netLocal = remittances.netLocal - dashAllQuotasAmt;
+  const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month);
   const churchBal = await calcChurchBalance();
   const pendingPetty = await getPettyCashPendingCount();
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
@@ -1607,6 +1622,7 @@ async function renderDashboard(){
         <div class="kpi-icon" style="background:#FCEBEB">📤</div>
         <div class="kpi-label">RCCG Remittances Due</div>
         <div class="kpi-val">${fmt(remittances.totalNatl+dashNatlQuotasAmt+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))}</div>
+        <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
         <div class="kpi-delta warn">↑ ${totalIncome?Math.round((remittances.totalNatl+dashNatlQuotasAmt+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))/totalIncome*100):0}% of income</div>
       </div>
       <div class="kpi">
@@ -2502,6 +2518,32 @@ function remCutoffDayForMonth(settings, monthIdx){
   return c.dates[monthIdx] || null;
 }
 
+function getRemittanceDueLabel(settings, year=state.year, month=state.month){
+  const cutoffConfig = getRemCutoffDates(settings, year);
+  const cutoffYear = cutoffConfig ? Number(cutoffConfig.year) : null;
+  const cutoffDay = (cutoffConfig && cutoffYear === year && Number.isInteger(cutoffConfig.dates[month]))
+    ? cutoffConfig.dates[month]
+    : null;
+  if(!cutoffDay) return `Due date not set for ${MONTHS[month]}`;
+
+  const dueDate = new Date(year, month, cutoffDay);
+  if(isNaN(dueDate.getTime())) return 'Due date not set';
+
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const due = new Date(dueDate.getFullYear(), dueDate.getMonth(), dueDate.getDate());
+  const dayDiff = Math.round((due - today) / 86400000);
+
+  if(dayDiff === 0) return `Due today (${fmtDate(due)})`;
+  if(dayDiff < 0) return `Cut-off passed ${Math.abs(dayDiff)} day${Math.abs(dayDiff)!==1?'s':''} ago (${fmtDate(due)})`;
+
+  if(due.getDay() === 0){
+    const sundays = countSundaysBetween(today, due);
+    if(sundays > 0) return `Due in next ${sundays} Sunday${sundays!==1?'s':''} (${fmtDate(due)})`;
+  }
+  return `Due in ${dayDiff} day${dayDiff!==1?'s':''} (${fmtDate(due)})`;
+}
+
 function canEditRemCutoff(){
   return ['it_admin','pastor','accountant'].includes(state.user?.role);
 }
@@ -2767,6 +2809,7 @@ async function renderRemittances(){
 
   const allLines=[...incomeLines,...tgLines,...provinceLines,...quotaLines];
   const totalDue=allLines.reduce((s,l)=>s+l.amount,0);
+  const remDueLabel = getRemittanceDueLabel(settings, state.year, state.month);
   const quotasTotal=quotaLines.reduce((s,l)=>s+l.amount,0);
   const trueNetLocal=rem.netLocal-quotasTotal;
   // Only count income that goes through the remittance split (records with INCOME_TYPES fields)
@@ -2845,7 +2888,7 @@ async function renderRemittances(){
     <!-- KPI Summary -->
     <div class="kpi-grid" style="margin-bottom:12px">
       <div class="kpi"><div class="kpi-icon" style="background:#E8F4FD">💰</div><div class="kpi-label">Total Collection</div><div class="kpi-val">${fmt(totalCollection)}</div></div>
-      <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Total Remittance Due</div><div class="kpi-val">${fmt(totalDue)}</div></div>
+      <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Total Remittance Due</div><div class="kpi-val">${fmt(totalDue)}</div><div class="kpi-delta" style="color:var(--text3)">📅 ${remDueLabel}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">✓</div><div class="kpi-label">Total Paid</div><div class="kpi-val">${fmt(totalPaid)}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">🏠</div><div class="kpi-label">Net Local Retained</div><div class="kpi-val">${fmt(trueNetLocal)}</div></div>
     </div>
