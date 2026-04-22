@@ -2535,9 +2535,10 @@ function renderRemCutoffCard(settings){
   if(!c){
     return `<div class="card" style="margin-bottom:12px">
       <div class="card-header">
-        <span onclick="App.toggleRemCutoff()" style="cursor:pointer;display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+        <span onclick="App.toggleRemCutoff()" style="cursor:pointer;display:flex;align-items:center;gap:8px;flex:1;min-width:0" title="${isOpen?'Collapse':'Expand'} cut-off dates">
           <span id="remCutoffChevron" style="font-size:10px;color:var(--text3);flex-shrink:0">${chevron}</span>
           <span class="card-title">📅 Remittance Cut-Off Dates</span>
+          <span id="remCutoffHint" style="font-size:11px;color:var(--text3);font-weight:400;font-style:italic;margin-left:2px">${isOpen?'(tap to collapse)':'(tap to expand)'}</span>
         </span>
         ${editBtn}
       </div>
@@ -2569,9 +2570,10 @@ function renderRemCutoffCard(settings){
 
   return `<div class="card" style="margin-bottom:12px">
     <div class="card-header">
-      <span onclick="App.toggleRemCutoff()" style="cursor:pointer;display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+      <span onclick="App.toggleRemCutoff()" style="cursor:pointer;display:flex;align-items:center;gap:8px;flex:1;min-width:0" title="${isOpen?'Collapse':'Expand'} cut-off dates">
         <span id="remCutoffChevron" style="font-size:10px;color:var(--text3);flex-shrink:0">${chevron}</span>
         <span class="card-title">📅 Remittance Cut-Off Dates — ${year}</span>
+        <span id="remCutoffHint" style="font-size:11px;color:var(--text3);font-weight:400;font-style:italic;margin-left:2px">${isOpen?'(tap to collapse)':'(tap to expand)'}</span>
       </span>
       ${editBtn}
     </div>
@@ -2592,8 +2594,10 @@ function toggleRemCutoff(){
   state.remCutoffOpen = !state.remCutoffOpen;
   const body = document.getElementById('remCutoffBody');
   const icon = document.getElementById('remCutoffChevron');
+  const hint = document.getElementById('remCutoffHint');
   if(body) body.style.display = state.remCutoffOpen ? 'block' : 'none';
   if(icon) icon.textContent = state.remCutoffOpen ? '▲' : '▼';
+  if(hint) hint.textContent = state.remCutoffOpen ? '(tap to collapse)' : '(tap to expand)';
 }
 
 async function showRemCutoffModal(){
@@ -2729,12 +2733,21 @@ async function renderRemittances(){
   const income=filterByDateRange(allIncome, fromDate, toDate);
   const rem=await calcRemittancesFromRecords(income);
 
-  // --- Build remittance lines (No Go-A-Fishing — not an HQ remittance) ---
+  // --- Build remittance lines ---
+  // Non-TG income types → National HQ (% based)
   const incomeLines=rem.lines.filter(l=>!l.isTg).map(l=>({
     label:l.label+' → National HQ',
     pct: l.total>0 ? Math.round((l.national/l.total)*100) : null,
     amount:l.national||0, section:'income', from:l
   })).filter(l=>l.amount>0);
+
+  // Thanksgiving National HQ portion (75%) — added as a separate income-based remittance line
+  const tgNatlAmt=rem.lines.filter(l=>l.isTg).reduce((s,l)=>s+(l.national||0),0);
+  if(tgNatlAmt>0) incomeLines.push({
+    label:'Thanksgiving (TG) → National HQ',
+    pct: Math.round(rr.tgNational*100),
+    amount:tgNatlAmt, section:'income'
+  });
 
   const tgLines=[
     { label:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      amount:rem.totalArea,     section:'tg' },
@@ -2792,7 +2805,7 @@ async function renderRemittances(){
     <div class="page-header">
       <div>
         <div class="page-title">Remittances</div>
-        <div class="page-sub">All amounts due to RCCG National & Provincial authorities</div>
+        <div class="page-sub">Summary of all amounts due to HQ, Province, and for local distribution</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${canAction('remittance_record_payment')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Payment</button>`:''}
@@ -2848,8 +2861,8 @@ async function renderRemittances(){
         </div>
         <div class="table-wrap"><table style="width:100%">
           <tr><th>Description</th><th style="width:100px">Type</th><th class="td-right" style="width:130px">Amount Due (₦)</th></tr>
-          ${renderSection(incomeLines,'Income-Based Remittances (% of collections)')}
-          ${renderSection(tgLines,'Thanksgiving Offering Distribution')}
+          ${renderSection(incomeLines,'Income-Based Remittances → National HQ (% of collections)')}
+          ${renderSection(tgLines,'Thanksgiving — Pastoral & Local Distribution')}
           ${renderSection(provinceLines,'Province Rebate (20% of Local Retained Tithes)')}
           ${renderSection(quotaLines,'Fixed Monthly Quotas')}
           <tr style="border-top:2px solid var(--border)">
