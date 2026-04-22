@@ -202,7 +202,7 @@ const DB = {
     updateNotifBadge();
   },
   markAllRead(){
-    apiFetch('notifications/read','POST').catch(()=>{});
+    return apiFetch('notifications/read','POST').catch(()=>{});
   },
   importBackup(data)            { return apiFetch('admin/import','POST',data); },
   clearAllData()                { return apiFetch('admin/clear','POST'); },
@@ -599,7 +599,7 @@ function updateSidebarUser(){
     <span style="display:inline-block;margin-top:4px;font-size:11px;padding:2px 8px;border-radius:10px;background:${r.bg};color:${r.color};font-weight:600">${r.label}</span>`;
 }
 
-function navigate(page, fromHistory){
+async function navigate(page, fromHistory){
   if(!canAccessPage(page)){
     if(page!=='dashboard') showAlert('You do not have permission to access that page.','danger');
     page='dashboard';
@@ -622,6 +622,7 @@ function navigate(page, fromHistory){
   document.getElementById('sidebarOverlay').classList.remove('visible');
   // Close notifications
   document.getElementById('notifPanel').style.display='none';
+  await Promise.all([buildSidebar(), updateNotifBadge()]);
   setTimeout(()=>{ renderPage(page).catch(e=>console.error(e)); },50);
 }
 
@@ -639,7 +640,8 @@ async function toggleNotifications(){
     const list=document.getElementById('notifList');
     if(!notifs.length){ list.innerHTML='<div class="notif-empty">No notifications</div>'; }
     else{ list.innerHTML=notifs.slice(0,15).map(n=>`<div class="notif-item" style="opacity:${n.read?0.6:1}"><div class="notif-item-title">${esc(n.title)}</div><div class="notif-item-body">${esc(n.body)}</div><div class="notif-item-time">${fmtDate(n.ts)} ${fmtTime(n.ts)}</div></div>`).join('') }
-    DB.markAllRead();
+    await DB.markAllRead();
+    await updateNotifBadge();
   }
 }
 
@@ -1432,25 +1434,28 @@ async function calcChurchBalance(){
     return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
   }, 0);
   const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
-  const cashExpenses = allExpenses.reduce((s,e)=>{
+  const cashExpenses = allExpenses.filter(e=>e.status==='approved').reduce((s,e)=>{
     if(e.paymentMethod==='cash') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.cashAmount||0);
     return s;
   }, 0);
   // Petty top-ups via accountant's cash reduce the accountant's cash holding
-  const pettyCashTopups = pettyHistory.filter(h=>h.type==='refill'&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
+  const pettyCashTopups = pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.cashAmount||0):(h.amount||0)),0);
-  const cashWithAccountant = cashFromCollections - cashDepositedToBank + bankToAccountant - cashExpenses - pettyCashTopups;
+  const cashWithAccountantRaw = cashFromCollections - cashDepositedToBank + bankToAccountant - cashExpenses - pettyCashTopups;
 
   // --- PETTY CASH (with Admin Officer) ---
   // pettyFloat can be negative — means Admin Officer spent personal money and church owes them
   const pettyFloat = petty.float;
 
   return {
-    cashWithAccountant: Math.max(0, cashWithAccountant),
+    cashWithAccountant: Math.max(0, cashWithAccountantRaw),
+    // cashDeficit > 0 means approved cash outflows exceed recorded cash inflows —
+    // the accountant has spent more than was received in cash (data entry review may be needed)
+    cashDeficit: Math.max(0, -cashWithAccountantRaw),
     bankBalance,
     pettyFloat,
-    total: Math.max(0, cashWithAccountant) + bankBalance + pettyFloat
+    total: cashWithAccountantRaw + bankBalance + pettyFloat
   };
 }
 
@@ -1485,7 +1490,7 @@ async function renderDashboard(){
     +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
   const dashPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   const dashOutstandingRems = Math.max(0, dashTotalRemDue - dashPaidRems);
-  const dashTotalFunds = churchBal.bankBalance + Math.max(0, churchBal.cashWithAccountant) + churchBal.pettyFloat;
+  const dashTotalFunds = churchBal.total;
   const dashSpendable = dashTotalFunds - dashOutstandingRems;
   const dashSpendLow = parseFloat(settingsDash?.spendableLow||0)||20000;
   const dashSpendColor = dashSpendable < 0 ? 'var(--danger)' : dashSpendable < dashSpendLow ? '#B8860B' : 'var(--success)';
@@ -1601,7 +1606,12 @@ async function renderDashboard(){
         <div class="kpi-val" style="color:${churchBal.total<0?'var(--danger)':'var(--primary)'}">${fmt(churchBal.total)}</div>
         <div style="margin-top:6px;font-size:11px;color:var(--text3);line-height:1.8">
           <a onclick="App.navigate('bank')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:4px"></span>Bank: ${fmt(churchBal.bankBalance)}</a>
-          <a onclick="App.setIncomeTab('all');App.navigate('income')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#BA7517;border-radius:50%;margin-right:4px"></span>Cash with Accountant: ${fmt(churchBal.cashWithAccountant)}</a>
+          <a onclick="App.setIncomeTab('all');App.navigate('income')" style="cursor:pointer;text-decoration:none;color:inherit;display:block">
+            <span style="display:inline-block;width:8px;height:8px;background:${churchBal.cashDeficit>0?'var(--danger)':'#BA7517'};border-radius:50%;margin-right:4px"></span>
+            ${churchBal.cashDeficit>0
+              ? `<span style="color:var(--danger);font-weight:600">🔴 Cash with Accountant: - ${fmt(churchBal.cashDeficit)} ⚠ Owes Accountant</span>`
+              : `Cash with Accountant: ${fmt(churchBal.cashWithAccountant)}`}
+          </a>
           <a onclick="App.navigate('petty_cash')" style="cursor:pointer;text-decoration:none;color:inherit;display:block">
             <span style="display:inline-block;width:8px;height:8px;background:${churchBal.pettyFloat<0?'var(--danger)':'#1D9E75'};border-radius:50%;margin-right:4px"></span>
             ${churchBal.pettyFloat<0
@@ -1798,7 +1808,7 @@ async function renderIncomeList(records, cashTxOverride){
               ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} still pending</span>`
               : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
         return `<tr>
-          <td><strong>${fmtDate(r.date)}</strong>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
+          <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.date)}</div>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
           <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
           <td class="td-muted">${cashHeld>0?fmt(cashHeld):'—'}</td>
           <td class="td-muted">${btAmt>0?fmt(btAmt):'—'}</td>
@@ -1823,7 +1833,7 @@ async function renderIncomeList(records, cashTxOverride){
             ? `<span class="badge badge-success">✓ Deposited</span>`
             : `<span class="badge badge-warn">⏳ Pending</span>`;
         return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="Sunday Collection ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
-          <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div></td>
+          <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div><div class="td-muted" style="font-size:11px">${fmtTime(r.date)}</div></td>
           <td style="max-width:0;width:55%">
             <div style="font-size:13px;font-weight:500">📅 Sunday Collection</div>
             <div style="margin-top:3px">${mobileStatus}</div>
@@ -1853,7 +1863,7 @@ async function renderOtherIncomeList(records){
               ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} pending</span>`
               : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
         return `<tr>
-          <td><strong>${fmtDate(r.date)}</strong></td>
+          <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.date)}</div></td>
           <td><span class="badge badge-gray">${src.label}</span></td>
           <td class="td-muted">${r.donorName||r.notes||'—'}</td>
           <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
@@ -1876,7 +1886,7 @@ async function renderOtherIncomeList(records){
             ? `<span class="badge badge-success">✓ Deposited</span>`
             : `<span class="badge badge-warn">⏳ Pending</span>`;
         return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(src.label)} ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
-          <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div></td>
+          <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div><div class="td-muted" style="font-size:11px">${fmtTime(r.date)}</div></td>
           <td style="max-width:0;width:55%">
             <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="badge badge-gray">${esc(src.label)}</span></div>
             <div class="td-muted" style="font-size:11px;margin-top:3px">${r.donorName||r.notes?esc(r.donorName||r.notes||''):''}</div>
@@ -1975,8 +1985,7 @@ async function renderAllIncomeList(records, cashTxOverride){
               : `<span class="badge badge-warn">⏳ Pending</span>`;
         const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
         return `<tr>
-          <td><strong>${fmtDate(r.date)}</strong>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
-          <td><span class="badge badge-gray" style="font-size:11px">${srcLabel}</span>${r.donorName?`<div class="td-muted">${r.donorName}</div>`:''}</td>
+          <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.date)}</div>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
           <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
           <td class="td-muted">${cashHeld>0?fmt(cashHeld):'—'}</td>
           <td class="td-muted">${btAmt>0?fmt(btAmt):'—'}</td>
@@ -2006,6 +2015,7 @@ async function renderAllIncomeList(records, cashTxOverride){
         return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(srcLabel)} ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
           <td>
             <div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div>
+            <div class="td-muted" style="font-size:11px">${fmtTime(r.date)}</div>
             ${r.notes?`<div class="td-muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:80px">${esc(r.notes)}</div>`:''}
           </td>
           <td style="max-width:0;width:55%">
@@ -2099,11 +2109,12 @@ async function submitIncome(btn=null){
   const rec={date,usher,source:'sunday_collection',recordedBy:state.user?.name,depositConfirmed:false};
   let total=0;
   INCOME_TYPES.forEach(t=>{ const v=parseFloat(document.getElementById('inc_'+t.key)?.value||0)||0; rec[t.key]=v; total+=v });
+  total=Math.round(total);
   if(!total){ alert('Please enter at least one income amount.'); return }
   rec.totalCollection=total;
 
-  const bankTransferAmount = parseFloat(document.getElementById('inc_bank_transfer')?.value||0)||0;
-  const directPettyCash    = parseFloat(document.getElementById('inc_direct_petty')?.value||0)||0;
+  const bankTransferAmount = Math.round((parseFloat(document.getElementById('inc_bank_transfer')?.value||0)||0)*100)/100;
+  const directPettyCash    = Math.round((parseFloat(document.getElementById('inc_direct_petty')?.value||0)||0)*100)/100;
   if(bankTransferAmount + directPettyCash > total){
     alert(`Bank transfer (${fmt(bankTransferAmount)}) + direct petty cash (${fmt(directPettyCash)}) cannot exceed the total collection (${fmt(total)}).`);
     return;
@@ -2195,6 +2206,7 @@ async function confirmDeposit(id){
   const alreadyDeposited = allCashCD.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
   const remaining = Math.max(0, cashHeld - alreadyDeposited);
   const today = new Date().toISOString().split('T')[0];
+  state._depositRemaining = remaining;
   closeModal();
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -2233,6 +2245,11 @@ async function submitCashDeposit(incomeId, btn=null){
   const ref     = document.getElementById('dep_ref')?.value?.trim();
   const date    = document.getElementById('dep_date')?.value;
   if(!amount||!ref||!date){ alert('Please fill all required fields.'); return }
+  const maxDeposit = state._depositRemaining ?? Infinity;
+  if(amount > maxDeposit + 0.5){
+    showAlert(`Deposit amount (${fmt(amount)}) exceeds the cash available for this record (${fmt(maxDeposit)}). Please enter a correct amount.`,'danger');
+    return;
+  }
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
@@ -2277,7 +2294,7 @@ async function confirmBulkDeposit(){
       <tr><th style="width:36px;text-align:center">✓</th><th>Date</th><th>Source</th><th>Cash Held</th><th>Prev. Deposited</th><th class="td-right">Remaining</th></tr>
       ${pending.map((p,i)=>`<tr>
         <td style="text-align:center"><input type="checkbox" id="bulk_chk_${i}" data-remaining="${p.remaining}" checked onchange="App.updateBulkDepositTotal()" style="width:16px;height:16px;cursor:pointer;accent-color:var(--primary)" /></td>
-        <td><strong>${fmtDate(p.date)}</strong></td>
+        <td><strong>${fmtDate(p.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(p.date)}</div></td>
         <td class="td-muted" style="font-size:12px">${p.source}</td>
         <td>${fmt(p.cashHeld)}</td>
         <td>${p.deposited>0?fmt(p.deposited):'—'}</td>
@@ -2404,7 +2421,7 @@ async function submitOtherIncome(btn=null){
   const source     = document.getElementById('oi_source')?.value;
   const donorName  = document.getElementById('oi_donor')?.value?.trim();
   const category   = document.getElementById('oi_category')?.value;
-  const amount     = parseFloat(document.getElementById('oi_amount')?.value)||0;
+  const amount     = Math.round(parseFloat(document.getElementById('oi_amount')?.value)||0);
   const method     = document.getElementById('oi_method')?.value;
   const notes      = document.getElementById('oi_notes')?.value||'';
   if(!date||!source){ alert('Please select a date and source type.'); return }
@@ -3215,7 +3232,7 @@ async function renderExpenses(){
   const totalRemDue = (rem.totalNatl||0)+(rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalMinisters||0)+(rem.totalSeed||0)+(rem.provinceRebate||0)+totalQuotas;
   const paidRems = allRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   const outstandingRems = Math.max(0, totalRemDue - paidRems);
-  const totalChurch = churchBal.bankBalance + Math.max(0,churchBal.cashWithAccountant) + churchBal.pettyFloat;
+  const totalChurch = churchBal.total;
   const spendable = totalChurch - outstandingRems;
   const spendLow = parseFloat(settings?.spendableLow||0)||20000;
   const spendColor = spendable < 0 ? 'var(--danger)' : spendable < spendLow ? 'var(--amber)' : 'var(--success)';
@@ -3421,7 +3438,7 @@ async function renderExpenses(){
             ? '<span class="badge badge-success">Approved</span>'
             : '<span class="badge badge-warn">Pending Approval</span>';
           return `<tr>
-            <td style="white-space:nowrap">${fmtDate(e.date||e.createdAt)}</td>
+            <td style="white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.date||e.createdAt)}</div></td>
             <td><span class="badge badge-gray">${c.icon} ${c.label}</span></td>
             <td>
               <div style="font-size:13px;font-weight:500">${e.subCategory||e.description||'—'}</div>
@@ -3452,7 +3469,7 @@ async function renderExpenses(){
             ? '<span class="badge badge-success">Approved</span>'
             : '<span class="badge badge-warn">Pending</span>';
           return `<tr class="tx-mobile-row" onclick="App.showExpenseDetail('${e.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.showExpenseDetail('${e.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(e.subCategory||e.description||'Expense')} — ${fmt(e.amount)}">
-            <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(e.date||e.createdAt)}</div></td>
+            <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(e.date||e.createdAt)}</div><div class="td-muted" style="font-size:11px">${fmtTime(e.date||e.createdAt)}</div></td>
             <td style="max-width:0;width:55%">
               <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="badge badge-gray" style="font-size:11px">${c.icon} ${c.label}</span></div>
               <div class="td-muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">${esc(e.subCategory||e.description||'—')}</div>
@@ -4204,7 +4221,7 @@ function renderBankOverview(monthBankTx,bankBalance){
       ${monthBankTx.map(t=>{
         const isCredit = t.txAmt > 0;
         return `<tr>
-          <td>${fmtDate(t.date||t.createdAt)}</td>
+          <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.date||t.createdAt)}</div></td>
           <td><span class="badge ${isCredit?'badge-success':'badge-danger'}">${t.txType}</span></td>
           <td>${t.txLabel}</td>
           <td class="td-right ${isCredit?'td-green':'td-red'} td-bold">${isCredit?'+':''}${fmt(Math.abs(t.txAmt))}</td>
@@ -4221,7 +4238,7 @@ function renderBankWithdrawals(withdrawals){
     <div class="table-wrap"><table>
       <tr><th>Date</th><th>Amount</th><th>Destination</th><th>Description</th><th>Reference</th><th>Authorized By</th></tr>
       ${withdrawals.map(t=>`<tr>
-        <td>${fmtDate(t.date||t.createdAt)}</td>
+        <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.date||t.createdAt)}</div></td>
         <td class="td-red td-bold">${fmt(t.amount)}</td>
         <td><span class="badge badge-info">${(t.destination||'').replace(/_/g,' ')}</span></td>
         <td>${t.description||'—'}</td>
@@ -4239,7 +4256,7 @@ function renderBankDeposits(deposits){
     <div class="table-wrap"><table>
       <tr><th>Date</th><th>Amount</th><th>Description</th><th>Reference</th><th>Recorded By</th></tr>
       ${deposits.map(t=>`<tr>
-        <td>${fmtDate(t.date||t.createdAt)}</td>
+        <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.date||t.createdAt)}</div></td>
         <td class="td-green td-bold">${fmt(t.amount)}</td>
         <td>${t.description||'Cash deposit'}</td>
         <td class="td-muted">${t.reference||'—'}</td>
@@ -4257,7 +4274,7 @@ function renderBankCharges(charges){
     <div class="table-wrap"><table>
       <tr><th>Date</th><th>Sub-category</th><th>Description</th><th class="td-right">Amount</th><th>Receipt</th></tr>
       ${charges.map(e=>`<tr>
-        <td>${fmtDate(e.date||e.createdAt)}</td>
+        <td style="white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.date||e.createdAt)}</div></td>
         <td>${e.subCategory||'—'}</td>
         <td>${e.description||'—'}</td>
         <td class="td-right td-red td-bold">${fmt(e.amount)}</td>
@@ -4304,7 +4321,7 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
         ${bankTxAll.map(t=>{
           const isCredit = t.txAmt > 0;
           return `<tr>
-            <td>${fmtDate(t.date||t.createdAt)}</td>
+            <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.date||t.createdAt)}</div></td>
             <td><span class="badge ${isCredit?'badge-success':'badge-danger'}">${t.txType}</span></td>
             <td>${t.txLabel}</td>
             <td class="td-right ${!isCredit?'td-red':''}">${!isCredit?fmt(Math.abs(t.txAmt)):'—'}</td>
@@ -4554,7 +4571,7 @@ async function renderPettyCash(){
       <div class="table-wrap"><table>
         <tr><th>Date Approved</th><th>Request</th><th>Requested By</th><th>Approved By</th><th class="td-right">Amount</th><th>Action</th></tr>
         ${approvedTopups.map(r=>`<tr>
-          <td style="white-space:nowrap">${fmtDate(r.approvedAt||r.createdAt)}</td>
+          <td style="white-space:nowrap">${fmtDate(r.approvedAt||r.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(r.approvedAt||r.createdAt)}</div></td>
           <td>
             <div style="font-size:13px;font-weight:500">${r.purpose||'Wallet top-up'}</div>
             ${r.expenseRefs?.length?`<div style="font-size:11px;color:var(--text3)">${r.expenseRefs.length} expense(s) included</div>`:''}
@@ -4580,7 +4597,7 @@ async function renderPettyCash(){
         ${advancesAwaitingProof.map(r=>{
           const hrs=Math.round((Date.now()-new Date(r.approvedAt||r.createdAt).getTime())/3600000);
           return`<tr${hrs>48?' style="background:var(--danger-light)"':''}>
-            <td>${fmtDate(r.approvedAt||r.createdAt)}</td>
+            <td style="white-space:nowrap">${fmtDate(r.approvedAt||r.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(r.approvedAt||r.createdAt)}</div></td>
             <td>${r.purpose}</td>
             <td class="td-muted">${r.approvedBy||'—'}</td>
             <td><span class="badge ${hrs>48?'badge-danger':hrs>24?'badge-warn':'badge-info'}">${hrs}h${hrs>48?' ⚠ OVERDUE':''}</span></td>
@@ -4694,7 +4711,7 @@ async function renderPettyCash(){
                   ?`<span class="badge badge-gray">Ref: ${r.reference}</span>`
                   :'<span style="color:var(--text3)">—</span>';
             return `<tr style="${overdue?'background:var(--danger-light)':''}">
-              <td style="white-space:nowrap;font-size:12px">${fmtDate(r.createdAt)}</td>
+              <td style="white-space:nowrap;font-size:12px">${fmtDate(r.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt)}</div></td>
               <td>${typeTag}</td>
               <td style="font-size:12px">${r.purpose||'—'}</td>
               <td class="td-muted" style="font-size:12px">${r.requestedBy||'—'}</td>
@@ -4726,7 +4743,7 @@ async function renderPettyCash(){
                 ?`<span style="font-weight:600">${fmt(r.originalAmount||r.amount)}</span>`
                 :`<span style="color:var(--amber);font-weight:700">−${fmt(r.amount)}</span>`;
             return `<tr class="tx-mobile-row" style="cursor:pointer${overdue?';background:var(--danger-light)':''}" onclick="App.showPettyDetail('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.showPettyDetail('${r.id}')}" tabindex="0" role="button" aria-label="${esc(r.purpose||'Petty cash entry')} — ${fmt(r.originalAmount||r.amount)}">
-              <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.createdAt)}</div></td>
+              <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.createdAt)}</div><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt)}</div></td>
               <td style="max-width:0;width:55%">
                 <div>${typeTag}${overdue?'<span class="badge badge-danger" style="margin-left:4px">Overdue</span>':''}</div>
                 <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">${esc(r.purpose||'—')}</div>
@@ -4825,7 +4842,7 @@ async function showTopUpRequest(){
     const amt = e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0);
     const detailBits = [e.subCategory, e.description&&e.description!==e.subCategory?e.description:'', e.notes?`Notes: ${e.notes}`:''].filter(Boolean);
     return `<tr>
-      <td style="font-size:12px">${fmtDate(e.date||e.createdAt)}</td>
+      <td style="font-size:12px;white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.date||e.createdAt)}</div></td>
       <td><span class="badge badge-gray" style="font-size:11px">${c.icon} ${c.label}</span></td>
       <td style="font-size:12px">
         ${detailBits.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}
@@ -5066,7 +5083,7 @@ async function approvePetty(id, btn=null){
           ? `<span style="color:var(--amber)">No receipt</span>`
           : '<span style="color:var(--text3)">—</span>';
       return `<tr>
-        <td style="font-size:12px;padding:5px 8px;white-space:nowrap">${fmtDate(e.date||e.createdAt)}</td>
+        <td style="font-size:12px;padding:5px 8px;white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.date||e.createdAt)}</div></td>
         <td style="padding:5px 8px;font-size:12px">${c.icon} ${c.label}</td>
         <td style="padding:5px 8px;font-size:12px">${detailBits.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}</td>
         <td style="padding:5px 8px;font-size:11px">${receiptCell}</td>
@@ -6008,9 +6025,13 @@ async function renderAudit(){
 // ── IT ADMIN ──────────────────────────────
 async function renderAdmin(){
   if(state.user?.role!=='it_admin'){ document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--danger)">Access denied. IT Administrators only.</p></div>'; return }
-  const users=await DB.getUsers();
-  const settings=await DB.getSettings();
-  const auditLog=await DB.getAudit();
+  const [users, settings, auditLog, pettyConfig] = await Promise.all([
+    DB.getUsers(),
+    DB.getSettings(),
+    DB.getAudit(),
+    DB.getPettyConfig()
+  ]);
+  const settingsForView = { ...settings, pettyMax: pettyConfig?.max ?? settings.pettyMax };
   const tab=state.adminTab||'users';
 
   document.getElementById('pageContent').innerHTML=`
@@ -6028,7 +6049,7 @@ async function renderAdmin(){
       <button class="tab ${tab==='perms'?'active':''}" onclick="App.setAdminTab('perms')">Role Permissions</button>
       <button class="tab ${tab==='backup'?'active':''}" onclick="App.setAdminTab('backup')">Backup & Restore</button>
     </div>
-    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settings):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
+    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settingsForView):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
   if(tab==='quotas') initQuotaDnd();
 }
 
@@ -6255,11 +6276,15 @@ async function saveSettings(btn=null){
   s.churchName=document.getElementById('set_name')?.value;
   s.bankName=document.getElementById('set_bank')?.value;
   s.accountNo=document.getElementById('set_acct')?.value;
-  s.pettyMax=parseFloat(document.getElementById('set_petty')?.value)||50000;
+  const pettyMax = parseFloat(document.getElementById('set_petty')?.value)||50000;
+  s.pettyMax=pettyMax;
   s.spendableLow=parseFloat(document.getElementById('set_spendable_low')?.value)||20000;
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.saveSettings(s);
+    const pettyCfg = await DB.getPettyConfig();
+    const currentFloat = Number.isFinite(pettyCfg?.float) ? pettyCfg.float : 50000;
+    await DB.savePettyConfig({ float: currentFloat, max: pettyMax });
     showAlert('Settings saved!','success');
     restore();
   } catch(err) {
