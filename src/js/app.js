@@ -61,6 +61,8 @@ const NAV = [
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const MAX_TRANSACTION_VIEW_NAME_LENGTH = 60;
+// Tolerance for considering a remittance "fully paid" (within 1% of due amount to allow for rounding)
+const PAYMENT_TOLERANCE_THRESHOLD = 0.99;
 
 const INCOME_TYPES = [
   { key:'membersTithe',    label:"Members' Tithe",         natl:0.58, local:0.42 },
@@ -1517,7 +1519,7 @@ async function renderDashboard(){
   const dashMonthPaidAmt = dashMonthPaidRems.reduce((s,r)=>s+(r.amount||0),0);
   const dashTotalRemDueKpi = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
     +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
-  const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashTotalRemDueKpi * 0.99;
+  const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashTotalRemDueKpi * PAYMENT_TOLERANCE_THRESHOLD;
   const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
   const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
@@ -2530,7 +2532,7 @@ function remCutoffDayForMonth(settings, monthIdx){
 function getRemittanceDueLabel(settings, year=state.year, month=state.month, { isPaid=false, isPartial=false, paidAmount=0 }={}){
   // Payment takes priority over any countdown
   if(isPaid) return `✅ Paid for this period`;
-  if(isPartial) return `⏳ Partially paid (${fmt(paidAmount)} of total)`;
+  if(isPartial) return `⏳ Partially paid — ${fmt(paidAmount)} paid for this period`;
 
   const cutoffConfig = getRemCutoffDates(settings, year);
   const cutoffYear = cutoffConfig ? Number(cutoffConfig.year) : null;
@@ -2834,7 +2836,7 @@ async function renderRemittances(){
   // --- Check for period payment ---
   const periodPayments=allRems.filter(r=>r.status==='paid'&&r.periodFrom===fromDate&&r.periodTo===toDate);
   const totalPaid=periodPayments.reduce((s,r)=>s+(r.amount||0),0);
-  const isPaid=totalPaid>0&&totalPaid>=totalDue*0.99;
+  const isPaid=totalPaid>0&&totalPaid>=totalDue*PAYMENT_TOLERANCE_THRESHOLD;
   const isPartial=totalPaid>0&&!isPaid;
   const remDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid, isPartial, paidAmount: totalPaid });
