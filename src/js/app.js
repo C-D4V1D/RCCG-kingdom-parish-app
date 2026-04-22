@@ -61,6 +61,8 @@ const NAV = [
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const MAX_TRANSACTION_VIEW_NAME_LENGTH = 60;
+// Tolerance for considering a remittance "fully paid" (within 1% of due amount to allow for rounding)
+const PAYMENT_TOLERANCE_THRESHOLD = 0.99;
 
 const INCOME_TYPES = [
   { key:'membersTithe',    label:"Members' Tithe",         natl:0.58, local:0.42 },
@@ -238,6 +240,20 @@ function countSundaysInMonth(year, month){
   let count = 0;
   const d = new Date(year, month, 1);
   while(d.getMonth() === month && d.getDate() <= limit){ if(d.getDay() === 0) count++; d.setDate(d.getDate()+1); }
+  return count;
+}
+function countSundaysBetween(fromDate, toDate){
+  const start = fromDate instanceof Date ? fromDate : new Date(fromDate);
+  const end = toDate instanceof Date ? toDate : new Date(toDate);
+  if(isNaN(start.getTime()) || isNaN(end.getTime())) return 0;
+  if(start > end) return 0;
+  const d = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const limit = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+  let count = 0;
+  while(d <= limit){
+    if(d.getDay() === 0) count++;
+    d.setDate(d.getDate() + 1);
+  }
   return count;
 }
 function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
@@ -1496,15 +1512,29 @@ async function renderDashboard(){
     .reduce((s,q)=>s+(q.amount||0),0);
   const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
   const netLocal = remittances.netLocal - dashAllQuotasAmt;
+  // Check if the current month's remittance has already been paid or partially paid.
+  // A remittance is considered "for this month" when its periodTo falls within the viewed year/month.
+  const dashMonthPrefix = `${state.year}-${String(state.month+1).padStart(2,'0')}`;
+  const dashMonthPaidRems = allRemsDash.filter(r=>r.status==='paid' && (r.periodTo||'').startsWith(dashMonthPrefix));
+  const dashMonthPaidAmt = dashMonthPaidRems.reduce((s,r)=>s+(r.amount||0),0);
+  // Unpaid amounts carried over from previous periods.
+  const dashOverdueRems = allRemsDash.filter(r=>r.status==='overdue');
+  const dashOverdueUnpaidAmt = dashOverdueRems.reduce((s,r)=>s+(r.amount||0),0);
+  const dashCurrentMonthRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
+    +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
+  // Total due = this month's computed remittances + any unpaid overdue from previous months.
+  const dashTotalRemDueKpi = dashCurrentMonthRemDue + dashOverdueUnpaidAmt;
+  const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashCurrentMonthRemDue * PAYMENT_TOLERANCE_THRESHOLD;
+  const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
+  const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
+    { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
   const churchBal = await calcChurchBalance();
   const pendingPetty = await getPettyCashPendingCount();
-  const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
+  const overdueRems = dashOverdueRems.length;
 
-  // Spendable = total church funds − outstanding remittances not yet paid
-  const dashTotalRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
-    +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
-  const dashPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-  const dashOutstandingRems = Math.max(0, dashTotalRemDue - dashPaidRems);
+  // Spendable = total church funds − total outstanding remittances (current month + all overdue) − already paid
+  const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
+  const dashOutstandingRems = Math.max(0, dashTotalRemDueKpi - dashAllPaidRems);
   const dashTotalFunds = churchBal.total;
   const dashSpendable = dashTotalFunds - dashOutstandingRems;
   const dashSpendLow = parseFloat(settingsDash?.spendableLow||0)||20000;
@@ -1606,8 +1636,10 @@ async function renderDashboard(){
       <div class="kpi">
         <div class="kpi-icon" style="background:#FCEBEB">📤</div>
         <div class="kpi-label">RCCG Remittances Due</div>
-        <div class="kpi-val">${fmt(remittances.totalNatl+dashNatlQuotasAmt+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))}</div>
-        <div class="kpi-delta warn">↑ ${totalIncome?Math.round((remittances.totalNatl+dashNatlQuotasAmt+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))/totalIncome*100):0}% of income</div>
+        <div class="kpi-val">${fmt(dashTotalRemDueKpi)}</div>
+        <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
+        ${dashOverdueUnpaidAmt>0?`<div class="kpi-delta warn" style="font-size:11px">⚠ Includes ${fmt(dashOverdueUnpaidAmt)} unpaid from previous month(s)</div>`:''}
+        <div class="kpi-delta warn">↑ ${totalIncome?Math.round(dashTotalRemDueKpi/totalIncome*100):0}% of income</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
@@ -2502,6 +2534,38 @@ function remCutoffDayForMonth(settings, monthIdx){
   return c.dates[monthIdx] || null;
 }
 
+function getRemittanceDueLabel(settings, year=state.year, month=state.month, { isPaid=false, isPartial=false, paidAmount=0 }={}){
+  // Payment takes priority over any countdown
+  if(isPaid) return `✅ Paid for this period`;
+  if(isPartial) return `⏳ Partially paid — ${fmt(paidAmount)} paid for this period`;
+
+  const cutoffConfig = getRemCutoffDates(settings, year);
+  const cutoffYear = cutoffConfig ? Number(cutoffConfig.year) : null;
+  const cutoffDay = (cutoffConfig && cutoffYear === year && Number.isInteger(cutoffConfig.dates[month]))
+    ? cutoffConfig.dates[month]
+    : null;
+  if(!cutoffDay) return `Due date not set for ${MONTHS[month]}`;
+
+  const dueDate = new Date(year, month, cutoffDay);
+  if(isNaN(dueDate.getTime())) return 'Due date not set';
+
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const due = new Date(dueDate.getFullYear(), dueDate.getMonth(), dueDate.getDate());
+  const dayDiff = Math.round((due - today) / 86400000);
+
+  if(dayDiff === 0) return `Due today (${fmtDate(due)})`;
+  if(dayDiff < 0) return `Cut-off passed ${Math.abs(dayDiff)} day${Math.abs(dayDiff)!==1?'s':''} ago (${fmtDate(due)})`;
+
+  if(due.getDay() === 0){
+    const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    if(start.getDay() === 0) start.setDate(start.getDate() + 1); // exclude current Sunday from "next Sundays"
+    const sundays = countSundaysBetween(start, due);
+    if(sundays > 0) return `Due in next ${sundays} Sunday${sundays!==1?'s':''} (${fmtDate(due)})`;
+  }
+  return `Due in ${dayDiff} day${dayDiff!==1?'s':''} (${fmtDate(due)})`;
+}
+
 function canEditRemCutoff(){
   return ['it_admin','pastor','accountant'].includes(state.user?.role);
 }
@@ -2777,8 +2841,10 @@ async function renderRemittances(){
   // --- Check for period payment ---
   const periodPayments=allRems.filter(r=>r.status==='paid'&&r.periodFrom===fromDate&&r.periodTo===toDate);
   const totalPaid=periodPayments.reduce((s,r)=>s+(r.amount||0),0);
-  const isPaid=totalPaid>0&&totalPaid>=totalDue*0.99;
+  const isPaid=totalPaid>0&&totalPaid>=totalDue*PAYMENT_TOLERANCE_THRESHOLD;
   const isPartial=totalPaid>0&&!isPaid;
+  const remDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
+    { isPaid, isPartial, paidAmount: totalPaid });
 
   const allPaidRems=allRems.filter(r=>r.status==='paid')
     .sort((a,b)=>new Date(b.paidDate||b.createdAt||0)-new Date(a.paidDate||a.createdAt||0));
@@ -2845,7 +2911,7 @@ async function renderRemittances(){
     <!-- KPI Summary -->
     <div class="kpi-grid" style="margin-bottom:12px">
       <div class="kpi"><div class="kpi-icon" style="background:#E8F4FD">💰</div><div class="kpi-label">Total Collection</div><div class="kpi-val">${fmt(totalCollection)}</div></div>
-      <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Total Remittance Due</div><div class="kpi-val">${fmt(totalDue)}</div></div>
+      <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Total Remittance Due</div><div class="kpi-val">${fmt(totalDue)}</div><div class="kpi-delta" style="color:var(--text3)">📅 ${remDueLabel}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">✓</div><div class="kpi-label">Total Paid</div><div class="kpi-val">${fmt(totalPaid)}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">🏠</div><div class="kpi-label">Net Local Retained</div><div class="kpi-val">${fmt(trueNetLocal)}</div></div>
     </div>
