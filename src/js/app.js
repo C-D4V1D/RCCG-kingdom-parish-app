@@ -2489,11 +2489,24 @@ function canEditRemCutoff(){
   return ['it_admin','pastor','accountant'].includes(state.user?.role);
 }
 
+function getOrdinalSuffix(day){
+  const d = Number(day);
+  if(!Number.isInteger(d)) return '';
+  const mod100 = d % 100;
+  if(mod100 >= 11 && mod100 <= 13) return 'th';
+  const mod10 = d % 10;
+  if(mod10 === 1) return 'st';
+  if(mod10 === 2) return 'nd';
+  if(mod10 === 3) return 'rd';
+  return 'th';
+}
+
 function renderRemCutoffCard(settings){
   const c = getRemCutoffDates(settings);
   const now = new Date();
   const curMonth = now.getMonth(); // 0-11
   const curYear = now.getFullYear();
+  const startOfToday = new Date(curYear, curMonth, now.getDate());
 
   const editBtn = canEditRemCutoff()
     ? `<button class="btn btn-sm" onclick="App.showRemCutoffModal()" style="flex-shrink:0">✏️ Edit Dates</button>`
@@ -2505,18 +2518,18 @@ function renderRemCutoffCard(settings){
         <span class="card-title">📅 Remittance Cut-Off Dates</span>
         ${editBtn}
       </div>
-      <div class="alert alert-info" style="margin:0"><span class="alert-icon">ℹ</span><span>No cut-off dates set for this year. ${canEditRemCutoff()?'Click <strong>Edit Dates</strong> to set the dates from the HQ memo.':'Ask the Pastor or Accountant to set the dates from the HQ annual memo.'}</span></div>
+      <div class="alert alert-info" style="margin:0"><span class="alert-icon">ℹ</span><span>No cut-off dates set for this year. ${canEditRemCutoff()?'Click <strong>Edit Dates</strong> to set the dates from the HQ memo.':'Ask the IT Admin, Pastor, or Accountant to set the dates from the HQ annual memo.'}</span></div>
     </div>`;
   }
 
-  const year = c.year || curYear;
+  const year = Number.isInteger(Number(c.year)) ? Number(c.year) : curYear;
   const rows = REM_MONTHS.map((m, i) => {
-    const day = c.dates[i];
-    const isCurrent = i === curMonth;
+    const day = Number.isInteger(c.dates[i]) ? c.dates[i] : null;
+    const isCurrent = (year === curYear) && (i === curMonth);
     const cutoffDate = day ? new Date(year, i, day) : null;
-    const isPast = cutoffDate && cutoffDate < now;
+    const isPast = cutoffDate ? cutoffDate < startOfToday : (year < curYear || (year === curYear && i < curMonth));
     const isThisMonth = isCurrent;
-    const dayLabel = day ? `${day}${['th','st','nd','rd','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th','th'][day-1]||'th'} ${m}` : '—';
+    const dayLabel = day ? `${day}${getOrdinalSuffix(day)} ${m}` : '—';
     const rowStyle = isThisMonth
       ? 'background:var(--primary-light);font-weight:600'
       : isPast ? 'color:var(--text3)' : '';
@@ -2546,7 +2559,7 @@ function renderRemCutoffCard(settings){
 }
 
 async function showRemCutoffModal(){
-  if(!canEditRemCutoff()){ showAlert('Only the Pastor or Accountant can edit cut-off dates.','danger'); return; }
+  if(!canEditRemCutoff()){ showAlert('Only IT Admin, Pastor, or Accountant can edit cut-off dates.','danger'); return; }
   const settings = await DB.getSettings();
   const c = getRemCutoffDates(settings);
   const year = c?.year || new Date().getFullYear();
@@ -2579,12 +2592,25 @@ async function showRemCutoffModal(){
 }
 
 async function saveRemCutoffDates(){
-  if(!canEditRemCutoff()){ showAlert('Only the Pastor or Accountant can edit cut-off dates.','danger'); return; }
-  const year = parseInt(document.getElementById('cutoff_year')?.value) || new Date().getFullYear();
+  if(!canEditRemCutoff()){ showAlert('Only IT Admin, Pastor, or Accountant can edit cut-off dates.','danger'); return; }
+  const yearInput = parseInt(document.getElementById('cutoff_year')?.value);
+  const year = (Number.isFinite(yearInput) && yearInput>=2024 && yearInput<=2099)
+    ? yearInput
+    : new Date().getFullYear();
+  const invalidMonths = [];
   const dates = Array.from({length:12}, (_,i) => {
-    const v = parseInt(document.getElementById(`cutoff_${i}`)?.value);
-    return (Number.isFinite(v) && v>=1 && v<=31) ? v : null;
+    const raw = (document.getElementById(`cutoff_${i}`)?.value || '').trim();
+    if(!raw) return null;
+    const v = parseInt(raw);
+    const maxDay = new Date(year, i+1, 0).getDate();
+    if(Number.isFinite(v) && v>=1 && v<=maxDay) return v;
+    invalidMonths.push(`${REM_MONTHS[i]} (1-${maxDay})`);
+    return null;
   });
+  if(invalidMonths.length){
+    showAlert(`Invalid cut-off day for ${invalidMonths.join(', ')}.`, 'danger');
+    return;
+  }
   const settings = await DB.getSettings();
   settings.remCutoffDates = { year, dates };
   await DB.saveSettings(settings);
@@ -6765,7 +6791,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
+  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
