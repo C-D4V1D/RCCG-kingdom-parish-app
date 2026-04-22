@@ -2538,7 +2538,9 @@ function getRemittanceDueLabel(settings, year=state.year, month=state.month){
   if(dayDiff < 0) return `Cut-off passed ${Math.abs(dayDiff)} day${Math.abs(dayDiff)!==1?'s':''} ago (${fmtDate(due)})`;
 
   if(due.getDay() === 0){
-    const sundays = countSundaysBetween(today, due);
+    const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    start.setDate(start.getDate() + 1); // "next Sundays" excludes today
+    const sundays = countSundaysBetween(start, due);
     if(sundays > 0) return `Due in next ${sundays} Sunday${sundays!==1?'s':''} (${fmtDate(due)})`;
   }
   return `Due in ${dayDiff} day${dayDiff!==1?'s':''} (${fmtDate(due)})`;
