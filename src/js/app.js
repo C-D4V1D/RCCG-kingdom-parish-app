@@ -1501,7 +1501,33 @@ async function renderDashboard(){
 
   const totalIncome = income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
-  const remittances = await calcRemittancesFromRecords(income);
+
+  // Determine the remittance period dates the same way renderRemittances does, so the
+  // "RCCG Remittances Due" figure on the dashboard matches the Remittances page exactly.
+  // Income recorded after the cut-off date belongs to the next period and must be excluded.
+  const dashCutoffConfig = getRemCutoffDates(settings, state.year);
+  const dashCutoffYear = dashCutoffConfig ? Number(dashCutoffConfig.year) : null;
+  const dashCutoffDay = (dashCutoffConfig && dashCutoffYear === state.year && Number.isInteger(dashCutoffConfig.dates[state.month]))
+    ? dashCutoffConfig.dates[state.month] : null;
+  let dashRemFromDate, dashRemToDate;
+  if(dashCutoffDay){
+    dashRemToDate = ymdLocal(new Date(state.year, state.month, dashCutoffDay));
+    const prevMonth = state.month === 0 ? 11 : state.month - 1;
+    const prevYear  = state.month === 0 ? state.year - 1 : state.year;
+    const prevCutoffConfig = getRemCutoffDates(settings, prevYear);
+    const prevCutoffDay = (prevCutoffConfig && Number.isInteger(prevCutoffConfig.dates[prevMonth]) && Number(prevCutoffConfig.year) === prevYear)
+      ? prevCutoffConfig.dates[prevMonth] : null;
+    if(prevCutoffDay){
+      const d = new Date(prevYear, prevMonth, prevCutoffDay);
+      d.setDate(d.getDate() + 1);
+      dashRemFromDate = ymdLocal(d);
+    } else {
+      dashRemFromDate = ymdLocal(new Date(state.year, state.month, 1));
+    }
+  }
+  // When no cut-off is configured, fall back to full calendar month (existing behaviour).
+  const remIncome = dashCutoffDay ? filterByDateRange(allIncomeDash, dashRemFromDate, dashRemToDate) : income;
+  const remittances = await calcRemittancesFromRecords(remIncome);
   const dashQuotas = getQuotaList(settings);
   const dashRegionalQuota = dashQuotas.find(q=>q.label.toLowerCase().includes('regional contribution'));
   const dashMummyQuota   = dashQuotas.find(q=>q.label.toLowerCase().includes('mummy'));
@@ -1634,7 +1660,8 @@ async function renderDashboard(){
         <div class="kpi-label">RCCG Remittances Due</div>
         <div class="kpi-val">${fmt(remittances.totalNatl+dashNatlQuotasAmt+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))}</div>
         <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
-        <div class="kpi-delta warn">↑ ${totalIncome?Math.round((remittances.totalNatl+dashNatlQuotasAmt+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))/totalIncome*100):0}% of income</div>
+        ${dashCutoffDay?`<div class="kpi-delta" style="color:var(--text3);font-size:11px">📋 Based on period: ${fmtDate(dashRemFromDate)} – ${fmtDate(dashRemToDate)}</div>`:''}
+        <div class="kpi-delta warn">↑ ${totalIncome?Math.round((remittances.totalNatl+dashNatlQuotasAmt+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))/(dashCutoffDay?remIncome.reduce((s,r)=>s+(r.totalCollection||0),0):totalIncome)*100):0}% of${dashCutoffDay?' period':''} income</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
