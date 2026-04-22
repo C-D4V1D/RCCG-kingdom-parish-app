@@ -2490,6 +2490,7 @@ function canEditRemCutoff(){
 }
 
 function getOrdinalSuffix(day){
+  // Used only for calendar day values (1-31)
   const d = Number(day);
   if(!Number.isInteger(d)) return '';
   const mod100 = d % 100;
@@ -2622,7 +2623,7 @@ async function saveRemCutoffDates(){
     const raw = (document.getElementById(`cutoff_${i}`)?.value || '').trim();
     if(!raw) return null;
     const v = parseInt(raw);
-    const maxDay = new Date(year, i+1, 0).getDate();
+    const maxDay = new Date(year, i+1, 0).getDate(); // day 0 of next month = last day of month i
     if(Number.isFinite(v) && v>=1 && v<=maxDay) return v;
     invalidMonths.push(`${REM_MONTHS[i]} (1-${maxDay})`);
     return null;
