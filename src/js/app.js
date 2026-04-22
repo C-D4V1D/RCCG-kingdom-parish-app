@@ -1510,14 +1510,23 @@ async function renderDashboard(){
     .reduce((s,q)=>s+(q.amount||0),0);
   const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
   const netLocal = remittances.netLocal - dashAllQuotasAmt;
-  const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month);
+  // Check if the current month's remittance has already been paid or partially paid.
+  // A remittance is considered "for this month" when its periodTo falls within the viewed year/month.
+  const dashMonthPrefix = `${state.year}-${String(state.month+1).padStart(2,'0')}`;
+  const dashMonthPaidRems = allRemsDash.filter(r=>r.status==='paid' && (r.periodTo||'').startsWith(dashMonthPrefix));
+  const dashMonthPaidAmt = dashMonthPaidRems.reduce((s,r)=>s+(r.amount||0),0);
+  const dashTotalRemDueKpi = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
+    +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
+  const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashTotalRemDueKpi * 0.99;
+  const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
+  const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
+    { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
   const churchBal = await calcChurchBalance();
   const pendingPetty = await getPettyCashPendingCount();
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
 
   // Spendable = total church funds − outstanding remittances not yet paid
-  const dashTotalRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
-    +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
+  const dashTotalRemDue = dashTotalRemDueKpi;
   const dashPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   const dashOutstandingRems = Math.max(0, dashTotalRemDue - dashPaidRems);
   const dashTotalFunds = churchBal.total;
@@ -2518,7 +2527,11 @@ function remCutoffDayForMonth(settings, monthIdx){
   return c.dates[monthIdx] || null;
 }
 
-function getRemittanceDueLabel(settings, year=state.year, month=state.month){
+function getRemittanceDueLabel(settings, year=state.year, month=state.month, { isPaid=false, isPartial=false, paidAmount=0 }={}){
+  // Payment takes priority over any countdown
+  if(isPaid) return `✅ Paid for this period`;
+  if(isPartial) return `⏳ Partially paid (${fmt(paidAmount)} of total)`;
+
   const cutoffConfig = getRemCutoffDates(settings, year);
   const cutoffYear = cutoffConfig ? Number(cutoffConfig.year) : null;
   const cutoffDay = (cutoffConfig && cutoffYear === year && Number.isInteger(cutoffConfig.dates[month]))
@@ -2811,7 +2824,6 @@ async function renderRemittances(){
 
   const allLines=[...incomeLines,...tgLines,...provinceLines,...quotaLines];
   const totalDue=allLines.reduce((s,l)=>s+l.amount,0);
-  const remDueLabel = getRemittanceDueLabel(settings, state.year, state.month);
   const quotasTotal=quotaLines.reduce((s,l)=>s+l.amount,0);
   const trueNetLocal=rem.netLocal-quotasTotal;
   // Only count income that goes through the remittance split (records with INCOME_TYPES fields)
@@ -2824,6 +2836,8 @@ async function renderRemittances(){
   const totalPaid=periodPayments.reduce((s,r)=>s+(r.amount||0),0);
   const isPaid=totalPaid>0&&totalPaid>=totalDue*0.99;
   const isPartial=totalPaid>0&&!isPaid;
+  const remDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
+    { isPaid, isPartial, paidAmount: totalPaid });
 
   const allPaidRems=allRems.filter(r=>r.status==='paid')
     .sort((a,b)=>new Date(b.paidDate||b.createdAt||0)-new Date(a.paidDate||a.createdAt||0));
