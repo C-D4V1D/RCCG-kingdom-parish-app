@@ -2539,7 +2539,7 @@ function getRemittanceDueLabel(settings, year=state.year, month=state.month){
 
   if(due.getDay() === 0){
     const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    start.setDate(start.getDate() + 1); // "next Sundays" excludes today
+    if(start.getDay() === 0) start.setDate(start.getDate() + 1); // exclude current Sunday from "next Sundays"
     const sundays = countSundaysBetween(start, due);
     if(sundays > 0) return `Due in next ${sundays} Sunday${sundays!==1?'s':''} (${fmtDate(due)})`;
   }
