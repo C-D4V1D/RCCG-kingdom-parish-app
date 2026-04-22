@@ -1402,13 +1402,13 @@ async function calcChurchBalance(){
     return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
   }, 0);
   const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
-  const cashExpenses = allExpenses.reduce((s,e)=>{
+  const cashExpenses = allExpenses.filter(e=>e.status==='approved').reduce((s,e)=>{
     if(e.paymentMethod==='cash') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.cashAmount||0);
     return s;
   }, 0);
   // Petty top-ups via accountant's cash reduce the accountant's cash holding
-  const pettyCashTopups = pettyHistory.filter(h=>h.type==='refill'&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
+  const pettyCashTopups = pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.cashAmount||0):(h.amount||0)),0);
   const cashWithAccountant = cashFromCollections - cashDepositedToBank + bankToAccountant - cashExpenses - pettyCashTopups;
 
@@ -2047,11 +2047,12 @@ async function submitIncome(){
   const rec={date,usher,source:'sunday_collection',recordedBy:state.user?.name,depositConfirmed:false};
   let total=0;
   INCOME_TYPES.forEach(t=>{ const v=parseFloat(document.getElementById('inc_'+t.key)?.value||0)||0; rec[t.key]=v; total+=v });
+  total=Math.round(total);
   if(!total){ alert('Please enter at least one income amount.'); return }
   rec.totalCollection=total;
 
-  const bankTransferAmount = parseFloat(document.getElementById('inc_bank_transfer')?.value||0)||0;
-  const directPettyCash    = parseFloat(document.getElementById('inc_direct_petty')?.value||0)||0;
+  const bankTransferAmount = Math.round((parseFloat(document.getElementById('inc_bank_transfer')?.value||0)||0)*100)/100;
+  const directPettyCash    = Math.round((parseFloat(document.getElementById('inc_direct_petty')?.value||0)||0)*100)/100;
   if(bankTransferAmount + directPettyCash > total){
     alert(`Bank transfer (${fmt(bankTransferAmount)}) + direct petty cash (${fmt(directPettyCash)}) cannot exceed the total collection (${fmt(total)}).`);
     return;
@@ -2334,7 +2335,7 @@ async function submitOtherIncome(){
   const source     = document.getElementById('oi_source')?.value;
   const donorName  = document.getElementById('oi_donor')?.value?.trim();
   const category   = document.getElementById('oi_category')?.value;
-  const amount     = parseFloat(document.getElementById('oi_amount')?.value)||0;
+  const amount     = Math.round(parseFloat(document.getElementById('oi_amount')?.value)||0);
   const method     = document.getElementById('oi_method')?.value;
   const notes      = document.getElementById('oi_notes')?.value||'';
   if(!date||!source){ alert('Please select a date and source type.'); return }
