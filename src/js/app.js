@@ -2508,6 +2508,8 @@ function renderRemCutoffCard(settings){
   const curYear = now.getFullYear();
   const startOfToday = new Date(curYear, curMonth, now.getDate());
 
+  const isOpen = !!state.remCutoffOpen;
+  const chevron = isOpen ? '▲' : '▼';
   const editBtn = canEditRemCutoff()
     ? `<button class="btn btn-sm" onclick="App.showRemCutoffModal()" style="flex-shrink:0">✏️ Edit Dates</button>`
     : '';
@@ -2515,10 +2517,15 @@ function renderRemCutoffCard(settings){
   if(!c){
     return `<div class="card" style="margin-bottom:12px">
       <div class="card-header">
-        <span class="card-title">📅 Remittance Cut-Off Dates</span>
+        <span onclick="App.toggleRemCutoff()" style="cursor:pointer;display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+          <span id="remCutoffChevron" style="font-size:10px;color:var(--text3);flex-shrink:0">${chevron}</span>
+          <span class="card-title">📅 Remittance Cut-Off Dates</span>
+        </span>
         ${editBtn}
       </div>
-      <div class="alert alert-info" style="margin:0"><span class="alert-icon">ℹ</span><span>No cut-off dates set for this year. ${canEditRemCutoff()?'Click <strong>Edit Dates</strong> to set the dates from the HQ memo.':'Ask the IT Admin, Pastor, or Accountant to set the dates from the HQ annual memo.'}</span></div>
+      <div id="remCutoffBody" style="display:${isOpen?'block':'none'}">
+        <div class="alert alert-info" style="margin:0"><span class="alert-icon">ℹ</span><span>No cut-off dates set for this year. ${canEditRemCutoff()?'Click <strong>Edit Dates</strong> to set the dates from the HQ memo.':'Ask the IT Admin, Pastor, or Accountant to set the dates from the HQ annual memo.'}</span></div>
+      </div>
     </div>`;
   }
 
@@ -2544,18 +2551,31 @@ function renderRemCutoffCard(settings){
 
   return `<div class="card" style="margin-bottom:12px">
     <div class="card-header">
-      <span class="card-title">📅 Remittance Cut-Off Dates — ${year}</span>
+      <span onclick="App.toggleRemCutoff()" style="cursor:pointer;display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+        <span id="remCutoffChevron" style="font-size:10px;color:var(--text3);flex-shrink:0">${chevron}</span>
+        <span class="card-title">📅 Remittance Cut-Off Dates — ${year}</span>
+      </span>
       ${editBtn}
     </div>
-    <p style="font-size:12px;color:var(--text2);margin-bottom:8px">These are the HQ-mandated monthly deadlines for remittance payments. The highlighted row is this month.</p>
-    <div class="table-wrap"><table style="width:100%">
-      <tr style="background:var(--surface)">
-        <th style="padding:5px 10px;font-size:11px">Month</th>
-        <th style="padding:5px 10px;font-size:11px">Cut-Off Date</th>
-      </tr>
-      ${rows}
-    </table></div>
+    <div id="remCutoffBody" style="display:${isOpen?'block':'none'}">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:8px">These are the HQ-mandated monthly deadlines for remittance payments. The highlighted row is this month.</p>
+      <div class="table-wrap"><table style="width:100%">
+        <tr style="background:var(--surface)">
+          <th style="padding:5px 10px;font-size:11px">Month</th>
+          <th style="padding:5px 10px;font-size:11px">Cut-Off Date</th>
+        </tr>
+        ${rows}
+      </table></div>
+    </div>
   </div>`;
+}
+
+function toggleRemCutoff(){
+  state.remCutoffOpen = !state.remCutoffOpen;
+  const body = document.getElementById('remCutoffBody');
+  const icon = document.getElementById('remCutoffChevron');
+  if(body) body.style.display = state.remCutoffOpen ? 'block' : 'none';
+  if(icon) icon.textContent = state.remCutoffOpen ? '▲' : '▼';
 }
 
 async function showRemCutoffModal(){
@@ -2627,6 +2647,14 @@ async function renderRemittances(){
   const quotas = getQuotaList(settings);
   const rr = await getRemRates();
 
+  // --- Cut-off date for selected month (governs To date when configured) ---
+  const cutoffConfig = getRemCutoffDates(settings);
+  const cutoffYear = cutoffConfig ? Number(cutoffConfig.year) : null;
+  const cutoffDay = (cutoffConfig && cutoffYear === state.year && Number.isInteger(cutoffConfig.dates[state.month]))
+    ? cutoffConfig.dates[state.month]
+    : null;
+  const hasCutoff = !!cutoffDay;
+
   // --- Determine period defaults ---
   const todayStr = new Date().toISOString().split('T')[0];
   if(!state.remFromDate){
@@ -2645,7 +2673,12 @@ async function renderRemittances(){
       state.remFromDate=new Date(state.year,state.month,1).toISOString().split('T')[0];
     }
   }
-  if(!state.remToDate) state.remToDate=todayStr;
+  // When a cut-off date is configured, always force the To date to match it
+  if(hasCutoff){
+    state.remToDate = new Date(state.year, state.month, cutoffDay).toISOString().split('T')[0];
+  } else if(!state.remToDate){
+    state.remToDate = todayStr;
+  }
 
   const fromDate=state.remFromDate;
   const toDate=state.remToDate;
@@ -2731,16 +2764,23 @@ async function renderRemittances(){
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="display:flex;align-items:center;gap:6px">
           <label style="font-size:12px;color:var(--text2);white-space:nowrap">From</label>
-          <input type="date" id="remFromDate" class="form-input" value="${fromDate}" style="width:auto;padding:6px 10px;font-size:13px" onchange="App.onRemDatesChange()" />
+          <input type="date" id="remFromDate" class="form-input" value="${fromDate}"
+            style="width:auto;padding:6px 10px;font-size:13px${hasCutoff?';background:var(--surface);cursor:default;color:var(--text2)':''}"
+            ${hasCutoff?'readonly':'onchange="App.onRemDatesChange()"'} />
         </div>
         <div style="display:flex;align-items:center;gap:6px">
           <label style="font-size:12px;color:var(--text2);white-space:nowrap">To</label>
-          <input type="date" id="remToDate" class="form-input" value="${toDate}" style="width:auto;padding:6px 10px;font-size:13px" onchange="App.onRemDatesChange()" />
+          <input type="date" id="remToDate" class="form-input" value="${toDate}"
+            style="width:auto;padding:6px 10px;font-size:13px${hasCutoff?';background:var(--surface);cursor:default;color:var(--text2)':''}"
+            ${hasCutoff?'readonly':'onchange="App.onRemDatesChange()"'} />
         </div>
+        ${hasCutoff?`<span class="badge badge-info" style="font-size:11px">🔒 Locked to cut-off date</span>`:''}
         ${isPaid?`<span class="badge badge-success" style="font-size:11px">✅ PAID for this period</span>`:isPartial?`<span class="badge badge-warn" style="font-size:11px">⏳ Partially paid</span>`:''}
       </div>
       <div style="font-size:11px;color:var(--text3);margin-top:8px">
-        ℹ️ Set <strong>From</strong> to the day after your last remittance payment, and <strong>To</strong> to the date of this month's remittance (e.g. last Sunday of the month).
+        ${hasCutoff
+          ? `🔒 Dates are automatically set from the HQ cut-off date for this month.`
+          : `ℹ️ Set <strong>From</strong> to the day after your last remittance payment, and <strong>To</strong> to the date of this month's remittance.`}
         Showing <strong>${income.length}</strong> income record(s) in this period.
       </div>
     </div>
@@ -6791,7 +6831,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
+  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
