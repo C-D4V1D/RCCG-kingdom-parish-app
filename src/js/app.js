@@ -2658,6 +2658,27 @@ async function renderRemittances(){
 
   // --- Determine period defaults ---
   const todayStr = new Date().toISOString().split('T')[0];
+  // When cut-off dates are configured, always recalculate both From and To from the cut-off table
+  if(hasCutoff){
+    // To = current month's cut-off date
+    state.remToDate = new Date(state.year, state.month, cutoffDay).toISOString().split('T')[0];
+    // From = day after the previous month's cut-off date (wrapping year if needed)
+    const prevMonth = state.month === 0 ? 11 : state.month - 1;
+    const prevYear  = state.month === 0 ? state.year - 1 : state.year;
+    const prevCutoffConfig = state.month === 0 ? null : cutoffConfig; // same config object, different month index
+    const prevCutoffDay = (prevCutoffConfig && Number.isInteger(prevCutoffConfig.dates[prevMonth]) && Number(prevCutoffConfig.year) === prevYear)
+      ? prevCutoffConfig.dates[prevMonth]
+      : null;
+    if(prevCutoffDay){
+      // Day after previous month's cut-off
+      const d = new Date(prevYear, prevMonth, prevCutoffDay);
+      d.setDate(d.getDate() + 1);
+      state.remFromDate = d.toISOString().split('T')[0];
+    } else {
+      // No cut-off for previous month — fall back to first day of current month
+      state.remFromDate = new Date(state.year, state.month, 1).toISOString().split('T')[0];
+    }
+  } else {
   if(!state.remFromDate){
     // Day after last paid remittance, or start of current month
     const lastPaid = allRems.filter(r=>r.status==='paid')
@@ -2674,11 +2695,9 @@ async function renderRemittances(){
       state.remFromDate=new Date(state.year,state.month,1).toISOString().split('T')[0];
     }
   }
-  // When a cut-off date is configured, always force the To date to match it
-  if(hasCutoff){
-    state.remToDate = new Date(state.year, state.month, cutoffDay).toISOString().split('T')[0];
-  } else if(!state.remToDate){
+  if(!state.remToDate){
     state.remToDate = todayStr;
+  }
   }
 
   const fromDate=state.remFromDate;
