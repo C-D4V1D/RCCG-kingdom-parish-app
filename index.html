@@ -135,8 +135,8 @@
           <select id="userSelect"></select>
         </div>
         <label class="form-label">PIN</label>
-        <input type="password" id="pinInput" maxlength="6" placeholder="••••••" inputmode="numeric" onkeydown="if(event.key==='Enter')App.login()" />
-        <button class="hp-signin-btn" onclick="App.login()">Sign In</button>
+        <input type="password" id="pinInput" maxlength="6" placeholder="••••••" inputmode="numeric" onkeydown="if(event.key==='Enter')App.login(document.querySelector('#loginScreen .hp-signin-btn'))" />
+        <button class="hp-signin-btn" onclick="App.login(this)">Sign In</button>
         <p class="hp-login-hint">Contact the IT Administrator if you have forgotten your PIN.</p>
       </div>
     </div>
