@@ -4116,6 +4116,17 @@ async function submitExpense(btn=null){
     cashAmount=amount; // cash (accountant)
   }
 
+  // Guard: cash amount must not exceed available cash with accountant.
+  // +0.5 tolerance absorbs floating-point rounding differences (consistent with submitRefill).
+  if(cashAmount > 0){
+    const _bal = await calcChurchBalance();
+    const availCash = Math.max(0, _bal.cashWithAccountant||0);
+    if(cashAmount > availCash + 0.5){
+      alert(`Cash with Accountant is insufficient for this expense.\nAvailable cash: ${fmt(availCash)}\nRequired: ${fmt(cashAmount)}`);
+      return;
+    }
+  }
+
   const fileEl = document.getElementById('exp_receipt_file');
   const file = fileEl?.files?.[0];
   const restore = setBtnLoading(btn, 'Saving…');
