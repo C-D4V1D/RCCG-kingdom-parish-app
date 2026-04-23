@@ -61,6 +61,8 @@ const NAV = [
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const MAX_TRANSACTION_VIEW_NAME_LENGTH = 60;
+// Tolerance for considering a remittance "fully paid" (within 1% of due amount to allow for rounding)
+const PAYMENT_TOLERANCE_THRESHOLD = 0.99;
 
 const INCOME_TYPES = [
   { key:'membersTithe',    label:"Members' Tithe",         natl:0.58, local:0.42 },
@@ -69,8 +71,8 @@ const INCOME_TYPES = [
   { key:'sundaySchool',    label:'Sunday School',          natl:1.00, local:0 },
   { key:'slo',             label:'Sunday Love Offering',   natl:0.30, local:0.70 },
   { key:'crm',             label:'CRM (Weekly Activities)',natl:0.60, local:0.40 },
-  { key:'workersOffering', label:"Workers' Offering",      natl:0.25, local:0.75 },
-  { key:'childrenOffering',label:"Children's Offering",    natl:0.35, local:0.65 }
+  { key:'workersOffering', label:"Gospel Fund (Workers' Offering)", natl:0.25, local:0.75 },
+  { key:'childrenOffering',label:"Teen/Children's Offering",        natl:0.35, local:0.65 }
 ];
 
 const EXPENSE_CATS = [
@@ -240,8 +242,30 @@ function countSundaysInMonth(year, month){
   while(d.getMonth() === month && d.getDate() <= limit){ if(d.getDay() === 0) count++; d.setDate(d.getDate()+1); }
   return count;
 }
+function countSundaysBetween(fromDate, toDate){
+  const start = fromDate instanceof Date ? fromDate : new Date(fromDate);
+  const end = toDate instanceof Date ? toDate : new Date(toDate);
+  if(isNaN(start.getTime()) || isNaN(end.getTime())) return 0;
+  if(start > end) return 0;
+  const d = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const limit = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+  let count = 0;
+  while(d <= limit){
+    if(d.getDay() === 0) count++;
+    d.setDate(d.getDate() + 1);
+  }
+  return count;
+}
 function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
 function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'}) }
+function ymdLocal(d){
+  const dt = d instanceof Date ? d : new Date(d);
+  if(isNaN(dt.getTime())) return '';
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth()+1).padStart(2,'0');
+  const day = String(dt.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
 function uid(){ return Date.now().toString(36) }
 function hasPermission(p){
   if(!state.user) return false;
@@ -315,7 +339,7 @@ function filterByDateRange(arr, fromDate, toDate){
   return (arr||[]).filter(r=>{
     const raw = new Date(r.date||r.createdAt||'');
     if(isNaN(raw.getTime())) return false;
-    const d = raw.toISOString().split('T')[0];
+    const d = ymdLocal(raw);
     return d >= fromDate && d <= toDate;
   });
 }
@@ -492,14 +516,21 @@ async function submitChangePin(btn=null){
   if(newPin !== confirmPin){ showAlert('New PIN and confirmation do not match.','danger'); return; }
   const restore = setBtnLoading(btn, 'Updating…');
   try{
+    if(!state.user?.id) throw new Error('Session error — please log out and back in.');
     const res = await DB.changePin({ userId: state.user.id, currentPin, newPin });
-    if(!res?.success) throw new Error('PIN update failed.');
+    // res is { success: true, id: '...' } on success — check either field
+    if(!res?.success && !res?.id) throw new Error('PIN update returned unexpected response.');
     DB.addAudit('pin_changed','User changed own PIN',state.user?.name);
     closeModal();
-    showAlert('PIN changed successfully. Use the new PIN at next sign in.','success');
+    showAlert('PIN updated successfully! Use your new PIN next time you sign in.','success');
   }catch(e){
     restore();
-    showAlert(e.message || 'Failed to change PIN. Please try again.','danger');
+    const msg = e.message || '';
+    if(msg.toLowerCase().includes('current pin is incorrect') || msg.toLowerCase().includes('invalid credentials')){
+      showAlert('Current PIN is incorrect. Please try again.','danger');
+    } else {
+      showAlert(msg || 'Failed to update PIN. Please try again.','danger');
+    }
   }
 }
 
@@ -1481,15 +1512,29 @@ async function renderDashboard(){
     .reduce((s,q)=>s+(q.amount||0),0);
   const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
   const netLocal = remittances.netLocal - dashAllQuotasAmt;
+  // Check if the current month's remittance has already been paid or partially paid.
+  // A remittance is considered "for this month" when its periodTo falls within the viewed year/month.
+  const dashMonthPrefix = `${state.year}-${String(state.month+1).padStart(2,'0')}`;
+  const dashMonthPaidRems = allRemsDash.filter(r=>r.status==='paid' && (r.periodTo||'').startsWith(dashMonthPrefix));
+  const dashMonthPaidAmt = dashMonthPaidRems.reduce((s,r)=>s+(r.amount||0),0);
+  // Unpaid amounts carried over from previous periods.
+  const dashOverdueRems = allRemsDash.filter(r=>r.status==='overdue');
+  const dashOverdueUnpaidAmt = dashOverdueRems.reduce((s,r)=>s+(r.amount||0),0);
+  const dashCurrentMonthRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
+    +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
+  // Total due = this month's computed remittances + any unpaid overdue from previous months.
+  const dashTotalRemDueKpi = dashCurrentMonthRemDue + dashOverdueUnpaidAmt;
+  const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashCurrentMonthRemDue * PAYMENT_TOLERANCE_THRESHOLD;
+  const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
+  const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
+    { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
   const churchBal = await calcChurchBalance();
   const pendingPetty = await getPettyCashPendingCount();
-  const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
+  const overdueRems = dashOverdueRems.length;
 
-  // Spendable = total church funds − outstanding remittances not yet paid
-  const dashTotalRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
-    +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
-  const dashPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-  const dashOutstandingRems = Math.max(0, dashTotalRemDue - dashPaidRems);
+  // Spendable = total church funds − total outstanding remittances (current month + all overdue) − already paid
+  const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
+  const dashOutstandingRems = Math.max(0, dashTotalRemDueKpi - dashAllPaidRems);
   const dashTotalFunds = churchBal.total;
   const dashSpendable = dashTotalFunds - dashOutstandingRems;
   const dashSpendLow = parseFloat(settingsDash?.spendableLow||0)||20000;
@@ -1591,8 +1636,10 @@ async function renderDashboard(){
       <div class="kpi">
         <div class="kpi-icon" style="background:#FCEBEB">📤</div>
         <div class="kpi-label">RCCG Remittances Due</div>
-        <div class="kpi-val">${fmt(remittances.totalNatl+dashNatlQuotasAmt+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))}</div>
-        <div class="kpi-delta warn">↑ ${totalIncome?Math.round((remittances.totalNatl+dashNatlQuotasAmt+dashRegionalAmt+remittances.provinceRebate+(remittances.totalPastor||0)+(remittances.totalSeed||0)+(remittances.totalArea||0)+dashMummyAmt+(remittances.totalMinisters||0))/totalIncome*100):0}% of income</div>
+        <div class="kpi-val">${fmt(dashTotalRemDueKpi)}</div>
+        <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
+        ${dashOverdueUnpaidAmt>0?`<div class="kpi-delta warn" style="font-size:11px">⚠ Includes ${fmt(dashOverdueUnpaidAmt)} unpaid from previous month(s)</div>`:''}
+        <div class="kpi-delta warn">↑ ${totalIncome?Math.round(dashTotalRemDueKpi/totalIncome*100):0}% of income</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
@@ -1934,7 +1981,7 @@ async function renderIncomeSummary(records){
               <div class="status-row-amt td-red">${fmt(l.national||0)}</div>
             </div>
             ${(l.area||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Area / Zonal</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.area)}</div></div>`:''}
-            ${(l.pastor||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Pastor's Share</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.pastor)}</div></div>`:''}
+            ${(l.pastor||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Pastor's Family Share</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.pastor)}</div></div>`:''}
             ${(l.ministers||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Ministers' Share</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.ministers)}</div></div>`:''}
             ${(l.seed||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Seed (Pastor's Children)</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.seed)}</div></div>`:''}`;
           }
@@ -2460,6 +2507,230 @@ async function submitOtherIncome(btn=null){
 }
 
 // ── REMITTANCES ───────────────────────────
+// ── REMITTANCE CUT-OFF DATES ──────────────────────────────────────
+const REM_MONTHS = ['January','February','March','April','May','June',
+                    'July','August','September','October','November','December'];
+
+function getRemCutoffDates(settings, year=null){
+  // Returns {year, dates} where dates is an array of 12 day-numbers (1-31), else null
+  const targetYear = Number.isInteger(Number(year)) ? Number(year) : null;
+  const byYear = settings?.remCutoffDatesByYear;
+  if(targetYear && byYear && typeof byYear==='object'){
+    const fromYear = byYear[targetYear];
+    if(Array.isArray(fromYear) && fromYear.length===12) return { year: targetYear, dates: fromYear };
+  }
+  const saved = settings?.remCutoffDates;
+  if(saved && Array.isArray(saved.dates) && saved.dates.length===12){
+    const savedYear = Number(saved.year);
+    if(!targetYear || savedYear===targetYear) return { year: savedYear, dates: saved.dates };
+  }
+  return null;
+}
+
+function remCutoffDayForMonth(settings, monthIdx){
+  // monthIdx 0-11. Returns the cut-off day number or null.
+  const c = getRemCutoffDates(settings);
+  if(!c) return null;
+  return c.dates[monthIdx] || null;
+}
+
+function getRemittanceDueLabel(settings, year=state.year, month=state.month, { isPaid=false, isPartial=false, paidAmount=0 }={}){
+  // Payment takes priority over any countdown
+  if(isPaid) return `✅ Paid for this period`;
+  if(isPartial) return `⏳ Partially paid — ${fmt(paidAmount)} paid for this period`;
+
+  const cutoffConfig = getRemCutoffDates(settings, year);
+  const cutoffYear = cutoffConfig ? Number(cutoffConfig.year) : null;
+  const cutoffDay = (cutoffConfig && cutoffYear === year && Number.isInteger(cutoffConfig.dates[month]))
+    ? cutoffConfig.dates[month]
+    : null;
+  if(!cutoffDay) return `Due date not set for ${MONTHS[month]}`;
+
+  const dueDate = new Date(year, month, cutoffDay);
+  if(isNaN(dueDate.getTime())) return 'Due date not set';
+
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const due = new Date(dueDate.getFullYear(), dueDate.getMonth(), dueDate.getDate());
+  const dayDiff = Math.round((due - today) / 86400000);
+
+  if(dayDiff === 0) return `Due today (${fmtDate(due)})`;
+  if(dayDiff < 0) return `Cut-off passed ${Math.abs(dayDiff)} day${Math.abs(dayDiff)!==1?'s':''} ago (${fmtDate(due)})`;
+
+  if(due.getDay() === 0){
+    const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    if(start.getDay() === 0) start.setDate(start.getDate() + 1); // exclude current Sunday from "next Sundays"
+    const sundays = countSundaysBetween(start, due);
+    if(sundays > 0) return `Due in next ${sundays} Sunday${sundays!==1?'s':''} (${fmtDate(due)})`;
+  }
+  return `Due in ${dayDiff} day${dayDiff!==1?'s':''} (${fmtDate(due)})`;
+}
+
+function canEditRemCutoff(){
+  return ['it_admin','pastor','accountant'].includes(state.user?.role);
+}
+
+function getOrdinalSuffix(day){
+  // Used only for calendar day values (1-31)
+  const d = Number(day);
+  if(!Number.isInteger(d)) return '';
+  const mod100 = d % 100;
+  if(mod100 >= 11 && mod100 <= 13) return 'th';
+  const mod10 = d % 10;
+  if(mod10 === 1) return 'st';
+  if(mod10 === 2) return 'nd';
+  if(mod10 === 3) return 'rd';
+  return 'th';
+}
+
+function renderRemCutoffCard(settings){
+  const c = getRemCutoffDates(settings, state.year) || getRemCutoffDates(settings);
+  const now = new Date();
+  const curMonth = now.getMonth(); // 0-11
+  const curYear = now.getFullYear();
+  const startOfToday = new Date(curYear, curMonth, now.getDate());
+
+  const isOpen = !!state.remCutoffOpen;
+  const chevron = isOpen ? '▲' : '▼';
+  const editBtn = canEditRemCutoff()
+    ? `<button class="btn btn-sm" onclick="App.showRemCutoffModal()" style="flex-shrink:0">✏️ Edit Dates</button>`
+    : '';
+
+  if(!c){
+    return `<div class="card" style="margin-bottom:12px">
+      <div class="card-header">
+        <span onclick="App.toggleRemCutoff()" style="cursor:pointer;display:flex;align-items:center;gap:8px;flex:1;min-width:0" title="${isOpen?'Collapse':'Expand'} cut-off dates">
+          <span id="remCutoffChevron" style="font-size:10px;color:var(--text3);flex-shrink:0">${chevron}</span>
+          <span class="card-title">📅 Remittance Cut-Off Dates</span>
+          <span id="remCutoffHint" style="font-size:11px;color:var(--text3);font-weight:400;font-style:italic;margin-left:2px">${isOpen?'(tap to collapse)':'(tap to expand)'}</span>
+        </span>
+        ${editBtn}
+      </div>
+      <div id="remCutoffBody" style="display:${isOpen?'block':'none'}">
+        <div class="alert alert-info" style="margin:0"><span class="alert-icon">ℹ</span><span>No cut-off dates set for this year. ${canEditRemCutoff()?'Click <strong>Edit Dates</strong> to set the dates from the HQ memo.':'Ask the IT Admin, Pastor, or Accountant to set the dates from the HQ annual memo.'}</span></div>
+      </div>
+    </div>`;
+  }
+
+  const year = Number.isInteger(Number(c.year)) ? Number(c.year) : curYear;
+  const rows = REM_MONTHS.map((m, i) => {
+    const day = Number.isInteger(c.dates[i]) ? c.dates[i] : null;
+    const isCurrent = (year === curYear) && (i === curMonth);
+    const cutoffDate = day ? new Date(year, i, day) : null;
+    const isPast = cutoffDate ? cutoffDate < startOfToday : (year < curYear || (year === curYear && i < curMonth));
+    const isThisMonth = isCurrent;
+    const dayLabel = day ? `${day}${getOrdinalSuffix(day)} ${m}` : '—';
+    const rowStyle = isThisMonth
+      ? 'background:var(--primary-light);font-weight:600'
+      : isPast ? 'color:var(--text3)' : '';
+    const badge = isThisMonth
+      ? `<span class="badge badge-info" style="margin-left:6px;font-size:10px">This month</span>`
+      : isPast ? `<span style="font-size:10px;color:var(--text3)">Passed</span>` : '';
+    return `<tr style="${rowStyle}">
+      <td style="padding:5px 10px;font-size:13px">${m}</td>
+      <td style="padding:5px 10px;font-size:13px;font-weight:${isThisMonth?700:400};color:${isPast&&!isThisMonth?'var(--text3)':'inherit'}">${dayLabel} ${badge}</td>
+    </tr>`;
+  }).join('');
+
+  return `<div class="card" style="margin-bottom:12px">
+    <div class="card-header">
+      <span onclick="App.toggleRemCutoff()" style="cursor:pointer;display:flex;align-items:center;gap:8px;flex:1;min-width:0" title="${isOpen?'Collapse':'Expand'} cut-off dates">
+        <span id="remCutoffChevron" style="font-size:10px;color:var(--text3);flex-shrink:0">${chevron}</span>
+        <span class="card-title">📅 Remittance Cut-Off Dates — ${year}</span>
+        <span id="remCutoffHint" style="font-size:11px;color:var(--text3);font-weight:400;font-style:italic;margin-left:2px">${isOpen?'(tap to collapse)':'(tap to expand)'}</span>
+      </span>
+      ${editBtn}
+    </div>
+    <div id="remCutoffBody" style="display:${isOpen?'block':'none'}">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:8px">These are the HQ-mandated monthly deadlines for remittance payments. The highlighted row is this month.</p>
+      <div class="table-wrap"><table style="width:100%">
+        <tr style="background:var(--surface)">
+          <th style="padding:5px 10px;font-size:11px">Month</th>
+          <th style="padding:5px 10px;font-size:11px">Cut-Off Date</th>
+        </tr>
+        ${rows}
+      </table></div>
+    </div>
+  </div>`;
+}
+
+function toggleRemCutoff(){
+  state.remCutoffOpen = !state.remCutoffOpen;
+  const body = document.getElementById('remCutoffBody');
+  const icon = document.getElementById('remCutoffChevron');
+  const hint = document.getElementById('remCutoffHint');
+  if(body) body.style.display = state.remCutoffOpen ? 'block' : 'none';
+  if(icon) icon.textContent = state.remCutoffOpen ? '▲' : '▼';
+  if(hint) hint.textContent = state.remCutoffOpen ? '(tap to collapse)' : '(tap to expand)';
+}
+
+async function showRemCutoffModal(){
+  if(!canEditRemCutoff()){ showAlert('Only IT Admin, Pastor, or Accountant can edit cut-off dates.','danger'); return; }
+  const settings = await DB.getSettings();
+  const preferredYear = Number.isInteger(state.year) ? state.year : new Date().getFullYear();
+  const c = getRemCutoffDates(settings, preferredYear) || getRemCutoffDates(settings);
+  const year = c?.year || preferredYear;
+  const dates = c?.dates || Array(12).fill('');
+
+  const inputs = REM_MONTHS.map((m, i) => `
+    <div class="form-row" style="align-items:center;gap:10px;margin-bottom:8px">
+      <label class="form-label" style="width:110px;margin:0;flex-shrink:0">${m}</label>
+      <input type="number" id="cutoff_${i}" class="form-input" min="1" max="31"
+        value="${dates[i]||''}" placeholder="Day (1-31)"
+        style="width:100px;flex-shrink:0" />
+      <span style="font-size:12px;color:var(--text3)">${year}</span>
+    </div>`).join('');
+
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">📅 Set Remittance Cut-Off Dates</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Enter the cut-off day for each month as stated in the HQ annual memo. These dates are shown on the Remittances page as a reminder.</span></div>
+    <div class="form-group">
+      <label class="form-label">Year</label>
+      <input type="number" id="cutoff_year" class="form-input" value="${year}" min="2024" max="2099" style="width:120px" />
+    </div>
+    <div style="max-height:340px;overflow-y:auto;padding-right:4px">
+      ${inputs}
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.saveRemCutoffDates()">Save Dates</button>
+    </div>`);
+}
+
+async function saveRemCutoffDates(){
+  if(!canEditRemCutoff()){ showAlert('Only IT Admin, Pastor, or Accountant can edit cut-off dates.','danger'); return; }
+  const yearInput = parseInt(document.getElementById('cutoff_year')?.value);
+  const year = (Number.isFinite(yearInput) && yearInput>=2024 && yearInput<=2099)
+    ? yearInput
+    : new Date().getFullYear();
+  const invalidMonths = [];
+  const dates = Array.from({length:12}, (_,i) => {
+    const raw = (document.getElementById(`cutoff_${i}`)?.value || '').trim();
+    if(!raw) return null;
+    const v = parseInt(raw);
+    const maxDay = new Date(year, i+1, 0).getDate(); // day 0 of next month = last day of month i
+    if(Number.isFinite(v) && v>=1 && v<=maxDay) return v;
+    invalidMonths.push(`${REM_MONTHS[i]} (1-${maxDay})`);
+    return null;
+  });
+  if(invalidMonths.length){
+    showAlert(`Invalid cut-off day for ${invalidMonths.join(', ')}.`, 'danger');
+    return;
+  }
+  const settings = await DB.getSettings();
+  if(!settings.remCutoffDatesByYear || typeof settings.remCutoffDatesByYear!=='object'){
+    settings.remCutoffDatesByYear = {};
+  }
+  settings.remCutoffDatesByYear[year] = dates;
+  settings.remCutoffDates = { year, dates };
+  await DB.saveSettings(settings);
+  DB.addAudit('rem_cutoff_updated', `Remittance cut-off dates set for ${year}`, state.user?.name);
+  closeModal();
+  showAlert(`Cut-off dates saved for ${year}.`, 'success');
+  renderRemittances();
+}
+
 async function renderRemittances(){
   const [allIncome, allRems, settings, allUsers] = await Promise.all([
     DB.getIncome(), DB.getRemittances(), DB.getSettings(), DB.getUsers()
@@ -2467,8 +2738,37 @@ async function renderRemittances(){
   const quotas = getQuotaList(settings);
   const rr = await getRemRates();
 
+  // --- Cut-off date for selected month (governs To date when configured) ---
+  const cutoffConfig = getRemCutoffDates(settings, state.year);
+  const cutoffYear = cutoffConfig ? Number(cutoffConfig.year) : null;
+  const cutoffDay = (cutoffConfig && cutoffYear === state.year && Number.isInteger(cutoffConfig.dates[state.month]))
+    ? cutoffConfig.dates[state.month]
+    : null;
+  const hasCutoff = !!cutoffDay;
+
   // --- Determine period defaults ---
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = ymdLocal(new Date());
+  // When cut-off dates are configured, always recalculate both From and To from the cut-off table
+  if(hasCutoff){
+    // To = current month's cut-off date
+    state.remToDate = ymdLocal(new Date(state.year, state.month, cutoffDay));
+    // From = day after the previous month's cut-off date (wrapping year if needed)
+    const prevMonth = state.month === 0 ? 11 : state.month - 1;
+    const prevYear  = state.month === 0 ? state.year - 1 : state.year;
+    const prevCutoffConfig = getRemCutoffDates(settings, prevYear);
+    const prevCutoffDay = (prevCutoffConfig && Number.isInteger(prevCutoffConfig.dates[prevMonth]) && Number(prevCutoffConfig.year) === prevYear)
+      ? prevCutoffConfig.dates[prevMonth]
+      : null;
+    if(prevCutoffDay){
+      // Day after previous month's cut-off
+      const d = new Date(prevYear, prevMonth, prevCutoffDay);
+      d.setDate(d.getDate() + 1);
+      state.remFromDate = ymdLocal(d);
+    } else {
+      // No cut-off for previous month — fall back to first day of current month
+      state.remFromDate = ymdLocal(new Date(state.year, state.month, 1));
+    }
+  } else {
   if(!state.remFromDate){
     // Day after last paid remittance, or start of current month
     const lastPaid = allRems.filter(r=>r.status==='paid')
@@ -2476,16 +2776,19 @@ async function renderRemittances(){
     if(lastPaid){
       const d=new Date(lastPaid.paidDate||lastPaid.createdAt||0);
       if(isNaN(d.getTime())){
-        state.remFromDate=new Date(state.year,state.month,1).toISOString().split('T')[0];
+        state.remFromDate=ymdLocal(new Date(state.year,state.month,1));
       } else {
         d.setDate(d.getDate()+1);
-        state.remFromDate=d.toISOString().split('T')[0];
+        state.remFromDate=ymdLocal(d);
       }
     } else {
-      state.remFromDate=new Date(state.year,state.month,1).toISOString().split('T')[0];
+      state.remFromDate=ymdLocal(new Date(state.year,state.month,1));
     }
   }
-  if(!state.remToDate) state.remToDate=todayStr;
+  if(!state.remToDate){
+    state.remToDate = todayStr;
+  }
+  }
 
   const fromDate=state.remFromDate;
   const toDate=state.remToDate;
@@ -2494,14 +2797,25 @@ async function renderRemittances(){
   const income=filterByDateRange(allIncome, fromDate, toDate);
   const rem=await calcRemittancesFromRecords(income);
 
-  // --- Build remittance lines (No Go-A-Fishing — not an HQ remittance) ---
-  const incomeLines=rem.lines.map(l=>({
-    label:l.label+' → National HQ', amount:l.national||0, section:'income', from:l
+  // --- Build remittance lines ---
+  // Non-TG income types → National HQ (% based)
+  const incomeLines=rem.lines.filter(l=>!l.isTg).map(l=>({
+    label:l.label+' → National HQ',
+    pct: l.total>0 ? Math.round((l.national/l.total)*100) : null,
+    amount:l.national||0, section:'income', from:l
   })).filter(l=>l.amount>0);
+
+  // Thanksgiving National HQ portion (75%) — added as a separate income-based remittance line
+  const tgNatlAmt=rem.lines.filter(l=>l.isTg).reduce((s,l)=>s+(l.national||0),0);
+  if(tgNatlAmt>0) incomeLines.push({
+    label:'Thanksgiving (TG) → National HQ',
+    pct: Math.round(rr.tgNational*100),
+    amount:tgNatlAmt, section:'income'
+  });
 
   const tgLines=[
     { label:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      amount:rem.totalArea,     section:'tg' },
-    { label:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor,   section:'tg' },
+    { label:`Thanksgiving → Pastor's Family Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor,   section:'tg' },
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters,section:'tg' },
     { label:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0,  section:'tg' },
   ].filter(l=>l.amount>0);
@@ -2527,8 +2841,10 @@ async function renderRemittances(){
   // --- Check for period payment ---
   const periodPayments=allRems.filter(r=>r.status==='paid'&&r.periodFrom===fromDate&&r.periodTo===toDate);
   const totalPaid=periodPayments.reduce((s,r)=>s+(r.amount||0),0);
-  const isPaid=totalPaid>0&&totalPaid>=totalDue*0.99;
+  const isPaid=totalPaid>0&&totalPaid>=totalDue*PAYMENT_TOLERANCE_THRESHOLD;
   const isPartial=totalPaid>0&&!isPaid;
+  const remDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
+    { isPaid, isPartial, paidAmount: totalPaid });
 
   const allPaidRems=allRems.filter(r=>r.status==='paid')
     .sort((a,b)=>new Date(b.paidDate||b.createdAt||0)-new Date(a.paidDate||a.createdAt||0));
@@ -2541,8 +2857,13 @@ async function renderRemittances(){
       <td colspan="3" style="font-size:10px;font-weight:700;color:var(--text3);padding:5px 12px;letter-spacing:0.6px;text-transform:uppercase">${sectionLabel}</td>
     </tr>
     ${rows.map(l=>`<tr>
-      <td style="padding:7px 12px"><strong>${l.label}</strong></td>
-      <td style="padding:7px 8px"><span class="badge ${l.section==='quota'?'badge-info':'badge-purple'}">${l.section==='quota'?'Fixed Quota':'% Based'}</span></td>
+      <td style="padding:7px 12px">
+        <strong>${l.label}</strong>
+        ${l.pct!=null?`<span style="margin-left:6px;font-size:11px;color:var(--text3);font-weight:400">(${l.pct}%)</span>`:''}
+      </td>
+      <td style="padding:7px 8px">
+        <span class="badge ${l.section==='quota'?'badge-info':'badge-purple'}">${l.section==='quota'?'Fixed Quota':'% Based'}</span>
+      </td>
       <td class="td-right td-bold td-red" style="padding:7px 12px">${fmt(l.amount)}</td>
     </tr>`).join('')}`:'';
 
@@ -2550,7 +2871,7 @@ async function renderRemittances(){
     <div class="page-header">
       <div>
         <div class="page-title">Remittances</div>
-        <div class="page-sub">All amounts due to RCCG National & Provincial authorities</div>
+        <div class="page-sub">Summary of all amounts due to HQ, Province, and for local distribution</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${canAction('remittance_record_payment')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Payment</button>`:''}
@@ -2564,24 +2885,33 @@ async function renderRemittances(){
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="display:flex;align-items:center;gap:6px">
           <label style="font-size:12px;color:var(--text2);white-space:nowrap">From</label>
-          <input type="date" id="remFromDate" class="form-input" value="${fromDate}" style="width:auto;padding:6px 10px;font-size:13px" onchange="App.onRemDatesChange()" />
+          <input type="date" id="remFromDate" class="form-input" value="${fromDate}"
+            style="width:auto;padding:6px 10px;font-size:13px${hasCutoff?';background:var(--surface);cursor:default;color:var(--text2)':''}"
+            ${hasCutoff?'readonly':'onchange="App.onRemDatesChange()"'} />
         </div>
         <div style="display:flex;align-items:center;gap:6px">
           <label style="font-size:12px;color:var(--text2);white-space:nowrap">To</label>
-          <input type="date" id="remToDate" class="form-input" value="${toDate}" style="width:auto;padding:6px 10px;font-size:13px" onchange="App.onRemDatesChange()" />
+          <input type="date" id="remToDate" class="form-input" value="${toDate}"
+            style="width:auto;padding:6px 10px;font-size:13px${hasCutoff?';background:var(--surface);cursor:default;color:var(--text2)':''}"
+            ${hasCutoff?'readonly':'onchange="App.onRemDatesChange()"'} />
         </div>
+        ${hasCutoff?`<span class="badge badge-info" style="font-size:11px">🔒 Locked to cut-off date</span>`:''}
         ${isPaid?`<span class="badge badge-success" style="font-size:11px">✅ PAID for this period</span>`:isPartial?`<span class="badge badge-warn" style="font-size:11px">⏳ Partially paid</span>`:''}
       </div>
       <div style="font-size:11px;color:var(--text3);margin-top:8px">
-        ℹ️ Set <strong>From</strong> to the day after your last remittance payment, and <strong>To</strong> to the date of this month's remittance (e.g. last Sunday of the month).
+        ${hasCutoff
+          ? `🔒 Dates are automatically set from the HQ cut-off date for this month.`
+          : `ℹ️ Set <strong>From</strong> to the day after your last remittance payment, and <strong>To</strong> to the date of this month's remittance.`}
         Showing <strong>${income.length}</strong> income record(s) in this period.
       </div>
     </div>
 
+    ${renderRemCutoffCard(settings)}
+
     <!-- KPI Summary -->
     <div class="kpi-grid" style="margin-bottom:12px">
       <div class="kpi"><div class="kpi-icon" style="background:#E8F4FD">💰</div><div class="kpi-label">Total Collection</div><div class="kpi-val">${fmt(totalCollection)}</div></div>
-      <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Total Remittance Due</div><div class="kpi-val">${fmt(totalDue)}</div></div>
+      <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Total Remittance Due</div><div class="kpi-val">${fmt(totalDue)}</div><div class="kpi-delta" style="color:var(--text3)">📅 ${remDueLabel}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">✓</div><div class="kpi-label">Total Paid</div><div class="kpi-val">${fmt(totalPaid)}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">🏠</div><div class="kpi-label">Net Local Retained</div><div class="kpi-val">${fmt(trueNetLocal)}</div></div>
     </div>
@@ -2597,8 +2927,8 @@ async function renderRemittances(){
         </div>
         <div class="table-wrap"><table style="width:100%">
           <tr><th>Description</th><th style="width:100px">Type</th><th class="td-right" style="width:130px">Amount Due (₦)</th></tr>
-          ${renderSection(incomeLines,'Income-Based Remittances (% of collections)')}
-          ${renderSection(tgLines,'Thanksgiving Offering Distribution')}
+          ${renderSection(incomeLines,'Income-Based Remittances → National HQ (% of collections)')}
+          ${renderSection(tgLines,'Thanksgiving — Pastoral & Local Distribution')}
           ${renderSection(provinceLines,'Province Rebate (20% of Local Retained Tithes)')}
           ${renderSection(quotaLines,'Fixed Monthly Quotas')}
           <tr style="border-top:2px solid var(--border)">
@@ -2691,11 +3021,11 @@ async function renderRemittances(){
           </div>
         </div>
 
-        <!-- Pastor's Share card -->
-        ${(rem.totalPastor||0)+(rem.totalArea||0)+(rem.totalSeed||0)>0?`
+        <!-- Pastor's Family Share card -->
+        ${(rem.totalPastor||0)+(rem.totalArea||0)+(rem.totalSeed||0)+(quotas.find(q=>q.label.toLowerCase().includes('mummy'))?.amount||0)>0?`
         <div class="card" style="margin-top:12px">
-          <div class="card-header"><span class="card-title">👨‍💼 Pastor's Share</span></div>
-          <p style="font-size:11px;color:var(--text3);margin-bottom:10px">Thanksgiving portions due to the Pastor (as Zonal / Area Pastor).</p>
+          <div class="card-header"><span class="card-title">👨‍💼 Pastor's Family Share</span></div>
+          <p style="font-size:11px;color:var(--text3);margin-bottom:10px">Thanksgiving portions and stipend due to the Pastor's family (as Zonal / Area Pastor).</p>
           ${(rem.totalArea||0)>0?`
           <div class="status-row">
             <div class="status-row-label">TG → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)</div>
@@ -2703,7 +3033,7 @@ async function renderRemittances(){
           </div>`:''}
           ${(rem.totalPastor||0)>0?`
           <div class="status-row">
-            <div class="status-row-label">TG → Pastor's Share (${Math.round(rr.tgPastor*100)}%)</div>
+            <div class="status-row-label">TG → Pastor's Family Share (${Math.round(rr.tgPastor*100)}%)</div>
             <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalPastor)}</div>
           </div>`:''}
           ${(rem.totalSeed||0)>0?`
@@ -2711,9 +3041,14 @@ async function renderRemittances(){
             <div class="status-row-label">TG → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)</div>
             <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalSeed)}</div>
           </div>`:''}
+          ${(()=>{ const mq=quotas.find(q=>q.label.toLowerCase().includes('mummy')); return mq&&(mq.amount||0)>0?`
+          <div class="status-row">
+            <div class="status-row-label">${mq.label} (Fixed Monthly)</div>
+            <div class="status-row-amt" style="color:var(--primary)">${fmt(mq.amount)}</div>
+          </div>`:'' })()}
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px">
-            <div class="status-row-label fw-bold">TOTAL PASTOR'S SHARE</div>
-            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt((rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalSeed||0))}</div>
+            <div class="status-row-label fw-bold">TOTAL PASTOR'S FAMILY SHARE</div>
+            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt((rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalSeed||0)+(quotas.find(q=>q.label.toLowerCase().includes('mummy'))?.amount||0))}</div>
           </div>
         </div>`:''}
       </div>
@@ -2733,7 +3068,7 @@ async function showRemittancePaymentModal(){
   const lines=[
     ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0 })),
     { label:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      amount:rem.totalArea },
-    { label:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor },
+    { label:`Thanksgiving → Pastor's Family Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor },
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters },
     { label:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0 },
     { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`, amount:rem.provinceRebate },
@@ -3068,7 +3403,7 @@ async function printRemittanceReport(fromOverride, toOverride){
   // ─── PART B: OTHER DISBURSEMENTS ─────────────────────────────────
   const partBRows=[
     { desc:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,       type:'% Based', amount:rem.totalArea||0 },
-    { desc:`Thanksgiving → Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,          type:'% Based', amount:rem.totalPastor||0 },
+    { desc:`Thanksgiving → Pastor's Family Share (${Math.round(rr.tgPastor*100)}%)`,          type:'% Based', amount:rem.totalPastor||0 },
     { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,     type:'% Based', amount:rem.totalMinisters||0 },
     { desc:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`,  type:'% Based', amount:rem.totalSeed||0 },
     ...mummyQuotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 }))
@@ -6131,7 +6466,7 @@ function renderAdminRates(s){
       <tr><th>Recipient</th><th>Percentage</th></tr>
       <tr><td>TG → National HQ</td><td>${rateInput('rate_tgNational', r.tgNational ?? DEFAULT_REMITTANCE_RATES.tgNational)}</td></tr>
       <tr><td>TG → Area</td><td>${rateInput('rate_tgArea', r.tgArea ?? DEFAULT_REMITTANCE_RATES.tgArea)}</td></tr>
-      <tr><td>TG → Pastor's Share</td><td>${rateInput('rate_tgPastor', r.tgPastor ?? DEFAULT_REMITTANCE_RATES.tgPastor)}</td></tr>
+      <tr><td>TG → Pastor's Family Share</td><td>${rateInput('rate_tgPastor', r.tgPastor ?? DEFAULT_REMITTANCE_RATES.tgPastor)}</td></tr>
       <tr><td>TG → Ministers' Share</td><td>${rateInput('rate_tgMinisters', r.tgMinisters ?? DEFAULT_REMITTANCE_RATES.tgMinisters)}</td></tr>
       <tr><td>TG → Seed — Pastor's Children</td><td>${rateInput('rate_tgSeed', r.tgSeed ?? DEFAULT_REMITTANCE_RATES.tgSeed)}</td></tr>
     </table></div>
@@ -6622,7 +6957,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
+  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
