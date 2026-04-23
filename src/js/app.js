@@ -461,7 +461,7 @@ async function login(btn=null){
   const pin = document.getElementById('pinInput').value.trim();
   const errEl = document.getElementById('loginError');
   if(!role||!pin){ errEl.textContent='Please select a role and enter your PIN.'; errEl.style.display='block'; return }
-  const loginBtn = btn || document.querySelector('#loginScreen .hp-signin-btn, #loginScreen .btn-primary');
+  const loginBtn = btn || document.querySelector('#loginScreen .hp-signin-btn');
   const roleEl = document.getElementById('roleSelect');
   const pinEl = document.getElementById('pinInput');
   const userEl = document.getElementById('userSelect');
