@@ -4116,14 +4116,23 @@ async function submitExpense(btn=null){
     cashAmount=amount; // cash (accountant)
   }
 
-  // Guard: cash amount must not exceed available cash with accountant.
+  // Guards: amounts must not exceed available balances.
   // +0.5 tolerance absorbs floating-point rounding differences (consistent with submitRefill).
-  if(cashAmount > 0){
+  if(bankAmount > 0 || cashAmount > 0){
     const _bal = await calcChurchBalance();
-    const availCash = Math.max(0, _bal.cashWithAccountant||0);
-    if(cashAmount > availCash + 0.5){
-      alert(`Cash with Accountant is insufficient for this expense.\nAvailable cash: ${fmt(availCash)}\nRequired: ${fmt(cashAmount)}`);
-      return;
+    if(bankAmount > 0){
+      const availBank = Math.max(0, _bal.bankBalance||0);
+      if(bankAmount > availBank + 0.5){
+        alert(`Bank balance is insufficient for this expense.\nAvailable bank balance: ${fmt(availBank)}\nRequired: ${fmt(bankAmount)}`);
+        return;
+      }
+    }
+    if(cashAmount > 0){
+      const availCash = Math.max(0, _bal.cashWithAccountant||0);
+      if(cashAmount > availCash + 0.5){
+        alert(`Cash with Accountant is insufficient for this expense.\nAvailable cash: ${fmt(availCash)}\nRequired: ${fmt(cashAmount)}`);
+        return;
+      }
     }
   }
 
