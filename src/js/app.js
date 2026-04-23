@@ -20,10 +20,10 @@ const ROLES = {
 
 const PERMISSIONS = {
   it_admin:      ['all'],
-  pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','petty_view','reports','audit','signoff'],
-  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit'],
+  pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','petty_view','reports','audit','signoff','rem_cutoff_edit'],
+  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit','rem_cutoff_edit'],
   admin_officer: ['dashboard','transactions','expenses','petty_request','petty_view','income_view'],
-  signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','bank','petty_approve'],
+  signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','bank','petty_approve','signoff'],
   viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','petty_view']
 };
 
@@ -35,6 +35,7 @@ const PERMISSION_DEFS = [
   { key:'income_view',      label:'View Income Records',    group:'Finance'    },
   { key:'remittances',      label:'Manage Remittances',     group:'Finance'    },
   { key:'remittances_view', label:'View Remittances',       group:'Finance'    },
+  { key:'rem_cutoff_edit',  label:'Edit Remittance Cut-Off Dates', group:'Finance' },
   { key:'expenses',         label:'Log Expenses',           group:'Finance'    },
   { key:'expenses_view',    label:'View Expenses',          group:'Finance'    },
   { key:'bank',             label:'Bank',                   group:'Finance'    },
@@ -124,6 +125,7 @@ const QUOTA_LABELS = {
 // Income source types used in the "Other Income" form
 const OTHER_INCOME_SOURCES = [
   { key:'midweek_offering',   label:'Midweek / Programme Offering' },
+  { key:'go_a_fishing_offering', label:'Go-a-Fishing Offering' },
   { key:'individual_tithe',   label:'Individual Tithe (Bank Transfer)' },
   { key:'individual_donation',label:'Personal / Individual Donation' },
   { key:'seed',               label:'Seed Offering' },
@@ -218,7 +220,8 @@ const state = {
   user: null,
   page: 'dashboard',
   month: new Date().getMonth(),
-  year: new Date().getFullYear()
+  year: new Date().getFullYear(),
+  loginBusy: false
 };
 
 // ──────────────────────────────────────────
@@ -452,13 +455,22 @@ async function onRoleChange(){
   }
 }
 
-async function login(){
+async function login(btn=null){
+  if(state.loginBusy) return;
   const role = document.getElementById('roleSelect').value;
   const pin = document.getElementById('pinInput').value.trim();
   const errEl = document.getElementById('loginError');
   if(!role||!pin){ errEl.textContent='Please select a role and enter your PIN.'; errEl.style.display='block'; return }
-  const btn = document.querySelector('#loginScreen .btn-primary');
-  if(btn){ btn.textContent='Connecting…'; btn.disabled=true; }
+  const loginBtn = btn || document.querySelector('#loginScreen .hp-signin-btn');
+  const roleEl = document.getElementById('roleSelect');
+  const pinEl = document.getElementById('pinInput');
+  const userEl = document.getElementById('userSelect');
+  const setFormDisabled = (disabled)=>{
+    [roleEl, pinEl, userEl].forEach(el=>{ if(el) el.disabled = !!disabled; });
+  };
+  state.loginBusy = true;
+  setFormDisabled(true);
+  const restore = setBtnLoading(loginBtn, 'Signing in…');
   try {
     // Ensure tables exist — silently ignore if this fails (may already be initialised)
     try { await apiFetch('init'); } catch(initErr) { console.warn('init skipped:', initErr.message); }
@@ -481,7 +493,10 @@ async function login(){
       errEl.textContent='Cannot connect to database: '+msg;
     }
     errEl.style.display='block';
-    if(btn){ btn.textContent='Sign In'; btn.disabled=false; }
+    restore();
+    setFormDisabled(false);
+  } finally {
+    state.loginBusy = false;
   }
 }
 function logout(){
@@ -2567,7 +2582,7 @@ function getRemittanceDueLabel(settings, year=state.year, month=state.month, { i
 }
 
 function canEditRemCutoff(){
-  return ['it_admin','pastor','accountant'].includes(state.user?.role);
+  return can('rem_cutoff_edit');
 }
 
 function getOrdinalSuffix(day){
@@ -2607,7 +2622,7 @@ function renderRemCutoffCard(settings){
         ${editBtn}
       </div>
       <div id="remCutoffBody" style="display:${isOpen?'block':'none'}">
-        <div class="alert alert-info" style="margin:0"><span class="alert-icon">ℹ</span><span>No cut-off dates set for this year. ${canEditRemCutoff()?'Click <strong>Edit Dates</strong> to set the dates from the HQ memo.':'Ask the IT Admin, Pastor, or Accountant to set the dates from the HQ annual memo.'}</span></div>
+        <div class="alert alert-info" style="margin:0"><span class="alert-icon">ℹ</span><span>No cut-off dates set for this year. ${canEditRemCutoff()?'Click <strong>Edit Dates</strong> to set the dates from the HQ memo.':'Ask an administrator to grant you the <strong>Edit Remittance Cut-Off Dates</strong> permission in IT Admin settings.'}</span></div>
       </div>
     </div>`;
   }
@@ -2665,7 +2680,7 @@ function toggleRemCutoff(){
 }
 
 async function showRemCutoffModal(){
-  if(!canEditRemCutoff()){ showAlert('Only IT Admin, Pastor, or Accountant can edit cut-off dates.','danger'); return; }
+  if(!canEditRemCutoff()){ showAlert('You do not have permission to edit remittance cut-off dates.','danger'); return; }
   const settings = await DB.getSettings();
   const preferredYear = Number.isInteger(state.year) ? state.year : new Date().getFullYear();
   const c = getRemCutoffDates(settings, preferredYear) || getRemCutoffDates(settings);
@@ -2694,12 +2709,12 @@ async function showRemCutoffModal(){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.saveRemCutoffDates()">Save Dates</button>
+      <button class="btn btn-primary" onclick="App.saveRemCutoffDates(this)">Save Dates</button>
     </div>`);
 }
 
-async function saveRemCutoffDates(){
-  if(!canEditRemCutoff()){ showAlert('Only IT Admin, Pastor, or Accountant can edit cut-off dates.','danger'); return; }
+async function saveRemCutoffDates(btn=null){
+  if(!canEditRemCutoff()){ showAlert('You do not have permission to edit remittance cut-off dates.','danger'); return; }
   const yearInput = parseInt(document.getElementById('cutoff_year')?.value);
   const year = (Number.isFinite(yearInput) && yearInput>=2024 && yearInput<=2099)
     ? yearInput
@@ -2718,17 +2733,23 @@ async function saveRemCutoffDates(){
     showAlert(`Invalid cut-off day for ${invalidMonths.join(', ')}.`, 'danger');
     return;
   }
-  const settings = await DB.getSettings();
-  if(!settings.remCutoffDatesByYear || typeof settings.remCutoffDatesByYear!=='object'){
-    settings.remCutoffDatesByYear = {};
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    const settings = await DB.getSettings();
+    if(!settings.remCutoffDatesByYear || typeof settings.remCutoffDatesByYear!=='object'){
+      settings.remCutoffDatesByYear = {};
+    }
+    settings.remCutoffDatesByYear[year] = dates;
+    settings.remCutoffDates = { year, dates };
+    await DB.saveSettings(settings);
+    DB.addAudit('rem_cutoff_updated', `Remittance cut-off dates set for ${year}`, state.user?.name);
+    closeModal();
+    showAlert(`Cut-off dates saved for ${year}.`, 'success');
+    renderRemittances();
+  } catch(err){
+    restore();
+    showAlert(`Failed to save cut-off dates: ${err.message||'Unknown error'}. Please try again.`, 'danger');
   }
-  settings.remCutoffDatesByYear[year] = dates;
-  settings.remCutoffDates = { year, dates };
-  await DB.saveSettings(settings);
-  DB.addAudit('rem_cutoff_updated', `Remittance cut-off dates set for ${year}`, state.user?.name);
-  closeModal();
-  showAlert(`Cut-off dates saved for ${year}.`, 'success');
-  renderRemittances();
 }
 
 async function renderRemittances(){
@@ -2949,7 +2970,7 @@ async function renderRemittances(){
 
       <!-- RIGHT: History + Local Share -->
       <div>
-        ${pendingApprovals.length&&['it_admin','pastor','signatory'].includes(state.user?.role)?`
+        ${pendingApprovals.length&&can('signoff')?`
         <div class="card" style="border-left:3px solid var(--amber);margin-bottom:12px">
           <div class="card-header"><span class="card-title">⏳ Pending Approval (${pendingApprovals.length})</span></div>
           <p style="font-size:11px;color:var(--text3);margin:0 0 8px 0">These payments have been submitted and are awaiting approval by the Pastor or a Bank Signatory.</p>
@@ -2963,7 +2984,7 @@ async function renderRemittances(){
               </div>
               <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
                 <span class="td-bold td-red">${fmt(r.amount)}</span>
-                ${['it_admin','pastor','signatory'].includes(state.user?.role)?`<button class="btn btn-sm btn-primary" onclick="App.approveRemittance('${r.id}', this)">✅ Approve</button>`:''}
+                ${can('signoff')?`<button class="btn btn-sm btn-primary" onclick="App.approveRemittance('${r.id}', this)">✅ Approve</button>`:''}
               </div>
             </div>`).join('')}
         </div>`:''}
@@ -3300,6 +3321,7 @@ async function submitRemittance(btn=null){
 }
 
 async function approveRemittance(id, btn=null){
+  if(!can('signoff')){ showAlert('You do not have permission to approve remittances.','danger'); return; }
   if(!confirm('Approve this remittance payment?')) return;
   const restore = setBtnLoading(btn, 'Approving…');
   try {
