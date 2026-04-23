@@ -1519,7 +1519,7 @@ async function calcChurchBalance(){
 }
 
 async function renderDashboard(){
-  const [allIncomeDash,allExpensesDash,pettyHistDash,settingsDash,allRemsDash,pettyConfigDash] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getPetty(),DB.getSettings(),DB.getRemittances(),DB.getPettyConfig()]);
+  const [allIncomeDash,allExpensesDash,pettyHistDash,settingsDash,allRemsDash,pettyConfigDash,remRatesDash] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getPetty(),DB.getSettings(),DB.getRemittances(),DB.getPettyConfig(),getRemRates()]);
   const income = filterByMonth(allIncomeDash);
   const expenses = filterByMonth(allExpensesDash);
   const petty = { history: pettyHistDash, float: pettyConfigDash.float, max: pettyConfigDash.max };
@@ -1540,6 +1540,9 @@ async function renderDashboard(){
     .reduce((s,q)=>s+(q.amount||0),0);
   const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
   const netLocal = remittances.netLocal - dashAllQuotasAmt;
+  const dashRemRates = remRatesDash?.rates || DEFAULT_REMITTANCE_RATES;
+  const dashSundayRecs = income.filter(r => !r.source || r.source === 'sunday_collection');
+  const dashChildrenTeacherTotal = dashSundayRecs.reduce((s, r) => s + getChildrenTeacherHeldCash(r, dashRemRates), 0);
   // Check if the current month's remittance has already been paid or partially paid.
   // A remittance is considered "for this month" when its periodTo falls within the viewed year/month.
   const dashMonthPrefix = `${state.year}-${String(state.month+1).padStart(2,'0')}`;
@@ -1674,6 +1677,11 @@ async function renderDashboard(){
         <div class="kpi-label">Local Retained Funds</div>
         <div class="kpi-val">${fmt(netLocal)}</div>
         <div class="kpi-delta up">After all remittances</div>
+        ${dashChildrenTeacherTotal > 0 ? `<div style="margin-top:8px;padding:7px 9px;border-radius:6px;background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.25);font-size:11px;line-height:1.5">
+          <div style="color:#BA7517;font-weight:600">🧒 ${fmt(dashChildrenTeacherTotal)} with Children Teacher</div>
+          <div style="color:var(--text3);font-size:10px;margin-top:1px">65% of Teen/Children's Offering (for refreshments)</div>
+          <button class="btn btn-sm" onclick="App.showChildrenTeacherModal()" aria-label="View breakdown of children teacher funds" style="margin-top:5px;font-size:10px;padding:2px 8px">View Breakdown →</button>
+        </div>` : ''}
       </div>
       <div class="kpi kpi-balance" style="grid-column:span 1">
         <div class="kpi-icon" style="background:#EAF3DE">🏛️</div>
@@ -6959,6 +6967,77 @@ async function clearAllData(){
   }
 }
 
+async function showChildrenTeacherModal(){
+  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
+  const allIncome = await DB.getIncome();
+  const monthIncome = filterByMonth(allIncome);
+  const sundayRecs = monthIncome
+    .filter(r => !r.source || r.source === 'sunday_collection')
+    .filter(r => (r.childrenOffering || 0) > 0);
+  const localRate = getChildrenOfferingLocalRate(remRates);
+  const natlRate = typeof remRates.childrenOffering?.natl === 'number'
+    ? remRates.childrenOffering.natl
+    : DEFAULT_REMITTANCE_RATES.childrenOffering.natl;
+  const totalChildrenOffering = sundayRecs.reduce((s, r) => s + (r.childrenOffering || 0), 0);
+  const totalTeacherShare = sundayRecs.reduce((s, r) => s + getChildrenTeacherHeldCash(r, remRates), 0);
+  const totalNatlShare = totalChildrenOffering * natlRate;
+
+  const rows = sundayRecs.map(r => {
+    const co = r.childrenOffering || 0;
+    const teacherShare = getChildrenTeacherHeldCash(r, remRates);
+    return `<tr>
+      <td style="padding:6px 8px">${fmtDate(r.date)}</td>
+      <td style="padding:6px 8px;text-align:right">${fmt(co)}</td>
+      <td style="padding:6px 8px;text-align:right;color:#A32D2D">${fmt(co * natlRate)}</td>
+      <td style="padding:6px 8px;text-align:right;color:#BA7517;font-weight:600">${fmt(teacherShare)}</td>
+    </tr>`;
+  }).join('');
+
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🧒 Children Teacher — ${monthLabel()}</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:14px">The local share (${Math.round(localRate*100)}%) of the Teen/Children's Offering stays with the Children Teacher to cover refreshments and departmental needs. This amount is <strong>not</strong> held by the accountant.</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+      <div style="background:var(--surface);border-radius:var(--r);padding:10px;text-align:center">
+        <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Total Collected</div>
+        <div style="font-size:18px;font-weight:700;color:var(--text)">${fmt(totalChildrenOffering)}</div>
+        <div style="font-size:10px;color:var(--text3);margin-top:2px">Teen/Children's Offering</div>
+      </div>
+      <div style="background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.25);border-radius:var(--r);padding:10px;text-align:center">
+        <div style="font-size:10px;color:#BA7517;text-transform:uppercase;letter-spacing:1px;font-weight:700;margin-bottom:4px">🧒 Teacher's Share (${Math.round(localRate*100)}%)</div>
+        <div style="font-size:18px;font-weight:700;color:#BA7517">${fmt(totalTeacherShare)}</div>
+        <div style="font-size:10px;color:var(--text3);margin-top:2px">For refreshments &amp; dept. needs</div>
+      </div>
+    </div>
+    <div style="background:rgba(163,45,45,0.06);border-radius:var(--r);padding:8px 10px;margin-bottom:14px;font-size:11px;color:var(--text2)">
+      <span style="color:#A32D2D;font-weight:600">📤 ${fmt(totalNatlShare)} (${Math.round(natlRate*100)}%) → National HQ</span>
+    </div>
+    ${sundayRecs.length > 0 ? `
+    <div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px">Per-Sunday Breakdown</div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="background:var(--surface)">
+            <th style="padding:6px 8px;text-align:left;font-weight:600;color:var(--text2)">Date</th>
+            <th style="padding:6px 8px;text-align:right;font-weight:600;color:var(--text2)">Offering</th>
+            <th style="padding:6px 8px;text-align:right;font-weight:600;color:#A32D2D">→ HQ (${Math.round(natlRate*100)}%)</th>
+            <th style="padding:6px 8px;text-align:right;font-weight:600;color:#BA7517">Teacher (${Math.round(localRate*100)}%)</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+        <tfoot>
+          <tr style="background:var(--surface);border-top:2px solid var(--border)">
+            <td style="padding:6px 8px;font-weight:700">Total</td>
+            <td style="padding:6px 8px;text-align:right;font-weight:700">${fmt(totalChildrenOffering)}</td>
+            <td style="padding:6px 8px;text-align:right;font-weight:700;color:#A32D2D">${fmt(totalNatlShare)}</td>
+            <td style="padding:6px 8px;text-align:right;font-weight:700;color:#BA7517">${fmt(totalTeacherShare)}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>` : '<div style="text-align:center;color:var(--text3);font-size:13px;padding:16px 0">No Teen/Children\'s Offering recorded this month.</div>'}
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
+}
+
 // ── KPSC ALERT ────────────────────────────
 async function showKPSCAlert(){
   const income=filterByMonth(await DB.getIncome());
@@ -7019,7 +7098,7 @@ return {
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
   setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
-  showKPSCAlert, submitKPSCAlert, closeModal: closeModal, showAlert
+  showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert
 };
 
 })();
