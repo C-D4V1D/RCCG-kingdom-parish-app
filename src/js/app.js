@@ -2311,23 +2311,32 @@ async function viewIncome(id){
 
 async function confirmDeposit(id){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
-  const allIncCD = await DB.getIncome();
+  const [allIncCD, allCashCD, remRatesData, balance] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance()]);
   const r = allIncCD.find(x=>x.id===id);
   if(!r) return;
-  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
-  const btAmt = r.bankTransferAmount||0;
-  const dpAmt = r.directPettyCash||0;
+  const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
   const childrenTeacherHeld = getChildrenTeacherHeldCash(r, remRates);
   const cashHeld = getSundayCashWithAccountant(r, remRates);
-  const allCashCD = await DB.getCashTransactions();
   const alreadyDeposited = allCashCD.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
   const remaining = Math.max(0, cashHeld - alreadyDeposited);
+  const totalCashWithAccountant = balance.cashWithAccountant;
+  const otherCash = Math.max(0, totalCashWithAccountant - remaining);
   const today = new Date().toISOString().split('T')[0];
   state._depositRemaining = remaining;
   closeModal();
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">💰 Record Cash Deposit — ${fmtDate(r.date)}</div>
+    ${totalCashWithAccountant > 0 ? `
+    <div style="background:var(--primary-light);border:1.5px solid var(--primary);border-radius:8px;padding:12px 14px;margin-bottom:14px">
+      <div style="font-size:11px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">Your Total Cash with Accountant</div>
+      <div style="font-size:22px;font-weight:800;color:var(--primary);line-height:1;margin-bottom:8px">${fmt(totalCashWithAccountant)}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:16px;font-size:13px">
+        <span style="color:var(--text2)">This record: <strong style="color:var(--text)">${fmt(remaining)}</strong></span>
+        ${otherCash > 0.5 ? `<span style="color:var(--text2)">Other cash held: <strong style="color:var(--text)">${fmt(otherCash)}</strong></span>` : `<span style="color:var(--success,#2e7d32);font-size:12px;font-weight:600">✓ Only pending record</span>`}
+      </div>
+      ${otherCash > 0.5 ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(0,0,0,.1);font-size:12px;color:var(--text2)">This form deposits cash from this record only. To deposit all your cash in one trip: <button class="btn btn-sm" onclick="closeModal();App.confirmBulkDeposit()" style="margin-left:4px;font-size:11px;padding:2px 8px">Deposit All Cash (${fmt(totalCashWithAccountant)}) →</button></div>` : ''}
+    </div>` : ''}
     <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Record when you physically deposit the cash collected into the church bank account.</span></div>
     <div class="form-group"><label class="form-label">Cash Available from this Record</label>
       <div style="font-size:20px;font-weight:700;color:var(--primary);padding:8px 0">${fmt(remaining)}</div>
@@ -2384,9 +2393,9 @@ async function submitCashDeposit(incomeId, btn=null){
 
 async function confirmBulkDeposit(){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
-  const allIncome = await DB.getIncome(); // all months — accountant may have old pending cash
-  const cashTx = await DB.getCashTransactions();
-  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
+  const [allIncome, cashTx, remRatesData, balance] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance()]);
+  const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
+  const cashWithAccountant = balance.cashWithAccountant;
   const pending = allIncome.map(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
@@ -2398,18 +2407,30 @@ async function confirmBulkDeposit(){
   }).filter(p=>p.cashHeld>0 && p.remaining>0).sort((a,b)=>new Date(a.date)-new Date(b.date));
   if(!pending.length){ showAlert('No pending cash deposits found.','warn'); return }
   state._bulkDepositPending = pending;
+  state._bulkDepositCashBalance = cashWithAccountant;
   const totalRemaining = pending.reduce((s,p)=>s+p.remaining,0);
+  const adjustments = cashWithAccountant - totalRemaining;
+  const allMatchBalance = Math.abs(adjustments) <= 0.5;
   const today = new Date().toISOString().split('T')[0];
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">💰 Record Cash Deposit</div>
+    <div style="background:var(--primary-light);border:1.5px solid var(--primary);border-radius:8px;padding:12px 14px;margin-bottom:14px">
+      <div style="font-size:11px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">Your Cash with Accountant Balance</div>
+      <div style="font-size:22px;font-weight:800;color:var(--primary);line-height:1;margin-bottom:6px">${fmt(cashWithAccountant)}</div>
+      ${allMatchBalance
+        ? `<div style="font-size:12px;color:var(--success,#2e7d32);font-weight:600">✓ Selecting all records below will deposit your full balance</div>`
+        : adjustments > 0
+          ? `<div style="font-size:12px;color:var(--text2)">Income records: <strong>${fmt(totalRemaining)}</strong> &nbsp;·&nbsp; <span style="color:var(--amber)">+${fmt(adjustments)} from bank withdrawals to you</span></div>`
+          : `<div style="font-size:12px;color:var(--text2)">Income records: <strong>${fmt(totalRemaining)}</strong> &nbsp;·&nbsp; −${fmt(Math.abs(adjustments))} paid as cash expenses / petty cash</div>`}
+    </div>
     <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Tick the records you are depositing in this single trip to the bank. You can deposit all at once or just some of them.</span></div>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
       <span style="font-size:13px;font-weight:600;color:var(--text2)">${pending.length} record(s) with outstanding cash:</span>
       <button class="btn btn-sm" onclick="App.toggleBulkSelectAll(true)" style="margin-left:auto">Select All</button>
       <button class="btn btn-sm" onclick="App.toggleBulkSelectAll(false)">Deselect All</button>
     </div>
-    <div class="table-wrap" style="margin-bottom:16px"><table>
+    <div class="table-wrap" style="margin-bottom:4px"><table>
       <tr><th style="width:36px;text-align:center">✓</th><th>Date</th><th>Source</th><th>Cash Held</th><th>Prev. Deposited</th><th class="td-right">Remaining</th></tr>
       ${pending.map((p,i)=>`<tr>
         <td style="text-align:center"><input type="checkbox" id="bulk_chk_${i}" data-remaining="${p.remaining}" checked onchange="App.updateBulkDepositTotal()" style="width:16px;height:16px;cursor:pointer;accent-color:var(--primary)" /></td>
@@ -2424,6 +2445,9 @@ async function confirmBulkDeposit(){
         <td class="td-right" id="bulk_selected_total" style="color:var(--primary);font-size:15px;font-weight:700;padding:8px 10px">${fmt(totalRemaining)}</td>
       </tr>
     </table></div>
+    <div id="bulk_deposit_status" style="font-size:12px;padding:6px 2px 12px;min-height:20px">
+      ${allMatchBalance ? '<span style="color:var(--success,#2e7d32);font-weight:600">✓ Depositing your full Cash with Accountant balance</span>' : `<span style="color:var(--text2)"><strong>${fmt(Math.max(0, cashWithAccountant - totalRemaining))}</strong> will remain with accountant after this deposit</span>`}
+    </div>
     <div class="form-group"><label class="form-label">Deposit Method *</label>
       <select id="bulk_dep_method" class="form-select">
         <option value="bank_teller">Bank Cash Teller</option>
@@ -2445,6 +2469,7 @@ async function confirmBulkDeposit(){
 
 function updateBulkDepositTotal(){
   const pending = state._bulkDepositPending || [];
+  const cashBalance = state._bulkDepositCashBalance || 0;
   let total = 0;
   pending.forEach((_,i)=>{
     const chk = document.getElementById(`bulk_chk_${i}`);
@@ -2452,9 +2477,22 @@ function updateBulkDepositTotal(){
   });
   const el  = document.getElementById('bulk_selected_total');
   const btn = document.getElementById('bulk_confirm_btn');
+  const statusEl = document.getElementById('bulk_deposit_status');
   if(el)  el.textContent = fmt(total);
   if(btn) btn.textContent = `Confirm Deposit — ${fmt(total)}`;
   if(btn) btn.disabled = total <= 0;
+  if(statusEl){
+    if(total <= 0){
+      statusEl.innerHTML = '<span style="color:var(--text2)">Select at least one record to deposit.</span>';
+    } else {
+      const remainingAfter = Math.max(0, cashBalance - total);
+      if(remainingAfter < 0.5){
+        statusEl.innerHTML = '<span style="color:var(--success,#2e7d32);font-weight:600">✓ Depositing your full Cash with Accountant balance</span>';
+      } else {
+        statusEl.innerHTML = `<span style="color:var(--text2)"><strong>${fmt(remainingAfter)}</strong> will remain with accountant after this deposit</span>`;
+      }
+    }
+  }
 }
 
 function toggleBulkSelectAll(checked){
