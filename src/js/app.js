@@ -387,6 +387,28 @@ async function getRemRates(){
   };
 }
 
+function getChildrenOfferingLocalRate(remRates = DEFAULT_REMITTANCE_RATES){
+  const localRate = remRates?.childrenOffering?.local;
+  if(typeof localRate === 'number' && Number.isFinite(localRate) && localRate >= 0) return localRate;
+  return DEFAULT_REMITTANCE_RATES.childrenOffering.local;
+}
+
+function getChildrenTeacherHeldCash(record, remRates = DEFAULT_REMITTANCE_RATES){
+  const isSunday = !record?.source || record?.source==='sunday_collection';
+  if(!isSunday) return 0;
+  const childrenOffering = Number(record?.childrenOffering || 0);
+  if(childrenOffering <= 0) return 0;
+  return Math.max(0, childrenOffering * getChildrenOfferingLocalRate(remRates));
+}
+
+function getSundayCashWithAccountant(record, remRates = DEFAULT_REMITTANCE_RATES){
+  const total = Number(record?.totalCollection || 0);
+  const bankTransfer = Number(record?.bankTransferAmount || 0);
+  const directPetty = Number(record?.directPettyCash || 0);
+  const childrenTeacherHeld = getChildrenTeacherHeldCash(record, remRates);
+  return Math.max(0, total - bankTransfer - directPetty - childrenTeacherHeld);
+}
+
 async function calcRemittances(income){
   const rr = await getRemRates();
   const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, totalSeed:0,
@@ -830,13 +852,16 @@ async function buildTransactionsLedger(){
   const [income, expenses, remittances, cashTx, petty] = await Promise.all([
     DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getCashTransactions(), DB.getPetty()
   ]);
+  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
 
   const tx = [];
 
   (income||[]).forEach(r=>{
     const sourceMeta = OTHER_INCOME_SOURCES.find(s=>s.key===r.source);
     const isSunday = !r.source || r.source==='sunday_collection';
-    const cashHeld = Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
+    const cashHeld = isSunday
+      ? getSundayCashWithAccountant(r, remRates)
+      : Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
     tx.push({
       id:`income_${r.id}`,
       module:'income',
@@ -1442,6 +1467,7 @@ function deleteTxView(idx){
 async function calcChurchBalance(){
   const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory,pettyConfig] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getRemittances(),DB.getCashTransactions(),DB.getPetty(),DB.getPettyConfig()]);
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
+  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
 
   // --- BANK BALANCE ---
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
@@ -1460,6 +1486,8 @@ async function calcChurchBalance(){
 
   // --- CASH WITH ACCOUNTANT ---
   const cashFromCollections = allIncome.reduce((s,r) => {
+    const isSunday = !r.source || r.source==='sunday_collection';
+    if(isSunday) return s + getSundayCashWithAccountant(r, remRates);
     const btAmt = r.bankTransferAmount||0;
     const dpAmt = r.directPettyCash||0;
     return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
@@ -1491,7 +1519,7 @@ async function calcChurchBalance(){
 }
 
 async function renderDashboard(){
-  const [allIncomeDash,allExpensesDash,pettyHistDash,settingsDash,allRemsDash,pettyConfigDash] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getPetty(),DB.getSettings(),DB.getRemittances(),DB.getPettyConfig()]);
+  const [allIncomeDash,allExpensesDash,pettyHistDash,settingsDash,allRemsDash,pettyConfigDash,remRatesDash] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getPetty(),DB.getSettings(),DB.getRemittances(),DB.getPettyConfig(),getRemRates()]);
   const income = filterByMonth(allIncomeDash);
   const expenses = filterByMonth(allExpensesDash);
   const petty = { history: pettyHistDash, float: pettyConfigDash.float, max: pettyConfigDash.max };
@@ -1512,6 +1540,9 @@ async function renderDashboard(){
     .reduce((s,q)=>s+(q.amount||0),0);
   const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
   const netLocal = remittances.netLocal - dashAllQuotasAmt;
+  const dashRemRates = remRatesDash?.rates || DEFAULT_REMITTANCE_RATES;
+  const dashSundayRecs = income.filter(r => !r.source || r.source === 'sunday_collection');
+  const dashChildrenTeacherTotal = dashSundayRecs.reduce((s, r) => s + getChildrenTeacherHeldCash(r, dashRemRates), 0);
   // Check if the current month's remittance has already been paid or partially paid.
   // A remittance is considered "for this month" when its periodTo falls within the viewed year/month.
   const dashMonthPrefix = `${state.year}-${String(state.month+1).padStart(2,'0')}`;
@@ -1646,6 +1677,11 @@ async function renderDashboard(){
         <div class="kpi-label">Local Retained Funds</div>
         <div class="kpi-val">${fmt(netLocal)}</div>
         <div class="kpi-delta up">After all remittances</div>
+        ${dashChildrenTeacherTotal > 0 ? `<div style="margin-top:8px;padding:7px 9px;border-radius:6px;background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.25);font-size:11px;line-height:1.5">
+          <div style="color:#BA7517;font-weight:600">🧒 ${fmt(dashChildrenTeacherTotal)} with Children Teacher</div>
+          <div style="color:var(--text3);font-size:10px;margin-top:1px">65% of Teen/Children's Offering (for refreshments)</div>
+          <button class="btn btn-sm" onclick="App.showChildrenTeacherModal()" aria-label="View breakdown of children teacher funds" style="margin-top:5px;font-size:10px;padding:2px 8px">View Breakdown →</button>
+        </div>` : ''}
       </div>
       <div class="kpi kpi-balance" style="grid-column:span 1">
         <div class="kpi-icon" style="background:#EAF3DE">🏛️</div>
@@ -1791,10 +1827,11 @@ async function renderIncome(){
   const tab = state.incomeTab||'list';
   // Compute pending records (cash not yet fully deposited) across ALL income types
   const _cashTx = await DB.getCashTransactions();
+  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
   const pendingItems = records.map(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
-      ? Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0))
+      ? getSundayCashWithAccountant(r, remRates)
       : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
     const dep = _cashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
     return { cashHeld, dep };
@@ -1828,14 +1865,15 @@ async function renderIncome(){
       <button class="tab ${tab==='summary'?'active':''}" onclick="App.setIncomeTab('summary')">Monthly Summary</button>
       <button class="tab ${tab==='all'?'active':''}" onclick="App.setIncomeTab('all')">All Records</button>
     </div>
-    ${await (tab==='list'?renderIncomeList(sundayRecs):tab==='other'?renderOtherIncomeList(otherRecs):tab==='summary'?renderIncomeSummary(records):renderAllIncomeList(allIncomeRecs, _cashTx))}`;
+    ${await (tab==='list'?renderIncomeList(sundayRecs, _cashTx, remRates):tab==='other'?renderOtherIncomeList(otherRecs):tab==='summary'?renderIncomeSummary(records):renderAllIncomeList(allIncomeRecs, _cashTx, remRates))}`;
 }
 
 function setIncomeTab(t){ state.incomeTab=t; renderIncome() }
 
-async function renderIncomeList(records, cashTxOverride){
+async function renderIncomeList(records, cashTxOverride, remRatesOverride){
   if(!records.length) return '<div class="card"><div class="empty-table">No Sunday collection records found for this month. Click "📥 Sunday Collections" above to add one.</div></div>';
   const allCashTxList = cashTxOverride || await DB.getCashTransactions();
+  const remRates = remRatesOverride || (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
   return `<div class="card">
     <span class="td-muted tx-mobile-hint" style="font-size:11px;padding-bottom:6px">Tap any row to see full details</span>
     <div class="table-wrap"><table class="tx-desktop-table">
@@ -1843,7 +1881,7 @@ async function renderIncomeList(records, cashTxOverride){
       ${records.map(r=>{
         const btAmt = r.bankTransferAmount||0;
         const dpAmt = r.directPettyCash||0;
-        const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
+        const cashHeld = getSundayCashWithAccountant(r, remRates);
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
         const remaining = cashHeld - depositedAmt;
@@ -1871,7 +1909,7 @@ async function renderIncomeList(records, cashTxOverride){
       ${records.map(r=>{
         const btAmt = r.bankTransferAmount||0;
         const dpAmt = r.directPettyCash||0;
-        const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
+        const cashHeld = getSundayCashWithAccountant(r, remRates);
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
         const mobileStatus = cashHeld===0
@@ -2005,9 +2043,10 @@ async function renderIncomeSummary(records){
     </div>`;
 }
 
-async function renderAllIncomeList(records, cashTxOverride){
+async function renderAllIncomeList(records, cashTxOverride, remRatesOverride){
   if(!records.length) return '<div class="card"><div class="empty-table">No income records found across all months.</div></div>';
   const allCashTxList = cashTxOverride || await DB.getCashTransactions();
+  const remRates = remRatesOverride || (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
   const sorted = [...records].sort((a,b)=> new Date(b.date||b.createdAt||0) - new Date(a.date||a.createdAt||0));
   return `<div class="card">
     <span class="td-muted tx-mobile-hint" style="font-size:11px;padding-bottom:6px">Tap any row to see full details</span>
@@ -2018,7 +2057,7 @@ async function renderAllIncomeList(records, cashTxOverride){
         const btAmt = r.bankTransferAmount||0;
         const dpAmt = r.directPettyCash||0;
         const cashHeld = isSunday
-          ? Math.max(0,(r.totalCollection||0) - btAmt - dpAmt)
+          ? getSundayCashWithAccountant(r, remRates)
           : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
@@ -2049,7 +2088,7 @@ async function renderAllIncomeList(records, cashTxOverride){
         const btAmt = r.bankTransferAmount||0;
         const dpAmt = r.directPettyCash||0;
         const cashHeld = isSunday
-          ? Math.max(0,(r.totalCollection||0) - btAmt - dpAmt)
+          ? getSundayCashWithAccountant(r, remRates)
           : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
@@ -2092,7 +2131,7 @@ function showIncomeForm(){
     </div>
     <hr class="divider">
     <p style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px">📋 How was this money received?</p>
-    <p style="font-size:11px;color:var(--text3);margin-bottom:12px">If part of the total was paid directly to the bank or given to the Admin Officer, record those portions below. The rest is cash held by the accountant awaiting deposit.</p>
+    <p style="font-size:11px;color:var(--text3);margin-bottom:12px">If part of the total was paid directly to the bank or given to the Admin Officer, record those portions below. The local share of Teen/Children's Offering is automatically treated as cash held by the Children Teacher for refreshments and is not available for bank deposit or general spending.</p>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Paid via Bank Transfer (₦)</label>
         <input type="number" id="inc_bank_transfer" class="form-input" placeholder="0" min="0" oninput="App.updateIncomeCashBreakdown()" />
@@ -2108,8 +2147,9 @@ function showIncomeForm(){
         <span style="color:var(--primary);font-weight:600">💵 Cash with Accountant (to deposit):</span> <span id="inc_cash_held">₦0</span>
         &nbsp;·&nbsp; 🏦 Bank Transfer: <span id="inc_bank_lbl">₦0</span>
         &nbsp;·&nbsp; 💳 To Petty Cash: <span id="inc_petty_lbl">₦0</span>
+        &nbsp;·&nbsp; 🧒 Children Teacher Hold: <span id="inc_children_teacher_lbl">₦0</span>
       </div>
-      <div id="inc_overalloc_warn" style="display:none;color:var(--danger);font-size:12px;margin-top:4px;font-weight:600">⚠ Bank transfer + petty cash amount exceeds the total collection. Please check the figures.</div>
+      <div id="inc_overalloc_warn" style="display:none;color:var(--danger);font-size:12px;margin-top:4px;font-weight:600">⚠ Bank transfer + petty cash amount exceeds what is available after Children Teacher hold. Please check the figures.</div>
     </div>
     <div class="form-group mt-2"><label class="form-label">Notes (optional)</label><textarea id="inc_notes" class="form-textarea" placeholder="e.g. Special thanksgiving offering, harvest Sunday, etc."></textarea></div>
     <div class="modal-footer">
@@ -2131,15 +2171,20 @@ function updateIncomeCashBreakdown(){
   INCOME_TYPES.forEach(t=>{ total+=parseFloat(document.getElementById('inc_'+t.key)?.value||0)||0 });
   const bt = parseFloat(document.getElementById('inc_bank_transfer')?.value||0)||0;
   const dp = parseFloat(document.getElementById('inc_direct_petty')?.value||0)||0;
-  const overalloc = bt + dp > total && total > 0;
-  const cash = Math.max(0, total - bt - dp);
+  const childrenOffering = parseFloat(document.getElementById('inc_childrenOffering')?.value||0)||0;
+  const childrenTeacherHold = Math.max(0, childrenOffering * DEFAULT_REMITTANCE_RATES.childrenOffering.local);
+  const allocatable = Math.max(0, total - childrenTeacherHold);
+  const overalloc = bt + dp > allocatable && total > 0;
+  const cash = Math.max(0, allocatable - bt - dp);
   const cashEl = document.getElementById('inc_cash_held');
   const btEl   = document.getElementById('inc_bank_lbl');
   const dpEl   = document.getElementById('inc_petty_lbl');
+  const ctEl   = document.getElementById('inc_children_teacher_lbl');
   const warnEl = document.getElementById('inc_overalloc_warn');
   if(cashEl) cashEl.textContent = fmt(cash);
   if(btEl)   btEl.textContent   = fmt(bt);
   if(dpEl)   dpEl.textContent   = fmt(dp);
+  if(ctEl)   ctEl.textContent   = fmt(childrenTeacherHold);
   if(warnEl) warnEl.style.display = overalloc ? 'block' : 'none';
   const btInput = document.getElementById('inc_bank_transfer');
   const dpInput = document.getElementById('inc_direct_petty');
@@ -2162,8 +2207,11 @@ async function submitIncome(btn=null){
 
   const bankTransferAmount = Math.round((parseFloat(document.getElementById('inc_bank_transfer')?.value||0)||0)*100)/100;
   const directPettyCash    = Math.round((parseFloat(document.getElementById('inc_direct_petty')?.value||0)||0)*100)/100;
-  if(bankTransferAmount + directPettyCash > total){
-    alert(`Bank transfer (${fmt(bankTransferAmount)}) + direct petty cash (${fmt(directPettyCash)}) cannot exceed the total collection (${fmt(total)}).`);
+  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
+  const childrenTeacherHeld = getChildrenTeacherHeldCash(rec, remRates);
+  const maxAllocatable = Math.max(0, total - childrenTeacherHeld);
+  if(bankTransferAmount + directPettyCash > maxAllocatable){
+    alert(`Bank transfer (${fmt(bankTransferAmount)}) + direct petty cash (${fmt(directPettyCash)}) cannot exceed the amount available after Children Teacher hold (${fmt(maxAllocatable)}).`);
     return;
   }
   rec.bankTransferAmount = bankTransferAmount;
@@ -2173,8 +2221,8 @@ async function submitIncome(btn=null){
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     const saved = await DB.addIncome(rec);
-    const cashWithAccountant = Math.max(0, total - bankTransferAmount - directPettyCash);
-    DB.addAudit('income_recorded',`Sunday collection ${fmt(total)} for ${fmtDate(date)} — Cash: ${fmt(cashWithAccountant)}, Bank Transfer: ${fmt(bankTransferAmount)}, Direct Petty: ${fmt(directPettyCash)}. Counted with: ${usher}`,state.user?.name);
+    const cashWithAccountant = getSundayCashWithAccountant(rec, remRates);
+    DB.addAudit('income_recorded',`Sunday collection ${fmt(total)} for ${fmtDate(date)} — Cash with Accountant: ${fmt(cashWithAccountant)}, Children Teacher Hold: ${fmt(childrenTeacherHeld)}, Bank Transfer: ${fmt(bankTransferAmount)}, Direct Petty: ${fmt(directPettyCash)}. Counted with: ${usher}`,state.user?.name);
 
     // If some cash was given directly to the admin officer, auto-create a petty refill
     if(directPettyCash > 0){
@@ -2188,9 +2236,9 @@ async function submitIncome(btn=null){
       DB.addAudit('petty_refilled',`${fmt(directPettyCash)} from Sunday collection credited to Admin Officer petty cash`,state.user?.name);
     }
 
-    DB.addNotification('Income Recorded',`${fmt(total)} recorded for ${fmtDate(date)}${directPettyCash?` | ${fmt(directPettyCash)} → Petty Cash`:''}`,'success');
+    DB.addNotification('Income Recorded',`${fmt(total)} recorded for ${fmtDate(date)}${childrenTeacherHeld?` | ${fmt(childrenTeacherHeld)} → Children Refreshments`:''}${directPettyCash?` | ${fmt(directPettyCash)} → Petty Cash`:''}`,'success');
     closeModal();
-    showAlert(`Income of ${fmt(total)} recorded. Cash with accountant: ${fmt(cashWithAccountant)}${bankTransferAmount?` | Bank: ${fmt(bankTransferAmount)}`:''}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
+    showAlert(`Income of ${fmt(total)} recorded. Cash with accountant: ${fmt(cashWithAccountant)}${childrenTeacherHeld?` | Children Teacher: ${fmt(childrenTeacherHeld)}`:''}${bankTransferAmount?` | Bank: ${fmt(bankTransferAmount)}`:''}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
     renderIncome();
     buildSidebar();
   } catch(err) {
@@ -2205,9 +2253,13 @@ async function viewIncome(id){
   if(!r) return;
   const isSunday = !r.source||r.source==='sunday_collection';
   const rem = isSunday ? await calcRemittances(r) : null;
+  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
   const btAmt = r.bankTransferAmount||0;
   const dpAmt = r.directPettyCash||0;
-  const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
+  const childrenTeacherHeld = isSunday ? getChildrenTeacherHeldCash(r, remRates) : 0;
+  const cashHeld = isSunday
+    ? getSundayCashWithAccountant(r, remRates)
+    : Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
   const allCashVI = await DB.getCashTransactions();
   const deposits = allCashVI.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id);
   const depositedTotal = deposits.reduce((s,t)=>s+(t.amount||0),0);
@@ -2222,6 +2274,7 @@ async function viewIncome(id){
     <hr class="divider">
     <p class="card-title">Cash Breakdown</p>
     <div class="status-row"><div class="status-row-label">💵 Cash with Accountant</div><div class="status-row-amt" style="color:var(--amber)">${fmt(cashHeld)}</div></div>
+    ${childrenTeacherHeld?`<div class="status-row"><div class="status-row-label">🧒 Children Teacher Hold (for refreshments)</div><div class="status-row-amt" style="color:var(--success)">${fmt(childrenTeacherHeld)}</div></div>`:''}
     ${btAmt?`<div class="status-row"><div class="status-row-label">🏦 Bank Transfer (already in bank)</div><div class="status-row-amt" style="color:var(--primary)">${fmt(btAmt)}</div></div>`:''}
     ${dpAmt?`<div class="status-row"><div class="status-row-label">💳 Direct → Admin Officer Petty Cash</div><div class="status-row-amt" style="color:var(--success)">${fmt(dpAmt)}</div></div>`:''}
     ${deposits.length?`<div class="status-row"><div class="status-row-label">✅ Deposited to Bank so far</div><div class="status-row-amt" style="color:var(--success)">${fmt(depositedTotal)}</div></div>`:''}
@@ -2246,9 +2299,11 @@ async function confirmDeposit(id){
   const allIncCD = await DB.getIncome();
   const r = allIncCD.find(x=>x.id===id);
   if(!r) return;
+  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
   const btAmt = r.bankTransferAmount||0;
   const dpAmt = r.directPettyCash||0;
-  const cashHeld = Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
+  const childrenTeacherHeld = getChildrenTeacherHeldCash(r, remRates);
+  const cashHeld = getSundayCashWithAccountant(r, remRates);
   const allCashCD = await DB.getCashTransactions();
   const alreadyDeposited = allCashCD.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
   const remaining = Math.max(0, cashHeld - alreadyDeposited);
@@ -2262,6 +2317,7 @@ async function confirmDeposit(id){
     <div class="form-group"><label class="form-label">Cash Available from this Record</label>
       <div style="font-size:20px;font-weight:700;color:var(--primary);padding:8px 0">${fmt(remaining)}</div>
       ${alreadyDeposited?`<div class="form-hint">₦${alreadyDeposited.toLocaleString('en-NG')} already deposited previously from this record.</div>`:''}
+      ${childrenTeacherHeld?`<div class="form-hint">Children Teacher hold (${fmt(childrenTeacherHeld)}) is excluded from bank deposits.</div>`:''}
     </div>
     <div class="form-group"><label class="form-label">Amount Deposited *</label>
       <input type="number" id="dep_amount" class="form-input" value="${remaining}" min="0" max="${remaining}" />
@@ -2315,10 +2371,11 @@ async function confirmBulkDeposit(){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const allIncome = await DB.getIncome(); // all months — accountant may have old pending cash
   const cashTx = await DB.getCashTransactions();
+  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
   const pending = allIncome.map(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
-      ? Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0))
+      ? getSundayCashWithAccountant(r, remRates)
       : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
     const deposited = cashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
     const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
@@ -4429,6 +4486,7 @@ async function renderBank(){
   const [allCashTx, allExpenses, allIncome, allRemittances] = await Promise.all([
     DB.getCashTransactions(), DB.getExpenses(), DB.getIncome(), DB.getRemittances()
   ]);
+  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
   const tab = state.bankTab||'overview';
 
   // Calculate bank balance components
@@ -4458,7 +4516,7 @@ async function renderBank(){
   const pendingDepItems = allIncome.filter(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
-      ? Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0))
+      ? getSundayCashWithAccountant(r, remRates)
       : r.paymentMethod==='cash'?(r.totalCollection||0):0;
     if(cashHeld<=0) return false;
     const deposited = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
@@ -4468,7 +4526,7 @@ async function renderBank(){
   const pendingDepTotal = pendingDepItems.reduce((s,r)=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
-      ? Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0))
+      ? getSundayCashWithAccountant(r, remRates)
       : r.paymentMethod==='cash'?(r.totalCollection||0):0;
     const deposited = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
     return s + Math.max(0, cashHeld - deposited);
@@ -6909,6 +6967,77 @@ async function clearAllData(){
   }
 }
 
+async function showChildrenTeacherModal(){
+  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
+  const allIncome = await DB.getIncome();
+  const monthIncome = filterByMonth(allIncome);
+  const sundayRecs = monthIncome
+    .filter(r => !r.source || r.source === 'sunday_collection')
+    .filter(r => (r.childrenOffering || 0) > 0);
+  const localRate = getChildrenOfferingLocalRate(remRates);
+  const natlRate = typeof remRates.childrenOffering?.natl === 'number'
+    ? remRates.childrenOffering.natl
+    : DEFAULT_REMITTANCE_RATES.childrenOffering.natl;
+  const totalChildrenOffering = sundayRecs.reduce((s, r) => s + (r.childrenOffering || 0), 0);
+  const totalTeacherShare = sundayRecs.reduce((s, r) => s + getChildrenTeacherHeldCash(r, remRates), 0);
+  const totalNatlShare = totalChildrenOffering * natlRate;
+
+  const rows = sundayRecs.map(r => {
+    const co = r.childrenOffering || 0;
+    const teacherShare = getChildrenTeacherHeldCash(r, remRates);
+    return `<tr>
+      <td style="padding:6px 8px">${fmtDate(r.date)}</td>
+      <td style="padding:6px 8px;text-align:right">${fmt(co)}</td>
+      <td style="padding:6px 8px;text-align:right;color:#A32D2D">${fmt(co * natlRate)}</td>
+      <td style="padding:6px 8px;text-align:right;color:#BA7517;font-weight:600">${fmt(teacherShare)}</td>
+    </tr>`;
+  }).join('');
+
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🧒 Children Teacher — ${monthLabel()}</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:14px">The local share (${Math.round(localRate*100)}%) of the Teen/Children's Offering stays with the Children Teacher to cover refreshments and departmental needs. This amount is <strong>not</strong> held by the accountant.</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+      <div style="background:var(--surface);border-radius:var(--r);padding:10px;text-align:center">
+        <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Total Collected</div>
+        <div style="font-size:18px;font-weight:700;color:var(--text)">${fmt(totalChildrenOffering)}</div>
+        <div style="font-size:10px;color:var(--text3);margin-top:2px">Teen/Children's Offering</div>
+      </div>
+      <div style="background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.25);border-radius:var(--r);padding:10px;text-align:center">
+        <div style="font-size:10px;color:#BA7517;text-transform:uppercase;letter-spacing:1px;font-weight:700;margin-bottom:4px">🧒 Teacher's Share (${Math.round(localRate*100)}%)</div>
+        <div style="font-size:18px;font-weight:700;color:#BA7517">${fmt(totalTeacherShare)}</div>
+        <div style="font-size:10px;color:var(--text3);margin-top:2px">For refreshments &amp; dept. needs</div>
+      </div>
+    </div>
+    <div style="background:rgba(163,45,45,0.06);border-radius:var(--r);padding:8px 10px;margin-bottom:14px;font-size:11px;color:var(--text2)">
+      <span style="color:#A32D2D;font-weight:600">📤 ${fmt(totalNatlShare)} (${Math.round(natlRate*100)}%) → National HQ</span>
+    </div>
+    ${sundayRecs.length > 0 ? `
+    <div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px">Per-Sunday Breakdown</div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="background:var(--surface)">
+            <th style="padding:6px 8px;text-align:left;font-weight:600;color:var(--text2)">Date</th>
+            <th style="padding:6px 8px;text-align:right;font-weight:600;color:var(--text2)">Offering</th>
+            <th style="padding:6px 8px;text-align:right;font-weight:600;color:#A32D2D">→ HQ (${Math.round(natlRate*100)}%)</th>
+            <th style="padding:6px 8px;text-align:right;font-weight:600;color:#BA7517">Teacher (${Math.round(localRate*100)}%)</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+        <tfoot>
+          <tr style="background:var(--surface);border-top:2px solid var(--border)">
+            <td style="padding:6px 8px;font-weight:700">Total</td>
+            <td style="padding:6px 8px;text-align:right;font-weight:700">${fmt(totalChildrenOffering)}</td>
+            <td style="padding:6px 8px;text-align:right;font-weight:700;color:#A32D2D">${fmt(totalNatlShare)}</td>
+            <td style="padding:6px 8px;text-align:right;font-weight:700;color:#BA7517">${fmt(totalTeacherShare)}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>` : '<div style="text-align:center;color:var(--text3);font-size:13px;padding:16px 0">No Teen/Children\'s Offering recorded this month.</div>'}
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
+}
+
 // ── KPSC ALERT ────────────────────────────
 async function showKPSCAlert(){
   const income=filterByMonth(await DB.getIncome());
@@ -6969,7 +7098,7 @@ return {
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
   setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
-  showKPSCAlert, submitKPSCAlert, closeModal: closeModal, showAlert
+  showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert
 };
 
 })();
