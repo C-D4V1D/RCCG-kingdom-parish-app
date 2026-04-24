@@ -1835,14 +1835,14 @@ async function calcRemittancesFromRecords(records){
 
 // ── INCOME ────────────────────────────────
 async function renderIncome(){
-  const allIncomeRecs = await DB.getIncome();
+  const [allIncomeRecs, _cashTx, remRatesData, balance] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance()]);
+  const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
+  const cashWithAccountant = balance.cashWithAccountant;
   const records = filterByMonth(allIncomeRecs);
   const sundayRecs = records.filter(r=>!r.source||r.source==='sunday_collection');
   const otherRecs  = records.filter(r=>r.source && r.source!=='sunday_collection');
   const tab = state.incomeTab||'list';
-  // Compute pending records (cash not yet fully deposited) across ALL income types
-  const _cashTx = await DB.getCashTransactions();
-  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
+  // Pending count for this month's income records (informational only)
   const pendingItems = records.map(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
@@ -1852,7 +1852,6 @@ async function renderIncome(){
     return { cashHeld, dep };
   }).filter(p=>p.cashHeld>0 && p.dep<p.cashHeld);
   const pendingCount = pendingItems.length;
-  const pendingCashTotal = pendingItems.reduce((s,p)=>s+(p.cashHeld-p.dep),0);
   const totalCollected = records.reduce((s,r)=>s+(r.totalCollection||0),0);
   // Only count deposits linked to this month's income records (scoped correctly to the month view)
   const currentMonthRecordIds = new Set(records.map(r=>r.id));
@@ -1865,15 +1864,15 @@ async function renderIncome(){
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${canAction('income_record')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">📥 Sunday Collections</button>`:''}
         ${canAction('income_record')?`<button class="btn btn-amber" onclick="App.showOtherIncomeForm()">➕ Other Income</button>`:''}
-        ${canAction('income_deposit')&&pendingCount>=1?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${pendingCount} pending)</button>`:''}
+        ${canAction('income_deposit')&&cashWithAccountant>0?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${fmt(cashWithAccountant)})</button>`:''}
       </div>
     </div>
     <div class="kpi-grid" style="margin-bottom:16px">
       <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">📥</div><div class="kpi-label">Total Collected</div><div class="kpi-val">${fmt(totalCollected)}</div><div class="kpi-delta up">${records.length} record(s)</div></div>
-      <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">💵</div><div class="kpi-label">Cash Pending Deposit</div><div class="kpi-val" style="color:${pendingCashTotal>0?'var(--amber)':'var(--primary)'}">${fmt(pendingCashTotal)}</div><div class="kpi-delta ${pendingCashTotal>0?'warn':'up'}">${pendingCount>0?pendingCount+' record(s) awaiting deposit':'All cash deposited ✓'}</div></div>
+      <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">💵</div><div class="kpi-label">Cash with Accountant</div><div class="kpi-val" style="color:${cashWithAccountant>0?'var(--amber)':'var(--primary)'}">${fmt(cashWithAccountant)}</div><div class="kpi-delta ${cashWithAccountant>0?'warn':'up'}">${cashWithAccountant>0?'Awaiting bank deposit':'All deposited ✓'}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">🏦</div><div class="kpi-label">In Bank (this month)</div><div class="kpi-val">${fmt(totalDeposited)}</div><div class="kpi-delta up">Transfers + deposits</div></div>
     </div>
-    ${pendingCount>0&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>${pendingCount} cash record(s)</strong> totalling <strong>${fmt(pendingCashTotal)}</strong> still held by accountant and not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
+    ${cashWithAccountant>0&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong>${pendingCount>0?` (${pendingCount} income record(s) this month pending)`:''} — not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
     <div class="tabs">
       <button class="tab ${tab==='list'?'active':''}" onclick="App.setIncomeTab('list')">Sunday Collections (${sundayRecs.length})</button>
       <button class="tab ${tab==='other'?'active':''}" onclick="App.setIncomeTab('other')">Other Income (${otherRecs.length})</button>
@@ -2393,60 +2392,123 @@ async function submitCashDeposit(incomeId, btn=null){
 
 async function confirmBulkDeposit(){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
-  const [allIncome, cashTx, remRatesData, balance] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance()]);
+  const [allIncome, allCashTx, remRatesData, allExpenses, pettyHistory, balance] = await Promise.all([
+    DB.getIncome(), DB.getCashTransactions(), getRemRates(), DB.getExpenses(), DB.getPetty(), calcChurchBalance()
+  ]);
   const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
   const cashWithAccountant = balance.cashWithAccountant;
-  const pending = allIncome.map(r=>{
+
+  if(cashWithAccountant < 0.5){ showAlert('No cash currently held with accountant to deposit.','warn'); return; }
+
+  // Income records with remaining cash (positive contributors)
+  const incomeItems = allIncome.map(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
       ? getSundayCashWithAccountant(r, remRates)
       : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
-    const deposited = cashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-    const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
-    return { id:r.id, date:r.date, cashHeld, deposited, remaining:cashHeld-deposited, source:srcLabel };
-  }).filter(p=>p.cashHeld>0 && p.remaining>0).sort((a,b)=>new Date(a.date)-new Date(b.date));
-  if(!pending.length){ showAlert('No pending cash deposits found.','warn'); return }
-  state._bulkDepositPending = pending;
+    if(cashHeld<=0) return null;
+    const deposited = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+    const remaining = Math.max(0, cashHeld - deposited);
+    if(remaining<=0) return null;
+    const srcLabel = isSunday ? 'Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
+    const icon = isSunday ? '📅' : '💵';
+    return { id:r.id, date:r.date, icon, label:srcLabel, cashHeld, deposited, remaining };
+  }).filter(Boolean).sort((a,b)=>new Date(a.date)-new Date(b.date));
+
+  // Bank withdrawals routed to accountant's cash (positive)
+  const bankToAccountantItems = allCashTx
+    .filter(t=>t.type==='withdrawal'&&t.destination==='accountant_cash')
+    .sort((a,b)=>new Date(a.date||a.createdAt)-new Date(b.date||b.createdAt));
+
+  // Approved cash expenses (negative)
+  const cashExpenseItems = allExpenses
+    .filter(e=>e.status==='approved'&&(e.paymentMethod==='cash'||(e.paymentMethod==='split'&&(e.cashAmount||0)>0)))
+    .sort((a,b)=>new Date(a.date||a.createdAt)-new Date(b.date||b.createdAt));
+
+  // Petty cash top-ups paid from accountant's cash (negative)
+  const pettyTopupItems = pettyHistory
+    .filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
+    .sort((a,b)=>new Date(a.date||a.createdAt)-new Date(b.date||b.createdAt));
+
+  // Store for submit
+  state._bulkDepositPending  = incomeItems;
   state._bulkDepositCashBalance = cashWithAccountant;
-  const totalRemaining = pending.reduce((s,p)=>s+p.remaining,0);
-  const adjustments = cashWithAccountant - totalRemaining;
-  const allMatchBalance = Math.abs(adjustments) <= 0.5;
+
   const today = new Date().toISOString().split('T')[0];
+
+  // Build a single expandable row
+  function cwRow(icon, label, dateStr, amount, isPositive, detail){
+    const color  = isPositive ? 'var(--success,#2e7d32)' : 'var(--danger)';
+    const sign   = isPositive ? '+' : '−';
+    return `<div onclick="var d=this.querySelector('.cw-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0)">
+      <div style="display:flex;align-items:center;gap:8px;padding:9px 0">
+        <span style="font-size:15px;flex-shrink:0;width:22px;text-align:center">${icon}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${label}</div>
+          <div style="font-size:11px;color:var(--text3)">${fmtDate(dateStr)}</div>
+        </div>
+        <div style="font-size:13px;font-weight:700;color:${color};flex-shrink:0;margin-left:4px">${sign}${fmt(amount)}</div>
+        <span style="font-size:9px;color:var(--text3);flex-shrink:0">▾</span>
+      </div>
+      <div class="cw-det" style="display:none;padding:2px 30px 9px;font-size:11px;color:var(--text2);line-height:1.6">${detail}</div>
+    </div>`;
+  }
+
+  const hasIncome  = incomeItems.length > 0;
+  const hasBank    = bankToAccountantItems.length > 0;
+  const hasExp     = cashExpenseItems.length > 0;
+  const hasPetty   = pettyTopupItems.length > 0;
+
+  const incomeHtml = hasIncome ? `
+    <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:10px 0 2px">📥 Cash Received</div>
+    ${incomeItems.map(item=>{
+      const detail = item.deposited > 0
+        ? `Collected: ${fmt(item.cashHeld)} &nbsp;·&nbsp; Already deposited: ${fmt(item.deposited)} &nbsp;·&nbsp; <strong>Remaining: ${fmt(item.remaining)}</strong>`
+        : `Collected: ${fmt(item.cashHeld)}`;
+      return cwRow(item.icon, item.label, item.date, item.remaining, true, detail);
+    }).join('')}` : '';
+
+  const bankHtml = hasBank ? `
+    <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:10px 0 2px">🏦 Bank Withdrawals to You</div>
+    ${bankToAccountantItems.map(t=>cwRow('🏦', t.description||'Bank Withdrawal', t.date||t.createdAt, t.amount||0, true,
+        (t.reference?`Ref: ${t.reference} &nbsp;·&nbsp; `:'')+(t.authorizedBy?`Authorised by: ${t.authorizedBy}`:'')
+      )).join('')}` : '';
+
+  const expHtml = hasExp ? `
+    <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:10px 0 2px">💸 Cash Expenses Paid</div>
+    ${cashExpenseItems.map(e=>{
+      const amt = e.paymentMethod==='split' ? (e.cashAmount||0) : (e.amount||0);
+      const cat = (typeof EXPENSE_CATS!=='undefined'?EXPENSE_CATS:[]).find(c=>c.key===e.category)||{label:e.category||'Expense'};
+      return cwRow('💸', e.description||cat.label, e.date||e.createdAt, amt, false,
+        `Category: ${cat.label}`+(e.description&&e.description!==cat.label?` &nbsp;·&nbsp; ${e.description}`:'')+
+        (e.approvedBy?` &nbsp;·&nbsp; Approved by: ${e.approvedBy}`:'')
+      );
+    }).join('')}` : '';
+
+  const pettyHtml = hasPetty ? `
+    <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:10px 0 2px">🏧 Petty Cash Top-ups Paid</div>
+    ${pettyTopupItems.map(h=>{
+      const amt = h.paymentMethod==='split' ? (h.cashAmount||0) : (h.amount||0);
+      return cwRow('🏧', 'Petty Cash Refill', h.date||h.createdAt, amt, false,
+        `Amount paid: ${fmt(amt)}`+(h.status?` &nbsp;·&nbsp; Status: ${h.status}`:'')
+      );
+    }).join('')}` : '';
+
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">💰 Record Cash Deposit</div>
     <div style="background:var(--primary-light);border:1.5px solid var(--primary);border-radius:8px;padding:12px 14px;margin-bottom:14px">
-      <div style="font-size:11px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">Your Cash with Accountant Balance</div>
-      <div style="font-size:22px;font-weight:800;color:var(--primary);line-height:1;margin-bottom:6px">${fmt(cashWithAccountant)}</div>
-      ${allMatchBalance
-        ? `<div style="font-size:12px;color:var(--success,#2e7d32);font-weight:600">✓ Selecting all records below will deposit your full balance</div>`
-        : adjustments > 0
-          ? `<div style="font-size:12px;color:var(--text2)">Income records: <strong>${fmt(totalRemaining)}</strong> &nbsp;·&nbsp; <span style="color:var(--amber)">+${fmt(adjustments)} from bank withdrawals to you</span></div>`
-          : `<div style="font-size:12px;color:var(--text2)">Income records: <strong>${fmt(totalRemaining)}</strong> &nbsp;·&nbsp; −${fmt(Math.abs(adjustments))} paid as cash expenses / petty cash</div>`}
+      <div style="font-size:11px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">Cash with Accountant — Full Balance</div>
+      <div style="font-size:22px;font-weight:800;color:var(--primary);line-height:1">${fmt(cashWithAccountant)}</div>
+      <div style="font-size:12px;color:var(--text2);margin-top:4px">This is the exact amount you will deposit to the bank.</div>
     </div>
-    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Tick the records you are depositing in this single trip to the bank. You can deposit all at once or just some of them.</span></div>
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-      <span style="font-size:13px;font-weight:600;color:var(--text2)">${pending.length} record(s) with outstanding cash:</span>
-      <button class="btn btn-sm" onclick="App.toggleBulkSelectAll(true)" style="margin-left:auto">Select All</button>
-      <button class="btn btn-sm" onclick="App.toggleBulkSelectAll(false)">Deselect All</button>
-    </div>
-    <div class="table-wrap" style="margin-bottom:4px"><table>
-      <tr><th style="width:36px;text-align:center">✓</th><th>Date</th><th>Source</th><th>Cash Held</th><th>Prev. Deposited</th><th class="td-right">Remaining</th></tr>
-      ${pending.map((p,i)=>`<tr>
-        <td style="text-align:center"><input type="checkbox" id="bulk_chk_${i}" data-remaining="${p.remaining}" checked onchange="App.updateBulkDepositTotal()" style="width:16px;height:16px;cursor:pointer;accent-color:var(--primary)" /></td>
-        <td><strong>${fmtDate(p.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(p.date)}</div></td>
-        <td class="td-muted" style="font-size:12px">${p.source}</td>
-        <td>${fmt(p.cashHeld)}</td>
-        <td>${p.deposited>0?fmt(p.deposited):'—'}</td>
-        <td class="td-right td-bold">${fmt(p.remaining)}</td>
-      </tr>`).join('')}
-      <tr style="border-top:2px solid var(--border);background:var(--primary-light)">
-        <td colspan="5" style="font-weight:700;padding:8px 10px">SELECTED TOTAL TO DEPOSIT</td>
-        <td class="td-right" id="bulk_selected_total" style="color:var(--primary);font-size:15px;font-weight:700;padding:8px 10px">${fmt(totalRemaining)}</td>
-      </tr>
-    </table></div>
-    <div id="bulk_deposit_status" style="font-size:12px;padding:6px 2px 12px;min-height:20px">
-      ${allMatchBalance ? '<span style="color:var(--success,#2e7d32);font-weight:600">✓ Depositing your full Cash with Accountant balance</span>' : `<span style="color:var(--text2)"><strong>${fmt(Math.max(0, cashWithAccountant - totalRemaining))}</strong> will remain with accountant after this deposit</span>`}
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Every cash movement that makes up your current balance is listed below. Tap any row to see full details. Confirm to deposit the full amount.</span></div>
+    <div style="border:1px solid var(--border);border-radius:8px;padding:0 12px;margin-bottom:16px;max-height:300px;overflow-y:auto">
+      ${incomeHtml}${bankHtml}${expHtml}${pettyHtml}
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:2px solid var(--border);margin-top:6px">
+        <span style="font-size:13px;font-weight:700">Net Cash to Deposit</span>
+        <span style="font-size:17px;font-weight:800;color:var(--primary)">${fmt(cashWithAccountant)}</span>
+      </div>
     </div>
     <div class="form-group"><label class="form-label">Deposit Method *</label>
       <select id="bulk_dep_method" class="form-select">
@@ -2463,65 +2525,54 @@ async function confirmBulkDeposit(){
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" id="bulk_confirm_btn" onclick="App.submitBulkDeposit(this)">Confirm Deposit — ${fmt(totalRemaining)}</button>
+      <button class="btn btn-primary" id="bulk_confirm_btn" onclick="App.submitBulkDeposit(this)">Confirm Deposit — ${fmt(cashWithAccountant)}</button>
     </div>`);
 }
 
-function updateBulkDepositTotal(){
-  const pending = state._bulkDepositPending || [];
-  const cashBalance = state._bulkDepositCashBalance || 0;
-  let total = 0;
-  pending.forEach((_,i)=>{
-    const chk = document.getElementById(`bulk_chk_${i}`);
-    if(chk?.checked) total += pending[i].remaining;
-  });
-  const el  = document.getElementById('bulk_selected_total');
-  const btn = document.getElementById('bulk_confirm_btn');
-  const statusEl = document.getElementById('bulk_deposit_status');
-  if(el)  el.textContent = fmt(total);
-  if(btn) btn.textContent = `Confirm Deposit — ${fmt(total)}`;
-  if(btn) btn.disabled = total <= 0;
-  if(statusEl){
-    if(total <= 0){
-      statusEl.innerHTML = '<span style="color:var(--text2)">Select at least one record to deposit.</span>';
-    } else {
-      const remainingAfter = Math.max(0, cashBalance - total);
-      if(remainingAfter < 0.5){
-        statusEl.innerHTML = '<span style="color:var(--success,#2e7d32);font-weight:600">✓ Depositing your full Cash with Accountant balance</span>';
-      } else {
-        statusEl.innerHTML = `<span style="color:var(--text2)"><strong>${fmt(remainingAfter)}</strong> will remain with accountant after this deposit</span>`;
-      }
-    }
-  }
-}
-
-function toggleBulkSelectAll(checked){
-  const pending = state._bulkDepositPending || [];
-  pending.forEach((_,i)=>{ const c=document.getElementById(`bulk_chk_${i}`); if(c) c.checked=checked; });
-  updateBulkDepositTotal();
-}
 
 async function submitBulkDeposit(btn=null){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
-  const pending = state._bulkDepositPending || [];
-  const method  = document.getElementById('bulk_dep_method')?.value;
-  const ref     = document.getElementById('bulk_dep_ref')?.value?.trim();
-  const date    = document.getElementById('bulk_dep_date')?.value;
-  if(!ref||!date){ alert('Please fill all required fields (reference number and deposit date).'); return }
-  const selected = pending.filter((_,i)=>{ const c=document.getElementById(`bulk_chk_${i}`); return c?.checked; });
-  if(!selected.length){ alert('Please tick at least one record to deposit.'); return }
-  const totalAmount = selected.reduce((s,p)=>s+p.remaining,0);
+  const method = document.getElementById('bulk_dep_method')?.value;
+  const ref    = document.getElementById('bulk_dep_ref')?.value?.trim();
+  const date   = document.getElementById('bulk_dep_date')?.value;
+  if(!ref||!date){ alert('Please fill all required fields (reference number and deposit date).'); return; }
+  const cashToDeposit = state._bulkDepositCashBalance || 0;
+  if(cashToDeposit < 0.5){ showAlert('No cash to deposit.','warn'); return; }
   const restore = setBtnLoading(btn, 'Saving…');
   try {
-    for(const p of selected){
-      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:p.id, amount:p.remaining, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
+    // Re-fetch fresh data to build accurate income-record distribution
+    const [allIncome, allCashTx, remRatesData] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates()]);
+    const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
+    const incomeItems = allIncome.map(r=>{
+      const isSunday = !r.source||r.source==='sunday_collection';
+      const cashHeld = isSunday ? getSundayCashWithAccountant(r, remRates) : (r.paymentMethod==='cash'?(r.totalCollection||0):0);
+      const dep = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+      return { id:r.id, date:r.date, remaining: Math.max(0, cashHeld - dep) };
+    }).filter(x=>x.remaining>0).sort((a,b)=>new Date(a.date)-new Date(b.date));
+
+    // Distribute cashToDeposit across income records sequentially (oldest first).
+    // Stops when cashToDeposit is exhausted — this correctly handles cases where
+    // cash expenses / petty top-ups have already consumed part of the balance.
+    let amountLeft = cashToDeposit;
+    let recordCount = 0;
+    for(const item of incomeItems){
+      if(amountLeft < 0.5) break;
+      const depositAmt = Math.min(item.remaining, amountLeft);
+      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:item.id, amount:depositAmt, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
+      amountLeft -= depositAmt;
+      recordCount++;
     }
-    DB.addAudit('cash_deposited',`Bulk cash deposit: ${fmt(totalAmount)} across ${selected.length} record(s) via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
-    DB.addNotification('Cash Deposited',`${fmt(totalAmount)} deposited to bank (${selected.length} record(s), Ref: ${ref})`,'success');
+    // Any remainder comes from bank-withdrawal funds not tied to income records
+    if(amountLeft > 0.5){
+      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:'', amount:amountLeft, depositMethod:method, reference:ref, date, recordedBy:state.user?.name, description:'Cash deposit (bank withdrawal funds)' });
+      recordCount++;
+    }
+    DB.addAudit('cash_deposited',`Cash deposit: ${fmt(cashToDeposit)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
+    DB.addNotification('Cash Deposited',`${fmt(cashToDeposit)} deposited to bank (Ref: ${ref})`,'success');
     delete state._bulkDepositPending;
+    delete state._bulkDepositCashBalance;
     closeModal();
-    showAlert(`${fmt(totalAmount)} deposited across ${selected.length} record(s). Bank ref: ${ref}`, 'success');
-    // Navigate back to whichever page triggered the bulk deposit
+    showAlert(`${fmt(cashToDeposit)} deposited to bank. Ref: ${ref}`, 'success');
     if(state.page==='bank') renderBank(); else renderIncome();
   } catch(err) {
     restore();
@@ -4585,6 +4636,22 @@ async function renderBank(){
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)),0);
   const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals - pettyBankTopups;
 
+  // Cash with Accountant (mirrors calcChurchBalance, using data already fetched above)
+  const cashFromCollectionsRB = allIncome.reduce((s,r)=>{
+    const isSunday = !r.source||r.source==='sunday_collection';
+    if(isSunday) return s+getSundayCashWithAccountant(r, remRates);
+    return s+Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
+  },0);
+  const bankToAccountantRB = allCashTx.filter(t=>t.type==='withdrawal'&&t.destination==='accountant_cash').reduce((s,t)=>s+(t.amount||0),0);
+  const cashExpensesRB = allExpenses.filter(e=>e.status==='approved').reduce((s,e)=>{
+    if(e.paymentMethod==='cash') return s+(e.amount||0);
+    if(e.paymentMethod==='split') return s+(e.cashAmount||0);
+    return s;
+  },0);
+  const pettyCashTopupsRB = pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
+    .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.cashAmount||0):(h.amount||0)),0);
+  const cashWithAccountant = Math.max(0, cashFromCollectionsRB - cashDepositedToBank + bankToAccountantRB - cashExpensesRB - pettyCashTopupsRB);
+
   // Monthly bank charges
   const monthlyBankCharges = filterByMonth(allExpenses).filter(e=>e.category==='bank').reduce((s,e)=>s+(e.amount||0),0);
 
@@ -4640,12 +4707,12 @@ async function renderBank(){
     <div class="page-header">
       <div><div class="page-title">Bank Account</div><div class="page-sub">Balance: ${fmt(bankBalance)}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${canAction('income_deposit')&&pendingDepCount>0?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${pendingDepCount} pending · ${fmt(pendingDepTotal)})</button>`:''}
+        ${canAction('income_deposit')&&cashWithAccountant>0?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${fmt(cashWithAccountant)})</button>`:''}
         ${canAction('bank_withdrawal')?`<button class="btn btn-primary" onclick="App.showBankWithdrawal()">🏦 Record Withdrawal</button>`:''}
         ${canAction('bank_charge')?`<button class="btn" onclick="App.showBankChargeForm()">💳 Bank Charge</button>`:''}
       </div>
     </div>
-    ${pendingDepCount>0&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>${pendingDepCount} income record(s)</strong> totalling <strong>${fmt(pendingDepTotal)}</strong> have cash held by the Accountant and not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
+    ${cashWithAccountant>0&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong> not yet deposited to the bank account.${pendingDepCount>0?` (${pendingDepCount} income record(s) pending)`:''} <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
 
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
       <div class="kpi">
@@ -7166,7 +7233,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, updateBulkDepositTotal, toggleBulkSelectAll, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
+  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
