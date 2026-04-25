@@ -6221,17 +6221,32 @@ function renderReports(){
 }
 
 async function generateMonthlyReport(){
-  const [allIncome, allExpenses, allRemittances, settings] = await Promise.all([
-    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings()
+  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData] = await Promise.all([
+    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates()
   ]);
+  const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
+  const depositMapM={};
+  allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef).forEach(t=>{depositMapM[t.incomeRef]=(depositMapM[t.incomeRef]||0)+(t.amount||0)});
+  function depositBadgeM(r){
+    const cashHeld=getSundayCashWithAccountant(r,remRates);
+    if(cashHeld===0) return '<span class="badge badge-info">No Cash</span>';
+    const dep=depositMapM[r.id]||0;
+    if(dep>=cashHeld) return '<span class="badge badge-success">Deposited</span>';
+    if(dep>0) return '<span class="badge badge-warn">Partial</span>';
+    return '<span class="badge badge-warn">Pending</span>';
+  }
   const income=filterByMonth(allIncome);
-  const expenses=filterByMonth(allExpenses);
+  const allMonthExpenses=filterByMonth(allExpenses);
+  const expenses=allMonthExpenses.filter(e=>e.status==='approved');
+  const pendingExpCount=allMonthExpenses.filter(e=>e.status==='pending_approval'||e.status==='pending').length;
   const paidRems=filterByMonth(allRemittances);
   const rem=await calcRemittancesFromRecords(income);
+  const quotaList=getQuotaList(settings);
+  const totalFixedQuotas=quotaList.reduce((s,q)=>s+(q.amount||0),0);
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
   const totalRemPaid=paidRems.reduce((s,r)=>s+(r.amount||0),0);
-  const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate;
+  const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate+totalFixedQuotas;
   const netPosition=totalIncome-totalExpenses-totalRemDue;
 
   // Income by type summary
@@ -6267,12 +6282,9 @@ async function generateMonthlyReport(){
 
     <div class="section-title">Section B: Weekly Collection Details</div>
     ${income.length?`<table>
-      <tr><th>S/N</th><th>Date</th><th>Members' Tithe</th><th>Ministers' Tithe</th><th>Thanksgiving</th><th>SLO</th><th>Others</th><th class="td-r">Total</th><th>Status</th></tr>
-      ${income.map((r,i)=>{
-        const others=(r.sundaySchool||0)+(r.crm||0)+(r.workersOffering||0)+(r.childrenOffering||0);
-        return `<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td><td class="td-r">${fmt(r.membersTithe||0)}</td><td class="td-r">${fmt(r.ministersTithe||0)}</td><td class="td-r">${fmt(r.thanksgiving||0)}</td><td class="td-r">${fmt(r.slo||0)}</td><td class="td-r">${fmt(others)}</td><td class="td-r td-bold">${fmt(r.totalCollection)}</td><td>${r.depositConfirmed?'<span class="badge badge-success">Deposited</span>':'<span class="badge badge-warn">Pending</span>'}</td></tr>`;
-      }).join('')}
-      <tr class="total-row"><td colspan="7">TOTAL COLLECTIONS</td><td class="td-r">${fmt(totalIncome)}</td><td></td></tr>
+      <tr><th>S/N</th><th>Date</th>${INCOME_TYPES.map(t=>`<th class="td-r">${t.label}</th>`).join('')}<th class="td-r">Total</th><th class="td-c">% of Month</th><th>Status</th></tr>
+      ${income.map((r,i)=>`<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td>${INCOME_TYPES.map(t=>`<td class="td-r">${r[t.key]?fmt(r[t.key]):'—'}</td>`).join('')}<td class="td-r td-bold">${fmt(r.totalCollection)}</td><td class="td-c">${totalIncome?Math.round((r.totalCollection||0)/totalIncome*100):0}%</td><td>${depositBadgeM(r)}</td></tr>`).join('')}
+      <tr class="total-row"><td colspan="2">TOTAL COLLECTIONS</td>${INCOME_TYPES.map(t=>{const s=income.reduce((a,r)=>a+(r[t.key]||0),0);return `<td class="td-r">${s?fmt(s):'—'}</td>`}).join('')}<td class="td-r">${fmt(totalIncome)}</td><td class="td-c">100%</td><td></td></tr>
     </table>`:'<div class="no-data">No income records for this period.</div>'}
 
     <div class="section-title">Section C: Remittances Due to RCCG Authorities</div>
@@ -6280,16 +6292,20 @@ async function generateMonthlyReport(){
       <tr><th>Description</th><th class="td-c">Basis</th><th class="td-r">Amount (₦)</th></tr>
       ${rem.lines.filter(l=>l.national>0).map(l=>`<tr><td>${l.label} → National HQ</td><td class="td-c">% Based</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
       ${rem.provinceRebate>0?`<tr><td>Province Rebate</td><td class="td-c">% Based</td><td class="td-r">${fmt(rem.provinceRebate)}</td></tr>`:''}
+      ${quotaList.filter(q=>q.amount>0).map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">Fixed Quota</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${fmt(totalRemDue)}</td></tr>
+      ${totalRemPaid>0?`<tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Month</td><td class="td-r td-green">${fmt(totalRemPaid)}</td></tr>`:''}
+      ${totalRemPaid<totalRemDue?`<tr><td colspan="2" style="padding-left:20px;color:var(--danger)">Outstanding Balance</td><td class="td-r td-red">− ${fmt(totalRemDue-totalRemPaid)}</td></tr>`:''}
       <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">NET LOCAL RETAINED (after remittances)</td><td class="td-r td-green">${fmt(rem.netLocal)}</td></tr>
     </table>
 
-    <div class="section-title">Section D: Expenses <span>(${expenses.length} entries totalling ${fmt(totalExpenses)})</span></div>
+    <div class="section-title">Section D: Approved Expenses <span>(${expenses.length} entries totalling ${fmt(totalExpenses)})${pendingExpCount>0?' — '+pendingExpCount+' pending approval not included':''}</span></div>
     ${expenses.length?`<table>
-      <tr><th>S/N</th><th>Date</th><th>Category</th><th>Description</th><th>Receipt No.</th><th class="td-r">Amount (₦)</th></tr>
-      ${expenses.map((e,i)=>`<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${EXPENSE_CATS.find(c=>c.key===e.category)?.label||e.category}</td><td>${esc(e.description)}</td><td>${e.receiptNo||'—'}</td><td class="td-r">${fmt(e.amount)}</td></tr>`).join('')}
-      <tr class="total-row"><td colspan="5">TOTAL EXPENSES</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
-    </table>`:'<div class="no-data">No expenses recorded for this period.</div>'}
+      <tr><th>S/N</th><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th>Method</th><th>Status</th><th>Receipt No.</th><th class="td-r">Amount (₦)</th></tr>
+      ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const methodLabel=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${esc(e.description)}</td><td>${methodLabel}</td><td><span class="badge badge-success">Approved</span></td><td>${e.receiptNo||'—'}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
+      <tr class="total-row"><td colspan="8">TOTAL APPROVED EXPENSES</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
+    </table>`:'<div class="no-data">No approved expenses recorded for this period.</div>'}
+    ${pendingExpCount>0?`<div class="note-box">ℹ️ ${pendingExpCount} expense(s) are pending approval and not included in the financial totals above.</div>`:''}
 
     ${expSorted.length?`<div class="section-title">Section E: Expense Summary by Category</div>
     <table>
@@ -6313,8 +6329,21 @@ async function generateMonthlyReport(){
 }
 
 async function generateWeeklyReport(){
-  const [allIncome, settings] = await Promise.all([DB.getIncome(), DB.getSettings()]);
+  const [allIncome, settings, allCashTx, remRatesData] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getCashTransactions(), getRemRates()]);
+  const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
   const income=filterByMonth(allIncome);
+
+  // Build deposit map from cash_transactions
+  const depositMap={};
+  allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef).forEach(t=>{depositMap[t.incomeRef]=(depositMap[t.incomeRef]||0)+(t.amount||0)});
+  function depositBadge(r){
+    const cashHeld=getSundayCashWithAccountant(r,remRates);
+    if(cashHeld===0) return '<span class="badge badge-info">No Cash</span>';
+    const dep=depositMap[r.id]||0;
+    if(dep>=cashHeld) return '<span class="badge badge-success">✓ Deposited</span>';
+    if(dep>0) return `<span class="badge badge-warn">Partial</span>`;
+    return '<span class="badge badge-warn">Pending</span>';
+  }
 
   // Group by week
   const weeks={};
@@ -6328,7 +6357,7 @@ async function generateWeeklyReport(){
 
   const totalCollected=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const avgPerSunday=income.length?Math.round(totalCollected/income.length):0;
-  const deposited=income.filter(r=>r.depositConfirmed).length;
+  const deposited=income.filter(r=>{const c=getSundayCashWithAccountant(r,remRates);return c===0||(depositMap[r.id]||0)>=c}).length;
   const pending=income.length-deposited;
 
   // Highest and lowest
@@ -6350,7 +6379,7 @@ async function generateWeeklyReport(){
     <div class="section-title">Detailed Weekly Breakdown</div>
     ${income.length?`<table>
       <tr><th>S/N</th><th>Date</th>${INCOME_TYPES.map(t=>`<th class="td-r">${t.label}</th>`).join('')}<th class="td-r">Total</th><th>Deposit Status</th></tr>
-      ${income.map((r,i)=>`<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td>${INCOME_TYPES.map(t=>`<td class="td-r">${r[t.key]?fmt(r[t.key]):'—'}</td>`).join('')}<td class="td-r td-bold">${fmt(r.totalCollection)}</td><td>${r.depositConfirmed?'<span class="badge badge-success">✓ Deposited</span>':'<span class="badge badge-warn">Pending</span>'}</td></tr>`).join('')}
+      ${income.map((r,i)=>`<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td>${INCOME_TYPES.map(t=>`<td class="td-r">${r[t.key]?fmt(r[t.key]):'—'}</td>`).join('')}<td class="td-r td-bold">${fmt(r.totalCollection)}</td><td>${depositBadge(r)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">GRAND TOTAL</td>${INCOME_TYPES.map(t=>{const sum=income.reduce((s,r)=>s+(r[t.key]||0),0);return `<td class="td-r">${sum?fmt(sum):'—'}</td>`}).join('')}<td class="td-r">${fmt(totalCollected)}</td><td></td></tr>
     </table>`:'<div class="no-data">No Sunday collections recorded for this period.</div>'}
 
@@ -6378,7 +6407,7 @@ async function generateQuarterlyReport(){
   for(let i=2;i>=0;i--){
     let m=state.month-i; let y=state.year; if(m<0){m+=12;y--;}
     const recs=allIncome.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
-    const exps=allExpenses.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    const exps=allExpenses.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y&&r.status==='approved'});
     const total=recs.reduce((s,r)=>s+(r.totalCollection||0),0);
     const exp=exps.reduce((s,e)=>s+(e.amount||0),0);
     const rem=await calcRemittancesFromRecords(recs);
@@ -6474,9 +6503,9 @@ async function generateExpenseReport(){
 
     <div class="section-title">Detailed Line Items (All Expenses)</div>
     ${expenses.length?`<table>
-      <tr><th>S/N</th><th>Date</th><th>Category</th><th>Description</th><th>Receipt No.</th><th>Recorded By</th><th class="td-r">Amount (₦)</th></tr>
-      ${expenses.map((e,i)=>`<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${EXPENSE_CATS.find(c=>c.key===e.category)?.label||e.category}</td><td>${esc(e.description)}</td><td>${e.receiptNo||'—'}</td><td>${esc(e.recordedBy||e.createdByName||'—')}</td><td class="td-r">${fmt(e.amount)}</td></tr>`).join('')}
-      <tr class="total-row"><td colspan="6">TOTAL EXPENDITURE</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
+      <tr><th>S/N</th><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th>Method</th><th>Status</th><th>Receipt No.</th><th>Recorded By</th><th class="td-r">Amount (₦)</th></tr>
+      ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const mL=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';const sb=e.status==='approved'?'<span class="badge badge-success">Approved</span>':e.status==='rejected'?'<span class="badge badge-danger">Rejected</span>':'<span class="badge badge-warn">Pending</span>';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${esc(e.description)}</td><td>${mL}</td><td>${sb}</td><td>${e.receiptNo||'—'}</td><td>${esc(e.recordedBy||e.createdByName||'—')}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
+      <tr class="total-row"><td colspan="9">TOTAL EXPENDITURE</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
     </table>`:'<div class="no-data">No expenses recorded for this period.</div>'}
 
     ${withReceipt<expenses.length&&expenses.length>0?`<div class="note-box">⚠️ ${expenses.length-withReceipt} expense(s) do not have a receipt number attached. All expenditure should be supported by proper documentation.</div>`:''}
@@ -6521,16 +6550,19 @@ async function generatePettyCashReport(){
       <tr><td style="font-weight:600">Pending Receipt Submission</td><td class="td-r ${unaccounted>0?'td-amber':'td-green'}">${fmt(unaccounted)}</td></tr>
       ${rejected>0?`<tr><td style="font-weight:600">Rejected Requests</td><td class="td-r td-red">${rejected}</td></tr>`:''}
       ${pendingCount>0?`<tr><td style="font-weight:600">Awaiting Approval</td><td class="td-r td-amber">${pendingCount}</td></tr>`:''}
+      <tr class="total-row"><td style="font-weight:700">Current Float Balance (Live)</td><td class="td-r td-bold ${(pettyConfig.float||0)<0?'td-red':'td-green'}">${fmt(pettyConfig.float||0)}</td></tr>
+      <tr style="background:#e8f4f0"><td colspan="2" style="font-size:11px;color:#0F6E56">Reconciliation: Opening Float (${fmt((pettyConfig.float||0)+disbursed-refilled)}) + Refills (${fmt(refilled)}) − Disbursements (${fmt(disbursed)}) = Closing Balance (${fmt(pettyConfig.float||0)})</td></tr>
     </table>
 
     <div class="section-title">Transaction Details</div>
     ${history.length?`<table>
-      <tr><th>S/N</th><th>Date</th><th>Type</th><th>Purpose</th><th>Requested By</th><th>Approved By</th><th>Status</th><th class="td-r">Approved (₦)</th><th class="td-r">Actual (₦)</th><th>Receipt</th></tr>
+      <tr><th>S/N</th><th>Date</th><th>Type</th><th>Purpose</th><th>Method</th><th>Requested By</th><th>Approved By</th><th>Status</th><th class="td-r">Approved (₦)</th><th class="td-r">Actual (₦)</th><th>Receipt</th></tr>
       ${history.map((h,i)=>`<tr>
         <td>${i+1}</td>
         <td>${fmtDate(h.createdAt)}</td>
         <td>${h.type==='refill'?'<span class="badge badge-info">Refill</span>':h.type==='advance'?'<span class="badge badge-warn">Advance</span>':'<span class="badge badge-success">Direct</span>'}</td>
         <td>${h.type==='refill'?'Cash Top-Up / Refill':esc(h.purpose||'—')}</td>
+        <td style="font-size:11px">${h.type==='refill'?txMethodLabel(h.paymentMethod||h.source):'—'}</td>
         <td>${esc(h.requestedBy||'—')}</td>
         <td>${esc(h.approvedBy||h.authorizedBy||'—')}</td>
         <td>${h.status==='settled'?'<span class="badge badge-success">Settled</span>':h.status==='approved'?'<span class="badge badge-info">Approved</span>':h.status==='rejected'?'<span class="badge badge-danger">Rejected</span>':'<span class="badge badge-warn">Pending</span>'}</td>
@@ -6539,7 +6571,7 @@ async function generatePettyCashReport(){
         <td>${h.receiptNo||'—'}</td>
       </tr>`).join('')}
       <tr class="total-row">
-        <td colspan="7">TOTALS</td>
+        <td colspan="8">TOTALS</td>
         <td class="td-r">${fmt(history.filter(h=>h.type!=='refill').reduce((s,h)=>s+(h.amount||0),0))}</td>
         <td class="td-r">${fmt(settled)}</td>
         <td>${history.filter(h=>h.receiptNo).length} receipt(s)</td>
