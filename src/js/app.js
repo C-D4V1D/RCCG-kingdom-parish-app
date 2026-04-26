@@ -6237,21 +6237,19 @@ async function renderReports(){
         <div style="display:flex;align-items:center;gap:6px">
           <label style="font-size:12px;color:var(--text2);white-space:nowrap">From</label>
           <input type="date" id="reportFromDate" class="form-input" value="${fromDate}"
-            style="width:auto;padding:6px 10px;font-size:13px${cutoffDay?';background:var(--surface);cursor:default;color:var(--text2)':''}"
-            ${cutoffDay?'readonly':'onchange="App.onReportDatesChange()"'} />
+            style="width:auto;padding:6px 10px;font-size:13px"
+            onchange="App.onReportDatesChange()" />
         </div>
         <div style="display:flex;align-items:center;gap:6px">
           <label style="font-size:12px;color:var(--text2);white-space:nowrap">To</label>
           <input type="date" id="reportToDate" class="form-input" value="${toDate}"
-            style="width:auto;padding:6px 10px;font-size:13px${cutoffDay?';background:var(--surface);cursor:default;color:var(--text2)':''}"
-            ${cutoffDay?'readonly':'onchange="App.onReportDatesChange()"'} />
+            style="width:auto;padding:6px 10px;font-size:13px"
+            onchange="App.onReportDatesChange()" />
         </div>
-        ${cutoffDay?'<span class="badge badge-info" style="font-size:11px">🔒 Locked to cut-off date</span>':''}
+        ${cutoffDay?'<span class="badge badge-info" style="font-size:11px">📅 Default from cut-off date</span>':''}
       </div>
       <div style="font-size:11px;color:var(--text3);margin-top:6px">
-        ${cutoffDay
-          ? '🔒 Dates are automatically set from the HQ cut-off date for this month.'
-          : 'ℹ️ All reports below will cover this period. Adjust the dates before generating any report.'}
+        ℹ️ All reports below will cover this period. ${cutoffDay?'Defaulted from HQ cut-off date — you can still edit. ':''}Adjust the dates before generating any report.
         Period: <strong>${fmtDate(fromDate)}</strong> – <strong>${fmtDate(toDate)}</strong>
       </div>
     </div>
@@ -6305,6 +6303,7 @@ async function generateMonthlyReport(){
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
   const totalRemPaid=paidRems.reduce((s,r)=>s+(r.amount||0),0);
   const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate+totalFixedQuotas;
+  const trueNetLocal=rem.netLocal-totalFixedQuotas;
   const netPosition=totalIncome-totalExpenses-totalRemDue;
 
   // Income by type summary
@@ -6326,7 +6325,7 @@ async function generateMonthlyReport(){
       <div class="summary-box"><div class="label">Total Income</div><div class="value green">${fmt(totalIncome)}</div></div>
       <div class="summary-box"><div class="label">Total Expenses</div><div class="value red">${fmt(totalExpenses)}</div></div>
       <div class="summary-box"><div class="label">Total Remittances Due</div><div class="value red">${fmt(totalRemDue)}</div></div>
-      <div class="summary-box"><div class="label">Net Local Retained</div><div class="value green">${fmt(rem.netLocal)}</div></div>
+      <div class="summary-box"><div class="label">Net Local Retained</div><div class="value green">${fmt(trueNetLocal)}</div></div>
       <div class="summary-box"><div class="label">Net Position</div><div class="value ${netPosition>=0?'green':'red'}">${fmt(netPosition)}</div></div>
       <div class="summary-box"><div class="label">No. of Sundays</div><div class="value blue">${income.length}</div></div>
     </div>
@@ -6348,13 +6347,18 @@ async function generateMonthlyReport(){
     <div class="section-title">Section C: Remittances Due to RCCG Authorities</div>
     <table>
       <tr><th>Description</th><th class="td-c">Rate / Basis</th><th class="td-r">Amount (₦)</th></tr>
-      ${rem.lines.filter(l=>l.national>0).map(l=>`<tr><td>${l.label} → National HQ</td><td class="td-c">${l.total>0?Math.round(l.national/l.total*100)+'% of '+fmt(l.total):'% Based'}</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
+      ${rem.lines.filter(l=>!l.isTg&&l.national>0).map(l=>`<tr><td>${l.label} → National HQ</td><td class="td-c">${l.total>0?Math.round(l.national/l.total*100)+'% of '+fmt(l.total):'% Based'}</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
+      ${rem.lines.filter(l=>l.isTg&&l.national>0).map(l=>`<tr><td>Thanksgiving (TG) → National HQ</td><td class="td-c">${Math.round(remRatesData.tgNational*100)}% of ${fmt(l.total)}</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
       ${rem.provinceRebate>0?`<tr><td>Province Rebate (on local tithes)</td><td class="td-c">${rem.localTithe>0?Math.round(rem.provinceRebate/rem.localTithe*100)+'% of '+fmt(rem.localTithe):'% Based'}</td><td class="td-r">${fmt(rem.provinceRebate)}</td></tr>`:''}
+      ${rem.totalArea>0?`<tr><td style="padding-left:16px">Thanksgiving → Area/Zonal Pastor</td><td class="td-c">${Math.round(remRatesData.tgArea*100)}% of TG</td><td class="td-r">${fmt(rem.totalArea)}</td></tr>`:''}
+      ${rem.totalPastor>0?`<tr><td style="padding-left:16px">Thanksgiving → Pastor's Family Share</td><td class="td-c">${Math.round(remRatesData.tgPastor*100)}% of TG</td><td class="td-r">${fmt(rem.totalPastor)}</td></tr>`:''}
+      ${rem.totalMinisters>0?`<tr><td style="padding-left:16px">Thanksgiving → Ministers' Share</td><td class="td-c">${Math.round(remRatesData.tgMinisters*100)}% of TG</td><td class="td-r">${fmt(rem.totalMinisters)}</td></tr>`:''}
+      ${(rem.totalSeed||0)>0?`<tr><td style="padding-left:16px">Thanksgiving → Seed (Pastor's Children)</td><td class="td-c">${Math.round((remRatesData.tgSeed||0)*100)}% of TG</td><td class="td-r">${fmt(rem.totalSeed)}</td></tr>`:''}
       ${quotaList.filter(q=>q.amount>0).map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">Fixed Quota</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${fmt(totalRemDue)}</td></tr>
-      ${totalRemPaid>0?`<tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Month</td><td class="td-r td-green">${fmt(totalRemPaid)}</td></tr>`:''}
+      ${totalRemPaid>0?`<tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Period</td><td class="td-r td-green">${fmt(totalRemPaid)}</td></tr>`:''}
       ${totalRemPaid<totalRemDue?`<tr><td colspan="2" style="padding-left:20px;color:var(--danger)">Outstanding Balance</td><td class="td-r td-red">− ${fmt(totalRemDue-totalRemPaid)}</td></tr>`:''}
-      <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">NET LOCAL RETAINED (after remittances)</td><td class="td-r td-green">${fmt(rem.netLocal)}</td></tr>
+      <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">NET LOCAL RETAINED (after all remittances)</td><td class="td-r td-green">${fmt(trueNetLocal)}</td></tr>
     </table>
 
     <div class="section-title">Section D: Approved Expenses <span>(${expenses.length} entries totalling ${fmt(totalExpenses)})${pendingExpCount>0?' — '+pendingExpCount+' pending approval not included':''}</span></div>
@@ -6462,6 +6466,8 @@ function generateRemittanceReport(){ printRemittanceReport(); }
 
 async function generateQuarterlyReport(){
   const [allIncome, allExpenses, settings] = await Promise.all([DB.getIncome(), DB.getExpenses(), DB.getSettings()]);
+  const quotaList=getQuotaList(settings);
+  const quotasTotal=quotaList.reduce((s,q)=>s+(q.amount||0),0);
   const quarterData=[];
   let grandIncome=0, grandExp=0, grandRem=0, grandNet=0;
 
@@ -6472,9 +6478,10 @@ async function generateQuarterlyReport(){
     const total=recs.reduce((s,r)=>s+(r.totalCollection||0),0);
     const exp=exps.reduce((s,e)=>s+(e.amount||0),0);
     const rem=await calcRemittancesFromRecords(recs);
-    const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate;
+    const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate+quotasTotal;
+    const trueNetLocal=rem.netLocal-quotasTotal;
     const netSurplus=total-totalRemDue-exp;
-    quarterData.push({month:MONTHS[m],year:y,income:total,expenses:exp,remittances:totalRemDue,netLocal:rem.netLocal,surplus:netSurplus,sundays:recs.length});
+    quarterData.push({month:MONTHS[m],year:y,income:total,expenses:exp,remittances:totalRemDue,netLocal:trueNetLocal,surplus:netSurplus,sundays:recs.length});
     grandIncome+=total; grandExp+=exp; grandRem+=totalRemDue; grandNet+=netSurplus;
   }
 
