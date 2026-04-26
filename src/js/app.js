@@ -2308,6 +2308,18 @@ async function viewIncome(id){
     ${canAction('income_deposit')&&cashHeld>depositedTotal?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
 }
 
+function _previewDepPhoto(input, previewId){
+  const file = input.files?.[0];
+  const preview = document.getElementById(previewId);
+  if(!file||!preview) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    preview.style.display = 'block';
+    preview.querySelector('img').src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
 async function confirmDeposit(id){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const [allIncCD, allCashCD, remRatesData, balance] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance()]);
@@ -2352,8 +2364,14 @@ async function confirmDeposit(id){
         <option value="mobile_transfer">Mobile / Internet Banking Transfer</option>
       </select>
     </div>
-    <div class="form-group"><label class="form-label">Teller / Reference Number *</label>
-      <input type="text" id="dep_ref" class="form-input" placeholder="Bank teller number or transaction reference" />
+    <div class="form-group">
+      <label class="form-label">Proof of Deposit <span style="color:var(--danger)">*</span></label>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Provide at least one: a teller/reference number <strong>or</strong> a photo of the deposit slip.</div>
+      <input type="text" id="dep_ref" class="form-input" placeholder="Teller number / transaction reference (optional if photo uploaded)" style="margin-bottom:8px" />
+      <div style="font-size:11px;color:var(--text3);text-align:center;margin:2px 0 8px">— OR —</div>
+      <label style="font-size:12px;color:var(--text2);margin-bottom:4px;display:block">Upload Photo of Deposit Slip / POS Receipt</label>
+      <input type="file" id="dep_photo" accept="image/*" class="form-input" style="padding:6px" onchange="App._previewDepPhoto(this,'dep_photo_preview')" />
+      <div id="dep_photo_preview" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:6px;border:1px solid var(--border)" /></div>
     </div>
     <div class="form-group"><label class="form-label">Date of Deposit *</label>
       <input type="date" id="dep_date" class="form-input" value="${today}" max="${today}" />
@@ -2370,19 +2388,30 @@ async function submitCashDeposit(incomeId, btn=null){
   const method  = document.getElementById('dep_method')?.value;
   const ref     = document.getElementById('dep_ref')?.value?.trim();
   const date    = document.getElementById('dep_date')?.value;
-  if(!amount||!ref||!date){ alert('Please fill all required fields.'); return }
+  const photoFile = document.getElementById('dep_photo')?.files?.[0];
+  if(!amount||!date){ alert('Please fill all required fields.'); return; }
+  if(!ref&&!photoFile){ alert('Please provide either a teller/reference number or upload a photo of the deposit slip. At least one is required.'); return; }
   const maxDeposit = state._depositRemaining ?? Infinity;
   if(amount > maxDeposit + 0.5){
     showAlert(`Deposit amount (${fmt(amount)}) exceeds the cash available for this record (${fmt(maxDeposit)}). Please enter a correct amount.`,'danger');
     return;
   }
+  let photoData = '';
+  if(photoFile){
+    photoData = await new Promise(resolve=>{
+      const reader = new FileReader();
+      reader.onload = e => resolve(e.target.result);
+      reader.readAsDataURL(photoFile);
+    });
+  }
   const restore = setBtnLoading(btn, 'Saving…');
   try {
-    await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
-    DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
-    DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank (Ref: ${ref})`,'success');
+    await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name });
+    const refLabel = ref || (photoData ? '(photo uploaded)' : '—');
+    DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${refLabel}`,state.user?.name);
+    DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank${ref?` (Ref: ${ref})`:''}`,'success');
     closeModal();
-    showAlert(`${fmt(amount)} deposited to bank successfully! Ref: ${ref}`, 'success');
+    showAlert(`${fmt(amount)} deposited to bank successfully!${ref?` Ref: ${ref}`:''}`, 'success');
     renderIncome();
   } catch(err) {
     restore();
@@ -2517,8 +2546,14 @@ async function confirmBulkDeposit(){
         <option value="mobile_transfer">Mobile / Internet Banking Transfer</option>
       </select>
     </div>
-    <div class="form-group"><label class="form-label">Teller / Reference Number *</label>
-      <input type="text" id="bulk_dep_ref" class="form-input" placeholder="Bank teller number or transaction reference" />
+    <div class="form-group">
+      <label class="form-label">Proof of Deposit <span style="color:var(--danger)">*</span></label>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Provide at least one: a teller/reference number <strong>or</strong> a photo of the deposit slip.</div>
+      <input type="text" id="bulk_dep_ref" class="form-input" placeholder="Teller number / transaction reference (optional if photo uploaded)" style="margin-bottom:8px" />
+      <div style="font-size:11px;color:var(--text3);text-align:center;margin:2px 0 8px">— OR —</div>
+      <label style="font-size:12px;color:var(--text2);margin-bottom:4px;display:block">Upload Photo of Deposit Slip / POS Receipt</label>
+      <input type="file" id="bulk_dep_photo" accept="image/*" class="form-input" style="padding:6px" onchange="App._previewDepPhoto(this,'bulk_dep_photo_preview')" />
+      <div id="bulk_dep_photo_preview" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:6px;border:1px solid var(--border)" /></div>
     </div>
     <div class="form-group"><label class="form-label">Date of Deposit *</label>
       <input type="date" id="bulk_dep_date" class="form-input" value="${today}" max="${today}" />
@@ -2532,10 +2567,20 @@ async function confirmBulkDeposit(){
 
 async function submitBulkDeposit(btn=null){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
-  const method = document.getElementById('bulk_dep_method')?.value;
-  const ref    = document.getElementById('bulk_dep_ref')?.value?.trim();
-  const date   = document.getElementById('bulk_dep_date')?.value;
-  if(!ref||!date){ alert('Please fill all required fields (reference number and deposit date).'); return; }
+  const method    = document.getElementById('bulk_dep_method')?.value;
+  const ref       = document.getElementById('bulk_dep_ref')?.value?.trim();
+  const date      = document.getElementById('bulk_dep_date')?.value;
+  const photoFile = document.getElementById('bulk_dep_photo')?.files?.[0];
+  if(!date){ alert('Please enter the deposit date.'); return; }
+  if(!ref&&!photoFile){ alert('Please provide either a teller/reference number or upload a photo of the deposit slip. At least one is required.'); return; }
+  let photoData = '';
+  if(photoFile){
+    photoData = await new Promise(resolve=>{
+      const reader = new FileReader();
+      reader.onload = e => resolve(e.target.result);
+      reader.readAsDataURL(photoFile);
+    });
+  }
   const cashToDeposit = state._bulkDepositCashBalance || 0;
   if(cashToDeposit < 0.5){ showAlert('No cash to deposit.','warn'); return; }
   const restore = setBtnLoading(btn, 'Saving…');
@@ -2558,21 +2603,22 @@ async function submitBulkDeposit(btn=null){
     for(const item of incomeItems){
       if(amountLeft < 0.5) break;
       const depositAmt = Math.min(item.remaining, amountLeft);
-      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:item.id, amount:depositAmt, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
+      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:item.id, amount:depositAmt, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name });
       amountLeft -= depositAmt;
       recordCount++;
     }
     // Any remainder comes from bank-withdrawal funds not tied to income records
     if(amountLeft > 0.5){
-      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:'', amount:amountLeft, depositMethod:method, reference:ref, date, recordedBy:state.user?.name, description:'Cash deposit (bank withdrawal funds)' });
+      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:'', amount:amountLeft, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name, description:'Cash deposit (bank withdrawal funds)' });
       recordCount++;
     }
-    DB.addAudit('cash_deposited',`Cash deposit: ${fmt(cashToDeposit)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
-    DB.addNotification('Cash Deposited',`${fmt(cashToDeposit)} deposited to bank (Ref: ${ref})`,'success');
+    const refLabel = ref || (photoData ? '(photo uploaded)' : '—');
+    DB.addAudit('cash_deposited',`Cash deposit: ${fmt(cashToDeposit)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${refLabel}`,state.user?.name);
+    DB.addNotification('Cash Deposited',`${fmt(cashToDeposit)} deposited to bank${ref?` (Ref: ${ref})`:''}`,'success');
     delete state._bulkDepositPending;
     delete state._bulkDepositCashBalance;
     closeModal();
-    showAlert(`${fmt(cashToDeposit)} deposited to bank. Ref: ${ref}`, 'success');
+    showAlert(`${fmt(cashToDeposit)} deposited to bank successfully!${ref?` Ref: ${ref}`:''}`, 'success');
     if(state.page==='bank') renderBank(); else renderIncome();
   } catch(err) {
     restore();
@@ -4482,12 +4528,17 @@ async function showBankWithdrawal(){
         <input type="text" id="wd_exp_desc" class="form-input" placeholder="Additional detail about this expense" />
       </div>
       <div class="form-group" style="margin-bottom:0">
-        <label class="form-label">Receipt / Invoice Number</label>
-        <input type="text" id="wd_exp_receipt" class="form-input" placeholder="Optional receipt or invoice number" />
+        <label class="form-label">Receipt / Invoice Proof <span style="font-size:11px;color:var(--text2);font-weight:normal">(optional)</span></label>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Provide a receipt/invoice number <strong>or</strong> upload a photo — at least one recommended.</div>
+        <input type="text" id="wd_exp_receipt" class="form-input" placeholder="Receipt or invoice number" style="margin-bottom:8px" />
+        <div style="font-size:11px;color:var(--text3);text-align:center;margin:2px 0 8px">— OR —</div>
+        <label style="font-size:12px;color:var(--text2);margin-bottom:4px;display:block">Upload Photo of Receipt / Invoice</label>
+        <input type="file" id="wd_exp_receipt_photo" accept="image/*" class="form-input" style="padding:6px" onchange="App._previewDepPhoto(this,'wd_exp_receipt_preview')" />
+        <div id="wd_exp_receipt_preview" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:6px;border:1px solid var(--border)" /></div>
       </div>
     </div>
 
-    <div class="form-group"><label class="form-label">Bank Reference / Teller No.</label>
+    <div class="form-group"><label class="form-label" id="wd_ref_label">Bank Reference / Teller No.</label>
       <input type="text" id="wd_ref" class="form-input" placeholder="Optional bank reference number" />
     </div>
     <div class="form-group">
@@ -4506,9 +4557,11 @@ function onWdDestChange(){
   const section  = document.getElementById('wd_expense_section');
   const descGrp  = document.getElementById('wd_desc_group');
   const btn      = document.getElementById('wd_submit_btn');
+  const refLabel = document.getElementById('wd_ref_label');
   if(section)  section.style.display = isDirect ? '' : 'none';
   if(descGrp)  descGrp.style.display = isDirect ? 'none' : '';
   if(btn) btn.textContent = isDirect ? 'Record Withdrawal & Log Expense' : 'Record Withdrawal';
+  if(refLabel) refLabel.textContent = isDirect ? 'Bank Reference / Teller No.' : 'Bank Reference / Cheque No.';
 }
 
 function onWdCatChange(){
@@ -4545,12 +4598,22 @@ async function submitBankWithdrawal(btn=null){
   const expVendor = document.getElementById('wd_exp_vendor')?.value?.trim();
   const expDesc   = document.getElementById('wd_exp_desc')?.value?.trim();
   const receipt   = document.getElementById('wd_exp_receipt')?.value?.trim();
+  const receiptPhotoFile = isDirect ? document.getElementById('wd_exp_receipt_photo')?.files?.[0] : null;
 
-  if(!date||!amount){ alert('Please fill in the date and amount.'); return }
-  if(!isDirect && !description){ alert('Please fill in the purpose / description.'); return }
-  if(!auth){ alert('Please select at least one authorizing signatory.'); return }
-  if(isDirect && !expCat){ alert('Please select an expense category.'); return }
-  if(isDirect && !expSubcat){ alert('Please select a sub-category.'); return }
+  if(!date||!amount){ alert('Please fill in the date and amount.'); return; }
+  if(!isDirect && !description){ alert('Please fill in the purpose / description.'); return; }
+  if(!auth){ alert('Please select at least one authorizing signatory.'); return; }
+  if(isDirect && !expCat){ alert('Please select an expense category.'); return; }
+  if(isDirect && !expSubcat){ alert('Please select a sub-category.'); return; }
+
+  let receiptPhotoData = '';
+  if(receiptPhotoFile){
+    receiptPhotoData = await new Promise(resolve=>{
+      const reader = new FileReader();
+      reader.onload = e => resolve(e.target.result);
+      reader.readAsDataURL(receiptPhotoFile);
+    });
+  }
 
   // Build description for the cash_transaction record
   const txDescription = isDirect
@@ -4589,6 +4652,7 @@ async function submitBankWithdrawal(btn=null){
         paymentMethod:'bank_transfer',
         bankAmount: amount,
         receiptNo: receipt||'',
+        receiptImage: receiptPhotoData||'',
         notes:`Direct bank withdrawal. Ref: ${reference||'—'}. Authorized by: ${auth}.`,
         recordedBy: state.user?.name,
         status:'approved'
@@ -4754,20 +4818,41 @@ async function renderBank(){
 
 function renderBankOverview(monthBankTx,bankBalance){
   if(!monthBankTx.length) return '<div class="card"><div class="empty-table">No bank transactions this month.</div></div>';
+  // Compute balance after each transaction (list is newest-first)
+  let runningBal = bankBalance;
+  const txWithBal = monthBankTx.map(t => {
+    const balAfter = runningBal;
+    runningBal -= t.txAmt;
+    return { ...t, balAfter };
+  });
   return `<div class="card">
     <div class="card-header"><span class="card-title">Bank Transactions — ${monthLabel()}</span></div>
-    <div class="table-wrap"><table>
-      <tr><th>Date</th><th>Type</th><th>Description</th><th class="td-right">Amount</th><th>Reference</th></tr>
-      ${monthBankTx.map(t=>{
+    <div style="padding:0 4px">
+      ${txWithBal.map(t=>{
         const isCredit = t.txAmt > 0;
-        return `<tr>
-          <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.date||t.createdAt)}</div></td>
-          <td><span class="badge ${isCredit?'badge-success':'badge-danger'}">${t.txType}</span></td>
-          <td>${t.txLabel}</td>
-          <td class="td-right ${isCredit?'td-green':'td-red'} td-bold">${isCredit?'+':''}${fmt(Math.abs(t.txAmt))}</td>
-          <td class="td-muted">${t.reference||'—'}</td>
-        </tr>`}).join('')}
-    </table></div>
+        const color = isCredit ? 'var(--success,#2e7d32)' : 'var(--danger)';
+        const sign  = isCredit ? '+' : '';
+        const balColor = t.balAfter < 0 ? 'var(--danger)' : 'var(--primary)';
+        return `<div onclick="var d=this.querySelector('.bk-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.txLabel}</div>
+              <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(t.date||t.createdAt)} &nbsp;·&nbsp; <span class="badge ${isCredit?'badge-success':'badge-danger'}" style="font-size:10px">${t.txType}</span></div>
+            </div>
+            <div style="text-align:right;flex-shrink:0;margin-left:4px">
+              <div style="font-size:14px;font-weight:700;color:${color}">${sign}${fmt(Math.abs(t.txAmt))}</div>
+            </div>
+            <span style="font-size:9px;color:var(--text3);flex-shrink:0">▾</span>
+          </div>
+          <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
+            <div>Balance after this transaction: <strong style="color:${balColor}">${fmt(t.balAfter)}</strong></div>
+            ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
+            ${t.photoData?`<div><a href="${t.photoData}" target="_blank" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
+            <div>Time: ${fmtTime(t.date||t.createdAt)}</div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
   </div>`;
 }
 
@@ -4775,17 +4860,25 @@ function renderBankWithdrawals(withdrawals){
   if(!withdrawals.length) return '<div class="card"><div class="empty-table">No bank withdrawals this month.</div></div>';
   return `<div class="card">
     <div class="card-header"><span class="card-title">Bank Withdrawals — ${monthLabel()}</span></div>
-    <div class="table-wrap"><table>
-      <tr><th>Date</th><th>Amount</th><th>Destination</th><th>Description</th><th>Reference</th><th>Authorized By</th></tr>
-      ${withdrawals.map(t=>`<tr>
-        <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.date||t.createdAt)}</div></td>
-        <td class="td-red td-bold">${fmt(t.amount)}</td>
-        <td><span class="badge badge-info">${(t.destination||'').replace(/_/g,' ')}</span></td>
-        <td>${t.description||'—'}</td>
-        <td class="td-muted">${t.reference||'—'}</td>
-        <td class="td-muted">${t.authorizedBy||'—'}</td>
-      </tr>`).join('')}
-    </table></div>
+    <div style="padding:0 4px">
+      ${withdrawals.map(t=>`<div onclick="var d=this.querySelector('.bk-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.description||'Bank Withdrawal'}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(t.date||t.createdAt)} &nbsp;·&nbsp; <span class="badge badge-info" style="font-size:10px">${(t.destination||'').replace(/_/g,' ')}</span></div>
+          </div>
+          <div style="text-align:right;flex-shrink:0;margin-left:4px">
+            <div style="font-size:14px;font-weight:700;color:var(--danger)">−${fmt(t.amount)}</div>
+          </div>
+          <span style="font-size:9px;color:var(--text3);flex-shrink:0">▾</span>
+        </div>
+        <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
+          ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
+          ${t.authorizedBy?`<div>Authorized By: <strong>${t.authorizedBy}</strong></div>`:''}
+          <div>Time: ${fmtTime(t.date||t.createdAt)}</div>
+        </div>
+      </div>`).join('')}
+    </div>
   </div>`;
 }
 
@@ -4793,16 +4886,26 @@ function renderBankDeposits(deposits){
   if(!deposits.length) return '<div class="card"><div class="empty-table">No cash deposits to bank this month.</div></div>';
   return `<div class="card">
     <div class="card-header"><span class="card-title">Cash Deposits to Bank — ${monthLabel()}</span></div>
-    <div class="table-wrap"><table>
-      <tr><th>Date</th><th>Amount</th><th>Description</th><th>Reference</th><th>Recorded By</th></tr>
-      ${deposits.map(t=>`<tr>
-        <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.date||t.createdAt)}</div></td>
-        <td class="td-green td-bold">${fmt(t.amount)}</td>
-        <td>${t.description||'Cash deposit'}</td>
-        <td class="td-muted">${t.reference||'—'}</td>
-        <td class="td-muted">${t.recordedBy||'—'}</td>
-      </tr>`).join('')}
-    </table></div>
+    <div style="padding:0 4px">
+      ${deposits.map(t=>`<div onclick="var d=this.querySelector('.bk-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.description||'Cash Deposit'}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(t.date||t.createdAt)}${t.depositMethod?` &nbsp;·&nbsp; ${(t.depositMethod||'').replace(/_/g,' ')}`:''}${t.photoData?` &nbsp;·&nbsp; <span class="badge badge-info" style="font-size:10px">📷 Photo</span>`:''}</div>
+          </div>
+          <div style="text-align:right;flex-shrink:0;margin-left:4px">
+            <div style="font-size:14px;font-weight:700;color:var(--success,#2e7d32)">+${fmt(t.amount)}</div>
+          </div>
+          <span style="font-size:9px;color:var(--text3);flex-shrink:0">▾</span>
+        </div>
+        <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
+          ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
+          ${t.recordedBy?`<div>Recorded By: <strong>${t.recordedBy}</strong></div>`:''}
+          ${t.photoData?`<div><a href="${t.photoData}" target="_blank" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
+          <div>Time: ${fmtTime(t.date||t.createdAt)}</div>
+        </div>
+      </div>`).join('')}
+    </div>
   </div>`;
 }
 
@@ -4811,16 +4914,24 @@ function renderBankCharges(charges){
   if(!charges.length) return '<div class="card"><div class="empty-table">No bank charges recorded this month.</div></div>';
   return `<div class="card">
     <div class="card-header"><span class="card-title">Bank Charges — ${monthLabel()}</span><span style="font-size:13px;font-weight:600;color:var(--danger)">${fmt(total)}</span></div>
-    <div class="table-wrap"><table>
-      <tr><th>Date</th><th>Sub-category</th><th>Description</th><th class="td-right">Amount</th><th>Receipt</th></tr>
-      ${charges.map(e=>`<tr>
-        <td style="white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.date||e.createdAt)}</div></td>
-        <td>${e.subCategory||'—'}</td>
-        <td>${e.description||'—'}</td>
-        <td class="td-right td-red td-bold">${fmt(e.amount)}</td>
-        <td class="td-muted">${e.receiptNo||'—'}</td>
-      </tr>`).join('')}
-    </table></div>
+    <div style="padding:0 4px">
+      ${charges.map(e=>`<div onclick="var d=this.querySelector('.bk-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.subCategory||'Bank Charge'}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(e.date||e.createdAt)}${e.description?` &nbsp;·&nbsp; ${e.description}`:''}</div>
+          </div>
+          <div style="text-align:right;flex-shrink:0;margin-left:4px">
+            <div style="font-size:14px;font-weight:700;color:var(--danger)">−${fmt(e.amount)}</div>
+          </div>
+          <span style="font-size:9px;color:var(--text3);flex-shrink:0">▾</span>
+        </div>
+        <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
+          ${e.receiptNo?`<div>Receipt: <strong>${e.receiptNo}</strong></div>`:''}
+          <div>Time: ${fmtTime(e.date||e.createdAt)}</div>
+        </div>
+      </div>`).join('')}
+    </div>
   </div>`;
 }
 
@@ -6194,18 +6305,66 @@ function reportHeaderHTML(reportTitle, periodText, settings){
 }
 
 /** Shared signature section */
-function reportSignatureHTML(){
+function reportSignatureHTML(pastorName='', reviewerLabel='Reviewed &amp; Approved by:'){
+  const pastorDisplay = pastorName ? esc(pastorName) : '________________';
   return `<div class="sig-section">
     <div class="sig-box">Prepared by:<br><br><br><div class="sig-name">${esc(state.user?.name||'________________')}</div>Church Accountant</div>
-    <div class="sig-box">Reviewed &amp; Approved by:<br><br><br><div class="sig-name">________________</div>Parish Pastor</div>
+    <div class="sig-box">${reviewerLabel}<br><br><br><div class="sig-name">${pastorDisplay}</div>Parish Pastor</div>
     <div class="sig-box">Date:<br><br><br><div class="sig-name">${fmtDate(new Date().toISOString())}</div></div>
   </div>
   <div class="footer-note">This is a computer-generated report from the RCCG Kingdom Parish Finance Portal. For enquiries, contact the Church Accountant or Admin Officer.</div>`;
 }
 
-function renderReports(){
+async function renderReports(){
+  const settings = await DB.getSettings();
+  // Initialise report date range using same cut-off logic as remittances page
+  const cutoffConfig = getRemCutoffDates(settings, state.year);
+  const cutoffYear = cutoffConfig ? Number(cutoffConfig.year) : null;
+  const cutoffDay = (cutoffConfig && cutoffYear===state.year && Number.isInteger(cutoffConfig.dates[state.month]))
+    ? cutoffConfig.dates[state.month] : null;
+  if(cutoffDay){
+    state.reportToDate = ymdLocal(new Date(state.year, state.month, cutoffDay));
+    const prevMonth = state.month===0 ? 11 : state.month-1;
+    const prevYear  = state.month===0 ? state.year-1 : state.year;
+    const prevCC = getRemCutoffDates(settings, prevYear);
+    const prevCutoffDay = (prevCC && Number.isInteger(prevCC.dates[prevMonth]) && Number(prevCC.year)===prevYear)
+      ? prevCC.dates[prevMonth] : null;
+    if(prevCutoffDay){
+      const d=new Date(prevYear,prevMonth,prevCutoffDay); d.setDate(d.getDate()+1);
+      state.reportFromDate=ymdLocal(d);
+    } else {
+      state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
+    }
+  } else {
+    if(!state.reportFromDate) state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
+    if(!state.reportToDate)   state.reportToDate=ymdLocal(new Date());
+  }
+  const fromDate=state.reportFromDate;
+  const toDate=state.reportToDate;
   document.getElementById('pageContent').innerHTML=`
-    <div class="page-header"><div class="page-title">📊 Reports Centre</div><div class="page-sub">Generate comprehensive financial reports for ${monthLabel()}</div></div>
+    <div class="page-header"><div class="page-title">📊 Reports Centre</div><div class="page-sub">Generate comprehensive financial reports</div></div>
+    <div class="card" style="margin-bottom:12px;padding:14px 16px">
+      <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px">📅 Report Period</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:6px">
+          <label style="font-size:12px;color:var(--text2);white-space:nowrap">From</label>
+          <input type="date" id="reportFromDate" class="form-input" value="${fromDate}"
+            style="width:auto;padding:6px 10px;font-size:13px"
+            onchange="App.onReportDatesChange()" />
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <label style="font-size:12px;color:var(--text2);white-space:nowrap">To</label>
+          <input type="date" id="reportToDate" class="form-input" value="${toDate}"
+            style="width:auto;padding:6px 10px;font-size:13px"
+            onchange="App.onReportDatesChange()" />
+        </div>
+        ${cutoffDay?'<span class="badge badge-info" style="font-size:11px">📅 Default from cut-off date</span>':''}
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px">
+        ℹ️ All reports below will cover this period. ${cutoffDay?'Defaulted from HQ cut-off date — you can still edit. ':''}Adjust the dates before generating any report.
+        Period: <strong>${fmtDate(fromDate)}</strong> – <strong>${fmtDate(toDate)}</strong>
+      </div>
+    </div>
     <div class="card" style="margin-bottom:1rem;padding:1rem 1.25rem">
       <p style="font-size:12px;color:var(--text2);margin-bottom:0"><strong>Tip:</strong> Each report opens in a new window for clean, professional printing. Only the report content will be printed — not the web app interface.</p>
     </div>
@@ -6220,18 +6379,44 @@ function renderReports(){
     <div id="reportOutput"></div>`;
 }
 
+function onReportDatesChange(){
+  state.reportFromDate=document.getElementById('reportFromDate')?.value||null;
+  state.reportToDate=document.getElementById('reportToDate')?.value||null;
+  renderReports();
+}
+
 async function generateMonthlyReport(){
-  const [allIncome, allExpenses, allRemittances, settings] = await Promise.all([
-    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings()
+  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData, users] = await Promise.all([
+    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers()
   ]);
-  const income=filterByMonth(allIncome);
-  const expenses=filterByMonth(allExpenses);
-  const paidRems=filterByMonth(allRemittances);
+  const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
+  const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
+  const depositMapM={};
+  allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef).forEach(t=>{depositMapM[t.incomeRef]=(depositMapM[t.incomeRef]||0)+(t.amount||0)});
+  function depositBadgeM(r){
+    const cashHeld=getSundayCashWithAccountant(r,remRates);
+    if(cashHeld===0) return '<span class="badge badge-info">No Cash</span>';
+    const dep=depositMapM[r.id]||0;
+    if(dep>=cashHeld) return '<span class="badge badge-success">Deposited</span>';
+    if(dep>0) return '<span class="badge badge-warn">Partial</span>';
+    return '<span class="badge badge-warn">Pending</span>';
+  }
+  const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
+  const toDate=state.reportToDate||ymdLocal(new Date());
+  const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
+  const income=filterByDateRange(allIncome,fromDate,toDate);
+  const allMonthExpenses=filterByDateRange(allExpenses,fromDate,toDate);
+  const expenses=allMonthExpenses.filter(e=>e.status==='approved');
+  const pendingExpCount=allMonthExpenses.filter(e=>e.status==='pending_approval'||e.status==='pending').length;
+  const paidRems=filterByDateRange(allRemittances,fromDate,toDate);
   const rem=await calcRemittancesFromRecords(income);
+  const quotaList=getQuotaList(settings);
+  const totalFixedQuotas=quotaList.reduce((s,q)=>s+(q.amount||0),0);
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
   const totalRemPaid=paidRems.reduce((s,r)=>s+(r.amount||0),0);
-  const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate;
+  const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate+totalFixedQuotas;
+  const trueNetLocal=rem.netLocal-totalFixedQuotas;
   const netPosition=totalIncome-totalExpenses-totalRemDue;
 
   // Income by type summary
@@ -6247,13 +6432,13 @@ async function generateMonthlyReport(){
   const expSorted=Object.values(expByCat).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);
 
   const body=`
-    ${reportHeaderHTML('Monthly Financial Statement', monthLabel(), settings)}
+    ${reportHeaderHTML('Monthly Financial Statement', periodLabel, settings)}
 
     <div class="summary-grid">
       <div class="summary-box"><div class="label">Total Income</div><div class="value green">${fmt(totalIncome)}</div></div>
       <div class="summary-box"><div class="label">Total Expenses</div><div class="value red">${fmt(totalExpenses)}</div></div>
       <div class="summary-box"><div class="label">Total Remittances Due</div><div class="value red">${fmt(totalRemDue)}</div></div>
-      <div class="summary-box"><div class="label">Net Local Retained</div><div class="value green">${fmt(rem.netLocal)}</div></div>
+      <div class="summary-box"><div class="label">Net Local Retained</div><div class="value green">${fmt(trueNetLocal)}</div></div>
       <div class="summary-box"><div class="label">Net Position</div><div class="value ${netPosition>=0?'green':'red'}">${fmt(netPosition)}</div></div>
       <div class="summary-box"><div class="label">No. of Sundays</div><div class="value blue">${income.length}</div></div>
     </div>
@@ -6267,29 +6452,35 @@ async function generateMonthlyReport(){
 
     <div class="section-title">Section B: Weekly Collection Details</div>
     ${income.length?`<table>
-      <tr><th>S/N</th><th>Date</th><th>Members' Tithe</th><th>Ministers' Tithe</th><th>Thanksgiving</th><th>SLO</th><th>Others</th><th class="td-r">Total</th><th>Status</th></tr>
-      ${income.map((r,i)=>{
-        const others=(r.sundaySchool||0)+(r.crm||0)+(r.workersOffering||0)+(r.childrenOffering||0);
-        return `<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td><td class="td-r">${fmt(r.membersTithe||0)}</td><td class="td-r">${fmt(r.ministersTithe||0)}</td><td class="td-r">${fmt(r.thanksgiving||0)}</td><td class="td-r">${fmt(r.slo||0)}</td><td class="td-r">${fmt(others)}</td><td class="td-r td-bold">${fmt(r.totalCollection)}</td><td>${r.depositConfirmed?'<span class="badge badge-success">Deposited</span>':'<span class="badge badge-warn">Pending</span>'}</td></tr>`;
-      }).join('')}
-      <tr class="total-row"><td colspan="7">TOTAL COLLECTIONS</td><td class="td-r">${fmt(totalIncome)}</td><td></td></tr>
+      <tr><th>S/N</th><th>Date</th>${INCOME_TYPES.map(t=>`<th class="td-r">${t.label}</th>`).join('')}<th class="td-r">Total</th><th class="td-c">% of Month</th><th>Status</th></tr>
+      ${income.map((r,i)=>`<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td>${INCOME_TYPES.map(t=>`<td class="td-r">${r[t.key]?fmt(r[t.key]):'—'}</td>`).join('')}<td class="td-r td-bold">${fmt(r.totalCollection)}</td><td class="td-c">${totalIncome?Math.round((r.totalCollection||0)/totalIncome*100):0}%</td><td>${depositBadgeM(r)}</td></tr>`).join('')}
+      <tr class="total-row"><td colspan="2">TOTAL COLLECTIONS</td>${INCOME_TYPES.map(t=>{const s=income.reduce((a,r)=>a+(r[t.key]||0),0);return `<td class="td-r">${s?fmt(s):'—'}</td>`}).join('')}<td class="td-r">${fmt(totalIncome)}</td><td class="td-c">100%</td><td></td></tr>
     </table>`:'<div class="no-data">No income records for this period.</div>'}
 
     <div class="section-title">Section C: Remittances Due to RCCG Authorities</div>
     <table>
-      <tr><th>Description</th><th class="td-c">Basis</th><th class="td-r">Amount (₦)</th></tr>
-      ${rem.lines.filter(l=>l.national>0).map(l=>`<tr><td>${l.label} → National HQ</td><td class="td-c">% Based</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
-      ${rem.provinceRebate>0?`<tr><td>Province Rebate</td><td class="td-c">% Based</td><td class="td-r">${fmt(rem.provinceRebate)}</td></tr>`:''}
+      <tr><th>Description</th><th class="td-c">Rate / Basis</th><th class="td-r">Amount (₦)</th></tr>
+      ${rem.lines.filter(l=>!l.isTg&&l.national>0).map(l=>`<tr><td>${l.label} → National HQ</td><td class="td-c">${l.total>0?Math.round(l.national/l.total*100)+'% of '+fmt(l.total):'% Based'}</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
+      ${rem.lines.filter(l=>l.isTg&&l.national>0).map(l=>`<tr><td>Thanksgiving (TG) → National HQ</td><td class="td-c">${Math.round(remRatesData.tgNational*100)}% of ${fmt(l.total)}</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
+      ${rem.provinceRebate>0?`<tr><td>Province Rebate (on local tithes)</td><td class="td-c">${rem.localTithe>0?Math.round(rem.provinceRebate/rem.localTithe*100)+'% of '+fmt(rem.localTithe):'% Based'}</td><td class="td-r">${fmt(rem.provinceRebate)}</td></tr>`:''}
+      ${rem.totalArea>0?`<tr><td style="padding-left:16px">Thanksgiving → Area/Zonal Pastor</td><td class="td-c">${Math.round(remRatesData.tgArea*100)}% of TG</td><td class="td-r">${fmt(rem.totalArea)}</td></tr>`:''}
+      ${rem.totalPastor>0?`<tr><td style="padding-left:16px">Thanksgiving → Pastor's Family Share</td><td class="td-c">${Math.round(remRatesData.tgPastor*100)}% of TG</td><td class="td-r">${fmt(rem.totalPastor)}</td></tr>`:''}
+      ${rem.totalMinisters>0?`<tr><td style="padding-left:16px">Thanksgiving → Ministers' Share</td><td class="td-c">${Math.round(remRatesData.tgMinisters*100)}% of TG</td><td class="td-r">${fmt(rem.totalMinisters)}</td></tr>`:''}
+      ${(rem.totalSeed||0)>0?`<tr><td style="padding-left:16px">Thanksgiving → Seed (Pastor's Children)</td><td class="td-c">${Math.round((remRatesData.tgSeed||0)*100)}% of TG</td><td class="td-r">${fmt(rem.totalSeed)}</td></tr>`:''}
+      ${quotaList.filter(q=>q.amount>0).map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">Fixed Quota</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${fmt(totalRemDue)}</td></tr>
-      <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">NET LOCAL RETAINED (after remittances)</td><td class="td-r td-green">${fmt(rem.netLocal)}</td></tr>
+      ${totalRemPaid>0?`<tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Period</td><td class="td-r td-green">${fmt(totalRemPaid)}</td></tr>`:''}
+      ${totalRemPaid<totalRemDue?`<tr><td colspan="2" style="padding-left:20px;color:var(--danger)">Outstanding Balance</td><td class="td-r td-red">− ${fmt(totalRemDue-totalRemPaid)}</td></tr>`:''}
+      <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">NET LOCAL RETAINED (after all remittances)</td><td class="td-r td-green">${fmt(trueNetLocal)}</td></tr>
     </table>
 
-    <div class="section-title">Section D: Expenses <span>(${expenses.length} entries totalling ${fmt(totalExpenses)})</span></div>
+    <div class="section-title">Section D: Approved Expenses <span>(${expenses.length} entries totalling ${fmt(totalExpenses)})${pendingExpCount>0?' — '+pendingExpCount+' pending approval not included':''}</span></div>
     ${expenses.length?`<table>
-      <tr><th>S/N</th><th>Date</th><th>Category</th><th>Description</th><th>Receipt No.</th><th class="td-r">Amount (₦)</th></tr>
-      ${expenses.map((e,i)=>`<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${EXPENSE_CATS.find(c=>c.key===e.category)?.label||e.category}</td><td>${esc(e.description)}</td><td>${e.receiptNo||'—'}</td><td class="td-r">${fmt(e.amount)}</td></tr>`).join('')}
-      <tr class="total-row"><td colspan="5">TOTAL EXPENSES</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
-    </table>`:'<div class="no-data">No expenses recorded for this period.</div>'}
+      <tr><th>S/N</th><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th>Method</th><th>Status</th><th>Receipt No.</th><th class="td-r">Amount (₦)</th></tr>
+      ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const methodLabel=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';const desc=e.description&&e.description.trim()&&e.description.trim()!==e.subCategory?esc(e.description):'—';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${desc}</td><td>${methodLabel}</td><td><span class="badge badge-success">Approved</span></td><td>${e.receiptNo||'—'}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
+      <tr class="total-row"><td colspan="8">TOTAL APPROVED EXPENSES</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
+    </table>`:'<div class="no-data">No approved expenses recorded for this period.</div>'}
+    ${pendingExpCount>0?`<div class="note-box">ℹ️ ${pendingExpCount} expense(s) are pending approval and not included in the financial totals above.</div>`:''}
 
     ${expSorted.length?`<div class="section-title">Section E: Expense Summary by Category</div>
     <table>
@@ -6300,21 +6491,38 @@ async function generateMonthlyReport(){
 
     <div class="section-title">Section F: Financial Position Summary</div>
     <table>
-      <tr><td style="font-weight:600">Total Income for ${monthLabel()}</td><td class="td-r td-green">${fmt(totalIncome)}</td></tr>
+      <tr><td style="font-weight:600">Total Income for ${periodLabel}</td><td class="td-r td-green">${fmt(totalIncome)}</td></tr>
       <tr><td style="padding-left:20px;color:#555">Less: Remittances Due to RCCG</td><td class="td-r td-red">− ${fmt(totalRemDue)}</td></tr>
       <tr><td style="padding-left:20px;color:#555">Less: Local Expenses</td><td class="td-r td-red">− ${fmt(totalExpenses)}</td></tr>
       <tr class="total-row"><td>NET PARISH BALANCE</td><td class="td-r ${netPosition>=0?'td-green':'td-red'}">${fmt(netPosition)}</td></tr>
     </table>
     ${netPosition<0?'<div class="note-box">⚠️ The parish is in a deficit position this month. Expenses and remittances exceed total income. Please review with the Parish Pastor.</div>':''}
 
-    ${reportSignatureHTML()}`;
+    ${reportSignatureHTML(pastorName)}`;
 
-  openPrintableReport('Monthly Financial Statement — '+monthLabel(), body);
+  openPrintableReport('Monthly Financial Statement — '+periodLabel, body);
 }
 
 async function generateWeeklyReport(){
-  const [allIncome, settings] = await Promise.all([DB.getIncome(), DB.getSettings()]);
-  const income=filterByMonth(allIncome);
+  const [allIncome, settings, allCashTx, remRatesData, users] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers()]);
+  const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
+  const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
+  const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
+  const toDate=state.reportToDate||ymdLocal(new Date());
+  const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
+  const income=filterByDateRange(allIncome,fromDate,toDate);
+
+  // Build deposit map from cash_transactions
+  const depositMap={};
+  allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef).forEach(t=>{depositMap[t.incomeRef]=(depositMap[t.incomeRef]||0)+(t.amount||0)});
+  function depositBadge(r){
+    const cashHeld=getSundayCashWithAccountant(r,remRates);
+    if(cashHeld===0) return '<span class="badge badge-info">No Cash</span>';
+    const dep=depositMap[r.id]||0;
+    if(dep>=cashHeld) return '<span class="badge badge-success">✓ Deposited</span>';
+    if(dep>0) return `<span class="badge badge-warn">Partial</span>`;
+    return '<span class="badge badge-warn">Pending</span>';
+  }
 
   // Group by week
   const weeks={};
@@ -6328,7 +6536,7 @@ async function generateWeeklyReport(){
 
   const totalCollected=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const avgPerSunday=income.length?Math.round(totalCollected/income.length):0;
-  const deposited=income.filter(r=>r.depositConfirmed).length;
+  const deposited=income.filter(r=>{const c=getSundayCashWithAccountant(r,remRates);return c===0||(depositMap[r.id]||0)>=c}).length;
   const pending=income.length-deposited;
 
   // Highest and lowest
@@ -6336,7 +6544,7 @@ async function generateWeeklyReport(){
   const lowestRecord=income.length>1?income.reduce((a,b)=>(b.totalCollection||0)<(a.totalCollection||0)?b:a,income[0]):null;
 
   const body=`
-    ${reportHeaderHTML('Weekly Collection Summary Report', monthLabel(), settings)}
+    ${reportHeaderHTML('Weekly Collection Summary Report', periodLabel, settings)}
 
     <div class="summary-grid">
       <div class="summary-box"><div class="label">Total Collections</div><div class="value green">${fmt(totalCollected)}</div></div>
@@ -6350,7 +6558,7 @@ async function generateWeeklyReport(){
     <div class="section-title">Detailed Weekly Breakdown</div>
     ${income.length?`<table>
       <tr><th>S/N</th><th>Date</th>${INCOME_TYPES.map(t=>`<th class="td-r">${t.label}</th>`).join('')}<th class="td-r">Total</th><th>Deposit Status</th></tr>
-      ${income.map((r,i)=>`<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td>${INCOME_TYPES.map(t=>`<td class="td-r">${r[t.key]?fmt(r[t.key]):'—'}</td>`).join('')}<td class="td-r td-bold">${fmt(r.totalCollection)}</td><td>${r.depositConfirmed?'<span class="badge badge-success">✓ Deposited</span>':'<span class="badge badge-warn">Pending</span>'}</td></tr>`).join('')}
+      ${income.map((r,i)=>`<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td>${INCOME_TYPES.map(t=>`<td class="td-r">${r[t.key]?fmt(r[t.key]):'—'}</td>`).join('')}<td class="td-r td-bold">${fmt(r.totalCollection)}</td><td>${depositBadge(r)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">GRAND TOTAL</td>${INCOME_TYPES.map(t=>{const sum=income.reduce((s,r)=>s+(r[t.key]||0),0);return `<td class="td-r">${sum?fmt(sum):'—'}</td>`}).join('')}<td class="td-r">${fmt(totalCollected)}</td><td></td></tr>
     </table>`:'<div class="no-data">No Sunday collections recorded for this period.</div>'}
 
@@ -6363,28 +6571,32 @@ async function generateWeeklyReport(){
 
     ${pending>0?`<div class="note-box">⚠️ ${pending} collection record(s) still pending bank deposit. Please ensure all cash is deposited promptly and teller numbers recorded.</div>`:''}
 
-    ${reportSignatureHTML()}`;
+    ${reportSignatureHTML(pastorName)}`;
 
-  openPrintableReport('Weekly Collection Summary — '+monthLabel(), body);
+  openPrintableReport('Weekly Collection Summary — '+periodLabel, body);
 }
 
-function generateRemittanceReport(){ printRemittanceReport(); }
+function generateRemittanceReport(){ printRemittanceReport(state.reportFromDate, state.reportToDate); }
 
 async function generateQuarterlyReport(){
-  const [allIncome, allExpenses, settings] = await Promise.all([DB.getIncome(), DB.getExpenses(), DB.getSettings()]);
+  const [allIncome, allExpenses, settings, users] = await Promise.all([DB.getIncome(), DB.getExpenses(), DB.getSettings(), DB.getUsers()]);
+  const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
+  const quotaList=getQuotaList(settings);
+  const quotasTotal=quotaList.reduce((s,q)=>s+(q.amount||0),0);
   const quarterData=[];
   let grandIncome=0, grandExp=0, grandRem=0, grandNet=0;
 
   for(let i=2;i>=0;i--){
     let m=state.month-i; let y=state.year; if(m<0){m+=12;y--;}
     const recs=allIncome.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
-    const exps=allExpenses.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    const exps=allExpenses.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y&&r.status==='approved'});
     const total=recs.reduce((s,r)=>s+(r.totalCollection||0),0);
     const exp=exps.reduce((s,e)=>s+(e.amount||0),0);
     const rem=await calcRemittancesFromRecords(recs);
-    const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate;
+    const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate+quotasTotal;
+    const trueNetLocal=rem.netLocal-quotasTotal;
     const netSurplus=total-totalRemDue-exp;
-    quarterData.push({month:MONTHS[m],year:y,income:total,expenses:exp,remittances:totalRemDue,netLocal:rem.netLocal,surplus:netSurplus,sundays:recs.length});
+    quarterData.push({month:MONTHS[m],year:y,income:total,expenses:exp,remittances:totalRemDue,netLocal:trueNetLocal,surplus:netSurplus,sundays:recs.length});
     grandIncome+=total; grandExp+=exp; grandRem+=totalRemDue; grandNet+=netSurplus;
   }
 
@@ -6432,14 +6644,18 @@ async function generateQuarterlyReport(){
     ${grandNet<0?'<div class="note-box">⚠️ The parish has been running at a deficit over this quarter. It is recommended that the Admin Team reviews expenditure patterns and consider cost optimization measures.</div>':''}
     ${trendPct<-10?'<div class="note-box">⚠️ Income has declined by more than 10% over the quarter. This may require pastoral attention and congregation engagement.</div>':''}
 
-    ${reportSignatureHTML()}`;
+    ${reportSignatureHTML(pastorName)}`;
 
   openPrintableReport('Quarterly Health Report — '+periodLabel, body);
 }
 
 async function generateExpenseReport(){
-  const [allExpenses, settings] = await Promise.all([DB.getExpenses(), DB.getSettings()]);
-  const expenses=filterByMonth(allExpenses);
+  const [allExpenses, settings, users] = await Promise.all([DB.getExpenses(), DB.getSettings(), DB.getUsers()]);
+  const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
+  const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
+  const toDate=state.reportToDate||ymdLocal(new Date());
+  const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
+  const expenses=filterByDateRange(allExpenses,fromDate,toDate);
   const totalExpenses=expenses.reduce((s,e)=>s+(e.amount||0),0);
 
   // By category
@@ -6454,7 +6670,7 @@ async function generateExpenseReport(){
   const withReceipt=expenses.filter(e=>e.receiptNo).length;
 
   const body=`
-    ${reportHeaderHTML('Expense Report', monthLabel(), settings)}
+    ${reportHeaderHTML('Expense Report', periodLabel, settings)}
 
     <div class="summary-grid">
       <div class="summary-box"><div class="label">Total Expenditure</div><div class="value red">${fmt(totalExpenses)}</div></div>
@@ -6474,21 +6690,25 @@ async function generateExpenseReport(){
 
     <div class="section-title">Detailed Line Items (All Expenses)</div>
     ${expenses.length?`<table>
-      <tr><th>S/N</th><th>Date</th><th>Category</th><th>Description</th><th>Receipt No.</th><th>Recorded By</th><th class="td-r">Amount (₦)</th></tr>
-      ${expenses.map((e,i)=>`<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${EXPENSE_CATS.find(c=>c.key===e.category)?.label||e.category}</td><td>${esc(e.description)}</td><td>${e.receiptNo||'—'}</td><td>${esc(e.recordedBy||e.createdByName||'—')}</td><td class="td-r">${fmt(e.amount)}</td></tr>`).join('')}
-      <tr class="total-row"><td colspan="6">TOTAL EXPENDITURE</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
+      <tr><th>S/N</th><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th>Method</th><th>Status</th><th>Receipt No.</th><th>Recorded By</th><th class="td-r">Amount (₦)</th></tr>
+      ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const mL=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';const sb=e.status==='approved'?'<span class="badge badge-success">Approved</span>':e.status==='rejected'?'<span class="badge badge-danger">Rejected</span>':'<span class="badge badge-warn">Pending</span>';const desc=e.description&&e.description.trim()&&e.description.trim()!==e.subCategory?esc(e.description):'—';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${desc}</td><td>${mL}</td><td>${sb}</td><td>${e.receiptNo||'—'}</td><td>${esc(e.recordedBy||e.createdByName||'—')}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
+      <tr class="total-row"><td colspan="9">TOTAL EXPENDITURE</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
     </table>`:'<div class="no-data">No expenses recorded for this period.</div>'}
 
     ${withReceipt<expenses.length&&expenses.length>0?`<div class="note-box">⚠️ ${expenses.length-withReceipt} expense(s) do not have a receipt number attached. All expenditure should be supported by proper documentation.</div>`:''}
 
-    ${reportSignatureHTML()}`;
+    ${reportSignatureHTML(pastorName)}`;
 
-  openPrintableReport('Expense Report — '+monthLabel(), body);
+  openPrintableReport('Expense Report — '+periodLabel, body);
 }
 
 async function generatePettyCashReport(){
-  const [pettyHistory, pettyConfig, settings] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getSettings()]);
-  const history=pettyMonthHistory(pettyHistory);
+  const [pettyHistory, pettyConfig, settings, users] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getSettings(), DB.getUsers()]);
+  const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
+  const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
+  const toDate=state.reportToDate||ymdLocal(new Date());
+  const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
+  const history=(pettyHistory||[]).filter(h=>{const d=ymdLocal(new Date(h.createdAt||h.date||0));return d>=fromDate&&d<=toDate});
   const disbursements=history.filter(h=>h.type!=='refill'&&(h.status==='approved'||h.status==='settled'));
   const disbursed=disbursements.reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
   const settled=history.filter(h=>h.status==='settled'&&h.type!=='refill').reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
@@ -6499,14 +6719,14 @@ async function generatePettyCashReport(){
   const pendingCount=history.filter(h=>h.status==='pending'||h.status==='pending_approval').length;
 
   const body=`
-    ${reportHeaderHTML('Petty Cash Reconciliation Report', monthLabel(), settings)}
+    ${reportHeaderHTML('Petty Cash Reconciliation Report', periodLabel, settings)}
 
     <div class="summary-grid">
       <div class="summary-box"><div class="label">Approved Float</div><div class="value blue">${fmt(pettyConfig.float||0)}</div></div>
-      <div class="summary-box"><div class="label">Disbursed This Month</div><div class="value red">${fmt(disbursed)}</div></div>
+      <div class="summary-box"><div class="label">Disbursed This Period</div><div class="value red">${fmt(disbursed)}</div></div>
       <div class="summary-box"><div class="label">Receipts Accounted</div><div class="value green">${fmt(settled)}</div></div>
       <div class="summary-box"><div class="label">Unaccounted</div><div class="value ${unaccounted>0?'amber':'green'}">${fmt(unaccounted)}</div></div>
-      <div class="summary-box"><div class="label">Refills This Month</div><div class="value blue">${fmt(refilled)}</div></div>
+      <div class="summary-box"><div class="label">Refills This Period</div><div class="value blue">${fmt(refilled)}</div></div>
       <div class="summary-box"><div class="label">Total Transactions</div><div class="value">${history.length}</div></div>
     </div>
 
@@ -6521,16 +6741,19 @@ async function generatePettyCashReport(){
       <tr><td style="font-weight:600">Pending Receipt Submission</td><td class="td-r ${unaccounted>0?'td-amber':'td-green'}">${fmt(unaccounted)}</td></tr>
       ${rejected>0?`<tr><td style="font-weight:600">Rejected Requests</td><td class="td-r td-red">${rejected}</td></tr>`:''}
       ${pendingCount>0?`<tr><td style="font-weight:600">Awaiting Approval</td><td class="td-r td-amber">${pendingCount}</td></tr>`:''}
+      <tr class="total-row"><td style="font-weight:700">Current Float Balance (Live)</td><td class="td-r td-bold ${(pettyConfig.float||0)<0?'td-red':'td-green'}">${fmt(pettyConfig.float||0)}</td></tr>
+      <tr style="background:#e8f4f0"><td colspan="2" style="font-size:11px;color:#0F6E56">Reconciliation: Opening Float (${fmt((pettyConfig.float||0)+disbursed-refilled)}) + Refills (${fmt(refilled)}) − Disbursements (${fmt(disbursed)}) = Closing Balance (${fmt(pettyConfig.float||0)})</td></tr>
     </table>
 
     <div class="section-title">Transaction Details</div>
     ${history.length?`<table>
-      <tr><th>S/N</th><th>Date</th><th>Type</th><th>Purpose</th><th>Requested By</th><th>Approved By</th><th>Status</th><th class="td-r">Approved (₦)</th><th class="td-r">Actual (₦)</th><th>Receipt</th></tr>
+      <tr><th>S/N</th><th>Date</th><th>Type</th><th>Purpose</th><th>Method</th><th>Requested By</th><th>Approved By</th><th>Status</th><th class="td-r">Approved (₦)</th><th class="td-r">Actual (₦)</th><th>Receipt</th></tr>
       ${history.map((h,i)=>`<tr>
         <td>${i+1}</td>
         <td>${fmtDate(h.createdAt)}</td>
         <td>${h.type==='refill'?'<span class="badge badge-info">Refill</span>':h.type==='advance'?'<span class="badge badge-warn">Advance</span>':'<span class="badge badge-success">Direct</span>'}</td>
         <td>${h.type==='refill'?'Cash Top-Up / Refill':esc(h.purpose||'—')}</td>
+        <td style="font-size:11px">${h.type==='refill'?txMethodLabel(h.paymentMethod||h.source):'—'}</td>
         <td>${esc(h.requestedBy||'—')}</td>
         <td>${esc(h.approvedBy||h.authorizedBy||'—')}</td>
         <td>${h.status==='settled'?'<span class="badge badge-success">Settled</span>':h.status==='approved'?'<span class="badge badge-info">Approved</span>':h.status==='rejected'?'<span class="badge badge-danger">Rejected</span>':'<span class="badge badge-warn">Pending</span>'}</td>
@@ -6539,16 +6762,16 @@ async function generatePettyCashReport(){
         <td>${h.receiptNo||'—'}</td>
       </tr>`).join('')}
       <tr class="total-row">
-        <td colspan="7">TOTALS</td>
+        <td colspan="8">TOTALS</td>
         <td class="td-r">${fmt(history.filter(h=>h.type!=='refill').reduce((s,h)=>s+(h.amount||0),0))}</td>
         <td class="td-r">${fmt(settled)}</td>
         <td>${history.filter(h=>h.receiptNo).length} receipt(s)</td>
       </tr>
     </table>`:'<div class="no-data">No petty cash transactions for this period.</div>'}
 
-    ${reportSignatureHTML().replace('Reviewed &amp; Approved by:','Confirmed by (Admin Officer):')}`;
+    ${reportSignatureHTML(pastorName, 'Confirmed by (Admin Officer):')}`;
 
-  openPrintableReport('Petty Cash Report — '+monthLabel(), body);
+  openPrintableReport('Petty Cash Report — '+periodLabel, body);
 }
 
 // ── AUDIT LOG ─────────────────────────────
@@ -7233,7 +7456,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
+  viewIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
@@ -7242,7 +7465,7 @@ return {
   renderPettyCash, showPettyDetail, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
-  generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
+  generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange,
   setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert

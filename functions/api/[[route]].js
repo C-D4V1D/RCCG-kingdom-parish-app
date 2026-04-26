@@ -368,6 +368,7 @@ async function handleInit(DB) {
     `ALTER TABLE remittances ADD COLUMN approved_at TEXT DEFAULT ''`,
     `ALTER TABLE remittances ADD COLUMN bank_amount REAL DEFAULT 0`,
     `ALTER TABLE remittances ADD COLUMN cash_amount REAL DEFAULT 0`,
+    `ALTER TABLE cash_transactions ADD COLUMN photo_data TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -946,6 +947,7 @@ async function getCashTransactions(DB) {
     depositMethod: row.deposit_method,
     incomeRef:     row.income_ref,
     destination:   row.destination,
+    photoData:     row.photo_data,
     createdAt:     row.created_at,
   })));
 }
@@ -954,8 +956,8 @@ async function createCashTransaction(DB, data) {
   const id = data.id || newId('CTX-');
   await DB.prepare(`
     INSERT INTO cash_transactions
-      (id,type,date,amount,description,reference,authorized_by,recorded_by,deposit_method,income_ref,destination)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      (id,type,date,amount,description,reference,authorized_by,recorded_by,deposit_method,income_ref,destination,photo_data)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     data.type          || '',
@@ -968,6 +970,7 @@ async function createCashTransaction(DB, data) {
     data.depositMethod || '',
     data.incomeRef     || '',
     data.destination   || '',
+    data.photoData     || '',
   ).run();
   return ok({ ...data, id });
 }
