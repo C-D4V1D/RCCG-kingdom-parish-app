@@ -4528,12 +4528,17 @@ async function showBankWithdrawal(){
         <input type="text" id="wd_exp_desc" class="form-input" placeholder="Additional detail about this expense" />
       </div>
       <div class="form-group" style="margin-bottom:0">
-        <label class="form-label">Receipt / Invoice Number</label>
-        <input type="text" id="wd_exp_receipt" class="form-input" placeholder="Optional receipt or invoice number" />
+        <label class="form-label">Receipt / Invoice Proof <span style="font-size:11px;color:var(--text2);font-weight:normal">(optional)</span></label>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Provide a receipt/invoice number <strong>or</strong> upload a photo — at least one recommended.</div>
+        <input type="text" id="wd_exp_receipt" class="form-input" placeholder="Receipt or invoice number" style="margin-bottom:8px" />
+        <div style="font-size:11px;color:var(--text3);text-align:center;margin:2px 0 8px">— OR —</div>
+        <label style="font-size:12px;color:var(--text2);margin-bottom:4px;display:block">Upload Photo of Receipt / Invoice</label>
+        <input type="file" id="wd_exp_receipt_photo" accept="image/*" class="form-input" style="padding:6px" onchange="App._previewDepPhoto(this,'wd_exp_receipt_preview')" />
+        <div id="wd_exp_receipt_preview" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:6px;border:1px solid var(--border)" /></div>
       </div>
     </div>
 
-    <div class="form-group"><label class="form-label">Bank Reference / Teller No.</label>
+    <div class="form-group"><label class="form-label" id="wd_ref_label">Bank Reference / Teller No.</label>
       <input type="text" id="wd_ref" class="form-input" placeholder="Optional bank reference number" />
     </div>
     <div class="form-group">
@@ -4552,9 +4557,11 @@ function onWdDestChange(){
   const section  = document.getElementById('wd_expense_section');
   const descGrp  = document.getElementById('wd_desc_group');
   const btn      = document.getElementById('wd_submit_btn');
+  const refLabel = document.getElementById('wd_ref_label');
   if(section)  section.style.display = isDirect ? '' : 'none';
   if(descGrp)  descGrp.style.display = isDirect ? 'none' : '';
   if(btn) btn.textContent = isDirect ? 'Record Withdrawal & Log Expense' : 'Record Withdrawal';
+  if(refLabel) refLabel.textContent = isDirect ? 'Bank Reference / Teller No.' : 'Bank Reference / Cheque No.';
 }
 
 function onWdCatChange(){
@@ -4591,12 +4598,22 @@ async function submitBankWithdrawal(btn=null){
   const expVendor = document.getElementById('wd_exp_vendor')?.value?.trim();
   const expDesc   = document.getElementById('wd_exp_desc')?.value?.trim();
   const receipt   = document.getElementById('wd_exp_receipt')?.value?.trim();
+  const receiptPhotoFile = isDirect ? document.getElementById('wd_exp_receipt_photo')?.files?.[0] : null;
 
-  if(!date||!amount){ alert('Please fill in the date and amount.'); return }
-  if(!isDirect && !description){ alert('Please fill in the purpose / description.'); return }
-  if(!auth){ alert('Please select at least one authorizing signatory.'); return }
-  if(isDirect && !expCat){ alert('Please select an expense category.'); return }
-  if(isDirect && !expSubcat){ alert('Please select a sub-category.'); return }
+  if(!date||!amount){ alert('Please fill in the date and amount.'); return; }
+  if(!isDirect && !description){ alert('Please fill in the purpose / description.'); return; }
+  if(!auth){ alert('Please select at least one authorizing signatory.'); return; }
+  if(isDirect && !expCat){ alert('Please select an expense category.'); return; }
+  if(isDirect && !expSubcat){ alert('Please select a sub-category.'); return; }
+
+  let receiptPhotoData = '';
+  if(receiptPhotoFile){
+    receiptPhotoData = await new Promise(resolve=>{
+      const reader = new FileReader();
+      reader.onload = e => resolve(e.target.result);
+      reader.readAsDataURL(receiptPhotoFile);
+    });
+  }
 
   // Build description for the cash_transaction record
   const txDescription = isDirect
@@ -4635,6 +4652,7 @@ async function submitBankWithdrawal(btn=null){
         paymentMethod:'bank_transfer',
         bankAmount: amount,
         receiptNo: receipt||'',
+        receiptImage: receiptPhotoData||'',
         notes:`Direct bank withdrawal. Ref: ${reference||'—'}. Authorized by: ${auth}.`,
         recordedBy: state.user?.name,
         status:'approved'
@@ -4800,13 +4818,21 @@ async function renderBank(){
 
 function renderBankOverview(monthBankTx,bankBalance){
   if(!monthBankTx.length) return '<div class="card"><div class="empty-table">No bank transactions this month.</div></div>';
+  // Compute balance after each transaction (list is newest-first)
+  let runningBal = bankBalance;
+  const txWithBal = monthBankTx.map(t => {
+    const balAfter = runningBal;
+    runningBal -= t.txAmt;
+    return { ...t, balAfter };
+  });
   return `<div class="card">
     <div class="card-header"><span class="card-title">Bank Transactions — ${monthLabel()}</span></div>
     <div style="padding:0 4px">
-      ${monthBankTx.map(t=>{
+      ${txWithBal.map(t=>{
         const isCredit = t.txAmt > 0;
         const color = isCredit ? 'var(--success,#2e7d32)' : 'var(--danger)';
         const sign  = isCredit ? '+' : '';
+        const balColor = t.balAfter < 0 ? 'var(--danger)' : 'var(--primary)';
         return `<div onclick="var d=this.querySelector('.bk-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
           <div style="display:flex;align-items:center;gap:10px">
             <div style="flex:1;min-width:0">
@@ -4819,7 +4845,9 @@ function renderBankOverview(monthBankTx,bankBalance){
             <span style="font-size:9px;color:var(--text3);flex-shrink:0">▾</span>
           </div>
           <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
+            <div>Balance after this transaction: <strong style="color:${balColor}">${fmt(t.balAfter)}</strong></div>
             ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
+            ${t.photoData?`<div><a href="${t.photoData}" target="_blank" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
             <div>Time: ${fmtTime(t.date||t.createdAt)}</div>
           </div>
         </div>`;
