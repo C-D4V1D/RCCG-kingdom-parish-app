@@ -2308,6 +2308,18 @@ async function viewIncome(id){
     ${canAction('income_deposit')&&cashHeld>depositedTotal?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
 }
 
+function _previewDepPhoto(input, previewId){
+  const file = input.files?.[0];
+  const preview = document.getElementById(previewId);
+  if(!file||!preview) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    preview.style.display = 'block';
+    preview.querySelector('img').src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
 async function confirmDeposit(id){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
   const [allIncCD, allCashCD, remRatesData, balance] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance()]);
@@ -2352,8 +2364,14 @@ async function confirmDeposit(id){
         <option value="mobile_transfer">Mobile / Internet Banking Transfer</option>
       </select>
     </div>
-    <div class="form-group"><label class="form-label">Teller / Reference Number *</label>
-      <input type="text" id="dep_ref" class="form-input" placeholder="Bank teller number or transaction reference" />
+    <div class="form-group">
+      <label class="form-label">Proof of Deposit <span style="color:var(--danger)">*</span></label>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Provide at least one: a teller/reference number <strong>or</strong> a photo of the deposit slip.</div>
+      <input type="text" id="dep_ref" class="form-input" placeholder="Teller number / transaction reference (optional if photo uploaded)" style="margin-bottom:8px" />
+      <div style="font-size:11px;color:var(--text3);text-align:center;margin:2px 0 8px">— OR —</div>
+      <label style="font-size:12px;color:var(--text2);margin-bottom:4px;display:block">Upload Photo of Deposit Slip / POS Receipt</label>
+      <input type="file" id="dep_photo" accept="image/*" class="form-input" style="padding:6px" onchange="App._previewDepPhoto(this,'dep_photo_preview')" />
+      <div id="dep_photo_preview" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:6px;border:1px solid var(--border)" /></div>
     </div>
     <div class="form-group"><label class="form-label">Date of Deposit *</label>
       <input type="date" id="dep_date" class="form-input" value="${today}" max="${today}" />
@@ -2370,19 +2388,30 @@ async function submitCashDeposit(incomeId, btn=null){
   const method  = document.getElementById('dep_method')?.value;
   const ref     = document.getElementById('dep_ref')?.value?.trim();
   const date    = document.getElementById('dep_date')?.value;
-  if(!amount||!ref||!date){ alert('Please fill all required fields.'); return }
+  const photoFile = document.getElementById('dep_photo')?.files?.[0];
+  if(!amount||!date){ alert('Please fill all required fields.'); return; }
+  if(!ref&&!photoFile){ alert('Please provide either a teller/reference number or upload a photo of the deposit slip. At least one is required.'); return; }
   const maxDeposit = state._depositRemaining ?? Infinity;
   if(amount > maxDeposit + 0.5){
     showAlert(`Deposit amount (${fmt(amount)}) exceeds the cash available for this record (${fmt(maxDeposit)}). Please enter a correct amount.`,'danger');
     return;
   }
+  let photoData = '';
+  if(photoFile){
+    photoData = await new Promise(resolve=>{
+      const reader = new FileReader();
+      reader.onload = e => resolve(e.target.result);
+      reader.readAsDataURL(photoFile);
+    });
+  }
   const restore = setBtnLoading(btn, 'Saving…');
   try {
-    await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
-    DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
-    DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank (Ref: ${ref})`,'success');
+    await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name });
+    const refLabel = ref || (photoData ? '(photo uploaded)' : '—');
+    DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${refLabel}`,state.user?.name);
+    DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank${ref?` (Ref: ${ref})`:''}`,'success');
     closeModal();
-    showAlert(`${fmt(amount)} deposited to bank successfully! Ref: ${ref}`, 'success');
+    showAlert(`${fmt(amount)} deposited to bank successfully!${ref?` Ref: ${ref}`:''}`, 'success');
     renderIncome();
   } catch(err) {
     restore();
@@ -2517,8 +2546,14 @@ async function confirmBulkDeposit(){
         <option value="mobile_transfer">Mobile / Internet Banking Transfer</option>
       </select>
     </div>
-    <div class="form-group"><label class="form-label">Teller / Reference Number *</label>
-      <input type="text" id="bulk_dep_ref" class="form-input" placeholder="Bank teller number or transaction reference" />
+    <div class="form-group">
+      <label class="form-label">Proof of Deposit <span style="color:var(--danger)">*</span></label>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Provide at least one: a teller/reference number <strong>or</strong> a photo of the deposit slip.</div>
+      <input type="text" id="bulk_dep_ref" class="form-input" placeholder="Teller number / transaction reference (optional if photo uploaded)" style="margin-bottom:8px" />
+      <div style="font-size:11px;color:var(--text3);text-align:center;margin:2px 0 8px">— OR —</div>
+      <label style="font-size:12px;color:var(--text2);margin-bottom:4px;display:block">Upload Photo of Deposit Slip / POS Receipt</label>
+      <input type="file" id="bulk_dep_photo" accept="image/*" class="form-input" style="padding:6px" onchange="App._previewDepPhoto(this,'bulk_dep_photo_preview')" />
+      <div id="bulk_dep_photo_preview" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:6px;border:1px solid var(--border)" /></div>
     </div>
     <div class="form-group"><label class="form-label">Date of Deposit *</label>
       <input type="date" id="bulk_dep_date" class="form-input" value="${today}" max="${today}" />
@@ -2532,10 +2567,20 @@ async function confirmBulkDeposit(){
 
 async function submitBulkDeposit(btn=null){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
-  const method = document.getElementById('bulk_dep_method')?.value;
-  const ref    = document.getElementById('bulk_dep_ref')?.value?.trim();
-  const date   = document.getElementById('bulk_dep_date')?.value;
-  if(!ref||!date){ alert('Please fill all required fields (reference number and deposit date).'); return; }
+  const method    = document.getElementById('bulk_dep_method')?.value;
+  const ref       = document.getElementById('bulk_dep_ref')?.value?.trim();
+  const date      = document.getElementById('bulk_dep_date')?.value;
+  const photoFile = document.getElementById('bulk_dep_photo')?.files?.[0];
+  if(!date){ alert('Please enter the deposit date.'); return; }
+  if(!ref&&!photoFile){ alert('Please provide either a teller/reference number or upload a photo of the deposit slip. At least one is required.'); return; }
+  let photoData = '';
+  if(photoFile){
+    photoData = await new Promise(resolve=>{
+      const reader = new FileReader();
+      reader.onload = e => resolve(e.target.result);
+      reader.readAsDataURL(photoFile);
+    });
+  }
   const cashToDeposit = state._bulkDepositCashBalance || 0;
   if(cashToDeposit < 0.5){ showAlert('No cash to deposit.','warn'); return; }
   const restore = setBtnLoading(btn, 'Saving…');
@@ -2558,21 +2603,22 @@ async function submitBulkDeposit(btn=null){
     for(const item of incomeItems){
       if(amountLeft < 0.5) break;
       const depositAmt = Math.min(item.remaining, amountLeft);
-      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:item.id, amount:depositAmt, depositMethod:method, reference:ref, date, recordedBy:state.user?.name });
+      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:item.id, amount:depositAmt, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name });
       amountLeft -= depositAmt;
       recordCount++;
     }
     // Any remainder comes from bank-withdrawal funds not tied to income records
     if(amountLeft > 0.5){
-      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:'', amount:amountLeft, depositMethod:method, reference:ref, date, recordedBy:state.user?.name, description:'Cash deposit (bank withdrawal funds)' });
+      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:'', amount:amountLeft, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name, description:'Cash deposit (bank withdrawal funds)' });
       recordCount++;
     }
-    DB.addAudit('cash_deposited',`Cash deposit: ${fmt(cashToDeposit)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${ref}`,state.user?.name);
-    DB.addNotification('Cash Deposited',`${fmt(cashToDeposit)} deposited to bank (Ref: ${ref})`,'success');
+    const refLabel = ref || (photoData ? '(photo uploaded)' : '—');
+    DB.addAudit('cash_deposited',`Cash deposit: ${fmt(cashToDeposit)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${refLabel}`,state.user?.name);
+    DB.addNotification('Cash Deposited',`${fmt(cashToDeposit)} deposited to bank${ref?` (Ref: ${ref})`:''}`,'success');
     delete state._bulkDepositPending;
     delete state._bulkDepositCashBalance;
     closeModal();
-    showAlert(`${fmt(cashToDeposit)} deposited to bank. Ref: ${ref}`, 'success');
+    showAlert(`${fmt(cashToDeposit)} deposited to bank successfully!${ref?` Ref: ${ref}`:''}`, 'success');
     if(state.page==='bank') renderBank(); else renderIncome();
   } catch(err) {
     restore();
@@ -4756,18 +4802,29 @@ function renderBankOverview(monthBankTx,bankBalance){
   if(!monthBankTx.length) return '<div class="card"><div class="empty-table">No bank transactions this month.</div></div>';
   return `<div class="card">
     <div class="card-header"><span class="card-title">Bank Transactions — ${monthLabel()}</span></div>
-    <div class="table-wrap"><table>
-      <tr><th>Date</th><th>Type</th><th>Description</th><th class="td-right">Amount</th><th>Reference</th></tr>
+    <div style="padding:0 4px">
       ${monthBankTx.map(t=>{
         const isCredit = t.txAmt > 0;
-        return `<tr>
-          <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.date||t.createdAt)}</div></td>
-          <td><span class="badge ${isCredit?'badge-success':'badge-danger'}">${t.txType}</span></td>
-          <td>${t.txLabel}</td>
-          <td class="td-right ${isCredit?'td-green':'td-red'} td-bold">${isCredit?'+':''}${fmt(Math.abs(t.txAmt))}</td>
-          <td class="td-muted">${t.reference||'—'}</td>
-        </tr>`}).join('')}
-    </table></div>
+        const color = isCredit ? 'var(--success,#2e7d32)' : 'var(--danger)';
+        const sign  = isCredit ? '+' : '';
+        return `<div onclick="var d=this.querySelector('.bk-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.txLabel}</div>
+              <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(t.date||t.createdAt)} &nbsp;·&nbsp; <span class="badge ${isCredit?'badge-success':'badge-danger'}" style="font-size:10px">${t.txType}</span></div>
+            </div>
+            <div style="text-align:right;flex-shrink:0;margin-left:4px">
+              <div style="font-size:14px;font-weight:700;color:${color}">${sign}${fmt(Math.abs(t.txAmt))}</div>
+            </div>
+            <span style="font-size:9px;color:var(--text3);flex-shrink:0">▾</span>
+          </div>
+          <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
+            ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
+            <div>Time: ${fmtTime(t.date||t.createdAt)}</div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
   </div>`;
 }
 
@@ -4775,17 +4832,25 @@ function renderBankWithdrawals(withdrawals){
   if(!withdrawals.length) return '<div class="card"><div class="empty-table">No bank withdrawals this month.</div></div>';
   return `<div class="card">
     <div class="card-header"><span class="card-title">Bank Withdrawals — ${monthLabel()}</span></div>
-    <div class="table-wrap"><table>
-      <tr><th>Date</th><th>Amount</th><th>Destination</th><th>Description</th><th>Reference</th><th>Authorized By</th></tr>
-      ${withdrawals.map(t=>`<tr>
-        <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.date||t.createdAt)}</div></td>
-        <td class="td-red td-bold">${fmt(t.amount)}</td>
-        <td><span class="badge badge-info">${(t.destination||'').replace(/_/g,' ')}</span></td>
-        <td>${t.description||'—'}</td>
-        <td class="td-muted">${t.reference||'—'}</td>
-        <td class="td-muted">${t.authorizedBy||'—'}</td>
-      </tr>`).join('')}
-    </table></div>
+    <div style="padding:0 4px">
+      ${withdrawals.map(t=>`<div onclick="var d=this.querySelector('.bk-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.description||'Bank Withdrawal'}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(t.date||t.createdAt)} &nbsp;·&nbsp; <span class="badge badge-info" style="font-size:10px">${(t.destination||'').replace(/_/g,' ')}</span></div>
+          </div>
+          <div style="text-align:right;flex-shrink:0;margin-left:4px">
+            <div style="font-size:14px;font-weight:700;color:var(--danger)">−${fmt(t.amount)}</div>
+          </div>
+          <span style="font-size:9px;color:var(--text3);flex-shrink:0">▾</span>
+        </div>
+        <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
+          ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
+          ${t.authorizedBy?`<div>Authorized By: <strong>${t.authorizedBy}</strong></div>`:''}
+          <div>Time: ${fmtTime(t.date||t.createdAt)}</div>
+        </div>
+      </div>`).join('')}
+    </div>
   </div>`;
 }
 
@@ -4793,16 +4858,26 @@ function renderBankDeposits(deposits){
   if(!deposits.length) return '<div class="card"><div class="empty-table">No cash deposits to bank this month.</div></div>';
   return `<div class="card">
     <div class="card-header"><span class="card-title">Cash Deposits to Bank — ${monthLabel()}</span></div>
-    <div class="table-wrap"><table>
-      <tr><th>Date</th><th>Amount</th><th>Description</th><th>Reference</th><th>Recorded By</th></tr>
-      ${deposits.map(t=>`<tr>
-        <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.date||t.createdAt)}</div></td>
-        <td class="td-green td-bold">${fmt(t.amount)}</td>
-        <td>${t.description||'Cash deposit'}</td>
-        <td class="td-muted">${t.reference||'—'}</td>
-        <td class="td-muted">${t.recordedBy||'—'}</td>
-      </tr>`).join('')}
-    </table></div>
+    <div style="padding:0 4px">
+      ${deposits.map(t=>`<div onclick="var d=this.querySelector('.bk-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.description||'Cash Deposit'}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(t.date||t.createdAt)}${t.depositMethod?` &nbsp;·&nbsp; ${(t.depositMethod||'').replace(/_/g,' ')}`:''}${t.photoData?` &nbsp;·&nbsp; <span class="badge badge-info" style="font-size:10px">📷 Photo</span>`:''}</div>
+          </div>
+          <div style="text-align:right;flex-shrink:0;margin-left:4px">
+            <div style="font-size:14px;font-weight:700;color:var(--success,#2e7d32)">+${fmt(t.amount)}</div>
+          </div>
+          <span style="font-size:9px;color:var(--text3);flex-shrink:0">▾</span>
+        </div>
+        <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
+          ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
+          ${t.recordedBy?`<div>Recorded By: <strong>${t.recordedBy}</strong></div>`:''}
+          ${t.photoData?`<div><a href="${t.photoData}" target="_blank" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
+          <div>Time: ${fmtTime(t.date||t.createdAt)}</div>
+        </div>
+      </div>`).join('')}
+    </div>
   </div>`;
 }
 
@@ -4811,16 +4886,24 @@ function renderBankCharges(charges){
   if(!charges.length) return '<div class="card"><div class="empty-table">No bank charges recorded this month.</div></div>';
   return `<div class="card">
     <div class="card-header"><span class="card-title">Bank Charges — ${monthLabel()}</span><span style="font-size:13px;font-weight:600;color:var(--danger)">${fmt(total)}</span></div>
-    <div class="table-wrap"><table>
-      <tr><th>Date</th><th>Sub-category</th><th>Description</th><th class="td-right">Amount</th><th>Receipt</th></tr>
-      ${charges.map(e=>`<tr>
-        <td style="white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.date||e.createdAt)}</div></td>
-        <td>${e.subCategory||'—'}</td>
-        <td>${e.description||'—'}</td>
-        <td class="td-right td-red td-bold">${fmt(e.amount)}</td>
-        <td class="td-muted">${e.receiptNo||'—'}</td>
-      </tr>`).join('')}
-    </table></div>
+    <div style="padding:0 4px">
+      ${charges.map(e=>`<div onclick="var d=this.querySelector('.bk-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.subCategory||'Bank Charge'}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(e.date||e.createdAt)}${e.description?` &nbsp;·&nbsp; ${e.description}`:''}</div>
+          </div>
+          <div style="text-align:right;flex-shrink:0;margin-left:4px">
+            <div style="font-size:14px;font-weight:700;color:var(--danger)">−${fmt(e.amount)}</div>
+          </div>
+          <span style="font-size:9px;color:var(--text3);flex-shrink:0">▾</span>
+        </div>
+        <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
+          ${e.receiptNo?`<div>Receipt: <strong>${e.receiptNo}</strong></div>`:''}
+          <div>Time: ${fmtTime(e.date||e.createdAt)}</div>
+        </div>
+      </div>`).join('')}
+    </div>
   </div>`;
 }
 
@@ -6194,10 +6277,11 @@ function reportHeaderHTML(reportTitle, periodText, settings){
 }
 
 /** Shared signature section */
-function reportSignatureHTML(){
+function reportSignatureHTML(pastorName='', reviewerLabel='Reviewed &amp; Approved by:'){
+  const pastorDisplay = pastorName ? esc(pastorName) : '________________';
   return `<div class="sig-section">
     <div class="sig-box">Prepared by:<br><br><br><div class="sig-name">${esc(state.user?.name||'________________')}</div>Church Accountant</div>
-    <div class="sig-box">Reviewed &amp; Approved by:<br><br><br><div class="sig-name">________________</div>Parish Pastor</div>
+    <div class="sig-box">${reviewerLabel}<br><br><br><div class="sig-name">${pastorDisplay}</div>Parish Pastor</div>
     <div class="sig-box">Date:<br><br><br><div class="sig-name">${fmtDate(new Date().toISOString())}</div></div>
   </div>
   <div class="footer-note">This is a computer-generated report from the RCCG Kingdom Parish Finance Portal. For enquiries, contact the Church Accountant or Admin Officer.</div>`;
@@ -6274,9 +6358,10 @@ function onReportDatesChange(){
 }
 
 async function generateMonthlyReport(){
-  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData] = await Promise.all([
-    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates()
+  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData, users] = await Promise.all([
+    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers()
   ]);
+  const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
   const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
   const depositMapM={};
   allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef).forEach(t=>{depositMapM[t.incomeRef]=(depositMapM[t.incomeRef]||0)+(t.amount||0)});
@@ -6385,13 +6470,14 @@ async function generateMonthlyReport(){
     </table>
     ${netPosition<0?'<div class="note-box">⚠️ The parish is in a deficit position this month. Expenses and remittances exceed total income. Please review with the Parish Pastor.</div>':''}
 
-    ${reportSignatureHTML()}`;
+    ${reportSignatureHTML(pastorName)}`;
 
   openPrintableReport('Monthly Financial Statement — '+periodLabel, body);
 }
 
 async function generateWeeklyReport(){
-  const [allIncome, settings, allCashTx, remRatesData] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getCashTransactions(), getRemRates()]);
+  const [allIncome, settings, allCashTx, remRatesData, users] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers()]);
+  const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
   const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
   const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
   const toDate=state.reportToDate||ymdLocal(new Date());
@@ -6457,15 +6543,16 @@ async function generateWeeklyReport(){
 
     ${pending>0?`<div class="note-box">⚠️ ${pending} collection record(s) still pending bank deposit. Please ensure all cash is deposited promptly and teller numbers recorded.</div>`:''}
 
-    ${reportSignatureHTML()}`;
+    ${reportSignatureHTML(pastorName)}`;
 
   openPrintableReport('Weekly Collection Summary — '+periodLabel, body);
 }
 
-function generateRemittanceReport(){ printRemittanceReport(); }
+function generateRemittanceReport(){ printRemittanceReport(state.reportFromDate, state.reportToDate); }
 
 async function generateQuarterlyReport(){
-  const [allIncome, allExpenses, settings] = await Promise.all([DB.getIncome(), DB.getExpenses(), DB.getSettings()]);
+  const [allIncome, allExpenses, settings, users] = await Promise.all([DB.getIncome(), DB.getExpenses(), DB.getSettings(), DB.getUsers()]);
+  const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
   const quotaList=getQuotaList(settings);
   const quotasTotal=quotaList.reduce((s,q)=>s+(q.amount||0),0);
   const quarterData=[];
@@ -6529,13 +6616,14 @@ async function generateQuarterlyReport(){
     ${grandNet<0?'<div class="note-box">⚠️ The parish has been running at a deficit over this quarter. It is recommended that the Admin Team reviews expenditure patterns and consider cost optimization measures.</div>':''}
     ${trendPct<-10?'<div class="note-box">⚠️ Income has declined by more than 10% over the quarter. This may require pastoral attention and congregation engagement.</div>':''}
 
-    ${reportSignatureHTML()}`;
+    ${reportSignatureHTML(pastorName)}`;
 
   openPrintableReport('Quarterly Health Report — '+periodLabel, body);
 }
 
 async function generateExpenseReport(){
-  const [allExpenses, settings] = await Promise.all([DB.getExpenses(), DB.getSettings()]);
+  const [allExpenses, settings, users] = await Promise.all([DB.getExpenses(), DB.getSettings(), DB.getUsers()]);
+  const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
   const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
   const toDate=state.reportToDate||ymdLocal(new Date());
   const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
@@ -6581,13 +6669,14 @@ async function generateExpenseReport(){
 
     ${withReceipt<expenses.length&&expenses.length>0?`<div class="note-box">⚠️ ${expenses.length-withReceipt} expense(s) do not have a receipt number attached. All expenditure should be supported by proper documentation.</div>`:''}
 
-    ${reportSignatureHTML()}`;
+    ${reportSignatureHTML(pastorName)}`;
 
   openPrintableReport('Expense Report — '+periodLabel, body);
 }
 
 async function generatePettyCashReport(){
-  const [pettyHistory, pettyConfig, settings] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getSettings()]);
+  const [pettyHistory, pettyConfig, settings, users] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getSettings(), DB.getUsers()]);
+  const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
   const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
   const toDate=state.reportToDate||ymdLocal(new Date());
   const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
@@ -6652,7 +6741,7 @@ async function generatePettyCashReport(){
       </tr>
     </table>`:'<div class="no-data">No petty cash transactions for this period.</div>'}
 
-    ${reportSignatureHTML().replace('Reviewed &amp; Approved by:','Confirmed by (Admin Officer):')}`;
+    ${reportSignatureHTML(pastorName, 'Confirmed by (Admin Officer):')}`;
 
   openPrintableReport('Petty Cash Report — '+periodLabel, body);
 }
@@ -7339,7 +7428,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
+  viewIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
