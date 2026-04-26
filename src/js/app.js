@@ -6203,9 +6203,58 @@ function reportSignatureHTML(){
   <div class="footer-note">This is a computer-generated report from the RCCG Kingdom Parish Finance Portal. For enquiries, contact the Church Accountant or Admin Officer.</div>`;
 }
 
-function renderReports(){
+async function renderReports(){
+  const settings = await DB.getSettings();
+  // Initialise report date range using same cut-off logic as remittances page
+  const cutoffConfig = getRemCutoffDates(settings, state.year);
+  const cutoffYear = cutoffConfig ? Number(cutoffConfig.year) : null;
+  const cutoffDay = (cutoffConfig && cutoffYear===state.year && Number.isInteger(cutoffConfig.dates[state.month]))
+    ? cutoffConfig.dates[state.month] : null;
+  if(cutoffDay){
+    state.reportToDate = ymdLocal(new Date(state.year, state.month, cutoffDay));
+    const prevMonth = state.month===0 ? 11 : state.month-1;
+    const prevYear  = state.month===0 ? state.year-1 : state.year;
+    const prevCC = getRemCutoffDates(settings, prevYear);
+    const prevCutoffDay = (prevCC && Number.isInteger(prevCC.dates[prevMonth]) && Number(prevCC.year)===prevYear)
+      ? prevCC.dates[prevMonth] : null;
+    if(prevCutoffDay){
+      const d=new Date(prevYear,prevMonth,prevCutoffDay); d.setDate(d.getDate()+1);
+      state.reportFromDate=ymdLocal(d);
+    } else {
+      state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
+    }
+  } else {
+    if(!state.reportFromDate) state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
+    if(!state.reportToDate)   state.reportToDate=ymdLocal(new Date());
+  }
+  const fromDate=state.reportFromDate;
+  const toDate=state.reportToDate;
   document.getElementById('pageContent').innerHTML=`
-    <div class="page-header"><div class="page-title">📊 Reports Centre</div><div class="page-sub">Generate comprehensive financial reports for ${monthLabel()}</div></div>
+    <div class="page-header"><div class="page-title">📊 Reports Centre</div><div class="page-sub">Generate comprehensive financial reports</div></div>
+    <div class="card" style="margin-bottom:12px;padding:14px 16px">
+      <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px">📅 Report Period</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:6px">
+          <label style="font-size:12px;color:var(--text2);white-space:nowrap">From</label>
+          <input type="date" id="reportFromDate" class="form-input" value="${fromDate}"
+            style="width:auto;padding:6px 10px;font-size:13px${cutoffDay?';background:var(--surface);cursor:default;color:var(--text2)':''}"
+            ${cutoffDay?'readonly':'onchange="App.onReportDatesChange()"'} />
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <label style="font-size:12px;color:var(--text2);white-space:nowrap">To</label>
+          <input type="date" id="reportToDate" class="form-input" value="${toDate}"
+            style="width:auto;padding:6px 10px;font-size:13px${cutoffDay?';background:var(--surface);cursor:default;color:var(--text2)':''}"
+            ${cutoffDay?'readonly':'onchange="App.onReportDatesChange()"'} />
+        </div>
+        ${cutoffDay?'<span class="badge badge-info" style="font-size:11px">🔒 Locked to cut-off date</span>':''}
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px">
+        ${cutoffDay
+          ? '🔒 Dates are automatically set from the HQ cut-off date for this month.'
+          : 'ℹ️ All reports below will cover this period. Adjust the dates before generating any report.'}
+        Period: <strong>${fmtDate(fromDate)}</strong> – <strong>${fmtDate(toDate)}</strong>
+      </div>
+    </div>
     <div class="card" style="margin-bottom:1rem;padding:1rem 1.25rem">
       <p style="font-size:12px;color:var(--text2);margin-bottom:0"><strong>Tip:</strong> Each report opens in a new window for clean, professional printing. Only the report content will be printed — not the web app interface.</p>
     </div>
@@ -6218,6 +6267,12 @@ function renderReports(){
       <button class="qa-btn" onclick="App.generatePettyCashReport()"><div class="qa-icon" style="background:#EEEDFE">💳</div><div class="qa-label">Petty Cash Report</div><div class="qa-sub">Imprest reconciliation</div></button>
     </div>
     <div id="reportOutput"></div>`;
+}
+
+function onReportDatesChange(){
+  state.reportFromDate=document.getElementById('reportFromDate')?.value||null;
+  state.reportToDate=document.getElementById('reportToDate')?.value||null;
+  renderReports();
 }
 
 async function generateMonthlyReport(){
@@ -6235,11 +6290,14 @@ async function generateMonthlyReport(){
     if(dep>0) return '<span class="badge badge-warn">Partial</span>';
     return '<span class="badge badge-warn">Pending</span>';
   }
-  const income=filterByMonth(allIncome);
-  const allMonthExpenses=filterByMonth(allExpenses);
+  const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
+  const toDate=state.reportToDate||ymdLocal(new Date());
+  const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
+  const income=filterByDateRange(allIncome,fromDate,toDate);
+  const allMonthExpenses=filterByDateRange(allExpenses,fromDate,toDate);
   const expenses=allMonthExpenses.filter(e=>e.status==='approved');
   const pendingExpCount=allMonthExpenses.filter(e=>e.status==='pending_approval'||e.status==='pending').length;
-  const paidRems=filterByMonth(allRemittances);
+  const paidRems=filterByDateRange(allRemittances,fromDate,toDate);
   const rem=await calcRemittancesFromRecords(income);
   const quotaList=getQuotaList(settings);
   const totalFixedQuotas=quotaList.reduce((s,q)=>s+(q.amount||0),0);
@@ -6262,7 +6320,7 @@ async function generateMonthlyReport(){
   const expSorted=Object.values(expByCat).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);
 
   const body=`
-    ${reportHeaderHTML('Monthly Financial Statement', monthLabel(), settings)}
+    ${reportHeaderHTML('Monthly Financial Statement', periodLabel, settings)}
 
     <div class="summary-grid">
       <div class="summary-box"><div class="label">Total Income</div><div class="value green">${fmt(totalIncome)}</div></div>
@@ -6289,9 +6347,9 @@ async function generateMonthlyReport(){
 
     <div class="section-title">Section C: Remittances Due to RCCG Authorities</div>
     <table>
-      <tr><th>Description</th><th class="td-c">Basis</th><th class="td-r">Amount (₦)</th></tr>
-      ${rem.lines.filter(l=>l.national>0).map(l=>`<tr><td>${l.label} → National HQ</td><td class="td-c">% Based</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
-      ${rem.provinceRebate>0?`<tr><td>Province Rebate</td><td class="td-c">% Based</td><td class="td-r">${fmt(rem.provinceRebate)}</td></tr>`:''}
+      <tr><th>Description</th><th class="td-c">Rate / Basis</th><th class="td-r">Amount (₦)</th></tr>
+      ${rem.lines.filter(l=>l.national>0).map(l=>`<tr><td>${l.label} → National HQ</td><td class="td-c">${l.total>0?Math.round(l.national/l.total*100)+'% of '+fmt(l.total):'% Based'}</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
+      ${rem.provinceRebate>0?`<tr><td>Province Rebate (on local tithes)</td><td class="td-c">${rem.localTithe>0?Math.round(rem.provinceRebate/rem.localTithe*100)+'% of '+fmt(rem.localTithe):'% Based'}</td><td class="td-r">${fmt(rem.provinceRebate)}</td></tr>`:''}
       ${quotaList.filter(q=>q.amount>0).map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">Fixed Quota</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${fmt(totalRemDue)}</td></tr>
       ${totalRemPaid>0?`<tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Month</td><td class="td-r td-green">${fmt(totalRemPaid)}</td></tr>`:''}
@@ -6302,7 +6360,7 @@ async function generateMonthlyReport(){
     <div class="section-title">Section D: Approved Expenses <span>(${expenses.length} entries totalling ${fmt(totalExpenses)})${pendingExpCount>0?' — '+pendingExpCount+' pending approval not included':''}</span></div>
     ${expenses.length?`<table>
       <tr><th>S/N</th><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th>Method</th><th>Status</th><th>Receipt No.</th><th class="td-r">Amount (₦)</th></tr>
-      ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const methodLabel=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${esc(e.description)}</td><td>${methodLabel}</td><td><span class="badge badge-success">Approved</span></td><td>${e.receiptNo||'—'}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
+      ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const methodLabel=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';const desc=e.description&&e.description.trim()&&e.description.trim()!==e.subCategory?esc(e.description):'—';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${desc}</td><td>${methodLabel}</td><td><span class="badge badge-success">Approved</span></td><td>${e.receiptNo||'—'}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
       <tr class="total-row"><td colspan="8">TOTAL APPROVED EXPENSES</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
     </table>`:'<div class="no-data">No approved expenses recorded for this period.</div>'}
     ${pendingExpCount>0?`<div class="note-box">ℹ️ ${pendingExpCount} expense(s) are pending approval and not included in the financial totals above.</div>`:''}
@@ -6316,7 +6374,7 @@ async function generateMonthlyReport(){
 
     <div class="section-title">Section F: Financial Position Summary</div>
     <table>
-      <tr><td style="font-weight:600">Total Income for ${monthLabel()}</td><td class="td-r td-green">${fmt(totalIncome)}</td></tr>
+      <tr><td style="font-weight:600">Total Income for ${periodLabel}</td><td class="td-r td-green">${fmt(totalIncome)}</td></tr>
       <tr><td style="padding-left:20px;color:#555">Less: Remittances Due to RCCG</td><td class="td-r td-red">− ${fmt(totalRemDue)}</td></tr>
       <tr><td style="padding-left:20px;color:#555">Less: Local Expenses</td><td class="td-r td-red">− ${fmt(totalExpenses)}</td></tr>
       <tr class="total-row"><td>NET PARISH BALANCE</td><td class="td-r ${netPosition>=0?'td-green':'td-red'}">${fmt(netPosition)}</td></tr>
@@ -6325,13 +6383,16 @@ async function generateMonthlyReport(){
 
     ${reportSignatureHTML()}`;
 
-  openPrintableReport('Monthly Financial Statement — '+monthLabel(), body);
+  openPrintableReport('Monthly Financial Statement — '+periodLabel, body);
 }
 
 async function generateWeeklyReport(){
   const [allIncome, settings, allCashTx, remRatesData] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getCashTransactions(), getRemRates()]);
   const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
-  const income=filterByMonth(allIncome);
+  const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
+  const toDate=state.reportToDate||ymdLocal(new Date());
+  const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
+  const income=filterByDateRange(allIncome,fromDate,toDate);
 
   // Build deposit map from cash_transactions
   const depositMap={};
@@ -6365,7 +6426,7 @@ async function generateWeeklyReport(){
   const lowestRecord=income.length>1?income.reduce((a,b)=>(b.totalCollection||0)<(a.totalCollection||0)?b:a,income[0]):null;
 
   const body=`
-    ${reportHeaderHTML('Weekly Collection Summary Report', monthLabel(), settings)}
+    ${reportHeaderHTML('Weekly Collection Summary Report', periodLabel, settings)}
 
     <div class="summary-grid">
       <div class="summary-box"><div class="label">Total Collections</div><div class="value green">${fmt(totalCollected)}</div></div>
@@ -6394,7 +6455,7 @@ async function generateWeeklyReport(){
 
     ${reportSignatureHTML()}`;
 
-  openPrintableReport('Weekly Collection Summary — '+monthLabel(), body);
+  openPrintableReport('Weekly Collection Summary — '+periodLabel, body);
 }
 
 function generateRemittanceReport(){ printRemittanceReport(); }
@@ -6468,7 +6529,10 @@ async function generateQuarterlyReport(){
 
 async function generateExpenseReport(){
   const [allExpenses, settings] = await Promise.all([DB.getExpenses(), DB.getSettings()]);
-  const expenses=filterByMonth(allExpenses);
+  const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
+  const toDate=state.reportToDate||ymdLocal(new Date());
+  const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
+  const expenses=filterByDateRange(allExpenses,fromDate,toDate);
   const totalExpenses=expenses.reduce((s,e)=>s+(e.amount||0),0);
 
   // By category
@@ -6483,7 +6547,7 @@ async function generateExpenseReport(){
   const withReceipt=expenses.filter(e=>e.receiptNo).length;
 
   const body=`
-    ${reportHeaderHTML('Expense Report', monthLabel(), settings)}
+    ${reportHeaderHTML('Expense Report', periodLabel, settings)}
 
     <div class="summary-grid">
       <div class="summary-box"><div class="label">Total Expenditure</div><div class="value red">${fmt(totalExpenses)}</div></div>
@@ -6504,7 +6568,7 @@ async function generateExpenseReport(){
     <div class="section-title">Detailed Line Items (All Expenses)</div>
     ${expenses.length?`<table>
       <tr><th>S/N</th><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th>Method</th><th>Status</th><th>Receipt No.</th><th>Recorded By</th><th class="td-r">Amount (₦)</th></tr>
-      ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const mL=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';const sb=e.status==='approved'?'<span class="badge badge-success">Approved</span>':e.status==='rejected'?'<span class="badge badge-danger">Rejected</span>':'<span class="badge badge-warn">Pending</span>';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${esc(e.description)}</td><td>${mL}</td><td>${sb}</td><td>${e.receiptNo||'—'}</td><td>${esc(e.recordedBy||e.createdByName||'—')}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
+      ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const mL=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';const sb=e.status==='approved'?'<span class="badge badge-success">Approved</span>':e.status==='rejected'?'<span class="badge badge-danger">Rejected</span>':'<span class="badge badge-warn">Pending</span>';const desc=e.description&&e.description.trim()&&e.description.trim()!==e.subCategory?esc(e.description):'—';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${desc}</td><td>${mL}</td><td>${sb}</td><td>${e.receiptNo||'—'}</td><td>${esc(e.recordedBy||e.createdByName||'—')}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
       <tr class="total-row"><td colspan="9">TOTAL EXPENDITURE</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
     </table>`:'<div class="no-data">No expenses recorded for this period.</div>'}
 
@@ -6512,12 +6576,15 @@ async function generateExpenseReport(){
 
     ${reportSignatureHTML()}`;
 
-  openPrintableReport('Expense Report — '+monthLabel(), body);
+  openPrintableReport('Expense Report — '+periodLabel, body);
 }
 
 async function generatePettyCashReport(){
   const [pettyHistory, pettyConfig, settings] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getSettings()]);
-  const history=pettyMonthHistory(pettyHistory);
+  const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
+  const toDate=state.reportToDate||ymdLocal(new Date());
+  const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
+  const history=(pettyHistory||[]).filter(h=>{const d=ymdLocal(new Date(h.createdAt||h.date||0));return d>=fromDate&&d<=toDate});
   const disbursements=history.filter(h=>h.type!=='refill'&&(h.status==='approved'||h.status==='settled'));
   const disbursed=disbursements.reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
   const settled=history.filter(h=>h.status==='settled'&&h.type!=='refill').reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
@@ -6528,14 +6595,14 @@ async function generatePettyCashReport(){
   const pendingCount=history.filter(h=>h.status==='pending'||h.status==='pending_approval').length;
 
   const body=`
-    ${reportHeaderHTML('Petty Cash Reconciliation Report', monthLabel(), settings)}
+    ${reportHeaderHTML('Petty Cash Reconciliation Report', periodLabel, settings)}
 
     <div class="summary-grid">
       <div class="summary-box"><div class="label">Approved Float</div><div class="value blue">${fmt(pettyConfig.float||0)}</div></div>
-      <div class="summary-box"><div class="label">Disbursed This Month</div><div class="value red">${fmt(disbursed)}</div></div>
+      <div class="summary-box"><div class="label">Disbursed This Period</div><div class="value red">${fmt(disbursed)}</div></div>
       <div class="summary-box"><div class="label">Receipts Accounted</div><div class="value green">${fmt(settled)}</div></div>
       <div class="summary-box"><div class="label">Unaccounted</div><div class="value ${unaccounted>0?'amber':'green'}">${fmt(unaccounted)}</div></div>
-      <div class="summary-box"><div class="label">Refills This Month</div><div class="value blue">${fmt(refilled)}</div></div>
+      <div class="summary-box"><div class="label">Refills This Period</div><div class="value blue">${fmt(refilled)}</div></div>
       <div class="summary-box"><div class="label">Total Transactions</div><div class="value">${history.length}</div></div>
     </div>
 
@@ -6580,7 +6647,7 @@ async function generatePettyCashReport(){
 
     ${reportSignatureHTML().replace('Reviewed &amp; Approved by:','Confirmed by (Admin Officer):')}`;
 
-  openPrintableReport('Petty Cash Report — '+monthLabel(), body);
+  openPrintableReport('Petty Cash Report — '+periodLabel, body);
 }
 
 // ── AUDIT LOG ─────────────────────────────
@@ -7274,7 +7341,7 @@ return {
   renderPettyCash, showPettyDetail, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
-  generateQuarterlyReport, generateExpenseReport, generatePettyCashReport,
+  generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange,
   setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert
