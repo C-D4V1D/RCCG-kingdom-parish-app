@@ -268,7 +268,8 @@ function parseDisplayDate(value){
     const ymdMatch = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
     if(ymdMatch) return new Date(Number(ymdMatch[1]), Number(ymdMatch[2]) - 1, Number(ymdMatch[3]));
     const sqliteMatch = v.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})(?::(\d{2}))?$/);
-    if(sqliteMatch) return new Date(Number(sqliteMatch[1]), Number(sqliteMatch[2]) - 1, Number(sqliteMatch[3]), Number(sqliteMatch[4]), Number(sqliteMatch[5]), Number(sqliteMatch[6]||0));
+    // SQLite datetime('now') is UTC. Parse as UTC, then format in Africa/Lagos for display.
+    if(sqliteMatch) return new Date(Date.UTC(Number(sqliteMatch[1]), Number(sqliteMatch[2]) - 1, Number(sqliteMatch[3]), Number(sqliteMatch[4]), Number(sqliteMatch[5]), Number(sqliteMatch[6]||0)));
     const isoNoTz = v.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2}(?:\.\d{1,3})?)?$/);
     if(isoNoTz) return new Date(`${isoNoTz[1]}T${isoNoTz[2]}`);
   }
@@ -2053,7 +2054,7 @@ async function renderIncomeList(records, cashTxOverride, remRatesOverride){
               ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} still pending</span>`
               : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
         return `<tr>
-          <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.date)}</div>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
+          <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
           <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
           <td class="td-muted">${cashHeld>0?fmt(cashHeld):'—'}</td>
           <td class="td-muted">${btAmt>0?fmt(btAmt):'—'}</td>
@@ -2078,7 +2079,7 @@ async function renderIncomeList(records, cashTxOverride, remRatesOverride){
             ? `<span class="badge badge-success">✓ Deposited</span>`
             : `<span class="badge badge-warn">⏳ Pending</span>`;
         return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="Sunday Collection ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
-          <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div><div class="td-muted" style="font-size:11px">${fmtTime(r.date)}</div></td>
+          <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div></td>
           <td style="max-width:0;width:55%">
             <div style="font-size:13px;font-weight:500">📅 Sunday Collection</div>
             <div style="margin-top:3px">${mobileStatus}</div>
@@ -2108,7 +2109,7 @@ async function renderOtherIncomeList(records){
               ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} pending</span>`
               : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
         return `<tr>
-          <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.date)}</div></td>
+          <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div></td>
           <td><span class="badge badge-gray">${src.label}</span></td>
           <td class="td-muted">${r.donorName||r.notes||'—'}</td>
           <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
@@ -2131,7 +2132,7 @@ async function renderOtherIncomeList(records){
             ? `<span class="badge badge-success">✓ Deposited</span>`
             : `<span class="badge badge-warn">⏳ Pending</span>`;
         return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(src.label)} ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
-          <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div><div class="td-muted" style="font-size:11px">${fmtTime(r.date)}</div></td>
+          <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div></td>
           <td style="max-width:0;width:55%">
             <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="badge badge-gray">${esc(src.label)}</span></div>
             <div class="td-muted" style="font-size:11px;margin-top:3px">${r.donorName||r.notes?esc(r.donorName||r.notes||''):''}</div>
@@ -2231,7 +2232,7 @@ async function renderAllIncomeList(records, cashTxOverride, remRatesOverride){
               : `<span class="badge badge-warn">⏳ Pending</span>`;
         const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
         return `<tr>
-          <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.date)}</div>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
+          <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
           <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
           <td class="td-muted">${cashHeld>0?fmt(cashHeld):'—'}</td>
           <td class="td-muted">${btAmt>0?fmt(btAmt):'—'}</td>
@@ -2261,7 +2262,7 @@ async function renderAllIncomeList(records, cashTxOverride, remRatesOverride){
         return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(srcLabel)} ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
           <td>
             <div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div>
-            <div class="td-muted" style="font-size:11px">${fmtTime(r.date)}</div>
+            <div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div>
             ${r.notes?`<div class="td-muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:80px">${esc(r.notes)}</div>`:''}
           </td>
           <td style="max-width:0;width:55%">
@@ -4133,7 +4134,7 @@ async function renderExpenses(){
             ? '<span class="badge badge-success">Approved</span>'
             : '<span class="badge badge-warn">Pending Approval</span>';
           return `<tr>
-            <td style="white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.date||e.createdAt)}</div></td>
+            <td style="white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.createdAt||e.date)}</div></td>
             <td><span class="badge badge-gray">${c.icon} ${c.label}</span></td>
             <td>
               <div style="font-size:13px;font-weight:500">${e.subCategory||e.description||'—'}</div>
@@ -4164,7 +4165,7 @@ async function renderExpenses(){
             ? '<span class="badge badge-success">Approved</span>'
             : '<span class="badge badge-warn">Pending</span>';
           return `<tr class="tx-mobile-row" onclick="App.showExpenseDetail('${e.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.showExpenseDetail('${e.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(e.subCategory||e.description||'Expense')} — ${fmt(e.amount)}">
-            <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(e.date||e.createdAt)}</div><div class="td-muted" style="font-size:11px">${fmtTime(e.date||e.createdAt)}</div></td>
+            <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(e.date||e.createdAt)}</div><div class="td-muted" style="font-size:11px">${fmtTime(e.createdAt||e.date)}</div></td>
             <td style="max-width:0;width:55%">
               <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="badge badge-gray" style="font-size:11px">${c.icon} ${c.label}</span></div>
               <div class="td-muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">${esc(e.subCategory||e.description||'—')}</div>
@@ -4994,7 +4995,7 @@ function renderBankOverview(monthBankTx,bankBalance){
             <div>Balance after this transaction: <strong style="color:${balColor}">${fmt(t.balAfter)}</strong></div>
             ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
             ${t.photoData?`<div><a href="${t.photoData}" target="_blank" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
-            <div>Time: ${fmtTime(t.date||t.createdAt)}</div>
+            <div>Time: ${fmtTime(t.createdAt||t.date)}</div>
           </div>
         </div>`;
       }).join('')}
@@ -5021,7 +5022,7 @@ function renderBankWithdrawals(withdrawals){
         <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
           ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
           ${t.authorizedBy?`<div>Authorized By: <strong>${t.authorizedBy}</strong></div>`:''}
-          <div>Time: ${fmtTime(t.date||t.createdAt)}</div>
+          <div>Time: ${fmtTime(t.createdAt||t.date)}</div>
         </div>
       </div>`).join('')}
     </div>
@@ -5048,7 +5049,7 @@ function renderBankDeposits(deposits){
           ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
           ${t.recordedBy?`<div>Recorded By: <strong>${t.recordedBy}</strong></div>`:''}
           ${t.photoData?`<div><a href="${t.photoData}" target="_blank" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
-          <div>Time: ${fmtTime(t.date||t.createdAt)}</div>
+          <div>Time: ${fmtTime(t.createdAt||t.date)}</div>
         </div>
       </div>`).join('')}
     </div>
@@ -5074,7 +5075,7 @@ function renderBankCharges(charges){
         </div>
         <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
           ${e.receiptNo?`<div>Receipt: <strong>${e.receiptNo}</strong></div>`:''}
-          <div>Time: ${fmtTime(e.date||e.createdAt)}</div>
+          <div>Time: ${fmtTime(e.createdAt||e.date)}</div>
         </div>
       </div>`).join('')}
     </div>
@@ -5118,7 +5119,7 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
         ${bankTxAll.map(t=>{
           const isCredit = t.txAmt > 0;
           return `<tr>
-            <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.date||t.createdAt)}</div></td>
+            <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.createdAt||t.date)}</div></td>
             <td><span class="badge ${isCredit?'badge-success':'badge-danger'}">${t.txType}</span></td>
             <td>${t.txLabel}</td>
             <td class="td-right ${!isCredit?'td-red':''}">${!isCredit?fmt(Math.abs(t.txAmt)):'—'}</td>
@@ -5694,7 +5695,7 @@ async function showTopUpRequest(){
     const amt = e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0);
     const detailBits = [e.subCategory, e.description&&e.description!==e.subCategory?e.description:'', e.notes?`Notes: ${e.notes}`:''].filter(Boolean);
     return `<tr>
-      <td style="font-size:12px;white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.date||e.createdAt)}</div></td>
+      <td style="font-size:12px;white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.createdAt||e.date)}</div></td>
       <td><span class="badge badge-gray" style="font-size:11px">${c.icon} ${c.label}</span></td>
       <td style="font-size:12px">
         ${detailBits.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}
@@ -5935,7 +5936,7 @@ async function approvePetty(id, btn=null){
           ? `<span style="color:var(--amber)">No receipt</span>`
           : '<span style="color:var(--text3)">—</span>';
       return `<tr>
-        <td style="font-size:12px;padding:5px 8px;white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.date||e.createdAt)}</div></td>
+        <td style="font-size:12px;padding:5px 8px;white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.createdAt||e.date)}</div></td>
         <td style="padding:5px 8px;font-size:12px">${c.icon} ${c.label}</td>
         <td style="padding:5px 8px;font-size:12px">${detailBits.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}</td>
         <td style="padding:5px 8px;font-size:11px">${receiptCell}</td>
