@@ -500,6 +500,7 @@ async function login(btn=null){
     const user = await DB.login({ role, pin, userId: uid || undefined });
     errEl.style.display='none';
     state.user = user;
+    try { localStorage.setItem('rccgSession', JSON.stringify(user)); } catch(e) {}
     DB.addAudit('login','User logged in',user.name);
     document.getElementById('loginScreen').style.display='none';
     document.getElementById('appShell').style.display='flex';
@@ -523,6 +524,7 @@ async function login(btn=null){
 }
 function logout(){
   DB.addAudit('logout','User logged out', state.user?.name);
+  try { localStorage.removeItem('rccgSession'); } catch(e) {}
   state.user=null; state.page='dashboard';
   history.replaceState(null,'','/');
   document.getElementById('appShell').style.display='none';
@@ -7450,7 +7452,32 @@ function submitKPSCAlert(){
 }
 
 // ──────────────────────────────────────────
-// 8. PUBLIC API
+// 8. SESSION RESTORE
+// ──────────────────────────────────────────
+(function restoreSession(){
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('rccgSession') || 'null'); } catch(e) {}
+  if (!saved || !saved.id || !saved.role || !saved.name) return;
+  state.user = saved;
+  function doRestore(){
+    const loginEl = document.getElementById('loginScreen');
+    const appEl = document.getElementById('appShell');
+    if (!loginEl || !appEl) return;
+    loginEl.style.display = 'none';
+    appEl.style.display = 'flex';
+    DB.getSettings()
+      .then(s => { state.rolePermissions = s.rolePermissions || null; initApp(); })
+      .catch(() => initApp());
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', doRestore);
+  } else {
+    doRestore();
+  }
+})();
+
+// ──────────────────────────────────────────
+// 9. PUBLIC API
 // ──────────────────────────────────────────
 return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
