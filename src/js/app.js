@@ -1853,24 +1853,29 @@ async function renderDashboard(){
             <span><span style="display:inline-block;width:10px;height:10px;background:var(--danger);border-radius:2px;margin-right:4px"></span>Expenses</span>
           </div>
           <div style="display:flex;align-items:flex-end;gap:12px;height:130px;padding:8px 0">
-            ${trendData.map(t=>`
+            ${trendData.map(t=>{
+              const barH=Math.max(4,Math.round((t.income/maxTrend)*72)+4);
+              const expH=Math.max(4,Math.round((t.expenses/maxTrend)*72)+4);
+              const retainedH=t.netLocal>0&&t.income>0?Math.round(Math.min(1,Math.max(0,t.netLocal/t.income))*barH):0;
+              const retainedSeg=retainedH>0?'<div style="height:'+retainedH+'px;background:#BA7517;transition:height 0.4s"></div>':'';
+              return `
               <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
                 <div style="display:flex;gap:3px;align-items:flex-end;width:100%;justify-content:center;height:100px">
                   <div style="width:45%;display:flex;flex-direction:column;align-items:center">
                     <div style="font-size:9px;color:var(--text3);margin-bottom:1px;white-space:nowrap">${t.income?fmtShort(t.income).replace('₦',''):'—'}</div>
                     <div style="font-size:8px;color:#BA7517;margin-bottom:2px;white-space:nowrap;min-height:10px;line-height:10px">${t.netLocal>0?fmtShort(t.netLocal).replace('₦',''):''}</div>
-                    <div style="width:100%;border-radius:4px 4px 0 0;height:${Math.max(4,Math.round((t.income/maxTrend)*72)+4)}px;transition:height 0.4s;overflow:hidden;display:flex;flex-direction:column">
+                    <div style="width:100%;border-radius:4px 4px 0 0;height:${barH}px;transition:height 0.4s;overflow:hidden;display:flex;flex-direction:column">
                       <div style="flex:1;background:var(--primary)"></div>
-                      ${t.netLocal>0&&t.income>0?`<div style="height:${Math.round(Math.min(1,Math.max(0,t.netLocal/t.income))*(Math.max(4,Math.round((t.income/maxTrend)*72)+4))}px;background:#BA7517;transition:height 0.4s"></div>`:''}
+                      ${retainedSeg}
                     </div>
                   </div>
                   <div style="width:45%;display:flex;flex-direction:column;align-items:center">
                     <div style="font-size:9px;color:var(--text3);margin-bottom:2px;white-space:nowrap">${t.expenses?fmtShort(t.expenses).replace('₦',''):'—'}</div>
-                    <div style="width:100%;background:var(--danger);border-radius:4px 4px 0 0;height:${Math.max(4,Math.round((t.expenses/maxTrend)*72)+4)}px;transition:height 0.4s"></div>
+                    <div style="width:100%;background:var(--danger);border-radius:4px 4px 0 0;height:${expH}px;transition:height 0.4s"></div>
                   </div>
                 </div>
                 <div style="font-size:11px;color:var(--text2)">${t.label}</div>
-              </div>`).join('')}
+              </div>`;}).join('')}
           </div>
           ${forecastIncome?`
           <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
