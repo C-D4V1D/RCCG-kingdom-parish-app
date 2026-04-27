@@ -5365,43 +5365,98 @@ async function renderPettyCash(){
         <span class="card-title">✅ Approved Top-Ups — Awaiting Payment (${approvedTopups.length})</span>
         <span style="font-size:11px;color:var(--text3)">Total: ${fmt(approvedTopups.reduce((s,r)=>s+(r.amount||0),0))}</span>
       </div>
-      <div class="table-wrap"><table>
-        <tr><th>Date Approved</th><th>Request</th><th>Requested By</th><th>Approved By</th><th class="td-right">Amount</th><th>Action</th></tr>
-        ${approvedTopups.map(r=>`<tr>
-          <td style="white-space:nowrap">${fmtDate(r.approvedAt||r.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(r.approvedAt||r.createdAt)}</div></td>
-          <td>
-            <div style="font-size:13px;font-weight:500">${r.purpose||'Wallet top-up'}</div>
-            ${r.expenseRefs?.length?`<div style="font-size:11px;color:var(--text3)">${r.expenseRefs.length} expense(s) included</div>`:''}
-            ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--text3)">Paid so far: ${fmt(r.actualAmount||0)} · Remaining: ${fmt(Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0)))}</div>`:''}
-          </td>
-          <td class="td-muted">${r.requestedBy||'—'}</td>
-          <td class="td-muted">${r.approvedBy||'—'}</td>
-          <td class="td-right td-bold" style="color:var(--primary)">
-            <div>${fmt(r.originalAmount||r.amount)}</div>
-            ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--success)">Paid: ${fmt(r.actualAmount)}</div>`:''}
-            ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--amber)">Due: ${fmt(Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0)))}</div>`:''}
-          </td>
-          <td><button class="btn btn-sm btn-primary" onclick="App.showPettyRefill(${Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0))}, '${r.id}')">📋 Record Payment</button></td>
-        </tr>`).join('')}
-      </table></div>
+      <div class="topup-desktop-table">
+        <div class="table-wrap"><table>
+          <tr><th>Date Approved</th><th>Request</th><th>Requested By</th><th>Approved By</th><th class="td-right">Amount</th><th>Action</th></tr>
+          ${approvedTopups.map(r=>`<tr>
+            <td style="white-space:nowrap">${fmtDate(r.approvedAt||r.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(r.approvedAt||r.createdAt)}</div></td>
+            <td>
+              <div style="font-size:13px;font-weight:500">${r.purpose||'Wallet top-up'}</div>
+              ${r.expenseRefs?.length?`<div style="font-size:11px;color:var(--text3)">${r.expenseRefs.length} expense(s) included</div>`:''}
+              ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--text3)">Paid so far: ${fmt(r.actualAmount||0)} · Remaining: ${fmt(Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0)))}</div>`:''}
+            </td>
+            <td class="td-muted">${r.requestedBy||'—'}</td>
+            <td class="td-muted">${r.approvedBy||'—'}</td>
+            <td class="td-right td-bold" style="color:var(--primary)">
+              <div>${fmt(r.originalAmount||r.amount)}</div>
+              ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--success)">Paid: ${fmt(r.actualAmount)}</div>`:''}
+              ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--amber)">Due: ${fmt(Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0)))}</div>`:''}
+            </td>
+            <td><button class="btn btn-sm btn-primary" onclick="App.showPettyRefill(${Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0))}, '${r.id}')">📋 Record Payment</button></td>
+          </tr>`).join('')}
+        </table></div>
+      </div>
+      <div class="topup-mobile-list">
+        ${approvedTopups.map(r=>{
+          const due=Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0));
+          return`<div class="topup-card">
+            <div class="topup-card-header" onclick="toggleTopupCard(this)" role="button" tabindex="0" aria-expanded="false" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleTopupCard(this)}">
+              <div class="topup-card-left">
+                <div class="topup-card-date">${fmtDate(r.approvedAt||r.createdAt)}<span class="topup-card-time" style="margin-left:6px">${fmtTime(r.approvedAt||r.createdAt)}</span></div>
+                <div class="topup-card-title">${r.purpose||'Wallet top-up'}</div>
+                ${r.expenseRefs?.length?`<div class="topup-card-sub">${r.expenseRefs.length} expense(s) included</div>`:''}
+              </div>
+              <div class="topup-card-right">
+                <div class="topup-card-amount">${fmt(r.originalAmount||r.amount)}</div>
+                ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--amber)">Due: ${fmt(due)}</div>`:''}
+              </div>
+              <span class="topup-card-chevron">▼</span>
+            </div>
+            <div class="topup-card-body">
+              <div class="topup-card-detail-row"><span class="topup-card-detail-label">Requested By</span><span class="topup-card-detail-val">${r.requestedBy||'—'}</span></div>
+              <div class="topup-card-detail-row"><span class="topup-card-detail-label">Approved By</span><span class="topup-card-detail-val">${r.approvedBy||'—'}</span></div>
+              ${(r.actualAmount||0)>0?`<div class="topup-card-detail-row"><span class="topup-card-detail-label">Paid So Far</span><span class="topup-card-detail-val" style="color:var(--success)">${fmt(r.actualAmount)}</span></div>`:''}
+              ${(r.actualAmount||0)>0?`<div class="topup-card-detail-row"><span class="topup-card-detail-label">Remaining</span><span class="topup-card-detail-val" style="color:var(--amber)">${fmt(due)}</span></div>`:''}
+              <div class="topup-card-action"><button class="btn btn-sm btn-primary btn-full" onclick="App.showPettyRefill(${due}, '${r.id}')">📋 Record Payment</button></div>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
     </div>`:''}
 
     ${advancesAwaitingProof.length?`
     <div class="card" style="margin-bottom:1rem">
       <div class="card-header"><span class="card-title">Advances — Proof of Purchase Outstanding (${advancesAwaitingProof.length})</span></div>
-      <div class="table-wrap"><table>
-        <tr><th>When Approved</th><th>Purpose</th><th>Approved By</th><th>Time Since Approval</th><th class="td-right">Amount</th><th>Action</th></tr>
+      <div class="topup-desktop-table">
+        <div class="table-wrap"><table>
+          <tr><th>When Approved</th><th>Purpose</th><th>Approved By</th><th>Time Since Approval</th><th class="td-right">Amount</th><th>Action</th></tr>
+          ${advancesAwaitingProof.map(r=>{
+            const hrs=Math.round((Date.now()-new Date(r.approvedAt||r.createdAt).getTime())/3600000);
+            return`<tr${hrs>48?' style="background:var(--danger-light)"':''}>
+              <td style="white-space:nowrap">${fmtDate(r.approvedAt||r.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(r.approvedAt||r.createdAt)}</div></td>
+              <td>${r.purpose}</td>
+              <td class="td-muted">${r.approvedBy||'—'}</td>
+              <td><span class="badge ${hrs>48?'badge-danger':hrs>24?'badge-warn':'badge-info'}">${hrs}h${hrs>48?' ⚠ OVERDUE':''}</span></td>
+              <td class="td-right td-bold td-amber">${fmt(r.amount)}</td>
+              <td><button class="btn btn-sm btn-primary" onclick="App.submitPettyReceipt('${r.id}')">Submit Proof</button></td>
+            </tr>`;}).join('')}
+        </table></div>
+      </div>
+      <div class="topup-mobile-list">
         ${advancesAwaitingProof.map(r=>{
           const hrs=Math.round((Date.now()-new Date(r.approvedAt||r.createdAt).getTime())/3600000);
-          return`<tr${hrs>48?' style="background:var(--danger-light)"':''}>
-            <td style="white-space:nowrap">${fmtDate(r.approvedAt||r.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(r.approvedAt||r.createdAt)}</div></td>
-            <td>${r.purpose}</td>
-            <td class="td-muted">${r.approvedBy||'—'}</td>
-            <td><span class="badge ${hrs>48?'badge-danger':hrs>24?'badge-warn':'badge-info'}">${hrs}h${hrs>48?' ⚠ OVERDUE':''}</span></td>
-            <td class="td-right td-bold td-amber">${fmt(r.amount)}</td>
-            <td><button class="btn btn-sm btn-primary" onclick="App.submitPettyReceipt('${r.id}')">Submit Proof</button></td>
-          </tr>`;}).join('')}
-      </table></div>
+          const overdue=hrs>48;
+          const urgencyBadge=`<span class="badge ${hrs>48?'badge-danger':hrs>24?'badge-warn':'badge-info'}">${hrs}h${overdue?' ⚠ OVERDUE':''}</span>`;
+          return`<div class="topup-card"${overdue?' style="border-color:var(--danger)"':''}>
+            <div class="topup-card-header" onclick="toggleTopupCard(this)" role="button" tabindex="0" aria-expanded="false" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleTopupCard(this)}"${overdue?' style="background:var(--danger-light)"':''}>
+              <div class="topup-card-left">
+                <div class="topup-card-date">${fmtDate(r.approvedAt||r.createdAt)}<span class="topup-card-time" style="margin-left:6px">${fmtTime(r.approvedAt||r.createdAt)}</span></div>
+                <div class="topup-card-title">${r.purpose||'Advance'}</div>
+                <div style="margin-top:3px">${urgencyBadge}</div>
+              </div>
+              <div class="topup-card-right">
+                <div class="topup-card-amount" style="color:var(--amber)">${fmt(r.amount)}</div>
+              </div>
+              <span class="topup-card-chevron">▼</span>
+            </div>
+            <div class="topup-card-body">
+              <div class="topup-card-detail-row"><span class="topup-card-detail-label">Approved By</span><span class="topup-card-detail-val">${r.approvedBy||'—'}</span></div>
+              <div class="topup-card-detail-row"><span class="topup-card-detail-label">Time Since Approval</span><span class="topup-card-detail-val">${urgencyBadge}</span></div>
+              <div class="topup-card-action"><button class="btn btn-sm btn-primary btn-full" onclick="App.submitPettyReceipt('${r.id}')">Submit Proof</button></div>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
     </div>`:''}
 
     <div class="card">
@@ -7646,6 +7701,7 @@ return {
 
 // Global helpers
 function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
+function toggleTopupCard(el){ const card=el.closest('.topup-card'); if(card){ card.classList.toggle('expanded'); el.setAttribute('aria-expanded', card.classList.contains('expanded')?'true':'false') } }
 
 // Ensure App is accessible from inline onclick handlers in all browsers
 window.App = App;

@@ -152,6 +152,28 @@ tr:hover td{background:var(--surface)}
 .tx-mobile-table{display:none}
 .tx-mobile-hint{display:none}
 
+/* TOPUP / ADVANCE — expandable mobile cards */
+.topup-desktop-table{display:block}
+.topup-mobile-list{display:none}
+.topup-card{border:1px solid var(--border);border-radius:var(--r);margin-bottom:8px;overflow:hidden}
+.topup-card-header{display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;background:var(--card);user-select:none;-webkit-tap-highlight-color:transparent}
+.topup-card-header:active{background:var(--surface)}
+.topup-card-left{flex:1;min-width:0}
+.topup-card-date{font-size:12px;font-weight:600;color:var(--text);white-space:nowrap}
+.topup-card-time{font-size:11px;color:var(--text3)}
+.topup-card-title{font-size:13px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
+.topup-card-sub{font-size:11px;color:var(--text3);margin-top:1px}
+.topup-card-right{text-align:right;flex-shrink:0}
+.topup-card-amount{font-size:14px;font-weight:700;color:var(--primary)}
+.topup-card-chevron{font-size:12px;color:var(--text3);margin-left:6px;flex-shrink:0;transition:transform 0.2s}
+.topup-card.expanded .topup-card-chevron{transform:rotate(180deg)}
+.topup-card-body{display:none;border-top:1px solid var(--border);padding:10px 12px;background:var(--surface)}
+.topup-card.expanded .topup-card-body{display:block}
+.topup-card-detail-row{display:flex;justify-content:space-between;align-items:flex-start;padding:4px 0;font-size:12px}
+.topup-card-detail-label{color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:0.3px;font-size:10px;flex-shrink:0;margin-right:8px;padding-top:1px}
+.topup-card-detail-val{color:var(--text);text-align:right}
+.topup-card-action{margin-top:10px}
+
 /* BADGES */
 .badge{display:inline-flex;align-items:center;font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;white-space:nowrap}
 .badge-success{background:var(--success-light);color:var(--success)}
@@ -279,6 +301,9 @@ tr:hover td{background:var(--surface)}
   .tx-mobile-table{display:table}
   .tx-mobile-hint{display:inline}
   .tx-mobile-row:active td{background:var(--primary-light)}
+  /* Top-up / Advance — show expandable cards, hide wide desktop table */
+  .topup-desktop-table{display:none}
+  .topup-mobile-list{display:block}
 }
 @media(max-width:400px){
   .kpi-grid{grid-template-columns:1fr}
