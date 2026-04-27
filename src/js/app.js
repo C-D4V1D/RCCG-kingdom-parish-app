@@ -1687,12 +1687,29 @@ async function renderDashboard(){
       ?(currentRate*cw+historicalRate*hw)/(cw+hw)
       :(currentRate??historicalRate);
     const proj=trendData[3].income+remainingSundays*blendedRate;
-    forecastIncome={min:Math.round(proj*0.85),max:Math.round(proj*1.20)};
+    // Income spread: std dev of all known per-Sunday rates × full month Sunday count
+    const allRates=[...validHist.map(h=>h.income/h.sundays),...(currentRate!==null?[currentRate]:[])];
+    let incomeSpread;
+    if(allRates.length>=2){
+      const meanR=allRates.reduce((s,r)=>s+r,0)/allRates.length;
+      incomeSpread=Math.sqrt(allRates.reduce((s,r)=>s+(r-meanR)**2,0)/allRates.length)*totalSundaysFullMonth;
+    }else{
+      incomeSpread=proj*0.10; // 10% floor — single data point
+    }
+    forecastIncome={min:Math.max(0,Math.round(proj-incomeSpread)),max:Math.round(proj+incomeSpread)};
+    // Expense spread: std dev of actual monthly totals
     const validExp=histMonths.filter(h=>h.expenses>0);
     if(validExp.length>0){
       const ewts=validExp.map((_,i)=>i+1);
       const avgExp=validExp.reduce((s,h,i)=>s+ewts[i]*h.expenses,0)/ewts.reduce((s,w)=>s+w,0);
-      forecastExpenses={min:Math.round(avgExp*0.80),max:Math.round(avgExp*1.25)};
+      let expSpread;
+      if(validExp.length>=2){
+        const expMean=validExp.reduce((s,h)=>s+h.expenses,0)/validExp.length;
+        expSpread=Math.sqrt(validExp.reduce((s,h)=>s+(h.expenses-expMean)**2,0)/validExp.length);
+      }else{
+        expSpread=avgExp*0.20; // 20% floor — single data point
+      }
+      forecastExpenses={min:Math.max(0,Math.round(avgExp-expSpread)),max:Math.round(avgExp+expSpread)};
     }
   }
 
