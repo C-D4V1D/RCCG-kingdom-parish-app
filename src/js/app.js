@@ -1652,14 +1652,26 @@ async function renderDashboard(){
   if(pendingPetty>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span>${pendingPetty} petty cash request(s) awaiting approval. <button class="btn btn-sm" onclick="App.navigate('petty_cash')" style="margin-left:8px">Review</button></span></div>`;
   if(churchBal.bankBalance<50000 && churchBal.bankBalance>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Church balance is running low. Consider notifying the KPSC if remittances cannot be covered.</span></div>`;
 
-  // Monthly trend (last 4 months) — income AND expenses
+  // Monthly trend (last 4 months) — income, expenses, and netLocal retained
+  // Compute historical netLocal in parallel for accurate retention rates and chart visualisation
+  const histMonthRetention=await Promise.all([3,2,1].map(async i=>{
+    let m=state.month-i,y=state.year;
+    if(m<0){m+=12;y--;}
+    const mInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});
+    const mTotal=mInc.reduce((s,r)=>s+(r.totalCollection||0),0);
+    if(!mTotal) return {netLocal:0,retentionRate:null};
+    const mRem=await calcRemittancesFromRecords(mInc);
+    const mNet=mRem.netLocal-dashAllQuotasAmt;
+    return {netLocal:mNet,retentionRate:mNet/mTotal};
+  }));
   const trendData = [];
   for(let i=3;i>=0;i--){
     let m=state.month-i; let y=state.year;
     if(m<0){m+=12;y--;}
     const mIncome=(allIncomeDash).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
     const mExpenses=(allExpensesDash).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
-    trendData.push({label:MONTHS[m].slice(0,3),income:mIncome.reduce((s,r)=>s+(r.totalCollection||0),0),expenses:mExpenses.reduce((s,r)=>s+(r.amount||0),0)});
+    const mNetLocal=i===0?netLocal:(histMonthRetention[3-i]?.netLocal||0);
+    trendData.push({label:MONTHS[m].slice(0,3),income:mIncome.reduce((s,r)=>s+(r.totalCollection||0),0),expenses:mExpenses.reduce((s,r)=>s+(r.amount||0),0),netLocal:mNetLocal});
   }
   const maxTrend=Math.max(...trendData.map(t=>Math.max(t.income,t.expenses)),1);
 
@@ -1697,11 +1709,21 @@ async function renderDashboard(){
       incomeSpread=proj*0.10; // 10% floor — single data point
     }
     forecastIncome={min:Math.max(0,Math.round(proj-incomeSpread)),max:Math.round(proj+incomeSpread)};
-    // Retained income forecast: apply current month's actual retention rate (netLocal/totalIncome)
-    // This already accounts for all remittance splits, province rebate, and fixed quotas as configured
-    if(totalIncome>0){
-      const retentionRate=netLocal/totalIncome;
-      forecastRetained={min:Math.max(0,Math.round(forecastIncome.min*retentionRate)),max:Math.max(0,Math.round(forecastIncome.max*retentionRate))};
+    // Retained income forecast: blend historical retention rates with current month
+    // Correctly accounts for variable income mix (Thanksgiving = 0% local, tithes = ~40% local, etc.)
+    const validHistRates=histMonthRetention.filter(h=>h.retentionRate!==null);
+    const currentRetRate=totalIncome>0?netLocal/totalIncome:null;
+    if(currentRetRate!==null||validHistRates.length>0){
+      let blendedRetRate;
+      if(currentRetRate!==null&&validHistRates.length>0){
+        const rwts=validHistRates.map((_,i)=>i+1);
+        const rSum=rwts.reduce((s,w)=>s+w,0);
+        const histRetRate=validHistRates.reduce((s,h,i)=>s+rwts[i]*h.retentionRate,0)/rSum;
+        blendedRetRate=(currentRetRate*cw+histRetRate*hw)/(cw+hw);
+      }else{
+        blendedRetRate=currentRetRate??validHistRates[validHistRates.length-1].retentionRate;
+      }
+      forecastRetained={min:Math.max(0,Math.round(forecastIncome.min*blendedRetRate)),max:Math.max(0,Math.round(forecastIncome.max*blendedRetRate))};
     }
     // Expense spread: std dev of actual monthly totals
     const validExp=histMonths.filter(h=>h.expenses>0);
@@ -1827,6 +1849,7 @@ async function renderDashboard(){
           <div class="card-header"><span class="card-title">Monthly Trend (Income vs Expenses)</span></div>
           <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px;font-size:11px;color:var(--text3)">
             <span><span style="display:inline-block;width:10px;height:10px;background:var(--primary);border-radius:2px;margin-right:4px"></span>Income</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:#BA7517;border-radius:2px;margin-right:4px"></span>Retained</span>
             <span><span style="display:inline-block;width:10px;height:10px;background:var(--danger);border-radius:2px;margin-right:4px"></span>Expenses</span>
           </div>
           <div style="display:flex;align-items:flex-end;gap:12px;height:130px;padding:8px 0">
@@ -1834,8 +1857,12 @@ async function renderDashboard(){
               <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
                 <div style="display:flex;gap:3px;align-items:flex-end;width:100%;justify-content:center;height:100px">
                   <div style="width:45%;display:flex;flex-direction:column;align-items:center">
-                    <div style="font-size:9px;color:var(--text3);margin-bottom:2px;white-space:nowrap">${t.income?fmtShort(t.income).replace('₦',''):'—'}</div>
-                    <div style="width:100%;background:var(--primary);border-radius:4px 4px 0 0;height:${Math.max(4,Math.round((t.income/maxTrend)*72)+4)}px;transition:height 0.4s"></div>
+                    <div style="font-size:9px;color:var(--text3);margin-bottom:1px;white-space:nowrap">${t.income?fmtShort(t.income).replace('₦',''):'—'}</div>
+                    <div style="font-size:8px;color:#BA7517;margin-bottom:2px;white-space:nowrap;min-height:10px;line-height:10px">${t.netLocal>0?fmtShort(t.netLocal).replace('₦',''):''}</div>
+                    <div style="width:100%;border-radius:4px 4px 0 0;height:${Math.max(4,Math.round((t.income/maxTrend)*72)+4)}px;transition:height 0.4s;overflow:hidden;display:flex;flex-direction:column">
+                      <div style="flex:1;background:var(--primary)"></div>
+                      ${t.netLocal>0&&t.income>0?`<div style="height:${Math.round(Math.min(1,Math.max(0,t.netLocal/t.income))*(Math.max(4,Math.round((t.income/maxTrend)*72)+4))}px;background:#BA7517;transition:height 0.4s"></div>`:''}
+                    </div>
                   </div>
                   <div style="width:45%;display:flex;flex-direction:column;align-items:center">
                     <div style="font-size:9px;color:var(--text3);margin-bottom:2px;white-space:nowrap">${t.expenses?fmtShort(t.expenses).replace('₦',''):'—'}</div>
