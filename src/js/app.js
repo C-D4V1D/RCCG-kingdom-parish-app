@@ -873,7 +873,7 @@ function applyTxFilters(all){
     else if(sortField==='type'){ av=a.kind||''; bv=b.kind||''; }
     else if(sortField==='module'){ av=a.module||''; bv=b.module||''; }
     else if(sortField==='status'){ av=a.status||''; bv=b.status||''; }
-    else { av=new Date(a.date||0).getTime(); bv=new Date(b.date||0).getTime(); }
+    else { av=new Date(a.recordedAt||a.date||0).getTime(); bv=new Date(b.recordedAt||b.date||0).getTime(); }
     if(av===bv) return 0;
     if(typeof av==='string' || typeof bv==='string'){
       return sortDir==='asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
@@ -915,6 +915,7 @@ async function buildTransactionsLedger(){
       module:'income',
       kind:'income',
       date:r.date||r.createdAt||'',
+      recordedAt:r.createdAt||r.date||'',
       amount:r.totalCollection||0,
       direction:'credit',
       method:r.paymentMethod || ((r.bankTransferAmount||0)>0&&cashHeld>0?'split':(r.bankTransferAmount||0)>0?'bank_transfer':'cash'),
@@ -932,6 +933,7 @@ async function buildTransactionsLedger(){
       module:'expenses',
       kind:'expense',
       date:e.date||e.createdAt||'',
+      recordedAt:e.createdAt||e.date||'',
       amount:e.amount||0,
       direction:'debit',
       method:e.paymentMethod||'',
@@ -949,6 +951,7 @@ async function buildTransactionsLedger(){
       module:'remittances',
       kind:'remittance',
       date:r.paidDate||r.createdAt||'',
+      recordedAt:r.createdAt||r.paidDate||'',
       amount:r.amount||0,
       direction:'debit',
       method:r.paymentMethod||'bank_transfer',
@@ -967,6 +970,7 @@ async function buildTransactionsLedger(){
       module:'cash',
       kind:isDeposit?'cash_deposit':'cash_withdrawal',
       date:c.date||c.createdAt||'',
+      recordedAt:c.createdAt||c.date||'',
       amount:c.amount||0,
       direction:'transfer',
       method:c.depositMethod||'',
@@ -984,6 +988,7 @@ async function buildTransactionsLedger(){
       module:'petty_cash',
       kind:p.type||'petty',
       date:p.createdAt||p.dateNeeded||'',
+      recordedAt:p.createdAt||p.dateNeeded||'',
       amount:p.actualAmount||p.amount||0,
       direction:(p.type==='refill'||p.type==='topup_request')?'transfer':'debit',
       method:p.paymentMethod||'',
@@ -995,7 +1000,7 @@ async function buildTransactionsLedger(){
     });
   });
 
-  return tx.sort((a,b)=>new Date(b.date||0)-new Date(a.date||0));
+  return tx.sort((a,b)=>new Date(b.recordedAt||b.date||0)-new Date(a.recordedAt||a.date||0));
 }
 
 async function renderTransactions(){
@@ -1051,7 +1056,7 @@ async function renderTransactions(){
     const d = txDirectionMeta(t.direction);
     return `
     <tr class="tx-desktop-row">
-      <td style="white-space:nowrap">${fmtDate(t.date)}<div class="td-muted">${fmtTime(t.date)}</div></td>
+      <td style="white-space:nowrap">${fmtDate(t.date)}<div class="td-muted">${fmtTime(t.recordedAt||t.date)}</div></td>
       <td><span class="badge badge-gray">${esc(txKindLabel(t.kind))}</span></td>
       <td class="td-muted">${esc(txModuleLabel(t.module))}</td>
       <td><div style="font-size:13px;font-weight:500">${esc(t.description||'—')}</div>${t.notes?`<div class="td-muted" style="font-size:11px">${esc(t.notes)}</div>`:''}</td>
@@ -1070,7 +1075,7 @@ async function renderTransactions(){
     <tr class="tx-mobile-row" onclick="App.showTxDetail('${esc(t.id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.showTxDetail('${esc(t.id)}')}" tabindex="0" style="cursor:pointer" title="Tap to see full details" role="button" aria-label="${esc(t.description||'Transaction')} — ${d.symbol}${fmt(t.amount||0)}">${''/* mobile row */}
       <td>
         <div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(t.date)}</div>
-        <div class="td-muted" style="font-size:11px">${fmtTime(t.date)}</div>
+        <div class="td-muted" style="font-size:11px">${fmtTime(t.recordedAt||t.date)}</div>
       </td>
       <td style="max-width:0;width:60%">
         <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.description||'—')}</div>
@@ -1310,7 +1315,7 @@ function showTxDetail(id){
     ? '➖ Money Paid Out (went out)'
     : '↔ Internal Transfer';
   const rows = [
-    ['Date &amp; Time',    `${fmtDate(t.date)} at ${fmtTime(t.date)}`],
+    ['Date &amp; Time',    `${fmtDate(t.date)} at ${fmtTime(t.recordedAt||t.date)}`],
     ['Type',               txKindLabel(t.kind)],
     ['Section',            txModuleLabel(t.module)],
     ['Description',        esc(t.description||'—')],
