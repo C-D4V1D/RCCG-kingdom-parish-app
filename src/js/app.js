@@ -1650,7 +1650,7 @@ async function renderDashboard(){
   let alerts='';
   if(overdueRems>0) alerts+=`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span>${overdueRems} remittance(s) are <strong>overdue</strong>. Please process immediately.</span></div>`;
   if(pendingPetty>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span>${pendingPetty} petty cash request(s) awaiting approval. <button class="btn btn-sm" onclick="App.navigate('petty_cash')" style="margin-left:8px">Review</button></span></div>`;
-  if(churchBal.bankBalance<50000 && churchBal.bankBalance>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Bank balance is running low. Consider notifying the KPSC if remittances cannot be covered.</span></div>`;
+  if(churchBal.bankBalance<50000 && churchBal.bankBalance>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Church balance is running low. Consider notifying the KPSC if remittances cannot be covered.</span></div>`;
 
   // Monthly trend (last 4 months) — income AND expenses
   const trendData = [];
@@ -1662,6 +1662,29 @@ async function renderDashboard(){
     trendData.push({label:MONTHS[m].slice(0,3),income:mIncome.reduce((s,r)=>s+(r.totalCollection||0),0),expenses:mExpenses.reduce((s,r)=>s+(r.amount||0),0)});
   }
   const maxTrend=Math.max(...trendData.map(t=>Math.max(t.income,t.expenses)),1);
+
+  // Forecast: Sunday-weighted income projection + expense range
+  const fullMonthSundays=(y,m)=>{let c=0,d=new Date(y,m,1);while(d.getMonth()===m){if(d.getDay()===0)c++;d.setDate(d.getDate()+1);}return c;};
+  const totalSundaysFullMonth=fullMonthSundays(state.year,state.month);
+  const remainingSundays=Math.max(0,totalSundaysFullMonth-sundayCount);
+  const histMonths=[];
+  for(let i=3;i>=1;i--){let m=state.month-i,y=state.year;if(m<0){m+=12;y--;}histMonths.push({income:trendData[3-i].income,expenses:trendData[3-i].expenses,sundays:fullMonthSundays(y,m)});}
+  const validHist=histMonths.filter(h=>h.income>0&&h.sundays>0);
+  let forecastIncome=null,forecastExpenses=null,forecastDataMonths=validHist.length;
+  if(validHist.length>0){
+    const wts=validHist.map((_,i)=>i+1);
+    const wSum=wts.reduce((s,w)=>s+w,0);
+    const avgPerSunday=validHist.reduce((s,h,i)=>s+wts[i]*(h.income/h.sundays),0)/wSum;
+    const proj=trendData[3].income+remainingSundays*avgPerSunday;
+    forecastIncome={min:Math.round(proj*0.85),max:Math.round(proj*1.20)};
+    const validExp=histMonths.filter(h=>h.expenses>0);
+    if(validExp.length>0){
+      const ewts=validExp.map((_,i)=>i+1);
+      const ewSum=ewts.reduce((s,w)=>s+w,0);
+      const avgExp=validExp.reduce((s,h,i)=>s+ewts[i]*h.expenses,0)/ewSum;
+      forecastExpenses={min:Math.round(avgExp*0.80),max:Math.round(avgExp*1.25)};
+    }
+  }
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
@@ -1789,6 +1812,21 @@ async function renderDashboard(){
                 <div style="font-size:11px;color:var(--text2)">${t.label}</div>
               </div>`).join('')}
           </div>
+          ${forecastIncome?`
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:8px">Month Forecast <span style="font-weight:400;text-transform:none;letter-spacing:0">(${forecastDataMonths}-mo. trend · ${remainingSundays} Sunday${remainingSundays!==1?'s':''} remaining)</span></div>
+            <div style="display:flex;gap:8px">
+              <div style="flex:1;padding:8px 10px;background:rgba(29,158,117,0.06);border-radius:8px;border:1px solid rgba(29,158,117,0.18)">
+                <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Income</div>
+                <div style="font-size:13px;font-weight:700;color:var(--primary)">${fmtShort(forecastIncome.min)} – ${fmtShort(forecastIncome.max)}</div>
+              </div>
+              ${forecastExpenses?`
+              <div style="flex:1;padding:8px 10px;background:rgba(163,45,45,0.06);border-radius:8px;border:1px solid rgba(163,45,45,0.18)">
+                <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Expenses</div>
+                <div style="font-size:13px;font-weight:700;color:var(--danger)">${fmtShort(forecastExpenses.min)} – ${fmtShort(forecastExpenses.max)}</div>
+              </div>`:''}
+            </div>
+          </div>`:''}
         </div>
       </div>
 
