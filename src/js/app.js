@@ -476,7 +476,7 @@ async function calcRemittances(income){
 
 function showModal(html){ const o=document.createElement('div'); o.className='modal-overlay'; o.id='modalOverlay'; o.innerHTML=`<div class="modal">${html}</div>`; document.body.appendChild(o) }
 function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
-function toggleTopupCard(el){ const card=el.closest('.topup-card'); if(card) card.classList.toggle('expanded') }
+function toggleTopupCard(el){ const card=el.closest('.topup-card'); if(card){ card.classList.toggle('expanded'); el.setAttribute('aria-expanded', card.classList.contains('expanded')?'true':'false') } }
 function showAlert(msg,type='success'){
   const a=document.createElement('div'); a.className=`alert alert-${type}`;
   const icon=document.createElement('span'); icon.className='alert-icon'; icon.textContent=type==='success'?'✓':type==='danger'?'✕':'⚠';
