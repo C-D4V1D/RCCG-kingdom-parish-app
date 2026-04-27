@@ -259,8 +259,39 @@ function countSundaysBetween(fromDate, toDate){
   }
   return count;
 }
-function fmtDate(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric'}) }
-function fmtTime(d){ if(!d) return '—'; const dt=new Date(d); return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'}) }
+function parseDisplayDate(value){
+  if(!value) return null;
+  if(value instanceof Date) return isNaN(value.getTime()) ? null : value;
+  if(typeof value === 'string'){
+    const v = value.trim();
+    if(!v) return null;
+    const ymdMatch = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if(ymdMatch) return new Date(Number(ymdMatch[1]), Number(ymdMatch[2]) - 1, Number(ymdMatch[3]));
+    const sqliteMatch = v.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if(sqliteMatch) return new Date(Number(sqliteMatch[1]), Number(sqliteMatch[2]) - 1, Number(sqliteMatch[3]), Number(sqliteMatch[4]), Number(sqliteMatch[5]), Number(sqliteMatch[6]||0));
+    const isoNoTz = v.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2}(?:\.\d{1,3})?)?$/);
+    if(isoNoTz) return new Date(`${isoNoTz[1]}T${isoNoTz[2]}`);
+  }
+  const dt = new Date(value);
+  return isNaN(dt.getTime()) ? null : dt;
+}
+function hasExplicitTime(value){
+  if(value instanceof Date) return true;
+  if(typeof value !== 'string') return false;
+  return /(?:T|\s)\d{2}:\d{2}/.test(value.trim());
+}
+const NIGERIA_TIMEZONE = 'Africa/Lagos';
+function fmtDate(d){
+  const dt = parseDisplayDate(d);
+  if(!dt) return '—';
+  return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric',timeZone:NIGERIA_TIMEZONE});
+}
+function fmtTime(d){
+  if(!d || !hasExplicitTime(d)) return '—';
+  const dt = parseDisplayDate(d);
+  if(!dt) return '—';
+  return dt.toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit',hour12:true,timeZone:NIGERIA_TIMEZONE});
+}
 function ymdLocal(d){
   const dt = d instanceof Date ? d : new Date(d);
   if(isNaN(dt.getTime())) return '';
@@ -842,7 +873,7 @@ function applyTxFilters(all){
     else if(sortField==='type'){ av=a.kind||''; bv=b.kind||''; }
     else if(sortField==='module'){ av=a.module||''; bv=b.module||''; }
     else if(sortField==='status'){ av=a.status||''; bv=b.status||''; }
-    else { av=new Date(a.date||0).getTime(); bv=new Date(b.date||0).getTime(); }
+    else { av=new Date(a.recordedAt||a.date||0).getTime(); bv=new Date(b.recordedAt||b.date||0).getTime(); }
     if(av===bv) return 0;
     if(typeof av==='string' || typeof bv==='string'){
       return sortDir==='asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
@@ -884,6 +915,7 @@ async function buildTransactionsLedger(){
       module:'income',
       kind:'income',
       date:r.date||r.createdAt||'',
+      recordedAt:r.createdAt||r.date||'',
       amount:r.totalCollection||0,
       direction:'credit',
       method:r.paymentMethod || ((r.bankTransferAmount||0)>0&&cashHeld>0?'split':(r.bankTransferAmount||0)>0?'bank_transfer':'cash'),
@@ -901,6 +933,7 @@ async function buildTransactionsLedger(){
       module:'expenses',
       kind:'expense',
       date:e.date||e.createdAt||'',
+      recordedAt:e.createdAt||e.date||'',
       amount:e.amount||0,
       direction:'debit',
       method:e.paymentMethod||'',
@@ -918,6 +951,7 @@ async function buildTransactionsLedger(){
       module:'remittances',
       kind:'remittance',
       date:r.paidDate||r.createdAt||'',
+      recordedAt:r.createdAt||r.paidDate||'',
       amount:r.amount||0,
       direction:'debit',
       method:r.paymentMethod||'bank_transfer',
@@ -936,6 +970,7 @@ async function buildTransactionsLedger(){
       module:'cash',
       kind:isDeposit?'cash_deposit':'cash_withdrawal',
       date:c.date||c.createdAt||'',
+      recordedAt:c.createdAt||c.date||'',
       amount:c.amount||0,
       direction:'transfer',
       method:c.depositMethod||'',
@@ -953,6 +988,7 @@ async function buildTransactionsLedger(){
       module:'petty_cash',
       kind:p.type||'petty',
       date:p.createdAt||p.dateNeeded||'',
+      recordedAt:p.createdAt||p.dateNeeded||'',
       amount:p.actualAmount||p.amount||0,
       direction:(p.type==='refill'||p.type==='topup_request')?'transfer':'debit',
       method:p.paymentMethod||'',
@@ -964,7 +1000,7 @@ async function buildTransactionsLedger(){
     });
   });
 
-  return tx.sort((a,b)=>new Date(b.date||0)-new Date(a.date||0));
+  return tx.sort((a,b)=>new Date(b.recordedAt||b.date||0)-new Date(a.recordedAt||a.date||0));
 }
 
 async function renderTransactions(){
@@ -1020,7 +1056,7 @@ async function renderTransactions(){
     const d = txDirectionMeta(t.direction);
     return `
     <tr class="tx-desktop-row">
-      <td style="white-space:nowrap">${fmtDate(t.date)}<div class="td-muted">${fmtTime(t.date)}</div></td>
+      <td style="white-space:nowrap">${fmtDate(t.date)}<div class="td-muted">${fmtTime(t.recordedAt||t.date)}</div></td>
       <td><span class="badge badge-gray">${esc(txKindLabel(t.kind))}</span></td>
       <td class="td-muted">${esc(txModuleLabel(t.module))}</td>
       <td><div style="font-size:13px;font-weight:500">${esc(t.description||'—')}</div>${t.notes?`<div class="td-muted" style="font-size:11px">${esc(t.notes)}</div>`:''}</td>
@@ -1039,7 +1075,7 @@ async function renderTransactions(){
     <tr class="tx-mobile-row" onclick="App.showTxDetail('${esc(t.id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.showTxDetail('${esc(t.id)}')}" tabindex="0" style="cursor:pointer" title="Tap to see full details" role="button" aria-label="${esc(t.description||'Transaction')} — ${d.symbol}${fmt(t.amount||0)}">${''/* mobile row */}
       <td>
         <div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(t.date)}</div>
-        <div class="td-muted" style="font-size:11px">${fmtTime(t.date)}</div>
+        <div class="td-muted" style="font-size:11px">${fmtTime(t.recordedAt||t.date)}</div>
       </td>
       <td style="max-width:0;width:60%">
         <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.description||'—')}</div>
@@ -1279,7 +1315,7 @@ function showTxDetail(id){
     ? '➖ Money Paid Out (went out)'
     : '↔ Internal Transfer';
   const rows = [
-    ['Date &amp; Time',    `${fmtDate(t.date)} at ${fmtTime(t.date)}`],
+    ['Date &amp; Time',    `${fmtDate(t.date)} at ${fmtTime(t.recordedAt||t.date)}`],
     ['Type',               txKindLabel(t.kind)],
     ['Section',            txModuleLabel(t.module)],
     ['Description',        esc(t.description||'—')],
@@ -2143,7 +2179,7 @@ async function renderIncomeSummary(records){
               <div class="status-row-amt td-red">${fmt(l.national||0)}</div>
             </div>
             ${(l.area||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Area / Zonal</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.area)}</div></div>`:''}
-            ${(l.pastor||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Pastor's Family Share</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.pastor)}</div></div>`:''}
+            ${(l.pastor||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Parish Pastor's Share</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.pastor)}</div></div>`:''}
             ${(l.ministers||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Ministers' Share</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.ministers)}</div></div>`:''}
             ${(l.seed||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Seed (Pastor's Children)</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.seed)}</div></div>`:''}`;
           }
@@ -3138,7 +3174,7 @@ async function renderRemittances(){
 
   const tgLines=[
     { label:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      amount:rem.totalArea,     section:'tg' },
-    { label:`Thanksgiving → Pastor's Family Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor,   section:'tg' },
+    { label:`Thanksgiving → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor,   section:'tg' },
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters,section:'tg' },
     { label:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0,  section:'tg' },
   ].filter(l=>l.amount>0);
@@ -3344,10 +3380,10 @@ async function renderRemittances(){
           </div>
         </div>
 
-        <!-- Pastor's Family Share card -->
+        <!-- Parish Pastor's Share card -->
         ${(rem.totalPastor||0)+(rem.totalArea||0)+(rem.totalSeed||0)+(quotas.find(q=>q.label.toLowerCase().includes('mummy'))?.amount||0)>0?`
         <div class="card" style="margin-top:12px">
-          <div class="card-header"><span class="card-title">👨‍💼 Pastor's Family Share</span></div>
+          <div class="card-header"><span class="card-title">👨‍💼 Parish Pastor's Share</span></div>
           <p style="font-size:11px;color:var(--text3);margin-bottom:10px">Thanksgiving portions and stipend due to the Pastor's family (as Zonal / Area Pastor).</p>
           ${(rem.totalArea||0)>0?`
           <div class="status-row">
@@ -3356,7 +3392,7 @@ async function renderRemittances(){
           </div>`:''}
           ${(rem.totalPastor||0)>0?`
           <div class="status-row">
-            <div class="status-row-label">TG → Pastor's Family Share (${Math.round(rr.tgPastor*100)}%)</div>
+            <div class="status-row-label">TG → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)</div>
             <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalPastor)}</div>
           </div>`:''}
           ${(rem.totalSeed||0)>0?`
@@ -3391,7 +3427,7 @@ async function showRemittancePaymentModal(){
   const lines=[
     ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0 })),
     { label:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      amount:rem.totalArea },
-    { label:`Thanksgiving → Pastor's Family Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor },
+    { label:`Thanksgiving → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor },
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters },
     { label:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0 },
     { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`, amount:rem.provinceRebate },
@@ -3727,7 +3763,7 @@ async function printRemittanceReport(fromOverride, toOverride){
   // ─── PART B: OTHER DISBURSEMENTS ─────────────────────────────────
   const partBRows=[
     { desc:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,       type:'% Based', amount:rem.totalArea||0 },
-    { desc:`Thanksgiving → Pastor's Family Share (${Math.round(rr.tgPastor*100)}%)`,          type:'% Based', amount:rem.totalPastor||0 },
+    { desc:`Thanksgiving → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,          type:'% Based', amount:rem.totalPastor||0 },
     { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,     type:'% Based', amount:rem.totalMinisters||0 },
     { desc:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`,  type:'% Based', amount:rem.totalSeed||0 },
     ...mummyQuotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 }))
@@ -6574,7 +6610,7 @@ async function generateMonthlyReport(){
       ${rem.lines.filter(l=>l.isTg&&l.national>0).map(l=>`<tr><td>Thanksgiving (TG) → National HQ</td><td class="td-c">${Math.round(remRatesData.tgNational*100)}% of ${fmt(l.total)}</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
       ${rem.provinceRebate>0?`<tr><td>Province Rebate (on local tithes)</td><td class="td-c">${rem.localTithe>0?Math.round(rem.provinceRebate/rem.localTithe*100)+'% of '+fmt(rem.localTithe):'% Based'}</td><td class="td-r">${fmt(rem.provinceRebate)}</td></tr>`:''}
       ${rem.totalArea>0?`<tr><td style="padding-left:16px">Thanksgiving → Area/Zonal Pastor</td><td class="td-c">${Math.round(remRatesData.tgArea*100)}% of TG</td><td class="td-r">${fmt(rem.totalArea)}</td></tr>`:''}
-      ${rem.totalPastor>0?`<tr><td style="padding-left:16px">Thanksgiving → Pastor's Family Share</td><td class="td-c">${Math.round(remRatesData.tgPastor*100)}% of TG</td><td class="td-r">${fmt(rem.totalPastor)}</td></tr>`:''}
+      ${rem.totalPastor>0?`<tr><td style="padding-left:16px">Thanksgiving → Parish Pastor's Share</td><td class="td-c">${Math.round(remRatesData.tgPastor*100)}% of TG</td><td class="td-r">${fmt(rem.totalPastor)}</td></tr>`:''}
       ${rem.totalMinisters>0?`<tr><td style="padding-left:16px">Thanksgiving → Ministers' Share</td><td class="td-c">${Math.round(remRatesData.tgMinisters*100)}% of TG</td><td class="td-r">${fmt(rem.totalMinisters)}</td></tr>`:''}
       ${(rem.totalSeed||0)>0?`<tr><td style="padding-left:16px">Thanksgiving → Seed (Pastor's Children)</td><td class="td-c">${Math.round((remRatesData.tgSeed||0)*100)}% of TG</td><td class="td-r">${fmt(rem.totalSeed)}</td></tr>`:''}
       ${quotaList.filter(q=>q.amount>0).map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">Fixed Quota</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
@@ -7004,7 +7040,7 @@ function renderAdminRates(s){
       <tr><th>Recipient</th><th>Percentage</th></tr>
       <tr><td>TG → National HQ</td><td>${rateInput('rate_tgNational', r.tgNational ?? DEFAULT_REMITTANCE_RATES.tgNational)}</td></tr>
       <tr><td>TG → Area</td><td>${rateInput('rate_tgArea', r.tgArea ?? DEFAULT_REMITTANCE_RATES.tgArea)}</td></tr>
-      <tr><td>TG → Pastor's Family Share</td><td>${rateInput('rate_tgPastor', r.tgPastor ?? DEFAULT_REMITTANCE_RATES.tgPastor)}</td></tr>
+      <tr><td>TG → Parish Pastor's Share</td><td>${rateInput('rate_tgPastor', r.tgPastor ?? DEFAULT_REMITTANCE_RATES.tgPastor)}</td></tr>
       <tr><td>TG → Ministers' Share</td><td>${rateInput('rate_tgMinisters', r.tgMinisters ?? DEFAULT_REMITTANCE_RATES.tgMinisters)}</td></tr>
       <tr><td>TG → Seed — Pastor's Children</td><td>${rateInput('rate_tgSeed', r.tgSeed ?? DEFAULT_REMITTANCE_RATES.tgSeed)}</td></tr>
     </table></div>
