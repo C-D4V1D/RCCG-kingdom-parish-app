@@ -1678,7 +1678,7 @@ async function renderDashboard(){
     const wts=validHist.map((_,i)=>i+1);
     historicalRate=validHist.reduce((s,h,i)=>s+wts[i]*(h.income/h.sundays),0)/wts.reduce((s,w)=>s+w,0);
   }
-  let forecastIncome=null,forecastExpenses=null;
+  let forecastIncome=null,forecastExpenses=null,forecastRetained=null;
   const forecastLabel=currentRate!==null&&validHist.length>0?`${validHist.length}-mo. + live`:currentRate!==null?'live data':validHist.length>0?`${validHist.length}-mo. trend`:'';
   if(currentRate!==null||historicalRate!==null){
     // Blend: current month rate gains weight as more Sundays are recorded
@@ -1699,7 +1699,6 @@ async function renderDashboard(){
     forecastIncome={min:Math.max(0,Math.round(proj-incomeSpread)),max:Math.round(proj+incomeSpread)};
     // Retained income forecast: apply current month's actual retention rate (netLocal/totalIncome)
     // This already accounts for all remittance splits, province rebate, and fixed quotas as configured
-    let forecastRetained=null;
     if(totalIncome>0){
       const retentionRate=netLocal/totalIncome;
       forecastRetained={min:Math.max(0,Math.round(forecastIncome.min*retentionRate)),max:Math.max(0,Math.round(forecastIncome.max*retentionRate))};
