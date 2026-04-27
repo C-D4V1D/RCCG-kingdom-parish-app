@@ -1663,25 +1663,35 @@ async function renderDashboard(){
   }
   const maxTrend=Math.max(...trendData.map(t=>Math.max(t.income,t.expenses)),1);
 
-  // Forecast: Sunday-weighted income projection + expense range
+  // Forecast: adaptive Sunday-weighted income projection + expense range
   const fullMonthSundays=(y,m)=>{let c=0,d=new Date(y,m,1);while(d.getMonth()===m){if(d.getDay()===0)c++;d.setDate(d.getDate()+1);}return c;};
   const totalSundaysFullMonth=fullMonthSundays(state.year,state.month);
   const remainingSundays=Math.max(0,totalSundaysFullMonth-sundayCount);
   const histMonths=[];
   for(let i=3;i>=1;i--){let m=state.month-i,y=state.year;if(m<0){m+=12;y--;}histMonths.push({income:trendData[3-i].income,expenses:trendData[3-i].expenses,sundays:fullMonthSundays(y,m)});}
   const validHist=histMonths.filter(h=>h.income>0&&h.sundays>0);
-  let forecastIncome=null,forecastExpenses=null,forecastDataMonths=validHist.length;
+  // Current month's per-Sunday rate (most accurate signal when available)
+  const currentRate=sundayCount>0?trendData[3].income/sundayCount:null;
+  // Historical per-Sunday rate (weighted, newest months count more)
+  let historicalRate=null;
   if(validHist.length>0){
     const wts=validHist.map((_,i)=>i+1);
-    const wSum=wts.reduce((s,w)=>s+w,0);
-    const avgPerSunday=validHist.reduce((s,h,i)=>s+wts[i]*(h.income/h.sundays),0)/wSum;
-    const proj=trendData[3].income+remainingSundays*avgPerSunday;
+    historicalRate=validHist.reduce((s,h,i)=>s+wts[i]*(h.income/h.sundays),0)/wts.reduce((s,w)=>s+w,0);
+  }
+  let forecastIncome=null,forecastExpenses=null;
+  const forecastLabel=currentRate!==null&&validHist.length>0?`${validHist.length}-mo. + live`:currentRate!==null?'live data':validHist.length>0?`${validHist.length}-mo. trend`:'';
+  if(currentRate!==null||historicalRate!==null){
+    // Blend: current month rate gains weight as more Sundays are recorded
+    const cw=sundayCount*2, hw=Math.max(1,6-cw);
+    const blendedRate=currentRate!==null&&historicalRate!==null
+      ?(currentRate*cw+historicalRate*hw)/(cw+hw)
+      :(currentRate??historicalRate);
+    const proj=trendData[3].income+remainingSundays*blendedRate;
     forecastIncome={min:Math.round(proj*0.85),max:Math.round(proj*1.20)};
     const validExp=histMonths.filter(h=>h.expenses>0);
     if(validExp.length>0){
       const ewts=validExp.map((_,i)=>i+1);
-      const ewSum=ewts.reduce((s,w)=>s+w,0);
-      const avgExp=validExp.reduce((s,h,i)=>s+ewts[i]*h.expenses,0)/ewSum;
+      const avgExp=validExp.reduce((s,h,i)=>s+ewts[i]*h.expenses,0)/ewts.reduce((s,w)=>s+w,0);
       forecastExpenses={min:Math.round(avgExp*0.80),max:Math.round(avgExp*1.25)};
     }
   }
@@ -1814,7 +1824,7 @@ async function renderDashboard(){
           </div>
           ${forecastIncome?`
           <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:8px">Month Forecast <span style="font-weight:400;text-transform:none;letter-spacing:0">(${forecastDataMonths}-mo. trend · ${remainingSundays} Sunday${remainingSundays!==1?'s':''} remaining)</span></div>
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:8px">Month Forecast <span style="font-weight:400;text-transform:none;letter-spacing:0">(${forecastLabel} · ${remainingSundays} Sunday${remainingSundays!==1?'s':''} remaining)</span></div>
             <div style="display:flex;gap:8px">
               <div style="flex:1;padding:8px 10px;background:rgba(29,158,117,0.06);border-radius:8px;border:1px solid rgba(29,158,117,0.18)">
                 <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Income</div>
