@@ -1697,6 +1697,13 @@ async function renderDashboard(){
       incomeSpread=proj*0.10; // 10% floor — single data point
     }
     forecastIncome={min:Math.max(0,Math.round(proj-incomeSpread)),max:Math.round(proj+incomeSpread)};
+    // Retained income forecast: apply current month's actual retention rate (netLocal/totalIncome)
+    // This already accounts for all remittance splits, province rebate, and fixed quotas as configured
+    let forecastRetained=null;
+    if(totalIncome>0){
+      const retentionRate=netLocal/totalIncome;
+      forecastRetained={min:Math.max(0,Math.round(forecastIncome.min*retentionRate)),max:Math.max(0,Math.round(forecastIncome.max*retentionRate))};
+    }
     // Expense spread: std dev of actual monthly totals
     const validExp=histMonths.filter(h=>h.expenses>0);
     if(validExp.length>0){
@@ -1841,18 +1848,23 @@ async function renderDashboard(){
           </div>
           ${forecastIncome?`
           <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:8px">Month Forecast <span style="font-weight:400;text-transform:none;letter-spacing:0">(${forecastLabel} · ${remainingSundays} Sunday${remainingSundays!==1?'s':''} remaining)</span></div>
-            <div style="display:flex;gap:8px">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:8px">${MONTHS[state.month].toUpperCase()} FORECAST <span style="font-weight:400;text-transform:none;letter-spacing:0">(${forecastLabel} · ${remainingSundays} Sunday${remainingSundays!==1?'s':''} remaining)</span></div>
+            <div style="display:flex;gap:8px;margin-bottom:${forecastExpenses?'8px':'0'}">
               <div style="flex:1;padding:8px 10px;background:rgba(29,158,117,0.06);border-radius:8px;border:1px solid rgba(29,158,117,0.18)">
                 <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Income</div>
                 <div style="font-size:13px;font-weight:700;color:var(--primary)">${fmtShort(forecastIncome.min)} – ${fmtShort(forecastIncome.max)}</div>
               </div>
-              ${forecastExpenses?`
-              <div style="flex:1;padding:8px 10px;background:rgba(163,45,45,0.06);border-radius:8px;border:1px solid rgba(163,45,45,0.18)">
-                <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Expenses</div>
-                <div style="font-size:13px;font-weight:700;color:var(--danger)">${fmtShort(forecastExpenses.min)} – ${fmtShort(forecastExpenses.max)}</div>
+              ${forecastRetained?`
+              <div style="flex:1;padding:8px 10px;background:rgba(186,117,23,0.06);border-radius:8px;border:1px solid rgba(186,117,23,0.18)">
+                <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Retained</div>
+                <div style="font-size:13px;font-weight:700;color:#BA7517">${fmtShort(forecastRetained.min)} – ${fmtShort(forecastRetained.max)}</div>
               </div>`:''}
             </div>
+            ${forecastExpenses?`
+            <div style="padding:8px 10px;background:rgba(163,45,45,0.06);border-radius:8px;border:1px solid rgba(163,45,45,0.18)">
+              <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Expenses</div>
+              <div style="font-size:13px;font-weight:700;color:var(--danger)">${fmtShort(forecastExpenses.min)} – ${fmtShort(forecastExpenses.max)}</div>
+            </div>`:''}
           </div>`:''}
         </div>
       </div>
