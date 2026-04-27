@@ -1650,18 +1650,96 @@ async function renderDashboard(){
   let alerts='';
   if(overdueRems>0) alerts+=`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span>${overdueRems} remittance(s) are <strong>overdue</strong>. Please process immediately.</span></div>`;
   if(pendingPetty>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span>${pendingPetty} petty cash request(s) awaiting approval. <button class="btn btn-sm" onclick="App.navigate('petty_cash')" style="margin-left:8px">Review</button></span></div>`;
-  if(churchBal.bankBalance<50000 && churchBal.bankBalance>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Bank balance is running low. Consider notifying the KPSC if remittances cannot be covered.</span></div>`;
+  if(churchBal.bankBalance<50000 && churchBal.bankBalance>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Church balance is running low. Consider notifying the KPSC if remittances cannot be covered.</span></div>`;
 
-  // Monthly trend (last 4 months) — income AND expenses
+  // Monthly trend (last 4 months) — income, expenses, and netLocal retained
+  // Compute historical netLocal in parallel for accurate retention rates and chart visualisation
+  const histMonthRetention=await Promise.all([3,2,1].map(async i=>{
+    let m=state.month-i,y=state.year;
+    if(m<0){m+=12;y--;}
+    const mInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});
+    const mTotal=mInc.reduce((s,r)=>s+(r.totalCollection||0),0);
+    if(!mTotal) return {netLocal:0,retentionRate:null};
+    const mRem=await calcRemittancesFromRecords(mInc);
+    const mNet=mRem.netLocal-dashAllQuotasAmt;
+    return {netLocal:mNet,retentionRate:mNet/mTotal};
+  }));
   const trendData = [];
   for(let i=3;i>=0;i--){
     let m=state.month-i; let y=state.year;
     if(m<0){m+=12;y--;}
     const mIncome=(allIncomeDash).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
     const mExpenses=(allExpensesDash).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
-    trendData.push({label:MONTHS[m].slice(0,3),income:mIncome.reduce((s,r)=>s+(r.totalCollection||0),0),expenses:mExpenses.reduce((s,r)=>s+(r.amount||0),0)});
+    const mNetLocal=i===0?netLocal:(histMonthRetention[3-i]?.netLocal||0);
+    trendData.push({label:MONTHS[m].slice(0,3),income:mIncome.reduce((s,r)=>s+(r.totalCollection||0),0),expenses:mExpenses.reduce((s,r)=>s+(r.amount||0),0),netLocal:mNetLocal});
   }
   const maxTrend=Math.max(...trendData.map(t=>Math.max(t.income,t.expenses)),1);
+
+  // Forecast: adaptive Sunday-weighted income projection + expense range
+  const fullMonthSundays=(y,m)=>{let c=0,d=new Date(y,m,1);while(d.getMonth()===m){if(d.getDay()===0)c++;d.setDate(d.getDate()+1);}return c;};
+  const totalSundaysFullMonth=fullMonthSundays(state.year,state.month);
+  const remainingSundays=Math.max(0,totalSundaysFullMonth-sundayCount);
+  const histMonths=[];
+  for(let i=3;i>=1;i--){let m=state.month-i,y=state.year;if(m<0){m+=12;y--;}histMonths.push({income:trendData[3-i].income,expenses:trendData[3-i].expenses,sundays:fullMonthSundays(y,m)});}
+  const validHist=histMonths.filter(h=>h.income>0&&h.sundays>0);
+  // Current month's per-Sunday rate (most accurate signal when available)
+  const currentRate=sundayCount>0?trendData[3].income/sundayCount:null;
+  // Historical per-Sunday rate (weighted, newest months count more)
+  let historicalRate=null;
+  if(validHist.length>0){
+    const wts=validHist.map((_,i)=>i+1);
+    historicalRate=validHist.reduce((s,h,i)=>s+wts[i]*(h.income/h.sundays),0)/wts.reduce((s,w)=>s+w,0);
+  }
+  let forecastIncome=null,forecastExpenses=null,forecastRetained=null;
+  const forecastLabel=currentRate!==null&&validHist.length>0?`${validHist.length}-mo. + live`:currentRate!==null?'live data':validHist.length>0?`${validHist.length}-mo. trend`:'';
+  if(currentRate!==null||historicalRate!==null){
+    // Blend: current month rate gains weight as more Sundays are recorded
+    const cw=sundayCount*2, hw=Math.max(1,6-cw);
+    const blendedRate=currentRate!==null&&historicalRate!==null
+      ?(currentRate*cw+historicalRate*hw)/(cw+hw)
+      :(currentRate??historicalRate);
+    const proj=trendData[3].income+remainingSundays*blendedRate;
+    // Income spread: std dev of all known per-Sunday rates × full month Sunday count
+    const allRates=[...validHist.map(h=>h.income/h.sundays),...(currentRate!==null?[currentRate]:[])];
+    let incomeSpread;
+    if(allRates.length>=2){
+      const meanR=allRates.reduce((s,r)=>s+r,0)/allRates.length;
+      incomeSpread=Math.sqrt(allRates.reduce((s,r)=>s+(r-meanR)**2,0)/allRates.length)*totalSundaysFullMonth;
+    }else{
+      incomeSpread=proj*0.10; // 10% floor — single data point
+    }
+    forecastIncome={min:Math.max(0,Math.round(proj-incomeSpread)),max:Math.round(proj+incomeSpread)};
+    // Retained income forecast: blend historical retention rates with current month
+    // Correctly accounts for variable income mix (Thanksgiving = 0% local, tithes = ~40% local, etc.)
+    const validHistRates=histMonthRetention.filter(h=>h.retentionRate!==null);
+    const currentRetRate=totalIncome>0?netLocal/totalIncome:null;
+    if(currentRetRate!==null||validHistRates.length>0){
+      let blendedRetRate;
+      if(currentRetRate!==null&&validHistRates.length>0){
+        const rwts=validHistRates.map((_,i)=>i+1);
+        const rSum=rwts.reduce((s,w)=>s+w,0);
+        const histRetRate=validHistRates.reduce((s,h,i)=>s+rwts[i]*h.retentionRate,0)/rSum;
+        blendedRetRate=(currentRetRate*cw+histRetRate*hw)/(cw+hw);
+      }else{
+        blendedRetRate=currentRetRate??validHistRates[validHistRates.length-1].retentionRate;
+      }
+      forecastRetained={min:Math.max(0,Math.round(forecastIncome.min*blendedRetRate)),max:Math.max(0,Math.round(forecastIncome.max*blendedRetRate))};
+    }
+    // Expense spread: std dev of actual monthly totals
+    const validExp=histMonths.filter(h=>h.expenses>0);
+    if(validExp.length>0){
+      const ewts=validExp.map((_,i)=>i+1);
+      const avgExp=validExp.reduce((s,h,i)=>s+ewts[i]*h.expenses,0)/ewts.reduce((s,w)=>s+w,0);
+      let expSpread;
+      if(validExp.length>=2){
+        const expMean=validExp.reduce((s,h)=>s+h.expenses,0)/validExp.length;
+        expSpread=Math.sqrt(validExp.reduce((s,h)=>s+(h.expenses-expMean)**2,0)/validExp.length);
+      }else{
+        expSpread=avgExp*0.20; // 20% floor — single data point
+      }
+      forecastExpenses={min:Math.max(0,Math.round(avgExp-expSpread)),max:Math.round(avgExp+expSpread)};
+    }
+  }
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
@@ -1771,24 +1849,54 @@ async function renderDashboard(){
           <div class="card-header"><span class="card-title">Monthly Trend (Income vs Expenses)</span></div>
           <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px;font-size:11px;color:var(--text3)">
             <span><span style="display:inline-block;width:10px;height:10px;background:var(--primary);border-radius:2px;margin-right:4px"></span>Income</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:#BA7517;border-radius:2px;margin-right:4px"></span>Retained</span>
             <span><span style="display:inline-block;width:10px;height:10px;background:var(--danger);border-radius:2px;margin-right:4px"></span>Expenses</span>
           </div>
           <div style="display:flex;align-items:flex-end;gap:12px;height:130px;padding:8px 0">
-            ${trendData.map(t=>`
+            ${trendData.map(t=>{
+              const barH=Math.max(4,Math.round((t.income/maxTrend)*72)+4);
+              const expH=Math.max(4,Math.round((t.expenses/maxTrend)*72)+4);
+              const retainedH=t.netLocal>0&&t.income>0?Math.round(Math.min(1,Math.max(0,t.netLocal/t.income))*barH):0;
+              const retainedSeg=retainedH>0?'<div style="height:'+retainedH+'px;background:#BA7517;transition:height 0.4s"></div>':'';
+              return `
               <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
                 <div style="display:flex;gap:3px;align-items:flex-end;width:100%;justify-content:center;height:100px">
                   <div style="width:45%;display:flex;flex-direction:column;align-items:center">
-                    <div style="font-size:9px;color:var(--text3);margin-bottom:2px;white-space:nowrap">${t.income?fmtShort(t.income).replace('₦',''):'—'}</div>
-                    <div style="width:100%;background:var(--primary);border-radius:4px 4px 0 0;height:${Math.max(4,Math.round((t.income/maxTrend)*72)+4)}px;transition:height 0.4s"></div>
+                    <div style="font-size:9px;color:var(--text3);margin-bottom:1px;white-space:nowrap">${t.income?fmtShort(t.income).replace('₦',''):'—'}</div>
+                    <div style="font-size:8px;color:#BA7517;margin-bottom:2px;white-space:nowrap;min-height:10px;line-height:10px">${t.netLocal>0?fmtShort(t.netLocal).replace('₦',''):''}</div>
+                    <div style="width:100%;border-radius:4px 4px 0 0;height:${barH}px;transition:height 0.4s;overflow:hidden;display:flex;flex-direction:column">
+                      <div style="flex:1;background:var(--primary)"></div>
+                      ${retainedSeg}
+                    </div>
                   </div>
                   <div style="width:45%;display:flex;flex-direction:column;align-items:center">
                     <div style="font-size:9px;color:var(--text3);margin-bottom:2px;white-space:nowrap">${t.expenses?fmtShort(t.expenses).replace('₦',''):'—'}</div>
-                    <div style="width:100%;background:var(--danger);border-radius:4px 4px 0 0;height:${Math.max(4,Math.round((t.expenses/maxTrend)*72)+4)}px;transition:height 0.4s"></div>
+                    <div style="width:100%;background:var(--danger);border-radius:4px 4px 0 0;height:${expH}px;transition:height 0.4s"></div>
                   </div>
                 </div>
                 <div style="font-size:11px;color:var(--text2)">${t.label}</div>
-              </div>`).join('')}
+              </div>`;}).join('')}
           </div>
+          ${forecastIncome?`
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:8px">${MONTHS[state.month].toUpperCase()} FORECAST <span style="font-weight:400;text-transform:none;letter-spacing:0">(${forecastLabel} · ${remainingSundays} Sunday${remainingSundays!==1?'s':''} remaining)</span></div>
+            <div style="display:flex;gap:8px;margin-bottom:${forecastExpenses?'8px':'0'}">
+              <div style="flex:1;padding:8px 10px;background:rgba(29,158,117,0.06);border-radius:8px;border:1px solid rgba(29,158,117,0.18)">
+                <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Income</div>
+                <div style="font-size:13px;font-weight:700;color:var(--primary)">${fmtShort(forecastIncome.min)} – ${fmtShort(forecastIncome.max)}</div>
+              </div>
+              ${forecastRetained?`
+              <div style="flex:1;padding:8px 10px;background:rgba(186,117,23,0.06);border-radius:8px;border:1px solid rgba(186,117,23,0.18)">
+                <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Retained</div>
+                <div style="font-size:13px;font-weight:700;color:#BA7517">${fmtShort(forecastRetained.min)} – ${fmtShort(forecastRetained.max)}</div>
+              </div>`:''}
+            </div>
+            ${forecastExpenses?`
+            <div style="padding:8px 10px;background:rgba(163,45,45,0.06);border-radius:8px;border:1px solid rgba(163,45,45,0.18)">
+              <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Expenses</div>
+              <div style="font-size:13px;font-weight:700;color:var(--danger)">${fmtShort(forecastExpenses.min)} – ${fmtShort(forecastExpenses.max)}</div>
+            </div>`:''}
+          </div>`:''}
         </div>
       </div>
 
