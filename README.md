@@ -4,41 +4,50 @@ A comprehensive church accounting and reporting system built for the RCCG Kingdo
 
 ## Features
 
-- **Income Recording** — Log all Sunday collections (Tithes, Thanksgiving, SLO, CRM, Workers' Offering, Sunday School, Children's Offering)
-- **RCCG Remittance Calculator** — Auto-computes all HQ percentages and fixed quotas
-- **Petty Cash / Imprest System** — Admin Officer requests, Accountant verifies, Signatories approve
-- **Expense Tracking** — Categorised by Power, Facility, Repairs, Transport, Communication, etc.
-- **Monthly Reports** — Auto-generated statements for the Pastor to submit to RCCG authorities
-- **Role-Based Access** — Parish Pastor, Church Accountant, Admin Officer, Bank Signatories
+- **Authentication** — PIN-based login (4–6 digits, SHA-256 hashed) with role-based access control and in-app PIN change
+- **Dashboard** — Monthly summary cards showing income, expenses, remittance status, and petty cash float
+- **Transactions** — Unified ledger view of all income, expense, remittance, petty cash, and bank movements with filtering, sorting, and pagination
+- **Income Recording** — Log Sunday collections (Tithes, Thanksgiving, SLO, CRM, Gospel Fund, Sunday School, Teen/Children's Offering) plus Other Income types (midweek offerings, donations, bank transfers, building fund, etc.)
+- **RCCG Remittance Calculator** — Auto-computes all HQ percentages, fixed quotas (RMF, CSR, Education, Camp, Mummy Stipend, Volunteer, Regional), province rebate, and payment tracking with cut-off date management
+- **Expense Tracking** — Categorised by Power & Energy, Facility & Cleaning, Repairs & Maintenance, Sound & Media, Communication, Office & Stationery, Bank Charges, Transportation, RCCG Special Projects, Hospitality, Security, Church Welfare, Property & Projects, Events & Departments; with subcategory suggestions and approval workflow
+- **Bank Module** — Bank account balance tracking, deposits, withdrawals, bank charges, and monthly reconciliation
+- **Petty Cash / Imprest System** — Float management with Admin Officer requests, Accountant verification, Signatory approval, and bank top-up tracking
+- **Monthly Reports** — Auto-generated financial statements with Pastor sign-off workflow
+- **Audit Log** — Timestamped activity log of the last 100 system actions
+- **Notifications** — In-app notification centre with unread badge
+- **IT Admin Panel** — User management, church settings, monthly quota configuration, remittance rate overrides, role permission editor, and backup & restore
 
 ## Roles
 
 | Role | Access |
 |------|--------|
-| Parish Pastor | Full view, report sign-off, final approvals |
-| Church Accountant | Record income, calculate remittances, manage ledger |
-| Admin Officer | Submit petty cash requests, view operational budget |
-| Bank Signatories | Approve and authorise transactions |
+| IT Administrator | Full system access including admin panel, user management, and all financial modules |
+| Parish Pastor | Full view, report sign-off, remittance cut-off editing, final approvals |
+| Church Accountant | Record income, calculate remittances, manage ledger, approve petty cash, generate reports |
+| Admin Officer | Log expenses, submit petty cash requests, view income and petty cash |
+| Bank Signatory | View income and remittances, approve petty cash, authorise bank transactions |
+| Read-Only Viewer | View-only access to dashboard, transactions, income, remittances, expenses, and petty cash |
 
 ## Project Structure
 
 ```
 rccg-kingdom-parish-app/
-├── index.html          # App entry point
+├── index.html                    # SPA shell: login screen + app chrome
+├── _redirects                    # Cloudflare Pages routing (SPA fallback)
+├── wrangler.toml                 # Cloudflare Pages / D1 configuration
+├── package.json
 ├── src/
 │   ├── css/
-│   │   └── styles.css  # Global styles
-│   ├── js/
-│   │   ├── app.js      # Main app logic
-│   │   ├── remittance.js  # RCCG remittance calculations
-│   │   └── reports.js  # Report generation
-│   └── pages/
-│       ├── dashboard.html
-│       ├── income.html
-│       ├── expenses.html
-│       ├── remittances.html
-│       └── reports.html
-└── README.md
+│   │   └── styles.css            # Global styles
+│   └── js/
+│       ├── app.js                # Main SPA logic (all pages & UI)
+│       └── remittance.js         # RCCG remittance calculation module
+├── functions/
+│   └── api/
+│       └── [[route]].js          # Cloudflare Pages Function (REST API)
+└── tests/
+    ├── api-route.test.js         # API endpoint unit tests
+    └── remittance.test.js        # Remittance calculation unit tests
 ```
 
 ## RCCG Remittance Reference
@@ -46,17 +55,17 @@ rccg-kingdom-parish-app/
 ### Tithes
 - Members' Tithe → National: 58% | Local: 42%
 - Ministers' Tithe → National: 62% | Local: 38%
-- Province Rebate → 20% of total local retained share
+- Province Rebate → 20% of the combined local retained tithes (42% of Members' Tithe + 38% of Ministers' Tithe)
 
 ### Thanksgiving
 - National: 75% | Area: 5% | Pastor: 10% | Ministers: 9% | Pastors' Seed: 1%
 
 ### Offerings
 - Sunday Love Offering (SLO) → National: 30% | Local: 70%
-- CRM → National: 60% | Local: 40%
-- Workers' Offering → National: 25% | Local: 75%
+- CRM (Weekly Activities) → National: 60% | Local: 40%
+- Gospel Fund (Workers' Offering) → National: 25% | Local: 75%
 - Sunday School → National: 100%
-- Children's Offering → National: 35% | Local Children's Dept: 65%
+- Teen/Children's Offering → National: 35% | Local Children's Dept: 65%
 
 ## Branch Strategy
 
@@ -66,6 +75,8 @@ rccg-kingdom-parish-app/
 
 ## Built With
 
-- HTML5 / CSS3 / Vanilla JavaScript
-- Chart.js for data visualisation
-- Google Gemini API (AI features via Google AI Studio)
+- HTML5 / CSS3 / Vanilla JavaScript (no framework)
+- Cloudflare Pages — hosting and routing
+- Cloudflare Pages Functions — serverless REST API
+- Cloudflare D1 — SQLite database (production + preview environments)
+- Node.js built-in test runner (`node:test`) for unit tests
