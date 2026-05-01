@@ -1602,24 +1602,32 @@ async function renderDashboard(){
   const dashMonthPrefix = `${state.year}-${String(state.month+1).padStart(2,'0')}`;
   const dashMonthPaidRems = allRemsDash.filter(r=>r.status==='paid' && (r.periodTo||'').startsWith(dashMonthPrefix));
   const dashMonthPaidAmt = dashMonthPaidRems.reduce((s,r)=>s+(r.amount||0),0);
-  // Unpaid amounts carried over from previous periods.
-  const dashOverdueRems = allRemsDash.filter(r=>r.status==='overdue');
-  const dashOverdueUnpaidAmt = dashOverdueRems.reduce((s,r)=>s+(r.amount||0),0);
+  // Current month due (used only for paid/partial status label).
   const dashCurrentMonthRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
     +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
-  // Total due = this month's computed remittances + any unpaid overdue from previous months.
-  const dashTotalRemDueKpi = dashCurrentMonthRemDue + dashOverdueUnpaidAmt;
   const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashCurrentMonthRemDue * PAYMENT_TOLERANCE_THRESHOLD;
   const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
   const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
+  // Accumulated unpaid: remittances owed on ALL income ever collected, minus everything already paid.
+  const dashAllTimeRemittances = await calcRemittancesFromRecords(allIncomeDash);
+  const dashAllTimeIncomeRemDue = (dashAllTimeRemittances.totalNatl||0)+(dashAllTimeRemittances.totalArea||0)
+    +(dashAllTimeRemittances.totalPastor||0)+(dashAllTimeRemittances.totalMinisters||0)
+    +(dashAllTimeRemittances.totalSeed||0)+(dashAllTimeRemittances.provinceRebate||0);
+  // Accumulate monthly quotas for every month since the first income record.
+  const dashFirstIncRec = allIncomeDash.length > 0 ? allIncomeDash[allIncomeDash.length-1] : null;
+  const dashFirstDate = dashFirstIncRec ? new Date(dashFirstIncRec.date||dashFirstIncRec.createdAt) : new Date(state.year, state.month, 1);
+  const dashMonthsElapsed = Math.max(1, (state.year - dashFirstDate.getFullYear())*12 + (state.month - dashFirstDate.getMonth()) + 1);
+  const dashAccumQuotas = dashAllQuotasAmt * dashMonthsElapsed;
+  const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
+  // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
+  const dashTotalRemDueKpi = Math.max(0, dashAllTimeIncomeRemDue + dashAccumQuotas - dashAllPaidRems);
   const churchBal = await calcChurchBalance();
   const pendingPetty = await getPettyCashPendingCount();
-  const overdueRems = dashOverdueRems.length;
+  const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
 
-  // Spendable = total church funds − total outstanding remittances (current month + all overdue) − already paid
-  const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-  const dashOutstandingRems = Math.max(0, dashTotalRemDueKpi - dashAllPaidRems);
+  // Spendable = total church funds − net accumulated unpaid remittances.
+  const dashOutstandingRems = dashTotalRemDueKpi;
   const dashTotalFunds = churchBal.total;
   const dashSpendable = dashTotalFunds - dashOutstandingRems;
   const dashSpendLow = parseFloat(settingsDash?.spendableLow||0)||20000;
@@ -1801,8 +1809,8 @@ async function renderDashboard(){
         <div class="kpi-label">RCCG Remittances Due</div>
         <div class="kpi-val">${fmt(dashTotalRemDueKpi)}</div>
         <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
-        ${dashOverdueUnpaidAmt>0?`<div class="kpi-delta warn" style="font-size:11px">⚠ Includes ${fmt(dashOverdueUnpaidAmt)} unpaid from previous month(s)</div>`:''}
-        <div class="kpi-delta warn">↑ ${totalIncome?Math.round(dashTotalRemDueKpi/totalIncome*100):0}% of income</div>
+        ${dashMonthsElapsed>1?`<div class="kpi-delta warn" style="font-size:11px">⚠ Accumulated unpaid since ${fmtDate(dashFirstIncRec.date||dashFirstIncRec.createdAt)}</div>`:''}
+        <div class="kpi-delta warn">↑ ${dashAllTimeIncomeRemDue+dashAccumQuotas>0?Math.round(dashTotalRemDueKpi/(dashAllTimeIncomeRemDue+dashAccumQuotas)*100):0}% of all-time due</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
