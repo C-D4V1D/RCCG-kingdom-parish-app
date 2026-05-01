@@ -1625,7 +1625,8 @@ async function renderDashboard(){
     let fy=dashFirstDate.getFullYear(), fm=dashFirstDate.getMonth();
     let y=fy, m=fm;
     while(y<state.year||(y===state.year&&m<=state.month)){
-      const cd=getRemCutoffDates(settingsDash,y);
+      // Try year-specific cut-off first, fall back to default (year-agnostic lookup via remCutoffDayForMonth)
+      const cd=getRemCutoffDates(settingsDash,y)||getRemCutoffDates(settingsDash);
       const cutDay=cd?.dates?.[m]||null;
       if(cutDay){
         const cutStr=`${y}-${String(m+1).padStart(2,'0')}-${String(cutDay).padStart(2,'0')}`;
