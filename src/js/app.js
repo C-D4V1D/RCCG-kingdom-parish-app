@@ -1622,7 +1622,12 @@ async function renderDashboard(){
   const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
   const dashTotalRemDueKpi = Math.max(0, dashAllTimeIncomeRemDue + dashAccumQuotas - dashAllPaidRems);
-  const dashAllTimeIncome = allIncomeDash.reduce((s,r)=>s+(r.totalCollection||0),0);
+  // Income from periods not yet covered by a paid remittance — denominator for the % metric.
+  const dashPaidPeriods = allRemsDash.filter(r=>r.status==='paid'&&r.periodFrom&&r.periodTo).map(r=>({from:r.periodFrom,to:r.periodTo}));
+  const dashUnpaidPeriodIncome = allIncomeDash.filter(r=>{
+    const d=r.date||r.createdAt||'';
+    return !d||!dashPaidPeriods.some(p=>d>=p.from&&d<=p.to);
+  }).reduce((s,r)=>s+(r.totalCollection||0),0);
   const churchBal = await calcChurchBalance();
   const pendingPetty = await getPettyCashPendingCount();
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
@@ -1815,7 +1820,7 @@ async function renderDashboard(){
         <div class="kpi-val">${fmt(dashTotalRemDueKpi)}</div>
         <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
         ${dashMonthsElapsed>1?`<div class="kpi-delta warn" style="font-size:11px">⚠ Accumulated unpaid since ${fmtDate(dashFirstIncRec.date||dashFirstIncRec.createdAt)}</div>`:''}
-        <div class="kpi-delta warn">↑ ${dashAllTimeIncome>0?Math.round(dashTotalRemDueKpi/dashAllTimeIncome*100):0}% of income</div>
+        <div class="kpi-delta warn">↑ ${dashUnpaidPeriodIncome>0?Math.round(dashTotalRemDueKpi/dashUnpaidPeriodIncome*100):0}% of income</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
