@@ -1614,11 +1614,32 @@ async function renderDashboard(){
   const dashAllTimeIncomeRemDue = (dashAllTimeRemittances.totalNatl||0)+(dashAllTimeRemittances.totalArea||0)
     +(dashAllTimeRemittances.totalPastor||0)+(dashAllTimeRemittances.totalMinisters||0)
     +(dashAllTimeRemittances.totalSeed||0)+(dashAllTimeRemittances.provinceRebate||0);
-  // Accumulate monthly quotas for every month since the first income record.
+  // Accumulate quotas by counting remittance PERIODS (cut-off to cut-off), not calendar months.
+  // A period ends on a monthly cut-off date; counting calendar months over-counts when one period
+  // spans two calendar months (e.g. Apr 20 – May 24 is ONE period, not two).
   const dashFirstIncRec = allIncomeDash.length > 0 ? allIncomeDash[allIncomeDash.length-1] : null;
   const dashFirstDate = dashFirstIncRec ? new Date(dashFirstIncRec.date||dashFirstIncRec.createdAt) : new Date(state.year, state.month, 1);
-  const dashMonthsElapsed = Math.max(1, (state.year - dashFirstDate.getFullYear())*12 + (state.month - dashFirstDate.getMonth()) + 1);
-  const dashAccumQuotas = dashAllQuotasAmt * dashMonthsElapsed;
+  const dashFirstDateStr = (dashFirstIncRec ? (dashFirstIncRec.date||dashFirstIncRec.createdAt||'') : '').slice(0,10);
+  let dashQuotaPeriods = 0;
+  if(dashFirstIncRec){
+    let fy=dashFirstDate.getFullYear(), fm=dashFirstDate.getMonth();
+    let y=fy, m=fm;
+    while(y<state.year||(y===state.year&&m<=state.month)){
+      // Try year-specific cut-off first, fall back to default (year-agnostic lookup via remCutoffDayForMonth)
+      const cd=getRemCutoffDates(settingsDash,y)||getRemCutoffDates(settingsDash);
+      const cutDay=cd?.dates?.[m]||null;
+      if(cutDay){
+        const cutStr=`${y}-${String(m+1).padStart(2,'0')}-${String(cutDay).padStart(2,'0')}`;
+        if(cutStr>dashFirstDateStr) dashQuotaPeriods++;
+      } else {
+        dashQuotaPeriods++; // no cut-off configured: treat each calendar month as one period
+      }
+      m++; if(m>11){m=0;y++;}
+    }
+    dashQuotaPeriods=Math.max(1,dashQuotaPeriods);
+  }
+  const dashMonthsElapsed = dashQuotaPeriods;
+  const dashAccumQuotas = dashAllQuotasAmt * dashQuotaPeriods;
   const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
   const dashTotalRemDueKpi = Math.max(0, dashAllTimeIncomeRemDue + dashAccumQuotas - dashAllPaidRems);
