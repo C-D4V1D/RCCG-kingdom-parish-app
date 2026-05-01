@@ -1725,7 +1725,11 @@ async function renderDashboard(){
   const totalSundaysFullMonth=fullMonthSundays(state.year,state.month);
   const remainingSundays=Math.max(0,totalSundaysFullMonth-sundayCount);
   const histMonths=[];
-  for(let i=3;i>=1;i--){let m=state.month-i,y=state.year;if(m<0){m+=12;y--;}histMonths.push({income:trendData[3-i].income,expenses:trendData[3-i].expenses,sundays:fullMonthSundays(y,m)});}
+  for(let i=3;i>=1;i--){let m=state.month-i,y=state.year;if(m<0){m+=12;y--;}
+    const hInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});
+    const hSundayRecs=hInc.filter(r=>!r.source||r.source==='sunday_collection');
+    const hSundays=hSundayRecs.length>0?hSundayRecs.length:fullMonthSundays(y,m);
+    histMonths.push({income:trendData[3-i].income,expenses:trendData[3-i].expenses,sundays:hSundays});}
   const validHist=histMonths.filter(h=>h.income>0&&h.sundays>0);
   // Current month's per-Sunday rate (most accurate signal when available)
   const currentRate=sundayCount>0?trendData[3].income/sundayCount:null;
