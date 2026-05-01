@@ -1815,7 +1815,7 @@ async function renderDashboard(){
         <div class="kpi-val">${fmt(dashTotalRemDueKpi)}</div>
         <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
         ${dashMonthsElapsed>1?`<div class="kpi-delta warn" style="font-size:11px">⚠ Accumulated unpaid since ${fmtDate(dashFirstIncRec.date||dashFirstIncRec.createdAt)}</div>`:''}
-        <div class="kpi-delta warn">↑ ${dashAllTimeIncome>0?Math.round(dashAllTimeIncomeRemDue/dashAllTimeIncome*100):0}% of income</div>
+        <div class="kpi-delta warn">↑ ${dashAllTimeIncome>0?Math.round(dashTotalRemDueKpi/dashAllTimeIncome*100):0}% of income</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
