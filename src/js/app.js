@@ -7786,6 +7786,9 @@ window.onunhandledrejection = function(event){
   const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
   if(conn){
     conn.addEventListener('change', updateBanner);
+    // Poll every 10 s so the banner hides promptly when the connection recovers,
+    // since the 'change' event does not always fire on improvement.
+    setInterval(updateBanner, 10000);
     // Run once on load
     if(document.readyState === 'loading'){
       document.addEventListener('DOMContentLoaded', updateBanner);
