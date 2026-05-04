@@ -3959,14 +3959,39 @@ async function renderExpenses(){
     DB.getRemittances(),
     DB.getSettings()
   ]);
-  // Outstanding remittances = calculated due minus what's already been paid
-  const monthIncome = filterByMonth(allIncome);
-  const rem = await calcRemittancesFromRecords(monthIncome);
+  // Outstanding remittances = accumulated all-time due minus all-time paid (same as dashboard KPI logic)
+  const allTimeRemittances = await calcRemittancesFromRecords(allIncome);
+  const allTimeIncomeRemDue = (allTimeRemittances.totalNatl||0)+(allTimeRemittances.totalArea||0)
+    +(allTimeRemittances.totalPastor||0)+(allTimeRemittances.totalMinisters||0)
+    +(allTimeRemittances.totalSeed||0)+(allTimeRemittances.provinceRebate||0);
   const quotaList = getQuotaList(settings);
-  const totalQuotas = quotaList.reduce((s,q)=>s+(q.amount||0),0);
-  const totalRemDue = (rem.totalNatl||0)+(rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalMinisters||0)+(rem.totalSeed||0)+(rem.provinceRebate||0)+totalQuotas;
+  const allQuotasPerPeriod = quotaList.reduce((s,q)=>s+(q.amount||0),0);
+
+  // Count remittance periods from first income record up to viewed month, using configured cut-off dates.
+  const firstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
+  const firstDate = firstIncRec ? new Date(firstIncRec.date||firstIncRec.createdAt) : new Date(state.year, state.month, 1);
+  const firstDateStr = (firstIncRec ? (firstIncRec.date||firstIncRec.createdAt||'') : '').slice(0,10);
+  let quotaPeriods = 0;
+  if(firstIncRec){
+    let fy=firstDate.getFullYear(), fm=firstDate.getMonth();
+    let y=fy, m=fm;
+    while(y<state.year||(y===state.year&&m<=state.month)){
+      const cd=getRemCutoffDates(settings,y)||getRemCutoffDates(settings);
+      const cutDay=cd?.dates?.[m]||null;
+      if(cutDay){
+        const cutStr=`${y}-${String(m+1).padStart(2,'0')}-${String(cutDay).padStart(2,'0')}`;
+        if(cutStr>firstDateStr) quotaPeriods++;
+      } else {
+        quotaPeriods++;
+      }
+      m++; if(m>11){m=0;y++;}
+    }
+    quotaPeriods=Math.max(1,quotaPeriods);
+  }
+
+  const accumQuotas = allQuotasPerPeriod * quotaPeriods;
   const paidRems = allRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-  const outstandingRems = Math.max(0, totalRemDue - paidRems);
+  const outstandingRems = Math.max(0, allTimeIncomeRemDue + accumQuotas - paidRems);
   const totalChurch = churchBal.total;
   const spendable = totalChurch - outstandingRems;
   const spendLow = parseFloat(settings?.spendableLow||0)||20000;
