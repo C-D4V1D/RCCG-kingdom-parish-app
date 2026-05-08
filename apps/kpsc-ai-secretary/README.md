@@ -27,4 +27,13 @@ This folder will contain the **KPSC AI Secretary** Progressive Web App.
   - Post-processing: DeepSeek (summaries/minutes)
 
 ## Status
-Scaffold in progress.
+Integrated Phase 1 draft is now available inside the main finance portal under **KPSC → AI Secretary**.
+
+Current capabilities:
+- Create and save KPSC meeting drafts
+- Track Men/Women/Youth/Ministers attendance for quorum review
+- Paste or type live transcript notes
+- End meetings and generate draft summaries, minutes, resolutions, action items, and governance flags
+- Archive recent AI Secretary meetings through Cloudflare D1-backed API routes
+
+The current processor is deterministic and rule-based so it works without AI provider credentials. It is ready to be swapped to provider-backed transcription and LLM post-processing in a later phase.

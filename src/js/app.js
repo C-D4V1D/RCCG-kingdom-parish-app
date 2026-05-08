@@ -20,9 +20,9 @@ const ROLES = {
 
 const PERMISSIONS = {
   it_admin:      ['all'],
-  pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','petty_view','reports','audit','signoff','rem_cutoff_edit'],
-  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit','rem_cutoff_edit'],
-  admin_officer: ['dashboard','transactions','expenses','petty_request','petty_view','income_view'],
+  pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','petty_view','reports','audit','signoff','rem_cutoff_edit','ai_secretary'],
+  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit','rem_cutoff_edit','ai_secretary'],
+  admin_officer: ['dashboard','transactions','expenses','petty_request','petty_view','income_view','ai_secretary'],
   signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','bank','petty_approve','signoff'],
   viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','petty_view']
 };
@@ -45,6 +45,7 @@ const PERMISSION_DEFS = [
   { key:'reports',          label:'Generate Reports',       group:'Reports'    },
   { key:'audit',            label:'View Audit Log',         group:'Reports'    },
   { key:'signoff',          label:'Sign Off Remittances',   group:'Reports'    },
+  { key:'ai_secretary',     label:'AI Secretary',           group:'KPSC'       },
 ];
 
 const NAV = [
@@ -55,6 +56,7 @@ const NAV = [
   { id:'expenses',     label:'Expenses',      icon:'💸', section:'Finance',  minRole:['it_admin','accountant','admin_officer'] },
   { id:'bank',         label:'Bank',          icon:'🏦', section:'Finance',  minRole:['it_admin','accountant','signatory'] },
   { id:'petty_cash',   label:'Petty Cash',    icon:'💳', section:'Finance',  minRole:['it_admin','accountant','admin_officer','signatory'] },
+  { id:'ai_secretary', label:'AI Secretary',   icon:'🤖', section:'KPSC',     minRole:['it_admin','pastor','accountant','admin_officer'] },
   { id:'reports',      label:'Reports',       icon:'📊', section:'Reports',  minRole:['it_admin','pastor','accountant'] },
   { id:'audit',        label:'Audit Log',     icon:'📋', section:'Reports',  minRole:['it_admin','pastor','accountant'] },
   { id:'admin',        label:'IT Admin',      icon:'⚙️',  section:'System',   minRole:['it_admin'] }
@@ -211,6 +213,11 @@ const DB = {
   importBackup(data)            { return apiFetch('admin/import','POST',data); },
   clearAllData()                { return apiFetch('admin/clear','POST'); },
   clearDataOnly()               { return apiFetch('admin/clear-data','POST'); },
+
+  getAiSecretaryMeetings()       { return apiFetch('ai-secretary-meetings'); },
+  addAiSecretaryMeeting(d)       { return apiFetch('ai-secretary-meetings','POST',d); },
+  updateAiSecretaryMeeting(id,d) { return apiFetch(`ai-secretary-meetings/${id}`,'PUT',d); },
+  processAiSecretaryMeeting(id)  { return apiFetch(`ai-secretary-meetings/${id}/process`,'POST'); },
 };
 
 // ──────────────────────────────────────────
@@ -221,7 +228,8 @@ const state = {
   page: 'dashboard',
   month: new Date().getMonth(),
   year: new Date().getFullYear(),
-  loginBusy: false
+  loginBusy: false,
+  aiSecretaryActiveId: null
 };
 
 // ──────────────────────────────────────────
@@ -321,6 +329,7 @@ const ACCESS_RULES = {
     expenses:     { permissionsAny:['expenses','expenses_view'] },
     bank:         { permissionsAny:['bank'] },
     petty_cash:   { permissionsAny:['petty_request','petty_approve','petty_view'] },
+    ai_secretary: { permissionsAny:['ai_secretary'] },
     reports:      { permissionsAny:['reports'] },
     audit:        { permissionsAny:['audit'] },
     admin:        { roles:['it_admin'] }  // IT Admin only — never permission-gated
@@ -338,7 +347,8 @@ const ACCESS_RULES = {
     expense_edit_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_pending: { roles:['admin_officer','it_admin'] },
     expense_approve_pending: { roles:['accountant','it_admin'] },
-    topup_cancel: ({ request }) => canCancelTopupRequest(request)
+    topup_cancel: ({ request }) => canCancelTopupRequest(request),
+    ai_secretary_manage: ['ai_secretary']
   }
 };
 function evaluateAccessRule(rule, ctx={}){
@@ -608,7 +618,7 @@ async function submitChangePin(btn=null){
 // ──────────────────────────────────────────
 // 6. NAVIGATION & ROUTER
 // ──────────────────────────────────────────
-const VALID_PAGES = ['dashboard','transactions','income','remittances','expenses','bank','petty_cash','reports','audit','admin'];
+const VALID_PAGES = ['dashboard','transactions','income','remittances','expenses','bank','petty_cash','ai_secretary','reports','audit','admin'];
 
 function pageFromPath(){
   const seg = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
@@ -715,7 +725,7 @@ async function navigate(page, fromHistory){
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   const titles={dashboard:'Dashboard',transactions:'Transactions',income:'Record Income',remittances:'Remittances',
-    expenses:'Expenses',bank:'Bank',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel'};
+    expenses:'Expenses',bank:'Bank',petty_cash:'Petty Cash',ai_secretary:'AI Secretary',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel'};
   document.getElementById('topBarTitle').textContent=titles[page]||page;
   const pc=document.getElementById('pageContent');
   pc.innerHTML='<div style="padding:40px;text-align:center;color:var(--text3)">Loading...</div>';
@@ -757,7 +767,7 @@ async function getPettyCashPendingCount(){
 // ──────────────────────────────────────────
 async function renderPage(page){
   const pages={dashboard:renderDashboard,transactions:renderTransactions,income:renderIncome,remittances:renderRemittances,
-    expenses:renderExpenses,bank:renderBank,petty_cash:renderPettyCash,reports:renderReports,
+    expenses:renderExpenses,bank:renderBank,petty_cash:renderPettyCash,ai_secretary:renderAiSecretary,reports:renderReports,
     audit:renderAudit,admin:renderAdmin};
   try{
     if(pages[page]) await pages[page]();
@@ -7674,6 +7684,202 @@ async function showChildrenTeacherModal(){
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
 }
 
+
+// ── AI SECRETARY ──────────────────────────
+const AI_SECRETARY_PARTICIPANT_GROUPS = [
+  { group:'men', label:'Men' },
+  { group:'women', label:'Women' },
+  { group:'youth', label:'Youth' },
+  { group:'ministers', label:'Ministers' },
+];
+
+function normalizeAiSecretaryParticipants(participants=[]){
+  const byGroup = new Map((participants||[]).map(p=>[String(p.group||'').toLowerCase(),p]));
+  return AI_SECRETARY_PARTICIPANT_GROUPS.map(base=>{
+    const row = byGroup.get(base.group) || {};
+    return { group:base.group, label:base.label, present:!!row.present, name:row.name||'' };
+  });
+}
+
+function aiSecretaryParticipantPayload(){
+  return AI_SECRETARY_PARTICIPANT_GROUPS.map(p=>({
+    group:p.group,
+    label:p.label,
+    present:!!document.getElementById(`ais_${p.group}_present`)?.checked,
+    name:document.getElementById(`ais_${p.group}_name`)?.value?.trim() || ''
+  }));
+}
+
+function aiSecretaryStatusBadge(status){
+  const s = String(status||'draft').toLowerCase();
+  if(s==='processed') return '<span class="badge badge-success">✅ Processed</span>';
+  if(s==='recording') return '<span class="badge badge-warn">🔴 Recording</span>';
+  if(s==='ended') return '<span class="badge badge-gray">⏹ Ended</span>';
+  return '<span class="badge badge-gray">Draft</span>';
+}
+
+function aiSecretaryMinutesHtml(markdown=''){
+  return esc(markdown || 'Process the meeting to generate minutes.')
+    .replace(/^# (.*)$/gm,'<h2>$1</h2>')
+    .replace(/^## (.*)$/gm,'<h3>$1</h3>')
+    .replace(/^\*\*(.*?):\*\* (.*)$/gm,'<p><strong>$1:</strong> $2</p>')
+    .replace(/^- (.*)$/gm,'<li>$1</li>')
+    .replace(/\n/g,'<br>');
+}
+
+async function renderAiSecretary(){
+  const meetings = await DB.getAiSecretaryMeetings();
+  const active = (state.aiSecretaryActiveId && meetings.find(m=>m.id===state.aiSecretaryActiveId)) || meetings[0] || null;
+  if(active) state.aiSecretaryActiveId = active.id;
+  const participants = normalizeAiSecretaryParticipants(active?.participants);
+  const quorumMet = participants.every(p=>p.present);
+  const recentRows = meetings.length ? meetings.slice(0,8).map(m=>`
+    <div class="feed-item" onclick="App.loadAiSecretaryMeeting('${m.id}')" style="cursor:pointer">
+      <div class="feed-icon" style="background:var(--primary-light);color:var(--primary)">🤖</div>
+      <div class="feed-body"><div class="feed-title">${esc(m.title)}</div><div class="feed-sub">${fmtDate(m.meetingDate)} · ${esc(m.meetingType||'routine')} · ${aiSecretaryStatusBadge(m.status)}</div></div>
+    </div>`).join('') : '<div class="empty">No AI Secretary meetings yet. Create the first KPSC meeting below.</div>';
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="page-header">
+      <div><h1>🤖 AI Secretary</h1><p>Capture KPSC attendance, transcript notes, resolutions, action items, and policy checks.</p></div>
+      <button class="btn btn-primary" onclick="App.startAiSecretaryDraft()">➕ New Meeting</button>
+    </div>
+
+    <div class="ai-sec-grid">
+      <div class="card ai-sec-workspace">
+        <div class="section-hdr"><div class="section-title">Meeting Capture</div>${active?aiSecretaryStatusBadge(active.status):''}</div>
+        <input type="hidden" id="ais_id" value="${esc(active?.id||'')}" />
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">Meeting Title</label><input id="ais_title" class="form-input" value="${esc(active?.title||'KPSC Meeting')}" /></div>
+          <div class="form-group"><label class="form-label">Date</label><input id="ais_date" type="date" class="form-input" value="${esc(active?.meetingDate||ymdLocal(new Date()))}" /></div>
+        </div>
+        <div class="form-group"><label class="form-label">Meeting Type</label>
+          <select id="ais_type" class="form-select">
+            ${['routine','emergency','virtual'].map(t=>`<option value="${t}" ${active?.meetingType===t?'selected':''}>${t[0].toUpperCase()+t.slice(1)}</option>`).join('')}
+          </select>
+        </div>
+
+        <div class="ai-sec-quorum ${quorumMet?'ok':'warn'}">
+          <strong>${quorumMet?'✅ Quorum looks complete':'⚠️ Quorum needs attention'}</strong>
+          <span>KPSC approvals require Men, Women, Youth, and Ministers representation.</span>
+        </div>
+        <div class="ai-sec-attendance">
+          ${participants.map(p=>`
+            <label class="ai-sec-person">
+              <input type="checkbox" id="ais_${p.group}_present" ${p.present?'checked':''} />
+              <span>${p.label}</span>
+              <input type="text" id="ais_${p.group}_name" class="form-input" placeholder="Representative name" value="${esc(p.name)}" />
+            </label>`).join('')}
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Live Transcript / Secretary Notes</label>
+          <textarea id="ais_transcript" class="form-textarea ai-sec-transcript" placeholder="Paste live transcript here, or type notes as the meeting happens...">${esc(active?.transcriptText||'')}</textarea>
+        </div>
+        <div class="ai-sec-actions no-print">
+          <button class="btn" onclick="App.saveAiSecretaryMeeting(this)">💾 Save Draft</button>
+          <button class="btn btn-amber" onclick="App.endAiSecretaryMeeting(this)">⏹ End Meeting</button>
+          <button class="btn btn-primary" onclick="App.processAiSecretaryMeeting(this)">✨ Generate Minutes</button>
+          ${active?.minutesMarkdown?`<button class="btn" onclick="App.copyAiSecretaryMinutes()">📋 Copy Minutes</button>`:''}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="section-hdr"><div class="section-title">Recent Meetings</div><span class="text-muted fs-12">${meetings.length} total</span></div>
+        <div class="feed-list">${recentRows}</div>
+      </div>
+    </div>
+
+    <div class="grid-3 mt-2">
+      <div class="kpi"><div class="kpi-label">Potential Resolutions</div><div class="kpi-value">${active?.resolutions?.length||0}</div></div>
+      <div class="kpi"><div class="kpi-label">Action Items</div><div class="kpi-value">${active?.actionItems?.length||0}</div></div>
+      <div class="kpi"><div class="kpi-label">Policy Flags</div><div class="kpi-value" style="color:${active?.policyFlags?.length?'var(--danger)':'var(--success)'}">${active?.policyFlags?.length||0}</div></div>
+    </div>
+
+    <div class="card mt-2 ai-sec-output">
+      <div class="section-hdr"><div class="section-title">Generated Minutes & Governance Review</div><span class="text-muted fs-12">Draft for human approval</span></div>
+      ${active?.summaryShort?`<div class="alert alert-info"><span class="alert-icon">ℹ</span><span>${esc(active.summaryShort)}</span></div>`:''}
+      <div class="ai-sec-minutes">${aiSecretaryMinutesHtml(active?.minutesMarkdown)}</div>
+    </div>`;
+}
+
+async function startAiSecretaryDraft(){
+  const meeting = await DB.addAiSecretaryMeeting({
+    title:'KPSC Meeting', meetingType:'routine', meetingDate:ymdLocal(new Date()),
+    status:'recording', participants:normalizeAiSecretaryParticipants(), createdBy:state.user?.name||'', startedAt:new Date().toISOString()
+  });
+  state.aiSecretaryActiveId = meeting.id;
+  DB.addAudit('ai_secretary_started',`AI Secretary meeting started: ${meeting.title}`,state.user?.name);
+  showAlert('AI Secretary meeting created. Add attendance and transcript notes as the meeting progresses.','success');
+  await renderAiSecretary();
+}
+
+async function loadAiSecretaryMeeting(id){
+  state.aiSecretaryActiveId = id;
+  await renderAiSecretary();
+}
+
+async function saveAiSecretaryMeeting(btn=null){
+  const id = document.getElementById('ais_id')?.value;
+  const payload = {
+    title:document.getElementById('ais_title')?.value?.trim() || 'KPSC Meeting',
+    meetingType:document.getElementById('ais_type')?.value || 'routine',
+    meetingDate:document.getElementById('ais_date')?.value || ymdLocal(new Date()),
+    status:id ? 'recording' : 'draft',
+    participants:aiSecretaryParticipantPayload(),
+    transcriptText:document.getElementById('ais_transcript')?.value || '',
+    createdBy:state.user?.name||''
+  };
+  const restore = setBtnLoading(btn,'Saving…');
+  try{
+    const saved = id ? await DB.updateAiSecretaryMeeting(id,payload) : await DB.addAiSecretaryMeeting(payload);
+    state.aiSecretaryActiveId = saved.id;
+    DB.addAudit('ai_secretary_saved',`AI Secretary meeting saved: ${saved.title}`,state.user?.name);
+    showAlert('AI Secretary draft saved.','success');
+    await loadAiSecretaryMeeting(saved.id);
+  }catch(e){ showAlert(e.message || 'Failed to save meeting.','danger'); }
+  finally{ restore(); }
+}
+
+async function endAiSecretaryMeeting(btn=null){
+  const id = document.getElementById('ais_id')?.value;
+  if(!id){ await saveAiSecretaryMeeting(btn); return; }
+  const restore = setBtnLoading(btn,'Ending…');
+  try{
+    const payload = {
+      title:document.getElementById('ais_title')?.value?.trim() || 'KPSC Meeting',
+      meetingType:document.getElementById('ais_type')?.value || 'routine',
+      meetingDate:document.getElementById('ais_date')?.value || ymdLocal(new Date()),
+      status:'ended', endedAt:new Date().toISOString(), participants:aiSecretaryParticipantPayload(), transcriptText:document.getElementById('ais_transcript')?.value || ''
+    };
+    const saved = await DB.updateAiSecretaryMeeting(id,payload);
+    state.aiSecretaryActiveId = saved.id;
+    DB.addAudit('ai_secretary_ended',`AI Secretary meeting ended: ${saved.title}`,state.user?.name);
+    showAlert('Meeting marked ended. You can now generate minutes.','success');
+    await loadAiSecretaryMeeting(saved.id);
+  }catch(e){ showAlert(e.message || 'Failed to end meeting.','danger'); }
+  finally{ restore(); }
+}
+
+async function processAiSecretaryMeeting(btn=null){
+  const id = document.getElementById('ais_id')?.value;
+  if(!id){ showAlert('Save the meeting before generating minutes.','danger'); return; }
+  await saveAiSecretaryMeeting();
+  const restore = setBtnLoading(btn,'Generating…');
+  try{
+    const processed = await DB.processAiSecretaryMeeting(id);
+    DB.addAudit('ai_secretary_processed',`AI Secretary minutes generated: ${processed.title}`,state.user?.name);
+    showAlert('Draft minutes, resolutions, action items, and policy checks generated.','success');
+    await loadAiSecretaryMeeting(id);
+  }catch(e){ showAlert(e.message || 'Failed to generate minutes.','danger'); }
+  finally{ restore(); }
+}
+
+function copyAiSecretaryMinutes(){
+  const text = document.querySelector('.ai-sec-minutes')?.innerText || '';
+  navigator.clipboard?.writeText(text).then(()=>showAlert('Minutes copied to clipboard.','success')).catch(()=>showAlert('Could not copy minutes automatically. Select and copy manually.','warn'));
+}
+
 // ── KPSC ALERT ────────────────────────────
 async function showKPSCAlert(){
   const income=filterByMonth(await DB.getIncome());
@@ -7759,6 +7965,7 @@ return {
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange,
   setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
+  startAiSecretaryDraft, loadAiSecretaryMeeting, saveAiSecretaryMeeting, endAiSecretaryMeeting, processAiSecretaryMeeting, copyAiSecretaryMinutes,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert
 };
 

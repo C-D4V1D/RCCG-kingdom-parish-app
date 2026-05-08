@@ -335,3 +335,21 @@ tr:hover td{background:var(--surface)}
 .d-flex{display:flex}.align-center{align-items:center}.justify-between{justify-content:space-between}
 .gap-1{gap:8px}.gap-2{gap:16px}
 .hidden{display:none!important}
+
+/* AI SECRETARY */
+.ai-sec-grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(280px,0.8fr);gap:16px;align-items:start}
+.ai-sec-workspace{border-top:3px solid var(--primary)}
+.ai-sec-quorum{display:flex;gap:8px;align-items:center;justify-content:space-between;border-radius:var(--r);padding:10px 12px;margin-bottom:12px;font-size:12px;border:1px solid var(--border)}
+.ai-sec-quorum.ok{background:rgba(15,110,86,0.08);border-color:rgba(15,110,86,0.2);color:var(--primary)}
+.ai-sec-quorum.warn{background:rgba(186,117,23,0.1);border-color:rgba(186,117,23,0.25);color:var(--amber)}
+.ai-sec-attendance{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.ai-sec-person{display:grid;grid-template-columns:auto 82px minmax(0,1fr);gap:8px;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:10px;font-size:12px;font-weight:600;color:var(--text2)}
+.ai-sec-person .form-input{margin:0;padding:7px 9px;font-size:12px;background:var(--card)}
+.ai-sec-transcript{min-height:220px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.6}
+.ai-sec-actions{display:flex;flex-wrap:wrap;gap:8px}
+.ai-sec-output{border-left:3px solid var(--primary)}
+.ai-sec-minutes{font-size:13px;line-height:1.7;color:var(--text2)}
+.ai-sec-minutes h2{font-size:20px;color:var(--text);margin:0 0 8px;font-family:Georgia,serif}
+.ai-sec-minutes h3{font-size:14px;color:var(--primary);margin:14px 0 6px;text-transform:uppercase;letter-spacing:.4px}
+.ai-sec-minutes li{margin-left:18px;margin-bottom:4px}
+@media(max-width:900px){.ai-sec-grid{grid-template-columns:1fr}.ai-sec-attendance{grid-template-columns:1fr}.ai-sec-quorum{align-items:flex-start;flex-direction:column}.ai-sec-person{grid-template-columns:auto 70px minmax(0,1fr)}}

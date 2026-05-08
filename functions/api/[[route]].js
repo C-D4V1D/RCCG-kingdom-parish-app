@@ -173,6 +173,15 @@ export async function onRequest(context) {
       if (method === 'POST' && param === 'read') return await markAllRead(DB);
     }
 
+    // ── /api/ai-secretary-meetings ─────────────────────────────
+    if (route === 'ai-secretary-meetings') {
+      if (method === 'GET'  && !param) return await getAiSecretaryMeetings(DB);
+      if (method === 'POST' && !param) return await createAiSecretaryMeeting(DB, body);
+      if (method === 'GET'  &&  param) return await getAiSecretaryMeeting(DB, param);
+      if (method === 'PUT'  &&  param) return await updateAiSecretaryMeeting(DB, param, body);
+      if (method === 'POST' && parts[2] === 'process') return await processAiSecretaryMeeting(DB, param);
+    }
+
     // ── /api/admin ─────────────────────────────────────────────
     if (route === 'admin') {
       if (method === 'POST' && param === 'clear')      return await adminClear(DB);
@@ -328,6 +337,26 @@ async function handleInit(DB) {
       is_read INTEGER DEFAULT 0,
       ts      TEXT DEFAULT (datetime('now'))
     )`,
+    `CREATE TABLE IF NOT EXISTS ai_secretary_meetings (
+      id                TEXT PRIMARY KEY,
+      title             TEXT NOT NULL DEFAULT '',
+      meeting_type      TEXT DEFAULT 'routine',
+      meeting_date      TEXT DEFAULT '',
+      status            TEXT DEFAULT 'draft',
+      participants_json TEXT DEFAULT '[]',
+      transcript_text   TEXT DEFAULT '',
+      summary_short     TEXT DEFAULT '',
+      summary_long      TEXT DEFAULT '',
+      minutes_markdown  TEXT DEFAULT '',
+      resolutions_json  TEXT DEFAULT '[]',
+      action_items_json TEXT DEFAULT '[]',
+      policy_flags_json TEXT DEFAULT '[]',
+      created_by        TEXT DEFAULT '',
+      started_at        TEXT DEFAULT '',
+      ended_at          TEXT DEFAULT '',
+      processed_at      TEXT DEFAULT '',
+      created_at        TEXT DEFAULT (datetime('now'))
+    )`,
   ];
 
   // Run all CREATE TABLE statements first
@@ -434,7 +463,7 @@ async function handleInit(DB) {
   return ok({
     success: true,
     message: 'Database initialised. All tables created and default users seeded.',
-    tables: ['users','income','expenses','petty_cash','petty_config','remittances','cash_transactions','audit_log','settings','notifications'],
+    tables: ['users','income','expenses','petty_cash','petty_config','remittances','cash_transactions','audit_log','settings','notifications','ai_secretary_meetings'],
   });
 }
 
@@ -1016,6 +1045,198 @@ async function saveSettings(DB, data) {
     await DB.prepare(`INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)`).bind(key, stored).run();
   }
   return ok({ saved: true });
+}
+
+
+// ── AI SECRETARY ───────────────────────────────────────────────────
+function normalizeAiParticipants(participants) {
+  const fallback = [
+    { group: 'men', label: 'Men', present: false, name: '' },
+    { group: 'women', label: 'Women', present: false, name: '' },
+    { group: 'youth', label: 'Youth', present: false, name: '' },
+    { group: 'ministers', label: 'Ministers', present: false, name: '' },
+  ];
+  const incoming = Array.isArray(participants) ? participants : [];
+  const byGroup = new Map(incoming.map(p => [String(p.group || '').toLowerCase(), p]));
+  return fallback.map(base => {
+    const row = byGroup.get(base.group) || {};
+    return {
+      group: base.group,
+      label: row.label || base.label,
+      present: !!row.present,
+      name: String(row.name || '').trim(),
+    };
+  });
+}
+
+function aiSecretaryMeetingFromRow(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    meetingType: row.meeting_type,
+    meetingDate: row.meeting_date,
+    status: row.status,
+    participants: safeJsonParse(row.participants_json, []),
+    transcriptText: row.transcript_text || '',
+    summaryShort: row.summary_short || '',
+    summaryLong: row.summary_long || '',
+    minutesMarkdown: row.minutes_markdown || '',
+    resolutions: safeJsonParse(row.resolutions_json, []),
+    actionItems: safeJsonParse(row.action_items_json, []),
+    policyFlags: safeJsonParse(row.policy_flags_json, []),
+    createdBy: row.created_by || '',
+    startedAt: row.started_at || '',
+    endedAt: row.ended_at || '',
+    processedAt: row.processed_at || '',
+    createdAt: row.created_at || '',
+  };
+}
+
+function extractSentenceMatches(transcript, patterns, fallback) {
+  const sentences = String(transcript || '').split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(Boolean);
+  const found = sentences.filter(sentence => patterns.some(pattern => pattern.test(sentence))).slice(0, 8);
+  return found.length ? found : fallback;
+}
+
+function buildAiSecretaryOutput(meeting) {
+  const transcript = meeting.transcriptText || '';
+  const participants = normalizeAiParticipants(meeting.participants);
+  const present = participants.filter(p => p.present);
+  const missingGroups = participants.filter(p => !p.present).map(p => p.label);
+  const quorumMet = missingGroups.length === 0;
+  const decisions = extractSentenceMatches(transcript, [/\b(resolve[ds]?|approved|agreed|motion|decision|voted)\b/i], ['No explicit resolutions were detected. Review the transcript and add decisions manually.']);
+  const actions = extractSentenceMatches(transcript, [/\b(action|follow up|to do|assign(?:ed)?|responsible|by \d{1,2}|deadline|before)\b/i], ['No explicit action items were detected. Review the transcript and add follow-up tasks manually.']);
+  const privacyRisk = /beneficiar(y|ies)|welfare.+(name|names)|medical|hospital|family issue/i.test(transcript);
+  const majorProject = /building|land|capital|renovation|project|equipment/i.test(transcript);
+  const welfare = /welfare|support|assistance|benevolence/i.test(transcript);
+  const summaryShort = `${meeting.title || 'KPSC meeting'} captured ${present.length} of 4 required group representatives. ${decisions.length} potential resolution(s) and ${actions.length} potential action item(s) were identified.`;
+  const summaryLong = [
+    `Meeting type: ${meeting.meetingType || 'routine'}.`,
+    `Attendance: ${present.map(p => `${p.label}${p.name ? ` (${p.name})` : ''}`).join(', ') || 'No representatives marked present'}.`,
+    quorumMet ? 'Quorum check: Men, Women, Youth, and Ministers are all represented.' : `Quorum check: missing ${missingGroups.join(', ')} representative(s); approvals should be deferred or ratified later.`,
+    majorProject ? 'Governance note: capital/project language was detected, so two-thirds approval may apply.' : 'Governance note: no major capital-project language was detected by the draft processor.',
+    welfare ? 'Welfare note: welfare-related language was detected; keep KPSC records focused on funds and avoid unnecessary beneficiary names.' : 'Welfare note: no welfare-specific issue was detected.',
+  ].join('\n');
+  const resolutions = decisions.map((text, index) => ({
+    id: `res-${index + 1}`,
+    text,
+    category: welfare ? 'welfare' : (majorProject ? 'development' : 'other'),
+    requiredThreshold: majorProject ? 'two_thirds' : 'simple_majority',
+    approved: /approved|agreed|resolved|voted/i.test(text),
+    voteSummary: majorProject ? 'Two-thirds threshold suggested for review.' : 'Simple majority threshold suggested for review.',
+  }));
+  const actionItems = actions.map((text, index) => ({
+    id: `act-${index + 1}`,
+    task: text,
+    assignee: 'Unassigned',
+    dueDate: '',
+    status: 'pending',
+  }));
+  const policyFlags = [
+    ...(quorumMet ? [] : [{ type: 'quorum_missing', severity: 'high', message: `Missing required representative(s): ${missingGroups.join(', ')}.` }]),
+    ...(majorProject ? [{ type: 'threshold_review', severity: 'medium', message: 'Potential major capital project detected; confirm two-thirds approval.' }] : []),
+    ...(privacyRisk ? [{ type: 'welfare_privacy', severity: 'medium', message: 'Possible welfare/privacy details detected; remove beneficiary names from minutes unless necessary.' }] : []),
+  ];
+  const minutesMarkdown = [
+    `# ${meeting.title || 'KPSC Meeting'} Minutes`,
+    `**Date:** ${meeting.meetingDate || 'Not specified'}`,
+    `**Type:** ${meeting.meetingType || 'routine'}`,
+    `**Quorum:** ${quorumMet ? 'Met' : `Not met (${missingGroups.join(', ')} missing)`}`,
+    '',
+    '## Attendance',
+    ...participants.map(p => `- ${p.label}: ${p.present ? `Present${p.name ? ` — ${p.name}` : ''}` : 'Absent'}`),
+    '',
+    '## Summary',
+    summaryLong,
+    '',
+    '## Resolutions',
+    ...resolutions.map(r => `- ${r.text} (${r.requiredThreshold.replace('_', ' ')})`),
+    '',
+    '## Action Items',
+    ...actionItems.map(a => `- ${a.task} — ${a.assignee}`),
+    '',
+    '## Policy Checks',
+    ...(policyFlags.length ? policyFlags.map(f => `- ${f.severity.toUpperCase()}: ${f.message}`) : ['- No policy flags detected by the draft processor.']),
+  ].join('\n');
+  return { summaryShort, summaryLong, minutesMarkdown, resolutions, actionItems, policyFlags };
+}
+
+async function getAiSecretaryMeetings(DB) {
+  const { results } = await DB.prepare(`SELECT * FROM ai_secretary_meetings ORDER BY meeting_date DESC, created_at DESC`).all();
+  return ok((results || []).map(aiSecretaryMeetingFromRow));
+}
+
+async function getAiSecretaryMeeting(DB, id) {
+  const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
+  if (!row) return err('AI secretary meeting not found', 404);
+  return ok(aiSecretaryMeetingFromRow(row));
+}
+
+async function createAiSecretaryMeeting(DB, data) {
+  const id = data.id || newId('AIM-');
+  const participants = normalizeAiParticipants(data.participants);
+  const now = new Date().toISOString();
+  await DB.prepare(`
+    INSERT INTO ai_secretary_meetings
+      (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,created_by,started_at,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)
+  `).bind(
+    id,
+    String(data.title || 'KPSC Meeting').trim(),
+    data.meetingType || 'routine',
+    data.meetingDate || now.slice(0, 10),
+    data.status || 'draft',
+    JSON.stringify(participants),
+    data.transcriptText || '',
+    data.createdBy || '',
+    data.startedAt || '',
+    now,
+  ).run();
+  return await getAiSecretaryMeeting(DB, id);
+}
+
+async function updateAiSecretaryMeeting(DB, id, data) {
+  const existing = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
+  if (!existing) return err('AI secretary meeting not found', 404);
+  const participants = data.participants !== undefined ? normalizeAiParticipants(data.participants) : safeJsonParse(existing.participants_json, []);
+  await DB.prepare(`
+    UPDATE ai_secretary_meetings SET
+      title=?, meeting_type=?, meeting_date=?, status=?, participants_json=?, transcript_text=?, ended_at=?
+    WHERE id=?
+  `).bind(
+    data.title !== undefined ? String(data.title).trim() : existing.title,
+    data.meetingType !== undefined ? data.meetingType : existing.meeting_type,
+    data.meetingDate !== undefined ? data.meetingDate : existing.meeting_date,
+    data.status !== undefined ? data.status : existing.status,
+    JSON.stringify(participants),
+    data.transcriptText !== undefined ? data.transcriptText : existing.transcript_text,
+    data.endedAt !== undefined ? data.endedAt : existing.ended_at,
+    id,
+  ).run();
+  return await getAiSecretaryMeeting(DB, id);
+}
+
+async function processAiSecretaryMeeting(DB, id) {
+  const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
+  if (!row) return err('AI secretary meeting not found', 404);
+  const meeting = aiSecretaryMeetingFromRow(row);
+  const output = buildAiSecretaryOutput(meeting);
+  const processedAt = new Date().toISOString();
+  await DB.prepare(`
+    UPDATE ai_secretary_meetings SET
+      status='processed', summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?, processed_at=?
+    WHERE id=?
+  `).bind(
+    output.summaryShort,
+    output.summaryLong,
+    output.minutesMarkdown,
+    JSON.stringify(output.resolutions),
+    JSON.stringify(output.actionItems),
+    JSON.stringify(output.policyFlags),
+    processedAt,
+    id,
+  ).run();
+  return ok({ ...meeting, ...output, status: 'processed', processedAt });
 }
 
 // ── NOTIFICATIONS ─────────────────────────────────────────────────

@@ -238,3 +238,70 @@ test('login with hashed PIN does not run upgrade update', async () => {
   assert.equal(body.id, 'u5');
   assert.equal(runs.length, 0);
 });
+
+test('AI secretary processing returns draft minutes and policy flags', async () => {
+  const runs = [];
+  const participants = [
+    { group: 'men', label: 'Men', present: true, name: 'Bro A' },
+    { group: 'women', label: 'Women', present: true, name: 'Sis B' },
+    { group: 'youth', label: 'Youth', present: false, name: '' },
+    { group: 'ministers', label: 'Ministers', present: true, name: 'Min C' }
+  ];
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) {
+          statement._bound = args;
+          return statement;
+        },
+        async first() {
+          if (/SELECT \* FROM ai_secretary_meetings WHERE id=\?/.test(sql)) {
+            return {
+              id: 'AIM-1',
+              title: 'KPSC Emergency Meeting',
+              meeting_type: 'emergency',
+              meeting_date: '2026-05-08',
+              status: 'ended',
+              participants_json: JSON.stringify(participants),
+              transcript_text: 'The committee resolved to approve generator repairs. Action: treasurer to follow up before Friday. Welfare beneficiary names were discussed.',
+              summary_short: '',
+              summary_long: '',
+              minutes_markdown: '',
+              resolutions_json: '[]',
+              action_items_json: '[]',
+              policy_flags_json: '[]',
+              created_by: 'Secretary',
+              started_at: '',
+              ended_at: '',
+              processed_at: '',
+              created_at: '2026-05-08T00:00:00.000Z'
+            };
+          }
+          throw new Error(`Unexpected SQL in first(): ${sql}`);
+        },
+        async run() {
+          runs.push({ sql, bound: statement._bound });
+          return { success: true };
+        }
+      };
+      return statement;
+    }
+  });
+
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/ai-secretary-meetings/AIM-1/process', 'POST'),
+    env: { DB }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.status, 'processed');
+  assert.match(body.minutesMarkdown, /KPSC Emergency Meeting Minutes/);
+  assert.ok(body.resolutions.some(r => /generator repairs/i.test(r.text)));
+  assert.ok(body.actionItems.some(a => /treasurer to follow up/i.test(a.task)));
+  assert.ok(body.policyFlags.some(f => f.type === 'quorum_missing'));
+  assert.ok(body.policyFlags.some(f => f.type === 'welfare_privacy'));
+  assert.equal(runs.length, 1);
+  assert.match(runs[0].sql, /UPDATE ai_secretary_meetings SET/);
+});
