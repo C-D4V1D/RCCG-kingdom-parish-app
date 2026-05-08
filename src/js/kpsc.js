@@ -539,7 +539,7 @@ document.addEventListener('visibilitychange', () => {
 function diarizerFloat32ToInt16(float32) {
   const int16 = new Int16Array(float32.length);
   for (let i = 0; i < float32.length; i++) {
-    int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32768)));
+    int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
   }
   return int16;
 }
@@ -718,9 +718,12 @@ function diarizerClose(markManual) {
   try { Diarizer.workletNode?.disconnect(); } catch (_) { /* noop */ }
   Diarizer.workletNode = null;
   if (Diarizer.audioCtx && Diarizer.audioCtx.state !== 'closed') {
-    Diarizer.audioCtx.close().catch(() => {/* noop */});
+    const ctxToClose = Diarizer.audioCtx;
+    Diarizer.audioCtx = null;
+    ctxToClose.close().catch(() => {/* noop */});
+  } else {
+    Diarizer.audioCtx = null;
   }
-  Diarizer.audioCtx = null;
   if (Diarizer.workletUrl) {
     URL.revokeObjectURL(Diarizer.workletUrl);
     Diarizer.workletUrl = null;
@@ -1456,7 +1459,7 @@ async function renderSettings(main) {
           <input type="password" id="ks-deepseek-key" class="k-input"
             placeholder="${hasDeepseek ? '••••••••••••••••' : 'sk-...'}"
             autocomplete="off" value="${esc(deepseekKey)}" />
-          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at platform.deepseek.com</p>
+          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at https://platform.deepseek.com</p>
         </div>
 
         <div class="k-form-group">
@@ -1464,7 +1467,7 @@ async function renderSettings(main) {
           <input type="password" id="ks-openai-key" class="k-input"
             placeholder="${hasOpenai ? '••••••••••••••••' : 'sk-...'}"
             autocomplete="off" value="${esc(openaiKey)}" />
-          <p class="k-hint">Optional alternative AI provider for meeting minutes. Get a key at platform.openai.com</p>
+          <p class="k-hint">Optional alternative AI provider for meeting minutes. Get a key at https://platform.openai.com</p>
         </div>
 
         <div id="ks-save-msg" class="k-settings-msg" style="display:none"></div>
@@ -1481,11 +1484,11 @@ async function renderSettings(main) {
         </p>
         <div class="k-env-row">
           <code class="k-env-key">OPENAI_API_KEY</code>
-          <span class="k-env-desc">Powers live interim transcription (OpenAI Realtime Whisper via WebRTC). Get a key at <em>platform.openai.com</em>.</span>
+          <span class="k-env-desc">Powers live interim transcription (OpenAI Realtime Whisper via WebRTC). Get a key at <em>https://platform.openai.com</em>.</span>
         </div>
         <div class="k-env-row">
           <code class="k-env-key">DEEPGRAM_API_KEY</code>
-          <span class="k-env-desc">Powers speaker diarization — identifies who is speaking and labels each transcript turn. Get a key at <em>deepgram.com</em>.</span>
+          <span class="k-env-desc">Powers speaker diarization — identifies who is speaking and labels each transcript turn. Get a key at <em>https://console.deepgram.com</em>.</span>
         </div>
         <p class="k-hint" style="margin-top:12px">
           Set these in the Cloudflare Pages dashboard → Settings → Environment Variables.
