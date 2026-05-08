@@ -123,6 +123,7 @@ const AZURE_IDENTIFY_MIN_SCORE = 0.5;     // minimum confidence (0–1) to accep
 const AZURE_ENROLL_DURATION_SEC = 30;     // seconds of audio to capture for enrollment
 const DEFAULT_PCM_SAMPLE_RATE   = 48000;  // fallback rate before the AudioContext is created
 const BASE64_CHUNK_SIZE         = 32768;  // chars per chunk when encoding large buffers
+const PCM_BUFFER_DURATION_SEC   = 60;     // seconds of PCM audio to retain in the ring buffer
 
 function recFmt() {
   const m = Math.floor(Rec.elapsed / 60);
@@ -219,7 +220,7 @@ function recRenderUI() {
 // Return the display name for a Deepgram speaker index.
 // Uses the speakerMap if a member has been assigned, otherwise falls back to "Speaker N".
 function speakerDisplayName(idx) {
-  if (idx == null) return '';
+  if (idx === null || idx === undefined) return '';
   return Rec.speakerMap.get(idx) || `Speaker ${idx + 1}`;
 }
 
@@ -910,7 +911,7 @@ function diarizerBufferPcm(samples) {
   Diarizer.pcmChunks.push({ offset: Diarizer.pcmSampleOffset, data: samples.slice() });
   Diarizer.pcmSampleOffset += samples.length;
   // Remove chunks older than 60 seconds.
-  const minOffset = Diarizer.pcmSampleOffset - (60 * (Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE));
+  const minOffset = Diarizer.pcmSampleOffset - (PCM_BUFFER_DURATION_SEC * (Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE));
   while (Diarizer.pcmChunks.length &&
          Diarizer.pcmChunks[0].offset + Diarizer.pcmChunks[0].data.length <= minOffset) {
     Diarizer.pcmChunks.shift();
@@ -1152,6 +1153,9 @@ function esc(s) {
 // ── PCM AUDIO HELPERS ────────────────────────────────────────────
 // Linearly resample a Float32 PCM array from `fromRate` to 16 kHz.
 // Azure Speaker Recognition requires 8/16/32 kHz WAV input.
+// Linear interpolation is sufficient for speaker identification — the model
+// is robust to minor resampling artefacts, and higher-quality algorithms
+// (e.g. polyphase filters) are not worth the added complexity here.
 function resampleTo16k(float32, fromRate) {
   const toRate = 16000;
   if (fromRate === toRate) return float32;
@@ -1198,14 +1202,15 @@ function pcmToWav(float32, sampleRate) {
 }
 
 // Convert an ArrayBuffer to a base64 string (handles large buffers safely).
+// Chunks are collected into an array and joined once to avoid O(n²) string copies.
 function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary  = '';
+  const bytes  = new Uint8Array(buffer);
+  const parts  = [];
   for (let i = 0; i < bytes.length; i += BASE64_CHUNK_SIZE) {
-    // Spread each chunk into String.fromCharCode to avoid exceeding call-stack limits.
-    binary += String.fromCharCode(...bytes.subarray(i, i + BASE64_CHUNK_SIZE));
+    // Spread each fixed-size chunk to avoid exceeding the call-stack limit.
+    parts.push(String.fromCharCode(...bytes.subarray(i, i + BASE64_CHUNK_SIZE)));
   }
-  return btoa(binary);
+  return btoa(parts.join(''));
 }
 
 
@@ -1926,10 +1931,10 @@ async function finishEnrollRecording() {
     const wavBuffer   = pcmToWav(resampled, 16000);
     const audioBase64 = arrayBufferToBase64(wavBuffer);
 
-    // Delete the old Azure profile if one exists (best-effort).
+    // Delete the old Azure profile if one exists (best-effort; a failure won't block re-enrolment).
     if (member.azureSpeakerProfileId) {
       await fetch(`${API}/azure-speaker-profiles/${encodeURIComponent(member.azureSpeakerProfileId)}`,
-        { method: 'DELETE' }).catch(() => {});
+        { method: 'DELETE' }).catch(e => console.warn('Could not delete old Azure profile:', e));
     }
 
     // Create a new Azure speaker profile.

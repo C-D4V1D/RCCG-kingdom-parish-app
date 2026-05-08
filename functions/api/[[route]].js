@@ -1510,6 +1510,9 @@ async function createDeepgramTranscriptionToken(env) {
 //   AZURE_SPEAKER_KEY    – Azure Cognitive Services key
 //   AZURE_SPEAKER_REGION – Azure region slug, default: eastus
 
+// Azure returns this UUID when the identification API finds no matching profile.
+const AZURE_NIL_UUID = '00000000-0000-0000-0000-000000000000';
+
 function azureBase(env) {
   const key    = String(env.AZURE_SPEAKER_KEY    || '').trim();
   const region = String(env.AZURE_SPEAKER_REGION || 'eastus').trim();
@@ -1609,7 +1612,7 @@ async function azureIdentifySpeaker(env, body) {
   const profileId  = identified?.profileId || null;
   const score      = identified?.score ?? 0;
   // Azure returns the nil UUID when no profile matches.
-  const isNilUuid  = !profileId || profileId === '00000000-0000-0000-0000-000000000000';
+  const isNilUuid = !profileId || profileId === AZURE_NIL_UUID;
   return ok({ profileId: isNilUuid ? null : profileId, score });
 }
 
