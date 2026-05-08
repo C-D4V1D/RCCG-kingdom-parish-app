@@ -366,7 +366,7 @@ function navigate(page) {
     b.classList.toggle('active', b.dataset.page === page);
   });
   document.getElementById('kpsc-back-btn').style.display = 'none';
-  const titles = { dashboard: 'Dashboard', members: 'KPSC Members', archive: 'Meeting Archive' };
+  const titles = { dashboard: 'Dashboard', members: 'KPSC Members', archive: 'Meeting Archive', settings: 'Settings' };
   document.getElementById('kpsc-page-title').textContent = titles[page] || 'KPSC';
   renderPage(page);
 }
@@ -379,6 +379,7 @@ async function renderPage(page) {
     else if (page === 'meeting') await renderMeetingRoom(main);
     else if (page === 'members') await renderMembers(main);
     else if (page === 'archive') await renderArchive(main);
+    else if (page === 'settings') await renderSettings(main);
   } catch (e) {
     main.innerHTML = `<div class="k-page"><div class="k-error-box">
       <strong>Could not load page</strong><br>${esc(e.message || String(e))}
@@ -865,6 +866,90 @@ function archiveList(meetings, q) {
   return `<div class="k-meeting-list">${sorted.map(m => meetingCard(m)).join('')}</div>`;
 }
 
+// ── SETTINGS ──────────────────────────────────────────────────────
+async function renderSettings(main) {
+  const res = await apiGet('settings');
+  const deepseekKey = res?.ai_deepseek_key || '';
+  const openaiKey   = res?.ai_openai_key   || '';
+  const hasDeepseek = !!deepseekKey;
+  const hasOpenai   = !!openaiKey;
+
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-card">
+        <h2 class="k-card-title">AI Provider Keys</h2>
+        <p class="k-card-sub">
+          API keys are stored securely in the church database and are only used for processing
+          meeting minutes. Without a key the portal uses a built-in rule-based engine.
+        </p>
+        <div class="k-settings-status ${hasDeepseek || hasOpenai ? 'k-status-ai' : 'k-status-rule'}">
+          ${hasDeepseek || hasOpenai ? '🤖 AI-powered mode active' : '⚙️ Rule-based mode (no API key set)'}
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">DeepSeek API Key</label>
+          <input type="password" id="ks-deepseek-key" class="k-input"
+            placeholder="${hasDeepseek ? '••••••••••••••••' : 'sk-...'}"
+            autocomplete="off" value="${esc(deepseekKey)}" />
+          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at platform.deepseek.com</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">OpenAI API Key</label>
+          <input type="password" id="ks-openai-key" class="k-input"
+            placeholder="${hasOpenai ? '••••••••••••••••' : 'sk-...'}"
+            autocomplete="off" value="${esc(openaiKey)}" />
+          <p class="k-hint">Optional alternative AI provider. Get a key at platform.openai.com</p>
+        </div>
+
+        <div id="ks-save-msg" class="k-settings-msg" style="display:none"></div>
+        <button class="kbtn kbtn-primary" id="ks-save-btn" onclick="Kpsc.saveSettings()">Save Keys</button>
+        ${hasDeepseek || hasOpenai ? `<button class="kbtn kbtn-danger-outline" style="margin-left:8px" onclick="Kpsc.clearAiKeys()">Clear Keys</button>` : ''}
+      </div>
+
+      <div class="k-card" style="margin-top:16px">
+        <h2 class="k-card-title">About KPSC Portal</h2>
+        <p class="k-card-sub">Kingdom Parish Stewardship Committee Meeting Portal</p>
+        <div class="k-about-row"><span class="k-about-label">Church</span><span>Redeemed Christian Church of God</span></div>
+        <div class="k-about-row"><span class="k-about-label">Parish</span><span>Kingdom Parish, Aguleri</span></div>
+        <div class="k-about-row"><span class="k-about-label">Version</span><span>Phase 1</span></div>
+      </div>
+    </div>`;
+}
+
+async function saveSettings() {
+  const btn = document.getElementById('ks-save-btn');
+  const msg = document.getElementById('ks-save-msg');
+  const deepseekKey = document.getElementById('ks-deepseek-key')?.value.trim() || '';
+  const openaiKey   = document.getElementById('ks-openai-key')?.value.trim()   || '';
+
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  msg.style.display = 'none';
+
+  const res = await apiPost('settings', { ai_deepseek_key: deepseekKey, ai_openai_key: openaiKey });
+
+  if (res?.error) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = res.error;
+  } else {
+    msg.className = 'k-settings-msg k-msg-ok';
+    msg.textContent = 'Settings saved.';
+    await renderSettings(document.getElementById('kpsc-main'));
+    return;
+  }
+
+  msg.style.display = 'block';
+  btn.disabled = false;
+  btn.textContent = 'Save Keys';
+}
+
+async function clearAiKeys() {
+  if (!confirm('Remove all AI API keys? The portal will fall back to rule-based processing.')) return;
+  await apiPost('settings', { ai_deepseek_key: '', ai_openai_key: '' });
+  await renderSettings(document.getElementById('kpsc-main'));
+}
+
 // ── BOOT ──────────────────────────────────────────────────────────
 function init() {
   const session = loadSession();
@@ -890,6 +975,8 @@ window.Kpsc = {
   memberFieldChange,
   saveMembers,
   filterArchive,
+  saveSettings,
+  clearAiKeys,
   updateAttGroup,
   recStart,
   recPause,

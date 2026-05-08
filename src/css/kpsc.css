@@ -258,3 +258,19 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
   .k-room-actions{flex-direction:column;align-items:stretch;}
   .k-room-actions .kbtn{justify-content:center;}
 }
+
+/* ── SETTINGS ──────────────────────────────────────────────────── */
+.k-card-sub{font-size:13px;color:var(--text3);margin:0 0 16px;}
+.k-settings-status{padding:10px 14px;border-radius:8px;font-size:13.5px;font-weight:500;margin-bottom:20px;}
+.k-status-ai{background:#d1fae5;color:#065f46;border-left:3px solid var(--green);}
+.k-status-rule{background:var(--surface2);color:var(--text2);border-left:3px solid var(--border);}
+.k-form-group{margin-bottom:20px;}
+.k-hint{font-size:12px;color:var(--text3);margin:4px 0 0;}
+.k-settings-msg{padding:10px 14px;border-radius:8px;font-size:13.5px;margin-bottom:12px;}
+.k-msg-ok{background:#d1fae5;color:#065f46;}
+.k-msg-error{background:#FCEBEB;color:#7f1d1d;}
+.k-about-row{display:flex;gap:16px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13.5px;}
+.k-about-row:last-child{border-bottom:none;}
+.k-about-label{font-weight:600;color:var(--text2);min-width:80px;}
+.kbtn-danger-outline{background:transparent;border:1.5px solid var(--red);color:var(--red);}
+.kbtn-danger-outline:hover{background:var(--red);color:#fff;}
