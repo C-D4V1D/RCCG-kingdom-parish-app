@@ -1512,6 +1512,10 @@ async function createDeepgramTranscriptionToken(env) {
 
 // Azure returns this UUID when the identification API finds no matching profile.
 const AZURE_NIL_UUID = '00000000-0000-0000-0000-000000000000';
+// Standard UUID format: 8-4-4-4-12 hex digits.
+const AZURE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Max length of a UUID string after sanitization (36 chars + small safety margin).
+const AZURE_UUID_MAX_LEN = 50;
 
 function azureBase(env) {
   const key    = String(env.AZURE_SPEAKER_KEY    || '').trim();
@@ -1587,10 +1591,9 @@ async function azureIdentifySpeaker(env, body) {
   if (!audioBase64) return err('Missing audio data.', 400);
 
   // Sanitise and validate UUIDs (8-4-4-4-12 hex format).
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const safeIds = profileIds
     .map(id => String(id).replace(/[^a-fA-F0-9-]/g, ''))
-    .filter(id => UUID_RE.test(id));
+    .filter(id => id.length <= AZURE_UUID_MAX_LEN && AZURE_UUID_RE.test(id));
   if (!safeIds.length) return err('No valid profile IDs provided.', 400);
 
   let audioBytes;
