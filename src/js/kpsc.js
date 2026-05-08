@@ -88,7 +88,37 @@ const Diarizer = {
   reconnectTimer: null,
   reconnectAttempts: 0,
   manualStop: false,
+  // PCM ring buffer — raw Float32 samples from the AudioWorklet, used to
+  // extract per-speaker audio slices for Azure Speaker Recognition.
+  pcmChunks: [],        // Array of {offset: number, data: Float32Array}
+  pcmSampleOffset: 0,   // Total samples written since Diarizer was constructed
+  pcmSampleRate: 0,     // Set from AudioContext.sampleRate on connection
+  dgTimeOffset: 0,      // pcmSampleOffset when the current WS connection was opened;
+                        // adds to Deepgram's 0-based timestamps to get absolute offsets
+  speakerRanges: new Map(), // Map<speakerIdx, {startSample, endSample}[]>
+  identifyPending: new Set(), // speaker indices currently being identified by Azure
 };
+
+// ── VOICE ENROLLMENT ───────────────────────────────────────────────
+// Captures a ~30-second voice sample from a member and enrolls it
+// with Azure Speaker Recognition for automatic future identification.
+const Enrolling = {
+  stream: null,
+  audioCtx: null,
+  workletNode: null,
+  workletUrl: null,
+  samples: [],      // Float32Array chunks collected during enrollment
+  sampleRate: 0,
+  timer: null,
+  elapsed: 0,
+  memberIdx: -1,
+  active: false,
+};
+
+// ── AZURE SPEAKER RECOGNITION CONSTANTS ───────────────────────────
+const AZURE_IDENTIFY_THRESHOLD_SEC = 5;  // seconds of speech needed before triggering auto-ID
+const AZURE_IDENTIFY_MIN_SCORE = 0.5;    // minimum confidence (0–1) to accept auto-assignment
+const AZURE_ENROLL_DURATION_SEC = 30;    // seconds of audio to capture for enrollment
 
 function recFmt() {
   const m = Math.floor(Rec.elapsed / 60);
@@ -346,6 +376,9 @@ async function recStart(btn) {
     Rec.manualStop = false;
     Rec.reconnectAttempts = 0;
     Rec.status = 'recording';
+    // Reset per-speaker identification state for the new session.
+    Diarizer.speakerRanges   = new Map();
+    Diarizer.identifyPending = new Set();
 
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
@@ -555,6 +588,8 @@ function recReset() {
   Rec.seenSpeakers = new Set();
   Diarizer.status = 'offline';
   Diarizer.reconnectAttempts = 0;
+  Diarizer.speakerRanges   = new Map();
+  Diarizer.identifyPending = new Set();
   recRenderUI();
   recRenderTranscript();
   recRenderSpeakerMap();
@@ -719,12 +754,19 @@ async function diarizerConnect() {
   ws.onopen = () => {
     Diarizer.status = 'connected';
     Diarizer.reconnectAttempts = 0;
+    // Record the PCM sample offset at the moment this WS connection opened.
+    // Deepgram timestamps restart from 0 on each new connection; dgTimeOffset
+    // converts them to absolute positions in the PCM ring buffer.
+    Diarizer.dgTimeOffset  = Diarizer.pcmSampleOffset;
+    Diarizer.pcmSampleRate = audioCtx.sampleRate;
     recRenderUI();
     // Wire audio only after socket is open to avoid dropping early packets.
     workletNode.port.onmessage = (e) => {
       if (Diarizer.ws?.readyState === WebSocket.OPEN) {
         Diarizer.ws.send(diarizerFloat32ToInt16(e.data).buffer);
       }
+      // Buffer a copy of the raw PCM for Azure speaker identification.
+      diarizerBufferPcm(e.data);
     };
     source.connect(workletNode);
     // Worklet must be connected to something in the audio graph to keep processing.
@@ -783,6 +825,17 @@ function diarizerHandleMessage(raw) {
         const turns = diarizerExtractSpeakerTurns(words);
         for (const turn of turns) {
           recAppendTranscript(turn.text, `dg_${Date.now()}_${turn.speaker}`, turn.speaker);
+          // Accumulate the audio time range for this speaker to drive auto-identification.
+          if (!Rec.speakerMap.has(turn.speaker)) {
+            const speakerWords = words.filter(w => (w.speaker ?? 0) === turn.speaker);
+            if (speakerWords.length > 0) {
+              diarizerAccumulateSpeakerRange(
+                turn.speaker,
+                speakerWords[0].start,
+                speakerWords[speakerWords.length - 1].end,
+              );
+            }
+          }
         }
       } else {
         recAppendTranscript(transcript, `dg_${Date.now()}`);
@@ -816,7 +869,14 @@ function diarizerScheduleReconnect() {
 }
 
 function diarizerClose(markManual) {
-  if (markManual) Diarizer.manualStop = true;
+  if (markManual) {
+    Diarizer.manualStop = true;
+    // Free PCM ring buffer and per-speaker state when the session truly ends.
+    Diarizer.pcmChunks       = [];
+    Diarizer.pcmSampleOffset = 0;
+    Diarizer.speakerRanges   = new Map();
+    Diarizer.identifyPending = new Set();
+  }
   clearTimeout(Diarizer.reconnectTimer);
   Diarizer.reconnectTimer = null;
   // Send a CloseStream message so Deepgram finalises any pending utterance.
@@ -837,6 +897,123 @@ function diarizerClose(markManual) {
   if (Diarizer.workletUrl) {
     URL.revokeObjectURL(Diarizer.workletUrl);
     Diarizer.workletUrl = null;
+  }
+}
+
+// ── PCM RING BUFFER ────────────────────────────────────────────────
+// Add incoming worklet samples to the ring buffer, keeping the last 60 s.
+function diarizerBufferPcm(samples) {
+  Diarizer.pcmChunks.push({ offset: Diarizer.pcmSampleOffset, data: samples.slice() });
+  Diarizer.pcmSampleOffset += samples.length;
+  // Remove chunks older than 60 seconds.
+  const minOffset = Diarizer.pcmSampleOffset - (60 * (Diarizer.pcmSampleRate || 48000));
+  while (Diarizer.pcmChunks.length &&
+         Diarizer.pcmChunks[0].offset + Diarizer.pcmChunks[0].data.length <= minOffset) {
+    Diarizer.pcmChunks.shift();
+  }
+}
+
+// Extract a Float32 slice from the ring buffer for an absolute sample range.
+function diarizerExtractPcmRange(startSample, endSample) {
+  const needed = endSample - startSample;
+  if (needed <= 0) return null;
+  const out = new Float32Array(needed);
+  for (const chunk of Diarizer.pcmChunks) {
+    const cEnd = chunk.offset + chunk.data.length;
+    if (cEnd <= startSample || chunk.offset >= endSample) continue;
+    const readFrom = Math.max(0, startSample - chunk.offset);
+    const readTo   = Math.min(chunk.data.length, endSample - chunk.offset);
+    const writeAt  = Math.max(0, chunk.offset - startSample);
+    out.set(chunk.data.subarray(readFrom, readTo), writeAt);
+  }
+  return out;
+}
+
+// Collect up to 10 s of audio for a speaker index from the ring buffer.
+function diarizerExtractSpeakerAudio(speakerIdx) {
+  const ranges = Diarizer.speakerRanges.get(speakerIdx) || [];
+  if (!ranges.length || !Diarizer.pcmSampleRate) return null;
+  const maxSamples = 10 * Diarizer.pcmSampleRate;
+  let accumulated = 0;
+  const toExtract = [];
+  for (let i = ranges.length - 1; i >= 0 && accumulated < maxSamples; i--) {
+    toExtract.unshift(ranges[i]);
+    accumulated += ranges[i].endSample - ranges[i].startSample;
+  }
+  const chunks = toExtract.map(r => diarizerExtractPcmRange(r.startSample, r.endSample)).filter(Boolean);
+  if (!chunks.length) return null;
+  const totalLen = Math.min(chunks.reduce((a, c) => a + c.length, 0), maxSamples);
+  const out = new Float32Array(totalLen);
+  let pos = 0;
+  for (const c of chunks) {
+    if (pos >= out.length) break;
+    const take = Math.min(c.length, out.length - pos);
+    out.set(c.subarray(0, take), pos);
+    pos += take;
+  }
+  return out;
+}
+
+// Record the time range spoken by a Deepgram speaker index (in absolute PCM samples).
+// Triggers Azure identification once AZURE_IDENTIFY_THRESHOLD_SEC of audio is collected.
+function diarizerAccumulateSpeakerRange(speakerIdx, startSec, endSec) {
+  if (!Diarizer.pcmSampleRate) return;
+  const sr          = Diarizer.pcmSampleRate;
+  const startSample = Math.floor(startSec * sr) + Diarizer.dgTimeOffset;
+  const endSample   = Math.ceil(endSec   * sr) + Diarizer.dgTimeOffset;
+  if (!Diarizer.speakerRanges.has(speakerIdx)) Diarizer.speakerRanges.set(speakerIdx, []);
+  Diarizer.speakerRanges.get(speakerIdx).push({ startSample, endSample });
+
+  const totalSamples = Diarizer.speakerRanges.get(speakerIdx)
+    .reduce((a, r) => a + (r.endSample - r.startSample), 0);
+  if (!Diarizer.identifyPending.has(speakerIdx) &&
+      totalSamples >= AZURE_IDENTIFY_THRESHOLD_SEC * sr) {
+    diarizerTriggerIdentify(speakerIdx).catch(e => console.warn('Auto-identify error:', e));
+  }
+}
+
+// Return true if a member's attendance checkbox is ticked in the current meeting.
+function isMemberPresent(mem) {
+  const groupMembers = S.members.filter(m => m.group === mem.group);
+  const groupIdx     = groupMembers.indexOf(mem);
+  if (groupIdx < 0) return false;
+  const el = document.getElementById(`att_present_${mem.group}_${groupIdx}`);
+  return el?.checked === true;
+}
+
+// Attempt to auto-identify a Deepgram speaker index using Azure Speaker Recognition.
+// Silently skips if Azure is not configured or no enrolled members are present.
+async function diarizerTriggerIdentify(speakerIdx) {
+  if (Rec.speakerMap.has(speakerIdx)) return; // already assigned manually
+  const enrolledPresent = S.members.filter(m => m.azureSpeakerProfileId && isMemberPresent(m));
+  if (!enrolledPresent.length) return;
+
+  Diarizer.identifyPending.add(speakerIdx);
+  try {
+    const audio = diarizerExtractSpeakerAudio(speakerIdx);
+    // Azure needs at least 4 seconds of speech for a reliable match.
+    if (!audio || audio.length < 4 * Diarizer.pcmSampleRate) return;
+
+    const resampled   = resampleTo16k(audio, Diarizer.pcmSampleRate);
+    const wavBuffer   = pcmToWav(resampled, 16000);
+    const audioBase64 = arrayBufferToBase64(wavBuffer);
+    const profileIds  = enrolledPresent.map(m => m.azureSpeakerProfileId);
+
+    const res = await apiPost('azure-speaker-identify', { profileIds, audioBase64 });
+    if (res.error) { console.warn('Speaker identification:', res.error); return; }
+
+    if (res.profileId && res.score >= AZURE_IDENTIFY_MIN_SCORE) {
+      if (Rec.speakerMap.has(speakerIdx)) return; // assigned while we waited
+      const matched = enrolledPresent.find(m => m.azureSpeakerProfileId === res.profileId);
+      if (matched) {
+        assignSpeaker(speakerIdx, matched.name);
+        showToast(`🎙 Auto-identified: ${matched.name} (${Math.round(res.score * 100)}% match)`, 'success');
+      }
+    }
+  } catch (e) {
+    console.warn('diarizerTriggerIdentify error:', e);
+  } finally {
+    Diarizer.identifyPending.delete(speakerIdx);
   }
 }
 
@@ -968,7 +1145,65 @@ function esc(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ── AUTH ──────────────────────────────────────────────────────────
+// ── PCM AUDIO HELPERS ────────────────────────────────────────────
+// Linearly resample a Float32 PCM array from `fromRate` to 16 kHz.
+// Azure Speaker Recognition requires 8/16/32 kHz WAV input.
+function resampleTo16k(float32, fromRate) {
+  const toRate = 16000;
+  if (fromRate === toRate) return float32;
+  const ratio  = fromRate / toRate;
+  const outLen = Math.round(float32.length / ratio);
+  const out    = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const pos = i * ratio;
+    const lo  = Math.floor(pos);
+    const hi  = Math.min(lo + 1, float32.length - 1);
+    out[i] = float32[lo] * (1 - (pos - lo)) + float32[hi] * (pos - lo);
+  }
+  return out;
+}
+
+// Build a standard WAV (PCM 16-bit mono) ArrayBuffer from Float32 samples.
+function pcmToWav(float32, sampleRate) {
+  const int16   = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
+  }
+  const dataLen = int16.length * 2;
+  const buf     = new ArrayBuffer(44 + dataLen);
+  const view    = new DataView(buf);
+  // RIFF header
+  'RIFF'.split('').forEach((c, i) => view.setUint8(i,      c.charCodeAt(0)));
+  view.setUint32(4,  36 + dataLen, true);
+  'WAVE'.split('').forEach((c, i) => view.setUint8(8  + i, c.charCodeAt(0)));
+  // fmt  chunk
+  'fmt '.split('').forEach((c, i) => view.setUint8(12 + i, c.charCodeAt(0)));
+  view.setUint32(16, 16,              true); // chunk size
+  view.setUint16(20,  1,              true); // PCM
+  view.setUint16(22,  1,              true); // mono
+  view.setUint32(24, sampleRate,      true);
+  view.setUint32(28, sampleRate * 2,  true); // byte rate
+  view.setUint16(32,  2,              true); // block align
+  view.setUint16(34, 16,              true); // bits per sample
+  // data chunk
+  'data'.split('').forEach((c, i) => view.setUint8(36 + i, c.charCodeAt(0)));
+  view.setUint32(40, dataLen, true);
+  new Int16Array(buf, 44).set(int16);
+  return buf;
+}
+
+// Convert an ArrayBuffer to a base64 string (handles large buffers safely).
+function arrayBufferToBase64(buffer) {
+  const bytes     = new Uint8Array(buffer);
+  const chunkSize = 32768;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+
 async function login(btn) {
   const name = document.getElementById('kpsc-name-input')?.value.trim() || '';
   const pin  = document.getElementById('kpsc-pin-input')?.value.trim() || '';
@@ -1452,6 +1687,10 @@ function renderMembersList() {
 }
 
 function memberRow(idx, mem) {
+  const enrolled    = !!mem.azureSpeakerProfileId;
+  const enrollClass = enrolled ? 'kbtn kbtn-sm k-enroll-btn k-enrolled' : 'kbtn kbtn-sm kbtn-ghost k-enroll-btn';
+  const enrollTitle = enrolled ? 'Voice enrolled — click to re-enrol' : 'Enrol voice fingerprint for auto-identification';
+  const enrollIcon  = enrolled ? '🎙✓' : '🎙';
   return `
     <div class="k-mem-row" id="kmem-row-${idx}">
       <select class="k-input k-input-sm k-mem-group" data-idx="${idx}" onchange="Kpsc.memberFieldChange(${idx},'group',this.value)">
@@ -1461,6 +1700,7 @@ function memberRow(idx, mem) {
         value="${esc(mem.name || '')}" onchange="Kpsc.memberFieldChange(${idx},'name',this.value)" />
       <input class="k-input k-input-sm k-mem-pos" type="text" placeholder="Position (optional)"
         value="${esc(mem.position || '')}" onchange="Kpsc.memberFieldChange(${idx},'position',this.value)" />
+      <button class="${enrollClass}" onclick="Kpsc.enrollMemberVoice(${idx})" title="${enrollTitle}">${enrollIcon}</button>
       <button class="kbtn kbtn-sm kbtn-ghost kbtn-remove" onclick="Kpsc.removeMember(${idx})">✕</button>
     </div>`;
 }
@@ -1513,7 +1753,206 @@ async function saveMembers(btn) {
   }
 }
 
-// ── ARCHIVE ───────────────────────────────────────────────────────
+// ── VOICE ENROLLMENT UI ───────────────────────────────────────────
+
+function enrollMemberVoice(idx) {
+  const member = S.members[idx];
+  if (!member || !member.name.trim()) {
+    showToast('Please save the member name first.', 'warn');
+    return;
+  }
+  showEnrollModal(idx);
+}
+
+function showEnrollModal(idx) {
+  const member  = S.members[idx];
+  if (!member) return;
+  const alreadyEnrolled = !!member.azureSpeakerProfileId;
+
+  document.getElementById('k-enroll-modal')?.remove();
+
+  const modal = document.createElement('div');
+  modal.id        = 'k-enroll-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">🎙 Enrol Voice — ${esc(member.name)}</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeEnrollModal()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        ${alreadyEnrolled ? '<p class="k-enroll-warn">⚠ This member already has a voice enrolled. Recording again will replace it.</p>' : ''}
+        <p class="k-enroll-instruction">Ask <strong>${esc(member.name)}</strong> to speak naturally for <strong>30 seconds</strong>.</p>
+        <p class="k-hint">They can read aloud, count numbers, or talk about anything. At least 20 seconds of clear speech is needed.</p>
+        <div id="k-enroll-status"></div>
+        <div id="k-enroll-progress" style="display:none">
+          <div class="k-enroll-timer" id="k-enroll-timer">0:00 / 0:30</div>
+          <div class="k-enroll-bar-bg"><div class="k-enroll-bar" id="k-enroll-bar"></div></div>
+        </div>
+      </div>
+      <div class="k-modal-footer" id="k-enroll-footer">
+        <button class="kbtn kbtn-record" id="k-enroll-start-btn" onclick="Kpsc.startEnrollRecording(${idx})">🔴 Start Recording</button>
+        <button class="kbtn kbtn-ghost" onclick="Kpsc.closeEnrollModal()">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function closeEnrollModal() {
+  enrollCleanupAudio();
+  Enrolling.active  = false;
+  Enrolling.samples = [];
+  document.getElementById('k-enroll-modal')?.remove();
+}
+
+function enrollCleanupAudio() {
+  clearInterval(Enrolling.timer);
+  Enrolling.timer = null;
+  if (Enrolling.workletNode) {
+    try { Enrolling.workletNode.disconnect(); } catch (_) {}
+    Enrolling.workletNode = null;
+  }
+  if (Enrolling.audioCtx && Enrolling.audioCtx.state !== 'closed') {
+    Enrolling.audioCtx.close().catch(() => {});
+    Enrolling.audioCtx = null;
+  } else {
+    Enrolling.audioCtx = null;
+  }
+  if (Enrolling.workletUrl) {
+    URL.revokeObjectURL(Enrolling.workletUrl);
+    Enrolling.workletUrl = null;
+  }
+  if (Enrolling.stream) {
+    Enrolling.stream.getTracks().forEach(t => t.stop());
+    Enrolling.stream = null;
+  }
+}
+
+async function startEnrollRecording(idx) {
+  const startBtn   = document.getElementById('k-enroll-start-btn');
+  const statusEl   = document.getElementById('k-enroll-status');
+  const progressEl = document.getElementById('k-enroll-progress');
+  const footerEl   = document.getElementById('k-enroll-footer');
+
+  if (startBtn) { startBtn.disabled = true; startBtn.textContent = '🎙 Recording…'; }
+  if (footerEl) {
+    // Hide cancel while recording so the user completes the full 30 seconds.
+    footerEl.querySelector('.kbtn-ghost')?.remove();
+  }
+
+  try {
+    Enrolling.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    Enrolling.memberIdx  = idx;
+    Enrolling.samples    = [];
+    Enrolling.elapsed    = 0;
+    Enrolling.active     = true;
+
+    Enrolling.audioCtx   = new AudioContext();
+    Enrolling.sampleRate = Enrolling.audioCtx.sampleRate;
+
+    const blob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
+    Enrolling.workletUrl = URL.createObjectURL(blob);
+    await Enrolling.audioCtx.audioWorklet.addModule(Enrolling.workletUrl);
+
+    const source = Enrolling.audioCtx.createMediaStreamSource(Enrolling.stream);
+    Enrolling.workletNode = new AudioWorkletNode(Enrolling.audioCtx, 'pcm-capture-processor');
+    Enrolling.workletNode.port.onmessage = (e) => {
+      if (Enrolling.active) Enrolling.samples.push(e.data.slice());
+    };
+    source.connect(Enrolling.workletNode);
+    Enrolling.workletNode.connect(Enrolling.audioCtx.createMediaStreamDestination());
+
+    if (progressEl) progressEl.style.display = '';
+
+    Enrolling.timer = setInterval(() => {
+      Enrolling.elapsed++;
+      const m      = Math.floor(Enrolling.elapsed / 60);
+      const s      = Enrolling.elapsed % 60;
+      const timerEl = document.getElementById('k-enroll-timer');
+      const barEl   = document.getElementById('k-enroll-bar');
+      if (timerEl) timerEl.textContent = `${m}:${String(s).padStart(2, '0')} / 0:30`;
+      if (barEl)   barEl.style.width   = `${Math.min(100, (Enrolling.elapsed / AZURE_ENROLL_DURATION_SEC) * 100)}%`;
+      if (Enrolling.elapsed >= AZURE_ENROLL_DURATION_SEC) {
+        clearInterval(Enrolling.timer);
+        Enrolling.timer = null;
+        finishEnrollRecording();
+      }
+    }, 1000);
+
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = `<div class="k-enroll-error">❌ Microphone access error: ${esc(e.message)}</div>`;
+    if (startBtn) { startBtn.disabled = false; startBtn.textContent = '🔴 Start Recording'; }
+    enrollCleanupAudio();
+  }
+}
+
+async function finishEnrollRecording() {
+  const statusEl = document.getElementById('k-enroll-status');
+  const footerEl = document.getElementById('k-enroll-footer');
+
+  Enrolling.active = false;
+  enrollCleanupAudio();
+
+  if (statusEl) statusEl.innerHTML = '<div class="k-enroll-info">⏳ Processing voice data — please wait…</div>';
+  if (footerEl) footerEl.innerHTML = '';
+
+  try {
+    const idx    = Enrolling.memberIdx;
+    const member = S.members[idx];
+    if (!member) throw new Error('Member not found.');
+
+    if (!Enrolling.samples.length) throw new Error('No audio was captured.');
+
+    // Merge all captured PCM chunks into one Float32Array.
+    const totalLen = Enrolling.samples.reduce((a, c) => a + c.length, 0);
+    const merged   = new Float32Array(totalLen);
+    let pos = 0;
+    for (const chunk of Enrolling.samples) { merged.set(chunk, pos); pos += chunk.length; }
+    Enrolling.samples = []; // free memory
+
+    // Resample to 16 kHz and encode as WAV.
+    const resampled   = resampleTo16k(merged, Enrolling.sampleRate);
+    const wavBuffer   = pcmToWav(resampled, 16000);
+    const audioBase64 = arrayBufferToBase64(wavBuffer);
+
+    // Delete the old Azure profile if one exists (best-effort).
+    if (member.azureSpeakerProfileId) {
+      await fetch(`${API}/azure-speaker-profiles/${encodeURIComponent(member.azureSpeakerProfileId)}`,
+        { method: 'DELETE' }).catch(() => {});
+    }
+
+    // Create a new Azure speaker profile.
+    const createRes = await apiPost('azure-speaker-profiles', {});
+    if (createRes.error) throw new Error(createRes.error);
+    const profileId = createRes.profileId;
+    if (!profileId) throw new Error('Azure did not return a profile ID.');
+
+    // Enroll the recorded audio.
+    const enrollRes = await apiPost(`azure-speaker-profiles/${profileId}/enroll`, { audioBase64 });
+    if (enrollRes.error) throw new Error(enrollRes.error);
+
+    // Persist the profile ID on the member (azureSpeakerProfileId survives saveMembers).
+    S.members[idx].azureSpeakerProfileId = profileId;
+    await apiPost('settings', { kpsc_members: S.members });
+
+    if (statusEl) statusEl.innerHTML =
+      `<div class="k-enroll-ok">✅ Voice enrolled for <strong>${esc(member.name)}</strong>! Future meetings will auto-identify this speaker.</div>`;
+    if (footerEl) footerEl.innerHTML =
+      `<button class="kbtn kbtn-primary" onclick="Kpsc.closeEnrollModal()">Done</button>`;
+
+    // Refresh the member list so the ✓ badge appears.
+    const list = document.getElementById('km-members-list');
+    if (list) list.innerHTML = renderMembersList();
+
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = `<div class="k-enroll-error">❌ Enrollment failed: ${esc(e.message)}</div>`;
+    if (footerEl) footerEl.innerHTML = `<button class="kbtn kbtn-ghost" onclick="Kpsc.closeEnrollModal()">Close</button>`;
+  }
+}
+
+
 async function renderArchive(main) {
   const res = await apiGet('ai-secretary-meetings');
   S.meetings = res.meetings || res || [];
@@ -1601,11 +2040,20 @@ async function renderSettings(main) {
           <code class="k-env-key">DEEPGRAM_API_KEY</code>
           <span class="k-env-desc">Powers speaker diarization — identifies who is speaking and labels each transcript turn. Get a key at <a href="https://console.deepgram.com" target="_blank" rel="noopener">console.deepgram.com</a>.</span>
         </div>
+        <div class="k-env-row">
+          <code class="k-env-key">AZURE_SPEAKER_KEY</code>
+          <span class="k-env-desc">Azure Cognitive Services key for persistent voice fingerprinting. Enables one-time voice enrolment per member and automatic speaker identification across meetings. Get a key at <a href="https://portal.azure.com" target="_blank" rel="noopener">portal.azure.com</a> (Speech service → Keys and Endpoint).</span>
+        </div>
+        <div class="k-env-row">
+          <code class="k-env-key">AZURE_SPEAKER_REGION</code>
+          <span class="k-env-desc">Azure region for the Speech service (e.g. <code>eastus</code>, <code>westeurope</code>). Defaults to <code>eastus</code> if not set.</span>
+        </div>
         <p class="k-hint" style="margin-top:12px">
           Set these in the Cloudflare Pages dashboard → Settings → Environment Variables.
           If either key is absent, that feature degrades gracefully: transcription falls back to
           OpenAI-only (without speaker labels) when Deepgram is absent, and to chunk-based
-          upload only when both are absent.
+          upload only when both are absent. Voice fingerprinting is silently skipped when
+          AZURE_SPEAKER_KEY is absent.
         </p>
       </div>
 
@@ -1686,6 +2134,10 @@ window.Kpsc = {
   recStop,
   recReset,
   assignSpeaker,
+  enrollMemberVoice,
+  showEnrollModal,
+  closeEnrollModal,
+  startEnrollRecording,
 };
 
 document.addEventListener('DOMContentLoaded', init);

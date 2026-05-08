@@ -187,6 +187,21 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) return await createDeepgramTranscriptionToken(env);
     }
 
+    // ── /api/azure-speaker-profiles ────────────────────────────
+    // Proxy to Azure Cognitive Services Speaker Recognition v2.0.
+    // Create, enrol, and delete speaker profiles that power persistent
+    // voice fingerprinting across meetings.
+    if (route === 'azure-speaker-profiles') {
+      if (method === 'POST'   && !param)                    return await azureCreateSpeakerProfile(env);
+      if (method === 'POST'   &&  param && parts[2] === 'enroll') return await azureEnrollSpeaker(env, param, body);
+      if (method === 'DELETE' &&  param && !parts[2])       return await azureDeleteSpeakerProfile(env, param);
+    }
+
+    // ── /api/azure-speaker-identify ────────────────────────────
+    if (route === 'azure-speaker-identify') {
+      if (method === 'POST' && !param) return await azureIdentifySpeaker(env, body);
+    }
+
     // ── /api/ai-secretary-meetings ─────────────────────────────
     if (route === 'ai-secretary-meetings') {
       if (method === 'POST' && param === 'audio-chunk') return await uploadAiSecretaryAudioChunk(env, request);
@@ -1486,6 +1501,112 @@ async function createDeepgramTranscriptionToken(env) {
   const apiKey = String(env.DEEPGRAM_API_KEY || '').trim();
   if (!apiKey) return err('DEEPGRAM_API_KEY is not configured for speaker diarization.', 503);
   return ok({ key: apiKey });
+}
+
+// ── AZURE SPEAKER RECOGNITION ──────────────────────────────────────
+// These four functions proxy requests to Azure Cognitive Services
+// Speaker Recognition v2.0 (text-independent).
+// Required env vars:
+//   AZURE_SPEAKER_KEY    – Azure Cognitive Services key
+//   AZURE_SPEAKER_REGION – Azure region slug, default: eastus
+
+function azureBase(env) {
+  const key    = String(env.AZURE_SPEAKER_KEY    || '').trim();
+  const region = String(env.AZURE_SPEAKER_REGION || 'eastus').trim();
+  return { key, region, base: `https://${region}.api.cognitive.microsoft.com/speaker/identification/v2.0/text-independent` };
+}
+
+async function azureCreateSpeakerProfile(env) {
+  const { key, base } = azureBase(env);
+  if (!key) return err('AZURE_SPEAKER_KEY is not configured. Add it in Cloudflare Pages → Settings → Environment Variables.', 503);
+
+  const res  = await fetch(`${base}/profiles`, {
+    method: 'POST',
+    headers: { 'Ocp-Apim-Subscription-Key': key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ locale: 'en-us' }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return err(data.error?.message || `Azure error (${res.status}).`, res.status);
+  return ok({ profileId: data.profileId });
+}
+
+async function azureEnrollSpeaker(env, profileId, body) {
+  const { key, base } = azureBase(env);
+  if (!key) return err('AZURE_SPEAKER_KEY is not configured.', 503);
+  if (!profileId) return err('Missing profile ID.', 400);
+
+  const audioBase64 = String(body?.audioBase64 || '');
+  if (!audioBase64) return err('Missing audio data.', 400);
+
+  let audioBytes;
+  try {
+    audioBytes = Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0));
+  } catch {
+    return err('Invalid audio data encoding.', 400);
+  }
+
+  const res  = await fetch(`${base}/profiles/${encodeURIComponent(profileId)}/enrollments`, {
+    method: 'POST',
+    headers: { 'Ocp-Apim-Subscription-Key': key, 'Content-Type': 'audio/wav' },
+    body: audioBytes,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return err(data.error?.message || `Azure enrollment error (${res.status}).`, res.status);
+  return ok({
+    enrolled: true,
+    enrollmentStatus: data.enrollmentStatus || 'Enrolling',
+    remainingEnrollmentSpeechLength: data.remainingEnrollmentSpeechLength ?? 0,
+  });
+}
+
+async function azureDeleteSpeakerProfile(env, profileId) {
+  const { key, base } = azureBase(env);
+  if (!key) return err('AZURE_SPEAKER_KEY is not configured.', 503);
+
+  const res = await fetch(`${base}/profiles/${encodeURIComponent(profileId)}`, {
+    method: 'DELETE',
+    headers: { 'Ocp-Apim-Subscription-Key': key },
+  });
+  if (res.status === 204 || res.ok) return ok({ deleted: true });
+  const data = await res.json().catch(() => ({}));
+  return err(data.error?.message || `Azure delete error (${res.status}).`, res.status);
+}
+
+async function azureIdentifySpeaker(env, body) {
+  const { key, base } = azureBase(env);
+  if (!key) return err('AZURE_SPEAKER_KEY is not configured.', 503);
+
+  const profileIds = Array.isArray(body?.profileIds) ? body.profileIds : [];
+  if (!profileIds.length) return err('No profile IDs provided.', 400);
+  if (profileIds.length > 50) return err('Maximum 50 profile IDs per request.', 400);
+
+  const audioBase64 = String(body?.audioBase64 || '');
+  if (!audioBase64) return err('Missing audio data.', 400);
+
+  // Sanitise UUIDs — only allow hex chars and hyphens.
+  const safeIds = profileIds.map(id => String(id).replace(/[^a-fA-F0-9-]/g, ''));
+
+  let audioBytes;
+  try {
+    audioBytes = Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0));
+  } catch {
+    return err('Invalid audio data encoding.', 400);
+  }
+
+  const res  = await fetch(`${base}/profiles/identify/multipart?profileIds=${safeIds.join(',')}`, {
+    method: 'POST',
+    headers: { 'Ocp-Apim-Subscription-Key': key, 'Content-Type': 'audio/wav' },
+    body: audioBytes,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return err(data.error?.message || `Azure identify error (${res.status}).`, res.status);
+
+  const identified = data.identifiedProfile;
+  const profileId  = identified?.profileId || null;
+  const score      = identified?.score ?? 0;
+  // Azure returns the nil UUID when no profile matches.
+  const isNilUuid  = !profileId || profileId === '00000000-0000-0000-0000-000000000000';
+  return ok({ profileId: isNilUuid ? null : profileId, score });
 }
 
 async function uploadAiSecretaryAudioChunk(env, request) {
