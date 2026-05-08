@@ -109,6 +109,7 @@ export async function onRequest(context) {
     if (route === 'auth') {
       if (method === 'POST' && param === 'login') return await loginUser(DB, body);
     }
+    if (route === 'kpsc-login' && method === 'POST') return await kpscLoginUser(DB, body);
     if (route === 'change-pin' && method === 'POST') {
       return await changeUserPin(DB, body);
     }
@@ -542,6 +543,30 @@ async function changeUserPin(DB, data) {
   if (!validCurrentPin) return err('Current PIN is incorrect', 401);
   await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(newPin), userId).run();
   return ok({ success: true, id: userId });
+}
+
+async function kpscLoginUser(DB, data) {
+  const name = String(data?.name || '').trim();
+  const pin  = String(data?.pin  || '').trim();
+  if (!name || !pin) return err('name and pin are required', 400);
+
+  const { results } = await DB.prepare(
+    `SELECT id,name,role,email,pin FROM users WHERE LOWER(name)=LOWER(?) ORDER BY name`
+  ).bind(name).all();
+  const candidates = results || [];
+  if (candidates.length === 0) return err('Invalid credentials', 401);
+
+  // Try each matching user (same name could appear rarely)
+  for (const row of candidates) {
+    const valid = await verifyPin(row.pin, pin);
+    if (!valid) continue;
+    // Upgrade plaintext PIN on first successful KPSC login
+    if (!isHashedPin(row.pin)) {
+      await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(pin), row.id).run();
+    }
+    return ok(publicUser(row));
+  }
+  return err('Invalid credentials', 401);
 }
 
 function inferIncomePaymentMethod(row) {
