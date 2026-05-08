@@ -229,7 +229,9 @@ const state = {
   month: new Date().getMonth(),
   year: new Date().getFullYear(),
   loginBusy: false,
-  aiSecretaryActiveId: null
+  aiSecretaryActiveId: null,
+  aiSecretarySearch: '',
+  aiSecretaryMembersOpen: false
 };
 
 // ──────────────────────────────────────────
@@ -348,7 +350,7 @@ const ACCESS_RULES = {
     expense_delete_pending: { roles:['admin_officer','it_admin'] },
     expense_approve_pending: { roles:['accountant','it_admin'] },
     topup_cancel: ({ request }) => canCancelTopupRequest(request),
-    ai_secretary_manage: ['ai_secretary']
+    ai_secretary_manage: { permissionsAny: ['ai_secretary'] }
   }
 };
 function evaluateAccessRule(rule, ctx={}){
@@ -7087,8 +7089,9 @@ async function renderAdmin(){
       <button class="tab ${tab==='rates'?'active':''}" onclick="App.setAdminTab('rates')">Remittance Rates</button>
       <button class="tab ${tab==='perms'?'active':''}" onclick="App.setAdminTab('perms')">Role Permissions</button>
       <button class="tab ${tab==='backup'?'active':''}" onclick="App.setAdminTab('backup')">Backup & Restore</button>
+      <button class="tab ${tab==='ai_providers'?'active':''}" onclick="App.setAdminTab('ai_providers')">🤖 AI Providers</button>
     </div>
-    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settingsForView):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
+    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settingsForView):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):tab==='ai_providers'?renderAdminAiProviders(settings):renderAdminBackup()}`;
   if(tab==='quotas') initQuotaDnd();
 }
 
@@ -7308,6 +7311,50 @@ function renderAdminBackup(){
     </div>
     <div class="alert alert-warn"><span class="alert-icon">⚠</span><span>Clearing data is irreversible. Always export a backup first.</span></div>
   </div>`;
+}
+
+function renderAdminAiProviders(s){
+  const hasOpenAI = !!(s.ai_openai_key);
+  const hasDeepSeek = !!(s.ai_deepseek_key);
+  const mode = (hasDeepSeek||hasOpenAI) ? '🤖 AI-powered mode' : '⚙️ Rule-based mode (no keys set)';
+  const modeColor = (hasDeepSeek||hasOpenAI) ? 'var(--primary)' : 'var(--text3)';
+  return `<div class="card">
+    <div class="card-header"><span class="card-title">AI Provider Keys</span><span style="font-size:12px;color:${modeColor};font-weight:600">${mode}</span></div>
+    <div class="alert alert-warn" style="margin-bottom:1rem"><span class="alert-icon">⚠</span><span>API keys are stored in the church database. Treat them as sensitive credentials and rotate them if they are ever exposed.</span></div>
+    <div class="form-group">
+      <label class="form-label">DeepSeek API Key</label>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:6px">Used for AI-powered meeting summaries, minutes, and governance analysis. When set, replaces the built-in rule engine.</p>
+      <input type="password" id="ai_deepseek_key" class="form-input" placeholder="sk-…" value="${s.ai_deepseek_key?'••••••••••••':''}" autocomplete="new-password" />
+      <div class="form-hint">${hasDeepSeek?'Key is currently set. Enter a new value to replace it, or leave blank to keep existing.':'No DeepSeek key set — using deterministic rule engine.'}</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">OpenAI API Key</label>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:6px">Reserved for future live audio transcription via Whisper. Not used in Phase 1.</p>
+      <input type="password" id="ai_openai_key" class="form-input" placeholder="sk-…" value="${s.ai_openai_key?'••••••••••••':''}" autocomplete="new-password" />
+      <div class="form-hint">${hasOpenAI?'Key is currently set.':'No OpenAI key set.'}</div>
+    </div>
+    <button class="btn btn-primary" onclick="App.saveAiProviderKeys(this)">Save AI Keys</button>
+  </div>`;
+}
+
+async function saveAiProviderKeys(btn=null){
+  const deepseekVal = document.getElementById('ai_deepseek_key')?.value;
+  const openaiVal = document.getElementById('ai_openai_key')?.value;
+  const restore = setBtnLoading(btn,'Saving…');
+  try{
+    const updates = {};
+    // Only update if the field has a non-placeholder value (not the masked dots)
+    if(deepseekVal && !deepseekVal.startsWith('•')) updates.ai_deepseek_key = deepseekVal;
+    if(openaiVal && !openaiVal.startsWith('•')) updates.ai_openai_key = openaiVal;
+    if(Object.keys(updates).length){
+      await DB.saveSettings(updates);
+      showAlert('AI provider keys saved.','success');
+    } else {
+      showAlert('No changes to save. Enter a new key value to update.','warn');
+    }
+    restore();
+    renderAdmin();
+  }catch(e){ restore(); showAlert(e.message||'Failed to save AI keys.','danger'); }
 }
 
 async function saveSettings(btn=null){
@@ -7693,11 +7740,13 @@ const AI_SECRETARY_PARTICIPANT_GROUPS = [
   { group:'ministers', label:'Ministers' },
 ];
 
-function normalizeAiSecretaryParticipants(participants=[]){
+function normalizeAiSecretaryParticipants(participants=[], kpscMembers=[]){
   const byGroup = new Map((participants||[]).map(p=>[String(p.group||'').toLowerCase(),p]));
+  const rosterByGroup = new Map();
+  for(const m of (kpscMembers||[])){ const g=String(m.group||'').toLowerCase(); if(!rosterByGroup.has(g)) rosterByGroup.set(g,m); }
   return AI_SECRETARY_PARTICIPANT_GROUPS.map(base=>{
     const row = byGroup.get(base.group) || {};
-    return { group:base.group, label:base.label, present:!!row.present, name:row.name||'' };
+    return { group:base.group, label:base.label, present:!!row.present, name:row.name || rosterByGroup.get(base.group)?.name || '' };
   });
 }
 
@@ -7719,94 +7768,239 @@ function aiSecretaryStatusBadge(status){
 }
 
 function aiSecretaryMinutesHtml(markdown=''){
-  return esc(markdown || 'Process the meeting to generate minutes.')
-    .replace(/^# (.*)$/gm,'<h2>$1</h2>')
-    .replace(/^## (.*)$/gm,'<h3>$1</h3>')
-    .replace(/^\*\*(.*?):\*\* (.*)$/gm,'<p><strong>$1:</strong> $2</p>')
-    .replace(/^- (.*)$/gm,'<li>$1</li>')
-    .replace(/\n/g,'<br>');
+  if(!markdown) return '<p style="color:var(--text3);font-style:italic">Process the meeting to generate minutes.</p>';
+  const lines = esc(markdown).split('\n');
+  const out = [];
+  let inList = false;
+  for(const line of lines){
+    const h1=line.match(/^# (.+)$/), h2=line.match(/^## (.+)$/);
+    const bold=line.match(/^\*\*(.*?):\*\* (.*)$/), li=line.match(/^- (.+)$/);
+    if(inList && !li){ out.push('</ul>'); inList=false; }
+    if(h1)         out.push(`<h2>${h1[1]}</h2>`);
+    else if(h2)    out.push(`<h3>${h2[1]}</h3>`);
+    else if(bold)  out.push(`<p><strong>${bold[1]}:</strong> ${bold[2]}</p>`);
+    else if(li)    { if(!inList){ out.push('<ul>'); inList=true; } out.push(`<li>${li[1]}</li>`); }
+    else if(line.trim()==='') out.push('<br>');
+    else           out.push(`<p>${line}</p>`);
+  }
+  if(inList) out.push('</ul>');
+  return out.join('');
+}
+
+function aiSecretaryProgressStepper(status){
+  const steps=[{key:'draft',label:'Draft'},{key:'recording',label:'Recording'},{key:'ended',label:'Ended'},{key:'processed',label:'Processed'}];
+  const idx=steps.findIndex(s=>s.key===status);
+  return `<div class="ai-sec-stepper">${steps.map((s,i)=>`
+    <div class="ai-sec-step ${i<idx?'done':''} ${i===idx?'active':''}">
+      <div class="ai-sec-step-dot">${i<idx?'✓':String(i+1)}</div>
+      <div class="ai-sec-step-label">${s.label}</div>
+    </div>${i<steps.length-1?`<div class="ai-sec-step-line${i<idx?' done':''}"></div>`:''}`
+  ).join('')}</div>`;
 }
 
 async function renderAiSecretary(){
-  const meetings = await DB.getAiSecretaryMeetings();
-  const active = (state.aiSecretaryActiveId && meetings.find(m=>m.id===state.aiSecretaryActiveId)) || meetings[0] || null;
-  if(active) state.aiSecretaryActiveId = active.id;
-  const participants = normalizeAiSecretaryParticipants(active?.participants);
-  const quorumMet = participants.every(p=>p.present);
-  const recentRows = meetings.length ? meetings.slice(0,8).map(m=>`
-    <div class="feed-item" onclick="App.loadAiSecretaryMeeting('${m.id}')" style="cursor:pointer">
-      <div class="feed-icon" style="background:var(--primary-light);color:var(--primary)">🤖</div>
-      <div class="feed-body"><div class="feed-title">${esc(m.title)}</div><div class="feed-sub">${fmtDate(m.meetingDate)} · ${esc(m.meetingType||'routine')} · ${aiSecretaryStatusBadge(m.status)}</div></div>
-    </div>`).join('') : '<div class="empty">No AI Secretary meetings yet. Create the first KPSC meeting below.</div>';
+  const [meetings, settings] = await Promise.all([DB.getAiSecretaryMeetings(), DB.getSettings()]);
+  const kpscMembers = Array.isArray(settings.kpsc_members) ? settings.kpsc_members : [];
+  if(state.aiSecretaryActiveId){
+    const active = meetings.find(m=>m.id===state.aiSecretaryActiveId);
+    if(active){ renderAiSecretaryRoom(active, kpscMembers); return; }
+    state.aiSecretaryActiveId = null;
+  }
+  renderAiSecretaryDashboard(meetings, kpscMembers);
+}
 
-  document.getElementById('pageContent').innerHTML = `
+function renderAiSecretaryDashboard(meetings, kpscMembers){
+  const q=(state.aiSecretarySearch||'').toLowerCase();
+  const filtered=q?meetings.filter(m=>m.title.toLowerCase().includes(q)||m.meetingDate.includes(q)):meetings;
+  const cards=filtered.length?filtered.map(m=>`
+    <div class="ai-sec-meeting-card" onclick="App.loadAiSecretaryMeeting('${m.id}')">
+      <div class="ai-sec-card-icon">🤖</div>
+      <div class="ai-sec-card-body">
+        <div class="ai-sec-card-title">${esc(m.title)}</div>
+        <div class="ai-sec-card-meta">${fmtDate(m.meetingDate)} · ${esc(m.meetingType||'routine')}</div>
+        <div class="ai-sec-card-badges">
+          ${aiSecretaryStatusBadge(m.status)}
+          ${m.resolutions?.length?`<span class="badge badge-gray">${m.resolutions.length} res</span>`:''}
+          ${m.actionItems?.length?`<span class="badge badge-gray">${m.actionItems.length} actions</span>`:''}
+          ${m.policyFlags?.length?`<span class="badge" style="background:#fee2e2;color:#b91c1c">${m.policyFlags.length} flag(s)</span>`:''}
+        </div>
+      </div>
+    </div>`).join(''):
+    `<div class="empty">${q?'No meetings match your search.':'No KPSC AI Secretary meetings yet. Start a new meeting above.'}</div>`;
+
+  const membersOpen=!!state.aiSecretaryMembersOpen;
+  const memberRows=kpscMembers.length?kpscMembers.map((m,i)=>`
+    <div class="ai-sec-member-row">
+      <select class="form-select" style="width:110px;font-size:12px" onchange="App.kpscMemberField(${i},'group',this.value)">
+        ${AI_SECRETARY_PARTICIPANT_GROUPS.map(g=>`<option value="${g.group}" ${m.group===g.group?'selected':''}>${g.label}</option>`).join('')}
+      </select>
+      <input type="text" class="form-input" placeholder="Name" value="${esc(m.name||'')}" oninput="App.kpscMemberField(${i},'name',this.value)" />
+      <input type="text" class="form-input" placeholder="Role (optional)" value="${esc(m.role||'')}" oninput="App.kpscMemberField(${i},'role',this.value)" style="max-width:140px" />
+      <button class="btn" style="padding:7px 10px;color:var(--danger);flex-shrink:0" onclick="App.removeKpscMember(${i})" title="Remove">✕</button>
+    </div>`).join(''):'<div class="empty" style="font-size:12px;padding:12px 0">No members yet.</div>';
+
+  document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
-      <div><h1>🤖 AI Secretary</h1><p>Capture KPSC attendance, transcript notes, resolutions, action items, and policy checks.</p></div>
+      <div><h1>🤖 AI Secretary</h1><p>KPSC meeting capture — attendance, transcript, minutes &amp; governance review.</p></div>
       <button class="btn btn-primary" onclick="App.startAiSecretaryDraft()">➕ New Meeting</button>
     </div>
+    <div class="ai-sec-search-bar">
+      <input type="search" class="form-input" placeholder="🔍 Search meetings by title or date…" value="${esc(state.aiSecretarySearch||'')}" oninput="App.setAiSecretarySearch(this.value)" />
+      <span class="text-muted fs-12">${meetings.length} meeting${meetings.length!==1?'s':''}</span>
+    </div>
+    <div class="ai-sec-card-grid">${cards}</div>
+    <div class="card mt-2">
+      <div class="section-hdr" style="cursor:pointer;user-select:none" onclick="App.toggleAiSecretaryMembers()">
+        <div class="section-title">👥 KPSC Member Roster</div>
+        <span style="font-size:12px;color:var(--text3)">${membersOpen?'▲ Collapse':'▼ Manage'} · ${kpscMembers.length} member(s)</span>
+      </div>
+      ${membersOpen?`
+        <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Members listed here pre-fill attendance names when starting a meeting.</p>
+        <div id="kpsc-member-list">${memberRows}</div>
+        <div class="ai-sec-actions" style="margin-top:12px">
+          <button class="btn" onclick="App.addKpscMember()">➕ Add Member</button>
+          <button class="btn btn-primary" onclick="App.saveKpscMembers(this)">💾 Save Roster</button>
+        </div>`:''
+      }
+    </div>`;
+}
 
+function renderAiSecretaryRoom(active, kpscMembers){
+  const participants=normalizeAiSecretaryParticipants(active.participants, kpscMembers);
+  const quorumMet=participants.every(p=>p.present);
+  const processed=active.status==='processed';
+  document.getElementById('pageContent').innerHTML=`
+    <div class="page-header">
+      <div>
+        <button class="btn" onclick="App.backToAiSecretaryDashboard()" style="margin-bottom:6px;font-size:12px;padding:6px 10px">← Meetings</button>
+        <h1 style="margin-bottom:2px">🤖 ${esc(active.title)}</h1>
+        <p>${fmtDate(active.meetingDate)} · ${esc(active.meetingType||'routine')} meeting</p>
+      </div>
+      <div class="ai-sec-actions no-print" style="align-items:flex-start">
+        <button class="btn" onclick="App.saveAiSecretaryMeeting(this)">💾 Save</button>
+        ${active.status!=='processed'&&active.status!=='ended'?`<button class="btn btn-amber" onclick="App.endAiSecretaryMeeting(this)">⏹ End Meeting</button>`:''}
+        ${!processed?`<button class="btn btn-primary" onclick="App.processAiSecretaryMeeting(this)">✨ Generate Minutes</button>`:`<button class="btn" disabled style="opacity:.5;cursor:default" title="Minutes already generated">✅ Minutes Done</button>`}
+        ${active.minutesMarkdown?`<button class="btn" onclick="App.copyAiSecretaryMinutes()">📋 Copy</button>`:''}
+      </div>
+    </div>
+    ${aiSecretaryProgressStepper(active.status)}
     <div class="ai-sec-grid">
       <div class="card ai-sec-workspace">
-        <div class="section-hdr"><div class="section-title">Meeting Capture</div>${active?aiSecretaryStatusBadge(active.status):''}</div>
-        <input type="hidden" id="ais_id" value="${esc(active?.id||'')}" />
+        <div class="section-hdr"><div class="section-title">Meeting Capture</div>${aiSecretaryStatusBadge(active.status)}</div>
+        <input type="hidden" id="ais_id" value="${esc(active.id)}" />
+        <input type="hidden" id="ais_status" value="${esc(active.status)}" />
         <div class="form-row">
-          <div class="form-group"><label class="form-label">Meeting Title</label><input id="ais_title" class="form-input" value="${esc(active?.title||'KPSC Meeting')}" /></div>
-          <div class="form-group"><label class="form-label">Date</label><input id="ais_date" type="date" class="form-input" value="${esc(active?.meetingDate||ymdLocal(new Date()))}" /></div>
+          <div class="form-group"><label class="form-label">Meeting Title</label><input id="ais_title" class="form-input" value="${esc(active.title||'KPSC Meeting')}" /></div>
+          <div class="form-group"><label class="form-label">Date</label><input id="ais_date" type="date" class="form-input" value="${esc(active.meetingDate||ymdLocal(new Date()))}" /></div>
         </div>
         <div class="form-group"><label class="form-label">Meeting Type</label>
           <select id="ais_type" class="form-select">
-            ${['routine','emergency','virtual'].map(t=>`<option value="${t}" ${active?.meetingType===t?'selected':''}>${t[0].toUpperCase()+t.slice(1)}</option>`).join('')}
+            ${['routine','emergency','virtual'].map(t=>`<option value="${t}" ${active.meetingType===t?'selected':''}>${t[0].toUpperCase()+t.slice(1)}</option>`).join('')}
           </select>
         </div>
-
         <div class="ai-sec-quorum ${quorumMet?'ok':'warn'}">
           <strong>${quorumMet?'✅ Quorum looks complete':'⚠️ Quorum needs attention'}</strong>
-          <span>KPSC approvals require Men, Women, Youth, and Ministers representation.</span>
+          <span>KPSC approvals require Men, Women, Youth &amp; Ministers representation.</span>
         </div>
         <div class="ai-sec-attendance">
           ${participants.map(p=>`
             <label class="ai-sec-person">
               <input type="checkbox" id="ais_${p.group}_present" ${p.present?'checked':''} />
               <span>${p.label}</span>
-              <input type="text" id="ais_${p.group}_name" class="form-input" placeholder="Representative name" value="${esc(p.name)}" />
+              <input type="text" id="ais_${p.group}_name" class="form-input" placeholder="Name" value="${esc(p.name)}" />
             </label>`).join('')}
         </div>
-
         <div class="form-group">
           <label class="form-label">Live Transcript / Secretary Notes</label>
-          <textarea id="ais_transcript" class="form-textarea ai-sec-transcript" placeholder="Paste live transcript here, or type notes as the meeting happens...">${esc(active?.transcriptText||'')}</textarea>
-        </div>
-        <div class="ai-sec-actions no-print">
-          <button class="btn" onclick="App.saveAiSecretaryMeeting(this)">💾 Save Draft</button>
-          <button class="btn btn-amber" onclick="App.endAiSecretaryMeeting(this)">⏹ End Meeting</button>
-          <button class="btn btn-primary" onclick="App.processAiSecretaryMeeting(this)">✨ Generate Minutes</button>
-          ${active?.minutesMarkdown?`<button class="btn" onclick="App.copyAiSecretaryMinutes()">📋 Copy Minutes</button>`:''}
+          <textarea id="ais_transcript" class="form-textarea ai-sec-transcript" placeholder="Paste live transcript here, or type notes as the meeting progresses…">${esc(active.transcriptText||'')}</textarea>
         </div>
       </div>
-
-      <div class="card">
-        <div class="section-hdr"><div class="section-title">Recent Meetings</div><span class="text-muted fs-12">${meetings.length} total</span></div>
-        <div class="feed-list">${recentRows}</div>
+      <div class="card ai-sec-output">
+        <div class="section-hdr"><div class="section-title">Generated Minutes</div><span class="text-muted fs-12">Draft — requires human approval</span></div>
+        ${active.summaryShort?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">ℹ</span><span>${esc(active.summaryShort)}</span></div>`:''}
+        <div class="grid-3" style="margin-bottom:12px">
+          <div class="kpi" style="padding:10px"><div class="kpi-label">Resolutions</div><div class="kpi-value" style="font-size:22px">${active.resolutions?.length||0}</div></div>
+          <div class="kpi" style="padding:10px"><div class="kpi-label">Action Items</div><div class="kpi-value" style="font-size:22px">${active.actionItems?.length||0}</div></div>
+          <div class="kpi" style="padding:10px"><div class="kpi-label">Policy Flags</div><div class="kpi-value" style="font-size:22px;color:${active.policyFlags?.length?'var(--danger)':'var(--success)'}">${active.policyFlags?.length||0}</div></div>
+        </div>
+        <div class="ai-sec-minutes">${aiSecretaryMinutesHtml(active.minutesMarkdown)}</div>
       </div>
-    </div>
-
-    <div class="grid-3 mt-2">
-      <div class="kpi"><div class="kpi-label">Potential Resolutions</div><div class="kpi-value">${active?.resolutions?.length||0}</div></div>
-      <div class="kpi"><div class="kpi-label">Action Items</div><div class="kpi-value">${active?.actionItems?.length||0}</div></div>
-      <div class="kpi"><div class="kpi-label">Policy Flags</div><div class="kpi-value" style="color:${active?.policyFlags?.length?'var(--danger)':'var(--success)'}">${active?.policyFlags?.length||0}</div></div>
-    </div>
-
-    <div class="card mt-2 ai-sec-output">
-      <div class="section-hdr"><div class="section-title">Generated Minutes & Governance Review</div><span class="text-muted fs-12">Draft for human approval</span></div>
-      ${active?.summaryShort?`<div class="alert alert-info"><span class="alert-icon">ℹ</span><span>${esc(active.summaryShort)}</span></div>`:''}
-      <div class="ai-sec-minutes">${aiSecretaryMinutesHtml(active?.minutesMarkdown)}</div>
     </div>`;
 }
 
+function backToAiSecretaryDashboard(){
+  state.aiSecretaryActiveId = null;
+  renderAiSecretary();
+}
+
+function setAiSecretarySearch(val){
+  state.aiSecretarySearch = val;
+  renderAiSecretary();
+}
+
+function toggleAiSecretaryMembers(){
+  state.aiSecretaryMembersOpen = !state.aiSecretaryMembersOpen;
+  renderAiSecretary();
+}
+
+let _kpscMembersDraft = null;
+function kpscMemberField(idx, field, val){
+  if(!_kpscMembersDraft) _kpscMembersDraft = _readKpscMembersFromDom();
+  if(!_kpscMembersDraft[idx]) _kpscMembersDraft[idx] = { group:'men', name:'', role:'' };
+  _kpscMembersDraft[idx][field] = val;
+}
+function addKpscMember(){
+  const curr = _readKpscMembersFromDom();
+  curr.push({ group:'men', name:'', role:'' });
+  _kpscMembersDraft = curr;
+  _rerenderKpscMemberList(curr);
+}
+function removeKpscMember(idx){
+  const curr = _readKpscMembersFromDom();
+  curr.splice(idx, 1);
+  _kpscMembersDraft = curr;
+  _rerenderKpscMemberList(curr);
+}
+function _readKpscMembersFromDom(){
+  const list = document.getElementById('kpsc-member-list');
+  if(!list) return Array.isArray(_kpscMembersDraft) ? [..._kpscMembersDraft] : [];
+  return Array.from(list.querySelectorAll('.ai-sec-member-row')).map(row=>{
+    const sel = row.querySelector('select');
+    const inputs = row.querySelectorAll('input[type=text]');
+    return { group: sel?.value||'men', name: inputs[0]?.value||'', role: inputs[1]?.value||'' };
+  });
+}
+function _rerenderKpscMemberList(members){
+  const list = document.getElementById('kpsc-member-list');
+  if(!list) return;
+  list.innerHTML = members.length ? members.map((m,i)=>`
+    <div class="ai-sec-member-row">
+      <select class="form-select" style="width:110px;font-size:12px" onchange="App.kpscMemberField(${i},'group',this.value)">
+        ${AI_SECRETARY_PARTICIPANT_GROUPS.map(g=>`<option value="${g.group}" ${m.group===g.group?'selected':''}>${g.label}</option>`).join('')}
+      </select>
+      <input type="text" class="form-input" placeholder="Name" value="${esc(m.name||'')}" oninput="App.kpscMemberField(${i},'name',this.value)" />
+      <input type="text" class="form-input" placeholder="Role (optional)" value="${esc(m.role||'')}" oninput="App.kpscMemberField(${i},'role',this.value)" style="max-width:140px" />
+      <button class="btn" style="padding:7px 10px;color:var(--danger);flex-shrink:0" onclick="App.removeKpscMember(${i})" title="Remove">✕</button>
+    </div>`).join('') : '<div class="empty" style="font-size:12px;padding:12px 0">No members yet.</div>';
+}
+async function saveKpscMembers(btn=null){
+  const members = _readKpscMembersFromDom().filter(m=>m.name.trim());
+  const restore = setBtnLoading(btn,'Saving…');
+  try{
+    await DB.saveSettings({ kpsc_members: members });
+    _kpscMembersDraft = null;
+    showAlert(`KPSC member roster saved (${members.length} member${members.length!==1?'s':''}).`, 'success');
+    await renderAiSecretary();
+  }catch(e){ showAlert(e.message||'Failed to save roster.','danger'); }
+  finally{ restore(); }
+}
+
 async function startAiSecretaryDraft(){
+  const settings = await DB.getSettings();
+  const kpscMembers = Array.isArray(settings.kpsc_members) ? settings.kpsc_members : [];
   const meeting = await DB.addAiSecretaryMeeting({
     title:'KPSC Meeting', meetingType:'routine', meetingDate:ymdLocal(new Date()),
-    status:'recording', participants:normalizeAiSecretaryParticipants(), createdBy:state.user?.name||'', startedAt:new Date().toISOString()
+    status:'recording', participants:normalizeAiSecretaryParticipants([], kpscMembers), createdBy:state.user?.name||'', startedAt:new Date().toISOString()
   });
   state.aiSecretaryActiveId = meeting.id;
   DB.addAudit('ai_secretary_started',`AI Secretary meeting started: ${meeting.title}`,state.user?.name);
@@ -7821,11 +8015,14 @@ async function loadAiSecretaryMeeting(id){
 
 async function saveAiSecretaryMeeting(btn=null){
   const id = document.getElementById('ais_id')?.value;
+  const currentStatus = document.getElementById('ais_status')?.value || 'draft';
+  // Preserve ended/processed; only advance draft → recording
+  const status = id ? (currentStatus === 'draft' ? 'recording' : currentStatus) : 'draft';
   const payload = {
     title:document.getElementById('ais_title')?.value?.trim() || 'KPSC Meeting',
     meetingType:document.getElementById('ais_type')?.value || 'routine',
     meetingDate:document.getElementById('ais_date')?.value || ymdLocal(new Date()),
-    status:id ? 'recording' : 'draft',
+    status,
     participants:aiSecretaryParticipantPayload(),
     transcriptText:document.getElementById('ais_transcript')?.value || '',
     createdBy:state.user?.name||''
@@ -7864,7 +8061,16 @@ async function endAiSecretaryMeeting(btn=null){
 async function processAiSecretaryMeeting(btn=null){
   const id = document.getElementById('ais_id')?.value;
   if(!id){ showAlert('Save the meeting before generating minutes.','danger'); return; }
-  await saveAiSecretaryMeeting();
+  const currentStatus = document.getElementById('ais_status')?.value || 'ended';
+  // Save latest transcript/attendance while preserving status (no status clobber)
+  await DB.updateAiSecretaryMeeting(id, {
+    title:document.getElementById('ais_title')?.value?.trim() || 'KPSC Meeting',
+    meetingType:document.getElementById('ais_type')?.value || 'routine',
+    meetingDate:document.getElementById('ais_date')?.value || ymdLocal(new Date()),
+    status: currentStatus,
+    participants:aiSecretaryParticipantPayload(),
+    transcriptText:document.getElementById('ais_transcript')?.value || '',
+  });
   const restore = setBtnLoading(btn,'Generating…');
   try{
     const processed = await DB.processAiSecretaryMeeting(id);
@@ -7966,6 +8172,7 @@ return {
   setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   startAiSecretaryDraft, loadAiSecretaryMeeting, saveAiSecretaryMeeting, endAiSecretaryMeeting, processAiSecretaryMeeting, copyAiSecretaryMinutes,
+  backToAiSecretaryDashboard, setAiSecretarySearch, toggleAiSecretaryMembers, kpscMemberField, addKpscMember, removeKpscMember, saveKpscMembers, saveAiProviderKeys,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert
 };
 

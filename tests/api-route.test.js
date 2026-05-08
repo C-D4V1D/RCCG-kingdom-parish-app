@@ -241,12 +241,32 @@ test('login with hashed PIN does not run upgrade update', async () => {
 
 test('AI secretary processing returns draft minutes and policy flags', async () => {
   const runs = [];
-  const participants = [
-    { group: 'men', label: 'Men', present: true, name: 'Bro A' },
-    { group: 'women', label: 'Women', present: true, name: 'Sis B' },
-    { group: 'youth', label: 'Youth', present: false, name: '' },
-    { group: 'ministers', label: 'Ministers', present: true, name: 'Min C' }
-  ];
+  // Track DB state so the post-UPDATE re-fetch returns the processed row
+  let dbState = {
+    id: 'AIM-1',
+    title: 'KPSC Emergency Meeting',
+    meeting_type: 'emergency',
+    meeting_date: '2026-05-08',
+    status: 'ended',
+    participants_json: JSON.stringify([
+      { group: 'men', label: 'Men', present: true, name: 'Bro A' },
+      { group: 'women', label: 'Women', present: true, name: 'Sis B' },
+      { group: 'youth', label: 'Youth', present: false, name: '' },
+      { group: 'ministers', label: 'Ministers', present: true, name: 'Min C' }
+    ]),
+    transcript_text: 'The committee resolved to approve generator repairs. Action: treasurer to follow up before Friday. Welfare beneficiary names were discussed.',
+    summary_short: '',
+    summary_long: '',
+    minutes_markdown: '',
+    resolutions_json: '[]',
+    action_items_json: '[]',
+    policy_flags_json: '[]',
+    created_by: 'Secretary',
+    started_at: '',
+    ended_at: '',
+    processed_at: '',
+    created_at: '2026-05-08T00:00:00.000Z'
+  };
   const DB = createDBMock({
     onPrepare(sql) {
       const statement = {
@@ -257,30 +277,24 @@ test('AI secretary processing returns draft minutes and policy flags', async () 
         },
         async first() {
           if (/SELECT \* FROM ai_secretary_meetings WHERE id=\?/.test(sql)) {
-            return {
-              id: 'AIM-1',
-              title: 'KPSC Emergency Meeting',
-              meeting_type: 'emergency',
-              meeting_date: '2026-05-08',
-              status: 'ended',
-              participants_json: JSON.stringify(participants),
-              transcript_text: 'The committee resolved to approve generator repairs. Action: treasurer to follow up before Friday. Welfare beneficiary names were discussed.',
-              summary_short: '',
-              summary_long: '',
-              minutes_markdown: '',
-              resolutions_json: '[]',
-              action_items_json: '[]',
-              policy_flags_json: '[]',
-              created_by: 'Secretary',
-              started_at: '',
-              ended_at: '',
-              processed_at: '',
-              created_at: '2026-05-08T00:00:00.000Z'
-            };
+            return { ...dbState };
           }
+          // Settings lookup for DeepSeek key — return no key so deterministic engine runs
+          if (/SELECT key,value FROM settings/.test(sql)) return null;
           throw new Error(`Unexpected SQL in first(): ${sql}`);
         },
+        async all() {
+          // Settings lookup returns empty (no DeepSeek key configured)
+          if (/SELECT key,value FROM settings/.test(sql)) return { results: [] };
+          return { results: [] };
+        },
         async run() {
+          if (/UPDATE ai_secretary_meetings SET/.test(sql)) {
+            // Simulate the DB being updated; reflect processed status for re-fetch
+            dbState = { ...dbState, status: 'processed', minutes_markdown: statement._bound[2] || dbState.minutes_markdown,
+              summary_short: statement._bound[0] || '', resolutions_json: statement._bound[3] || '[]',
+              action_items_json: statement._bound[4] || '[]', policy_flags_json: statement._bound[5] || '[]' };
+          }
           runs.push({ sql, bound: statement._bound });
           return { success: true };
         }

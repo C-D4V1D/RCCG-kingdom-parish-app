@@ -1162,7 +1162,7 @@ function buildAiSecretaryOutput(meeting) {
 }
 
 async function getAiSecretaryMeetings(DB) {
-  const { results } = await DB.prepare(`SELECT * FROM ai_secretary_meetings ORDER BY meeting_date DESC, created_at DESC`).all();
+  const { results } = await DB.prepare(`SELECT * FROM ai_secretary_meetings ORDER BY meeting_date DESC, created_at DESC LIMIT 200`).all();
   return ok((results || []).map(aiSecretaryMeetingFromRow));
 }
 
@@ -1216,27 +1216,61 @@ async function updateAiSecretaryMeeting(DB, id, data) {
   return await getAiSecretaryMeeting(DB, id);
 }
 
+async function callDeepSeekForMeeting(apiKey, meeting) {
+  const participantList = (meeting.participants || [])
+    .map(p => `${p.label}: ${p.present ? (p.name || 'Present') : 'Absent'}`).join(', ');
+  const prompt = `You are a professional church committee secretary. Process the following KPSC meeting and return a JSON object with these exact keys: summaryShort (1-2 sentence string), summaryLong (multi-line string), minutesMarkdown (full minutes in Markdown), resolutions (array of {id,text,category,requiredThreshold,approved,voteSummary}), actionItems (array of {id,task,assignee,dueDate,status}), policyFlags (array of {type,severity,message}).
+
+Meeting title: ${meeting.title}
+Date: ${meeting.meetingDate}
+Type: ${meeting.meetingType}
+Attendance: ${participantList}
+Transcript:
+${meeting.transcriptText || '(no transcript provided)'}
+
+Return only valid JSON, no markdown fences.`;
+
+  const resp = await fetch('https://api.deepseek.com/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+    body: JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'user', content: prompt }], max_tokens: 3000, temperature: 0.3 }),
+  });
+  if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
+  const data = await resp.json();
+  const text = data.choices?.[0]?.message?.content || '';
+  return JSON.parse(text);
+}
+
 async function processAiSecretaryMeeting(DB, id) {
   const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
   if (!row) return err('AI secretary meeting not found', 404);
   const meeting = aiSecretaryMeetingFromRow(row);
-  const output = buildAiSecretaryOutput(meeting);
+
+  let output;
+  try {
+    const { results: settingsRows } = await DB.prepare(`SELECT key,value FROM settings WHERE key='ai_deepseek_key'`).all();
+    const deepseekKey = settingsRows?.[0]?.value ? String(settingsRows[0].value).trim() : '';
+    output = deepseekKey ? await callDeepSeekForMeeting(deepseekKey, meeting) : buildAiSecretaryOutput(meeting);
+  } catch (_) {
+    output = buildAiSecretaryOutput(meeting);
+  }
+
   const processedAt = new Date().toISOString();
   await DB.prepare(`
     UPDATE ai_secretary_meetings SET
       status='processed', summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?, processed_at=?
     WHERE id=?
   `).bind(
-    output.summaryShort,
-    output.summaryLong,
-    output.minutesMarkdown,
-    JSON.stringify(output.resolutions),
-    JSON.stringify(output.actionItems),
-    JSON.stringify(output.policyFlags),
+    output.summaryShort || '',
+    output.summaryLong || '',
+    output.minutesMarkdown || '',
+    JSON.stringify(output.resolutions || []),
+    JSON.stringify(output.actionItems || []),
+    JSON.stringify(output.policyFlags || []),
     processedAt,
     id,
   ).run();
-  return ok({ ...meeting, ...output, status: 'processed', processedAt });
+  return getAiSecretaryMeeting(DB, id);
 }
 
 // ── NOTIFICATIONS ─────────────────────────────────────────────────
