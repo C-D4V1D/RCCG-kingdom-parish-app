@@ -1075,23 +1075,22 @@ async function saveSettings(DB, data) {
 
 // ── AI SECRETARY ───────────────────────────────────────────────────
 function normalizeAiParticipants(participants) {
-  const fallback = [
-    { group: 'men', label: 'Men', present: false, name: '' },
-    { group: 'women', label: 'Women', present: false, name: '' },
-    { group: 'youth', label: 'Youth', present: false, name: '' },
-    { group: 'ministers', label: 'Ministers', present: false, name: '' },
-  ];
   const incoming = Array.isArray(participants) ? participants : [];
-  const byGroup = new Map(incoming.map(p => [String(p.group || '').toLowerCase(), p]));
-  return fallback.map(base => {
-    const row = byGroup.get(base.group) || {};
-    return {
-      group: base.group,
-      label: row.label || base.label,
-      present: !!row.present,
-      name: String(row.name || '').trim(),
-    };
-  });
+  if (incoming.length === 0) {
+    return [
+      { group: 'men',       label: 'Men',       present: false, name: '' },
+      { group: 'women',     label: 'Women',     present: false, name: '' },
+      { group: 'youth',     label: 'Youth',     present: false, name: '' },
+      { group: 'ministers', label: 'Ministers', present: false, name: '' },
+    ];
+  }
+  // Preserve all entries as-is (supports multiple members per group from the KPSC portal)
+  return incoming.map(p => ({
+    group:   String(p.group   || 'men').toLowerCase(),
+    label:   String(p.label   || p.group || ''),
+    present: !!p.present,
+    name:    String(p.name    || '').trim(),
+  }));
 }
 
 function aiSecretaryMeetingFromRow(row) {

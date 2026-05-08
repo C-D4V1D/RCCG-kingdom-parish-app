@@ -374,10 +374,17 @@ function navigate(page) {
 async function renderPage(page) {
   const main = document.getElementById('kpsc-main');
   main.innerHTML = '<div class="k-loading">Loading…</div>';
-  if (page === 'dashboard') await renderDashboard(main);
-  else if (page === 'meeting') await renderMeetingRoom(main);
-  else if (page === 'members') await renderMembers(main);
-  else if (page === 'archive') await renderArchive(main);
+  try {
+    if (page === 'dashboard') await renderDashboard(main);
+    else if (page === 'meeting') await renderMeetingRoom(main);
+    else if (page === 'members') await renderMembers(main);
+    else if (page === 'archive') await renderArchive(main);
+  } catch (e) {
+    main.innerHTML = `<div class="k-page"><div class="k-error-box">
+      <strong>Could not load page</strong><br>${esc(e.message || String(e))}
+      <br><br>If this is the first time using the portal, ask the IT Administrator to run the database setup (Admin → Setup in the Finance Portal).
+    </div></div>`;
+  }
 }
 
 function goBack() {
@@ -390,8 +397,9 @@ async function renderDashboard(main) {
     apiGet('ai-secretary-meetings'),
     apiGet('settings'),
   ]);
-  S.meetings = meetingsRes.meetings || meetingsRes || [];
-  S.members  = (settingsRes.kpsc_members || []);
+  if (meetingsRes?.error) throw new Error(meetingsRes.error);
+  S.meetings = Array.isArray(meetingsRes) ? meetingsRes : [];
+  S.members  = Array.isArray(settingsRes?.kpsc_members) ? settingsRes.kpsc_members : [];
 
   const recent  = [...S.meetings].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')).slice(0, 10);
   const total   = S.meetings.length;
@@ -525,46 +533,38 @@ async function renderMeetingRoom(main) {
 }
 
 function buildAttendanceRows(savedParts) {
-  const byGroup = new Map((savedParts || []).map(p => [p.group, p]));
+  // Build a name-keyed lookup so each roster member can be matched individually
+  const savedByName = new Map((savedParts || []).map(p => [p.name, p]));
   const membersByGroup = new Map(GROUPS.map(g => [g.key, []]));
   for (const mem of S.members) {
     if (membersByGroup.has(mem.group)) membersByGroup.get(mem.group).push(mem);
   }
 
   return GROUPS.map(g => {
-    const saved = byGroup.get(g.key) || {};
     const groupMembers = membersByGroup.get(g.key) || [];
     const rows = groupMembers.length > 0
       ? groupMembers.map((mem, i) => {
           const presentKey = `att_present_${g.key}_${i}`;
-          const nameKey = `att_name_${g.key}_${i}`;
-          const isPresent = savedParts.length > 0
-            ? (saved.name === mem.name ? !!saved.present : false)
-            : false;
+          const saved = savedByName.get(mem.name);
+          const isPresent = saved ? !!saved.present : false;
           return `
             <label class="k-att-member">
               <input type="checkbox" id="${presentKey}" data-group="${g.key}" data-idx="${i}"
                 ${isPresent ? 'checked' : ''} onchange="Kpsc.updateAttGroup('${g.key}')"/>
               <span class="k-att-name">${esc(mem.name)}</span>
               ${mem.position ? `<span class="k-att-pos">${esc(mem.position)}</span>` : ''}
-              <input type="hidden" id="${nameKey}" value="${esc(mem.name)}"/>
             </label>`;
         }).join('')
-      : `<div class="k-att-no-members">No members in roster for this group.
+      : `<div class="k-att-no-members">No members in this group.
            <button class="kbtn-link" onclick="Kpsc.navigate('members')">Add members →</button>
          </div>`;
-
-    const groupPresent = groupMembers.filter((_, i) => {
-      const el = document.getElementById(`att_present_${g.key}_${i}`);
-      return el?.checked;
-    }).length;
 
     return `
       <div class="k-att-group">
         <div class="k-att-group-hdr">${g.icon} ${g.label}
           <span class="k-att-group-count" id="att_count_${g.key}"></span>
         </div>
-        <div class="k-att-group-members" id="att_group_${g.key}">${rows}</div>
+        <div class="k-att-group-members">${rows}</div>
       </div>`;
   }).join('');
 }
