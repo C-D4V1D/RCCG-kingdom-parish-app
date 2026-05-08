@@ -1583,8 +1583,12 @@ async function azureIdentifySpeaker(env, body) {
   const audioBase64 = String(body?.audioBase64 || '');
   if (!audioBase64) return err('Missing audio data.', 400);
 
-  // Sanitise UUIDs — only allow hex chars and hyphens.
-  const safeIds = profileIds.map(id => String(id).replace(/[^a-fA-F0-9-]/g, ''));
+  // Sanitise and validate UUIDs (8-4-4-4-12 hex format).
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const safeIds = profileIds
+    .map(id => String(id).replace(/[^a-fA-F0-9-]/g, ''))
+    .filter(id => UUID_RE.test(id));
+  if (!safeIds.length) return err('No valid profile IDs provided.', 400);
 
   let audioBytes;
   try {

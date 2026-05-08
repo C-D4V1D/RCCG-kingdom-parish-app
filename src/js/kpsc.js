@@ -116,9 +116,13 @@ const Enrolling = {
 };
 
 // ── AZURE SPEAKER RECOGNITION CONSTANTS ───────────────────────────
-const AZURE_IDENTIFY_THRESHOLD_SEC = 5;  // seconds of speech needed before triggering auto-ID
-const AZURE_IDENTIFY_MIN_SCORE = 0.5;    // minimum confidence (0–1) to accept auto-assignment
-const AZURE_ENROLL_DURATION_SEC = 30;    // seconds of audio to capture for enrollment
+const AZURE_IDENTIFY_THRESHOLD_SEC = 5;   // seconds of speech needed before triggering auto-ID
+const AZURE_IDENTIFY_MIN_AUDIO_SEC  = 4;  // minimum seconds Azure needs for a reliable match
+const AZURE_IDENTIFY_MAX_AUDIO_SEC  = 10; // max seconds of audio to send per identification call
+const AZURE_IDENTIFY_MIN_SCORE = 0.5;     // minimum confidence (0–1) to accept auto-assignment
+const AZURE_ENROLL_DURATION_SEC = 30;     // seconds of audio to capture for enrollment
+const DEFAULT_PCM_SAMPLE_RATE   = 48000;  // fallback rate before the AudioContext is created
+const BASE64_CHUNK_SIZE         = 32768;  // chars per chunk when encoding large buffers
 
 function recFmt() {
   const m = Math.floor(Rec.elapsed / 60);
@@ -906,7 +910,7 @@ function diarizerBufferPcm(samples) {
   Diarizer.pcmChunks.push({ offset: Diarizer.pcmSampleOffset, data: samples.slice() });
   Diarizer.pcmSampleOffset += samples.length;
   // Remove chunks older than 60 seconds.
-  const minOffset = Diarizer.pcmSampleOffset - (60 * (Diarizer.pcmSampleRate || 48000));
+  const minOffset = Diarizer.pcmSampleOffset - (60 * (Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE));
   while (Diarizer.pcmChunks.length &&
          Diarizer.pcmChunks[0].offset + Diarizer.pcmChunks[0].data.length <= minOffset) {
     Diarizer.pcmChunks.shift();
@@ -929,11 +933,11 @@ function diarizerExtractPcmRange(startSample, endSample) {
   return out;
 }
 
-// Collect up to 10 s of audio for a speaker index from the ring buffer.
+// Collect up to AZURE_IDENTIFY_MAX_AUDIO_SEC of audio for a speaker index from the ring buffer.
 function diarizerExtractSpeakerAudio(speakerIdx) {
   const ranges = Diarizer.speakerRanges.get(speakerIdx) || [];
   if (!ranges.length || !Diarizer.pcmSampleRate) return null;
-  const maxSamples = 10 * Diarizer.pcmSampleRate;
+  const maxSamples = AZURE_IDENTIFY_MAX_AUDIO_SEC * Diarizer.pcmSampleRate;
   let accumulated = 0;
   const toExtract = [];
   for (let i = ranges.length - 1; i >= 0 && accumulated < maxSamples; i--) {
@@ -991,8 +995,8 @@ async function diarizerTriggerIdentify(speakerIdx) {
   Diarizer.identifyPending.add(speakerIdx);
   try {
     const audio = diarizerExtractSpeakerAudio(speakerIdx);
-    // Azure needs at least 4 seconds of speech for a reliable match.
-    if (!audio || audio.length < 4 * Diarizer.pcmSampleRate) return;
+    // Azure needs at least AZURE_IDENTIFY_MIN_AUDIO_SEC of speech for a reliable match.
+    if (!audio || audio.length < AZURE_IDENTIFY_MIN_AUDIO_SEC * Diarizer.pcmSampleRate) return;
 
     const resampled   = resampleTo16k(audio, Diarizer.pcmSampleRate);
     const wavBuffer   = pcmToWav(resampled, 16000);
@@ -1155,10 +1159,11 @@ function resampleTo16k(float32, fromRate) {
   const outLen = Math.round(float32.length / ratio);
   const out    = new Float32Array(outLen);
   for (let i = 0; i < outLen; i++) {
-    const pos = i * ratio;
-    const lo  = Math.floor(pos);
-    const hi  = Math.min(lo + 1, float32.length - 1);
-    out[i] = float32[lo] * (1 - (pos - lo)) + float32[hi] * (pos - lo);
+    const pos  = i * ratio;
+    const lo   = Math.floor(pos);
+    const hi   = Math.min(lo + 1, float32.length - 1);
+    const frac = pos - lo; // interpolation weight towards the next sample
+    out[i] = float32[lo] * (1 - frac) + float32[hi] * frac;
   }
   return out;
 }
@@ -1194,11 +1199,11 @@ function pcmToWav(float32, sampleRate) {
 
 // Convert an ArrayBuffer to a base64 string (handles large buffers safely).
 function arrayBufferToBase64(buffer) {
-  const bytes     = new Uint8Array(buffer);
-  const chunkSize = 32768;
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  const bytes = new Uint8Array(buffer);
+  let binary  = '';
+  for (let i = 0; i < bytes.length; i += BASE64_CHUNK_SIZE) {
+    // Spread each chunk into String.fromCharCode to avoid exceeding call-stack limits.
+    binary += String.fromCharCode(...bytes.subarray(i, i + BASE64_CHUNK_SIZE));
   }
   return btoa(binary);
 }
@@ -1836,8 +1841,12 @@ async function startEnrollRecording(idx) {
 
   if (startBtn) { startBtn.disabled = true; startBtn.textContent = '🎙 Recording…'; }
   if (footerEl) {
-    // Hide cancel while recording so the user completes the full 30 seconds.
-    footerEl.querySelector('.kbtn-ghost')?.remove();
+    // Replace Cancel button to abort the recording and clean up resources.
+    const cancelBtn = footerEl.querySelector('.kbtn-ghost');
+    if (cancelBtn) {
+      cancelBtn.textContent = '✕ Abort';
+      cancelBtn.onclick = () => { closeEnrollModal(); };
+    }
   }
 
   try {
