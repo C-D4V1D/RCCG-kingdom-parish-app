@@ -35,16 +35,31 @@ const S = {
   archiveSearch: '',
 };
 
-// ── AUDIO RECORDER ────────────────────────────────────────────────
+// ── AUDIO RECORDER + REALTIME TRANSCRIPTION ───────────────────────
+const REC_CHUNK_MS = 5000;
+const REC_RETRY_BASE_MS = 1200;
+const REC_MAX_RETRIES = 5;
+
 const Rec = {
   mediaRecorder: null,
   stream: null,
-  chunks: [],
-  blob: null,
-  url: null,
+  chunkSeq: 0,
+  uploadSessionId: '',
   elapsed: 0,
   timer: null,
   status: 'idle', // idle | recording | paused | stopped
+  pc: null,
+  dc: null,
+  realtimeStatus: 'offline', // offline | connecting | connected | reconnecting | error
+  reconnectAttempts: 0,
+  reconnectTimer: null,
+  manualStop: false,
+  transcriptEntries: [],
+  liveDeltas: new Map(),
+  uploadQueue: [],
+  uploadBusy: false,
+  uploadedChunks: 0,
+  failedChunks: 0,
 };
 
 function recFmt() {
@@ -53,124 +68,404 @@ function recFmt() {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+function recTimestamp() {
+  const total = Rec.elapsed;
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return h > 0
+    ? `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+    : `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function recStatusLabel() {
+  if (Rec.realtimeStatus === 'connected') return 'Realtime transcription connected';
+  if (Rec.realtimeStatus === 'connecting') return 'Connecting transcription…';
+  if (Rec.realtimeStatus === 'reconnecting') return `Reconnecting transcription (${Rec.reconnectAttempts}/${REC_MAX_RETRIES})…`;
+  if (Rec.realtimeStatus === 'error') return 'Transcription offline — audio chunks still uploading';
+  return 'Transcription offline';
+}
+
 function recRenderUI() {
   const el = document.getElementById('kpsc-rec-ui');
   if (!el) return;
+  const liveDisabled = Rec.status === 'recording' ? '' : 'disabled';
+  const uploadMeta = Rec.status === 'idle'
+    ? 'Stream audio continuously with 5-second chunk backups and realtime transcription.'
+    : `${Rec.uploadedChunks} chunk${Rec.uploadedChunks === 1 ? '' : 's'} uploaded${Rec.failedChunks ? ` • ${Rec.failedChunks} pending retry` : ''}`;
+
   if (Rec.status === 'idle') {
     el.innerHTML = `
-      <div class="rec-row">
-        <button class="kbtn kbtn-record" onclick="Kpsc.recStart()">🎙 Start Recording</button>
-        <span class="rec-hint">Audio stays in your browser — not uploaded to the server</span>
+      <div class="rec-card">
+        <div class="rec-main">
+          <button class="kbtn kbtn-record" onclick="Kpsc.recStart(this)">🎙 Start Meeting</button>
+          <span class="rec-hint">${uploadMeta}</span>
+        </div>
       </div>`;
   } else if (Rec.status === 'recording') {
     el.innerHTML = `
-      <div class="rec-row">
-        <span class="rec-dot rec-dot-live"></span>
-        <span class="rec-timer" id="kpsc-rec-timer">${recFmt()}</span>
-        <button class="kbtn kbtn-sm" onclick="Kpsc.recPause()">⏸ Pause</button>
-        <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.recStop()">⏹ Stop</button>
+      <div class="rec-card rec-card-live">
+        <div class="rec-main">
+          <span class="rec-dot rec-dot-live"></span>
+          <span class="rec-timer" id="kpsc-rec-timer">${recFmt()}</span>
+          <button class="kbtn kbtn-sm" onclick="Kpsc.recPause()">⏸ Pause</button>
+          <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.recStop()">⏹ Stop</button>
+        </div>
+        <div class="rec-meta">
+          <span class="rec-rt rec-rt-${Rec.realtimeStatus}">${recStatusLabel()}</span>
+          <span>${uploadMeta}</span>
+        </div>
       </div>`;
   } else if (Rec.status === 'paused') {
     el.innerHTML = `
-      <div class="rec-row">
-        <span class="rec-dot rec-dot-paused"></span>
-        <span class="rec-timer">${recFmt()} — Paused</span>
-        <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.recResume()">▶ Resume</button>
-        <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.recStop()">⏹ Stop</button>
-      </div>`;
-  } else if (Rec.status === 'stopped' && Rec.url) {
-    el.innerHTML = `
-      <div class="rec-stopped">
-        <audio controls src="${Rec.url}" class="rec-player"></audio>
-        <div class="rec-row rec-row-actions">
-          <a class="kbtn kbtn-sm" href="${Rec.url}" download="kpsc-recording.webm">⬇ Download</a>
-          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.recReset()">🗑 Clear</button>
+      <div class="rec-card rec-card-paused">
+        <div class="rec-main">
+          <span class="rec-dot rec-dot-paused"></span>
+          <span class="rec-timer">${recFmt()} — Paused</span>
+          <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.recResume()">▶ Resume</button>
+          <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.recStop()">⏹ Stop</button>
+        </div>
+        <div class="rec-meta">
+          <span>Microphone paused</span>
+          <span>${uploadMeta}</span>
         </div>
       </div>`;
+  } else if (Rec.status === 'stopped') {
+    el.innerHTML = `
+      <div class="rec-card rec-card-stopped">
+        <div class="rec-main">
+          <span class="rec-dot rec-dot-stopped"></span>
+          <span class="rec-timer">${recFmt()} — Stopped</span>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.recReset()">🗑 Reset Recorder</button>
+        </div>
+        <div class="rec-meta">Recording ended. Full audio was never kept in browser memory; only short chunks were uploaded.</div>
+      </div>`;
   }
+  const transcriptPanel = document.getElementById('kpsc-live-transcript');
+  if (transcriptPanel) transcriptPanel.toggleAttribute('data-recording', liveDisabled === '');
 }
 
-async function recStart() {
+function recRenderTranscript() {
+  const list = document.getElementById('kpsc-live-transcript-list');
+  if (!list) return;
+  const partials = [...Rec.liveDeltas.entries()].filter(([, text]) => text.trim()).map(([itemId, text]) => ({
+    itemId,
+    timestamp: recTimestamp(),
+    text,
+    partial: true,
+  }));
+  const rows = [...Rec.transcriptEntries, ...partials];
+  list.innerHTML = rows.length ? rows.map(entry => `
+    <div class="lt-entry${entry.partial ? ' lt-entry-partial' : ''}">
+      <span class="lt-time">${esc(entry.timestamp)}</span>
+      <span class="lt-text">${esc(entry.text)}</span>
+    </div>`).join('') : '<div class="lt-empty">Live transcript will appear here as people speak.</div>';
+  list.scrollTop = list.scrollHeight;
+}
+
+function recAppendTranscript(text, itemId = '') {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return;
+  const entry = { itemId, timestamp: recTimestamp(), text: clean };
+  Rec.transcriptEntries.push(entry);
+  const textarea = document.getElementById('km-transcript');
+  if (textarea) {
+    const line = `[${entry.timestamp}] ${entry.text}`;
+    textarea.value = textarea.value ? `${textarea.value}\n${line}` : line;
+    textarea.scrollTop = textarea.scrollHeight;
+  }
+  recRenderTranscript();
+}
+
+async function recStart(btn) {
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    showToast('This browser does not support live audio recording.', 'error');
+    return;
+  }
   try {
-    Rec.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    Rec.chunks = [];
+    if (btn) btn.disabled = true;
+    Rec.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    Rec.chunkSeq = 0;
+    Rec.uploadSessionId = `kpsc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     Rec.elapsed = 0;
-    Rec.blob = null;
-    if (Rec.url) { URL.revokeObjectURL(Rec.url); Rec.url = null; }
+    Rec.uploadedChunks = 0;
+    Rec.failedChunks = 0;
+    Rec.uploadQueue = [];
+    Rec.transcriptEntries = [];
+    Rec.liveDeltas = new Map();
+    Rec.manualStop = false;
+    Rec.reconnectAttempts = 0;
+    Rec.status = 'recording';
 
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
       : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
     Rec.mediaRecorder = new MediaRecorder(Rec.stream, mimeType ? { mimeType } : undefined);
-    Rec.mediaRecorder.ondataavailable = e => { if (e.data.size > 0) Rec.chunks.push(e.data); };
-    Rec.mediaRecorder.onstop = () => {
-      Rec.blob = new Blob(Rec.chunks, { type: Rec.mediaRecorder.mimeType || 'audio/webm' });
-      Rec.url = URL.createObjectURL(Rec.blob);
-      Rec.status = 'stopped';
-      recRenderUI();
+    Rec.mediaRecorder.ondataavailable = e => {
+      if (e.data.size > 0) recQueueChunk(e.data, Rec.mediaRecorder.mimeType || mimeType || 'audio/webm');
     };
-    Rec.mediaRecorder.start(1000);
-    Rec.status = 'recording';
-    Rec.timer = setInterval(() => {
-      Rec.elapsed++;
-      const el = document.getElementById('kpsc-rec-timer');
-      if (el) el.textContent = recFmt();
-    }, 1000);
+    Rec.mediaRecorder.onstop = () => recFlushUploads(true);
+    Rec.mediaRecorder.start(REC_CHUNK_MS);
+    recStartTimer();
     recRenderUI();
+    recRenderTranscript();
+    try {
+      await recConnectRealtime();
+    } catch (e) {
+      Rec.realtimeStatus = 'error';
+      recRenderUI();
+      showToast(e.message || 'Realtime transcription is offline; chunked audio upload is still running.', 'error');
+    }
 
-    // Auto-advance meeting status from draft to recording
     const statusInput = document.getElementById('km-status');
     if (statusInput && statusInput.value === 'draft') {
       statusInput.value = 'recording';
       updateStepperUI('recording');
     }
   } catch (e) {
-    showToast('Microphone access denied. Please allow mic permission and try again.', 'error');
+    recStopTracks();
+    Rec.status = 'idle';
+    Rec.realtimeStatus = 'error';
+    showToast(e.message || 'Microphone access denied. Please allow mic permission and try again.', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+    recRenderUI();
   }
+}
+
+function recStartTimer() {
+  clearInterval(Rec.timer);
+  Rec.timer = setInterval(() => {
+    if (Rec.status !== 'recording') return;
+    Rec.elapsed++;
+    const el = document.getElementById('kpsc-rec-timer');
+    if (el) el.textContent = recFmt();
+  }, 1000);
+}
+
+async function recConnectRealtime() {
+  if (!Rec.stream || Rec.manualStop) return;
+  recCloseRealtime(false);
+  Rec.realtimeStatus = Rec.reconnectAttempts > 0 ? 'reconnecting' : 'connecting';
+  recRenderUI();
+
+  const tokenRes = await apiPost('realtime-transcription-token', {});
+  if (tokenRes.error) throw new Error(tokenRes.error);
+  const ephemeralKey = tokenRes.value || tokenRes.client_secret?.value;
+  if (!ephemeralKey) throw new Error('Realtime transcription token was not returned by the server.');
+
+  const pc = new RTCPeerConnection();
+  Rec.pc = pc;
+  pc.onconnectionstatechange = () => {
+    if (['failed', 'disconnected', 'closed'].includes(pc.connectionState) && !Rec.manualStop && Rec.status === 'recording') {
+      recScheduleReconnect();
+    }
+  };
+
+  const track = Rec.stream.getAudioTracks()[0];
+  if (!track) throw new Error('No microphone audio track is available.');
+  pc.addTrack(track, Rec.stream);
+
+  const dc = pc.createDataChannel('oai-events');
+  Rec.dc = dc;
+  dc.onopen = () => {
+    Rec.realtimeStatus = 'connected';
+    Rec.reconnectAttempts = 0;
+    recRenderUI();
+  };
+  dc.onmessage = (event) => recHandleRealtimeEvent(event.data);
+  dc.onclose = () => {
+    if (!Rec.manualStop && Rec.status === 'recording') recScheduleReconnect();
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  const sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
+    method: 'POST',
+    body: offer.sdp,
+    headers: {
+      Authorization: `Bearer ${ephemeralKey}`,
+      'Content-Type': 'application/sdp',
+    },
+  });
+  if (!sdpResponse.ok) throw new Error(`Realtime connection failed (${sdpResponse.status}).`);
+  await pc.setRemoteDescription({ type: 'answer', sdp: await sdpResponse.text() });
+}
+
+function recHandleRealtimeEvent(raw) {
+  let event;
+  try { event = JSON.parse(raw); } catch { return; }
+  if (event.type === 'conversation.item.input_audio_transcription.delta') {
+    const itemId = event.item_id || event.itemId || 'live';
+    const current = Rec.liveDeltas.get(itemId) || '';
+    Rec.liveDeltas.set(itemId, current + (event.delta || ''));
+    recRenderTranscript();
+  } else if (event.type === 'conversation.item.input_audio_transcription.completed') {
+    const itemId = event.item_id || event.itemId || '';
+    Rec.liveDeltas.delete(itemId);
+    recAppendTranscript(event.transcript || '', itemId);
+  } else if (event.type === 'error') {
+    showToast(event.error?.message || 'Realtime transcription error.', 'error');
+  }
+}
+
+function recScheduleReconnect() {
+  if (Rec.manualStop || Rec.status !== 'recording' || Rec.reconnectTimer) return;
+  if (Rec.reconnectAttempts >= REC_MAX_RETRIES) {
+    Rec.realtimeStatus = 'error';
+    recRenderUI();
+    showToast('Realtime transcription disconnected. Audio chunk uploads are still running.', 'error');
+    return;
+  }
+  Rec.reconnectAttempts++;
+  Rec.realtimeStatus = 'reconnecting';
+  const delay = REC_RETRY_BASE_MS * (2 ** (Rec.reconnectAttempts - 1));
+  recRenderUI();
+  Rec.reconnectTimer = setTimeout(async () => {
+    Rec.reconnectTimer = null;
+    try { await recConnectRealtime(); }
+    catch { recScheduleReconnect(); }
+  }, delay);
 }
 
 function recPause() {
   if (Rec.mediaRecorder?.state === 'recording') {
+    Rec.mediaRecorder.requestData();
     Rec.mediaRecorder.pause();
+    Rec.stream?.getAudioTracks().forEach(t => { t.enabled = false; });
     clearInterval(Rec.timer);
+    recCloseRealtime(false);
     Rec.status = 'paused';
+    Rec.realtimeStatus = 'offline';
     recRenderUI();
   }
 }
 
-function recResume() {
+async function recResume() {
   if (Rec.mediaRecorder?.state === 'paused') {
+    Rec.stream?.getAudioTracks().forEach(t => { t.enabled = true; });
     Rec.mediaRecorder.resume();
-    Rec.timer = setInterval(() => {
-      Rec.elapsed++;
-      const el = document.getElementById('kpsc-rec-timer');
-      if (el) el.textContent = recFmt();
-    }, 1000);
     Rec.status = 'recording';
+    Rec.manualStop = false;
+    recStartTimer();
     recRenderUI();
+    try { await recConnectRealtime(); }
+    catch { recScheduleReconnect(); }
   }
 }
 
 function recStop() {
+  Rec.manualStop = true;
   clearInterval(Rec.timer);
+  clearTimeout(Rec.reconnectTimer);
+  Rec.reconnectTimer = null;
   if (Rec.mediaRecorder && Rec.mediaRecorder.state !== 'inactive') {
+    try { Rec.mediaRecorder.requestData(); } catch (_) { /* noop */ }
     Rec.mediaRecorder.stop();
   }
+  recCloseRealtime(true);
+  recStopTracks();
+  Rec.status = 'stopped';
+  Rec.realtimeStatus = 'offline';
+  recRenderUI();
+}
+
+function recReset() {
+  recStop();
+  Rec.chunkSeq = 0;
+  Rec.uploadSessionId = '';
+  Rec.elapsed = 0;
+  Rec.status = 'idle';
+  Rec.transcriptEntries = [];
+  Rec.liveDeltas = new Map();
+  Rec.uploadQueue = [];
+  Rec.uploadedChunks = 0;
+  Rec.failedChunks = 0;
+  recRenderUI();
+  recRenderTranscript();
+}
+
+function recCloseRealtime(markManual) {
+  if (markManual) Rec.manualStop = true;
+  try { Rec.dc?.close(); } catch (_) { /* noop */ }
+  try { Rec.pc?.close(); } catch (_) { /* noop */ }
+  Rec.dc = null;
+  Rec.pc = null;
+}
+
+function recStopTracks() {
   if (Rec.stream) {
     Rec.stream.getTracks().forEach(t => t.stop());
     Rec.stream = null;
   }
 }
 
-function recReset() {
-  recStop();
-  if (Rec.url) { URL.revokeObjectURL(Rec.url); Rec.url = null; }
-  Rec.chunks = [];
-  Rec.blob = null;
-  Rec.elapsed = 0;
-  Rec.status = 'idle';
-  recRenderUI();
+function recQueueChunk(blob, mimeType) {
+  const chunk = {
+    blob,
+    mimeType,
+    seq: ++Rec.chunkSeq,
+    meetingId: S.activeMeeting?.id || '',
+    uploadSessionId: Rec.uploadSessionId,
+    createdAt: new Date().toISOString(),
+  };
+  Rec.uploadQueue.push(chunk);
+  recFlushUploads(false);
 }
+
+async function recFlushUploads(useKeepalive) {
+  if (Rec.uploadBusy) return;
+  Rec.uploadBusy = true;
+  try {
+    while (Rec.uploadQueue.length) {
+      const chunk = Rec.uploadQueue[0];
+      try {
+        await recUploadChunk(chunk, useKeepalive);
+        Rec.uploadQueue.shift();
+        Rec.uploadedChunks++;
+        Rec.failedChunks = Math.max(0, Rec.failedChunks - 1);
+        recRenderUI();
+      } catch (_) {
+        Rec.failedChunks = Rec.uploadQueue.length;
+        setTimeout(() => recFlushUploads(false), 2500);
+        break;
+      }
+    }
+  } finally {
+    Rec.uploadBusy = false;
+  }
+}
+
+async function recUploadChunk(chunk, useKeepalive) {
+  const form = new FormData();
+  form.append('audio', chunk.blob, `kpsc-${chunk.uploadSessionId}-${String(chunk.seq).padStart(5, '0')}.webm`);
+  form.append('meetingId', chunk.meetingId);
+  form.append('uploadSessionId', chunk.uploadSessionId);
+  form.append('sequence', String(chunk.seq));
+  form.append('mimeType', chunk.mimeType);
+  form.append('createdAt', chunk.createdAt);
+  const response = await fetch(`${API}/ai-secretary-meetings/audio-chunk`, {
+    method: 'POST',
+    body: form,
+    keepalive: !!useKeepalive && chunk.blob.size < 60000,
+  });
+  if (!response.ok) throw new Error('Chunk upload failed');
+  const data = await response.json();
+  if (data.error) throw new Error(data.error);
+}
+
+window.addEventListener('beforeunload', () => {
+  if (Rec.status === 'recording' && Rec.mediaRecorder?.state === 'recording') {
+    try { Rec.mediaRecorder.requestData(); } catch (_) { /* noop */ }
+  }
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && Rec.status === 'recording' && Rec.mediaRecorder?.state === 'recording') {
+    try { Rec.mediaRecorder.requestData(); } catch (_) { /* noop */ }
+    recFlushUploads(true);
+  }
+});
 
 // ── API HELPERS ───────────────────────────────────────────────────
 async function apiGet(path) {
@@ -514,9 +809,20 @@ async function renderMeetingRoom(main) {
       </section>
 
       <section class="k-section">
-        <h3 class="k-sec-title">Transcript / Notes</h3>
+        <h3 class="k-sec-title">Live Audio & Realtime Transcript</h3>
         ${canRecord ? `<div id="kpsc-rec-ui" class="k-rec-ui"></div>` : ''}
-        <textarea class="k-input k-textarea" id="km-transcript" placeholder="Type or paste the meeting transcript here…" ${isProcessed ? 'readonly' : ''}>${esc(m?.transcriptText || '')}</textarea>
+        <div class="k-live-transcript" id="kpsc-live-transcript">
+          <div class="lt-head">
+            <div>
+              <div class="lt-title">Live Transcript</div>
+              <div class="lt-sub">Timestamped entries auto-scroll as OpenAI realtime transcription returns speech turns.</div>
+            </div>
+            <span class="lt-pill">Realtime</span>
+          </div>
+          <div class="lt-list" id="kpsc-live-transcript-list"></div>
+        </div>
+        <label class="k-label k-transcript-label" for="km-transcript">Saved Transcript / Notes</label>
+        <textarea class="k-input k-textarea" id="km-transcript" placeholder="Type notes here, or start the meeting to append live transcript entries…" ${isProcessed ? 'readonly' : ''}>${esc(m?.transcriptText || '')}</textarea>
       </section>
 
       <div class="k-room-actions">
@@ -530,6 +836,7 @@ async function renderMeetingRoom(main) {
     </div>`;
 
   if (canRecord) recRenderUI();
+  recRenderTranscript();
 }
 
 function buildAttendanceRows(savedParts) {
@@ -648,10 +955,8 @@ async function saveMeeting(btn) {
   const trans = document.getElementById('km-transcript')?.value || '';
   const rawStatus = document.getElementById('km-status')?.value || 'draft';
 
-  // If there's no activeMeeting it's a new draft; if there is one preserve status unless it was draft→recording
-  const status = S.activeMeeting
-    ? rawStatus
-    : 'draft';
+  // Preserve draft→recording transitions from the Start Meeting control, including new meetings.
+  const status = rawStatus;
   const participants = readAttendance();
 
   const orig = btn.textContent;

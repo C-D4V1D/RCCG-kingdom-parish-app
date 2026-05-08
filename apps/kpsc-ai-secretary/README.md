@@ -37,3 +37,18 @@ Current capabilities:
 - Archive recent AI Secretary meetings through Cloudflare D1-backed API routes
 
 The current processor uses a deterministic governance-first strategy so it works without AI provider credentials, while still allowing provider-backed post-processing when a key is configured. Provider output is treated as draft content only: the backend sanitizes the response, falls back to deterministic extraction when fields are missing or malformed, and always re-applies mandatory policy checks for quorum, missing transcript notes, unfinished meetings, major-project thresholds, welfare/privacy language, and transcript prompt-injection attempts. This prevents an LLM from suppressing governance flags even if the transcript or model response says everything is approved.
+
+## Live audio + realtime transcription
+
+The integrated KPSC meeting room now supports live meeting capture:
+
+- **Start Meeting / Pause / Resume / Stop** controls in the meeting room.
+- Continuous microphone streaming to OpenAI Realtime transcription through a browser WebRTC session.
+- Timestamped transcript entries with auto-scroll, plus automatic appending into the saved transcript notes.
+- MediaRecorder chunking every 5 seconds so the browser never builds a full in-memory recording.
+- Chunk uploads to `/api/ai-secretary-meetings/audio-chunk`; bind an R2 bucket as `KPSC_AUDIO_BUCKET` (or `AUDIO_BUCKET`) to persist chunks.
+- Reconnect and retry behavior for realtime transcription and chunk uploads.
+
+Required production secret:
+
+- `OPENAI_API_KEY` — used only by the Cloudflare Pages Function to mint short-lived Realtime client secrets.
