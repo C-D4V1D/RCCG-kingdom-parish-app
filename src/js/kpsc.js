@@ -62,6 +62,298 @@ const Rec = {
   failedChunks: 0,
 };
 
+// ── SPEAKER LABELING / VOICE FINGERPRINTING ───────────────────────
+// Uses the Web Audio API AnalyserNode to extract spectral features
+// from each speech turn and match them to enrolled speaker profiles.
+
+const SPEAKER_FFT_SIZE = 2048;
+const SPEAKER_SAMPLE_MS = 80;        // ms between FFT snapshots during a turn
+const SPEAKER_ENROLL_MS = 3000;      // enrollment capture duration
+const SPEAKER_MATCH_THRESHOLD = 0.09; // max Euclidean distance for enrolled match
+const SPEAKER_AUTO_THRESHOLD  = 0.04; // max distance to group as same unknown speaker
+
+// Color palette for speaker badges (navy → teal across 8 slots)
+const SPEAKER_COLORS = [
+  '#1e3a5f', // navy
+  '#1a7a5e', // green
+  '#b45309', // amber
+  '#c0392b', // red
+  '#7c3aed', // purple
+  '#0369a1', // blue
+  '#be185d', // pink
+  '#047857', // teal
+];
+
+const SpeakerReg = {
+  profiles: [],      // { name, features: number[4], color }  — enrolled members
+  autoProfiles: [],  // { features: number[4], label, color }  — auto-detected unknowns
+  analyser: null,
+  audioCtx: null,
+  sampleTimer: null,
+  currentFrames: [],
+  currentItemId: null,
+  enrolling: false,
+  enrollFrames: [],
+};
+
+function speakerSetupAnalyser(stream) {
+  speakerTeardownAnalyser();
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source   = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = SPEAKER_FFT_SIZE;
+    analyser.smoothingTimeConstant = 0.2;
+    source.connect(analyser);
+    SpeakerReg.audioCtx = audioCtx;
+    SpeakerReg.analyser = analyser;
+  } catch (_) {
+    SpeakerReg.analyser = null;
+    SpeakerReg.audioCtx = null;
+  }
+}
+
+function speakerTeardownAnalyser() {
+  clearInterval(SpeakerReg.sampleTimer);
+  SpeakerReg.sampleTimer   = null;
+  SpeakerReg.currentFrames = [];
+  SpeakerReg.currentItemId = null;
+  try { SpeakerReg.audioCtx?.close(); } catch (_) {}
+  SpeakerReg.audioCtx = null;
+  SpeakerReg.analyser = null;
+}
+
+function speakerStartSampling(itemId) {
+  if (!SpeakerReg.analyser) return;
+  SpeakerReg.currentItemId = itemId;
+  SpeakerReg.currentFrames = [];
+  clearInterval(SpeakerReg.sampleTimer);
+  SpeakerReg.sampleTimer = setInterval(() => {
+    if (!SpeakerReg.analyser) return;
+    const buf = new Uint8Array(SpeakerReg.analyser.frequencyBinCount);
+    SpeakerReg.analyser.getByteFrequencyData(buf);
+    SpeakerReg.currentFrames.push(buf.slice());
+  }, SPEAKER_SAMPLE_MS);
+}
+
+function speakerStopSampling() {
+  clearInterval(SpeakerReg.sampleTimer);
+  SpeakerReg.sampleTimer = null;
+}
+
+// Extracts a 4-element feature vector from an array of FFT byte frames:
+// [normalised spectral centroid, low-band energy, mid-band energy, high-band energy]
+function speakerExtractFeatures(frames) {
+  if (!frames || frames.length === 0 || !SpeakerReg.audioCtx) return null;
+  const sampleRate = SpeakerReg.audioCtx.sampleRate || 48000;
+  const binCount   = frames[0].length;
+  const hzPerBin   = sampleRate / SPEAKER_FFT_SIZE;
+
+  // Speech band limits (Hz → bin indices)
+  const loIdx    = Math.max(1, Math.round(80   / hzPerBin));
+  const midIdx   = Math.round(500  / hzPerBin);
+  const hiMidIdx = Math.round(2000 / hzPerBin);
+  const hiIdx    = Math.min(binCount - 1, Math.round(3400 / hzPerBin));
+
+  let centroidSum = 0, lowSum = 0, midSum = 0, highSum = 0;
+  for (const frame of frames) {
+    let totalMag = 0, centroidNumer = 0;
+    let low = 0, mid = 0, high = 0;
+    for (let i = loIdx; i <= hiIdx; i++) {
+      const mag = frame[i];
+      totalMag      += mag;
+      centroidNumer += mag * i;
+      if      (i < midIdx)   low  += mag;
+      else if (i < hiMidIdx) mid  += mag;
+      else                   high += mag;
+    }
+    centroidSum += totalMag > 0 ? centroidNumer / totalMag : 0;
+    const lowCount  = Math.max(1, midIdx   - loIdx);
+    const midCount  = Math.max(1, hiMidIdx - midIdx);
+    const highCount = Math.max(1, hiIdx    - hiMidIdx);
+    lowSum  += low  / lowCount;
+    midSum  += mid  / midCount;
+    highSum += high / highCount;
+  }
+  const n = frames.length;
+  return [
+    centroidSum / n / binCount,  // normalised centroid (0–1)
+    lowSum  / n / 255,           // normalised low-band energy
+    midSum  / n / 255,           // normalised mid-band energy
+    highSum / n / 255,           // normalised high-band energy
+  ];
+}
+
+function speakerEuclidean(a, b) {
+  if (!a || !b || a.length !== b.length) return Infinity;
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += (a[i] - b[i]) ** 2;
+  return Math.sqrt(sum);
+}
+
+// Returns { name, color, enrolled } or null when no features available.
+function speakerIdentify(features) {
+  if (!features) return null;
+
+  // 1. Try enrolled profiles first
+  let bestMatch = null, bestDist = Infinity;
+  for (const p of SpeakerReg.profiles) {
+    const d = speakerEuclidean(features, p.features);
+    if (d < bestDist) { bestDist = d; bestMatch = p; }
+  }
+  if (bestMatch && bestDist < SPEAKER_MATCH_THRESHOLD) {
+    return { name: bestMatch.name, color: bestMatch.color, enrolled: true };
+  }
+
+  // 2. Group with an existing auto-detected speaker
+  for (const a of SpeakerReg.autoProfiles) {
+    if (speakerEuclidean(features, a.features) < SPEAKER_AUTO_THRESHOLD) {
+      return { name: a.label, color: a.color, enrolled: false };
+    }
+  }
+
+  // 3. New unknown speaker
+  const idx   = SpeakerReg.autoProfiles.length;
+  const label = `Speaker ${String.fromCharCode(65 + idx)}`; // A, B, C …
+  const color = SPEAKER_COLORS[idx % SPEAKER_COLORS.length];
+  SpeakerReg.autoProfiles.push({ features, label, color });
+  return { name: label, color, enrolled: false };
+}
+
+// Enroll the voice of a committee member (by their index in S.members).
+// Called from the speaker panel UI while recording is active.
+async function speakerEnrollMember(idx, btn) {
+  const member = S.members[idx];
+  if (!member?.name) return;
+  const name = member.name;
+
+  if (!SpeakerReg.analyser) {
+    showToast('Start recording first to enable voice enrollment.', 'error');
+    return;
+  }
+  if (SpeakerReg.enrolling) {
+    showToast('Enrollment already in progress. Please wait.', 'error');
+    return;
+  }
+
+  SpeakerReg.enrolling   = true;
+  SpeakerReg.enrollFrames = [];
+  const orig = btn.textContent;
+  btn.disabled = true;
+
+  const statusEl = document.getElementById(`sp-status-${idx}`);
+  if (statusEl) { statusEl.textContent = 'Listening…'; statusEl.className = 'sp-status sp-listening'; }
+
+  // Capture audio frames for SPEAKER_ENROLL_MS milliseconds
+  let remaining = Math.ceil(SPEAKER_ENROLL_MS / 1000);
+  btn.textContent = `${remaining}s…`;
+  const collectInterval = setInterval(() => {
+    if (!SpeakerReg.analyser) return;
+    const buf = new Uint8Array(SpeakerReg.analyser.frequencyBinCount);
+    SpeakerReg.analyser.getByteFrequencyData(buf);
+    SpeakerReg.enrollFrames.push(buf.slice());
+  }, SPEAKER_SAMPLE_MS);
+
+  await new Promise(resolve => {
+    const countdown = setInterval(() => {
+      remaining--;
+      btn.textContent = remaining > 0 ? `${remaining}s…` : 'Processing…';
+      if (remaining <= 0) clearInterval(countdown);
+    }, 1000);
+    setTimeout(() => { clearInterval(countdown); resolve(); }, SPEAKER_ENROLL_MS + 100);
+  });
+
+  clearInterval(collectInterval);
+  SpeakerReg.enrolling = false;
+
+  const features = speakerExtractFeatures(SpeakerReg.enrollFrames);
+  SpeakerReg.enrollFrames = [];
+
+  // Reject silent or near-silent captures
+  if (!features || features.slice(1).every(v => v < 0.005)) {
+    if (statusEl) { statusEl.textContent = 'Not enrolled'; statusEl.className = 'sp-status'; }
+    btn.textContent = orig;
+    btn.disabled = false;
+    showToast('No voice detected. Please speak clearly during the 3-second window.', 'error');
+    return;
+  }
+
+  // Replace any existing profile for this member
+  SpeakerReg.profiles = SpeakerReg.profiles.filter(p => p.name !== name);
+  const colorIdx = SpeakerReg.profiles.length % SPEAKER_COLORS.length;
+  const profile  = { name, features, color: SPEAKER_COLORS[colorIdx] };
+  SpeakerReg.profiles.push(profile);
+
+  if (statusEl) { statusEl.textContent = '✓ Voice saved'; statusEl.className = 'sp-status sp-enrolled'; }
+  btn.textContent = '🔄 Re-enroll';
+  btn.disabled = false;
+
+  // Update the colour dot in the row
+  const row = btn.closest('.sp-row');
+  if (row) {
+    let dot = row.querySelector('.sp-dot');
+    if (!dot) { dot = document.createElement('span'); dot.className = 'sp-dot'; row.prepend(dot); }
+    dot.style.background = profile.color;
+  }
+
+  showToast(`Voice enrolled for ${name}`, 'success');
+}
+
+function speakerClearProfiles() {
+  if (!confirm('Clear all enrolled voice profiles? Speaker labeling will start over.')) return;
+  SpeakerReg.profiles    = [];
+  SpeakerReg.autoProfiles = [];
+  const panel = document.getElementById('kpsc-speaker-panel');
+  if (panel) panel.innerHTML = speakerRenderEnrollPanel();
+  showToast('Voice profiles cleared', 'info');
+}
+
+// Renders the speaker enrollment panel HTML (called by renderMeetingRoom & recRenderUI).
+function speakerRenderEnrollPanel() {
+  const members = S.members.filter(m => m.name?.trim());
+  if (!members.length) return '';
+
+  const isRecording = Rec.status === 'recording';
+  const hasProfiles = SpeakerReg.profiles.length > 0;
+
+  const rows = members.map((m, idx) => {
+    const profile  = SpeakerReg.profiles.find(p => p.name === m.name);
+    const enrolled = !!profile;
+    const dotStyle = enrolled ? ` style="background:${profile.color}"` : '';
+    return `
+      <div class="sp-row">
+        <span class="sp-dot"${dotStyle}></span>
+        <span class="sp-name">${esc(m.name)}</span>
+        ${m.position ? `<span class="sp-pos">${esc(m.position)}</span>` : ''}
+        <span class="sp-status ${enrolled ? 'sp-enrolled' : ''}" id="sp-status-${idx}">
+          ${enrolled ? '✓ Voice saved' : 'Not enrolled'}
+        </span>
+        <button class="kbtn kbtn-sm kbtn-ghost sp-enroll-btn"
+          id="sp-btn-${idx}"
+          ${isRecording ? '' : 'disabled'}
+          onclick="Kpsc.speakerEnrollMember(${idx}, this)">
+          ${enrolled ? '🔄 Re-enroll' : '🎤 Enroll'}
+        </button>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="sp-panel">
+      <div class="sp-hdr">
+        <div class="sp-hdr-left">
+          <div class="sp-title">🎤 Speaker Labeling <span class="sp-beta">Beta</span></div>
+          <div class="sp-sub">
+            ${isRecording
+              ? 'Click <strong>Enroll</strong> next to a member, then have them speak naturally for 3 seconds. The live transcript will then label their speech turns.'
+              : 'Start recording to enroll voices for automatic speaker labeling.'}
+          </div>
+        </div>
+        ${hasProfiles ? `<button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.speakerClearProfiles()">Clear All</button>` : ''}
+      </div>
+      <div class="sp-list">${rows}</div>
+    </div>`;
+}
+
 function recFmt() {
   const m = Math.floor(Rec.elapsed / 60);
   const s = Rec.elapsed % 60;
@@ -143,6 +435,10 @@ function recRenderUI() {
   }
   const transcriptPanel = document.getElementById('kpsc-live-transcript');
   if (transcriptPanel) transcriptPanel.toggleAttribute('data-recording', liveDisabled === '');
+
+  // Refresh speaker enrollment panel to reflect current recording state
+  const speakerPanel = document.getElementById('kpsc-speaker-panel');
+  if (speakerPanel) speakerPanel.innerHTML = speakerRenderEnrollPanel();
 }
 
 function recRenderTranscript() {
@@ -153,24 +449,31 @@ function recRenderTranscript() {
     timestamp: recTimestamp(),
     text,
     partial: true,
+    speaker: null,
   }));
   const rows = [...Rec.transcriptEntries, ...partials];
-  list.innerHTML = rows.length ? rows.map(entry => `
-    <div class="lt-entry${entry.partial ? ' lt-entry-partial' : ''}">
-      <span class="lt-time">${esc(entry.timestamp)}</span>
-      <span class="lt-text">${esc(entry.text)}</span>
-    </div>`).join('') : '<div class="lt-empty">Live transcript will appear here as people speak.</div>';
+  list.innerHTML = rows.length ? rows.map(entry => {
+    const speakerBadge = entry.speaker
+      ? `<span class="lt-speaker" style="background:${entry.speaker.color}1a;color:${entry.speaker.color};border-color:${entry.speaker.color}55">${esc(entry.speaker.name)}</span>`
+      : '';
+    return `
+      <div class="lt-entry${entry.partial ? ' lt-entry-partial' : ''}">
+        <span class="lt-time">${esc(entry.timestamp)}</span>
+        <span class="lt-text">${speakerBadge}${esc(entry.text)}</span>
+      </div>`;
+  }).join('') : '<div class="lt-empty">Live transcript will appear here as people speak.</div>';
   list.scrollTop = list.scrollHeight;
 }
 
-function recAppendTranscript(text, itemId = '') {
+function recAppendTranscript(text, itemId = '', speaker = null) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) return;
-  const entry = { itemId, timestamp: recTimestamp(), text: clean };
+  const entry = { itemId, timestamp: recTimestamp(), text: clean, speaker };
   Rec.transcriptEntries.push(entry);
   const textarea = document.getElementById('km-transcript');
   if (textarea) {
-    const line = `[${entry.timestamp}] ${entry.text}`;
+    const speakerPrefix = speaker ? `[${speaker.name}] ` : '';
+    const line = `[${entry.timestamp}] ${speakerPrefix}${entry.text}`;
     textarea.value = textarea.value ? `${textarea.value}\n${line}` : line;
     textarea.scrollTop = textarea.scrollHeight;
   }
@@ -196,6 +499,10 @@ async function recStart(btn) {
     Rec.manualStop = false;
     Rec.reconnectAttempts = 0;
     Rec.status = 'recording';
+
+    // Set up the Web Audio analyser for speaker fingerprinting and reset auto-labels
+    speakerSetupAnalyser(Rec.stream);
+    SpeakerReg.autoProfiles = [];
 
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
@@ -299,11 +606,19 @@ function recHandleRealtimeEvent(raw) {
     const itemId = event.item_id || event.itemId || 'live';
     const current = Rec.liveDeltas.get(itemId) || '';
     Rec.liveDeltas.set(itemId, current + (event.delta || ''));
+    // Begin collecting FFT frames for this speech turn if it's a new item
+    if (SpeakerReg.currentItemId !== itemId) speakerStartSampling(itemId);
     recRenderTranscript();
   } else if (event.type === 'conversation.item.input_audio_transcription.completed') {
     const itemId = event.item_id || event.itemId || '';
     Rec.liveDeltas.delete(itemId);
-    recAppendTranscript(event.transcript || '', itemId);
+    // Stop sampling, extract features, and identify the speaker for this turn
+    speakerStopSampling();
+    const features = speakerExtractFeatures(SpeakerReg.currentFrames);
+    const speaker  = speakerIdentify(features);
+    SpeakerReg.currentFrames = [];
+    SpeakerReg.currentItemId = null;
+    recAppendTranscript(event.transcript || '', itemId, speaker);
   } else if (event.type === 'error') {
     showToast(event.error?.message || 'Realtime transcription error.', 'error');
   }
@@ -335,6 +650,7 @@ function recPause() {
     Rec.stream?.getAudioTracks().forEach(t => { t.enabled = false; });
     clearInterval(Rec.timer);
     recCloseRealtime(false);
+    speakerStopSampling();
     Rec.status = 'paused';
     Rec.realtimeStatus = 'offline';
     recRenderUI();
@@ -365,6 +681,7 @@ function recStop() {
   }
   recCloseRealtime(true);
   recStopTracks();
+  speakerTeardownAnalyser();
   Rec.status = 'stopped';
   Rec.realtimeStatus = 'offline';
   recRenderUI();
@@ -381,6 +698,7 @@ function recReset() {
   Rec.uploadQueue = [];
   Rec.uploadedChunks = 0;
   Rec.failedChunks = 0;
+  SpeakerReg.autoProfiles = [];
   recRenderUI();
   recRenderTranscript();
 }
@@ -811,7 +1129,7 @@ async function renderMeetingRoom(main) {
 
       <section class="k-section">
         <h3 class="k-sec-title">Live Audio & Realtime Transcript</h3>
-        ${canRecord ? `<div id="kpsc-rec-ui" class="k-rec-ui"></div>` : ''}
+        ${canRecord ? `<div id="kpsc-rec-ui" class="k-rec-ui"></div><div id="kpsc-speaker-panel"></div>` : ''}
         <div class="k-live-transcript" id="kpsc-live-transcript">
           <div class="lt-head">
             <div>
@@ -1288,6 +1606,8 @@ window.Kpsc = {
   recResume,
   recStop,
   recReset,
+  speakerEnrollMember,
+  speakerClearProfiles,
 };
 
 document.addEventListener('DOMContentLoaded', init);
