@@ -86,6 +86,13 @@
     .hp-steps li{counter-increment:step;display:flex;gap:12px;align-items:flex-start;margin-bottom:10px!important;}
     .hp-steps li::before{content:counter(step);width:22px;height:22px;background:var(--green);color:white;border-radius:50%;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;}
 
+    /* KPSC PORTAL BUTTON */
+    .hp-kpsc-btn{display:inline-block;margin-top:14px;padding:9px 18px;background:var(--gold);color:#fff;
+      border-radius:8px;font-size:13px;font-weight:600;text-decoration:none;letter-spacing:.3px;
+      transition:background .15s,transform .1s;}
+    .hp-kpsc-btn:hover{background:#96700a;}
+    .hp-kpsc-btn:active{transform:scale(.97);}
+
     /* FOOTER */
     .hp-footer{text-align:center;padding:32px 20px 48px;font-size:12px;color:var(--text3);border-top:1px solid var(--border);}
 
@@ -154,6 +161,7 @@
       <div class="hp-note">
         <div class="hp-note-label">A note on the KPSC</div>
         <p>The Kingdom Parish Stewardship Committee manages the church's development and welfare funds — a separate account from the one this team operates. When the main church account is strained by heavy RCCG remittances and cannot cover a local need, the Admin Officer formally requests support from the KPSC. This prevents emergency pressure on the Pastor and on the church members.</p>
+        <a href="/kpsc/" class="hp-kpsc-btn">Open KPSC Meeting Portal &rarr;</a>
       </div>
     </div>
 

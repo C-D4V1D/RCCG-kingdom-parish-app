@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="theme-color" content="#1e3a5f" />
+  <title>KPSC Meeting Portal — Kingdom Parish</title>
+  <link rel="stylesheet" href="/src/css/kpsc.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<!-- LOGIN SCREEN -->
+<div id="kpsc-login-screen">
+  <div class="kl-hero">
+    <div class="kl-cross">✝</div>
+    <p class="kl-denom">Redeemed Christian Church of God</p>
+    <h1 class="kl-name">Kingdom Parish, Aguleri</h1>
+    <p class="kl-portal">KPSC Meeting Portal</p>
+    <div class="kl-divider"></div>
+    <p class="kl-tagline">Kingdom Parish Stewardship Committee — secure workspace for recording, processing, and archiving committee meetings.</p>
+  </div>
+
+  <div class="kl-body">
+    <div class="kl-card-wrap">
+      <div class="kl-card">
+        <h2 class="kl-card-title">Sign In</h2>
+        <div id="kpsc-login-error" class="kl-error" style="display:none"></div>
+        <label class="kl-label">Your Name</label>
+        <input type="text" id="kpsc-name-input" class="kl-input" placeholder="Enter your full name"
+          autocomplete="name" autocorrect="off"
+          onkeydown="if(event.key==='Enter')document.getElementById('kpsc-pin-input').focus()" />
+        <label class="kl-label">PIN</label>
+        <input type="password" id="kpsc-pin-input" class="kl-input" maxlength="6"
+          placeholder="••••••" inputmode="numeric"
+          onkeydown="if(event.key==='Enter')Kpsc.login(this.closest('.kl-card').querySelector('.kl-submit'))" />
+        <button class="kl-submit" onclick="Kpsc.login(this)">Sign In</button>
+        <p class="kl-hint">Contact the IT Administrator if you have forgotten your PIN.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- APP SHELL -->
+<div id="kpsc-app" style="display:none">
+  <header class="ka-header">
+    <button class="ka-back" id="kpsc-back-btn" onclick="Kpsc.goBack()" style="display:none">&#8592; Back</button>
+    <div class="ka-title" id="kpsc-page-title">Dashboard</div>
+    <div class="ka-right">
+      <span class="ka-user" id="kpsc-user-name"></span>
+      <button class="ka-logout" onclick="Kpsc.logout()" title="Sign Out">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="ka-main" id="kpsc-main"></main>
+
+  <nav class="ka-nav" id="kpsc-nav">
+    <button class="ka-nav-item active" data-page="dashboard" onclick="Kpsc.navigate('dashboard')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+      <span>Dashboard</span>
+    </button>
+    <button class="ka-nav-item" data-page="members" onclick="Kpsc.navigate('members')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      <span>Members</span>
+    </button>
+    <button class="ka-nav-item" data-page="archive" onclick="Kpsc.navigate('archive')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+      <span>Archive</span>
+    </button>
+  </nav>
+</div>
+
+<script src="/src/js/kpsc.js"></script>
+</body>
+</html>

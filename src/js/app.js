@@ -211,6 +211,11 @@ const DB = {
   importBackup(data)            { return apiFetch('admin/import','POST',data); },
   clearAllData()                { return apiFetch('admin/clear','POST'); },
   clearDataOnly()               { return apiFetch('admin/clear-data','POST'); },
+
+  getAiSecretaryMeetings()       { return apiFetch('ai-secretary-meetings'); },
+  addAiSecretaryMeeting(d)       { return apiFetch('ai-secretary-meetings','POST',d); },
+  updateAiSecretaryMeeting(id,d) { return apiFetch(`ai-secretary-meetings/${id}`,'PUT',d); },
+  processAiSecretaryMeeting(id)  { return apiFetch(`ai-secretary-meetings/${id}/process`,'POST'); },
 };
 
 // ──────────────────────────────────────────
@@ -221,7 +226,8 @@ const state = {
   page: 'dashboard',
   month: new Date().getMonth(),
   year: new Date().getFullYear(),
-  loginBusy: false
+  loginBusy: false,
+  aiSecretaryActiveId: null,
 };
 
 // ──────────────────────────────────────────
@@ -1602,24 +1608,59 @@ async function renderDashboard(){
   const dashMonthPrefix = `${state.year}-${String(state.month+1).padStart(2,'0')}`;
   const dashMonthPaidRems = allRemsDash.filter(r=>r.status==='paid' && (r.periodTo||'').startsWith(dashMonthPrefix));
   const dashMonthPaidAmt = dashMonthPaidRems.reduce((s,r)=>s+(r.amount||0),0);
-  // Unpaid amounts carried over from previous periods.
-  const dashOverdueRems = allRemsDash.filter(r=>r.status==='overdue');
-  const dashOverdueUnpaidAmt = dashOverdueRems.reduce((s,r)=>s+(r.amount||0),0);
+  // Current month due (used only for paid/partial status label).
   const dashCurrentMonthRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
     +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
-  // Total due = this month's computed remittances + any unpaid overdue from previous months.
-  const dashTotalRemDueKpi = dashCurrentMonthRemDue + dashOverdueUnpaidAmt;
   const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashCurrentMonthRemDue * PAYMENT_TOLERANCE_THRESHOLD;
   const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
   const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
+  // Accumulated unpaid: remittances owed on ALL income ever collected, minus everything already paid.
+  const dashAllTimeRemittances = await calcRemittancesFromRecords(allIncomeDash);
+  const dashAllTimeIncomeRemDue = (dashAllTimeRemittances.totalNatl||0)+(dashAllTimeRemittances.totalArea||0)
+    +(dashAllTimeRemittances.totalPastor||0)+(dashAllTimeRemittances.totalMinisters||0)
+    +(dashAllTimeRemittances.totalSeed||0)+(dashAllTimeRemittances.provinceRebate||0);
+  // Accumulate quotas by counting remittance PERIODS (cut-off to cut-off), not calendar months.
+  // A period ends on a monthly cut-off date; counting calendar months over-counts when one period
+  // spans two calendar months (e.g. Apr 20 – May 24 is ONE period, not two).
+  const dashFirstIncRec = allIncomeDash.length > 0 ? allIncomeDash[allIncomeDash.length-1] : null;
+  const dashFirstDate = dashFirstIncRec ? new Date(dashFirstIncRec.date||dashFirstIncRec.createdAt) : new Date(state.year, state.month, 1);
+  const dashFirstDateStr = (dashFirstIncRec ? (dashFirstIncRec.date||dashFirstIncRec.createdAt||'') : '').slice(0,10);
+  let dashQuotaPeriods = 0;
+  if(dashFirstIncRec){
+    let fy=dashFirstDate.getFullYear(), fm=dashFirstDate.getMonth();
+    let y=fy, m=fm;
+    while(y<state.year||(y===state.year&&m<=state.month)){
+      // Try year-specific cut-off first, fall back to default (year-agnostic lookup via remCutoffDayForMonth)
+      const cd=getRemCutoffDates(settingsDash,y)||getRemCutoffDates(settingsDash);
+      const cutDay=cd?.dates?.[m]||null;
+      if(cutDay){
+        const cutStr=`${y}-${String(m+1).padStart(2,'0')}-${String(cutDay).padStart(2,'0')}`;
+        if(cutStr>dashFirstDateStr) dashQuotaPeriods++;
+      } else {
+        dashQuotaPeriods++; // no cut-off configured: treat each calendar month as one period
+      }
+      m++; if(m>11){m=0;y++;}
+    }
+    dashQuotaPeriods=Math.max(1,dashQuotaPeriods);
+  }
+  const dashMonthsElapsed = dashQuotaPeriods;
+  const dashAccumQuotas = dashAllQuotasAmt * dashQuotaPeriods;
+  const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
+  // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
+  const dashTotalRemDueKpi = Math.max(0, dashAllTimeIncomeRemDue + dashAccumQuotas - dashAllPaidRems);
+  // Income from periods not yet covered by a paid remittance — denominator for the % metric.
+  const dashPaidPeriods = allRemsDash.filter(r=>r.status==='paid'&&r.periodFrom&&r.periodTo).map(r=>({from:r.periodFrom,to:r.periodTo}));
+  const dashUnpaidPeriodIncome = allIncomeDash.filter(r=>{
+    const d=r.date||r.createdAt||'';
+    return !d||!dashPaidPeriods.some(p=>d>=p.from&&d<=p.to);
+  }).reduce((s,r)=>s+(r.totalCollection||0),0);
   const churchBal = await calcChurchBalance();
   const pendingPetty = await getPettyCashPendingCount();
-  const overdueRems = dashOverdueRems.length;
+  const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
 
-  // Spendable = total church funds − total outstanding remittances (current month + all overdue) − already paid
-  const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-  const dashOutstandingRems = Math.max(0, dashTotalRemDueKpi - dashAllPaidRems);
+  // Spendable = total church funds − net accumulated unpaid remittances.
+  const dashOutstandingRems = dashTotalRemDueKpi;
   const dashTotalFunds = churchBal.total;
   const dashSpendable = dashTotalFunds - dashOutstandingRems;
   const dashSpendLow = parseFloat(settingsDash?.spendableLow||0)||20000;
@@ -1717,7 +1758,11 @@ async function renderDashboard(){
   const totalSundaysFullMonth=fullMonthSundays(state.year,state.month);
   const remainingSundays=Math.max(0,totalSundaysFullMonth-sundayCount);
   const histMonths=[];
-  for(let i=3;i>=1;i--){let m=state.month-i,y=state.year;if(m<0){m+=12;y--;}histMonths.push({income:trendData[3-i].income,expenses:trendData[3-i].expenses,sundays:fullMonthSundays(y,m)});}
+  for(let i=3;i>=1;i--){let m=state.month-i,y=state.year;if(m<0){m+=12;y--;}
+    const hInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});
+    const hSundayRecs=hInc.filter(r=>!r.source||r.source==='sunday_collection');
+    const hSundays=hSundayRecs.length>0?hSundayRecs.length:fullMonthSundays(y,m);
+    histMonths.push({income:trendData[3-i].income,expenses:trendData[3-i].expenses,sundays:hSundays});}
   const validHist=histMonths.filter(h=>h.income>0&&h.sundays>0);
   // Current month's per-Sunday rate (most accurate signal when available)
   const currentRate=sundayCount>0?trendData[3].income/sundayCount:null;
@@ -1801,8 +1846,8 @@ async function renderDashboard(){
         <div class="kpi-label">RCCG Remittances Due</div>
         <div class="kpi-val">${fmt(dashTotalRemDueKpi)}</div>
         <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
-        ${dashOverdueUnpaidAmt>0?`<div class="kpi-delta warn" style="font-size:11px">⚠ Includes ${fmt(dashOverdueUnpaidAmt)} unpaid from previous month(s)</div>`:''}
-        <div class="kpi-delta warn">↑ ${totalIncome?Math.round(dashTotalRemDueKpi/totalIncome*100):0}% of income</div>
+        ${dashMonthsElapsed>1?`<div class="kpi-delta warn" style="font-size:11px">⚠ Accumulated unpaid since ${fmtDate(dashFirstIncRec.date||dashFirstIncRec.createdAt)}</div>`:''}
+        <div class="kpi-delta warn">↑ ${dashUnpaidPeriodIncome>0?Math.round(dashTotalRemDueKpi/dashUnpaidPeriodIncome*100):0}% of income</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
@@ -3920,14 +3965,39 @@ async function renderExpenses(){
     DB.getRemittances(),
     DB.getSettings()
   ]);
-  // Outstanding remittances = calculated due minus what's already been paid
-  const monthIncome = filterByMonth(allIncome);
-  const rem = await calcRemittancesFromRecords(monthIncome);
+  // Outstanding remittances = accumulated all-time due minus all-time paid (same as dashboard KPI logic)
+  const allTimeRemittances = await calcRemittancesFromRecords(allIncome);
+  const allTimeIncomeRemDue = (allTimeRemittances.totalNatl||0)+(allTimeRemittances.totalArea||0)
+    +(allTimeRemittances.totalPastor||0)+(allTimeRemittances.totalMinisters||0)
+    +(allTimeRemittances.totalSeed||0)+(allTimeRemittances.provinceRebate||0);
   const quotaList = getQuotaList(settings);
-  const totalQuotas = quotaList.reduce((s,q)=>s+(q.amount||0),0);
-  const totalRemDue = (rem.totalNatl||0)+(rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalMinisters||0)+(rem.totalSeed||0)+(rem.provinceRebate||0)+totalQuotas;
+  const allQuotasPerPeriod = quotaList.reduce((s,q)=>s+(q.amount||0),0);
+
+  // Count remittance periods from first income record up to viewed month, using configured cut-off dates.
+  const firstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
+  const firstDate = firstIncRec ? new Date(firstIncRec.date||firstIncRec.createdAt) : new Date(state.year, state.month, 1);
+  const firstDateStr = (firstIncRec ? (firstIncRec.date||firstIncRec.createdAt||'') : '').slice(0,10);
+  let quotaPeriods = 0;
+  if(firstIncRec){
+    let fy=firstDate.getFullYear(), fm=firstDate.getMonth();
+    let y=fy, m=fm;
+    while(y<state.year||(y===state.year&&m<=state.month)){
+      const cd=getRemCutoffDates(settings,y)||getRemCutoffDates(settings);
+      const cutDay=cd?.dates?.[m]||null;
+      if(cutDay){
+        const cutStr=`${y}-${String(m+1).padStart(2,'0')}-${String(cutDay).padStart(2,'0')}`;
+        if(cutStr>firstDateStr) quotaPeriods++;
+      } else {
+        quotaPeriods++;
+      }
+      m++; if(m>11){m=0;y++;}
+    }
+    quotaPeriods=Math.max(1,quotaPeriods);
+  }
+
+  const accumQuotas = allQuotasPerPeriod * quotaPeriods;
   const paidRems = allRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-  const outstandingRems = Math.max(0, totalRemDue - paidRems);
+  const outstandingRems = Math.max(0, allTimeIncomeRemDue + accumQuotas - paidRems);
   const totalChurch = churchBal.total;
   const spendable = totalChurch - outstandingRems;
   const spendLow = parseFloat(settings?.spendableLow||0)||20000;
@@ -7236,6 +7306,7 @@ function renderAdminBackup(){
   </div>`;
 }
 
+
 async function saveSettings(btn=null){
   const s=await DB.getSettings();
   s.churchName=document.getElementById('set_name')?.value;
@@ -7609,6 +7680,45 @@ async function showChildrenTeacherModal(){
     </div>` : '<div style="text-align:center;color:var(--text3);font-size:13px;padding:16px 0">No Teen/Children\'s Offering recorded this month.</div>'}
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
 }
+
+
+// ── AI SECRETARY ──────────────────────────
+const AI_SECRETARY_PARTICIPANT_GROUPS = [
+  { group:'men', label:'Men' },
+  { group:'women', label:'Women' },
+  { group:'youth', label:'Youth' },
+  { group:'ministers', label:'Ministers' },
+];
+
+function normalizeAiSecretaryParticipants(participants=[], kpscMembers=[]){
+  const byGroup = new Map((participants||[]).map(p=>[String(p.group||'').toLowerCase(),p]));
+  const rosterByGroup = new Map();
+  for(const m of (kpscMembers||[])){ const g=String(m.group||'').toLowerCase(); if(!rosterByGroup.has(g)) rosterByGroup.set(g,m); }
+  return AI_SECRETARY_PARTICIPANT_GROUPS.map(base=>{
+    const row = byGroup.get(base.group) || {};
+    return { group:base.group, label:base.label, present:!!row.present, name:row.name || rosterByGroup.get(base.group)?.name || '' };
+  });
+}
+
+function aiSecretaryParticipantPayload(){
+  return AI_SECRETARY_PARTICIPANT_GROUPS.map(p=>({
+    group:p.group,
+    label:p.label,
+    present:!!document.getElementById(`ais_${p.group}_present`)?.checked,
+    name:document.getElementById(`ais_${p.group}_name`)?.value?.trim() || ''
+  }));
+}
+
+function aiSecretaryStatusBadge(status){
+  const s = String(status||'draft').toLowerCase();
+  if(s==='processed') return '<span class="badge badge-success">✅ Processed</span>';
+  if(s==='recording') return '<span class="badge badge-warn">🔴 Recording</span>';
+  if(s==='ended') return '<span class="badge badge-gray">⏹ Ended</span>';
+  return '<span class="badge badge-gray">Draft</span>';
+}
+
+
+
 
 // ── KPSC ALERT ────────────────────────────
 async function showKPSCAlert(){
