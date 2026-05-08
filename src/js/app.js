@@ -7089,9 +7089,8 @@ async function renderAdmin(){
       <button class="tab ${tab==='rates'?'active':''}" onclick="App.setAdminTab('rates')">Remittance Rates</button>
       <button class="tab ${tab==='perms'?'active':''}" onclick="App.setAdminTab('perms')">Role Permissions</button>
       <button class="tab ${tab==='backup'?'active':''}" onclick="App.setAdminTab('backup')">Backup & Restore</button>
-      <button class="tab ${tab==='ai_providers'?'active':''}" onclick="App.setAdminTab('ai_providers')">🤖 AI Providers</button>
     </div>
-    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settingsForView):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):tab==='ai_providers'?renderAdminAiProviders(settings):renderAdminBackup()}`;
+    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settingsForView):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
   if(tab==='quotas') initQuotaDnd();
 }
 
@@ -7313,49 +7312,6 @@ function renderAdminBackup(){
   </div>`;
 }
 
-function renderAdminAiProviders(s){
-  const hasOpenAI = !!(s.ai_openai_key);
-  const hasDeepSeek = !!(s.ai_deepseek_key);
-  const mode = (hasDeepSeek||hasOpenAI) ? '🤖 AI-powered mode' : '⚙️ Rule-based mode (no keys set)';
-  const modeColor = (hasDeepSeek||hasOpenAI) ? 'var(--primary)' : 'var(--text3)';
-  return `<div class="card">
-    <div class="card-header"><span class="card-title">AI Provider Keys</span><span style="font-size:12px;color:${modeColor};font-weight:600">${mode}</span></div>
-    <div class="alert alert-warn" style="margin-bottom:1rem"><span class="alert-icon">⚠</span><span>API keys are stored in the church database. Treat them as sensitive credentials and rotate them if they are ever exposed.</span></div>
-    <div class="form-group">
-      <label class="form-label">DeepSeek API Key</label>
-      <p style="font-size:12px;color:var(--text3);margin-bottom:6px">Used for AI-powered meeting summaries, minutes, and governance analysis. When set, replaces the built-in rule engine.</p>
-      <input type="password" id="ai_deepseek_key" class="form-input" placeholder="sk-…" value="${s.ai_deepseek_key?'••••••••••••':''}" autocomplete="new-password" />
-      <div class="form-hint">${hasDeepSeek?'Key is currently set. Enter a new value to replace it, or leave blank to keep existing.':'No DeepSeek key set — using deterministic rule engine.'}</div>
-    </div>
-    <div class="form-group">
-      <label class="form-label">OpenAI API Key</label>
-      <p style="font-size:12px;color:var(--text3);margin-bottom:6px">Reserved for future live audio transcription via Whisper. Not used in Phase 1.</p>
-      <input type="password" id="ai_openai_key" class="form-input" placeholder="sk-…" value="${s.ai_openai_key?'••••••••••••':''}" autocomplete="new-password" />
-      <div class="form-hint">${hasOpenAI?'Key is currently set.':'No OpenAI key set.'}</div>
-    </div>
-    <button class="btn btn-primary" onclick="App.saveAiProviderKeys(this)">Save AI Keys</button>
-  </div>`;
-}
-
-async function saveAiProviderKeys(btn=null){
-  const deepseekVal = document.getElementById('ai_deepseek_key')?.value;
-  const openaiVal = document.getElementById('ai_openai_key')?.value;
-  const restore = setBtnLoading(btn,'Saving…');
-  try{
-    const updates = {};
-    // Only update if the field has a non-placeholder value (not the masked dots)
-    if(deepseekVal && !deepseekVal.startsWith('•')) updates.ai_deepseek_key = deepseekVal;
-    if(openaiVal && !openaiVal.startsWith('•')) updates.ai_openai_key = openaiVal;
-    if(Object.keys(updates).length){
-      await DB.saveSettings(updates);
-      showAlert('AI provider keys saved.','success');
-    } else {
-      showAlert('No changes to save. Enter a new key value to update.','warn');
-    }
-    restore();
-    renderAdmin();
-  }catch(e){ restore(); showAlert(e.message||'Failed to save AI keys.','danger'); }
-}
 
 async function saveSettings(btn=null){
   const s=await DB.getSettings();
@@ -8172,7 +8128,7 @@ return {
   setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   startAiSecretaryDraft, loadAiSecretaryMeeting, saveAiSecretaryMeeting, endAiSecretaryMeeting, processAiSecretaryMeeting, copyAiSecretaryMinutes,
-  backToAiSecretaryDashboard, setAiSecretarySearch, toggleAiSecretaryMembers, kpscMemberField, addKpscMember, removeKpscMember, saveKpscMembers, saveAiProviderKeys,
+  backToAiSecretaryDashboard, setAiSecretarySearch, toggleAiSecretaryMembers, kpscMemberField, addKpscMember, removeKpscMember, saveKpscMembers,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert
 };
 
