@@ -1116,28 +1116,157 @@ function aiSecretaryMeetingFromRow(row) {
   };
 }
 
-function extractSentenceMatches(transcript, patterns, fallback) {
-  const sentences = String(transcript || '').split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(Boolean);
-  const found = sentences.filter(sentence => patterns.some(pattern => pattern.test(sentence))).slice(0, 8);
-  return found.length ? found : fallback;
+function extractSentenceMatches(transcript, patterns) {
+  const sentences = String(transcript || '')
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+  return sentences
+    .filter(sentence => patterns.some(pattern => pattern.test(sentence)))
+    .slice(0, 8);
 }
 
-function buildAiSecretaryOutput(meeting) {
+const AI_SECRETARY_REQUIRED_GROUPS = [
+  { group: 'men', label: 'Men' },
+  { group: 'women', label: 'Women' },
+  { group: 'youth', label: 'Youth' },
+  { group: 'ministers', label: 'Ministers' },
+];
+
+function aiSecretaryText(value, fallback = '') {
+  return String(value ?? fallback).trim();
+}
+
+function aiSecretaryArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function aiSecretarySeverity(value, fallback = 'medium') {
+  const severity = String(value || '').toLowerCase();
+  return ['low', 'medium', 'high'].includes(severity) ? severity : fallback;
+}
+
+function aiSecretaryThreshold(value, fallback = 'simple_majority') {
+  const threshold = String(value || '').toLowerCase().replace(/[\s-]+/g, '_');
+  return ['simple_majority', 'two_thirds', 'manual_review'].includes(threshold) ? threshold : fallback;
+}
+
+function aiSecretaryParticipantCoverage(participants) {
+  const normalized = normalizeAiParticipants(participants);
+  const represented = new Set(normalized.filter(p => p.present).map(p => String(p.group || '').toLowerCase()));
+  const missingGroups = AI_SECRETARY_REQUIRED_GROUPS
+    .filter(required => !represented.has(required.group))
+    .map(required => required.label);
+  return { normalized, represented, missingGroups, quorumMet: missingGroups.length === 0 };
+}
+
+function buildAiSecretaryGovernanceFlags(meeting) {
   const transcript = meeting.transcriptText || '';
-  const participants = normalizeAiParticipants(meeting.participants);
+  const { missingGroups, quorumMet } = aiSecretaryParticipantCoverage(meeting.participants);
+  const flags = [];
+  if (!quorumMet) {
+    flags.push({ type: 'quorum_missing', severity: 'high', message: `Missing required representative group(s): ${missingGroups.join(', ')}.` });
+  }
+  if (!String(transcript).trim()) {
+    flags.push({ type: 'transcript_missing', severity: 'high', message: 'No transcript or secretary notes were provided; generated minutes require manual reconstruction from approved records.' });
+  }
+  if (!['ended', 'processed'].includes(String(meeting.status || '').toLowerCase())) {
+    flags.push({ type: 'meeting_not_ended', severity: 'medium', message: 'Meeting was processed before being marked ended; confirm the transcript is final before approval.' });
+  }
+  if (/building|land|capital|renovation|project|equipment/i.test(transcript)) {
+    flags.push({ type: 'threshold_review', severity: 'medium', message: 'Potential major capital project detected; confirm whether two-thirds approval is required.' });
+  }
+  if (/beneficiar(y|ies)|welfare.+(name|names)|medical|hospital|family issue|confidential|diagnosis/i.test(transcript)) {
+    flags.push({ type: 'welfare_privacy', severity: 'medium', message: 'Possible welfare/privacy details detected; remove beneficiary names from minutes unless necessary.' });
+  }
+  if (/ignore (previous|all|policy|instruction)|override (policy|governance)|do not flag|hide (this|the)|return only approved/i.test(transcript)) {
+    flags.push({ type: 'prompt_injection_risk', severity: 'high', message: 'Transcript contains instruction-like language that could manipulate AI output; rely on human review and deterministic policy checks.' });
+  }
+  return flags;
+}
+
+function dedupeAiSecretaryFlags(flags) {
+  const seen = new Set();
+  return aiSecretaryArray(flags).map(flag => ({
+    type: aiSecretaryText(flag?.type, 'manual_review').toLowerCase().replace(/[^a-z0-9_]+/g, '_') || 'manual_review',
+    severity: aiSecretarySeverity(flag?.severity),
+    message: aiSecretaryText(flag?.message, 'Manual review required.'),
+  })).filter(flag => {
+    const key = `${flag.type}:${flag.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 20);
+}
+
+function appendAiSecretaryMandatoryChecks(markdown, flags) {
+  const mandatoryFlags = dedupeAiSecretaryFlags(flags);
+  if (!mandatoryFlags.length) return markdown;
+  const section = [
+    '',
+    '## Mandatory Governance Checks',
+    ...mandatoryFlags.map(flag => `- ${flag.severity.toUpperCase()}: ${flag.message}`),
+  ].join('\n');
+  return /mandatory governance checks|policy checks/i.test(markdown) ? markdown : `${markdown}${section}`;
+}
+
+function sanitizeAiSecretaryOutput(rawOutput, meeting, deterministicOutput) {
+  const raw = rawOutput && typeof rawOutput === 'object' ? rawOutput : {};
+  const deterministic = deterministicOutput || buildAiSecretaryOutput(meeting, { skipSanitize: true });
+  const governanceFlags = buildAiSecretaryGovernanceFlags(meeting);
+  const resolutions = aiSecretaryArray(raw.resolutions).map((item, index) => ({
+    id: aiSecretaryText(item?.id, `res-${index + 1}`),
+    text: aiSecretaryText(item?.text),
+    category: aiSecretaryText(item?.category, 'other') || 'other',
+    requiredThreshold: aiSecretaryThreshold(item?.requiredThreshold),
+    approved: item?.approved === true,
+    voteSummary: aiSecretaryText(item?.voteSummary, 'Manual vote review required.'),
+  })).filter(item => item.text).slice(0, 20);
+  const actionItems = aiSecretaryArray(raw.actionItems).map((item, index) => ({
+    id: aiSecretaryText(item?.id, `act-${index + 1}`),
+    task: aiSecretaryText(item?.task),
+    assignee: aiSecretaryText(item?.assignee, 'Unassigned') || 'Unassigned',
+    dueDate: aiSecretaryText(item?.dueDate),
+    status: aiSecretaryText(item?.status, 'pending') || 'pending',
+  })).filter(item => item.task).slice(0, 30);
+  const output = {
+    summaryShort: aiSecretaryText(raw.summaryShort, deterministic.summaryShort),
+    summaryLong: aiSecretaryText(raw.summaryLong, deterministic.summaryLong),
+    minutesMarkdown: aiSecretaryText(raw.minutesMarkdown, deterministic.minutesMarkdown),
+    resolutions: resolutions.length ? resolutions : deterministic.resolutions,
+    actionItems: actionItems.length ? actionItems : deterministic.actionItems,
+    policyFlags: dedupeAiSecretaryFlags([...aiSecretaryArray(raw.policyFlags), ...governanceFlags]),
+  };
+  if (!output.minutesMarkdown) output.minutesMarkdown = deterministic.minutesMarkdown;
+  output.minutesMarkdown = appendAiSecretaryMandatoryChecks(output.minutesMarkdown, governanceFlags);
+  return output;
+}
+
+function parseAiSecretaryJson(text) {
+  const raw = String(text || '').trim();
+  try { return JSON.parse(raw); } catch (_) {}
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced) return JSON.parse(fenced[1]);
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1));
+  throw new Error('AI response did not contain valid JSON');
+}
+
+function buildAiSecretaryOutput(meeting, options = {}) {
+  const transcript = meeting.transcriptText || '';
+  const { normalized: participants, missingGroups, quorumMet } = aiSecretaryParticipantCoverage(meeting.participants);
   const present = participants.filter(p => p.present);
-  const missingGroups = participants.filter(p => !p.present).map(p => p.label);
-  const quorumMet = missingGroups.length === 0;
-  const decisions = extractSentenceMatches(transcript, [/\b(resolve[ds]?|approved|agreed|motion|decision|voted)\b/i], ['No explicit resolutions were detected. Review the transcript and add decisions manually.']);
-  const actions = extractSentenceMatches(transcript, [/\b(action|follow up|to do|assign(?:ed)?|responsible|by \d{1,2}|deadline|before)\b/i], ['No explicit action items were detected. Review the transcript and add follow-up tasks manually.']);
-  const privacyRisk = /beneficiar(y|ies)|welfare.+(name|names)|medical|hospital|family issue/i.test(transcript);
-  const majorProject = /building|land|capital|renovation|project|equipment/i.test(transcript);
+  const decisions = extractSentenceMatches(transcript, [/\b(resolve[ds]?|approved|agreed|motion|decision|voted)\b/i]);
+  const actions = extractSentenceMatches(transcript, [/\b(action|follow up|to do|assign(?:ed)?|responsible|by \d{1,2}|deadline|before)\b/i]);
+  const governanceFlags = buildAiSecretaryGovernanceFlags(meeting);
+  const majorProject = governanceFlags.some(flag => flag.type === 'threshold_review');
   const welfare = /welfare|support|assistance|benevolence/i.test(transcript);
-  const summaryShort = `${meeting.title || 'KPSC meeting'} captured ${present.length} of 4 required group representatives. ${decisions.length} potential resolution(s) and ${actions.length} potential action item(s) were identified.`;
+  const summaryShort = `${meeting.title || 'KPSC meeting'} captured ${present.length} attendee(s) across ${new Set(present.map(p => p.group)).size} of 4 required representative groups. ${decisions.length} potential resolution(s) and ${actions.length} potential action item(s) were identified.`;
   const summaryLong = [
     `Meeting type: ${meeting.meetingType || 'routine'}.`,
     `Attendance: ${present.map(p => `${p.label}${p.name ? ` (${p.name})` : ''}`).join(', ') || 'No representatives marked present'}.`,
-    quorumMet ? 'Quorum check: Men, Women, Youth, and Ministers are all represented.' : `Quorum check: missing ${missingGroups.join(', ')} representative(s); approvals should be deferred or ratified later.`,
+    quorumMet ? 'Quorum check: Men, Women, Youth, and Ministers are all represented.' : `Quorum check: missing ${missingGroups.join(', ')} representative group(s); approvals should be deferred or ratified later.`,
     majorProject ? 'Governance note: capital/project language was detected, so two-thirds approval may apply.' : 'Governance note: no major capital-project language was detected by the draft processor.',
     welfare ? 'Welfare note: welfare-related language was detected; keep KPSC records focused on funds and avoid unnecessary beneficiary names.' : 'Welfare note: no welfare-specific issue was detected.',
   ].join('\n');
@@ -1156,11 +1285,6 @@ function buildAiSecretaryOutput(meeting) {
     dueDate: '',
     status: 'pending',
   }));
-  const policyFlags = [
-    ...(quorumMet ? [] : [{ type: 'quorum_missing', severity: 'high', message: `Missing required representative(s): ${missingGroups.join(', ')}.` }]),
-    ...(majorProject ? [{ type: 'threshold_review', severity: 'medium', message: 'Potential major capital project detected; confirm two-thirds approval.' }] : []),
-    ...(privacyRisk ? [{ type: 'welfare_privacy', severity: 'medium', message: 'Possible welfare/privacy details detected; remove beneficiary names from minutes unless necessary.' }] : []),
-  ];
   const minutesMarkdown = [
     `# ${meeting.title || 'KPSC Meeting'} Minutes`,
     `**Date:** ${meeting.meetingDate || 'Not specified'}`,
@@ -1174,15 +1298,16 @@ function buildAiSecretaryOutput(meeting) {
     summaryLong,
     '',
     '## Resolutions',
-    ...resolutions.map(r => `- ${r.text} (${r.requiredThreshold.replace('_', ' ')})`),
+    ...(resolutions.length ? resolutions.map(r => `- ${r.text} (${r.requiredThreshold.replace('_', ' ')})`) : ['- No explicit resolutions detected. Review transcript and add approved decisions manually.']),
     '',
     '## Action Items',
-    ...actionItems.map(a => `- ${a.task} — ${a.assignee}`),
+    ...(actionItems.length ? actionItems.map(a => `- ${a.task} — ${a.assignee}`) : ['- No explicit action items detected. Review transcript and add follow-up tasks manually.']),
     '',
     '## Policy Checks',
-    ...(policyFlags.length ? policyFlags.map(f => `- ${f.severity.toUpperCase()}: ${f.message}`) : ['- No policy flags detected by the draft processor.']),
+    ...(governanceFlags.length ? governanceFlags.map(f => `- ${f.severity.toUpperCase()}: ${f.message}`) : ['- No policy flags detected by the draft processor.']),
   ].join('\n');
-  return { summaryShort, summaryLong, minutesMarkdown, resolutions, actionItems, policyFlags };
+  const output = { summaryShort, summaryLong, minutesMarkdown, resolutions, actionItems, policyFlags: governanceFlags };
+  return options.skipSanitize ? output : sanitizeAiSecretaryOutput(output, meeting, output);
 }
 
 async function getAiSecretaryMeetings(DB) {
@@ -1262,7 +1387,7 @@ Return only valid JSON, no markdown fences.`;
   if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
   const data = await resp.json();
   const text = data.choices?.[0]?.message?.content || '';
-  return JSON.parse(text);
+  return parseAiSecretaryJson(text);
 }
 
 async function processAiSecretaryMeeting(DB, id) {
@@ -1270,13 +1395,16 @@ async function processAiSecretaryMeeting(DB, id) {
   if (!row) return err('AI secretary meeting not found', 404);
   const meeting = aiSecretaryMeetingFromRow(row);
 
+  const deterministicOutput = buildAiSecretaryOutput(meeting);
   let output;
   try {
     const { results: settingsRows } = await DB.prepare(`SELECT key,value FROM settings WHERE key='ai_deepseek_key'`).all();
     const deepseekKey = settingsRows?.[0]?.value ? String(settingsRows[0].value).trim() : '';
-    output = deepseekKey ? await callDeepSeekForMeeting(deepseekKey, meeting) : buildAiSecretaryOutput(meeting);
+    output = deepseekKey
+      ? sanitizeAiSecretaryOutput(await callDeepSeekForMeeting(deepseekKey, meeting), meeting, deterministicOutput)
+      : deterministicOutput;
   } catch (_) {
-    output = buildAiSecretaryOutput(meeting);
+    output = deterministicOutput;
   }
 
   const processedAt = new Date().toISOString();
