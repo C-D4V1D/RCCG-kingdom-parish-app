@@ -236,7 +236,7 @@ function recRenderTranscript() {
   }));
   const rows = [...Rec.transcriptEntries, ...partials];
   list.innerHTML = rows.length ? rows.map(entry => {
-    const hasSpeaker = entry.speaker != null;
+    const hasSpeaker = entry.speaker !== null && entry.speaker !== undefined;
     const displayName = hasSpeaker ? speakerDisplayName(entry.speaker) : '';
     const speakerHtml = hasSpeaker
       ? `<span class="lt-speaker lt-spk-${entry.speaker % 6}">${esc(displayName)}</span>`
@@ -255,7 +255,7 @@ function recAppendTranscript(text, itemId = '', speaker = null) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) return;
   // Track newly seen speakers so the identity panel can be updated.
-  if (speaker != null && !Rec.seenSpeakers.has(speaker)) {
+  if (speaker !== null && speaker !== undefined && !Rec.seenSpeakers.has(speaker)) {
     Rec.seenSpeakers.add(speaker);
     recRenderSpeakerMap();
   }
@@ -263,7 +263,7 @@ function recAppendTranscript(text, itemId = '', speaker = null) {
   Rec.transcriptEntries.push(entry);
   const textarea = document.getElementById('km-transcript');
   if (textarea) {
-    const speakerTag = speaker != null ? ` [${speakerDisplayName(speaker)}]` : '';
+    const speakerTag = speaker !== null && speaker !== undefined ? ` [${speakerDisplayName(speaker)}]` : '';
     const line = `[${entry.timestamp}]${speakerTag} ${entry.text}`;
     textarea.value = textarea.value ? `${textarea.value}\n${line}` : line;
     textarea.scrollTop = textarea.scrollHeight;
@@ -277,7 +277,7 @@ function rebuildTranscriptTextarea() {
   const textarea = document.getElementById('km-transcript');
   if (!textarea) return;
   const lines = Rec.transcriptEntries.map(entry => {
-    const speakerTag = entry.speaker != null ? ` [${speakerDisplayName(entry.speaker)}]` : '';
+    const speakerTag = entry.speaker !== null && entry.speaker !== undefined ? ` [${speakerDisplayName(entry.speaker)}]` : '';
     return `[${entry.timestamp}]${speakerTag} ${entry.text}`;
   });
   textarea.value = lines.join('\n');
@@ -825,7 +825,7 @@ function diarizerHandleMessage(raw) {
       // Also clear any OpenAI interim partials that overlap to avoid duplicate display.
       const keysToDelete = [...Rec.liveDeltas.keys()].filter(k => !k.startsWith('dg'));
       for (const k of keysToDelete) Rec.liveDeltas.delete(k);
-      const hasSpeakers = words.length > 0 && words[0].speaker != null;
+      const hasSpeakers = words.length > 0 && words[0].speaker !== null && words[0].speaker !== undefined;
       if (hasSpeakers) {
         const turns = diarizerExtractSpeakerTurns(words);
         for (const turn of turns) {
