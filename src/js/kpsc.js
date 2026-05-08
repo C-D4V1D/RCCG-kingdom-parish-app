@@ -60,6 +60,8 @@ const Rec = {
   uploadBusy: false,
   uploadedChunks: 0,
   failedChunks: 0,
+  speakerMap: new Map(),    // Map<number, string>: Deepgram speaker idx → member name
+  seenSpeakers: new Set(),  // Set<number>: all Deepgram speaker indices encountered so far
 };
 
 // ── DIARIZER (Deepgram speaker diarization) ────────────────────────
@@ -180,6 +182,13 @@ function recRenderUI() {
   if (transcriptPanel) transcriptPanel.toggleAttribute('data-recording', liveDisabled === '');
 }
 
+// Return the display name for a Deepgram speaker index.
+// Uses the speakerMap if a member has been assigned, otherwise falls back to "Speaker N".
+function speakerDisplayName(idx) {
+  if (idx == null) return '';
+  return Rec.speakerMap.get(idx) || `Speaker ${idx + 1}`;
+}
+
 function recRenderTranscript() {
   const list = document.getElementById('kpsc-live-transcript-list');
   if (!list) return;
@@ -193,8 +202,9 @@ function recRenderTranscript() {
   const rows = [...Rec.transcriptEntries, ...partials];
   list.innerHTML = rows.length ? rows.map(entry => {
     const hasSpeaker = entry.speaker != null;
+    const displayName = hasSpeaker ? speakerDisplayName(entry.speaker) : '';
     const speakerHtml = hasSpeaker
-      ? `<span class="lt-speaker lt-spk-${entry.speaker % 6}">${esc(`Speaker ${entry.speaker + 1}`)}</span>`
+      ? `<span class="lt-speaker lt-spk-${entry.speaker % 6}">${esc(displayName)}</span>`
       : '';
     return `
     <div class="lt-entry${entry.partial ? ' lt-entry-partial' : ''}${hasSpeaker ? ' lt-entry-diarized' : ''}">
@@ -209,17 +219,111 @@ function recRenderTranscript() {
 function recAppendTranscript(text, itemId = '', speaker = null) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) return;
+  // Track newly seen speakers so the identity panel can be updated.
+  if (speaker != null && !Rec.seenSpeakers.has(speaker)) {
+    Rec.seenSpeakers.add(speaker);
+    recRenderSpeakerMap();
+  }
   const entry = { itemId, timestamp: recTimestamp(), text: clean, speaker: speaker ?? null };
   Rec.transcriptEntries.push(entry);
   const textarea = document.getElementById('km-transcript');
   if (textarea) {
-    const speakerTag = speaker != null ? ` [Speaker ${speaker + 1}]` : '';
+    const speakerTag = speaker != null ? ` [${speakerDisplayName(speaker)}]` : '';
     const line = `[${entry.timestamp}]${speakerTag} ${entry.text}`;
     textarea.value = textarea.value ? `${textarea.value}\n${line}` : line;
     textarea.scrollTop = textarea.scrollHeight;
   }
   recRenderTranscript();
 }
+
+// Rebuild the transcript textarea from scratch using the current speakerMap.
+// Called after a speaker assignment changes so existing lines reflect the new name.
+function rebuildTranscriptTextarea() {
+  const textarea = document.getElementById('km-transcript');
+  if (!textarea) return;
+  const lines = Rec.transcriptEntries.map(entry => {
+    const speakerTag = entry.speaker != null ? ` [${speakerDisplayName(entry.speaker)}]` : '';
+    return `[${entry.timestamp}]${speakerTag} ${entry.text}`;
+  });
+  textarea.value = lines.join('\n');
+  textarea.scrollTop = textarea.scrollHeight;
+}
+
+// Build a sorted list of member names for the speaker-identity dropdowns.
+// Present members (checked in attendance) are shown first; the rest follow.
+function speakerMemberOptions() {
+  const present = new Set();
+  for (const g of GROUPS) {
+    const groupMembers = S.members.filter(m => m.group === g.key);
+    groupMembers.forEach((mem, i) => {
+      const el = document.getElementById(`att_present_${g.key}_${i}`);
+      if (el?.checked) present.add(mem.name);
+    });
+  }
+  const presentNames = S.members.filter(m => present.has(m.name)).map(m => m.name);
+  const otherNames  = S.members.filter(m => !present.has(m.name)).map(m => m.name);
+  return { presentNames, otherNames };
+}
+
+// Render (or refresh) the "Identify Speakers" panel that maps Deepgram indices to members.
+function recRenderSpeakerMap() {
+  const panel = document.getElementById('kpsc-speaker-map');
+  if (!panel) return;
+  if (Rec.seenSpeakers.size === 0) {
+    panel.innerHTML = '';
+    return;
+  }
+
+  const { presentNames, otherNames } = speakerMemberOptions();
+  const indices = [...Rec.seenSpeakers].sort((a, b) => a - b);
+
+  const rows = indices.map(idx => {
+    const assigned = Rec.speakerMap.get(idx) || '';
+    const colourClass = `lt-spk-${idx % 6}`;
+    const makeOption = (name, label) =>
+      `<option value="${esc(name)}" ${assigned === name ? 'selected' : ''}>${esc(label || name)}</option>`;
+
+    const presentOpts = presentNames.length
+      ? `<optgroup label="Present">${presentNames.map(n => makeOption(n, n)).join('')}</optgroup>`
+      : '';
+    const otherOpts = otherNames.length
+      ? `<optgroup label="Other Members">${otherNames.map(n => makeOption(n, n)).join('')}</optgroup>`
+      : '';
+
+    return `
+      <div class="k-spk-row">
+        <span class="lt-speaker ${colourClass}">${esc(speakerDisplayName(idx))}</span>
+        <select class="k-spk-sel" onchange="Kpsc.assignSpeaker(${idx}, this.value)">
+          <option value=""${!assigned ? ' selected' : ''}>— Unassigned —</option>
+          ${presentOpts}${otherOpts}
+        </select>
+      </div>`;
+  }).join('');
+
+  panel.innerHTML = `
+    <div class="k-speaker-map">
+      <div class="k-spk-hdr">
+        <span class="k-spk-title">🎙 Identify Speakers</span>
+        <span class="k-spk-hint">Assign each detected voice to a member. The transcript updates instantly.</span>
+      </div>
+      <div class="k-spk-rows">${rows}</div>
+    </div>`;
+}
+
+// Assign a Deepgram speaker index to a member name (or clear if name is empty).
+// Updates the live transcript and the saved textarea immediately.
+function assignSpeaker(idx, name) {
+  const n = String(name || '').trim();
+  if (n) {
+    Rec.speakerMap.set(idx, n);
+  } else {
+    Rec.speakerMap.delete(idx);
+  }
+  rebuildTranscriptTextarea();
+  recRenderTranscript();
+  recRenderSpeakerMap();
+}
+
 
 async function recStart(btn) {
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
@@ -237,6 +341,8 @@ async function recStart(btn) {
     Rec.uploadQueue = [];
     Rec.transcriptEntries = [];
     Rec.liveDeltas = new Map();
+    Rec.speakerMap = new Map();
+    Rec.seenSpeakers = new Set();
     Rec.manualStop = false;
     Rec.reconnectAttempts = 0;
     Rec.status = 'recording';
@@ -445,10 +551,13 @@ function recReset() {
   Rec.uploadQueue = [];
   Rec.uploadedChunks = 0;
   Rec.failedChunks = 0;
+  Rec.speakerMap = new Map();
+  Rec.seenSpeakers = new Set();
   Diarizer.status = 'offline';
   Diarizer.reconnectAttempts = 0;
   recRenderUI();
   recRenderTranscript();
+  recRenderSpeakerMap();
 }
 
 function recCloseRealtime(markManual) {
@@ -1075,6 +1184,7 @@ async function renderMeetingRoom(main) {
       <section class="k-section">
         <h3 class="k-sec-title">Live Audio & Realtime Transcript</h3>
         ${canRecord ? `<div id="kpsc-rec-ui" class="k-rec-ui"></div>` : ''}
+        <div id="kpsc-speaker-map"></div>
         <div class="k-live-transcript" id="kpsc-live-transcript">
           <div class="lt-head">
             <div>
@@ -1574,6 +1684,7 @@ window.Kpsc = {
   recResume,
   recStop,
   recReset,
+  assignSpeaker,
 };
 
 document.addEventListener('DOMContentLoaded', init);
