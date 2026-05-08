@@ -776,7 +776,8 @@ function diarizerHandleMessage(raw) {
       // Final result: extract speaker turns and commit each as a transcript entry.
       Rec.liveDeltas.delete('dg_interim');
       // Also clear any OpenAI interim partials that overlap to avoid duplicate display.
-      Rec.liveDeltas.forEach((_, key) => { if (!key.startsWith('dg')) Rec.liveDeltas.delete(key); });
+      const keysToDelete = [...Rec.liveDeltas.keys()].filter(k => !k.startsWith('dg'));
+      for (const k of keysToDelete) Rec.liveDeltas.delete(k);
       const hasSpeakers = words.length > 0 && words[0].speaker != null;
       if (hasSpeakers) {
         const turns = diarizerExtractSpeakerTurns(words);
@@ -1189,7 +1190,7 @@ async function renderMeetingRoom(main) {
           <div class="lt-head">
             <div>
               <div class="lt-title">Live Transcript with Speaker Diarization</div>
-              <div class="lt-sub">OpenAI Realtime provides fast interim display; Deepgram identifies individual speakers and commits final entries with speaker labels.</div>
+              <div class="lt-sub">OpenAI Real-time provides fast interim display; Deepgram identifies individual speakers and commits final entries with speaker labels.</div>
             </div>
             <span class="lt-pill">Realtime + Diarization</span>
           </div>
