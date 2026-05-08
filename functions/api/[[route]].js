@@ -182,6 +182,11 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) return await createRealtimeTranscriptionToken(env);
     }
 
+    // ── /api/deepgram-transcription-token ───────────────────────
+    if (route === 'deepgram-transcription-token') {
+      if (method === 'POST' && !param) return await createDeepgramTranscriptionToken(env);
+    }
+
     // ── /api/ai-secretary-meetings ─────────────────────────────
     if (route === 'ai-secretary-meetings') {
       if (method === 'POST' && param === 'audio-chunk') return await uploadAiSecretaryAudioChunk(env, request);
@@ -1475,6 +1480,12 @@ async function createRealtimeTranscriptionToken(env) {
     return err(data.error?.message || `OpenAI realtime token request failed (${response.status}).`, response.status);
   }
   return ok(data);
+}
+
+async function createDeepgramTranscriptionToken(env) {
+  const apiKey = String(env.DEEPGRAM_API_KEY || '').trim();
+  if (!apiKey) return err('DEEPGRAM_API_KEY is not configured for speaker diarization.', 503);
+  return ok({ key: apiKey });
 }
 
 async function uploadAiSecretaryAudioChunk(env, request) {

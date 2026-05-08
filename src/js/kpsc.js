@@ -62,6 +62,32 @@ const Rec = {
   failedChunks: 0,
 };
 
+// ── DIARIZER (Deepgram speaker diarization) ────────────────────────
+const DG_MAX_RETRIES = 5;
+const DG_RETRY_BASE_MS = 1500;
+// Worklet processor code bundled inline to avoid requiring a separate file.
+const DG_WORKLET_CODE = `
+class PcmCaptureProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0]?.[0];
+    if (ch && ch.length) this.port.postMessage(ch);
+    return true;
+  }
+}
+registerProcessor('pcm-capture-processor', PcmCaptureProcessor);
+`;
+
+const Diarizer = {
+  ws: null,
+  audioCtx: null,
+  workletNode: null,
+  workletUrl: null,
+  status: 'offline', // offline | connecting | connected | reconnecting | error
+  reconnectTimer: null,
+  reconnectAttempts: 0,
+  manualStop: false,
+};
+
 function recFmt() {
   const m = Math.floor(Rec.elapsed / 60);
   const s = Rec.elapsed % 60;
@@ -79,11 +105,19 @@ function recTimestamp() {
 }
 
 function recStatusLabel() {
-  if (Rec.realtimeStatus === 'connected') return 'Realtime transcription connected';
-  if (Rec.realtimeStatus === 'connecting') return 'Connecting transcription…';
-  if (Rec.realtimeStatus === 'reconnecting') return `Reconnecting transcription (${Rec.reconnectAttempts}/${REC_MAX_RETRIES})…`;
-  if (Rec.realtimeStatus === 'error') return 'Transcription offline — audio chunks still uploading';
-  return 'Transcription offline';
+  if (Rec.realtimeStatus === 'connected') return 'OpenAI: transcribing';
+  if (Rec.realtimeStatus === 'connecting') return 'OpenAI: connecting…';
+  if (Rec.realtimeStatus === 'reconnecting') return `OpenAI: reconnecting (${Rec.reconnectAttempts}/${REC_MAX_RETRIES})…`;
+  if (Rec.realtimeStatus === 'error') return 'OpenAI: offline';
+  return 'OpenAI: offline';
+}
+
+function diarizerStatusLabel() {
+  if (Diarizer.status === 'connected') return 'Deepgram: diarizing';
+  if (Diarizer.status === 'connecting') return 'Deepgram: connecting…';
+  if (Diarizer.status === 'reconnecting') return `Deepgram: reconnecting (${Diarizer.reconnectAttempts}/${DG_MAX_RETRIES})…`;
+  if (Diarizer.status === 'error') return 'Deepgram: offline';
+  return 'Deepgram: offline';
 }
 
 function recRenderUI() {
@@ -91,7 +125,7 @@ function recRenderUI() {
   if (!el) return;
   const liveDisabled = Rec.status === 'recording' ? '' : 'disabled';
   const uploadMeta = Rec.status === 'idle'
-    ? 'Stream audio continuously with 5-second chunk backups and realtime transcription.'
+    ? 'Stream audio with 5-second chunk backups, OpenAI realtime transcription and Deepgram speaker diarization.'
     : `${Rec.uploadedChunks} chunk${Rec.uploadedChunks === 1 ? '' : 's'} uploaded${Rec.failedChunks ? ` • ${Rec.failedChunks} pending retry` : ''}`;
 
   if (Rec.status === 'idle') {
@@ -113,6 +147,7 @@ function recRenderUI() {
         </div>
         <div class="rec-meta">
           <span class="rec-rt rec-rt-${Rec.realtimeStatus}">${recStatusLabel()}</span>
+          <span class="rec-rt rec-rt-dg-${Diarizer.status}">${diarizerStatusLabel()}</span>
           <span>${uploadMeta}</span>
         </div>
       </div>`;
@@ -153,24 +188,33 @@ function recRenderTranscript() {
     timestamp: recTimestamp(),
     text,
     partial: true,
+    speaker: null,
   }));
   const rows = [...Rec.transcriptEntries, ...partials];
-  list.innerHTML = rows.length ? rows.map(entry => `
-    <div class="lt-entry${entry.partial ? ' lt-entry-partial' : ''}">
+  list.innerHTML = rows.length ? rows.map(entry => {
+    const hasSpeaker = entry.speaker != null;
+    const speakerHtml = hasSpeaker
+      ? `<span class="lt-speaker lt-spk-${entry.speaker % 6}">${esc(`Speaker ${entry.speaker + 1}`)}</span>`
+      : '';
+    return `
+    <div class="lt-entry${entry.partial ? ' lt-entry-partial' : ''}${hasSpeaker ? ' lt-entry-diarized' : ''}">
       <span class="lt-time">${esc(entry.timestamp)}</span>
+      ${speakerHtml}
       <span class="lt-text">${esc(entry.text)}</span>
-    </div>`).join('') : '<div class="lt-empty">Live transcript will appear here as people speak.</div>';
+    </div>`;
+  }).join('') : '<div class="lt-empty">Live transcript will appear here as people speak.</div>';
   list.scrollTop = list.scrollHeight;
 }
 
-function recAppendTranscript(text, itemId = '') {
+function recAppendTranscript(text, itemId = '', speaker = null) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) return;
-  const entry = { itemId, timestamp: recTimestamp(), text: clean };
+  const entry = { itemId, timestamp: recTimestamp(), text: clean, speaker };
   Rec.transcriptEntries.push(entry);
   const textarea = document.getElementById('km-transcript');
   if (textarea) {
-    const line = `[${entry.timestamp}] ${entry.text}`;
+    const speakerTag = speaker != null ? ` [Speaker ${speaker + 1}]` : '';
+    const line = `[${entry.timestamp}]${speakerTag} ${entry.text}`;
     textarea.value = textarea.value ? `${textarea.value}\n${line}` : line;
     textarea.scrollTop = textarea.scrollHeight;
   }
@@ -209,12 +253,21 @@ async function recStart(btn) {
     recStartTimer();
     recRenderUI();
     recRenderTranscript();
+    // Start OpenAI realtime transcription (fast interim display)
     try {
       await recConnectRealtime();
     } catch (e) {
       Rec.realtimeStatus = 'error';
       recRenderUI();
       showToast(e.message || 'Realtime transcription is offline; chunked audio upload is still running.', 'error');
+    }
+    // Start Deepgram diarization (speaker-labelled final transcripts)
+    try {
+      await diarizerConnect();
+    } catch (e) {
+      Diarizer.status = 'error';
+      recRenderUI();
+      showToast(e.message || 'Speaker diarization is offline; transcription may still be running.', 'warn');
     }
 
     const statusInput = document.getElementById('km-status');
@@ -303,7 +356,13 @@ function recHandleRealtimeEvent(raw) {
   } else if (event.type === 'conversation.item.input_audio_transcription.completed') {
     const itemId = event.item_id || event.itemId || '';
     Rec.liveDeltas.delete(itemId);
-    recAppendTranscript(event.transcript || '', itemId);
+    // When Deepgram diarization is active it owns the final transcript (with speaker labels).
+    // OpenAI only provides the fast interim display; suppress its final commit here.
+    if (Diarizer.status !== 'connected') {
+      recAppendTranscript(event.transcript || '', itemId);
+    } else {
+      recRenderTranscript();
+    }
   } else if (event.type === 'error') {
     showToast(event.error?.message || 'Realtime transcription error.', 'error');
   }
@@ -335,6 +394,7 @@ function recPause() {
     Rec.stream?.getAudioTracks().forEach(t => { t.enabled = false; });
     clearInterval(Rec.timer);
     recCloseRealtime(false);
+    diarizerClose(false);
     Rec.status = 'paused';
     Rec.realtimeStatus = 'offline';
     recRenderUI();
@@ -347,10 +407,13 @@ async function recResume() {
     Rec.mediaRecorder.resume();
     Rec.status = 'recording';
     Rec.manualStop = false;
+    Diarizer.manualStop = false;
     recStartTimer();
     recRenderUI();
     try { await recConnectRealtime(); }
     catch { recScheduleReconnect(); }
+    try { await diarizerConnect(); }
+    catch { diarizerScheduleReconnect(); }
   }
 }
 
@@ -364,6 +427,7 @@ function recStop() {
     Rec.mediaRecorder.stop();
   }
   recCloseRealtime(true);
+  diarizerClose(true);
   recStopTracks();
   Rec.status = 'stopped';
   Rec.realtimeStatus = 'offline';
@@ -381,6 +445,8 @@ function recReset() {
   Rec.uploadQueue = [];
   Rec.uploadedChunks = 0;
   Rec.failedChunks = 0;
+  Diarizer.status = 'offline';
+  Diarizer.reconnectAttempts = 0;
   recRenderUI();
   recRenderTranscript();
 }
@@ -467,7 +533,201 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-// ── API HELPERS ───────────────────────────────────────────────────
+// ── DIARIZER FUNCTIONS (Deepgram speaker diarization) ─────────────
+
+// Convert Float32 PCM samples to Int16 for Deepgram's linear16 encoding.
+function diarizerFloat32ToInt16(float32) {
+  const int16 = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32768)));
+  }
+  return int16;
+}
+
+// Group consecutive words by speaker to form speaker-turn segments.
+function diarizerExtractSpeakerTurns(words) {
+  if (!words || !words.length) return [];
+  const turns = [];
+  let curSpeaker = words[0].speaker ?? 0;
+  let curWords = [words[0].word];
+  for (let i = 1; i < words.length; i++) {
+    const spk = words[i].speaker ?? 0;
+    if (spk === curSpeaker) {
+      curWords.push(words[i].word);
+    } else {
+      turns.push({ speaker: curSpeaker, text: curWords.join(' ') });
+      curSpeaker = spk;
+      curWords = [words[i].word];
+    }
+  }
+  if (curWords.length) turns.push({ speaker: curSpeaker, text: curWords.join(' ') });
+  return turns;
+}
+
+async function diarizerConnect() {
+  if (!Rec.stream || Diarizer.manualStop) return;
+  diarizerClose(false);
+  Diarizer.status = Diarizer.reconnectAttempts > 0 ? 'reconnecting' : 'connecting';
+  recRenderUI();
+
+  const tokenRes = await apiPost('deepgram-transcription-token', {});
+  if (tokenRes.error) throw new Error(tokenRes.error);
+  const apiKey = tokenRes.key;
+  if (!apiKey) throw new Error('Deepgram API key was not returned by the server.');
+
+  // Build AudioContext and AudioWorklet pipeline for raw PCM streaming.
+  const audioCtx = new AudioContext();
+  Diarizer.audioCtx = audioCtx;
+
+  // Register the inline worklet processor via a Blob URL.
+  const blob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
+  const workletUrl = URL.createObjectURL(blob);
+  Diarizer.workletUrl = workletUrl;
+  await audioCtx.audioWorklet.addModule(workletUrl);
+
+  const source = audioCtx.createMediaStreamSource(Rec.stream);
+  const workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture-processor');
+  Diarizer.workletNode = workletNode;
+
+  // Build the Deepgram WebSocket URL with required parameters.
+  const sampleRate = audioCtx.sampleRate;
+  const dgParams = new URLSearchParams({
+    token: apiKey,
+    model: 'nova-3',
+    diarize: 'true',
+    punctuate: 'true',
+    interim_results: 'true',
+    smart_format: 'true',
+    encoding: 'linear16',
+    sample_rate: String(Math.round(sampleRate)),
+    channels: '1',
+    language: 'en',
+  });
+  const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`);
+  Diarizer.ws = ws;
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    Diarizer.status = 'connected';
+    Diarizer.reconnectAttempts = 0;
+    recRenderUI();
+    // Wire audio only after socket is open to avoid dropping early packets.
+    workletNode.port.onmessage = (e) => {
+      if (Diarizer.ws?.readyState === WebSocket.OPEN) {
+        Diarizer.ws.send(diarizerFloat32ToInt16(e.data).buffer);
+      }
+    };
+    source.connect(workletNode);
+    // Worklet must be connected to something in the audio graph to keep processing.
+    workletNode.connect(audioCtx.createMediaStreamDestination());
+  };
+
+  ws.onmessage = (e) => diarizerHandleMessage(e.data);
+
+  ws.onclose = (e) => {
+    if (!Diarizer.manualStop && Rec.status === 'recording') {
+      diarizerScheduleReconnect();
+    } else {
+      Diarizer.status = 'offline';
+      recRenderUI();
+    }
+  };
+
+  ws.onerror = () => {
+    if (!Diarizer.manualStop && Rec.status === 'recording') {
+      diarizerScheduleReconnect();
+    }
+  };
+}
+
+function diarizerHandleMessage(raw) {
+  let msg;
+  try { msg = JSON.parse(raw); } catch { return; }
+
+  if (msg.type === 'Results') {
+    const alt = msg.channel?.alternatives?.[0];
+    if (!alt) return;
+    const transcript = String(alt.transcript || '').trim();
+    const words = alt.words || [];
+    const isFinal = !!msg.is_final;
+
+    if (!transcript) {
+      if (isFinal) {
+        Rec.liveDeltas.delete('dg_interim');
+        recRenderTranscript();
+      }
+      return;
+    }
+
+    if (!isFinal) {
+      // Show streaming interim text (no speaker labels yet).
+      Rec.liveDeltas.set('dg_interim', transcript);
+      recRenderTranscript();
+    } else {
+      // Final result: extract speaker turns and commit each as a transcript entry.
+      Rec.liveDeltas.delete('dg_interim');
+      // Also clear any OpenAI interim partials that overlap to avoid duplicate display.
+      Rec.liveDeltas.forEach((_, key) => { if (!key.startsWith('dg')) Rec.liveDeltas.delete(key); });
+      const hasSpeakers = words.length > 0 && words[0].speaker != null;
+      if (hasSpeakers) {
+        const turns = diarizerExtractSpeakerTurns(words);
+        for (const turn of turns) {
+          recAppendTranscript(turn.text, `dg_${Date.now()}_${turn.speaker}`, turn.speaker);
+        }
+      } else {
+        recAppendTranscript(transcript, `dg_${Date.now()}`);
+      }
+    }
+  } else if (msg.type === 'UtteranceEnd') {
+    Rec.liveDeltas.delete('dg_interim');
+    recRenderTranscript();
+  } else if (msg.type === 'Error') {
+    showToast(`Deepgram: ${msg.message || 'connection error'}`, 'error');
+  }
+}
+
+function diarizerScheduleReconnect() {
+  if (Diarizer.manualStop || Rec.status !== 'recording' || Diarizer.reconnectTimer) return;
+  if (Diarizer.reconnectAttempts >= DG_MAX_RETRIES) {
+    Diarizer.status = 'error';
+    recRenderUI();
+    showToast('Speaker diarization disconnected. Transcription may still be active.', 'warn');
+    return;
+  }
+  Diarizer.reconnectAttempts++;
+  Diarizer.status = 'reconnecting';
+  const delay = DG_RETRY_BASE_MS * (2 ** (Diarizer.reconnectAttempts - 1));
+  recRenderUI();
+  Diarizer.reconnectTimer = setTimeout(async () => {
+    Diarizer.reconnectTimer = null;
+    try { await diarizerConnect(); }
+    catch { diarizerScheduleReconnect(); }
+  }, delay);
+}
+
+function diarizerClose(markManual) {
+  if (markManual) Diarizer.manualStop = true;
+  clearTimeout(Diarizer.reconnectTimer);
+  Diarizer.reconnectTimer = null;
+  // Send a CloseStream message so Deepgram finalises any pending utterance.
+  if (Diarizer.ws && Diarizer.ws.readyState === WebSocket.OPEN) {
+    try { Diarizer.ws.send(JSON.stringify({ type: 'CloseStream' })); } catch (_) { /* noop */ }
+  }
+  try { Diarizer.ws?.close(); } catch (_) { /* noop */ }
+  Diarizer.ws = null;
+  try { Diarizer.workletNode?.disconnect(); } catch (_) { /* noop */ }
+  Diarizer.workletNode = null;
+  if (Diarizer.audioCtx && Diarizer.audioCtx.state !== 'closed') {
+    Diarizer.audioCtx.close().catch(() => {/* noop */});
+  }
+  Diarizer.audioCtx = null;
+  if (Diarizer.workletUrl) {
+    URL.revokeObjectURL(Diarizer.workletUrl);
+    Diarizer.workletUrl = null;
+  }
+}
+
+
 async function apiGet(path) {
   const r = await fetch(`${API}/${path}`);
   return r.json();
@@ -815,10 +1075,10 @@ async function renderMeetingRoom(main) {
         <div class="k-live-transcript" id="kpsc-live-transcript">
           <div class="lt-head">
             <div>
-              <div class="lt-title">Live Transcript</div>
-              <div class="lt-sub">Timestamped entries auto-scroll as OpenAI realtime transcription returns speech turns.</div>
+              <div class="lt-title">Live Transcript with Speaker Diarization</div>
+              <div class="lt-sub">OpenAI Realtime provides fast interim display; Deepgram identifies individual speakers and commits final entries with speaker labels.</div>
             </div>
-            <span class="lt-pill">Realtime</span>
+            <span class="lt-pill">Realtime + Diarization</span>
           </div>
           <div class="lt-list" id="kpsc-live-transcript-list"></div>
         </div>
@@ -1204,12 +1464,35 @@ async function renderSettings(main) {
           <input type="password" id="ks-openai-key" class="k-input"
             placeholder="${hasOpenai ? '••••••••••••••••' : 'sk-...'}"
             autocomplete="off" value="${esc(openaiKey)}" />
-          <p class="k-hint">Optional alternative AI provider. Get a key at platform.openai.com</p>
+          <p class="k-hint">Optional alternative AI provider for meeting minutes. Get a key at platform.openai.com</p>
         </div>
 
         <div id="ks-save-msg" class="k-settings-msg" style="display:none"></div>
         <button class="kbtn kbtn-primary" id="ks-save-btn" onclick="Kpsc.saveSettings()">Save Keys</button>
         ${hasDeepseek || hasOpenai ? `<button class="kbtn kbtn-danger-outline" style="margin-left:8px" onclick="Kpsc.clearAiKeys()">Clear Keys</button>` : ''}
+      </div>
+
+      <div class="k-card" style="margin-top:16px">
+        <h2 class="k-card-title">Live Transcription &amp; Diarization</h2>
+        <p class="k-card-sub">
+          Real-time transcription and speaker diarization require API keys configured as
+          <strong>Cloudflare Pages environment variables</strong> by the IT Administrator —
+          they are not stored in this settings page.
+        </p>
+        <div class="k-env-row">
+          <code class="k-env-key">OPENAI_API_KEY</code>
+          <span class="k-env-desc">Powers live interim transcription (OpenAI Realtime Whisper via WebRTC). Get a key at <em>platform.openai.com</em>.</span>
+        </div>
+        <div class="k-env-row">
+          <code class="k-env-key">DEEPGRAM_API_KEY</code>
+          <span class="k-env-desc">Powers speaker diarization — identifies who is speaking and labels each transcript turn. Get a key at <em>deepgram.com</em>.</span>
+        </div>
+        <p class="k-hint" style="margin-top:12px">
+          Set these in the Cloudflare Pages dashboard → Settings → Environment Variables.
+          If either key is absent, that feature degrades gracefully: transcription falls back to
+          OpenAI-only (without speaker labels) when Deepgram is absent, and to chunk-based
+          upload only when both are absent.
+        </p>
       </div>
 
       <div class="k-card" style="margin-top:16px">
