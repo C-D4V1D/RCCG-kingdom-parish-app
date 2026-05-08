@@ -71,6 +71,7 @@ const SPEAKER_SAMPLE_MS = 80;        // ms between FFT snapshots during a turn
 const SPEAKER_ENROLL_MS = 3000;      // enrollment capture duration
 const SPEAKER_MATCH_THRESHOLD = 0.09; // max Euclidean distance for enrolled match
 const SPEAKER_AUTO_THRESHOLD  = 0.04; // max distance to group as same unknown speaker
+const SPEAKER_SILENCE_THRESHOLD = 0.005; // min normalised energy per band to consider non-silent
 
 // Color palette for speaker badges (navy → teal across 8 slots)
 const SPEAKER_COLORS = [
@@ -214,7 +215,7 @@ function speakerIdentify(features) {
 
   // 3. New unknown speaker
   const idx   = SpeakerReg.autoProfiles.length;
-  const label = `Speaker ${String.fromCharCode(65 + idx)}`; // A, B, C …
+  const label = idx < 26 ? `Speaker ${String.fromCharCode(65 + idx)}` : `Speaker ${idx + 1}`;
   const color = SPEAKER_COLORS[idx % SPEAKER_COLORS.length];
   SpeakerReg.autoProfiles.push({ features, label, color });
   return { name: label, color, enrolled: false };
@@ -245,7 +246,7 @@ async function speakerEnrollMember(idx, btn) {
   if (statusEl) { statusEl.textContent = 'Listening…'; statusEl.className = 'sp-status sp-listening'; }
 
   // Capture audio frames for SPEAKER_ENROLL_MS milliseconds
-  let remaining = Math.ceil(SPEAKER_ENROLL_MS / 1000);
+  let remaining = Math.round(SPEAKER_ENROLL_MS / 1000);
   btn.textContent = `${remaining}s…`;
   const collectInterval = setInterval(() => {
     if (!SpeakerReg.analyser) return;
@@ -270,7 +271,7 @@ async function speakerEnrollMember(idx, btn) {
   SpeakerReg.enrollFrames = [];
 
   // Reject silent or near-silent captures
-  if (!features || features.slice(1).every(v => v < 0.005)) {
+  if (!features || features.slice(1).every(v => v < SPEAKER_SILENCE_THRESHOLD)) {
     if (statusEl) { statusEl.textContent = 'Not enrolled'; statusEl.className = 'sp-status'; }
     btn.textContent = orig;
     btn.disabled = false;
@@ -455,6 +456,7 @@ function recRenderTranscript() {
   list.innerHTML = rows.length ? rows.map(entry => {
     const speakerBadge = entry.speaker
       ? `<span class="lt-speaker" style="background:${entry.speaker.color}1a;color:${entry.speaker.color};border-color:${entry.speaker.color}55">${esc(entry.speaker.name)}</span>`
+      // '1a' ≈ 10% opacity fill, '55' ≈ 33% opacity border — tints the badge with the speaker colour
       : '';
     return `
       <div class="lt-entry${entry.partial ? ' lt-entry-partial' : ''}">
