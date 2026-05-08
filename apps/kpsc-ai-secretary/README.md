@@ -36,4 +36,4 @@ Current capabilities:
 - End meetings and generate draft summaries, minutes, resolutions, action items, and governance flags
 - Archive recent AI Secretary meetings through Cloudflare D1-backed API routes
 
-The current processor is deterministic and rule-based so it works without AI provider credentials. It is ready to be swapped to provider-backed transcription and LLM post-processing in a later phase.
+The current processor uses a deterministic governance-first strategy so it works without AI provider credentials, while still allowing provider-backed post-processing when a key is configured. Provider output is treated as draft content only: the backend sanitizes the response, falls back to deterministic extraction when fields are missing or malformed, and always re-applies mandatory policy checks for quorum, missing transcript notes, unfinished meetings, major-project thresholds, welfare/privacy language, and transcript prompt-injection attempts. This prevents an LLM from suppressing governance flags even if the transcript or model response says everything is approved.
