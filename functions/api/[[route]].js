@@ -92,8 +92,11 @@ export async function onRequest(context) {
 
   try {
     let body = null;
-    if (['POST', 'PUT', 'PATCH'].includes(method)) {
+    const contentType = request.headers.get('Content-Type') || '';
+    if (['POST', 'PUT', 'PATCH'].includes(method) && contentType.includes('application/json')) {
       try { body = await request.json(); } catch { body = {}; }
+    } else if (['POST', 'PUT', 'PATCH'].includes(method)) {
+      body = {};
     }
 
     // ── /api/init ──────────────────────────────────────────────
@@ -174,8 +177,14 @@ export async function onRequest(context) {
       if (method === 'POST' && param === 'read') return await markAllRead(DB);
     }
 
+    // ── /api/realtime-transcription-token ───────────────────────
+    if (route === 'realtime-transcription-token') {
+      if (method === 'POST' && !param) return await createRealtimeTranscriptionToken(env);
+    }
+
     // ── /api/ai-secretary-meetings ─────────────────────────────
     if (route === 'ai-secretary-meetings') {
+      if (method === 'POST' && param === 'audio-chunk') return await uploadAiSecretaryAudioChunk(env, request);
       if (method === 'GET'  && !param) return await getAiSecretaryMeetings(DB);
       if (method === 'POST' && !param) return await createAiSecretaryMeeting(DB, body);
       if (method === 'GET'  &&  param) return await getAiSecretaryMeeting(DB, param);
@@ -1423,6 +1432,76 @@ async function processAiSecretaryMeeting(DB, id) {
     id,
   ).run();
   return getAiSecretaryMeeting(DB, id);
+}
+
+
+async function createRealtimeTranscriptionToken(env) {
+  const apiKey = String(env.OPENAI_API_KEY || '').trim();
+  if (!apiKey) return err('OPENAI_API_KEY is not configured for realtime transcription.', 503);
+
+  const response = await fetch('https://api.openai.com/v1/realtime/client_secrets', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      session: {
+        type: 'transcription',
+        audio: {
+          input: {
+            format: { type: 'audio/pcm', rate: 24000 },
+            noise_reduction: { type: 'near_field' },
+            transcription: {
+              model: 'gpt-4o-transcribe',
+              language: 'en',
+              prompt: 'Kingdom Parish Stewardship Committee meeting transcription. Preserve names, votes, resolutions, action items, and church finance terms accurately.',
+            },
+            turn_detection: {
+              type: 'server_vad',
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 500,
+            },
+          },
+        },
+      },
+      expires_after: { anchor: 'created_at', seconds: 600 },
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return err(data.error?.message || `OpenAI realtime token request failed (${response.status}).`, response.status);
+  }
+  return ok(data);
+}
+
+async function uploadAiSecretaryAudioChunk(env, request) {
+  const form = await request.formData();
+  const audio = form.get('audio');
+  const uploadSessionId = String(form.get('uploadSessionId') || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+  const meetingId = String(form.get('meetingId') || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80) || 'unsaved';
+  const sequence = String(form.get('sequence') || '0').padStart(5, '0').slice(-5);
+  const createdAt = String(form.get('createdAt') || new Date().toISOString());
+  const mimeType = String(form.get('mimeType') || audio?.type || 'audio/webm');
+
+  if (!audio || typeof audio.arrayBuffer !== 'function') return err('Missing audio chunk.', 400);
+  if (!uploadSessionId) return err('Missing upload session id.', 400);
+
+  const key = `kpsc-audio/${meetingId}/${uploadSessionId}/${sequence}.webm`;
+  const bucket = env.KPSC_AUDIO_BUCKET || env.AUDIO_BUCKET;
+  if (bucket?.put) {
+    await bucket.put(key, audio.stream(), {
+      httpMetadata: { contentType: mimeType },
+      customMetadata: { meetingId, uploadSessionId, sequence, createdAt },
+    });
+    return ok({ uploaded: true, stored: true, key, sequence: Number(sequence) });
+  }
+
+  // Accept chunks even before an R2 bucket is bound so the browser can keep streaming
+  // without retaining a full recording in memory. Configure KPSC_AUDIO_BUCKET to persist audio.
+  return ok({ uploaded: true, stored: false, key, sequence: Number(sequence), note: 'No audio bucket configured.' });
 }
 
 // ── NOTIFICATIONS ─────────────────────────────────────────────────
