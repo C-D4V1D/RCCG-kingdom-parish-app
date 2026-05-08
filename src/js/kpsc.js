@@ -209,7 +209,7 @@ function recRenderTranscript() {
 function recAppendTranscript(text, itemId = '', speaker = null) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) return;
-  const entry = { itemId, timestamp: recTimestamp(), text: clean, speaker };
+  const entry = { itemId, timestamp: recTimestamp(), text: clean, speaker: speaker ?? null };
   Rec.transcriptEntries.push(entry);
   const textarea = document.getElementById('km-transcript');
   if (textarea) {
@@ -1459,7 +1459,7 @@ async function renderSettings(main) {
           <input type="password" id="ks-deepseek-key" class="k-input"
             placeholder="${hasDeepseek ? '••••••••••••••••' : 'sk-...'}"
             autocomplete="off" value="${esc(deepseekKey)}" />
-          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at https://platform.deepseek.com</p>
+          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at <a href="https://platform.deepseek.com" target="_blank" rel="noopener">platform.deepseek.com</a></p>
         </div>
 
         <div class="k-form-group">
@@ -1467,7 +1467,7 @@ async function renderSettings(main) {
           <input type="password" id="ks-openai-key" class="k-input"
             placeholder="${hasOpenai ? '••••••••••••••••' : 'sk-...'}"
             autocomplete="off" value="${esc(openaiKey)}" />
-          <p class="k-hint">Optional alternative AI provider for meeting minutes. Get a key at https://platform.openai.com</p>
+          <p class="k-hint">Optional alternative AI provider for meeting minutes. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a></p>
         </div>
 
         <div id="ks-save-msg" class="k-settings-msg" style="display:none"></div>
@@ -1484,11 +1484,11 @@ async function renderSettings(main) {
         </p>
         <div class="k-env-row">
           <code class="k-env-key">OPENAI_API_KEY</code>
-          <span class="k-env-desc">Powers live interim transcription (OpenAI Realtime Whisper via WebRTC). Get a key at <em>https://platform.openai.com</em>.</span>
+          <span class="k-env-desc">Powers live interim transcription (OpenAI Realtime Whisper via WebRTC). Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a>.</span>
         </div>
         <div class="k-env-row">
           <code class="k-env-key">DEEPGRAM_API_KEY</code>
-          <span class="k-env-desc">Powers speaker diarization — identifies who is speaking and labels each transcript turn. Get a key at <em>https://console.deepgram.com</em>.</span>
+          <span class="k-env-desc">Powers speaker diarization — identifies who is speaking and labels each transcript turn. Get a key at <a href="https://console.deepgram.com" target="_blank" rel="noopener">console.deepgram.com</a>.</span>
         </div>
         <p class="k-hint" style="margin-top:12px">
           Set these in the Cloudflare Pages dashboard → Settings → Environment Variables.

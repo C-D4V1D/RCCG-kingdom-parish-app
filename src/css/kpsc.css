@@ -210,7 +210,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .lt-list{height:210px;overflow-y:auto;padding:12px 14px;scroll-behavior:smooth;}
 .lt-empty{height:100%;display:flex;align-items:center;justify-content:center;text-align:center;color:var(--text3);font-size:13px;}
 .lt-entry{display:grid;grid-template-columns:54px 1fr;gap:9px;align-items:start;padding:8px 0;border-bottom:1px solid #f1f5f9;}
-.lt-entry.lt-entry-diarized{grid-template-columns:54px auto 1fr;}
+.lt-entry.lt-entry-diarized{grid-template-columns:54px minmax(90px, auto) 1fr;}
 .lt-entry:last-child{border-bottom:0;}
 .lt-entry-partial{opacity:.72;font-style:italic;}
 .lt-time{font-size:11px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;}
