@@ -4622,21 +4622,89 @@ async function editExpense(id){
   if(exp.status==='approved'){ alert('Approved expenses cannot be edited.'); return }
   if(!canAction('expense_edit_pending')){ alert('You are not allowed to edit this expense.'); return }
 
-  const amountStr = prompt('Update amount (₦):', String(exp.amount||0));
-  if(amountStr===null) return;
-  const amount = parseFloat(amountStr);
-  if(!Number.isFinite(amount) || amount<=0){ alert('Please enter a valid amount.'); return }
-  const description = prompt('Update description:', exp.description||exp.subCategory||'') ?? exp.description;
-  const notes = prompt('Update notes (optional):', exp.notes||'') ?? exp.notes;
+  const methodLabel = exp.paymentMethod==='petty_cash'?'💳 Petty Cash'
+    :exp.paymentMethod==='bank_transfer'?'🏦 Bank Transfer'
+    :exp.paymentMethod==='split'?'🔀 Split'
+    :'💵 Cash';
+  const splitDetail = exp.paymentMethod==='split'
+    ? `<span style="color:var(--text3);font-size:11px;margin-left:8px">Bank: ${fmt(exp.bankAmount||0)} · Petty: ${fmt(exp.pettyAmount||0)} · Cash: ${fmt(exp.cashAmount||0)}</span>`
+    : '';
+
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">✏️ Edit Expense</div>
+    <div class="form-group">
+      <label class="form-label">Category *</label>
+      <select id="exp_cat" class="form-select" onchange="App.updateExpenseSubcats()">
+        <option value="">— Select category —</option>
+        ${EXPENSE_CATS.map(c=>`<option value="${c.key}" ${exp.category===c.key?'selected':''}>${c.icon} ${c.label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group" id="exp_subcat_group" style="display:${exp.category?'block':'none'}">
+      <label class="form-label">Sub-category *</label>
+      <select id="exp_subcat" class="form-select" onchange="App.updateExpenseDescRequired()">
+        <option value="">— Select sub-category —</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label" id="exp_desc_label">Description</label>
+      <input type="text" id="exp_desc" class="form-input" value="${esc(exp.description||'')}" placeholder="What was purchased / paid for?" />
+      <div id="exp_desc_hint" class="form-hint" style="display:none;color:var(--danger);font-size:11px;margin-top:4px">Description is required when "Others..." is selected.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Amount (₦) *</label>
+      <input type="number" id="exp_amt" class="form-input" value="${exp.amount||0}" min="0" />
+    </div>
+    <div class="form-group">
+      <label class="form-label">Payment Method</label>
+      <div style="font-size:13px;color:var(--text2);padding:8px 0">${methodLabel}${splitDetail}
+        <span style="color:var(--text3);font-size:11px;margin-left:8px">(cannot be changed here)</span>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Notes (optional)</label>
+      <textarea id="exp_notes" class="form-textarea">${esc(exp.notes||'')}</textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.submitEditExpense('${id}', this)">Save Changes</button>
+    </div>`);
+
+  // Populate subcategory dropdown and restore the saved selection
+  setTimeout(()=>{
+    App.updateExpenseSubcats();
+    const sel = document.getElementById('exp_subcat');
+    if(sel && exp.subCategory){
+      for(const opt of sel.options){
+        if(opt.value===exp.subCategory){ opt.selected=true; break; }
+      }
+    }
+    App.updateExpenseDescRequired();
+  }, 30);
+}
+
+async function submitEditExpense(id, btn=null){
+  const category    = document.getElementById('exp_cat')?.value;
+  const subCategory = document.getElementById('exp_subcat')?.value;
+  const description = document.getElementById('exp_desc')?.value?.trim();
+  const amount      = parseFloat(document.getElementById('exp_amt')?.value)||0;
+  const notes       = document.getElementById('exp_notes')?.value?.trim();
+
+  if(!category){ alert('Please select a category.'); return }
+  if(!subCategory){ alert('Please select a sub-category.'); return }
+  if(subCategory==='Others...' && !description){ alert('Description is required when "Others..." is selected.'); return }
+  if(!amount || amount<=0){ alert('Please enter a valid amount.'); return }
+
+  if(btn) btn.disabled=true;
+  const all = await DB.getExpenses();
+  const exp = all.find(e=>e.id===id);
+  if(!exp){ if(btn) btn.disabled=false; alert('Expense not found.'); return }
+
   let newPettyAmount = exp.pettyAmount||0;
   if(exp.paymentMethod==='petty_cash'){
     newPettyAmount = amount;
   } else if(exp.paymentMethod==='split' && (exp.pettyAmount||0)>0){
-    const pettyStr = prompt('Update petty-cash portion (₦):', String(exp.pettyAmount||0));
-    if(pettyStr===null) return;
-    const pettyVal = parseFloat(pettyStr);
-    if(!Number.isFinite(pettyVal) || pettyVal<0 || pettyVal>amount){ alert('Petty portion must be between 0 and total amount.'); return }
-    newPettyAmount = pettyVal;
+    newPettyAmount = Math.min(exp.pettyAmount||0, amount);
   }
 
   const pettyDelta = newPettyAmount - (exp.pettyAmount||0);
@@ -4646,8 +4714,9 @@ async function editExpense(id){
     DB.addAudit('petty_adjustment',`Petty float adjusted by ${fmt(Math.abs(pettyDelta))} from expense edit (${pettyDelta>0?'deducted':'returned'})`,state.user?.name);
   }
 
-  await DB.updateExpense(id, { amount, description, notes, pettyAmount:newPettyAmount });
-  DB.addAudit('expense_updated',`Expense updated: ${exp.id} (${fmt(exp.amount)} → ${fmt(amount)})`,state.user?.name);
+  await DB.updateExpense(id, { category, subCategory, description: description||subCategory, notes, amount, pettyAmount: newPettyAmount });
+  DB.addAudit('expense_updated',`Expense updated: ${id} — ${category}/${subCategory}, amount: ${fmt(amount)}`,state.user?.name);
+  closeModal();
   showAlert('Expense updated.','success');
   renderExpenses();
 }
@@ -7807,7 +7876,7 @@ return {
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
-  showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
+  showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, submitEditExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
