@@ -233,7 +233,11 @@ const state = {
 // ──────────────────────────────────────────
 // 4. UTILITIES
 // ──────────────────────────────────────────
-function fmt(n){ return '₦' + Math.round(n||0).toLocaleString('en-NG') }
+function fmt(n){
+  const v = Math.round((n||0) * 100) / 100;
+  const hasDec = v % 1 !== 0;
+  return '₦' + v.toLocaleString('en-NG', {minimumFractionDigits: hasDec ? 2 : 0, maximumFractionDigits: 2});
+}
 function fmtShort(n){
   if(!n) return '₦0';
   const abs = Math.abs(n);
