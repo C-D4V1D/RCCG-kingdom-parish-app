@@ -347,6 +347,7 @@ const ACCESS_RULES = {
     petty_approve_or_view: ['income','petty_approve'],
     expense_edit_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_pending: { roles:['admin_officer','it_admin'] },
+    expense_delete_approved: { roles:['accountant','it_admin'] },
     expense_approve_pending: { roles:['accountant','it_admin'] },
     topup_cancel: ({ request }) => canCancelTopupRequest(request)
   }
@@ -4310,6 +4311,7 @@ function showExpenseDetail(id){
     ? '<span class="badge badge-success">Approved</span>'
     : '<span class="badge badge-warn">Pending Approval</span>';
   const canEditPending = canAction('expense_edit_pending') && e.status!=='approved';
+  const canDeleteApproved = canAction('expense_delete_approved') && e.status==='approved';
   const canApprovePending = canAction('expense_approve_pending') && e.status!=='approved';
   const rows = [
     ['Date',            fmtDate(e.date||e.createdAt)],
@@ -4336,7 +4338,7 @@ function showExpenseDetail(id){
       <button class="btn" onclick="closeModal()">Close</button>
       ${e.receiptImage?`<button class="btn btn-sm" onclick="closeModal();App.viewExpenseReceipt('${e.id}')">🧾 View Receipt</button>`:''}
       ${canEditPending?`<button class="btn btn-sm" onclick="closeModal();App.editExpense('${e.id}')">✏️ Edit</button>`:''}
-      ${canEditPending?`<button class="btn btn-sm btn-danger" onclick="closeModal();App.deleteExpense('${e.id}')">🗑 Delete</button>`:''}
+      ${(canEditPending||canDeleteApproved)?`<button class="btn btn-sm btn-danger" onclick="closeModal();App.deleteExpense('${e.id}')">🗑 Delete</button>`:''}
       ${canApprovePending?`<button class="btn btn-primary" onclick="closeModal();App.approveExpense('${e.id}')">✓ Approve</button>`:''}
     </div>`);
 }
@@ -4729,8 +4731,11 @@ async function deleteExpense(id, btn=null){
   const all = await DB.getExpenses();
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
-  if(exp.status==='approved'){ alert('Approved expenses cannot be deleted.'); return }
-  if(!canAction('expense_delete_pending')){ alert('You are not allowed to delete this expense.'); return }
+  if(exp.status==='approved'){
+    if(!canAction('expense_delete_approved')){ alert('You are not allowed to delete approved expenses.'); return }
+  } else {
+    if(!canAction('expense_delete_pending')){ alert('You are not allowed to delete this expense.'); return }
+  }
   if(!confirm(`Delete this expense (${fmt(exp.amount)})?`)) return;
   const restore = setBtnLoading(btn, 'Deleting…');
   try {
