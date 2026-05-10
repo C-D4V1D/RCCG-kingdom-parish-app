@@ -1673,10 +1673,22 @@ async function renderDashboard(){
   const recentPetty = pettyHistDash.filter(h=>h.type==='disbursement'&&h.status==='approved').slice(0,2);
   const feedItems = [
     ...recentIncome.map(r=>{
+      const isSunday = !r.source || r.source==='sunday_collection';
       const deposited = r.depositConfirmed;
+      const bankAmt = r.bankTransferAmount||0;
+      const method = r.paymentMethod || (bankAmt>0 ? 'bank_transfer' : 'cash');
+      let title, methodLabel;
+      if(isSunday){
+        title = deposited ? 'Sunday collections deposited' : 'Sunday collections collected (cash)';
+        methodLabel = deposited ? 'Deposited by Accountant' : (bankAmt>0 ? txMethodLabel('bank_transfer') : 'Cash held by Accountant');
+      } else {
+        const srcMeta = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:(r.source||'Other').replace(/_/g,' ')};
+        title = srcMeta.label;
+        methodLabel = txMethodLabel(method);
+      }
       return {type:'income',date:r.date,
-        title: deposited ? 'Sunday collections deposited' : 'Sunday collections collected (cash)',
-        sub: `${fmtDate(r.date)} · ${deposited?'Deposited by Accountant':'Cash held by Accountant'}`,
+        title,
+        sub: `${fmtDate(r.date)} · ${methodLabel}`,
         amt:r.totalCollection, icon:'🏛️', color:'#1D9E75', bg:'rgba(29,158,117,0.15)'};
     }),
     ...recentExp.map(r=>{
