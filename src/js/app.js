@@ -21,7 +21,7 @@ const ROLES = {
 const PERMISSIONS = {
   it_admin:      ['all'],
   pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','petty_view','reports','audit','signoff','rem_cutoff_edit'],
-  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit','rem_cutoff_edit'],
+  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit','rem_cutoff_edit','expense_delete_approved'],
   admin_officer: ['dashboard','transactions','expenses','petty_request','petty_view','income_view'],
   signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','bank','petty_approve','signoff'],
   viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','petty_view']
@@ -36,8 +36,9 @@ const PERMISSION_DEFS = [
   { key:'remittances',      label:'Manage Remittances',     group:'Finance'    },
   { key:'remittances_view', label:'View Remittances',       group:'Finance'    },
   { key:'rem_cutoff_edit',  label:'Edit Remittance Cut-Off Dates', group:'Finance' },
-  { key:'expenses',         label:'Log Expenses',           group:'Finance'    },
-  { key:'expenses_view',    label:'View Expenses',          group:'Finance'    },
+  { key:'expenses',               label:'Log Expenses',                group:'Finance' },
+  { key:'expenses_view',          label:'View Expenses',               group:'Finance' },
+  { key:'expense_delete_approved',label:'Delete Approved Expenses',    group:'Finance' },
   { key:'bank',             label:'Bank',                   group:'Finance'    },
   { key:'petty_request',    label:'Request Petty Cash',     group:'Petty Cash' },
   { key:'petty_approve',    label:'Approve Petty Cash',     group:'Petty Cash' },
@@ -347,7 +348,7 @@ const ACCESS_RULES = {
     petty_approve_or_view: ['income','petty_approve'],
     expense_edit_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_pending: { roles:['admin_officer','it_admin'] },
-    expense_delete_approved: { roles:['accountant','it_admin'] },
+    expense_delete_approved: ['expense_delete_approved'],
     expense_approve_pending: { roles:['accountant','it_admin'] },
     topup_cancel: ({ request }) => canCancelTopupRequest(request)
   }
