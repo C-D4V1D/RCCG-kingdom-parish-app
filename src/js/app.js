@@ -21,7 +21,7 @@ const ROLES = {
 const PERMISSIONS = {
   it_admin:      ['all'],
   pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','petty_view','reports','audit','signoff','rem_cutoff_edit'],
-  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit','rem_cutoff_edit'],
+  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit','rem_cutoff_edit','expense_delete_approved'],
   admin_officer: ['dashboard','transactions','expenses','petty_request','petty_view','income_view'],
   signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','bank','petty_approve','signoff'],
   viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','petty_view']
@@ -36,8 +36,9 @@ const PERMISSION_DEFS = [
   { key:'remittances',      label:'Manage Remittances',     group:'Finance'    },
   { key:'remittances_view', label:'View Remittances',       group:'Finance'    },
   { key:'rem_cutoff_edit',  label:'Edit Remittance Cut-Off Dates', group:'Finance' },
-  { key:'expenses',         label:'Log Expenses',           group:'Finance'    },
-  { key:'expenses_view',    label:'View Expenses',          group:'Finance'    },
+  { key:'expenses',               label:'Log Expenses',                group:'Finance' },
+  { key:'expenses_view',          label:'View Expenses',               group:'Finance' },
+  { key:'expense_delete_approved',label:'Delete Approved Expenses',    group:'Finance' },
   { key:'bank',             label:'Bank',                   group:'Finance'    },
   { key:'petty_request',    label:'Request Petty Cash',     group:'Petty Cash' },
   { key:'petty_approve',    label:'Approve Petty Cash',     group:'Petty Cash' },
@@ -233,7 +234,11 @@ const state = {
 // ──────────────────────────────────────────
 // 4. UTILITIES
 // ──────────────────────────────────────────
-function fmt(n){ return '₦' + Math.round(n||0).toLocaleString('en-NG') }
+function fmt(n){
+  const v = Math.round((n||0) * 100) / 100;
+  const hasDec = v % 1 !== 0;
+  return '₦' + v.toLocaleString('en-NG', {minimumFractionDigits: hasDec ? 2 : 0, maximumFractionDigits: 2});
+}
 function fmtShort(n){
   if(!n) return '₦0';
   const abs = Math.abs(n);
@@ -343,6 +348,7 @@ const ACCESS_RULES = {
     petty_approve_or_view: ['income','petty_approve'],
     expense_edit_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_pending: { roles:['admin_officer','it_admin'] },
+    expense_delete_approved: ['expense_delete_approved'],
     expense_approve_pending: { roles:['accountant','it_admin'] },
     topup_cancel: ({ request }) => canCancelTopupRequest(request)
   }
@@ -4306,6 +4312,7 @@ function showExpenseDetail(id){
     ? '<span class="badge badge-success">Approved</span>'
     : '<span class="badge badge-warn">Pending Approval</span>';
   const canEditPending = canAction('expense_edit_pending') && e.status!=='approved';
+  const canDeleteApproved = canAction('expense_delete_approved') && e.status==='approved';
   const canApprovePending = canAction('expense_approve_pending') && e.status!=='approved';
   const rows = [
     ['Date',            fmtDate(e.date||e.createdAt)],
@@ -4332,7 +4339,7 @@ function showExpenseDetail(id){
       <button class="btn" onclick="closeModal()">Close</button>
       ${e.receiptImage?`<button class="btn btn-sm" onclick="closeModal();App.viewExpenseReceipt('${e.id}')">🧾 View Receipt</button>`:''}
       ${canEditPending?`<button class="btn btn-sm" onclick="closeModal();App.editExpense('${e.id}')">✏️ Edit</button>`:''}
-      ${canEditPending?`<button class="btn btn-sm btn-danger" onclick="closeModal();App.deleteExpense('${e.id}')">🗑 Delete</button>`:''}
+      ${(canEditPending||canDeleteApproved)?`<button class="btn btn-sm btn-danger" onclick="closeModal();App.deleteExpense('${e.id}')">🗑 Delete</button>`:''}
       ${canApprovePending?`<button class="btn btn-primary" onclick="closeModal();App.approveExpense('${e.id}')">✓ Approve</button>`:''}
     </div>`);
 }
@@ -4725,8 +4732,11 @@ async function deleteExpense(id, btn=null){
   const all = await DB.getExpenses();
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
-  if(exp.status==='approved'){ alert('Approved expenses cannot be deleted.'); return }
-  if(!canAction('expense_delete_pending')){ alert('You are not allowed to delete this expense.'); return }
+  if(exp.status==='approved'){
+    if(!canAction('expense_delete_approved')){ alert('You are not allowed to delete approved expenses.'); return }
+  } else {
+    if(!canAction('expense_delete_pending')){ alert('You are not allowed to delete this expense.'); return }
+  }
   if(!confirm(`Delete this expense (${fmt(exp.amount)})?`)) return;
   const restore = setBtnLoading(btn, 'Deleting…');
   try {
