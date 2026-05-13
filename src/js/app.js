@@ -7921,3 +7921,41 @@ window.onunhandledrejection = function(event){
     App.showAlert('A background operation failed. Please retry or refresh.','danger');
   }
 };
+
+// ──────────────────────────────────────────
+// SLOW NETWORK DETECTION
+// ──────────────────────────────────────────
+(function initSlowNetworkBanner(){
+  const SLOW_TYPES = new Set(['slow-2g','2g']);
+  const SLOW_DOWNLINK_MBPS = 0.5; // below 0.5 Mbps is considered slow
+  const SLOW_RTT_MS = 500;        // above 500 ms RTT is considered slow
+
+  function isSlow(conn){
+    if(!conn) return false;
+    if(SLOW_TYPES.has(conn.effectiveType)) return true;
+    if(typeof conn.downlink === 'number' && conn.downlink < SLOW_DOWNLINK_MBPS) return true;
+    if(typeof conn.rtt === 'number' && conn.rtt > SLOW_RTT_MS) return true;
+    return false;
+  }
+
+  function updateBanner(){
+    const banner = document.getElementById('slowNetworkBanner');
+    if(!banner) return;
+    const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    banner.style.display = isSlow(conn) ? 'flex' : 'none';
+  }
+
+  const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  if(conn){
+    conn.addEventListener('change', updateBanner);
+    // Poll every 10 s so the banner hides promptly when the connection recovers,
+    // since the 'change' event does not always fire on improvement.
+    setInterval(updateBanner, 10000);
+    // Run once on load
+    if(document.readyState === 'loading'){
+      document.addEventListener('DOMContentLoaded', updateBanner);
+    } else {
+      updateBanner();
+    }
+  }
+})();
