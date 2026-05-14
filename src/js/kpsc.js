@@ -1328,10 +1328,12 @@ function arrayBufferToBase64(buffer) {
 // downloaded once and cached in the browser's IndexedDB by transformers.js.
 
 const SB_MODEL_ID    = 'Xenova/speechbrain-spkrec-ecapa-voxceleb';
-// ESM build from jsDelivr — dynamic import() works from any script context in modern browsers.
-// Pin the minor version (2.17.x) for stability; bump to the next stable release when testing
-// confirms the new AutoFeatureExtractor/AutoModel API remains compatible.
-const SB_XFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.esm.js';
+// Use the bare jsDelivr URL (no file path) — jsDelivr resolves it to the package's
+// module entry point automatically. Do NOT append /dist/transformers.esm.js or similar
+// sub-paths because those files do not exist in the @xenova/transformers v2 package.
+// Bump the pin to the next stable release once the AutoFeatureExtractor/AutoModel
+// API is tested to remain compatible.
+const SB_XFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
 
 let _sbExtractor = null;
 let _sbModel     = null;
