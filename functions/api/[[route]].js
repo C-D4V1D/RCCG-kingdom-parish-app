@@ -146,6 +146,15 @@ export async function onRequest(context) {
     }
     if (route === 'kpsc-dashboard' && method === 'GET') return await getKpscDashboard(DB, url);
     if (route === 'kpsc-reconciliation' && method === 'POST') return await runKpscReconciliation(DB, body);
+    if (route === 'kpsc-projects') {
+      if (method === 'GET'  && !param) return await getKpscProjects(DB, url);
+      if (method === 'POST' && !param) return await createKpscProject(DB, body);
+      if (method === 'PUT'  &&  param) return await updateKpscProject(DB, param, body);
+      if (method === 'DELETE' && param) return await deleteKpscProject(DB, param);
+    }
+    if (route === 'kpsc-extract-projects' && method === 'POST') return await extractProjectsFromMeeting(DB, env, body);
+    if (route === 'kpsc-ocr-notes' && method === 'POST') return await ocrHandwrittenNotes(env, body);
+    if (route === 'kpsc-parse-statement' && method === 'POST') return await parseStatementWithAI(env, DB, body);
     if (route === 'change-pin' && method === 'POST') {
       return await changeUserPin(DB, body);
     }
@@ -500,6 +509,22 @@ async function handleInit(DB) {
       result_json       TEXT DEFAULT '{}',
       created_by        TEXT DEFAULT '',
       created_at        TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_projects (
+      id               TEXT PRIMARY KEY,
+      title            TEXT NOT NULL DEFAULT '',
+      description      TEXT DEFAULT '',
+      estimated_cost   REAL DEFAULT 0,
+      actual_cost      REAL DEFAULT 0,
+      status           TEXT DEFAULT 'proposed',
+      priority         TEXT DEFAULT 'medium',
+      target_date      TEXT DEFAULT '',
+      source_meeting_id TEXT DEFAULT '',
+      source           TEXT DEFAULT 'manual',
+      notes            TEXT DEFAULT '',
+      created_by       TEXT DEFAULT '',
+      created_at       TEXT DEFAULT (datetime('now')),
+      updated_at       TEXT DEFAULT (datetime('now'))
     )`,
   ];
 
@@ -1938,8 +1963,260 @@ async function runKpscReconciliation(DB, data) {
   return ok({ runId, ...result });
 }
 
+function kpscProjectFromRow(row) {
+  return {
+    id: row.id,
+    title: row.title || '',
+    description: row.description || '',
+    estimatedCost: Number(row.estimated_cost || 0),
+    actualCost: Number(row.actual_cost || 0),
+    status: row.status || 'proposed',
+    priority: row.priority || 'medium',
+    targetDate: row.target_date || '',
+    sourceMeetingId: row.source_meeting_id || '',
+    source: row.source || 'manual',
+    notes: row.notes || '',
+    createdBy: row.created_by || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || '',
+  };
+}
 
-// ── AI SECRETARY ───────────────────────────────────────────────────
+async function getKpscProjects(DB, url) {
+  const status = String(url.searchParams.get('status') || '').trim().toLowerCase();
+  let where = '';
+  const binds = [];
+  if (status && status !== 'all') {
+    where = 'WHERE status=?';
+    binds.push(status);
+  }
+  const { results } = await DB.prepare(`SELECT * FROM kpsc_projects ${where} ORDER BY priority DESC, created_at DESC`).bind(...binds).all();
+  return ok((results || []).map(kpscProjectFromRow));
+}
+
+async function createKpscProject(DB, data) {
+  const title = String(data?.title || '').trim();
+  if (!title) return err('title is required', 400);
+  const id = newId('kprj');
+  const now = new Date().toISOString();
+  await DB.prepare(`
+    INSERT INTO kpsc_projects (id,title,description,estimated_cost,actual_cost,status,priority,target_date,source_meeting_id,source,notes,created_by,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `).bind(
+    id,
+    title,
+    String(data?.description || '').trim(),
+    Number(data?.estimatedCost || 0),
+    Number(data?.actualCost || 0),
+    String(data?.status || 'proposed').trim() || 'proposed',
+    String(data?.priority || 'medium').trim() || 'medium',
+    String(data?.targetDate || '').trim(),
+    String(data?.sourceMeetingId || '').trim(),
+    String(data?.source || 'manual').trim() || 'manual',
+    String(data?.notes || '').trim(),
+    String(data?.createdBy || '').trim(),
+    now,
+  ).run();
+  const row = await DB.prepare(`SELECT * FROM kpsc_projects WHERE id=?`).bind(id).first();
+  return ok(kpscProjectFromRow(row));
+}
+
+async function updateKpscProject(DB, id, data) {
+  const row = await DB.prepare(`SELECT * FROM kpsc_projects WHERE id=?`).bind(id).first();
+  if (!row) return err('Project not found', 404);
+  const title = data?.title !== undefined ? String(data.title || '').trim() : row.title;
+  if (!title) return err('title is required', 400);
+  await DB.prepare(`
+    UPDATE kpsc_projects SET title=?,description=?,estimated_cost=?,actual_cost=?,status=?,priority=?,target_date=?,source_meeting_id=?,source=?,notes=?,created_by=?,updated_at=? WHERE id=?
+  `).bind(
+    title,
+    data?.description !== undefined ? String(data.description || '').trim() : row.description,
+    data?.estimatedCost !== undefined ? Number(data.estimatedCost || 0) : Number(row.estimated_cost || 0),
+    data?.actualCost !== undefined ? Number(data.actualCost || 0) : Number(row.actual_cost || 0),
+    data?.status !== undefined ? String(data.status || 'proposed').trim() : row.status,
+    data?.priority !== undefined ? String(data.priority || 'medium').trim() : row.priority,
+    data?.targetDate !== undefined ? String(data.targetDate || '').trim() : row.target_date,
+    data?.sourceMeetingId !== undefined ? String(data.sourceMeetingId || '').trim() : row.source_meeting_id,
+    data?.source !== undefined ? String(data.source || 'manual').trim() : row.source,
+    data?.notes !== undefined ? String(data.notes || '').trim() : row.notes,
+    data?.createdBy !== undefined ? String(data.createdBy || '').trim() : row.created_by,
+    new Date().toISOString(),
+    id,
+  ).run();
+  const updated = await DB.prepare(`SELECT * FROM kpsc_projects WHERE id=?`).bind(id).first();
+  return ok(kpscProjectFromRow(updated));
+}
+
+async function deleteKpscProject(DB, id) {
+  await DB.prepare(`DELETE FROM kpsc_projects WHERE id=?`).bind(id).run();
+  return ok({ deleted: id });
+}
+
+async function extractProjectsFromMeeting(DB, env, data) {
+  const meetingId = String(data?.meetingId || '').trim();
+  const createdBy = String(data?.createdBy || '').trim();
+  if (!meetingId) return err('meetingId is required', 400);
+  const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(meetingId).first();
+  if (!row) return err('Meeting not found', 404);
+
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-chat';
+  try {
+    const { results: sr } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
+    const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
+    deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-chat';
+  } catch (_) {}
+
+  const transcript = row.transcript_text || '';
+  const minutesMarkdown = row.minutes_markdown || '';
+  const content = [transcript, minutesMarkdown].filter(Boolean).join('\n\n');
+
+  function ruleExtract(text) {
+    const projectPatterns = [
+      /(?:project|construction|renovation|repair|purchase|build|install|acquire|procure|fund)\s+(?:of\s+)?([^.!?\n]{10,100})/gi,
+      /(?:carry out|undertake|execute)\s+(?:the\s+)?([^.!?\n]{10,100})/gi,
+    ];
+    const found = [];
+    for (const pattern of projectPatterns) {
+      let m;
+      while ((m = pattern.exec(text)) !== null) {
+        const t = m[1].trim().replace(/[,;:].*/, '');
+        if (t.length > 8) found.push({ title: t, description: m[0].trim(), estimatedCost: 0, source: 'ai_extracted', sourceMeetingId: meetingId });
+      }
+    }
+    return found.slice(0, 5);
+  }
+
+  let extracted = [];
+  if (deepseekKey && content.trim()) {
+    try {
+      const prompt = `Extract church project proposals from this KPSC meeting content. Return a JSON array of projects with keys: title (string), description (string), estimatedCost (number in naira, 0 if not stated), priority (low/medium/high), targetDate (YYYY-MM-DD or empty string). Only include actual project proposals (things to build, buy, repair, or fund). Limit to 10 items. Return ONLY valid JSON array.\n\nMeeting content:\n${content.slice(0, 4000)}`;
+      const resp = await fetch('https://api.deepseek.com/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+        body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 1500, temperature: 0.2 }),
+      });
+      if (resp.ok) {
+        const aiData = await resp.json();
+        const rawText = aiData.choices?.[0]?.message?.content || '[]';
+        const parsed = safeJsonParse(rawText.replace(/```json?\s*/gi, '').replace(/```\s*/gi, '').trim(), null);
+        if (Array.isArray(parsed)) {
+          extracted = parsed.map(p => ({
+            title: String(p.title || '').trim(),
+            description: String(p.description || '').trim(),
+            estimatedCost: Number(p.estimatedCost || 0),
+            priority: ['low','medium','high'].includes(String(p.priority||'').toLowerCase()) ? p.priority.toLowerCase() : 'medium',
+            targetDate: String(p.targetDate || '').trim(),
+            source: 'ai_extracted',
+            sourceMeetingId: meetingId,
+          })).filter(p => p.title.length > 3);
+        }
+      }
+    } catch (_) {
+      extracted = ruleExtract(content);
+    }
+  } else {
+    extracted = ruleExtract(content);
+  }
+
+  const inserted = [];
+  for (const proj of extracted) {
+    if (!proj.title) continue;
+    const id = newId('kprj');
+    await DB.prepare(`
+      INSERT INTO kpsc_projects (id,title,description,estimated_cost,status,priority,target_date,source_meeting_id,source,created_by,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id, proj.title, proj.description || '', proj.estimatedCost || 0,
+      'proposed', proj.priority || 'medium', proj.targetDate || '',
+      proj.sourceMeetingId || meetingId, proj.source || 'ai_extracted',
+      createdBy, new Date().toISOString(),
+    ).run();
+    const saved = await DB.prepare(`SELECT * FROM kpsc_projects WHERE id=?`).bind(id).first();
+    if (saved) inserted.push(kpscProjectFromRow(saved));
+  }
+  return ok({ extracted: inserted.length, projects: inserted });
+}
+
+async function ocrHandwrittenNotes(env, data) {
+  const imageBase64 = String(data?.imageBase64 || '').trim();
+  const mimeType = String(data?.mimeType || 'image/jpeg').trim();
+  if (!imageBase64) return err('imageBase64 is required', 400);
+
+  const openaiKey = String(env.OPENAI_API_KEY || '').trim();
+  if (openaiKey) {
+    try {
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+        body: JSON.stringify({
+          model: 'gpt-4o',
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: 'This is a photo of handwritten meeting notes from a church committee meeting. Please transcribe the text exactly as written, preserving structure and formatting. If the writing mentions names, amounts (naira), dates, resolutions, or action items, preserve them accurately. Return only the transcribed text, nothing else.' },
+              { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
+            ],
+          }],
+          max_tokens: 2000,
+        }),
+      });
+      if (resp.ok) {
+        const aiData = await resp.json();
+        const text = aiData.choices?.[0]?.message?.content || '';
+        if (text.trim()) return ok({ transcript: text.trim(), method: 'openai_vision' });
+      }
+    } catch (_) {}
+  }
+
+  return ok({ transcript: '', method: 'none', error: 'No vision-capable AI key is configured. Please configure OPENAI_API_KEY in Cloudflare environment variables to enable OCR.' });
+}
+
+async function parseStatementWithAI(env, DB, data) {
+  const statementText = String(data?.statementText || '').trim();
+  if (!statementText) return err('statementText is required', 400);
+
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-chat';
+  try {
+    const { results: sr } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
+    const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
+    deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-chat';
+  } catch (_) {}
+
+  if (!deepseekKey) {
+    return err('DeepSeek API key is required. Configure it in Settings → AI Provider Keys.', 503);
+  }
+
+  const prompt = `Parse this bank statement text and extract all transaction line items. Return a JSON array where each item has:\n- date: "YYYY-MM-DD" (best guess from statement)\n- amount: positive number (always positive)\n- type: "income" if credit/deposit/inflow, "expense" if debit/withdrawal/outflow\n- reference: transaction reference or narration code\n- narration: brief description of the transaction\n\nReturn ONLY a valid JSON array, no other text. If a field is unclear, use empty string or 0.\n\nBank statement text:\n${statementText.slice(0, 5000)}`;
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 3000, temperature: 0.1 }),
+    });
+    if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
+    const aiData = await resp.json();
+    const rawText = aiData.choices?.[0]?.message?.content || '[]';
+    const cleanText = rawText.replace(/```json?\s*/gi, '').replace(/```\s*/gi, '').trim();
+    const parsed = safeJsonParse(cleanText, null);
+    if (!Array.isArray(parsed)) throw new Error('AI did not return a valid JSON array');
+    const items = parsed.map((item, i) => ({
+      id: `st-${i + 1}`,
+      date: String(item?.date || '').slice(0, 10),
+      amount: Math.abs(Number(item?.amount || 0)),
+      type: String(item?.type || '').toLowerCase() === 'expense' ? 'expense' : 'income',
+      reference: String(item?.reference || '').trim(),
+      narration: String(item?.narration || '').trim(),
+    }));
+    return ok({ items, count: items.length });
+  } catch (e) {
+    return err(`Failed to parse statement: ${e.message}`, 500);
+  }
+}
 function normalizeAiParticipants(participants) {
   const incoming = Array.isArray(participants) ? participants : [];
   if (incoming.length === 0) {
@@ -2503,7 +2780,7 @@ Return only valid JSON, no markdown fences.`;
   const resp = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'user', content: prompt }], max_tokens: 3000, temperature: 0.3 }),
+    body: JSON.stringify({ model: meeting.deepseekModel || 'deepseek-chat', messages: [{ role: 'user', content: prompt }], max_tokens: 3000, temperature: 0.3 }),
   });
   if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
   const data = await resp.json();
@@ -2517,9 +2794,10 @@ async function processAiSecretaryMeeting(DB, id) {
   const meeting = aiSecretaryMeetingFromRow(row);
   let deepseekKey = '';
   try {
-    const { results: settingsRows } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','kpsc_policy_url','kpsc_policy_notes')`).all();
+    const { results: settingsRows } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model','kpsc_policy_url','kpsc_policy_notes')`).all();
     const settings = Object.fromEntries((settingsRows || []).map(item => [item.key, String(item.value || '')]));
     deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+    meeting.deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-chat';
     meeting.policyContext = [
       settings.kpsc_policy_url ? `Policy URL: ${settings.kpsc_policy_url}` : '',
       settings.kpsc_policy_notes || '',

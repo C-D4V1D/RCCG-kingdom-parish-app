@@ -26,11 +26,11 @@ const STATUS_CONFIG = {
 };
 
 const KPSC_PERMISSIONS = {
-  acting_chairman: ['dashboard', 'partners', 'finance', 'reminders', 'members', 'archive', 'reports', 'settings'],
-  general_secretary: ['dashboard', 'partners', 'reminders', 'members', 'archive', 'reports', 'settings'],
-  financial_secretary: ['dashboard', 'partners', 'finance', 'reminders', 'archive', 'reports'],
-  treasurer: ['dashboard', 'partners', 'finance', 'reminders', 'archive', 'reports'],
-  committee_viewer: ['dashboard', 'partners', 'reports', 'archive'],
+  acting_chairman:    ['dashboard', 'projects', 'partners', 'finance', 'reminders', 'members', 'archive', 'reports', 'settings'],
+  general_secretary:  ['dashboard', 'projects', 'partners', 'reminders', 'members', 'archive', 'reports', 'settings'],
+  financial_secretary:['dashboard', 'projects', 'partners', 'finance', 'reminders', 'archive', 'reports'],
+  treasurer:          ['dashboard', 'projects', 'partners', 'finance', 'reminders', 'archive', 'reports'],
+  committee_viewer:   ['dashboard', 'projects', 'partners', 'reports', 'archive'],
 };
 const PIN_REGEX = /^\d{4,6}$/;
 
@@ -47,6 +47,8 @@ const S = {
   financeEntries: [],
   reminders: [],
   dashboard: null,
+  projects: [],
+  projectsFilter: 'all',
   archiveSearch: '',
   archiveQuickFilter: 'all',
   partnersYear: new Date().getUTCFullYear(),
@@ -54,6 +56,7 @@ const S = {
   financeYear: new Date().getUTCFullYear(),
   financeMonth: new Date().getUTCMonth() + 1,
   reportsYear: new Date().getUTCFullYear(),
+  _meetingTab: 'record',
 };
 
 // ── AUDIO RECORDER + REALTIME TRANSCRIPTION ───────────────────────
@@ -1460,7 +1463,9 @@ function enterApp() {
   document.getElementById('kpsc-app').style.display = '';
   document.getElementById('kpsc-user-name').textContent = `${S.user.name} (${roleLabel(S.user.role)})`;
   applyNavPermissions();
-  navigate(defaultPageForRole());
+  const hashPage = window.location.hash.replace('#', '');
+  const startPage = hashPage && canAccess(hashPage) ? hashPage : defaultPageForRole();
+  navigate(startPage);
 }
 
 // ── NAVIGATION ────────────────────────────────────────────────────
@@ -1474,6 +1479,8 @@ function navigate(page) {
   recStop();
   Rec.status = 'idle';
   S.page = page;
+  const hash = '#' + page;
+  if (window.location.hash !== hash) history.pushState({ page }, '', hash);
   S.activeMeeting = null;
   document.querySelectorAll('.ka-nav-item').forEach(b => {
     b.classList.toggle('active', b.dataset.page === page);
@@ -1481,6 +1488,7 @@ function navigate(page) {
   document.getElementById('kpsc-back-btn').style.display = 'none';
   const titles = {
     dashboard: 'Dashboard',
+    projects: 'Projects',
     partners: 'Partners',
     finance: 'Finance',
     reminders: 'Reminders',
@@ -1505,6 +1513,7 @@ async function renderPage(page) {
     else if (page === 'members') await renderMembers(main);
     else if (page === 'archive') await renderArchive(main);
     else if (page === 'reports') await renderReports(main);
+    else if (page === 'projects') await renderProjects(main);
     else if (page === 'settings') await renderSettings(main);
   } catch (e) {
     main.innerHTML = `<div class="k-page"><div class="k-error-box">
@@ -1523,10 +1532,11 @@ async function renderDashboard(main) {
   const now = new Date();
   const year = now.getUTCFullYear();
   const month = now.getUTCMonth() + 1;
-  const [meetingsRes, settingsRes, dashboardRes] = await Promise.all([
+  const [meetingsRes, settingsRes, dashboardRes, projectsRes] = await Promise.all([
     apiGet('ai-secretary-meetings'),
     apiGet('settings'),
     apiGet(`kpsc-dashboard?year=${year}&month=${month}`),
+    apiGet('kpsc-projects?status=in_progress'),
   ]);
   if (meetingsRes?.error) throw new Error(meetingsRes.error);
   S.meetings = Array.isArray(meetingsRes) ? meetingsRes : [];
@@ -1538,6 +1548,27 @@ async function renderDashboard(main) {
   const thisMonth = today().slice(0, 7);
   const monthCount = S.meetings.filter(m => (m.meetingDate || '').startsWith(thisMonth)).length;
   const pending = S.meetings.filter(m => m.status === 'ended').length;
+
+  // Recent resolutions from all meetings
+  const allResolutions = [];
+  for (const m of S.meetings.slice(0, 20)) {
+    for (const r of (m.resolutions || [])) {
+      allResolutions.push({ ...r, meetingTitle: m.title, meetingDate: m.meetingDate, meetingId: m.id });
+    }
+  }
+  const recentResolutions = allResolutions.slice(0, 6);
+
+  // Action items
+  const allActions = [];
+  for (const m of S.meetings.slice(0, 20)) {
+    for (const a of (m.actionItems || [])) {
+      allActions.push({ ...a, meetingTitle: m.title, meetingDate: m.meetingDate });
+    }
+  }
+  const pendingActions = allActions.filter(a => a.status === 'pending' || !a.status).slice(0, 5);
+
+  // Projects
+  const activeProjects = Array.isArray(projectsRes) ? projectsRes.slice(0, 4) : [];
 
   main.innerHTML = `
     <div class="k-page">
@@ -1561,7 +1592,70 @@ async function renderDashboard(main) {
       ${recent.length === 0
         ? `<div class="k-empty">No meetings yet. Start your first meeting above.</div>`
         : `<div class="k-meeting-list">${recent.map(m => meetingCard(m)).join('')}</div>`}
+
+      ${recentResolutions.length ? `
+      <div class="k-section-hdr" style="margin-top:24px">
+        <h2>Recent Resolutions</h2>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('archive')">View All</button>
+      </div>
+      <div class="k-meeting-list">
+        ${recentResolutions.map(r => `
+          <div class="k-meeting-card" style="cursor:default">
+            <div class="k-mc-top">
+              <div style="flex:1">
+                <div style="font-size:13px;color:var(--text2);line-height:1.5">${esc(r.text)}</div>
+                <div class="k-mc-meta" style="margin-top:4px">
+                  <span>${esc(r.meetingTitle)}</span>
+                  <span>${esc(fmtDate(r.meetingDate))}</span>
+                  ${r.approved === true ? '<span class="kbadge badge-green">Approved</span>' : r.approved === false ? '<span class="kbadge badge-red">Rejected</span>' : '<span class="kbadge badge-amber">Pending</span>'}
+                </div>
+              </div>
+            </div>
+          </div>`).join('')}
+      </div>` : ''}
+
+      ${pendingActions.length ? `
+      <div class="k-section-hdr" style="margin-top:24px">
+        <h2>Pending Action Items</h2>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('archive')">View All</button>
+      </div>
+      <div class="k-meeting-list">
+        ${pendingActions.map(a => `
+          <div class="k-meeting-card" style="cursor:default">
+            <div class="k-mc-top">
+              <div style="flex:1">
+                <div style="font-size:13px;color:var(--text2)">${esc(a.task)}</div>
+                <div class="k-mc-meta" style="margin-top:4px">
+                  <span>Owner: ${esc(a.assignee || 'Unassigned')}</span>
+                  ${a.dueDate ? `<span>Due: ${esc(a.dueDate)}</span>` : ''}
+                  <span>${esc(a.meetingTitle)}</span>
+                </div>
+              </div>
+            </div>
+          </div>`).join('')}
+      </div>` : ''}
+
+      ${activeProjects.length ? `
+      <div class="k-section-hdr" style="margin-top:24px">
+        <h2>Active Projects</h2>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('projects')">View All</button>
+      </div>
+      <div class="k-meeting-list">
+        ${activeProjects.map(p => `
+          <div class="k-meeting-card" style="cursor:default" onclick="Kpsc.navigate('projects')">
+            <div class="k-mc-top">
+              <div style="flex:1">
+                <div class="k-mc-title">${esc(p.title)}</div>
+                <div class="k-mc-meta">
+                  ${p.estimatedCost ? `<span>₦${Number(p.estimatedCost).toLocaleString('en-NG')}</span>` : ''}
+                  <span class="kbadge badge-amber">In Progress</span>
+                </div>
+              </div>
+            </div>
+          </div>`).join('')}
+      </div>` : ''}
     </div>`;
+}
 }
 
 function canDeleteMeeting(m) {
@@ -1663,6 +1757,11 @@ async function renderMeetingRoom(main) {
 
       <section class="k-section">
         <h3 class="k-sec-title">Live Audio & Realtime Transcript</h3>
+        <div class="k-tabs" style="margin-bottom:16px">
+          <button class="k-tab ${S._meetingTab !== 'upload' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('record')">🎙 Live Recording</button>
+          <button class="k-tab ${S._meetingTab === 'upload' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('upload')">📷 Upload Notes</button>
+        </div>
+        <div id="km-rec-panel" style="${S._meetingTab === 'upload' ? 'display:none' : ''}">
         ${canRecord ? `<div id="kpsc-rec-ui" class="k-rec-ui"></div>` : ''}
         <div id="kpsc-speaker-map"></div>
         <div class="k-live-transcript" id="kpsc-live-transcript">
@@ -1677,6 +1776,15 @@ async function renderMeetingRoom(main) {
         </div>
         <label class="k-label k-transcript-label" for="km-transcript">Saved Transcript / Notes</label>
         <textarea class="k-input k-textarea" id="km-transcript" placeholder="Type notes here, or start the meeting to append live transcript entries…" ${isProcessed ? 'readonly' : ''}>${esc(m?.transcriptText || '')}</textarea>
+        </div>
+        <div id="km-upload-panel" style="${S._meetingTab !== 'upload' ? 'display:none' : ''}">
+          <div class="k-section">
+            <p class="k-hint">Take a photo of your handwritten meeting notes. The AI will transcribe the handwriting and use it to generate meeting minutes.</p>
+            <label class="k-label">Upload Photo of Handwritten Notes</label>
+            <input id="km-notes-photo" type="file" accept="image/*" capture="environment" class="k-input" style="padding:8px" onchange="Kpsc.previewNotesPhoto(this)" />
+            <div id="km-notes-preview" style="margin-top:12px"></div>
+          </div>
+        </div>
       </section>
 
       <div class="k-room-actions">
@@ -1842,6 +1950,10 @@ function renderMinutesPanel(m) {
       ${m.summaryShort ? `<div class="k-summary">${esc(m.summaryShort)}</div>` : ''}
       ${m.summaryLong ? `<details class="k-summary-detail"><summary>Detailed summary</summary><pre>${esc(m.summaryLong)}</pre></details>` : ''}
       ${renderReviewPanel(m)}
+      <div class="k-room-actions" style="margin-bottom:12px">
+        <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')">🖨 Print / Save PDF</button>
+        ${canManageProjects() && m.status === 'processed' ? `<button class="kbtn kbtn-sm" onclick="Kpsc.extractProjectsFromMeetingUI('${m.id}', this)">🤖 Extract Projects</button>` : ''}
+      </div>
       <div class="k-minutes-body">${minutesHtml(m.minutesMarkdown)}</div>
 
       ${resolutions.length ? `
@@ -2831,12 +2943,26 @@ async function renderFinance(main) {
       </div>
       ${canManage ? `
       <div class="k-section" style="margin-top:16px">
-        <h3 class="k-sec-title">Bank Reconciliation (AI-assisted)</h3>
-        <p class="k-hint">Paste bank statement items as a JSON array. Each item needs date, amount, type (income/expense), and optional reference. The system suggests matches against recorded entries — always review before approving.</p>
-        <textarea id="krec-items" class="k-input k-textarea" placeholder='Paste statement JSON items here'></textarea>
-        <p class="k-hint">Example: [{"date":"${year}-01-05","amount":5000,"type":"income","reference":"TRF001"}]</p>
-        <div class="k-room-actions" style="margin-top:10px">
-          <button class="kbtn kbtn-primary" onclick="Kpsc.runReconciliation(this)">Run Reconciliation</button>
+        <h3 class="k-sec-title">Bank Reconciliation</h3>
+        <p class="k-hint">Upload your bank statement PDF for AI-assisted reconciliation, or paste the data manually as JSON.</p>
+        <div class="k-tabs" style="margin-bottom:16px">
+          <button class="k-tab active" id="krec-tab-pdf" onclick="Kpsc.setReconciliationTab('pdf')">📄 Upload PDF</button>
+          <button class="k-tab" id="krec-tab-json" onclick="Kpsc.setReconciliationTab('json')">{ } Paste JSON</button>
+        </div>
+        <div id="krec-pdf-panel">
+          <label class="k-label">Bank Statement PDF</label>
+          <input id="krec-pdf-input" type="file" accept=".pdf,application/pdf" class="k-input" style="padding:8px" />
+          <p class="k-hint">Upload a digital PDF (not scanned). The AI will extract the transaction lines automatically.</p>
+          <div class="k-room-actions" style="margin-top:10px">
+            <button class="kbtn kbtn-primary" onclick="Kpsc.runPdfReconciliation(this)">🤖 Upload &amp; Reconcile</button>
+          </div>
+        </div>
+        <div id="krec-json-panel" style="display:none">
+          <textarea id="krec-items" class="k-input k-textarea" placeholder='Paste statement JSON items here'></textarea>
+          <p class="k-hint">Example: [{"date":"${year}-01-05","amount":5000,"type":"income","reference":"TRF001"}]</p>
+          <div class="k-room-actions" style="margin-top:10px">
+            <button class="kbtn kbtn-primary" onclick="Kpsc.runReconciliation(this)">Run Reconciliation</button>
+          </div>
         </div>
         <div id="krec-result"></div>
       </div>` : ''}
@@ -2970,65 +3096,7 @@ async function runReconciliation(btn) {
     return;
   }
   const out = document.getElementById('krec-result');
-  if (out) {
-    const s = res.summary || {};
-    const matches = Array.isArray(res.matches) ? res.matches : [];
-    const unmatchedSt = Array.isArray(res.unmatchedStatement) ? res.unmatchedStatement : [];
-    const unmatchedFin = Array.isArray(res.unmatchedFinance) ? res.unmatchedFinance : [];
-    out.innerHTML = `
-      <div class="k-rec-summary">
-        <span class="k-rec-chip k-rec-matched">✓ ${s.matchedCount || 0} Matched</span>
-        <span class="k-rec-chip k-rec-unmatched">⚠ ${s.unmatchedStatementCount || 0} Statement unmatched</span>
-        <span class="k-rec-chip k-rec-missing">✗ ${s.unmatchedFinanceCount || 0} Records unmatched</span>
-      </div>
-      ${matches.length ? `
-        <h4 class="k-sec-title" style="margin:12px 0 8px">Matched Items</h4>
-        <div class="k-rec-table-wrap">
-          <table class="k-rec-table">
-            <thead><tr><th>Statement Date</th><th>Amount</th><th>Type</th><th>Ref</th><th>Matched Record</th></tr></thead>
-            <tbody>${matches.map(m=>`
-              <tr class="k-rec-matched-row">
-                <td>${esc(m.statementItem?.date||'')}</td>
-                <td>₦${Number(m.statementItem?.amount||0).toLocaleString('en-NG')}</td>
-                <td>${esc(m.statementItem?.type||'')}</td>
-                <td>${esc(m.statementItem?.reference||'—')}</td>
-                <td>${esc(fmtDate(m.financeEntry?.date||''))} — ${esc(m.financeEntry?.narration||m.financeEntry?.reference||'—')}</td>
-              </tr>`).join('')}
-            </tbody>
-          </table>
-        </div>` : ''}
-      ${unmatchedSt.length ? `
-        <h4 class="k-sec-title" style="margin:12px 0 8px;color:var(--amber)">Unmatched Statement Items</h4>
-        <div class="k-rec-table-wrap">
-          <table class="k-rec-table">
-            <thead><tr><th>Date</th><th>Amount</th><th>Type</th><th>Reference</th></tr></thead>
-            <tbody>${unmatchedSt.map(i=>`
-              <tr class="k-rec-unmatched-row">
-                <td>${esc(i.date||'')}</td>
-                <td>₦${Number(i.amount||0).toLocaleString('en-NG')}</td>
-                <td>${esc(i.type||'')}</td>
-                <td>${esc(i.reference||'—')}</td>
-              </tr>`).join('')}
-            </tbody>
-          </table>
-        </div>` : ''}
-      ${unmatchedFin.length ? `
-        <h4 class="k-sec-title" style="margin:12px 0 8px;color:var(--red)">Records with No Statement Match</h4>
-        <div class="k-rec-table-wrap">
-          <table class="k-rec-table">
-            <thead><tr><th>Date</th><th>Amount</th><th>Type</th><th>Reference/Narration</th></tr></thead>
-            <tbody>${unmatchedFin.map(i=>`
-              <tr class="k-rec-missing-row">
-                <td>${esc(fmtDate(i.date||''))}</td>
-                <td>₦${Number(i.amount||0).toLocaleString('en-NG')}</td>
-                <td>${esc(i.type||'')}</td>
-                <td>${esc(i.reference||i.narration||'—')}</td>
-              </tr>`).join('')}
-            </tbody>
-          </table>
-        </div>` : ''}
-      <p class="k-hint" style="margin-top:12px">⚠️ AI reconciliation result requires officer review and confirmation before filing.</p>`;
-  }
+  renderReconciliationResult(out, res);
 }
 
 async function renderReminders(main) {
@@ -3509,6 +3577,15 @@ async function renderSettings(main) {
         </div>
 
         <div class="k-form-group">
+          <label class="k-label">DeepSeek Model</label>
+          <select id="ks-deepseek-model" class="k-input">
+            <option value="deepseek-chat" ${(res?.ai_deepseek_model||'deepseek-chat')==='deepseek-chat'?'selected':''}>deepseek-chat — DeepSeek V3 (Fast, Recommended)</option>
+            <option value="deepseek-reasoner" ${(res?.ai_deepseek_model||'')==='deepseek-reasoner'?'selected':''}>deepseek-reasoner — DeepSeek R1 (Deep reasoning, slower)</option>
+          </select>
+          <p class="k-hint"><strong>deepseek-chat</strong> (DeepSeek V3) is the recommended model — fast, accurate, and cost-efficient. Use <strong>deepseek-reasoner</strong> (R1) for complex analysis tasks.</p>
+        </div>
+
+        <div class="k-form-group">
           <label class="k-label">OpenAI API Key</label>
           <input type="password" id="ks-openai-key" class="k-input"
             placeholder="${hasOpenai ? '••••••••••••••••' : 'sk-...'}"
@@ -3584,6 +3661,7 @@ async function saveSettings() {
   const openaiKey   = document.getElementById('ks-openai-key')?.value.trim()   || '';
   const policyUrl   = document.getElementById('ks-policy-url')?.value.trim()   || '';
   const policyNotes = document.getElementById('ks-policy-notes')?.value.trim() || '';
+  const deepseekModel = document.getElementById('ks-deepseek-model')?.value || 'deepseek-chat';
 
   btn.disabled = true;
   btn.textContent = 'Saving…';
@@ -3592,6 +3670,7 @@ async function saveSettings() {
   const res = await apiPost('settings', {
     ai_deepseek_key: deepseekKey,
     ai_openai_key: openaiKey,
+    ai_deepseek_model: deepseekModel,
     kpsc_policy_url: policyUrl,
     kpsc_policy_notes: policyNotes,
   });
@@ -3638,6 +3717,486 @@ async function saveKpscOpsSettings() {
   }
   msg.style.display = 'block';
   setTimeout(() => { if(msg) msg.style.display = 'none'; }, 3000);
+}
+
+// ── PROJECTS ─────────────────────────────────────────────────────
+
+function canManageProjects() {
+  const role = String(S.user?.role || '').toLowerCase();
+  return ['acting_chairman','general_secretary','financial_secretary','treasurer'].includes(role);
+}
+
+const PROJECT_STATUSES = [
+  { value: 'proposed',    label: 'Proposed',    cls: 'badge-gray' },
+  { value: 'approved',    label: 'Approved',    cls: 'badge-blue' },
+  { value: 'in_progress', label: 'In Progress', cls: 'badge-amber' },
+  { value: 'completed',   label: 'Completed',   cls: 'badge-green' },
+  { value: 'cancelled',   label: 'Cancelled',   cls: 'badge-red' },
+];
+
+const PROJECT_PRIORITIES = [
+  { value: 'high',   label: 'High',   cls: 'badge-red' },
+  { value: 'medium', label: 'Medium', cls: 'badge-amber' },
+  { value: 'low',    label: 'Low',    cls: 'badge-gray' },
+];
+
+function projectStatusConfig(status) {
+  return PROJECT_STATUSES.find(s => s.value === status) || { label: status, cls: 'badge-gray' };
+}
+
+function projectPriorityConfig(priority) {
+  return PROJECT_PRIORITIES.find(p => p.value === priority) || { label: priority, cls: 'badge-gray' };
+}
+
+async function renderProjects(main) {
+  const res = await apiGet('kpsc-projects');
+  if (res?.error) throw new Error(res.error);
+  S.projects = Array.isArray(res) ? res : [];
+  const canManage = canManageProjects();
+  const total = S.projects.length;
+  const totalCost = S.projects.reduce((s,p) => s + Number(p.estimatedCost || 0), 0);
+  const byStatus = {};
+  for (const p of S.projects) byStatus[p.status] = (byStatus[p.status] || 0) + 1;
+
+  const filterBtns = [
+    { key: 'all', label: 'All' },
+    { key: 'proposed', label: 'Proposed' },
+    { key: 'approved', label: 'Approved' },
+    { key: 'in_progress', label: 'In Progress' },
+    { key: 'completed', label: 'Completed' },
+  ];
+  const filtered = S.projectsFilter === 'all'
+    ? S.projects
+    : S.projects.filter(p => p.status === S.projectsFilter);
+
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-section-hdr">
+        <h2>Church Projects</h2>
+        ${canManage ? `<button class="kbtn kbtn-primary" onclick="Kpsc.openProjectModal()">+ Add Project</button>` : ''}
+      </div>
+      <p class="k-page-hint">Track planned and ongoing church projects. Visible to all committee members.</p>
+      <div class="k-dash-stats" style="grid-template-columns:repeat(3,1fr)">
+        <div class="k-stat"><div class="k-stat-val">${total}</div><div class="k-stat-lbl">Total Projects</div></div>
+        <div class="k-stat"><div class="k-stat-val">${byStatus.in_progress || 0}</div><div class="k-stat-lbl">In Progress</div></div>
+        <div class="k-stat k-stat-highlight"><div class="k-stat-val">₦${totalCost.toLocaleString('en-NG')}</div><div class="k-stat-lbl">Total Budget</div></div>
+      </div>
+      <div class="k-tabs" style="margin-bottom:16px">
+        ${filterBtns.map(f => `<button class="k-tab ${S.projectsFilter === f.key ? 'active' : ''}" onclick="Kpsc.setProjectsFilter('${f.key}')">${f.label}${byStatus[f.key] ? ` (${byStatus[f.key]})` : ''}</button>`).join('')}
+      </div>
+      <div id="kpsc-projects-list">${renderProjectsList(filtered, canManage)}</div>
+    </div>`;
+}
+
+function renderProjectsList(projects, canManage) {
+  if (!projects.length) return `<div class="k-empty">No projects found.</div>`;
+  return `<div class="k-meeting-list">${projects.map(p => {
+    const sc = projectStatusConfig(p.status);
+    const pc = projectPriorityConfig(p.priority);
+    const progress = p.estimatedCost > 0 && p.actualCost > 0
+      ? Math.min(100, Math.round((p.actualCost / p.estimatedCost) * 100)) : null;
+    return `
+      <div class="k-meeting-card">
+        <div class="k-mc-top">
+          <div style="flex:1">
+            <div class="k-mc-title">${esc(p.title)}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+              <span class="kbadge ${sc.cls}">${sc.label}</span>
+              <span class="kbadge ${pc.cls}">⚡ ${pc.label} Priority</span>
+              ${p.source === 'ai_extracted' ? `<span class="kbadge badge-blue">🤖 AI extracted</span>` : ''}
+            </div>
+            ${p.description ? `<div class="k-page-hint" style="margin-top:8px;font-size:13px">${esc(p.description)}</div>` : ''}
+            <div class="k-mc-meta" style="margin-top:8px">
+              ${p.estimatedCost ? `<span>Estimated: ₦${Number(p.estimatedCost).toLocaleString('en-NG')}</span>` : ''}
+              ${p.actualCost ? `<span>Actual: ₦${Number(p.actualCost).toLocaleString('en-NG')}</span>` : ''}
+              ${p.targetDate ? `<span>Target: ${esc(fmtDate(p.targetDate))}</span>` : ''}
+            </div>
+            ${progress !== null ? `
+              <div class="k-progress-row" style="margin-top:8px">
+                <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${progress}%;background:${p.status === 'completed' ? 'var(--green)' : 'var(--navy)'}"></div></div>
+                <span class="k-progress-label">${progress}% funded</span>
+              </div>` : ''}
+          </div>
+        </div>
+        ${canManage ? `
+          <div class="k-room-actions" style="flex-wrap:wrap">
+            <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.openProjectModal('${p.id}')">Edit</button>
+            <select class="k-input k-input-sm" style="width:auto;padding:4px 8px" onchange="Kpsc.changeProjectStatus('${p.id}', this.value)">
+              ${PROJECT_STATUSES.map(s => `<option value="${s.value}" ${p.status === s.value ? 'selected' : ''}>${s.label}</option>`).join('')}
+            </select>
+            <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.deleteProject('${p.id}')">Delete</button>
+          </div>` : ''}
+      </div>`;
+  }).join('')}</div>`;
+}
+
+function setProjectsFilter(filter) {
+  S.projectsFilter = filter;
+  const canManage = canManageProjects();
+  const filtered = filter === 'all' ? S.projects : S.projects.filter(p => p.status === filter);
+  const el = document.getElementById('kpsc-projects-list');
+  if (el) el.innerHTML = renderProjectsList(filtered, canManage);
+  document.querySelectorAll('.k-tab').forEach(b => {
+    if (b.getAttribute('onclick')?.includes(`'${filter}'`)) b.classList.add('active');
+    else b.classList.remove('active');
+  });
+}
+
+function openProjectModal(id = null) {
+  const existing = id ? S.projects.find(p => p.id === id) : null;
+  document.getElementById('kpsc-project-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'kpsc-project-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">${existing ? 'Edit Project' : 'New Project'}</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeProjectModal()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <label class="k-label">Project Title *</label>
+        <input id="kprj-title" class="k-input" value="${esc(existing?.title || '')}" placeholder="e.g. Church Hall Renovation" />
+        <label class="k-label">Description</label>
+        <textarea id="kprj-desc" class="k-input k-textarea" style="min-height:70px">${esc(existing?.description || '')}</textarea>
+        <label class="k-label">Estimated Cost (₦)</label>
+        <input id="kprj-est-cost" type="number" min="0" class="k-input" value="${Number(existing?.estimatedCost || 0)}" />
+        <label class="k-label">Actual/Spent So Far (₦)</label>
+        <input id="kprj-actual-cost" type="number" min="0" class="k-input" value="${Number(existing?.actualCost || 0)}" />
+        <label class="k-label">Priority</label>
+        <select id="kprj-priority" class="k-input">
+          ${PROJECT_PRIORITIES.map(p => `<option value="${p.value}" ${(existing?.priority||'medium')===p.value?'selected':''}>${p.label}</option>`).join('')}
+        </select>
+        <label class="k-label">Status</label>
+        <select id="kprj-status" class="k-input">
+          ${PROJECT_STATUSES.map(s => `<option value="${s.value}" ${(existing?.status||'proposed')===s.value?'selected':''}>${s.label}</option>`).join('')}
+        </select>
+        <label class="k-label">Target Completion Date</label>
+        <input id="kprj-target-date" type="date" class="k-input" value="${esc(existing?.targetDate || '')}" />
+        <label class="k-label">Notes</label>
+        <textarea id="kprj-notes" class="k-input k-textarea" style="min-height:60px">${esc(existing?.notes || '')}</textarea>
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.saveProject('${existing?.id || ''}', this)">Save Project</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function closeProjectModal() {
+  document.getElementById('kpsc-project-modal')?.remove();
+}
+
+async function saveProject(id, btn) {
+  const title = document.getElementById('kprj-title')?.value.trim() || '';
+  if (!title) { showToast('Project title is required.', 'warn'); return; }
+  btn.disabled = true;
+  const payload = {
+    title,
+    description: document.getElementById('kprj-desc')?.value.trim() || '',
+    estimatedCost: Number(document.getElementById('kprj-est-cost')?.value || 0),
+    actualCost: Number(document.getElementById('kprj-actual-cost')?.value || 0),
+    priority: document.getElementById('kprj-priority')?.value || 'medium',
+    status: document.getElementById('kprj-status')?.value || 'proposed',
+    targetDate: document.getElementById('kprj-target-date')?.value || '',
+    notes: document.getElementById('kprj-notes')?.value.trim() || '',
+    createdBy: S.user?.name || '',
+  };
+  const res = id ? await apiPut(`kpsc-projects/${id}`, payload) : await apiPost('kpsc-projects', payload);
+  btn.disabled = false;
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  closeProjectModal();
+  await renderProjects(document.getElementById('kpsc-main'));
+  showToast('Project saved.', 'success');
+}
+
+async function changeProjectStatus(id, status) {
+  const res = await apiPut(`kpsc-projects/${id}`, { status });
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  const idx = S.projects.findIndex(p => p.id === id);
+  if (idx >= 0) S.projects[idx] = res;
+  showToast('Project status updated.', 'success');
+}
+
+async function deleteProject(id) {
+  if (!confirm('Delete this project?')) return;
+  const res = await apiDelete(`kpsc-projects/${id}`);
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  await renderProjects(document.getElementById('kpsc-main'));
+  showToast('Project deleted.', 'success');
+}
+
+async function extractProjectsFromMeetingUI(meetingId, btn) {
+  if (!meetingId) return;
+  btn.disabled = true;
+  btn.textContent = 'Extracting…';
+  const res = await apiPost('kpsc-extract-projects', { meetingId, createdBy: S.user?.name || '' });
+  btn.disabled = false;
+  btn.textContent = '🤖 Extract Projects';
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  if (!res.extracted) { showToast('No projects found in this meeting.', 'info'); return; }
+  showToast(`${res.extracted} project(s) extracted and added to Projects.`, 'success');
+}
+
+// ── MEETING UPLOAD NOTES ──────────────────────────────────────────
+
+function setMeetingTab(tab) {
+  S._meetingTab = tab;
+  const recPanel = document.getElementById('km-rec-panel');
+  const uploadPanel = document.getElementById('km-upload-panel');
+  if (recPanel) recPanel.style.display = tab === 'upload' ? 'none' : '';
+  if (uploadPanel) uploadPanel.style.display = tab !== 'upload' ? 'none' : '';
+  document.querySelectorAll('.k-tab').forEach(b => {
+    const onclick = b.getAttribute('onclick') || '';
+    b.classList.toggle('active', onclick.includes(`'${tab}'`));
+  });
+}
+
+async function previewNotesPhoto(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  const preview = document.getElementById('km-notes-preview');
+  if (!preview) return;
+
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    const dataUrl = e.target.result;
+    preview.innerHTML = `
+      <img src="${dataUrl}" style="max-width:100%;border-radius:10px;border:1px solid var(--border);margin-bottom:12px" alt="Notes preview" />
+      <div class="k-room-actions">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.ocrNotesPhoto()">🤖 Extract Text with AI</button>
+      </div>
+      <div id="km-ocr-status"></div>`;
+  };
+  reader.readAsDataURL(file);
+}
+
+async function ocrNotesPhoto() {
+  const input = document.getElementById('km-notes-photo');
+  const file = input?.files?.[0];
+  if (!file) return;
+  const status = document.getElementById('km-ocr-status');
+  if (status) status.innerHTML = '<div class="k-loading" style="padding:16px">🤖 Analysing handwriting…</div>';
+
+  try {
+    const base64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = e => resolve(e.target.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    const mimeType = file.type || 'image/jpeg';
+    const res = await apiPost('kpsc-ocr-notes', { imageBase64: base64, mimeType });
+
+    if (res?.error) {
+      if (status) status.innerHTML = `<div class="k-error-box">${esc(res.error)}</div>`;
+      return;
+    }
+
+    if (!res.transcript) {
+      if (status) status.innerHTML = `<div class="k-error-box">${esc(res.error || 'No text could be extracted. Please ensure the image is clear.')}</div>`;
+      return;
+    }
+
+    const transcriptEl = document.getElementById('km-transcript');
+    if (transcriptEl) {
+      transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + res.transcript;
+      showToast('Handwritten notes transcribed! Review and adjust before processing.', 'success');
+    }
+
+    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Text extracted successfully. See the transcript section above.</div>`;
+
+    setMeetingTab('record');
+  } catch (e) {
+    if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── FINANCE PDF RECONCILIATION ────────────────────────────────────
+
+function setReconciliationTab(tab) {
+  const pdfPanel = document.getElementById('krec-pdf-panel');
+  const jsonPanel = document.getElementById('krec-json-panel');
+  const pdfTab = document.getElementById('krec-tab-pdf');
+  const jsonTab = document.getElementById('krec-tab-json');
+  if (pdfPanel) pdfPanel.style.display = tab === 'pdf' ? '' : 'none';
+  if (jsonPanel) jsonPanel.style.display = tab !== 'pdf' ? '' : 'none';
+  if (pdfTab) pdfTab.classList.toggle('active', tab === 'pdf');
+  if (jsonTab) jsonTab.classList.toggle('active', tab !== 'pdf');
+}
+
+async function runPdfReconciliation(btn) {
+  const input = document.getElementById('krec-pdf-input');
+  const file = input?.files?.[0];
+  if (!file) { showToast('Please select a PDF file first.', 'warn'); return; }
+  if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
+    showToast('Please upload a PDF file.', 'warn'); return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Reading PDF…';
+
+  const out = document.getElementById('krec-result');
+  if (out) out.innerHTML = '<div class="k-loading" style="padding:16px">📄 Extracting text from PDF…</div>';
+
+  try {
+    const pdfText = await extractPdfText(file);
+    if (!pdfText.trim()) {
+      showToast('Could not extract text from this PDF. It may be a scanned image. Try the JSON tab instead.', 'warn');
+      btn.disabled = false;
+      btn.textContent = '🤖 Upload & Reconcile';
+      if (out) out.innerHTML = '';
+      return;
+    }
+
+    if (out) out.innerHTML = '<div class="k-loading" style="padding:16px">🤖 AI is parsing transactions…</div>';
+    btn.textContent = 'Parsing…';
+
+    const parseRes = await apiPost('kpsc-parse-statement', { statementText: pdfText });
+    if (parseRes?.error) {
+      showToast(parseRes.error, 'error');
+      btn.disabled = false;
+      btn.textContent = '🤖 Upload & Reconcile';
+      if (out) out.innerHTML = '';
+      return;
+    }
+
+    const items = parseRes.items || [];
+    if (!items.length) {
+      showToast('No transactions found in the PDF. Check the file or try the JSON tab.', 'warn');
+      btn.disabled = false;
+      btn.textContent = '🤖 Upload & Reconcile';
+      if (out) out.innerHTML = '';
+      return;
+    }
+
+    btn.textContent = 'Reconciling…';
+    const recRes = await apiPost('kpsc-reconciliation', {
+      statementYear: S.financeYear,
+      statementMonth: S.financeMonth || 0,
+      statementItems: items,
+      createdBy: S.user?.name || '',
+    });
+
+    btn.disabled = false;
+    btn.textContent = '🤖 Upload & Reconcile';
+
+    if (recRes?.error) { showToast(recRes.error, 'error'); return; }
+    showToast(`PDF parsed: ${items.length} transaction(s) found.`, 'success');
+
+    renderReconciliationResult(out, recRes);
+  } catch (e) {
+    showToast('Error processing PDF: ' + e.message, 'error');
+    btn.disabled = false;
+    btn.textContent = '🤖 Upload & Reconcile';
+    if (out) out.innerHTML = '';
+  }
+}
+
+async function extractPdfText(file) {
+  if (!window.pdfjsLib) {
+    await new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let fullText = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    const pageText = content.items.map(item => item.str).join(' ');
+    fullText += pageText + '\n';
+  }
+  return fullText;
+}
+
+function renderReconciliationResult(out, res) {
+  if (!out) return;
+  const s = res.summary || {};
+  const matches = Array.isArray(res.matches) ? res.matches : [];
+  const unmatchedSt = Array.isArray(res.unmatchedStatement) ? res.unmatchedStatement : [];
+  const unmatchedFin = Array.isArray(res.unmatchedFinance) ? res.unmatchedFinance : [];
+  out.innerHTML = `
+    <div class="k-rec-summary">
+      <span class="k-rec-chip k-rec-matched">✓ ${s.matchedCount || 0} Matched</span>
+      <span class="k-rec-chip k-rec-unmatched">⚠ ${s.unmatchedStatementCount || 0} Statement unmatched</span>
+      <span class="k-rec-chip k-rec-missing">✗ ${s.unmatchedFinanceCount || 0} Records unmatched</span>
+    </div>
+    ${matches.length ? `
+      <h4 class="k-sec-title" style="margin:12px 0 8px">Matched Items</h4>
+      <div class="k-rec-table-wrap">
+        <table class="k-rec-table">
+          <thead><tr><th>Date</th><th>Amount</th><th>Type</th><th>Ref</th><th>Matched Record</th></tr></thead>
+          <tbody>${matches.map(m=>`<tr class="k-rec-matched-row"><td>${esc(m.statementItem?.date||'')}</td><td>₦${Number(m.statementItem?.amount||0).toLocaleString('en-NG')}</td><td>${esc(m.statementItem?.type||'')}</td><td>${esc(m.statementItem?.reference||'—')}</td><td>${esc(fmtDate(m.financeEntry?.date||''))} — ${esc(m.financeEntry?.narration||m.financeEntry?.reference||'—')}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>` : ''}
+    ${unmatchedSt.length ? `
+      <h4 class="k-sec-title" style="margin:12px 0 8px;color:var(--amber)">Unmatched Statement Items</h4>
+      <div class="k-rec-table-wrap">
+        <table class="k-rec-table">
+          <thead><tr><th>Date</th><th>Amount</th><th>Type</th><th>Reference</th></tr></thead>
+          <tbody>${unmatchedSt.map(i=>`<tr class="k-rec-unmatched-row"><td>${esc(i.date||'')}</td><td>₦${Number(i.amount||0).toLocaleString('en-NG')}</td><td>${esc(i.type||'')}</td><td>${esc(i.reference||'—')}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>` : ''}
+    <p class="k-hint" style="margin-top:12px">⚠️ Requires officer review before filing.</p>`;
+}
+
+// ── PRINT MINUTES ─────────────────────────────────────────────────
+
+function printMinutes(meetingId) {
+  const meeting = S.activeMeeting;
+  if (!meeting?.minutesMarkdown) { showToast('No minutes to print. Process the meeting first.', 'warn'); return; }
+
+  function mdToHtml(md) {
+    return md
+      .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+      .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+      .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/^- (.+)$/gm, '<li>$1</li>')
+      .replace(/(<li>.*<\/li>[\n]?)+/g, '<ul>$&</ul>')
+      .replace(/\n\n/g, '<br><br>')
+      .replace(/\n/g, '<br>');
+  }
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>${meeting.title || 'KPSC Minutes'}</title>
+  <style>
+    body { font-family: Georgia, serif; max-width: 800px; margin: 40px auto; padding: 0 24px; color: #1a1a1a; font-size: 14px; line-height: 1.8; }
+    h1 { font-size: 22px; border-bottom: 2px solid #1e3a5f; padding-bottom: 8px; color: #1e3a5f; }
+    h2 { font-size: 16px; color: #1e3a5f; margin-top: 24px; }
+    h3 { font-size: 14px; color: #2c5282; }
+    ul { padding-left: 24px; }
+    li { margin-bottom: 6px; }
+    .header-meta { color: #666; font-size: 12px; margin-bottom: 24px; }
+    @media print { button { display:none!important; } }
+  </style>
+</head>
+<body>
+  <div class="header-meta">
+    <strong>RCCG Kingdom Parish — Kingdom Parish Stewardship Committee</strong><br>
+    Generated: ${new Date().toLocaleDateString('en-NG', { day:'numeric', month:'long', year:'numeric' })}
+  </div>
+  ${mdToHtml(meeting.minutesMarkdown)}
+  <script>window.onload = () => { window.print(); }<\/script>
+</body>
+</html>`;
+
+  const win = window.open('', '_blank');
+  if (!win) { showToast('Pop-up blocked. Please allow pop-ups for this site.', 'warn'); return; }
+  win.document.write(html);
+  win.document.close();
 }
 
 // ── BOOT ──────────────────────────────────────────────────────────
@@ -3715,6 +4274,33 @@ window.Kpsc = {
   showEnrollModal,
   closeEnrollModal,
   startEnrollRecording,
+  // Projects
+  renderProjects,
+  setProjectsFilter,
+  openProjectModal,
+  closeProjectModal,
+  saveProject,
+  changeProjectStatus,
+  deleteProject,
+  extractProjectsFromMeetingUI,
+  // Meeting - upload notes
+  setMeetingTab,
+  previewNotesPhoto,
+  ocrNotesPhoto,
+  // Finance - PDF reconciliation
+  setReconciliationTab,
+  runPdfReconciliation,
+  // Minutes PDF
+  printMinutes,
 };
 
 document.addEventListener('DOMContentLoaded', init);
+
+window.addEventListener('popstate', e => {
+  const page = e.state?.page || window.location.hash.replace('#', '') || 'dashboard';
+  if (page && page !== S.page) {
+    S.page = page;
+    document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.toggle('active', b.dataset.page === page));
+    renderPage(page);
+  }
+});

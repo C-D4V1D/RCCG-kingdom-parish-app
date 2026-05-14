@@ -452,3 +452,31 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 /* ── FINANCE CARD DELETE BUTTON ─────────────────────────────────── */
 .k-meeting-card .kbtn-danger{opacity:.8;}
 .k-meeting-card .kbtn-danger:hover{opacity:1;}
+
+/* ── MOBILE RESPONSIVE IMPROVEMENTS ────────────────────────────── */
+@media (max-width: 480px) {
+  .k-dash-stats { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .k-stat-val { font-size: 22px; }
+  .k-modal { max-height: 92vh; overflow-y: auto; }
+  .k-rec-table { font-size: 11px; }
+  .k-rec-table th, .k-rec-table td { padding: 6px 8px; }
+  .k-page { padding: 16px 12px 24px; }
+}
+
+/* ── MEETING TAB CONTENT ────────────────────────────────────────── */
+#km-notes-preview img { max-height: 280px; object-fit: contain; }
+
+/* ── PRINT STYLES ───────────────────────────────────────────────── */
+@media print {
+  .ka-header, .ka-nav, .kbtn, .k-room-actions { display: none !important; }
+  .k-page { max-width: 100%; padding: 0; }
+}
+
+/* ── PROJECT CARDS ──────────────────────────────────────────────── */
+.badge-red { background: #fee2e2; color: #991b1b; }
+
+/* ── PROGRESS BAR ───────────────────────────────────────────────── */
+.k-progress-row { display: flex; align-items: center; gap: 8px; }
+.k-progress-bar-bg { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.k-progress-bar { height: 100%; border-radius: 3px; transition: width 0.3s; }
+.k-progress-label { font-size: 11px; color: var(--text3); white-space: nowrap; }
