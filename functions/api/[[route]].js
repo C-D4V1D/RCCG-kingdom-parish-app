@@ -267,7 +267,20 @@ export async function onRequest(context) {
 
   } catch (e) {
     console.error(`[API Error] ${method} /api/${path}:`, e.message, e.stack);
-    return err(`Server error: ${e.message}`);
+    const full = Object.fromEntries(Object.getOwnPropertyNames(e).map(k => [k, e[k]]));
+    return new Response(
+      JSON.stringify({
+        message: e.message,
+        stack: e.stack,
+        full
+      }),
+      {
+        status: 500,
+        headers: {
+          "Content-Type": "application/json"
+        }
+      }
+    );
   }
 }
 
