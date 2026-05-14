@@ -3144,7 +3144,7 @@ async function renderReminders(main) {
         <h3 class="k-sec-title">Partner Reminder Workflow — ${monthName(month)} ${year}</h3>
         <p class="k-hint">${unpaid.length} unpaid active partner(s) for ${monthName(month)} ${year}.</p>
         <label class="k-label">Reminder Message Template</label>
-        <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message">${esc(defaultTemplate)}</textarea>
+        <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message" oninput="Kpsc.debouncedSaveReminderTemplate(this)">${esc(defaultTemplate)}</textarea>
         <p class="k-hint">Use <code>{{name}}</code> for partner name and <code>{{month}}</code> for month name.</p>
         <div class="k-room-actions" style="margin-top:10px">
           <button class="kbtn kbtn-primary" onclick="Kpsc.sendBulkReminders(this)">Send Bulk Reminders (${unpaid.length})</button>
@@ -3237,6 +3237,20 @@ async function sendBulkReminders(btn) {
     showToast(`Reminders sent to ${responses.length} partner(s).`, 'success');
   }
   await renderReminders(document.getElementById('kpsc-main'));
+}
+
+let _reminderTemplateSaveTimer = null;
+function debouncedSaveReminderTemplate(textarea) {
+  clearTimeout(_reminderTemplateSaveTimer);
+  _reminderTemplateSaveTimer = setTimeout(async () => {
+    const template = textarea.value.trim();
+    const res = await apiPost('settings', { kpsc_reminder_template: template });
+    if (res?.error) {
+      showToast('Could not save template: ' + res.error, 'error');
+    } else {
+      showToast('Template saved.', 'success');
+    }
+  }, 500);
 }
 
 async function renderReports(main) {
@@ -4287,6 +4301,7 @@ window.Kpsc = {
   runReconciliation,
   sendBulkReminders,
   copyReminderMessage,
+  debouncedSaveReminderTemplate,
   setReportsYear,
   saveKpscOpsSettings,
   partnerTypeLabel,
