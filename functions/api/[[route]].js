@@ -89,6 +89,44 @@ export async function onRequest(context) {
   const route = parts[0];
   const param = parts[1] || null;
 
+  // ── /api/hf-proxy/* ─────────────────────────────────────────
+  // Proxy HuggingFace model-file downloads so the browser never hits
+  // huggingface.co directly (which now returns 401 for unauthenticated
+  // browser requests even for public models).  Server-to-server fetch
+  // works without auth; the optional HF_TOKEN env var can be set in
+  // Cloudflare Pages → Settings → Environment variables for gated models.
+  if (route === 'hf-proxy' && method === 'GET') {
+    const hfPath = parts.slice(1).join('/');
+    // Validate path: must be <org>/<repo>/resolve/<revision>/<file>
+    // Blocks path traversal and restricts proxy to model-file download URLs.
+    const VALID_HF_PATH = /^[A-Za-z0-9_][A-Za-z0-9_.-]*\/[A-Za-z0-9_][A-Za-z0-9_.-]*\/resolve\/[A-Za-z0-9._-]+\/[A-Za-z0-9_./-]+$/;
+    if (!hfPath || !VALID_HF_PATH.test(hfPath) || hfPath.includes('..')) {
+      return err('Invalid HuggingFace model path', 400);
+    }
+    const hfUrl  = 'https://huggingface.co/' + hfPath;
+    const hfHdrs = {};
+    if (env.HF_TOKEN) hfHdrs['Authorization'] = 'Bearer ' + env.HF_TOKEN;
+    try {
+      const hfRes = await fetch(hfUrl, { headers: hfHdrs });
+      if (!hfRes.ok) {
+        return err(`HuggingFace returned ${hfRes.status} for ${hfPath}`, hfRes.status === 404 ? 404 : 502);
+      }
+      const cType    = hfRes.headers.get('Content-Type') || 'application/octet-stream';
+      const hfCache  = hfRes.headers.get('Cache-Control');
+      return new Response(hfRes.body, {
+        status: 200,
+        headers: {
+          'Content-Type': cType,
+          'Access-Control-Allow-Origin': '*',
+          // Respect upstream cache headers; fall back to 1-day for model files.
+          'Cache-Control': hfCache || 'public, max-age=86400',
+        },
+      });
+    } catch (e) {
+      return err('HuggingFace proxy error: ' + e.message, 502);
+    }
+  }
+
   if (!DB) {
     return err('Database binding "DB" not found. Check Cloudflare Pages → Settings → Functions → D1 bindings.', 503);
   }

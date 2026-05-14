@@ -1353,6 +1353,13 @@ async function loadSbModel() {
     // The result is cached on _sbExtractor / _sbModel so subsequent calls are instant.
     const { AutoProcessor, AutoModel, env } = await import(SB_XFORMERS_URL);
     env.allowLocalModels = false;
+    env.allowRemoteModels = true;
+    // Route model-file downloads through our own Cloudflare Function instead of
+    // hitting huggingface.co directly.  HuggingFace now returns 401 for
+    // unauthenticated browser requests; server-to-server requests from the
+    // Function work without an API key.  An optional HF_TOKEN env var can be
+    // set in Cloudflare Pages settings if a gated model ever needs it.
+    env.remoteHost = window.location.origin + '/api/hf-proxy/';
 
     const [extractor, model] = await Promise.all([
       AutoProcessor.from_pretrained(SB_MODEL_ID),
