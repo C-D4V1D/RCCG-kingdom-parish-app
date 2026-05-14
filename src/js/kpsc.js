@@ -410,9 +410,10 @@ async function recStart(btn) {
     try {
       await diarizerConnect();
     } catch (e) {
+      console.error('[diarizer] connect failed:', e);
       Diarizer.status = 'error';
       recRenderUI();
-      showToast(e.message || 'Speaker diarization is offline; transcription may still be running.', 'warn');
+      showToast(`Deepgram: ${e.message || 'speaker diarization is offline'}`, 'warn');
     }
 
     const statusInput = document.getElementById('km-status');
@@ -720,10 +721,12 @@ async function diarizerConnect() {
   Diarizer.status = Diarizer.reconnectAttempts > 0 ? 'reconnecting' : 'connecting';
   recRenderUI();
 
+  console.info('[diarizer] requesting token from server');
   const tokenRes = await apiPost('deepgram-transcription-token', {});
   if (tokenRes.error) throw new Error(tokenRes.error);
   const apiKey = tokenRes.key;
   if (!apiKey) throw new Error('Deepgram API key was not returned by the server.');
+  console.info('[diarizer] token received, length =', apiKey.length);
 
   // Build AudioContext and AudioWorklet pipeline for raw PCM streaming.
   const audioCtx = new AudioContext();
@@ -755,6 +758,7 @@ async function diarizerConnect() {
   // Deepgram authenticates browser WebSocket connections via the
   // Sec-WebSocket-Protocol subprotocol ('token', <api-key>). Query
   // parameters like ?token=... are NOT accepted and silently fail.
+  console.info('[diarizer] opening WebSocket to Deepgram');
   const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, ['token', apiKey]);
   Diarizer.ws = ws;
   ws.binaryType = 'arraybuffer';
@@ -784,6 +788,7 @@ async function diarizerConnect() {
   ws.onmessage = (e) => diarizerHandleMessage(e.data);
 
   ws.onclose = (e) => {
+    console.warn('[diarizer] WS closed', { code: e.code, reason: e.reason, wasClean: e.wasClean });
     if (!Diarizer.manualStop && Rec.status === 'recording') {
       diarizerScheduleReconnect();
     } else {
@@ -792,7 +797,8 @@ async function diarizerConnect() {
     }
   };
 
-  ws.onerror = () => {
+  ws.onerror = (e) => {
+    console.error('[diarizer] WS error', e);
     if (!Diarizer.manualStop && Rec.status === 'recording') {
       diarizerScheduleReconnect();
     }
