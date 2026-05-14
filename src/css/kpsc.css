@@ -265,6 +265,11 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 /* ── ROOM ACTIONS ──────────────────────────────────────────────── */
 .k-room-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px;}
 .k-processed-note{font-size:13px;color:var(--green);font-weight:500;}
+.k-autosave-status{font-size:12px;color:var(--muted,#888);font-style:italic;}
+.k-autosave-status[data-kind="ok"]{color:var(--green);font-style:normal;}
+.k-autosave-status[data-kind="error"]{color:var(--red,#c33);font-style:normal;}
+.k-mc-del{background:transparent;border:none;cursor:pointer;font-size:14px;line-height:1;padding:4px 6px;border-radius:4px;color:var(--muted,#888);transition:background .15s,color .15s;}
+.k-mc-del:hover{background:rgba(200,40,40,0.1);color:var(--red,#c33);}
 
 /* ── MINUTES ───────────────────────────────────────────────────── */
 .k-minutes-section{margin-top:8px;}

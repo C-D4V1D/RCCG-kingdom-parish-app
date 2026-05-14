@@ -410,9 +410,10 @@ async function recStart(btn) {
     try {
       await diarizerConnect();
     } catch (e) {
+      console.error('[diarizer] connect failed:', e);
       Diarizer.status = 'error';
       recRenderUI();
-      showToast(e.message || 'Speaker diarization is offline; transcription may still be running.', 'warn');
+      showToast(`Deepgram: ${e.message || 'speaker diarization is offline'}`, 'warn');
     }
 
     const statusInput = document.getElementById('km-status');
@@ -720,14 +721,22 @@ async function diarizerConnect() {
   Diarizer.status = Diarizer.reconnectAttempts > 0 ? 'reconnecting' : 'connecting';
   recRenderUI();
 
+  console.info('[diarizer] requesting token from server');
   const tokenRes = await apiPost('deepgram-transcription-token', {});
   if (tokenRes.error) throw new Error(tokenRes.error);
-  const apiKey = tokenRes.key;
-  if (!apiKey) throw new Error('Deepgram API key was not returned by the server.');
+  const accessToken = tokenRes.key;
+  if (!accessToken) throw new Error('Deepgram access token was not returned by the server.');
+  console.info('[diarizer] token received, length =', accessToken.length);
 
   // Build AudioContext and AudioWorklet pipeline for raw PCM streaming.
   const audioCtx = new AudioContext();
   Diarizer.audioCtx = audioCtx;
+  // AudioContext starts suspended when created outside an active user
+  // gesture (e.g. after awaiting the token fetch). Without this resume,
+  // no PCM reaches the worklet until the user pauses and resumes.
+  if (audioCtx.state === 'suspended') {
+    try { await audioCtx.resume(); } catch (_) { /* noop */ }
+  }
 
   // Register the inline worklet processor via a Blob URL.
   const blob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
@@ -742,7 +751,6 @@ async function diarizerConnect() {
   // Build the Deepgram WebSocket URL with required parameters.
   const sampleRate = audioCtx.sampleRate;
   const dgParams = new URLSearchParams({
-    token: apiKey,
     model: 'nova-3',
     diarize: 'true',
     punctuate: 'true',
@@ -753,7 +761,14 @@ async function diarizerConnect() {
     channels: '1',
     language: 'en',
   });
-  const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`);
+  // Deepgram authenticates browser WebSocket connections via the
+  // Sec-WebSocket-Protocol subprotocol ('token', <api-key>). Query
+  // parameters like ?token=... are NOT accepted and silently fail.
+  console.info('[diarizer] opening WebSocket to Deepgram');
+  // Temporary access token from /v1/auth/grant uses the Bearer scheme;
+  // browsers can't set the Authorization header on a WebSocket, so the
+  // scheme + token ride in the Sec-WebSocket-Protocol subprotocols list.
+  const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, ['bearer', accessToken]);
   Diarizer.ws = ws;
   ws.binaryType = 'arraybuffer';
 
@@ -782,6 +797,7 @@ async function diarizerConnect() {
   ws.onmessage = (e) => diarizerHandleMessage(e.data);
 
   ws.onclose = (e) => {
+    console.warn('[diarizer] WS closed', { code: e.code, reason: e.reason, wasClean: e.wasClean });
     if (!Diarizer.manualStop && Rec.status === 'recording') {
       diarizerScheduleReconnect();
     } else {
@@ -790,7 +806,8 @@ async function diarizerConnect() {
     }
   };
 
-  ws.onerror = () => {
+  ws.onerror = (e) => {
+    console.error('[diarizer] WS error', e);
     if (!Diarizer.manualStop && Rec.status === 'recording') {
       diarizerScheduleReconnect();
     }
@@ -1043,6 +1060,15 @@ async function apiPut(path, body) {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  });
+  return r.json();
+}
+
+async function apiDelete(path, body) {
+  const r = await fetch(`${API}/${path}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
   });
   return r.json();
 }
@@ -1341,12 +1367,22 @@ async function renderDashboard(main) {
     </div>`;
 }
 
+function canDeleteMeeting(m) {
+  const role = String(S.user?.role || '').toLowerCase();
+  if (role === 'admin' || role === 'it_administrator') return true;
+  return !!S.user?.name && S.user.name === (m.createdBy || '');
+}
+
 function meetingCard(m) {
+  const showDelete = canDeleteMeeting(m);
   return `
     <div class="k-meeting-card" onclick="Kpsc.openMeeting('${m.id}')">
       <div class="k-mc-top">
         <div class="k-mc-title">${esc(m.title)}</div>
-        <div class="k-mc-badges">${typeBadge(m.meetingType)} ${statusBadge(m.status)}</div>
+        <div class="k-mc-badges">
+          ${typeBadge(m.meetingType)} ${statusBadge(m.status)}
+          ${showDelete ? `<button class="k-mc-del" title="Delete draft" aria-label="Delete draft" onclick="Kpsc.deleteMeetingDraft('${m.id}', event)">🗑</button>` : ''}
+        </div>
       </div>
       <div class="k-mc-meta">
         <span>${fmtDate(m.meetingDate)}</span>
@@ -1448,6 +1484,7 @@ async function renderMeetingRoom(main) {
 
       <div class="k-room-actions">
         ${!isProcessed ? `<button class="kbtn" onclick="Kpsc.saveMeeting(this)">💾 Save</button>` : ''}
+        ${!isProcessed ? `<span id="km-autosave-status" class="k-autosave-status" aria-live="polite"></span>` : ''}
         ${status === 'recording' ? `<button class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
         ${status === 'ended' ? `<button class="kbtn kbtn-primary" onclick="Kpsc.processMeeting(this)">✨ Generate Minutes</button>` : ''}
         ${isProcessed ? `<div class="k-processed-note">✅ Minutes have been generated and finalised.</div>` : ''}
@@ -1458,6 +1495,7 @@ async function renderMeetingRoom(main) {
 
   if (canRecord) recRenderUI();
   recRenderTranscript();
+  if (!isProcessed) bindAutoSave();
 }
 
 function buildAttendanceRows(savedParts) {
@@ -1700,7 +1738,129 @@ async function saveMinutesReview(btn) {
   }
 }
 
+// ── DRAFT AUTO-SAVE ───────────────────────────────────────────────
+// Debounced auto-save for the Meeting Room form. The first change on a
+// brand-new draft triggers a POST (creating the row); subsequent changes
+// PUT. While a save is in flight, further edits flip a dirty flag and
+// fire one more save when the inflight one returns.
+const AUTOSAVE_DEBOUNCE_MS = 1500;
+const Draft = {
+  timer: null,
+  inflight: false,
+  dirty: false,
+  meetingId: null, // matches S.activeMeeting?.id when bound; used to detect re-bind
+};
+
+function setAutoSaveStatus(text, kind) {
+  const el = document.getElementById('km-autosave-status');
+  if (!el) return;
+  el.textContent = text;
+  el.dataset.kind = kind || '';
+}
+
+function scheduleAutoSave() {
+  // Skip auto-save for processed meetings (form is readonly anyway).
+  if (S.activeMeeting?.status === 'processed') return;
+  clearTimeout(Draft.timer);
+  setAutoSaveStatus('Unsaved changes…', 'pending');
+  Draft.timer = setTimeout(() => { autoSaveNow(); }, AUTOSAVE_DEBOUNCE_MS);
+}
+
+async function autoSaveNow() {
+  if (Draft.inflight) { Draft.dirty = true; return; }
+  Draft.inflight = true;
+  Draft.dirty = false;
+  setAutoSaveStatus('Saving…', 'pending');
+
+  const title = document.getElementById('km-title')?.value.trim() || 'KPSC Meeting';
+  const date  = document.getElementById('km-date')?.value  || today();
+  const type  = document.getElementById('km-type')?.value  || 'routine';
+  const trans = document.getElementById('km-transcript')?.value || '';
+  const status = document.getElementById('km-status')?.value || 'draft';
+  const participants = readAttendance();
+
+  try {
+    let res;
+    if (S.activeMeeting) {
+      res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
+        title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
+      });
+    } else {
+      res = await apiPost('ai-secretary-meetings', {
+        title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
+        createdBy: S.user?.name || '',
+      });
+    }
+    if (res?.error) {
+      setAutoSaveStatus(`Save failed: ${res.error}`, 'error');
+    } else {
+      S.activeMeeting = res;
+      Draft.meetingId = res.id;
+      setAutoSaveStatus(`Saved · ${fmtClock(new Date())}`, 'ok');
+    }
+  } catch {
+    setAutoSaveStatus('Offline — will retry on next change', 'error');
+  } finally {
+    Draft.inflight = false;
+    if (Draft.dirty) autoSaveNow();
+  }
+}
+
+function fmtClock(d) {
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+function bindAutoSave() {
+  clearTimeout(Draft.timer);
+  Draft.timer = null;
+  Draft.inflight = false;
+  Draft.dirty = false;
+  Draft.meetingId = S.activeMeeting?.id || null;
+
+  const fire = () => scheduleAutoSave();
+  const form = document.getElementById('km-title')?.closest('.k-page');
+  if (!form) return;
+  for (const sel of ['#km-title', '#km-transcript']) {
+    const el = form.querySelector(sel);
+    if (el) el.addEventListener('input', fire);
+  }
+  for (const sel of ['#km-date', '#km-type']) {
+    const el = form.querySelector(sel);
+    if (el) el.addEventListener('change', fire);
+  }
+  const att = form.querySelector('#km-attendance');
+  if (att) {
+    att.addEventListener('change', fire);
+    att.addEventListener('input', fire);
+  }
+}
+
 // ── MEETING ACTIONS ───────────────────────────────────────────────
+async function deleteMeetingDraft(id, event) {
+  if (event) { event.stopPropagation(); event.preventDefault(); }
+  const m = S.meetings.find(x => x.id === id);
+  if (!m) return;
+  const role = String(S.user?.role || '').toLowerCase();
+  const isAdmin = role === 'admin' || role === 'it_administrator';
+  const isAuthor = !!S.user?.name && S.user.name === (m.createdBy || '');
+  if (!isAdmin && !isAuthor) {
+    showToast('Only the meeting author or an administrator can delete this draft.', 'error');
+    return;
+  }
+  if (!confirm(`Delete "${m.title || 'this meeting'}"? It will be hidden from the list.`)) return;
+  const res = await apiDelete(`ai-secretary-meetings/${id}`, {
+    userName: S.user?.name || '',
+    userRole: S.user?.role || '',
+  });
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  S.meetings = S.meetings.filter(x => x.id !== id);
+  const main = document.getElementById('kpsc-main');
+  if (main) await renderDashboard(main);
+  showToast('Draft deleted', 'success');
+}
+
 async function saveMeeting(btn) {
   const title = document.getElementById('km-title')?.value.trim() || 'KPSC Meeting';
   const date  = document.getElementById('km-date')?.value  || today();
@@ -2406,6 +2566,7 @@ window.Kpsc = {
   startNewMeeting,
   openMeeting,
   saveMeeting,
+  deleteMeetingDraft,
   endMeeting,
   processMeeting,
   saveMinutesReview,
