@@ -2860,7 +2860,7 @@ async function openFinanceModal(entryToEdit = null) {
       <div class="k-modal-hdr"><span class="k-modal-title">New Finance Entry</span><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeFinanceModal()">✕</button></div>
       <div class="k-modal-body">
         <label class="k-label">Date</label>
-        <input id="kf-date" type="date" class="k-input" value="${(()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')})()}" />
+        <input id="kf-date" type="date" class="k-input" value="${today()}" />
         <label class="k-label">Entry Type</label>
         <select id="kf-type" class="k-input" onchange="Kpsc.updateFinanceCategoryOptions()">
           <option value="income">Income</option>
@@ -3132,9 +3132,13 @@ async function sendBulkReminders(btn) {
   btn.disabled = false;
   const failed = responses.filter(r => r?.error);
   if (failed.length) {
-    showToast(`Sent with ${failed.length} failure(s).`, 'warn');
+    const failedNames = unpaidPartners
+      .filter((_, i) => responses[i]?.error)
+      .map(p => p.fullName)
+      .join(', ');
+    showToast(`${failed.length} reminder(s) failed: ${failedNames}`, 'warn');
   } else {
-    showToast('Reminders sent.', 'success');
+    showToast(`Reminders sent to ${responses.length} partner(s).`, 'success');
   }
   await renderReminders(document.getElementById('kpsc-main'));
 }
