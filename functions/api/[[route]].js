@@ -15,7 +15,8 @@ const ok  = (data)       => new Response(JSON.stringify(data),        { status: 
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
-const RECONCILIATION_AMOUNT_TOLERANCE = 0.5;
+// Absolute naira tolerance when matching statement lines to recorded entries.
+const RECONCILIATION_AMOUNT_TOLERANCE_ABSOLUTE = 0.5;
 
 function isValidPin(pin) {
   return /^\d{4,6}$/.test(String(pin || ''));
@@ -1839,6 +1840,13 @@ function normalizeStatementItem(item, index) {
   };
 }
 
+function dateDistanceInDays(dateA, dateB) {
+  const a = Date.parse(String(dateA || ''));
+  const b = Date.parse(String(dateB || ''));
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return Number.POSITIVE_INFINITY;
+  return Math.abs(a - b) / (24 * 60 * 60 * 1000);
+}
+
 async function runKpscReconciliation(DB, data) {
   const statementYear = normalizeYear(data?.statementYear);
   const statementMonth = normalizeMonth(data?.statementMonth) || (new Date().getUTCMonth() + 1);
@@ -1865,11 +1873,13 @@ async function runKpscReconciliation(DB, data) {
   const matches = [];
   const unmatchedStatement = [];
   for (const item of statementItems) {
-    const candidate = financeEntries.find(entry =>
-      !usedFinanceIds.has(entry.id)
-      && entry.type === item.type
-      && Math.abs(entry.amount - item.amount) < RECONCILIATION_AMOUNT_TOLERANCE
-    );
+    const candidate = financeEntries
+      .filter(entry =>
+        !usedFinanceIds.has(entry.id)
+        && entry.type === item.type
+        && Math.abs(entry.amount - item.amount) < RECONCILIATION_AMOUNT_TOLERANCE_ABSOLUTE
+      )
+      .sort((a, b) => dateDistanceInDays(item.date, a.date) - dateDistanceInDays(item.date, b.date))[0];
     if (candidate) {
       usedFinanceIds.add(candidate.id);
       matches.push({

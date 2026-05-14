@@ -1105,6 +1105,14 @@ function canAccess(page) {
   return allowed.includes(page);
 }
 
+function canManagePartners() {
+  return ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer'].includes(String(S.user?.role || '').toLowerCase());
+}
+
+function canManageFinance() {
+  return ['acting_chairman', 'financial_secretary', 'treasurer'].includes(String(S.user?.role || '').toLowerCase());
+}
+
 function applyNavPermissions() {
   const role = String(S.user?.role || 'committee_viewer').toLowerCase();
   const allowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
@@ -1344,6 +1352,12 @@ async function submitPinChange(btn) {
   if (!currentPin || !newPin || !confirmPin) {
     msg.className = 'k-settings-msg k-msg-error';
     msg.textContent = 'All fields are required.';
+    msg.style.display = 'block';
+    return;
+  }
+  if (!PIN_REGEX.test(currentPin)) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = 'Current PIN must be 4-6 digits.';
     msg.style.display = 'block';
     return;
   }
@@ -2464,7 +2478,7 @@ function partnerMonthlyPaid(partnerId, month, year = currentYear()) {
 
 async function renderPartners(main) {
   await loadPartnerData(currentYear());
-  const canManage = !['committee_viewer'].includes(String(S.user?.role || '').toLowerCase());
+  const canManage = canManagePartners();
   main.innerHTML = `
     <div class="k-page">
       <div class="k-section-hdr">
@@ -2615,7 +2629,7 @@ async function renderFinance(main) {
   if (partnersRes?.error) throw new Error(partnersRes.error);
   S.financeEntries = Array.isArray(financeRes) ? financeRes : [];
   S.partners = Array.isArray(partnersRes) ? partnersRes : [];
-  const canManage = ['treasurer', 'financial_secretary', 'acting_chairman'].includes(String(S.user?.role || '').toLowerCase());
+  const canManage = canManageFinance();
   const incomeTotal = S.financeEntries.filter(e => e.entryType === 'income').reduce((sum, e) => sum + Number(e.amount || 0), 0);
   const expenseTotal = S.financeEntries.filter(e => e.entryType === 'expense').reduce((sum, e) => sum + Number(e.amount || 0), 0);
   main.innerHTML = `
@@ -2754,18 +2768,21 @@ async function runReconciliation(btn) {
 
 async function renderReminders(main) {
   await loadPartnerData(currentYear());
+  const settingsRes = await apiGet('settings');
   const month = currentMonth();
   const year = currentYear();
   const unpaid = S.partners.filter(p => p.status === 'active' && !partnerMonthlyPaid(p.id, month, year));
   const remindersRes = await apiGet(`kpsc-reminders?year=${year}&month=${month}`);
   if (remindersRes?.error) throw new Error(remindersRes.error);
+  const defaultTemplate = String(settingsRes?.kpsc_reminder_template || '').trim()
+    || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge.';
   S.reminders = Array.isArray(remindersRes) ? remindersRes : [];
   main.innerHTML = `
     <div class="k-page">
       <div class="k-section">
         <h3 class="k-sec-title">Partner Reminder Workflow</h3>
         <p class="k-hint">${unpaid.length} unpaid active partner(s) for ${monthName(month)} ${year}.</p>
-        <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message">Dear {{name}}, this is a reminder for your ${monthName(month)} partnership pledge.</textarea>
+        <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message">${esc(defaultTemplate)}</textarea>
         <div class="k-room-actions" style="margin-top:10px">
           <button class="kbtn kbtn-primary" onclick="Kpsc.sendBulkReminders(this)">Send Bulk SMS Reminders</button>
         </div>
