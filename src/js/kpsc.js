@@ -845,7 +845,10 @@ async function diarizerConnect() {
 
   ws.onopen = () => {
     Diarizer.status = 'connected';
-    Diarizer.reconnectAttempts = 0;
+    // Don't reset reconnectAttempts here — Deepgram sometimes opens the socket
+    // then closes it immediately (auth race, model mismatch). Resetting on open
+    // would create an infinite reconnect loop. We reset only after the first
+    // real Results message arrives in diarizerHandleMessage().
     // Record the PCM sample offset at the moment this WS connection opened.
     // Deepgram timestamps restart from 0 on each new connection; dgTimeOffset
     // converts them to absolute positions in the PCM ring buffer.
@@ -888,6 +891,9 @@ async function diarizerConnect() {
 function diarizerHandleMessage(raw) {
   let msg;
   try { msg = JSON.parse(raw); } catch { return; }
+
+  // Any well-formed message means the connection is genuinely working — safe to reset retry counter.
+  if (Diarizer.reconnectAttempts !== 0) Diarizer.reconnectAttempts = 0;
 
   if (msg.type === 'Results') {
     const alt = msg.channel?.alternatives?.[0];
@@ -947,8 +953,9 @@ function diarizerScheduleReconnect() {
   if (Diarizer.manualStop || Rec.status !== 'recording' || Diarizer.reconnectTimer) return;
   if (Diarizer.reconnectAttempts >= DG_MAX_RETRIES) {
     Diarizer.status = 'error';
+    Diarizer.manualStop = true; // stop new reconnect attempts; live transcription via OpenAI continues.
     recRenderUI();
-    showToast('Speaker diarization disconnected. Transcription may still be active.', 'warn');
+    showToast('Speaker diarization is unavailable — recording will continue without speaker labels. Check DEEPGRAM_API_KEY in environment settings.', 'warn');
     return;
   }
   Diarizer.reconnectAttempts++;
