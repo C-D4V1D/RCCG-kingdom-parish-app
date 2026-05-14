@@ -1378,7 +1378,7 @@ async function loadSbModel() {
         console.warn(`ECAPA-TDNN: failed to load ${modelId}`, e);
       }
     }
-    throw lastErr || new Error('Failed to load ECAPA-TDNN model');
+    throw lastErr || new Error(`Failed to load ECAPA-TDNN model (attempted: ${modelCandidates.join(', ')})`);
   })();
 
   return _sbLoading;

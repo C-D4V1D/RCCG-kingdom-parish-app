@@ -108,7 +108,7 @@ export async function onRequest(context) {
     const hfHdrs = {
       // Keep requests deterministic and binary-safe across HF redirects/CDN edges.
       'Accept': '*/*',
-      'User-Agent': 'rccg-kingdom-parish-app/1.0 (+https://rccg-kingdom-parish-app.pages.dev)',
+      'User-Agent': 'rccg-kingdom-parish-app (+https://rccg-kingdom-parish-app.pages.dev)',
     };
     if (hfToken) hfHdrs['Authorization'] = 'Bearer ' + hfToken;
     try {
