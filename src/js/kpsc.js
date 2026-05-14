@@ -326,8 +326,6 @@ function recAppendTranscript(text, itemId = '', speaker = null) {
     const line = `[${entry.timestamp}]${speakerTag} ${entry.text}`;
     textarea.value = textarea.value ? `${textarea.value}\n${line}` : line;
     textarea.scrollTop = textarea.scrollHeight;
-    // Programmatic value writes don't fire 'input', so autosave never sees live transcript additions.
-    scheduleAutoSave();
   }
   recRenderTranscript();
 }
