@@ -2860,7 +2860,7 @@ async function openFinanceModal(entryToEdit = null) {
       <div class="k-modal-hdr"><span class="k-modal-title">New Finance Entry</span><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeFinanceModal()">✕</button></div>
       <div class="k-modal-body">
         <label class="k-label">Date</label>
-        <input id="kf-date" type="date" class="k-input" value="${new Date().toISOString().slice(0, 10)}" />
+        <input id="kf-date" type="date" class="k-input" value="${(()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')})()}" />
         <label class="k-label">Entry Type</label>
         <select id="kf-type" class="k-input" onchange="Kpsc.updateFinanceCategoryOptions()">
           <option value="income">Income</option>
@@ -3027,7 +3027,7 @@ async function runReconciliation(btn) {
             </tbody>
           </table>
         </div>` : ''}
-      <p class="k-hint" style="margin-top:12px">⚠️ AI reconciliation result requires officer review and confirmation before filing. Confidence scores are approximate.</p>`;
+      <p class="k-hint" style="margin-top:12px">⚠️ AI reconciliation result requires officer review and confirmation before filing.</p>`;
   }
 }
 
