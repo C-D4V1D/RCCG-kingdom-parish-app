@@ -746,6 +746,14 @@ function normalizeKpscAccountStatus(status) {
 
 function normalizeMonth(value) {
   const month = Number.parseInt(value, 10);
+  if (!Number.isFinite(month)) return 1;
+  return Math.min(12, Math.max(1, month));
+}
+
+function normalizeOptionalMonth(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 0;
+  const month = Number.parseInt(raw, 10);
   if (!Number.isFinite(month)) return 0;
   return Math.min(12, Math.max(1, month));
 }
@@ -1498,7 +1506,7 @@ async function createKpscPartnerResponse(DB, id) {
 
 async function getKpscPartnerPayments(DB, url) {
   const year = normalizeYear(url.searchParams.get('year'));
-  const month = normalizeMonth(url.searchParams.get('month'));
+  const month = normalizeOptionalMonth(url.searchParams.get('month'));
   const filters = ['p.year=?'];
   const binds = [year];
   if (month) {
@@ -1591,7 +1599,7 @@ async function deleteKpscPartnerPayment(DB, id) {
 }
 
 async function getKpscFinanceEntries(DB, url) {
-  const month = normalizeMonth(url.searchParams.get('month'));
+  const month = normalizeOptionalMonth(url.searchParams.get('month'));
   const year = normalizeYear(url.searchParams.get('year'));
   const entryType = String(url.searchParams.get('entryType') || '').trim().toLowerCase();
   const where = ['strftime(\'%Y\', date)=?',];
@@ -1712,7 +1720,7 @@ async function getKpscFinanceEntryById(DB, id) {
 
 async function getKpscReminders(DB, url) {
   const year = normalizeYear(url.searchParams.get('year'));
-  const month = normalizeMonth(url.searchParams.get('month'));
+  const month = normalizeOptionalMonth(url.searchParams.get('month'));
   const { results } = await DB.prepare(`
     SELECT r.*, p.full_name AS partner_name
     FROM kpsc_reminders r
@@ -1759,7 +1767,7 @@ async function createKpscReminder(DB, data) {
 
 async function getKpscDashboard(DB, url) {
   const year = normalizeYear(url.searchParams.get('year'));
-  const month = normalizeMonth(url.searchParams.get('month')) || (new Date().getUTCMonth() + 1);
+  const month = normalizeOptionalMonth(url.searchParams.get('month')) || (new Date().getUTCMonth() + 1);
 
   const incomeRow = await DB.prepare(`
     SELECT COALESCE(SUM(amount),0) AS total

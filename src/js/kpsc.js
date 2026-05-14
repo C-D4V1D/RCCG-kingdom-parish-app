@@ -2437,7 +2437,7 @@ function currentMonth() {
 }
 
 function monthName(month) {
-  return new Date(Date.UTC(2026, Math.max(0, month - 1), 1)).toLocaleString('en-NG', { month: 'long', timeZone: 'UTC' });
+  return new Date(Date.UTC(currentYear(), Math.max(0, month - 1), 1)).toLocaleString('en-NG', { month: 'long', timeZone: 'UTC' });
 }
 
 async function loadPartnerData(year = currentYear()) {
