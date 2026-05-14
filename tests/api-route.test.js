@@ -758,7 +758,7 @@ test('settings api-status reports configured realtime API keys without exposing 
   assert.equal(body.liveTranscription.masked.includes('secret'), false);
   assert.equal(body.diarization.configured, true);
   assert.equal(body.speakerRecognition.configured, true);
-  assert.equal(body.speakerRecognition.provider, 'SpeechBrain ECAPA-TDNN');
+  assert.equal(body.speakerRecognition.provider, 'Picovoice Eagle');
 });
 
 test('settings api-status reports missing realtime API key', async () => {

@@ -52,3 +52,37 @@ The integrated KPSC meeting room now supports live meeting capture:
 Required production secret:
 
 - `OPENAI_API_KEY` — used only by the Cloudflare Pages Function to mint short-lived Realtime client secrets.
+
+## Dummy setup guide: Picovoice Eagle (voice fingerprinting)
+
+1. **Get your AccessKey**
+   - Create/sign in to Picovoice Console: `https://console.picovoice.ai`
+   - Copy your Eagle AccessKey.
+
+2. **Add the Eagle model file**
+   - Download `eagle_params.pv` from the Picovoice Eagle package/release.
+   - Place it in your app public path as:
+     - `/models/eagle_params.pv`
+   - Use a same-site absolute path (default used by this project is `/models/eagle_params.pv`).
+
+3. **Configure KPSC settings UI**
+   - Open **KPSC Portal → Settings**.
+   - Set:
+     - **Picovoice Eagle AccessKey**
+     - **Picovoice Eagle Model Path** (e.g. `/models/eagle_params.pv`)
+   - Save settings.
+
+4. **Enroll members**
+   - Go to **Members**.
+   - Click the 🎙 button beside a member.
+   - Record ~30 seconds of clear speech.
+
+5. **Test auto-identification**
+   - Start a meeting and record conversation with attendance marked.
+   - Confirm speaker tags start auto-mapping to enrolled members.
+
+### Quick troubleshooting
+
+- **“AccessKey is missing”** → Fill Picovoice Eagle AccessKey in KPSC Settings and save.
+- **Model load fails** → Verify model path is public and correct.
+- **No auto-match** → Re-enroll with clearer voice sample and reduce noise.

@@ -113,19 +113,19 @@ const Diarizer = {
   reconnectAttempts: 0,
   manualStop: false,
   // PCM ring buffer — raw Float32 samples from the AudioWorklet, used to
-  // extract per-speaker audio slices for ECAPA-TDNN speaker identification.
+  // extract per-speaker audio slices for Picovoice Eagle speaker identification.
   pcmChunks: [],        // Array of {offset: number, data: Float32Array}
   pcmSampleOffset: 0,   // Total samples written since Diarizer was constructed
   pcmSampleRate: 0,     // Set from AudioContext.sampleRate on connection
   dgTimeOffset: 0,      // pcmSampleOffset when the current WS connection was opened;
                         // adds to Deepgram's 0-based timestamps to get absolute offsets
   speakerRanges: new Map(), // Map<speakerIdx, {startSample, endSample}[]>
-  identifyPending: new Set(), // speaker indices currently being identified by ECAPA-TDNN
+  identifyPending: new Set(), // speaker indices currently being identified by Picovoice Eagle
 };
 
 // ── VOICE ENROLLMENT ───────────────────────────────────────────────
 // Captures a ~30-second voice sample from a member and computes a
-// SpeechBrain ECAPA-TDNN speaker embedding for automatic future identification.
+// Picovoice Eagle speaker profile for automatic future identification.
 const Enrolling = {
   stream: null,
   audioCtx: null,
@@ -139,12 +139,14 @@ const Enrolling = {
   active: false,
 };
 
-// ── SPEECHBRAIN ECAPA-TDNN CONSTANTS ─────────────────────────────
-const SB_IDENTIFY_THRESHOLD_SEC = 5;   // seconds of speech needed before triggering auto-ID
-const SB_IDENTIFY_MIN_AUDIO_SEC  = 4;  // minimum seconds of speech for a reliable match
-const SB_IDENTIFY_MAX_AUDIO_SEC  = 10; // max seconds of audio to send per identification call
-const SB_IDENTIFY_MIN_SCORE = 0.75;    // minimum cosine similarity (0–1) to accept auto-assignment
-const SB_ENROLL_DURATION_SEC = 30;     // seconds of audio to capture for enrollment
+// ── PICOVOICE EAGLE CONSTANTS ──────────────────────────────────────
+const EAGLE_IDENTIFY_THRESHOLD_SEC = 5;   // seconds of speech needed before triggering auto-ID
+const EAGLE_IDENTIFY_MIN_AUDIO_SEC = 4;   // minimum seconds of speech for a reliable match
+const EAGLE_IDENTIFY_MAX_AUDIO_SEC = 10;  // max seconds of audio to send per identification call
+const EAGLE_IDENTIFY_MIN_SCORE     = 0.50; // minimum average Eagle score (0–1) to accept auto-assignment
+const EAGLE_ENROLL_DURATION_SEC    = 30;  // seconds of audio to capture for enrollment
+const EAGLE_WEB_URL                = 'https://cdn.jsdelivr.net/npm/@picovoice/eagle-web@3.0.0/+esm';
+const EAGLE_DEFAULT_MODEL_PATH     = '/models/eagle_params.pv';
 const DEFAULT_PCM_SAMPLE_RATE   = 48000;  // fallback rate before the AudioContext is created
 const BASE64_CHUNK_SIZE         = 32768;  // chars per chunk when encoding large buffers
 const PCM_BUFFER_DURATION_SEC   = 60;     // seconds of PCM audio to retain in the ring buffer
@@ -809,7 +811,7 @@ async function diarizerConnect() {
       if (Diarizer.ws?.readyState === WebSocket.OPEN) {
         Diarizer.ws.send(diarizerFloat32ToInt16(e.data).buffer);
       }
-      // Buffer a copy of the raw PCM for ECAPA-TDNN speaker identification.
+      // Buffer a copy of the raw PCM for Picovoice Eagle speaker identification.
       diarizerBufferPcm(e.data);
     };
     source.connect(workletNode);
@@ -975,11 +977,11 @@ function diarizerExtractPcmRange(startSample, endSample) {
   return out;
 }
 
-// Collect up to SB_IDENTIFY_MAX_AUDIO_SEC of audio for a speaker index from the ring buffer.
+// Collect up to EAGLE_IDENTIFY_MAX_AUDIO_SEC of audio for a speaker index from the ring buffer.
 function diarizerExtractSpeakerAudio(speakerIdx) {
   const ranges = Diarizer.speakerRanges.get(speakerIdx) || [];
   if (!ranges.length || !Diarizer.pcmSampleRate) return null;
-  const maxSamples = SB_IDENTIFY_MAX_AUDIO_SEC * Diarizer.pcmSampleRate;
+  const maxSamples = EAGLE_IDENTIFY_MAX_AUDIO_SEC * Diarizer.pcmSampleRate;
   let accumulated = 0;
   const toExtract = [];
   for (let i = ranges.length - 1; i >= 0 && accumulated < maxSamples; i--) {
@@ -1001,7 +1003,7 @@ function diarizerExtractSpeakerAudio(speakerIdx) {
 }
 
 // Record the time range spoken by a Deepgram speaker index (in absolute PCM samples).
-// Triggers ECAPA-TDNN identification once SB_IDENTIFY_THRESHOLD_SEC of audio is collected.
+// Triggers Eagle identification once EAGLE_IDENTIFY_THRESHOLD_SEC of audio is collected.
 function diarizerAccumulateSpeakerRange(speakerIdx, startSec, endSec) {
   if (!Diarizer.pcmSampleRate) return;
   const sr          = Diarizer.pcmSampleRate;
@@ -1013,7 +1015,7 @@ function diarizerAccumulateSpeakerRange(speakerIdx, startSec, endSec) {
   const totalSamples = Diarizer.speakerRanges.get(speakerIdx)
     .reduce((a, r) => a + (r.endSample - r.startSample), 0);
   if (!Diarizer.identifyPending.has(speakerIdx) &&
-      totalSamples >= SB_IDENTIFY_THRESHOLD_SEC * sr) {
+      totalSamples >= EAGLE_IDENTIFY_THRESHOLD_SEC * sr) {
     diarizerTriggerIdentify(speakerIdx).catch(e => console.warn('Auto-identify error:', e));
   }
 }
@@ -1027,8 +1029,8 @@ function isMemberPresent(mem) {
   return el?.checked === true;
 }
 
-// Attempt to auto-identify a Deepgram speaker index using ECAPA-TDNN embeddings
-// and cosine similarity. Silently skips if no enrolled members are present.
+// Attempt to auto-identify a Deepgram speaker index using Picovoice Eagle scores.
+// Silently skips if no enrolled members are present.
 async function diarizerTriggerIdentify(speakerIdx) {
   if (Rec.speakerMap.has(speakerIdx)) return; // already assigned manually
   const enrolledPresent = S.members.filter(m => m.sbVoiceEmbedding && isMemberPresent(m));
@@ -1037,22 +1039,27 @@ async function diarizerTriggerIdentify(speakerIdx) {
   Diarizer.identifyPending.add(speakerIdx);
   try {
     const audio = diarizerExtractSpeakerAudio(speakerIdx);
-    // Need at least SB_IDENTIFY_MIN_AUDIO_SEC of speech for a reliable ECAPA-TDNN embedding.
-    if (!audio || audio.length < SB_IDENTIFY_MIN_AUDIO_SEC * Diarizer.pcmSampleRate) return;
+    if (!audio || audio.length < EAGLE_IDENTIFY_MIN_AUDIO_SEC * Diarizer.pcmSampleRate) return;
 
-    const embedding = await computeSpeakerEmbedding(audio, Diarizer.pcmSampleRate);
-    if (!embedding) return;
+    const memberProfiles = enrolledPresent
+      .map(m => ({ member: m, profile: base64ToEmbedding(m.sbVoiceEmbedding) }))
+      .filter(item => item.profile && item.profile.length);
+    if (!memberProfiles.length) return;
 
-    let bestScore  = -Infinity;
+    const scores = await computeSpeakerScores(audio, Diarizer.pcmSampleRate, memberProfiles.map(item => item.profile));
+    if (!scores || !scores.length) return;
+
+    let bestScore = -Infinity;
     let bestMember = null;
-    for (const m of enrolledPresent) {
-      const stored = base64ToEmbedding(m.sbVoiceEmbedding);
-      if (!stored) continue;
-      const score = cosineSimilarity(embedding, stored);
-      if (score > bestScore) { bestScore = score; bestMember = m; }
+    for (let i = 0; i < scores.length; i++) {
+      const score = Number(scores[i]);
+      if (score > bestScore) {
+        bestScore = score;
+        bestMember = memberProfiles[i].member;
+      }
     }
 
-    if (bestMember && bestScore >= SB_IDENTIFY_MIN_SCORE) {
+    if (bestMember && Number.isFinite(bestScore) && bestScore >= EAGLE_IDENTIFY_MIN_SCORE) {
       if (Rec.speakerMap.has(speakerIdx)) return; // assigned while we waited
       assignSpeaker(speakerIdx, bestMember.name);
       showToast(`🎙 Auto-identified: ${bestMember.name} (${Math.round(bestScore * 100)}% match)`, 'success');
@@ -1251,7 +1258,7 @@ function esc(s) {
 
 // ── PCM AUDIO HELPERS ────────────────────────────────────────────
 // Linearly resample a Float32 PCM array from `fromRate` to 16 kHz.
-// ECAPA-TDNN requires 16 kHz input. Linear interpolation is sufficient
+// Eagle requires 16 kHz input. Linear interpolation is sufficient
 // for speaker identification — the model is robust to minor resampling
 // artefacts, and higher-quality algorithms (e.g. polyphase filters) are
 // not worth the added complexity here.
@@ -1312,145 +1319,130 @@ function arrayBufferToBase64(buffer) {
   return btoa(parts.join(''));
 }
 
-// ── SPEECHBRAIN ECAPA-TDNN SPEAKER EMBEDDINGS ─────────────────────
-// Speaker embeddings are computed entirely client-side using the
-// SpeechBrain ECAPA-TDNN model (Xenova/speechbrain-spkrec-ecapa-voxceleb)
-// via transformers.js loaded on demand from a CDN.
-//
+// ── PICOVOICE EAGLE SPEAKER PROFILES ───────────────────────────────
 // Architecture:
-//   1. Enrollment  – Record 30 s of audio → compute 512-dim ECAPA-TDNN
-//                    embedding → store as base64 in member data.
-//   2. Identification – Compute embedding for unknown speaker segment →
-//                    cosine similarity against all enrolled embeddings →
-//                    assign speaker if best match ≥ SB_IDENTIFY_MIN_SCORE.
-//
-// No external API key is required; the ONNX model (~20 MB quantized) is
-// downloaded once and cached in the browser's IndexedDB by transformers.js.
+//   1. Enrollment  – Record 30 s of audio → train Eagle profile → store as base64.
+//   2. Identification – Run Eagle score comparison against enrolled profiles and
+//                    assign speaker if best score ≥ EAGLE_IDENTIFY_MIN_SCORE.
 
-const SB_MODEL_ID    = 'Xenova/speechbrain-spkrec-ecapa-voxceleb';
-const SB_MODEL_FALLBACK_ID = 'onnx-community/speechbrain-spkrec-ecapa-voxceleb';
-// Use the self-contained ESM bundle. 'dist/transformers.js' ends with proper
-// `export { ... }` statements so named destructuring works in dynamic import().
-// Do NOT use the bare package URL (resolves to src/transformers.js which has
-// relative imports the browser cannot follow) or dist/transformers.min.js
-// (webpack IIFE with no ESM export statements).
-// AutoFeatureExtractor does not exist in v2 — the correct class is AutoProcessor.
-const SB_XFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.js';
+let _eagleModule = null;
+let _eagleSettings = null;
+let _eagleSettingsLoading = null;
 
-let _sbExtractor = null;
-let _sbModel     = null;
-let _sbLoading   = null; // single in-flight Promise so concurrent callers wait on the same load
+async function loadEagleModule() {
+  if (_eagleModule) return _eagleModule;
+  _eagleModule = await import(EAGLE_WEB_URL);
+  return _eagleModule;
+}
 
-// Load the transformers.js library and the ECAPA-TDNN model (first call only).
-// Dynamic import() is a standard JavaScript expression that works in any script
-// context (module or classic) in all modern browsers (Chrome 63+, Firefox 67+,
-// Safari 11.1+). It is not restricted to type="module" scripts.
-async function loadSbModel() {
-  if (_sbExtractor && _sbModel) return { extractor: _sbExtractor, model: _sbModel };
-  if (_sbLoading) return _sbLoading;
-
-  _sbLoading = (async () => {
-    // Lazy ESM import — works from regular (non-module) scripts in all modern browsers.
-    // The result is cached on _sbExtractor / _sbModel so subsequent calls are instant.
-    const { AutoProcessor, AutoModel, env } = await import(SB_XFORMERS_URL);
-    env.allowLocalModels = false;
-    env.allowRemoteModels = true;
-    // Route model-file downloads through our own Cloudflare Function instead of
-    // hitting huggingface.co directly.  HuggingFace now returns 401 for
-    // unauthenticated browser requests; server-to-server requests from the
-    // Function work without an API key.  An optional HF_TOKEN env var can be
-    // set in Cloudflare Pages settings if a gated model ever needs it.
-    env.remoteHost = window.location.origin + '/api/hf-proxy/';
-
-    const modelCandidates = [SB_MODEL_ID, SB_MODEL_FALLBACK_ID];
-    let lastErr = null;
-    for (const modelId of modelCandidates) {
-      try {
-        const [extractor, model] = await Promise.all([
-          AutoProcessor.from_pretrained(modelId),
-          AutoModel.from_pretrained(modelId, { quantized: true }),
-        ]);
-        _sbExtractor = extractor;
-        _sbModel = model;
-        return { extractor, model };
-      } catch (e) {
-        lastErr = e;
-        console.warn(`ECAPA-TDNN: failed to load ${modelId}`, e);
-      }
+async function loadEagleSettings() {
+  if (_eagleSettings) return _eagleSettings;
+  if (_eagleSettingsLoading) return _eagleSettingsLoading;
+  _eagleSettingsLoading = (async () => {
+    try {
+      const res = await apiGet('settings');
+      const accessKey = String(res?.kpsc_picovoice_access_key || '').trim();
+      const modelPath = String(res?.kpsc_picovoice_model_path || '').trim() || EAGLE_DEFAULT_MODEL_PATH;
+      _eagleSettings = { accessKey, modelPath };
+      return _eagleSettings;
+    } catch (e) {
+      _eagleSettings = null;
+      _eagleSettingsLoading = null;
+      throw e;
     }
-    throw lastErr || new Error(`Failed to load ECAPA-TDNN model (attempted: ${modelCandidates.join(', ')})`);
   })();
-
-  return _sbLoading;
+  return _eagleSettingsLoading;
 }
 
-// Compute a speaker embedding from a Float32 PCM array at arbitrary sample rate.
-// Returns a normalised Float32Array (L2 norm = 1) or null on failure.
-async function computeSpeakerEmbedding(audioFloat32, sampleRate) {
-  // resampleTo16k returns the original array unchanged when already at 16 kHz.
-  const audio16k = resampleTo16k(audioFloat32, sampleRate);
-
-  const { extractor, model } = await loadSbModel();
-
-  // AutoProcessor handles pre-emphasis, windowing, FBANK, and CMVN.
-  const inputs  = await extractor(audio16k, { sampling_rate: 16000 });
-  const outputs = await model(inputs);
-
-  // Retrieve embedding tensor — prefer the named 'embeddings' key, fall back to
-  // the first output. Validate the shape to catch unexpected model output formats.
-  const tensor = outputs.embeddings ?? Object.values(outputs)[0];
-  const raw    = tensor?.data;
-  if (!raw || raw.length === 0) {
-    console.warn('ECAPA-TDNN: model returned no embedding data.');
-    return null;
+function float32ToInt16(float32) {
+  const out = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const v = Math.max(-1, Math.min(1, float32[i]));
+    out[i] = v < 0 ? Math.round(v * 32768) : Math.round(v * 32767);
   }
-
-  const embedding = l2Normalize(new Float32Array(raw));
-  return embedding;
-}
-
-// L2-normalise a Float32Array so dot-product == cosine similarity.
-function l2Normalize(v) {
-  let norm = 0;
-  for (let i = 0; i < v.length; i++) norm += v[i] * v[i];
-  norm = Math.sqrt(norm);
-  if (norm === 0) return v;
-  const out = new Float32Array(v.length);
-  for (let i = 0; i < v.length; i++) out[i] = v[i] / norm;
   return out;
 }
 
-// Cosine similarity between two L2-normalised embeddings (dot product).
-// Returns 0 if the embeddings have different dimensions rather than producing
-// a meaningless partial result.
-function cosineSimilarity(a, b) {
-  if (a.length !== b.length) return 0;
-  let dot = 0;
-  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
-  return dot;
+async function createEagleProfiler() {
+  const { EagleProfiler } = await loadEagleModule();
+  const cfg = await loadEagleSettings();
+  if (!cfg.accessKey) {
+    throw new Error('Picovoice AccessKey is missing. Set it in KPSC Portal -> Settings -> Picovoice Eagle AccessKey.');
+  }
+  return EagleProfiler.create(cfg.accessKey, { publicPath: cfg.modelPath });
 }
 
-// Serialise a Float32Array embedding to a base64 string for persistent storage.
-// Bytes are written in little-endian order (IEEE 754 single-precision) so the
-// representation is consistent regardless of the host system's native endianness.
+async function createEagleRecognizer(profiles) {
+  const { Eagle } = await loadEagleModule();
+  const cfg = await loadEagleSettings();
+  if (!cfg.accessKey) {
+    throw new Error('Picovoice AccessKey is missing. Set it in KPSC Portal -> Settings -> Picovoice Eagle AccessKey.');
+  }
+  return Eagle.create(cfg.accessKey, { publicPath: cfg.modelPath }, ...profiles);
+}
+
+// Build a Picovoice Eagle profile (Uint8Array) from Float32 PCM audio at arbitrary sample rate.
+async function computeSpeakerEmbedding(audioFloat32, sampleRate) {
+  const profiler = await createEagleProfiler();
+  try {
+    const audio16k = resampleTo16k(audioFloat32, sampleRate);
+    const pcm = float32ToInt16(audio16k);
+    const minSamples = Number(profiler.minEnrollSamples) || 1;
+    let percentage = 0;
+    for (let i = 0; i + minSamples <= pcm.length && percentage < 100; i += minSamples) {
+      const result = await profiler.enroll(pcm.subarray(i, i + minSamples));
+      percentage = Number(result?.percentage ?? percentage);
+    }
+    if (percentage < 100) {
+      throw new Error(`Enrollment reached ${Math.round(percentage)}%. Record ${EAGLE_ENROLL_DURATION_SEC} seconds of louder, cleaner speech with less background noise.`);
+    }
+    const profile = await profiler.export();
+    return profile instanceof Uint8Array ? profile : new Uint8Array(profile);
+  } finally {
+    try { profiler.release?.(); } catch (_) {}
+  }
+}
+
+// Compute average Eagle scores per enrolled profile for a captured speaker segment.
+async function computeSpeakerScores(audioFloat32, sampleRate, profiles) {
+  if (!Array.isArray(profiles) || !profiles.length) return null;
+  const recognizer = await createEagleRecognizer(profiles);
+  try {
+    const audio16k = resampleTo16k(audioFloat32, sampleRate);
+    const pcm = float32ToInt16(audio16k);
+    const frameLength = Number(recognizer.frameLength) || 512;
+    const sums = new Array(profiles.length).fill(0);
+    let frames = 0;
+    for (let i = 0; i + frameLength <= pcm.length; i += frameLength) {
+      const scores = await recognizer.process(pcm.subarray(i, i + frameLength));
+      if (!Array.isArray(scores) || scores.length !== profiles.length) continue;
+      for (let j = 0; j < scores.length; j++) sums[j] += Number(scores[j]) || 0;
+      frames++;
+    }
+    if (!frames) return null;
+    return sums.map(sum => sum / frames);
+  } finally {
+    try { recognizer.release?.(); } catch (_) {}
+  }
+}
+
+// Serialise an Eagle profile to base64 for persistent storage.
 function embeddingToBase64(embedding) {
-  const bytes = new Uint8Array(embedding.length * 4);
-  const view  = new DataView(bytes.buffer);
-  for (let i = 0; i < embedding.length; i++) view.setFloat32(i * 4, embedding[i], true);
-  return arrayBufferToBase64(bytes.buffer);
+  if (!embedding) return '';
+  const bytes = embedding instanceof Uint8Array ? embedding : new Uint8Array(embedding);
+  const slice = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    ? bytes.buffer
+    : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return arrayBufferToBase64(slice);
 }
 
-// Deserialise a base64 string back to a Float32Array embedding.
-// Reads bytes in little-endian order to match embeddingToBase64.
+// Deserialise a base64-encoded Eagle profile back to Uint8Array.
 function base64ToEmbedding(b64) {
   try {
     const binary = atob(b64);
     const bytes  = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const view   = new DataView(bytes.buffer);
-    const floats = new Float32Array(binary.length / 4);
-    for (let i = 0; i < floats.length; i++) floats[i] = view.getFloat32(i * 4, true);
-    return floats;
+    return bytes;
   } catch {
     return null;
   }
@@ -2445,7 +2437,7 @@ function renderMembersList() {
 function memberRow(idx, mem) {
   const enrolled    = !!mem.sbVoiceEmbedding;
   const enrollClass = enrolled ? 'kbtn kbtn-sm k-enroll-btn k-enrolled' : 'kbtn kbtn-sm kbtn-ghost k-enroll-btn';
-  const enrollTitle = enrolled ? 'Voice enrolled — click to re-enrol' : 'Enrol voice fingerprint for auto-identification';
+  const enrollTitle = enrolled ? 'Voice enrolled — click to re-enroll' : 'Enroll voice fingerprint for auto-identification';
   const enrollIcon  = enrolled ? '🎙✓' : '🎙';
   return `
     <div class="k-mem-row" id="kmem-row-${idx}">
@@ -2633,8 +2625,8 @@ async function startEnrollRecording(idx) {
       const timerEl = document.getElementById('k-enroll-timer');
       const barEl   = document.getElementById('k-enroll-bar');
       if (timerEl) timerEl.textContent = `${m}:${String(s).padStart(2, '0')} / 0:30`;
-      if (barEl)   barEl.style.width   = `${Math.min(100, (Enrolling.elapsed / SB_ENROLL_DURATION_SEC) * 100)}%`;
-      if (Enrolling.elapsed >= SB_ENROLL_DURATION_SEC) {
+      if (barEl)   barEl.style.width   = `${Math.min(100, (Enrolling.elapsed / EAGLE_ENROLL_DURATION_SEC) * 100)}%`;
+      if (Enrolling.elapsed >= EAGLE_ENROLL_DURATION_SEC) {
         clearInterval(Enrolling.timer);
         Enrolling.timer = null;
         finishEnrollRecording();
@@ -2672,8 +2664,8 @@ async function finishEnrollRecording() {
     for (const chunk of Enrolling.samples) { merged.set(chunk, pos); pos += chunk.length; }
     Enrolling.samples = []; // free memory
 
-    // Compute the ECAPA-TDNN speaker embedding from the recorded audio.
-    if (statusEl) statusEl.innerHTML = '<div class="k-enroll-info">⏳ Loading ECAPA-TDNN model (first use only — ~20 MB cached locally)…</div>';
+    // Compute the Picovoice Eagle speaker profile from the recorded audio.
+    if (statusEl) statusEl.innerHTML = '<div class="k-enroll-info">⏳ Loading Picovoice Eagle model (first use only)…</div>';
     const embedding = await computeSpeakerEmbedding(merged, Enrolling.sampleRate);
     if (!embedding || !embedding.length) throw new Error('Embedding computation returned no data.');
 
@@ -3525,7 +3517,7 @@ function renderApiStatusCard(apiStatus) {
         </div>
         <div class="k-api-status-row">
           <span class="k-api-label">Voice recognition</span>
-          <span>${apiStatusPill(sb)} <small>${esc(sb.provider || 'SpeechBrain ECAPA-TDNN')} — no API key required</small></span>
+          <span>${apiStatusPill(sb)} <small>${esc(sb.provider || 'Picovoice Eagle')}</small></span>
         </div>
       </div>
       <p class="k-api-message">${esc(live.message || apiStatus?.error || 'Status unavailable.')}</p>
@@ -3658,6 +3650,9 @@ async function renderSettings(main) {
   const policyNotes = res?.kpsc_policy_notes || '';
   const hasDeepseek = !!deepseekKey;
   const hasOpenai   = !!openaiKey;
+  const picovoiceAccessKey = res?.kpsc_picovoice_access_key || '';
+  const hasPicovoiceAccessKey = !!picovoiceAccessKey;
+  const picovoiceModelPath = res?.kpsc_picovoice_model_path || EAGLE_DEFAULT_MODEL_PATH;
   const reminderTemplate = res?.kpsc_reminder_template || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge. God bless you.';
   const incomeCategories = Array.isArray(res?.kpsc_income_categories) ? res.kpsc_income_categories.join('\n') : '';
   const expenseCategories = Array.isArray(res?.kpsc_expense_categories) ? res.kpsc_expense_categories.join('\n') : '';
@@ -3722,6 +3717,22 @@ async function renderSettings(main) {
         </div>
 
         <div class="k-form-group">
+          <label class="k-label">Picovoice Eagle AccessKey</label>
+          <input type="password" id="ks-picovoice-access-key" class="k-input"
+            data-has-key="${hasPicovoiceAccessKey ? '1' : '0'}"
+            placeholder="${hasPicovoiceAccessKey ? '••••••••••••••••' : 'pv_...'}"
+            autocomplete="off" value="" />
+          <p class="k-hint">Required for voice fingerprint enrollment/auto-identification. Get one at <a href="https://console.picovoice.ai" target="_blank" rel="noopener">console.picovoice.ai</a>.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Picovoice Eagle Model Path</label>
+          <input type="text" id="ks-picovoice-model-path" class="k-input"
+            placeholder="/models/eagle_params.pv" value="${esc(picovoiceModelPath)}" />
+          <p class="k-hint">Same-site absolute path to <code>eagle_params.pv</code>. Default is <code>/models/eagle_params.pv</code>.</p>
+        </div>
+
+        <div class="k-form-group">
           <label class="k-label">KPSC Bylaw / Policy URL</label>
           <input type="url" id="ks-policy-url" class="k-input"
             placeholder="https://..." value="${esc(policyUrl)}" />
@@ -3762,11 +3773,9 @@ async function renderSettings(main) {
           upload only when both are absent.
         </p>
         <p class="k-hint" style="margin-top:8px">
-          <strong>Voice fingerprinting</strong> uses <strong>SpeechBrain ECAPA-TDNN</strong>
-          (<code>Xenova/speechbrain-spkrec-ecapa-voxceleb</code>) — an open-source speaker
-          recognition model that runs <em>entirely in the browser</em> via transformers.js.
-          No API key is required. The quantised model (~20 MB) is downloaded once on first
-          enrolment and cached locally by the browser.
+          <strong>Voice fingerprinting</strong> uses <strong>Picovoice Eagle</strong>, running
+          fully on-device in the browser. Configure <code>Picovoice Eagle AccessKey</code> and
+          model path in this page before first enrollment.
         </p>
       </div>
 
@@ -3783,11 +3792,26 @@ async function renderSettings(main) {
 async function saveSettings() {
   const btn = document.getElementById('ks-save-btn');
   const msg = document.getElementById('ks-save-msg');
+  const picovoiceInput = document.getElementById('ks-picovoice-access-key');
   const deepseekKey = document.getElementById('ks-deepseek-key')?.value.trim() || '';
   const openaiKey   = document.getElementById('ks-openai-key')?.value.trim()   || '';
+  let picovoiceAccessKey = picovoiceInput?.value.trim() || '';
+  const picovoiceModelPath = document.getElementById('ks-picovoice-model-path')?.value.trim() || EAGLE_DEFAULT_MODEL_PATH;
   const policyUrl   = document.getElementById('ks-policy-url')?.value.trim()   || '';
   const policyNotes = document.getElementById('ks-policy-notes')?.value.trim() || '';
   const deepseekModel = document.getElementById('ks-deepseek-model')?.value || 'deepseek-chat';
+
+  if (picovoiceModelPath && !/^\/\S+$/.test(picovoiceModelPath)) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = 'Picovoice model path must be a same-site absolute path (example: /models/eagle_params.pv).';
+    msg.style.display = 'block';
+    return;
+  }
+
+  if (!picovoiceAccessKey && picovoiceInput?.dataset.hasKey === '1') {
+    const currentSettings = await apiGet('settings');
+    picovoiceAccessKey = String(currentSettings?.kpsc_picovoice_access_key || '').trim();
+  }
 
   btn.disabled = true;
   btn.textContent = 'Saving…';
@@ -3797,6 +3821,8 @@ async function saveSettings() {
     ai_deepseek_key: deepseekKey,
     ai_openai_key: openaiKey,
     ai_deepseek_model: deepseekModel,
+    kpsc_picovoice_access_key: picovoiceAccessKey,
+    kpsc_picovoice_model_path: picovoiceModelPath,
     kpsc_policy_url: policyUrl,
     kpsc_policy_notes: policyNotes,
   });
@@ -3807,6 +3833,8 @@ async function saveSettings() {
   } else {
     msg.className = 'k-settings-msg k-msg-ok';
     msg.textContent = 'Settings saved.';
+    _eagleSettings = null;
+    _eagleSettingsLoading = null;
     await renderSettings(document.getElementById('kpsc-main'));
     return;
   }

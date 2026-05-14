@@ -1433,8 +1433,8 @@ function getApiStatus(env) {
     speakerRecognition: {
       configured: true,
       active: true,
-      provider: 'SpeechBrain ECAPA-TDNN',
-      message: 'Speaker embeddings computed client-side via ECAPA-TDNN (Xenova/speechbrain-spkrec-ecapa-voxceleb). No server-side key required.',
+      provider: 'Picovoice Eagle',
+      message: 'Speaker recognition runs client-side with Picovoice Eagle. Configure AccessKey and model path in KPSC Settings.',
     },
   });
 }
