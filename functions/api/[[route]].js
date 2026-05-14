@@ -2780,7 +2780,7 @@ Return only valid JSON, no markdown fences.`;
   const resp = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: meeting.deepseekModel || 'deepseek-chat', messages: [{ role: 'user', content: prompt }], max_tokens: 3000, temperature: 0.3 }),
+    body: JSON.stringify({ model: ['deepseek-chat','deepseek-reasoner'].includes(meeting.deepseekModel) ? meeting.deepseekModel : 'deepseek-chat', messages: [{ role: 'user', content: prompt }], max_tokens: 3000, temperature: 0.3 }),
   });
   if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
   const data = await resp.json();
