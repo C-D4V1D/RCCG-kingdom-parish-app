@@ -14,6 +14,7 @@ const CORS_HEADERS = {
 const ok  = (data)       => new Response(JSON.stringify(data),        { status: 200, headers: CORS_HEADERS });
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper';
 
 function isValidPin(pin) {
   return /^\d{4,6}$/.test(String(pin || ''));
@@ -1710,7 +1711,7 @@ async function createRealtimeTranscriptionToken(env) {
             format: { type: 'audio/pcm', rate: 24000 },
             noise_reduction: { type: 'near_field' },
             transcription: {
-              model: 'gpt-4o-transcribe',
+              model: OPENAI_REALTIME_TRANSCRIPTION_MODEL,
               language: 'en',
               prompt: 'Kingdom Parish Stewardship Committee meeting transcription. Preserve names, votes, resolutions, action items, and church finance terms accurately.',
             },

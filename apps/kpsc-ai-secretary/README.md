@@ -43,7 +43,7 @@ The current processor uses a deterministic governance-first strategy so it works
 The integrated KPSC meeting room now supports live meeting capture:
 
 - **Start Meeting / Pause / Resume / Stop** controls in the meeting room.
-- Continuous microphone streaming to OpenAI Realtime transcription through a browser WebRTC session.
+- Continuous microphone streaming to GPT Realtime Whisper transcription through a browser WebRTC session.
 - Timestamped transcript entries with auto-scroll, plus automatic appending into the saved transcript notes.
 - MediaRecorder chunking every 5 seconds so the browser never builds a full in-memory recording.
 - Chunk uploads to `/api/ai-secretary-meetings/audio-chunk`; bind an R2 bucket as `KPSC_AUDIO_BUCKET` (or `AUDIO_BUCKET`) to persist chunks.

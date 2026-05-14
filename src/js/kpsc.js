@@ -2251,7 +2251,7 @@ async function renderSettings(main) {
         </p>
         <div class="k-env-row">
           <code class="k-env-key">OPENAI_API_KEY</code>
-          <span class="k-env-desc">Powers live interim transcription (OpenAI Realtime Whisper via WebRTC). Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a>.</span>
+          <span class="k-env-desc">Powers live interim transcription (GPT Realtime Whisper via WebRTC). Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a>.</span>
         </div>
         <div class="k-env-row">
           <code class="k-env-key">DEEPGRAM_API_KEY</code>
