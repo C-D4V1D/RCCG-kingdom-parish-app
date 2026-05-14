@@ -33,6 +33,7 @@ const S = {
   activeMeeting: null,
   members: [],
   archiveSearch: '',
+  archiveQuickFilter: 'all',
 };
 
 // ── AUDIO RECORDER + REALTIME TRANSCRIPTION ───────────────────────
@@ -180,7 +181,7 @@ function recRenderUI() {
           <span class="rec-dot rec-dot-live"></span>
           <span class="rec-timer" id="kpsc-rec-timer">${recFmt()}</span>
           <button class="kbtn kbtn-sm" onclick="Kpsc.recPause()">⏸ Pause</button>
-          <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.recStop()">⏹ Stop</button>
+          <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.recStop()">⏹ End Recording</button>
         </div>
         <div class="rec-meta">
           <span class="rec-rt rec-rt-${Rec.realtimeStatus}">${recStatusLabel()}</span>
@@ -195,7 +196,7 @@ function recRenderUI() {
           <span class="rec-dot rec-dot-paused"></span>
           <span class="rec-timer">${recFmt()} — Paused</span>
           <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.recResume()">▶ Resume</button>
-          <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.recStop()">⏹ Stop</button>
+          <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.recStop()">⏹ End Recording</button>
         </div>
         <div class="rec-meta">
           <span>Microphone paused</span>
@@ -210,7 +211,7 @@ function recRenderUI() {
           <span class="rec-timer">${recFmt()} — Stopped</span>
           <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.recReset()">🗑 Reset Recorder</button>
         </div>
-        <div class="rec-meta">Recording ended. Full audio was never kept in browser memory; only short chunks were uploaded.</div>
+        <div class="rec-meta">Recording ended. Use the End Meeting button to lock the transcript and prepare minutes; full audio was never kept in browser memory, only short chunks were uploaded.</div>
       </div>`;
   }
   const transcriptPanel = document.getElementById('kpsc-live-transcript');
@@ -1523,6 +1524,77 @@ function readAttendance() {
   }).flat();
 }
 
+function resolutionStatus(r) {
+  if (r.approved === true) return { label: 'Approved', cls: 'badge-green' };
+  if (r.approved === false) return { label: 'Rejected', cls: 'badge-red' };
+  return { label: 'Needs confirmation', cls: 'badge-amber' };
+}
+
+function formatResolutionAmount(amount) {
+  const n = Number(String(amount || '').replace(/,/g, ''));
+  return Number.isFinite(n) && n > 0 ? `₦${n.toLocaleString('en-NG')}` : String(amount || '').trim();
+}
+
+
+function renderReviewPanel(m) {
+  const resolutions = m.resolutions || [];
+  const actionItems = m.actionItems || [];
+  return `
+    <details class="k-review-panel">
+      <summary>✍️ Review & Correct AI Draft Before Filing</summary>
+      <p class="k-review-hint">AI output is a draft. Confirm approvals, vote wording, owners, deadlines, and the final minutes text before sharing or filing.</p>
+      <div class="k-form-group">
+        <label class="k-label">Short Summary</label>
+        <textarea class="k-input k-review-textarea" id="kr-summary-short">${esc(m.summaryShort || '')}</textarea>
+      </div>
+      <div class="k-form-group">
+        <label class="k-label">Detailed Summary</label>
+        <textarea class="k-input k-review-textarea" id="kr-summary-long">${esc(m.summaryLong || '')}</textarea>
+      </div>
+      <div class="k-form-group">
+        <label class="k-label">Minutes Markdown</label>
+        <textarea class="k-input k-review-minutes" id="kr-minutes">${esc(m.minutesMarkdown || '')}</textarea>
+      </div>
+
+      <h4 class="k-sub-title">Review Resolutions</h4>
+      <div class="k-review-list" id="kr-resolutions">
+        ${resolutions.length ? resolutions.map((r, i) => `
+          <div class="k-review-row" data-idx="${i}">
+            <label class="k-label">Resolution Text</label>
+            <textarea class="k-input" id="kr-res-text-${i}">${esc(r.text || '')}</textarea>
+            <div class="k-review-grid">
+              <input class="k-input" id="kr-res-type-${i}" value="${esc(r.resolutionType || '')}" placeholder="Type e.g. financial_approval" />
+              <input class="k-input" id="kr-res-category-${i}" value="${esc(r.category || '')}" placeholder="Category" />
+              <select class="k-input" id="kr-res-approved-${i}">
+                <option value="null" ${r.approved === null || r.approved === undefined ? 'selected' : ''}>Needs confirmation</option>
+                <option value="true" ${r.approved === true ? 'selected' : ''}>Approved</option>
+                <option value="false" ${r.approved === false ? 'selected' : ''}>Rejected</option>
+              </select>
+              <input class="k-input" id="kr-res-amount-${i}" value="${esc(r.amount || '')}" placeholder="Amount" />
+            </div>
+            <input class="k-input" id="kr-res-vote-${i}" value="${esc(r.voteSummary || '')}" placeholder="Vote summary" />
+          </div>`).join('') : '<div class="k-empty">No resolutions detected. Add them in the minutes text if needed.</div>'}
+      </div>
+
+      <h4 class="k-sub-title">Review Action Items</h4>
+      <div class="k-review-list" id="kr-actions">
+        ${actionItems.length ? actionItems.map((a, i) => `
+          <div class="k-review-row" data-idx="${i}">
+            <label class="k-label">Task</label>
+            <textarea class="k-input" id="kr-act-task-${i}">${esc(a.task || '')}</textarea>
+            <div class="k-review-grid">
+              <input class="k-input" id="kr-act-assignee-${i}" value="${esc(a.assignee || '')}" placeholder="Owner" />
+              <input class="k-input" id="kr-act-due-${i}" value="${esc(a.dueDate || '')}" placeholder="Deadline" />
+              <select class="k-input" id="kr-act-status-${i}">
+                ${['pending','in_progress','done','cancelled'].map(st => `<option value="${st}" ${(a.status || 'pending') === st ? 'selected' : ''}>${st.replace('_', ' ')}</option>`).join('')}
+              </select>
+            </div>
+          </div>`).join('') : '<div class="k-empty">No action items detected. Add them in the minutes text if needed.</div>'}
+      </div>
+      <button class="kbtn kbtn-primary" onclick="Kpsc.saveMinutesReview(this)">Save Review Corrections</button>
+    </details>`;
+}
+
 function renderMinutesPanel(m) {
   if (!m?.minutesMarkdown) return '';
   const resolutions = m.resolutions || [];
@@ -1533,15 +1605,24 @@ function renderMinutesPanel(m) {
     <section class="k-section k-minutes-section">
       <h3 class="k-sec-title">Meeting Minutes</h3>
       ${m.summaryShort ? `<div class="k-summary">${esc(m.summaryShort)}</div>` : ''}
+      ${m.summaryLong ? `<details class="k-summary-detail"><summary>Detailed summary</summary><pre>${esc(m.summaryLong)}</pre></details>` : ''}
+      ${renderReviewPanel(m)}
       <div class="k-minutes-body">${minutesHtml(m.minutesMarkdown)}</div>
 
       ${resolutions.length ? `
-        <h4 class="k-sub-title">Resolutions (${resolutions.length})</h4>
-        <div class="k-res-list">${resolutions.map(r => `
+        <h4 class="k-sub-title">Decision & Resolution Register (${resolutions.length})</h4>
+        <div class="k-res-list">${resolutions.map(r => {
+          const status = resolutionStatus(r);
+          return `
           <div class="k-res-item">
-            <span class="kbadge ${r.approved ? 'badge-green' : 'badge-amber'}">${r.approved ? 'Approved' : 'Deferred'}</span>
-            ${esc(r.text)}
-          </div>`).join('')}
+            <span class="kbadge ${status.cls}">${status.label}</span>
+            ${r.resolutionType ? `<span class="kbadge badge-gray">${esc(String(r.resolutionType).replace(/_/g, ' '))}</span>` : ''}
+            ${r.category ? `<span class="kbadge badge-type">${esc(r.category)}</span>` : ''}
+            ${r.amount ? `<span class="kbadge badge-green">${esc(formatResolutionAmount(r.amount))}</span>` : ''}
+            <div>${esc(r.text)}</div>
+            ${r.voteSummary ? `<small>${esc(r.voteSummary)}</small>` : ''}
+          </div>`;
+        }).join('')}
         </div>` : ''}
 
       ${actionItems.length ? `
@@ -1550,8 +1631,8 @@ function renderMinutesPanel(m) {
           <div class="k-action-item">
             <div class="k-action-task">${esc(a.task)}</div>
             <div class="k-action-meta">
-              ${a.assignee ? `<span>👤 ${esc(a.assignee)}</span>` : ''}
-              ${a.dueDate  ? `<span>📅 ${fmtDate(a.dueDate)}</span>` : ''}
+              ${a.assignee ? `<span>👤 ${esc(a.assignee)}</span>` : '<span>👤 Unassigned</span>'}
+              ${a.dueDate  ? `<span>📅 ${esc(a.dueDate)}</span>` : '<span>📅 No deadline stated</span>'}
               <span class="kbadge badge-gray">${a.status || 'pending'}</span>
             </div>
           </div>`).join('')}
@@ -1565,6 +1646,58 @@ function renderMinutesPanel(m) {
           </div>`).join('')}
         </div>` : ''}
     </section>`;
+}
+
+
+function readReviewResolutions() {
+  return (S.activeMeeting?.resolutions || []).map((r, i) => {
+    const approvedRaw = document.getElementById(`kr-res-approved-${i}`)?.value || 'null';
+    return {
+      ...r,
+      text: document.getElementById(`kr-res-text-${i}`)?.value.trim() || '',
+      resolutionType: document.getElementById(`kr-res-type-${i}`)?.value.trim() || 'decision',
+      category: document.getElementById(`kr-res-category-${i}`)?.value.trim() || 'other',
+      approved: approvedRaw === 'true' ? true : approvedRaw === 'false' ? false : null,
+      amount: document.getElementById(`kr-res-amount-${i}`)?.value.trim() || '',
+      voteSummary: document.getElementById(`kr-res-vote-${i}`)?.value.trim() || '',
+    };
+  }).filter(r => r.text);
+}
+
+function readReviewActions() {
+  return (S.activeMeeting?.actionItems || []).map((a, i) => ({
+    ...a,
+    task: document.getElementById(`kr-act-task-${i}`)?.value.trim() || '',
+    assignee: document.getElementById(`kr-act-assignee-${i}`)?.value.trim() || 'Unassigned',
+    dueDate: document.getElementById(`kr-act-due-${i}`)?.value.trim() || '',
+    status: document.getElementById(`kr-act-status-${i}`)?.value || 'pending',
+  })).filter(a => a.task);
+}
+
+async function saveMinutesReview(btn) {
+  if (!S.activeMeeting) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Saving review…';
+  try {
+    const res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
+      summaryShort: document.getElementById('kr-summary-short')?.value || '',
+      summaryLong: document.getElementById('kr-summary-long')?.value || '',
+      minutesMarkdown: document.getElementById('kr-minutes')?.value || '',
+      resolutions: readReviewResolutions(),
+      actionItems: readReviewActions(),
+      policyFlags: S.activeMeeting.policyFlags || [],
+    });
+    if (res.error) { showToast(res.error, 'error'); return; }
+    S.activeMeeting = res;
+    renderPage('meeting');
+    showToast('Review corrections saved', 'success');
+  } catch {
+    showToast('Review save failed. Check your connection.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
 }
 
 // ── MEETING ACTIONS ───────────────────────────────────────────────
@@ -1967,14 +2100,55 @@ async function finishEnrollRecording() {
 }
 
 
+
+function archiveQuickFilters() {
+  return [
+    { key: 'all', label: 'All' },
+    { key: 'welfare', label: 'Welfare' },
+    { key: 'financial', label: 'Financial approvals' },
+    { key: 'rejected', label: 'Rejected' },
+    { key: 'deferred', label: 'Needs confirmation' },
+    { key: 'unassigned', label: 'Unassigned actions' },
+    { key: 'missing_deadline', label: 'Missing deadlines' },
+    { key: 'policy_flags', label: 'Policy flags' },
+  ];
+}
+
+function meetingMatchesQuickFilter(m, filter) {
+  if (!filter || filter === 'all') return true;
+  const resolutions = m.resolutions || [];
+  const actions = m.actionItems || [];
+  const flags = m.policyFlags || [];
+  if (filter === 'welfare') return resolutions.some(r => r.category === 'welfare') || /welfare|benevolence|assistance/i.test(`${m.transcriptText || ''} ${m.minutesMarkdown || ''}`);
+  if (filter === 'financial') return resolutions.some(r => r.resolutionType === 'financial_approval' || r.category === 'financial' || r.amount);
+  if (filter === 'rejected') return resolutions.some(r => r.approved === false || r.resolutionType === 'rejection');
+  if (filter === 'deferred') return resolutions.some(r => r.approved === null || r.approved === undefined);
+  if (filter === 'unassigned') return actions.some(a => !a.assignee || /^unassigned$/i.test(a.assignee));
+  if (filter === 'missing_deadline') return actions.some(a => !a.dueDate);
+  if (filter === 'policy_flags') return flags.length > 0;
+  return true;
+}
+
+function setArchiveQuickFilter(filter) {
+  S.archiveQuickFilter = filter || 'all';
+  const el = document.getElementById('k-archive-list');
+  if (el) el.innerHTML = archiveList(S.meetings, S.archiveSearch);
+  document.querySelectorAll('.k-filter').forEach(btn => btn.classList.remove('active'));
+  const active = [...document.querySelectorAll('.k-filter')].find(btn => btn.getAttribute('onclick')?.includes(`'${S.archiveQuickFilter}'`));
+  active?.classList.add('active');
+}
+
 async function renderArchive(main) {
   const res = await apiGet('ai-secretary-meetings');
   S.meetings = res.meetings || res || [];
   main.innerHTML = `
     <div class="k-page">
       <div class="k-search-bar">
-        <input class="k-input" type="search" id="k-archive-search" placeholder="Search by title or date…"
+        <input class="k-input" type="search" id="k-archive-search" placeholder="Search title, date, transcript, resolutions, actions…"
           value="${esc(S.archiveSearch)}" oninput="Kpsc.filterArchive(this.value)" />
+      </div>
+      <div class="k-quick-filters">
+        ${archiveQuickFilters().map(f => `<button class="k-filter ${S.archiveQuickFilter === f.key ? 'active' : ''}" onclick="Kpsc.setArchiveQuickFilter('${f.key}')">${f.label}</button>`).join('')}
       </div>
       <div id="k-archive-list">${archiveList(S.meetings, S.archiveSearch)}</div>
     </div>`;
@@ -1988,11 +2162,25 @@ function filterArchive(q) {
 
 function archiveList(meetings, q) {
   const lq = (q || '').toLowerCase();
+  const quickFiltered = meetings.filter(m => meetingMatchesQuickFilter(m, S.archiveQuickFilter));
   const filtered = lq
-    ? meetings.filter(m =>
-        (m.title || '').toLowerCase().includes(lq) ||
-        (m.meetingDate || '').includes(lq))
-    : meetings;
+    ? quickFiltered.filter(m => {
+        const searchable = [
+          m.title,
+          m.meetingDate,
+          m.meetingType,
+          m.status,
+          m.transcriptText,
+          m.summaryShort,
+          m.summaryLong,
+          m.minutesMarkdown,
+          ...(m.resolutions || []).flatMap(r => [r.text, r.category, r.resolutionType, r.voteSummary, r.amount]),
+          ...(m.actionItems || []).flatMap(a => [a.task, a.assignee, a.dueDate, a.status]),
+          ...(m.policyFlags || []).flatMap(f => [f.type, f.severity, f.message]),
+        ].filter(Boolean).join(' ').toLowerCase();
+        return searchable.includes(lq);
+      })
+    : quickFiltered;
   const sorted = [...filtered].sort((a, b) => (b.meetingDate || '').localeCompare(a.meetingDate || ''));
   if (sorted.length === 0) return `<div class="k-empty">No meetings found.</div>`;
   return `<div class="k-meeting-list">${sorted.map(m => meetingCard(m)).join('')}</div>`;
@@ -2003,6 +2191,8 @@ async function renderSettings(main) {
   const res = await apiGet('settings');
   const deepseekKey = res?.ai_deepseek_key || '';
   const openaiKey   = res?.ai_openai_key   || '';
+  const policyUrl   = res?.kpsc_policy_url  || '';
+  const policyNotes = res?.kpsc_policy_notes || '';
   const hasDeepseek = !!deepseekKey;
   const hasOpenai   = !!openaiKey;
 
@@ -2034,8 +2224,21 @@ async function renderSettings(main) {
           <p class="k-hint">Optional alternative AI provider for meeting minutes. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a></p>
         </div>
 
+        <div class="k-form-group">
+          <label class="k-label">KPSC Bylaw / Policy URL</label>
+          <input type="url" id="ks-policy-url" class="k-input"
+            placeholder="https://..." value="${esc(policyUrl)}" />
+          <p class="k-hint">Optional link to the current KPSC bylaws or governance document for secretary review.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Policy Notes for AI Secretary</label>
+          <textarea id="ks-policy-notes" class="k-input k-textarea" placeholder="Paste key KPSC rules here, e.g. quorum, approval thresholds, welfare privacy rules...">${esc(policyNotes)}</textarea>
+          <p class="k-hint">Optional. These notes are included in provider-backed minutes processing and kept available for human review.</p>
+        </div>
+
         <div id="ks-save-msg" class="k-settings-msg" style="display:none"></div>
-        <button class="kbtn kbtn-primary" id="ks-save-btn" onclick="Kpsc.saveSettings()">Save Keys</button>
+        <button class="kbtn kbtn-primary" id="ks-save-btn" onclick="Kpsc.saveSettings()">Save Settings</button>
         ${hasDeepseek || hasOpenai ? `<button class="kbtn kbtn-danger-outline" style="margin-left:8px" onclick="Kpsc.clearAiKeys()">Clear Keys</button>` : ''}
       </div>
 
@@ -2086,12 +2289,19 @@ async function saveSettings() {
   const msg = document.getElementById('ks-save-msg');
   const deepseekKey = document.getElementById('ks-deepseek-key')?.value.trim() || '';
   const openaiKey   = document.getElementById('ks-openai-key')?.value.trim()   || '';
+  const policyUrl   = document.getElementById('ks-policy-url')?.value.trim()   || '';
+  const policyNotes = document.getElementById('ks-policy-notes')?.value.trim() || '';
 
   btn.disabled = true;
   btn.textContent = 'Saving…';
   msg.style.display = 'none';
 
-  const res = await apiPost('settings', { ai_deepseek_key: deepseekKey, ai_openai_key: openaiKey });
+  const res = await apiPost('settings', {
+    ai_deepseek_key: deepseekKey,
+    ai_openai_key: openaiKey,
+    kpsc_policy_url: policyUrl,
+    kpsc_policy_notes: policyNotes,
+  });
 
   if (res?.error) {
     msg.className = 'k-settings-msg k-msg-error';
@@ -2134,11 +2344,13 @@ window.Kpsc = {
   saveMeeting,
   endMeeting,
   processMeeting,
+  saveMinutesReview,
   addMember,
   removeMember,
   memberFieldChange,
   saveMembers,
   filterArchive,
+  setArchiveQuickFilter,
   saveSettings,
   clearAiKeys,
   updateAttGroup,
