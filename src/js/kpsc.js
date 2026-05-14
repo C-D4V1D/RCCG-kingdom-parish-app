@@ -2981,6 +2981,7 @@ async function renderFinance(main) {
           <label class="k-label">Bank Statement PDF</label>
           <input id="krec-pdf-input" type="file" accept=".pdf,application/pdf" class="k-input" style="padding:8px" />
           <p class="k-hint">Upload a digital PDF (not scanned). The AI will extract the transaction lines automatically.</p>
+          <div id="krec-stepper" style="display:none" aria-live="polite"></div>
           <div class="k-room-actions" style="margin-top:10px">
             <button class="kbtn kbtn-primary" onclick="Kpsc.runPdfReconciliation(this)">🤖 Upload &amp; Reconcile</button>
           </div>
@@ -4101,6 +4102,25 @@ function setReconciliationTab(tab) {
   if (jsonTab) jsonTab.classList.toggle('active', tab !== 'pdf');
 }
 
+const PDF_RECONCILIATION_STEPS = [
+  { label: 'Extracting text', key: 'extract' },
+  { label: 'Parsing transactions', key: 'parse' },
+  { label: 'Matching to ledger', key: 'match' },
+];
+
+function renderPdfStepper(stepperEl, activeIdx, errorIdx, errorMsg) {
+  if (!stepperEl) return;
+  stepperEl.style.display = '';
+  stepperEl.innerHTML = `<div class="krec-stepper">${PDF_RECONCILIATION_STEPS.map((s, i) => {
+    let cls = 'krec-step';
+    let icon = String(i + 1);
+    if (i < activeIdx) { cls += ' krec-step-done'; icon = '✓'; }
+    else if (i === activeIdx) { cls += ' krec-step-active'; }
+    if (i === errorIdx) { cls += ' krec-step-error'; icon = '✕'; }
+    return `<div class="${cls}"><span class="krec-step-pip">${icon}</span><span class="krec-step-label">${s.label}</span></div>${i < PDF_RECONCILIATION_STEPS.length - 1 ? '<div class="krec-step-connector"></div>' : ''}`;
+  }).join('')}${errorMsg ? `<p class="krec-step-error-msg">${esc(errorMsg)}</p>` : ''}</div>`;
+}
+
 async function runPdfReconciliation(btn) {
   const input = document.getElementById('krec-pdf-input');
   const file = input?.files?.[0];
@@ -4110,43 +4130,45 @@ async function runPdfReconciliation(btn) {
   }
 
   btn.disabled = true;
-  btn.textContent = 'Reading PDF…';
+  btn.textContent = 'Processing…';
 
   const out = document.getElementById('krec-result');
-  if (out) out.innerHTML = '<div class="k-loading" style="padding:16px">📄 Extracting text from PDF…</div>';
+  const stepperEl = document.getElementById('krec-stepper');
+  if (out) out.innerHTML = '';
+  renderPdfStepper(stepperEl, 0, -1, null);
+
+  const resetBtn = () => {
+    btn.disabled = false;
+    btn.textContent = '🤖 Upload & Reconcile';
+  };
+  const stepError = (stepIdx, msg) => {
+    renderPdfStepper(stepperEl, stepIdx, stepIdx, msg);
+    resetBtn();
+  };
 
   try {
+    // Step 1: Extract text
     const pdfText = await extractPdfText(file);
     if (!pdfText.trim()) {
-      showToast('Could not extract text from this PDF. It may be a scanned image. Try the JSON tab instead.', 'warn');
-      btn.disabled = false;
-      btn.textContent = '🤖 Upload & Reconcile';
-      if (out) out.innerHTML = '';
+      stepError(0, 'No text could be extracted. This PDF may be a scanned image — use the JSON tab to paste transactions manually, or ask your bank for a digital statement.');
       return;
     }
 
-    if (out) out.innerHTML = '<div class="k-loading" style="padding:16px">🤖 AI is parsing transactions…</div>';
-    btn.textContent = 'Parsing…';
-
+    // Step 2: Parse transactions
+    renderPdfStepper(stepperEl, 1, -1, null);
     const parseRes = await apiPost('kpsc-parse-statement', { statementText: pdfText });
     if (parseRes?.error) {
-      showToast(parseRes.error, 'error');
-      btn.disabled = false;
-      btn.textContent = '🤖 Upload & Reconcile';
-      if (out) out.innerHTML = '';
+      stepError(1, parseRes.error);
       return;
     }
-
     const items = parseRes.items || [];
     if (!items.length) {
-      showToast('No transactions found in the PDF. Check the file or try the JSON tab.', 'warn');
-      btn.disabled = false;
-      btn.textContent = '🤖 Upload & Reconcile';
-      if (out) out.innerHTML = '';
+      stepError(1, 'No transactions found in the PDF. Check the file content or try the JSON tab.');
       return;
     }
 
-    btn.textContent = 'Reconciling…';
+    // Step 3: Reconcile
+    renderPdfStepper(stepperEl, 2, -1, null);
     const recRes = await apiPost('kpsc-reconciliation', {
       statementYear: S.financeYear,
       statementMonth: S.financeMonth || 0,
@@ -4154,17 +4176,20 @@ async function runPdfReconciliation(btn) {
       createdBy: S.user?.name || '',
     });
 
-    btn.disabled = false;
-    btn.textContent = '🤖 Upload & Reconcile';
+    if (recRes?.error) {
+      stepError(2, recRes.error);
+      return;
+    }
 
-    if (recRes?.error) { showToast(recRes.error, 'error'); return; }
+    // All done — mark all steps complete and show results
+    renderPdfStepper(stepperEl, 3, -1, null);
     showToast(`PDF parsed: ${items.length} transaction(s) found.`, 'success');
-
     renderReconciliationResult(out, recRes);
+    resetBtn();
   } catch (e) {
     showToast('Error processing PDF: ' + e.message, 'error');
-    btn.disabled = false;
-    btn.textContent = '🤖 Upload & Reconcile';
+    if (stepperEl) stepperEl.style.display = 'none';
+    resetBtn();
     if (out) out.innerHTML = '';
   }
 }
