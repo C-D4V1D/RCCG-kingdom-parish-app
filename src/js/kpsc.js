@@ -4156,7 +4156,13 @@ function printMinutes(meetingId) {
   if (!meeting?.minutesMarkdown) { showToast('No minutes to print. Process the meeting first.', 'warn'); return; }
 
   function mdToHtml(md) {
-    return md
+    // Escape HTML entities first to prevent XSS before applying markdown transforms
+    const escaped = md
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+    return escaped
       .replace(/^# (.+)$/gm, '<h1>$1</h1>')
       .replace(/^## (.+)$/gm, '<h2>$1</h2>')
       .replace(/^### (.+)$/gm, '<h3>$1</h3>')
