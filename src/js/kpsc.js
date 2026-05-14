@@ -1328,12 +1328,13 @@ function arrayBufferToBase64(buffer) {
 // downloaded once and cached in the browser's IndexedDB by transformers.js.
 
 const SB_MODEL_ID    = 'Xenova/speechbrain-spkrec-ecapa-voxceleb';
-// Use the bare jsDelivr URL (no file path) — jsDelivr resolves it to the package's
-// module entry point automatically. Do NOT append /dist/transformers.esm.js or similar
-// sub-paths because those files do not exist in the @xenova/transformers v2 package.
-// Bump the pin to the next stable release once the AutoFeatureExtractor/AutoModel
-// API is tested to remain compatible.
-const SB_XFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+// Use the self-contained ESM bundle. 'dist/transformers.js' ends with proper
+// `export { ... }` statements so named destructuring works in dynamic import().
+// Do NOT use the bare package URL (resolves to src/transformers.js which has
+// relative imports the browser cannot follow) or dist/transformers.min.js
+// (webpack IIFE with no ESM export statements).
+// AutoFeatureExtractor does not exist in v2 — the correct class is AutoProcessor.
+const SB_XFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.js';
 
 let _sbExtractor = null;
 let _sbModel     = null;
@@ -1350,11 +1351,11 @@ async function loadSbModel() {
   _sbLoading = (async () => {
     // Lazy ESM import — works from regular (non-module) scripts in all modern browsers.
     // The result is cached on _sbExtractor / _sbModel so subsequent calls are instant.
-    const { AutoFeatureExtractor, AutoModel, env } = await import(SB_XFORMERS_URL);
+    const { AutoProcessor, AutoModel, env } = await import(SB_XFORMERS_URL);
     env.allowLocalModels = false;
 
     const [extractor, model] = await Promise.all([
-      AutoFeatureExtractor.from_pretrained(SB_MODEL_ID),
+      AutoProcessor.from_pretrained(SB_MODEL_ID),
       AutoModel.from_pretrained(SB_MODEL_ID, { quantized: true }),
     ]);
     _sbExtractor = extractor;
@@ -1373,7 +1374,7 @@ async function computeSpeakerEmbedding(audioFloat32, sampleRate) {
 
   const { extractor, model } = await loadSbModel();
 
-  // AutoFeatureExtractor handles pre-emphasis, windowing, FBANK, and CMVN.
+  // AutoProcessor handles pre-emphasis, windowing, FBANK, and CMVN.
   const inputs  = await extractor(audio16k, { sampling_rate: 16000 });
   const outputs = await model(inputs);
 
