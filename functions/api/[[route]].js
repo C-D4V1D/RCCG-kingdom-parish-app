@@ -94,9 +94,9 @@ export async function onRequest(context) {
   try {
     let body = null;
     const contentType = request.headers.get('Content-Type') || '';
-    if (['POST', 'PUT', 'PATCH'].includes(method) && contentType.includes('application/json')) {
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && contentType.includes('application/json')) {
       try { body = await request.json(); } catch { body = {}; }
-    } else if (['POST', 'PUT', 'PATCH'].includes(method)) {
+    } else if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
       body = {};
     }
 
@@ -211,6 +211,7 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) return await createAiSecretaryMeeting(DB, body);
       if (method === 'GET'  &&  param) return await getAiSecretaryMeeting(DB, param);
       if (method === 'PUT'  &&  param) return await updateAiSecretaryMeeting(DB, param, body);
+      if (method === 'DELETE' && param) return await deleteAiSecretaryMeeting(DB, param, body);
       if (method === 'POST' && parts[2] === 'process') return await processAiSecretaryMeeting(DB, param);
     }
 
@@ -430,6 +431,9 @@ async function handleInit(DB) {
     `ALTER TABLE remittances ADD COLUMN bank_amount REAL DEFAULT 0`,
     `ALTER TABLE remittances ADD COLUMN cash_amount REAL DEFAULT 0`,
     `ALTER TABLE cash_transactions ADD COLUMN photo_data TEXT DEFAULT ''`,
+    // Soft-delete for AI secretary meeting drafts.
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_at TEXT DEFAULT ''`,
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_by TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -1179,6 +1183,8 @@ function aiSecretaryMeetingFromRow(row) {
     endedAt: row.ended_at || '',
     processedAt: row.processed_at || '',
     createdAt: row.created_at || '',
+    deletedAt: row.deleted_at || '',
+    deletedBy: row.deleted_by || '',
   };
 }
 
@@ -1548,8 +1554,34 @@ function buildAiSecretaryOutput(meeting, options = {}) {
 }
 
 async function getAiSecretaryMeetings(DB) {
-  const { results } = await DB.prepare(`SELECT * FROM ai_secretary_meetings ORDER BY meeting_date DESC, created_at DESC LIMIT 200`).all();
+  const { results } = await DB.prepare(
+    `SELECT * FROM ai_secretary_meetings
+     WHERE COALESCE(deleted_at,'') = ''
+     ORDER BY meeting_date DESC, created_at DESC LIMIT 200`
+  ).all();
   return ok((results || []).map(aiSecretaryMeetingFromRow));
+}
+
+async function deleteAiSecretaryMeeting(DB, id, data) {
+  const existing = await DB.prepare(`SELECT id, created_by, deleted_at FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
+  if (!existing) return err('AI secretary meeting not found', 404);
+  if (existing.deleted_at) return ok({ id, deletedAt: existing.deleted_at });
+
+  // Author-or-admin authorization. The frontend is trusted to forward the
+  // logged-in user's name and role (same trust model as createdBy on POST).
+  const userName = String(data?.userName || '').trim();
+  const userRole = String(data?.userRole || '').trim().toLowerCase();
+  const isAdmin = userRole === 'admin' || userRole === 'it_administrator';
+  const isAuthor = !!userName && userName === (existing.created_by || '');
+  if (!isAdmin && !isAuthor) {
+    return err('Only the meeting author or an administrator can delete this draft.', 403);
+  }
+
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE ai_secretary_meetings SET deleted_at=?, deleted_by=? WHERE id=?`
+  ).bind(now, userName || (isAdmin ? 'admin' : ''), id).run();
+  return ok({ id, deletedAt: now });
 }
 
 async function getAiSecretaryMeeting(DB, id) {
