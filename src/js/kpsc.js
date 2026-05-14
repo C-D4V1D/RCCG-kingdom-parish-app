@@ -722,8 +722,8 @@ async function diarizerConnect() {
 
   const tokenRes = await apiPost('deepgram-transcription-token', {});
   if (tokenRes.error) throw new Error(tokenRes.error);
-  const apiKey = tokenRes.key;
-  if (!apiKey) throw new Error('Deepgram API key was not returned by the server.');
+  const deepgramToken = tokenRes.key;
+  if (!deepgramToken) throw new Error('Deepgram browser token was not returned by the server.');
 
   // Build AudioContext and AudioWorklet pipeline for raw PCM streaming.
   const audioCtx = new AudioContext();
@@ -742,7 +742,7 @@ async function diarizerConnect() {
   // Build the Deepgram WebSocket URL with required parameters.
   const sampleRate = audioCtx.sampleRate;
   const dgParams = new URLSearchParams({
-    token: apiKey,
+    token: deepgramToken,
     model: 'nova-3',
     diarize: 'true',
     punctuate: 'true',
