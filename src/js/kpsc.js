@@ -2470,6 +2470,10 @@ function monthName(month) {
   return new Date(Date.UTC(currentYear(), Math.max(0, month - 1), 1)).toLocaleString('en-NG', { month: 'long', timeZone: 'UTC' });
 }
 
+function catLabel(c) {
+  return String(c || '').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+}
+
 async function loadPartnerData(year = currentYear()) {
   const [partnersRes, paymentsRes] = await Promise.all([
     apiGet('kpsc-partners'),
@@ -2790,7 +2794,6 @@ async function renderFinance(main) {
   const monthOpts = [0,1,2,3,4,5,6,7,8,9,10,11,12].map(m=>
     `<option value="${m}" ${month===m?'selected':''}>${m===0?'All Months':monthName(m)}</option>`
   ).join('');
-  function catLabel(c) { return String(c || '').replace(/_/g,' ').replace(/\b\w/g, l=>l.toUpperCase()); }
   main.innerHTML = `
     <div class="k-page">
       <div class="k-dash-stats">
@@ -2846,7 +2849,6 @@ async function openFinanceModal(entryToEdit = null) {
   const incomeCategories = Array.isArray(settingsRes?.kpsc_income_categories) ? settingsRes.kpsc_income_categories : ['partnership_payment','one_time_donation','wealth_development_offering','other_income'];
   const expenseCategories = Array.isArray(settingsRes?.kpsc_expense_categories) ? settingsRes.kpsc_expense_categories : ['projects','welfare','rent','church_support','committee_operations'];
 
-  function catLabel(c) { return String(c || '').replace(/_/g,' ').replace(/\b\w/g, l=>l.toUpperCase()); }
   const incomeOpts = incomeCategories.map(c=>`<option value="${esc(c)}">${esc(catLabel(c))}</option>`).join('');
   const expenseOpts = expenseCategories.map(c=>`<option value="${esc(c)}">${esc(catLabel(c))}</option>`).join('');
 
@@ -2973,7 +2975,6 @@ async function runReconciliation(btn) {
     const matches = Array.isArray(res.matches) ? res.matches : [];
     const unmatchedSt = Array.isArray(res.unmatchedStatement) ? res.unmatchedStatement : [];
     const unmatchedFin = Array.isArray(res.unmatchedFinance) ? res.unmatchedFinance : [];
-    function catLabel(c) { return String(c || '').replace(/_/g,' ').replace(/\b\w/g, l=>l.toUpperCase()); }
     out.innerHTML = `
       <div class="k-rec-summary">
         <span class="k-rec-chip k-rec-matched">✓ ${s.matchedCount || 0} Matched</span>
