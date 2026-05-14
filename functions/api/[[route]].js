@@ -14,7 +14,7 @@ const CORS_HEADERS = {
 const ok  = (data)       => new Response(JSON.stringify(data),        { status: 200, headers: CORS_HEADERS });
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper';
+const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
 
 function isValidPin(pin) {
   return /^\d{4,6}$/.test(String(pin || ''));
