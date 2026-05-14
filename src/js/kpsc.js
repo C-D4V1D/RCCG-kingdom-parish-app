@@ -32,6 +32,7 @@ const KPSC_PERMISSIONS = {
   treasurer: ['dashboard', 'partners', 'finance', 'reminders', 'archive', 'reports'],
   committee_viewer: ['dashboard', 'partners', 'reports', 'archive'],
 };
+const PIN_REGEX = /^\d{4,6}$/;
 
 // ── STATE ──────────────────────────────────────────────────────────
 const S = {
@@ -1346,7 +1347,7 @@ async function submitPinChange(btn) {
     msg.style.display = 'block';
     return;
   }
-  if (!/^\d{4,6}$/.test(newPin)) {
+  if (!PIN_REGEX.test(newPin)) {
     msg.className = 'k-settings-msg k-msg-error';
     msg.textContent = 'New PIN must be 4-6 digits.';
     msg.style.display = 'block';
@@ -2653,7 +2654,8 @@ async function renderFinance(main) {
       <div class="k-section" style="margin-top:16px">
         <h3 class="k-sec-title">Bank Reconciliation (AI-assisted)</h3>
         <p class="k-hint">Paste statement items as JSON array. The system suggests matches; review before approval.</p>
-        <textarea id="krec-items" class="k-input k-textarea" placeholder='[{"date":"${year}-${String(month).padStart(2, '0')}-05","amount":1000,"type":"income","reference":"TRX123"}]'></textarea>
+        <textarea id="krec-items" class="k-input k-textarea" placeholder='Paste statement JSON items here'></textarea>
+        <p class="k-hint">Example item: {"date":"YYYY-MM-DD","amount":1000,"type":"income","reference":"TRX123"}</p>
         <div class="k-room-actions" style="margin-top:10px">
           <button class="kbtn kbtn-primary" onclick="Kpsc.runReconciliation(this)">Run Reconciliation</button>
         </div>

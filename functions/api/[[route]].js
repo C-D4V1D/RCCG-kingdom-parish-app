@@ -15,6 +15,7 @@ const ok  = (data)       => new Response(JSON.stringify(data),        { status: 
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
+const RECONCILIATION_AMOUNT_TOLERANCE = 0.5;
 
 function isValidPin(pin) {
   return /^\d{4,6}$/.test(String(pin || ''));
@@ -624,12 +625,13 @@ async function handleInit(DB) {
     ).bind(u.id, u.name, u.role, hashedPin, u.email).run();
   }
 
+  const seededKpscDefaultPin = String(defaultSettings.kpsc_default_pin || '1234');
   const defaultKpscAccounts = [
-    { id: 'ka1', name: 'Acting Chairman', role: 'acting_chairman', pin: '1234' },
-    { id: 'ka2', name: 'General Secretary', role: 'general_secretary', pin: '1234' },
-    { id: 'ka3', name: 'Financial Secretary', role: 'financial_secretary', pin: '1234' },
-    { id: 'ka4', name: 'Treasurer', role: 'treasurer', pin: '1234' },
-    { id: 'ka5', name: 'Committee Viewer', role: 'committee_viewer', pin: '1234' },
+    { id: 'ka1', name: 'Acting Chairman', role: 'acting_chairman', pin: seededKpscDefaultPin },
+    { id: 'ka2', name: 'General Secretary', role: 'general_secretary', pin: seededKpscDefaultPin },
+    { id: 'ka3', name: 'Financial Secretary', role: 'financial_secretary', pin: seededKpscDefaultPin },
+    { id: 'ka4', name: 'Treasurer', role: 'treasurer', pin: seededKpscDefaultPin },
+    { id: 'ka5', name: 'Committee Viewer', role: 'committee_viewer', pin: seededKpscDefaultPin },
   ];
   for (const acct of defaultKpscAccounts) {
     const hashedPin = await hashPin(acct.pin);
@@ -746,7 +748,7 @@ function normalizeKpscAccountStatus(status) {
 
 function normalizeMonth(value) {
   const month = Number.parseInt(value, 10);
-  if (!Number.isFinite(month)) return 1;
+  if (!Number.isFinite(month)) return null;
   return Math.min(12, Math.max(1, month));
 }
 
@@ -1866,7 +1868,7 @@ async function runKpscReconciliation(DB, data) {
     const candidate = financeEntries.find(entry =>
       !usedFinanceIds.has(entry.id)
       && entry.type === item.type
-      && Math.abs(entry.amount - item.amount) < 0.5
+      && Math.abs(entry.amount - item.amount) < RECONCILIATION_AMOUNT_TOLERANCE
     );
     if (candidate) {
       usedFinanceIds.add(candidate.id);
