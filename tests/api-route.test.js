@@ -918,3 +918,109 @@ test('kpsc mutating endpoint with allowed role returns success', async () => {
   const response = await onRequest({ request: req, env: { DB } });
   assert.equal(response.status, 200);
 });
+
+// ── KPSC account deletion tests ───────────────────────────────────────
+
+function createDeleteAccountDB({ callerAccountId, callerRole, targetId, targetRole, chairmanCount = 2 }) {
+  return createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT account_id, expires_at FROM kpsc_sessions/.test(sql)) {
+            return { account_id: callerAccountId, expires_at: Date.now() + 3600_000 };
+          }
+          if (/SELECT id, name, role, status FROM kpsc_accounts WHERE id=\? AND status='active'/.test(sql)) {
+            return { id: callerAccountId, name: 'Caller', role: callerRole, status: 'active' };
+          }
+          if (/SELECT id,name,role FROM kpsc_accounts WHERE id=\?/.test(sql)) {
+            return { id: targetId, name: 'Target User', role: targetRole };
+          }
+          return null;
+        },
+        async all() {
+          if (/SELECT id FROM kpsc_accounts WHERE role='acting_chairman' AND status='active'/.test(sql)) {
+            const rows = Array.from({ length: chairmanCount }, (_, i) => ({ id: `ka-chair-${i}` }));
+            return { results: rows };
+          }
+          return { results: [] };
+        },
+        async run() { return { success: true }; }
+      };
+      return statement;
+    }
+  });
+}
+
+test('delete kpsc account: happy path succeeds for acting_chairman', async () => {
+  const DB = createDeleteAccountDB({
+    callerAccountId: 'ka-chair', callerRole: 'acting_chairman',
+    targetId: 'ka-viewer', targetRole: 'committee_viewer',
+    chairmanCount: 1, // irrelevant since target is not chairman
+  });
+  const sessionHeader = JSON.stringify({ accountId: 'ka-chair', token: 'ks-tok' });
+  const req = new Request('https://example.com/api/kpsc-accounts/ka-viewer', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+    body: JSON.stringify({}),
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  assert.equal(body.success, true);
+});
+
+test('delete kpsc account: refuses to delete last acting_chairman', async () => {
+  const DB = createDeleteAccountDB({
+    callerAccountId: 'ka-chair', callerRole: 'acting_chairman',
+    targetId: 'ka-chair2', targetRole: 'acting_chairman',
+    chairmanCount: 1, // only one chairman remains
+  });
+  const sessionHeader = JSON.stringify({ accountId: 'ka-chair', token: 'ks-tok' });
+  const req = new Request('https://example.com/api/kpsc-accounts/ka-chair2', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+    body: JSON.stringify({}),
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+  assert.equal(response.status, 409);
+  assert.match(body.error, /last acting_chairman/i);
+});
+
+test('delete kpsc account: refuses self-delete', async () => {
+  const DB = createDeleteAccountDB({
+    callerAccountId: 'ka-chair', callerRole: 'acting_chairman',
+    targetId: 'ka-chair', targetRole: 'acting_chairman',
+    chairmanCount: 2,
+  });
+  const sessionHeader = JSON.stringify({ accountId: 'ka-chair', token: 'ks-tok' });
+  const req = new Request('https://example.com/api/kpsc-accounts/ka-chair', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+    body: JSON.stringify({}),
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+  assert.equal(response.status, 409);
+  assert.match(body.error, /own account/i);
+});
+
+test('delete kpsc account: 403 for non-chairman caller', async () => {
+  const DB = createDeleteAccountDB({
+    callerAccountId: 'ka-sec', callerRole: 'general_secretary',
+    targetId: 'ka-viewer', targetRole: 'committee_viewer',
+    chairmanCount: 1,
+  });
+  const sessionHeader = JSON.stringify({ accountId: 'ka-sec', token: 'ks-tok' });
+  const req = new Request('https://example.com/api/kpsc-accounts/ka-viewer', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+    body: JSON.stringify({}),
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+  assert.equal(response.status, 403);
+  assert.match(body.error, /not permitted/i);
+});

@@ -3484,6 +3484,7 @@ function renderKpscAccountsCard(accounts) {
               </div>
               <div class="k-mc-badges">
                 <button class="kbtn kbtn-sm" onclick="Kpsc.openAccountEditor('${a.id}')">Edit</button>
+                ${String(S.user?.role || '') === 'acting_chairman' ? `<button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.confirmDeleteKpscAccount('${a.id}','${esc(a.name)}')">Delete</button>` : ''}
               </div>
             </div>
           </div>`).join('') : '<div class="k-empty">No KPSC accounts found.</div>'}
@@ -3557,6 +3558,38 @@ async function saveAccountEditor(id, btn) {
   closeAccountEditor();
   await renderSettings(document.getElementById('kpsc-main'));
   showToast('Account saved.', 'success');
+}
+
+function confirmDeleteKpscAccount(id, name) {
+  document.getElementById('kpsc-delete-account-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'kpsc-delete-account-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr"><span class="k-modal-title">Delete Account</span><button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('kpsc-delete-account-modal')?.remove()">✕</button></div>
+      <div class="k-modal-body">
+        <p>Delete account for <strong>${esc(name)}</strong>? They will lose access immediately. This cannot be undone.</p>
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('kpsc-delete-account-modal')?.remove()">Cancel</button>
+        <button class="kbtn kbtn-danger" onclick="Kpsc.executeDeleteKpscAccount('${id}', this)">Delete Account</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function executeDeleteKpscAccount(id, btn) {
+  btn.disabled = true;
+  const res = await apiDelete(`kpsc-accounts/${id}`);
+  btn.disabled = false;
+  document.getElementById('kpsc-delete-account-modal')?.remove();
+  if (res?.error) {
+    showToast(res.error, 'error');
+    return;
+  }
+  showToast('Account deleted.', 'success');
+  await renderSettings(document.getElementById('kpsc-main'));
 }
 
 async function renderSettings(main) {
@@ -4310,6 +4343,8 @@ window.Kpsc = {
   openAccountEditor,
   closeAccountEditor,
   saveAccountEditor,
+  confirmDeleteKpscAccount,
+  executeDeleteKpscAccount,
   saveSettings,
   clearAiKeys,
   refreshApiStatus,
