@@ -2937,6 +2937,8 @@ function azureBase(env) {
 
 async function azureCreateSpeakerProfile(env) {
   const { key, base } = azureBase(env);
+  console.log("KEY EXISTS:", !!env.AZURE_SPEAKER_KEY);
+  console.log("REGION:", env.AZURE_SPEAKER_REGION);
   if (!key) return err('AZURE_SPEAKER_KEY is not configured. Add it in Cloudflare Pages → Settings → Environment Variables.', 503);
 
   const res  = await fetch(`${base}/profiles`, {
@@ -2944,6 +2946,7 @@ async function azureCreateSpeakerProfile(env) {
     headers: { 'Ocp-Apim-Subscription-Key': key, 'Content-Type': 'application/json' },
     body: JSON.stringify({ locale: 'en-us' }),
   });
+  console.log("AZURE RESPONSE:", await res.clone().text());
   const data = await res.json().catch(() => ({}));
   if (!res.ok) return err(data.error?.message || `Azure error (${res.status}).`, res.status);
   return ok({ profileId: data.profileId });
@@ -2951,6 +2954,8 @@ async function azureCreateSpeakerProfile(env) {
 
 async function azureEnrollSpeaker(env, profileId, body) {
   const { key, base } = azureBase(env);
+  console.log("KEY EXISTS:", !!env.AZURE_SPEAKER_KEY);
+  console.log("REGION:", env.AZURE_SPEAKER_REGION);
   if (!key) return err('AZURE_SPEAKER_KEY is not configured.', 503);
   if (!profileId) return err('Missing profile ID.', 400);
 
@@ -2969,6 +2974,7 @@ async function azureEnrollSpeaker(env, profileId, body) {
     headers: { 'Ocp-Apim-Subscription-Key': key, 'Content-Type': 'audio/wav' },
     body: audioBytes,
   });
+  console.log("AZURE RESPONSE:", await res.clone().text());
   const data = await res.json().catch(() => ({}));
   if (!res.ok) return err(data.error?.message || `Azure enrollment error (${res.status}).`, res.status);
   return ok({
