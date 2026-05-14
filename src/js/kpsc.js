@@ -731,6 +731,12 @@ async function diarizerConnect() {
   // Build AudioContext and AudioWorklet pipeline for raw PCM streaming.
   const audioCtx = new AudioContext();
   Diarizer.audioCtx = audioCtx;
+  // AudioContext starts suspended when created outside an active user
+  // gesture (e.g. after awaiting the token fetch). Without this resume,
+  // no PCM reaches the worklet until the user pauses and resumes.
+  if (audioCtx.state === 'suspended') {
+    try { await audioCtx.resume(); } catch (_) { /* noop */ }
+  }
 
   // Register the inline worklet processor via a Blob URL.
   const blob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
