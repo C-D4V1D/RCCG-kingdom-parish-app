@@ -1774,7 +1774,26 @@ async function createRealtimeTranscriptionToken(env) {
 async function createDeepgramTranscriptionToken(env) {
   const apiKey = String(env.DEEPGRAM_API_KEY || '').trim();
   if (!apiKey) return err('DEEPGRAM_API_KEY is not configured for speaker diarization.', 503);
-  return ok({ key: apiKey });
+
+  // Deepgram rejects raw API keys passed from browsers via
+  // Sec-WebSocket-Protocol. Mint a short-lived (30s) token via the
+  // /v1/auth/grant endpoint; the client uses it during the WS handshake.
+  const res = await fetch('https://api.deepgram.com/v1/auth/grant', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Token ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ ttl_seconds: 30 }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const reason = data.err_msg || data.error || data.message || `Deepgram grant failed (${res.status}).`;
+    return err(reason, res.status);
+  }
+  const token = data.access_token || data.token;
+  if (!token) return err('Deepgram grant response did not include an access token.', 502);
+  return ok({ key: token, expires_in: data.expires_in ?? 30 });
 }
 
 // ── AZURE SPEAKER RECOGNITION ──────────────────────────────────────

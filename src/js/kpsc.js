@@ -724,9 +724,9 @@ async function diarizerConnect() {
   console.info('[diarizer] requesting token from server');
   const tokenRes = await apiPost('deepgram-transcription-token', {});
   if (tokenRes.error) throw new Error(tokenRes.error);
-  const apiKey = tokenRes.key;
-  if (!apiKey) throw new Error('Deepgram API key was not returned by the server.');
-  console.info('[diarizer] token received, length =', apiKey.length);
+  const accessToken = tokenRes.key;
+  if (!accessToken) throw new Error('Deepgram access token was not returned by the server.');
+  console.info('[diarizer] token received, length =', accessToken.length);
 
   // Build AudioContext and AudioWorklet pipeline for raw PCM streaming.
   const audioCtx = new AudioContext();
@@ -759,7 +759,10 @@ async function diarizerConnect() {
   // Sec-WebSocket-Protocol subprotocol ('token', <api-key>). Query
   // parameters like ?token=... are NOT accepted and silently fail.
   console.info('[diarizer] opening WebSocket to Deepgram');
-  const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, ['token', apiKey]);
+  // Temporary access token from /v1/auth/grant uses the Bearer scheme;
+  // browsers can't set the Authorization header on a WebSocket, so the
+  // scheme + token ride in the Sec-WebSocket-Protocol subprotocols list.
+  const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, ['bearer', accessToken]);
   Diarizer.ws = ws;
   ws.binaryType = 'arraybuffer';
 
