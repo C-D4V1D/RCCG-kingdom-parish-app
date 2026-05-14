@@ -239,6 +239,105 @@ test('login with hashed PIN does not run upgrade update', async () => {
   assert.equal(runs.length, 0);
 });
 
+test('kpsc login authenticates against dedicated kpsc_accounts table', async () => {
+  const runs = [];
+  const crypto = await import('node:crypto');
+  const inputPin = '1234';
+  const inputHash = crypto.createHash('sha256').update(inputPin).digest('hex');
+  const storedHashedPin = `sha256$${inputHash}`;
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) {
+          statement._bound = args;
+          return statement;
+        },
+        async first() {
+          if (/SELECT \* FROM kpsc_accounts WHERE id=\? AND status='active'/.test(sql)) {
+            return {
+              id: 'ka1',
+              name: 'General Secretary',
+              role: 'general_secretary',
+              status: 'active',
+              pin: storedHashedPin,
+              must_change_pin: 1,
+              last_login_at: '',
+            };
+          }
+          throw new Error(`Unexpected SQL in first(): ${sql}`);
+        },
+        async run() {
+          runs.push({ sql, bound: statement._bound });
+          return { success: true };
+        }
+      };
+      return statement;
+    }
+  });
+
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/kpsc-login', 'POST', {
+      accountId: 'ka1',
+      pin: '1234',
+    }),
+    env: { DB }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.id, 'ka1');
+  assert.equal(body.role, 'general_secretary');
+  assert.equal(body.sessionType, 'kpsc');
+  assert.equal(runs.length, 1);
+  assert.match(runs[0].sql, /UPDATE kpsc_accounts SET last_login_at=\?, updated_at=\? WHERE id=\?/);
+});
+
+test('kpsc change pin enforces current pin and clears must_change_pin', async () => {
+  const runs = [];
+  const crypto = await import('node:crypto');
+  const currentPin = '1234';
+  const currentHash = crypto.createHash('sha256').update(currentPin).digest('hex');
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) {
+          statement._bound = args;
+          return statement;
+        },
+        async first() {
+          if (/SELECT id,pin FROM kpsc_accounts WHERE id=\?/.test(sql)) {
+            return { id: 'ka3', pin: `sha256$${currentHash}` };
+          }
+          throw new Error(`Unexpected SQL in first(): ${sql}`);
+        },
+        async run() {
+          runs.push({ sql, bound: statement._bound });
+          return { success: true };
+        }
+      };
+      return statement;
+    }
+  });
+
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/kpsc-change-pin', 'POST', {
+      accountId: 'ka3',
+      currentPin: '1234',
+      newPin: '6789',
+    }),
+    env: { DB }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.success, true);
+  assert.equal(body.mustChangePin, false);
+  assert.equal(runs.length, 1);
+  assert.match(runs[0].sql, /UPDATE kpsc_accounts SET pin=\?, must_change_pin=0, updated_at=\? WHERE id=\?/);
+});
+
 test('AI secretary processing returns draft minutes and policy flags', async () => {
   const runs = [];
   // Track DB state so the post-UPDATE re-fetch returns the processed row

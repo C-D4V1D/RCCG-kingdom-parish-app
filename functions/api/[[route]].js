@@ -113,7 +113,35 @@ export async function onRequest(context) {
     if (route === 'auth') {
       if (method === 'POST' && param === 'login') return await loginUser(DB, body);
     }
+    if (route === 'kpsc-login-options' && method === 'GET') return await getKpscLoginOptions(DB);
     if (route === 'kpsc-login' && method === 'POST') return await kpscLoginUser(DB, body);
+    if (route === 'kpsc-change-pin' && method === 'POST') return await changeKpscPin(DB, body);
+    if (route === 'kpsc-accounts') {
+      if (method === 'GET'  && !param) return await getKpscAccounts(DB);
+      if (method === 'POST' && !param) return await createKpscAccount(DB, body);
+      if (method === 'PUT'  &&  param) return await updateKpscAccount(DB, param, body);
+    }
+    if (route === 'kpsc-partners') {
+      if (method === 'GET'  && !param) return await getKpscPartners(DB);
+      if (method === 'POST' && !param) return await createKpscPartner(DB, body);
+      if (method === 'PUT'  &&  param) return await updateKpscPartner(DB, param, body);
+    }
+    if (route === 'kpsc-partner-payments') {
+      if (method === 'GET'  && !param) return await getKpscPartnerPayments(DB, url);
+      if (method === 'POST' && !param) return await upsertKpscPartnerPayment(DB, body);
+      if (method === 'DELETE' && param) return await deleteKpscPartnerPayment(DB, param);
+    }
+    if (route === 'kpsc-finance') {
+      if (method === 'GET'  && !param) return await getKpscFinanceEntries(DB, url);
+      if (method === 'POST' && !param) return await createKpscFinanceEntry(DB, body);
+      if (method === 'PUT'  &&  param) return await updateKpscFinanceEntry(DB, param, body);
+    }
+    if (route === 'kpsc-reminders') {
+      if (method === 'GET'  && !param) return await getKpscReminders(DB, url);
+      if (method === 'POST' && !param) return await createKpscReminder(DB, body);
+    }
+    if (route === 'kpsc-dashboard' && method === 'GET') return await getKpscDashboard(DB, url);
+    if (route === 'kpsc-reconciliation' && method === 'POST') return await runKpscReconciliation(DB, body);
     if (route === 'change-pin' && method === 'POST') {
       return await changeUserPin(DB, body);
     }
@@ -390,6 +418,85 @@ async function handleInit(DB) {
       processed_at      TEXT DEFAULT '',
       created_at        TEXT DEFAULT (datetime('now'))
     )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_accounts (
+      id                TEXT PRIMARY KEY,
+      name              TEXT NOT NULL,
+      role              TEXT NOT NULL DEFAULT 'committee_viewer',
+      pin               TEXT NOT NULL,
+      status            TEXT NOT NULL DEFAULT 'active',
+      must_change_pin   INTEGER DEFAULT 1,
+      last_login_at     TEXT DEFAULT '',
+      created_at        TEXT DEFAULT (datetime('now')),
+      updated_at        TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_partners (
+      id                  TEXT PRIMARY KEY,
+      full_name           TEXT NOT NULL DEFAULT '',
+      phone               TEXT DEFAULT '',
+      partnership_type    TEXT NOT NULL DEFAULT 'gods_kingdom_partner',
+      start_date          TEXT DEFAULT '',
+      monthly_pledge      REAL DEFAULT 0,
+      status              TEXT NOT NULL DEFAULT 'active',
+      reminder_preference TEXT DEFAULT 'sms',
+      notes               TEXT DEFAULT '',
+      created_by          TEXT DEFAULT '',
+      created_at          TEXT DEFAULT (datetime('now')),
+      updated_at          TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_partner_payments (
+      id            TEXT PRIMARY KEY,
+      partner_id    TEXT NOT NULL,
+      year          INTEGER NOT NULL,
+      month         INTEGER NOT NULL,
+      amount        REAL DEFAULT 0,
+      payment_type  TEXT NOT NULL DEFAULT 'monthly_pledge',
+      source        TEXT DEFAULT 'partnership',
+      paid          INTEGER DEFAULT 1,
+      paid_at       TEXT DEFAULT '',
+      reference     TEXT DEFAULT '',
+      recorded_by   TEXT DEFAULT '',
+      notes         TEXT DEFAULT '',
+      created_at    TEXT DEFAULT (datetime('now')),
+      updated_at    TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_finance_entries (
+      id               TEXT PRIMARY KEY,
+      date             TEXT NOT NULL DEFAULT '',
+      entry_type       TEXT NOT NULL DEFAULT 'income',
+      category         TEXT NOT NULL DEFAULT '',
+      sub_category     TEXT DEFAULT '',
+      amount           REAL DEFAULT 0,
+      payment_method   TEXT DEFAULT '',
+      reference        TEXT DEFAULT '',
+      narration        TEXT DEFAULT '',
+      partner_id       TEXT DEFAULT '',
+      recorded_by      TEXT DEFAULT '',
+      approved_by      TEXT DEFAULT '',
+      approval_status  TEXT DEFAULT 'recorded',
+      attachment_name  TEXT DEFAULT '',
+      created_at       TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_reminders (
+      id            TEXT PRIMARY KEY,
+      partner_id    TEXT NOT NULL DEFAULT '',
+      channel       TEXT NOT NULL DEFAULT 'sms',
+      message       TEXT NOT NULL DEFAULT '',
+      status        TEXT NOT NULL DEFAULT 'queued',
+      year          INTEGER NOT NULL,
+      month         INTEGER NOT NULL,
+      sent_by       TEXT DEFAULT '',
+      sent_at       TEXT DEFAULT '',
+      created_at    TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_reconciliation_runs (
+      id                TEXT PRIMARY KEY,
+      statement_year    INTEGER NOT NULL,
+      statement_month   INTEGER NOT NULL,
+      statement_items_json TEXT DEFAULT '[]',
+      result_json       TEXT DEFAULT '{}',
+      created_by        TEXT DEFAULT '',
+      created_at        TEXT DEFAULT (datetime('now'))
+    )`,
   ];
 
   // Run all CREATE TABLE statements first
@@ -439,6 +546,8 @@ async function handleInit(DB) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
   }
 
+  await DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_kpsc_partner_payment_period ON kpsc_partner_payments(partner_id, year, month, payment_type)`).run();
+
   // Migrate legacy: remove goFishing from saved quotas setting
   try {
     const row = await DB.prepare(`SELECT value FROM settings WHERE key='quotas'`).first();
@@ -474,6 +583,25 @@ async function handleInit(DB) {
       tgNational:0.75, tgArea:0.05, tgPastor:0.10, tgMinisters:0.09, tgSeed:0.01,
       provinceRebate:0.20
     }),
+    kpsc_default_pin: '1234',
+    kpsc_partnership_types: JSON.stringify([
+      { key: 'gods_kingdom_partner', label: "God's Kingdom Partner" },
+      { key: 'covenant_partner', label: 'Covenant Partner' },
+    ]),
+    kpsc_income_categories: JSON.stringify([
+      'partnership_payment',
+      'one_time_donation',
+      'wealth_development_offering',
+      'other_income',
+    ]),
+    kpsc_expense_categories: JSON.stringify([
+      'projects',
+      'welfare',
+      'rent',
+      'church_support',
+      'committee_operations',
+    ]),
+    kpsc_reminder_template: 'Dear {{name}}, this is a reminder to pay your {{month}} partnership pledge. God bless you.',
   };
   for (const [key, value] of Object.entries(defaultSettings)) {
     await DB.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).bind(key, value).run();
@@ -496,10 +624,24 @@ async function handleInit(DB) {
     ).bind(u.id, u.name, u.role, hashedPin, u.email).run();
   }
 
+  const defaultKpscAccounts = [
+    { id: 'ka1', name: 'Acting Chairman', role: 'acting_chairman', pin: '1234' },
+    { id: 'ka2', name: 'General Secretary', role: 'general_secretary', pin: '1234' },
+    { id: 'ka3', name: 'Financial Secretary', role: 'financial_secretary', pin: '1234' },
+    { id: 'ka4', name: 'Treasurer', role: 'treasurer', pin: '1234' },
+    { id: 'ka5', name: 'Committee Viewer', role: 'committee_viewer', pin: '1234' },
+  ];
+  for (const acct of defaultKpscAccounts) {
+    const hashedPin = await hashPin(acct.pin);
+    await DB.prepare(
+      `INSERT OR IGNORE INTO kpsc_accounts (id,name,role,pin,status,must_change_pin) VALUES (?,?,?,?,?,?)`
+    ).bind(acct.id, acct.name, acct.role, hashedPin, 'active', 1).run();
+  }
+
   return ok({
     success: true,
     message: 'Database initialised. All tables created and default users seeded.',
-    tables: ['users','income','expenses','petty_cash','petty_config','remittances','cash_transactions','audit_log','settings','notifications','ai_secretary_meetings'],
+    tables: ['users','income','expenses','petty_cash','petty_config','remittances','cash_transactions','audit_log','settings','notifications','ai_secretary_meetings','kpsc_accounts','kpsc_partners','kpsc_partner_payments','kpsc_finance_entries','kpsc_reminders','kpsc_reconciliation_runs'],
   });
 }
 
@@ -580,28 +722,137 @@ async function changeUserPin(DB, data) {
   return ok({ success: true, id: userId });
 }
 
-async function kpscLoginUser(DB, data) {
+const KPSC_ROLES = new Set(['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'committee_viewer']);
+
+function publicKpscAccount(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    role: row.role,
+    status: row.status,
+    mustChangePin: Number(row.must_change_pin || 0) === 1,
+    lastLoginAt: row.last_login_at || '',
+  };
+}
+
+function normalizeKpscRole(role) {
+  const normalized = String(role || '').trim().toLowerCase().replace(/\s+/g, '_');
+  return KPSC_ROLES.has(normalized) ? normalized : 'committee_viewer';
+}
+
+function normalizeKpscAccountStatus(status) {
+  return String(status || '').toLowerCase() === 'inactive' ? 'inactive' : 'active';
+}
+
+function normalizeMonth(value) {
+  const month = Number.parseInt(value, 10);
+  if (!Number.isFinite(month)) return 0;
+  return Math.min(12, Math.max(1, month));
+}
+
+function normalizeYear(value) {
+  const year = Number.parseInt(value, 10);
+  const currentYear = new Date().getUTCFullYear();
+  if (!Number.isFinite(year)) return currentYear;
+  return Math.min(2099, Math.max(2000, year));
+}
+
+async function getKpscLoginOptions(DB) {
+  const { results } = await DB.prepare(`
+    SELECT id,name,role,status,must_change_pin,last_login_at
+    FROM kpsc_accounts
+    WHERE status='active'
+    ORDER BY name
+  `).all();
+  return ok((results || []).map(publicKpscAccount));
+}
+
+async function getKpscAccounts(DB) {
+  const { results } = await DB.prepare(`
+    SELECT id,name,role,status,must_change_pin,last_login_at,created_at
+    FROM kpsc_accounts
+    ORDER BY name
+  `).all();
+  return ok((results || []).map(row => ({
+    ...publicKpscAccount(row),
+    createdAt: row.created_at || '',
+  })));
+}
+
+async function createKpscAccount(DB, data) {
   const name = String(data?.name || '').trim();
-  const pin  = String(data?.pin  || '').trim();
+  const role = normalizeKpscRole(data?.role);
+  const status = normalizeKpscAccountStatus(data?.status);
+  const pin = String(data?.pin || '').trim();
   if (!name || !pin) return err('name and pin are required', 400);
+  if (!isValidPin(pin)) return err('pin must be 4-6 digits', 400);
+  const id = newId('ka');
+  await DB.prepare(`
+    INSERT INTO kpsc_accounts (id,name,role,pin,status,must_change_pin,updated_at)
+    VALUES (?,?,?,?,?,?,?)
+  `).bind(
+    id,
+    name,
+    role,
+    await hashPin(pin),
+    status,
+    Number(data?.mustChangePin !== false),
+    new Date().toISOString(),
+  ).run();
+  return ok({ id, name, role, status, mustChangePin: Number(data?.mustChangePin !== false) === 1 });
+}
 
-  const { results } = await DB.prepare(
-    `SELECT id,name,role,email,pin FROM users WHERE LOWER(name)=LOWER(?) ORDER BY name`
-  ).bind(name).all();
-  const candidates = results || [];
-  if (candidates.length === 0) return err('Invalid credentials', 401);
-
-  // Try each matching user (same name could appear rarely)
-  for (const row of candidates) {
-    const valid = await verifyPin(row.pin, pin);
-    if (!valid) continue;
-    // Upgrade plaintext PIN on first successful KPSC login
-    if (!isHashedPin(row.pin)) {
-      await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(pin), row.id).run();
-    }
-    return ok(publicUser(row));
+async function updateKpscAccount(DB, id, data) {
+  const existing = await DB.prepare(`SELECT * FROM kpsc_accounts WHERE id=?`).bind(id).first();
+  if (!existing) return err('KPSC account not found', 404);
+  const name = data?.name !== undefined ? String(data.name || '').trim() : existing.name;
+  const role = data?.role !== undefined ? normalizeKpscRole(data.role) : existing.role;
+  const status = data?.status !== undefined ? normalizeKpscAccountStatus(data.status) : existing.status;
+  const mustChangePin = data?.mustChangePin !== undefined ? Number(!!data.mustChangePin) : Number(existing.must_change_pin || 0);
+  const rawPin = String(data?.pin || '').trim();
+  let pin = existing.pin;
+  if (rawPin) {
+    if (!isValidPin(rawPin)) return err('pin must be 4-6 digits', 400);
+    pin = await hashPin(rawPin);
   }
-  return err('Invalid credentials', 401);
+  if (!name) return err('name is required', 400);
+  await DB.prepare(`
+    UPDATE kpsc_accounts
+    SET name=?, role=?, status=?, pin=?, must_change_pin=?, updated_at=?
+    WHERE id=?
+  `).bind(name, role, status, pin, mustChangePin, new Date().toISOString(), id).run();
+  const updated = await DB.prepare(`SELECT id,name,role,status,must_change_pin,last_login_at FROM kpsc_accounts WHERE id=?`).bind(id).first();
+  return ok(publicKpscAccount(updated));
+}
+
+async function kpscLoginUser(DB, data) {
+  const accountId = String(data?.accountId || '').trim();
+  const pin = String(data?.pin || '').trim();
+  if (!accountId || !pin) return err('accountId and pin are required', 400);
+  const row = await DB.prepare(`SELECT * FROM kpsc_accounts WHERE id=? AND status='active'`).bind(accountId).first();
+  if (!row) return err('Invalid credentials', 401);
+  const valid = await verifyPin(row.pin, pin);
+  if (!valid) return err('Invalid credentials', 401);
+  if (!isHashedPin(row.pin)) {
+    await DB.prepare(`UPDATE kpsc_accounts SET pin=?, updated_at=? WHERE id=?`).bind(await hashPin(pin), new Date().toISOString(), row.id).run();
+  }
+  const now = new Date().toISOString();
+  await DB.prepare(`UPDATE kpsc_accounts SET last_login_at=?, updated_at=? WHERE id=?`).bind(now, now, row.id).run();
+  return ok({ ...publicKpscAccount({ ...row, last_login_at: now }), sessionType: 'kpsc' });
+}
+
+async function changeKpscPin(DB, data) {
+  const accountId = String(data?.accountId || '').trim();
+  const currentPin = String(data?.currentPin || '').trim();
+  const newPin = String(data?.newPin || '').trim();
+  if (!accountId || !currentPin || !newPin) return err('accountId, currentPin, and newPin are required', 400);
+  if (!isValidPin(newPin)) return err('New PIN must be 4-6 digits', 400);
+  const row = await DB.prepare(`SELECT id,pin FROM kpsc_accounts WHERE id=?`).bind(accountId).first();
+  if (!row) return err('KPSC account not found', 404);
+  if (!(await verifyPin(row.pin, currentPin))) return err('Current PIN is incorrect', 401);
+  await DB.prepare(`UPDATE kpsc_accounts SET pin=?, must_change_pin=0, updated_at=? WHERE id=?`)
+    .bind(await hashPin(newPin), new Date().toISOString(), accountId).run();
+  return ok({ success: true, id: accountId, mustChangePin: false });
 }
 
 function inferIncomePaymentMethod(row) {
@@ -1140,6 +1391,517 @@ async function saveSettings(DB, data) {
     await DB.prepare(`INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)`).bind(key, stored).run();
   }
   return ok({ saved: true });
+}
+
+async function getKpscPartners(DB) {
+  const { results } = await DB.prepare(`
+    SELECT *
+    FROM kpsc_partners
+    ORDER BY full_name
+  `).all();
+  return ok((results || []).map(row => ({
+    id: row.id,
+    fullName: row.full_name,
+    phone: row.phone || '',
+    partnershipType: row.partnership_type || 'gods_kingdom_partner',
+    startDate: row.start_date || '',
+    monthlyPledge: Number(row.monthly_pledge || 0),
+    status: row.status || 'active',
+    reminderPreference: row.reminder_preference || 'sms',
+    notes: row.notes || '',
+    createdBy: row.created_by || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || '',
+  })));
+}
+
+async function createKpscPartner(DB, data) {
+  const fullName = String(data?.fullName || '').trim();
+  if (!fullName) return err('fullName is required', 400);
+  const id = newId('kp');
+  await DB.prepare(`
+    INSERT INTO kpsc_partners (
+      id,full_name,phone,partnership_type,start_date,monthly_pledge,status,reminder_preference,notes,created_by,updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+  `).bind(
+    id,
+    fullName,
+    String(data?.phone || '').trim(),
+    String(data?.partnershipType || 'gods_kingdom_partner').trim(),
+    String(data?.startDate || '').trim(),
+    Number(data?.monthlyPledge || 0),
+    normalizeKpscAccountStatus(data?.status),
+    String(data?.reminderPreference || 'sms').trim() || 'sms',
+    String(data?.notes || '').trim(),
+    String(data?.createdBy || '').trim(),
+    new Date().toISOString(),
+  ).run();
+  const row = await DB.prepare(`SELECT * FROM kpsc_partners WHERE id=?`).bind(id).first();
+  return ok({
+    id: row.id,
+    fullName: row.full_name,
+    phone: row.phone || '',
+    partnershipType: row.partnership_type,
+    startDate: row.start_date || '',
+    monthlyPledge: Number(row.monthly_pledge || 0),
+    status: row.status || 'active',
+    reminderPreference: row.reminder_preference || 'sms',
+    notes: row.notes || '',
+    createdBy: row.created_by || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || '',
+  });
+}
+
+async function updateKpscPartner(DB, id, data) {
+  const row = await DB.prepare(`SELECT * FROM kpsc_partners WHERE id=?`).bind(id).first();
+  if (!row) return err('KPSC partner not found', 404);
+  const fullName = data?.fullName !== undefined ? String(data.fullName || '').trim() : row.full_name;
+  if (!fullName) return err('fullName is required', 400);
+  await DB.prepare(`
+    UPDATE kpsc_partners
+    SET full_name=?, phone=?, partnership_type=?, start_date=?, monthly_pledge=?, status=?, reminder_preference=?, notes=?, updated_at=?
+    WHERE id=?
+  `).bind(
+    fullName,
+    data?.phone !== undefined ? String(data.phone || '').trim() : row.phone,
+    data?.partnershipType !== undefined ? String(data.partnershipType || 'gods_kingdom_partner').trim() : row.partnership_type,
+    data?.startDate !== undefined ? String(data.startDate || '').trim() : row.start_date,
+    data?.monthlyPledge !== undefined ? Number(data.monthlyPledge || 0) : Number(row.monthly_pledge || 0),
+    data?.status !== undefined ? normalizeKpscAccountStatus(data.status) : row.status,
+    data?.reminderPreference !== undefined ? String(data.reminderPreference || 'sms').trim() : row.reminder_preference,
+    data?.notes !== undefined ? String(data.notes || '').trim() : row.notes,
+    new Date().toISOString(),
+    id,
+  ).run();
+  return await createKpscPartnerResponse(DB, id);
+}
+
+async function createKpscPartnerResponse(DB, id) {
+  const row = await DB.prepare(`SELECT * FROM kpsc_partners WHERE id=?`).bind(id).first();
+  if (!row) return err('KPSC partner not found', 404);
+  return ok({
+    id: row.id,
+    fullName: row.full_name,
+    phone: row.phone || '',
+    partnershipType: row.partnership_type,
+    startDate: row.start_date || '',
+    monthlyPledge: Number(row.monthly_pledge || 0),
+    status: row.status || 'active',
+    reminderPreference: row.reminder_preference || 'sms',
+    notes: row.notes || '',
+    createdBy: row.created_by || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || '',
+  });
+}
+
+async function getKpscPartnerPayments(DB, url) {
+  const year = normalizeYear(url.searchParams.get('year'));
+  const month = normalizeMonth(url.searchParams.get('month'));
+  const filters = ['p.year=?'];
+  const binds = [year];
+  if (month) {
+    filters.push('p.month=?');
+    binds.push(month);
+  }
+  const { results } = await DB.prepare(`
+    SELECT p.*, kp.full_name AS partner_name, kp.partnership_type, kp.status AS partner_status
+    FROM kpsc_partner_payments p
+    LEFT JOIN kpsc_partners kp ON kp.id = p.partner_id
+    WHERE ${filters.join(' AND ')}
+    ORDER BY p.year DESC, p.month DESC, partner_name
+  `).bind(...binds).all();
+  return ok((results || []).map(row => ({
+    id: row.id,
+    partnerId: row.partner_id,
+    partnerName: row.partner_name || '',
+    partnershipType: row.partnership_type || '',
+    partnerStatus: row.partner_status || '',
+    year: Number(row.year || 0),
+    month: Number(row.month || 0),
+    amount: Number(row.amount || 0),
+    paymentType: row.payment_type || 'monthly_pledge',
+    source: row.source || 'partnership',
+    paid: Number(row.paid || 0) === 1,
+    paidAt: row.paid_at || '',
+    reference: row.reference || '',
+    recordedBy: row.recorded_by || '',
+    notes: row.notes || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || '',
+  })));
+}
+
+async function upsertKpscPartnerPayment(DB, data) {
+  const partnerId = String(data?.partnerId || '').trim();
+  const year = normalizeYear(data?.year);
+  const month = normalizeMonth(data?.month);
+  if (!partnerId || !month) return err('partnerId, year, and month are required', 400);
+  const paymentType = String(data?.paymentType || 'monthly_pledge').trim() || 'monthly_pledge';
+  const existing = await DB.prepare(`
+    SELECT id FROM kpsc_partner_payments
+    WHERE partner_id=? AND year=? AND month=? AND payment_type=?
+  `).bind(partnerId, year, month, paymentType).first();
+  const id = existing?.id || newId('kpp');
+  const paid = Number(data?.paid !== false);
+  const paidAt = data?.paidAt !== undefined ? String(data.paidAt || '').trim() : (paid ? new Date().toISOString() : '');
+  await DB.prepare(`
+    INSERT OR REPLACE INTO kpsc_partner_payments
+    (id,partner_id,year,month,amount,payment_type,source,paid,paid_at,reference,recorded_by,notes,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,COALESCE((SELECT created_at FROM kpsc_partner_payments WHERE id=?), datetime('now')),?)
+  `).bind(
+    id,
+    partnerId,
+    year,
+    month,
+    Number(data?.amount || 0),
+    paymentType,
+    String(data?.source || 'partnership').trim() || 'partnership',
+    paid,
+    paidAt,
+    String(data?.reference || '').trim(),
+    String(data?.recordedBy || '').trim(),
+    String(data?.notes || '').trim(),
+    id,
+    new Date().toISOString(),
+  ).run();
+  const row = await DB.prepare(`SELECT * FROM kpsc_partner_payments WHERE id=?`).bind(id).first();
+  return ok({
+    id: row.id,
+    partnerId: row.partner_id,
+    year: Number(row.year || 0),
+    month: Number(row.month || 0),
+    amount: Number(row.amount || 0),
+    paymentType: row.payment_type || 'monthly_pledge',
+    source: row.source || 'partnership',
+    paid: Number(row.paid || 0) === 1,
+    paidAt: row.paid_at || '',
+    reference: row.reference || '',
+    recordedBy: row.recorded_by || '',
+    notes: row.notes || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || '',
+  });
+}
+
+async function deleteKpscPartnerPayment(DB, id) {
+  await DB.prepare(`DELETE FROM kpsc_partner_payments WHERE id=?`).bind(id).run();
+  return ok({ deleted: id });
+}
+
+async function getKpscFinanceEntries(DB, url) {
+  const month = normalizeMonth(url.searchParams.get('month'));
+  const year = normalizeYear(url.searchParams.get('year'));
+  const entryType = String(url.searchParams.get('entryType') || '').trim().toLowerCase();
+  const where = ['strftime(\'%Y\', date)=?',];
+  const binds = [String(year)];
+  if (month) {
+    where.push(`strftime('%m', date)=?`);
+    binds.push(String(month).padStart(2, '0'));
+  }
+  if (entryType === 'income' || entryType === 'expense') {
+    where.push('entry_type=?');
+    binds.push(entryType);
+  }
+  const { results } = await DB.prepare(`
+    SELECT f.*, p.full_name AS partner_name
+    FROM kpsc_finance_entries f
+    LEFT JOIN kpsc_partners p ON p.id = f.partner_id
+    WHERE ${where.join(' AND ')}
+    ORDER BY date DESC, created_at DESC
+  `).bind(...binds).all();
+  return ok((results || []).map(row => ({
+    id: row.id,
+    date: row.date,
+    entryType: row.entry_type,
+    category: row.category || '',
+    subCategory: row.sub_category || '',
+    amount: Number(row.amount || 0),
+    paymentMethod: row.payment_method || '',
+    reference: row.reference || '',
+    narration: row.narration || '',
+    partnerId: row.partner_id || '',
+    partnerName: row.partner_name || '',
+    recordedBy: row.recorded_by || '',
+    approvedBy: row.approved_by || '',
+    approvalStatus: row.approval_status || 'recorded',
+    attachmentName: row.attachment_name || '',
+    createdAt: row.created_at || '',
+  })));
+}
+
+async function createKpscFinanceEntry(DB, data) {
+  const date = String(data?.date || '').trim();
+  const entryType = String(data?.entryType || '').trim().toLowerCase();
+  const category = String(data?.category || '').trim();
+  if (!date || !category || !['income', 'expense'].includes(entryType)) {
+    return err('date, category and valid entryType are required', 400);
+  }
+  const id = newId('kfe');
+  await DB.prepare(`
+    INSERT INTO kpsc_finance_entries
+    (id,date,entry_type,category,sub_category,amount,payment_method,reference,narration,partner_id,recorded_by,approved_by,approval_status,attachment_name)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `).bind(
+    id,
+    date,
+    entryType,
+    category,
+    String(data?.subCategory || '').trim(),
+    Number(data?.amount || 0),
+    String(data?.paymentMethod || '').trim(),
+    String(data?.reference || '').trim(),
+    String(data?.narration || '').trim(),
+    String(data?.partnerId || '').trim(),
+    String(data?.recordedBy || '').trim(),
+    String(data?.approvedBy || '').trim(),
+    String(data?.approvalStatus || 'recorded').trim() || 'recorded',
+    String(data?.attachmentName || '').trim(),
+  ).run();
+  return await getKpscFinanceEntryById(DB, id);
+}
+
+async function updateKpscFinanceEntry(DB, id, data) {
+  const row = await DB.prepare(`SELECT * FROM kpsc_finance_entries WHERE id=?`).bind(id).first();
+  if (!row) return err('KPSC finance entry not found', 404);
+  await DB.prepare(`
+    UPDATE kpsc_finance_entries
+    SET date=?, entry_type=?, category=?, sub_category=?, amount=?, payment_method=?, reference=?, narration=?, partner_id=?, recorded_by=?, approved_by=?, approval_status=?, attachment_name=?
+    WHERE id=?
+  `).bind(
+    data?.date !== undefined ? String(data.date || '').trim() : row.date,
+    data?.entryType !== undefined ? String(data.entryType || row.entry_type).trim().toLowerCase() : row.entry_type,
+    data?.category !== undefined ? String(data.category || '').trim() : row.category,
+    data?.subCategory !== undefined ? String(data.subCategory || '').trim() : row.sub_category,
+    data?.amount !== undefined ? Number(data.amount || 0) : Number(row.amount || 0),
+    data?.paymentMethod !== undefined ? String(data.paymentMethod || '').trim() : row.payment_method,
+    data?.reference !== undefined ? String(data.reference || '').trim() : row.reference,
+    data?.narration !== undefined ? String(data.narration || '').trim() : row.narration,
+    data?.partnerId !== undefined ? String(data.partnerId || '').trim() : row.partner_id,
+    data?.recordedBy !== undefined ? String(data.recordedBy || '').trim() : row.recorded_by,
+    data?.approvedBy !== undefined ? String(data.approvedBy || '').trim() : row.approved_by,
+    data?.approvalStatus !== undefined ? String(data.approvalStatus || 'recorded').trim() : row.approval_status,
+    data?.attachmentName !== undefined ? String(data.attachmentName || '').trim() : row.attachment_name,
+    id,
+  ).run();
+  return await getKpscFinanceEntryById(DB, id);
+}
+
+async function getKpscFinanceEntryById(DB, id) {
+  const row = await DB.prepare(`SELECT * FROM kpsc_finance_entries WHERE id=?`).bind(id).first();
+  if (!row) return err('KPSC finance entry not found', 404);
+  return ok({
+    id: row.id,
+    date: row.date,
+    entryType: row.entry_type,
+    category: row.category || '',
+    subCategory: row.sub_category || '',
+    amount: Number(row.amount || 0),
+    paymentMethod: row.payment_method || '',
+    reference: row.reference || '',
+    narration: row.narration || '',
+    partnerId: row.partner_id || '',
+    recordedBy: row.recorded_by || '',
+    approvedBy: row.approved_by || '',
+    approvalStatus: row.approval_status || 'recorded',
+    attachmentName: row.attachment_name || '',
+    createdAt: row.created_at || '',
+  });
+}
+
+async function getKpscReminders(DB, url) {
+  const year = normalizeYear(url.searchParams.get('year'));
+  const month = normalizeMonth(url.searchParams.get('month'));
+  const { results } = await DB.prepare(`
+    SELECT r.*, p.full_name AS partner_name
+    FROM kpsc_reminders r
+    LEFT JOIN kpsc_partners p ON p.id = r.partner_id
+    WHERE r.year=? AND r.month=?
+    ORDER BY r.created_at DESC
+  `).bind(year, month || (new Date().getUTCMonth() + 1)).all();
+  return ok((results || []).map(row => ({
+    id: row.id,
+    partnerId: row.partner_id,
+    partnerName: row.partner_name || '',
+    channel: row.channel || 'sms',
+    message: row.message || '',
+    status: row.status || 'queued',
+    year: Number(row.year || 0),
+    month: Number(row.month || 0),
+    sentBy: row.sent_by || '',
+    sentAt: row.sent_at || '',
+    createdAt: row.created_at || '',
+  })));
+}
+
+async function createKpscReminder(DB, data) {
+  const partnerIds = Array.isArray(data?.partnerIds) ? data.partnerIds : [data?.partnerId];
+  const cleaned = partnerIds.map(id => String(id || '').trim()).filter(Boolean);
+  if (!cleaned.length) return err('partnerId or partnerIds is required', 400);
+  const month = normalizeMonth(data?.month) || (new Date().getUTCMonth() + 1);
+  const year = normalizeYear(data?.year);
+  const message = String(data?.message || '').trim();
+  if (!message) return err('message is required', 400);
+  const sentBy = String(data?.sentBy || '').trim();
+  const channel = String(data?.channel || 'sms').trim() || 'sms';
+  const out = [];
+  for (const partnerId of cleaned) {
+    const id = newId('krm');
+    await DB.prepare(`
+      INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,year,month,sent_by,sent_at)
+      VALUES (?,?,?,?,?,?,?,?,?)
+    `).bind(id, partnerId, channel, message, 'sent', year, month, sentBy, new Date().toISOString()).run();
+    out.push({ id, partnerId, channel, status: 'sent', year, month });
+  }
+  return ok({ sent: out.length, reminders: out });
+}
+
+async function getKpscDashboard(DB, url) {
+  const year = normalizeYear(url.searchParams.get('year'));
+  const month = normalizeMonth(url.searchParams.get('month')) || (new Date().getUTCMonth() + 1);
+
+  const incomeRow = await DB.prepare(`
+    SELECT COALESCE(SUM(amount),0) AS total
+    FROM kpsc_finance_entries
+    WHERE entry_type='income' AND strftime('%Y', date)=? AND strftime('%m', date)=?
+  `).bind(String(year), String(month).padStart(2, '0')).first();
+
+  const expenseRow = await DB.prepare(`
+    SELECT COALESCE(SUM(amount),0) AS total
+    FROM kpsc_finance_entries
+    WHERE entry_type='expense' AND strftime('%Y', date)=? AND strftime('%m', date)=?
+  `).bind(String(year), String(month).padStart(2, '0')).first();
+
+  const partnersRow = await DB.prepare(`
+    SELECT
+      COUNT(*) AS total_partners,
+      SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active_partners
+    FROM kpsc_partners
+  `).first();
+
+  const paidPartnersRow = await DB.prepare(`
+    SELECT COUNT(DISTINCT partner_id) AS paid_count
+    FROM kpsc_partner_payments
+    WHERE year=? AND month=? AND paid=1
+  `).bind(year, month).first();
+
+  const unpaidPartnersRow = await DB.prepare(`
+    SELECT COUNT(*) AS unpaid_count
+    FROM kpsc_partners p
+    WHERE p.status='active'
+      AND NOT EXISTS (
+        SELECT 1 FROM kpsc_partner_payments pay
+        WHERE pay.partner_id=p.id AND pay.year=? AND pay.month=? AND pay.paid=1
+      )
+  `).bind(year, month).first();
+
+  const remindersRow = await DB.prepare(`
+    SELECT COUNT(*) AS sent_count
+    FROM kpsc_reminders
+    WHERE year=? AND month=?
+  `).bind(year, month).first();
+
+  return ok({
+    month,
+    year,
+    totals: {
+      income: Number(incomeRow?.total || 0),
+      expense: Number(expenseRow?.total || 0),
+      balance: Number(incomeRow?.total || 0) - Number(expenseRow?.total || 0),
+      partners: Number(partnersRow?.total_partners || 0),
+      activePartners: Number(partnersRow?.active_partners || 0),
+      paidPartners: Number(paidPartnersRow?.paid_count || 0),
+      unpaidPartners: Number(unpaidPartnersRow?.unpaid_count || 0),
+      remindersSent: Number(remindersRow?.sent_count || 0),
+    },
+  });
+}
+
+function normalizeStatementItem(item, index) {
+  return {
+    id: `st-${index + 1}`,
+    date: String(item?.date || '').slice(0, 10),
+    amount: Math.abs(Number(item?.amount || 0)),
+    type: String(item?.type || '').toLowerCase() === 'expense' ? 'expense' : 'income',
+    reference: String(item?.reference || '').trim(),
+    narration: String(item?.narration || '').trim(),
+  };
+}
+
+async function runKpscReconciliation(DB, data) {
+  const statementYear = normalizeYear(data?.statementYear);
+  const statementMonth = normalizeMonth(data?.statementMonth) || (new Date().getUTCMonth() + 1);
+  const statementItems = Array.isArray(data?.statementItems) ? data.statementItems.map(normalizeStatementItem) : [];
+  const createdBy = String(data?.createdBy || '').trim();
+  if (!statementItems.length) return err('statementItems is required', 400);
+
+  const { results } = await DB.prepare(`
+    SELECT id,date,entry_type,amount,reference,narration
+    FROM kpsc_finance_entries
+    WHERE strftime('%Y', date)=? AND strftime('%m', date)=?
+    ORDER BY date ASC, created_at ASC
+  `).bind(String(statementYear), String(statementMonth).padStart(2, '0')).all();
+  const financeEntries = (results || []).map(row => ({
+    id: row.id,
+    date: row.date,
+    type: row.entry_type === 'expense' ? 'expense' : 'income',
+    amount: Math.abs(Number(row.amount || 0)),
+    reference: row.reference || '',
+    narration: row.narration || '',
+  }));
+
+  const usedFinanceIds = new Set();
+  const matches = [];
+  const unmatchedStatement = [];
+  for (const item of statementItems) {
+    const candidate = financeEntries.find(entry =>
+      !usedFinanceIds.has(entry.id)
+      && entry.type === item.type
+      && Math.abs(entry.amount - item.amount) < 0.5
+    );
+    if (candidate) {
+      usedFinanceIds.add(candidate.id);
+      matches.push({
+        statementItem: item,
+        financeEntry: candidate,
+        confidence: 0.9,
+      });
+    } else {
+      unmatchedStatement.push(item);
+    }
+  }
+
+  const unmatchedFinance = financeEntries.filter(entry => !usedFinanceIds.has(entry.id));
+  const result = {
+    summary: {
+      totalStatementItems: statementItems.length,
+      matchedCount: matches.length,
+      unmatchedStatementCount: unmatchedStatement.length,
+      unmatchedFinanceCount: unmatchedFinance.length,
+    },
+    matches,
+    unmatchedStatement,
+    unmatchedFinance,
+    notes: [
+      'This reconciliation result is AI-assisted/deterministic and requires officer review before final approval.',
+    ],
+  };
+
+  const runId = newId('krec');
+  await DB.prepare(`
+    INSERT INTO kpsc_reconciliation_runs (id,statement_year,statement_month,statement_items_json,result_json,created_by)
+    VALUES (?,?,?,?,?,?)
+  `).bind(
+    runId,
+    statementYear,
+    statementMonth,
+    JSON.stringify(statementItems),
+    JSON.stringify(result),
+    createdBy,
+  ).run();
+
+  return ok({ runId, ...result });
 }
 
 
@@ -1994,7 +2756,7 @@ async function createNotification(DB, data) {
 async function adminClearDataOnly(DB) {
   // Clears ALL transaction/financial data but preserves:
   // users, settings (church info, rates, quotas, permissions), petty_config
-  const tables = ['income','expenses','petty_cash','remittances','cash_transactions','audit_log','notifications'];
+  const tables = ['income','expenses','petty_cash','remittances','cash_transactions','audit_log','notifications','kpsc_partner_payments','kpsc_finance_entries','kpsc_reminders','kpsc_reconciliation_runs'];
   for (const t of tables) {
     await DB.prepare(`DELETE FROM ${t}`).run();
   }
@@ -2004,7 +2766,7 @@ async function adminClearDataOnly(DB) {
 }
 
 async function adminClear(DB) {
-  const tables = ['income','expenses','petty_cash','remittances','cash_transactions','audit_log','notifications'];
+  const tables = ['income','expenses','petty_cash','remittances','cash_transactions','audit_log','notifications','kpsc_accounts','kpsc_partners','kpsc_partner_payments','kpsc_finance_entries','kpsc_reminders','kpsc_reconciliation_runs'];
   for (const t of tables) {
     await DB.prepare(`DELETE FROM ${t}`).run();
   }

@@ -27,10 +27,11 @@
       <div class="kl-card">
         <h2 class="kl-card-title">Sign In</h2>
         <div id="kpsc-login-error" class="kl-error" style="display:none"></div>
-        <label class="kl-label">Your Name</label>
-        <input type="text" id="kpsc-name-input" class="kl-input" placeholder="Enter your full name"
-          autocomplete="name" autocorrect="off"
-          onkeydown="if(event.key==='Enter')document.getElementById('kpsc-pin-input').focus()" />
+        <label class="kl-label">Committee Member</label>
+        <select id="kpsc-account-select" class="kl-input"
+          onkeydown="if(event.key==='Enter')document.getElementById('kpsc-pin-input').focus()">
+          <option value="">Loading members…</option>
+        </select>
         <label class="kl-label">PIN</label>
         <input type="password" id="kpsc-pin-input" class="kl-input" maxlength="6"
           placeholder="••••••" inputmode="numeric"
@@ -62,6 +63,18 @@
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
       <span>Dashboard</span>
     </button>
+    <button class="ka-nav-item" data-page="partners" onclick="Kpsc.navigate('partners')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M20 8v6"/><path d="M23 11h-6"/></svg>
+      <span>Partners</span>
+    </button>
+    <button class="ka-nav-item" data-page="finance" onclick="Kpsc.navigate('finance')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v8"/><path d="M1 12h22"/><path d="M7 16h.01"/><path d="M11 16h2"/></svg>
+      <span>Finance</span>
+    </button>
+    <button class="ka-nav-item" data-page="reminders" onclick="Kpsc.navigate('reminders')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+      <span>Reminders</span>
+    </button>
     <button class="ka-nav-item" data-page="members" onclick="Kpsc.navigate('members')">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       <span>Members</span>
@@ -69,6 +82,10 @@
     <button class="ka-nav-item" data-page="archive" onclick="Kpsc.navigate('archive')">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
       <span>Archive</span>
+    </button>
+    <button class="ka-nav-item" data-page="reports" onclick="Kpsc.navigate('reports')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 14l3-3 3 2 4-5"/></svg>
+      <span>Reports</span>
     </button>
     <button class="ka-nav-item" data-page="settings" onclick="Kpsc.navigate('settings')">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>

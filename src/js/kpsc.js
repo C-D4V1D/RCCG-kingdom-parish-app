@@ -25,6 +25,14 @@ const STATUS_CONFIG = {
   processed: { label: 'Processed', cls: 'badge-green' },
 };
 
+const KPSC_PERMISSIONS = {
+  acting_chairman: ['dashboard', 'partners', 'finance', 'reminders', 'members', 'archive', 'reports', 'settings'],
+  general_secretary: ['dashboard', 'partners', 'reminders', 'members', 'archive', 'reports', 'settings'],
+  financial_secretary: ['dashboard', 'partners', 'finance', 'reminders', 'archive', 'reports'],
+  treasurer: ['dashboard', 'partners', 'finance', 'reminders', 'archive', 'reports'],
+  committee_viewer: ['dashboard', 'partners', 'reports', 'archive'],
+};
+
 // ── STATE ──────────────────────────────────────────────────────────
 const S = {
   user: null,
@@ -32,6 +40,12 @@ const S = {
   meetings: [],
   activeMeeting: null,
   members: [],
+  accounts: [],
+  partners: [],
+  partnerPayments: [],
+  financeEntries: [],
+  reminders: [],
+  dashboard: null,
   archiveSearch: '',
   archiveQuickFilter: 'all',
 };
@@ -1073,6 +1087,38 @@ async function apiDelete(path, body) {
   return r.json();
 }
 
+function roleLabel(role) {
+  const map = {
+    acting_chairman: 'Acting Chairman',
+    general_secretary: 'General Secretary',
+    financial_secretary: 'Financial Secretary',
+    treasurer: 'Treasurer',
+    committee_viewer: 'Committee Viewer',
+  };
+  return map[String(role || '').toLowerCase()] || 'Committee Viewer';
+}
+
+function canAccess(page) {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const allowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
+  return allowed.includes(page);
+}
+
+function applyNavPermissions() {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const allowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
+  document.querySelectorAll('.ka-nav-item').forEach(btn => {
+    const visible = allowed.includes(btn.dataset.page);
+    btn.style.display = visible ? '' : 'none';
+  });
+}
+
+function defaultPageForRole() {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const allowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
+  return allowed[0] || 'dashboard';
+}
+
 // ── SESSION ───────────────────────────────────────────────────────
 function loadSession() {
   try {
@@ -1241,13 +1287,99 @@ function arrayBufferToBase64(buffer) {
 }
 
 
+async function loadLoginOptions() {
+  const select = document.getElementById('kpsc-account-select');
+  if (!select) return;
+  select.innerHTML = '<option value="">Loading members…</option>';
+  try {
+    const res = await apiGet('kpsc-login-options');
+    if (res?.error) throw new Error(res.error);
+    S.accounts = Array.isArray(res) ? res : [];
+    if (!S.accounts.length) {
+      select.innerHTML = '<option value="">No active committee members</option>';
+      return;
+    }
+    select.innerHTML = [
+      '<option value="">— Select your name —</option>',
+      ...S.accounts.map(acct => `<option value="${esc(acct.id)}">${esc(acct.name)} — ${esc(roleLabel(acct.role))}</option>`),
+    ].join('');
+  } catch {
+    select.innerHTML = '<option value="">Could not load committee members</option>';
+  }
+}
+
+function showPinChangeModal() {
+  document.getElementById('kpsc-pin-change-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'kpsc-pin-change-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">Change Default PIN</span>
+      </div>
+      <div class="k-modal-body">
+        <p class="k-hint" style="margin-bottom:12px">For security, set a new PIN before entering the portal.</p>
+        <label class="k-label">Current PIN</label>
+        <input id="kpc-current-pin" class="k-input" type="password" maxlength="6" inputmode="numeric" />
+        <label class="k-label">New PIN</label>
+        <input id="kpc-new-pin" class="k-input" type="password" maxlength="6" inputmode="numeric" />
+        <label class="k-label">Confirm New PIN</label>
+        <input id="kpc-confirm-pin" class="k-input" type="password" maxlength="6" inputmode="numeric" />
+        <div id="kpc-pin-msg" class="k-settings-msg" style="display:none"></div>
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.submitPinChange(this)">Save PIN</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function submitPinChange(btn) {
+  const msg = document.getElementById('kpc-pin-msg');
+  const currentPin = document.getElementById('kpc-current-pin')?.value.trim() || '';
+  const newPin = document.getElementById('kpc-new-pin')?.value.trim() || '';
+  const confirmPin = document.getElementById('kpc-confirm-pin')?.value.trim() || '';
+  if (!currentPin || !newPin || !confirmPin) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = 'All fields are required.';
+    msg.style.display = 'block';
+    return;
+  }
+  if (!/^\d{4,6}$/.test(newPin)) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = 'New PIN must be 4-6 digits.';
+    msg.style.display = 'block';
+    return;
+  }
+  if (newPin !== confirmPin) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = 'PIN confirmation does not match.';
+    msg.style.display = 'block';
+    return;
+  }
+  btn.disabled = true;
+  const res = await apiPost('kpsc-change-pin', { accountId: S.user?.id, currentPin, newPin });
+  if (res?.error) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = res.error;
+    msg.style.display = 'block';
+    btn.disabled = false;
+    return;
+  }
+  S.user.mustChangePin = false;
+  saveSession(S.user);
+  document.getElementById('kpsc-pin-change-modal')?.remove();
+  enterApp();
+}
+
 async function login(btn) {
-  const name = document.getElementById('kpsc-name-input')?.value.trim() || '';
+  const accountId = document.getElementById('kpsc-account-select')?.value.trim() || '';
   const pin  = document.getElementById('kpsc-pin-input')?.value.trim() || '';
   const errEl = document.getElementById('kpsc-login-error');
 
-  if (!name || !pin) {
-    errEl.textContent = 'Please enter your name and PIN.';
+  if (!accountId || !pin) {
+    errEl.textContent = 'Please select your name and enter your PIN.';
     errEl.style.display = 'block';
     return;
   }
@@ -1257,16 +1389,20 @@ async function login(btn) {
   errEl.style.display = 'none';
 
   try {
-    const res = await apiPost('kpsc-login', { name, pin });
+    const res = await apiPost('kpsc-login', { accountId, pin });
     if (res.error) {
       errEl.textContent = res.error === 'Invalid credentials'
-        ? 'Name or PIN is incorrect. Please try again.'
+        ? 'Selected name or PIN is incorrect. Please try again.'
         : res.error;
       errEl.style.display = 'block';
     } else {
       S.user = res;
       saveSession(res);
-      enterApp();
+      if (S.user.mustChangePin) {
+        showPinChangeModal();
+      } else {
+        enterApp();
+      }
     }
   } catch {
     errEl.textContent = 'Unable to connect. Check your connection and try again.';
@@ -1285,19 +1421,26 @@ function logout() {
   S.activeMeeting = null;
   document.getElementById('kpsc-app').style.display = 'none';
   document.getElementById('kpsc-login-screen').style.display = '';
-  document.getElementById('kpsc-name-input').value = '';
+  if (document.getElementById('kpsc-account-select')) document.getElementById('kpsc-account-select').value = '';
   document.getElementById('kpsc-pin-input').value = '';
+  document.getElementById('kpsc-pin-change-modal')?.remove();
+  loadLoginOptions();
 }
 
 function enterApp() {
   document.getElementById('kpsc-login-screen').style.display = 'none';
   document.getElementById('kpsc-app').style.display = '';
-  document.getElementById('kpsc-user-name').textContent = S.user.name;
-  navigate('dashboard');
+  document.getElementById('kpsc-user-name').textContent = `${S.user.name} (${roleLabel(S.user.role)})`;
+  applyNavPermissions();
+  navigate(defaultPageForRole());
 }
 
 // ── NAVIGATION ────────────────────────────────────────────────────
 function navigate(page) {
+  if (!canAccess(page)) {
+    showToast('You do not have access to that section.', 'warn');
+    page = defaultPageForRole();
+  }
   recStop();
   Rec.status = 'idle';
   S.page = page;
@@ -1306,7 +1449,16 @@ function navigate(page) {
     b.classList.toggle('active', b.dataset.page === page);
   });
   document.getElementById('kpsc-back-btn').style.display = 'none';
-  const titles = { dashboard: 'Dashboard', members: 'KPSC Members', archive: 'Meeting Archive', settings: 'Settings' };
+  const titles = {
+    dashboard: 'Dashboard',
+    partners: 'Partners',
+    finance: 'Finance',
+    reminders: 'Reminders',
+    members: 'KPSC Members',
+    archive: 'Meeting Archive',
+    reports: 'Reports',
+    settings: 'Settings',
+  };
   document.getElementById('kpsc-page-title').textContent = titles[page] || 'KPSC';
   renderPage(page);
 }
@@ -1316,9 +1468,13 @@ async function renderPage(page) {
   main.innerHTML = '<div class="k-loading">Loading…</div>';
   try {
     if (page === 'dashboard') await renderDashboard(main);
+    else if (page === 'partners') await renderPartners(main);
+    else if (page === 'finance') await renderFinance(main);
+    else if (page === 'reminders') await renderReminders(main);
     else if (page === 'meeting') await renderMeetingRoom(main);
     else if (page === 'members') await renderMembers(main);
     else if (page === 'archive') await renderArchive(main);
+    else if (page === 'reports') await renderReports(main);
     else if (page === 'settings') await renderSettings(main);
   } catch (e) {
     main.innerHTML = `<div class="k-page"><div class="k-error-box">
@@ -1334,13 +1490,18 @@ function goBack() {
 
 // ── DASHBOARD ─────────────────────────────────────────────────────
 async function renderDashboard(main) {
-  const [meetingsRes, settingsRes] = await Promise.all([
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth() + 1;
+  const [meetingsRes, settingsRes, dashboardRes] = await Promise.all([
     apiGet('ai-secretary-meetings'),
     apiGet('settings'),
+    apiGet(`kpsc-dashboard?year=${year}&month=${month}`),
   ]);
   if (meetingsRes?.error) throw new Error(meetingsRes.error);
   S.meetings = Array.isArray(meetingsRes) ? meetingsRes : [];
   S.members  = Array.isArray(settingsRes?.kpsc_members) ? settingsRes.kpsc_members : [];
+  S.dashboard = dashboardRes?.totals || null;
 
   const recent  = [...S.meetings].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')).slice(0, 10);
   const total   = S.meetings.length;
@@ -1354,6 +1515,12 @@ async function renderDashboard(main) {
         <div class="k-stat"><div class="k-stat-val">${total}</div><div class="k-stat-lbl">Total Meetings</div></div>
         <div class="k-stat"><div class="k-stat-val">${monthCount}</div><div class="k-stat-lbl">This Month</div></div>
         <div class="k-stat k-stat-highlight"><div class="k-stat-val">${pending}</div><div class="k-stat-lbl">Awaiting Minutes</div></div>
+      </div>
+
+      <div class="k-dash-stats">
+        <div class="k-stat"><div class="k-stat-val">₦${Number(S.dashboard?.income || 0).toLocaleString('en-NG')}</div><div class="k-stat-lbl">KPSC Income</div></div>
+        <div class="k-stat"><div class="k-stat-val">₦${Number(S.dashboard?.expense || 0).toLocaleString('en-NG')}</div><div class="k-stat-lbl">KPSC Expense</div></div>
+        <div class="k-stat k-stat-highlight"><div class="k-stat-val">${Number(S.dashboard?.unpaidPartners || 0)}</div><div class="k-stat-lbl">Unpaid Partners</div></div>
       </div>
 
       <div class="k-section-hdr">
@@ -2261,6 +2428,423 @@ async function finishEnrollRecording() {
 
 
 
+function currentYear() {
+  return new Date().getUTCFullYear();
+}
+
+function currentMonth() {
+  return new Date().getUTCMonth() + 1;
+}
+
+function monthName(month) {
+  return new Date(Date.UTC(2026, Math.max(0, month - 1), 1)).toLocaleString('en-NG', { month: 'long', timeZone: 'UTC' });
+}
+
+async function loadPartnerData(year = currentYear()) {
+  const [partnersRes, paymentsRes] = await Promise.all([
+    apiGet('kpsc-partners'),
+    apiGet(`kpsc-partner-payments?year=${year}`),
+  ]);
+  if (partnersRes?.error) throw new Error(partnersRes.error);
+  if (paymentsRes?.error) throw new Error(paymentsRes.error);
+  S.partners = Array.isArray(partnersRes) ? partnersRes : [];
+  S.partnerPayments = Array.isArray(paymentsRes) ? paymentsRes : [];
+}
+
+function partnerPaymentsByPartner(partnerId, year = currentYear()) {
+  return S.partnerPayments.filter(p => p.partnerId === partnerId && Number(p.year) === Number(year) && p.paid);
+}
+
+function partnerMonthlyPaid(partnerId, month, year = currentYear()) {
+  return S.partnerPayments.some(p =>
+    p.partnerId === partnerId && Number(p.year) === Number(year) && Number(p.month) === Number(month) && p.paid && p.paymentType === 'monthly_pledge'
+  );
+}
+
+async function renderPartners(main) {
+  await loadPartnerData(currentYear());
+  const canManage = !['committee_viewer'].includes(String(S.user?.role || '').toLowerCase());
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-section-hdr">
+        <h2>Partnership Management</h2>
+        ${canManage ? `<button class="kbtn kbtn-primary" onclick="Kpsc.addPartner()">+ Add Partner</button>` : ''}
+      </div>
+      <p class="k-page-hint">Track God's Kingdom Partners and Covenant Partners, monthly pledges, and payment progress.</p>
+      <div id="kpsc-partners-list">${renderPartnersList(canManage)}</div>
+    </div>`;
+}
+
+function renderPartnersList(canManage) {
+  if (!S.partners.length) return '<div class="k-empty">No partners added yet.</div>';
+  const year = currentYear();
+  return `<div class="k-meeting-list">${S.partners.map(partner => {
+    const paidMonths = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
+    const currentPaid = partnerMonthlyPaid(partner.id, currentMonth(), year);
+    return `
+      <div class="k-meeting-card">
+        <div class="k-mc-top">
+          <div>
+            <div class="k-mc-title">${esc(partner.fullName)}</div>
+            <div class="k-mc-meta">
+              <span>${esc((partner.partnershipType || '').replace(/_/g, ' '))}</span>
+              <span>${paidMonths}/12 paid (${year})</span>
+              <span>${partner.status === 'active' ? 'Active' : 'Inactive'}</span>
+            </div>
+          </div>
+          <div class="k-mc-badges">
+            <span class="kbadge ${currentPaid ? 'badge-green' : 'badge-amber'}">${currentPaid ? 'Paid this month' : 'Unpaid this month'}</span>
+          </div>
+        </div>
+        ${canManage ? `
+          <div class="k-room-actions">
+            <button class="kbtn kbtn-sm ${currentPaid ? '' : 'kbtn-primary'}" onclick="Kpsc.togglePartnerMonth('${partner.id}', ${currentMonth()}, ${year}, ${!currentPaid})">${currentPaid ? 'Mark Unpaid' : 'Mark Paid'}</button>
+            <button class="kbtn kbtn-sm" onclick="Kpsc.editPartner('${partner.id}')">Edit</button>
+          </div>` : ''}
+      </div>`;
+  }).join('')}</div>`;
+}
+
+function addPartner() {
+  showPartnerModal();
+}
+
+function editPartner(id) {
+  const partner = S.partners.find(p => p.id === id);
+  if (!partner) return;
+  showPartnerModal(partner);
+}
+
+function showPartnerModal(partner = null) {
+  document.getElementById('kpsc-partner-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'kpsc-partner-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">${partner ? 'Edit Partner' : 'Add Partner'}</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closePartnerModal()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <label class="k-label">Full Name</label>
+        <input id="kp-full-name" class="k-input" value="${esc(partner?.fullName || '')}" />
+        <label class="k-label">Phone</label>
+        <input id="kp-phone" class="k-input" value="${esc(partner?.phone || '')}" />
+        <label class="k-label">Partnership Type</label>
+        <select id="kp-type" class="k-input">
+          <option value="gods_kingdom_partner" ${(partner?.partnershipType || '') === 'gods_kingdom_partner' ? 'selected' : ''}>God's Kingdom Partner</option>
+          <option value="covenant_partner" ${(partner?.partnershipType || '') === 'covenant_partner' ? 'selected' : ''}>Covenant Partner</option>
+        </select>
+        <label class="k-label">Monthly Pledge (private)</label>
+        <input id="kp-pledge" class="k-input" type="number" min="0" value="${Number(partner?.monthlyPledge || 0)}" />
+        <label class="k-label">Status</label>
+        <select id="kp-status" class="k-input">
+          <option value="active" ${(partner?.status || 'active') === 'active' ? 'selected' : ''}>Active</option>
+          <option value="inactive" ${(partner?.status || '') === 'inactive' ? 'selected' : ''}>Inactive</option>
+        </select>
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.savePartner('${partner?.id || ''}', this)">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function closePartnerModal() {
+  document.getElementById('kpsc-partner-modal')?.remove();
+}
+
+async function savePartner(id, btn) {
+  const payload = {
+    fullName: document.getElementById('kp-full-name')?.value.trim() || '',
+    phone: document.getElementById('kp-phone')?.value.trim() || '',
+    partnershipType: document.getElementById('kp-type')?.value || 'gods_kingdom_partner',
+    monthlyPledge: Number(document.getElementById('kp-pledge')?.value || 0),
+    status: document.getElementById('kp-status')?.value || 'active',
+    createdBy: S.user?.name || '',
+  };
+  btn.disabled = true;
+  const res = id ? await apiPut(`kpsc-partners/${id}`, payload) : await apiPost('kpsc-partners', payload);
+  if (res?.error) {
+    showToast(res.error, 'error');
+    btn.disabled = false;
+    return;
+  }
+  closePartnerModal();
+  await renderPartners(document.getElementById('kpsc-main'));
+  showToast('Partner saved', 'success');
+}
+
+async function togglePartnerMonth(partnerId, month, year, paid) {
+  if (!paid) {
+    const payment = S.partnerPayments.find(p => p.partnerId === partnerId && p.month === month && p.year === year && p.paymentType === 'monthly_pledge');
+    if (payment) {
+      const res = await apiDelete(`kpsc-partner-payments/${payment.id}`);
+      if (res?.error) { showToast(res.error, 'error'); return; }
+    }
+  } else {
+    const partner = S.partners.find(p => p.id === partnerId);
+    const res = await apiPost('kpsc-partner-payments', {
+      partnerId,
+      year,
+      month,
+      amount: Number(partner?.monthlyPledge || 0),
+      paymentType: 'monthly_pledge',
+      source: 'partnership',
+      paid: true,
+      paidAt: new Date().toISOString(),
+      recordedBy: S.user?.name || '',
+    });
+    if (res?.error) { showToast(res.error, 'error'); return; }
+  }
+  await loadPartnerData(year);
+  const list = document.getElementById('kpsc-partners-list');
+  if (list) list.innerHTML = renderPartnersList(true);
+}
+
+async function renderFinance(main) {
+  const year = currentYear();
+  const month = currentMonth();
+  const [financeRes, partnersRes] = await Promise.all([
+    apiGet(`kpsc-finance?year=${year}&month=${month}`),
+    apiGet('kpsc-partners'),
+  ]);
+  if (financeRes?.error) throw new Error(financeRes.error);
+  if (partnersRes?.error) throw new Error(partnersRes.error);
+  S.financeEntries = Array.isArray(financeRes) ? financeRes : [];
+  S.partners = Array.isArray(partnersRes) ? partnersRes : [];
+  const canManage = ['treasurer', 'financial_secretary', 'acting_chairman'].includes(String(S.user?.role || '').toLowerCase());
+  const incomeTotal = S.financeEntries.filter(e => e.entryType === 'income').reduce((sum, e) => sum + Number(e.amount || 0), 0);
+  const expenseTotal = S.financeEntries.filter(e => e.entryType === 'expense').reduce((sum, e) => sum + Number(e.amount || 0), 0);
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-dash-stats">
+        <div class="k-stat"><div class="k-stat-val">₦${incomeTotal.toLocaleString('en-NG')}</div><div class="k-stat-lbl">${monthName(month)} Income</div></div>
+        <div class="k-stat"><div class="k-stat-val">₦${expenseTotal.toLocaleString('en-NG')}</div><div class="k-stat-lbl">${monthName(month)} Expense</div></div>
+        <div class="k-stat k-stat-highlight"><div class="k-stat-val">₦${(incomeTotal - expenseTotal).toLocaleString('en-NG')}</div><div class="k-stat-lbl">Net</div></div>
+      </div>
+      <div class="k-section-hdr">
+        <h2>Finance Entries</h2>
+        ${canManage ? `<button class="kbtn kbtn-primary" onclick="Kpsc.openFinanceModal()">+ New Entry</button>` : ''}
+      </div>
+      <div class="k-meeting-list">
+        ${S.financeEntries.length ? S.financeEntries.map(e => `
+          <div class="k-meeting-card">
+            <div class="k-mc-top">
+              <div>
+                <div class="k-mc-title">${esc(e.category)} — ₦${Number(e.amount || 0).toLocaleString('en-NG')}</div>
+                <div class="k-mc-meta">
+                  <span>${esc(e.date)}</span>
+                  <span>${esc(e.entryType)}</span>
+                  <span>${esc(e.paymentMethod || 'N/A')}</span>
+                </div>
+              </div>
+              <span class="kbadge ${e.entryType === 'income' ? 'badge-green' : 'badge-red'}">${esc(e.entryType)}</span>
+            </div>
+            <div class="k-mc-meta">
+              ${e.reference ? `<span>Ref: ${esc(e.reference)}</span>` : ''}
+              ${e.narration ? `<span>${esc(e.narration)}</span>` : ''}
+              ${e.partnerName ? `<span>Partner: ${esc(e.partnerName)}</span>` : ''}
+            </div>
+          </div>`).join('') : '<div class="k-empty">No entries for this month.</div>'}
+      </div>
+      ${canManage ? `
+      <div class="k-section" style="margin-top:16px">
+        <h3 class="k-sec-title">Bank Reconciliation (AI-assisted)</h3>
+        <p class="k-hint">Paste statement items as JSON array. The system suggests matches; review before approval.</p>
+        <textarea id="krec-items" class="k-input k-textarea" placeholder='[{"date":"${year}-${String(month).padStart(2, '0')}-05","amount":1000,"type":"income","reference":"TRX123"}]'></textarea>
+        <div class="k-room-actions" style="margin-top:10px">
+          <button class="kbtn kbtn-primary" onclick="Kpsc.runReconciliation(this)">Run Reconciliation</button>
+        </div>
+        <div id="krec-result"></div>
+      </div>` : ''}
+    </div>`;
+}
+
+function openFinanceModal() {
+  document.getElementById('kpsc-finance-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'kpsc-finance-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr"><span class="k-modal-title">New Finance Entry</span><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeFinanceModal()">✕</button></div>
+      <div class="k-modal-body">
+        <label class="k-label">Date</label>
+        <input id="kf-date" type="date" class="k-input" value="${new Date().toISOString().slice(0, 10)}" />
+        <label class="k-label">Entry Type</label>
+        <select id="kf-type" class="k-input"><option value="income">Income</option><option value="expense">Expense</option></select>
+        <label class="k-label">Category</label>
+        <input id="kf-category" class="k-input" placeholder="e.g. wealth_development_offering, projects" />
+        <label class="k-label">Amount</label>
+        <input id="kf-amount" type="number" min="0" class="k-input" />
+        <label class="k-label">Payment Method</label>
+        <input id="kf-method" class="k-input" placeholder="cash, transfer, POS..." />
+        <label class="k-label">Reference</label>
+        <input id="kf-ref" class="k-input" />
+        <label class="k-label">Narration</label>
+        <textarea id="kf-note" class="k-input k-textarea"></textarea>
+      </div>
+      <div class="k-modal-footer"><button class="kbtn kbtn-primary" onclick="Kpsc.saveFinanceEntry(this)">Save Entry</button></div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function closeFinanceModal() {
+  document.getElementById('kpsc-finance-modal')?.remove();
+}
+
+async function saveFinanceEntry(btn) {
+  btn.disabled = true;
+  const res = await apiPost('kpsc-finance', {
+    date: document.getElementById('kf-date')?.value || '',
+    entryType: document.getElementById('kf-type')?.value || '',
+    category: document.getElementById('kf-category')?.value.trim() || '',
+    amount: Number(document.getElementById('kf-amount')?.value || 0),
+    paymentMethod: document.getElementById('kf-method')?.value.trim() || '',
+    reference: document.getElementById('kf-ref')?.value.trim() || '',
+    narration: document.getElementById('kf-note')?.value.trim() || '',
+    recordedBy: S.user?.name || '',
+  });
+  if (res?.error) {
+    showToast(res.error, 'error');
+    btn.disabled = false;
+    return;
+  }
+  closeFinanceModal();
+  await renderFinance(document.getElementById('kpsc-main'));
+  showToast('Finance entry saved', 'success');
+}
+
+async function runReconciliation(btn) {
+  let statementItems;
+  try {
+    statementItems = JSON.parse(document.getElementById('krec-items')?.value || '[]');
+  } catch {
+    showToast('Invalid JSON for statement items.', 'error');
+    return;
+  }
+  if (!Array.isArray(statementItems) || !statementItems.length) {
+    showToast('Provide at least one statement item.', 'warn');
+    return;
+  }
+  btn.disabled = true;
+  const res = await apiPost('kpsc-reconciliation', {
+    statementYear: currentYear(),
+    statementMonth: currentMonth(),
+    statementItems,
+    createdBy: S.user?.name || '',
+  });
+  btn.disabled = false;
+  if (res?.error) {
+    showToast(res.error, 'error');
+    return;
+  }
+  const out = document.getElementById('krec-result');
+  if (out) {
+    out.innerHTML = `
+      <div class="k-summary" style="margin-top:12px">
+        Matched: ${res.summary?.matchedCount || 0}, Unmatched statement: ${res.summary?.unmatchedStatementCount || 0}, Unmatched records: ${res.summary?.unmatchedFinanceCount || 0}.
+      </div>`;
+  }
+}
+
+async function renderReminders(main) {
+  await loadPartnerData(currentYear());
+  const month = currentMonth();
+  const year = currentYear();
+  const unpaid = S.partners.filter(p => p.status === 'active' && !partnerMonthlyPaid(p.id, month, year));
+  const remindersRes = await apiGet(`kpsc-reminders?year=${year}&month=${month}`);
+  if (remindersRes?.error) throw new Error(remindersRes.error);
+  S.reminders = Array.isArray(remindersRes) ? remindersRes : [];
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-section">
+        <h3 class="k-sec-title">Partner Reminder Workflow</h3>
+        <p class="k-hint">${unpaid.length} unpaid active partner(s) for ${monthName(month)} ${year}.</p>
+        <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message">Dear {{name}}, this is a reminder for your ${monthName(month)} partnership pledge.</textarea>
+        <div class="k-room-actions" style="margin-top:10px">
+          <button class="kbtn kbtn-primary" onclick="Kpsc.sendBulkReminders(this)">Send Bulk SMS Reminders</button>
+        </div>
+      </div>
+      <div class="k-section-hdr"><h2>Reminder History</h2></div>
+      <div class="k-meeting-list">
+        ${S.reminders.length ? S.reminders.map(r => `
+          <div class="k-meeting-card">
+            <div class="k-mc-top">
+              <div class="k-mc-title">${esc(r.partnerName || 'Partner')}</div>
+              <span class="kbadge badge-blue">${esc(r.channel || 'sms')}</span>
+            </div>
+            <div class="k-mc-meta"><span>${esc(r.createdAt || '')}</span><span>${esc(r.status || '')}</span></div>
+            <div class="k-page-hint">${esc(r.message)}</div>
+          </div>`).join('') : '<div class="k-empty">No reminders sent this month.</div>'}
+      </div>
+    </div>`;
+}
+
+async function sendBulkReminders(btn) {
+  await loadPartnerData(currentYear());
+  const month = currentMonth();
+  const year = currentYear();
+  const unpaidPartners = S.partners.filter(p => p.status === 'active' && !partnerMonthlyPaid(p.id, month, year));
+  if (!unpaidPartners.length) {
+    showToast('No unpaid active partners for this month.', 'info');
+    return;
+  }
+  const template = document.getElementById('krem-message')?.value.trim() || '';
+  if (!template) {
+    showToast('Reminder message is required.', 'warn');
+    return;
+  }
+  btn.disabled = true;
+  const responses = await Promise.all(unpaidPartners.map(partner => apiPost('kpsc-reminders', {
+    partnerId: partner.id,
+    year,
+    month,
+    channel: partner.reminderPreference || 'sms',
+    sentBy: S.user?.name || '',
+    message: template.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month)),
+  })));
+  btn.disabled = false;
+  const failed = responses.filter(r => r?.error);
+  if (failed.length) {
+    showToast(`Sent with ${failed.length} failure(s).`, 'warn');
+  } else {
+    showToast('Reminders sent.', 'success');
+  }
+  await renderReminders(document.getElementById('kpsc-main'));
+}
+
+async function renderReports(main) {
+  await loadPartnerData(currentYear());
+  const year = currentYear();
+  const month = currentMonth();
+  const progressRows = S.partners.filter(p => p.status === 'active').map(partner => {
+    const monthsPaid = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
+    const paidPercent = Math.round((monthsPaid / 12) * 100);
+    return `
+      <div class="k-meeting-card">
+        <div class="k-mc-top">
+          <div class="k-mc-title">${esc(partner.fullName)}</div>
+          <span class="kbadge badge-type">${esc((partner.partnershipType || '').replace(/_/g, ' '))}</span>
+        </div>
+        <div class="k-mc-meta">
+          <span>${monthsPaid}/12 months paid</span>
+          <span>${paidPercent}% progress</span>
+          <span>${partnerMonthlyPaid(partner.id, month, year) ? 'Paid this month' : 'Unpaid this month'}</span>
+        </div>
+      </div>`;
+  }).join('');
+
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-section-hdr"><h2>Partner Progress (${year})</h2></div>
+      <p class="k-page-hint">Public/internal progress view — pledge amounts are hidden by design.</p>
+      <div class="k-meeting-list">${progressRows || '<div class="k-empty">No active partners available.</div>'}</div>
+    </div>`;
+}
+
 function archiveQuickFilters() {
   return [
     { key: 'all', label: 'All' },
@@ -2407,11 +2991,108 @@ async function refreshApiStatus(btn) {
   }
 }
 
+function renderKpscAccountsCard(accounts) {
+  const list = Array.isArray(accounts) ? accounts : [];
+  return `
+    <div class="k-card" style="margin-bottom:16px">
+      <h2 class="k-card-title">KPSC Login Accounts</h2>
+      <p class="k-card-sub">Dedicated KPSC authentication (separate from Finance/Admin users). Members select name from dropdown and use PIN.</p>
+      <div class="k-meeting-list">
+        ${list.length ? list.map(a => `
+          <div class="k-meeting-card">
+            <div class="k-mc-top">
+              <div>
+                <div class="k-mc-title">${esc(a.name)}</div>
+                <div class="k-mc-meta">
+                  <span>${esc(roleLabel(a.role))}</span>
+                  <span>${a.status === 'active' ? 'Active' : 'Inactive'}</span>
+                  <span>${a.mustChangePin ? 'Must change PIN' : 'PIN set'}</span>
+                </div>
+              </div>
+              <div class="k-mc-badges">
+                <button class="kbtn kbtn-sm" onclick="Kpsc.openAccountEditor('${a.id}')">Edit</button>
+              </div>
+            </div>
+          </div>`).join('') : '<div class="k-empty">No KPSC accounts found.</div>'}
+      </div>
+      <div class="k-room-actions" style="margin-top:10px">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.openAccountEditor('')">+ Add Account</button>
+      </div>
+    </div>`;
+}
+
+async function openAccountEditor(id) {
+  const existing = (S.accounts || []).find(a => a.id === id);
+  document.getElementById('kpsc-account-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'kpsc-account-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr"><span class="k-modal-title">${existing ? 'Edit KPSC Account' : 'New KPSC Account'}</span><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeAccountEditor()">✕</button></div>
+      <div class="k-modal-body">
+        <label class="k-label">Name</label>
+        <input id="ka-name" class="k-input" value="${esc(existing?.name || '')}" />
+        <label class="k-label">Role</label>
+        <select id="ka-role" class="k-input">
+          ${['acting_chairman','general_secretary','financial_secretary','treasurer','committee_viewer'].map(role => `<option value="${role}" ${existing?.role === role ? 'selected' : ''}>${esc(roleLabel(role))}</option>`).join('')}
+        </select>
+        <label class="k-label">Status</label>
+        <select id="ka-status" class="k-input">
+          <option value="active" ${(existing?.status || 'active') === 'active' ? 'selected' : ''}>Active</option>
+          <option value="inactive" ${(existing?.status || '') === 'inactive' ? 'selected' : ''}>Inactive</option>
+        </select>
+        <label class="k-label">${existing ? 'Reset PIN (optional)' : 'Default PIN'}</label>
+        <input id="ka-pin" class="k-input" maxlength="6" inputmode="numeric" placeholder="4-6 digits" />
+        <label class="k-label" style="display:flex;gap:8px;align-items:center">
+          <input id="ka-must-change" type="checkbox" ${existing?.mustChangePin !== false ? 'checked' : ''} />
+          Force PIN change at next login
+        </label>
+      </div>
+      <div class="k-modal-footer"><button class="kbtn kbtn-primary" onclick="Kpsc.saveAccountEditor('${existing?.id || ''}', this)">Save Account</button></div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function closeAccountEditor() {
+  document.getElementById('kpsc-account-modal')?.remove();
+}
+
+async function saveAccountEditor(id, btn) {
+  const payload = {
+    name: document.getElementById('ka-name')?.value.trim() || '',
+    role: document.getElementById('ka-role')?.value || 'committee_viewer',
+    status: document.getElementById('ka-status')?.value || 'active',
+    pin: document.getElementById('ka-pin')?.value.trim() || '',
+    mustChangePin: !!document.getElementById('ka-must-change')?.checked,
+  };
+  if (!payload.name) {
+    showToast('Account name is required.', 'warn');
+    return;
+  }
+  if (!id && !payload.pin) {
+    showToast('Default PIN is required for new account.', 'warn');
+    return;
+  }
+  btn.disabled = true;
+  const res = id ? await apiPut(`kpsc-accounts/${id}`, payload) : await apiPost('kpsc-accounts', payload);
+  btn.disabled = false;
+  if (res?.error) {
+    showToast(res.error, 'error');
+    return;
+  }
+  closeAccountEditor();
+  await renderSettings(document.getElementById('kpsc-main'));
+  showToast('Account saved.', 'success');
+}
+
 async function renderSettings(main) {
-  const [res, apiStatus] = await Promise.all([
+  const [res, apiStatus, accountsRes] = await Promise.all([
     apiGet('settings'),
     apiGet('settings/api-status').catch(() => ({ error: 'Could not check API status.' })),
+    apiGet('kpsc-accounts').catch(() => []),
   ]);
+  S.accounts = Array.isArray(accountsRes) ? accountsRes : [];
   const deepseekKey = res?.ai_deepseek_key || '';
   const openaiKey   = res?.ai_openai_key   || '';
   const policyUrl   = res?.kpsc_policy_url  || '';
@@ -2421,6 +3102,7 @@ async function renderSettings(main) {
 
   main.innerHTML = `
     <div class="k-page">
+      ${renderKpscAccountsCard(S.accounts)}
       <div class="k-card">
         <h2 class="k-card-title">AI Provider Keys</h2>
         <p class="k-card-sub">
@@ -2553,7 +3235,13 @@ function init() {
   const session = loadSession();
   if (session?.id) {
     S.user = session;
-    enterApp();
+    if (S.user.mustChangePin) {
+      showPinChangeModal();
+    } else {
+      enterApp();
+    }
+  } else {
+    loadLoginOptions();
   }
 }
 
@@ -2561,6 +3249,7 @@ function init() {
 window.Kpsc = {
   login,
   logout,
+  submitPinChange,
   navigate,
   goBack,
   startNewMeeting,
@@ -2574,8 +3263,21 @@ window.Kpsc = {
   removeMember,
   memberFieldChange,
   saveMembers,
+  addPartner,
+  editPartner,
+  closePartnerModal,
+  savePartner,
+  togglePartnerMonth,
+  openFinanceModal,
+  closeFinanceModal,
+  saveFinanceEntry,
+  runReconciliation,
+  sendBulkReminders,
   filterArchive,
   setArchiveQuickFilter,
+  openAccountEditor,
+  closeAccountEditor,
+  saveAccountEditor,
   saveSettings,
   clearAiKeys,
   refreshApiStatus,

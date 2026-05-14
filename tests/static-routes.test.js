@@ -14,6 +14,7 @@ test('KPSC portal directory page uses root-relative assets', async () => {
 
   assert.match(html, /<link rel="stylesheet" href="\/src\/css\/kpsc\.css" \/>/);
   assert.match(html, /<script src="\/src\/js\/kpsc\.js"><\/script>/);
+  assert.match(html, /id="kpsc-account-select"/);
 });
 
 test('Cloudflare redirects do not rewrite KPSC back to an .html file', async () => {
