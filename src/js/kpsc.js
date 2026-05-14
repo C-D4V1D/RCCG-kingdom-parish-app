@@ -751,7 +751,7 @@ async function diarizerConnect() {
   // Build the Deepgram WebSocket URL with required parameters.
   const sampleRate = audioCtx.sampleRate;
   const dgParams = new URLSearchParams({
-    model: 'nova-3',
+    model: 'nova-2-general',
     diarize: 'true',
     punctuate: 'true',
     interim_results: 'true',

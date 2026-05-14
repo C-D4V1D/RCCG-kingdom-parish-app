@@ -1816,7 +1816,7 @@ async function createDeepgramTranscriptionToken(env) {
       'Authorization': `Token ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ ttl_seconds: 30 }),
+    body: JSON.stringify({ ttl_seconds: 120 }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
