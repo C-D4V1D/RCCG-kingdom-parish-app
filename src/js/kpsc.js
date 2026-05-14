@@ -836,13 +836,10 @@ async function diarizerConnect() {
   // Sec-WebSocket-Protocol subprotocol ('token', <api-key>). Query
   // parameters like ?token=... are NOT accepted and silently fail.
   console.info('[diarizer] opening WebSocket to Deepgram');
-  // Deepgram's documented browser pattern is the subprotocol pair ('token', <value>)
-  // for BOTH raw API keys and short-lived access tokens from /v1/auth/grant.
-  // The 'bearer' scheme is only valid in the HTTP Authorization header — browsers
-  // can't set custom headers on WS handshakes, so the token rides the subprotocol slot.
-  // Using ('bearer', token) here caused Deepgram to accept the handshake then close
-  // immediately with code 1005, putting the client into an infinite reconnect loop.
-  const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, ['token', accessToken]);
+  // Temporary access token from /v1/auth/grant uses the Bearer scheme;
+  // browsers can't set the Authorization header on a WebSocket, so the
+  // scheme + token ride in the Sec-WebSocket-Protocol subprotocols list.
+  const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, ['bearer', accessToken]);
   Diarizer.ws = ws;
   ws.binaryType = 'arraybuffer';
 
