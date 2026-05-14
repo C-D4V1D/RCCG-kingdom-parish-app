@@ -113,19 +113,19 @@ const Diarizer = {
   reconnectAttempts: 0,
   manualStop: false,
   // PCM ring buffer — raw Float32 samples from the AudioWorklet, used to
-  // extract per-speaker audio slices for Azure Speaker Recognition.
+  // extract per-speaker audio slices for ECAPA-TDNN speaker identification.
   pcmChunks: [],        // Array of {offset: number, data: Float32Array}
   pcmSampleOffset: 0,   // Total samples written since Diarizer was constructed
   pcmSampleRate: 0,     // Set from AudioContext.sampleRate on connection
   dgTimeOffset: 0,      // pcmSampleOffset when the current WS connection was opened;
                         // adds to Deepgram's 0-based timestamps to get absolute offsets
   speakerRanges: new Map(), // Map<speakerIdx, {startSample, endSample}[]>
-  identifyPending: new Set(), // speaker indices currently being identified by Azure
+  identifyPending: new Set(), // speaker indices currently being identified by ECAPA-TDNN
 };
 
 // ── VOICE ENROLLMENT ───────────────────────────────────────────────
-// Captures a ~30-second voice sample from a member and enrolls it
-// with Azure Speaker Recognition for automatic future identification.
+// Captures a ~30-second voice sample from a member and computes a
+// SpeechBrain ECAPA-TDNN speaker embedding for automatic future identification.
 const Enrolling = {
   stream: null,
   audioCtx: null,
@@ -139,12 +139,12 @@ const Enrolling = {
   active: false,
 };
 
-// ── AZURE SPEAKER RECOGNITION CONSTANTS ───────────────────────────
-const AZURE_IDENTIFY_THRESHOLD_SEC = 5;   // seconds of speech needed before triggering auto-ID
-const AZURE_IDENTIFY_MIN_AUDIO_SEC  = 4;  // minimum seconds Azure needs for a reliable match
-const AZURE_IDENTIFY_MAX_AUDIO_SEC  = 10; // max seconds of audio to send per identification call
-const AZURE_IDENTIFY_MIN_SCORE = 0.5;     // minimum confidence (0–1) to accept auto-assignment
-const AZURE_ENROLL_DURATION_SEC = 30;     // seconds of audio to capture for enrollment
+// ── SPEECHBRAIN ECAPA-TDNN CONSTANTS ─────────────────────────────
+const SB_IDENTIFY_THRESHOLD_SEC = 5;   // seconds of speech needed before triggering auto-ID
+const SB_IDENTIFY_MIN_AUDIO_SEC  = 4;  // minimum seconds of speech for a reliable match
+const SB_IDENTIFY_MAX_AUDIO_SEC  = 10; // max seconds of audio to send per identification call
+const SB_IDENTIFY_MIN_SCORE = 0.75;    // minimum cosine similarity (0–1) to accept auto-assignment
+const SB_ENROLL_DURATION_SEC = 30;     // seconds of audio to capture for enrollment
 const DEFAULT_PCM_SAMPLE_RATE   = 48000;  // fallback rate before the AudioContext is created
 const BASE64_CHUNK_SIZE         = 32768;  // chars per chunk when encoding large buffers
 const PCM_BUFFER_DURATION_SEC   = 60;     // seconds of PCM audio to retain in the ring buffer
@@ -809,7 +809,7 @@ async function diarizerConnect() {
       if (Diarizer.ws?.readyState === WebSocket.OPEN) {
         Diarizer.ws.send(diarizerFloat32ToInt16(e.data).buffer);
       }
-      // Buffer a copy of the raw PCM for Azure speaker identification.
+      // Buffer a copy of the raw PCM for ECAPA-TDNN speaker identification.
       diarizerBufferPcm(e.data);
     };
     source.connect(workletNode);
@@ -975,11 +975,11 @@ function diarizerExtractPcmRange(startSample, endSample) {
   return out;
 }
 
-// Collect up to AZURE_IDENTIFY_MAX_AUDIO_SEC of audio for a speaker index from the ring buffer.
+// Collect up to SB_IDENTIFY_MAX_AUDIO_SEC of audio for a speaker index from the ring buffer.
 function diarizerExtractSpeakerAudio(speakerIdx) {
   const ranges = Diarizer.speakerRanges.get(speakerIdx) || [];
   if (!ranges.length || !Diarizer.pcmSampleRate) return null;
-  const maxSamples = AZURE_IDENTIFY_MAX_AUDIO_SEC * Diarizer.pcmSampleRate;
+  const maxSamples = SB_IDENTIFY_MAX_AUDIO_SEC * Diarizer.pcmSampleRate;
   let accumulated = 0;
   const toExtract = [];
   for (let i = ranges.length - 1; i >= 0 && accumulated < maxSamples; i--) {
@@ -1001,7 +1001,7 @@ function diarizerExtractSpeakerAudio(speakerIdx) {
 }
 
 // Record the time range spoken by a Deepgram speaker index (in absolute PCM samples).
-// Triggers Azure identification once AZURE_IDENTIFY_THRESHOLD_SEC of audio is collected.
+// Triggers ECAPA-TDNN identification once SB_IDENTIFY_THRESHOLD_SEC of audio is collected.
 function diarizerAccumulateSpeakerRange(speakerIdx, startSec, endSec) {
   if (!Diarizer.pcmSampleRate) return;
   const sr          = Diarizer.pcmSampleRate;
@@ -1013,7 +1013,7 @@ function diarizerAccumulateSpeakerRange(speakerIdx, startSec, endSec) {
   const totalSamples = Diarizer.speakerRanges.get(speakerIdx)
     .reduce((a, r) => a + (r.endSample - r.startSample), 0);
   if (!Diarizer.identifyPending.has(speakerIdx) &&
-      totalSamples >= AZURE_IDENTIFY_THRESHOLD_SEC * sr) {
+      totalSamples >= SB_IDENTIFY_THRESHOLD_SEC * sr) {
     diarizerTriggerIdentify(speakerIdx).catch(e => console.warn('Auto-identify error:', e));
   }
 }
@@ -1027,34 +1027,35 @@ function isMemberPresent(mem) {
   return el?.checked === true;
 }
 
-// Attempt to auto-identify a Deepgram speaker index using Azure Speaker Recognition.
-// Silently skips if Azure is not configured or no enrolled members are present.
+// Attempt to auto-identify a Deepgram speaker index using ECAPA-TDNN embeddings
+// and cosine similarity. Silently skips if no enrolled members are present.
 async function diarizerTriggerIdentify(speakerIdx) {
   if (Rec.speakerMap.has(speakerIdx)) return; // already assigned manually
-  const enrolledPresent = S.members.filter(m => m.azureSpeakerProfileId && isMemberPresent(m));
+  const enrolledPresent = S.members.filter(m => m.sbVoiceEmbedding && isMemberPresent(m));
   if (!enrolledPresent.length) return;
 
   Diarizer.identifyPending.add(speakerIdx);
   try {
     const audio = diarizerExtractSpeakerAudio(speakerIdx);
-    // Azure needs at least AZURE_IDENTIFY_MIN_AUDIO_SEC of speech for a reliable match.
-    if (!audio || audio.length < AZURE_IDENTIFY_MIN_AUDIO_SEC * Diarizer.pcmSampleRate) return;
+    // Need at least SB_IDENTIFY_MIN_AUDIO_SEC of speech for a reliable ECAPA-TDNN embedding.
+    if (!audio || audio.length < SB_IDENTIFY_MIN_AUDIO_SEC * Diarizer.pcmSampleRate) return;
 
-    const resampled   = resampleTo16k(audio, Diarizer.pcmSampleRate);
-    const wavBuffer   = pcmToWav(resampled, 16000);
-    const audioBase64 = arrayBufferToBase64(wavBuffer);
-    const profileIds  = enrolledPresent.map(m => m.azureSpeakerProfileId);
+    const embedding = await computeSpeakerEmbedding(audio, Diarizer.pcmSampleRate);
+    if (!embedding) return;
 
-    const res = await apiPost('azure-speaker-identify', { profileIds, audioBase64 });
-    if (res.error) { console.warn('Speaker identification:', res.error); return; }
+    let bestScore  = -Infinity;
+    let bestMember = null;
+    for (const m of enrolledPresent) {
+      const stored = base64ToEmbedding(m.sbVoiceEmbedding);
+      if (!stored) continue;
+      const score = cosineSimilarity(embedding, stored);
+      if (score > bestScore) { bestScore = score; bestMember = m; }
+    }
 
-    if (res.profileId && res.score >= AZURE_IDENTIFY_MIN_SCORE) {
+    if (bestMember && bestScore >= SB_IDENTIFY_MIN_SCORE) {
       if (Rec.speakerMap.has(speakerIdx)) return; // assigned while we waited
-      const matched = enrolledPresent.find(m => m.azureSpeakerProfileId === res.profileId);
-      if (matched) {
-        assignSpeaker(speakerIdx, matched.name);
-        showToast(`🎙 Auto-identified: ${matched.name} (${Math.round(res.score * 100)}% match)`, 'success');
-      }
+      assignSpeaker(speakerIdx, bestMember.name);
+      showToast(`🎙 Auto-identified: ${bestMember.name} (${Math.round(bestScore * 100)}% match)`, 'success');
     }
   } catch (e) {
     console.warn('diarizerTriggerIdentify error:', e);
@@ -1250,10 +1251,10 @@ function esc(s) {
 
 // ── PCM AUDIO HELPERS ────────────────────────────────────────────
 // Linearly resample a Float32 PCM array from `fromRate` to 16 kHz.
-// Azure Speaker Recognition requires 8/16/32 kHz WAV input.
-// Linear interpolation is sufficient for speaker identification — the model
-// is robust to minor resampling artefacts, and higher-quality algorithms
-// (e.g. polyphase filters) are not worth the added complexity here.
+// ECAPA-TDNN requires 16 kHz input. Linear interpolation is sufficient
+// for speaker identification — the model is robust to minor resampling
+// artefacts, and higher-quality algorithms (e.g. polyphase filters) are
+// not worth the added complexity here.
 function resampleTo16k(float32, fromRate) {
   const toRate = 16000;
   if (fromRate === toRate) return float32;
@@ -1309,6 +1310,106 @@ function arrayBufferToBase64(buffer) {
     parts.push(String.fromCharCode(...bytes.subarray(i, i + BASE64_CHUNK_SIZE)));
   }
   return btoa(parts.join(''));
+}
+
+// ── SPEECHBRAIN ECAPA-TDNN SPEAKER EMBEDDINGS ─────────────────────
+// Speaker embeddings are computed entirely client-side using the
+// SpeechBrain ECAPA-TDNN model (Xenova/speechbrain-spkrec-ecapa-voxceleb)
+// via transformers.js loaded on demand from a CDN.
+//
+// Architecture:
+//   1. Enrollment  – Record 30 s of audio → compute 512-dim ECAPA-TDNN
+//                    embedding → store as base64 in member data.
+//   2. Identification – Compute embedding for unknown speaker segment →
+//                    cosine similarity against all enrolled embeddings →
+//                    assign speaker if best match ≥ SB_IDENTIFY_MIN_SCORE.
+//
+// No external API key is required; the ONNX model (~20 MB quantized) is
+// downloaded once and cached in the browser's IndexedDB by transformers.js.
+
+const SB_MODEL_ID    = 'Xenova/speechbrain-spkrec-ecapa-voxceleb';
+// ESM build from jsDelivr — dynamic import() works from any script context in modern browsers.
+const SB_XFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.esm.js';
+
+let _sbExtractor = null;
+let _sbModel     = null;
+let _sbLoading   = null; // single in-flight Promise so concurrent callers wait on the same load
+
+// Load the transformers.js library and the ECAPA-TDNN model (first call only).
+async function loadSbModel() {
+  if (_sbExtractor && _sbModel) return { extractor: _sbExtractor, model: _sbModel };
+  if (_sbLoading) return _sbLoading;
+
+  _sbLoading = (async () => {
+    // Lazy ESM import — works from regular (non-module) scripts in all modern browsers.
+    // The result is cached on _sbExtractor / _sbModel so subsequent calls are instant.
+    const { AutoFeatureExtractor, AutoModel, env } = await import(SB_XFORMERS_URL);
+    env.allowLocalModels = false;
+
+    const [extractor, model] = await Promise.all([
+      AutoFeatureExtractor.from_pretrained(SB_MODEL_ID),
+      AutoModel.from_pretrained(SB_MODEL_ID, { quantized: true }),
+    ]);
+    _sbExtractor = extractor;
+    _sbModel     = model;
+    return { extractor, model };
+  })();
+
+  return _sbLoading;
+}
+
+// Compute a speaker embedding from a Float32 PCM array at arbitrary sample rate.
+// Returns a normalised Float32Array (L2 norm = 1) or null on failure.
+async function computeSpeakerEmbedding(audioFloat32, sampleRate) {
+  const audio16k = sampleRate !== 16000 ? resampleTo16k(audioFloat32, sampleRate) : audioFloat32;
+
+  const { extractor, model } = await loadSbModel();
+
+  // AutoFeatureExtractor handles pre-emphasis, windowing, FBANK, and CMVN.
+  const inputs  = await extractor(audio16k, { sampling_rate: 16000 });
+  const outputs = await model(inputs);
+
+  // The model outputs embeddings under 'embeddings' or the first output key.
+  const raw = outputs.embeddings?.data ?? outputs[Object.keys(outputs)[0]]?.data;
+  if (!raw) return null;
+
+  return l2Normalize(new Float32Array(raw));
+}
+
+// L2-normalise a Float32Array so dot-product == cosine similarity.
+function l2Normalize(v) {
+  let norm = 0;
+  for (let i = 0; i < v.length; i++) norm += v[i] * v[i];
+  norm = Math.sqrt(norm);
+  if (norm === 0) return v;
+  const out = new Float32Array(v.length);
+  for (let i = 0; i < v.length; i++) out[i] = v[i] / norm;
+  return out;
+}
+
+// Cosine similarity between two L2-normalised embeddings (dot product).
+function cosineSimilarity(a, b) {
+  let dot = 0;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) dot += a[i] * b[i];
+  return dot;
+}
+
+// Serialise a Float32Array embedding to a base64 string for persistent storage.
+function embeddingToBase64(embedding) {
+  return arrayBufferToBase64(embedding.buffer);
+}
+
+// Deserialise a base64 string back to a Float32Array embedding.
+function base64ToEmbedding(b64) {
+  try {
+    const binary = atob(b64);
+    const bytes  = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Float32Array(bytes.buffer);
+  } catch {
+    return null;
+  }
 }
 
 
@@ -2298,7 +2399,7 @@ function renderMembersList() {
 }
 
 function memberRow(idx, mem) {
-  const enrolled    = !!mem.azureSpeakerProfileId;
+  const enrolled    = !!mem.sbVoiceEmbedding;
   const enrollClass = enrolled ? 'kbtn kbtn-sm k-enroll-btn k-enrolled' : 'kbtn kbtn-sm kbtn-ghost k-enroll-btn';
   const enrollTitle = enrolled ? 'Voice enrolled — click to re-enrol' : 'Enrol voice fingerprint for auto-identification';
   const enrollIcon  = enrolled ? '🎙✓' : '🎙';
@@ -2378,7 +2479,7 @@ function enrollMemberVoice(idx) {
 function showEnrollModal(idx) {
   const member  = S.members[idx];
   if (!member) return;
-  const alreadyEnrolled = !!member.azureSpeakerProfileId;
+  const alreadyEnrolled = !!member.sbVoiceEmbedding;
 
   document.getElementById('k-enroll-modal')?.remove();
 
@@ -2488,8 +2589,8 @@ async function startEnrollRecording(idx) {
       const timerEl = document.getElementById('k-enroll-timer');
       const barEl   = document.getElementById('k-enroll-bar');
       if (timerEl) timerEl.textContent = `${m}:${String(s).padStart(2, '0')} / 0:30`;
-      if (barEl)   barEl.style.width   = `${Math.min(100, (Enrolling.elapsed / AZURE_ENROLL_DURATION_SEC) * 100)}%`;
-      if (Enrolling.elapsed >= AZURE_ENROLL_DURATION_SEC) {
+      if (barEl)   barEl.style.width   = `${Math.min(100, (Enrolling.elapsed / SB_ENROLL_DURATION_SEC) * 100)}%`;
+      if (Enrolling.elapsed >= SB_ENROLL_DURATION_SEC) {
         clearInterval(Enrolling.timer);
         Enrolling.timer = null;
         finishEnrollRecording();
@@ -2510,7 +2611,7 @@ async function finishEnrollRecording() {
   Enrolling.active = false;
   enrollCleanupAudio();
 
-  if (statusEl) statusEl.innerHTML = '<div class="k-enroll-info">⏳ Processing voice data — please wait…</div>';
+  if (statusEl) statusEl.innerHTML = '<div class="k-enroll-info">⏳ Computing voice embedding — please wait…</div>';
   if (footerEl) footerEl.innerHTML = '';
 
   try {
@@ -2527,29 +2628,13 @@ async function finishEnrollRecording() {
     for (const chunk of Enrolling.samples) { merged.set(chunk, pos); pos += chunk.length; }
     Enrolling.samples = []; // free memory
 
-    // Resample to 16 kHz and encode as WAV.
-    const resampled   = resampleTo16k(merged, Enrolling.sampleRate);
-    const wavBuffer   = pcmToWav(resampled, 16000);
-    const audioBase64 = arrayBufferToBase64(wavBuffer);
+    // Compute the ECAPA-TDNN speaker embedding from the recorded audio.
+    if (statusEl) statusEl.innerHTML = '<div class="k-enroll-info">⏳ Loading ECAPA-TDNN model (first use only — ~20 MB cached locally)…</div>';
+    const embedding = await computeSpeakerEmbedding(merged, Enrolling.sampleRate);
+    if (!embedding || !embedding.length) throw new Error('Embedding computation returned no data.');
 
-    // Delete the old Azure profile if one exists (best-effort; a failure won't block re-enrolment).
-    if (member.azureSpeakerProfileId) {
-      await fetch(`${API}/azure-speaker-profiles/${encodeURIComponent(member.azureSpeakerProfileId)}`,
-        { method: 'DELETE' }).catch(e => console.warn('Could not delete old Azure profile:', e));
-    }
-
-    // Create a new Azure speaker profile.
-    const createRes = await apiPost('azure-speaker-profiles', {});
-    if (createRes.error) throw new Error(createRes.error);
-    const profileId = createRes.profileId;
-    if (!profileId) throw new Error('Azure did not return a profile ID.');
-
-    // Enroll the recorded audio.
-    const enrollRes = await apiPost(`azure-speaker-profiles/${profileId}/enroll`, { audioBase64 });
-    if (enrollRes.error) throw new Error(enrollRes.error);
-
-    // Persist the profile ID on the member (azureSpeakerProfileId survives saveMembers).
-    S.members[idx].azureSpeakerProfileId = profileId;
+    // Persist the embedding on the member record.
+    S.members[idx].sbVoiceEmbedding = embeddingToBase64(embedding);
     await apiPost('settings', { kpsc_members: S.members });
 
     if (statusEl) statusEl.innerHTML =
@@ -3370,8 +3455,8 @@ function apiStatusPill(status) {
 
 function renderApiStatusCard(apiStatus) {
   const live = apiStatus?.liveTranscription || {};
-  const dg = apiStatus?.diarization || {};
-  const azure = apiStatus?.speakerRecognition || {};
+  const dg   = apiStatus?.diarization      || {};
+  const sb   = apiStatus?.speakerRecognition || {};
   return `
     <div class="k-api-status-card ${live.active ? 'k-api-card-active' : 'k-api-card-missing'}">
       <div class="k-api-status-head">
@@ -3396,7 +3481,7 @@ function renderApiStatusCard(apiStatus) {
         </div>
         <div class="k-api-status-row">
           <span class="k-api-label">Voice recognition</span>
-          <span>${apiStatusPill(azure)} <code>${esc(azure.keyName || 'AZURE_SPEAKER_KEY')}</code> <small>Region: ${esc(azure.region || 'eastus')}</small></span>
+          <span>${apiStatusPill(sb)} <small>${esc(sb.provider || 'SpeechBrain ECAPA-TDNN')} — no API key required</small></span>
         </div>
       </div>
       <p class="k-api-message">${esc(live.message || apiStatus?.error || 'Status unavailable.')}</p>
@@ -3626,20 +3711,18 @@ async function renderSettings(main) {
           <code class="k-env-key">DEEPGRAM_API_KEY</code>
           <span class="k-env-desc">Powers speaker diarization — identifies who is speaking and labels each transcript turn. Get a key at <a href="https://console.deepgram.com" target="_blank" rel="noopener">console.deepgram.com</a>.</span>
         </div>
-        <div class="k-env-row">
-          <code class="k-env-key">AZURE_SPEAKER_KEY</code>
-          <span class="k-env-desc">Azure Cognitive Services key for persistent voice fingerprinting. Enables one-time voice enrolment per member and automatic speaker identification across meetings. Get a key at <a href="https://portal.azure.com" target="_blank" rel="noopener">portal.azure.com</a> (Speech service → Keys and Endpoint).</span>
-        </div>
-        <div class="k-env-row">
-          <code class="k-env-key">AZURE_SPEAKER_REGION</code>
-          <span class="k-env-desc">Azure region for the Speech service (e.g. <code>eastus</code>, <code>westeurope</code>). Defaults to <code>eastus</code> if not set.</span>
-        </div>
         <p class="k-hint" style="margin-top:12px">
           Set these in the Cloudflare Pages dashboard → Settings → Environment Variables.
           If either key is absent, that feature degrades gracefully: transcription falls back to
           OpenAI-only (without speaker labels) when Deepgram is absent, and to chunk-based
-          upload only when both are absent. Voice fingerprinting is silently skipped when
-          AZURE_SPEAKER_KEY is absent.
+          upload only when both are absent.
+        </p>
+        <p class="k-hint" style="margin-top:8px">
+          <strong>Voice fingerprinting</strong> uses <strong>SpeechBrain ECAPA-TDNN</strong>
+          (<code>Xenova/speechbrain-spkrec-ecapa-voxceleb</code>) — an open-source speaker
+          recognition model that runs <em>entirely in the browser</em> via transformers.js.
+          No API key is required. The quantised model (~20 MB) is downloaded once on first
+          enrolment and cached locally by the browser.
         </p>
       </div>
 

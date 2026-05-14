@@ -747,8 +747,6 @@ test('settings api-status reports configured realtime API keys without exposing 
       DB: createDBMock({ onPrepare: () => ({}) }),
       OPENAI_API_KEY: 'sk-test-openai-secret',
       DEEPGRAM_API_KEY: 'dg-test-secret',
-      AZURE_SPEAKER_KEY: 'az-test-secret',
-      AZURE_SPEAKER_REGION: 'westeurope'
     }
   });
   const body = await readJson(response);
@@ -759,7 +757,8 @@ test('settings api-status reports configured realtime API keys without exposing 
   assert.equal(body.liveTranscription.keyName, 'OPENAI_API_KEY');
   assert.equal(body.liveTranscription.masked.includes('secret'), false);
   assert.equal(body.diarization.configured, true);
-  assert.equal(body.speakerRecognition.region, 'westeurope');
+  assert.equal(body.speakerRecognition.configured, true);
+  assert.equal(body.speakerRecognition.provider, 'SpeechBrain ECAPA-TDNN');
 });
 
 test('settings api-status reports missing realtime API key', async () => {
