@@ -14,6 +14,7 @@ const CORS_HEADERS = {
 const ok  = (data)       => new Response(JSON.stringify(data),        { status: 200, headers: CORS_HEADERS });
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
 
 function isValidPin(pin) {
   return /^\d{4,6}$/.test(String(pin || ''));
@@ -93,9 +94,9 @@ export async function onRequest(context) {
   try {
     let body = null;
     const contentType = request.headers.get('Content-Type') || '';
-    if (['POST', 'PUT', 'PATCH'].includes(method) && contentType.includes('application/json')) {
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && contentType.includes('application/json')) {
       try { body = await request.json(); } catch { body = {}; }
-    } else if (['POST', 'PUT', 'PATCH'].includes(method)) {
+    } else if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
       body = {};
     }
 
@@ -166,6 +167,7 @@ export async function onRequest(context) {
 
     // ── /api/settings ──────────────────────────────────────────
     if (route === 'settings') {
+      if (method === 'GET'  && param === 'api-status') return getApiStatus(env);
       if (method === 'GET'  && !param) return await getSettings(DB);
       if (method === 'POST' && !param) return await saveSettings(DB, body);
     }
@@ -182,6 +184,26 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) return await createRealtimeTranscriptionToken(env);
     }
 
+    // ── /api/deepgram-transcription-token ───────────────────────
+    if (route === 'deepgram-transcription-token') {
+      if (method === 'POST' && !param) return await createDeepgramTranscriptionToken(env);
+    }
+
+    // ── /api/azure-speaker-profiles ────────────────────────────
+    // Proxy to Azure Cognitive Services Speaker Recognition v2.0.
+    // Create, enrol, and delete speaker profiles that power persistent
+    // voice fingerprinting across meetings.
+    if (route === 'azure-speaker-profiles') {
+      if (method === 'POST'   && !param)                    return await azureCreateSpeakerProfile(env);
+      if (method === 'POST'   &&  param && parts[2] === 'enroll') return await azureEnrollSpeaker(env, param, body);
+      if (method === 'DELETE' &&  param && !parts[2])       return await azureDeleteSpeakerProfile(env, param);
+    }
+
+    // ── /api/azure-speaker-identify ────────────────────────────
+    if (route === 'azure-speaker-identify') {
+      if (method === 'POST' && !param) return await azureIdentifySpeaker(env, body);
+    }
+
     // ── /api/ai-secretary-meetings ─────────────────────────────
     if (route === 'ai-secretary-meetings') {
       if (method === 'POST' && param === 'audio-chunk') return await uploadAiSecretaryAudioChunk(env, request);
@@ -189,6 +211,7 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) return await createAiSecretaryMeeting(DB, body);
       if (method === 'GET'  &&  param) return await getAiSecretaryMeeting(DB, param);
       if (method === 'PUT'  &&  param) return await updateAiSecretaryMeeting(DB, param, body);
+      if (method === 'DELETE' && param) return await deleteAiSecretaryMeeting(DB, param, body);
       if (method === 'POST' && parts[2] === 'process') return await processAiSecretaryMeeting(DB, param);
     }
 
@@ -408,6 +431,9 @@ async function handleInit(DB) {
     `ALTER TABLE remittances ADD COLUMN bank_amount REAL DEFAULT 0`,
     `ALTER TABLE remittances ADD COLUMN cash_amount REAL DEFAULT 0`,
     `ALTER TABLE cash_transactions ADD COLUMN photo_data TEXT DEFAULT ''`,
+    // Soft-delete for AI secretary meeting drafts.
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_at TEXT DEFAULT ''`,
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_by TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -1058,6 +1084,41 @@ async function createAuditEntry(DB, data) {
 }
 
 // ── SETTINGS ──────────────────────────────────────────────────────
+
+function maskedKeyStatus(value) {
+  const key = String(value || '').trim();
+  if (!key) return { configured: false, masked: '', message: 'Missing' };
+  const start = key.slice(0, 5);
+  const end = key.length > 9 ? key.slice(-4) : '';
+  return { configured: true, masked: `${start}…${end}`, message: 'Configured' };
+}
+
+function getApiStatus(env) {
+  const openai = maskedKeyStatus(env.OPENAI_API_KEY);
+  return ok({
+    liveTranscription: {
+      configured: openai.configured,
+      active: openai.configured,
+      provider: 'OpenAI',
+      model: OPENAI_REALTIME_TRANSCRIPTION_MODEL,
+      keyName: 'OPENAI_API_KEY',
+      masked: openai.masked,
+      message: openai.configured
+        ? `OPENAI_API_KEY is configured. Live transcription will use ${OPENAI_REALTIME_TRANSCRIPTION_MODEL}.`
+        : 'OPENAI_API_KEY is missing. Add it in Cloudflare Pages → Settings → Environment Variables.',
+    },
+    diarization: {
+      ...maskedKeyStatus(env.DEEPGRAM_API_KEY),
+      keyName: 'DEEPGRAM_API_KEY',
+    },
+    speakerRecognition: {
+      ...maskedKeyStatus(env.AZURE_SPEAKER_KEY),
+      keyName: 'AZURE_SPEAKER_KEY',
+      region: String(env.AZURE_SPEAKER_REGION || 'eastus').trim(),
+    },
+  });
+}
+
 async function getSettings(DB) {
   const { results } = await DB.prepare(`SELECT key,value FROM settings`).all();
   const out = {};
@@ -1122,17 +1183,157 @@ function aiSecretaryMeetingFromRow(row) {
     endedAt: row.ended_at || '',
     processedAt: row.processed_at || '',
     createdAt: row.created_at || '',
+    deletedAt: row.deleted_at || '',
+    deletedBy: row.deleted_by || '',
   };
 }
 
-function extractSentenceMatches(transcript, patterns) {
-  const sentences = String(transcript || '')
+function transcriptSentences(transcript) {
+  return String(transcript || '')
     .split(/(?<=[.!?])\s+|\n+/)
     .map(s => s.trim())
     .filter(Boolean);
-  return sentences
+}
+
+function extractSentenceMatches(transcript, patterns, limit = 8) {
+  return transcriptSentences(transcript)
     .filter(sentence => patterns.some(pattern => pattern.test(sentence)))
-    .slice(0, 8);
+    .slice(0, limit);
+}
+
+function uniqueAiSecretaryItems(items, keyFn, limit = 12) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items) {
+    const key = String(keyFn(item) || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function titleCaseAiSecretary(text) {
+  return String(text || '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, ch => ch.toUpperCase());
+}
+
+function extractNairaAmount(text) {
+  const m = String(text || '').match(/(?:₦|N\s?)([0-9][0-9,]*(?:\.\d{1,2})?)|([0-9][0-9,]*(?:\.\d{1,2})?)\s*(?:naira|ngn)/i);
+  return m ? (m[1] || m[2] || '').replace(/,/g, '') : '';
+}
+
+function inferResolutionType(text) {
+  const t = String(text || '').toLowerCase();
+  if (/\b(reject(?:ed|ion)?|declin(?:ed|e)|not approved|voted down|disapproved)\b/.test(t)) return 'rejection';
+  if (/\b(amend(?:ed|ment)?|modify|revis(?:ed|ion)|adjust(?:ed|ment)?)\b/.test(t)) return 'amendment';
+  if (/\b(motion|moved|proposed)\b/.test(t)) return 'motion';
+  if (/\b(vote|voted|ballot|show of hands|unanimous|majority)\b/.test(t)) return 'vote';
+  if (/(₦|\bnaira\b|\bngn\b|budget|fund|payment|expense|cost|purchase|welfare|repair|invoice|quote)/i.test(text)) return 'financial_approval';
+  if (/\b(approv(?:e|es|ed|al)|agreed|resolved|carried|adopted|passed)\b/.test(t)) return 'approval';
+  return 'decision';
+}
+
+function inferResolutionCategory(text, fallback = 'other') {
+  const t = String(text || '').toLowerCase();
+  if (/welfare|support|assistance|benevolence|beneficiar/.test(t)) return 'welfare';
+  if (/budget|fund|payment|expense|cost|purchase|repair|invoice|quote|₦|naira|ngn/.test(t)) return 'financial';
+  if (/building|land|capital|renovation|project|equipment|generator/.test(t)) return 'development';
+  if (/policy|bylaw|constitution|procedure|governance/.test(t)) return 'governance';
+  return fallback;
+}
+
+function inferApprovalState(text) {
+  const t = String(text || '').toLowerCase();
+  if (/\b(reject(?:ed|ion)?|declin(?:ed|e)|not approved|voted down|disapproved)\b/.test(t)) return false;
+  if (/\b(defer(?:red)?|pending|table(?:d)?|postpone(?:d)?|await(?:ing)?|review later)\b/.test(t)) return null;
+  if (/\b(approv(?:e|es|ed|al)|agreed|resolved|carried|adopted|passed|unanimous)\b/.test(t)) return true;
+  return null;
+}
+
+function inferVoteSummary(text, type, threshold) {
+  const t = String(text || '').toLowerCase();
+  const voteMatch = text.match(/(?:vote(?:d)?|votes?)\s*(?:was|were|:)?\s*([^.;\n]+)/i);
+  if (voteMatch) return voteMatch[1].trim();
+  if (/unanimous(?:ly)?/.test(t)) return 'Unanimous approval detected; secretary should confirm before final filing.';
+  if (/second(?:ed)?/.test(t) && /motion|moved|proposed/.test(t)) return 'Motion and seconding detected; final vote count should be confirmed.';
+  if (type === 'rejection') return 'Rejected/declined language detected; confirm vote record.';
+  if (type === 'amendment') return 'Amendment language detected; confirm amended wording and vote outcome.';
+  return threshold === 'two_thirds' ? 'Two-thirds threshold suggested for review.' : 'Simple majority threshold suggested for review.';
+}
+
+function inferPersonAfter(text, patterns) {
+  for (const pattern of patterns) {
+    const m = String(text || '').match(pattern);
+    if (m?.[1]) return m[1].replace(/[,.;:].*$/, '').trim();
+  }
+  return '';
+}
+
+function inferActionAssignee(text) {
+  const cleaned = String(text || '').replace(/^action\s*[:.-]?\s*/i, '').trim();
+  return inferPersonAfter(cleaned, [
+    /^([^:–—-]{2,60}?)\s+(?:to|will|shall|should|is to|was asked to)\b/i,
+    /(?:assigned to|responsible person:?|owner:?|by)\s+([^,.;]{2,60})/i,
+    /(?:treasurer|secretary|pastor|chair(?:person)?|women(?: president)?|youth(?: vp| president)?|admin(?: officer)?|accountant)/i,
+  ]) || (cleaned.match(/\b(treasurer|secretary|pastor|chair(?:person)?|women(?: president)?|youth(?: vp| president)?|admin(?: officer)?|accountant)\b/i)?.[0] || 'Unassigned');
+}
+
+function inferActionDueDate(text) {
+  const m = String(text || '').match(/\b(?:by|before|on|deadline:?|due:?|not later than)\s+([A-Za-z]+\s+\d{1,2}(?:,?\s*\d{4})?|\d{4}-\d{2}-\d{2}|(?:next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|tomorrow|today)\b/i);
+  return m ? m[1].trim() : '';
+}
+
+function extractAgendaItems(transcript) {
+  const sentences = transcriptSentences(transcript);
+  const explicit = [];
+  for (const sentence of sentences) {
+    const m = sentence.match(/(?:agenda|item|matter|discussion)\s*(?:item)?\s*(?:[:.-]|was|is)?\s*(.+)$/i);
+    if (m?.[1]) explicit.push(m[1].trim());
+  }
+  const topical = sentences
+    .filter(s => /welfare|budget|finance|financial|generator|rent|building|repair|policy|bylaw|project|offering|remittance|department|proposal/i.test(s))
+    .map(s => s.replace(/^.*?\b(?:discuss(?:ed|ion)?|review(?:ed)?|consider(?:ed)?|approve(?:s|d)?|agenda)\b\s*(?:of|on|for|:)?\s*/i, '').trim());
+  return uniqueAiSecretaryItems([...explicit, ...topical], item => item, 8);
+}
+
+function extractResolutions(transcript, governanceFlags) {
+  const majorProject = governanceFlags.some(flag => flag.type === 'threshold_review');
+  const decisionSentences = extractSentenceMatches(transcript, [
+    /\b(resolve[ds]?|resolution|approves|approved|approval|agreed|motion|moved|second(?:ed)?|decision|voted|vote|rejected|declined|not approved|amend(?:ed|ment)?|deferred|financial approval|budget|₦|naira|ngn)\b/i,
+  ], 20);
+  return uniqueAiSecretaryItems(decisionSentences.map((text, index) => {
+    const type = inferResolutionType(text);
+    const category = inferResolutionCategory(text, majorProject ? 'development' : 'other');
+    const threshold = majorProject || category === 'development' ? 'two_thirds' : 'simple_majority';
+    return {
+      id: `res-${index + 1}`,
+      text,
+      category,
+      resolutionType: type,
+      requiredThreshold: threshold,
+      approved: inferApprovalState(text),
+      amount: extractNairaAmount(text),
+      motionBy: inferPersonAfter(text, [/\b(?:moved|proposed by|motion by)\s+([^,.;]+)/i]),
+      secondedBy: inferPersonAfter(text, [/\b(?:seconded by|supported by)\s+([^,.;]+)/i]),
+      voteSummary: inferVoteSummary(text, type, threshold),
+    };
+  }), item => item.text, 20);
+}
+
+function extractActionItems(transcript) {
+  const actionSentences = extractSentenceMatches(transcript, [
+    /\b(action|follow up|to do|assign(?:ed)?|responsible|deadline|before|not later than|to submit|to prepare|to review|to send|to provide|to obtain|to present|to contact|will submit|shall submit|should submit|will prepare|shall prepare|should prepare)\b/i,
+  ], 30);
+  return uniqueAiSecretaryItems(actionSentences.map((text, index) => ({
+    id: `act-${index + 1}`,
+    task: text.replace(/^action\s*[:.-]?\s*/i, '').trim(),
+    assignee: inferActionAssignee(text),
+    dueDate: inferActionDueDate(text),
+    status: 'pending',
+  })), item => item.task, 30);
 }
 
 const AI_SECRETARY_REQUIRED_GROUPS = [
@@ -1223,29 +1424,46 @@ function sanitizeAiSecretaryOutput(rawOutput, meeting, deterministicOutput) {
   const raw = rawOutput && typeof rawOutput === 'object' ? rawOutput : {};
   const deterministic = deterministicOutput || buildAiSecretaryOutput(meeting, { skipSanitize: true });
   const governanceFlags = buildAiSecretaryGovernanceFlags(meeting);
-  const resolutions = aiSecretaryArray(raw.resolutions).map((item, index) => ({
-    id: aiSecretaryText(item?.id, `res-${index + 1}`),
-    text: aiSecretaryText(item?.text),
-    category: aiSecretaryText(item?.category, 'other') || 'other',
-    requiredThreshold: aiSecretaryThreshold(item?.requiredThreshold),
-    approved: item?.approved === true,
-    voteSummary: aiSecretaryText(item?.voteSummary, 'Manual vote review required.'),
-  })).filter(item => item.text).slice(0, 20);
-  const actionItems = aiSecretaryArray(raw.actionItems).map((item, index) => ({
-    id: aiSecretaryText(item?.id, `act-${index + 1}`),
-    task: aiSecretaryText(item?.task),
-    assignee: aiSecretaryText(item?.assignee, 'Unassigned') || 'Unassigned',
-    dueDate: aiSecretaryText(item?.dueDate),
-    status: aiSecretaryText(item?.status, 'pending') || 'pending',
-  })).filter(item => item.task).slice(0, 30);
+  const resolutions = aiSecretaryArray(raw.resolutions).map((item, index) => {
+    const text = aiSecretaryText(item?.text);
+    const resolutionType = aiSecretaryText(item?.resolutionType || item?.type, inferResolutionType(text));
+    const category = aiSecretaryText(item?.category, inferResolutionCategory(text)) || 'other';
+    const requiredThreshold = aiSecretaryThreshold(item?.requiredThreshold, category === 'development' ? 'two_thirds' : 'simple_majority');
+    const approved = item?.approved === true ? true : item?.approved === false ? false : inferApprovalState(text);
+    return {
+      id: aiSecretaryText(item?.id, `res-${index + 1}`),
+      text,
+      category,
+      resolutionType,
+      requiredThreshold,
+      approved,
+      amount: aiSecretaryText(item?.amount, extractNairaAmount(text)),
+      motionBy: aiSecretaryText(item?.motionBy),
+      secondedBy: aiSecretaryText(item?.secondedBy),
+      voteSummary: aiSecretaryText(item?.voteSummary, inferVoteSummary(text, resolutionType, requiredThreshold)),
+    };
+  }).filter(item => item.text).slice(0, 20);
+  const actionItems = aiSecretaryArray(raw.actionItems).map((item, index) => {
+    const task = aiSecretaryText(item?.task);
+    return {
+      id: aiSecretaryText(item?.id, `act-${index + 1}`),
+      task,
+      assignee: aiSecretaryText(item?.assignee, inferActionAssignee(task)) || 'Unassigned',
+      dueDate: aiSecretaryText(item?.dueDate, inferActionDueDate(task)),
+      status: aiSecretaryText(item?.status, 'pending') || 'pending',
+    };
+  }).filter(item => item.task).slice(0, 30);
   const output = {
     summaryShort: aiSecretaryText(raw.summaryShort, deterministic.summaryShort),
+    executiveSummary: aiSecretaryText(raw.executiveSummary, deterministic.executiveSummary),
     summaryLong: aiSecretaryText(raw.summaryLong, deterministic.summaryLong),
+    agendaItems: aiSecretaryArray(raw.agendaItems).map(item => aiSecretaryText(item)).filter(Boolean).slice(0, 12),
     minutesMarkdown: aiSecretaryText(raw.minutesMarkdown, deterministic.minutesMarkdown),
     resolutions: resolutions.length ? resolutions : deterministic.resolutions,
     actionItems: actionItems.length ? actionItems : deterministic.actionItems,
     policyFlags: dedupeAiSecretaryFlags([...aiSecretaryArray(raw.policyFlags), ...governanceFlags]),
   };
+  if (!output.agendaItems.length) output.agendaItems = deterministic.agendaItems || extractAgendaItems(meeting.transcriptText || '');
   if (!output.minutesMarkdown) output.minutesMarkdown = deterministic.minutesMarkdown;
   output.minutesMarkdown = appendAiSecretaryMandatoryChecks(output.minutesMarkdown, governanceFlags);
   return output;
@@ -1266,34 +1484,37 @@ function buildAiSecretaryOutput(meeting, options = {}) {
   const transcript = meeting.transcriptText || '';
   const { normalized: participants, missingGroups, quorumMet } = aiSecretaryParticipantCoverage(meeting.participants);
   const present = participants.filter(p => p.present);
-  const decisions = extractSentenceMatches(transcript, [/\b(resolve[ds]?|approved|agreed|motion|decision|voted)\b/i]);
-  const actions = extractSentenceMatches(transcript, [/\b(action|follow up|to do|assign(?:ed)?|responsible|by \d{1,2}|deadline|before)\b/i]);
   const governanceFlags = buildAiSecretaryGovernanceFlags(meeting);
   const majorProject = governanceFlags.some(flag => flag.type === 'threshold_review');
   const welfare = /welfare|support|assistance|benevolence/i.test(transcript);
-  const summaryShort = `${meeting.title || 'KPSC meeting'} captured ${present.length} attendee(s) across ${new Set(present.map(p => p.group)).size} of 4 required representative groups. ${decisions.length} potential resolution(s) and ${actions.length} potential action item(s) were identified.`;
+  const policyContext = aiSecretaryText(meeting.policyContext);
+  const agendaItems = extractAgendaItems(transcript);
+  const resolutions = extractResolutions(transcript, governanceFlags);
+  const actionItems = extractActionItems(transcript);
+  const approvedCount = resolutions.filter(r => r.approved === true).length;
+  const rejectedCount = resolutions.filter(r => r.approved === false).length;
+  const deferredCount = resolutions.filter(r => r.approved === null).length;
+  const financialCount = resolutions.filter(r => r.category === 'financial' || r.resolutionType === 'financial_approval').length;
+  const attendanceText = present.map(p => `${p.label}${p.name ? ` (${p.name})` : ''}`).join(', ') || 'No representatives marked present';
+  const summaryShort = `${meeting.title || 'KPSC meeting'} captured ${present.length} attendee(s) across ${new Set(present.map(p => p.group)).size} of 4 required representative groups. ${resolutions.length} decision item(s), ${financialCount} financial/welfare approval item(s), and ${actionItems.length} action item(s) were identified.`;
+  const executiveSummary = [
+    quorumMet ? 'Quorum appears met across Men, Women, Youth, and Ministers.' : `Quorum needs attention: missing ${missingGroups.join(', ')} representative group(s).`,
+    resolutions.length
+      ? `Decision register: ${approvedCount} approved, ${rejectedCount} rejected, ${deferredCount} deferred/needs confirmation.`
+      : 'No explicit decision register items were detected; secretary review is required.',
+    actionItems.length
+      ? `${actionItems.length} follow-up task(s) were extracted for tracking.`
+      : 'No explicit follow-up task was detected; secretary should confirm manually.',
+  ].join(' ');
   const summaryLong = [
     `Meeting type: ${meeting.meetingType || 'routine'}.`,
-    `Attendance: ${present.map(p => `${p.label}${p.name ? ` (${p.name})` : ''}`).join(', ') || 'No representatives marked present'}.`,
+    `Attendance: ${attendanceText}.`,
     quorumMet ? 'Quorum check: Men, Women, Youth, and Ministers are all represented.' : `Quorum check: missing ${missingGroups.join(', ')} representative group(s); approvals should be deferred or ratified later.`,
     majorProject ? 'Governance note: capital/project language was detected, so two-thirds approval may apply.' : 'Governance note: no major capital-project language was detected by the draft processor.',
     welfare ? 'Welfare note: welfare-related language was detected; keep KPSC records focused on funds and avoid unnecessary beneficiary names.' : 'Welfare note: no welfare-specific issue was detected.',
+    financialCount ? `Financial note: ${financialCount} financial or welfare approval-related item(s) should be cross-checked with the finance records.` : 'Financial note: no explicit financial approval amount was detected by the draft processor.',
+    policyContext ? 'Policy reference note: saved KPSC policy notes are available for review and provider-backed processing.' : 'Policy reference note: no extra KPSC policy notes were saved in settings.',
   ].join('\n');
-  const resolutions = decisions.map((text, index) => ({
-    id: `res-${index + 1}`,
-    text,
-    category: welfare ? 'welfare' : (majorProject ? 'development' : 'other'),
-    requiredThreshold: majorProject ? 'two_thirds' : 'simple_majority',
-    approved: /approved|agreed|resolved|voted/i.test(text),
-    voteSummary: majorProject ? 'Two-thirds threshold suggested for review.' : 'Simple majority threshold suggested for review.',
-  }));
-  const actionItems = actions.map((text, index) => ({
-    id: `act-${index + 1}`,
-    task: text,
-    assignee: 'Unassigned',
-    dueDate: '',
-    status: 'pending',
-  }));
   const minutesMarkdown = [
     `# ${meeting.title || 'KPSC Meeting'} Minutes`,
     `**Date:** ${meeting.meetingDate || 'Not specified'}`,
@@ -1303,25 +1524,64 @@ function buildAiSecretaryOutput(meeting, options = {}) {
     '## Attendance',
     ...participants.map(p => `- ${p.label}: ${p.present ? `Present${p.name ? ` — ${p.name}` : ''}` : 'Absent'}`),
     '',
-    '## Summary',
+    '## Agenda / Matters Discussed',
+    ...(agendaItems.length ? agendaItems.map(item => `- ${item}`) : ['- No explicit agenda was detected. Use transcript review to confirm the agenda before final filing.']),
+    '',
+    '## Executive Summary',
+    executiveSummary,
+    '',
+    '## Detailed Summary',
     summaryLong,
     '',
-    '## Resolutions',
-    ...(resolutions.length ? resolutions.map(r => `- ${r.text} (${r.requiredThreshold.replace('_', ' ')})`) : ['- No explicit resolutions detected. Review transcript and add approved decisions manually.']),
+    '## Decision & Resolution Register',
+    ...(resolutions.length ? resolutions.map(r => {
+      const status = r.approved === true ? 'Approved' : r.approved === false ? 'Rejected' : 'Deferred / confirm outcome';
+      const amount = r.amount ? `; Amount: ₦${Number(r.amount).toLocaleString('en-NG')}` : '';
+      return `- **${titleCaseAiSecretary(r.resolutionType)}** (${status}; ${titleCaseAiSecretary(r.category)}; ${r.requiredThreshold.replace('_', ' ')}${amount}) — ${r.text}`;
+    }) : ['- No explicit resolutions detected. Review transcript and add approved decisions manually.']),
+    '',
+    '## Motions, Voting & Amendments',
+    ...(resolutions.length ? resolutions.map(r => `- ${r.voteSummary || 'Manual vote review required.'}${r.motionBy ? ` Motion by: ${r.motionBy}.` : ''}${r.secondedBy ? ` Seconded by: ${r.secondedBy}.` : ''}`) : ['- No explicit motion, seconding, amendment, or voting outcome was detected.']),
     '',
     '## Action Items',
-    ...(actionItems.length ? actionItems.map(a => `- ${a.task} — ${a.assignee}`) : ['- No explicit action items detected. Review transcript and add follow-up tasks manually.']),
+    ...(actionItems.length ? actionItems.map(a => `- ${a.task} — Owner: ${a.assignee || 'Unassigned'}${a.dueDate ? `; Due: ${a.dueDate}` : '; Due: Not stated'}`) : ['- No explicit action items detected. Review transcript and add follow-up tasks manually.']),
     '',
     '## Policy Checks',
     ...(governanceFlags.length ? governanceFlags.map(f => `- ${f.severity.toUpperCase()}: ${f.message}`) : ['- No policy flags detected by the draft processor.']),
   ].join('\n');
-  const output = { summaryShort, summaryLong, minutesMarkdown, resolutions, actionItems, policyFlags: governanceFlags };
+  const output = { summaryShort, executiveSummary, summaryLong, agendaItems, minutesMarkdown, resolutions, actionItems, policyFlags: governanceFlags };
   return options.skipSanitize ? output : sanitizeAiSecretaryOutput(output, meeting, output);
 }
 
 async function getAiSecretaryMeetings(DB) {
-  const { results } = await DB.prepare(`SELECT * FROM ai_secretary_meetings ORDER BY meeting_date DESC, created_at DESC LIMIT 200`).all();
+  const { results } = await DB.prepare(
+    `SELECT * FROM ai_secretary_meetings
+     WHERE COALESCE(deleted_at,'') = ''
+     ORDER BY meeting_date DESC, created_at DESC LIMIT 200`
+  ).all();
   return ok((results || []).map(aiSecretaryMeetingFromRow));
+}
+
+async function deleteAiSecretaryMeeting(DB, id, data) {
+  const existing = await DB.prepare(`SELECT id, created_by, deleted_at FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
+  if (!existing) return err('AI secretary meeting not found', 404);
+  if (existing.deleted_at) return ok({ id, deletedAt: existing.deleted_at });
+
+  // Author-or-admin authorization. The frontend is trusted to forward the
+  // logged-in user's name and role (same trust model as createdBy on POST).
+  const userName = String(data?.userName || '').trim();
+  const userRole = String(data?.userRole || '').trim().toLowerCase();
+  const isAdmin = userRole === 'admin' || userRole === 'it_administrator';
+  const isAuthor = !!userName && userName === (existing.created_by || '');
+  if (!isAdmin && !isAuthor) {
+    return err('Only the meeting author or an administrator can delete this draft.', 403);
+  }
+
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE ai_secretary_meetings SET deleted_at=?, deleted_by=? WHERE id=?`
+  ).bind(now, userName || (isAdmin ? 'admin' : ''), id).run();
+  return ok({ id, deletedAt: now });
 }
 
 async function getAiSecretaryMeeting(DB, id) {
@@ -1357,9 +1617,44 @@ async function updateAiSecretaryMeeting(DB, id, data) {
   const existing = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
   if (!existing) return err('AI secretary meeting not found', 404);
   const participants = data.participants !== undefined ? normalizeAiParticipants(data.participants) : safeJsonParse(existing.participants_json, []);
+  const resolutions = data.resolutions !== undefined
+    ? aiSecretaryArray(data.resolutions).map((item, index) => {
+        const text = aiSecretaryText(item?.text);
+        const resolutionType = aiSecretaryText(item?.resolutionType || item?.type, inferResolutionType(text));
+        const category = aiSecretaryText(item?.category, inferResolutionCategory(text)) || 'other';
+        const requiredThreshold = aiSecretaryThreshold(item?.requiredThreshold, category === 'development' ? 'two_thirds' : 'simple_majority');
+        const approved = item?.approved === true ? true : item?.approved === false ? false : null;
+        return {
+          id: aiSecretaryText(item?.id, `res-${index + 1}`),
+          text,
+          category,
+          resolutionType,
+          requiredThreshold,
+          approved,
+          amount: aiSecretaryText(item?.amount),
+          motionBy: aiSecretaryText(item?.motionBy),
+          secondedBy: aiSecretaryText(item?.secondedBy),
+          voteSummary: aiSecretaryText(item?.voteSummary),
+        };
+      }).filter(item => item.text).slice(0, 20)
+    : safeJsonParse(existing.resolutions_json, []);
+  const actionItems = data.actionItems !== undefined
+    ? aiSecretaryArray(data.actionItems).map((item, index) => ({
+        id: aiSecretaryText(item?.id, `act-${index + 1}`),
+        task: aiSecretaryText(item?.task),
+        assignee: aiSecretaryText(item?.assignee, 'Unassigned') || 'Unassigned',
+        dueDate: aiSecretaryText(item?.dueDate),
+        status: aiSecretaryText(item?.status, 'pending') || 'pending',
+      })).filter(item => item.task).slice(0, 30)
+    : safeJsonParse(existing.action_items_json, []);
+  const policyFlags = data.policyFlags !== undefined
+    ? dedupeAiSecretaryFlags(data.policyFlags)
+    : safeJsonParse(existing.policy_flags_json, []);
+
   await DB.prepare(`
     UPDATE ai_secretary_meetings SET
-      title=?, meeting_type=?, meeting_date=?, status=?, participants_json=?, transcript_text=?, ended_at=?
+      title=?, meeting_type=?, meeting_date=?, status=?, participants_json=?, transcript_text=?, ended_at=?,
+      summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?
     WHERE id=?
   `).bind(
     data.title !== undefined ? String(data.title).trim() : existing.title,
@@ -1369,6 +1664,12 @@ async function updateAiSecretaryMeeting(DB, id, data) {
     JSON.stringify(participants),
     data.transcriptText !== undefined ? data.transcriptText : existing.transcript_text,
     data.endedAt !== undefined ? data.endedAt : existing.ended_at,
+    data.summaryShort !== undefined ? aiSecretaryText(data.summaryShort) : existing.summary_short,
+    data.summaryLong !== undefined ? aiSecretaryText(data.summaryLong) : existing.summary_long,
+    data.minutesMarkdown !== undefined ? aiSecretaryText(data.minutesMarkdown) : existing.minutes_markdown,
+    JSON.stringify(resolutions),
+    JSON.stringify(actionItems),
+    JSON.stringify(policyFlags),
     id,
   ).run();
   return await getAiSecretaryMeeting(DB, id);
@@ -1377,7 +1678,22 @@ async function updateAiSecretaryMeeting(DB, id, data) {
 async function callDeepSeekForMeeting(apiKey, meeting) {
   const participantList = (meeting.participants || [])
     .map(p => `${p.label}: ${p.present ? (p.name || 'Present') : 'Absent'}`).join(', ');
-  const prompt = `You are a professional church committee secretary. Process the following KPSC meeting and return a JSON object with these exact keys: summaryShort (1-2 sentence string), summaryLong (multi-line string), minutesMarkdown (full minutes in Markdown), resolutions (array of {id,text,category,requiredThreshold,approved,voteSummary}), actionItems (array of {id,task,assignee,dueDate,status}), policyFlags (array of {type,severity,message}).
+  const policyContext = aiSecretaryText(meeting.policyContext);
+  const prompt = `You are a professional church committee secretary. Process the following KPSC meeting and return a JSON object with these exact keys: summaryShort (1-2 sentence string), executiveSummary (plain-language executive summary string), summaryLong (detailed multi-line string), agendaItems (array of agenda or discussion topics), minutesMarkdown (full minutes in Markdown), resolutions (array of {id,text,category,resolutionType,requiredThreshold,approved,amount,motionBy,secondedBy,voteSummary}), actionItems (array of {id,task,assignee,dueDate,status}), policyFlags (array of {type,severity,message}).
+
+Resolution classification requirements:
+- resolutionType must be one of approval, rejection, amendment, motion, vote, financial_approval, decision.
+- category should identify welfare, financial, development, governance, or other.
+- Extract naira/NGN amounts for financial approvals when present.
+- Capture motion mover, seconder, and vote outcome where mentioned.
+- If outcome is unclear, set approved to null and explain in voteSummary.
+
+Action item requirements:
+- Extract task, owner/assignee, and deadline if spoken.
+- Use "Unassigned" and empty dueDate only when not stated.
+
+Saved KPSC policy/bylaw notes:
+${policyContext || '(none saved)'}
 
 Meeting title: ${meeting.title}
 Date: ${meeting.meetingDate}
@@ -1403,12 +1719,22 @@ async function processAiSecretaryMeeting(DB, id) {
   const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
   if (!row) return err('AI secretary meeting not found', 404);
   const meeting = aiSecretaryMeetingFromRow(row);
+  let deepseekKey = '';
+  try {
+    const { results: settingsRows } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','kpsc_policy_url','kpsc_policy_notes')`).all();
+    const settings = Object.fromEntries((settingsRows || []).map(item => [item.key, String(item.value || '')]));
+    deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+    meeting.policyContext = [
+      settings.kpsc_policy_url ? `Policy URL: ${settings.kpsc_policy_url}` : '',
+      settings.kpsc_policy_notes || '',
+    ].filter(Boolean).join('\n');
+  } catch (_) {
+    meeting.policyContext = '';
+  }
 
   const deterministicOutput = buildAiSecretaryOutput(meeting);
   let output;
   try {
-    const { results: settingsRows } = await DB.prepare(`SELECT key,value FROM settings WHERE key='ai_deepseek_key'`).all();
-    const deepseekKey = settingsRows?.[0]?.value ? String(settingsRows[0].value).trim() : '';
     output = deepseekKey
       ? sanitizeAiSecretaryOutput(await callDeepSeekForMeeting(deepseekKey, meeting), meeting, deterministicOutput)
       : deterministicOutput;
@@ -1453,7 +1779,7 @@ async function createRealtimeTranscriptionToken(env) {
             format: { type: 'audio/pcm', rate: 24000 },
             noise_reduction: { type: 'near_field' },
             transcription: {
-              model: 'gpt-4o-transcribe',
+              model: OPENAI_REALTIME_TRANSCRIPTION_MODEL,
               language: 'en',
               prompt: 'Kingdom Parish Stewardship Committee meeting transcription. Preserve names, votes, resolutions, action items, and church finance terms accurately.',
             },
@@ -1475,6 +1801,147 @@ async function createRealtimeTranscriptionToken(env) {
     return err(data.error?.message || `OpenAI realtime token request failed (${response.status}).`, response.status);
   }
   return ok(data);
+}
+
+async function createDeepgramTranscriptionToken(env) {
+  const apiKey = String(env.DEEPGRAM_API_KEY || '').trim();
+  if (!apiKey) return err('DEEPGRAM_API_KEY is not configured for speaker diarization.', 503);
+
+  // Deepgram rejects raw API keys passed from browsers via
+  // Sec-WebSocket-Protocol. Mint a short-lived (30s) token via the
+  // /v1/auth/grant endpoint; the client uses it during the WS handshake.
+  const res = await fetch('https://api.deepgram.com/v1/auth/grant', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Token ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ ttl_seconds: 30 }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const reason = data.err_msg || data.error || data.message || `Deepgram grant failed (${res.status}).`;
+    return err(reason, res.status);
+  }
+  const token = data.access_token || data.token;
+  if (!token) return err('Deepgram grant response did not include an access token.', 502);
+  return ok({ key: token, expires_in: data.expires_in ?? 30 });
+}
+
+// ── AZURE SPEAKER RECOGNITION ──────────────────────────────────────
+// These four functions proxy requests to Azure Cognitive Services
+// Speaker Recognition v2.0 (text-independent).
+// Required env vars:
+//   AZURE_SPEAKER_KEY    – Azure Cognitive Services key
+//   AZURE_SPEAKER_REGION – Azure region slug, default: eastus
+
+// Azure returns this UUID when the identification API finds no matching profile.
+const AZURE_NIL_UUID = '00000000-0000-0000-0000-000000000000';
+// Standard UUID format: 8-4-4-4-12 hex digits.
+const AZURE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Max length of a UUID string after sanitization (36 chars + small safety margin).
+const AZURE_UUID_MAX_LEN = 50;
+
+function azureBase(env) {
+  const key    = String(env.AZURE_SPEAKER_KEY    || '').trim();
+  const region = String(env.AZURE_SPEAKER_REGION || 'eastus').trim();
+  return { key, region, base: `https://${region}.api.cognitive.microsoft.com/speaker/identification/v2.0/text-independent` };
+}
+
+async function azureCreateSpeakerProfile(env) {
+  const { key, base } = azureBase(env);
+  if (!key) return err('AZURE_SPEAKER_KEY is not configured. Add it in Cloudflare Pages → Settings → Environment Variables.', 503);
+
+  const res  = await fetch(`${base}/profiles`, {
+    method: 'POST',
+    headers: { 'Ocp-Apim-Subscription-Key': key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ locale: 'en-us' }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return err(data.error?.message || `Azure error (${res.status}).`, res.status);
+  return ok({ profileId: data.profileId });
+}
+
+async function azureEnrollSpeaker(env, profileId, body) {
+  const { key, base } = azureBase(env);
+  if (!key) return err('AZURE_SPEAKER_KEY is not configured.', 503);
+  if (!profileId) return err('Missing profile ID.', 400);
+
+  const audioBase64 = String(body?.audioBase64 || '');
+  if (!audioBase64) return err('Missing audio data.', 400);
+
+  let audioBytes;
+  try {
+    audioBytes = Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0));
+  } catch {
+    return err('Invalid audio data encoding.', 400);
+  }
+
+  const res  = await fetch(`${base}/profiles/${encodeURIComponent(profileId)}/enrollments`, {
+    method: 'POST',
+    headers: { 'Ocp-Apim-Subscription-Key': key, 'Content-Type': 'audio/wav' },
+    body: audioBytes,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return err(data.error?.message || `Azure enrollment error (${res.status}).`, res.status);
+  return ok({
+    enrolled: true,
+    enrollmentStatus: data.enrollmentStatus || 'Enrolling',
+    remainingEnrollmentSpeechLength: data.remainingEnrollmentSpeechLength ?? 0,
+  });
+}
+
+async function azureDeleteSpeakerProfile(env, profileId) {
+  const { key, base } = azureBase(env);
+  if (!key) return err('AZURE_SPEAKER_KEY is not configured.', 503);
+
+  const res = await fetch(`${base}/profiles/${encodeURIComponent(profileId)}`, {
+    method: 'DELETE',
+    headers: { 'Ocp-Apim-Subscription-Key': key },
+  });
+  if (res.status === 204 || res.ok) return ok({ deleted: true });
+  const data = await res.json().catch(() => ({}));
+  return err(data.error?.message || `Azure delete error (${res.status}).`, res.status);
+}
+
+async function azureIdentifySpeaker(env, body) {
+  const { key, base } = azureBase(env);
+  if (!key) return err('AZURE_SPEAKER_KEY is not configured.', 503);
+
+  const profileIds = Array.isArray(body?.profileIds) ? body.profileIds : [];
+  if (!profileIds.length) return err('No profile IDs provided.', 400);
+  if (profileIds.length > 50) return err('Maximum 50 profile IDs per request.', 400);
+
+  const audioBase64 = String(body?.audioBase64 || '');
+  if (!audioBase64) return err('Missing audio data.', 400);
+
+  // Sanitise and validate UUIDs (8-4-4-4-12 hex format).
+  const safeIds = profileIds
+    .map(id => String(id).replace(/[^a-fA-F0-9-]/g, ''))
+    .filter(id => id.length <= AZURE_UUID_MAX_LEN && AZURE_UUID_RE.test(id));
+  if (!safeIds.length) return err('No valid profile IDs provided.', 400);
+
+  let audioBytes;
+  try {
+    audioBytes = Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0));
+  } catch {
+    return err('Invalid audio data encoding.', 400);
+  }
+
+  const res  = await fetch(`${base}/profiles/identify/multipart?profileIds=${safeIds.join(',')}`, {
+    method: 'POST',
+    headers: { 'Ocp-Apim-Subscription-Key': key, 'Content-Type': 'audio/wav' },
+    body: audioBytes,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return err(data.error?.message || `Azure identify error (${res.status}).`, res.status);
+
+  const identified = data.identifiedProfile;
+  const profileId  = identified?.profileId || null;
+  const score      = identified?.score ?? 0;
+  // Azure returns the nil UUID when no profile matches.
+  const isNilUuid = !profileId || profileId === AZURE_NIL_UUID;
+  return ok({ profileId: isNilUuid ? null : profileId, score });
 }
 
 async function uploadAiSecretaryAudioChunk(env, request) {

@@ -33,6 +33,7 @@ const S = {
   activeMeeting: null,
   members: [],
   archiveSearch: '',
+  archiveQuickFilter: 'all',
 };
 
 // ── AUDIO RECORDER + REALTIME TRANSCRIPTION ───────────────────────
@@ -60,7 +61,70 @@ const Rec = {
   uploadBusy: false,
   uploadedChunks: 0,
   failedChunks: 0,
+  speakerMap: new Map(),    // Map<number, string>: Deepgram speaker idx → member name
+  seenSpeakers: new Set(),  // Set<number>: all Deepgram speaker indices encountered so far
 };
+
+// ── DIARIZER (Deepgram speaker diarization) ────────────────────────
+const DG_MAX_RETRIES = 5;
+const DG_RETRY_BASE_MS = 1500;
+// Worklet processor code bundled inline to avoid requiring a separate file.
+const DG_WORKLET_CODE = `
+class PcmCaptureProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0]?.[0];
+    if (ch && ch.length) this.port.postMessage(ch);
+    return true;
+  }
+}
+registerProcessor('pcm-capture-processor', PcmCaptureProcessor);
+`;
+
+const Diarizer = {
+  ws: null,
+  audioCtx: null,
+  workletNode: null,
+  workletUrl: null,
+  status: 'offline', // offline | connecting | connected | reconnecting | error
+  reconnectTimer: null,
+  reconnectAttempts: 0,
+  manualStop: false,
+  // PCM ring buffer — raw Float32 samples from the AudioWorklet, used to
+  // extract per-speaker audio slices for Azure Speaker Recognition.
+  pcmChunks: [],        // Array of {offset: number, data: Float32Array}
+  pcmSampleOffset: 0,   // Total samples written since Diarizer was constructed
+  pcmSampleRate: 0,     // Set from AudioContext.sampleRate on connection
+  dgTimeOffset: 0,      // pcmSampleOffset when the current WS connection was opened;
+                        // adds to Deepgram's 0-based timestamps to get absolute offsets
+  speakerRanges: new Map(), // Map<speakerIdx, {startSample, endSample}[]>
+  identifyPending: new Set(), // speaker indices currently being identified by Azure
+};
+
+// ── VOICE ENROLLMENT ───────────────────────────────────────────────
+// Captures a ~30-second voice sample from a member and enrolls it
+// with Azure Speaker Recognition for automatic future identification.
+const Enrolling = {
+  stream: null,
+  audioCtx: null,
+  workletNode: null,
+  workletUrl: null,
+  samples: [],      // Float32Array chunks collected during enrollment
+  sampleRate: 0,
+  timer: null,
+  elapsed: 0,
+  memberIdx: -1,
+  active: false,
+};
+
+// ── AZURE SPEAKER RECOGNITION CONSTANTS ───────────────────────────
+const AZURE_IDENTIFY_THRESHOLD_SEC = 5;   // seconds of speech needed before triggering auto-ID
+const AZURE_IDENTIFY_MIN_AUDIO_SEC  = 4;  // minimum seconds Azure needs for a reliable match
+const AZURE_IDENTIFY_MAX_AUDIO_SEC  = 10; // max seconds of audio to send per identification call
+const AZURE_IDENTIFY_MIN_SCORE = 0.5;     // minimum confidence (0–1) to accept auto-assignment
+const AZURE_ENROLL_DURATION_SEC = 30;     // seconds of audio to capture for enrollment
+const DEFAULT_PCM_SAMPLE_RATE   = 48000;  // fallback rate before the AudioContext is created
+const BASE64_CHUNK_SIZE         = 32768;  // chars per chunk when encoding large buffers
+const PCM_BUFFER_DURATION_SEC   = 60;     // seconds of PCM audio to retain in the ring buffer
 
 function recFmt() {
   const m = Math.floor(Rec.elapsed / 60);
@@ -79,11 +143,19 @@ function recTimestamp() {
 }
 
 function recStatusLabel() {
-  if (Rec.realtimeStatus === 'connected') return 'Realtime transcription connected';
-  if (Rec.realtimeStatus === 'connecting') return 'Connecting transcription…';
-  if (Rec.realtimeStatus === 'reconnecting') return `Reconnecting transcription (${Rec.reconnectAttempts}/${REC_MAX_RETRIES})…`;
-  if (Rec.realtimeStatus === 'error') return 'Transcription offline — audio chunks still uploading';
-  return 'Transcription offline';
+  if (Rec.realtimeStatus === 'connected') return 'OpenAI: transcribing';
+  if (Rec.realtimeStatus === 'connecting') return 'OpenAI: connecting…';
+  if (Rec.realtimeStatus === 'reconnecting') return `OpenAI: reconnecting (${Rec.reconnectAttempts}/${REC_MAX_RETRIES})…`;
+  if (Rec.realtimeStatus === 'error') return 'OpenAI: offline';
+  return 'OpenAI: offline';
+}
+
+function diarizerStatusLabel() {
+  if (Diarizer.status === 'connected') return 'Deepgram: diarizing';
+  if (Diarizer.status === 'connecting') return 'Deepgram: connecting…';
+  if (Diarizer.status === 'reconnecting') return `Deepgram: reconnecting (${Diarizer.reconnectAttempts}/${DG_MAX_RETRIES})…`;
+  if (Diarizer.status === 'error') return 'Deepgram: offline';
+  return 'Deepgram: offline';
 }
 
 function recRenderUI() {
@@ -91,7 +163,7 @@ function recRenderUI() {
   if (!el) return;
   const liveDisabled = Rec.status === 'recording' ? '' : 'disabled';
   const uploadMeta = Rec.status === 'idle'
-    ? 'Stream audio continuously with 5-second chunk backups and realtime transcription.'
+    ? 'Stream audio with 5-second chunk backups, OpenAI realtime transcription and Deepgram speaker diarization.'
     : `${Rec.uploadedChunks} chunk${Rec.uploadedChunks === 1 ? '' : 's'} uploaded${Rec.failedChunks ? ` • ${Rec.failedChunks} pending retry` : ''}`;
 
   if (Rec.status === 'idle') {
@@ -109,10 +181,11 @@ function recRenderUI() {
           <span class="rec-dot rec-dot-live"></span>
           <span class="rec-timer" id="kpsc-rec-timer">${recFmt()}</span>
           <button class="kbtn kbtn-sm" onclick="Kpsc.recPause()">⏸ Pause</button>
-          <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.recStop()">⏹ Stop</button>
+          <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.recStop()">⏹ End Recording</button>
         </div>
         <div class="rec-meta">
           <span class="rec-rt rec-rt-${Rec.realtimeStatus}">${recStatusLabel()}</span>
+          <span class="rec-rt rec-rt-dg-${Diarizer.status}">${diarizerStatusLabel()}</span>
           <span>${uploadMeta}</span>
         </div>
       </div>`;
@@ -123,7 +196,7 @@ function recRenderUI() {
           <span class="rec-dot rec-dot-paused"></span>
           <span class="rec-timer">${recFmt()} — Paused</span>
           <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.recResume()">▶ Resume</button>
-          <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.recStop()">⏹ Stop</button>
+          <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.recStop()">⏹ End Recording</button>
         </div>
         <div class="rec-meta">
           <span>Microphone paused</span>
@@ -138,11 +211,18 @@ function recRenderUI() {
           <span class="rec-timer">${recFmt()} — Stopped</span>
           <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.recReset()">🗑 Reset Recorder</button>
         </div>
-        <div class="rec-meta">Recording ended. Full audio was never kept in browser memory; only short chunks were uploaded.</div>
+        <div class="rec-meta">Recording ended. Use the End Meeting button to lock the transcript and prepare minutes; full audio was never kept in browser memory, only short chunks were uploaded.</div>
       </div>`;
   }
   const transcriptPanel = document.getElementById('kpsc-live-transcript');
   if (transcriptPanel) transcriptPanel.toggleAttribute('data-recording', liveDisabled === '');
+}
+
+// Return the display name for a Deepgram speaker index.
+// Uses the speakerMap if a member has been assigned, otherwise falls back to "Speaker N".
+function speakerDisplayName(idx) {
+  if (idx === null || idx === undefined) return '';
+  return Rec.speakerMap.get(idx) || `Speaker ${idx + 1}`;
 }
 
 function recRenderTranscript() {
@@ -153,29 +233,133 @@ function recRenderTranscript() {
     timestamp: recTimestamp(),
     text,
     partial: true,
+    speaker: null,
   }));
   const rows = [...Rec.transcriptEntries, ...partials];
-  list.innerHTML = rows.length ? rows.map(entry => `
-    <div class="lt-entry${entry.partial ? ' lt-entry-partial' : ''}">
+  list.innerHTML = rows.length ? rows.map(entry => {
+    const hasSpeaker = entry.speaker !== null && entry.speaker !== undefined;
+    const displayName = hasSpeaker ? speakerDisplayName(entry.speaker) : '';
+    const speakerHtml = hasSpeaker
+      ? `<span class="lt-speaker lt-spk-${entry.speaker % 6}">${esc(displayName)}</span>`
+      : '';
+    return `
+    <div class="lt-entry${entry.partial ? ' lt-entry-partial' : ''}${hasSpeaker ? ' lt-entry-diarized' : ''}">
       <span class="lt-time">${esc(entry.timestamp)}</span>
+      ${speakerHtml}
       <span class="lt-text">${esc(entry.text)}</span>
-    </div>`).join('') : '<div class="lt-empty">Live transcript will appear here as people speak.</div>';
+    </div>`;
+  }).join('') : '<div class="lt-empty">Live transcript will appear here as people speak.</div>';
   list.scrollTop = list.scrollHeight;
 }
 
-function recAppendTranscript(text, itemId = '') {
+function recAppendTranscript(text, itemId = '', speaker = null) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) return;
-  const entry = { itemId, timestamp: recTimestamp(), text: clean };
+  // Track newly seen speakers so the identity panel can be updated.
+  if (speaker !== null && speaker !== undefined && !Rec.seenSpeakers.has(speaker)) {
+    Rec.seenSpeakers.add(speaker);
+    recRenderSpeakerMap();
+  }
+  const entry = { itemId, timestamp: recTimestamp(), text: clean, speaker: speaker ?? null };
   Rec.transcriptEntries.push(entry);
   const textarea = document.getElementById('km-transcript');
   if (textarea) {
-    const line = `[${entry.timestamp}] ${entry.text}`;
+    const speakerTag = speaker !== null && speaker !== undefined ? ` [${speakerDisplayName(speaker)}]` : '';
+    const line = `[${entry.timestamp}]${speakerTag} ${entry.text}`;
     textarea.value = textarea.value ? `${textarea.value}\n${line}` : line;
     textarea.scrollTop = textarea.scrollHeight;
   }
   recRenderTranscript();
 }
+
+// Rebuild the transcript textarea from scratch using the current speakerMap.
+// Called after a speaker assignment changes so existing lines reflect the new name.
+function rebuildTranscriptTextarea() {
+  const textarea = document.getElementById('km-transcript');
+  if (!textarea) return;
+  const lines = Rec.transcriptEntries.map(entry => {
+    const speakerTag = entry.speaker !== null && entry.speaker !== undefined ? ` [${speakerDisplayName(entry.speaker)}]` : '';
+    return `[${entry.timestamp}]${speakerTag} ${entry.text}`;
+  });
+  textarea.value = lines.join('\n');
+  textarea.scrollTop = textarea.scrollHeight;
+}
+
+// Build a sorted list of member names for the speaker-identity dropdowns.
+// Present members (checked in attendance) are shown first; the rest follow.
+function speakerMemberOptions() {
+  const present = new Set();
+  for (const g of GROUPS) {
+    const groupMembers = S.members.filter(m => m.group === g.key);
+    groupMembers.forEach((mem, i) => {
+      const el = document.getElementById(`att_present_${g.key}_${i}`);
+      if (el?.checked) present.add(mem.name);
+    });
+  }
+  const presentNames = S.members.filter(m => present.has(m.name)).map(m => m.name);
+  const otherNames  = S.members.filter(m => !present.has(m.name)).map(m => m.name);
+  return { presentNames, otherNames };
+}
+
+// Render (or refresh) the "Identify Speakers" panel that maps Deepgram indices to members.
+function recRenderSpeakerMap() {
+  const panel = document.getElementById('kpsc-speaker-map');
+  if (!panel) return;
+  if (Rec.seenSpeakers.size === 0) {
+    panel.innerHTML = '';
+    return;
+  }
+
+  const { presentNames, otherNames } = speakerMemberOptions();
+  const indices = [...Rec.seenSpeakers].sort((a, b) => a - b);
+
+  const rows = indices.map(idx => {
+    const assigned = Rec.speakerMap.get(idx) || '';
+    const colourClass = `lt-spk-${idx % 6}`;
+    const makeOption = (name, label) =>
+      `<option value="${esc(name)}" ${assigned === name ? 'selected' : ''}>${esc(label || name)}</option>`;
+
+    const presentOpts = presentNames.length
+      ? `<optgroup label="Present">${presentNames.map(n => makeOption(n, n)).join('')}</optgroup>`
+      : '';
+    const otherOpts = otherNames.length
+      ? `<optgroup label="Other Members">${otherNames.map(n => makeOption(n, n)).join('')}</optgroup>`
+      : '';
+
+    return `
+      <div class="k-spk-row">
+        <span class="lt-speaker ${colourClass}">${esc(speakerDisplayName(idx))}</span>
+        <select class="k-spk-sel" onchange="Kpsc.assignSpeaker(${idx}, this.value)">
+          <option value=""${!assigned ? ' selected' : ''}>— Unassigned —</option>
+          ${presentOpts}${otherOpts}
+        </select>
+      </div>`;
+  }).join('');
+
+  panel.innerHTML = `
+    <div class="k-speaker-map">
+      <div class="k-spk-hdr">
+        <span class="k-spk-title">🎙 Identify Speakers</span>
+        <span class="k-spk-hint">Assign each detected voice to a member. The transcript updates instantly.</span>
+      </div>
+      <div class="k-spk-rows">${rows}</div>
+    </div>`;
+}
+
+// Assign a Deepgram speaker index to a member name (or clear if name is empty).
+// Updates the live transcript and the saved textarea immediately.
+function assignSpeaker(idx, name) {
+  const n = String(name || '').trim();
+  if (n) {
+    Rec.speakerMap.set(idx, n);
+  } else {
+    Rec.speakerMap.delete(idx);
+  }
+  rebuildTranscriptTextarea();
+  recRenderTranscript();
+  recRenderSpeakerMap();
+}
+
 
 async function recStart(btn) {
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
@@ -193,9 +377,14 @@ async function recStart(btn) {
     Rec.uploadQueue = [];
     Rec.transcriptEntries = [];
     Rec.liveDeltas = new Map();
+    Rec.speakerMap = new Map();
+    Rec.seenSpeakers = new Set();
     Rec.manualStop = false;
     Rec.reconnectAttempts = 0;
     Rec.status = 'recording';
+    // Reset per-speaker identification state for the new session.
+    Diarizer.speakerRanges   = new Map();
+    Diarizer.identifyPending = new Set();
 
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
@@ -209,12 +398,22 @@ async function recStart(btn) {
     recStartTimer();
     recRenderUI();
     recRenderTranscript();
+    // Start OpenAI realtime transcription (fast interim display)
     try {
       await recConnectRealtime();
     } catch (e) {
       Rec.realtimeStatus = 'error';
       recRenderUI();
       showToast(e.message || 'Realtime transcription is offline; chunked audio upload is still running.', 'error');
+    }
+    // Start Deepgram diarization (speaker-labelled final transcripts)
+    try {
+      await diarizerConnect();
+    } catch (e) {
+      console.error('[diarizer] connect failed:', e);
+      Diarizer.status = 'error';
+      recRenderUI();
+      showToast(`Deepgram: ${e.message || 'speaker diarization is offline'}`, 'warn');
     }
 
     const statusInput = document.getElementById('km-status');
@@ -303,7 +502,13 @@ function recHandleRealtimeEvent(raw) {
   } else if (event.type === 'conversation.item.input_audio_transcription.completed') {
     const itemId = event.item_id || event.itemId || '';
     Rec.liveDeltas.delete(itemId);
-    recAppendTranscript(event.transcript || '', itemId);
+    // When Deepgram diarization is active it owns the final transcript (with speaker labels).
+    // OpenAI only provides the fast interim display; suppress its final commit here.
+    if (Diarizer.status !== 'connected') {
+      recAppendTranscript(event.transcript || '', itemId);
+    } else {
+      recRenderTranscript();
+    }
   } else if (event.type === 'error') {
     showToast(event.error?.message || 'Realtime transcription error.', 'error');
   }
@@ -335,6 +540,7 @@ function recPause() {
     Rec.stream?.getAudioTracks().forEach(t => { t.enabled = false; });
     clearInterval(Rec.timer);
     recCloseRealtime(false);
+    diarizerClose(false);
     Rec.status = 'paused';
     Rec.realtimeStatus = 'offline';
     recRenderUI();
@@ -347,10 +553,13 @@ async function recResume() {
     Rec.mediaRecorder.resume();
     Rec.status = 'recording';
     Rec.manualStop = false;
+    Diarizer.manualStop = false;
     recStartTimer();
     recRenderUI();
     try { await recConnectRealtime(); }
     catch { recScheduleReconnect(); }
+    try { await diarizerConnect(); }
+    catch { diarizerScheduleReconnect(); }
   }
 }
 
@@ -364,6 +573,7 @@ function recStop() {
     Rec.mediaRecorder.stop();
   }
   recCloseRealtime(true);
+  diarizerClose(true);
   recStopTracks();
   Rec.status = 'stopped';
   Rec.realtimeStatus = 'offline';
@@ -381,8 +591,15 @@ function recReset() {
   Rec.uploadQueue = [];
   Rec.uploadedChunks = 0;
   Rec.failedChunks = 0;
+  Rec.speakerMap = new Map();
+  Rec.seenSpeakers = new Set();
+  Diarizer.status = 'offline';
+  Diarizer.reconnectAttempts = 0;
+  Diarizer.speakerRanges   = new Map();
+  Diarizer.identifyPending = new Set();
   recRenderUI();
   recRenderTranscript();
+  recRenderSpeakerMap();
 }
 
 function recCloseRealtime(markManual) {
@@ -467,7 +684,363 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-// ── API HELPERS ───────────────────────────────────────────────────
+// ── DIARIZER FUNCTIONS (Deepgram speaker diarization) ─────────────
+
+// Convert Float32 PCM samples to Int16 for Deepgram's linear16 encoding.
+function diarizerFloat32ToInt16(float32) {
+  const int16 = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
+  }
+  return int16;
+}
+
+// Group consecutive words by speaker to form speaker-turn segments.
+function diarizerExtractSpeakerTurns(words) {
+  if (!words || !words.length) return [];
+  const turns = [];
+  let curSpeaker = words[0].speaker ?? 0;
+  let curWords = [words[0].word];
+  for (let i = 1; i < words.length; i++) {
+    const spk = words[i].speaker ?? 0;
+    if (spk === curSpeaker) {
+      curWords.push(words[i].word);
+    } else {
+      turns.push({ speaker: curSpeaker, text: curWords.join(' ') });
+      curSpeaker = spk;
+      curWords = [words[i].word];
+    }
+  }
+  if (curWords.length) turns.push({ speaker: curSpeaker, text: curWords.join(' ') });
+  return turns;
+}
+
+async function diarizerConnect() {
+  if (!Rec.stream || Diarizer.manualStop) return;
+  diarizerClose(false);
+  Diarizer.status = Diarizer.reconnectAttempts > 0 ? 'reconnecting' : 'connecting';
+  recRenderUI();
+
+  console.info('[diarizer] requesting token from server');
+  const tokenRes = await apiPost('deepgram-transcription-token', {});
+  if (tokenRes.error) throw new Error(tokenRes.error);
+  const accessToken = tokenRes.key;
+  if (!accessToken) throw new Error('Deepgram access token was not returned by the server.');
+  console.info('[diarizer] token received, length =', accessToken.length);
+
+  // Build AudioContext and AudioWorklet pipeline for raw PCM streaming.
+  const audioCtx = new AudioContext();
+  Diarizer.audioCtx = audioCtx;
+  // AudioContext starts suspended when created outside an active user
+  // gesture (e.g. after awaiting the token fetch). Without this resume,
+  // no PCM reaches the worklet until the user pauses and resumes.
+  if (audioCtx.state === 'suspended') {
+    try { await audioCtx.resume(); } catch (_) { /* noop */ }
+  }
+
+  // Register the inline worklet processor via a Blob URL.
+  const blob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
+  const workletUrl = URL.createObjectURL(blob);
+  Diarizer.workletUrl = workletUrl;
+  await audioCtx.audioWorklet.addModule(workletUrl);
+
+  const source = audioCtx.createMediaStreamSource(Rec.stream);
+  const workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture-processor');
+  Diarizer.workletNode = workletNode;
+
+  // Build the Deepgram WebSocket URL with required parameters.
+  const sampleRate = audioCtx.sampleRate;
+  const dgParams = new URLSearchParams({
+    model: 'nova-3',
+    diarize: 'true',
+    punctuate: 'true',
+    interim_results: 'true',
+    smart_format: 'true',
+    encoding: 'linear16',
+    sample_rate: String(Math.round(sampleRate)),
+    channels: '1',
+    language: 'en',
+  });
+  // Deepgram authenticates browser WebSocket connections via the
+  // Sec-WebSocket-Protocol subprotocol ('token', <api-key>). Query
+  // parameters like ?token=... are NOT accepted and silently fail.
+  console.info('[diarizer] opening WebSocket to Deepgram');
+  // Temporary access token from /v1/auth/grant uses the Bearer scheme;
+  // browsers can't set the Authorization header on a WebSocket, so the
+  // scheme + token ride in the Sec-WebSocket-Protocol subprotocols list.
+  const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, ['bearer', accessToken]);
+  Diarizer.ws = ws;
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    Diarizer.status = 'connected';
+    Diarizer.reconnectAttempts = 0;
+    // Record the PCM sample offset at the moment this WS connection opened.
+    // Deepgram timestamps restart from 0 on each new connection; dgTimeOffset
+    // converts them to absolute positions in the PCM ring buffer.
+    Diarizer.dgTimeOffset  = Diarizer.pcmSampleOffset;
+    Diarizer.pcmSampleRate = audioCtx.sampleRate;
+    recRenderUI();
+    // Wire audio only after socket is open to avoid dropping early packets.
+    workletNode.port.onmessage = (e) => {
+      if (Diarizer.ws?.readyState === WebSocket.OPEN) {
+        Diarizer.ws.send(diarizerFloat32ToInt16(e.data).buffer);
+      }
+      // Buffer a copy of the raw PCM for Azure speaker identification.
+      diarizerBufferPcm(e.data);
+    };
+    source.connect(workletNode);
+    // Worklet must be connected to something in the audio graph to keep processing.
+    workletNode.connect(audioCtx.createMediaStreamDestination());
+  };
+
+  ws.onmessage = (e) => diarizerHandleMessage(e.data);
+
+  ws.onclose = (e) => {
+    console.warn('[diarizer] WS closed', { code: e.code, reason: e.reason, wasClean: e.wasClean });
+    if (!Diarizer.manualStop && Rec.status === 'recording') {
+      diarizerScheduleReconnect();
+    } else {
+      Diarizer.status = 'offline';
+      recRenderUI();
+    }
+  };
+
+  ws.onerror = (e) => {
+    console.error('[diarizer] WS error', e);
+    if (!Diarizer.manualStop && Rec.status === 'recording') {
+      diarizerScheduleReconnect();
+    }
+  };
+}
+
+function diarizerHandleMessage(raw) {
+  let msg;
+  try { msg = JSON.parse(raw); } catch { return; }
+
+  if (msg.type === 'Results') {
+    const alt = msg.channel?.alternatives?.[0];
+    if (!alt) return;
+    const transcript = String(alt.transcript || '').trim();
+    const words = alt.words || [];
+    const isFinal = !!msg.is_final;
+
+    if (!transcript) {
+      if (isFinal) {
+        Rec.liveDeltas.delete('dg_interim');
+        recRenderTranscript();
+      }
+      return;
+    }
+
+    if (!isFinal) {
+      // Show streaming interim text (no speaker labels yet).
+      Rec.liveDeltas.set('dg_interim', transcript);
+      recRenderTranscript();
+    } else {
+      // Final result: extract speaker turns and commit each as a transcript entry.
+      Rec.liveDeltas.delete('dg_interim');
+      // Also clear any OpenAI interim partials that overlap to avoid duplicate display.
+      const keysToDelete = [...Rec.liveDeltas.keys()].filter(k => !k.startsWith('dg'));
+      for (const k of keysToDelete) Rec.liveDeltas.delete(k);
+      const hasSpeakers = words.length > 0 && words[0].speaker !== null && words[0].speaker !== undefined;
+      if (hasSpeakers) {
+        const turns = diarizerExtractSpeakerTurns(words);
+        for (const turn of turns) {
+          recAppendTranscript(turn.text, `dg_${Date.now()}_${turn.speaker}`, turn.speaker);
+          // Accumulate the audio time range for this speaker to drive auto-identification.
+          if (!Rec.speakerMap.has(turn.speaker)) {
+            const speakerWords = words.filter(w => (w.speaker ?? 0) === turn.speaker);
+            if (speakerWords.length > 0) {
+              diarizerAccumulateSpeakerRange(
+                turn.speaker,
+                speakerWords[0].start,
+                speakerWords[speakerWords.length - 1].end,
+              );
+            }
+          }
+        }
+      } else {
+        recAppendTranscript(transcript, `dg_${Date.now()}`);
+      }
+    }
+  } else if (msg.type === 'UtteranceEnd') {
+    Rec.liveDeltas.delete('dg_interim');
+    recRenderTranscript();
+  } else if (msg.type === 'Error') {
+    showToast(`Deepgram: ${msg.message || 'connection error'}`, 'error');
+  }
+}
+
+function diarizerScheduleReconnect() {
+  if (Diarizer.manualStop || Rec.status !== 'recording' || Diarizer.reconnectTimer) return;
+  if (Diarizer.reconnectAttempts >= DG_MAX_RETRIES) {
+    Diarizer.status = 'error';
+    recRenderUI();
+    showToast('Speaker diarization disconnected. Transcription may still be active.', 'warn');
+    return;
+  }
+  Diarizer.reconnectAttempts++;
+  Diarizer.status = 'reconnecting';
+  const delay = DG_RETRY_BASE_MS * (2 ** (Diarizer.reconnectAttempts - 1));
+  recRenderUI();
+  Diarizer.reconnectTimer = setTimeout(async () => {
+    Diarizer.reconnectTimer = null;
+    try { await diarizerConnect(); }
+    catch { diarizerScheduleReconnect(); }
+  }, delay);
+}
+
+function diarizerClose(markManual) {
+  if (markManual) {
+    Diarizer.manualStop = true;
+    // Free PCM ring buffer and per-speaker state when the session truly ends.
+    Diarizer.pcmChunks       = [];
+    Diarizer.pcmSampleOffset = 0;
+    Diarizer.speakerRanges   = new Map();
+    Diarizer.identifyPending = new Set();
+  }
+  clearTimeout(Diarizer.reconnectTimer);
+  Diarizer.reconnectTimer = null;
+  // Send a CloseStream message so Deepgram finalises any pending utterance.
+  if (Diarizer.ws && Diarizer.ws.readyState === WebSocket.OPEN) {
+    try { Diarizer.ws.send(JSON.stringify({ type: 'CloseStream' })); } catch (_) { /* noop */ }
+  }
+  try { Diarizer.ws?.close(); } catch (_) { /* noop */ }
+  Diarizer.ws = null;
+  try { Diarizer.workletNode?.disconnect(); } catch (_) { /* noop */ }
+  Diarizer.workletNode = null;
+  if (Diarizer.audioCtx && Diarizer.audioCtx.state !== 'closed') {
+    const ctxToClose = Diarizer.audioCtx;
+    Diarizer.audioCtx = null;
+    ctxToClose.close().catch(() => {/* noop */});
+  } else {
+    Diarizer.audioCtx = null;
+  }
+  if (Diarizer.workletUrl) {
+    URL.revokeObjectURL(Diarizer.workletUrl);
+    Diarizer.workletUrl = null;
+  }
+}
+
+// ── PCM RING BUFFER ────────────────────────────────────────────────
+// Add incoming worklet samples to the ring buffer, keeping the last 60 s.
+function diarizerBufferPcm(samples) {
+  Diarizer.pcmChunks.push({ offset: Diarizer.pcmSampleOffset, data: samples.slice() });
+  Diarizer.pcmSampleOffset += samples.length;
+  // Remove chunks older than 60 seconds.
+  const minOffset = Diarizer.pcmSampleOffset - (PCM_BUFFER_DURATION_SEC * (Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE));
+  while (Diarizer.pcmChunks.length &&
+         Diarizer.pcmChunks[0].offset + Diarizer.pcmChunks[0].data.length <= minOffset) {
+    Diarizer.pcmChunks.shift();
+  }
+}
+
+// Extract a Float32 slice from the ring buffer for an absolute sample range.
+function diarizerExtractPcmRange(startSample, endSample) {
+  const needed = endSample - startSample;
+  if (needed <= 0) return null;
+  const out = new Float32Array(needed);
+  for (const chunk of Diarizer.pcmChunks) {
+    const cEnd = chunk.offset + chunk.data.length;
+    if (cEnd <= startSample || chunk.offset >= endSample) continue;
+    const readFrom = Math.max(0, startSample - chunk.offset);
+    const readTo   = Math.min(chunk.data.length, endSample - chunk.offset);
+    const writeAt  = Math.max(0, chunk.offset - startSample);
+    out.set(chunk.data.subarray(readFrom, readTo), writeAt);
+  }
+  return out;
+}
+
+// Collect up to AZURE_IDENTIFY_MAX_AUDIO_SEC of audio for a speaker index from the ring buffer.
+function diarizerExtractSpeakerAudio(speakerIdx) {
+  const ranges = Diarizer.speakerRanges.get(speakerIdx) || [];
+  if (!ranges.length || !Diarizer.pcmSampleRate) return null;
+  const maxSamples = AZURE_IDENTIFY_MAX_AUDIO_SEC * Diarizer.pcmSampleRate;
+  let accumulated = 0;
+  const toExtract = [];
+  for (let i = ranges.length - 1; i >= 0 && accumulated < maxSamples; i--) {
+    toExtract.unshift(ranges[i]);
+    accumulated += ranges[i].endSample - ranges[i].startSample;
+  }
+  const chunks = toExtract.map(r => diarizerExtractPcmRange(r.startSample, r.endSample)).filter(Boolean);
+  if (!chunks.length) return null;
+  const totalLen = Math.min(chunks.reduce((a, c) => a + c.length, 0), maxSamples);
+  const out = new Float32Array(totalLen);
+  let pos = 0;
+  for (const c of chunks) {
+    if (pos >= out.length) break;
+    const take = Math.min(c.length, out.length - pos);
+    out.set(c.subarray(0, take), pos);
+    pos += take;
+  }
+  return out;
+}
+
+// Record the time range spoken by a Deepgram speaker index (in absolute PCM samples).
+// Triggers Azure identification once AZURE_IDENTIFY_THRESHOLD_SEC of audio is collected.
+function diarizerAccumulateSpeakerRange(speakerIdx, startSec, endSec) {
+  if (!Diarizer.pcmSampleRate) return;
+  const sr          = Diarizer.pcmSampleRate;
+  const startSample = Math.floor(startSec * sr) + Diarizer.dgTimeOffset;
+  const endSample   = Math.ceil(endSec   * sr) + Diarizer.dgTimeOffset;
+  if (!Diarizer.speakerRanges.has(speakerIdx)) Diarizer.speakerRanges.set(speakerIdx, []);
+  Diarizer.speakerRanges.get(speakerIdx).push({ startSample, endSample });
+
+  const totalSamples = Diarizer.speakerRanges.get(speakerIdx)
+    .reduce((a, r) => a + (r.endSample - r.startSample), 0);
+  if (!Diarizer.identifyPending.has(speakerIdx) &&
+      totalSamples >= AZURE_IDENTIFY_THRESHOLD_SEC * sr) {
+    diarizerTriggerIdentify(speakerIdx).catch(e => console.warn('Auto-identify error:', e));
+  }
+}
+
+// Return true if a member's attendance checkbox is ticked in the current meeting.
+function isMemberPresent(mem) {
+  const groupMembers = S.members.filter(m => m.group === mem.group);
+  const groupIdx     = groupMembers.indexOf(mem);
+  if (groupIdx < 0) return false;
+  const el = document.getElementById(`att_present_${mem.group}_${groupIdx}`);
+  return el?.checked === true;
+}
+
+// Attempt to auto-identify a Deepgram speaker index using Azure Speaker Recognition.
+// Silently skips if Azure is not configured or no enrolled members are present.
+async function diarizerTriggerIdentify(speakerIdx) {
+  if (Rec.speakerMap.has(speakerIdx)) return; // already assigned manually
+  const enrolledPresent = S.members.filter(m => m.azureSpeakerProfileId && isMemberPresent(m));
+  if (!enrolledPresent.length) return;
+
+  Diarizer.identifyPending.add(speakerIdx);
+  try {
+    const audio = diarizerExtractSpeakerAudio(speakerIdx);
+    // Azure needs at least AZURE_IDENTIFY_MIN_AUDIO_SEC of speech for a reliable match.
+    if (!audio || audio.length < AZURE_IDENTIFY_MIN_AUDIO_SEC * Diarizer.pcmSampleRate) return;
+
+    const resampled   = resampleTo16k(audio, Diarizer.pcmSampleRate);
+    const wavBuffer   = pcmToWav(resampled, 16000);
+    const audioBase64 = arrayBufferToBase64(wavBuffer);
+    const profileIds  = enrolledPresent.map(m => m.azureSpeakerProfileId);
+
+    const res = await apiPost('azure-speaker-identify', { profileIds, audioBase64 });
+    if (res.error) { console.warn('Speaker identification:', res.error); return; }
+
+    if (res.profileId && res.score >= AZURE_IDENTIFY_MIN_SCORE) {
+      if (Rec.speakerMap.has(speakerIdx)) return; // assigned while we waited
+      const matched = enrolledPresent.find(m => m.azureSpeakerProfileId === res.profileId);
+      if (matched) {
+        assignSpeaker(speakerIdx, matched.name);
+        showToast(`🎙 Auto-identified: ${matched.name} (${Math.round(res.score * 100)}% match)`, 'success');
+      }
+    }
+  } catch (e) {
+    console.warn('diarizerTriggerIdentify error:', e);
+  } finally {
+    Diarizer.identifyPending.delete(speakerIdx);
+  }
+}
+
+
 async function apiGet(path) {
   const r = await fetch(`${API}/${path}`);
   return r.json();
@@ -487,6 +1060,15 @@ async function apiPut(path, body) {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  });
+  return r.json();
+}
+
+async function apiDelete(path, body) {
+  const r = await fetch(`${API}/${path}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
   });
   return r.json();
 }
@@ -595,7 +1177,70 @@ function esc(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ── AUTH ──────────────────────────────────────────────────────────
+// ── PCM AUDIO HELPERS ────────────────────────────────────────────
+// Linearly resample a Float32 PCM array from `fromRate` to 16 kHz.
+// Azure Speaker Recognition requires 8/16/32 kHz WAV input.
+// Linear interpolation is sufficient for speaker identification — the model
+// is robust to minor resampling artefacts, and higher-quality algorithms
+// (e.g. polyphase filters) are not worth the added complexity here.
+function resampleTo16k(float32, fromRate) {
+  const toRate = 16000;
+  if (fromRate === toRate) return float32;
+  const ratio  = fromRate / toRate;
+  const outLen = Math.round(float32.length / ratio);
+  const out    = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const pos  = i * ratio;
+    const lo   = Math.floor(pos);
+    const hi   = Math.min(lo + 1, float32.length - 1);
+    const frac = pos - lo; // interpolation weight towards the next sample
+    out[i] = float32[lo] * (1 - frac) + float32[hi] * frac;
+  }
+  return out;
+}
+
+// Build a standard WAV (PCM 16-bit mono) ArrayBuffer from Float32 samples.
+function pcmToWav(float32, sampleRate) {
+  const int16   = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
+  }
+  const dataLen = int16.length * 2;
+  const buf     = new ArrayBuffer(44 + dataLen);
+  const view    = new DataView(buf);
+  // RIFF header
+  'RIFF'.split('').forEach((c, i) => view.setUint8(i,      c.charCodeAt(0)));
+  view.setUint32(4,  36 + dataLen, true);
+  'WAVE'.split('').forEach((c, i) => view.setUint8(8  + i, c.charCodeAt(0)));
+  // fmt  chunk
+  'fmt '.split('').forEach((c, i) => view.setUint8(12 + i, c.charCodeAt(0)));
+  view.setUint32(16, 16,              true); // chunk size
+  view.setUint16(20,  1,              true); // PCM
+  view.setUint16(22,  1,              true); // mono
+  view.setUint32(24, sampleRate,      true);
+  view.setUint32(28, sampleRate * 2,  true); // byte rate
+  view.setUint16(32,  2,              true); // block align
+  view.setUint16(34, 16,              true); // bits per sample
+  // data chunk
+  'data'.split('').forEach((c, i) => view.setUint8(36 + i, c.charCodeAt(0)));
+  view.setUint32(40, dataLen, true);
+  new Int16Array(buf, 44).set(int16);
+  return buf;
+}
+
+// Convert an ArrayBuffer to a base64 string (handles large buffers safely).
+// Chunks are collected into an array and joined once to avoid O(n²) string copies.
+function arrayBufferToBase64(buffer) {
+  const bytes  = new Uint8Array(buffer);
+  const parts  = [];
+  for (let i = 0; i < bytes.length; i += BASE64_CHUNK_SIZE) {
+    // Spread each fixed-size chunk to avoid exceeding the call-stack limit.
+    parts.push(String.fromCharCode(...bytes.subarray(i, i + BASE64_CHUNK_SIZE)));
+  }
+  return btoa(parts.join(''));
+}
+
+
 async function login(btn) {
   const name = document.getElementById('kpsc-name-input')?.value.trim() || '';
   const pin  = document.getElementById('kpsc-pin-input')?.value.trim() || '';
@@ -722,12 +1367,22 @@ async function renderDashboard(main) {
     </div>`;
 }
 
+function canDeleteMeeting(m) {
+  const role = String(S.user?.role || '').toLowerCase();
+  if (role === 'admin' || role === 'it_administrator') return true;
+  return !!S.user?.name && S.user.name === (m.createdBy || '');
+}
+
 function meetingCard(m) {
+  const showDelete = canDeleteMeeting(m);
   return `
     <div class="k-meeting-card" onclick="Kpsc.openMeeting('${m.id}')">
       <div class="k-mc-top">
         <div class="k-mc-title">${esc(m.title)}</div>
-        <div class="k-mc-badges">${typeBadge(m.meetingType)} ${statusBadge(m.status)}</div>
+        <div class="k-mc-badges">
+          ${typeBadge(m.meetingType)} ${statusBadge(m.status)}
+          ${showDelete ? `<button class="k-mc-del" title="Delete draft" aria-label="Delete draft" onclick="Kpsc.deleteMeetingDraft('${m.id}', event)">🗑</button>` : ''}
+        </div>
       </div>
       <div class="k-mc-meta">
         <span>${fmtDate(m.meetingDate)}</span>
@@ -812,13 +1467,14 @@ async function renderMeetingRoom(main) {
       <section class="k-section">
         <h3 class="k-sec-title">Live Audio & Realtime Transcript</h3>
         ${canRecord ? `<div id="kpsc-rec-ui" class="k-rec-ui"></div>` : ''}
+        <div id="kpsc-speaker-map"></div>
         <div class="k-live-transcript" id="kpsc-live-transcript">
           <div class="lt-head">
             <div>
-              <div class="lt-title">Live Transcript</div>
-              <div class="lt-sub">Timestamped entries auto-scroll as OpenAI realtime transcription returns speech turns.</div>
+              <div class="lt-title">Live Transcript with Speaker Diarization</div>
+              <div class="lt-sub">OpenAI Real-time provides fast interim display; Deepgram identifies individual speakers and commits final entries with speaker labels.</div>
             </div>
-            <span class="lt-pill">Realtime</span>
+            <span class="lt-pill">Realtime + Diarization</span>
           </div>
           <div class="lt-list" id="kpsc-live-transcript-list"></div>
         </div>
@@ -828,6 +1484,7 @@ async function renderMeetingRoom(main) {
 
       <div class="k-room-actions">
         ${!isProcessed ? `<button class="kbtn" onclick="Kpsc.saveMeeting(this)">💾 Save</button>` : ''}
+        ${!isProcessed ? `<span id="km-autosave-status" class="k-autosave-status" aria-live="polite"></span>` : ''}
         ${status === 'recording' ? `<button class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
         ${status === 'ended' ? `<button class="kbtn kbtn-primary" onclick="Kpsc.processMeeting(this)">✨ Generate Minutes</button>` : ''}
         ${isProcessed ? `<div class="k-processed-note">✅ Minutes have been generated and finalised.</div>` : ''}
@@ -838,6 +1495,7 @@ async function renderMeetingRoom(main) {
 
   if (canRecord) recRenderUI();
   recRenderTranscript();
+  if (!isProcessed) bindAutoSave();
 }
 
 function buildAttendanceRows(savedParts) {
@@ -904,6 +1562,77 @@ function readAttendance() {
   }).flat();
 }
 
+function resolutionStatus(r) {
+  if (r.approved === true) return { label: 'Approved', cls: 'badge-green' };
+  if (r.approved === false) return { label: 'Rejected', cls: 'badge-red' };
+  return { label: 'Needs confirmation', cls: 'badge-amber' };
+}
+
+function formatResolutionAmount(amount) {
+  const n = Number(String(amount || '').replace(/,/g, ''));
+  return Number.isFinite(n) && n > 0 ? `₦${n.toLocaleString('en-NG')}` : String(amount || '').trim();
+}
+
+
+function renderReviewPanel(m) {
+  const resolutions = m.resolutions || [];
+  const actionItems = m.actionItems || [];
+  return `
+    <details class="k-review-panel">
+      <summary>✍️ Review & Correct AI Draft Before Filing</summary>
+      <p class="k-review-hint">AI output is a draft. Confirm approvals, vote wording, owners, deadlines, and the final minutes text before sharing or filing.</p>
+      <div class="k-form-group">
+        <label class="k-label">Short Summary</label>
+        <textarea class="k-input k-review-textarea" id="kr-summary-short">${esc(m.summaryShort || '')}</textarea>
+      </div>
+      <div class="k-form-group">
+        <label class="k-label">Detailed Summary</label>
+        <textarea class="k-input k-review-textarea" id="kr-summary-long">${esc(m.summaryLong || '')}</textarea>
+      </div>
+      <div class="k-form-group">
+        <label class="k-label">Minutes Markdown</label>
+        <textarea class="k-input k-review-minutes" id="kr-minutes">${esc(m.minutesMarkdown || '')}</textarea>
+      </div>
+
+      <h4 class="k-sub-title">Review Resolutions</h4>
+      <div class="k-review-list" id="kr-resolutions">
+        ${resolutions.length ? resolutions.map((r, i) => `
+          <div class="k-review-row" data-idx="${i}">
+            <label class="k-label">Resolution Text</label>
+            <textarea class="k-input" id="kr-res-text-${i}">${esc(r.text || '')}</textarea>
+            <div class="k-review-grid">
+              <input class="k-input" id="kr-res-type-${i}" value="${esc(r.resolutionType || '')}" placeholder="Type e.g. financial_approval" />
+              <input class="k-input" id="kr-res-category-${i}" value="${esc(r.category || '')}" placeholder="Category" />
+              <select class="k-input" id="kr-res-approved-${i}">
+                <option value="null" ${r.approved === null || r.approved === undefined ? 'selected' : ''}>Needs confirmation</option>
+                <option value="true" ${r.approved === true ? 'selected' : ''}>Approved</option>
+                <option value="false" ${r.approved === false ? 'selected' : ''}>Rejected</option>
+              </select>
+              <input class="k-input" id="kr-res-amount-${i}" value="${esc(r.amount || '')}" placeholder="Amount" />
+            </div>
+            <input class="k-input" id="kr-res-vote-${i}" value="${esc(r.voteSummary || '')}" placeholder="Vote summary" />
+          </div>`).join('') : '<div class="k-empty">No resolutions detected. Add them in the minutes text if needed.</div>'}
+      </div>
+
+      <h4 class="k-sub-title">Review Action Items</h4>
+      <div class="k-review-list" id="kr-actions">
+        ${actionItems.length ? actionItems.map((a, i) => `
+          <div class="k-review-row" data-idx="${i}">
+            <label class="k-label">Task</label>
+            <textarea class="k-input" id="kr-act-task-${i}">${esc(a.task || '')}</textarea>
+            <div class="k-review-grid">
+              <input class="k-input" id="kr-act-assignee-${i}" value="${esc(a.assignee || '')}" placeholder="Owner" />
+              <input class="k-input" id="kr-act-due-${i}" value="${esc(a.dueDate || '')}" placeholder="Deadline" />
+              <select class="k-input" id="kr-act-status-${i}">
+                ${['pending','in_progress','done','cancelled'].map(st => `<option value="${st}" ${(a.status || 'pending') === st ? 'selected' : ''}>${st.replace('_', ' ')}</option>`).join('')}
+              </select>
+            </div>
+          </div>`).join('') : '<div class="k-empty">No action items detected. Add them in the minutes text if needed.</div>'}
+      </div>
+      <button class="kbtn kbtn-primary" onclick="Kpsc.saveMinutesReview(this)">Save Review Corrections</button>
+    </details>`;
+}
+
 function renderMinutesPanel(m) {
   if (!m?.minutesMarkdown) return '';
   const resolutions = m.resolutions || [];
@@ -914,15 +1643,24 @@ function renderMinutesPanel(m) {
     <section class="k-section k-minutes-section">
       <h3 class="k-sec-title">Meeting Minutes</h3>
       ${m.summaryShort ? `<div class="k-summary">${esc(m.summaryShort)}</div>` : ''}
+      ${m.summaryLong ? `<details class="k-summary-detail"><summary>Detailed summary</summary><pre>${esc(m.summaryLong)}</pre></details>` : ''}
+      ${renderReviewPanel(m)}
       <div class="k-minutes-body">${minutesHtml(m.minutesMarkdown)}</div>
 
       ${resolutions.length ? `
-        <h4 class="k-sub-title">Resolutions (${resolutions.length})</h4>
-        <div class="k-res-list">${resolutions.map(r => `
+        <h4 class="k-sub-title">Decision & Resolution Register (${resolutions.length})</h4>
+        <div class="k-res-list">${resolutions.map(r => {
+          const status = resolutionStatus(r);
+          return `
           <div class="k-res-item">
-            <span class="kbadge ${r.approved ? 'badge-green' : 'badge-amber'}">${r.approved ? 'Approved' : 'Deferred'}</span>
-            ${esc(r.text)}
-          </div>`).join('')}
+            <span class="kbadge ${status.cls}">${status.label}</span>
+            ${r.resolutionType ? `<span class="kbadge badge-gray">${esc(String(r.resolutionType).replace(/_/g, ' '))}</span>` : ''}
+            ${r.category ? `<span class="kbadge badge-type">${esc(r.category)}</span>` : ''}
+            ${r.amount ? `<span class="kbadge badge-green">${esc(formatResolutionAmount(r.amount))}</span>` : ''}
+            <div>${esc(r.text)}</div>
+            ${r.voteSummary ? `<small>${esc(r.voteSummary)}</small>` : ''}
+          </div>`;
+        }).join('')}
         </div>` : ''}
 
       ${actionItems.length ? `
@@ -931,8 +1669,8 @@ function renderMinutesPanel(m) {
           <div class="k-action-item">
             <div class="k-action-task">${esc(a.task)}</div>
             <div class="k-action-meta">
-              ${a.assignee ? `<span>👤 ${esc(a.assignee)}</span>` : ''}
-              ${a.dueDate  ? `<span>📅 ${fmtDate(a.dueDate)}</span>` : ''}
+              ${a.assignee ? `<span>👤 ${esc(a.assignee)}</span>` : '<span>👤 Unassigned</span>'}
+              ${a.dueDate  ? `<span>📅 ${esc(a.dueDate)}</span>` : '<span>📅 No deadline stated</span>'}
               <span class="kbadge badge-gray">${a.status || 'pending'}</span>
             </div>
           </div>`).join('')}
@@ -948,7 +1686,181 @@ function renderMinutesPanel(m) {
     </section>`;
 }
 
+
+function readReviewResolutions() {
+  return (S.activeMeeting?.resolutions || []).map((r, i) => {
+    const approvedRaw = document.getElementById(`kr-res-approved-${i}`)?.value || 'null';
+    return {
+      ...r,
+      text: document.getElementById(`kr-res-text-${i}`)?.value.trim() || '',
+      resolutionType: document.getElementById(`kr-res-type-${i}`)?.value.trim() || 'decision',
+      category: document.getElementById(`kr-res-category-${i}`)?.value.trim() || 'other',
+      approved: approvedRaw === 'true' ? true : approvedRaw === 'false' ? false : null,
+      amount: document.getElementById(`kr-res-amount-${i}`)?.value.trim() || '',
+      voteSummary: document.getElementById(`kr-res-vote-${i}`)?.value.trim() || '',
+    };
+  }).filter(r => r.text);
+}
+
+function readReviewActions() {
+  return (S.activeMeeting?.actionItems || []).map((a, i) => ({
+    ...a,
+    task: document.getElementById(`kr-act-task-${i}`)?.value.trim() || '',
+    assignee: document.getElementById(`kr-act-assignee-${i}`)?.value.trim() || 'Unassigned',
+    dueDate: document.getElementById(`kr-act-due-${i}`)?.value.trim() || '',
+    status: document.getElementById(`kr-act-status-${i}`)?.value || 'pending',
+  })).filter(a => a.task);
+}
+
+async function saveMinutesReview(btn) {
+  if (!S.activeMeeting) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Saving review…';
+  try {
+    const res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
+      summaryShort: document.getElementById('kr-summary-short')?.value || '',
+      summaryLong: document.getElementById('kr-summary-long')?.value || '',
+      minutesMarkdown: document.getElementById('kr-minutes')?.value || '',
+      resolutions: readReviewResolutions(),
+      actionItems: readReviewActions(),
+      policyFlags: S.activeMeeting.policyFlags || [],
+    });
+    if (res.error) { showToast(res.error, 'error'); return; }
+    S.activeMeeting = res;
+    renderPage('meeting');
+    showToast('Review corrections saved', 'success');
+  } catch {
+    showToast('Review save failed. Check your connection.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+// ── DRAFT AUTO-SAVE ───────────────────────────────────────────────
+// Debounced auto-save for the Meeting Room form. The first change on a
+// brand-new draft triggers a POST (creating the row); subsequent changes
+// PUT. While a save is in flight, further edits flip a dirty flag and
+// fire one more save when the inflight one returns.
+const AUTOSAVE_DEBOUNCE_MS = 1500;
+const Draft = {
+  timer: null,
+  inflight: false,
+  dirty: false,
+  meetingId: null, // matches S.activeMeeting?.id when bound; used to detect re-bind
+};
+
+function setAutoSaveStatus(text, kind) {
+  const el = document.getElementById('km-autosave-status');
+  if (!el) return;
+  el.textContent = text;
+  el.dataset.kind = kind || '';
+}
+
+function scheduleAutoSave() {
+  // Skip auto-save for processed meetings (form is readonly anyway).
+  if (S.activeMeeting?.status === 'processed') return;
+  clearTimeout(Draft.timer);
+  setAutoSaveStatus('Unsaved changes…', 'pending');
+  Draft.timer = setTimeout(() => { autoSaveNow(); }, AUTOSAVE_DEBOUNCE_MS);
+}
+
+async function autoSaveNow() {
+  if (Draft.inflight) { Draft.dirty = true; return; }
+  Draft.inflight = true;
+  Draft.dirty = false;
+  setAutoSaveStatus('Saving…', 'pending');
+
+  const title = document.getElementById('km-title')?.value.trim() || 'KPSC Meeting';
+  const date  = document.getElementById('km-date')?.value  || today();
+  const type  = document.getElementById('km-type')?.value  || 'routine';
+  const trans = document.getElementById('km-transcript')?.value || '';
+  const status = document.getElementById('km-status')?.value || 'draft';
+  const participants = readAttendance();
+
+  try {
+    let res;
+    if (S.activeMeeting) {
+      res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
+        title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
+      });
+    } else {
+      res = await apiPost('ai-secretary-meetings', {
+        title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
+        createdBy: S.user?.name || '',
+      });
+    }
+    if (res?.error) {
+      setAutoSaveStatus(`Save failed: ${res.error}`, 'error');
+    } else {
+      S.activeMeeting = res;
+      Draft.meetingId = res.id;
+      setAutoSaveStatus(`Saved · ${fmtClock(new Date())}`, 'ok');
+    }
+  } catch {
+    setAutoSaveStatus('Offline — will retry on next change', 'error');
+  } finally {
+    Draft.inflight = false;
+    if (Draft.dirty) autoSaveNow();
+  }
+}
+
+function fmtClock(d) {
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+function bindAutoSave() {
+  clearTimeout(Draft.timer);
+  Draft.timer = null;
+  Draft.inflight = false;
+  Draft.dirty = false;
+  Draft.meetingId = S.activeMeeting?.id || null;
+
+  const fire = () => scheduleAutoSave();
+  const form = document.getElementById('km-title')?.closest('.k-page');
+  if (!form) return;
+  for (const sel of ['#km-title', '#km-transcript']) {
+    const el = form.querySelector(sel);
+    if (el) el.addEventListener('input', fire);
+  }
+  for (const sel of ['#km-date', '#km-type']) {
+    const el = form.querySelector(sel);
+    if (el) el.addEventListener('change', fire);
+  }
+  const att = form.querySelector('#km-attendance');
+  if (att) {
+    att.addEventListener('change', fire);
+    att.addEventListener('input', fire);
+  }
+}
+
 // ── MEETING ACTIONS ───────────────────────────────────────────────
+async function deleteMeetingDraft(id, event) {
+  if (event) { event.stopPropagation(); event.preventDefault(); }
+  const m = S.meetings.find(x => x.id === id);
+  if (!m) return;
+  const role = String(S.user?.role || '').toLowerCase();
+  const isAdmin = role === 'admin' || role === 'it_administrator';
+  const isAuthor = !!S.user?.name && S.user.name === (m.createdBy || '');
+  if (!isAdmin && !isAuthor) {
+    showToast('Only the meeting author or an administrator can delete this draft.', 'error');
+    return;
+  }
+  if (!confirm(`Delete "${m.title || 'this meeting'}"? It will be hidden from the list.`)) return;
+  const res = await apiDelete(`ai-secretary-meetings/${id}`, {
+    userName: S.user?.name || '',
+    userRole: S.user?.role || '',
+  });
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  S.meetings = S.meetings.filter(x => x.id !== id);
+  const main = document.getElementById('kpsc-main');
+  if (main) await renderDashboard(main);
+  showToast('Draft deleted', 'success');
+}
+
 async function saveMeeting(btn) {
   const title = document.getElementById('km-title')?.value.trim() || 'KPSC Meeting';
   const date  = document.getElementById('km-date')?.value  || today();
@@ -1078,6 +1990,10 @@ function renderMembersList() {
 }
 
 function memberRow(idx, mem) {
+  const enrolled    = !!mem.azureSpeakerProfileId;
+  const enrollClass = enrolled ? 'kbtn kbtn-sm k-enroll-btn k-enrolled' : 'kbtn kbtn-sm kbtn-ghost k-enroll-btn';
+  const enrollTitle = enrolled ? 'Voice enrolled — click to re-enrol' : 'Enrol voice fingerprint for auto-identification';
+  const enrollIcon  = enrolled ? '🎙✓' : '🎙';
   return `
     <div class="k-mem-row" id="kmem-row-${idx}">
       <select class="k-input k-input-sm k-mem-group" data-idx="${idx}" onchange="Kpsc.memberFieldChange(${idx},'group',this.value)">
@@ -1087,6 +2003,7 @@ function memberRow(idx, mem) {
         value="${esc(mem.name || '')}" onchange="Kpsc.memberFieldChange(${idx},'name',this.value)" />
       <input class="k-input k-input-sm k-mem-pos" type="text" placeholder="Position (optional)"
         value="${esc(mem.position || '')}" onchange="Kpsc.memberFieldChange(${idx},'position',this.value)" />
+      <button class="${enrollClass}" onclick="Kpsc.enrollMemberVoice(${idx})" title="${enrollTitle}">${enrollIcon}</button>
       <button class="kbtn kbtn-sm kbtn-ghost kbtn-remove" onclick="Kpsc.removeMember(${idx})">✕</button>
     </div>`;
 }
@@ -1139,15 +2056,259 @@ async function saveMembers(btn) {
   }
 }
 
-// ── ARCHIVE ───────────────────────────────────────────────────────
+// ── VOICE ENROLLMENT UI ───────────────────────────────────────────
+
+function enrollMemberVoice(idx) {
+  const member = S.members[idx];
+  if (!member || !member.name.trim()) {
+    showToast('Please save the member name first.', 'warn');
+    return;
+  }
+  showEnrollModal(idx);
+}
+
+function showEnrollModal(idx) {
+  const member  = S.members[idx];
+  if (!member) return;
+  const alreadyEnrolled = !!member.azureSpeakerProfileId;
+
+  document.getElementById('k-enroll-modal')?.remove();
+
+  const modal = document.createElement('div');
+  modal.id        = 'k-enroll-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">🎙 Enrol Voice — ${esc(member.name)}</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeEnrollModal()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        ${alreadyEnrolled ? '<p class="k-enroll-warn">⚠ This member already has a voice enrolled. Recording again will replace it.</p>' : ''}
+        <p class="k-enroll-instruction">Ask <strong>${esc(member.name)}</strong> to speak naturally for <strong>30 seconds</strong>.</p>
+        <p class="k-hint">They can read aloud, count numbers, or talk about anything. At least 20 seconds of clear speech is needed.</p>
+        <div id="k-enroll-status"></div>
+        <div id="k-enroll-progress" style="display:none">
+          <div class="k-enroll-timer" id="k-enroll-timer">0:00 / 0:30</div>
+          <div class="k-enroll-bar-bg"><div class="k-enroll-bar" id="k-enroll-bar"></div></div>
+        </div>
+      </div>
+      <div class="k-modal-footer" id="k-enroll-footer">
+        <button class="kbtn kbtn-record" id="k-enroll-start-btn" onclick="Kpsc.startEnrollRecording(${idx})">🔴 Start Recording</button>
+        <button class="kbtn kbtn-ghost" onclick="Kpsc.closeEnrollModal()">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function closeEnrollModal() {
+  enrollCleanupAudio();
+  Enrolling.active  = false;
+  Enrolling.samples = [];
+  document.getElementById('k-enroll-modal')?.remove();
+}
+
+function enrollCleanupAudio() {
+  clearInterval(Enrolling.timer);
+  Enrolling.timer = null;
+  if (Enrolling.workletNode) {
+    try { Enrolling.workletNode.disconnect(); } catch (_) {}
+    Enrolling.workletNode = null;
+  }
+  if (Enrolling.audioCtx && Enrolling.audioCtx.state !== 'closed') {
+    Enrolling.audioCtx.close().catch(() => {});
+    Enrolling.audioCtx = null;
+  } else {
+    Enrolling.audioCtx = null;
+  }
+  if (Enrolling.workletUrl) {
+    URL.revokeObjectURL(Enrolling.workletUrl);
+    Enrolling.workletUrl = null;
+  }
+  if (Enrolling.stream) {
+    Enrolling.stream.getTracks().forEach(t => t.stop());
+    Enrolling.stream = null;
+  }
+}
+
+async function startEnrollRecording(idx) {
+  const startBtn   = document.getElementById('k-enroll-start-btn');
+  const statusEl   = document.getElementById('k-enroll-status');
+  const progressEl = document.getElementById('k-enroll-progress');
+  const footerEl   = document.getElementById('k-enroll-footer');
+
+  if (startBtn) { startBtn.disabled = true; startBtn.textContent = '🎙 Recording…'; }
+  if (footerEl) {
+    // Replace Cancel button to abort the recording and clean up resources.
+    const cancelBtn = footerEl.querySelector('.kbtn-ghost');
+    if (cancelBtn) {
+      cancelBtn.textContent = '✕ Abort';
+      cancelBtn.onclick = () => { closeEnrollModal(); };
+    }
+  }
+
+  try {
+    Enrolling.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    Enrolling.memberIdx  = idx;
+    Enrolling.samples    = [];
+    Enrolling.elapsed    = 0;
+    Enrolling.active     = true;
+
+    Enrolling.audioCtx   = new AudioContext();
+    Enrolling.sampleRate = Enrolling.audioCtx.sampleRate;
+
+    const blob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
+    Enrolling.workletUrl = URL.createObjectURL(blob);
+    await Enrolling.audioCtx.audioWorklet.addModule(Enrolling.workletUrl);
+
+    const source = Enrolling.audioCtx.createMediaStreamSource(Enrolling.stream);
+    Enrolling.workletNode = new AudioWorkletNode(Enrolling.audioCtx, 'pcm-capture-processor');
+    Enrolling.workletNode.port.onmessage = (e) => {
+      if (Enrolling.active) Enrolling.samples.push(e.data.slice());
+    };
+    source.connect(Enrolling.workletNode);
+    Enrolling.workletNode.connect(Enrolling.audioCtx.createMediaStreamDestination());
+
+    if (progressEl) progressEl.style.display = '';
+
+    Enrolling.timer = setInterval(() => {
+      Enrolling.elapsed++;
+      const m      = Math.floor(Enrolling.elapsed / 60);
+      const s      = Enrolling.elapsed % 60;
+      const timerEl = document.getElementById('k-enroll-timer');
+      const barEl   = document.getElementById('k-enroll-bar');
+      if (timerEl) timerEl.textContent = `${m}:${String(s).padStart(2, '0')} / 0:30`;
+      if (barEl)   barEl.style.width   = `${Math.min(100, (Enrolling.elapsed / AZURE_ENROLL_DURATION_SEC) * 100)}%`;
+      if (Enrolling.elapsed >= AZURE_ENROLL_DURATION_SEC) {
+        clearInterval(Enrolling.timer);
+        Enrolling.timer = null;
+        finishEnrollRecording();
+      }
+    }, 1000);
+
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = `<div class="k-enroll-error">❌ Microphone access error: ${esc(e.message)}</div>`;
+    if (startBtn) { startBtn.disabled = false; startBtn.textContent = '🔴 Start Recording'; }
+    enrollCleanupAudio();
+  }
+}
+
+async function finishEnrollRecording() {
+  const statusEl = document.getElementById('k-enroll-status');
+  const footerEl = document.getElementById('k-enroll-footer');
+
+  Enrolling.active = false;
+  enrollCleanupAudio();
+
+  if (statusEl) statusEl.innerHTML = '<div class="k-enroll-info">⏳ Processing voice data — please wait…</div>';
+  if (footerEl) footerEl.innerHTML = '';
+
+  try {
+    const idx    = Enrolling.memberIdx;
+    const member = S.members[idx];
+    if (!member) throw new Error('Member not found.');
+
+    if (!Enrolling.samples.length) throw new Error('No audio was captured.');
+
+    // Merge all captured PCM chunks into one Float32Array.
+    const totalLen = Enrolling.samples.reduce((a, c) => a + c.length, 0);
+    const merged   = new Float32Array(totalLen);
+    let pos = 0;
+    for (const chunk of Enrolling.samples) { merged.set(chunk, pos); pos += chunk.length; }
+    Enrolling.samples = []; // free memory
+
+    // Resample to 16 kHz and encode as WAV.
+    const resampled   = resampleTo16k(merged, Enrolling.sampleRate);
+    const wavBuffer   = pcmToWav(resampled, 16000);
+    const audioBase64 = arrayBufferToBase64(wavBuffer);
+
+    // Delete the old Azure profile if one exists (best-effort; a failure won't block re-enrolment).
+    if (member.azureSpeakerProfileId) {
+      await fetch(`${API}/azure-speaker-profiles/${encodeURIComponent(member.azureSpeakerProfileId)}`,
+        { method: 'DELETE' }).catch(e => console.warn('Could not delete old Azure profile:', e));
+    }
+
+    // Create a new Azure speaker profile.
+    const createRes = await apiPost('azure-speaker-profiles', {});
+    if (createRes.error) throw new Error(createRes.error);
+    const profileId = createRes.profileId;
+    if (!profileId) throw new Error('Azure did not return a profile ID.');
+
+    // Enroll the recorded audio.
+    const enrollRes = await apiPost(`azure-speaker-profiles/${profileId}/enroll`, { audioBase64 });
+    if (enrollRes.error) throw new Error(enrollRes.error);
+
+    // Persist the profile ID on the member (azureSpeakerProfileId survives saveMembers).
+    S.members[idx].azureSpeakerProfileId = profileId;
+    await apiPost('settings', { kpsc_members: S.members });
+
+    if (statusEl) statusEl.innerHTML =
+      `<div class="k-enroll-ok">✅ Voice enrolled for <strong>${esc(member.name)}</strong>! Future meetings will auto-identify this speaker.</div>`;
+    if (footerEl) footerEl.innerHTML =
+      `<button class="kbtn kbtn-primary" onclick="Kpsc.closeEnrollModal()">Done</button>`;
+
+    // Refresh the member list so the ✓ badge appears.
+    const list = document.getElementById('km-members-list');
+    if (list) list.innerHTML = renderMembersList();
+
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = `<div class="k-enroll-error">❌ Enrollment failed: ${esc(e.message)}</div>`;
+    if (footerEl) footerEl.innerHTML = `<button class="kbtn kbtn-ghost" onclick="Kpsc.closeEnrollModal()">Close</button>`;
+  }
+}
+
+
+
+function archiveQuickFilters() {
+  return [
+    { key: 'all', label: 'All' },
+    { key: 'welfare', label: 'Welfare' },
+    { key: 'financial', label: 'Financial approvals' },
+    { key: 'rejected', label: 'Rejected' },
+    { key: 'deferred', label: 'Needs confirmation' },
+    { key: 'unassigned', label: 'Unassigned actions' },
+    { key: 'missing_deadline', label: 'Missing deadlines' },
+    { key: 'policy_flags', label: 'Policy flags' },
+  ];
+}
+
+function meetingMatchesQuickFilter(m, filter) {
+  if (!filter || filter === 'all') return true;
+  const resolutions = m.resolutions || [];
+  const actions = m.actionItems || [];
+  const flags = m.policyFlags || [];
+  if (filter === 'welfare') return resolutions.some(r => r.category === 'welfare') || /welfare|benevolence|assistance/i.test(`${m.transcriptText || ''} ${m.minutesMarkdown || ''}`);
+  if (filter === 'financial') return resolutions.some(r => r.resolutionType === 'financial_approval' || r.category === 'financial' || r.amount);
+  if (filter === 'rejected') return resolutions.some(r => r.approved === false || r.resolutionType === 'rejection');
+  if (filter === 'deferred') return resolutions.some(r => r.approved === null || r.approved === undefined);
+  if (filter === 'unassigned') return actions.some(a => !a.assignee || /^unassigned$/i.test(a.assignee));
+  if (filter === 'missing_deadline') return actions.some(a => !a.dueDate);
+  if (filter === 'policy_flags') return flags.length > 0;
+  return true;
+}
+
+function setArchiveQuickFilter(filter) {
+  S.archiveQuickFilter = filter || 'all';
+  const el = document.getElementById('k-archive-list');
+  if (el) el.innerHTML = archiveList(S.meetings, S.archiveSearch);
+  document.querySelectorAll('.k-filter').forEach(btn => btn.classList.remove('active'));
+  const active = [...document.querySelectorAll('.k-filter')].find(btn => btn.getAttribute('onclick')?.includes(`'${S.archiveQuickFilter}'`));
+  active?.classList.add('active');
+}
+
 async function renderArchive(main) {
   const res = await apiGet('ai-secretary-meetings');
   S.meetings = res.meetings || res || [];
   main.innerHTML = `
     <div class="k-page">
       <div class="k-search-bar">
-        <input class="k-input" type="search" id="k-archive-search" placeholder="Search by title or date…"
+        <input class="k-input" type="search" id="k-archive-search" placeholder="Search title, date, transcript, resolutions, actions…"
           value="${esc(S.archiveSearch)}" oninput="Kpsc.filterArchive(this.value)" />
+      </div>
+      <div class="k-quick-filters">
+        ${archiveQuickFilters().map(f => `<button class="k-filter ${S.archiveQuickFilter === f.key ? 'active' : ''}" onclick="Kpsc.setArchiveQuickFilter('${f.key}')">${f.label}</button>`).join('')}
       </div>
       <div id="k-archive-list">${archiveList(S.meetings, S.archiveSearch)}</div>
     </div>`;
@@ -1161,21 +2322,100 @@ function filterArchive(q) {
 
 function archiveList(meetings, q) {
   const lq = (q || '').toLowerCase();
+  const quickFiltered = meetings.filter(m => meetingMatchesQuickFilter(m, S.archiveQuickFilter));
   const filtered = lq
-    ? meetings.filter(m =>
-        (m.title || '').toLowerCase().includes(lq) ||
-        (m.meetingDate || '').includes(lq))
-    : meetings;
+    ? quickFiltered.filter(m => {
+        const searchable = [
+          m.title,
+          m.meetingDate,
+          m.meetingType,
+          m.status,
+          m.transcriptText,
+          m.summaryShort,
+          m.summaryLong,
+          m.minutesMarkdown,
+          ...(m.resolutions || []).flatMap(r => [r.text, r.category, r.resolutionType, r.voteSummary, r.amount]),
+          ...(m.actionItems || []).flatMap(a => [a.task, a.assignee, a.dueDate, a.status]),
+          ...(m.policyFlags || []).flatMap(f => [f.type, f.severity, f.message]),
+        ].filter(Boolean).join(' ').toLowerCase();
+        return searchable.includes(lq);
+      })
+    : quickFiltered;
   const sorted = [...filtered].sort((a, b) => (b.meetingDate || '').localeCompare(a.meetingDate || ''));
   if (sorted.length === 0) return `<div class="k-empty">No meetings found.</div>`;
   return `<div class="k-meeting-list">${sorted.map(m => meetingCard(m)).join('')}</div>`;
 }
 
 // ── SETTINGS ──────────────────────────────────────────────────────
+
+function apiStatusPill(status) {
+  if (!status || status.error) return '<span class="k-api-pill k-api-unknown">Check failed</span>';
+  if (status.active || status.configured) return '<span class="k-api-pill k-api-active">Active</span>';
+  return '<span class="k-api-pill k-api-missing">Not set</span>';
+}
+
+function renderApiStatusCard(apiStatus) {
+  const live = apiStatus?.liveTranscription || {};
+  const dg = apiStatus?.diarization || {};
+  const azure = apiStatus?.speakerRecognition || {};
+  return `
+    <div class="k-api-status-card ${live.active ? 'k-api-card-active' : 'k-api-card-missing'}">
+      <div class="k-api-status-head">
+        <div>
+          <div class="k-api-title">Live Transcription API Status</div>
+          <div class="k-api-sub">Server-side check from Cloudflare environment variables.</div>
+        </div>
+        ${apiStatusPill(live)}
+      </div>
+      <div class="k-api-status-grid">
+        <div class="k-api-status-row">
+          <span class="k-api-label">OpenAI transcription</span>
+          <span>${apiStatusPill(live)} <code>${esc(live.keyName || 'OPENAI_API_KEY')}</code> ${live.masked ? `<small>${esc(live.masked)}</small>` : ''}</span>
+        </div>
+        <div class="k-api-status-row">
+          <span class="k-api-label">Model</span>
+          <span><code>${esc(live.model || 'gpt-4o-transcribe')}</code></span>
+        </div>
+        <div class="k-api-status-row">
+          <span class="k-api-label">Speaker diarization</span>
+          <span>${apiStatusPill(dg)} <code>${esc(dg.keyName || 'DEEPGRAM_API_KEY')}</code></span>
+        </div>
+        <div class="k-api-status-row">
+          <span class="k-api-label">Voice recognition</span>
+          <span>${apiStatusPill(azure)} <code>${esc(azure.keyName || 'AZURE_SPEAKER_KEY')}</code> <small>Region: ${esc(azure.region || 'eastus')}</small></span>
+        </div>
+      </div>
+      <p class="k-api-message">${esc(live.message || apiStatus?.error || 'Status unavailable.')}</p>
+      <button class="kbtn kbtn-sm" onclick="Kpsc.refreshApiStatus(this)">Refresh API Status</button>
+    </div>`;
+}
+
+async function refreshApiStatus(btn) {
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  const panel = document.getElementById('k-api-status-panel');
+  try {
+    const status = await apiGet('settings/api-status');
+    if (panel) panel.innerHTML = renderApiStatusCard(status);
+    showToast(status?.liveTranscription?.active ? 'OpenAI transcription key is active.' : 'OpenAI transcription key is missing.', status?.liveTranscription?.active ? 'success' : 'warn');
+  } catch {
+    showToast('Could not check API status.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
 async function renderSettings(main) {
-  const res = await apiGet('settings');
+  const [res, apiStatus] = await Promise.all([
+    apiGet('settings'),
+    apiGet('settings/api-status').catch(() => ({ error: 'Could not check API status.' })),
+  ]);
   const deepseekKey = res?.ai_deepseek_key || '';
   const openaiKey   = res?.ai_openai_key   || '';
+  const policyUrl   = res?.kpsc_policy_url  || '';
+  const policyNotes = res?.kpsc_policy_notes || '';
   const hasDeepseek = !!deepseekKey;
   const hasOpenai   = !!openaiKey;
 
@@ -1196,7 +2436,7 @@ async function renderSettings(main) {
           <input type="password" id="ks-deepseek-key" class="k-input"
             placeholder="${hasDeepseek ? '••••••••••••••••' : 'sk-...'}"
             autocomplete="off" value="${esc(deepseekKey)}" />
-          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at platform.deepseek.com</p>
+          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at <a href="https://platform.deepseek.com" target="_blank" rel="noopener">platform.deepseek.com</a></p>
         </div>
 
         <div class="k-form-group">
@@ -1204,12 +2444,58 @@ async function renderSettings(main) {
           <input type="password" id="ks-openai-key" class="k-input"
             placeholder="${hasOpenai ? '••••••••••••••••' : 'sk-...'}"
             autocomplete="off" value="${esc(openaiKey)}" />
-          <p class="k-hint">Optional alternative AI provider. Get a key at platform.openai.com</p>
+          <p class="k-hint">Optional alternative AI provider for meeting minutes. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a></p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">KPSC Bylaw / Policy URL</label>
+          <input type="url" id="ks-policy-url" class="k-input"
+            placeholder="https://..." value="${esc(policyUrl)}" />
+          <p class="k-hint">Optional link to the current KPSC bylaws or governance document for secretary review.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Policy Notes for AI Secretary</label>
+          <textarea id="ks-policy-notes" class="k-input k-textarea" placeholder="Paste key KPSC rules here, e.g. quorum, approval thresholds, welfare privacy rules...">${esc(policyNotes)}</textarea>
+          <p class="k-hint">Optional. These notes are included in provider-backed minutes processing and kept available for human review.</p>
         </div>
 
         <div id="ks-save-msg" class="k-settings-msg" style="display:none"></div>
-        <button class="kbtn kbtn-primary" id="ks-save-btn" onclick="Kpsc.saveSettings()">Save Keys</button>
+        <button class="kbtn kbtn-primary" id="ks-save-btn" onclick="Kpsc.saveSettings()">Save Settings</button>
         ${hasDeepseek || hasOpenai ? `<button class="kbtn kbtn-danger-outline" style="margin-left:8px" onclick="Kpsc.clearAiKeys()">Clear Keys</button>` : ''}
+      </div>
+
+      <div class="k-card" style="margin-top:16px">
+        <h2 class="k-card-title">Live Transcription &amp; Diarization</h2>
+        <p class="k-card-sub">
+          Real-time transcription and speaker diarization require API keys configured as
+          <strong>Cloudflare Pages environment variables</strong> by the IT Administrator —
+          they are not stored in this settings page.
+        </p>
+        <div id="k-api-status-panel">${renderApiStatusCard(apiStatus)}</div>
+        <div class="k-env-row">
+          <code class="k-env-key">OPENAI_API_KEY</code>
+          <span class="k-env-desc">Powers live interim transcription (OpenAI gpt-4o-transcribe via WebRTC). Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a>.</span>
+        </div>
+        <div class="k-env-row">
+          <code class="k-env-key">DEEPGRAM_API_KEY</code>
+          <span class="k-env-desc">Powers speaker diarization — identifies who is speaking and labels each transcript turn. Get a key at <a href="https://console.deepgram.com" target="_blank" rel="noopener">console.deepgram.com</a>.</span>
+        </div>
+        <div class="k-env-row">
+          <code class="k-env-key">AZURE_SPEAKER_KEY</code>
+          <span class="k-env-desc">Azure Cognitive Services key for persistent voice fingerprinting. Enables one-time voice enrolment per member and automatic speaker identification across meetings. Get a key at <a href="https://portal.azure.com" target="_blank" rel="noopener">portal.azure.com</a> (Speech service → Keys and Endpoint).</span>
+        </div>
+        <div class="k-env-row">
+          <code class="k-env-key">AZURE_SPEAKER_REGION</code>
+          <span class="k-env-desc">Azure region for the Speech service (e.g. <code>eastus</code>, <code>westeurope</code>). Defaults to <code>eastus</code> if not set.</span>
+        </div>
+        <p class="k-hint" style="margin-top:12px">
+          Set these in the Cloudflare Pages dashboard → Settings → Environment Variables.
+          If either key is absent, that feature degrades gracefully: transcription falls back to
+          OpenAI-only (without speaker labels) when Deepgram is absent, and to chunk-based
+          upload only when both are absent. Voice fingerprinting is silently skipped when
+          AZURE_SPEAKER_KEY is absent.
+        </p>
       </div>
 
       <div class="k-card" style="margin-top:16px">
@@ -1227,12 +2513,19 @@ async function saveSettings() {
   const msg = document.getElementById('ks-save-msg');
   const deepseekKey = document.getElementById('ks-deepseek-key')?.value.trim() || '';
   const openaiKey   = document.getElementById('ks-openai-key')?.value.trim()   || '';
+  const policyUrl   = document.getElementById('ks-policy-url')?.value.trim()   || '';
+  const policyNotes = document.getElementById('ks-policy-notes')?.value.trim() || '';
 
   btn.disabled = true;
   btn.textContent = 'Saving…';
   msg.style.display = 'none';
 
-  const res = await apiPost('settings', { ai_deepseek_key: deepseekKey, ai_openai_key: openaiKey });
+  const res = await apiPost('settings', {
+    ai_deepseek_key: deepseekKey,
+    ai_openai_key: openaiKey,
+    kpsc_policy_url: policyUrl,
+    kpsc_policy_notes: policyNotes,
+  });
 
   if (res?.error) {
     msg.className = 'k-settings-msg k-msg-error';
@@ -1273,21 +2566,30 @@ window.Kpsc = {
   startNewMeeting,
   openMeeting,
   saveMeeting,
+  deleteMeetingDraft,
   endMeeting,
   processMeeting,
+  saveMinutesReview,
   addMember,
   removeMember,
   memberFieldChange,
   saveMembers,
   filterArchive,
+  setArchiveQuickFilter,
   saveSettings,
   clearAiKeys,
+  refreshApiStatus,
   updateAttGroup,
   recStart,
   recPause,
   recResume,
   recStop,
   recReset,
+  assignSpeaker,
+  enrollMemberVoice,
+  showEnrollModal,
+  closeEnrollModal,
+  startEnrollRecording,
 };
 
 document.addEventListener('DOMContentLoaded', init);
