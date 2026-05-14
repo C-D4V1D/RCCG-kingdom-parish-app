@@ -1916,7 +1916,7 @@ async function runKpscReconciliation(DB, data) {
       .filter(entry =>
         !usedFinanceIds.has(entry.id)
         && entry.type === item.type
-        && Math.abs(entry.amount - item.amount) < RECONCILIATION_AMOUNT_TOLERANCE_ABSOLUTE
+        && Math.abs(entry.amount - item.amount) <= RECONCILIATION_AMOUNT_TOLERANCE_ABSOLUTE
       )
       .sort((a, b) => dateDistanceInDays(item.date, a.date) - dateDistanceInDays(item.date, b.date))[0];
     if (candidate) {
