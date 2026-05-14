@@ -222,11 +222,14 @@ function recRenderUI() {
     : `${Rec.uploadedChunks} chunk${Rec.uploadedChunks === 1 ? '' : 's'} uploaded${Rec.failedChunks ? ` • ${Rec.failedChunks} pending retry` : ''}`;
 
   if (Rec.status === 'idle') {
+    // If the meeting was already started in a prior browser session, the in-memory MediaRecorder is gone.
+    // Offer "Continue Recording" so the secretary can start a fresh mic segment that appends to the same meeting.
+    const resuming = S.activeMeeting?.status === 'recording';
     el.innerHTML = `
       <div class="rec-card">
         <div class="rec-main">
-          <button class="kbtn kbtn-record" onclick="Kpsc.recStart(this)">🎙 Start Meeting</button>
-          <span class="rec-hint">${uploadMeta}</span>
+          <button class="kbtn kbtn-record" onclick="Kpsc.recStart(this)">${resuming ? '▶ Continue Recording' : '🎙 Start Meeting'}</button>
+          <span class="rec-hint">${resuming ? 'Previous mic session ended when you navigated away. A new segment will be appended to this meeting.' : uploadMeta}</span>
         </div>
       </div>`;
   } else if (Rec.status === 'recording') {
@@ -323,6 +326,8 @@ function recAppendTranscript(text, itemId = '', speaker = null) {
     const line = `[${entry.timestamp}]${speakerTag} ${entry.text}`;
     textarea.value = textarea.value ? `${textarea.value}\n${line}` : line;
     textarea.scrollTop = textarea.scrollHeight;
+    // Programmatic value writes don't fire 'input', so autosave never sees live transcript additions.
+    scheduleAutoSave();
   }
   recRenderTranscript();
 }
@@ -338,6 +343,7 @@ function rebuildTranscriptTextarea() {
   });
   textarea.value = lines.join('\n');
   textarea.scrollTop = textarea.scrollHeight;
+  scheduleAutoSave();
 }
 
 // Build a sorted list of member names for the speaker-identity dropdowns.
@@ -727,6 +733,7 @@ async function recUploadChunk(chunk, useKeepalive) {
   form.append('createdAt', chunk.createdAt);
   const response = await fetch(`${API}/ai-secretary-meetings/audio-chunk`, {
     method: 'POST',
+    headers: { ...kpscSessionHeader() },
     body: form,
     keepalive: !!useKeepalive && chunk.blob.size < 60000,
   });
