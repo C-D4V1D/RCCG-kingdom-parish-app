@@ -1688,7 +1688,7 @@ async function renderDashboard(main) {
 
 function canDeleteMeeting(m) {
   const role = String(S.user?.role || '').toLowerCase();
-  if (role === 'admin' || role === 'it_administrator') return true;
+  if (role === 'acting_chairman' || role === 'general_secretary') return true;
   return !!S.user?.name && S.user.name === (m.createdBy || '');
 }
 
@@ -2180,10 +2180,10 @@ async function deleteMeetingDraft(id, event) {
   const m = S.meetings.find(x => x.id === id);
   if (!m) return;
   const role = String(S.user?.role || '').toLowerCase();
-  const isAdmin = role === 'admin' || role === 'it_administrator';
+  const isChair = role === 'acting_chairman' || role === 'general_secretary';
   const isAuthor = !!S.user?.name && S.user.name === (m.createdBy || '');
-  if (!isAdmin && !isAuthor) {
-    showToast('Only the meeting author or an administrator can delete this draft.', 'error');
+  if (!isChair && !isAuthor) {
+    showToast('Only the meeting author, Acting Chairman, or General Secretary can delete this draft.', 'error');
     return;
   }
   if (!confirm(`Delete "${m.title || 'this meeting'}"? It will be hidden from the list.`)) return;
