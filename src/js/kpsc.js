@@ -1475,16 +1475,29 @@ function enterApp() {
   document.getElementById('kpsc-app').style.display = '';
   document.getElementById('kpsc-user-name').textContent = `${S.user.name} (${roleLabel(S.user.role)})`;
   applyNavPermissions();
+  S._navStack = [];
   const hashPage = window.location.hash.replace('#', '');
   const startPage = hashPage && canAccess(hashPage) ? hashPage : defaultPageForRole();
-  navigate(startPage);
+  navigate(startPage, { replace: true });
 }
 
 // ── NAVIGATION ────────────────────────────────────────────────────
-function navigate(page) {
+const NAV_STACK_MAX = 10;
+
+function navigate(page, opts) {
+  const replace = !!(opts && opts.replace);
   if (!canAccess(page)) {
     showToast('You do not have access to that section.', 'warn');
     page = defaultPageForRole();
+  }
+  // Maintain a navigation stack for goBack()
+  if (!S._navStack) S._navStack = [];
+  if (!replace) {
+    const top = S._navStack[S._navStack.length - 1];
+    if (top !== page) {
+      S._navStack.push(page);
+      if (S._navStack.length > NAV_STACK_MAX) S._navStack.shift();
+    }
   }
   S._partnerDetailId = null;
   S._partnerDetailYear = null;
@@ -1536,7 +1549,11 @@ async function renderPage(page) {
 }
 
 function goBack() {
-  navigate(S.page === 'meeting' ? 'dashboard' : 'dashboard');
+  if (!S._navStack) S._navStack = [];
+  // Pop the current page off the stack before navigating back
+  if (S._navStack[S._navStack.length - 1] === S.page) S._navStack.pop();
+  const prev = S._navStack.pop() || 'dashboard';
+  navigate(prev, { replace: true });
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────────────
