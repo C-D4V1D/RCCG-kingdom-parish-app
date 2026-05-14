@@ -1064,15 +1064,21 @@ async function diarizerTriggerIdentify(speakerIdx) {
 }
 
 
+function kpscSessionHeader() {
+  const user = S.user;
+  if (!user?.sessionToken) return {};
+  return { 'X-KPSC-Session': JSON.stringify({ accountId: user.id, token: user.sessionToken }) };
+}
+
 async function apiGet(path) {
-  const r = await fetch(`${API}/${path}`);
+  const r = await fetch(`${API}/${path}`, { headers: { ...kpscSessionHeader() } });
   return r.json();
 }
 
 async function apiPost(path, body) {
   const r = await fetch(`${API}/${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
     body: JSON.stringify(body),
   });
   return r.json();
@@ -1081,7 +1087,7 @@ async function apiPost(path, body) {
 async function apiPut(path, body) {
   const r = await fetch(`${API}/${path}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
     body: JSON.stringify(body),
   });
   return r.json();
@@ -1090,7 +1096,7 @@ async function apiPut(path, body) {
 async function apiDelete(path, body) {
   const r = await fetch(`${API}/${path}`, {
     method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
     body: JSON.stringify(body || {}),
   });
   return r.json();
@@ -1427,6 +1433,7 @@ async function login(btn) {
         : res.error;
       errEl.style.display = 'block';
     } else {
+      // res includes sessionToken from the server; persist it in the session
       S.user = res;
       saveSession(res);
       if (S.user.mustChangePin) {
@@ -1446,6 +1453,11 @@ async function login(btn) {
 
 function logout() {
   recStop();
+  // Fire-and-forget server-side session deletion; don't await so UI is instant
+  const sessionToken = S.user?.sessionToken;
+  if (sessionToken) {
+    apiPost('kpsc-logout', { sessionToken }).catch(() => {});
+  }
   clearSession();
   S.user = null;
   S.page = 'dashboard';

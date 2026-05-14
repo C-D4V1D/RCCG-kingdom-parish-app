@@ -15,6 +15,43 @@ function createRequest(url, method = 'GET', body) {
   return new Request(url, init);
 }
 
+// Create a request with a pre-authorised KPSC session header for tests that
+// hit mutating endpoints now protected by requireKpscRole.
+const TEST_KPSC_SESSION_HEADER = JSON.stringify({ accountId: 'ka-test', token: 'ks-test-token' });
+function createKpscRequest(url, method = 'POST', body) {
+  const init = {
+    method,
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': TEST_KPSC_SESSION_HEADER },
+  };
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+  }
+  return new Request(url, init);
+}
+
+// Wrap a DB mock factory so that session-checking queries are answered first.
+// The caller provides a function that handles their own SQL; this wrapper adds
+// session and account lookups so requireKpscRole passes.
+function withKpscSessionMock(innerOnPrepare, { role = 'general_secretary' } = {}) {
+  return function onPrepare(sql) {
+    if (/SELECT account_id, expires_at FROM kpsc_sessions/.test(sql)) {
+      const st = {
+        _bound: [], bind(...a) { st._bound = a; return st; },
+        async first() { return { account_id: 'ka-test', expires_at: Date.now() + 3600_000 }; }
+      };
+      return st;
+    }
+    if (/SELECT id, name, role, status FROM kpsc_accounts/.test(sql)) {
+      const st = {
+        _bound: [], bind(...a) { st._bound = a; return st; },
+        async first() { return { id: 'ka-test', name: 'Test User', role, status: 'active' }; }
+      };
+      return st;
+    }
+    return innerOnPrepare(sql);
+  };
+}
+
 function createDBMock({ onPrepare }) {
   return {
     prepare(sql) {
@@ -289,8 +326,11 @@ test('kpsc login authenticates against dedicated kpsc_accounts table', async () 
   assert.equal(body.id, 'ka1');
   assert.equal(body.role, 'general_secretary');
   assert.equal(body.sessionType, 'kpsc');
-  assert.equal(runs.length, 1);
+  assert.ok(body.sessionToken, 'should return a sessionToken');
+  // runs: UPDATE last_login_at + INSERT INTO kpsc_sessions
+  assert.equal(runs.length, 2);
   assert.match(runs[0].sql, /UPDATE kpsc_accounts SET last_login_at=\?, updated_at=\? WHERE id=\?/);
+  assert.match(runs[1].sql, /INSERT INTO kpsc_sessions/);
 });
 
 test('kpsc change pin enforces current pin and clears must_change_pin', async () => {
@@ -367,7 +407,7 @@ test('AI secretary processing returns draft minutes and policy flags', async () 
     created_at: '2026-05-08T00:00:00.000Z'
   };
   const DB = createDBMock({
-    onPrepare(sql) {
+    onPrepare: withKpscSessionMock(function(sql) {
       const statement = {
         _bound: [],
         bind(...args) {
@@ -399,11 +439,11 @@ test('AI secretary processing returns draft minutes and policy flags', async () 
         }
       };
       return statement;
-    }
+    })
   });
 
   const response = await onRequest({
-    request: createRequest('https://example.com/api/ai-secretary-meetings/AIM-1/process', 'POST'),
+    request: createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-1/process', 'POST'),
     env: { DB }
   });
   const body = await readJson(response);
@@ -458,7 +498,7 @@ test('AI secretary keeps deterministic governance flags when provider omits them
     created_at: '2026-05-08T00:00:00.000Z'
   };
   const DB = createDBMock({
-    onPrepare(sql) {
+    onPrepare: withKpscSessionMock(function(sql) {
       const statement = {
         _bound: [],
         bind(...args) {
@@ -491,12 +531,12 @@ test('AI secretary keeps deterministic governance flags when provider omits them
         }
       };
       return statement;
-    }
+    })
   });
 
   try {
     const response = await onRequest({
-      request: createRequest('https://example.com/api/ai-secretary-meetings/AIM-2/process', 'POST'),
+      request: createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-2/process', 'POST'),
       env: { DB }
     });
     const body = await readJson(response);
@@ -542,7 +582,7 @@ test('AI secretary quorum is based on required group coverage instead of every r
     created_at: '2026-05-08T00:00:00.000Z'
   };
   const DB = createDBMock({
-    onPrepare(sql) {
+    onPrepare: withKpscSessionMock(function(sql) {
       const statement = {
         _bound: [],
         bind(...args) {
@@ -575,11 +615,11 @@ test('AI secretary quorum is based on required group coverage instead of every r
         }
       };
       return statement;
-    }
+    })
   });
 
   const response = await onRequest({
-    request: createRequest('https://example.com/api/ai-secretary-meetings/AIM-3/process', 'POST'),
+    request: createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-3/process', 'POST'),
     env: { DB }
   });
   const body = await readJson(response);
@@ -616,7 +656,7 @@ test('AI secretary classifies resolutions and extracts action owners/deadlines',
     created_at: '2026-05-14T00:00:00.000Z'
   };
   const DB = createDBMock({
-    onPrepare(sql) {
+    onPrepare: withKpscSessionMock(function(sql) {
       const statement = {
         _bound: [],
         bind(...args) {
@@ -649,11 +689,11 @@ test('AI secretary classifies resolutions and extracts action owners/deadlines',
         }
       };
       return statement;
-    }
+    })
   });
 
   const response = await onRequest({
-    request: createRequest('https://example.com/api/ai-secretary-meetings/AIM-4/process', 'POST'),
+    request: createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-4/process', 'POST'),
     env: { DB }
   });
   const body = await readJson(response);
@@ -689,7 +729,7 @@ test('AI secretary meeting update persists reviewed minutes corrections', async 
     created_at: '2026-05-14T00:00:00.000Z'
   };
   const DB = createDBMock({
-    onPrepare(sql) {
+    onPrepare: withKpscSessionMock(function(sql) {
       const statement = {
         _bound: [],
         bind(...args) {
@@ -716,17 +756,22 @@ test('AI secretary meeting update persists reviewed minutes corrections', async 
         }
       };
       return statement;
-    }
+    })
   });
 
+  const sessionHeader = JSON.stringify({ accountId: 'ka-test', token: 'ks-test-token' });
   const response = await onRequest({
-    request: createRequest('https://example.com/api/ai-secretary-meetings/AIM-5', 'PUT', {
-      summaryShort: 'Reviewed summary',
-      summaryLong: 'Reviewed details',
-      minutesMarkdown: '# Reviewed Minutes',
-      resolutions: [{ text: 'Reviewed approval', resolutionType: 'approval', category: 'financial', approved: true, amount: '50000' }],
-      actionItems: [{ task: 'Treasurer to file receipt', assignee: 'Treasurer', dueDate: 'Friday', status: 'pending' }],
-      policyFlags: [{ type: 'manual_review', severity: 'medium', message: 'Secretary reviewed.' }]
+    request: new Request('https://example.com/api/ai-secretary-meetings/AIM-5', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+      body: JSON.stringify({
+        summaryShort: 'Reviewed summary',
+        summaryLong: 'Reviewed details',
+        minutesMarkdown: '# Reviewed Minutes',
+        resolutions: [{ text: 'Reviewed approval', resolutionType: 'approval', category: 'financial', approved: true, amount: '50000' }],
+        actionItems: [{ task: 'Treasurer to file receipt', assignee: 'Treasurer', dueDate: 'Friday', status: 'pending' }],
+        policyFlags: [{ type: 'manual_review', severity: 'medium', message: 'Secretary reviewed.' }]
+      }),
     }),
     env: { DB }
   });
@@ -772,4 +817,104 @@ test('settings api-status reports missing realtime API key', async () => {
   assert.equal(response.status, 200);
   assert.equal(body.liveTranscription.active, false);
   assert.match(body.liveTranscription.message, /OPENAI_API_KEY is missing/);
+});
+
+// ── KPSC role enforcement tests ───────────────────────────────────────
+
+function createKpscSessionDB({ accountId, token, accountRole, sessionExpiry }) {
+  return createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) {
+          statement._bound = args;
+          return statement;
+        },
+        async first() {
+          if (/SELECT account_id, expires_at FROM kpsc_sessions/.test(sql)) {
+            if (!token) return null;
+            return { account_id: accountId, expires_at: sessionExpiry ?? (Date.now() + 3600_000) };
+          }
+          if (/SELECT id, name, role, status FROM kpsc_accounts/.test(sql)) {
+            if (!accountRole) return null;
+            return { id: accountId, name: 'Test User', role: accountRole, status: 'active' };
+          }
+          return null;
+        },
+        async run() { return { success: true }; },
+        async all() { return { results: [] }; }
+      };
+      return statement;
+    }
+  });
+}
+
+test('kpsc mutating endpoint without session returns 401', async () => {
+  const DB = createKpscSessionDB({ accountId: 'ka1', token: null, accountRole: null });
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/kpsc-partners', 'POST', { fullName: 'Test' }),
+    env: { DB }
+  });
+  const body = await readJson(response);
+  assert.equal(response.status, 401);
+  assert.match(body.error, /KPSC session/i);
+});
+
+test('kpsc mutating endpoint with viewer role returns 403', async () => {
+  const crypto = await import('node:crypto');
+  const sessionToken = 'ks-viewer-token';
+  const DB = createKpscSessionDB({
+    accountId: 'ka2',
+    token: sessionToken,
+    accountRole: 'committee_viewer',
+  });
+  const sessionHeader = JSON.stringify({ accountId: 'ka2', token: sessionToken });
+  const req = new Request('https://example.com/api/kpsc-partners', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+    body: JSON.stringify({ fullName: 'Test' }),
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+  assert.equal(response.status, 403);
+  assert.match(body.error, /not permitted/i);
+});
+
+test('kpsc mutating endpoint with allowed role returns success', async () => {
+  const sessionToken = 'ks-treasurer-token';
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) {
+          statement._bound = args;
+          return statement;
+        },
+        async first() {
+          if (/SELECT account_id, expires_at FROM kpsc_sessions/.test(sql)) {
+            return { account_id: 'ka3', expires_at: Date.now() + 3600_000 };
+          }
+          if (/SELECT id, name, role, status FROM kpsc_accounts/.test(sql)) {
+            return { id: 'ka3', name: 'Treasurer', role: 'treasurer', status: 'active' };
+          }
+          // getKpscFinanceEntryById re-fetches the row after insert
+          if (/SELECT \* FROM kpsc_finance_entries WHERE id=\?/.test(sql)) {
+            return { id: 'kfe1', date: '2026-01-01', entry_type: 'income', category: 'partnership', sub_category: '', amount: 1000, payment_method: '', reference: '', narration: '', partner_id: '', recorded_by: '', approved_by: '', approval_status: 'recorded', attachment_name: '', created_at: '2026-01-01' };
+          }
+          return null;
+        },
+        async run() { return { success: true }; },
+        async all() { return { results: [] }; }
+      };
+      return statement;
+    }
+  });
+  const sessionHeader = JSON.stringify({ accountId: 'ka3', token: sessionToken });
+  const req = new Request('https://example.com/api/kpsc-finance', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+    body: JSON.stringify({ date: '2026-01-01', entryType: 'income', category: 'partnership', amount: 1000 }),
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  assert.equal(response.status, 200);
 });
