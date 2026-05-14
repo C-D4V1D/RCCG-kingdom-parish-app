@@ -104,12 +104,19 @@ export async function onRequest(context) {
       return err('Invalid HuggingFace model path', 400);
     }
     const hfUrl  = 'https://huggingface.co/' + hfPath;
-    const hfHdrs = {};
-    if (env.HF_TOKEN) hfHdrs['Authorization'] = 'Bearer ' + env.HF_TOKEN;
+    const hfToken = env.HF_TOKEN || env.HUGGINGFACE_TOKEN || env.HUGGINGFACE_API_KEY || env.HF_ACCESS_TOKEN || '';
+    const hfHdrs = {
+      // Keep requests deterministic and binary-safe across HF redirects/CDN edges.
+      'Accept': '*/*',
+      'User-Agent': 'rccg-kingdom-parish-app/1.0 (+https://rccg-kingdom-parish-app.pages.dev)',
+    };
+    if (hfToken) hfHdrs['Authorization'] = 'Bearer ' + hfToken;
     try {
       const hfRes = await fetch(hfUrl, { headers: hfHdrs });
       if (!hfRes.ok) {
-        return err(`HuggingFace returned ${hfRes.status} for ${hfPath}`, hfRes.status === 404 ? 404 : 502);
+        // Preserve upstream status codes (401/403/429/etc.) instead of masking
+        // everything as 502, so client errors are diagnosable.
+        return err(`HuggingFace returned ${hfRes.status} for ${hfPath}`, hfRes.status);
       }
       const cType    = hfRes.headers.get('Content-Type') || 'application/octet-stream';
       const hfCache  = hfRes.headers.get('Cache-Control');

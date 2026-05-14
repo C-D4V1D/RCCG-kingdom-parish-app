@@ -1328,6 +1328,7 @@ function arrayBufferToBase64(buffer) {
 // downloaded once and cached in the browser's IndexedDB by transformers.js.
 
 const SB_MODEL_ID    = 'Xenova/speechbrain-spkrec-ecapa-voxceleb';
+const SB_MODEL_FALLBACK_ID = 'onnx-community/speechbrain-spkrec-ecapa-voxceleb';
 // Use the self-contained ESM bundle. 'dist/transformers.js' ends with proper
 // `export { ... }` statements so named destructuring works in dynamic import().
 // Do NOT use the bare package URL (resolves to src/transformers.js which has
@@ -1361,13 +1362,23 @@ async function loadSbModel() {
     // set in Cloudflare Pages settings if a gated model ever needs it.
     env.remoteHost = window.location.origin + '/api/hf-proxy/';
 
-    const [extractor, model] = await Promise.all([
-      AutoProcessor.from_pretrained(SB_MODEL_ID),
-      AutoModel.from_pretrained(SB_MODEL_ID, { quantized: true }),
-    ]);
-    _sbExtractor = extractor;
-    _sbModel     = model;
-    return { extractor, model };
+    const modelCandidates = [SB_MODEL_ID, SB_MODEL_FALLBACK_ID];
+    let lastErr = null;
+    for (const modelId of modelCandidates) {
+      try {
+        const [extractor, model] = await Promise.all([
+          AutoProcessor.from_pretrained(modelId),
+          AutoModel.from_pretrained(modelId, { quantized: true }),
+        ]);
+        _sbExtractor = extractor;
+        _sbModel = model;
+        return { extractor, model };
+      } catch (e) {
+        lastErr = e;
+        console.warn(`ECAPA-TDNN: failed to load ${modelId}`, e);
+      }
+    }
+    throw lastErr || new Error('Failed to load ECAPA-TDNN model');
   })();
 
   return _sbLoading;
