@@ -160,6 +160,18 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 
 /* ── FORM FIELDS ───────────────────────────────────────────────── */
 .k-section{background:var(--white);border-radius:12px;padding:20px;margin-bottom:16px;border:1px solid var(--border);}
+.k-collapsible{background:var(--white);border-radius:12px;border:1px solid var(--border);margin-bottom:16px;overflow:hidden;}
+.k-collapsible-hdr{cursor:pointer;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;gap:12px;list-style:none;}
+.k-collapsible-hdr::-webkit-details-marker{display:none;}
+.k-collapsible-hdr::after{content:'▾';font-size:11px;color:var(--text3);transition:transform .15s;flex-shrink:0;}
+.k-collapsible[open] > .k-collapsible-hdr::after{transform:rotate(180deg);}
+.k-collapsible-title{font-size:13px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--navy);}
+.k-collapsible-summary{font-size:13px;font-weight:400;color:var(--text3);text-align:right;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.k-collapsible[open] .k-collapsible-summary{display:none;}
+.k-collapsible > *:not(summary){padding-left:20px;padding-right:20px;}
+.k-collapsible > *:not(summary):last-child{padding-bottom:20px;}
+.k-collapsible[open] > .k-collapsible-hdr{border-bottom:1px solid var(--border);padding-bottom:14px;margin-bottom:16px;}
+.k-quick-hint{font-size:13px;color:var(--text3);background:var(--navy-light);border-radius:8px;padding:10px 14px;margin-bottom:16px;line-height:1.5;}
 .k-sec-title{font-size:13px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;
   color:var(--navy);margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--border);}
 .k-sub-title{font-size:13px;font-weight:600;color:var(--navy);margin:20px 0 10px;}

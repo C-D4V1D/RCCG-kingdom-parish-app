@@ -87,6 +87,8 @@ const S = {
   reportsYear: new Date().getUTCFullYear(),
   _meetingTab: 'record',
   _reviewEditMode: false, // true = show inline review editor; false = show reviewed summary
+  _isNewMeeting: false,   // true when the room is hosting a fresh, never-saved draft
+  kpscMeetingCadence: 'none',
 };
 
 // ── AUDIO RECORDER + REALTIME TRANSCRIPTION ───────────────────────
@@ -421,6 +423,15 @@ async function recStart(btn) {
   }
   try {
     if (btn) btn.disabled = true;
+    // Auto-persist the meeting so End/Generate Minutes have a backing record. No toast on success.
+    if (!S.activeMeeting) {
+      await autoSaveNow();
+      if (!S.activeMeeting) {
+        showToast('Could not save the meeting. Check your connection and try again.', 'error');
+        if (btn) btn.disabled = false;
+        return;
+      }
+    }
     Rec.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     Rec.chunkSeq = 0;
     Rec.uploadSessionId = `kpsc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1250,6 +1261,46 @@ function fmtDateTime(iso) {
 
 function today() {
   return new Date().toISOString().slice(0, 10);
+}
+
+// ── MEETING PRE-FILL ──────────────────────────────────────────────
+// Cadence strings: 'none' | 'weekly:sun..sat' | 'monthly:first-sun..sat'
+const DAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+
+function nextMeetingDate(cadence, now) {
+  const base = now ? new Date(now) : new Date();
+  base.setHours(0, 0, 0, 0);
+  const isoLocal = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  if (!cadence || cadence === 'none') return isoLocal(base);
+  const [kind, spec] = cadence.split(':');
+  if (kind === 'weekly') {
+    const target = DAY_KEYS.indexOf(spec);
+    if (target < 0) return isoLocal(base);
+    const offset = (target - base.getDay() + 7) % 7;
+    const d = new Date(base); d.setDate(d.getDate() + offset);
+    return isoLocal(d);
+  }
+  if (kind === 'monthly' && spec?.startsWith('first-')) {
+    const target = DAY_KEYS.indexOf(spec.slice(6));
+    if (target < 0) return isoLocal(base);
+    const firstInMonth = (yr, mo) => {
+      const d = new Date(yr, mo, 1);
+      d.setDate(1 + ((target - d.getDay() + 7) % 7));
+      return d;
+    };
+    let candidate = firstInMonth(base.getFullYear(), base.getMonth());
+    if (candidate < base) candidate = firstInMonth(base.getFullYear(), base.getMonth() + 1);
+    return isoLocal(candidate);
+  }
+  return isoLocal(base);
+}
+
+function prefilledMeetingTitle(_cadence, dateStr) {
+  const d = dateStr ? new Date(dateStr + 'T00:00:00') : new Date();
+  if (isNaN(d.getTime())) return 'KPSC Meeting';
+  const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()];
+  const month = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
+  return `KPSC Meeting – ${dayName} ${month} ${d.getDate()}`;
 }
 
 // ── MINUTES HTML ──────────────────────────────────────────────────
@@ -2172,6 +2223,7 @@ function meetingCard(m) {
 
 function startNewMeeting() {
   S.activeMeeting = null;
+  S._isNewMeeting = true;
   S.page = 'meeting';
   S.group = 'meetings';
   S.subTab = null;
@@ -2189,6 +2241,7 @@ async function openMeeting(id) {
   const res = await apiGet(`ai-secretary-meetings/${id}`);
   if (res.error) { showToast(res.error, 'error'); return; }
   S.activeMeeting = res;
+  S._isNewMeeting = false;
   S.page = 'meeting';
   S.group = 'meetings';
   S.subTab = null;
@@ -2207,6 +2260,7 @@ async function renderMeetingRoom(main) {
   if (!S.members.length) {
     const settingsRes = await apiGet('settings');
     S.members = settingsRes.kpsc_members || [];
+    if (settingsRes.kpsc_meeting_cadence) S.kpscMeetingCadence = settingsRes.kpsc_meeting_cadence;
   }
 
   const m  = S.activeMeeting;
@@ -2219,45 +2273,66 @@ async function renderMeetingRoom(main) {
   const isProcessed = status === 'processed';
   const isEnded     = status === 'ended' || isProcessed;
   const canRecord   = !isEnded;
+  const phase = isProcessed ? 'review' : status === 'ended' ? 'ended' : status === 'recording' ? 'live' : 'setup';
 
-  // Build attendance rows from roster, merged with saved participants
+  // Pre-fill defaults for never-saved drafts. Title/date follow the configured cadence;
+  // attendance defaults to "everyone present" so secretaries uncheck absentees instead of
+  // checking each present member.
+  const isFresh = S._isNewMeeting && !m;
+  const cadence = S.kpscMeetingCadence || 'none';
+  const prefillDate = isFresh ? nextMeetingDate(cadence) : (m?.meetingDate || today());
+  const prefillTitle = isFresh ? prefilledMeetingTitle(cadence, prefillDate) : (m?.title || 'KPSC Meeting');
+  const prefillType = m?.meetingType || 'routine';
+
+  // Build attendance rows from roster, merged with saved participants.
   const savedParts = m?.participants || [];
-  const attendanceRows = buildAttendanceRows(savedParts);
+  const attendanceRows = buildAttendanceRows(savedParts, isFresh);
+
+  const detailsSummary = `${esc(prefillTitle)} · ${esc(fmtDate(prefillDate))} · ${esc((MEETING_TYPES.find(t=>t.value===prefillType)||{}).label||'')}`;
+  const presentInitial = isFresh ? S.members.length : savedParts.filter(p => p.present).length;
+  const attendanceSummary = `${presentInitial} present of ${S.members.length}`;
 
   main.innerHTML = `
-    <div class="k-page k-room">
+    <div class="k-page k-room" data-phase="${phase}">
       <div id="km-stepper">${stepper(status)}</div>
 
-      <section class="k-section">
-        <h3 class="k-sec-title">Meeting Details</h3>
+      <details class="k-collapsible" id="km-details-section" ${phase === 'setup' ? 'open' : ''}>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">Meeting Details</span>
+          <span class="k-collapsible-summary" id="km-details-summary">${detailsSummary}</span>
+        </summary>
         <input type="hidden" id="km-status" value="${status}" />
         <div class="k-field-row">
           <div class="k-field">
             <label class="k-label">Title</label>
-            <input class="k-input" id="km-title" type="text" value="${esc(m?.title || 'KPSC Meeting')}" ${isProcessed ? 'readonly' : ''} />
+            <input class="k-input" id="km-title" type="text" value="${esc(prefillTitle)}" ${isProcessed ? 'readonly' : ''} />
           </div>
           <div class="k-field k-field-sm">
             <label class="k-label">Date</label>
-            <input class="k-input" id="km-date" type="date" value="${m?.meetingDate || today()}" ${isProcessed ? 'readonly' : ''} />
+            <input class="k-input" id="km-date" type="date" value="${prefillDate}" ${isProcessed ? 'readonly' : ''} />
           </div>
         </div>
         <div class="k-field">
           <label class="k-label">Meeting Type</label>
           <select class="k-input" id="km-type" ${isProcessed ? 'disabled' : ''}>
-            ${MEETING_TYPES.map(t => `<option value="${t.value}" ${(m?.meetingType || 'routine') === t.value ? 'selected' : ''}>${t.label}</option>`).join('')}
+            ${MEETING_TYPES.map(t => `<option value="${t.value}" ${prefillType === t.value ? 'selected' : ''}>${t.label}</option>`).join('')}
           </select>
         </div>
-      </section>
+      </details>
 
-      <section class="k-section">
-        <h3 class="k-sec-title">Attendance</h3>
+      <details class="k-collapsible" id="km-attendance-section" ${phase === 'setup' ? 'open' : ''}>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">Attendance</span>
+          <span class="k-collapsible-summary" id="km-attendance-summary">${attendanceSummary}</span>
+        </summary>
         <div id="km-attendance" class="k-attendance">
           ${attendanceRows}
         </div>
-      </section>
+      </details>
 
       <section class="k-section">
         <h3 class="k-sec-title">Live Audio & Realtime Transcript</h3>
+        ${phase === 'setup' ? `<p class="k-quick-hint">Confirm the details above, then tap 🎙 Start Meeting below to begin recording. Everything saves automatically.</p>` : ''}
         <div class="k-tabs" style="margin-bottom:16px">
           <button class="k-tab ${S._meetingTab !== 'upload' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('record')">🎙 Live Recording</button>
           <button class="k-tab ${S._meetingTab === 'upload' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('upload')">📷 Upload Notes</button>
@@ -2289,7 +2364,6 @@ async function renderMeetingRoom(main) {
       </section>
 
       <div class="k-room-actions">
-        ${!isProcessed ? `<button class="kbtn" onclick="Kpsc.saveMeeting(this)">💾 Save</button>` : ''}
         ${!isProcessed ? `<span id="km-autosave-status" class="k-autosave-status" aria-live="polite"></span>` : ''}
         ${status === 'recording' ? `<button class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
         ${status === 'ended' ? `<button class="kbtn kbtn-primary" onclick="Kpsc.processMeeting(this)">✨ Generate Minutes</button>` : ''}
@@ -2304,7 +2378,7 @@ async function renderMeetingRoom(main) {
   if (!isProcessed) bindAutoSave();
 }
 
-function buildAttendanceRows(savedParts) {
+function buildAttendanceRows(savedParts, defaultPresent = false) {
   // Build a name-keyed lookup so each roster member can be matched individually
   const savedByName = new Map((savedParts || []).map(p => [p.name, p]));
   const membersByGroup = new Map(GROUPS.map(g => [g.key, []]));
@@ -2318,7 +2392,7 @@ function buildAttendanceRows(savedParts) {
       ? groupMembers.map((mem, i) => {
           const presentKey = `att_present_${g.key}_${i}`;
           const saved = savedByName.get(mem.name);
-          const isPresent = saved ? !!saved.present : false;
+          const isPresent = saved ? !!saved.present : defaultPresent;
           return `
             <label class="k-att-member">
               <input type="checkbox" id="${presentKey}" data-group="${g.key}" data-idx="${i}"
@@ -2661,6 +2735,7 @@ async function autoSaveNow() {
     } else {
       S.activeMeeting = res;
       Draft.meetingId = res.id;
+      S._isNewMeeting = false;
       setAutoSaveStatus(`Saved · ${fmtClock(new Date())}`, 'ok');
     }
   } catch {
@@ -2684,7 +2759,7 @@ function bindAutoSave() {
   Draft.dirty = false;
   Draft.meetingId = S.activeMeeting?.id || null;
 
-  const fire = () => scheduleAutoSave();
+  const fire = () => { scheduleAutoSave(); updateCollapsibleSummaries(); };
   const form = document.getElementById('km-title')?.closest('.k-page');
   if (!form) return;
   for (const sel of ['#km-title', '#km-transcript']) {
@@ -2699,6 +2774,22 @@ function bindAutoSave() {
   if (att) {
     att.addEventListener('change', fire);
     att.addEventListener('input', fire);
+  }
+}
+
+function updateCollapsibleSummaries() {
+  const detailsSum = document.getElementById('km-details-summary');
+  if (detailsSum) {
+    const title = document.getElementById('km-title')?.value.trim() || 'KPSC Meeting';
+    const date  = document.getElementById('km-date')?.value || today();
+    const type  = document.getElementById('km-type')?.value || 'routine';
+    const typeLabel = (MEETING_TYPES.find(t => t.value === type) || {}).label || '';
+    detailsSum.textContent = `${title} · ${fmtDate(date)} · ${typeLabel}`;
+  }
+  const attSum = document.getElementById('km-attendance-summary');
+  if (attSum) {
+    const present = readAttendance().filter(p => p.present).length;
+    attSum.textContent = `${present} present of ${S.members.length}`;
   }
 }
 
@@ -2755,6 +2846,7 @@ async function saveMeeting(btn) {
     }
     if (res.error) { showToast(res.error, 'error'); return; }
     S.activeMeeting = res;
+    S._isNewMeeting = false;
     document.getElementById('kpsc-page-title').textContent = 'Meeting Room';
     document.getElementById('km-status').value = res.status;
     updateStepperUI(res.status);
@@ -4144,6 +4236,25 @@ async function renderSettings(main) {
   const reminderTemplate = res?.kpsc_reminder_template || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge. God bless you.';
   const incomeCategories = Array.isArray(res?.kpsc_income_categories) ? res.kpsc_income_categories.join('\n') : '';
   const expenseCategories = Array.isArray(res?.kpsc_expense_categories) ? res.kpsc_expense_categories.join('\n') : '';
+  const meetingCadence = res?.kpsc_meeting_cadence || 'none';
+  S.kpscMeetingCadence = meetingCadence;
+  const cadenceOptions = [
+    { value: 'none',              label: 'No fixed cadence' },
+    { value: 'weekly:sun',        label: 'Weekly on Sunday' },
+    { value: 'weekly:mon',        label: 'Weekly on Monday' },
+    { value: 'weekly:tue',        label: 'Weekly on Tuesday' },
+    { value: 'weekly:wed',        label: 'Weekly on Wednesday' },
+    { value: 'weekly:thu',        label: 'Weekly on Thursday' },
+    { value: 'weekly:fri',        label: 'Weekly on Friday' },
+    { value: 'weekly:sat',        label: 'Weekly on Saturday' },
+    { value: 'monthly:first-sun', label: 'First Sunday of the month' },
+    { value: 'monthly:first-mon', label: 'First Monday of the month' },
+    { value: 'monthly:first-tue', label: 'First Tuesday of the month' },
+    { value: 'monthly:first-wed', label: 'First Wednesday of the month' },
+    { value: 'monthly:first-thu', label: 'First Thursday of the month' },
+    { value: 'monthly:first-fri', label: 'First Friday of the month' },
+    { value: 'monthly:first-sat', label: 'First Saturday of the month' },
+  ];
 
   main.innerHTML = `
     <div class="k-page">
@@ -4151,6 +4262,13 @@ async function renderSettings(main) {
       <div class="k-card" style="margin-bottom:16px">
         <h2 class="k-card-title">KPSC Operations Settings</h2>
         <p class="k-card-sub">Configure partnership categories, finance categories, and reminder templates for the KPSC portal.</p>
+        <div class="k-form-group">
+          <label class="k-label">Meeting Cadence</label>
+          <select id="ks-meeting-cadence" class="k-input">
+            ${cadenceOptions.map(o => `<option value="${o.value}" ${meetingCadence === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+          </select>
+          <p class="k-hint">Used to pre-fill the date and title when you start a new meeting. Set to "No fixed cadence" if your committee meets ad-hoc.</p>
+        </div>
         <div class="k-form-group">
           <label class="k-label">SMS/WhatsApp Reminder Template</label>
           <textarea id="ks-reminder-template" class="k-input k-textarea" style="min-height:80px">${esc(reminderTemplate)}</textarea>
@@ -4312,13 +4430,16 @@ async function saveKpscOpsSettings() {
   const template = document.getElementById('ks-reminder-template')?.value.trim() || '';
   const incomeText = document.getElementById('ks-income-cats')?.value || '';
   const expenseText = document.getElementById('ks-expense-cats')?.value || '';
+  const cadence = document.getElementById('ks-meeting-cadence')?.value || 'none';
   const incomeCategories = incomeText.split(/[\n,]/).map(s=>s.trim().toLowerCase().replace(/\s+/g,'_')).filter(Boolean);
   const expenseCategories = expenseText.split(/[\n,]/).map(s=>s.trim().toLowerCase().replace(/\s+/g,'_')).filter(Boolean);
   const res = await apiPost('settings', {
     kpsc_reminder_template: template,
     kpsc_income_categories: incomeCategories,
     kpsc_expense_categories: expenseCategories,
+    kpsc_meeting_cadence: cadence,
   });
+  if (!res?.error) S.kpscMeetingCadence = cadence;
   if (res?.error) {
     msg.className = 'k-settings-msg k-msg-error';
     msg.textContent = res.error;
