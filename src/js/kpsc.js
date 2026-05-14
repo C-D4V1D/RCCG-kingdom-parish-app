@@ -1329,6 +1329,8 @@ function arrayBufferToBase64(buffer) {
 
 const SB_MODEL_ID    = 'Xenova/speechbrain-spkrec-ecapa-voxceleb';
 // ESM build from jsDelivr — dynamic import() works from any script context in modern browsers.
+// Pin the minor version (2.17.x) for stability; bump to the next stable release when testing
+// confirms the new AutoFeatureExtractor/AutoModel API remains compatible.
 const SB_XFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.esm.js';
 
 let _sbExtractor = null;
@@ -1336,6 +1338,9 @@ let _sbModel     = null;
 let _sbLoading   = null; // single in-flight Promise so concurrent callers wait on the same load
 
 // Load the transformers.js library and the ECAPA-TDNN model (first call only).
+// Dynamic import() is a standard JavaScript expression that works in any script
+// context (module or classic) in all modern browsers (Chrome 63+, Firefox 67+,
+// Safari 11.1+). It is not restricted to type="module" scripts.
 async function loadSbModel() {
   if (_sbExtractor && _sbModel) return { extractor: _sbExtractor, model: _sbModel };
   if (_sbLoading) return _sbLoading;
@@ -1361,7 +1366,8 @@ async function loadSbModel() {
 // Compute a speaker embedding from a Float32 PCM array at arbitrary sample rate.
 // Returns a normalised Float32Array (L2 norm = 1) or null on failure.
 async function computeSpeakerEmbedding(audioFloat32, sampleRate) {
-  const audio16k = sampleRate !== 16000 ? resampleTo16k(audioFloat32, sampleRate) : audioFloat32;
+  // resampleTo16k returns the original array unchanged when already at 16 kHz.
+  const audio16k = resampleTo16k(audioFloat32, sampleRate);
 
   const { extractor, model } = await loadSbModel();
 
@@ -1369,11 +1375,17 @@ async function computeSpeakerEmbedding(audioFloat32, sampleRate) {
   const inputs  = await extractor(audio16k, { sampling_rate: 16000 });
   const outputs = await model(inputs);
 
-  // The model outputs embeddings under 'embeddings' or the first output key.
-  const raw = outputs.embeddings?.data ?? outputs[Object.keys(outputs)[0]]?.data;
-  if (!raw) return null;
+  // Retrieve embedding tensor — prefer the named 'embeddings' key, fall back to
+  // the first output. Validate the shape to catch unexpected model output formats.
+  const tensor = outputs.embeddings ?? Object.values(outputs)[0];
+  const raw    = tensor?.data;
+  if (!raw || raw.length === 0) {
+    console.warn('ECAPA-TDNN: model returned no embedding data.');
+    return null;
+  }
 
-  return l2Normalize(new Float32Array(raw));
+  const embedding = l2Normalize(new Float32Array(raw));
+  return embedding;
 }
 
 // L2-normalise a Float32Array so dot-product == cosine similarity.
@@ -1388,25 +1400,36 @@ function l2Normalize(v) {
 }
 
 // Cosine similarity between two L2-normalised embeddings (dot product).
+// Returns 0 if the embeddings have different dimensions rather than producing
+// a meaningless partial result.
 function cosineSimilarity(a, b) {
+  if (a.length !== b.length) return 0;
   let dot = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) dot += a[i] * b[i];
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
   return dot;
 }
 
 // Serialise a Float32Array embedding to a base64 string for persistent storage.
+// Bytes are written in little-endian order (IEEE 754 single-precision) so the
+// representation is consistent regardless of the host system's native endianness.
 function embeddingToBase64(embedding) {
-  return arrayBufferToBase64(embedding.buffer);
+  const bytes = new Uint8Array(embedding.length * 4);
+  const view  = new DataView(bytes.buffer);
+  for (let i = 0; i < embedding.length; i++) view.setFloat32(i * 4, embedding[i], true);
+  return arrayBufferToBase64(bytes.buffer);
 }
 
 // Deserialise a base64 string back to a Float32Array embedding.
+// Reads bytes in little-endian order to match embeddingToBase64.
 function base64ToEmbedding(b64) {
   try {
     const binary = atob(b64);
     const bytes  = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return new Float32Array(bytes.buffer);
+    const view   = new DataView(bytes.buffer);
+    const floats = new Float32Array(binary.length / 4);
+    for (let i = 0; i < floats.length; i++) floats[i] = view.getFloat32(i * 4, true);
+    return floats;
   } catch {
     return null;
   }
