@@ -1656,7 +1656,6 @@ async function renderDashboard(main) {
       </div>` : ''}
     </div>`;
 }
-}
 
 function canDeleteMeeting(m) {
   const role = String(S.user?.role || '').toLowerCase();
