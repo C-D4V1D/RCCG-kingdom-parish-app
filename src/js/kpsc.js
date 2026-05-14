@@ -742,7 +742,6 @@ async function diarizerConnect() {
   // Build the Deepgram WebSocket URL with required parameters.
   const sampleRate = audioCtx.sampleRate;
   const dgParams = new URLSearchParams({
-    token: apiKey,
     model: 'nova-3',
     diarize: 'true',
     punctuate: 'true',
@@ -753,7 +752,10 @@ async function diarizerConnect() {
     channels: '1',
     language: 'en',
   });
-  const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`);
+  // Deepgram authenticates browser WebSocket connections via the
+  // Sec-WebSocket-Protocol subprotocol ('token', <api-key>). Query
+  // parameters like ?token=... are NOT accepted and silently fail.
+  const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, ['token', apiKey]);
   Diarizer.ws = ws;
   ws.binaryType = 'arraybuffer';
 
