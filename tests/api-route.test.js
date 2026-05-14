@@ -675,37 +675,18 @@ test('settings api-status reports missing realtime API key', async () => {
   assert.match(body.liveTranscription.message, /OPENAI_API_KEY is missing/);
 });
 
-test('deepgram transcription token endpoint mints browser token', async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init = {}) => {
-    assert.equal(url, 'https://api.deepgram.com/v1/auth/grant');
-    assert.equal(init.method, 'POST');
-    assert.equal(init.headers?.Authorization, 'Token dg-test-secret');
-    assert.equal(init.headers?.['Content-Type'], 'application/json');
-    const payload = JSON.parse(init.body || '{}');
-    assert.equal(payload.ttl, 600);
-    return new Response(JSON.stringify({ token: 'dg-browser-token', expires_in: 600 }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  };
+test('deepgram transcription token endpoint returns the api key', async () => {
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/deepgram-transcription-token', 'POST', {}),
+    env: {
+      DB: createDBMock({ onPrepare: () => ({}) }),
+      DEEPGRAM_API_KEY: 'dg-test-secret'
+    }
+  });
+  const body = await readJson(response);
 
-  try {
-    const response = await onRequest({
-      request: createRequest('https://example.com/api/deepgram-transcription-token', 'POST', {}),
-      env: {
-        DB: createDBMock({ onPrepare: () => ({}) }),
-        DEEPGRAM_API_KEY: 'dg-test-secret'
-      }
-    });
-    const body = await readJson(response);
-
-    assert.equal(response.status, 200);
-    assert.equal(body.key, 'dg-browser-token');
-    assert.equal(body.expiresIn, 600);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  assert.equal(response.status, 200);
+  assert.equal(body.key, 'dg-test-secret');
 });
 
 test('deepgram transcription token endpoint returns 503 when key is missing', async () => {
@@ -717,30 +698,4 @@ test('deepgram transcription token endpoint returns 503 when key is missing', as
 
   assert.equal(response.status, 503);
   assert.match(body.error, /DEEPGRAM_API_KEY is not configured/);
-});
-
-test('deepgram transcription token endpoint surfaces upstream errors', async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    error: { message: 'Invalid Deepgram credentials.' }
-  }), {
-    status: 401,
-    headers: { 'Content-Type': 'application/json' }
-  });
-
-  try {
-    const response = await onRequest({
-      request: createRequest('https://example.com/api/deepgram-transcription-token', 'POST', {}),
-      env: {
-        DB: createDBMock({ onPrepare: () => ({}) }),
-        DEEPGRAM_API_KEY: 'dg-test-secret'
-      }
-    });
-    const body = await readJson(response);
-
-    assert.equal(response.status, 401);
-    assert.match(body.error, /Invalid Deepgram credentials/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
 });

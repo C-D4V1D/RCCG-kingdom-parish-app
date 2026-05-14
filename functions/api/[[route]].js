@@ -15,7 +15,6 @@ const ok  = (data)       => new Response(JSON.stringify(data),        { status: 
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
-const DEEPGRAM_BROWSER_TOKEN_TTL_SECONDS = 600;
 
 function isValidPin(pin) {
   return /^\d{4,6}$/.test(String(pin || ''));
@@ -1775,27 +1774,7 @@ async function createRealtimeTranscriptionToken(env) {
 async function createDeepgramTranscriptionToken(env) {
   const apiKey = String(env.DEEPGRAM_API_KEY || '').trim();
   if (!apiKey) return err('DEEPGRAM_API_KEY is not configured for speaker diarization.', 503);
-
-  const response = await fetch('https://api.deepgram.com/v1/auth/grant', {
-    method: 'POST',
-    headers: {
-      Authorization: `Token ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ ttl: DEEPGRAM_BROWSER_TOKEN_TTL_SECONDS }),
-  });
-
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    return err(data.error?.message || `Deepgram token request failed (${response.status}).`, response.status);
-  }
-
-  const token = String(data.token || data.access_token || '').trim();
-  if (!token) {
-    return err('Deepgram token request succeeded but no browser token was returned.', 502);
-  }
-
-  return ok({ key: token, expiresIn: Number(data.expires_in || DEEPGRAM_BROWSER_TOKEN_TTL_SECONDS) });
+  return ok({ key: apiKey });
 }
 
 // ── AZURE SPEAKER RECOGNITION ──────────────────────────────────────
