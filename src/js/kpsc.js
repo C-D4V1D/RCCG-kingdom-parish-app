@@ -1557,28 +1557,23 @@ function goBack() {
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────────────
-async function renderDashboard(main) {
-  const now = new Date();
-  const year = now.getUTCFullYear();
-  const month = now.getUTCMonth() + 1;
-  const [meetingsRes, settingsRes, dashboardRes, projectsRes] = await Promise.all([
-    apiGet('ai-secretary-meetings'),
-    apiGet('settings'),
-    apiGet(`kpsc-dashboard?year=${year}&month=${month}`),
-    apiGet('kpsc-projects?status=in_progress'),
-  ]);
-  if (meetingsRes?.error) throw new Error(meetingsRes.error);
-  S.meetings = Array.isArray(meetingsRes) ? meetingsRes : [];
-  S.members  = Array.isArray(settingsRes?.kpsc_members) ? settingsRes.kpsc_members : [];
-  S.dashboard = dashboardRes?.totals || null;
+
+// Build a data context object for the dashboard from already-loaded state.
+function buildDashboardContext() {
+  const thisMonth = today().slice(0, 7);
+  const month = currentMonth();
+  const year  = currentYear();
 
   const recent  = [...S.meetings].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')).slice(0, 10);
   const total   = S.meetings.length;
-  const thisMonth = today().slice(0, 7);
   const monthCount = S.meetings.filter(m => (m.meetingDate || '').startsWith(thisMonth)).length;
   const pending = S.meetings.filter(m => m.status === 'ended').length;
 
-  // Recent resolutions from all meetings
+  // Most-recent processed meeting
+  const processedMeetings = S.meetings.filter(m => m.status === 'processed');
+  const latestProcessed   = processedMeetings[0] || null;
+
+  // Recent resolutions (top 6)
   const allResolutions = [];
   for (const m of S.meetings.slice(0, 20)) {
     for (const r of (m.resolutions || [])) {
@@ -1596,93 +1591,336 @@ async function renderDashboard(main) {
   }
   const pendingActions = allActions.filter(a => a.status === 'pending' || !a.status).slice(0, 5);
 
-  // Projects
-  const activeProjects = Array.isArray(projectsRes) ? projectsRes.slice(0, 4) : [];
+  // Chairman: action items I assigned that are not done
+  const myName = S.user?.name || '';
+  const myOpenActions = allActions.filter(a =>
+    (a.assignedBy === myName) && (a.status !== 'done')
+  );
 
-  main.innerHTML = `
-    <div class="k-page">
-      <div class="k-dash-stats">
-        <div class="k-stat"><div class="k-stat-val">${total}</div><div class="k-stat-lbl">Total Meetings</div></div>
-        <div class="k-stat"><div class="k-stat-val">${monthCount}</div><div class="k-stat-lbl">This Month</div></div>
-        <div class="k-stat k-stat-highlight"><div class="k-stat-val">${pending}</div><div class="k-stat-lbl">Awaiting Minutes</div></div>
+  // Quorum: members with voice enrolled (proxy for "voice" quorum) vs total
+  const enrolledCount = S.members.filter(m => m.azureSpeakerProfileId).length;
+  const totalMembers  = S.members.length;
+
+  // Last meeting attendance %
+  const lastMeeting = recent[0] || null;
+  let lastAttendancePct = null;
+  if (lastMeeting?.participants) {
+    const present = lastMeeting.participants.filter(p => p.present).length;
+    const total2  = lastMeeting.participants.length;
+    if (total2 > 0) lastAttendancePct = Math.round((present / total2) * 100);
+  }
+
+  // Pending projects (proposed status)
+  const proposedProjects = S.projects.filter(p => p.status === 'proposed');
+  const inProgressProjects = S.projects.filter(p => p.status === 'in_progress');
+
+  // General secretary: draft needing review
+  const needsReview = processedMeetings.find(m => m.minutesMarkdown && !m.reviewedAt) || null;
+
+  // Secretary: drafts pending distribution (processed meetings not in kpsc_distributed_meeting_ids)
+  const distributedIds = S._distributedMeetingIds || [];
+  const pendingDistribution = processedMeetings.filter(m => !distributedIds.includes(m.id));
+
+  // Finance: this-month entries
+  const monthEntries = S.financeEntries.filter(e => (e.date || '').startsWith(thisMonth));
+  const incomeThisMonth  = monthEntries.filter(e => e.entryType === 'income').reduce((s, e) => s + Number(e.amount || 0), 0);
+  const expenseThisMonth = monthEntries.filter(e => e.entryType === 'expense').reduce((s, e) => s + Number(e.amount || 0), 0);
+
+  // Unreconciled: income entries this month with no reference
+  const unreconciledCount = monthEntries.filter(e => !String(e.reference || '').trim()).length;
+
+  // Unpaid partners this month
+  const activePartners = S.partners.filter(p => p.status === 'active');
+  const unpaidThisMonth = activePartners.filter(p => !partnerMonthlyPaid(p.id, month, year));
+
+  // Partner progress this year: paid months / (active partners * 12)
+  let partnerYearPct = 0;
+  if (activePartners.length > 0) {
+    const totalPossible = activePartners.length * 12;
+    const totalPaid = activePartners.reduce((sum, p) => {
+      let c = 0;
+      for (let m2 = 1; m2 <= 12; m2++) if (partnerMonthlyPaid(p.id, m2, year)) c++;
+      return sum + c;
+    }, 0);
+    partnerYearPct = Math.round((totalPaid / totalPossible) * 100);
+  }
+
+  // Recent finance entries (top 5)
+  const recentFinance = [...S.financeEntries]
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+    .slice(0, 5);
+
+  return {
+    recent, total, monthCount, pending,
+    latestProcessed, recentResolutions, pendingActions,
+    myOpenActions, enrolledCount, totalMembers,
+    lastAttendancePct, proposedProjects, inProgressProjects,
+    needsReview, pendingDistribution,
+    incomeThisMonth, expenseThisMonth,
+    unreconciledCount, unpaidThisMonth, activePartners,
+    partnerYearPct, recentFinance,
+    activeProjects: inProgressProjects.slice(0, 5),
+  };
+}
+
+// Returns HTML for the "Open / Resume meeting" primary action card.
+function dashCardOpenMeeting(ctx) {
+  const draft = [...S.meetings].find(m => m.status === 'draft' || m.status === 'recording');
+  if (draft) {
+    return `
+      <div class="k-meeting-card ka-card-primary" onclick="Kpsc.openMeeting('${draft.id}')">
+        <div class="k-mc-top">
+          <div style="flex:1">
+            <div class="k-mc-title" style="font-size:16px">▶ Resume Draft Meeting</div>
+            <div class="k-mc-meta" style="margin-top:6px">
+              <span>${esc(draft.title)}</span>
+              <span>${esc(fmtDate(draft.meetingDate))}</span>
+              ${statusBadge(draft.status)}
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="k-meeting-card ka-card-primary" onclick="Kpsc.startNewMeeting()">
+      <div class="k-mc-top">
+        <div style="flex:1">
+          <div class="k-mc-title" style="font-size:16px">+ Open New Meeting</div>
+          <div class="k-mc-meta" style="margin-top:6px"><span>Start a new KPSC meeting session</span></div>
+        </div>
       </div>
+    </div>`;
+}
 
-      <div class="k-dash-stats">
-        <div class="k-stat"><div class="k-stat-val">₦${Number(S.dashboard?.income || 0).toLocaleString('en-NG')}</div><div class="k-stat-lbl">KPSC Income</div></div>
-        <div class="k-stat"><div class="k-stat-val">₦${Number(S.dashboard?.expense || 0).toLocaleString('en-NG')}</div><div class="k-stat-lbl">KPSC Expense</div></div>
-        <div class="k-stat k-stat-highlight"><div class="k-stat-val">${Number(S.dashboard?.unpaidPartners || 0)}</div><div class="k-stat-lbl">Unpaid Partners</div></div>
+// Renders a simple stat tile (tappable).
+function dashTile({ title, value, sub, badge, onclick, highlight }) {
+  const cls = highlight ? 'k-meeting-card k-stat-highlight' : 'k-meeting-card';
+  const cursor = onclick ? 'cursor:pointer' : 'cursor:default';
+  return `
+    <div class="${cls}" style="${cursor}" ${onclick ? `onclick="${onclick}"` : ''}>
+      <div class="k-mc-top">
+        <div style="flex:1">
+          <div class="k-mc-title">${esc(title)}</div>
+          <div style="font-size:26px;font-weight:700;color:var(--navy);margin:6px 0 2px;line-height:1.1">${value}</div>
+          ${sub ? `<div class="k-mc-meta" style="margin-top:4px"><span>${sub}</span></div>` : ''}
+          ${badge ? `<div style="margin-top:6px">${badge}</div>` : ''}
+        </div>
       </div>
+      <div style="margin-top:10px;font-size:12px;color:var(--navy);font-weight:600">View →</div>
+    </div>`;
+}
 
-      <div class="k-section-hdr">
-        <h2>Recent Meetings</h2>
-        <button class="kbtn kbtn-primary" onclick="Kpsc.startNewMeeting()">+ New Meeting</button>
+// Returns the set of extra dashboard sections (below primary card) for each role.
+function dashboardCardsForRole(role, ctx) {
+  const r = String(role || 'committee_viewer').toLowerCase();
+
+  if (r === 'acting_chairman') {
+    return `
+      ${dashCardOpenMeeting(ctx)}
+      <div class="k-section-hdr" style="margin-top:20px"><h2>At a Glance</h2></div>
+      <div class="k-meeting-list">
+        ${dashTile({
+          title: 'Action Items I Assigned',
+          value: ctx.myOpenActions.length,
+          sub: 'open items not yet done',
+          onclick: "Kpsc.navigate('archive')",
+        })}
+        ${dashTile({
+          title: 'Quorum Status This Month',
+          value: `${ctx.enrolledCount}/${ctx.totalMembers}`,
+          sub: ctx.lastAttendancePct !== null
+            ? `Last meeting: ${ctx.lastAttendancePct}% attended`
+            : 'No meeting attendance yet',
+          onclick: "Kpsc.navigate('members')",
+        })}
+        ${dashTile({
+          title: 'Pending Project Decisions',
+          value: ctx.proposedProjects.length,
+          sub: 'projects proposed, awaiting approval',
+          onclick: "Kpsc.navigate('projects')",
+          highlight: ctx.proposedProjects.length > 0,
+        })}
       </div>
-
-      ${recent.length === 0
-        ? `<div class="k-empty">No meetings yet. Start your first meeting above.</div>`
-        : `<div class="k-meeting-list">${recent.map(m => meetingCard(m)).join('')}</div>`}
-
-      ${recentResolutions.length ? `
+      ${ctx.recentResolutions.length ? `
       <div class="k-section-hdr" style="margin-top:24px">
         <h2>Recent Resolutions</h2>
         <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('archive')">View All</button>
       </div>
       <div class="k-meeting-list">
-        ${recentResolutions.map(r => `
+        ${ctx.recentResolutions.slice(0, 5).map(r2 => `
           <div class="k-meeting-card" style="cursor:default">
-            <div class="k-mc-top">
-              <div style="flex:1">
-                <div style="font-size:13px;color:var(--text2);line-height:1.5">${esc(r.text)}</div>
-                <div class="k-mc-meta" style="margin-top:4px">
-                  <span>${esc(r.meetingTitle)}</span>
-                  <span>${esc(fmtDate(r.meetingDate))}</span>
-                  ${r.approved === true ? '<span class="kbadge badge-green">Approved</span>' : r.approved === false ? '<span class="kbadge badge-red">Rejected</span>' : '<span class="kbadge badge-amber">Pending</span>'}
-                </div>
+            <div class="k-mc-top"><div style="flex:1">
+              <div style="font-size:13px;color:var(--text2);line-height:1.5">${esc(r2.text)}</div>
+              <div class="k-mc-meta" style="margin-top:4px">
+                <span>${esc(r2.meetingTitle)}</span>
+                <span>${esc(fmtDate(r2.meetingDate))}</span>
+                ${r2.approved === true ? '<span class="kbadge badge-green">Approved</span>' : r2.approved === false ? '<span class="kbadge badge-red">Rejected</span>' : '<span class="kbadge badge-amber">Pending</span>'}
               </div>
-            </div>
+            </div></div>
           </div>`).join('')}
-      </div>` : ''}
+      </div>` : ''}`;
+  }
 
-      ${pendingActions.length ? `
+  if (r === 'general_secretary') {
+    return `
+      ${dashCardOpenMeeting(ctx)}
+      <div class="k-section-hdr" style="margin-top:20px"><h2>At a Glance</h2></div>
+      <div class="k-meeting-list">
+        ${ctx.needsReview ? dashTile({
+          title: 'Last Meeting Needs Review',
+          value: esc(ctx.needsReview.title),
+          sub: `Processed ${esc(fmtDate(ctx.needsReview.processedAt || ctx.needsReview.meetingDate))} — AI draft not yet reviewed`,
+          onclick: `Kpsc.openMeeting('${ctx.needsReview.id}')`,
+          highlight: true,
+        }) : ''}
+        ${dashTile({
+          title: 'Drafts Pending Distribution',
+          value: ctx.pendingDistribution.length,
+          sub: 'processed meetings not yet distributed',
+          onclick: "Kpsc.navigate('archive')",
+          highlight: ctx.pendingDistribution.length > 0,
+        })}
+      </div>
+      ${ctx.recentResolutions.length ? `
       <div class="k-section-hdr" style="margin-top:24px">
-        <h2>Pending Action Items</h2>
+        <h2>Recent Resolutions</h2>
         <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('archive')">View All</button>
       </div>
       <div class="k-meeting-list">
-        ${pendingActions.map(a => `
+        ${ctx.recentResolutions.slice(0, 5).map(r2 => `
           <div class="k-meeting-card" style="cursor:default">
-            <div class="k-mc-top">
-              <div style="flex:1">
-                <div style="font-size:13px;color:var(--text2)">${esc(a.task)}</div>
-                <div class="k-mc-meta" style="margin-top:4px">
-                  <span>Owner: ${esc(a.assignee || 'Unassigned')}</span>
-                  ${a.dueDate ? `<span>Due: ${esc(a.dueDate)}</span>` : ''}
-                  <span>${esc(a.meetingTitle)}</span>
-                </div>
+            <div class="k-mc-top"><div style="flex:1">
+              <div style="font-size:13px;color:var(--text2);line-height:1.5">${esc(r2.text)}</div>
+              <div class="k-mc-meta" style="margin-top:4px">
+                <span>${esc(r2.meetingTitle)}</span>
+                <span>${esc(fmtDate(r2.meetingDate))}</span>
+                ${r2.approved === true ? '<span class="kbadge badge-green">Approved</span>' : r2.approved === false ? '<span class="kbadge badge-red">Rejected</span>' : '<span class="kbadge badge-amber">Pending</span>'}
               </div>
-            </div>
+            </div></div>
           </div>`).join('')}
-      </div>` : ''}
+      </div>` : ''}`;
+  }
 
-      ${activeProjects.length ? `
+  if (r === 'financial_secretary' || r === 'treasurer') {
+    return `
+      <div class="k-section-hdr" style="margin-top:4px"><h2>Finance At a Glance</h2></div>
+      <div class="k-meeting-list">
+        ${dashTile({
+          title: 'Unreconciled Bank Items',
+          value: ctx.unreconciledCount,
+          sub: 'income entries this month without a reference',
+          onclick: "Kpsc.navigate('finance')",
+          highlight: ctx.unreconciledCount > 0,
+        })}
+        ${dashTile({
+          title: 'Unpaid Partners This Month',
+          value: ctx.unpaidThisMonth.length,
+          sub: `of ${ctx.activePartners.length} active partners`,
+          onclick: "Kpsc.navigate('reminders')",
+          highlight: ctx.unpaidThisMonth.length > 0,
+        })}
+        <div class="k-meeting-card" style="cursor:pointer" onclick="Kpsc.navigate('finance')">
+          <div class="k-mc-top"><div style="flex:1">
+            <div class="k-mc-title">This Month P&amp;L</div>
+            <div style="margin:6px 0 2px">
+              <div style="font-size:20px;font-weight:700;color:var(--green)">₦${ctx.incomeThisMonth.toLocaleString('en-NG')} <span style="font-size:13px;font-weight:500;color:var(--text3)">income</span></div>
+              <div style="font-size:20px;font-weight:700;color:var(--red)">₦${ctx.expenseThisMonth.toLocaleString('en-NG')} <span style="font-size:13px;font-weight:500;color:var(--text3)">expense</span></div>
+            </div>
+            <div class="k-mc-meta" style="margin-top:4px">
+              <span style="font-weight:600;color:${ctx.incomeThisMonth - ctx.expenseThisMonth >= 0 ? 'var(--green)' : 'var(--red)'}">
+                Net: ₦${Math.abs(ctx.incomeThisMonth - ctx.expenseThisMonth).toLocaleString('en-NG')} ${ctx.incomeThisMonth - ctx.expenseThisMonth >= 0 ? 'surplus' : 'deficit'}
+              </span>
+            </div>
+          </div></div>
+          <div style="margin-top:10px;font-size:12px;color:var(--navy);font-weight:600">View →</div>
+        </div>
+      </div>
+      ${ctx.recentFinance.length ? `
       <div class="k-section-hdr" style="margin-top:24px">
-        <h2>Active Projects</h2>
-        <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('projects')">View All</button>
+        <h2>Recent Finance Entries</h2>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('finance')">View All</button>
       </div>
       <div class="k-meeting-list">
-        ${activeProjects.map(p => `
-          <div class="k-meeting-card" style="cursor:default" onclick="Kpsc.navigate('projects')">
-            <div class="k-mc-top">
-              <div style="flex:1">
-                <div class="k-mc-title">${esc(p.title)}</div>
-                <div class="k-mc-meta">
-                  ${p.estimatedCost ? `<span>₦${Number(p.estimatedCost).toLocaleString('en-NG')}</span>` : ''}
-                  <span class="kbadge badge-amber">In Progress</span>
-                </div>
+        ${ctx.recentFinance.map(e => `
+          <div class="k-meeting-card" style="cursor:default">
+            <div class="k-mc-top"><div style="flex:1">
+              <div class="k-mc-title">${esc(catLabel(e.category))} — ₦${Number(e.amount || 0).toLocaleString('en-NG')}</div>
+              <div class="k-mc-meta" style="margin-top:4px">
+                <span>${esc(fmtDate(e.date))}</span>
+                <span class="kbadge ${e.entryType === 'income' ? 'badge-green' : 'badge-red'}">${esc(e.entryType)}</span>
+                ${e.reference ? `<span>Ref: ${esc(e.reference)}</span>` : ''}
               </div>
-            </div>
+            </div></div>
           </div>`).join('')}
-      </div>` : ''}
+      </div>` : ''}`;
+  }
+
+  // committee_viewer (default)
+  return `
+    <div class="k-section-hdr" style="margin-top:4px"><h2>Committee Overview</h2></div>
+    <div class="k-meeting-list">
+      ${ctx.latestProcessed ? `
+        <div class="k-meeting-card ka-card-primary" onclick="Kpsc.openMeeting('${ctx.latestProcessed.id}')">
+          <div class="k-mc-top"><div style="flex:1">
+            <div class="k-mc-title" style="font-size:15px">Latest Minutes</div>
+            <div class="k-mc-meta" style="margin-top:6px">
+              <span>${esc(ctx.latestProcessed.title)}</span>
+              <span>${esc(fmtDate(ctx.latestProcessed.meetingDate))}</span>
+            </div>
+          </div></div>
+          <div style="margin-top:10px;font-size:12px;color:var(--navy);font-weight:600">View →</div>
+        </div>` : '<div class="k-empty">No processed minutes yet.</div>'}
+      ${dashTile({
+        title: 'Projects in Progress',
+        value: ctx.inProgressProjects.length,
+        sub: ctx.inProgressProjects.slice(0, 3).map(p => esc(p.title)).join(', ') || 'None',
+        onclick: "Kpsc.navigate('projects')",
+      })}
+      ${dashTile({
+        title: 'Partner Progress This Year',
+        value: `${ctx.partnerYearPct}%`,
+        sub: `${ctx.activePartners.length} active partners`,
+        onclick: "Kpsc.navigate('partners')",
+      })}
+    </div>`;
+}
+
+async function renderDashboard(main) {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth() + 1;
+
+  // Load all data needed for any role in parallel
+  const [meetingsRes, settingsRes, dashboardRes, projectsRes, financeRes, partnersRes, paymentsRes] = await Promise.all([
+    apiGet('ai-secretary-meetings'),
+    apiGet('settings'),
+    apiGet(`kpsc-dashboard?year=${year}&month=${month}`),
+    apiGet('kpsc-projects'),
+    apiGet(`kpsc-finance?year=${year}&month=${month}`),
+    apiGet('kpsc-partners'),
+    apiGet(`kpsc-partner-payments?year=${year}`),
+  ]);
+  if (meetingsRes?.error) throw new Error(meetingsRes.error);
+  S.meetings        = Array.isArray(meetingsRes)            ? meetingsRes            : [];
+  S.members         = Array.isArray(settingsRes?.kpsc_members) ? settingsRes.kpsc_members : [];
+  S.dashboard       = dashboardRes?.totals || null;
+  S.projects        = Array.isArray(projectsRes)            ? projectsRes            : [];
+  S.financeEntries  = Array.isArray(financeRes)             ? financeRes             : [];
+  S.partners        = Array.isArray(partnersRes)            ? partnersRes            : [];
+  S.partnerPayments = Array.isArray(paymentsRes)            ? paymentsRes            : [];
+
+  // Load distributed-meeting-ids from settings (stored as JSON string)
+  const rawDistributed = Array.isArray(settingsRes?.kpsc_distributed_meeting_ids)
+    ? settingsRes.kpsc_distributed_meeting_ids
+    : (Array.isArray(S._distributedMeetingIds) ? S._distributedMeetingIds : []);
+  S._distributedMeetingIds = rawDistributed;
+
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const ctx  = buildDashboardContext();
+
+  main.innerHTML = `
+    <div class="k-page">
+      ${dashboardCardsForRole(role, ctx)}
     </div>`;
 }
 
