@@ -127,6 +127,7 @@ export async function onRequest(context) {
       if (method === 'GET'  && !param) return await getKpscPartners(DB);
       if (method === 'POST' && !param) return await createKpscPartner(DB, body);
       if (method === 'PUT'  &&  param) return await updateKpscPartner(DB, param, body);
+      if (method === 'DELETE' && param) return await deleteKpscPartner(DB, param);
     }
     if (route === 'kpsc-partner-payments') {
       if (method === 'GET'  && !param) return await getKpscPartnerPayments(DB, url);
@@ -137,6 +138,7 @@ export async function onRequest(context) {
       if (method === 'GET'  && !param) return await getKpscFinanceEntries(DB, url);
       if (method === 'POST' && !param) return await createKpscFinanceEntry(DB, body);
       if (method === 'PUT'  &&  param) return await updateKpscFinanceEntry(DB, param, body);
+      if (method === 'DELETE' && param) return await deleteKpscFinanceEntry(DB, param);
     }
     if (route === 'kpsc-reminders') {
       if (method === 'GET'  && !param) return await getKpscReminders(DB, url);
@@ -1598,6 +1600,18 @@ async function upsertKpscPartnerPayment(DB, data) {
 
 async function deleteKpscPartnerPayment(DB, id) {
   await DB.prepare(`DELETE FROM kpsc_partner_payments WHERE id=?`).bind(id).run();
+  return ok({ deleted: id });
+}
+
+async function deleteKpscPartner(DB, id) {
+  await DB.prepare(`DELETE FROM kpsc_partner_payments WHERE partner_id=?`).bind(id).run();
+  await DB.prepare(`DELETE FROM kpsc_reminders WHERE partner_id=?`).bind(id).run();
+  await DB.prepare(`DELETE FROM kpsc_partners WHERE id=?`).bind(id).run();
+  return ok({ deleted: id });
+}
+
+async function deleteKpscFinanceEntry(DB, id) {
+  await DB.prepare(`DELETE FROM kpsc_finance_entries WHERE id=?`).bind(id).run();
   return ok({ deleted: id });
 }
 

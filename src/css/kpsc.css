@@ -391,3 +391,64 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-filter{border:1px solid var(--border);background:var(--white);border-radius:999px;padding:6px 11px;font-size:12px;color:var(--text2);cursor:pointer;}
 .k-filter.active{background:var(--navy);border-color:var(--navy);color:#fff;}
 @media (max-width: 720px){.k-review-grid{grid-template-columns:1fr;}}
+
+/* ── PARTNER CONTROLS ──────────────────────────────────────────── */
+.k-partners-controls{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;}
+.k-year-select{width:auto!important;}
+
+/* ── TABS ──────────────────────────────────────────────────────── */
+.k-tabs{display:flex;gap:4px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:3px;}
+.k-tab{padding:6px 14px;border-radius:6px;border:none;background:transparent;font-size:13px;font-weight:500;font-family:'DM Sans',sans-serif;color:var(--text2);cursor:pointer;transition:background .15s,color .15s;}
+.k-tab.active{background:var(--white);color:var(--navy);box-shadow:0 1px 4px rgba(0,0,0,.08);}
+.k-tab:hover:not(.active){background:rgba(255,255,255,.6);}
+
+/* ── PROGRESS BAR ──────────────────────────────────────────────── */
+.k-progress-row{display:flex;align-items:center;gap:8px;margin-top:8px;}
+.k-progress-bar-bg{flex:1;height:6px;background:#e0e0e0;border-radius:3px;overflow:hidden;}
+.k-progress-bar{height:6px;background:var(--navy);border-radius:3px;transition:width .3s;}
+.k-progress-label{font-size:12px;color:var(--text3);white-space:nowrap;flex-shrink:0;}
+
+/* ── 12-MONTH PAYMENT GRID ─────────────────────────────────────── */
+.k-payment-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px;}
+@media(max-width:400px){.k-payment-grid{grid-template-columns:repeat(3,1fr);}}
+.k-pgrid-cell{border-radius:10px;padding:12px 8px;text-align:center;border:1.5px solid transparent;display:flex;flex-direction:column;align-items:center;gap:4px;}
+.k-pgrid-clickable{cursor:pointer;transition:transform .1s,box-shadow .1s;}
+.k-pgrid-clickable:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.1);}
+.k-pgrid-paid{background:#d1fae5;border-color:#6ee7b7;}
+.k-pgrid-unpaid{background:#fee2e2;border-color:#fca5a5;}
+.k-pgrid-future{background:#f3f4f6;border-color:#e5e7eb;opacity:.6;}
+.k-pgrid-month{font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--text3);}
+.k-pgrid-paid .k-pgrid-month{color:#065f46;}
+.k-pgrid-unpaid .k-pgrid-month{color:#991b1b;}
+.k-pgrid-icon{font-size:18px;font-weight:700;line-height:1;}
+.k-pgrid-paid .k-pgrid-icon{color:#059669;}
+.k-pgrid-unpaid .k-pgrid-icon{color:#dc2626;}
+.k-pgrid-future .k-pgrid-icon{color:#9ca3af;}
+
+/* ── DOT GRID (reports) ────────────────────────────────────────── */
+.k-dot-row{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;}
+.k-dot-cell{display:inline-block;width:18px;height:18px;border-radius:50%;}
+.k-dot-paid{background:#059669;}
+.k-dot-unpaid{background:#dc2626;}
+.k-dot-future{background:#d1d5db;}
+.k-dot-legend{display:flex;gap:16px;font-size:12px;color:var(--text3);margin:4px 0 14px;align-items:center;}
+.k-dot-legend span{display:flex;align-items:center;gap:4px;}
+
+/* ── RECONCILIATION TABLE ──────────────────────────────────────── */
+.k-rec-summary{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;}
+.k-rec-chip{display:inline-flex;align-items:center;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:700;}
+.k-rec-matched{background:#d1fae5;color:#065f46;}
+.k-rec-unmatched{background:#fef3c7;color:#92400e;}
+.k-rec-missing{background:#fee2e2;color:#991b1b;}
+.k-rec-table-wrap{overflow-x:auto;margin-bottom:12px;border-radius:8px;border:1px solid var(--border);}
+.k-rec-table{width:100%;border-collapse:collapse;font-size:13px;}
+.k-rec-table th{background:var(--navy-light);color:var(--navy);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);}
+.k-rec-table td{padding:9px 12px;border-bottom:1px solid #f1f5f9;color:var(--text2);}
+.k-rec-table tr:last-child td{border-bottom:none;}
+.k-rec-matched-row td{background:#f0fdf4;}
+.k-rec-unmatched-row td{background:#fffbeb;}
+.k-rec-missing-row td{background:#fef2f2;}
+
+/* ── FINANCE CARD DELETE BUTTON ─────────────────────────────────── */
+.k-meeting-card .kbtn-danger{opacity:.8;}
+.k-meeting-card .kbtn-danger:hover{opacity:1;}

@@ -49,6 +49,11 @@ const S = {
   dashboard: null,
   archiveSearch: '',
   archiveQuickFilter: 'all',
+  partnersYear: new Date().getUTCFullYear(),
+  partnersFilter: 'active',
+  financeYear: new Date().getUTCFullYear(),
+  financeMonth: new Date().getUTCMonth() + 1,
+  reportsYear: new Date().getUTCFullYear(),
 };
 
 // ── AUDIO RECORDER + REALTIME TRANSCRIPTION ───────────────────────
@@ -1194,6 +1199,14 @@ function fmtDate(d) {
   return `${day} ${months[parseInt(m, 10) - 1]} ${y}`;
 }
 
+function fmtDateTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-NG', { day:'numeric', month:'short', year:'numeric' })
+    + ' ' + d.toLocaleTimeString('en-NG', { hour:'2-digit', minute:'2-digit', hour12:true });
+}
+
 function today() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -1456,6 +1469,8 @@ function navigate(page) {
     showToast('You do not have access to that section.', 'warn');
     page = defaultPageForRole();
   }
+  S._partnerDetailId = null;
+  S._partnerDetailYear = null;
   recStop();
   Rec.status = 'idle';
   S.page = page;
@@ -2477,7 +2492,7 @@ function partnerMonthlyPaid(partnerId, month, year = currentYear()) {
 }
 
 async function renderPartners(main) {
-  await loadPartnerData(currentYear());
+  await loadPartnerData(S.partnersYear);
   const canManage = canManagePartners();
   main.innerHTML = `
     <div class="k-page">
@@ -2486,36 +2501,51 @@ async function renderPartners(main) {
         ${canManage ? `<button class="kbtn kbtn-primary" onclick="Kpsc.addPartner()">+ Add Partner</button>` : ''}
       </div>
       <p class="k-page-hint">Track God's Kingdom Partners and Covenant Partners, monthly pledges, and payment progress.</p>
+      <div class="k-partners-controls">
+        <div class="k-tabs">
+          <button class="k-tab ${S.partnersFilter === 'active' ? 'active' : ''}" onclick="Kpsc.setPartnersFilter('active')">Active</button>
+          <button class="k-tab ${S.partnersFilter === 'all' ? 'active' : ''}" onclick="Kpsc.setPartnersFilter('all')">All</button>
+          <button class="k-tab ${S.partnersFilter === 'inactive' ? 'active' : ''}" onclick="Kpsc.setPartnersFilter('inactive')">Inactive</button>
+        </div>
+        <select class="k-input k-input-sm k-year-select" onchange="Kpsc.setPartnersYear(this.value)">
+          ${[currentYear(), currentYear()-1, currentYear()-2].map(y => `<option value="${y}" ${S.partnersYear === y ? 'selected' : ''}>${y}</option>`).join('')}
+        </select>
+      </div>
       <div id="kpsc-partners-list">${renderPartnersList(canManage)}</div>
     </div>`;
 }
 
 function renderPartnersList(canManage) {
-  if (!S.partners.length) return '<div class="k-empty">No partners added yet.</div>';
-  const year = currentYear();
-  return `<div class="k-meeting-list">${S.partners.map(partner => {
+  const year = S.partnersYear;
+  let partners = S.partners;
+  if (S.partnersFilter === 'active') partners = partners.filter(p => p.status === 'active');
+  else if (S.partnersFilter === 'inactive') partners = partners.filter(p => p.status === 'inactive');
+  if (!partners.length) return `<div class="k-empty">No ${S.partnersFilter === 'all' ? '' : S.partnersFilter + ' '}partners found.</div>`;
+  return `<div class="k-meeting-list">${partners.map(partner => {
     const paidMonths = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
     const currentPaid = partnerMonthlyPaid(partner.id, currentMonth(), year);
+    const pct = Math.round((paidMonths / 12) * 100);
     return `
       <div class="k-meeting-card">
         <div class="k-mc-top">
-          <div>
+          <div style="flex:1">
             <div class="k-mc-title">${esc(partner.fullName)}</div>
-            <div class="k-mc-meta">
-              <span>${esc((partner.partnershipType || '').replace(/_/g, ' '))}</span>
-              <span>${paidMonths}/12 paid (${year})</span>
-              <span>${partner.status === 'active' ? 'Active' : 'Inactive'}</span>
+            <div class="k-mc-meta" style="margin-top:4px">
+              <span class="kbadge badge-type">${esc(partnerTypeLabel(partner.partnershipType))}</span>
+              <span class="kbadge ${partner.status === 'active' ? 'badge-green' : 'badge-gray'}">${partner.status === 'active' ? 'Active' : 'Inactive'}</span>
+              <span class="kbadge ${currentPaid ? 'badge-green' : 'badge-amber'}">${currentPaid ? '✓ Paid this month' : 'Unpaid this month'}</span>
+            </div>
+            <div class="k-progress-row">
+              <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
+              <span class="k-progress-label">${paidMonths}/12 months paid (${year})</span>
             </div>
           </div>
-          <div class="k-mc-badges">
-            <span class="kbadge ${currentPaid ? 'badge-green' : 'badge-amber'}">${currentPaid ? 'Paid this month' : 'Unpaid this month'}</span>
-          </div>
         </div>
-        ${canManage ? `
-          <div class="k-room-actions">
-            <button class="kbtn kbtn-sm ${currentPaid ? '' : 'kbtn-primary'}" onclick="Kpsc.togglePartnerMonth('${partner.id}', ${currentMonth()}, ${year}, ${!currentPaid})">${currentPaid ? 'Mark Unpaid' : 'Mark Paid'}</button>
-            <button class="kbtn kbtn-sm" onclick="Kpsc.editPartner('${partner.id}')">Edit</button>
-          </div>` : ''}
+        <div class="k-room-actions" style="flex-wrap:wrap">
+          <button class="kbtn kbtn-sm" onclick="Kpsc.openPartnerDetail('${partner.id}')">📅 View History</button>
+          ${canManage ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.editPartner('${partner.id}')">Edit</button>` : ''}
+          ${canManage ? `<button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.deletePartner('${partner.id}')">Delete</button>` : ''}
+        </div>
       </div>`;
   }).join('')}</div>`;
 }
@@ -2558,6 +2588,16 @@ function showPartnerModal(partner = null) {
           <option value="active" ${(partner?.status || 'active') === 'active' ? 'selected' : ''}>Active</option>
           <option value="inactive" ${(partner?.status || '') === 'inactive' ? 'selected' : ''}>Inactive</option>
         </select>
+        <label class="k-label">Start Date</label>
+        <input id="kp-start-date" type="date" class="k-input" value="${esc(partner?.startDate || today())}" />
+        <label class="k-label">Reminder Preference</label>
+        <select id="kp-reminder-pref" class="k-input">
+          <option value="sms" ${(partner?.reminderPreference || 'sms') === 'sms' ? 'selected' : ''}>SMS</option>
+          <option value="whatsapp" ${(partner?.reminderPreference || '') === 'whatsapp' ? 'selected' : ''}>WhatsApp</option>
+          <option value="none" ${(partner?.reminderPreference || '') === 'none' ? 'selected' : ''}>None</option>
+        </select>
+        <label class="k-label">Notes (private)</label>
+        <textarea id="kp-notes" class="k-input k-textarea" style="min-height:60px">${esc(partner?.notes || '')}</textarea>
       </div>
       <div class="k-modal-footer">
         <button class="kbtn kbtn-primary" onclick="Kpsc.savePartner('${partner?.id || ''}', this)">Save</button>
@@ -2577,6 +2617,9 @@ async function savePartner(id, btn) {
     partnershipType: document.getElementById('kp-type')?.value || 'gods_kingdom_partner',
     monthlyPledge: Number(document.getElementById('kp-pledge')?.value || 0),
     status: document.getElementById('kp-status')?.value || 'active',
+    startDate: document.getElementById('kp-start-date')?.value || '',
+    reminderPreference: document.getElementById('kp-reminder-pref')?.value || 'sms',
+    notes: document.getElementById('kp-notes')?.value.trim() || '',
     createdBy: S.user?.name || '',
   };
   btn.disabled = true;
@@ -2614,15 +2657,124 @@ async function togglePartnerMonth(partnerId, month, year, paid) {
     if (res?.error) { showToast(res.error, 'error'); return; }
   }
   await loadPartnerData(year);
+  if (S._partnerDetailId) {
+    renderPartnerDetail(document.getElementById('kpsc-main'));
+  } else {
+    const list = document.getElementById('kpsc-partners-list');
+    if (list) list.innerHTML = renderPartnersList(canManagePartners());
+  }
+}
+
+function partnerTypeLabel(type) {
+  const map = {
+    gods_kingdom_partner: "God's Kingdom Partner",
+    covenant_partner: 'Covenant Partner',
+  };
+  return map[String(type || '').toLowerCase()] || String(type || '').replace(/_/g, ' ');
+}
+
+function setPartnersFilter(filter) {
+  S.partnersFilter = filter;
   const list = document.getElementById('kpsc-partners-list');
-  if (list) list.innerHTML = renderPartnersList(true);
+  if (list) list.innerHTML = renderPartnersList(canManagePartners());
+  document.querySelectorAll('.k-tab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.k-tab').forEach(b => {
+    if (b.textContent.toLowerCase().startsWith(filter === 'all' ? 'all' : filter === 'active' ? 'active' : 'inactive')) b.classList.add('active');
+  });
+}
+
+async function setPartnersYear(year) {
+  S.partnersYear = Number(year) || currentYear();
+  await loadPartnerData(S.partnersYear);
+  const list = document.getElementById('kpsc-partners-list');
+  if (list) list.innerHTML = renderPartnersList(canManagePartners());
+}
+
+async function deletePartner(id) {
+  if (!confirm('Delete this partner and all their payment records?')) return;
+  const res = await apiDelete(`kpsc-partners/${id}`);
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  await renderPartners(document.getElementById('kpsc-main'));
+  showToast('Partner deleted.', 'success');
+}
+
+async function openPartnerDetail(partnerId) {
+  const main = document.getElementById('kpsc-main');
+  main.innerHTML = '<div class="k-loading">Loading partner history…</div>';
+  document.getElementById('kpsc-back-btn').style.display = '';
+  document.getElementById('kpsc-page-title').textContent = 'Partner History';
+  S._partnerDetailId = partnerId;
+  S._partnerDetailYear = S.partnersYear;
+  await loadPartnerData(S._partnerDetailYear);
+  renderPartnerDetail(main);
+}
+
+function renderPartnerDetail(main) {
+  const partner = S.partners.find(p => p.id === S._partnerDetailId);
+  if (!partner) { main.innerHTML = '<div class="k-page"><div class="k-empty">Partner not found.</div></div>'; return; }
+  const year = S._partnerDetailYear;
+  const canManage = canManagePartners();
+  const months = [1,2,3,4,5,6,7,8,9,10,11,12];
+  const now = new Date();
+  const nowYear = now.getUTCFullYear();
+  const nowMonth = now.getUTCMonth() + 1;
+
+  const gridCells = months.map(m => {
+    const isPaid = partnerMonthlyPaid(partner.id, m, year);
+    const isFuture = year > nowYear || (year === nowYear && m > nowMonth);
+    const cls = isFuture ? 'k-pgrid-cell k-pgrid-future' : isPaid ? 'k-pgrid-cell k-pgrid-paid' : 'k-pgrid-cell k-pgrid-unpaid';
+    const icon = isFuture ? '·' : isPaid ? '✓' : '✗';
+    const clickable = canManage && !isFuture;
+    return `<div class="${cls}${clickable ? ' k-pgrid-clickable' : ''}" title="${monthName(m)}" ${clickable ? `onclick="Kpsc.togglePartnerMonth('${partner.id}', ${m}, ${year}, ${!isPaid})"` : ''}>
+      <span class="k-pgrid-month">${monthName(m).slice(0,3)}</span>
+      <span class="k-pgrid-icon">${icon}</span>
+    </div>`;
+  }).join('');
+
+  const paidCount = months.filter(m => partnerMonthlyPaid(partner.id, m, year)).length;
+  const yearOptions = [nowYear, nowYear-1, nowYear-2].map(y => `<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
+
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-section">
+        <div class="k-section-hdr" style="margin-bottom:8px">
+          <h2>${esc(partner.fullName)}</h2>
+          <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setPartnerDetailYear(this.value)">${yearOptions}</select>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+          <span class="kbadge badge-type">${esc(partnerTypeLabel(partner.partnershipType))}</span>
+          <span class="kbadge ${partner.status === 'active' ? 'badge-green' : 'badge-gray'}">${partner.status === 'active' ? 'Active' : 'Inactive'}</span>
+          ${partner.startDate ? `<span class="kbadge badge-gray">Since ${esc(fmtDate(partner.startDate))}</span>` : ''}
+          ${partner.phone ? `<span class="kbadge badge-gray">📞 ${esc(partner.phone)}</span>` : ''}
+        </div>
+        <div class="k-about-row"><span class="k-about-label">Year</span><span>${year}</span></div>
+        <div class="k-about-row"><span class="k-about-label">Months Paid</span><span>${paidCount} / 12</span></div>
+        <div class="k-about-row"><span class="k-about-label">Progress</span><span>${Math.round((paidCount/12)*100)}%</span></div>
+        ${canManageFinance() ? `<div class="k-about-row"><span class="k-about-label">Monthly Pledge</span><span>₦${Number(partner.monthlyPledge||0).toLocaleString('en-NG')}</span></div>` : ''}
+      </div>
+      <div class="k-section">
+        <h3 class="k-sec-title">${year} Payment Calendar</h3>
+        ${canManage ? `<p class="k-hint" style="margin-bottom:12px">Tap a month to toggle paid/unpaid. Future months are read-only.</p>` : ''}
+        <div class="k-payment-grid">${gridCells}</div>
+      </div>
+      ${partner.notes ? `<div class="k-section"><h3 class="k-sec-title">Notes (private)</h3><p style="font-size:14px;color:var(--text2);line-height:1.65">${esc(partner.notes)}</p></div>` : ''}
+      <div style="margin-top:12px">
+        <button class="kbtn" onclick="Kpsc.navigate('partners')">← Back to Partners</button>
+      </div>
+    </div>`;
+}
+
+async function setPartnerDetailYear(year) {
+  S._partnerDetailYear = Number(year) || currentYear();
+  await loadPartnerData(S._partnerDetailYear);
+  renderPartnerDetail(document.getElementById('kpsc-main'));
 }
 
 async function renderFinance(main) {
-  const year = currentYear();
-  const month = currentMonth();
+  const year = S.financeYear;
+  const month = S.financeMonth;
   const [financeRes, partnersRes] = await Promise.all([
-    apiGet(`kpsc-finance?year=${year}&month=${month}`),
+    apiGet(`kpsc-finance?year=${year}${month ? `&month=${month}` : ''}`),
     apiGet('kpsc-partners'),
   ]);
   if (financeRes?.error) throw new Error(financeRes.error);
@@ -2632,44 +2784,54 @@ async function renderFinance(main) {
   const canManage = canManageFinance();
   const incomeTotal = S.financeEntries.filter(e => e.entryType === 'income').reduce((sum, e) => sum + Number(e.amount || 0), 0);
   const expenseTotal = S.financeEntries.filter(e => e.entryType === 'expense').reduce((sum, e) => sum + Number(e.amount || 0), 0);
+  const net = incomeTotal - expenseTotal;
+  const nowYear = currentYear();
+  const yearOpts = [nowYear, nowYear-1, nowYear-2].map(y=>`<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
+  const monthOpts = [0,1,2,3,4,5,6,7,8,9,10,11,12].map(m=>
+    `<option value="${m}" ${month===m?'selected':''}>${m===0?'All Months':monthName(m)}</option>`
+  ).join('');
+  function catLabel(c) { return String(c || '').replace(/_/g,' ').replace(/\b\w/g, l=>l.toUpperCase()); }
   main.innerHTML = `
     <div class="k-page">
       <div class="k-dash-stats">
-        <div class="k-stat"><div class="k-stat-val">₦${incomeTotal.toLocaleString('en-NG')}</div><div class="k-stat-lbl">${monthName(month)} Income</div></div>
-        <div class="k-stat"><div class="k-stat-val">₦${expenseTotal.toLocaleString('en-NG')}</div><div class="k-stat-lbl">${monthName(month)} Expense</div></div>
-        <div class="k-stat k-stat-highlight"><div class="k-stat-val">₦${(incomeTotal - expenseTotal).toLocaleString('en-NG')}</div><div class="k-stat-lbl">Net</div></div>
+        <div class="k-stat"><div class="k-stat-val">₦${incomeTotal.toLocaleString('en-NG')}</div><div class="k-stat-lbl">Income</div></div>
+        <div class="k-stat"><div class="k-stat-val">₦${expenseTotal.toLocaleString('en-NG')}</div><div class="k-stat-lbl">Expense</div></div>
+        <div class="k-stat ${net >= 0 ? '' : 'k-stat-highlight'}"><div class="k-stat-val" style="color:${net>=0?'var(--green)':'var(--red)'}">₦${Math.abs(net).toLocaleString('en-NG')}</div><div class="k-stat-lbl">${net >= 0 ? 'Net Surplus' : 'Net Deficit'}</div></div>
       </div>
       <div class="k-section-hdr">
         <h2>Finance Entries</h2>
-        ${canManage ? `<button class="kbtn kbtn-primary" onclick="Kpsc.openFinanceModal()">+ New Entry</button>` : ''}
+        <div style="display:flex;gap:8px;align-items:center">
+          <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setFinanceYear(this.value)">${yearOpts}</select>
+          <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setFinanceMonth(this.value)">${monthOpts}</select>
+          ${canManage ? `<button class="kbtn kbtn-primary kbtn-sm" onclick="Kpsc.openFinanceModal()">+ New Entry</button>` : ''}
+        </div>
       </div>
       <div class="k-meeting-list">
         ${S.financeEntries.length ? S.financeEntries.map(e => `
           <div class="k-meeting-card">
             <div class="k-mc-top">
-              <div>
-                <div class="k-mc-title">${esc(e.category)} — ₦${Number(e.amount || 0).toLocaleString('en-NG')}</div>
-                <div class="k-mc-meta">
-                  <span>${esc(e.date)}</span>
-                  <span>${esc(e.entryType)}</span>
-                  <span>${esc(e.paymentMethod || 'N/A')}</span>
+              <div style="flex:1">
+                <div class="k-mc-title">${esc(catLabel(e.category))} — ₦${Number(e.amount || 0).toLocaleString('en-NG')}</div>
+                <div class="k-mc-meta" style="margin-top:4px">
+                  <span>${esc(fmtDate(e.date))}</span>
+                  <span class="kbadge ${e.entryType==='income'?'badge-green':'badge-red'}">${esc(e.entryType)}</span>
+                  ${e.paymentMethod ? `<span class="kbadge badge-gray">${esc(e.paymentMethod.replace(/_/g,' '))}</span>` : ''}
                 </div>
+                ${e.narration ? `<div class="k-page-hint" style="margin-top:6px">${esc(e.narration)}</div>` : ''}
+                ${e.reference ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Ref: ${esc(e.reference)}</div>` : ''}
+                ${e.partnerName ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Partner: ${esc(e.partnerName)}</div>` : ''}
+                ${e.recordedBy ? `<div style="font-size:11px;color:var(--text3)">Recorded by: ${esc(e.recordedBy)}</div>` : ''}
               </div>
-              <span class="kbadge ${e.entryType === 'income' ? 'badge-green' : 'badge-red'}">${esc(e.entryType)}</span>
+              ${canManage ? `<button class="kbtn kbtn-sm kbtn-danger" style="flex-shrink:0;align-self:flex-start" onclick="Kpsc.deleteFinanceEntry('${e.id}')">🗑</button>` : ''}
             </div>
-            <div class="k-mc-meta">
-              ${e.reference ? `<span>Ref: ${esc(e.reference)}</span>` : ''}
-              ${e.narration ? `<span>${esc(e.narration)}</span>` : ''}
-              ${e.partnerName ? `<span>Partner: ${esc(e.partnerName)}</span>` : ''}
-            </div>
-          </div>`).join('') : '<div class="k-empty">No entries for this month.</div>'}
+          </div>`).join('') : '<div class="k-empty">No entries for the selected period.</div>'}
       </div>
       ${canManage ? `
       <div class="k-section" style="margin-top:16px">
         <h3 class="k-sec-title">Bank Reconciliation (AI-assisted)</h3>
-        <p class="k-hint">Paste statement items as JSON array. The system suggests matches; review before approval.</p>
+        <p class="k-hint">Paste bank statement items as a JSON array. Each item needs date, amount, type (income/expense), and optional reference. The system suggests matches against recorded entries — always review before approving.</p>
         <textarea id="krec-items" class="k-input k-textarea" placeholder='Paste statement JSON items here'></textarea>
-        <p class="k-hint">Example item: {"date":"YYYY-MM-DD","amount":1000,"type":"income","reference":"TRX123"}</p>
+        <p class="k-hint">Example: [{"date":"${year}-01-05","amount":5000,"type":"income","reference":"TRF001"}]</p>
         <div class="k-room-actions" style="margin-top:10px">
           <button class="kbtn kbtn-primary" onclick="Kpsc.runReconciliation(this)">Run Reconciliation</button>
         </div>
@@ -2678,8 +2840,16 @@ async function renderFinance(main) {
     </div>`;
 }
 
-function openFinanceModal() {
+async function openFinanceModal(entryToEdit = null) {
   document.getElementById('kpsc-finance-modal')?.remove();
+  const settingsRes = await apiGet('settings');
+  const incomeCategories = Array.isArray(settingsRes?.kpsc_income_categories) ? settingsRes.kpsc_income_categories : ['partnership_payment','one_time_donation','wealth_development_offering','other_income'];
+  const expenseCategories = Array.isArray(settingsRes?.kpsc_expense_categories) ? settingsRes.kpsc_expense_categories : ['projects','welfare','rent','church_support','committee_operations'];
+
+  function catLabel(c) { return String(c || '').replace(/_/g,' ').replace(/\b\w/g, l=>l.toUpperCase()); }
+  const incomeOpts = incomeCategories.map(c=>`<option value="${esc(c)}">${esc(catLabel(c))}</option>`).join('');
+  const expenseOpts = expenseCategories.map(c=>`<option value="${esc(c)}">${esc(catLabel(c))}</option>`).join('');
+
   const modal = document.createElement('div');
   modal.id = 'kpsc-finance-modal';
   modal.className = 'k-modal-overlay';
@@ -2690,25 +2860,47 @@ function openFinanceModal() {
         <label class="k-label">Date</label>
         <input id="kf-date" type="date" class="k-input" value="${new Date().toISOString().slice(0, 10)}" />
         <label class="k-label">Entry Type</label>
-        <select id="kf-type" class="k-input"><option value="income">Income</option><option value="expense">Expense</option></select>
+        <select id="kf-type" class="k-input" onchange="Kpsc.updateFinanceCategoryOptions()">
+          <option value="income">Income</option>
+          <option value="expense">Expense</option>
+        </select>
         <label class="k-label">Category</label>
-        <input id="kf-category" class="k-input" placeholder="e.g. wealth_development_offering, projects" />
-        <label class="k-label">Amount</label>
-        <input id="kf-amount" type="number" min="0" class="k-input" />
+        <select id="kf-category" class="k-input">
+          ${incomeOpts}
+        </select>
+        <label class="k-label">Amount (₦)</label>
+        <input id="kf-amount" type="number" min="0" class="k-input" placeholder="0" />
         <label class="k-label">Payment Method</label>
-        <input id="kf-method" class="k-input" placeholder="cash, transfer, POS..." />
+        <select id="kf-method" class="k-input">
+          <option value="cash">Cash</option>
+          <option value="bank_transfer">Bank Transfer</option>
+          <option value="pos">POS</option>
+          <option value="cheque">Cheque</option>
+          <option value="other">Other</option>
+        </select>
         <label class="k-label">Reference</label>
-        <input id="kf-ref" class="k-input" />
+        <input id="kf-ref" class="k-input" placeholder="e.g. receipt number, transaction ID" />
         <label class="k-label">Narration</label>
-        <textarea id="kf-note" class="k-input k-textarea"></textarea>
+        <textarea id="kf-note" class="k-input k-textarea" style="min-height:70px" placeholder="Brief description of this transaction…"></textarea>
       </div>
       <div class="k-modal-footer"><button class="kbtn kbtn-primary" onclick="Kpsc.saveFinanceEntry(this)">Save Entry</button></div>
     </div>`;
   document.body.appendChild(modal);
+  modal._incomeOpts = incomeOpts;
+  modal._expenseOpts = expenseOpts;
 }
 
 function closeFinanceModal() {
   document.getElementById('kpsc-finance-modal')?.remove();
+}
+
+function updateFinanceCategoryOptions() {
+  const modal = document.getElementById('kpsc-finance-modal');
+  if (!modal) return;
+  const type = document.getElementById('kf-type')?.value;
+  const cat = document.getElementById('kf-category');
+  if (!cat) return;
+  cat.innerHTML = type === 'expense' ? modal._expenseOpts : modal._incomeOpts;
 }
 
 async function saveFinanceEntry(btn) {
@@ -2731,6 +2923,24 @@ async function saveFinanceEntry(btn) {
   closeFinanceModal();
   await renderFinance(document.getElementById('kpsc-main'));
   showToast('Finance entry saved', 'success');
+}
+
+async function setFinanceYear(year) {
+  S.financeYear = Number(year) || currentYear();
+  await renderFinance(document.getElementById('kpsc-main'));
+}
+
+async function setFinanceMonth(month) {
+  S.financeMonth = Number(month) || 0;
+  await renderFinance(document.getElementById('kpsc-main'));
+}
+
+async function deleteFinanceEntry(id) {
+  if (!confirm('Delete this finance entry?')) return;
+  const res = await apiDelete(`kpsc-finance/${id}`);
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  await renderFinance(document.getElementById('kpsc-main'));
+  showToast('Entry deleted.', 'success');
 }
 
 async function runReconciliation(btn) {
@@ -2759,10 +2969,64 @@ async function runReconciliation(btn) {
   }
   const out = document.getElementById('krec-result');
   if (out) {
+    const s = res.summary || {};
+    const matches = Array.isArray(res.matches) ? res.matches : [];
+    const unmatchedSt = Array.isArray(res.unmatchedStatement) ? res.unmatchedStatement : [];
+    const unmatchedFin = Array.isArray(res.unmatchedFinance) ? res.unmatchedFinance : [];
+    function catLabel(c) { return String(c || '').replace(/_/g,' ').replace(/\b\w/g, l=>l.toUpperCase()); }
     out.innerHTML = `
-      <div class="k-summary" style="margin-top:12px">
-        Matched: ${res.summary?.matchedCount || 0}, Unmatched statement: ${res.summary?.unmatchedStatementCount || 0}, Unmatched records: ${res.summary?.unmatchedFinanceCount || 0}.
-      </div>`;
+      <div class="k-rec-summary">
+        <span class="k-rec-chip k-rec-matched">✓ ${s.matchedCount || 0} Matched</span>
+        <span class="k-rec-chip k-rec-unmatched">⚠ ${s.unmatchedStatementCount || 0} Statement unmatched</span>
+        <span class="k-rec-chip k-rec-missing">✗ ${s.unmatchedFinanceCount || 0} Records unmatched</span>
+      </div>
+      ${matches.length ? `
+        <h4 class="k-sec-title" style="margin:12px 0 8px">Matched Items</h4>
+        <div class="k-rec-table-wrap">
+          <table class="k-rec-table">
+            <thead><tr><th>Statement Date</th><th>Amount</th><th>Type</th><th>Ref</th><th>Matched Record</th></tr></thead>
+            <tbody>${matches.map(m=>`
+              <tr class="k-rec-matched-row">
+                <td>${esc(m.statementItem?.date||'')}</td>
+                <td>₦${Number(m.statementItem?.amount||0).toLocaleString('en-NG')}</td>
+                <td>${esc(m.statementItem?.type||'')}</td>
+                <td>${esc(m.statementItem?.reference||'—')}</td>
+                <td>${esc(fmtDate(m.financeEntry?.date||''))} — ${esc(m.financeEntry?.narration||m.financeEntry?.reference||'—')}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>` : ''}
+      ${unmatchedSt.length ? `
+        <h4 class="k-sec-title" style="margin:12px 0 8px;color:var(--amber)">Unmatched Statement Items</h4>
+        <div class="k-rec-table-wrap">
+          <table class="k-rec-table">
+            <thead><tr><th>Date</th><th>Amount</th><th>Type</th><th>Reference</th></tr></thead>
+            <tbody>${unmatchedSt.map(i=>`
+              <tr class="k-rec-unmatched-row">
+                <td>${esc(i.date||'')}</td>
+                <td>₦${Number(i.amount||0).toLocaleString('en-NG')}</td>
+                <td>${esc(i.type||'')}</td>
+                <td>${esc(i.reference||'—')}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>` : ''}
+      ${unmatchedFin.length ? `
+        <h4 class="k-sec-title" style="margin:12px 0 8px;color:var(--red)">Records with No Statement Match</h4>
+        <div class="k-rec-table-wrap">
+          <table class="k-rec-table">
+            <thead><tr><th>Date</th><th>Amount</th><th>Type</th><th>Reference/Narration</th></tr></thead>
+            <tbody>${unmatchedFin.map(i=>`
+              <tr class="k-rec-missing-row">
+                <td>${esc(fmtDate(i.date||''))}</td>
+                <td>₦${Number(i.amount||0).toLocaleString('en-NG')}</td>
+                <td>${esc(i.type||'')}</td>
+                <td>${esc(i.reference||i.narration||'—')}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>` : ''}
+      <p class="k-hint" style="margin-top:12px">⚠️ AI reconciliation result requires officer review and confirmation before filing. Confidence scores are approximate.</p>`;
   }
 }
 
@@ -2780,26 +3044,65 @@ async function renderReminders(main) {
   main.innerHTML = `
     <div class="k-page">
       <div class="k-section">
-        <h3 class="k-sec-title">Partner Reminder Workflow</h3>
+        <h3 class="k-sec-title">Partner Reminder Workflow — ${monthName(month)} ${year}</h3>
         <p class="k-hint">${unpaid.length} unpaid active partner(s) for ${monthName(month)} ${year}.</p>
+        <label class="k-label">Reminder Message Template</label>
         <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message">${esc(defaultTemplate)}</textarea>
+        <p class="k-hint">Use <code>{{name}}</code> for partner name and <code>{{month}}</code> for month name.</p>
         <div class="k-room-actions" style="margin-top:10px">
-          <button class="kbtn kbtn-primary" onclick="Kpsc.sendBulkReminders(this)">Send Bulk SMS Reminders</button>
+          <button class="kbtn kbtn-primary" onclick="Kpsc.sendBulkReminders(this)">Send Bulk Reminders (${unpaid.length})</button>
         </div>
       </div>
+
+      ${unpaid.length ? `
+      <div class="k-section">
+        <h3 class="k-sec-title">Unpaid Partners — Quick Copy</h3>
+        <p class="k-hint">Copy individual messages for WhatsApp or SMS.</p>
+        <div class="k-meeting-list">
+          ${unpaid.map(p => `
+            <div class="k-meeting-card" style="cursor:default">
+              <div class="k-mc-top">
+                <div style="flex:1">
+                  <div class="k-mc-title">${esc(p.fullName)}</div>
+                  <div class="k-mc-meta">
+                    <span class="kbadge badge-type">${esc(partnerTypeLabel(p.partnershipType))}</span>
+                    ${p.phone ? `<span>📞 ${esc(p.phone)}</span>` : ''}
+                    <span class="kbadge badge-gray">${esc(p.reminderPreference || 'sms')}</span>
+                  </div>
+                </div>
+                <button class="kbtn kbtn-sm" onclick="Kpsc.copyReminderMessage('${esc(p.id)}')">📋 Copy</button>
+              </div>
+            </div>`).join('')}
+        </div>
+      </div>` : `<div class="k-section"><div class="k-empty">🎉 All active partners have paid for ${monthName(month)} ${year}!</div></div>`}
+
       <div class="k-section-hdr"><h2>Reminder History</h2></div>
       <div class="k-meeting-list">
         ${S.reminders.length ? S.reminders.map(r => `
-          <div class="k-meeting-card">
+          <div class="k-meeting-card" style="cursor:default">
             <div class="k-mc-top">
               <div class="k-mc-title">${esc(r.partnerName || 'Partner')}</div>
               <span class="kbadge badge-blue">${esc(r.channel || 'sms')}</span>
             </div>
-            <div class="k-mc-meta"><span>${esc(r.createdAt || '')}</span><span>${esc(r.status || '')}</span></div>
-            <div class="k-page-hint">${esc(r.message)}</div>
+            <div class="k-mc-meta"><span>${esc(fmtDateTime(r.createdAt))}</span><span class="kbadge badge-green">${esc(r.status || 'sent')}</span>${r.sentBy ? `<span>by ${esc(r.sentBy)}</span>` : ''}</div>
+            <div class="k-page-hint" style="margin-top:6px;font-size:13px">${esc(r.message)}</div>
           </div>`).join('') : '<div class="k-empty">No reminders sent this month.</div>'}
       </div>
     </div>`;
+}
+
+function copyReminderMessage(partnerId) {
+  const partner = S.partners.find(p => p.id === partnerId);
+  if (!partner) return;
+  const template = document.getElementById('krem-message')?.value.trim() || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge.';
+  const message = template
+    .replace(/\{\{name\}\}/g, partner.fullName)
+    .replace(/\{\{month\}\}/g, monthName(currentMonth()));
+  navigator.clipboard.writeText(message).then(() => {
+    showToast(`Reminder copied for ${partner.fullName}`, 'success');
+  }).catch(() => {
+    showToast('Could not copy. Please copy manually.', 'warn');
+  });
 }
 
 async function sendBulkReminders(btn) {
@@ -2836,32 +3139,68 @@ async function sendBulkReminders(btn) {
 }
 
 async function renderReports(main) {
-  await loadPartnerData(currentYear());
-  const year = currentYear();
+  const year = S.reportsYear;
+  await loadPartnerData(year);
   const month = currentMonth();
-  const progressRows = S.partners.filter(p => p.status === 'active').map(partner => {
+  const nowYear = currentYear();
+  const yearOpts = [nowYear, nowYear-1, nowYear-2].map(y=>`<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
+
+  const activePartners = S.partners.filter(p => p.status === 'active');
+  const allPaidThisMonth = activePartners.filter(p => partnerMonthlyPaid(p.id, month, year)).length;
+  const allUnpaidThisMonth = activePartners.length - allPaidThisMonth;
+  const months = [1,2,3,4,5,6,7,8,9,10,11,12];
+
+  const progressRows = activePartners.map(partner => {
     const monthsPaid = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
-    const paidPercent = Math.round((monthsPaid / 12) * 100);
+    const pct = Math.round((monthsPaid / 12) * 100);
+    const dotRow = months.map(m => {
+      const isPaid = partnerMonthlyPaid(partner.id, m, year);
+      const isFuture = year > nowYear || (year === nowYear && m > month);
+      return `<span class="k-dot-cell ${isPaid ? 'k-dot-paid' : isFuture ? 'k-dot-future' : 'k-dot-unpaid'}" title="${monthName(m)}: ${isPaid ? 'Paid' : isFuture ? 'Future' : 'Unpaid'}"></span>`;
+    }).join('');
     return `
-      <div class="k-meeting-card">
+      <div class="k-meeting-card" style="cursor:default">
         <div class="k-mc-top">
-          <div class="k-mc-title">${esc(partner.fullName)}</div>
-          <span class="kbadge badge-type">${esc((partner.partnershipType || '').replace(/_/g, ' '))}</span>
-        </div>
-        <div class="k-mc-meta">
-          <span>${monthsPaid}/12 months paid</span>
-          <span>${paidPercent}% progress</span>
-          <span>${partnerMonthlyPaid(partner.id, month, year) ? 'Paid this month' : 'Unpaid this month'}</span>
+          <div style="flex:1">
+            <div class="k-mc-title">${esc(partner.fullName)}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+              <span class="kbadge badge-type">${esc(partnerTypeLabel(partner.partnershipType))}</span>
+              <span class="kbadge ${partnerMonthlyPaid(partner.id, month, year) ? 'badge-green' : 'badge-amber'}">${partnerMonthlyPaid(partner.id, month, year) ? '✓ Current' : 'Unpaid'}</span>
+            </div>
+            <div class="k-dot-row" style="margin-top:8px">${dotRow}</div>
+            <div class="k-progress-row">
+              <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
+              <span class="k-progress-label">${monthsPaid}/12 (${pct}%)</span>
+            </div>
+          </div>
         </div>
       </div>`;
   }).join('');
 
   main.innerHTML = `
     <div class="k-page">
-      <div class="k-section-hdr"><h2>Partner Progress (${year})</h2></div>
-      <p class="k-page-hint">Public/internal progress view — pledge amounts are hidden by design.</p>
+      <div class="k-section-hdr">
+        <h2>Partner Progress Report</h2>
+        <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setReportsYear(this.value)">${yearOpts}</select>
+      </div>
+      <p class="k-page-hint">Progress view — pledge amounts are private and not shown here.</p>
+      <div class="k-dash-stats">
+        <div class="k-stat"><div class="k-stat-val">${activePartners.length}</div><div class="k-stat-lbl">Active Partners</div></div>
+        <div class="k-stat"><div class="k-stat-val">${allPaidThisMonth}</div><div class="k-stat-lbl">Paid This Month</div></div>
+        <div class="k-stat k-stat-highlight"><div class="k-stat-val">${allUnpaidThisMonth}</div><div class="k-stat-lbl">Unpaid This Month</div></div>
+      </div>
+      <div class="k-dot-legend">
+        <span><span class="k-dot-cell k-dot-paid"></span> Paid</span>
+        <span><span class="k-dot-cell k-dot-unpaid"></span> Unpaid</span>
+        <span><span class="k-dot-cell k-dot-future"></span> Future</span>
+      </div>
       <div class="k-meeting-list">${progressRows || '<div class="k-empty">No active partners available.</div>'}</div>
     </div>`;
+}
+
+async function setReportsYear(year) {
+  S.reportsYear = Number(year) || currentYear();
+  await renderReports(document.getElementById('kpsc-main'));
 }
 
 function archiveQuickFilters() {
@@ -3118,10 +3457,34 @@ async function renderSettings(main) {
   const policyNotes = res?.kpsc_policy_notes || '';
   const hasDeepseek = !!deepseekKey;
   const hasOpenai   = !!openaiKey;
+  const reminderTemplate = res?.kpsc_reminder_template || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge. God bless you.';
+  const incomeCategories = Array.isArray(res?.kpsc_income_categories) ? res.kpsc_income_categories.join('\n') : '';
+  const expenseCategories = Array.isArray(res?.kpsc_expense_categories) ? res.kpsc_expense_categories.join('\n') : '';
 
   main.innerHTML = `
     <div class="k-page">
       ${renderKpscAccountsCard(S.accounts)}
+      <div class="k-card" style="margin-bottom:16px">
+        <h2 class="k-card-title">KPSC Operations Settings</h2>
+        <p class="k-card-sub">Configure partnership categories, finance categories, and reminder templates for the KPSC portal.</p>
+        <div class="k-form-group">
+          <label class="k-label">SMS/WhatsApp Reminder Template</label>
+          <textarea id="ks-reminder-template" class="k-input k-textarea" style="min-height:80px">${esc(reminderTemplate)}</textarea>
+          <p class="k-hint">Use <code>{{name}}</code> for partner name and <code>{{month}}</code> for month name.</p>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">Income Categories (one per line)</label>
+          <textarea id="ks-income-cats" class="k-input k-textarea" style="min-height:100px">${esc(incomeCategories)}</textarea>
+          <p class="k-hint">e.g. partnership_payment, one_time_donation, wealth_development_offering, other_income</p>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">Expense Categories (one per line)</label>
+          <textarea id="ks-expense-cats" class="k-input k-textarea" style="min-height:100px">${esc(expenseCategories)}</textarea>
+          <p class="k-hint">e.g. projects, welfare, rent, church_support, committee_operations</p>
+        </div>
+        <div id="ks-ops-save-msg" class="k-settings-msg" style="display:none"></div>
+        <button class="kbtn kbtn-primary" onclick="Kpsc.saveKpscOpsSettings()">Save Operations Settings</button>
+      </div>
       <div class="k-card">
         <h2 class="k-card-title">AI Provider Keys</h2>
         <p class="k-card-sub">
@@ -3249,6 +3612,29 @@ async function clearAiKeys() {
   await renderSettings(document.getElementById('kpsc-main'));
 }
 
+async function saveKpscOpsSettings() {
+  const msg = document.getElementById('ks-ops-save-msg');
+  const template = document.getElementById('ks-reminder-template')?.value.trim() || '';
+  const incomeText = document.getElementById('ks-income-cats')?.value || '';
+  const expenseText = document.getElementById('ks-expense-cats')?.value || '';
+  const incomeCategories = incomeText.split(/[\n,]/).map(s=>s.trim().toLowerCase().replace(/\s+/g,'_')).filter(Boolean);
+  const expenseCategories = expenseText.split(/[\n,]/).map(s=>s.trim().toLowerCase().replace(/\s+/g,'_')).filter(Boolean);
+  const res = await apiPost('settings', {
+    kpsc_reminder_template: template,
+    kpsc_income_categories: incomeCategories,
+    kpsc_expense_categories: expenseCategories,
+  });
+  if (res?.error) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = res.error;
+  } else {
+    msg.className = 'k-settings-msg k-msg-ok';
+    msg.textContent = 'Operations settings saved.';
+  }
+  msg.style.display = 'block';
+  setTimeout(() => { if(msg) msg.style.display = 'none'; }, 3000);
+}
+
 // ── BOOT ──────────────────────────────────────────────────────────
 function init() {
   const session = loadSession();
@@ -3287,11 +3673,24 @@ window.Kpsc = {
   closePartnerModal,
   savePartner,
   togglePartnerMonth,
+  setPartnersFilter,
+  setPartnersYear,
+  deletePartner,
+  openPartnerDetail,
+  setPartnerDetailYear,
   openFinanceModal,
   closeFinanceModal,
   saveFinanceEntry,
+  updateFinanceCategoryOptions,
+  setFinanceYear,
+  setFinanceMonth,
+  deleteFinanceEntry,
   runReconciliation,
   sendBulkReminders,
+  copyReminderMessage,
+  setReportsYear,
+  saveKpscOpsSettings,
+  partnerTypeLabel,
   filterArchive,
   setArchiveQuickFilter,
   openAccountEditor,
