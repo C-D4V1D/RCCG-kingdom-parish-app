@@ -2187,8 +2187,71 @@ function archiveList(meetings, q) {
 }
 
 // ── SETTINGS ──────────────────────────────────────────────────────
+
+function apiStatusPill(status) {
+  if (!status || status.error) return '<span class="k-api-pill k-api-unknown">Check failed</span>';
+  if (status.active || status.configured) return '<span class="k-api-pill k-api-active">Active</span>';
+  return '<span class="k-api-pill k-api-missing">Not set</span>';
+}
+
+function renderApiStatusCard(apiStatus) {
+  const live = apiStatus?.liveTranscription || {};
+  const dg = apiStatus?.diarization || {};
+  const azure = apiStatus?.speakerRecognition || {};
+  return `
+    <div class="k-api-status-card ${live.active ? 'k-api-card-active' : 'k-api-card-missing'}">
+      <div class="k-api-status-head">
+        <div>
+          <div class="k-api-title">Live Transcription API Status</div>
+          <div class="k-api-sub">Server-side check from Cloudflare environment variables.</div>
+        </div>
+        ${apiStatusPill(live)}
+      </div>
+      <div class="k-api-status-grid">
+        <div class="k-api-status-row">
+          <span class="k-api-label">OpenAI transcription</span>
+          <span>${apiStatusPill(live)} <code>${esc(live.keyName || 'OPENAI_API_KEY')}</code> ${live.masked ? `<small>${esc(live.masked)}</small>` : ''}</span>
+        </div>
+        <div class="k-api-status-row">
+          <span class="k-api-label">Model</span>
+          <span><code>${esc(live.model || 'gpt-4o-transcribe')}</code></span>
+        </div>
+        <div class="k-api-status-row">
+          <span class="k-api-label">Speaker diarization</span>
+          <span>${apiStatusPill(dg)} <code>${esc(dg.keyName || 'DEEPGRAM_API_KEY')}</code></span>
+        </div>
+        <div class="k-api-status-row">
+          <span class="k-api-label">Voice recognition</span>
+          <span>${apiStatusPill(azure)} <code>${esc(azure.keyName || 'AZURE_SPEAKER_KEY')}</code> <small>Region: ${esc(azure.region || 'eastus')}</small></span>
+        </div>
+      </div>
+      <p class="k-api-message">${esc(live.message || apiStatus?.error || 'Status unavailable.')}</p>
+      <button class="kbtn kbtn-sm" onclick="Kpsc.refreshApiStatus(this)">Refresh API Status</button>
+    </div>`;
+}
+
+async function refreshApiStatus(btn) {
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  const panel = document.getElementById('k-api-status-panel');
+  try {
+    const status = await apiGet('settings/api-status');
+    if (panel) panel.innerHTML = renderApiStatusCard(status);
+    showToast(status?.liveTranscription?.active ? 'OpenAI transcription key is active.' : 'OpenAI transcription key is missing.', status?.liveTranscription?.active ? 'success' : 'warn');
+  } catch {
+    showToast('Could not check API status.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
 async function renderSettings(main) {
-  const res = await apiGet('settings');
+  const [res, apiStatus] = await Promise.all([
+    apiGet('settings'),
+    apiGet('settings/api-status').catch(() => ({ error: 'Could not check API status.' })),
+  ]);
   const deepseekKey = res?.ai_deepseek_key || '';
   const openaiKey   = res?.ai_openai_key   || '';
   const policyUrl   = res?.kpsc_policy_url  || '';
@@ -2249,6 +2312,7 @@ async function renderSettings(main) {
           <strong>Cloudflare Pages environment variables</strong> by the IT Administrator —
           they are not stored in this settings page.
         </p>
+        <div id="k-api-status-panel">${renderApiStatusCard(apiStatus)}</div>
         <div class="k-env-row">
           <code class="k-env-key">OPENAI_API_KEY</code>
           <span class="k-env-desc">Powers live interim transcription (OpenAI gpt-4o-transcribe via WebRTC). Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a>.</span>
@@ -2353,6 +2417,7 @@ window.Kpsc = {
   setArchiveQuickFilter,
   saveSettings,
   clearAiKeys,
+  refreshApiStatus,
   updateAttGroup,
   recStart,
   recPause,

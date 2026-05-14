@@ -167,6 +167,7 @@ export async function onRequest(context) {
 
     // ── /api/settings ──────────────────────────────────────────
     if (route === 'settings') {
+      if (method === 'GET'  && param === 'api-status') return getApiStatus(env);
       if (method === 'GET'  && !param) return await getSettings(DB);
       if (method === 'POST' && !param) return await saveSettings(DB, body);
     }
@@ -1079,6 +1080,41 @@ async function createAuditEntry(DB, data) {
 }
 
 // ── SETTINGS ──────────────────────────────────────────────────────
+
+function maskedKeyStatus(value) {
+  const key = String(value || '').trim();
+  if (!key) return { configured: false, masked: '', message: 'Missing' };
+  const start = key.slice(0, 5);
+  const end = key.length > 9 ? key.slice(-4) : '';
+  return { configured: true, masked: `${start}…${end}`, message: 'Configured' };
+}
+
+function getApiStatus(env) {
+  const openai = maskedKeyStatus(env.OPENAI_API_KEY);
+  return ok({
+    liveTranscription: {
+      configured: openai.configured,
+      active: openai.configured,
+      provider: 'OpenAI',
+      model: OPENAI_REALTIME_TRANSCRIPTION_MODEL,
+      keyName: 'OPENAI_API_KEY',
+      masked: openai.masked,
+      message: openai.configured
+        ? `OPENAI_API_KEY is configured. Live transcription will use ${OPENAI_REALTIME_TRANSCRIPTION_MODEL}.`
+        : 'OPENAI_API_KEY is missing. Add it in Cloudflare Pages → Settings → Environment Variables.',
+    },
+    diarization: {
+      ...maskedKeyStatus(env.DEEPGRAM_API_KEY),
+      keyName: 'DEEPGRAM_API_KEY',
+    },
+    speakerRecognition: {
+      ...maskedKeyStatus(env.AZURE_SPEAKER_KEY),
+      keyName: 'AZURE_SPEAKER_KEY',
+      region: String(env.AZURE_SPEAKER_REGION || 'eastus').trim(),
+    },
+  });
+}
+
 async function getSettings(DB) {
   const { results } = await DB.prepare(`SELECT key,value FROM settings`).all();
   const out = {};

@@ -640,3 +640,37 @@ test('AI secretary meeting update persists reviewed minutes corrections', async 
   assert.equal(body.actionItems[0].assignee, 'Treasurer');
   assert.equal(body.policyFlags[0].type, 'manual_review');
 });
+
+test('settings api-status reports configured realtime API keys without exposing secrets', async () => {
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/settings/api-status', 'GET'),
+    env: {
+      DB: createDBMock({ onPrepare: () => ({}) }),
+      OPENAI_API_KEY: 'sk-test-openai-secret',
+      DEEPGRAM_API_KEY: 'dg-test-secret',
+      AZURE_SPEAKER_KEY: 'az-test-secret',
+      AZURE_SPEAKER_REGION: 'westeurope'
+    }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.liveTranscription.active, true);
+  assert.equal(body.liveTranscription.model, 'gpt-4o-transcribe');
+  assert.equal(body.liveTranscription.keyName, 'OPENAI_API_KEY');
+  assert.equal(body.liveTranscription.masked.includes('secret'), false);
+  assert.equal(body.diarization.configured, true);
+  assert.equal(body.speakerRecognition.region, 'westeurope');
+});
+
+test('settings api-status reports missing realtime API key', async () => {
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/settings/api-status', 'GET'),
+    env: { DB: createDBMock({ onPrepare: () => ({}) }) }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.liveTranscription.active, false);
+  assert.match(body.liveTranscription.message, /OPENAI_API_KEY is missing/);
+});
