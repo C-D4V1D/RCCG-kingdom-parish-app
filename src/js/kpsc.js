@@ -89,6 +89,7 @@ const Diarizer = {
   reconnectTimer: null,
   reconnectAttempts: 0,
   manualStop: false,
+  _connecting: false, // guard against concurrent diarizerConnect() invocations
   // PCM ring buffer — raw Float32 samples from the AudioWorklet, used to
   // extract per-speaker audio slices for Azure Speaker Recognition.
   pcmChunks: [],        // Array of {offset: number, data: Float32Array}
@@ -717,101 +718,107 @@ function diarizerExtractSpeakerTurns(words) {
 
 async function diarizerConnect() {
   if (!Rec.stream || Diarizer.manualStop) return;
-  diarizerClose(false);
-  Diarizer.status = Diarizer.reconnectAttempts > 0 ? 'reconnecting' : 'connecting';
-  recRenderUI();
-
-  console.info('[diarizer] requesting token from server');
-  const tokenRes = await apiPost('deepgram-transcription-token', {});
-  if (tokenRes.error) throw new Error(tokenRes.error);
-  const accessToken = tokenRes.key;
-  if (!accessToken) throw new Error('Deepgram access token was not returned by the server.');
-  console.info('[diarizer] token received, length =', accessToken.length);
-
-  // Build AudioContext and AudioWorklet pipeline for raw PCM streaming.
-  const audioCtx = new AudioContext();
-  Diarizer.audioCtx = audioCtx;
-  // AudioContext starts suspended when created outside an active user
-  // gesture (e.g. after awaiting the token fetch). Without this resume,
-  // no PCM reaches the worklet until the user pauses and resumes.
-  if (audioCtx.state === 'suspended') {
-    try { await audioCtx.resume(); } catch (_) { /* noop */ }
-  }
-
-  // Register the inline worklet processor via a Blob URL.
-  const blob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
-  const workletUrl = URL.createObjectURL(blob);
-  Diarizer.workletUrl = workletUrl;
-  await audioCtx.audioWorklet.addModule(workletUrl);
-
-  const source = audioCtx.createMediaStreamSource(Rec.stream);
-  const workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture-processor');
-  Diarizer.workletNode = workletNode;
-
-  // Build the Deepgram WebSocket URL with required parameters.
-  const sampleRate = audioCtx.sampleRate;
-  const dgParams = new URLSearchParams({
-    model: 'nova-3',
-    diarize: 'true',
-    punctuate: 'true',
-    interim_results: 'true',
-    smart_format: 'true',
-    encoding: 'linear16',
-    sample_rate: String(Math.round(sampleRate)),
-    channels: '1',
-    language: 'en',
-  });
-  // Deepgram authenticates browser WebSocket connections via the
-  // Sec-WebSocket-Protocol subprotocol ('token', <api-key>). Query
-  // parameters like ?token=... are NOT accepted and silently fail.
-  console.info('[diarizer] opening WebSocket to Deepgram');
-  // Temporary access token from /v1/auth/grant uses the Bearer scheme;
-  // browsers can't set the Authorization header on a WebSocket, so the
-  // scheme + token ride in the Sec-WebSocket-Protocol subprotocols list.
-  const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, ['bearer', accessToken]);
-  Diarizer.ws = ws;
-  ws.binaryType = 'arraybuffer';
-
-  ws.onopen = () => {
-    Diarizer.status = 'connected';
-    Diarizer.reconnectAttempts = 0;
-    // Record the PCM sample offset at the moment this WS connection opened.
-    // Deepgram timestamps restart from 0 on each new connection; dgTimeOffset
-    // converts them to absolute positions in the PCM ring buffer.
-    Diarizer.dgTimeOffset  = Diarizer.pcmSampleOffset;
-    Diarizer.pcmSampleRate = audioCtx.sampleRate;
+  if (Diarizer._connecting) return;
+  Diarizer._connecting = true;
+  try {
+    diarizerClose(false);
+    Diarizer.status = Diarizer.reconnectAttempts > 0 ? 'reconnecting' : 'connecting';
     recRenderUI();
-    // Wire audio only after socket is open to avoid dropping early packets.
-    workletNode.port.onmessage = (e) => {
-      if (Diarizer.ws?.readyState === WebSocket.OPEN) {
-        Diarizer.ws.send(diarizerFloat32ToInt16(e.data).buffer);
-      }
-      // Buffer a copy of the raw PCM for Azure speaker identification.
-      diarizerBufferPcm(e.data);
-    };
-    source.connect(workletNode);
-    // Worklet must be connected to something in the audio graph to keep processing.
-    workletNode.connect(audioCtx.createMediaStreamDestination());
-  };
 
-  ws.onmessage = (e) => diarizerHandleMessage(e.data);
+    console.info('[diarizer] requesting token from server');
+    const tokenRes = await apiPost('deepgram-transcription-token', {});
+    if (tokenRes.error) throw new Error(tokenRes.error);
+    const accessToken = tokenRes.key;
+    if (!accessToken) throw new Error('Deepgram access token was not returned by the server.');
+    console.info('[diarizer] token received, length =', accessToken.length);
 
-  ws.onclose = (e) => {
-    console.warn('[diarizer] WS closed', { code: e.code, reason: e.reason, wasClean: e.wasClean });
-    if (!Diarizer.manualStop && Rec.status === 'recording') {
-      diarizerScheduleReconnect();
-    } else {
-      Diarizer.status = 'offline';
+    // Build AudioContext and AudioWorklet pipeline for raw PCM streaming.
+    const audioCtx = new AudioContext();
+    Diarizer.audioCtx = audioCtx;
+    // AudioContext starts suspended when created outside an active user
+    // gesture (e.g. after awaiting the token fetch). Without this resume,
+    // no PCM reaches the worklet until the user pauses and resumes.
+    if (audioCtx.state === 'suspended') {
+      try { await audioCtx.resume(); } catch (_) { /* noop */ }
+    }
+
+    // Register the inline worklet processor via a Blob URL.
+    const blob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
+    const workletUrl = URL.createObjectURL(blob);
+    Diarizer.workletUrl = workletUrl;
+    await audioCtx.audioWorklet.addModule(workletUrl);
+
+    const source = audioCtx.createMediaStreamSource(Rec.stream);
+    const workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture-processor');
+    Diarizer.workletNode = workletNode;
+
+    // Build the Deepgram WebSocket URL with required parameters.
+    const sampleRate = audioCtx.sampleRate;
+    const dgParams = new URLSearchParams({
+      model: 'nova-3',
+      diarize: 'true',
+      punctuate: 'true',
+      interim_results: 'true',
+      smart_format: 'true',
+      encoding: 'linear16',
+      sample_rate: String(Math.round(sampleRate)),
+      channels: '1',
+      language: 'en',
+    });
+    // Deepgram authenticates browser WebSocket connections via the
+    // Sec-WebSocket-Protocol subprotocol ('token', <value>). Query
+    // parameters like ?token=... are NOT accepted and silently fail.
+    // Browsers cannot set the Authorization header on a WebSocket, so the
+    // token rides in the Sec-WebSocket-Protocol subprotocols list. Deepgram
+    // requires 'token' as the scheme identifier for all token types.
+    console.info('[diarizer] opening WebSocket to Deepgram');
+    const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, ['token', accessToken]);
+    Diarizer.ws = ws;
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+      Diarizer.status = 'connected';
+      Diarizer.reconnectAttempts = 0;
+      // Record the PCM sample offset at the moment this WS connection opened.
+      // Deepgram timestamps restart from 0 on each new connection; dgTimeOffset
+      // converts them to absolute positions in the PCM ring buffer.
+      Diarizer.dgTimeOffset  = Diarizer.pcmSampleOffset;
+      Diarizer.pcmSampleRate = audioCtx.sampleRate;
       recRenderUI();
-    }
-  };
+      // Wire audio only after socket is open to avoid dropping early packets.
+      workletNode.port.onmessage = (e) => {
+        if (Diarizer.ws?.readyState === WebSocket.OPEN) {
+          Diarizer.ws.send(diarizerFloat32ToInt16(e.data).buffer);
+        }
+        // Buffer a copy of the raw PCM for Azure speaker identification.
+        diarizerBufferPcm(e.data);
+      };
+      source.connect(workletNode);
+      // Worklet must be connected to something in the audio graph to keep processing.
+      workletNode.connect(audioCtx.createMediaStreamDestination());
+    };
 
-  ws.onerror = (e) => {
-    console.error('[diarizer] WS error', e);
-    if (!Diarizer.manualStop && Rec.status === 'recording') {
-      diarizerScheduleReconnect();
-    }
-  };
+    ws.onmessage = (e) => diarizerHandleMessage(e.data);
+
+    ws.onclose = (e) => {
+      console.warn('[diarizer] WS closed', { code: e.code, reason: e.reason, wasClean: e.wasClean });
+      if (!Diarizer.manualStop && Rec.status === 'recording') {
+        diarizerScheduleReconnect();
+      } else {
+        Diarizer.status = 'offline';
+        recRenderUI();
+      }
+    };
+
+    ws.onerror = (e) => {
+      console.error('[diarizer] WS error', e);
+      if (!Diarizer.manualStop && Rec.status === 'recording') {
+        diarizerScheduleReconnect();
+      }
+    };
+  } finally {
+    Diarizer._connecting = false;
+  }
 }
 
 function diarizerHandleMessage(raw) {
