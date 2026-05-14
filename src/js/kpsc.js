@@ -34,10 +34,39 @@ const KPSC_PERMISSIONS = {
 };
 const PIN_REGEX = /^\d{4,6}$/;
 
+// ── NAV GROUP / SUB-TAB MAPPING ────────────────────────────────────
+// Maps old page names to (group, subTab) pairs for backwards compat.
+const PAGE_TO_GROUP = {
+  dashboard: { group: 'home',     subTab: null         },
+  archive:   { group: 'meetings', subTab: 'archive'    },
+  reports:   { group: 'meetings', subTab: 'reports'    },
+  projects:  { group: 'meetings', subTab: 'projects'   },
+  finance:   { group: 'money',    subTab: 'finance'    },
+  partners:  { group: 'money',    subTab: 'partners'   },
+  reminders: { group: 'money',    subTab: 'reminders'  },
+  members:   { group: 'more',     subTab: 'members'    },
+  settings:  { group: 'more',     subTab: 'settings'   },
+  // Group-level pseudo-pages (rendered inline by their own renderer)
+  more:         { group: 'more',     subTab: null },
+  // Sub-pages (reachable from within a group; nav highlight stays on group)
+  meeting:      { group: 'meetings', subTab: null },
+  partnerDetail:{ group: 'money',    subTab: null },
+};
+
+// Default sub-tabs when navigating to a group by name
+const GROUP_DEFAULT_PAGE = {
+  home:     'dashboard',
+  meetings: 'archive',
+  money:    'partners',
+  more:     null, // 'more' renders its own inline menu
+};
+
 // ── STATE ──────────────────────────────────────────────────────────
 const S = {
   user: null,
   page: 'dashboard',
+  group: 'home',
+  subTab: null,
   meetings: [],
   activeMeeting: null,
   members: [],
@@ -1115,6 +1144,8 @@ function roleLabel(role) {
 }
 
 function canAccess(page) {
+  // Group-level navigation names are always accessible (groups are always shown).
+  if (['home', 'meetings', 'money', 'more'].includes(page)) return true;
   const role = String(S.user?.role || 'committee_viewer').toLowerCase();
   const allowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
   return allowed.includes(page);
@@ -1129,12 +1160,9 @@ function canManageFinance() {
 }
 
 function applyNavPermissions() {
-  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
-  const allowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
-  document.querySelectorAll('.ka-nav-item').forEach(btn => {
-    const visible = allowed.includes(btn.dataset.page);
-    btn.style.display = visible ? '' : 'none';
-  });
+  // All 4 top-level groups are visible to every role.
+  // Individual sub-tabs are hidden per-role when the group page renders.
+  // (No top-level nav items need to be hidden — the groups are always present.)
 }
 
 function defaultPageForRole() {
@@ -1462,6 +1490,8 @@ function logout() {
   clearSession();
   S.user = null;
   S.page = 'dashboard';
+  S.group = 'home';
+  S.subTab = null;
   S.activeMeeting = null;
   document.getElementById('kpsc-app').style.display = 'none';
   document.getElementById('kpsc-login-screen').style.display = '';
@@ -1478,7 +1508,8 @@ function enterApp() {
   applyNavPermissions();
   S._navStack = [];
   const hashPage = window.location.hash.replace('#', '');
-  const startPage = hashPage && canAccess(hashPage) ? hashPage : defaultPageForRole();
+  // hashPage might be an old page name (e.g. 'archive', 'partners') — canAccess handles those.
+  const startPage = hashPage && (canAccess(hashPage) || PAGE_TO_GROUP[hashPage]) ? hashPage : defaultPageForRole();
   navigate(startPage, { replace: true });
 }
 
@@ -1487,10 +1518,28 @@ const NAV_STACK_MAX = 10;
 
 function navigate(page, opts) {
   const replace = !!(opts && opts.replace);
+
+  // If a group name is passed, resolve it to its default page.
+  if (PAGE_TO_GROUP[page] === undefined && GROUP_DEFAULT_PAGE[page] !== undefined) {
+    const defaultPage = GROUP_DEFAULT_PAGE[page];
+    if (defaultPage === null) {
+      // 'more' group — treat 'more' as the page itself.
+      page = 'more';
+    } else {
+      page = defaultPage;
+    }
+  }
+
   if (!canAccess(page)) {
     showToast('You do not have access to that section.', 'warn');
     page = defaultPageForRole();
   }
+
+  // Resolve group and subTab from the page name.
+  const mapping = PAGE_TO_GROUP[page] || { group: 'home', subTab: null };
+  S.group  = mapping.group;
+  S.subTab = mapping.subTab;
+
   // Maintain a navigation stack for goBack()
   if (!S._navStack) S._navStack = [];
   if (!replace) {
@@ -1508,45 +1557,210 @@ function navigate(page, opts) {
   const hash = '#' + page;
   if (window.location.hash !== hash) history.pushState({ page }, '', hash);
   S.activeMeeting = null;
+
+  // Highlight the correct group tab in the bottom nav.
   document.querySelectorAll('.ka-nav-item').forEach(b => {
-    b.classList.toggle('active', b.dataset.page === page);
+    b.classList.toggle('active', b.dataset.group === S.group);
   });
+
   document.getElementById('kpsc-back-btn').style.display = 'none';
   const titles = {
-    dashboard: 'Dashboard',
+    dashboard: 'Home',
     projects: 'Projects',
     partners: 'Partners',
     finance: 'Finance',
     reminders: 'Reminders',
-    members: 'KPSC Members',
+    members: 'Members',
     archive: 'Meeting Archive',
     reports: 'Reports',
     settings: 'Settings',
+    more: 'More',
+    meeting: 'Meeting Room',
+    partnerDetail: 'Partner History',
   };
   document.getElementById('kpsc-page-title').textContent = titles[page] || 'KPSC';
+  updateFab();
   renderPage(page);
+}
+
+// ── FAB ────────────────────────────────────────────────────────────
+function updateFab() {
+  const fab = document.getElementById('ka-fab');
+  if (!fab) return;
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const { group, subTab, page } = S;
+
+  let label = null;
+
+  if (page === 'dashboard' && group === 'home') {
+    // Only chairman and gen_sec can start a new meeting from home
+    if (role === 'acting_chairman' || role === 'general_secretary') {
+      label = '+ New Meeting';
+    }
+  } else if (group === 'meetings') {
+    if (subTab === 'archive' || subTab === null) {
+      if (role === 'acting_chairman' || role === 'general_secretary') label = '+ New Meeting';
+    } else if (subTab === 'projects') {
+      if (role !== 'committee_viewer') label = '+ New Project';
+    }
+    // archive, reports sub-tabs: no FAB
+  } else if (group === 'money') {
+    if (subTab === 'finance') {
+      if (role === 'acting_chairman' || role === 'financial_secretary' || role === 'treasurer') label = '+ Finance Entry';
+    } else if (subTab === 'partners') {
+      if (role !== 'committee_viewer') label = '+ Add Partner';
+    } else if (subTab === 'reminders') {
+      if (canAccess('reminders')) label = '+ Send Reminders';
+    }
+  }
+  // On meeting sub-pages or 'more', no FAB
+
+  if (label) {
+    fab.textContent = label;
+    fab.style.display = '';
+  } else {
+    fab.style.display = 'none';
+  }
+}
+
+function fabAction() {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const { group, subTab, page } = S;
+
+  if (page === 'dashboard' && group === 'home') {
+    startNewMeeting();
+  } else if (group === 'meetings') {
+    if (subTab === 'archive' || subTab === null) {
+      startNewMeeting();
+    } else if (subTab === 'projects') {
+      openProjectModal();
+    }
+  } else if (group === 'money') {
+    if (subTab === 'finance') {
+      openFinanceModal();
+    } else if (subTab === 'partners') {
+      addPartner();
+    } else if (subTab === 'reminders') {
+      // Pass the FAB itself as the button so it can be disabled during the request.
+      const fab = document.getElementById('ka-fab');
+      if (fab) sendBulkReminders(fab);
+    }
+  }
+}
+
+// ── SUB-TAB STRIPS ─────────────────────────────────────────────────
+
+function meetingsSubTabStrip() {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const cur = S.subTab || 'archive';
+  const tabs = [
+    { key: 'archive',  label: 'Archive' },
+    { key: 'reports',  label: 'Reports' },
+    { key: 'projects', label: 'Projects' },
+  ];
+  return `<div class="ka-subtabs">${tabs.map(t =>
+    `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
+  ).join('')}</div>`;
+}
+
+function moneySubTabStrip() {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const cur = S.subTab || 'partners';
+  const tabs = [];
+  if (canAccess('finance')) tabs.push({ key: 'finance',   label: 'Finance'   });
+  tabs.push({ key: 'partners',  label: 'Partners'  });
+  if (canAccess('reminders')) tabs.push({ key: 'reminders', label: 'Reminders' });
+  return `<div class="ka-subtabs">${tabs.map(t =>
+    `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
+  ).join('')}</div>`;
+}
+
+// Prepend sub-tab strip HTML to a rendered page's main content.
+function prependSubTabs(main, stripHtml) {
+  const strip = document.createElement('div');
+  strip.innerHTML = stripHtml;
+  main.insertBefore(strip.firstElementChild, main.firstChild);
 }
 
 async function renderPage(page) {
   const main = document.getElementById('kpsc-main');
   main.innerHTML = '<div class="k-loading">Loading…</div>';
   try {
-    if (page === 'dashboard') await renderDashboard(main);
-    else if (page === 'partners') await renderPartners(main);
-    else if (page === 'finance') await renderFinance(main);
-    else if (page === 'reminders') await renderReminders(main);
-    else if (page === 'meeting') await renderMeetingRoom(main);
-    else if (page === 'members') await renderMembers(main);
-    else if (page === 'archive') await renderArchive(main);
-    else if (page === 'reports') await renderReports(main);
-    else if (page === 'projects') await renderProjects(main);
-    else if (page === 'settings') await renderSettings(main);
+    if (page === 'dashboard') {
+      await renderDashboard(main);
+    } else if (page === 'archive') {
+      await renderArchive(main);
+      prependSubTabs(main, meetingsSubTabStrip());
+    } else if (page === 'reports') {
+      await renderReports(main);
+      prependSubTabs(main, meetingsSubTabStrip());
+    } else if (page === 'projects') {
+      await renderProjects(main);
+      prependSubTabs(main, meetingsSubTabStrip());
+    } else if (page === 'finance') {
+      await renderFinance(main);
+      prependSubTabs(main, moneySubTabStrip());
+    } else if (page === 'partners') {
+      await renderPartners(main);
+      prependSubTabs(main, moneySubTabStrip());
+    } else if (page === 'reminders') {
+      await renderReminders(main);
+      prependSubTabs(main, moneySubTabStrip());
+    } else if (page === 'meeting') {
+      await renderMeetingRoom(main);
+    } else if (page === 'members') {
+      await renderMembers(main);
+      prependSubTabs(main, moreSubTabStrip());
+    } else if (page === 'settings') {
+      await renderSettings(main);
+      prependSubTabs(main, moreSubTabStrip());
+    } else if (page === 'more') {
+      renderMoreMenu(main);
+    }
   } catch (e) {
     main.innerHTML = `<div class="k-page"><div class="k-error-box">
       <strong>Could not load page</strong><br>${esc(e.message || String(e))}
       <br><br>If this is the first time using the portal, ask the IT Administrator to run the database setup (Admin → Setup in the Finance Portal).
     </div></div>`;
   }
+}
+
+function moreSubTabStrip() {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const cur = S.subTab;
+  const tabs = [];
+  if (role !== 'committee_viewer') tabs.push({ key: 'members',  label: 'Members'  });
+  if (role !== 'committee_viewer') tabs.push({ key: 'settings', label: 'Settings' });
+  if (!tabs.length) return '';
+  return `<div class="ka-subtabs">${tabs.map(t =>
+    `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
+  ).join('')}</div>`;
+}
+
+function renderMoreMenu(main) {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const isViewer = role === 'committee_viewer';
+  main.innerHTML = `
+    <div class="k-page ka-more-menu">
+      <h2 style="font-family:'Lora',serif;font-size:20px;color:var(--navy);margin-bottom:20px">More</h2>
+      <div class="ka-more-list">
+        ${!isViewer ? `
+        <button class="ka-more-item" onclick="Kpsc.navigate('members')">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span>Members</span>
+          <svg class="ka-more-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+        <button class="ka-more-item" onclick="Kpsc.navigate('settings')">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings</span>
+          <svg class="ka-more-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>` : ''}
+        <button class="ka-more-item ka-more-item-danger" onclick="Kpsc.logout()">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          <span>Sign Out</span>
+        </button>
+      </div>
+    </div>`;
 }
 
 function goBack() {
@@ -1953,10 +2167,15 @@ function meetingCard(m) {
 function startNewMeeting() {
   S.activeMeeting = null;
   S.page = 'meeting';
+  S.group = 'meetings';
+  S.subTab = null;
   Rec.status = 'idle';
-  document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.ka-nav-item').forEach(b => {
+    b.classList.toggle('active', b.dataset.group === 'meetings');
+  });
   document.getElementById('kpsc-back-btn').style.display = '';
   document.getElementById('kpsc-page-title').textContent = 'New Meeting';
+  updateFab();
   renderPage('meeting');
 }
 
@@ -1965,10 +2184,15 @@ async function openMeeting(id) {
   if (res.error) { showToast(res.error, 'error'); return; }
   S.activeMeeting = res;
   S.page = 'meeting';
+  S.group = 'meetings';
+  S.subTab = null;
   Rec.status = 'idle';
-  document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.ka-nav-item').forEach(b => {
+    b.classList.toggle('active', b.dataset.group === 'meetings');
+  });
   document.getElementById('kpsc-back-btn').style.display = '';
   document.getElementById('kpsc-page-title').textContent = 'Meeting Room';
+  updateFab();
   renderPage('meeting');
 }
 
@@ -3145,6 +3369,13 @@ async function openPartnerDetail(partnerId) {
   main.innerHTML = '<div class="k-loading">Loading partner history…</div>';
   document.getElementById('kpsc-back-btn').style.display = '';
   document.getElementById('kpsc-page-title').textContent = 'Partner History';
+  S.page = 'partnerDetail';
+  S.group = 'money';
+  S.subTab = null;
+  document.querySelectorAll('.ka-nav-item').forEach(b => {
+    b.classList.toggle('active', b.dataset.group === 'money');
+  });
+  updateFab();
   S._partnerDetailId = partnerId;
   S._partnerDetailYear = S.partnersYear;
   await loadPartnerData(S._partnerDetailYear);
@@ -4626,6 +4857,7 @@ window.Kpsc = {
   submitPinChange,
   navigate,
   goBack,
+  fabAction,
   startNewMeeting,
   openMeeting,
   saveMeeting,
@@ -4708,8 +4940,12 @@ document.addEventListener('DOMContentLoaded', init);
 window.addEventListener('popstate', e => {
   const page = e.state?.page || window.location.hash.replace('#', '') || 'dashboard';
   if (page && page !== S.page) {
-    S.page = page;
-    document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.toggle('active', b.dataset.page === page));
+    const mapping = PAGE_TO_GROUP[page] || { group: 'home', subTab: null };
+    S.page   = page;
+    S.group  = mapping.group;
+    S.subTab = mapping.subTab;
+    document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.toggle('active', b.dataset.group === S.group));
+    updateFab();
     renderPage(page);
   }
 });

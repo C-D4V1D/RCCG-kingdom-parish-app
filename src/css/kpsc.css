@@ -502,3 +502,53 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .krec-step-error .krec-step-pip { border-color: #dc2626; background: #fee2e2; color: #dc2626; }
 .krec-step-error .krec-step-label { color: #dc2626; }
 .krec-step-error-msg { width: 100%; margin: 8px 0 0; padding: 10px 12px; background: #fee2e2; border-radius: 6px; color: #991b1b; font-size: 13px; }
+
+/* ── 4-TAB BOTTOM NAV (Wave 3) ──────────────────────────────────── */
+/* Override the 9-tab sizing; 4 tabs get more space and a taller tap target */
+.ka-nav-item{min-height:56px;font-size:11px;padding:8px 4px 10px;}
+.ka-nav-item svg{width:24px;height:24px;}
+
+/* ── SUB-TAB STRIPS ─────────────────────────────────────────────── */
+.ka-subtabs{display:flex;gap:0;background:var(--navy-light);border-bottom:2px solid var(--border);
+  overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;}
+.ka-subtabs::-webkit-scrollbar{display:none;}
+.ka-subtab{flex-shrink:0;padding:10px 18px;background:none;border:none;
+  font-size:13px;font-weight:500;font-family:'DM Sans',sans-serif;
+  color:var(--navy-mid);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;
+  transition:color .15s,border-color .15s;white-space:nowrap;}
+.ka-subtab.active{color:var(--navy);border-bottom-color:var(--navy);font-weight:700;}
+.ka-subtab:hover:not(.active){color:var(--navy);background:rgba(30,58,95,.06);}
+
+/* ── FLOATING ACTION BUTTON ─────────────────────────────────────── */
+#ka-fab{position:fixed;right:16px;bottom:72px;width:52px;height:52px;border-radius:50%;
+  background:var(--navy);color:#fff;border:none;font-size:22px;font-weight:300;
+  line-height:1;cursor:pointer;z-index:200;
+  box-shadow:0 4px 16px rgba(30,58,95,.35),0 2px 6px rgba(0,0,0,.15);
+  display:flex;align-items:center;justify-content:center;
+  transition:background .15s,transform .1s,box-shadow .15s;
+  font-family:'DM Sans',sans-serif;letter-spacing:0;padding:0;
+  /* Wide labels: shrink font and expand width */
+  width:auto;min-width:52px;height:52px;border-radius:26px;
+  padding:0 16px;font-size:14px;font-weight:700;white-space:nowrap;}
+#ka-fab:hover{background:var(--navy-dark);box-shadow:0 6px 20px rgba(30,58,95,.45);}
+#ka-fab:active{transform:scale(.95);}
+
+/* ── MORE MENU ──────────────────────────────────────────────────── */
+.ka-more-list{display:flex;flex-direction:column;gap:2px;}
+.ka-more-item{display:flex;align-items:center;gap:14px;width:100%;padding:16px 20px;
+  background:var(--white);border:1px solid var(--border);border-radius:12px;
+  font-size:15px;font-weight:500;font-family:'DM Sans',sans-serif;
+  color:var(--text);cursor:pointer;transition:background .15s,border-color .15s;
+  text-align:left;margin-bottom:8px;}
+.ka-more-item:hover{background:var(--navy-light);border-color:var(--navy-mid);}
+.ka-more-item svg:first-child{color:var(--navy);flex-shrink:0;}
+.ka-more-item span{flex:1;}
+.ka-more-chevron{color:var(--text3);flex-shrink:0;}
+.ka-more-item-danger{color:var(--red);}
+.ka-more-item-danger svg:first-child{color:var(--red);}
+.ka-more-item-danger:hover{background:#FCEBEB;border-color:#fca5a5;}
+
+/* ── PRINT: hide new nav chrome ─────────────────────────────────── */
+@media print {
+  #ka-fab, .ka-subtabs { display: none !important; }
+}
