@@ -57,6 +57,7 @@ const S = {
   financeMonth: new Date().getUTCMonth() + 1,
   reportsYear: new Date().getUTCFullYear(),
   _meetingTab: 'record',
+  _reviewEditMode: false, // true = show inline review editor; false = show reviewed summary
 };
 
 // ── AUDIO RECORDER + REALTIME TRANSCRIPTION ───────────────────────
@@ -1979,6 +1980,10 @@ async function renderMeetingRoom(main) {
   }
 
   const m  = S.activeMeeting;
+  // Default review-edit mode: show editor if not yet reviewed, summary if reviewed.
+  if (m?.status === 'processed') {
+    S._reviewEditMode = !m.reviewedAt;
+  }
   const id = m?.id || '';
   const status = m?.status || 'draft';
   const isProcessed = status === 'processed';
@@ -2146,12 +2151,27 @@ function formatResolutionAmount(amount) {
 
 
 function renderReviewPanel(m) {
+  // If already reviewed and not in edit mode, show compact summary.
+  if (m.reviewedAt && !S._reviewEditMode) {
+    const reviewer = m.reviewedBy || S.user?.name || 'Unknown';
+    const at = m.reviewedAt ? new Date(m.reviewedAt).toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' }) : '';
+    return `
+      <div class="k-review-panel k-review-done" id="kr-panel">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+          <span style="font-weight:700;color:var(--green)">✓ Reviewed by ${esc(reviewer)}${at ? ` at ${esc(at)}` : ''}</span>
+          <button class="kbtn kbtn-sm" onclick="Kpsc.openReviewEditor()">Edit again</button>
+        </div>
+      </div>`;
+  }
+
+  // Inline editable review panel.
   const resolutions = m.resolutions || [];
   const actionItems = m.actionItems || [];
+  const policyFlags = m.policyFlags || [];
   return `
-    <details class="k-review-panel">
-      <summary>✍️ Review & Correct AI Draft Before Filing</summary>
-      <p class="k-review-hint">AI output is a draft. Confirm approvals, vote wording, owners, deadlines, and the final minutes text before sharing or filing.</p>
+    <div class="k-review-panel" id="kr-panel">
+      <h4 class="k-sub-title" style="margin-top:0">✍️ Review & Correct AI Draft</h4>
+      <p class="k-review-hint">AI output is a draft. Confirm approvals, vote wording, owners, deadlines, and the final minutes text before approving.</p>
       <div class="k-form-group">
         <label class="k-label">Short Summary</label>
         <textarea class="k-input k-review-textarea" id="kr-summary-short">${esc(m.summaryShort || '')}</textarea>
@@ -2164,8 +2184,12 @@ function renderReviewPanel(m) {
         <label class="k-label">Minutes Markdown</label>
         <textarea class="k-input k-review-minutes" id="kr-minutes">${esc(m.minutesMarkdown || '')}</textarea>
       </div>
+      <div class="k-form-group">
+        <label class="k-label">Markdown Preview (read-only)</label>
+        <div class="k-minutes-body" style="border:1.5px solid #e0e0e0;border-radius:8px;padding:12px;background:#fafafa;font-size:13px">${minutesHtml(m.minutesMarkdown || '')}</div>
+      </div>
 
-      <h4 class="k-sub-title">Review Resolutions</h4>
+      <h4 class="k-sub-title">Resolutions</h4>
       <div class="k-review-list" id="kr-resolutions">
         ${resolutions.length ? resolutions.map((r, i) => `
           <div class="k-review-row" data-idx="${i}">
@@ -2185,7 +2209,7 @@ function renderReviewPanel(m) {
           </div>`).join('') : '<div class="k-empty">No resolutions detected. Add them in the minutes text if needed.</div>'}
       </div>
 
-      <h4 class="k-sub-title">Review Action Items</h4>
+      <h4 class="k-sub-title">Action Items</h4>
       <div class="k-review-list" id="kr-actions">
         ${actionItems.length ? actionItems.map((a, i) => `
           <div class="k-review-row" data-idx="${i}">
@@ -2200,8 +2224,18 @@ function renderReviewPanel(m) {
             </div>
           </div>`).join('') : '<div class="k-empty">No action items detected. Add them in the minutes text if needed.</div>'}
       </div>
-      <button class="kbtn kbtn-primary" onclick="Kpsc.saveMinutesReview(this)">Save Review Corrections</button>
-    </details>`;
+
+      ${policyFlags.length ? `
+      <h4 class="k-sub-title">Policy Flags (read-only)</h4>
+      <div class="k-flags-list">
+        ${policyFlags.map(f => `
+          <div class="k-flag k-flag-${f.severity || 'info'}">
+            <strong>${esc(f.type)}</strong> — ${esc(f.message)}
+          </div>`).join('')}
+      </div>` : ''}
+
+      <button class="kbtn kbtn-primary" style="margin-top:8px" onclick="Kpsc.saveMinutesReview(this)">Approve &amp; Save Review</button>
+    </div>`;
 }
 
 function renderMinutesPanel(m) {
@@ -2215,11 +2249,15 @@ function renderMinutesPanel(m) {
       <h3 class="k-sec-title">Meeting Minutes</h3>
       ${m.summaryShort ? `<div class="k-summary">${esc(m.summaryShort)}</div>` : ''}
       ${m.summaryLong ? `<details class="k-summary-detail"><summary>Detailed summary</summary><pre>${esc(m.summaryLong)}</pre></details>` : ''}
+
       ${renderReviewPanel(m)}
-      <div class="k-room-actions" style="margin-bottom:12px">
+
+      <div class="k-room-actions" style="margin-bottom:12px;margin-top:16px">
         <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')">🖨 Print / Save PDF</button>
         ${canManageProjects() && m.status === 'processed' ? `<button class="kbtn kbtn-sm" onclick="Kpsc.extractProjectsFromMeetingUI('${m.id}', this)">🤖 Extract Projects</button>` : ''}
       </div>
+
+      <h4 class="k-sub-title">Minutes Preview</h4>
       <div class="k-minutes-body">${minutesHtml(m.minutesMarkdown)}</div>
 
       ${resolutions.length ? `
@@ -2291,7 +2329,7 @@ async function saveMinutesReview(btn) {
   if (!S.activeMeeting) return;
   const orig = btn.textContent;
   btn.disabled = true;
-  btn.textContent = 'Saving review…';
+  btn.textContent = 'Saving…';
   try {
     const res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
       summaryShort: document.getElementById('kr-summary-short')?.value || '',
@@ -2302,14 +2340,36 @@ async function saveMinutesReview(btn) {
       policyFlags: S.activeMeeting.policyFlags || [],
     });
     if (res.error) { showToast(res.error, 'error'); return; }
-    S.activeMeeting = res;
-    renderPage('meeting');
-    showToast('Review corrections saved', 'success');
+    // Mark as reviewed locally (no DB column — tracked in client state).
+    S.activeMeeting = {
+      ...res,
+      reviewedAt: new Date().toISOString(),
+      reviewedBy: S.user?.name || '',
+    };
+    S._reviewEditMode = false;
+    // Re-render only the review panel in-place.
+    const panel = document.getElementById('kr-panel');
+    if (panel) {
+      panel.outerHTML = renderReviewPanel(S.activeMeeting);
+    } else {
+      renderPage('meeting');
+    }
+    showToast('Review approved and saved', 'success');
   } catch {
     showToast('Review save failed. Check your connection.', 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
+  }
+}
+
+function openReviewEditor() {
+  S._reviewEditMode = true;
+  const panel = document.getElementById('kr-panel');
+  if (panel && S.activeMeeting) {
+    panel.outerHTML = renderReviewPanel(S.activeMeeting);
+  } else if (S.activeMeeting) {
+    renderPage('meeting');
   }
 }
 
@@ -4573,6 +4633,7 @@ window.Kpsc = {
   endMeeting,
   processMeeting,
   saveMinutesReview,
+  openReviewEditor,
   addMember,
   removeMember,
   memberFieldChange,
