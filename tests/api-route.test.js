@@ -489,3 +489,188 @@ test('AI secretary quorum is based on required group coverage instead of every r
   assert.match(body.minutesMarkdown, /\*\*Quorum:\*\* Met/);
   assert.equal(body.policyFlags.some(f => f.type === 'quorum_missing'), false);
 });
+
+test('AI secretary classifies resolutions and extracts action owners/deadlines', async () => {
+  let dbState = {
+    id: 'AIM-4',
+    title: 'KPSC Welfare Meeting',
+    meeting_type: 'routine',
+    meeting_date: '2026-05-14',
+    status: 'ended',
+    participants_json: JSON.stringify([
+      { group: 'men', label: 'Men', present: true, name: 'Bro A' },
+      { group: 'women', label: 'Women', present: true, name: 'Sis B' },
+      { group: 'youth', label: 'Youth', present: true, name: 'Youth C' },
+      { group: 'ministers', label: 'Ministers', present: true, name: 'Pastor D' }
+    ]),
+    transcript_text: 'Agenda: welfare budget and generator repair. The committee approves ₦250,000 for welfare support. The rent increase request was rejected. The motion was amended to split payment into two tranches and seconded by Women President. Treasurer to submit statement before Friday.',
+    summary_short: '',
+    summary_long: '',
+    minutes_markdown: '',
+    resolutions_json: '[]',
+    action_items_json: '[]',
+    policy_flags_json: '[]',
+    created_by: 'Secretary',
+    started_at: '',
+    ended_at: '',
+    processed_at: '',
+    created_at: '2026-05-14T00:00:00.000Z'
+  };
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) {
+          statement._bound = args;
+          return statement;
+        },
+        async first() {
+          if (/SELECT \* FROM ai_secretary_meetings WHERE id=\?/.test(sql)) return { ...dbState };
+          throw new Error(`Unexpected SQL in first(): ${sql}`);
+        },
+        async all() {
+          if (/SELECT key,value FROM settings/.test(sql)) return { results: [] };
+          return { results: [] };
+        },
+        async run() {
+          if (/UPDATE ai_secretary_meetings SET/.test(sql)) {
+            dbState = {
+              ...dbState,
+              status: 'processed',
+              summary_short: statement._bound[0] || '',
+              summary_long: statement._bound[1] || '',
+              minutes_markdown: statement._bound[2] || '',
+              resolutions_json: statement._bound[3] || '[]',
+              action_items_json: statement._bound[4] || '[]',
+              policy_flags_json: statement._bound[5] || '[]',
+              processed_at: statement._bound[6] || ''
+            };
+          }
+          return { success: true };
+        }
+      };
+      return statement;
+    }
+  });
+
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/ai-secretary-meetings/AIM-4/process', 'POST'),
+    env: { DB }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.match(body.minutesMarkdown, /Agenda \/ Matters Discussed/);
+  assert.match(body.minutesMarkdown, /Executive Summary/);
+  assert.ok(body.resolutions.some(r => r.resolutionType === 'financial_approval' && r.amount === '250000'));
+  assert.ok(body.resolutions.some(r => r.resolutionType === 'rejection' && r.approved === false));
+  assert.ok(body.resolutions.some(r => r.resolutionType === 'amendment'));
+  assert.ok(body.actionItems.some(a => /Treasurer/i.test(a.assignee) && /Friday/i.test(a.dueDate)));
+});
+
+test('AI secretary meeting update persists reviewed minutes corrections', async () => {
+  let dbState = {
+    id: 'AIM-5',
+    title: 'KPSC Reviewed Meeting',
+    meeting_type: 'routine',
+    meeting_date: '2026-05-14',
+    status: 'processed',
+    participants_json: '[]',
+    transcript_text: 'Original transcript',
+    summary_short: 'Old summary',
+    summary_long: 'Old details',
+    minutes_markdown: 'Old minutes',
+    resolutions_json: '[]',
+    action_items_json: '[]',
+    policy_flags_json: '[]',
+    created_by: 'Secretary',
+    started_at: '',
+    ended_at: '',
+    processed_at: '2026-05-14T00:00:00.000Z',
+    created_at: '2026-05-14T00:00:00.000Z'
+  };
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) {
+          statement._bound = args;
+          return statement;
+        },
+        async first() {
+          if (/SELECT \* FROM ai_secretary_meetings WHERE id=\?/.test(sql)) return { ...dbState };
+          throw new Error(`Unexpected SQL in first(): ${sql}`);
+        },
+        async run() {
+          if (/UPDATE ai_secretary_meetings SET/.test(sql)) {
+            dbState = {
+              ...dbState,
+              summary_short: statement._bound[7],
+              summary_long: statement._bound[8],
+              minutes_markdown: statement._bound[9],
+              resolutions_json: statement._bound[10],
+              action_items_json: statement._bound[11],
+              policy_flags_json: statement._bound[12]
+            };
+          }
+          return { success: true };
+        }
+      };
+      return statement;
+    }
+  });
+
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/ai-secretary-meetings/AIM-5', 'PUT', {
+      summaryShort: 'Reviewed summary',
+      summaryLong: 'Reviewed details',
+      minutesMarkdown: '# Reviewed Minutes',
+      resolutions: [{ text: 'Reviewed approval', resolutionType: 'approval', category: 'financial', approved: true, amount: '50000' }],
+      actionItems: [{ task: 'Treasurer to file receipt', assignee: 'Treasurer', dueDate: 'Friday', status: 'pending' }],
+      policyFlags: [{ type: 'manual_review', severity: 'medium', message: 'Secretary reviewed.' }]
+    }),
+    env: { DB }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.summaryShort, 'Reviewed summary');
+  assert.equal(body.minutesMarkdown, '# Reviewed Minutes');
+  assert.equal(body.resolutions[0].amount, '50000');
+  assert.equal(body.actionItems[0].assignee, 'Treasurer');
+  assert.equal(body.policyFlags[0].type, 'manual_review');
+});
+
+test('settings api-status reports configured realtime API keys without exposing secrets', async () => {
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/settings/api-status', 'GET'),
+    env: {
+      DB: createDBMock({ onPrepare: () => ({}) }),
+      OPENAI_API_KEY: 'sk-test-openai-secret',
+      DEEPGRAM_API_KEY: 'dg-test-secret',
+      AZURE_SPEAKER_KEY: 'az-test-secret',
+      AZURE_SPEAKER_REGION: 'westeurope'
+    }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.liveTranscription.active, true);
+  assert.equal(body.liveTranscription.model, 'gpt-4o-transcribe');
+  assert.equal(body.liveTranscription.keyName, 'OPENAI_API_KEY');
+  assert.equal(body.liveTranscription.masked.includes('secret'), false);
+  assert.equal(body.diarization.configured, true);
+  assert.equal(body.speakerRecognition.region, 'westeurope');
+});
+
+test('settings api-status reports missing realtime API key', async () => {
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/settings/api-status', 'GET'),
+    env: { DB: createDBMock({ onPrepare: () => ({}) }) }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.liveTranscription.active, false);
+  assert.match(body.liveTranscription.message, /OPENAI_API_KEY is missing/);
+});
