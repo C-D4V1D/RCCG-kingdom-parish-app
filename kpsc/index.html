@@ -49,12 +49,24 @@
     <button class="ka-back" id="kpsc-back-btn" onclick="Kpsc.goBack()" style="display:none">&#8592; Back</button>
     <div class="ka-title" id="kpsc-page-title">Dashboard</div>
     <div class="ka-right">
+      <button class="ka-search-toggle" id="kpsc-search-toggle" onclick="Kpsc.toggleSearch()" title="Search" aria-label="Search" style="display:none">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      </button>
       <span class="ka-user" id="kpsc-user-name"></span>
       <button class="ka-logout" onclick="Kpsc.logout()" title="Sign Out">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
       </button>
     </div>
   </header>
+  <div id="kpsc-search-overlay" class="ka-search-overlay" style="display:none">
+    <div class="ka-search-wrap">
+      <input id="kpsc-search-input" class="ka-search-input" type="search" placeholder="Search members, partners, meetings, projects…"
+        oninput="Kpsc.onSearchInput(this.value)"
+        onkeydown="if(event.key==='Escape')Kpsc.closeSearch()" />
+      <button class="ka-search-close" onclick="Kpsc.closeSearch()">✕</button>
+    </div>
+    <div id="kpsc-search-results" class="ka-search-results"></div>
+  </div>
 
   <main class="ka-main" id="kpsc-main"></main>
 

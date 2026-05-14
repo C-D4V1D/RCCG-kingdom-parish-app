@@ -1163,6 +1163,9 @@ function applyNavPermissions() {
   // All 4 top-level groups are visible to every role.
   // Individual sub-tabs are hidden per-role when the group page renders.
   // (No top-level nav items need to be hidden — the groups are always present.)
+  // Show the search toggle once logged in.
+  const toggle = document.getElementById('kpsc-search-toggle');
+  if (toggle) toggle.style.display = '';
 }
 
 function defaultPageForRole() {
@@ -1482,6 +1485,7 @@ async function login(btn) {
 
 function logout() {
   recStop();
+  closeSearch();
   // Fire-and-forget server-side session deletion; don't await so UI is instant
   const sessionToken = S.user?.sessionToken;
   if (sessionToken) {
@@ -1495,6 +1499,8 @@ function logout() {
   S.activeMeeting = null;
   document.getElementById('kpsc-app').style.display = 'none';
   document.getElementById('kpsc-login-screen').style.display = '';
+  const searchToggle = document.getElementById('kpsc-search-toggle');
+  if (searchToggle) searchToggle.style.display = 'none';
   if (document.getElementById('kpsc-account-select')) document.getElementById('kpsc-account-select').value = '';
   document.getElementById('kpsc-pin-input').value = '';
   document.getElementById('kpsc-pin-change-modal')?.remove();
@@ -4835,6 +4841,203 @@ function printMinutes(meetingId) {
   win.document.close();
 }
 
+// ── GLOBAL SEARCH ─────────────────────────────────────────────────
+let _searchDebounceTimer = null;
+
+function toggleSearch() {
+  const overlay = document.getElementById('kpsc-search-overlay');
+  if (!overlay) return;
+  const isOpen = overlay.style.display !== 'none';
+  if (isOpen) {
+    closeSearch();
+  } else {
+    overlay.style.display = '';
+    const input = document.getElementById('kpsc-search-input');
+    if (input) { input.value = ''; input.focus(); }
+    document.getElementById('kpsc-search-results').innerHTML = '';
+  }
+}
+
+function onSearchInput(query) {
+  clearTimeout(_searchDebounceTimer);
+  if (!String(query || '').trim()) {
+    document.getElementById('kpsc-search-results').innerHTML = '';
+    return;
+  }
+  _searchDebounceTimer = setTimeout(() => globalSearch(query), 300);
+}
+
+function closeSearch() {
+  const overlay = document.getElementById('kpsc-search-overlay');
+  if (overlay) overlay.style.display = 'none';
+  const input = document.getElementById('kpsc-search-input');
+  if (input) input.value = '';
+  const results = document.getElementById('kpsc-search-results');
+  if (results) results.innerHTML = '';
+  clearTimeout(_searchDebounceTimer);
+}
+
+// Escape a string for use in a regex (for highlight matching).
+function escapeRegex(s) {
+  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Return an HTML-escaped string with the matched substring wrapped in <mark>.
+function highlightMatch(text, query) {
+  const escaped = esc(text);
+  const escapedQuery = esc(query);
+  // Rebuild: search within the escaped text for the escaped query.
+  const re = new RegExp(`(${escapeRegex(escapedQuery)})`, 'gi');
+  return escaped.replace(re, '<mark>$1</mark>');
+}
+
+// Trigger a one-time background fetch of data that may not be loaded yet.
+async function ensureSearchDataLoaded() {
+  const loads = [];
+  if (!S.partners.length) {
+    loads.push(apiGet('kpsc-partners').then(r => { if (Array.isArray(r)) S.partners = r; }));
+  }
+  if (!S.projects.length) {
+    loads.push(apiGet('kpsc-projects').then(r => { if (Array.isArray(r)) S.projects = r; }));
+  }
+  if (!S.meetings.length) {
+    loads.push(apiGet('ai-secretary-meetings').then(r => {
+      const arr = r?.meetings || r;
+      if (Array.isArray(arr)) S.meetings = arr;
+    }));
+  }
+  if (!S.members.length) {
+    loads.push(apiGet('settings').then(r => {
+      if (Array.isArray(r?.kpsc_members)) S.members = r.kpsc_members;
+    }));
+  }
+  if (loads.length) await Promise.all(loads).catch(() => {});
+}
+
+async function globalSearch(query) {
+  const resultsEl = document.getElementById('kpsc-search-results');
+  if (!resultsEl) return;
+  const q = String(query || '').trim();
+  if (!q) { resultsEl.innerHTML = ''; return; }
+
+  // Show a brief loading indicator while data is being fetched.
+  resultsEl.innerHTML = '<div class="ka-search-loading">Searching…</div>';
+  await ensureSearchDataLoaded();
+
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const lq = q.toLowerCase();
+  const MAX_PER_GROUP = 5;
+  const sections = [];
+
+  // ── Members (hidden for committee_viewer) ─────────────────────
+  if (role !== 'committee_viewer') {
+    const hits = [];
+    for (const m of S.members) {
+      if (hits.length >= MAX_PER_GROUP) break;
+      const searchIn = [m.name, m.role, m.group, m.position].filter(Boolean).join(' ').toLowerCase();
+      if (searchIn.includes(lq)) {
+        const snippet = m.position ? `${esc(m.position)} · ${esc(m.group)}` : esc(m.group || '');
+        hits.push(`
+          <div class="ka-search-result" onclick="Kpsc.navigate('members');Kpsc.closeSearch()">
+            <span class="ka-search-badge ka-badge-member">Member</span>
+            <span class="ka-search-title">${highlightMatch(m.name || '', q)}</span>
+            <span class="ka-search-sub">${snippet}</span>
+          </div>`);
+      }
+    }
+    if (hits.length) sections.push(`<div class="ka-search-group">${hits.join('')}</div>`);
+  }
+
+  // ── Partners ──────────────────────────────────────────────────
+  {
+    const hits = [];
+    for (const p of S.partners) {
+      if (hits.length >= MAX_PER_GROUP) break;
+      const searchIn = [p.fullName, p.phone, p.email, p.partnershipType, p.group].filter(Boolean).join(' ').toLowerCase();
+      if (searchIn.includes(lq)) {
+        hits.push(`
+          <div class="ka-search-result" onclick="Kpsc.navigate('partners');Kpsc.closeSearch()">
+            <span class="ka-search-badge ka-badge-partner">Partner</span>
+            <span class="ka-search-title">${highlightMatch(p.fullName || '', q)}</span>
+            <span class="ka-search-sub">${esc(p.partnershipType ? p.partnershipType.replace(/_/g, ' ') : '')}</span>
+          </div>`);
+      }
+    }
+    if (hits.length) sections.push(`<div class="ka-search-group">${hits.join('')}</div>`);
+  }
+
+  // ── Meetings ──────────────────────────────────────────────────
+  {
+    const hits = [];
+    for (const m of S.meetings) {
+      if (hits.length >= MAX_PER_GROUP) break;
+      const resText = (m.resolutions || []).map(r => [r.text, r.voteSummary].filter(Boolean).join(' ')).join(' ');
+      const actText = (m.actionItems || []).map(a => [a.description, a.task, a.assignee].filter(Boolean).join(' ')).join(' ');
+      const searchIn = [m.title, m.meetingDate, m.summaryShort, m.summaryLong, m.transcriptText, resText, actText].filter(Boolean).join(' ').toLowerCase();
+      if (searchIn.includes(lq)) {
+        // Find the first field that matched for the snippet.
+        const fields = [
+          { label: m.title, text: m.title },
+          { label: 'Summary', text: m.summaryShort },
+          { label: 'Transcript', text: m.transcriptText },
+        ];
+        let snippet = '';
+        for (const f of fields) {
+          if (f.text && f.text.toLowerCase().includes(lq)) {
+            const idx = f.text.toLowerCase().indexOf(lq);
+            const start = Math.max(0, idx - 30);
+            const end   = Math.min(f.text.length, idx + q.length + 30);
+            snippet = (start > 0 ? '…' : '') + highlightMatch(f.text.slice(start, end), q) + (end < f.text.length ? '…' : '');
+            break;
+          }
+        }
+        const meetingId = esc(m.id || '');
+        hits.push(`
+          <div class="ka-search-result" onclick="Kpsc.openMeeting('${meetingId}');Kpsc.closeSearch()">
+            <span class="ka-search-badge ka-badge-meeting">Meeting</span>
+            <span class="ka-search-title">${highlightMatch(m.title || '', q)}</span>
+            ${snippet ? `<span class="ka-search-sub">${snippet}</span>` : `<span class="ka-search-sub">${esc(m.meetingDate || '')}</span>`}
+          </div>`);
+      }
+    }
+    if (hits.length) sections.push(`<div class="ka-search-group">${hits.join('')}</div>`);
+  }
+
+  // ── Projects ──────────────────────────────────────────────────
+  {
+    const hits = [];
+    for (const p of S.projects) {
+      if (hits.length >= MAX_PER_GROUP) break;
+      const searchIn = [p.title, p.name, p.description, p.status, p.owner, p.createdBy].filter(Boolean).join(' ').toLowerCase();
+      if (searchIn.includes(lq)) {
+        hits.push(`
+          <div class="ka-search-result" onclick="Kpsc.navigate('projects');Kpsc.closeSearch()">
+            <span class="ka-search-badge ka-badge-project">Project</span>
+            <span class="ka-search-title">${highlightMatch(p.title || p.name || '', q)}</span>
+            <span class="ka-search-sub">${esc(p.status || '')}</span>
+          </div>`);
+      }
+    }
+    if (hits.length) sections.push(`<div class="ka-search-group">${hits.join('')}</div>`);
+  }
+
+  if (sections.length) {
+    resultsEl.innerHTML = sections.join('<hr class="ka-search-divider" />');
+  } else {
+    resultsEl.innerHTML = `<div class="ka-search-empty">No results for <strong>${esc(q)}</strong></div>`;
+  }
+}
+
+// Close search on outside click
+document.addEventListener('click', e => {
+  const overlay = document.getElementById('kpsc-search-overlay');
+  if (!overlay || overlay.style.display === 'none') return;
+  const toggle = document.getElementById('kpsc-search-toggle');
+  if (!overlay.contains(e.target) && e.target !== toggle) {
+    closeSearch();
+  }
+}, true);
+
 // ── BOOT ──────────────────────────────────────────────────────────
 function init() {
   const session = loadSession();
@@ -4858,6 +5061,10 @@ window.Kpsc = {
   navigate,
   goBack,
   fabAction,
+  toggleSearch,
+  onSearchInput,
+  closeSearch,
+  globalSearch,
   startNewMeeting,
   openMeeting,
   saveMeeting,
