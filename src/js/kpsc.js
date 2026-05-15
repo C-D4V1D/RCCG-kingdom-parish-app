@@ -6696,7 +6696,6 @@ function applyDiarizedTranscriptRaw() {
   setMeetingTab('record');
   _diarizedUtterances = [];
 }
-
 // ── PLAIN ENGLISH TOGGLE ──────────────────────────────────────────
 let _plainEnglishCache = {}; // Cache {meetingId: plainEnglishText}
 
