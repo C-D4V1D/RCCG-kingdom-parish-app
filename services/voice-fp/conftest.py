@@ -69,22 +69,16 @@ sys.modules["torch"] = torch_stub
 torchaudio_stub = types.ModuleType("torchaudio")
 
 def _fake_load(buf):
-    """Return a short silence waveform + 16000 SR for any input.
+    """Return a waveform + sample-rate for any BytesIO input.
 
-    Accepts either a BytesIO (primary path) or a string file path
-    (temp-file fallback path introduced in the webm/opus fix).
+    torchaudio.load() always receives a BytesIO in the application code
+    (both the primary path and the ffmpeg fallback path), so the stub only
+    needs to handle that case.
     """
     import io as _io
     import wave as _wave
-    # Support the temp-file fallback path where torchaudio.load receives a
-    # string file path instead of a BytesIO object.
-    if isinstance(buf, str):
-        with open(buf, "rb") as fh:
-            data = fh.read()
-    else:
-        data = buf.read()
-    # Synthesise a short sine representing the file (good enough for unit tests)
-    # The actual wave bytes are from soundfile-written WAV; parse them properly.
+    data = buf.read()
+    # Parse proper WAV bytes so duration-based tests work correctly.
     try:
         with _wave.open(_io.BytesIO(data)) as wf:
             sr = wf.getframerate()
@@ -97,7 +91,7 @@ def _fake_load(buf):
             waveform = np.expand_dims(samples, 0)  # (1, N)
             return _FakeTensor(waveform, shape=(1, len(samples))), sr
     except Exception:
-        # Fallback: treat as 0.1 s silence at 16kHz
+        # Fallback: treat as 0.1 s silence at 16 kHz
         samples = np.zeros(1600, dtype=np.float32)
         return _FakeTensor(samples[np.newaxis, :], shape=(1, 1600)), 16000
 

@@ -145,50 +145,65 @@ class TestEmbedValidation:
         )
         assert resp.status_code == 413
 
-    def test_torchaudio_bytesio_fail_falls_back_to_temp_file(self, client, monkeypatch):
-        """When torchaudio.load(BytesIO) fails, the service retries via a temp file."""
+    def test_torchaudio_bytesio_fail_falls_back_to_ffmpeg(self, client, monkeypatch):
+        """
+        When torchaudio.load(BytesIO) fails the service should call
+        _ffmpeg_decode_to_wav, then reload the resulting WAV bytes.
+        """
         import sys
+        import unittest.mock as _mock
+        import app.main as main_module
 
         ta_mod = sys.modules["torchaudio"]
         original_load = ta_mod.load
 
-        call_args = []
+        load_calls = []
 
         def _selective_load(buf, **kw):
-            call_args.append(type(buf).__name__)
-            if isinstance(buf, str):
-                # Simulate success when called with a file path
-                return original_load(buf, **kw)
+            load_calls.append("first")
             raise RuntimeError("BytesIO not supported for this format")
 
         monkeypatch.setattr(ta_mod, "load", _selective_load)
 
         wav_bytes = _make_wav(3.0)
+
+        # _ffmpeg_decode_to_wav returns the same WAV bytes; restore torchaudio
+        # so the second load (after ffmpeg conversion) succeeds.
+        def _fake_ffmpeg(data):
+            # Restore real (stub) load so the second call succeeds
+            monkeypatch.setattr(ta_mod, "load", original_load)
+            return wav_bytes
+
+        monkeypatch.setattr(main_module, "_ffmpeg_decode_to_wav", _fake_ffmpeg)
+
         resp = client.post(
             "/embed",
             files={"audio": ("clip.webm", wav_bytes, "audio/webm")},
             headers=self.VALID_HEADERS,
         )
         assert resp.status_code == 200, resp.text
-        assert "str" in call_args, "expected a temp-file path call to torchaudio.load"
 
     def test_all_decoders_fail_returns_422(self, client, monkeypatch):
-        """When every decode attempt fails, the endpoint returns HTTP 422."""
+        """When torchaudio AND ffmpeg both fail, the endpoint returns HTTP 422."""
         import sys
+        import app.main as main_module
 
-        def _always_fail(*args, **kwargs):
-            raise RuntimeError("Format not recognised")
+        monkeypatch.setattr(
+            sys.modules["torchaudio"],
+            "load",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("Format not recognised")),
+        )
+        monkeypatch.setattr(
+            main_module,
+            "_ffmpeg_decode_to_wav",
+            lambda data: (_ for _ in ()).throw(RuntimeError("ffmpeg not found")),
+        )
 
-        monkeypatch.setattr(sys.modules["torchaudio"], "load", _always_fail)
-
-        # Patch librosa inside app.main so the import-inside-except also fails
-        import unittest.mock as _mock
-        with _mock.patch("librosa.load", side_effect=RuntimeError("Format not recognised")):
-            resp = client.post(
-                "/embed",
-                files={"audio": ("garbage.webm", b"NOTAUDIODATA", "audio/webm")},
-                headers=self.VALID_HEADERS,
-            )
+        resp = client.post(
+            "/embed",
+            files={"audio": ("garbage.webm", b"NOTAUDIODATA", "audio/webm")},
+            headers=self.VALID_HEADERS,
+        )
         assert resp.status_code == 422
         assert "Could not decode audio" in resp.json()["detail"]
 
