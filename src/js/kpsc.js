@@ -2732,8 +2732,13 @@ async function renderMeetingRoom(main) {
             <p class="k-hint">Upload a pre-recorded audio file. The AI will transcribe it and add the text to the transcript. Supported formats: mp3, mp4, m4a, wav, webm, ogg (max 25 MB).</p>
             <label class="k-label">Audio Recording</label>
             <input id="km-audio-file" type="file" accept="audio/*" class="k-input" style="padding:8px" onchange="Kpsc.previewAudioFile(this)" />
+            <div style="margin-top:10px;display:flex;align-items:center;gap:8px">
+              <input type="checkbox" id="km-audio-diarize" style="width:16px;height:16px;cursor:pointer" />
+              <label for="km-audio-diarize" class="k-label" style="margin:0;cursor:pointer">🎙️ Use speaker diarization (Deepgram) — identifies who said what</label>
+            </div>
             <div id="km-audio-preview" style="margin-top:8px"></div>
             <div id="km-audio-status" style="margin-top:8px"></div>
+            <div id="km-speaker-map" style="margin-top:8px"></div>
           </div>
           <details class="k-collapsible" style="margin-top:4px">
             <summary class="k-collapsible-hdr">
@@ -2884,6 +2889,7 @@ function renderReviewPanel(m) {
   const resolutions = m.resolutions || [];
   const actionItems = m.actionItems || [];
   const policyFlags = m.policyFlags || [];
+  const suggestedProjects = m.suggestedProjects || [];
   return `
     <div class="k-review-panel" id="kr-panel">
       <h4 class="k-sub-title" style="margin-top:0">✍️ Review & Correct AI Draft</h4>
@@ -2950,6 +2956,29 @@ function renderReviewPanel(m) {
           </div>`).join('')}
       </div>` : ''}
 
+      <h4 class="k-sub-title">🏗️ Suggested Projects</h4>
+      <p class="k-review-hint">AI detected the following project proposals in this meeting. Review each one — tick the checkbox to approve and save it to the Project Tracker, or leave it unticked to discard.</p>
+      <div class="k-review-list" id="kr-projects">
+        ${suggestedProjects.length ? suggestedProjects.map((p, i) => `
+          <div class="k-review-row" data-idx="${i}" style="border-left:3px solid var(--warning,#f59e0b)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+              <input type="checkbox" id="kr-proj-approve-${i}" checked style="width:16px;height:16px;cursor:pointer" />
+              <label for="kr-proj-approve-${i}" class="k-label" style="margin:0;font-weight:700;cursor:pointer">Approve this project</label>
+            </div>
+            <label class="k-label">Project Title</label>
+            <input class="k-input" id="kr-proj-title-${i}" value="${esc(p.title || '')}" placeholder="Project title" />
+            <label class="k-label" style="margin-top:6px">Description</label>
+            <textarea class="k-input" id="kr-proj-desc-${i}" rows="2">${esc(p.description || '')}</textarea>
+            <div class="k-review-grid" style="margin-top:6px">
+              <input class="k-input" id="kr-proj-cost-${i}" value="${esc(String(p.estimatedCost || '0'))}" placeholder="Estimated cost (₦)" type="number" min="0" />
+              <select class="k-input" id="kr-proj-priority-${i}">
+                ${['low','medium','high'].map(v => `<option value="${v}" ${(p.priority || 'medium') === v ? 'selected' : ''}>${v.charAt(0).toUpperCase()+v.slice(1)}</option>`).join('')}
+              </select>
+              <input class="k-input" id="kr-proj-date-${i}" value="${esc(p.targetDate || '')}" placeholder="Target date (YYYY-MM-DD)" type="date" />
+            </div>
+          </div>`).join('') : '<div class="k-empty">No project proposals detected by the AI in this meeting. You can add projects manually from the Projects page.</div>'}
+      </div>
+
       <button class="kbtn kbtn-primary" style="margin-top:8px" onclick="Kpsc.saveMinutesReview(this)">Approve &amp; Save Review</button>
     </div>`;
 }
@@ -2970,7 +2999,7 @@ function renderMinutesPanel(m) {
 
       <div class="k-room-actions" style="margin-bottom:12px;margin-top:16px">
         <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')">🖨 Print / Save PDF</button>
-        ${canManageProjects() && m.status === 'processed' ? `<button class="kbtn kbtn-sm" onclick="Kpsc.extractProjectsFromMeetingUI('${m.id}', this)">🤖 Extract Projects</button>` : ''}
+        <button class="kbtn kbtn-sm" onclick="Kpsc.shareMinutesWhatsApp('${m.id}')">📲 Share via WhatsApp</button>
       </div>
 
       <h4 class="k-sub-title">Minutes Preview</h4>
@@ -3041,6 +3070,21 @@ function readReviewActions() {
   })).filter(a => a.task);
 }
 
+function readReviewProjects() {
+  const projects = S.activeMeeting?.suggestedProjects || [];
+  return projects.map((p, i) => {
+    const approved = document.getElementById(`kr-proj-approve-${i}`)?.checked;
+    if (!approved) return null;
+    return {
+      title: document.getElementById(`kr-proj-title-${i}`)?.value.trim() || p.title || '',
+      description: document.getElementById(`kr-proj-desc-${i}`)?.value.trim() || p.description || '',
+      estimatedCost: Number(document.getElementById(`kr-proj-cost-${i}`)?.value || 0),
+      priority: document.getElementById(`kr-proj-priority-${i}`)?.value || p.priority || 'medium',
+      targetDate: document.getElementById(`kr-proj-date-${i}`)?.value.trim() || p.targetDate || '',
+    };
+  }).filter(Boolean);
+}
+
 async function saveMinutesReview(btn) {
   if (!S.activeMeeting) return;
   const orig = btn.textContent;
@@ -3056,9 +3100,27 @@ async function saveMinutesReview(btn) {
       policyFlags: S.activeMeeting.policyFlags || [],
     });
     if (res.error) { showToast(res.error, 'error'); return; }
+
+    // Save approved suggested projects to the Project Tracker.
+    const approvedProjects = readReviewProjects();
+    if (approvedProjects.length) {
+      const projRes = await apiPost('kpsc-approve-meeting-projects', {
+        meetingId: S.activeMeeting.id,
+        projects: approvedProjects,
+        createdBy: S.user?.name || '',
+      });
+      if (projRes?.saved > 0) {
+        showToast(`${projRes.saved} project(s) added to the Project Tracker.`, 'success');
+        // Refresh projects list in state.
+        const projList = await apiGet('kpsc-projects');
+        if (Array.isArray(projList)) S.projects = projList;
+      }
+    }
+
     // Mark as reviewed locally (no DB column — tracked in client state).
     S.activeMeeting = {
       ...res,
+      suggestedProjects: [],       // cleared after approval
       reviewedAt: new Date().toISOString(),
       reviewedBy: S.user?.name || '',
     };
@@ -3071,6 +3133,10 @@ async function saveMinutesReview(btn) {
       renderPage('meeting');
     }
     showToast('Review approved and saved', 'success');
+
+    // Show action item WhatsApp notification links if any action items exist.
+    const actions = S.activeMeeting.actionItems || [];
+    if (actions.length) renderActionNotifications(actions, S.activeMeeting);
   } catch {
     showToast('Review save failed. Check your connection.', 'error');
   } finally {
@@ -6049,7 +6115,36 @@ async function transcribeAudioFile() {
   const status     = document.getElementById('km-audio-status');
   if (!audioFile) { showToast('Please select an audio file first.', 'error'); return; }
 
+  const useDiarize = document.getElementById('km-audio-diarize')?.checked;
+
   if (status) status.innerHTML = '<div class="k-loading" style="padding:16px">🤖 Transcribing audio…</div>';
+
+  // Clear any previous speaker map.
+  const speakerMapEl = document.getElementById('km-speaker-map');
+  if (speakerMapEl) speakerMapEl.innerHTML = '';
+
+  // ── Diarization path ──────────────────────────────────────────
+  if (useDiarize) {
+    try {
+      const diarizedTranscript = await transcribeAudioWithDiarization_UI(audioFile, status);
+      if (diarizedTranscript !== null) {
+        // Plain transcript returned (no utterances) — treat same as regular.
+        const transcriptEl = document.getElementById('km-transcript');
+        if (transcriptEl) {
+          transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + diarizedTranscript;
+        }
+        if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Audio transcribed. Review the transcript before generating minutes.</div>`;
+        showToast('Audio transcribed!', 'success');
+        setMeetingTab('record');
+      }
+      // If null is returned, speaker assignment UI is showing — no further action here.
+    } catch (e) {
+      if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
+    }
+    return;
+  }
+
+  // ── Standard (non-diarized) path ──────────────────────────────
 
   const notesInput = document.getElementById('km-audio-notes-photo');
   const notesFile  = notesInput?.files?.[0];
@@ -6414,6 +6509,188 @@ function printMinutes(meetingId) {
   win.document.close();
 }
 
+// ── WHATSAPP MINUTES SHARING ───────────────────────────────────────
+async function shareMinutesWhatsApp(meetingId) {
+  const meeting = S.activeMeeting;
+  if (!meeting?.minutesMarkdown) { showToast('No minutes to share. Process the meeting first.', 'warn'); return; }
+
+  const title   = meeting.title || 'KPSC Meeting';
+  const date    = meeting.meetingDate || '';
+  const summary = meeting.summaryShort || 'Please find the meeting minutes in the KPSC portal.';
+  const resCount = (meeting.resolutions || []).length;
+  const actCount = (meeting.actionItems || []).length;
+
+  const msg = [
+    `*KPSC Meeting Minutes — ${title}*`,
+    date ? `📅 Date: ${date}` : '',
+    '',
+    summary,
+    '',
+    resCount ? `📋 Resolutions: ${resCount}` : '',
+    actCount ? `✅ Action Items: ${actCount}` : '',
+    '',
+    'Full minutes are available in the Kingdom Parish Stewardship Committee portal. Please log in to review and access the complete document.',
+  ].filter(line => line !== undefined && line !== null).join('\n').trim();
+
+  const waUrl = `https://wa.me/?text=${encodeURIComponent(msg)}`;
+  window.open(waUrl, '_blank');
+
+  // Mark this meeting as distributed.
+  const distributedIds = S._distributedMeetingIds || [];
+  if (!distributedIds.includes(meetingId)) {
+    const updated = [...distributedIds, meetingId];
+    S._distributedMeetingIds = updated;
+    await apiPost('settings', { kpsc_distributed_meeting_ids: updated }).catch(() => {});
+  }
+  showToast('WhatsApp message prepared. Select recipients in WhatsApp to send.', 'success');
+}
+
+// ── ACTION ITEM WHATSAPP NOTIFICATIONS ────────────────────────────
+function renderActionNotifications(actions, meeting) {
+  const assignedActions = actions.filter(a => a.assignee && a.assignee !== 'Unassigned');
+  if (!assignedActions.length) return;
+
+  const meetingTitle = meeting?.title || 'KPSC Meeting';
+  const meetingDate  = meeting?.meetingDate || '';
+
+  // Render a notification panel below the reviewed panel.
+  const notifHtml = `
+    <div id="kr-action-notifications" class="k-section" style="margin-top:16px;background:var(--surface,#f8fafc);border:1.5px solid var(--border);border-radius:10px;padding:14px">
+      <h4 class="k-sub-title" style="margin-top:0">📲 Notify Assignees via WhatsApp</h4>
+      <p class="k-review-hint" style="margin-bottom:12px">Tap a link below to open WhatsApp with a pre-composed notification for each assigned action item. Select the recipient in WhatsApp before sending.</p>
+      ${assignedActions.map((a) => {
+        const msg = [
+          `*KPSC Action Item — ${meetingTitle}*`,
+          meetingDate ? `📅 Meeting date: ${meetingDate}` : '',
+          '',
+          `Dear ${a.assignee},`,
+          '',
+          `You have been assigned the following action item from the KPSC meeting:`,
+          `📌 ${a.task}`,
+          a.dueDate ? `🗓️ Due: ${a.dueDate}` : '',
+          '',
+          'Please update the secretary on progress at your earliest convenience.',
+          '— Kingdom Parish Stewardship Committee',
+        ].filter(l => l !== undefined && l !== null).join('\n').trim();
+        const waUrl = `https://wa.me/?text=${encodeURIComponent(msg)}`;
+        return `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+            <span style="font-size:13px;color:var(--text-secondary,#666);min-width:120px">👤 ${esc(a.assignee)}</span>
+            <span style="font-size:13px;flex:1">${esc(a.task.slice(0, 80))}${a.task.length > 80 ? '…' : ''}</span>
+            <a href="${esc(waUrl)}" target="_blank" class="kbtn kbtn-sm" style="text-decoration:none;background:#25d366;color:#fff;border-color:#25d366">💬 Send via WhatsApp</a>
+          </div>`;
+      }).join('')}
+    </div>`;
+
+  // Insert after the kr-panel (reviewed state).
+  const panel = document.getElementById('kr-panel');
+  if (panel) panel.insertAdjacentHTML('afterend', notifHtml);
+}
+
+// ── AUDIO DIARIZATION ─────────────────────────────────────────────
+// State: diarized utterances for speaker assignment UI.
+let _diarizedUtterances = [];
+let _diarizedSpeakerCount = 0;
+
+async function transcribeAudioWithDiarization_UI(audioFile, status) {
+  if (status) status.innerHTML = '<div class="k-loading" style="padding:16px">🎙️ Transcribing with speaker diarization…</div>';
+
+  const form = new FormData();
+  form.append('audio', audioFile, audioFile.name);
+  form.append('mimeType', audioFile.type || 'audio/webm');
+
+  const res = await fetch(`${API}/kpsc-transcribe-audio-diarize`, {
+    method: 'POST',
+    headers: { ...kpscSessionHeader() },
+    body: form,
+  }).then(r => r.json());
+
+  handleKpscAuthFailure(res);
+
+  if (res?.error && !res?.transcript) {
+    if (status) status.innerHTML = `<div class="k-error-box">${esc(res.error)}</div>`;
+    return null;
+  }
+  if (!res?.transcript) {
+    if (status) status.innerHTML = `<div class="k-error-box">No speech was detected in the audio file.</div>`;
+    return null;
+  }
+
+  // If no diarization (speakerCount is 0 or utterances missing), just return plain transcript.
+  if (!res.speakerCount || !res.utterances?.length) {
+    return res.transcript;
+  }
+
+  // Store utterances for speaker assignment.
+  _diarizedUtterances = res.utterances || [];
+  _diarizedSpeakerCount = res.speakerCount || 0;
+
+  // Render speaker assignment UI.
+  const speakerMapEl = document.getElementById('km-speaker-map');
+  if (speakerMapEl) {
+    const memberNames = (S.members || []).map(m => m.name).filter(Boolean);
+    const speakerNums = [...new Set(_diarizedUtterances.map(u => u.speaker))].sort((a, b) => a - b);
+    speakerMapEl.innerHTML = `
+      <div class="k-section" style="background:var(--surface,#f8fafc);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:8px">
+        <h4 class="k-sub-title" style="margin-top:0">🎙️ Speaker Assignment</h4>
+        <p class="k-review-hint">Deepgram detected ${_diarizedSpeakerCount} speaker(s). Assign each speaker label to a committee member name. Leave blank to keep the label as-is.</p>
+        ${speakerNums.map(n => `
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+            <span class="kbadge badge-gray" style="min-width:80px">Speaker ${n}</span>
+            <input list="km-member-names" id="km-spk-name-${n}" class="k-input" style="max-width:200px" placeholder="Enter member name…" />
+          </div>`).join('')}
+        <datalist id="km-member-names">
+          ${memberNames.map(n => `<option value="${esc(n)}">`).join('')}
+        </datalist>
+        <div class="k-room-actions" style="margin-top:8px">
+          <button class="kbtn kbtn-primary" onclick="Kpsc.applyDiarizedTranscript()">✅ Apply Names &amp; Add to Transcript</button>
+          <button class="kbtn kbtn-ghost" onclick="Kpsc.applyDiarizedTranscriptRaw()">Add Without Names</button>
+        </div>
+      </div>`;
+  }
+
+  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Diarization complete — ${_diarizedSpeakerCount} speaker(s) detected. Assign names above, then click "Apply".</div>`;
+  return null; // transcript will be applied via applyDiarizedTranscript()
+}
+
+function buildDiarizedTranscript(nameMap) {
+  return _diarizedUtterances
+    .map(u => `${nameMap[u.speaker] || `Speaker ${u.speaker}`}: ${String(u.transcript || '').trim()}`)
+    .join('\n');
+}
+
+function applyDiarizedTranscript() {
+  const speakerNums = [...new Set(_diarizedUtterances.map(u => u.speaker))];
+  const nameMap = {};
+  for (const n of speakerNums) {
+    const val = document.getElementById(`km-spk-name-${n}`)?.value.trim();
+    if (val) nameMap[n] = val;
+  }
+  const transcript = buildDiarizedTranscript(nameMap);
+  const el = document.getElementById('km-transcript');
+  if (el) el.value = (el.value ? el.value + '\n\n' : '') + transcript;
+  const speakerMapEl = document.getElementById('km-speaker-map');
+  if (speakerMapEl) speakerMapEl.innerHTML = '';
+  const status = document.getElementById('km-audio-status');
+  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Speaker-labelled transcript added. Review before generating minutes.</div>`;
+  showToast('Diarized transcript applied!', 'success');
+  setMeetingTab('record');
+  _diarizedUtterances = [];
+}
+
+function applyDiarizedTranscriptRaw() {
+  const transcript = buildDiarizedTranscript({});
+  const el = document.getElementById('km-transcript');
+  if (el) el.value = (el.value ? el.value + '\n\n' : '') + transcript;
+  const speakerMapEl = document.getElementById('km-speaker-map');
+  if (speakerMapEl) speakerMapEl.innerHTML = '';
+  const status = document.getElementById('km-audio-status');
+  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Transcript added with speaker labels. Review before generating minutes.</div>`;
+  showToast('Transcript applied.', 'success');
+  setMeetingTab('record');
+  _diarizedUtterances = [];
+}
+
 // ── GLOBAL SEARCH ─────────────────────────────────────────────────
 let _searchDebounceTimer = null;
 
@@ -6723,18 +7000,21 @@ window.Kpsc = {
   setMeetingTab,
   previewNotesPhoto,
   ocrNotesPhoto,
-  // Meeting - upload audio (+ combined mode)
+  // Meeting - upload audio (+ combined mode, + diarization)
   previewAudioFile,
   transcribeAudioFile,
   previewAudioNotesPhoto,
+  applyDiarizedTranscript,
+  applyDiarizedTranscriptRaw,
   // Meeting - live recording notes upload
   previewRecNotesPhoto,
   ocrRecNotesPhoto,
   // Finance - PDF reconciliation
   setReconciliationTab,
   runPdfReconciliation,
-  // Minutes PDF
+  // Minutes PDF + WhatsApp sharing
   printMinutes,
+  shareMinutesWhatsApp,
 };
 
 document.addEventListener('DOMContentLoaded', init);

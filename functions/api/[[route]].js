@@ -293,6 +293,11 @@ export async function onRequest(context) {
       if (auth instanceof Response) return auth;
       return await extractProjectsFromMeeting(DB, env, body);
     }
+    if (route === 'kpsc-approve-meeting-projects' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await approveMeetingProjects(DB, body);
+    }
     if (route === 'kpsc-ocr-notes' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
@@ -302,6 +307,11 @@ export async function onRequest(context) {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
       return await transcribeAudioWithWhisper(env, request, DB);
+    }
+    if (route === 'kpsc-transcribe-audio-diarize' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await transcribeAudioWithDiarization(env, request);
     }
     if (route === 'kpsc-ocr-receipt' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -802,6 +812,8 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_members ADD COLUMN voice_embedding BLOB`,
     `ALTER TABLE kpsc_members ADD COLUMN voice_enrolled_at TEXT`,
     `ALTER TABLE kpsc_members ADD COLUMN voice_sample_count INTEGER DEFAULT 0`,
+    // Suggested projects extracted during AI minutes generation (pending secretary approval).
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN suggested_projects_json TEXT DEFAULT '[]'`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -2408,6 +2420,105 @@ async function extractProjectsFromMeeting(DB, env, data) {
   return ok({ extracted: inserted.length, projects: inserted });
 }
 
+// ── APPROVE MEETING SUGGESTED PROJECTS ───────────────────────────────────────
+// Called when the secretary approves suggested projects in the review panel.
+// Writes each approved project to kpsc_projects and clears the suggested list.
+async function approveMeetingProjects(DB, data) {
+  const meetingId = String(data?.meetingId || '').trim();
+  const createdBy = String(data?.createdBy || '').trim();
+  const projects = Array.isArray(data?.projects) ? data.projects : [];
+  if (!meetingId) return err('meetingId is required', 400);
+
+  const row = await DB.prepare(`SELECT id FROM ai_secretary_meetings WHERE id=?`).bind(meetingId).first();
+  if (!row) return err('Meeting not found', 404);
+
+  const inserted = [];
+  for (const proj of projects) {
+    const title = String(proj?.title || '').trim();
+    if (!title) continue;
+    const id = newId('kprj');
+    await DB.prepare(`
+      INSERT INTO kpsc_projects (id,title,description,estimated_cost,status,priority,target_date,source_meeting_id,source,created_by,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id, title, String(proj.description || '').trim(), Number(proj.estimatedCost || 0),
+      'proposed',
+      ['low', 'medium', 'high'].includes(String(proj.priority || '').toLowerCase()) ? String(proj.priority).toLowerCase() : 'medium',
+      String(proj.targetDate || '').trim(),
+      meetingId, 'ai_extracted', createdBy, new Date().toISOString(),
+    ).run();
+    const saved = await DB.prepare(`SELECT * FROM kpsc_projects WHERE id=?`).bind(id).first();
+    if (saved) inserted.push(kpscProjectFromRow(saved));
+  }
+
+  // Clear suggested projects from the meeting so they don't appear as pending again.
+  await DB.prepare(`UPDATE ai_secretary_meetings SET suggested_projects_json='[]' WHERE id=?`).bind(meetingId).run();
+
+  return ok({ saved: inserted.length, projects: inserted });
+}
+
+// ── DEEPGRAM BATCH DIARIZATION ───────────────────────────────────────────────
+// Transcribes an uploaded audio file using Deepgram's pre-recorded REST API
+// with speaker diarization enabled. Returns a labelled transcript.
+async function transcribeAudioWithDiarization(env, request) {
+  const apiKey = String(env.DEEPGRAM_API_KEY || '').trim();
+  if (!apiKey) {
+    return ok({ transcript: '', utterances: [], error: 'DEEPGRAM_API_KEY is not configured. Please set it in Cloudflare environment variables.' });
+  }
+
+  let form;
+  try {
+    form = await request.formData();
+  } catch (_) {
+    return err('Expected multipart form data with an "audio" field.', 400);
+  }
+
+  const audio = form.get('audio');
+  if (!audio || typeof audio.arrayBuffer !== 'function') {
+    return err('Missing or invalid audio field.', 400);
+  }
+
+  const mimeType = String(form.get('mimeType') || audio.type || 'audio/webm');
+  const audioBuffer = await audio.arrayBuffer();
+
+  const dgUrl = 'https://api.deepgram.com/v1/listen?diarize=true&utterances=true&model=nova-2&smart_format=true&punctuate=true';
+  let dgResp;
+  try {
+    dgResp = await fetch(dgUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Token ${apiKey}`,
+        'Content-Type': mimeType,
+      },
+      body: audioBuffer,
+    });
+  } catch (e) {
+    return ok({ transcript: '', utterances: [], error: `Deepgram request failed: ${e.message}` });
+  }
+
+  if (!dgResp.ok) {
+    const errText = await dgResp.text().catch(() => `HTTP ${dgResp.status}`);
+    return ok({ transcript: '', utterances: [], error: `Deepgram error: ${errText}` });
+  }
+
+  const dgData = await dgResp.json().catch(() => ({}));
+  const utterances = dgData?.results?.utterances || [];
+
+  if (!utterances.length) {
+    // Fall back to plain transcript if no utterances returned.
+    const plain = dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
+    if (!plain) return ok({ transcript: '', utterances: [], error: 'No speech detected in the audio file.' });
+    return ok({ transcript: plain, utterances: [], speakerCount: 0 });
+  }
+
+  // Build a speaker-labelled transcript and find how many distinct speakers there are.
+  const speakerNums = [...new Set(utterances.map(u => Number(u.speaker)))].sort((a, b) => a - b);
+  const lines = utterances.map(u => `Speaker ${u.speaker}: ${String(u.transcript || '').trim()}`);
+  const transcript = lines.join('\n');
+
+  return ok({ transcript, utterances, speakerCount: speakerNums.length, speakers: speakerNums });
+}
+
 async function ocrHandwrittenNotes(env, data, DB) {
   const imageBase64 = String(data?.imageBase64 || '').trim();
   const mimeType = String(data?.mimeType || 'image/jpeg').trim();
@@ -2640,6 +2751,7 @@ function aiSecretaryMeetingFromRow(row) {
     resolutions: safeJsonParse(row.resolutions_json, []),
     actionItems: safeJsonParse(row.action_items_json, []),
     policyFlags: safeJsonParse(row.policy_flags_json, []),
+    suggestedProjects: safeJsonParse(row.suggested_projects_json, []),
     createdBy: row.created_by || '',
     startedAt: row.started_at || '',
     endedAt: row.ended_at || '',
@@ -2924,6 +3036,13 @@ function sanitizeAiSecretaryOutput(rawOutput, meeting, deterministicOutput) {
     resolutions: resolutions.length ? resolutions : deterministic.resolutions,
     actionItems: actionItems.length ? actionItems : deterministic.actionItems,
     policyFlags: dedupeAiSecretaryFlags([...aiSecretaryArray(raw.policyFlags), ...governanceFlags]),
+    suggestedProjects: aiSecretaryArray(raw.suggestedProjects).map(p => ({
+      title: String(p?.title || '').trim(),
+      description: String(p?.description || '').trim(),
+      estimatedCost: Number(p?.estimatedCost || 0),
+      priority: ['low', 'medium', 'high'].includes(String(p?.priority || '').toLowerCase()) ? String(p.priority).toLowerCase() : 'medium',
+      targetDate: String(p?.targetDate || '').trim(),
+    })).filter(p => p.title.length > 3).slice(0, 10),
   };
   if (!output.agendaItems.length) output.agendaItems = deterministic.agendaItems || extractAgendaItems(meeting.transcriptText || '');
   if (!output.minutesMarkdown) output.minutesMarkdown = deterministic.minutesMarkdown;
@@ -3141,7 +3260,7 @@ async function callDeepSeekForMeeting(apiKey, meeting) {
   const participantList = (meeting.participants || [])
     .map(p => `${p.label}: ${p.present ? (p.name || 'Present') : 'Absent'}`).join(', ');
   const policyContext = aiSecretaryText(meeting.policyContext);
-  const prompt = `You are a professional church committee secretary. Process the following KPSC meeting and return a JSON object with these exact keys: summaryShort (1-2 sentence string), executiveSummary (plain-language executive summary string), summaryLong (detailed multi-line string), agendaItems (array of agenda or discussion topics), minutesMarkdown (full minutes in Markdown), resolutions (array of {id,text,category,resolutionType,requiredThreshold,approved,amount,motionBy,secondedBy,voteSummary}), actionItems (array of {id,task,assignee,dueDate,status}), policyFlags (array of {type,severity,message}).
+  const prompt = `You are a professional church committee secretary. Process the following KPSC meeting and return a JSON object with these exact keys: summaryShort (1-2 sentence string), executiveSummary (plain-language executive summary string), summaryLong (detailed multi-line string), agendaItems (array of agenda or discussion topics), minutesMarkdown (full minutes in Markdown), resolutions (array of {id,text,category,resolutionType,requiredThreshold,approved,amount,motionBy,secondedBy,voteSummary}), actionItems (array of {id,task,assignee,dueDate,status}), policyFlags (array of {type,severity,message}), suggestedProjects (array of {title,description,estimatedCost,priority,targetDate} for any church project proposals discussed).
 
 Resolution classification requirements:
 - resolutionType must be one of approval, rejection, amendment, motion, vote, financial_approval, decision.
@@ -3153,6 +3272,13 @@ Resolution classification requirements:
 Action item requirements:
 - Extract task, owner/assignee, and deadline if spoken.
 - Use "Unassigned" and empty dueDate only when not stated.
+
+Suggested projects requirements:
+- Only include real church project proposals: things to build, purchase, repair, fund, or undertake.
+- estimatedCost is a number in naira (0 if not stated).
+- priority is one of low, medium, high.
+- targetDate is YYYY-MM-DD or empty string.
+- Limit to 10 items. Omit this key if no projects were discussed.
 
 Saved KPSC policy/bylaw notes:
 ${policyContext || '(none saved)'}
@@ -3169,7 +3295,7 @@ Return only valid JSON, no markdown fences.`;
   const resp = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: meeting.deepseekModel || 'deepseek-v4-flash', messages: [{ role: 'user', content: prompt }], max_tokens: 3000, temperature: 0.3 }),
+    body: JSON.stringify({ model: meeting.deepseekModel || 'deepseek-v4-flash', messages: [{ role: 'user', content: prompt }], max_tokens: 3500, temperature: 0.3 }),
   });
   if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
   const data = await resp.json();
@@ -3211,7 +3337,7 @@ async function processAiSecretaryMeeting(DB, id) {
   const processedAt = new Date().toISOString();
   await DB.prepare(`
     UPDATE ai_secretary_meetings SET
-      status='processed', summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?, processed_at=?
+      status='processed', summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?, suggested_projects_json=?, processed_at=?
     WHERE id=?
   `).bind(
     output.summaryShort || '',
@@ -3220,6 +3346,7 @@ async function processAiSecretaryMeeting(DB, id) {
     JSON.stringify(output.resolutions || []),
     JSON.stringify(output.actionItems || []),
     JSON.stringify(output.policyFlags || []),
+    JSON.stringify(output.suggestedProjects || []),
     processedAt,
     id,
   ).run();
