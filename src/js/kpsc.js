@@ -96,6 +96,11 @@ const S = {
 const REC_CHUNK_MS = 5000;
 const REC_RETRY_BASE_MS = 1200;
 const REC_MAX_RETRIES = 5;
+const KPSC_SESSION_ERRORS = new Set([
+  'KPSC session required',
+  'KPSC session not found or expired',
+  'KPSC session expired',
+]);
 
 const Rec = {
   mediaRecorder: null,
@@ -1232,16 +1237,19 @@ function kpscSessionHeader() {
 }
 
 function isKpscSessionError(errorMessage) {
-  return ['KPSC session required', 'KPSC session not found or expired', 'KPSC session expired'].includes(String(errorMessage || ''));
+  return KPSC_SESSION_ERRORS.has(String(errorMessage || ''));
 }
 
 function handleKpscAuthFailure(data) {
   if (!isKpscSessionError(data?.error)) return;
   if (!S.user?.sessionToken || S._authRecoveryInProgress) return;
   S._authRecoveryInProgress = true;
-  showToast('KPSC session expired. Please sign in again.', 'warn');
-  logout();
-  S._authRecoveryInProgress = false;
+  try {
+    showToast('KPSC session expired. Please sign in again.', 'warn');
+    logout();
+  } finally {
+    S._authRecoveryInProgress = false;
+  }
 }
 
 async function apiGet(path) {
