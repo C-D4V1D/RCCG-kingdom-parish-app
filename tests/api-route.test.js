@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { onRequest, cosineSim, embeddingToBlob, blobToEmbedding } from '../functions/api/[[route]].js';
+import { onRequest, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone } from '../functions/api/[[route]].js';
 
 async function readJson(response) {
   return JSON.parse(await response.text());
@@ -1887,4 +1887,198 @@ test('voice-enrollment GET: returns enrolled:false when member has no enrollment
 
   assert.equal(response.status, 200);
   assert.equal(body.enrolled, false);
+});
+
+// ── B4: smart reminders — classifyPartnerTone unit tests ────────────────────
+
+test('classifyPartnerTone: returns "new" for partner with fewer than 3 payments', () => {
+  const partner = { id: 'p1', full_name: 'Brother Test' };
+  // Only 2 payments total
+  const payments = [
+    { year: 2026, month: 3 },
+    { year: 2026, month: 4 },
+  ];
+  const result = classifyPartnerTone(partner, payments, 2026, 5);
+  assert.equal(result, 'new');
+});
+
+test('classifyPartnerTone: returns "chronic" for partner with 3+ missed months in last 6', () => {
+  const partner = { id: 'p2', full_name: 'Sister Chronic' };
+  // paidInLast(6) counts: Apr, Mar, Feb, Jan, Dec'25, Nov'25
+  // Only paid Jan and Feb → missed Apr, Mar, Dec, Nov = 4 missed → chronic
+  const payments = [
+    { year: 2026, month: 1 },
+    { year: 2026, month: 2 },
+    { year: 2026, month: 5 }, // current month (not counted in paidInLast)
+  ];
+  const result = classifyPartnerTone(partner, payments, 2026, 5);
+  assert.equal(result, 'chronic');
+});
+
+// ── B4: smart reminders — endpoint happy path ────────────────────────────────
+
+test('POST /api/kpsc-reminder-personalize: happy path returns 3 variants with tone bucket', async () => {
+  const fakeVariants = [
+    'Dear {{name}}, friendly reminder for {{month}}. Bless you!',
+    'Hi {{name}}, please settle your {{month}} pledge. God bless.',
+    '{{name}}, your {{month}} partnership pledge is due. Thank you!',
+  ];
+  const aiResponse = { choices: [{ message: { content: JSON.stringify(fakeVariants) } }] };
+
+  let fetchCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('deepseek')) {
+      fetchCalled = true;
+      return { ok: true, json: async () => aiResponse };
+    }
+    return originalFetch(url);
+  };
+
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...args) { st._bound = args; return st; },
+        async first() {
+          if (/SELECT \* FROM kpsc_partners/.test(sql)) {
+            return { id: 'p1', full_name: 'Brother Happy', status: 'active' };
+          }
+          if (/SELECT key,value FROM settings/.test(sql)) return null;
+          return null;
+        },
+        async all() {
+          if (/SELECT key,value FROM settings/.test(sql)) {
+            return { results: [
+              { key: 'ai_deepseek_key', value: 'test-key-123' },
+              { key: 'ai_deepseek_model', value: 'deepseek-v4-flash' },
+            ]};
+          }
+          if (/SELECT year, month, amount, paid_at/.test(sql)) {
+            return { results: [
+              { year: 2026, month: 1 },
+              { year: 2026, month: 2 },
+              { year: 2026, month: 3 },
+              { year: 2026, month: 4 },
+            ]};
+          }
+          return { results: [] };
+        },
+      };
+      return st;
+    })
+  });
+
+  const req = createKpscRequest('https://example.com/api/kpsc-reminder-personalize', 'POST', {
+    partnerId: 'p1',
+    year: 2026,
+    month: 5,
+    fallbackTemplate: 'Dear {{name}}, pay your {{month}} pledge.',
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  globalThis.fetch = originalFetch;
+
+  assert.equal(response.status, 200);
+  assert.ok(Array.isArray(body.variants), 'variants should be an array');
+  assert.equal(body.variants.length, 3);
+  assert.ok(typeof body.toneBucket === 'string', 'toneBucket should be a string');
+  assert.ok(fetchCalled, 'DeepSeek fetch should have been called');
+});
+
+test('POST /api/kpsc-reminder-personalize: missing DeepSeek key returns fallback, no 500', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...args) { st._bound = args; return st; },
+        async first() {
+          if (/SELECT \* FROM kpsc_partners/.test(sql)) {
+            return { id: 'p2', full_name: 'Sister Nokey', status: 'active' };
+          }
+          return null;
+        },
+        async all() {
+          if (/SELECT key,value FROM settings/.test(sql)) {
+            // No DeepSeek key set
+            return { results: [] };
+          }
+          if (/SELECT year, month, amount, paid_at/.test(sql)) {
+            return { results: [] };
+          }
+          return { results: [] };
+        },
+      };
+      return st;
+    })
+  });
+
+  const fallback = 'Dear {{name}}, pay your {{month}} pledge. God bless.';
+  const req = createKpscRequest('https://example.com/api/kpsc-reminder-personalize', 'POST', {
+    partnerId: 'p2',
+    year: 2026,
+    month: 5,
+    fallbackTemplate: fallback,
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.ok(Array.isArray(body.variants), 'should return variants array');
+  assert.equal(body.variants[0], fallback);
+  assert.ok(typeof body.error === 'string', 'should include an error hint');
+});
+
+test('POST /api/kpsc-reminder-personalize: malformed DeepSeek response falls back gracefully', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('deepseek')) {
+      // Return non-JSON-array content
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'I cannot help with that.' } }] }) };
+    }
+    return originalFetch(url);
+  };
+
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...args) { st._bound = args; return st; },
+        async first() {
+          if (/SELECT \* FROM kpsc_partners/.test(sql)) {
+            return { id: 'p3', full_name: 'Elder Malformed', status: 'active' };
+          }
+          return null;
+        },
+        async all() {
+          if (/SELECT key,value FROM settings/.test(sql)) {
+            return { results: [{ key: 'ai_deepseek_key', value: 'test-key' }] };
+          }
+          if (/SELECT year, month, amount, paid_at/.test(sql)) {
+            return { results: [] };
+          }
+          return { results: [] };
+        },
+      };
+      return st;
+    })
+  });
+
+  const fallback = 'Dear {{name}}, remember your {{month}} pledge.';
+  const req = createKpscRequest('https://example.com/api/kpsc-reminder-personalize', 'POST', {
+    partnerId: 'p3',
+    year: 2026,
+    month: 5,
+    fallbackTemplate: fallback,
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  globalThis.fetch = originalFetch;
+
+  assert.equal(response.status, 200);
+  assert.ok(Array.isArray(body.variants));
+  assert.equal(body.variants[0], fallback, 'should fall back to template on parse failure');
+  assert.ok(typeof body.error === 'string', 'should report the parsing error');
 });
