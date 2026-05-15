@@ -162,39 +162,16 @@ const Diarizer = {
   reconnectTimer: null,
   reconnectAttempts: 0,
   manualStop: false,
-  // PCM ring buffer — raw Float32 samples from the AudioWorklet, used to
-  // extract per-speaker audio slices for Azure Speaker Recognition.
+  // PCM ring buffer — raw Float32 samples from the AudioWorklet. Used by
+  // VF-4 to extract per-speaker audio slices for voice fingerprinting.
   pcmChunks: [],        // Array of {offset: number, data: Float32Array}
   pcmSampleOffset: 0,   // Total samples written since Diarizer was constructed
   pcmSampleRate: 0,     // Set from AudioContext.sampleRate on connection
   dgTimeOffset: 0,      // pcmSampleOffset when the current WS connection was opened;
                         // adds to Deepgram's 0-based timestamps to get absolute offsets
   speakerRanges: new Map(), // Map<speakerIdx, {startSample, endSample}[]>
-  identifyPending: new Set(), // speaker indices currently being identified by Azure
 };
 
-// ── VOICE ENROLLMENT ───────────────────────────────────────────────
-// Captures a ~30-second voice sample from a member and enrolls it
-// with Azure Speaker Recognition for automatic future identification.
-const Enrolling = {
-  stream: null,
-  audioCtx: null,
-  workletNode: null,
-  workletUrl: null,
-  samples: [],      // Float32Array chunks collected during enrollment
-  sampleRate: 0,
-  timer: null,
-  elapsed: 0,
-  memberIdx: -1,
-  active: false,
-};
-
-// ── AZURE SPEAKER RECOGNITION CONSTANTS ───────────────────────────
-const AZURE_IDENTIFY_THRESHOLD_SEC = 5;   // seconds of speech needed before triggering auto-ID
-const AZURE_IDENTIFY_MIN_AUDIO_SEC  = 4;  // minimum seconds Azure needs for a reliable match
-const AZURE_IDENTIFY_MAX_AUDIO_SEC  = 10; // max seconds of audio to send per identification call
-const AZURE_IDENTIFY_MIN_SCORE = 0.5;     // minimum confidence (0–1) to accept auto-assignment
-const AZURE_ENROLL_DURATION_SEC = 30;     // seconds of audio to capture for enrollment
 const DEFAULT_PCM_SAMPLE_RATE   = 48000;  // fallback rate before the AudioContext is created
 const BASE64_CHUNK_SIZE         = 32768;  // chars per chunk when encoding large buffers
 const PCM_BUFFER_DURATION_SEC   = 60;     // seconds of PCM audio to retain in the ring buffer
@@ -579,7 +556,6 @@ async function recStart(btn) {
     Rec._voiceIdConsecutive503 = 0;
     // Reset per-speaker identification state for the new session.
     Diarizer.speakerRanges   = new Map();
-    Diarizer.identifyPending = new Set();
 
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
@@ -797,7 +773,6 @@ function recReset() {
   Diarizer.status = 'offline';
   Diarizer.reconnectAttempts = 0;
   Diarizer.speakerRanges   = new Map();
-  Diarizer.identifyPending = new Set();
   recRenderUI();
   recRenderTranscript();
   recRenderSpeakerMap();
@@ -991,7 +966,7 @@ async function diarizerConnect() {
       if (Diarizer.ws?.readyState === WebSocket.OPEN) {
         Diarizer.ws.send(diarizerFloat32ToInt16(e.data).buffer);
       }
-      // Buffer a copy of the raw PCM for Azure speaker identification.
+      // Buffer a copy of the raw PCM for VF-4 voice identification.
       diarizerBufferPcm(e.data);
     };
     source.connect(workletNode);
@@ -1107,7 +1082,6 @@ function diarizerClose(markManual) {
     Diarizer.pcmChunks       = [];
     Diarizer.pcmSampleOffset = 0;
     Diarizer.speakerRanges   = new Map();
-    Diarizer.identifyPending = new Set();
   }
   clearTimeout(Diarizer.reconnectTimer);
   Diarizer.reconnectTimer = null;
@@ -1161,33 +1135,8 @@ function diarizerExtractPcmRange(startSample, endSample) {
   return out;
 }
 
-// Collect up to AZURE_IDENTIFY_MAX_AUDIO_SEC of audio for a speaker index from the ring buffer.
-function diarizerExtractSpeakerAudio(speakerIdx) {
-  const ranges = Diarizer.speakerRanges.get(speakerIdx) || [];
-  if (!ranges.length || !Diarizer.pcmSampleRate) return null;
-  const maxSamples = AZURE_IDENTIFY_MAX_AUDIO_SEC * Diarizer.pcmSampleRate;
-  let accumulated = 0;
-  const toExtract = [];
-  for (let i = ranges.length - 1; i >= 0 && accumulated < maxSamples; i--) {
-    toExtract.unshift(ranges[i]);
-    accumulated += ranges[i].endSample - ranges[i].startSample;
-  }
-  const chunks = toExtract.map(r => diarizerExtractPcmRange(r.startSample, r.endSample)).filter(Boolean);
-  if (!chunks.length) return null;
-  const totalLen = Math.min(chunks.reduce((a, c) => a + c.length, 0), maxSamples);
-  const out = new Float32Array(totalLen);
-  let pos = 0;
-  for (const c of chunks) {
-    if (pos >= out.length) break;
-    const take = Math.min(c.length, out.length - pos);
-    out.set(c.subarray(0, take), pos);
-    pos += take;
-  }
-  return out;
-}
-
 // Record the time range spoken by a Deepgram speaker index (in absolute PCM samples).
-// Triggers Azure identification once AZURE_IDENTIFY_THRESHOLD_SEC of audio is collected.
+// VF-4 reads Diarizer.speakerRanges to extract audio for /api/voice-identify.
 function diarizerAccumulateSpeakerRange(speakerIdx, startSec, endSec) {
   if (!Diarizer.pcmSampleRate) return;
   const sr          = Diarizer.pcmSampleRate;
@@ -1195,58 +1144,6 @@ function diarizerAccumulateSpeakerRange(speakerIdx, startSec, endSec) {
   const endSample   = Math.ceil(endSec   * sr) + Diarizer.dgTimeOffset;
   if (!Diarizer.speakerRanges.has(speakerIdx)) Diarizer.speakerRanges.set(speakerIdx, []);
   Diarizer.speakerRanges.get(speakerIdx).push({ startSample, endSample });
-
-  const totalSamples = Diarizer.speakerRanges.get(speakerIdx)
-    .reduce((a, r) => a + (r.endSample - r.startSample), 0);
-  if (!Diarizer.identifyPending.has(speakerIdx) &&
-      totalSamples >= AZURE_IDENTIFY_THRESHOLD_SEC * sr) {
-    diarizerTriggerIdentify(speakerIdx).catch(e => console.warn('Auto-identify error:', e));
-  }
-}
-
-// Return true if a member's attendance checkbox is ticked in the current meeting.
-function isMemberPresent(mem) {
-  const groupMembers = S.members.filter(m => m.group === mem.group);
-  const groupIdx     = groupMembers.indexOf(mem);
-  if (groupIdx < 0) return false;
-  const el = document.getElementById(`att_present_${mem.group}_${groupIdx}`);
-  return el?.checked === true;
-}
-
-// Attempt to auto-identify a Deepgram speaker index using Azure Speaker Recognition.
-// Silently skips if Azure is not configured or no enrolled members are present.
-async function diarizerTriggerIdentify(speakerIdx) {
-  if (Rec.speakerMap.has(speakerIdx)) return; // already assigned manually
-  const enrolledPresent = S.members.filter(m => m.azureSpeakerProfileId && isMemberPresent(m));
-  if (!enrolledPresent.length) return;
-
-  Diarizer.identifyPending.add(speakerIdx);
-  try {
-    const audio = diarizerExtractSpeakerAudio(speakerIdx);
-    // Azure needs at least AZURE_IDENTIFY_MIN_AUDIO_SEC of speech for a reliable match.
-    if (!audio || audio.length < AZURE_IDENTIFY_MIN_AUDIO_SEC * Diarizer.pcmSampleRate) return;
-
-    const resampled   = resampleTo16k(audio, Diarizer.pcmSampleRate);
-    const wavBuffer   = pcmToWav(resampled, 16000);
-    const audioBase64 = arrayBufferToBase64(wavBuffer);
-    const profileIds  = enrolledPresent.map(m => m.azureSpeakerProfileId);
-
-    const res = await apiPost('azure-speaker-identify', { profileIds, audioBase64 });
-    if (res.error) { console.warn('Speaker identification:', res.error); return; }
-
-    if (res.profileId && res.score >= AZURE_IDENTIFY_MIN_SCORE) {
-      if (Rec.speakerMap.has(speakerIdx)) return; // assigned while we waited
-      const matched = enrolledPresent.find(m => m.azureSpeakerProfileId === res.profileId);
-      if (matched) {
-        assignSpeaker(speakerIdx, matched.name);
-        showToast(`🎙 Auto-identified: ${matched.name} (${Math.round(res.score * 100)}% match)`, 'success');
-      }
-    }
-  } catch (e) {
-    console.warn('diarizerTriggerIdentify error:', e);
-  } finally {
-    Diarizer.identifyPending.delete(speakerIdx);
-  }
 }
 
 // ── VF-4: VOICE FINGERPRINT IDENTIFICATION DURING MEETINGS ───────────
@@ -1312,7 +1209,7 @@ async function voiceIdTriggerForSpeaker(speakerIdx) {
     }
 
     if (!float32 || float32.length < 1.5 * (Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE)) {
-      // Not enough audio yet — let Azure identify handle it next time
+      // Not enough audio yet — allow another identify attempt on next speaker turn.
       Rec.speakerIdentified.delete(speakerIdx); // allow retry
       return;
     }
@@ -1646,7 +1543,7 @@ function esc(s) {
 
 // ── PCM AUDIO HELPERS ────────────────────────────────────────────
 // Linearly resample a Float32 PCM array from `fromRate` to 16 kHz.
-// Azure Speaker Recognition requires 8/16/32 kHz WAV input.
+// 16 kHz is the required input rate for the SpeechBrain ECAPA-TDNN model.
 // Linear interpolation is sufficient for speaker identification — the model
 // is robust to minor resampling artefacts, and higher-quality algorithms
 // (e.g. polyphase filters) are not worth the added complexity here.
@@ -2215,7 +2112,7 @@ function buildDashboardContext() {
   );
 
   // Quorum: members with voice enrolled (proxy for "voice" quorum) vs total
-  const enrolledCount = S.members.filter(m => m.azureSpeakerProfileId).length;
+  const enrolledCount = S.members.filter(m => m.voice_enrolled_at).length;
   const totalMembers  = S.members.length;
 
   // Last meeting attendance %
@@ -3329,12 +3226,6 @@ function memberVoiceId(mem) {
 }
 
 function memberRow(idx, mem) {
-  const enrolled    = !!mem.azureSpeakerProfileId;
-  const enrollClass = enrolled ? 'kbtn kbtn-sm k-enroll-btn k-enrolled' : 'kbtn kbtn-sm kbtn-ghost k-enroll-btn';
-  const enrollTitle = enrolled ? 'Voice enrolled — click to re-enrol' : 'Enrol voice fingerprint for auto-identification';
-  const enrollIcon  = enrolled ? '🎙✓' : '🎙';
-
-  // VF-3: voice fingerprint enrollment status badge
   const vfpEnrolled = !!mem.voice_enrolled_at;
   const vfpBadge = vfpEnrolled
     ? `<span class="k-vfp-badge k-vfp-enrolled" title="Voice fingerprint enrolled ${esc(mem.voice_enrolled_at || '')}">🎙&#xFE0F; FP</span>`
@@ -3350,10 +3241,9 @@ function memberRow(idx, mem) {
       <input class="k-input k-input-sm k-mem-pos" type="text" placeholder="Position (optional)"
         value="${esc(mem.position || '')}" onchange="Kpsc.memberFieldChange(${idx},'position',this.value)" />
       ${vfpBadge}
-      <button class="kbtn kbtn-sm kbtn-ghost k-vfp-enroll-btn" onclick="Kpsc.showVoiceFpEnrollModal(${idx})" title="${vfpEnrolled ? 'Re-enroll voice fingerprint (KPSC AI system)' : 'Enroll voice fingerprint for meeting identification'}">
+      <button class="kbtn kbtn-sm kbtn-ghost k-vfp-enroll-btn" onclick="Kpsc.showVoiceFpEnrollModal(${idx})" title="${vfpEnrolled ? 'Re-enroll voice fingerprint' : 'Enroll voice fingerprint for meeting identification'}">
         ${vfpEnrolled ? '🔁 FP' : '🎙 FP'}
       </button>
-      <button class="${enrollClass}" onclick="Kpsc.enrollMemberVoice(${idx})" title="${enrollTitle}">${enrollIcon}</button>
       <button class="kbtn kbtn-sm kbtn-ghost kbtn-remove" onclick="Kpsc.removeMember(${idx})">✕</button>
     </div>`;
 }
@@ -3405,210 +3295,6 @@ async function saveMembers(btn) {
     btn.textContent = orig;
   }
 }
-
-// ── VOICE ENROLLMENT UI ───────────────────────────────────────────
-
-function enrollMemberVoice(idx) {
-  const member = S.members[idx];
-  if (!member || !member.name.trim()) {
-    showToast('Please save the member name first.', 'warn');
-    return;
-  }
-  showEnrollModal(idx);
-}
-
-function showEnrollModal(idx) {
-  const member  = S.members[idx];
-  if (!member) return;
-  const alreadyEnrolled = !!member.azureSpeakerProfileId;
-
-  document.getElementById('k-enroll-modal')?.remove();
-
-  const modal = document.createElement('div');
-  modal.id        = 'k-enroll-modal';
-  modal.className = 'k-modal-overlay';
-  modal.innerHTML = `
-    <div class="k-modal">
-      <div class="k-modal-hdr">
-        <span class="k-modal-title">🎙 Enrol Voice — ${esc(member.name)}</span>
-        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeEnrollModal()">✕</button>
-      </div>
-      <div class="k-modal-body">
-        ${alreadyEnrolled ? '<p class="k-enroll-warn">⚠ This member already has a voice enrolled. Recording again will replace it.</p>' : ''}
-        <p class="k-enroll-instruction">Ask <strong>${esc(member.name)}</strong> to speak naturally for <strong>30 seconds</strong>.</p>
-        <p class="k-hint">They can read aloud, count numbers, or talk about anything. At least 20 seconds of clear speech is needed.</p>
-        <div id="k-enroll-status"></div>
-        <div id="k-enroll-progress" style="display:none">
-          <div class="k-enroll-timer" id="k-enroll-timer">0:00 / 0:30</div>
-          <div class="k-enroll-bar-bg"><div class="k-enroll-bar" id="k-enroll-bar"></div></div>
-        </div>
-      </div>
-      <div class="k-modal-footer" id="k-enroll-footer">
-        <button class="kbtn kbtn-record" id="k-enroll-start-btn" onclick="Kpsc.startEnrollRecording(${idx})">🔴 Start Recording</button>
-        <button class="kbtn kbtn-ghost" onclick="Kpsc.closeEnrollModal()">Cancel</button>
-      </div>
-    </div>`;
-  document.body.appendChild(modal);
-}
-
-function closeEnrollModal() {
-  enrollCleanupAudio();
-  Enrolling.active  = false;
-  Enrolling.samples = [];
-  document.getElementById('k-enroll-modal')?.remove();
-}
-
-function enrollCleanupAudio() {
-  clearInterval(Enrolling.timer);
-  Enrolling.timer = null;
-  if (Enrolling.workletNode) {
-    try { Enrolling.workletNode.disconnect(); } catch (_) {}
-    Enrolling.workletNode = null;
-  }
-  if (Enrolling.audioCtx && Enrolling.audioCtx.state !== 'closed') {
-    Enrolling.audioCtx.close().catch(() => {});
-    Enrolling.audioCtx = null;
-  } else {
-    Enrolling.audioCtx = null;
-  }
-  if (Enrolling.workletUrl) {
-    URL.revokeObjectURL(Enrolling.workletUrl);
-    Enrolling.workletUrl = null;
-  }
-  if (Enrolling.stream) {
-    Enrolling.stream.getTracks().forEach(t => t.stop());
-    Enrolling.stream = null;
-  }
-}
-
-async function startEnrollRecording(idx) {
-  const startBtn   = document.getElementById('k-enroll-start-btn');
-  const statusEl   = document.getElementById('k-enroll-status');
-  const progressEl = document.getElementById('k-enroll-progress');
-  const footerEl   = document.getElementById('k-enroll-footer');
-
-  if (startBtn) { startBtn.disabled = true; startBtn.textContent = '🎙 Recording…'; }
-  if (footerEl) {
-    // Replace Cancel button to abort the recording and clean up resources.
-    const cancelBtn = footerEl.querySelector('.kbtn-ghost');
-    if (cancelBtn) {
-      cancelBtn.textContent = '✕ Abort';
-      cancelBtn.onclick = () => { closeEnrollModal(); };
-    }
-  }
-
-  try {
-    Enrolling.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    });
-    Enrolling.memberIdx  = idx;
-    Enrolling.samples    = [];
-    Enrolling.elapsed    = 0;
-    Enrolling.active     = true;
-
-    Enrolling.audioCtx   = new AudioContext();
-    Enrolling.sampleRate = Enrolling.audioCtx.sampleRate;
-
-    const blob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
-    Enrolling.workletUrl = URL.createObjectURL(blob);
-    await Enrolling.audioCtx.audioWorklet.addModule(Enrolling.workletUrl);
-
-    const source = Enrolling.audioCtx.createMediaStreamSource(Enrolling.stream);
-    Enrolling.workletNode = new AudioWorkletNode(Enrolling.audioCtx, 'pcm-capture-processor');
-    Enrolling.workletNode.port.onmessage = (e) => {
-      if (Enrolling.active) Enrolling.samples.push(e.data.slice());
-    };
-    source.connect(Enrolling.workletNode);
-    Enrolling.workletNode.connect(Enrolling.audioCtx.createMediaStreamDestination());
-
-    if (progressEl) progressEl.style.display = '';
-
-    Enrolling.timer = setInterval(() => {
-      Enrolling.elapsed++;
-      const m      = Math.floor(Enrolling.elapsed / 60);
-      const s      = Enrolling.elapsed % 60;
-      const timerEl = document.getElementById('k-enroll-timer');
-      const barEl   = document.getElementById('k-enroll-bar');
-      if (timerEl) timerEl.textContent = `${m}:${String(s).padStart(2, '0')} / 0:30`;
-      if (barEl)   barEl.style.width   = `${Math.min(100, (Enrolling.elapsed / AZURE_ENROLL_DURATION_SEC) * 100)}%`;
-      if (Enrolling.elapsed >= AZURE_ENROLL_DURATION_SEC) {
-        clearInterval(Enrolling.timer);
-        Enrolling.timer = null;
-        finishEnrollRecording();
-      }
-    }, 1000);
-
-  } catch (e) {
-    if (statusEl) statusEl.innerHTML = `<div class="k-enroll-error">❌ Microphone access error: ${esc(e.message)}</div>`;
-    if (startBtn) { startBtn.disabled = false; startBtn.textContent = '🔴 Start Recording'; }
-    enrollCleanupAudio();
-  }
-}
-
-async function finishEnrollRecording() {
-  const statusEl = document.getElementById('k-enroll-status');
-  const footerEl = document.getElementById('k-enroll-footer');
-
-  Enrolling.active = false;
-  enrollCleanupAudio();
-
-  if (statusEl) statusEl.innerHTML = '<div class="k-enroll-info">⏳ Processing voice data — please wait…</div>';
-  if (footerEl) footerEl.innerHTML = '';
-
-  try {
-    const idx    = Enrolling.memberIdx;
-    const member = S.members[idx];
-    if (!member) throw new Error('Member not found.');
-
-    if (!Enrolling.samples.length) throw new Error('No audio was captured.');
-
-    // Merge all captured PCM chunks into one Float32Array.
-    const totalLen = Enrolling.samples.reduce((a, c) => a + c.length, 0);
-    const merged   = new Float32Array(totalLen);
-    let pos = 0;
-    for (const chunk of Enrolling.samples) { merged.set(chunk, pos); pos += chunk.length; }
-    Enrolling.samples = []; // free memory
-
-    // Resample to 16 kHz and encode as WAV.
-    const resampled   = resampleTo16k(merged, Enrolling.sampleRate);
-    const wavBuffer   = pcmToWav(resampled, 16000);
-    const audioBase64 = arrayBufferToBase64(wavBuffer);
-
-    // Delete the old Azure profile if one exists (best-effort; a failure won't block re-enrolment).
-    if (member.azureSpeakerProfileId) {
-      await fetch(`${API}/azure-speaker-profiles/${encodeURIComponent(member.azureSpeakerProfileId)}`,
-        { method: 'DELETE' }).catch(e => console.warn('Could not delete old Azure profile:', e));
-    }
-
-    // Create a new Azure speaker profile.
-    const createRes = await apiPost('azure-speaker-profiles', {});
-    if (createRes.error) throw new Error(createRes.error);
-    const profileId = createRes.profileId;
-    if (!profileId) throw new Error('Azure did not return a profile ID.');
-
-    // Enroll the recorded audio.
-    const enrollRes = await apiPost(`azure-speaker-profiles/${profileId}/enroll`, { audioBase64 });
-    if (enrollRes.error) throw new Error(enrollRes.error);
-
-    // Persist the profile ID on the member (azureSpeakerProfileId survives saveMembers).
-    S.members[idx].azureSpeakerProfileId = profileId;
-    await apiPost('settings', { kpsc_members: S.members });
-
-    if (statusEl) statusEl.innerHTML =
-      `<div class="k-enroll-ok">✅ Voice enrolled for <strong>${esc(member.name)}</strong>! Future meetings will auto-identify this speaker.</div>`;
-    if (footerEl) footerEl.innerHTML =
-      `<button class="kbtn kbtn-primary" onclick="Kpsc.closeEnrollModal()">Done</button>`;
-
-    // Refresh the member list so the ✓ badge appears.
-    const list = document.getElementById('km-members-list');
-    if (list) list.innerHTML = renderMembersList();
-
-  } catch (e) {
-    if (statusEl) statusEl.innerHTML = `<div class="k-enroll-error">❌ Enrollment failed: ${esc(e.message)}</div>`;
-    if (footerEl) footerEl.innerHTML = `<button class="kbtn kbtn-ghost" onclick="Kpsc.closeEnrollModal()">Close</button>`;
-  }
-}
-
 
 // ── VF-3 VOICE FINGERPRINT ENROLLMENT (new /api/voice-enroll path) ───────
 
@@ -5167,7 +4853,7 @@ function apiStatusPill(status) {
 function renderApiStatusCard(apiStatus) {
   const live = apiStatus?.liveTranscription || {};
   const dg = apiStatus?.diarization || {};
-  const azure = apiStatus?.speakerRecognition || {};
+  const voiceFp = apiStatus?.speakerRecognition || {};
   return `
     <div class="k-api-status-card ${live.active ? 'k-api-card-active' : 'k-api-card-missing'}">
       <div class="k-api-status-head">
@@ -5191,8 +4877,8 @@ function renderApiStatusCard(apiStatus) {
           <span>${apiStatusPill(dg)} <code>${esc(dg.keyName || 'DEEPGRAM_API_KEY')}</code></span>
         </div>
         <div class="k-api-status-row">
-          <span class="k-api-label">Voice recognition</span>
-          <span>${apiStatusPill(azure)} <code>${esc(azure.keyName || 'AZURE_SPEAKER_KEY')}</code> <small>Region: ${esc(azure.region || 'eastus')}</small></span>
+          <span class="k-api-label">Voice fingerprinting</span>
+          <span>${apiStatusPill(voiceFp)} <code>${esc(voiceFp.keyName || 'VOICE_FP_TOKEN')}</code> ${voiceFp.url ? `<small>${esc(voiceFp.url)}</small>` : '<small>not configured</small>'}</span>
         </div>
       </div>
       <p class="k-api-message">${esc(live.message || apiStatus?.error || 'Status unavailable.')}</p>
@@ -5484,19 +5170,19 @@ async function renderSettings(main) {
           <span class="k-env-desc">Powers speaker diarization — identifies who is speaking and labels each transcript turn. Get a key at <a href="https://console.deepgram.com" target="_blank" rel="noopener">console.deepgram.com</a>.</span>
         </div>
         <div class="k-env-row">
-          <code class="k-env-key">AZURE_SPEAKER_KEY</code>
-          <span class="k-env-desc">Azure Cognitive Services key for persistent voice fingerprinting. Enables one-time voice enrolment per member and automatic speaker identification across meetings. Get a key at <a href="https://portal.azure.com" target="_blank" rel="noopener">portal.azure.com</a> (Speech service → Keys and Endpoint).</span>
+          <code class="k-env-key">VOICE_FP_URL</code>
+          <span class="k-env-desc">URL of the self-hosted SpeechBrain voice-fingerprinting service (Cloud Run). Replaces the retired Azure Speaker Recognition. See <code>services/voice-fp/README.md</code> for deploy instructions.</span>
         </div>
         <div class="k-env-row">
-          <code class="k-env-key">AZURE_SPEAKER_REGION</code>
-          <span class="k-env-desc">Azure region for the Speech service (e.g. <code>eastus</code>, <code>westeurope</code>). Defaults to <code>eastus</code> if not set.</span>
+          <code class="k-env-key">VOICE_FP_TOKEN</code>
+          <span class="k-env-desc">Bearer secret used by the Worker to authenticate against the voice-fingerprinting service. Generate with <code>openssl rand -hex 32</code> and set the same value on the Cloud Run service.</span>
         </div>
         <p class="k-hint" style="margin-top:12px">
           Set these in the Cloudflare Pages dashboard → Settings → Environment Variables.
           If either key is absent, that feature degrades gracefully: transcription falls back to
           OpenAI-only (without speaker labels) when Deepgram is absent, and to chunk-based
           upload only when both are absent. Voice fingerprinting is silently skipped when
-          AZURE_SPEAKER_KEY is absent.
+          VOICE_FP_URL or VOICE_FP_TOKEN are absent.
         </p>
       </div>
 
@@ -6372,10 +6058,6 @@ window.Kpsc = {
   recStop,
   recReset,
   assignSpeaker,
-  enrollMemberVoice,
-  showEnrollModal,
-  closeEnrollModal,
-  startEnrollRecording,
   // VF-3 voice fingerprint enrollment
   showVoiceFpEnrollModal,
   closeVoiceFpModal,
