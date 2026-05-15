@@ -63,7 +63,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .ka-back:hover{background:rgba(255,255,255,.1);}
 .ka-title{flex:1;font-weight:600;font-size:15px;letter-spacing:.3px;}
 .ka-right{display:flex;align-items:center;gap:10px;}
-.ka-user{font-size:12px;color:rgba(255,255,255,.7);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ka-user{font-size:12px;color:rgba(255,255,255,.7);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ka-logout{background:none;border:none;color:rgba(255,255,255,.7);cursor:pointer;padding:4px;
   border-radius:6px;display:flex;align-items:center;transition:color .15s;}
 .ka-logout:hover{color:#fff;}
@@ -366,6 +366,16 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-about-label{font-weight:600;color:var(--text2);min-width:80px;}
 .kbtn-danger-outline{background:transparent;border:1.5px solid var(--red);color:var(--red);}
 .kbtn-danger-outline:hover{background:var(--red);color:#fff;}
+
+/* ── ROLE PERMISSIONS TABLE ────────────────────────────────────── */
+.k-perm-table{width:100%;border-collapse:collapse;font-size:13px;}
+.k-perm-table th,.k-perm-table td{border:1px solid var(--border);padding:8px 10px;text-align:center;}
+.k-perm-role-col{text-align:left;min-width:150px;background:var(--surface2);font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--text3);}
+.k-perm-page-col{min-width:72px;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--text3);background:var(--surface2);}
+.k-perm-role-name{text-align:left;font-weight:500;color:var(--text2);white-space:nowrap;}
+.k-perm-check-cell{padding:6px;vertical-align:middle;}
+.k-perm-check-cell input[type=checkbox]{width:16px;height:16px;cursor:pointer;accent-color:var(--navy);}
+.k-perm-check-cell input[type=checkbox]:disabled{cursor:not-allowed;opacity:.45;}
 
 /* ── VOICE ENROLLMENT MODAL ────────────────────────────────────── */
 .k-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;

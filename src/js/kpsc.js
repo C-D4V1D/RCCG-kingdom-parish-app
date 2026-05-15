@@ -31,6 +31,8 @@ const KPSC_PERMISSIONS = {
   financial_secretary:['dashboard', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
   treasurer:          ['dashboard', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
   committee_viewer:   ['dashboard', 'projects', 'partners', 'partner-progress', 'reports', 'archive'],
+  // IT admin: full read access + account/settings management; no operational write actions.
+  it_admin:           ['dashboard', 'archive', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'reports', 'settings'],
 };
 const PIN_REGEX = /^\d{4,6}$/;
 
@@ -95,6 +97,7 @@ const S = {
   _reviewEditMode: false, // true = show inline review editor; false = show reviewed summary
   _isNewMeeting: false,   // true when the room is hosting a fresh, never-saved draft
   kpscMeetingCadence: 'none',
+  rolePermissions: null, // loaded from DB; null means use KPSC_PERMISSIONS defaults
 };
 
 // ── AUDIO RECORDER + REALTIME TRANSCRIPTION ───────────────────────
@@ -1366,15 +1369,21 @@ function roleLabel(role) {
     financial_secretary: 'Financial Secretary',
     treasurer: 'Treasurer',
     committee_viewer: 'Committee Viewer',
+    it_admin: 'IT Administrator',
   };
   return map[String(role || '').toLowerCase()] || 'Committee Viewer';
+}
+
+function effectiveRolePermissions() {
+  return S.rolePermissions || KPSC_PERMISSIONS;
 }
 
 function canAccess(page) {
   // Group-level navigation names are always accessible (groups are always shown).
   if (['home', 'meetings', 'money', 'more'].includes(page)) return true;
   const role = String(S.user?.role || 'committee_viewer').toLowerCase();
-  const allowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
+  const perms = effectiveRolePermissions();
+  const allowed = perms[role] || KPSC_PERMISSIONS.committee_viewer;
   return allowed.includes(page);
 }
 
@@ -1397,7 +1406,8 @@ function applyNavPermissions() {
 
 function defaultPageForRole() {
   const role = String(S.user?.role || 'committee_viewer').toLowerCase();
-  const allowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
+  const perms = effectiveRolePermissions();
+  const allowed = perms[role] || KPSC_PERMISSIONS.committee_viewer;
   return allowed[0] || 'dashboard';
 }
 
@@ -1804,10 +1814,21 @@ function logout() {
   loadLoginOptions();
 }
 
-function enterApp() {
+async function enterApp() {
   document.getElementById('kpsc-login-screen').style.display = 'none';
   document.getElementById('kpsc-app').style.display = '';
-  document.getElementById('kpsc-user-name').textContent = `${S.user.name} (${roleLabel(S.user.role)})`;
+  const userLabel = `${S.user.name} (${roleLabel(S.user.role)})`;
+  const userNameEl = document.getElementById('kpsc-user-name');
+  userNameEl.textContent = userLabel;
+  userNameEl.title = userLabel;
+  // Load role permissions from DB so canAccess() uses current settings
+  try {
+    const settingsRes = await apiGet('settings');
+    const saved = settingsRes?.kpsc_role_permissions;
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      S.rolePermissions = saved;
+    }
+  } catch { /* fall back to hardcoded KPSC_PERMISSIONS */ }
   applyNavPermissions();
   S._navStack = [];
   const hashPage = window.location.hash.replace('#', '');
@@ -2180,12 +2201,16 @@ function buildDashboardContext() {
   const pendingFollowups = Array.isArray(S.followups) ? S.followups.filter(f => f.status === 'pending') : [];
 
   // B6: upcoming meeting with pre-brief (within next 24h)
+  // Compare as timestamps so that datetime-local strings (YYYY-MM-DDTHH:MM, no timezone)
+  // are treated as local Date objects rather than being compared lexicographically.
   const now2 = new Date();
-  const in24h = new Date(now2.getTime() + 24 * 60 * 60 * 1000).toISOString();
-  const upcomingBriefMeeting = S.meetings.find(m =>
-    m.scheduledFor && m.preBriefMarkdown &&
-    m.scheduledFor >= now2.toISOString() && m.scheduledFor <= in24h
-  ) || null;
+  const nowMs = now2.getTime();
+  const in24hMs = nowMs + 24 * 60 * 60 * 1000;
+  const upcomingBriefMeeting = S.meetings.find(m => {
+    if (!m.scheduledFor || !m.preBriefMarkdown) return false;
+    const ms = new Date(m.scheduledFor).getTime();
+    return !isNaN(ms) && ms >= nowMs && ms <= in24hMs;
+  }) || null;
 
   return {
     recent, total, monthCount, pending,
@@ -2702,10 +2727,11 @@ async function renderMeetingRoom(main) {
         <h3 class="k-sec-title">Live Audio & Realtime Transcript</h3>
         ${phase === 'setup' ? `<p class="k-quick-hint">Confirm the details above, then tap 🎙 Start Meeting below to begin recording. Everything saves automatically.</p>` : ''}
         <div class="k-tabs" style="margin-bottom:16px">
-          <button class="k-tab ${S._meetingTab !== 'upload' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('record')">🎙 Live Recording</button>
+          <button class="k-tab ${S._meetingTab === 'record' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('record')">🎙 Live Recording</button>
+          <button class="k-tab ${S._meetingTab === 'audio' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('audio')">🎵 Upload Audio</button>
           <button class="k-tab ${S._meetingTab === 'upload' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('upload')">📷 Upload Notes</button>
         </div>
-        <div id="km-rec-panel" style="${S._meetingTab === 'upload' ? 'display:none' : ''}">
+        <div id="km-rec-panel" style="${S._meetingTab !== 'record' ? 'display:none' : ''}">
         ${canRecord ? `<div id="kpsc-rec-ui" class="k-rec-ui"></div>` : ''}
         <div id="kpsc-speaker-map"></div>
         <div class="k-live-transcript" id="kpsc-live-transcript">
@@ -2720,6 +2746,40 @@ async function renderMeetingRoom(main) {
         </div>
         <label class="k-label k-transcript-label" for="km-transcript">Saved Transcript / Notes</label>
         <textarea class="k-input k-textarea" id="km-transcript" placeholder="Type notes here, or start the meeting to append live transcript entries…" ${isProcessed ? 'readonly' : ''}>${esc(m?.transcriptText || '')}</textarea>
+        ${!isProcessed ? `
+        <details class="k-collapsible" style="margin-top:16px">
+          <summary class="k-collapsible-hdr">
+            <span class="k-collapsible-title">📷 Also upload handwritten notes (optional)</span>
+          </summary>
+          <p class="k-hint" style="margin-top:8px">Take a photo of your handwritten notes. The AI will extract the text and append it to the transcript above.</p>
+          <label class="k-label">Photo of Handwritten Notes</label>
+          <input id="km-rec-notes-photo" type="file" accept="image/*" capture="environment" class="k-input" style="padding:8px" onchange="Kpsc.previewRecNotesPhoto(this)" />
+          <div id="km-rec-notes-preview" style="margin-top:12px"></div>
+          <div id="km-rec-notes-status"></div>
+        </details>` : ''}
+        </div>
+        <div id="km-audio-panel" style="${S._meetingTab !== 'audio' ? 'display:none' : ''}">
+          <div class="k-section">
+            <p class="k-hint">Upload a pre-recorded audio file. The AI will transcribe it and add the text to the transcript. Supported formats: mp3, mp4, m4a, wav, webm, ogg (max 25 MB).</p>
+            <label class="k-label">Audio Recording</label>
+            <input id="km-audio-file" type="file" accept="audio/*" class="k-input" style="padding:8px" onchange="Kpsc.previewAudioFile(this)" />
+            <div style="margin-top:10px;display:flex;align-items:center;gap:8px">
+              <input type="checkbox" id="km-audio-diarize" style="width:16px;height:16px;cursor:pointer" />
+              <label for="km-audio-diarize" class="k-label" style="margin:0;cursor:pointer">🎙️ Use speaker diarization (Deepgram) — identifies who said what</label>
+            </div>
+            <div id="km-audio-preview" style="margin-top:8px"></div>
+            <div id="km-audio-status" style="margin-top:8px"></div>
+            <div id="km-speaker-map" style="margin-top:8px"></div>
+          </div>
+          <details class="k-collapsible" style="margin-top:4px">
+            <summary class="k-collapsible-hdr">
+              <span class="k-collapsible-title">📷 Also attach handwritten notes (optional)</span>
+            </summary>
+            <p class="k-hint" style="margin-top:8px">If you also have handwritten notes, upload a photo here. Both the audio transcript and the notes will be combined before processing.</p>
+            <label class="k-label">Photo of Handwritten Notes</label>
+            <input id="km-audio-notes-photo" type="file" accept="image/*" capture="environment" class="k-input" style="padding:8px" onchange="Kpsc.previewAudioNotesPhoto(this)" />
+            <div id="km-audio-notes-preview" style="margin-top:12px"></div>
+          </details>
         </div>
         <div id="km-upload-panel" style="${S._meetingTab !== 'upload' ? 'display:none' : ''}">
           <div class="k-section">
@@ -2860,6 +2920,7 @@ function renderReviewPanel(m) {
   const resolutions = m.resolutions || [];
   const actionItems = m.actionItems || [];
   const policyFlags = m.policyFlags || [];
+  const suggestedProjects = m.suggestedProjects || [];
   return `
     <div class="k-review-panel" id="kr-panel">
       <h4 class="k-sub-title" style="margin-top:0">✍️ Review & Correct AI Draft</h4>
@@ -2926,6 +2987,29 @@ function renderReviewPanel(m) {
           </div>`).join('')}
       </div>` : ''}
 
+      <h4 class="k-sub-title">🏗️ Suggested Projects</h4>
+      <p class="k-review-hint">AI detected the following project proposals in this meeting. Review each one — tick the checkbox to approve and save it to the Project Tracker, or leave it unticked to discard.</p>
+      <div class="k-review-list" id="kr-projects">
+        ${suggestedProjects.length ? suggestedProjects.map((p, i) => `
+          <div class="k-review-row" data-idx="${i}" style="border-left:3px solid var(--warning,#f59e0b)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+              <input type="checkbox" id="kr-proj-approve-${i}" checked style="width:16px;height:16px;cursor:pointer" />
+              <label for="kr-proj-approve-${i}" class="k-label" style="margin:0;font-weight:700;cursor:pointer">Approve this project</label>
+            </div>
+            <label class="k-label">Project Title</label>
+            <input class="k-input" id="kr-proj-title-${i}" value="${esc(p.title || '')}" placeholder="Project title" />
+            <label class="k-label" style="margin-top:6px">Description</label>
+            <textarea class="k-input" id="kr-proj-desc-${i}" rows="2">${esc(p.description || '')}</textarea>
+            <div class="k-review-grid" style="margin-top:6px">
+              <input class="k-input" id="kr-proj-cost-${i}" value="${esc(String(p.estimatedCost || '0'))}" placeholder="Estimated cost (₦)" type="number" min="0" />
+              <select class="k-input" id="kr-proj-priority-${i}">
+                ${['low','medium','high'].map(v => `<option value="${v}" ${(p.priority || 'medium') === v ? 'selected' : ''}>${v.charAt(0).toUpperCase()+v.slice(1)}</option>`).join('')}
+              </select>
+              <input class="k-input" id="kr-proj-date-${i}" value="${esc(p.targetDate || '')}" placeholder="Target date (YYYY-MM-DD)" type="date" />
+            </div>
+          </div>`).join('') : '<div class="k-empty">No project proposals detected by the AI in this meeting. You can add projects manually from the Projects page.</div>'}
+      </div>
+
       <button class="kbtn kbtn-primary" style="margin-top:8px" onclick="Kpsc.saveMinutesReview(this)">Approve &amp; Save Review</button>
     </div>`;
 }
@@ -2946,8 +3030,8 @@ function renderMinutesPanel(m) {
 
       <div class="k-room-actions" style="margin-bottom:12px;margin-top:16px">
         <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')">🖨 Print / Save PDF</button>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.shareMinutesWhatsApp('${m.id}')">📲 Share via WhatsApp</button>
         <button class="kbtn kbtn-sm" id="btn-plain-english-${m.id}" onclick="Kpsc.togglePlainEnglish('${m.id}')" data-plain-english="false">📖 Read in plain English</button>
-        ${canManageProjects() && m.status === 'processed' ? `<button class="kbtn kbtn-sm" onclick="Kpsc.extractProjectsFromMeetingUI('${m.id}', this)">🤖 Extract Projects</button>` : ''}
       </div>
 
       <h4 class="k-sub-title">Minutes Preview</h4>
@@ -3019,6 +3103,21 @@ function readReviewActions() {
   })).filter(a => a.task);
 }
 
+function readReviewProjects() {
+  const projects = S.activeMeeting?.suggestedProjects || [];
+  return projects.map((p, i) => {
+    const approved = document.getElementById(`kr-proj-approve-${i}`)?.checked;
+    if (!approved) return null;
+    return {
+      title: document.getElementById(`kr-proj-title-${i}`)?.value.trim() || p.title || '',
+      description: document.getElementById(`kr-proj-desc-${i}`)?.value.trim() || p.description || '',
+      estimatedCost: Number(document.getElementById(`kr-proj-cost-${i}`)?.value || 0),
+      priority: document.getElementById(`kr-proj-priority-${i}`)?.value || p.priority || 'medium',
+      targetDate: document.getElementById(`kr-proj-date-${i}`)?.value.trim() || p.targetDate || '',
+    };
+  }).filter(Boolean);
+}
+
 async function saveMinutesReview(btn) {
   if (!S.activeMeeting) return;
   const orig = btn.textContent;
@@ -3034,9 +3133,27 @@ async function saveMinutesReview(btn) {
       policyFlags: S.activeMeeting.policyFlags || [],
     });
     if (res.error) { showToast(res.error, 'error'); return; }
+
+    // Save approved suggested projects to the Project Tracker.
+    const approvedProjects = readReviewProjects();
+    if (approvedProjects.length) {
+      const projRes = await apiPost('kpsc-approve-meeting-projects', {
+        meetingId: S.activeMeeting.id,
+        projects: approvedProjects,
+        createdBy: S.user?.name || '',
+      });
+      if (projRes?.saved > 0) {
+        showToast(`${projRes.saved} project(s) added to the Project Tracker.`, 'success');
+        // Refresh projects list in state.
+        const projList = await apiGet('kpsc-projects');
+        if (Array.isArray(projList)) S.projects = projList;
+      }
+    }
+
     // Mark as reviewed locally (no DB column — tracked in client state).
     S.activeMeeting = {
       ...res,
+      suggestedProjects: [],       // cleared after approval
       reviewedAt: new Date().toISOString(),
       reviewedBy: S.user?.name || '',
     };
@@ -3049,6 +3166,10 @@ async function saveMinutesReview(btn) {
       renderPage('meeting');
     }
     showToast('Review approved and saved', 'success');
+
+    // Show action item WhatsApp notification links if any action items exist.
+    const actions = S.activeMeeting.actionItems || [];
+    if (actions.length) renderActionNotifications(actions, S.activeMeeting);
   } catch {
     showToast('Review save failed. Check your connection.', 'error');
   } finally {
@@ -5171,7 +5292,7 @@ function renderKpscAccountsCard(accounts) {
               </div>
               <div class="k-mc-badges">
                 <button class="kbtn kbtn-sm" onclick="Kpsc.openAccountEditor('${a.id}')">Edit</button>
-                ${String(S.user?.role || '') === 'acting_chairman' ? `<button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.confirmDeleteKpscAccount('${a.id}','${esc(a.name)}')">Delete</button>` : ''}
+                ${['acting_chairman','it_admin'].includes(String(S.user?.role || '')) ? `<button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.confirmDeleteKpscAccount('${a.id}','${esc(a.name)}')">Delete</button>` : ''}
               </div>
             </div>
           </div>`).join('') : '<div class="k-empty">No KPSC accounts found.</div>'}
@@ -5196,7 +5317,7 @@ async function openAccountEditor(id) {
         <input id="ka-name" class="k-input" value="${esc(existing?.name || '')}" />
         <label class="k-label">Role</label>
         <select id="ka-role" class="k-input">
-          ${['acting_chairman','general_secretary','financial_secretary','treasurer','committee_viewer'].map(role => `<option value="${role}" ${existing?.role === role ? 'selected' : ''}>${esc(roleLabel(role))}</option>`).join('')}
+          ${['acting_chairman','general_secretary','financial_secretary','treasurer','committee_viewer','it_admin'].map(role => `<option value="${role}" ${existing?.role === role ? 'selected' : ''}>${esc(roleLabel(role))}</option>`).join('')}
         </select>
         <label class="k-label">Status</label>
         <select id="ka-status" class="k-input">
@@ -5286,12 +5407,20 @@ async function renderSettings(main) {
     apiGet('kpsc-accounts').catch(() => []),
   ]);
   S.accounts = Array.isArray(accountsRes) ? accountsRes : [];
+  // Hydrate role permissions from DB so canAccess() reflects any saved customisations
+  const savedPerms = res?.kpsc_role_permissions;
+  if (savedPerms && typeof savedPerms === 'object' && !Array.isArray(savedPerms)) {
+    S.rolePermissions = savedPerms;
+  }
   const deepseekKey = res?.ai_deepseek_key || '';
   const openaiKey   = res?.ai_openai_key   || '';
   const policyUrl   = res?.kpsc_policy_url  || '';
   const policyNotes = res?.kpsc_policy_notes || '';
   const hasDeepseek = !!deepseekKey;
   const hasOpenai   = !!openaiKey;
+  const transcriptionModel = res?.ai_transcription_model || 'gpt-4o-transcribe';
+  const ocrModel           = res?.ai_ocr_model           || 'gpt-5-mini';
+  const deepseekModel      = res?.ai_deepseek_model      || 'deepseek-v4-flash';
   const reminderTemplate = res?.kpsc_reminder_template || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge. God bless you.';
   const incomeCategories = Array.isArray(res?.kpsc_income_categories) ? res.kpsc_income_categories.join('\n') : '';
   const expenseCategories = Array.isArray(res?.kpsc_expense_categories) ? res.kpsc_expense_categories.join('\n') : '';
@@ -5318,6 +5447,91 @@ async function renderSettings(main) {
   main.innerHTML = `
     <div class="k-page">
       ${renderKpscAccountsCard(S.accounts)}
+
+      ${renderRolePermissionsCard()}
+
+      <div class="k-card" style="margin-bottom:16px">
+        <h2 class="k-card-title">AI Models</h2>
+        <p class="k-card-sub">Choose which AI model powers each feature. Changing a model here takes effect immediately on the next request — no redeployment needed.</p>
+
+        <div class="k-form-group">
+          <label class="k-label">Meeting Minutes Model (DeepSeek)</label>
+          <select id="ks-deepseek-model" class="k-input">
+            <option value="deepseek-v4-flash" ${deepseekModel === 'deepseek-v4-flash' ? 'selected' : ''}>deepseek-v4-flash — V4 Flash (Fast, Recommended)</option>
+            <option value="deepseek-v4-pro" ${deepseekModel === 'deepseek-v4-pro' ? 'selected' : ''}>deepseek-v4-pro — V4 Pro (Deep reasoning, 1M context)</option>
+            <option value="deepseek-chat" ${deepseekModel === 'deepseek-chat' ? 'selected' : ''}>deepseek-chat — V3 (Deprecated · removed 2026-07-24)</option>
+            <option value="deepseek-reasoner" ${deepseekModel === 'deepseek-reasoner' ? 'selected' : ''}>deepseek-reasoner — R1 (Deprecated · removed 2026-07-24)</option>
+          </select>
+          <p class="k-hint">Used to generate and structure meeting minutes. <strong>deepseek-v4-flash</strong> is recommended — fast, cheap, 1M token context. Use <strong>deepseek-v4-pro</strong> for complex multi-page analyses. Legacy V3/R1 will be removed by DeepSeek on 2026-07-24.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Audio Transcription Model (OpenAI)</label>
+          <select id="ks-transcription-model" class="k-input">
+            <option value="gpt-4o-transcribe" ${transcriptionModel === 'gpt-4o-transcribe' ? 'selected' : ''}>gpt-4o-transcribe — GPT-4o (Best quality, Recommended)</option>
+            <option value="whisper-1" ${transcriptionModel === 'whisper-1' ? 'selected' : ''}>whisper-1 — Whisper v2 (Legacy · lower cost)</option>
+          </select>
+          <p class="k-hint">Used when you upload an audio file for transcription. <strong>gpt-4o-transcribe</strong> produces higher accuracy transcripts especially for accented speech and multi-speaker audio. <strong>whisper-1</strong> costs less per minute and is a good fallback.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Vision / OCR Model (OpenAI)</label>
+          <select id="ks-ocr-model" class="k-input">
+            <option value="gpt-5-mini" ${ocrModel === 'gpt-5-mini' ? 'selected' : ''}>gpt-5-mini (Best · Recommended)</option>
+            <option value="gpt-4o" ${ocrModel === 'gpt-4o' ? 'selected' : ''}>gpt-4o (High accuracy)</option>
+            <option value="gpt-4o-mini" ${ocrModel === 'gpt-4o-mini' ? 'selected' : ''}>gpt-4o-mini (Faster · lower cost)</option>
+          </select>
+          <p class="k-hint">Used for handwritten notes OCR and receipt scanning. <strong>gpt-5-mini</strong> gives the best accuracy at competitive cost. Use <strong>gpt-4o</strong> if gpt-5-mini is unavailable in your region. Switch to <strong>gpt-4o-mini</strong> to minimise cost on clear handwriting.</p>
+        </div>
+
+        <div id="ks-ai-models-save-msg" class="k-settings-msg" style="display:none"></div>
+        <button class="kbtn kbtn-primary" onclick="Kpsc.saveAiModels()">Save AI Models</button>
+      </div>
+
+      <div class="k-card" style="margin-bottom:16px">
+        <h2 class="k-card-title">AI Provider Keys</h2>
+        <p class="k-card-sub">
+          API keys are stored securely in the church database and are only used for processing
+          meeting minutes, transcription, and OCR. Without a key the portal uses a built-in rule-based engine.
+        </p>
+        <div class="k-settings-status ${hasDeepseek || hasOpenai ? 'k-status-ai' : 'k-status-rule'}">
+          ${hasDeepseek || hasOpenai ? '🤖 AI-powered mode active' : '⚙️ Rule-based mode (no API key set)'}
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">DeepSeek API Key</label>
+          <input type="password" id="ks-deepseek-key" class="k-input"
+            placeholder="${hasDeepseek ? '••••••••••••••••' : 'sk-...'}"
+            autocomplete="off" value="${esc(deepseekKey)}" />
+          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at <a href="https://platform.deepseek.com" target="_blank" rel="noopener">platform.deepseek.com</a></p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">OpenAI API Key</label>
+          <input type="password" id="ks-openai-key" class="k-input"
+            placeholder="${hasOpenai ? '••••••••••••••••' : 'sk-...'}"
+            autocomplete="off" value="${esc(openaiKey)}" />
+          <p class="k-hint">Required for audio transcription, notes OCR, and receipt scanning. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a></p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">KPSC Bylaw / Policy URL</label>
+          <input type="url" id="ks-policy-url" class="k-input"
+            placeholder="https://..." value="${esc(policyUrl)}" />
+          <p class="k-hint">Optional link to the current KPSC bylaws or governance document for secretary review.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Policy Notes for AI Secretary</label>
+          <textarea id="ks-policy-notes" class="k-input k-textarea" placeholder="Paste key KPSC rules here, e.g. quorum, approval thresholds, welfare privacy rules...">${esc(policyNotes)}</textarea>
+          <p class="k-hint">Optional. These notes are included in provider-backed minutes processing and kept available for human review.</p>
+        </div>
+
+        <div id="ks-save-msg" class="k-settings-msg" style="display:none"></div>
+        <button class="kbtn kbtn-primary" id="ks-save-btn" onclick="Kpsc.saveSettings()">Save API Keys &amp; Policy</button>
+        ${hasDeepseek || hasOpenai ? `<button class="kbtn kbtn-danger-outline" style="margin-left:8px" onclick="Kpsc.clearAiKeys()">Clear Keys</button>` : ''}
+      </div>
+
       <div class="k-card" style="margin-bottom:16px">
         <h2 class="k-card-title">KPSC Operations Settings</h2>
         <p class="k-card-sub">Configure partnership categories, finance categories, and reminder templates for the KPSC portal.</p>
@@ -5346,60 +5560,6 @@ async function renderSettings(main) {
         <div id="ks-ops-save-msg" class="k-settings-msg" style="display:none"></div>
         <button class="kbtn kbtn-primary" onclick="Kpsc.saveKpscOpsSettings()">Save Operations Settings</button>
       </div>
-      <div class="k-card">
-        <h2 class="k-card-title">AI Provider Keys</h2>
-        <p class="k-card-sub">
-          API keys are stored securely in the church database and are only used for processing
-          meeting minutes. Without a key the portal uses a built-in rule-based engine.
-        </p>
-        <div class="k-settings-status ${hasDeepseek || hasOpenai ? 'k-status-ai' : 'k-status-rule'}">
-          ${hasDeepseek || hasOpenai ? '🤖 AI-powered mode active' : '⚙️ Rule-based mode (no API key set)'}
-        </div>
-
-        <div class="k-form-group">
-          <label class="k-label">DeepSeek API Key</label>
-          <input type="password" id="ks-deepseek-key" class="k-input"
-            placeholder="${hasDeepseek ? '••••••••••••••••' : 'sk-...'}"
-            autocomplete="off" value="${esc(deepseekKey)}" />
-          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at <a href="https://platform.deepseek.com" target="_blank" rel="noopener">platform.deepseek.com</a></p>
-        </div>
-
-        <div class="k-form-group">
-          <label class="k-label">DeepSeek Model</label>
-          <select id="ks-deepseek-model" class="k-input">
-            <option value="deepseek-v4-flash" ${(res?.ai_deepseek_model||'deepseek-v4-flash')==='deepseek-v4-flash'?'selected':''}>deepseek-v4-flash — V4 Flash (Fast, Recommended)</option>
-            <option value="deepseek-v4-pro" ${(res?.ai_deepseek_model||'')==='deepseek-v4-pro'?'selected':''}>deepseek-v4-pro — V4 Pro (Deep reasoning, 1M context)</option>
-            <option value="deepseek-chat" ${(res?.ai_deepseek_model||'')==='deepseek-chat'?'selected':''}>deepseek-chat — V3 (Deprecated · removed 2026-07-24)</option>
-            <option value="deepseek-reasoner" ${(res?.ai_deepseek_model||'')==='deepseek-reasoner'?'selected':''}>deepseek-reasoner — R1 (Deprecated · removed 2026-07-24)</option>
-          </select>
-          <p class="k-hint"><strong>deepseek-v4-flash</strong> is recommended for meeting minutes (fast, cheap, 1M context). Use <strong>deepseek-v4-pro</strong> for complex analysis. Legacy V3/R1 models will be removed by DeepSeek on 2026-07-24 — please migrate.</p>
-        </div>
-
-        <div class="k-form-group">
-          <label class="k-label">OpenAI API Key</label>
-          <input type="password" id="ks-openai-key" class="k-input"
-            placeholder="${hasOpenai ? '••••••••••••••••' : 'sk-...'}"
-            autocomplete="off" value="${esc(openaiKey)}" />
-          <p class="k-hint">Optional alternative AI provider for meeting minutes. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a></p>
-        </div>
-
-        <div class="k-form-group">
-          <label class="k-label">KPSC Bylaw / Policy URL</label>
-          <input type="url" id="ks-policy-url" class="k-input"
-            placeholder="https://..." value="${esc(policyUrl)}" />
-          <p class="k-hint">Optional link to the current KPSC bylaws or governance document for secretary review.</p>
-        </div>
-
-        <div class="k-form-group">
-          <label class="k-label">Policy Notes for AI Secretary</label>
-          <textarea id="ks-policy-notes" class="k-input k-textarea" placeholder="Paste key KPSC rules here, e.g. quorum, approval thresholds, welfare privacy rules...">${esc(policyNotes)}</textarea>
-          <p class="k-hint">Optional. These notes are included in provider-backed minutes processing and kept available for human review.</p>
-        </div>
-
-        <div id="ks-save-msg" class="k-settings-msg" style="display:none"></div>
-        <button class="kbtn kbtn-primary" id="ks-save-btn" onclick="Kpsc.saveSettings()">Save Settings</button>
-        ${hasDeepseek || hasOpenai ? `<button class="kbtn kbtn-danger-outline" style="margin-left:8px" onclick="Kpsc.clearAiKeys()">Clear Keys</button>` : ''}
-      </div>
 
       <div class="k-card" style="margin-top:16px">
         <h2 class="k-card-title">Live Transcription &amp; Diarization</h2>
@@ -5411,7 +5571,7 @@ async function renderSettings(main) {
         <div id="k-api-status-panel">${renderApiStatusCard(apiStatus)}</div>
         <div class="k-env-row">
           <code class="k-env-key">OPENAI_API_KEY</code>
-          <span class="k-env-desc">Powers live interim transcription (OpenAI gpt-4o-transcribe via WebRTC). Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a>.</span>
+          <span class="k-env-desc">Powers live interim transcription (OpenAI gpt-4o-transcribe via WebRTC), audio file upload transcription, and handwritten notes OCR. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a>.</span>
         </div>
         <div class="k-env-row">
           <code class="k-env-key">DEEPGRAM_API_KEY</code>
@@ -5444,6 +5604,27 @@ async function renderSettings(main) {
     </div>`;
 }
 
+async function saveAiModels() {
+  const msg = document.getElementById('ks-ai-models-save-msg');
+  const deepseekModel      = document.getElementById('ks-deepseek-model')?.value      || 'deepseek-v4-flash';
+  const transcriptionModel = document.getElementById('ks-transcription-model')?.value || 'gpt-4o-transcribe';
+  const ocrModel           = document.getElementById('ks-ocr-model')?.value           || 'gpt-5-mini';
+  const res = await apiPost('settings', {
+    ai_deepseek_model: deepseekModel,
+    ai_transcription_model: transcriptionModel,
+    ai_ocr_model: ocrModel,
+  });
+  if (res?.error) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = res.error;
+  } else {
+    msg.className = 'k-settings-msg k-msg-ok';
+    msg.textContent = 'AI models saved.';
+  }
+  msg.style.display = 'block';
+  setTimeout(() => { if (msg) msg.style.display = 'none'; }, 3000);
+}
+
 async function saveSettings() {
   const btn = document.getElementById('ks-save-btn');
   const msg = document.getElementById('ks-save-msg');
@@ -5451,7 +5632,6 @@ async function saveSettings() {
   const openaiKey   = document.getElementById('ks-openai-key')?.value.trim()   || '';
   const policyUrl   = document.getElementById('ks-policy-url')?.value.trim()   || '';
   const policyNotes = document.getElementById('ks-policy-notes')?.value.trim() || '';
-  const deepseekModel = document.getElementById('ks-deepseek-model')?.value || 'deepseek-v4-flash';
 
   btn.disabled = true;
   btn.textContent = 'Saving…';
@@ -5460,7 +5640,6 @@ async function saveSettings() {
   const res = await apiPost('settings', {
     ai_deepseek_key: deepseekKey,
     ai_openai_key: openaiKey,
-    ai_deepseek_model: deepseekModel,
     kpsc_policy_url: policyUrl,
     kpsc_policy_notes: policyNotes,
   });
@@ -5470,14 +5649,14 @@ async function saveSettings() {
     msg.textContent = res.error;
   } else {
     msg.className = 'k-settings-msg k-msg-ok';
-    msg.textContent = 'Settings saved.';
+    msg.textContent = 'API keys & policy saved.';
     await renderSettings(document.getElementById('kpsc-main'));
     return;
   }
 
   msg.style.display = 'block';
   btn.disabled = false;
-  btn.textContent = 'Save Keys';
+  btn.textContent = 'Save API Keys & Policy';
 }
 
 async function clearAiKeys() {
@@ -5510,6 +5689,115 @@ async function saveKpscOpsSettings() {
   }
   msg.style.display = 'block';
   setTimeout(() => { if(msg) msg.style.display = 'none'; }, 3000);
+}
+
+// ── ROLE PERMISSIONS ─────────────────────────────────────────────
+
+const PERM_ROLES = [
+  { key: 'acting_chairman',    label: 'Acting Chairman' },
+  { key: 'general_secretary',  label: 'General Secretary' },
+  { key: 'financial_secretary',label: 'Financial Secretary' },
+  { key: 'treasurer',          label: 'Treasurer' },
+  { key: 'committee_viewer',   label: 'Committee Viewer' },
+  { key: 'it_admin',           label: 'IT Administrator' },
+];
+
+const PERM_PAGES = [
+  { key: 'dashboard',  label: 'Dashboard' },
+  { key: 'archive',    label: 'Archive' },
+  { key: 'projects',   label: 'Projects' },
+  { key: 'partners',   label: 'Partners' },
+  { key: 'finance',    label: 'Finance' },
+  { key: 'reminders',  label: 'Reminders' },
+  { key: 'reports',    label: 'Reports' },
+  { key: 'members',    label: 'Members' },
+  { key: 'settings',   label: 'Settings' },
+];
+
+function isPermForced(roleKey, pageKey) {
+  // Dashboard is always accessible to every role
+  if (pageKey === 'dashboard') return true;
+  // Acting Chairman must always keep access to Settings (prevents self-lockout)
+  if (roleKey === 'acting_chairman' && pageKey === 'settings') return true;
+  return false;
+}
+
+function renderRolePermissionsCard() {
+  const perms = effectiveRolePermissions();
+  return `
+    <div class="k-card" style="margin-bottom:16px">
+      <h2 class="k-card-title">Role Permissions</h2>
+      <p class="k-card-sub">Control which sections each role can access. Greyed checkboxes are always enforced and cannot be changed.</p>
+      <div style="overflow-x:auto">
+        <table class="k-perm-table">
+          <thead>
+            <tr>
+              <th class="k-perm-role-col">Role</th>
+              ${PERM_PAGES.map(p => `<th class="k-perm-page-col">${p.label}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${PERM_ROLES.map(role => {
+              const allowed = Array.isArray(perms[role.key]) ? perms[role.key] : (KPSC_PERMISSIONS[role.key] || []);
+              return `<tr>
+                <td class="k-perm-role-name">${role.label}</td>
+                ${PERM_PAGES.map(page => {
+                  const forced  = isPermForced(role.key, page.key);
+                  const checked = forced || allowed.includes(page.key);
+                  return `<td class="k-perm-check-cell">
+                    <input type="checkbox" id="kp-${role.key}-${page.key}"
+                      ${checked ? 'checked' : ''}
+                      ${forced  ? 'disabled title="Always enabled"' : ''}
+                    />
+                  </td>`;
+                }).join('')}
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div id="ks-perms-save-msg" class="k-settings-msg" style="display:none"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.saveRolePermissions()">Save Role Permissions</button>
+        <button class="kbtn" onclick="Kpsc.resetRolePermissions()">Reset to Defaults</button>
+      </div>
+    </div>`;
+}
+
+async function saveRolePermissions() {
+  const perms = {};
+  for (const role of PERM_ROLES) {
+    perms[role.key] = PERM_PAGES
+      .filter(page => isPermForced(role.key, page.key) || document.getElementById(`kp-${role.key}-${page.key}`)?.checked)
+      .map(page => page.key);
+  }
+  const msg = document.getElementById('ks-perms-save-msg');
+  const res = await apiPost('settings', { kpsc_role_permissions: perms });
+  if (res?.error) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = res.error;
+  } else {
+    S.rolePermissions = perms;
+    msg.className = 'k-settings-msg k-msg-ok';
+    msg.textContent = 'Role permissions saved.';
+  }
+  msg.style.display = 'block';
+  setTimeout(() => { if (msg) msg.style.display = 'none'; }, 3000);
+}
+
+async function resetRolePermissions() {
+  if (!confirm('Reset all role permissions to defaults? This will undo any customisations.')) return;
+  const msg = document.getElementById('ks-perms-save-msg');
+  const res = await apiPost('settings', { kpsc_role_permissions: KPSC_PERMISSIONS });
+  if (res?.error) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = res.error;
+    msg.style.display = 'block';
+    setTimeout(() => { if (msg) msg.style.display = 'none'; }, 3000);
+  } else {
+    S.rolePermissions = null; // null triggers fallback to KPSC_PERMISSIONS in effectiveRolePermissions()
+    await renderSettings(document.getElementById('kpsc-main'));
+  }
 }
 
 // ── PROJECTS ─────────────────────────────────────────────────────
@@ -5735,10 +6023,12 @@ async function extractProjectsFromMeetingUI(meetingId, btn) {
 
 function setMeetingTab(tab) {
   S._meetingTab = tab;
-  const recPanel = document.getElementById('km-rec-panel');
+  const recPanel   = document.getElementById('km-rec-panel');
+  const audioPanel = document.getElementById('km-audio-panel');
   const uploadPanel = document.getElementById('km-upload-panel');
-  if (recPanel) recPanel.style.display = tab === 'upload' ? 'none' : '';
-  if (uploadPanel) uploadPanel.style.display = tab !== 'upload' ? 'none' : '';
+  if (recPanel)   recPanel.style.display   = tab === 'record' ? '' : 'none';
+  if (audioPanel) audioPanel.style.display = tab === 'audio'  ? '' : 'none';
+  if (uploadPanel) uploadPanel.style.display = tab === 'upload' ? '' : 'none';
   document.querySelectorAll('.k-tab').forEach(b => {
     const onclick = b.getAttribute('onclick') || '';
     b.classList.toggle('active', onclick.includes(`'${tab}'`));
@@ -5801,6 +6091,210 @@ async function ocrNotesPhoto() {
     if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Text extracted successfully. See the transcript section above.</div>`;
 
     setMeetingTab('record');
+  } catch (e) {
+    if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── MEETING UPLOAD AUDIO ──────────────────────────────────────────
+
+const NOTES_SEPARATOR = "\n\n---\nSecretary's Handwritten Notes:\n";
+
+function previewAudioFile(input) {
+  const file = input.files?.[0];
+  const preview = document.getElementById('km-audio-preview');
+  const status  = document.getElementById('km-audio-status');
+  if (!preview) return;
+  if (!file) { preview.innerHTML = ''; return; }
+  const mb = (file.size / 1024 / 1024).toFixed(1);
+  preview.innerHTML = `
+    <div style="background:var(--surface,#f8fafc);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:10px">
+      🎵 <strong>${esc(file.name)}</strong> &nbsp;·&nbsp; ${mb} MB
+    </div>
+    <div class="k-room-actions">
+      <button class="kbtn kbtn-primary" onclick="Kpsc.transcribeAudioFile()">🤖 Transcribe with AI</button>
+    </div>`;
+  if (status) status.innerHTML = '';
+}
+
+async function transcribeAudioFile() {
+  const audioInput = document.getElementById('km-audio-file');
+  const audioFile  = audioInput?.files?.[0];
+  const status     = document.getElementById('km-audio-status');
+  if (!audioFile) { showToast('Please select an audio file first.', 'error'); return; }
+
+  const useDiarize = document.getElementById('km-audio-diarize')?.checked;
+
+  if (status) status.innerHTML = '<div class="k-loading" style="padding:16px">🤖 Transcribing audio…</div>';
+
+  // Clear any previous speaker map.
+  const speakerMapEl = document.getElementById('km-speaker-map');
+  if (speakerMapEl) speakerMapEl.innerHTML = '';
+
+  // ── Diarization path ──────────────────────────────────────────
+  if (useDiarize) {
+    try {
+      const diarizedTranscript = await transcribeAudioWithDiarization_UI(audioFile, status);
+      if (diarizedTranscript !== null) {
+        // Plain transcript returned (no utterances) — treat same as regular.
+        const transcriptEl = document.getElementById('km-transcript');
+        if (transcriptEl) {
+          transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + diarizedTranscript;
+        }
+        if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Audio transcribed. Review the transcript before generating minutes.</div>`;
+        showToast('Audio transcribed!', 'success');
+        setMeetingTab('record');
+      }
+      // If null is returned, speaker assignment UI is showing — no further action here.
+    } catch (e) {
+      if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
+    }
+    return;
+  }
+
+  // ── Standard (non-diarized) path ──────────────────────────────
+
+  const notesInput = document.getElementById('km-audio-notes-photo');
+  const notesFile  = notesInput?.files?.[0];
+
+  try {
+    // Build audio formData for multipart POST (no Content-Type header — browser sets boundary)
+    const audioForm = new FormData();
+    audioForm.append('audio', audioFile, audioFile.name);
+    audioForm.append('mimeType', audioFile.type || 'audio/webm');
+
+    // Kick off audio transcription (and optional OCR) in parallel
+    const audioPromise = fetch(`${API}/kpsc-transcribe-audio`, {
+      method: 'POST',
+      headers: { ...kpscSessionHeader() },
+      body: audioForm,
+    }).then(r => r.json());
+
+    let ocrPromise = Promise.resolve(null);
+    let ocrError = null;
+    if (notesFile) {
+      ocrPromise = new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+          try {
+            const base64 = e.target.result.split(',')[1];
+            const mimeType = notesFile.type || 'image/jpeg';
+            const res = await apiPost('kpsc-ocr-notes', { imageBase64: base64, mimeType });
+            resolve(res);
+          } catch (err) { ocrError = err.message; resolve(null); }
+        };
+        reader.onerror = () => { ocrError = 'Failed to read the notes photo.'; resolve(null); };
+        reader.readAsDataURL(notesFile);
+      });
+    }
+
+    const [audioRes, ocrRes] = await Promise.all([audioPromise, ocrPromise]);
+
+    handleKpscAuthFailure(audioRes);
+
+    if (audioRes?.error && !audioRes?.transcript) {
+      if (status) status.innerHTML = `<div class="k-error-box">${esc(audioRes.error)}</div>`;
+      return;
+    }
+
+    const audioText = (audioRes?.transcript || '').trim();
+    if (!audioText) {
+      if (status) status.innerHTML = `<div class="k-error-box">No speech was detected in the audio file. Please check the recording and try again.</div>`;
+      return;
+    }
+
+    const ocrText = (ocrRes?.transcript || '').trim();
+    const ocrFailed = notesFile && !ocrText;
+    const combined = ocrText
+      ? `${audioText}${NOTES_SEPARATOR}${ocrText}`
+      : audioText;
+
+    const transcriptEl = document.getElementById('km-transcript');
+    if (transcriptEl) {
+      transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + combined;
+    }
+
+    let successMsg = ocrText
+      ? '✓ Audio transcribed and handwritten notes combined successfully.'
+      : '✓ Audio transcribed successfully.';
+    if (ocrFailed) {
+      const reason = ocrError || ocrRes?.error || 'could not extract text from the notes photo';
+      successMsg += ` (Note: handwritten notes were skipped — ${esc(reason)}.)`;
+    }
+    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">${successMsg} Review the transcript before generating minutes.</div>`;
+    showToast(ocrText ? 'Audio and notes combined! Review before processing.' : 'Audio transcribed! Review before processing.', 'success');
+    setMeetingTab('record');
+  } catch (e) {
+    if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+async function previewAudioNotesPhoto(input) {
+  const file = input.files?.[0];
+  const preview = document.getElementById('km-audio-notes-preview');
+  if (!preview) return;
+  if (!file) { preview.innerHTML = ''; return; }
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    preview.innerHTML = `<img src="${e.target.result}" style="max-width:100%;border-radius:10px;border:1px solid var(--border)" alt="Notes preview" />`;
+  };
+  reader.readAsDataURL(file);
+}
+
+// ── MEETING LIVE RECORDING — also upload notes ────────────────────
+
+async function previewRecNotesPhoto(input) {
+  const file = input.files?.[0];
+  const preview = document.getElementById('km-rec-notes-preview');
+  if (!preview) return;
+  if (!file) { preview.innerHTML = ''; return; }
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    preview.innerHTML = `
+      <img src="${e.target.result}" style="max-width:100%;border-radius:10px;border:1px solid var(--border);margin-bottom:12px" alt="Notes preview" />
+      <div class="k-room-actions">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.ocrRecNotesPhoto()">🤖 Extract Text with AI</button>
+      </div>
+      <div id="km-rec-notes-status"></div>`;
+  };
+  reader.readAsDataURL(file);
+}
+
+async function ocrRecNotesPhoto() {
+  const input = document.getElementById('km-rec-notes-photo');
+  const file  = input?.files?.[0];
+  if (!file) return;
+  const status = document.getElementById('km-rec-notes-status');
+  if (status) status.innerHTML = '<div class="k-loading" style="padding:16px">🤖 Analysing handwriting…</div>';
+
+  try {
+    const base64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = e => resolve(e.target.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    const mimeType = file.type || 'image/jpeg';
+    const res = await apiPost('kpsc-ocr-notes', { imageBase64: base64, mimeType });
+
+    if (res?.error) {
+      if (status) status.innerHTML = `<div class="k-error-box">${esc(res.error)}</div>`;
+      return;
+    }
+
+    if (!res.transcript) {
+      if (status) status.innerHTML = `<div class="k-error-box">No text could be extracted. Please ensure the image is clear.</div>`;
+      return;
+    }
+
+    const transcriptEl = document.getElementById('km-transcript');
+    if (transcriptEl) {
+      transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + res.transcript;
+      showToast('Handwritten notes appended to transcript!', 'success');
+    }
+
+    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Text extracted and appended to the transcript above.</div>`;
   } catch (e) {
     if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
   }
@@ -6023,6 +6517,185 @@ function printMinutes(meetingId) {
   win.document.close();
 }
 
+// ── WHATSAPP MINUTES SHARING ───────────────────────────────────────
+async function shareMinutesWhatsApp(meetingId) {
+  const meeting = S.activeMeeting;
+  if (!meeting?.minutesMarkdown) { showToast('No minutes to share. Process the meeting first.', 'warn'); return; }
+  const date    = meeting.meetingDate || '';
+  const summary = meeting.summaryShort || 'Please find the meeting minutes in the KPSC portal.';
+  const resCount = (meeting.resolutions || []).length;
+  const actCount = (meeting.actionItems || []).length;
+
+  const msg = [
+    `*KPSC Meeting Minutes — ${meeting.title || 'KPSC Meeting'}*`,
+    date ? `📅 Date: ${date}` : '',
+    '',
+    summary,
+    '',
+    resCount ? `📋 Resolutions: ${resCount}` : '',
+    actCount ? `✅ Action Items: ${actCount}` : '',
+    '',
+    'Full minutes are available in the Kingdom Parish Stewardship Committee portal. Please log in to review and access the complete document.',
+  ].filter(line => line !== undefined && line !== null).join('\n').trim();
+
+  const waUrl = `https://wa.me/?text=${encodeURIComponent(msg)}`;
+  window.open(waUrl, '_blank');
+
+  // Mark this meeting as distributed.
+  const distributedIds = S._distributedMeetingIds || [];
+  if (!distributedIds.includes(meetingId)) {
+    const updated = [...distributedIds, meetingId];
+    S._distributedMeetingIds = updated;
+    await apiPost('settings', { kpsc_distributed_meeting_ids: updated }).catch(() => {});
+  }
+  showToast('WhatsApp message prepared. Select recipients in WhatsApp to send.', 'success');
+}
+
+// ── ACTION ITEM WHATSAPP NOTIFICATIONS ────────────────────────────
+function renderActionNotifications(actions, meeting) {
+  const assignedActions = actions.filter(a => a.assignee && a.assignee !== 'Unassigned');
+  if (!assignedActions.length) return;
+
+  const meetingTitle = meeting?.title || 'KPSC Meeting';
+  const meetingDate  = meeting?.meetingDate || '';
+
+  // Render a notification panel below the reviewed panel.
+  const notifHtml = `
+    <div id="kr-action-notifications" class="k-section" style="margin-top:16px;background:var(--surface,#f8fafc);border:1.5px solid var(--border);border-radius:10px;padding:14px">
+      <h4 class="k-sub-title" style="margin-top:0">📲 Notify Assignees via WhatsApp</h4>
+      <p class="k-review-hint" style="margin-bottom:12px">Tap a link below to open WhatsApp with a pre-composed notification for each assigned action item. Select the recipient in WhatsApp before sending.</p>
+      ${assignedActions.map((a) => {
+        const msg = [
+          `*KPSC Action Item — ${meetingTitle}*`,
+          meetingDate ? `📅 Meeting date: ${meetingDate}` : '',
+          '',
+          `Dear ${a.assignee},`,
+          '',
+          `You have been assigned the following action item from the KPSC meeting:`,
+          `📌 ${a.task}`,
+          a.dueDate ? `🗓️ Due: ${a.dueDate}` : '',
+          '',
+          'Please update the secretary on progress at your earliest convenience.',
+          '— Kingdom Parish Stewardship Committee',
+        ].filter(l => l !== undefined && l !== null).join('\n').trim();
+        const waUrl = `https://wa.me/?text=${encodeURIComponent(msg)}`;
+        return `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+            <span style="font-size:13px;color:var(--text-secondary,#666);min-width:120px">👤 ${esc(a.assignee)}</span>
+            <span style="font-size:13px;flex:1">${esc(a.task.slice(0, 80))}${a.task.length > 80 ? '…' : ''}</span>
+            <a href="${esc(waUrl)}" target="_blank" class="kbtn kbtn-sm" style="text-decoration:none;background:#25d366;color:#fff;border-color:#25d366">💬 Send via WhatsApp</a>
+          </div>`;
+      }).join('')}
+    </div>`;
+
+  // Insert after the kr-panel (reviewed state).
+  const panel = document.getElementById('kr-panel');
+  if (panel) panel.insertAdjacentHTML('afterend', notifHtml);
+}
+
+// ── AUDIO DIARIZATION ─────────────────────────────────────────────
+// State: diarized utterances for speaker assignment UI.
+let _diarizedUtterances = [];
+let _diarizedSpeakerCount = 0;
+
+async function transcribeAudioWithDiarization_UI(audioFile, status) {
+  if (status) status.innerHTML = '<div class="k-loading" style="padding:16px">🎙️ Transcribing with speaker diarization…</div>';
+
+  const form = new FormData();
+  form.append('audio', audioFile, audioFile.name);
+  form.append('mimeType', audioFile.type || 'audio/webm');
+
+  const res = await fetch(`${API}/kpsc-transcribe-audio-diarize`, {
+    method: 'POST',
+    headers: { ...kpscSessionHeader() },
+    body: form,
+  }).then(r => r.json());
+
+  handleKpscAuthFailure(res);
+
+  if (res?.error && !res?.transcript) {
+    if (status) status.innerHTML = `<div class="k-error-box">${esc(res.error)}</div>`;
+    return null;
+  }
+  if (!res?.transcript) {
+    if (status) status.innerHTML = `<div class="k-error-box">No speech was detected in the audio file.</div>`;
+    return null;
+  }
+
+  // If no diarization (speakerCount is 0 or utterances missing), just return plain transcript.
+  if (!res.speakerCount || !res.utterances?.length) {
+    return res.transcript;
+  }
+
+  // Store utterances for speaker assignment.
+  _diarizedUtterances = res.utterances || [];
+  _diarizedSpeakerCount = res.speakerCount || 0;
+
+  // Render speaker assignment UI.
+  const speakerMapEl = document.getElementById('km-speaker-map');
+  if (speakerMapEl) {
+    const memberNames = (S.members || []).map(m => m.name).filter(Boolean);
+    const speakerNums = [...new Set(_diarizedUtterances.map(u => u.speaker))].sort((a, b) => a - b);
+    speakerMapEl.innerHTML = `
+      <div class="k-section" style="background:var(--surface,#f8fafc);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:8px">
+        <h4 class="k-sub-title" style="margin-top:0">🎙️ Speaker Assignment</h4>
+        <p class="k-review-hint">Deepgram detected ${_diarizedSpeakerCount} speaker(s). Assign each speaker label to a committee member name. Leave blank to keep the label as-is.</p>
+        ${speakerNums.map(n => `
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+            <span class="kbadge badge-gray" style="min-width:80px">Speaker ${n}</span>
+            <input list="km-member-names" id="km-spk-name-${n}" class="k-input" style="max-width:200px" placeholder="Enter member name…" />
+          </div>`).join('')}
+        <datalist id="km-member-names">
+          ${memberNames.map(n => `<option value="${esc(n)}">`).join('')}
+        </datalist>
+        <div class="k-room-actions" style="margin-top:8px">
+          <button class="kbtn kbtn-primary" onclick="Kpsc.applyDiarizedTranscript()">✅ Apply Names &amp; Add to Transcript</button>
+          <button class="kbtn kbtn-ghost" onclick="Kpsc.applyDiarizedTranscriptRaw()">Add Without Names</button>
+        </div>
+      </div>`;
+  }
+
+  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Diarization complete — ${_diarizedSpeakerCount} speaker(s) detected. Assign names above, then click "Apply".</div>`;
+  return null; // transcript will be applied via applyDiarizedTranscript()
+}
+
+function buildDiarizedTranscript(nameMap) {
+  return _diarizedUtterances
+    .map(u => `${nameMap[u.speaker] || `Speaker ${u.speaker}`}: ${String(u.transcript || '').trim()}`)
+    .join('\n');
+}
+
+function applyDiarizedTranscript() {
+  const speakerNums = [...new Set(_diarizedUtterances.map(u => u.speaker))];
+  const nameMap = {};
+  for (const n of speakerNums) {
+    const val = document.getElementById(`km-spk-name-${n}`)?.value.trim();
+    if (val) nameMap[n] = val;
+  }
+  const transcript = buildDiarizedTranscript(nameMap);
+  const el = document.getElementById('km-transcript');
+  if (el) el.value = (el.value ? el.value + '\n\n' : '') + transcript;
+  const speakerMapEl = document.getElementById('km-speaker-map');
+  if (speakerMapEl) speakerMapEl.innerHTML = '';
+  const status = document.getElementById('km-audio-status');
+  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Speaker-labelled transcript added. Review before generating minutes.</div>`;
+  showToast('Diarized transcript applied!', 'success');
+  setMeetingTab('record');
+  _diarizedUtterances = [];
+}
+
+function applyDiarizedTranscriptRaw() {
+  const transcript = buildDiarizedTranscript({});
+  const el = document.getElementById('km-transcript');
+  if (el) el.value = (el.value ? el.value + '\n\n' : '') + transcript;
+  const speakerMapEl = document.getElementById('km-speaker-map');
+  if (speakerMapEl) speakerMapEl.innerHTML = '';
+  const status = document.getElementById('km-audio-status');
+  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Transcript added with speaker labels. Review before generating minutes.</div>`;
+  showToast('Transcript applied.', 'success');
+  setMeetingTab('record');
+  _diarizedUtterances = [];
+}
 // ── PLAIN ENGLISH TOGGLE ──────────────────────────────────────────
 let _plainEnglishCache = {}; // Cache {meetingId: plainEnglishText}
 
@@ -6407,6 +7080,8 @@ window.Kpsc = {
   setReportsSearch,
   updateReportActionStatus,
   saveKpscOpsSettings,
+  saveRolePermissions,
+  resetRolePermissions,
   partnerTypeLabel,
   filterArchive,
   setArchiveQuickFilter,
@@ -6416,6 +7091,7 @@ window.Kpsc = {
   confirmDeleteKpscAccount,
   executeDeleteKpscAccount,
   saveSettings,
+  saveAiModels,
   clearAiKeys,
   refreshApiStatus,
   updateAttGroup,
@@ -6444,11 +7120,21 @@ window.Kpsc = {
   setMeetingTab,
   previewNotesPhoto,
   ocrNotesPhoto,
+  // Meeting - upload audio (+ combined mode, + diarization)
+  previewAudioFile,
+  transcribeAudioFile,
+  previewAudioNotesPhoto,
+  applyDiarizedTranscript,
+  applyDiarizedTranscriptRaw,
+  // Meeting - live recording notes upload
+  previewRecNotesPhoto,
+  ocrRecNotesPhoto,
   // Finance - PDF reconciliation
   setReconciliationTab,
   runPdfReconciliation,
-  // Minutes PDF
+  // Minutes PDF + WhatsApp sharing
   printMinutes,
+  shareMinutesWhatsApp,
   togglePlainEnglish,
   // B5: Follow-up nudges
   approveFollowup,
