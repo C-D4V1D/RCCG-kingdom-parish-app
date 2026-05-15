@@ -408,7 +408,11 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-quick-filters{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 16px;}
 .k-filter{border:1px solid var(--border);background:var(--white);border-radius:999px;padding:6px 11px;font-size:12px;color:var(--text2);cursor:pointer;}
 .k-filter.active{background:var(--navy);border-color:var(--navy);color:#fff;}
+.k-insight-filters{display:grid;grid-template-columns:150px 170px 1fr;gap:8px;margin-bottom:12px;}
+.k-insight-status-wrap{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text3);}
+.k-insight-status-select{width:auto;min-width:130px;}
 @media (max-width: 720px){.k-review-grid{grid-template-columns:1fr;}}
+@media (max-width: 720px){.k-insight-filters{grid-template-columns:1fr;}}
 
 /* ── PARTNER CONTROLS ──────────────────────────────────────────── */
 .k-partners-controls{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;}
