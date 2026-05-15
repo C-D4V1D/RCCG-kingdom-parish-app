@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { onRequest, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone } from '../functions/api/[[route]].js';
+import { onRequest, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems } from '../functions/api/[[route]].js';
 
 async function readJson(response) {
   return JSON.parse(await response.text());
@@ -2166,4 +2166,302 @@ test('plain-english translation returns 400 when minutes are empty', async () =>
 
   assert.equal(response.status, 400);
   assert.match(body.error, /No minutes to translate/);
+});
+
+// ── B5: classifyOverdueActionItems (pure helper) ──────────────────────
+
+test('classifyOverdueActionItems: empty input returns empty array', () => {
+  const result = classifyOverdueActionItems([], '2026-05-15');
+  assert.deepEqual(result, []);
+});
+
+test('classifyOverdueActionItems: returns only pending overdue items, skips future/done/cancelled', () => {
+  const meetings = [
+    {
+      id: 'm1',
+      title: 'Test Meeting',
+      meeting_date: '2026-04-01',
+      status: 'processed',
+      action_items: [
+        { id: 'act-1', task: 'Submit report', assignee: 'Alice', dueDate: '2026-05-10', status: 'pending' },   // overdue
+        { id: 'act-2', task: 'Review budget', assignee: 'Bob',   dueDate: '2026-05-20', status: 'pending' },   // future
+        { id: 'act-3', task: 'Pay invoice',   assignee: 'Carol', dueDate: '2026-05-08', status: 'done' },      // done
+        { id: 'act-4', task: 'No due date',   assignee: 'Dave',  dueDate: '',           status: 'pending' },   // no due date
+        { id: 'act-5', task: 'Cancelled item',assignee: 'Eve',   dueDate: '2026-04-01', status: 'cancelled' }, // cancelled
+      ],
+    },
+  ];
+  const result = classifyOverdueActionItems(meetings, '2026-05-15');
+  assert.equal(result.length, 1);
+  assert.equal(result[0].actionId, 'act-1');
+  assert.equal(result[0].assignee, 'Alice');
+  assert.equal(result[0].meetingId, 'm1');
+});
+
+test('classifyOverdueActionItems: skips items already in existingFollowupKeys', () => {
+  const meetings = [
+    {
+      id: 'm2',
+      title: 'Another Meeting',
+      meeting_date: '2026-03-15',
+      status: 'processed',
+      action_items: [
+        { id: 'act-10', task: 'Draft letter', assignee: 'Frank', dueDate: '2026-05-01', status: 'pending' },
+        { id: 'act-11', task: 'Submit form',  assignee: 'Grace', dueDate: '2026-05-01', status: 'pending' },
+      ],
+    },
+  ];
+  // act-10 already has a follow-up
+  const existing = new Set(['m2:act-10']);
+  const result = classifyOverdueActionItems(meetings, '2026-05-15', existing);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].actionId, 'act-11');
+});
+
+// ── B5: /api/internal/run-followups ──────────────────────────────────
+
+test('run-followups: returns 401 without CRON_SECRET', async () => {
+  const DB = createDBMock({ onPrepare: () => ({ bind: () => ({ all: async () => ({ results: [] }) }) }) });
+  const req = new Request('https://example.com/api/internal/run-followups', { method: 'POST' });
+  const response = await onRequest({ request: req, env: { DB, CRON_SECRET: 'my-secret' } });
+  assert.equal(response.status, 401);
+});
+
+test('run-followups: returns 401 with wrong Bearer token', async () => {
+  const DB = createDBMock({ onPrepare: () => ({ bind: () => ({ all: async () => ({ results: [] }) }) }) });
+  const req = new Request('https://example.com/api/internal/run-followups', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer wrong-token' },
+  });
+  const response = await onRequest({ request: req, env: { DB, CRON_SECRET: 'my-secret' } });
+  assert.equal(response.status, 401);
+});
+
+test('run-followups: happy path — inserts a kpsc_followups row for overdue item', async () => {
+  const insertedRows = [];
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const st = {
+        _bound: [],
+        bind(...args) { st._bound = args; return st; },
+        async run() { insertedRows.push({ sql, bound: st._bound }); return { success: true }; },
+        async first() {
+          if (/SELECT value FROM settings/.test(sql)) return { value: '' }; // no deepseek key
+          if (/SELECT id FROM kpsc_followups WHERE meeting_id/.test(sql)) return null; // not existing
+          return null;
+        },
+        async all() {
+          if (/SELECT id, title, meeting_date, status, action_items_json FROM ai_secretary_meetings/.test(sql)) {
+            return { results: [{
+              id: 'm-run1',
+              title: 'Monthly Meeting',
+              meeting_date: '2026-04-01',
+              status: 'processed',
+              action_items_json: JSON.stringify([
+                { id: 'act-r1', task: 'Submit quarterly report', assignee: 'Bro. James', dueDate: '2026-05-01', status: 'pending' },
+              ]),
+            }] };
+          }
+          if (/SELECT meeting_id, action_id FROM kpsc_followups/.test(sql)) {
+            return { results: [] }; // no existing followups
+          }
+          return { results: [] };
+        },
+      };
+      return st;
+    }
+  });
+
+  const req = new Request('https://example.com/api/internal/run-followups', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer test-cron-secret' },
+  });
+  const response = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-cron-secret' } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.generated, 1);
+  assert.equal(body.skipped, 0);
+  const insertRun = insertedRows.find(r => /INSERT OR IGNORE INTO kpsc_followups/.test(r.sql));
+  assert.ok(insertRun, 'should have inserted a kpsc_followups row');
+});
+
+test('run-followups: does not double-insert when follow-up already exists', async () => {
+  const insertedRows = [];
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const st = {
+        _bound: [],
+        bind(...args) { st._bound = args; return st; },
+        async run() { insertedRows.push({ sql, bound: st._bound }); return { success: true }; },
+        async first() {
+          if (/SELECT value FROM settings/.test(sql)) return { value: '' };
+          if (/SELECT id FROM kpsc_followups WHERE meeting_id/.test(sql)) return { id: 'FU-existing' };
+          return null;
+        },
+        async all() {
+          if (/SELECT id, title, meeting_date, status, action_items_json/.test(sql)) {
+            return { results: [{
+              id: 'm-dup1',
+              title: 'April Meeting',
+              meeting_date: '2026-04-15',
+              status: 'processed',
+              action_items_json: JSON.stringify([
+                { id: 'act-dup1', task: 'Prepare agenda', assignee: 'Sis. Ada', dueDate: '2026-05-01', status: 'pending' },
+              ]),
+            }] };
+          }
+          if (/SELECT meeting_id, action_id FROM kpsc_followups/.test(sql)) {
+            return { results: [{ meeting_id: 'm-dup1', action_id: 'act-dup1' }] };
+          }
+          return { results: [] };
+        },
+      };
+      return st;
+    }
+  });
+
+  const req = new Request('https://example.com/api/internal/run-followups', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer test-cron-secret' },
+  });
+  const response = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-cron-secret' } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.generated, 0);
+  const insertRun = insertedRows.find(r => /INSERT OR IGNORE INTO kpsc_followups/.test(r.sql));
+  assert.ok(!insertRun, 'should NOT have inserted a duplicate followup row');
+});
+
+// ── B6: /api/internal/run-prebriefs ──────────────────────────────────
+
+test('run-prebriefs: returns 401 without CRON_SECRET', async () => {
+  const DB = createDBMock({ onPrepare: () => ({ bind: () => ({ all: async () => ({ results: [] }) }) }) });
+  const req = new Request('https://example.com/api/internal/run-prebriefs', { method: 'POST' });
+  const response = await onRequest({ request: req, env: { DB, CRON_SECRET: 'my-secret' } });
+  assert.equal(response.status, 401);
+});
+
+test('run-prebriefs: generates brief when meeting is scheduled within 24h', async () => {
+  const updatedRows = [];
+  const now = new Date();
+  const in12h = new Date(now.getTime() + 12 * 60 * 60 * 1000).toISOString();
+
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const st = {
+        _bound: [],
+        bind(...args) { st._bound = args; return st; },
+        async run() { updatedRows.push({ sql, bound: st._bound }); return { success: true }; },
+        async first() {
+          if (/SELECT value FROM settings/.test(sql)) return { value: '' }; // no deepseek key
+          if (/SELECT title, meeting_date, minutes_markdown, action_items_json/.test(sql)) {
+            return {
+              title: 'Previous Meeting',
+              meeting_date: '2026-04-01',
+              minutes_markdown: '# Previous Meeting\nWe discussed various topics.',
+              action_items_json: JSON.stringify([
+                { id: 'a1', task: 'Review contracts', assignee: 'Elder Paul', dueDate: '2026-05-01', status: 'pending' },
+              ]),
+            };
+          }
+          return null;
+        },
+        async all() {
+          if (/SELECT id, title, scheduled_for FROM ai_secretary_meetings/.test(sql)) {
+            return { results: [{ id: 'mtg-brief1', title: 'May Monthly Meeting', scheduled_for: in12h }] };
+          }
+          return { results: [] };
+        },
+      };
+      return st;
+    }
+  });
+
+  const req = new Request('https://example.com/api/internal/run-prebriefs', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer test-cron-secret' },
+  });
+  const response = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-cron-secret' } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.generated, 1);
+  const updateRun = updatedRows.find(r => /UPDATE ai_secretary_meetings SET pre_brief_markdown/.test(r.sql));
+  assert.ok(updateRun, 'should have written pre_brief_markdown');
+  assert.equal(updateRun.bound[2], 'mtg-brief1');
+});
+
+test('run-prebriefs: skips meeting when pre_brief_markdown already set (handled by SQL WHERE clause)', async () => {
+  // The WHERE clause filters pre_brief_markdown IS NULL, so no rows are returned
+  // when a brief already exists. We test that 0 are generated in this case.
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const st = {
+        _bound: [],
+        bind(...args) { st._bound = args; return st; },
+        async run() { return { success: true }; },
+        async first() { return null; },
+        async all() {
+          // Simulate SQL returning empty because pre_brief_markdown IS NOT NULL
+          return { results: [] };
+        },
+      };
+      return st;
+    }
+  });
+
+  const req = new Request('https://example.com/api/internal/run-prebriefs', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer test-cron-secret' },
+  });
+  const response = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-cron-secret' } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.generated, 0);
+});
+
+// ── B5: GET /api/kpsc-followups ──────────────────────────────────────
+
+test('GET /api/kpsc-followups: returns pending follow-ups for authenticated user', async () => {
+  const sampleFollowups = [
+    { id: 'FU-1', meeting_id: 'm1', action_id: 'act-1', assignee: 'Bro. Chukwuemeka',
+      task: 'Submit quarterly finance report', due_date: '2026-05-01',
+      draft_message: 'Hi Chukwuemeka, just checking in...', status: 'pending',
+      meeting_title: 'April Meeting', meeting_date: '2026-04-15' },
+  ];
+
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...args) { st._bound = args; return st; },
+        async all() {
+          if (/SELECT f\.\*, m\.title/.test(sql)) return { results: sampleFollowups };
+          return { results: [] };
+        },
+        async first() { return null; },
+        async run() { return { success: true }; },
+      };
+      return st;
+    })
+  });
+
+  const req = new Request('https://example.com/api/kpsc-followups?status=pending', {
+    method: 'GET',
+    headers: { 'X-KPSC-Session': TEST_KPSC_SESSION_HEADER },
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.ok(Array.isArray(body), 'response should be an array');
+  assert.equal(body.length, 1);
+  assert.equal(body[0].id, 'FU-1');
+  assert.equal(body[0].assignee, 'Bro. Chukwuemeka');
 });

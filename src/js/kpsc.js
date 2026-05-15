@@ -79,6 +79,7 @@ const S = {
   dashboard: null,
   projects: [],
   projectsFilter: 'all',
+  followups: [],
   archiveSearch: '',
   archiveQuickFilter: 'all',
   partnersYear: new Date().getUTCFullYear(),
@@ -1347,6 +1348,17 @@ async function apiDelete(path, body) {
   return data;
 }
 
+async function apiPatch(path, body) {
+  const r = await fetch(`${API}/${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json();
+  handleKpscAuthFailure(data);
+  return data;
+}
+
 function roleLabel(role) {
   const map = {
     acting_chairman: 'Acting Chairman',
@@ -2164,6 +2176,17 @@ function buildDashboardContext() {
     .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
     .slice(0, 5);
 
+  // B5: pending follow-ups
+  const pendingFollowups = Array.isArray(S.followups) ? S.followups.filter(f => f.status === 'pending') : [];
+
+  // B6: upcoming meeting with pre-brief (within next 24h)
+  const now2 = new Date();
+  const in24h = new Date(now2.getTime() + 24 * 60 * 60 * 1000).toISOString();
+  const upcomingBriefMeeting = S.meetings.find(m =>
+    m.scheduledFor && m.preBriefMarkdown &&
+    m.scheduledFor >= now2.toISOString() && m.scheduledFor <= in24h
+  ) || null;
+
   return {
     recent, total, monthCount, pending,
     latestProcessed, recentResolutions, pendingActions,
@@ -2174,6 +2197,8 @@ function buildDashboardContext() {
     unreconciledCount, unpaidThisMonth, activePartners,
     partnerYearPct, recentFinance,
     activeProjects: inProgressProjects.slice(0, 5),
+    pendingFollowups,
+    upcomingBriefMeeting,
   };
 }
 
@@ -2225,11 +2250,87 @@ function dashTile({ title, value, sub, badge, onclick, highlight }) {
 }
 
 // Returns the set of extra dashboard sections (below primary card) for each role.
+// ── B5: Follow-up card helpers ─────────────────────────────────────
+
+function daysAgoLabel(dueDateStr) {
+  const due = new Date(dueDateStr);
+  const now = new Date();
+  const diff = Math.floor((now - due) / (1000 * 60 * 60 * 24));
+  if (diff <= 0) return 'Due today';
+  if (diff === 1) return 'Due 1 day ago';
+  return `Due ${diff} days ago`;
+}
+
+function renderFollowupRow(f) {
+  const rowId = `fu-row-${f.id}`;
+  return `
+    <div class="k-fu-row" id="${rowId}" style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px">
+      <div class="k-mc-top" style="margin-bottom:8px">
+        <div style="flex:1">
+          <div style="font-weight:600;font-size:14px">${esc(f.assignee || 'Unassigned')}</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:2px">${esc(f.task || '')}</div>
+        </div>
+        <span class="kbadge badge-red" style="align-self:flex-start">${esc(daysAgoLabel(f.due_date))}</span>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px">
+        ${esc(f.meeting_title || '')} · ${esc(fmtDate(f.meeting_date || ''))}
+      </div>
+      <textarea class="k-input k-textarea" id="fu-msg-${f.id}" style="min-height:80px;font-size:13px;margin-bottom:8px">${esc(f.draft_message || '')}</textarea>
+      <div class="k-fu-actions" style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.approveFollowup('${f.id}')">Approve &amp; copy</button>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.saveFollowupEdit('${f.id}')">Save edit</button>
+        <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.skipFollowup('${f.id}')">Skip</button>
+      </div>
+    </div>`;
+}
+
+function dashCardFollowups(ctx) {
+  const items = ctx.pendingFollowups || [];
+  const count = items.length;
+  const open = count > 0 ? 'open' : '';
+  return `
+    <details class="k-collapsible k-fu-card" ${open} style="margin-bottom:16px;border:1px solid var(--border);border-radius:10px;overflow:hidden">
+      <summary class="k-collapsible-hdr" style="padding:14px 16px;background:var(--card);cursor:pointer">
+        <span class="k-collapsible-title" style="font-size:15px;font-weight:600">Follow-ups (${count})</span>
+        ${count > 0 ? '<span class="kbadge badge-red" style="margin-left:8px">Action needed</span>' : ''}
+      </summary>
+      <div style="padding:12px 16px 16px">
+        ${count === 0
+          ? '<p class="k-hint" style="margin:0;text-align:center">No overdue action items — great job!</p>'
+          : items.map(renderFollowupRow).join('')}
+      </div>
+    </details>`;
+}
+
+// ── B6: Pre-brief card ─────────────────────────────────────────────
+
+function dashCardPreBrief(ctx) {
+  const m = ctx.upcomingBriefMeeting;
+  if (!m) return '';
+  return `
+    <div class="k-meeting-card" style="border-left:4px solid var(--navy);margin-bottom:16px">
+      <div class="k-mc-top">
+        <div style="flex:1">
+          <div class="k-mc-title" style="font-size:15px">Tomorrow's Meeting: ${esc(m.title)}</div>
+          <div class="k-mc-meta" style="margin-top:4px">
+            <span>${esc(fmtDateTime(m.scheduledFor))}</span>
+          </div>
+        </div>
+      </div>
+      <details style="margin-top:10px">
+        <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--navy)">Read full brief</summary>
+        <div style="margin-top:10px;white-space:pre-wrap;font-size:12px;line-height:1.6;color:var(--text1)">${esc(m.preBriefMarkdown)}</div>
+      </details>
+    </div>`;
+}
+
 function dashboardCardsForRole(role, ctx) {
   const r = String(role || 'committee_viewer').toLowerCase();
 
   if (r === 'acting_chairman') {
     return `
+      ${dashCardPreBrief(ctx)}
+      ${dashCardFollowups(ctx)}
       ${dashCardOpenMeeting(ctx)}
       <div class="k-section-hdr" style="margin-top:20px"><h2>At a Glance</h2></div>
       <div class="k-meeting-list">
@@ -2277,6 +2378,8 @@ function dashboardCardsForRole(role, ctx) {
 
   if (r === 'general_secretary') {
     return `
+      ${dashCardPreBrief(ctx)}
+      ${dashCardFollowups(ctx)}
       ${dashCardOpenMeeting(ctx)}
       <div class="k-section-hdr" style="margin-top:20px"><h2>At a Glance</h2></div>
       <div class="k-meeting-list">
@@ -2403,9 +2506,11 @@ async function renderDashboard(main) {
   const now = new Date();
   const year = now.getUTCFullYear();
   const month = now.getUTCMonth() + 1;
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const isChairOrSecretary = role === 'acting_chairman' || role === 'general_secretary';
 
   // Load all data needed for any role in parallel
-  const [meetingsRes, settingsRes, dashboardRes, projectsRes, financeRes, partnersRes, paymentsRes] = await Promise.all([
+  const loadPromises = [
     apiGet('ai-secretary-meetings'),
     apiGet('settings'),
     apiGet(`kpsc-dashboard?year=${year}&month=${month}`),
@@ -2413,7 +2518,13 @@ async function renderDashboard(main) {
     apiGet(`kpsc-finance?year=${year}&month=${month}`),
     apiGet('kpsc-partners'),
     apiGet(`kpsc-partner-payments?year=${year}`),
-  ]);
+  ];
+  // B5: only load followups for chairman/secretary
+  if (isChairOrSecretary) loadPromises.push(apiGet('kpsc-followups?status=pending'));
+
+  const [meetingsRes, settingsRes, dashboardRes, projectsRes, financeRes, partnersRes, paymentsRes, followupsRes] =
+    await Promise.all(loadPromises);
+
   if (meetingsRes?.error) throw new Error(meetingsRes.error);
   S.meetings        = Array.isArray(meetingsRes)            ? meetingsRes            : [];
   S.members         = Array.isArray(settingsRes?.kpsc_members) ? settingsRes.kpsc_members : [];
@@ -2422,6 +2533,7 @@ async function renderDashboard(main) {
   S.financeEntries  = Array.isArray(financeRes)             ? financeRes             : [];
   S.partners        = Array.isArray(partnersRes)            ? partnersRes            : [];
   S.partnerPayments = Array.isArray(paymentsRes)            ? paymentsRes            : [];
+  S.followups       = Array.isArray(followupsRes)           ? followupsRes           : [];
 
   // Load distributed-meeting-ids from settings (stored as JSON string)
   const rawDistributed = Array.isArray(settingsRes?.kpsc_distributed_meeting_ids)
@@ -2429,7 +2541,6 @@ async function renderDashboard(main) {
     : (Array.isArray(S._distributedMeetingIds) ? S._distributedMeetingIds : []);
   S._distributedMeetingIds = rawDistributed;
 
-  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
   const ctx  = buildDashboardContext();
 
   main.innerHTML = `
@@ -2534,9 +2645,20 @@ async function renderMeetingRoom(main) {
   const presentInitial = isFresh ? S.members.length : savedParts.filter(p => p.present).length;
   const attendanceSummary = `${presentInitial} present of ${S.members.length}`;
 
+  // B6: pre-meeting brief card (show if brief exists, for all phases)
+  const preBriefHtml = (m?.preBriefMarkdown) ? `
+    <details class="k-collapsible" id="km-prebrief-section" style="margin-bottom:12px">
+      <summary class="k-collapsible-hdr">
+        <span class="k-collapsible-title">📋 Pre-Meeting Brief</span>
+        <span class="k-collapsible-summary">Generated ${esc(fmtDate((m.preBriefGeneratedAt || '').slice(0, 10)))}</span>
+      </summary>
+      <div class="k-pre-brief-body" id="km-prebrief-body" style="padding:12px 0;white-space:pre-wrap;font-size:13px;line-height:1.6;color:var(--text1)">${esc(m.preBriefMarkdown)}</div>
+    </details>` : '';
+
   main.innerHTML = `
     <div class="k-page k-room" data-phase="${phase}">
       <div id="km-stepper">${stepper(status)}</div>
+      ${preBriefHtml}
 
       <details class="k-collapsible" id="km-details-section" ${phase === 'setup' ? 'open' : ''}>
         <summary class="k-collapsible-hdr">
@@ -2559,6 +2681,10 @@ async function renderMeetingRoom(main) {
           <select class="k-input" id="km-type" ${isProcessed ? 'disabled' : ''}>
             ${MEETING_TYPES.map(t => `<option value="${t.value}" ${prefillType === t.value ? 'selected' : ''}>${t.label}</option>`).join('')}
           </select>
+        </div>
+        <div class="k-field">
+          <label class="k-label">Scheduled For <span class="k-label-hint">(optional — enables pre-meeting brief)</span></label>
+          <input class="k-input" id="km-scheduled-for" type="datetime-local" value="${esc(m?.scheduledFor ? m.scheduledFor.slice(0, 16) : '')}" ${isProcessed ? 'readonly' : ''} />
         </div>
       </details>
 
@@ -2981,17 +3107,18 @@ async function autoSaveNow() {
   const trans = document.getElementById('km-transcript')?.value || '';
   const status = document.getElementById('km-status')?.value || 'draft';
   const participants = readAttendance();
+  const scheduledFor = document.getElementById('km-scheduled-for')?.value || null;
 
   try {
     let res;
     if (S.activeMeeting) {
       res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
-        title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
+        title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants, scheduledFor,
       });
     } else {
       res = await apiPost('ai-secretary-meetings', {
         title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
-        createdBy: S.user?.name || '',
+        createdBy: S.user?.name || '', scheduledFor,
       });
     }
     if (res?.error) {
@@ -3030,7 +3157,7 @@ function bindAutoSave() {
     const el = form.querySelector(sel);
     if (el) el.addEventListener('input', fire);
   }
-  for (const sel of ['#km-date', '#km-type']) {
+  for (const sel of ['#km-date', '#km-type', '#km-scheduled-for']) {
     const el = form.querySelector(sel);
     if (el) el.addEventListener('change', fire);
   }
@@ -6182,6 +6309,49 @@ function init() {
 }
 
 // ── PUBLIC API ────────────────────────────────────────────────────
+// ── B5: Follow-up actions ──────────────────────────────────────────
+
+async function approveFollowup(id) {
+  const msgEl = document.getElementById(`fu-msg-${id}`);
+  const editedMessage = msgEl ? msgEl.value.trim() : '';
+  const res = await apiPatch(`kpsc-followups/${id}`, { status: 'approved', editedMessage });
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  // Copy to clipboard
+  try {
+    await navigator.clipboard.writeText(editedMessage);
+    showToast('Approved and copied to clipboard!', 'success');
+  } catch {
+    showToast('Approved! (clipboard copy failed — copy manually)', 'info');
+  }
+  // Remove the row from DOM
+  const row = document.getElementById(`fu-row-${id}`);
+  if (row) row.remove();
+  // Update S.followups
+  S.followups = (S.followups || []).filter(f => f.id !== id);
+  // Update card title count
+  const title = document.querySelector('.k-fu-card summary .k-collapsible-title');
+  if (title) title.textContent = `Follow-ups (${S.followups.filter(f => f.status === 'pending').length})`;
+}
+
+async function saveFollowupEdit(id) {
+  const msgEl = document.getElementById(`fu-msg-${id}`);
+  const editedMessage = msgEl ? msgEl.value.trim() : '';
+  const res = await apiPatch(`kpsc-followups/${id}`, { editedMessage });
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  showToast('Draft message saved.', 'success');
+}
+
+async function skipFollowup(id) {
+  const res = await apiPatch(`kpsc-followups/${id}`, { status: 'skipped' });
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  const row = document.getElementById(`fu-row-${id}`);
+  if (row) row.remove();
+  S.followups = (S.followups || []).filter(f => f.id !== id);
+  showToast('Follow-up skipped.', 'info');
+  const title = document.querySelector('.k-fu-card summary .k-collapsible-title');
+  if (title) title.textContent = `Follow-ups (${S.followups.filter(f => f.status === 'pending').length})`;
+}
+
 window.Kpsc = {
   login,
   logout,
@@ -6280,6 +6450,10 @@ window.Kpsc = {
   // Minutes PDF
   printMinutes,
   togglePlainEnglish,
+  // B5: Follow-up nudges
+  approveFollowup,
+  saveFollowupEdit,
+  skipFollowup,
 };
 
 document.addEventListener('DOMContentLoaded', init);
