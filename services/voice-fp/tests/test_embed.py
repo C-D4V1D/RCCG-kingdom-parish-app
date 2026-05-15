@@ -145,6 +145,53 @@ class TestEmbedValidation:
         )
         assert resp.status_code == 413
 
+    def test_torchaudio_bytesio_fail_falls_back_to_temp_file(self, client, monkeypatch):
+        """When torchaudio.load(BytesIO) fails, the service retries via a temp file."""
+        import sys
+
+        ta_mod = sys.modules["torchaudio"]
+        original_load = ta_mod.load
+
+        call_args = []
+
+        def _selective_load(buf, **kw):
+            call_args.append(type(buf).__name__)
+            if isinstance(buf, str):
+                # Simulate success when called with a file path
+                return original_load(buf, **kw)
+            raise RuntimeError("BytesIO not supported for this format")
+
+        monkeypatch.setattr(ta_mod, "load", _selective_load)
+
+        wav_bytes = _make_wav(3.0)
+        resp = client.post(
+            "/embed",
+            files={"audio": ("clip.webm", wav_bytes, "audio/webm")},
+            headers=self.VALID_HEADERS,
+        )
+        assert resp.status_code == 200, resp.text
+        assert "str" in call_args, "expected a temp-file path call to torchaudio.load"
+
+    def test_all_decoders_fail_returns_422(self, client, monkeypatch):
+        """When every decode attempt fails, the endpoint returns HTTP 422."""
+        import sys
+
+        def _always_fail(*args, **kwargs):
+            raise RuntimeError("Format not recognised")
+
+        monkeypatch.setattr(sys.modules["torchaudio"], "load", _always_fail)
+
+        # Patch librosa inside app.main so the import-inside-except also fails
+        import unittest.mock as _mock
+        with _mock.patch("librosa.load", side_effect=RuntimeError("Format not recognised")):
+            resp = client.post(
+                "/embed",
+                files={"audio": ("garbage.webm", b"NOTAUDIODATA", "audio/webm")},
+                headers=self.VALID_HEADERS,
+            )
+        assert resp.status_code == 422
+        assert "Could not decode audio" in resp.json()["detail"]
+
 
 # ---------------------------------------------------------------------------
 # Tests — successful embedding

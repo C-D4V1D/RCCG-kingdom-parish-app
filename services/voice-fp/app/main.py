@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import os
+import tempfile
 import time
 from typing import Optional
 
@@ -111,8 +112,17 @@ def _decode_audio(data: bytes, filename: str) -> tuple:
     Decode audio bytes to a (1, N) mono float32 tensor at TARGET_SR.
 
     Returns (waveform, duration_seconds).
-    Supports WAV, webm/opus, mp3, m4a via torchaudio (ffmpeg backend) with a
-    soundfile+librosa fallback for formats torchaudio can't handle directly.
+    Supports WAV, webm/opus, mp3, m4a via torchaudio (ffmpeg backend).
+
+    Fallback strategy when the in-memory (BytesIO) load fails:
+      1. Write the bytes to a named temp file so that torchaudio's ffmpeg
+         backend can auto-detect the container format from magic bytes.
+         This is necessary for webm/opus produced by the browser's
+         MediaRecorder, because libsndfile (used by torchaudio's sox/soundfile
+         backends and by librosa's primary reader) cannot decode those formats.
+      2. If torchaudio still fails on the temp file, try librosa, which can
+         reach its audioread/ffmpeg fallback only when given a file path
+         (not a BytesIO stream).
     """
     buf = io.BytesIO(data)
 
@@ -123,21 +133,40 @@ def _decode_audio(data: bytes, filename: str) -> tuple:
     try:
         waveform, sr = torchaudio.load(buf)
     except Exception as ta_err:
-        logger.warning(f"torchaudio.load failed ({ta_err}); falling back to librosa")
-        buf.seek(0)
+        logger.warning(f"torchaudio.load(BytesIO) failed ({ta_err}); writing to temp file")
+        # libsndfile / soundfile cannot decode webm/opus from a BytesIO stream.
+        # Writing to a named temp file lets torchaudio's ffmpeg backend—and
+        # librosa's audioread fallback—detect the format from magic bytes.
+        suffix = os.path.splitext(filename or "")[1] or ".audio"
+        tmp_path = None
         try:
-            import soundfile as sf  # noqa: F401
-            import librosa
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp.write(data)
+                tmp_path = tmp.name
 
-            # librosa handles webm/opus via ffmpeg subprocess
-            y, sr_lib = librosa.load(buf, sr=None, mono=False)
-            if y.ndim == 1:
-                y = y[np.newaxis, :]
-            waveform = torch.from_numpy(y.astype(np.float32))
-            sr = sr_lib
-        except Exception as lb_err:
-            logger.error(f"librosa fallback also failed: {lb_err}")
-            raise HTTPException(status_code=422, detail=f"Could not decode audio: {lb_err}")
+            try:
+                waveform, sr = torchaudio.load(tmp_path)
+            except Exception as ta2_err:
+                logger.warning(f"torchaudio.load(file) failed ({ta2_err}); falling back to librosa")
+                import librosa
+
+                # librosa reaches its ffmpeg/audioread fallback only with a path
+                y, sr_lib = librosa.load(tmp_path, sr=None, mono=False)
+                if y.ndim == 1:
+                    y = y[np.newaxis, :]
+                waveform = torch.from_numpy(y.astype(np.float32))
+                sr = sr_lib
+        except HTTPException:
+            raise
+        except Exception as final_err:
+            logger.error(f"All decode attempts failed: {final_err}")
+            raise HTTPException(status_code=422, detail=f"Could not decode audio: {final_err}")
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     # Convert to mono
     if waveform.shape[0] > 1:

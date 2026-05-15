@@ -69,14 +69,24 @@ sys.modules["torch"] = torch_stub
 torchaudio_stub = types.ModuleType("torchaudio")
 
 def _fake_load(buf):
-    """Return a short silence waveform + 16000 SR for any input."""
-    # Read up to MAX_BYTES from the buffer to determine approximate size
-    data = buf.read()
+    """Return a short silence waveform + 16000 SR for any input.
+
+    Accepts either a BytesIO (primary path) or a string file path
+    (temp-file fallback path introduced in the webm/opus fix).
+    """
+    import io as _io
+    import wave as _wave
+    # Support the temp-file fallback path where torchaudio.load receives a
+    # string file path instead of a BytesIO object.
+    if isinstance(buf, str):
+        with open(buf, "rb") as fh:
+            data = fh.read()
+    else:
+        data = buf.read()
     # Synthesise a short sine representing the file (good enough for unit tests)
     # The actual wave bytes are from soundfile-written WAV; parse them properly.
-    import io, wave as _wave
     try:
-        with _wave.open(io.BytesIO(data)) as wf:
+        with _wave.open(_io.BytesIO(data)) as wf:
             sr = wf.getframerate()
             n_frames = wf.getnframes()
             n_channels = wf.getnchannels()
