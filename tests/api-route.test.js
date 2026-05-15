@@ -1888,3 +1888,87 @@ test('voice-enrollment GET: returns enrolled:false when member has no enrollment
   assert.equal(response.status, 200);
   assert.equal(body.enrolled, false);
 });
+
+// ── Batch B-B8: Plain English Minutes Translation ───────────────────
+
+test('plain-english translation returns 404 for non-existent meeting', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() { return null; }
+      };
+      return statement;
+    })
+  });
+
+  const req = createKpscRequest('https://example.com/api/ai-secretary-meetings/nonexistent/translate-plain-english');
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 404);
+  assert.match(body.error, /Meeting not found/);
+});
+
+test('plain-english translation returns cached result without calling DeepSeek', async () => {
+  const queries = [];
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      queries.push(sql);
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT minutes_markdown, plain_english_minutes_md FROM ai_secretary_meetings/.test(sql)) {
+            return {
+              minutes_markdown: '## Meeting Minutes\nStuff happened.',
+              plain_english_minutes_md: 'Stuff happened.' // cached result
+            };
+          }
+          return null;
+        }
+      };
+      return statement;
+    })
+  });
+
+  const req = createKpscRequest('https://example.com/api/ai-secretary-meetings/test-123/translate-plain-english');
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.plainEnglish, 'Stuff happened.');
+  assert.equal(body.fromCache, true);
+  // Verify no DeepSeek call was made (no settings query for ai_deepseek_key)
+  const settingsQuery = queries.find(q => /SELECT key,value FROM settings WHERE key IN/.test(q));
+  assert.ok(!settingsQuery || settingsQuery.includes('ai_deepseek_key') === false, 'should not fetch deepseek key when cached');
+});
+
+test('plain-english translation returns 400 when minutes are empty', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT minutes_markdown, plain_english_minutes_md FROM ai_secretary_meetings/.test(sql)) {
+            return {
+              minutes_markdown: '', // empty
+              plain_english_minutes_md: ''
+            };
+          }
+          return null;
+        }
+      };
+      return statement;
+    })
+  });
+
+  const req = createKpscRequest('https://example.com/api/ai-secretary-meetings/test-123/translate-plain-english');
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 400);
+  assert.match(body.error, /No minutes to translate/);
+});

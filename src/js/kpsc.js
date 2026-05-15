@@ -2919,11 +2919,13 @@ function renderMinutesPanel(m) {
 
       <div class="k-room-actions" style="margin-bottom:12px;margin-top:16px">
         <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')">🖨 Print / Save PDF</button>
+        <button class="kbtn kbtn-sm" id="btn-plain-english-${m.id}" onclick="Kpsc.togglePlainEnglish('${m.id}')" data-plain-english="false">📖 Read in plain English</button>
         ${canManageProjects() && m.status === 'processed' ? `<button class="kbtn kbtn-sm" onclick="Kpsc.extractProjectsFromMeetingUI('${m.id}', this)">🤖 Extract Projects</button>` : ''}
       </div>
 
       <h4 class="k-sub-title">Minutes Preview</h4>
-      <div class="k-minutes-body">${minutesHtml(m.minutesMarkdown)}</div>
+      <div class="k-minutes-body" id="minutes-body-${m.id}">${minutesHtml(m.minutesMarkdown)}</div>
+      <div class="k-plain-english-indicator" id="pe-indicator-${m.id}" style="display:none;font-size:0.9em;color:#666;margin-top:8px;padding:8px;background:#f5f5f5;border-radius:4px;">📖 Showing plain English version</div>
 
       ${resolutions.length ? `
         <h4 class="k-sub-title">Decision & Resolution Register (${resolutions.length})</h4>
@@ -6019,6 +6021,79 @@ function printMinutes(meetingId) {
   win.document.close();
 }
 
+// ── PLAIN ENGLISH TOGGLE ──────────────────────────────────────────
+let _plainEnglishCache = {}; // Cache {meetingId: plainEnglishText}
+
+async function togglePlainEnglish(meetingId) {
+  const btn = document.getElementById(`btn-plain-english-${meetingId}`);
+  const minutesBody = document.getElementById(`minutes-body-${meetingId}`);
+  const indicator = document.getElementById(`pe-indicator-${meetingId}`);
+  if (!btn || !minutesBody) return;
+
+  const isPlainEnglish = btn.dataset.plainEnglish === 'true';
+  const meeting = S.activeMeeting;
+  if (!meeting?.minutesMarkdown) return;
+
+  if (isPlainEnglish) {
+    // Toggle off: revert to original minutes
+    btn.dataset.plainEnglish = 'false';
+    btn.textContent = '📖 Read in plain English';
+    btn.style.opacity = '1';
+    minutesBody.innerHTML = minutesHtml(meeting.minutesMarkdown);
+    if (indicator) indicator.style.display = 'none';
+  } else {
+    // Toggle on: show plain English version
+    btn.dataset.plainEnglish = 'true';
+    btn.textContent = '📖 Reading in plain English...';
+    btn.style.opacity = '0.6';
+    btn.disabled = true;
+
+    try {
+      // Check cache first
+      if (_plainEnglishCache[meetingId]) {
+        minutesBody.innerHTML = minutesHtml(_plainEnglishCache[meetingId]);
+        btn.textContent = '📖 Reading in plain English';
+        if (indicator) indicator.style.display = '';
+      } else {
+        // Fetch from API
+        const response = await fetch(
+          `/api/ai-secretary-meetings/${meetingId}/translate-plain-english`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...kpscSessionHeader()
+            }
+          }
+        );
+        const data = await response.json();
+
+        if (!response.ok) {
+          showToast(`Failed to translate: ${data.error || 'Unknown error'}`, 'error');
+          btn.dataset.plainEnglish = 'false';
+          btn.textContent = '📖 Read in plain English';
+          btn.style.opacity = '1';
+          btn.disabled = false;
+          return;
+        }
+
+        // Cache the plain English version
+        _plainEnglishCache[meetingId] = data.plainEnglish;
+        minutesBody.innerHTML = minutesHtml(data.plainEnglish);
+        btn.textContent = `📖 Reading in plain English${data.fromCache ? ' (cached)' : ''}`;
+        if (indicator) indicator.style.display = '';
+      }
+    } catch (e) {
+      showToast(`Error: ${e.message}`, 'error');
+      btn.dataset.plainEnglish = 'false';
+      btn.textContent = '📖 Read in plain English';
+      btn.style.opacity = '1';
+    }
+
+    btn.disabled = false;
+  }
+}
+
 // ── GLOBAL SEARCH ─────────────────────────────────────────────────
 let _searchDebounceTimer = null;
 
@@ -6330,6 +6405,7 @@ window.Kpsc = {
   runPdfReconciliation,
   // Minutes PDF
   printMinutes,
+  togglePlainEnglish,
 };
 
 document.addEventListener('DOMContentLoaded', init);
