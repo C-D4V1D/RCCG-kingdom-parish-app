@@ -603,6 +603,11 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .ka-search-badge + .ka-search-title{flex:1 1 calc(100% - 90px);}
 .ka-search-sub{flex-basis:100%;padding-left:0;}
 
+/* ── Receipt scan block ──────────────────────────────────────────── */
+.kf-scan-block{padding:10px 0 14px;border-bottom:1px solid var(--border);margin-bottom:14px;}
+.kf-receipt-thumb{display:block;max-height:120px;width:auto;border-radius:8px;border:1px solid var(--border);margin-top:10px;object-fit:contain;}
+.kf-receipt-thumb--scanning{opacity:0.45;filter:grayscale(60%);}
+
 /* ── PRINT: hide new nav chrome ─────────────────────────────────── */
 @media print {
   #ka-fab, .ka-subtabs, .ka-search-overlay, .ka-search-toggle { display: none !important; }

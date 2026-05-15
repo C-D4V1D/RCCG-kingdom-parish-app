@@ -3784,6 +3784,12 @@ async function openFinanceModal(entryToEdit = null) {
     <div class="k-modal">
       <div class="k-modal-hdr"><span class="k-modal-title">New Finance Entry</span><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeFinanceModal()">✕</button></div>
       <div class="k-modal-body">
+        <div class="kf-scan-block">
+          <input type="file" id="kf-receipt-file" accept="image/*" capture="environment" style="display:none" onchange="Kpsc.scanReceiptPhoto(this)" />
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('kf-receipt-file').click()">📷 Scan Receipt</button>
+          <span id="kf-scan-status" class="k-hint" style="margin-left:8px"></span>
+          <div id="kf-receipt-preview"></div>
+        </div>
         <label class="k-label">Date</label>
         <input id="kf-date" type="date" class="k-input" value="${today()}" />
         <label class="k-label">Entry Type</label>
@@ -3815,6 +3821,97 @@ async function openFinanceModal(entryToEdit = null) {
   document.body.appendChild(modal);
   modal._incomeOpts = incomeOpts;
   modal._expenseOpts = expenseOpts;
+}
+
+// Pure helper — maps raw OCR receipt response → form-field values.
+// Canonical source: src/js/receipt-ocr-utils.js (ES module version used by unit tests).
+function mapReceiptOcrToFormFields(ocr) {
+  // date: accept YYYY-MM-DD only
+  let date = null;
+  if (typeof ocr?.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(ocr.date.trim())) {
+    date = ocr.date.trim();
+  }
+
+  // amount: parse numbers permissively (strip commas, reject negative)
+  let amount = null;
+  if (ocr?.amount !== null && ocr?.amount !== undefined) {
+    const raw = String(ocr.amount).replace(/,/g, '').trim();
+    const n = parseFloat(raw);
+    if (!isNaN(n) && n >= 0) amount = n;
+  }
+
+  // reference: prefer receipt reference, fall back to vendor
+  let ref = null;
+  if (typeof ocr?.reference === 'string' && ocr.reference.trim()) ref = ocr.reference.trim();
+  else if (typeof ocr?.vendor === 'string' && ocr.vendor.trim()) ref = ocr.vendor.trim();
+
+  // note: "vendor — itemsSummary"
+  const parts = [
+    typeof ocr?.vendor === 'string' && ocr.vendor.trim() ? ocr.vendor.trim() : null,
+    typeof ocr?.itemsSummary === 'string' && ocr.itemsSummary.trim() ? ocr.itemsSummary.trim() : null,
+  ].filter(Boolean);
+  const note = parts.join(' — ') || null;
+
+  return { date, amount, ref, note };
+}
+
+async function scanReceiptPhoto(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+
+  const preview = document.getElementById('kf-receipt-preview');
+  const status = document.getElementById('kf-scan-status');
+
+  // Show thumbnail preview while scanning
+  const dataUrl = await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = e => resolve(e.target.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+  if (preview) preview.innerHTML = `<img src="${dataUrl}" class="kf-receipt-thumb kf-receipt-thumb--scanning" alt="Receipt preview" />`;
+  if (status) status.textContent = 'Scanning…';
+
+  try {
+    const base64 = dataUrl.split(',')[1];
+    const mimeType = file.type || 'image/jpeg';
+    const res = await apiPost('kpsc-ocr-receipt', { imageBase64: base64, mimeType });
+
+    if (preview) preview.querySelector('img')?.classList.remove('kf-receipt-thumb--scanning');
+    if (status) status.textContent = '';
+
+    if (res?.error) {
+      showToast('Could not read receipt. Please enter manually.', 'warn');
+      return;
+    }
+
+    const fields = mapReceiptOcrToFormFields(res);
+    if (fields.date) {
+      const dateEl = document.getElementById('kf-date');
+      if (dateEl) dateEl.value = fields.date;
+    }
+    if (fields.amount !== null) {
+      const amtEl = document.getElementById('kf-amount');
+      if (amtEl) amtEl.value = fields.amount;
+    }
+    if (fields.ref) {
+      const refEl = document.getElementById('kf-ref');
+      if (refEl) refEl.value = fields.ref;
+    }
+    if (fields.note) {
+      const noteEl = document.getElementById('kf-note');
+      if (noteEl) noteEl.value = fields.note;
+    }
+    if (fields.date || fields.amount !== null || fields.ref || fields.note) {
+      showToast('Receipt scanned — please review and correct if needed.', 'info');
+    } else {
+      showToast('Could not read receipt. Please enter manually.', 'warn');
+    }
+  } catch (_) {
+    if (preview) preview.querySelector('img')?.classList.remove('kf-receipt-thumb--scanning');
+    if (status) status.textContent = '';
+    showToast('Could not read receipt. Please enter manually.', 'warn');
+  }
 }
 
 function closeFinanceModal() {
@@ -5355,6 +5452,8 @@ window.Kpsc = {
   closeFinanceModal,
   saveFinanceEntry,
   updateFinanceCategoryOptions,
+  scanReceiptPhoto,
+  mapReceiptOcrToFormFields,
   setFinanceYear,
   setFinanceMonth,
   deleteFinanceEntry,
