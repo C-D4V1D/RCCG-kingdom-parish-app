@@ -1328,3 +1328,100 @@ test('AI secretary deepseek model migration: deepseek-v4-pro remains unchanged',
     globalThis.fetch = originalFetch;
   }
 });
+
+// ── VF-3A: voice-member-sync endpoint tests ───────────────────────
+
+test('voice-member-sync: inserts new member into D1', async () => {
+  const runs = [];
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async run() { runs.push({ sql, bound: statement._bound }); return { success: true }; },
+        async first() { return null; }
+      };
+      return statement;
+    })
+  });
+
+  const sessionHeader = JSON.stringify({ accountId: 'ka-test', token: 'ks-test-token' });
+  const req = new Request('https://example.com/api/voice-member-sync/vfp_men_brother-ade', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+    body: JSON.stringify({ name: 'Brother Ade', group: 'men', position: 'Men President' }),
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.memberId, 'vfp_men_brother-ade');
+  const syncRun = runs.find(r => /INSERT INTO kpsc_members/.test(r.sql));
+  assert.ok(syncRun, 'should have run an INSERT INTO kpsc_members');
+  assert.match(syncRun.sql, /ON CONFLICT\(id\) DO UPDATE/);
+  assert.equal(syncRun.bound[0], 'vfp_men_brother-ade');
+  assert.equal(syncRun.bound[1], 'Brother Ade');
+});
+
+test('voice-member-sync: update-existing updates name via ON CONFLICT', async () => {
+  const runs = [];
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async run() { runs.push({ sql, bound: statement._bound }); return { success: true }; },
+        async first() { return null; }
+      };
+      return statement;
+    })
+  });
+
+  const sessionHeader = JSON.stringify({ accountId: 'ka-test', token: 'ks-test-token' });
+  const req = new Request('https://example.com/api/voice-member-sync/vfp_women_sister-bisi', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+    body: JSON.stringify({ name: 'Sister Bisi Renamed', group: 'women', position: '' }),
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  // The ON CONFLICT upsert should include the new name in bound params
+  const syncRun = runs.find(r => /INSERT INTO kpsc_members/.test(r.sql));
+  assert.ok(syncRun, 'should have run upsert');
+  assert.equal(syncRun.bound[1], 'Sister Bisi Renamed');
+});
+
+// ── VF-3B: GET voice-enrollment/:memberId ────────────────────────
+
+test('voice-enrollment GET: returns enrolled:false when member has no enrollment', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT id, enrolled_at, sample_count FROM kpsc_members/.test(sql)) {
+            return { id: 'vfp_men_test', enrolled_at: null, sample_count: 0 };
+          }
+          return null;
+        }
+      };
+      return statement;
+    })
+  });
+
+  const sessionHeader = JSON.stringify({ accountId: 'ka-test', token: 'ks-test-token' });
+  const req = new Request('https://example.com/api/voice-enrollment/vfp_men_test', {
+    method: 'GET',
+    headers: { 'X-KPSC-Session': sessionHeader },
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.enrolled, false);
+});

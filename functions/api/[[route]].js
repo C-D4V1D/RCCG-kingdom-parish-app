@@ -15,6 +15,7 @@ const CORS_HEADERS = {
 const KPSC_WRITE_ROLES   = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer'];
 const KPSC_FINANCE_ROLES = ['acting_chairman', 'financial_secretary', 'treasurer'];
 const KPSC_ADMIN_ROLES   = ['acting_chairman', 'general_secretary'];
+const KPSC_READ_ROLES    = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'committee_viewer'];
 
 // KPSC_SESSION_TTL_MS: 8 hours
 const KPSC_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -373,6 +374,41 @@ export async function onRequest(context) {
     // ── /api/azure-speaker-identify ────────────────────────────
     if (route === 'azure-speaker-identify') {
       if (method === 'POST' && !param) return await azureIdentifySpeaker(env, body);
+    }
+
+    // ── /api/voice-enroll/:memberId ────────────────────────────
+    if (route === 'voice-enroll' && param) {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await voiceEnroll(DB, env, request, param);
+    }
+
+    // ── /api/voice-identify ─────────────────────────────────────
+    if (route === 'voice-identify' && method === 'POST' && !param) {
+      const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+      if (auth instanceof Response) return auth;
+      return await voiceIdentify(DB, env, request);
+    }
+
+    // ── /api/voice-enrollment/:memberId ────────────────────────
+    if (route === 'voice-enrollment' && param) {
+      if (method === 'GET') {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await voiceGetEnrollment(DB, param);
+      }
+      if (method === 'DELETE') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await voiceDeleteEnrollment(DB, param);
+      }
+    }
+
+    // ── /api/voice-member-sync/:memberId ───────────────────────
+    if (route === 'voice-member-sync' && param && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await voiceMemberSync(DB, param, body);
     }
 
     // ── /api/ai-secretary-meetings ─────────────────────────────
@@ -3392,4 +3428,176 @@ async function adminImport(DB, data) {
 async function markAllRead(DB) {
   await DB.prepare(`UPDATE notifications SET is_read=1 WHERE is_read=0`).run();
   return ok({ marked: true });
+}
+
+// ── VOICE FINGERPRINTING (VF-2 + VF-3A/VF-3B) ────────────────────────
+
+/** cosine similarity between two numeric arrays of equal length */
+function cosineSim(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+/** Store a Float32 embedding (192 floats) as a BLOB in D1 */
+function embeddingToBlob(floats) {
+  const buf = new ArrayBuffer(floats.length * 4);
+  new Float32Array(buf).set(floats);
+  return new Uint8Array(buf);
+}
+
+/** Restore embedding from a D1 BLOB (Uint8Array or ArrayBuffer) */
+function blobToEmbedding(blob) {
+  const buf = blob instanceof ArrayBuffer ? blob : blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength);
+  return Array.from(new Float32Array(buf));
+}
+
+/**
+ * Call the voice-fp Cloud Run service to compute a 192-float embedding.
+ * Returns { embedding: number[], duration_s: number, model: string }
+ */
+async function callEmbedder(env, audioBlob) {
+  const url   = env.VOICE_FP_URL;
+  const token = env.VOICE_FP_TOKEN;
+  if (!url || !token) return { error: 'Voice fingerprinting service not configured', status: 503 };
+
+  const form = new FormData();
+  form.append('audio', audioBlob, 'audio.wav');
+  const res = await fetch(`${url}/embed`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    return { error: text || `Embedder returned ${res.status}`, status: res.status };
+  }
+  return res.json();
+}
+
+/** POST /api/voice-enroll/:memberId — multipart `audio` field → upsert embedding */
+async function voiceEnroll(DB, env, request, memberId) {
+  let audioBlob;
+  try {
+    const formData = await request.formData();
+    audioBlob = formData.get('audio');
+  } catch {
+    return err('Expected multipart form with audio field', 400);
+  }
+  if (!audioBlob) return err('Missing audio field', 400);
+
+  const embedRes = await callEmbedder(env, audioBlob);
+  if (embedRes.error) return err(embedRes.error, embedRes.status || 500);
+
+  const { embedding } = embedRes;
+  if (!Array.isArray(embedding) || embedding.length !== 192) {
+    return err('Embedder returned invalid embedding', 500);
+  }
+
+  const blob      = embeddingToBlob(embedding);
+  const now       = new Date().toISOString();
+
+  // Upsert into kpsc_members — member row must already exist (created by voice-member-sync)
+  const existing = await DB.prepare(
+    `SELECT id, sample_count FROM kpsc_members WHERE id=?`
+  ).bind(memberId).first();
+
+  if (!existing) return err(`Member ${memberId} not found in D1; call voice-member-sync first`, 404);
+
+  const sampleCount = (existing.sample_count || 0) + 1;
+  await DB.prepare(
+    `UPDATE kpsc_members SET embedding=?, enrolled_at=?, sample_count=? WHERE id=?`
+  ).bind(blob, now, sampleCount, memberId).run();
+
+  return ok({ ok: true, enrolledAt: now, sampleCount, embeddingDim: 192 });
+}
+
+/** POST /api/voice-identify — multipart `audio` → best matching member */
+async function voiceIdentify(DB, env, request) {
+  let audioBlob;
+  try {
+    const formData = await request.formData();
+    audioBlob = formData.get('audio');
+  } catch {
+    return err('Expected multipart form with audio field', 400);
+  }
+  if (!audioBlob) return err('Missing audio field', 400);
+
+  const embedRes = await callEmbedder(env, audioBlob);
+  if (embedRes.error) return err(embedRes.error, embedRes.status || 500);
+
+  const { embedding: queryEmbedding } = embedRes;
+  if (!Array.isArray(queryEmbedding) || queryEmbedding.length !== 192) {
+    return err('Embedder returned invalid embedding', 500);
+  }
+
+  // Fetch all enrolled members
+  const { results } = await DB.prepare(
+    `SELECT id, name, embedding FROM kpsc_members WHERE embedding IS NOT NULL`
+  ).all();
+
+  if (!results || results.length === 0) {
+    return ok({ match: false, reason: 'no_enrolled_members', threshold: 0.65 });
+  }
+
+  const THRESHOLD = 0.65;
+  let best = null;
+  let bestScore = -1;
+
+  for (const row of results) {
+    if (!row.embedding) continue;
+    try {
+      const storedEmb = blobToEmbedding(row.embedding);
+      const score     = cosineSim(queryEmbedding, storedEmb);
+      if (score > bestScore) { bestScore = score; best = row; }
+    } catch {
+      // corrupt blob — skip
+    }
+  }
+
+  if (best && bestScore >= THRESHOLD) {
+    return ok({ match: true, memberId: best.id, memberName: best.name, score: bestScore, threshold: THRESHOLD });
+  }
+  return ok({ match: false, score: bestScore, threshold: THRESHOLD, reason: 'below_threshold' });
+}
+
+/** GET /api/voice-enrollment/:memberId — returns enrollment status */
+async function voiceGetEnrollment(DB, memberId) {
+  const row = await DB.prepare(
+    `SELECT id, enrolled_at, sample_count FROM kpsc_members WHERE id=?`
+  ).bind(memberId).first();
+
+  if (!row || !row.enrolled_at) {
+    return ok({ enrolled: false });
+  }
+  return ok({ enrolled: true, enrolledAt: row.enrolled_at, sampleCount: row.sample_count || 0 });
+}
+
+/** DELETE /api/voice-enrollment/:memberId — removes embedding */
+async function voiceDeleteEnrollment(DB, memberId) {
+  const row = await DB.prepare(`SELECT id FROM kpsc_members WHERE id=?`).bind(memberId).first();
+  if (!row) return ok({ ok: true, deleted: false });
+
+  await DB.prepare(
+    `UPDATE kpsc_members SET embedding=NULL, enrolled_at=NULL, sample_count=0 WHERE id=?`
+  ).bind(memberId).run();
+  return ok({ ok: true, deleted: true });
+}
+
+/** POST /api/voice-member-sync/:memberId — upsert JSON-roster member into D1 */
+async function voiceMemberSync(DB, memberId, body) {
+  const name     = String(body?.name     || '').trim();
+  const grp      = String(body?.group    || body?.grp || '').trim();
+  const position = String(body?.position || '').trim();
+
+  if (!name) return err('name is required', 400);
+
+  await DB.prepare(
+    `INSERT INTO kpsc_members(id, name, grp, position)
+     VALUES(?,?,?,?)
+     ON CONFLICT(id) DO UPDATE SET name=excluded.name, grp=excluded.grp, position=excluded.position`
+  ).bind(memberId, name, grp, position).run();
+
+  return ok({ ok: true, memberId });
 }
