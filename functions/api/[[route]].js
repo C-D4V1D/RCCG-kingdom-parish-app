@@ -15,6 +15,8 @@ const CORS_HEADERS = {
 const KPSC_WRITE_ROLES   = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer'];
 const KPSC_FINANCE_ROLES = ['acting_chairman', 'financial_secretary', 'treasurer'];
 const KPSC_ADMIN_ROLES   = ['acting_chairman', 'general_secretary'];
+// All roles that can log in to the portal (including read-only viewer).
+const KPSC_READ_ROLES    = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'committee_viewer'];
 
 // KPSC_SESSION_TTL_MS: 8 hours
 const KPSC_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -64,6 +66,26 @@ const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().to
 const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
 // Absolute naira tolerance when matching statement lines to recorded entries.
 const RECONCILIATION_AMOUNT_TOLERANCE_ABSOLUTE = 0.5;
+
+// ── VOICE FINGERPRINTING HELPERS ─────────────────────────────────────
+// Cosine similarity between two numeric arrays. Returns -1 on any error.
+function cosineSim(a, b) {
+  if (!a || !b || a.length !== b.length) return -1;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na  += a[i] * a[i];
+    nb  += b[i] * b[i];
+  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  return denom === 0 ? -1 : dot / denom;
+}
+
+// Convert a JS number array to an ArrayBuffer (Float32 little-endian) for D1 BLOB storage.
+function embeddingToBlob(arr)  { return new Float32Array(arr).buffer; }
+
+// Convert an ArrayBuffer (Float32 little-endian) back to a JS number array.
+function blobToEmbedding(blob) { return Array.from(new Float32Array(blob)); }
 
 function isValidPin(pin) {
   return /^\d{4,6}$/.test(String(pin || ''));
@@ -375,6 +397,27 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) return await azureIdentifySpeaker(env, body);
     }
 
+    // ── /api/voice-enroll/:memberId ─────────────────────────────
+    if (route === 'voice-enroll' && param && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await voiceEnroll(DB, env, request, param);
+    }
+
+    // ── /api/voice-identify ─────────────────────────────────────
+    if (route === 'voice-identify' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+      if (auth instanceof Response) return auth;
+      return await voiceIdentify(DB, env, request);
+    }
+
+    // ── /api/voice-enrollment/:memberId (DELETE) ─────────────────
+    if (route === 'voice-enrollment' && param && method === 'DELETE') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await voiceDeleteEnrollment(DB, param);
+    }
+
     // ── /api/ai-secretary-meetings ─────────────────────────────
     if (route === 'ai-secretary-meetings') {
       if (method === 'POST' && param === 'audio-chunk') {
@@ -681,6 +724,16 @@ async function handleInit(DB) {
       account_id  TEXT NOT NULL,
       expires_at  INTEGER NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_members (
+      id                    TEXT PRIMARY KEY,
+      name                  TEXT NOT NULL DEFAULT '',
+      grp                   TEXT NOT NULL DEFAULT 'men',
+      position              TEXT DEFAULT '',
+      azureSpeakerProfileId TEXT DEFAULT '',
+      voice_embedding       BLOB,
+      voice_enrolled_at     TEXT,
+      voice_sample_count    INTEGER DEFAULT 0
+    )`,
   ];
 
   // Run all CREATE TABLE statements first
@@ -725,6 +778,10 @@ async function handleInit(DB) {
     // Soft-delete for AI secretary meeting drafts.
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_at TEXT DEFAULT ''`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_by TEXT DEFAULT ''`,
+    // Wave 3 VF-2: voice fingerprinting columns on kpsc_members.
+    `ALTER TABLE kpsc_members ADD COLUMN voice_embedding BLOB`,
+    `ALTER TABLE kpsc_members ADD COLUMN voice_enrolled_at TEXT`,
+    `ALTER TABLE kpsc_members ADD COLUMN voice_sample_count INTEGER DEFAULT 0`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -3154,6 +3211,152 @@ async function createDeepgramTranscriptionToken(env) {
   return ok({ key: token, expires_in: data.expires_in ?? 30 });
 }
 
+// ── VOICE FINGERPRINTING ENDPOINTS (Wave 3 VF-2) ─────────────────────
+// Uses a stateless Cloud Run embedder at ${VOICE_FP_URL} (VF-1).
+const VOICE_IDENTIFY_THRESHOLD = 0.65;
+
+/**
+ * Forward audio to the VF-1 embedder and return the parsed JSON response.
+ * Returns { ok: true, data } on success, or { ok: false, response } with the
+ * pre-built error Response that should be returned immediately to the caller.
+ */
+async function callEmbedder(env, audioBlob) {
+  const fpUrl   = String(env.VOICE_FP_URL   || '').replace(/\/$/, '');
+  const fpToken = String(env.VOICE_FP_TOKEN || '');
+  if (!fpUrl || !fpToken) {
+    return { ok: false, response: err('Voice fingerprinting service not configured', 503) };
+  }
+
+  const upstreamForm = new FormData();
+  upstreamForm.append('audio', audioBlob);
+
+  let upstreamRes;
+  try {
+    upstreamRes = await fetch(`${fpUrl}/embed`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${fpToken}` },
+      body: upstreamForm,
+    });
+  } catch (e) {
+    return { ok: false, response: err(`Voice fingerprinting service unavailable: ${e.message}`, 502) };
+  }
+
+  if (!upstreamRes.ok) {
+    const data = await upstreamRes.json().catch(() => ({}));
+    const msg  = data.detail || data.error || `Upstream error (${upstreamRes.status})`;
+    if (upstreamRes.status >= 500) {
+      return { ok: false, response: err(`Voice fingerprinting service error: ${msg}`, 502) };
+    }
+    return { ok: false, response: err(msg, upstreamRes.status) };
+  }
+
+  const data = await upstreamRes.json().catch(() => null);
+  if (!data) {
+    return { ok: false, response: err('Invalid response from voice fingerprinting service', 502) };
+  }
+  return { ok: true, data };
+}
+
+async function voiceEnroll(DB, env, request, memberId) {
+  // Fetch the member record; it must already exist (created by the frontend roster save).
+  const member = await DB.prepare(`SELECT id, name, voice_sample_count FROM kpsc_members WHERE id=?`)
+    .bind(memberId).first();
+  if (!member) return err('Member not found', 404);
+
+  // Parse the incoming multipart form — extract the audio file/blob.
+  let form;
+  try {
+    form = await request.formData();
+  } catch {
+    return err('Expected multipart form data with an "audio" field', 400);
+  }
+  const audioBlob = form.get('audio');
+  if (!audioBlob) return err('Missing "audio" field in form data', 400);
+
+  // Call the VF-1 embedder.
+  const result = await callEmbedder(env, audioBlob);
+  if (!result.ok) return result.response;
+
+  const embedding = result.data.embedding;
+  if (!Array.isArray(embedding) || embedding.length !== 192) {
+    return err('Unexpected embedding shape from voice fingerprinting service', 502);
+  }
+
+  const enrolledAt    = new Date().toISOString();
+  const sampleCount   = Number(member.voice_sample_count || 0) + 1;
+  const embeddingBuf  = embeddingToBlob(embedding);
+
+  await DB.prepare(
+    `UPDATE kpsc_members SET voice_embedding=?, voice_enrolled_at=?, voice_sample_count=? WHERE id=?`
+  ).bind(embeddingBuf, enrolledAt, sampleCount, memberId).run();
+
+  return ok({ ok: true, enrolledAt, sampleCount, embeddingDim: 192 });
+}
+
+async function voiceIdentify(DB, env, request) {
+  // Parse incoming audio.
+  let form;
+  try {
+    form = await request.formData();
+  } catch {
+    return err('Expected multipart form data with an "audio" field', 400);
+  }
+  const audioBlob = form.get('audio');
+  if (!audioBlob) return err('Missing "audio" field in form data', 400);
+
+  // Get all enrolled members.
+  const { results: enrolled } = await DB.prepare(
+    `SELECT id, name, voice_embedding FROM kpsc_members WHERE voice_embedding IS NOT NULL`
+  ).all();
+
+  if (!enrolled || enrolled.length === 0) {
+    return ok({ match: false, score: 0, threshold: VOICE_IDENTIFY_THRESHOLD, reason: 'no_enrolled_members' });
+  }
+
+  // Call the VF-1 embedder.
+  const result = await callEmbedder(env, audioBlob);
+  if (!result.ok) return result.response;
+
+  const queryEmbedding = result.data.embedding;
+  if (!Array.isArray(queryEmbedding) || queryEmbedding.length === 0) {
+    return err('Unexpected embedding shape from voice fingerprinting service', 502);
+  }
+
+  // Find the best match.
+  let bestScore  = -1;
+  let bestMember = null;
+  for (const row of enrolled) {
+    const storedEmbedding = blobToEmbedding(row.voice_embedding);
+    const score = cosineSim(queryEmbedding, storedEmbedding);
+    if (score > bestScore) {
+      bestScore  = score;
+      bestMember = row;
+    }
+  }
+
+  if (bestScore >= VOICE_IDENTIFY_THRESHOLD) {
+    return ok({
+      match:      true,
+      memberId:   bestMember.id,
+      memberName: bestMember.name,
+      score:      bestScore,
+      threshold:  VOICE_IDENTIFY_THRESHOLD,
+    });
+  }
+  return ok({ match: false, score: bestScore, threshold: VOICE_IDENTIFY_THRESHOLD });
+}
+
+async function voiceDeleteEnrollment(DB, memberId) {
+  const member = await DB.prepare(`SELECT id FROM kpsc_members WHERE id=?`).bind(memberId).first();
+  if (!member) return err('Member not found', 404);
+
+  await DB.prepare(
+    `UPDATE kpsc_members SET voice_embedding=NULL, voice_enrolled_at=NULL, voice_sample_count=0 WHERE id=?`
+  ).bind(memberId).run();
+
+  return ok({ ok: true, deleted: true });
+}
+
 // ── AZURE SPEAKER RECOGNITION ──────────────────────────────────────
 // These four functions proxy requests to Azure Cognitive Services
 // Speaker Recognition v2.0 (text-independent).
@@ -3393,3 +3596,8 @@ async function markAllRead(DB) {
   await DB.prepare(`UPDATE notifications SET is_read=1 WHERE is_read=0`).run();
   return ok({ marked: true });
 }
+
+// ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
+// Pure helpers exported so unit tests can exercise them directly without
+// going through the full HTTP handler stack.
+export { cosineSim, embeddingToBlob, blobToEmbedding };
