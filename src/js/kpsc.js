@@ -1620,6 +1620,10 @@ function navigate(page, opts) {
   }
   S._partnerDetailId = null;
   S._partnerDetailYear = null;
+  // Flush in-memory transcript before the meeting-room DOM unmounts.
+  if ((Rec.status === 'recording' || Rec.status === 'paused') && document.getElementById('km-transcript')) {
+    autoSaveNow();
+  }
   recStop();
   Rec.status = 'idle';
   S.page = page;
