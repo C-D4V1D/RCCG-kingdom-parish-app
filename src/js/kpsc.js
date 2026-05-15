@@ -2201,12 +2201,16 @@ function buildDashboardContext() {
   const pendingFollowups = Array.isArray(S.followups) ? S.followups.filter(f => f.status === 'pending') : [];
 
   // B6: upcoming meeting with pre-brief (within next 24h)
+  // Compare as timestamps so that datetime-local strings (YYYY-MM-DDTHH:MM, no timezone)
+  // are treated as local Date objects rather than being compared lexicographically.
   const now2 = new Date();
-  const in24h = new Date(now2.getTime() + 24 * 60 * 60 * 1000).toISOString();
-  const upcomingBriefMeeting = S.meetings.find(m =>
-    m.scheduledFor && m.preBriefMarkdown &&
-    m.scheduledFor >= now2.toISOString() && m.scheduledFor <= in24h
-  ) || null;
+  const nowMs = now2.getTime();
+  const in24hMs = nowMs + 24 * 60 * 60 * 1000;
+  const upcomingBriefMeeting = S.meetings.find(m => {
+    if (!m.scheduledFor || !m.preBriefMarkdown) return false;
+    const ms = new Date(m.scheduledFor).getTime();
+    return !isNaN(ms) && ms >= nowMs && ms <= in24hMs;
+  }) || null;
 
   return {
     recent, total, monthCount, pending,
