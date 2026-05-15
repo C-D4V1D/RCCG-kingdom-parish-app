@@ -8,8 +8,55 @@ const CORS_HEADERS = {
   'Content-Type': 'application/json',
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, X-KPSC-Session',
 };
+
+// ── KPSC ROLE GROUPS ────────────────────────────────────────────────
+const KPSC_WRITE_ROLES   = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer'];
+const KPSC_FINANCE_ROLES = ['acting_chairman', 'financial_secretary', 'treasurer'];
+const KPSC_ADMIN_ROLES   = ['acting_chairman', 'general_secretary'];
+
+// KPSC_SESSION_TTL_MS: 8 hours
+const KPSC_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+/**
+ * Verify a KPSC session token and check that the account has one of the
+ * allowed roles.  Returns the account row on success, or a Response on
+ * failure (401 / 403).
+ */
+async function requireKpscRole(DB, request, allowedRoles) {
+  const header = request.headers.get('X-KPSC-Session') || '';
+  if (!header) return err('KPSC session required', 401);
+  let accountId, token;
+  try {
+    const parsed = JSON.parse(header);
+    accountId = String(parsed.accountId || '').trim();
+    token     = String(parsed.token     || '').trim();
+  } catch {
+    return err('Invalid X-KPSC-Session header', 401);
+  }
+  if (!accountId || !token) return err('KPSC session required', 401);
+
+  const now = Date.now();
+  const session = await DB.prepare(
+    `SELECT account_id, expires_at FROM kpsc_sessions WHERE id=? AND account_id=?`
+  ).bind(token, accountId).first();
+  if (!session) return err('KPSC session not found or expired', 401);
+  if (session.expires_at < now) {
+    await DB.prepare(`DELETE FROM kpsc_sessions WHERE id=?`).bind(token).run();
+    return err('KPSC session expired', 401);
+  }
+
+  const account = await DB.prepare(
+    `SELECT id, name, role, status FROM kpsc_accounts WHERE id=? AND status='active'`
+  ).bind(accountId).first();
+  if (!account) return err('KPSC account not found or inactive', 401);
+
+  if (!allowedRoles.includes(account.role)) {
+    return err(`Role '${account.role}' is not permitted for this action`, 403);
+  }
+  return account;
+}
 
 const ok  = (data)       => new Response(JSON.stringify(data),        { status: 200, headers: CORS_HEADERS });
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
@@ -117,44 +164,127 @@ export async function onRequest(context) {
     }
     if (route === 'kpsc-login-options' && method === 'GET') return await getKpscLoginOptions(DB);
     if (route === 'kpsc-login' && method === 'POST') return await kpscLoginUser(DB, body);
+    if (route === 'kpsc-logout' && method === 'POST') return await kpscLogout(DB, body);
     if (route === 'kpsc-change-pin' && method === 'POST') return await changeKpscPin(DB, body);
     if (route === 'kpsc-accounts') {
       if (method === 'GET'  && !param) return await getKpscAccounts(DB);
-      if (method === 'POST' && !param) return await createKpscAccount(DB, body);
-      if (method === 'PUT'  &&  param) return await updateKpscAccount(DB, param, body);
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_ADMIN_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createKpscAccount(DB, body);
+      }
+      if (method === 'PUT'  &&  param) {
+        const auth = await requireKpscRole(DB, request, KPSC_ADMIN_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateKpscAccount(DB, param, body);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, ['acting_chairman']);
+        if (auth instanceof Response) return auth;
+        return await deleteKpscAccount(DB, param, auth);
+      }
     }
     if (route === 'kpsc-partners') {
       if (method === 'GET'  && !param) return await getKpscPartners(DB);
-      if (method === 'POST' && !param) return await createKpscPartner(DB, body);
-      if (method === 'PUT'  &&  param) return await updateKpscPartner(DB, param, body);
-      if (method === 'DELETE' && param) return await deleteKpscPartner(DB, param);
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createKpscPartner(DB, body);
+      }
+      if (method === 'PUT'  &&  param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateKpscPartner(DB, param, body);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteKpscPartner(DB, param);
+      }
     }
     if (route === 'kpsc-partner-payments') {
       if (method === 'GET'  && !param) return await getKpscPartnerPayments(DB, url);
-      if (method === 'POST' && !param) return await upsertKpscPartnerPayment(DB, body);
-      if (method === 'DELETE' && param) return await deleteKpscPartnerPayment(DB, param);
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await upsertKpscPartnerPayment(DB, body);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteKpscPartnerPayment(DB, param);
+      }
     }
     if (route === 'kpsc-finance') {
       if (method === 'GET'  && !param) return await getKpscFinanceEntries(DB, url);
-      if (method === 'POST' && !param) return await createKpscFinanceEntry(DB, body);
-      if (method === 'PUT'  &&  param) return await updateKpscFinanceEntry(DB, param, body);
-      if (method === 'DELETE' && param) return await deleteKpscFinanceEntry(DB, param);
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createKpscFinanceEntry(DB, body);
+      }
+      if (method === 'PUT'  &&  param) {
+        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateKpscFinanceEntry(DB, param, body);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteKpscFinanceEntry(DB, param);
+      }
     }
     if (route === 'kpsc-reminders') {
       if (method === 'GET'  && !param) return await getKpscReminders(DB, url);
-      if (method === 'POST' && !param) return await createKpscReminder(DB, body);
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createKpscReminder(DB, body);
+      }
     }
     if (route === 'kpsc-dashboard' && method === 'GET') return await getKpscDashboard(DB, url);
-    if (route === 'kpsc-reconciliation' && method === 'POST') return await runKpscReconciliation(DB, body);
+    if (route === 'kpsc-reconciliation' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await runKpscReconciliation(DB, body);
+    }
     if (route === 'kpsc-projects') {
       if (method === 'GET'  && !param) return await getKpscProjects(DB, url);
-      if (method === 'POST' && !param) return await createKpscProject(DB, body);
-      if (method === 'PUT'  &&  param) return await updateKpscProject(DB, param, body);
-      if (method === 'DELETE' && param) return await deleteKpscProject(DB, param);
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createKpscProject(DB, body);
+      }
+      if (method === 'PUT'  &&  param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateKpscProject(DB, param, body);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteKpscProject(DB, param);
+      }
     }
-    if (route === 'kpsc-extract-projects' && method === 'POST') return await extractProjectsFromMeeting(DB, env, body);
-    if (route === 'kpsc-ocr-notes' && method === 'POST') return await ocrHandwrittenNotes(env, body);
-    if (route === 'kpsc-parse-statement' && method === 'POST') return await parseStatementWithAI(env, DB, body);
+    if (route === 'kpsc-extract-projects' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await extractProjectsFromMeeting(DB, env, body);
+    }
+    if (route === 'kpsc-ocr-notes' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await ocrHandwrittenNotes(env, body);
+    }
+    if (route === 'kpsc-ocr-receipt' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await ocrReceipt(env, body);
+    }
+    if (route === 'kpsc-parse-statement' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await parseStatementWithAI(env, DB, body);
+    }
     if (route === 'change-pin' && method === 'POST') {
       return await changeUserPin(DB, body);
     }
@@ -247,13 +377,33 @@ export async function onRequest(context) {
 
     // ── /api/ai-secretary-meetings ─────────────────────────────
     if (route === 'ai-secretary-meetings') {
-      if (method === 'POST' && param === 'audio-chunk') return await uploadAiSecretaryAudioChunk(env, request);
+      if (method === 'POST' && param === 'audio-chunk') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await uploadAiSecretaryAudioChunk(env, request);
+      }
       if (method === 'GET'  && !param) return await getAiSecretaryMeetings(DB);
-      if (method === 'POST' && !param) return await createAiSecretaryMeeting(DB, body);
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createAiSecretaryMeeting(DB, body);
+      }
       if (method === 'GET'  &&  param) return await getAiSecretaryMeeting(DB, param);
-      if (method === 'PUT'  &&  param) return await updateAiSecretaryMeeting(DB, param, body);
-      if (method === 'DELETE' && param) return await deleteAiSecretaryMeeting(DB, param, body);
-      if (method === 'POST' && parts[2] === 'process') return await processAiSecretaryMeeting(DB, param);
+      if (method === 'PUT'  &&  param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateAiSecretaryMeeting(DB, param, body);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteAiSecretaryMeeting(DB, param, body);
+      }
+      if (method === 'POST' && parts[2] === 'process') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await processAiSecretaryMeeting(DB, param);
+      }
     }
 
     // ── /api/admin ─────────────────────────────────────────────
@@ -525,6 +675,11 @@ async function handleInit(DB) {
       created_by       TEXT DEFAULT '',
       created_at       TEXT DEFAULT (datetime('now')),
       updated_at       TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_sessions (
+      id          TEXT PRIMARY KEY,
+      account_id  TEXT NOT NULL,
+      expires_at  INTEGER NOT NULL
     )`,
   ];
 
@@ -863,6 +1018,25 @@ async function updateKpscAccount(DB, id, data) {
   return ok(publicKpscAccount(updated));
 }
 
+async function deleteKpscAccount(DB, id, callerAccount) {
+  const target = await DB.prepare(`SELECT id,name,role FROM kpsc_accounts WHERE id=?`).bind(id).first();
+  if (!target) return err('KPSC account not found', 404);
+  // Refuse self-delete
+  if (callerAccount.id === id) return err('You cannot delete your own account', 409);
+  // Refuse to delete the last acting_chairman
+  if (target.role === 'acting_chairman') {
+    const { results } = await DB.prepare(
+      `SELECT id FROM kpsc_accounts WHERE role='acting_chairman' AND status='active'`
+    ).all();
+    if ((results || []).length <= 1) {
+      return err('Cannot delete the last acting_chairman account', 409);
+    }
+  }
+  await DB.prepare(`DELETE FROM kpsc_accounts WHERE id=?`).bind(id).run();
+  await DB.prepare(`DELETE FROM kpsc_sessions WHERE account_id=?`).bind(id).run();
+  return ok({ success: true, id });
+}
+
 async function kpscLoginUser(DB, data) {
   const accountId = String(data?.accountId || '').trim();
   const pin = String(data?.pin || '').trim();
@@ -876,7 +1050,19 @@ async function kpscLoginUser(DB, data) {
   }
   const now = new Date().toISOString();
   await DB.prepare(`UPDATE kpsc_accounts SET last_login_at=?, updated_at=? WHERE id=?`).bind(now, now, row.id).run();
-  return ok({ ...publicKpscAccount({ ...row, last_login_at: now }), sessionType: 'kpsc' });
+  // Create a server-side session token so subsequent requests can be authenticated.
+  const sessionToken = newId('ks');
+  const expiresAt = Date.now() + KPSC_SESSION_TTL_MS;
+  await DB.prepare(`INSERT INTO kpsc_sessions (id, account_id, expires_at) VALUES (?,?,?)`).bind(sessionToken, row.id, expiresAt).run();
+  return ok({ ...publicKpscAccount({ ...row, last_login_at: now }), sessionType: 'kpsc', sessionToken });
+}
+
+async function kpscLogout(DB, data) {
+  const token = String(data?.sessionToken || '').trim();
+  if (token) {
+    await DB.prepare(`DELETE FROM kpsc_sessions WHERE id=?`).bind(token).run();
+  }
+  return ok({ success: true });
 }
 
 async function changeKpscPin(DB, data) {
@@ -2060,12 +2246,15 @@ async function extractProjectsFromMeeting(DB, env, data) {
   if (!row) return err('Meeting not found', 404);
 
   let deepseekKey = '';
-  let deepseekModel = 'deepseek-chat';
+  let deepseekModel = 'deepseek-v4-flash';
   try {
     const { results: sr } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
     const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
     deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
-    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-chat';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    // Auto-migrate legacy DeepSeek model names that are being discontinued 2026-07-24.
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
   } catch (_) {}
 
   const transcript = row.transcript_text || '';
@@ -2173,17 +2362,77 @@ async function ocrHandwrittenNotes(env, data) {
   return ok({ transcript: '', method: 'none', error: 'No vision-capable AI key is configured. Please configure OPENAI_API_KEY in Cloudflare environment variables to enable OCR.' });
 }
 
+async function ocrReceipt(env, data) {
+  const imageBase64 = String(data?.imageBase64 || '').trim();
+  const mimeType = String(data?.mimeType || 'image/jpeg').trim();
+  if (!imageBase64) return err('imageBase64 is required', 400);
+
+  const openaiKey = String(env.OPENAI_API_KEY || '').trim();
+  if (openaiKey) {
+    try {
+      const prompt = `You are a receipt OCR assistant. Analyse this receipt image and extract the following fields. Respond ONLY with a JSON object — no prose, no markdown fences.
+{
+  "vendor": "string or null — business/vendor name",
+  "date": "YYYY-MM-DD or null — date on receipt",
+  "amount": "number or null — total amount in major currency units (e.g. 12500.00 for ₦12,500)",
+  "currency": "NGN|USD|GBP|EUR or null",
+  "reference": "string or null — receipt or invoice number",
+  "items_summary": "string or null — one-line description of goods/services purchased"
+}`;
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+        body: JSON.stringify({
+          model: 'gpt-4o',
+          response_format: { type: 'json_object' },
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
+            ],
+          }],
+          max_tokens: 500,
+        }),
+      });
+      if (resp.ok) {
+        const aiData = await resp.json();
+        const raw = aiData.choices?.[0]?.message?.content || '';
+        try {
+          const parsed = JSON.parse(raw);
+          return ok({
+            vendor: parsed.vendor ?? null,
+            date: parsed.date ?? null,
+            amount: parsed.amount ?? null,
+            currency: parsed.currency ?? null,
+            reference: parsed.reference ?? null,
+            itemsSummary: parsed.items_summary ?? null,
+            method: 'openai_vision',
+          });
+        } catch (_) {
+          return ok({ error: 'Could not parse receipt', method: 'openai_vision' });
+        }
+      }
+    } catch (_) {}
+  }
+
+  return ok({ vendor: null, date: null, amount: null, currency: null, reference: null, itemsSummary: null, method: 'none', error: 'No vision-capable AI key is configured. Please configure OPENAI_API_KEY to enable receipt scanning.' });
+}
+
 async function parseStatementWithAI(env, DB, data) {
   const statementText = String(data?.statementText || '').trim();
   if (!statementText) return err('statementText is required', 400);
 
   let deepseekKey = '';
-  let deepseekModel = 'deepseek-chat';
+  let deepseekModel = 'deepseek-v4-flash';
   try {
     const { results: sr } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
     const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
     deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
-    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-chat';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    // Auto-migrate legacy DeepSeek model names that are being discontinued 2026-07-24.
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
   } catch (_) {}
 
   if (!deepseekKey) {
@@ -2780,7 +3029,7 @@ Return only valid JSON, no markdown fences.`;
   const resp = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: ['deepseek-chat','deepseek-reasoner'].includes(meeting.deepseekModel) ? meeting.deepseekModel : 'deepseek-chat', messages: [{ role: 'user', content: prompt }], max_tokens: 3000, temperature: 0.3 }),
+    body: JSON.stringify({ model: meeting.deepseekModel || 'deepseek-v4-flash', messages: [{ role: 'user', content: prompt }], max_tokens: 3000, temperature: 0.3 }),
   });
   if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
   const data = await resp.json();
@@ -2797,7 +3046,10 @@ async function processAiSecretaryMeeting(DB, id) {
     const { results: settingsRows } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model','kpsc_policy_url','kpsc_policy_notes')`).all();
     const settings = Object.fromEntries((settingsRows || []).map(item => [item.key, String(item.value || '')]));
     deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
-    meeting.deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-chat';
+    meeting.deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    // Auto-migrate legacy DeepSeek model names that are being discontinued 2026-07-24.
+    if (meeting.deepseekModel === 'deepseek-chat')     meeting.deepseekModel = 'deepseek-v4-flash';
+    if (meeting.deepseekModel === 'deepseek-reasoner') meeting.deepseekModel = 'deepseek-v4-pro';
     meeting.policyContext = [
       settings.kpsc_policy_url ? `Policy URL: ${settings.kpsc_policy_url}` : '',
       settings.kpsc_policy_notes || '',

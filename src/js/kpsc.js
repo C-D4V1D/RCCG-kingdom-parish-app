@@ -34,10 +34,39 @@ const KPSC_PERMISSIONS = {
 };
 const PIN_REGEX = /^\d{4,6}$/;
 
+// ── NAV GROUP / SUB-TAB MAPPING ────────────────────────────────────
+// Maps old page names to (group, subTab) pairs for backwards compat.
+const PAGE_TO_GROUP = {
+  dashboard: { group: 'home',     subTab: null         },
+  archive:   { group: 'meetings', subTab: 'archive'    },
+  reports:   { group: 'meetings', subTab: 'reports'    },
+  projects:  { group: 'meetings', subTab: 'projects'   },
+  finance:   { group: 'money',    subTab: 'finance'    },
+  partners:  { group: 'money',    subTab: 'partners'   },
+  reminders: { group: 'money',    subTab: 'reminders'  },
+  members:   { group: 'more',     subTab: 'members'    },
+  settings:  { group: 'more',     subTab: 'settings'   },
+  // Group-level pseudo-pages (rendered inline by their own renderer)
+  more:         { group: 'more',     subTab: null },
+  // Sub-pages (reachable from within a group; nav highlight stays on group)
+  meeting:      { group: 'meetings', subTab: null },
+  partnerDetail:{ group: 'money',    subTab: null },
+};
+
+// Default sub-tabs when navigating to a group by name
+const GROUP_DEFAULT_PAGE = {
+  home:     'dashboard',
+  meetings: 'archive',
+  money:    'partners',
+  more:     null, // 'more' renders its own inline menu
+};
+
 // ── STATE ──────────────────────────────────────────────────────────
 const S = {
   user: null,
   page: 'dashboard',
+  group: 'home',
+  subTab: null,
   meetings: [],
   activeMeeting: null,
   members: [],
@@ -57,6 +86,9 @@ const S = {
   financeMonth: new Date().getUTCMonth() + 1,
   reportsYear: new Date().getUTCFullYear(),
   _meetingTab: 'record',
+  _reviewEditMode: false, // true = show inline review editor; false = show reviewed summary
+  _isNewMeeting: false,   // true when the room is hosting a fresh, never-saved draft
+  kpscMeetingCadence: 'none',
 };
 
 // ── AUDIO RECORDER + REALTIME TRANSCRIPTION ───────────────────────
@@ -86,6 +118,10 @@ const Rec = {
   failedChunks: 0,
   speakerMap: new Map(),    // Map<number, string>: Deepgram speaker idx → member name
   seenSpeakers: new Set(),  // Set<number>: all Deepgram speaker indices encountered so far
+  // Voice-attendance state — keyed by "${groupKey}_${memberIdx}" (same format as checkbox id suffix)
+  voiceTicked: new Set(),   // members auto-ticked from transcript this session
+  _nameIndex: null,         // lazily built Map<token, [{groupKey, idx, fullName}]>
+  _nameIndexSize: -1,       // S.members.length when _nameIndex was last built
 };
 
 // ── DIARIZER (Deepgram speaker diarization) ────────────────────────
@@ -190,11 +226,14 @@ function recRenderUI() {
     : `${Rec.uploadedChunks} chunk${Rec.uploadedChunks === 1 ? '' : 's'} uploaded${Rec.failedChunks ? ` • ${Rec.failedChunks} pending retry` : ''}`;
 
   if (Rec.status === 'idle') {
+    // If the meeting was already started in a prior browser session, the in-memory MediaRecorder is gone.
+    // Offer "Continue Recording" so the secretary can start a fresh mic segment that appends to the same meeting.
+    const resuming = S.activeMeeting?.status === 'recording';
     el.innerHTML = `
       <div class="rec-card">
         <div class="rec-main">
-          <button class="kbtn kbtn-record" onclick="Kpsc.recStart(this)">🎙 Start Meeting</button>
-          <span class="rec-hint">${uploadMeta}</span>
+          <button class="kbtn kbtn-record" onclick="Kpsc.recStart(this)">${resuming ? '▶ Continue Recording' : '🎙 Start Meeting'}</button>
+          <span class="rec-hint">${resuming ? 'Previous mic session ended when you navigated away. A new segment will be appended to this meeting.' : uploadMeta}</span>
         </div>
       </div>`;
   } else if (Rec.status === 'recording') {
@@ -285,6 +324,8 @@ function recAppendTranscript(text, itemId = '', speaker = null) {
   }
   const entry = { itemId, timestamp: recTimestamp(), text: clean, speaker: speaker ?? null };
   Rec.transcriptEntries.push(entry);
+  // Auto-tick attendance when a roster member's name is spoken.
+  voiceAutoTick(clean);
   const textarea = document.getElementById('km-transcript');
   if (textarea) {
     const speakerTag = speaker !== null && speaker !== undefined ? ` [${speakerDisplayName(speaker)}]` : '';
@@ -306,6 +347,7 @@ function rebuildTranscriptTextarea() {
   });
   textarea.value = lines.join('\n');
   textarea.scrollTop = textarea.scrollHeight;
+  scheduleAutoSave();
 }
 
 // Build a sorted list of member names for the speaker-identity dropdowns.
@@ -383,6 +425,104 @@ function assignSpeaker(idx, name) {
   recRenderSpeakerMap();
 }
 
+// ── VOICE-DRIVEN ATTENDANCE ────────────────────────────────────────
+
+// Normalise a name string into a single first-name token used for matching.
+// Strips diacritics, keeps only lowercase a-z, returns the first word.
+// Returns '' if the result is shorter than 3 characters (too ambiguous).
+function _normToken(str) {
+  const tok = String(str || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')  // strip combining diacritics
+    .replace(/[^a-z\s]/g, ' ')
+    .trim()
+    .split(/\s+/)[0] || '';
+  return tok.length >= 3 ? tok : '';
+}
+
+// Build Map<token, [{groupKey, idx, fullName}]> from the current roster.
+// Multiple members with the same first-name token land in the same array so
+// we can detect ambiguity and skip the auto-tick (see voiceAutoTick).
+function buildAttendanceNameIndex(members) {
+  const index = new Map();
+  for (const g of GROUPS) {
+    const groupMembers = members.filter(m => m.group === g.key);
+    groupMembers.forEach((mem, i) => {
+      const token = _normToken(mem.name);
+      if (!token) return;
+      if (!index.has(token)) index.set(token, []);
+      index.get(token).push({ groupKey: g.key, idx: i, fullName: mem.name });
+    });
+  }
+  return index;
+}
+
+// Pure decision function — returns [{groupKey, idx}] for members that should
+// be auto-ticked based on the transcript text.  Exported for unit testing.
+// alreadyTicked is a Set of "${groupKey}_${idx}" strings.
+function pickAutoTickTargets(text, nameIndex, alreadyTicked) {
+  const results = [];
+  const seenKeys = new Set();
+  // Tokenise the incoming text the same way as the index keys.
+  const words = String(text || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z\s]/g, ' ')
+    .trim()
+    .split(/\s+/);
+  const unique = [...new Set(words.filter(w => w.length >= 3))];
+  for (const word of unique) {
+    const matches = nameIndex.get(word);
+    if (!matches || matches.length === 0) continue;
+    if (matches.length > 1) continue; // ambiguous — skip
+    const { groupKey, idx } = matches[0];
+    const key = `${groupKey}_${idx}`;
+    if (alreadyTicked.has(key)) continue; // already voice-ticked
+    if (seenKeys.has(key)) continue;       // duplicate token in same utterance
+    seenKeys.add(key);
+    results.push({ groupKey, idx });
+  }
+  return results;
+}
+
+// Apply a single voice-tick to the DOM checkbox for the given member.
+function autoTickMember(groupKey, idx) {
+  const checkbox = document.getElementById(`att_present_${groupKey}_${idx}`);
+  if (!checkbox) return; // attendance panel not rendered (user navigated away)
+  const key = `${groupKey}_${idx}`;
+  // If already checked manually (not by voice), leave it alone — don't badge it.
+  if (checkbox.checked && !Rec.voiceTicked.has(key)) return;
+  checkbox.checked = true;
+  checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+  Rec.voiceTicked.add(key);
+  // Inject mic badge into the member row's name span — idempotent.
+  const label = checkbox.closest('label');
+  const nameSpan = label?.querySelector('.k-att-name');
+  if (nameSpan && !nameSpan.querySelector('.k-att-voice-tick')) {
+    const badge = document.createElement('span');
+    badge.className = 'k-att-voice-tick';
+    badge.title = 'Auto-ticked from voice transcript';
+    badge.textContent = '🎙';
+    nameSpan.appendChild(badge);
+  }
+}
+
+// Called from recAppendTranscript for each incoming line of transcript.
+// Lazily builds/rebuilds the name index when roster size changes.
+function voiceAutoTick(clean) {
+  if (!clean) return;
+  // Lazily (re)build the name index if the roster has changed size.
+  if (Rec._nameIndex === null || Rec._nameIndexSize !== S.members.length) {
+    Rec._nameIndex     = buildAttendanceNameIndex(S.members);
+    Rec._nameIndexSize = S.members.length;
+  }
+  const targets = pickAutoTickTargets(clean, Rec._nameIndex, Rec.voiceTicked);
+  for (const { groupKey, idx } of targets) {
+    autoTickMember(groupKey, idx);
+  }
+}
 
 async function recStart(btn) {
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
@@ -391,6 +531,15 @@ async function recStart(btn) {
   }
   try {
     if (btn) btn.disabled = true;
+    // Auto-persist the meeting so End/Generate Minutes have a backing record. No toast on success.
+    if (!S.activeMeeting) {
+      await autoSaveNow();
+      if (!S.activeMeeting) {
+        showToast('Could not save the meeting. Check your connection and try again.', 'error');
+        if (btn) btn.disabled = false;
+        return;
+      }
+    }
     Rec.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     Rec.chunkSeq = 0;
     Rec.uploadSessionId = `kpsc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -616,6 +765,9 @@ function recReset() {
   Rec.failedChunks = 0;
   Rec.speakerMap = new Map();
   Rec.seenSpeakers = new Set();
+  Rec.voiceTicked = new Set();
+  Rec._nameIndex = null;
+  Rec._nameIndexSize = -1;
   Diarizer.status = 'offline';
   Diarizer.reconnectAttempts = 0;
   Diarizer.speakerRanges   = new Map();
@@ -686,6 +838,7 @@ async function recUploadChunk(chunk, useKeepalive) {
   form.append('createdAt', chunk.createdAt);
   const response = await fetch(`${API}/ai-secretary-meetings/audio-chunk`, {
     method: 'POST',
+    headers: { ...kpscSessionHeader() },
     body: form,
     keepalive: !!useKeepalive && chunk.blob.size < 60000,
   });
@@ -797,7 +950,10 @@ async function diarizerConnect() {
 
   ws.onopen = () => {
     Diarizer.status = 'connected';
-    Diarizer.reconnectAttempts = 0;
+    // Don't reset reconnectAttempts here — Deepgram sometimes opens the socket
+    // then closes it immediately (auth race, model mismatch). Resetting on open
+    // would create an infinite reconnect loop. We reset only after the first
+    // real Results message arrives in diarizerHandleMessage().
     // Record the PCM sample offset at the moment this WS connection opened.
     // Deepgram timestamps restart from 0 on each new connection; dgTimeOffset
     // converts them to absolute positions in the PCM ring buffer.
@@ -840,6 +996,9 @@ async function diarizerConnect() {
 function diarizerHandleMessage(raw) {
   let msg;
   try { msg = JSON.parse(raw); } catch { return; }
+
+  // Any well-formed message means the connection is genuinely working — safe to reset retry counter.
+  if (Diarizer.reconnectAttempts !== 0) Diarizer.reconnectAttempts = 0;
 
   if (msg.type === 'Results') {
     const alt = msg.channel?.alternatives?.[0];
@@ -899,8 +1058,9 @@ function diarizerScheduleReconnect() {
   if (Diarizer.manualStop || Rec.status !== 'recording' || Diarizer.reconnectTimer) return;
   if (Diarizer.reconnectAttempts >= DG_MAX_RETRIES) {
     Diarizer.status = 'error';
+    Diarizer.manualStop = true; // stop new reconnect attempts; live transcription via OpenAI continues.
     recRenderUI();
-    showToast('Speaker diarization disconnected. Transcription may still be active.', 'warn');
+    showToast('Speaker diarization is unavailable — recording will continue without speaker labels. Check DEEPGRAM_API_KEY in environment settings.', 'warn');
     return;
   }
   Diarizer.reconnectAttempts++;
@@ -1064,15 +1224,21 @@ async function diarizerTriggerIdentify(speakerIdx) {
 }
 
 
+function kpscSessionHeader() {
+  const user = S.user;
+  if (!user?.sessionToken) return {};
+  return { 'X-KPSC-Session': JSON.stringify({ accountId: user.id, token: user.sessionToken }) };
+}
+
 async function apiGet(path) {
-  const r = await fetch(`${API}/${path}`);
+  const r = await fetch(`${API}/${path}`, { headers: { ...kpscSessionHeader() } });
   return r.json();
 }
 
 async function apiPost(path, body) {
   const r = await fetch(`${API}/${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
     body: JSON.stringify(body),
   });
   return r.json();
@@ -1081,7 +1247,7 @@ async function apiPost(path, body) {
 async function apiPut(path, body) {
   const r = await fetch(`${API}/${path}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
     body: JSON.stringify(body),
   });
   return r.json();
@@ -1090,7 +1256,7 @@ async function apiPut(path, body) {
 async function apiDelete(path, body) {
   const r = await fetch(`${API}/${path}`, {
     method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
     body: JSON.stringify(body || {}),
   });
   return r.json();
@@ -1108,6 +1274,8 @@ function roleLabel(role) {
 }
 
 function canAccess(page) {
+  // Group-level navigation names are always accessible (groups are always shown).
+  if (['home', 'meetings', 'money', 'more'].includes(page)) return true;
   const role = String(S.user?.role || 'committee_viewer').toLowerCase();
   const allowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
   return allowed.includes(page);
@@ -1122,12 +1290,12 @@ function canManageFinance() {
 }
 
 function applyNavPermissions() {
-  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
-  const allowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
-  document.querySelectorAll('.ka-nav-item').forEach(btn => {
-    const visible = allowed.includes(btn.dataset.page);
-    btn.style.display = visible ? '' : 'none';
-  });
+  // All 4 top-level groups are visible to every role.
+  // Individual sub-tabs are hidden per-role when the group page renders.
+  // (No top-level nav items need to be hidden — the groups are always present.)
+  // Show the search toggle once logged in.
+  const toggle = document.getElementById('kpsc-search-toggle');
+  if (toggle) toggle.style.display = '';
 }
 
 function defaultPageForRole() {
@@ -1212,6 +1380,46 @@ function fmtDateTime(iso) {
 
 function today() {
   return new Date().toISOString().slice(0, 10);
+}
+
+// ── MEETING PRE-FILL ──────────────────────────────────────────────
+// Cadence strings: 'none' | 'weekly:sun..sat' | 'monthly:first-sun..sat'
+const DAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+
+function nextMeetingDate(cadence, now) {
+  const base = now ? new Date(now) : new Date();
+  base.setHours(0, 0, 0, 0);
+  const isoLocal = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  if (!cadence || cadence === 'none') return isoLocal(base);
+  const [kind, spec] = cadence.split(':');
+  if (kind === 'weekly') {
+    const target = DAY_KEYS.indexOf(spec);
+    if (target < 0) return isoLocal(base);
+    const offset = (target - base.getDay() + 7) % 7;
+    const d = new Date(base); d.setDate(d.getDate() + offset);
+    return isoLocal(d);
+  }
+  if (kind === 'monthly' && spec?.startsWith('first-')) {
+    const target = DAY_KEYS.indexOf(spec.slice(6));
+    if (target < 0) return isoLocal(base);
+    const firstInMonth = (yr, mo) => {
+      const d = new Date(yr, mo, 1);
+      d.setDate(1 + ((target - d.getDay() + 7) % 7));
+      return d;
+    };
+    let candidate = firstInMonth(base.getFullYear(), base.getMonth());
+    if (candidate < base) candidate = firstInMonth(base.getFullYear(), base.getMonth() + 1);
+    return isoLocal(candidate);
+  }
+  return isoLocal(base);
+}
+
+function prefilledMeetingTitle(_cadence, dateStr) {
+  const d = dateStr ? new Date(dateStr + 'T00:00:00') : new Date();
+  if (isNaN(d.getTime())) return 'KPSC Meeting';
+  const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()];
+  const month = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
+  return `KPSC Meeting – ${dayName} ${month} ${d.getDate()}`;
 }
 
 // ── MINUTES HTML ──────────────────────────────────────────────────
@@ -1427,6 +1635,7 @@ async function login(btn) {
         : res.error;
       errEl.style.display = 'block';
     } else {
+      // res includes sessionToken from the server; persist it in the session
       S.user = res;
       saveSession(res);
       if (S.user.mustChangePin) {
@@ -1446,12 +1655,22 @@ async function login(btn) {
 
 function logout() {
   recStop();
+  closeSearch();
+  // Fire-and-forget server-side session deletion; don't await so UI is instant
+  const sessionToken = S.user?.sessionToken;
+  if (sessionToken) {
+    apiPost('kpsc-logout', { sessionToken }).catch(() => {});
+  }
   clearSession();
   S.user = null;
   S.page = 'dashboard';
+  S.group = 'home';
+  S.subTab = null;
   S.activeMeeting = null;
   document.getElementById('kpsc-app').style.display = 'none';
   document.getElementById('kpsc-login-screen').style.display = '';
+  const searchToggle = document.getElementById('kpsc-search-toggle');
+  if (searchToggle) searchToggle.style.display = 'none';
   if (document.getElementById('kpsc-account-select')) document.getElementById('kpsc-account-select').value = '';
   document.getElementById('kpsc-pin-input').value = '';
   document.getElementById('kpsc-pin-change-modal')?.remove();
@@ -1463,58 +1682,221 @@ function enterApp() {
   document.getElementById('kpsc-app').style.display = '';
   document.getElementById('kpsc-user-name').textContent = `${S.user.name} (${roleLabel(S.user.role)})`;
   applyNavPermissions();
+  S._navStack = [];
   const hashPage = window.location.hash.replace('#', '');
-  const startPage = hashPage && canAccess(hashPage) ? hashPage : defaultPageForRole();
-  navigate(startPage);
+  // hashPage might be an old page name (e.g. 'archive', 'partners') — canAccess handles those.
+  const startPage = hashPage && (canAccess(hashPage) || PAGE_TO_GROUP[hashPage]) ? hashPage : defaultPageForRole();
+  navigate(startPage, { replace: true });
 }
 
 // ── NAVIGATION ────────────────────────────────────────────────────
-function navigate(page) {
+const NAV_STACK_MAX = 10;
+
+function navigate(page, opts) {
+  const replace = !!(opts && opts.replace);
+
+  // If a group name is passed, resolve it to its default page.
+  if (PAGE_TO_GROUP[page] === undefined && GROUP_DEFAULT_PAGE[page] !== undefined) {
+    const defaultPage = GROUP_DEFAULT_PAGE[page];
+    if (defaultPage === null) {
+      // 'more' group — treat 'more' as the page itself.
+      page = 'more';
+    } else {
+      page = defaultPage;
+    }
+  }
+
   if (!canAccess(page)) {
     showToast('You do not have access to that section.', 'warn');
     page = defaultPageForRole();
   }
+
+  // Resolve group and subTab from the page name.
+  const mapping = PAGE_TO_GROUP[page] || { group: 'home', subTab: null };
+  S.group  = mapping.group;
+  S.subTab = mapping.subTab;
+
+  // Maintain a navigation stack for goBack()
+  if (!S._navStack) S._navStack = [];
+  if (!replace) {
+    const top = S._navStack[S._navStack.length - 1];
+    if (top !== page) {
+      S._navStack.push(page);
+      if (S._navStack.length > NAV_STACK_MAX) S._navStack.shift();
+    }
+  }
   S._partnerDetailId = null;
   S._partnerDetailYear = null;
+  // Flush in-memory transcript before the meeting-room DOM unmounts.
+  if ((Rec.status === 'recording' || Rec.status === 'paused') && document.getElementById('km-transcript')) {
+    autoSaveNow();
+  }
   recStop();
   Rec.status = 'idle';
   S.page = page;
   const hash = '#' + page;
   if (window.location.hash !== hash) history.pushState({ page }, '', hash);
   S.activeMeeting = null;
+
+  // Highlight the correct group tab in the bottom nav.
   document.querySelectorAll('.ka-nav-item').forEach(b => {
-    b.classList.toggle('active', b.dataset.page === page);
+    b.classList.toggle('active', b.dataset.group === S.group);
   });
+
   document.getElementById('kpsc-back-btn').style.display = 'none';
   const titles = {
-    dashboard: 'Dashboard',
+    dashboard: 'Home',
     projects: 'Projects',
     partners: 'Partners',
     finance: 'Finance',
     reminders: 'Reminders',
-    members: 'KPSC Members',
+    members: 'Members',
     archive: 'Meeting Archive',
     reports: 'Reports',
     settings: 'Settings',
+    more: 'More',
+    meeting: 'Meeting Room',
+    partnerDetail: 'Partner History',
   };
   document.getElementById('kpsc-page-title').textContent = titles[page] || 'KPSC';
+  updateFab();
   renderPage(page);
+}
+
+// ── FAB ────────────────────────────────────────────────────────────
+function updateFab() {
+  const fab = document.getElementById('ka-fab');
+  if (!fab) return;
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const { group, subTab, page } = S;
+
+  let label = null;
+
+  if (page === 'dashboard' && group === 'home') {
+    // Only chairman and gen_sec can start a new meeting from home
+    if (role === 'acting_chairman' || role === 'general_secretary') {
+      label = '+ New Meeting';
+    }
+  } else if (group === 'meetings') {
+    if (subTab === 'archive' || subTab === null) {
+      if (role === 'acting_chairman' || role === 'general_secretary') label = '+ New Meeting';
+    } else if (subTab === 'projects') {
+      if (role !== 'committee_viewer') label = '+ New Project';
+    }
+    // archive, reports sub-tabs: no FAB
+  } else if (group === 'money') {
+    if (subTab === 'finance') {
+      if (role === 'acting_chairman' || role === 'financial_secretary' || role === 'treasurer') label = '+ Finance Entry';
+    } else if (subTab === 'partners') {
+      if (role !== 'committee_viewer') label = '+ Add Partner';
+    } else if (subTab === 'reminders') {
+      if (canAccess('reminders')) label = '+ Send Reminders';
+    }
+  }
+  // On meeting sub-pages or 'more', no FAB
+
+  if (label) {
+    fab.textContent = label;
+    fab.style.display = '';
+  } else {
+    fab.style.display = 'none';
+  }
+}
+
+function fabAction() {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const { group, subTab, page } = S;
+
+  if (page === 'dashboard' && group === 'home') {
+    startNewMeeting();
+  } else if (group === 'meetings') {
+    if (subTab === 'archive' || subTab === null) {
+      startNewMeeting();
+    } else if (subTab === 'projects') {
+      openProjectModal();
+    }
+  } else if (group === 'money') {
+    if (subTab === 'finance') {
+      openFinanceModal();
+    } else if (subTab === 'partners') {
+      addPartner();
+    } else if (subTab === 'reminders') {
+      // Pass the FAB itself as the button so it can be disabled during the request.
+      const fab = document.getElementById('ka-fab');
+      if (fab) sendBulkReminders(fab);
+    }
+  }
+}
+
+// ── SUB-TAB STRIPS ─────────────────────────────────────────────────
+
+function meetingsSubTabStrip() {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const cur = S.subTab || 'archive';
+  const tabs = [
+    { key: 'archive',  label: 'Archive' },
+    { key: 'reports',  label: 'Reports' },
+    { key: 'projects', label: 'Projects' },
+  ];
+  return `<div class="ka-subtabs">${tabs.map(t =>
+    `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
+  ).join('')}</div>`;
+}
+
+function moneySubTabStrip() {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const cur = S.subTab || 'partners';
+  const tabs = [];
+  if (canAccess('finance')) tabs.push({ key: 'finance',   label: 'Finance'   });
+  tabs.push({ key: 'partners',  label: 'Partners'  });
+  if (canAccess('reminders')) tabs.push({ key: 'reminders', label: 'Reminders' });
+  return `<div class="ka-subtabs">${tabs.map(t =>
+    `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
+  ).join('')}</div>`;
+}
+
+// Prepend sub-tab strip HTML to a rendered page's main content.
+function prependSubTabs(main, stripHtml) {
+  const strip = document.createElement('div');
+  strip.innerHTML = stripHtml;
+  main.insertBefore(strip.firstElementChild, main.firstChild);
 }
 
 async function renderPage(page) {
   const main = document.getElementById('kpsc-main');
   main.innerHTML = '<div class="k-loading">Loading…</div>';
   try {
-    if (page === 'dashboard') await renderDashboard(main);
-    else if (page === 'partners') await renderPartners(main);
-    else if (page === 'finance') await renderFinance(main);
-    else if (page === 'reminders') await renderReminders(main);
-    else if (page === 'meeting') await renderMeetingRoom(main);
-    else if (page === 'members') await renderMembers(main);
-    else if (page === 'archive') await renderArchive(main);
-    else if (page === 'reports') await renderReports(main);
-    else if (page === 'projects') await renderProjects(main);
-    else if (page === 'settings') await renderSettings(main);
+    if (page === 'dashboard') {
+      await renderDashboard(main);
+    } else if (page === 'archive') {
+      await renderArchive(main);
+      prependSubTabs(main, meetingsSubTabStrip());
+    } else if (page === 'reports') {
+      await renderReports(main);
+      prependSubTabs(main, meetingsSubTabStrip());
+    } else if (page === 'projects') {
+      await renderProjects(main);
+      prependSubTabs(main, meetingsSubTabStrip());
+    } else if (page === 'finance') {
+      await renderFinance(main);
+      prependSubTabs(main, moneySubTabStrip());
+    } else if (page === 'partners') {
+      await renderPartners(main);
+      prependSubTabs(main, moneySubTabStrip());
+    } else if (page === 'reminders') {
+      await renderReminders(main);
+      prependSubTabs(main, moneySubTabStrip());
+    } else if (page === 'meeting') {
+      await renderMeetingRoom(main);
+    } else if (page === 'members') {
+      await renderMembers(main);
+      prependSubTabs(main, moreSubTabStrip());
+    } else if (page === 'settings') {
+      await renderSettings(main);
+      prependSubTabs(main, moreSubTabStrip());
+    } else if (page === 'more') {
+      renderMoreMenu(main);
+    }
   } catch (e) {
     main.innerHTML = `<div class="k-page"><div class="k-error-box">
       <strong>Could not load page</strong><br>${esc(e.message || String(e))}
@@ -1523,33 +1905,70 @@ async function renderPage(page) {
   }
 }
 
+function moreSubTabStrip() {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const cur = S.subTab;
+  const tabs = [];
+  if (role !== 'committee_viewer') tabs.push({ key: 'members',  label: 'Members'  });
+  if (role !== 'committee_viewer') tabs.push({ key: 'settings', label: 'Settings' });
+  if (!tabs.length) return '';
+  return `<div class="ka-subtabs">${tabs.map(t =>
+    `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
+  ).join('')}</div>`;
+}
+
+function renderMoreMenu(main) {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const isViewer = role === 'committee_viewer';
+  main.innerHTML = `
+    <div class="k-page ka-more-menu">
+      <h2 style="font-family:'Lora',serif;font-size:20px;color:var(--navy);margin-bottom:20px">More</h2>
+      <div class="ka-more-list">
+        ${!isViewer ? `
+        <button class="ka-more-item" onclick="Kpsc.navigate('members')">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span>Members</span>
+          <svg class="ka-more-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+        <button class="ka-more-item" onclick="Kpsc.navigate('settings')">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings</span>
+          <svg class="ka-more-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>` : ''}
+        <button class="ka-more-item ka-more-item-danger" onclick="Kpsc.logout()">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          <span>Sign Out</span>
+        </button>
+      </div>
+    </div>`;
+}
+
 function goBack() {
-  navigate(S.page === 'meeting' ? 'dashboard' : 'dashboard');
+  if (!S._navStack) S._navStack = [];
+  // Pop the current page off the stack before navigating back
+  if (S._navStack[S._navStack.length - 1] === S.page) S._navStack.pop();
+  const prev = S._navStack.pop() || 'dashboard';
+  navigate(prev, { replace: true });
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────────────
-async function renderDashboard(main) {
-  const now = new Date();
-  const year = now.getUTCFullYear();
-  const month = now.getUTCMonth() + 1;
-  const [meetingsRes, settingsRes, dashboardRes, projectsRes] = await Promise.all([
-    apiGet('ai-secretary-meetings'),
-    apiGet('settings'),
-    apiGet(`kpsc-dashboard?year=${year}&month=${month}`),
-    apiGet('kpsc-projects?status=in_progress'),
-  ]);
-  if (meetingsRes?.error) throw new Error(meetingsRes.error);
-  S.meetings = Array.isArray(meetingsRes) ? meetingsRes : [];
-  S.members  = Array.isArray(settingsRes?.kpsc_members) ? settingsRes.kpsc_members : [];
-  S.dashboard = dashboardRes?.totals || null;
+
+// Build a data context object for the dashboard from already-loaded state.
+function buildDashboardContext() {
+  const thisMonth = today().slice(0, 7);
+  const month = currentMonth();
+  const year  = currentYear();
 
   const recent  = [...S.meetings].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')).slice(0, 10);
   const total   = S.meetings.length;
-  const thisMonth = today().slice(0, 7);
   const monthCount = S.meetings.filter(m => (m.meetingDate || '').startsWith(thisMonth)).length;
   const pending = S.meetings.filter(m => m.status === 'ended').length;
 
-  // Recent resolutions from all meetings
+  // Most-recent processed meeting
+  const processedMeetings = S.meetings.filter(m => m.status === 'processed');
+  const latestProcessed   = processedMeetings[0] || null;
+
+  // Recent resolutions (top 6)
   const allResolutions = [];
   for (const m of S.meetings.slice(0, 20)) {
     for (const r of (m.resolutions || [])) {
@@ -1567,99 +1986,342 @@ async function renderDashboard(main) {
   }
   const pendingActions = allActions.filter(a => a.status === 'pending' || !a.status).slice(0, 5);
 
-  // Projects
-  const activeProjects = Array.isArray(projectsRes) ? projectsRes.slice(0, 4) : [];
+  // Chairman: action items I assigned that are not done
+  const myName = S.user?.name || '';
+  const myOpenActions = allActions.filter(a =>
+    (a.assignedBy === myName) && (a.status !== 'done')
+  );
 
-  main.innerHTML = `
-    <div class="k-page">
-      <div class="k-dash-stats">
-        <div class="k-stat"><div class="k-stat-val">${total}</div><div class="k-stat-lbl">Total Meetings</div></div>
-        <div class="k-stat"><div class="k-stat-val">${monthCount}</div><div class="k-stat-lbl">This Month</div></div>
-        <div class="k-stat k-stat-highlight"><div class="k-stat-val">${pending}</div><div class="k-stat-lbl">Awaiting Minutes</div></div>
+  // Quorum: members with voice enrolled (proxy for "voice" quorum) vs total
+  const enrolledCount = S.members.filter(m => m.azureSpeakerProfileId).length;
+  const totalMembers  = S.members.length;
+
+  // Last meeting attendance %
+  const lastMeeting = recent[0] || null;
+  let lastAttendancePct = null;
+  if (lastMeeting?.participants) {
+    const present = lastMeeting.participants.filter(p => p.present).length;
+    const total2  = lastMeeting.participants.length;
+    if (total2 > 0) lastAttendancePct = Math.round((present / total2) * 100);
+  }
+
+  // Pending projects (proposed status)
+  const proposedProjects = S.projects.filter(p => p.status === 'proposed');
+  const inProgressProjects = S.projects.filter(p => p.status === 'in_progress');
+
+  // General secretary: draft needing review
+  const needsReview = processedMeetings.find(m => m.minutesMarkdown && !m.reviewedAt) || null;
+
+  // Secretary: drafts pending distribution (processed meetings not in kpsc_distributed_meeting_ids)
+  const distributedIds = S._distributedMeetingIds || [];
+  const pendingDistribution = processedMeetings.filter(m => !distributedIds.includes(m.id));
+
+  // Finance: this-month entries
+  const monthEntries = S.financeEntries.filter(e => (e.date || '').startsWith(thisMonth));
+  const incomeThisMonth  = monthEntries.filter(e => e.entryType === 'income').reduce((s, e) => s + Number(e.amount || 0), 0);
+  const expenseThisMonth = monthEntries.filter(e => e.entryType === 'expense').reduce((s, e) => s + Number(e.amount || 0), 0);
+
+  // Unreconciled: income entries this month with no reference
+  const unreconciledCount = monthEntries.filter(e => !String(e.reference || '').trim()).length;
+
+  // Unpaid partners this month
+  const activePartners = S.partners.filter(p => p.status === 'active');
+  const unpaidThisMonth = activePartners.filter(p => !partnerMonthlyPaid(p.id, month, year));
+
+  // Partner progress this year: paid months / (active partners * 12)
+  let partnerYearPct = 0;
+  if (activePartners.length > 0) {
+    const totalPossible = activePartners.length * 12;
+    const totalPaid = activePartners.reduce((sum, p) => {
+      let c = 0;
+      for (let m2 = 1; m2 <= 12; m2++) if (partnerMonthlyPaid(p.id, m2, year)) c++;
+      return sum + c;
+    }, 0);
+    partnerYearPct = Math.round((totalPaid / totalPossible) * 100);
+  }
+
+  // Recent finance entries (top 5)
+  const recentFinance = [...S.financeEntries]
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+    .slice(0, 5);
+
+  return {
+    recent, total, monthCount, pending,
+    latestProcessed, recentResolutions, pendingActions,
+    myOpenActions, enrolledCount, totalMembers,
+    lastAttendancePct, proposedProjects, inProgressProjects,
+    needsReview, pendingDistribution,
+    incomeThisMonth, expenseThisMonth,
+    unreconciledCount, unpaidThisMonth, activePartners,
+    partnerYearPct, recentFinance,
+    activeProjects: inProgressProjects.slice(0, 5),
+  };
+}
+
+// Returns HTML for the "Open / Resume meeting" primary action card.
+function dashCardOpenMeeting(ctx) {
+  const draft = [...S.meetings].find(m => m.status === 'draft' || m.status === 'recording');
+  if (draft) {
+    return `
+      <div class="k-meeting-card ka-card-primary" onclick="Kpsc.openMeeting('${draft.id}')">
+        <div class="k-mc-top">
+          <div style="flex:1">
+            <div class="k-mc-title" style="font-size:16px">▶ Resume Draft Meeting</div>
+            <div class="k-mc-meta" style="margin-top:6px">
+              <span>${esc(draft.title)}</span>
+              <span>${esc(fmtDate(draft.meetingDate))}</span>
+              ${statusBadge(draft.status)}
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="k-meeting-card ka-card-primary" onclick="Kpsc.startNewMeeting()">
+      <div class="k-mc-top">
+        <div style="flex:1">
+          <div class="k-mc-title" style="font-size:16px">+ Open New Meeting</div>
+          <div class="k-mc-meta" style="margin-top:6px"><span>Start a new KPSC meeting session</span></div>
+        </div>
       </div>
+    </div>`;
+}
 
-      <div class="k-dash-stats">
-        <div class="k-stat"><div class="k-stat-val">₦${Number(S.dashboard?.income || 0).toLocaleString('en-NG')}</div><div class="k-stat-lbl">KPSC Income</div></div>
-        <div class="k-stat"><div class="k-stat-val">₦${Number(S.dashboard?.expense || 0).toLocaleString('en-NG')}</div><div class="k-stat-lbl">KPSC Expense</div></div>
-        <div class="k-stat k-stat-highlight"><div class="k-stat-val">${Number(S.dashboard?.unpaidPartners || 0)}</div><div class="k-stat-lbl">Unpaid Partners</div></div>
+// Renders a simple stat tile (tappable).
+function dashTile({ title, value, sub, badge, onclick, highlight }) {
+  const cls = highlight ? 'k-meeting-card k-stat-highlight' : 'k-meeting-card';
+  const cursor = onclick ? 'cursor:pointer' : 'cursor:default';
+  return `
+    <div class="${cls}" style="${cursor}" ${onclick ? `onclick="${onclick}"` : ''}>
+      <div class="k-mc-top">
+        <div style="flex:1">
+          <div class="k-mc-title">${esc(title)}</div>
+          <div style="font-size:26px;font-weight:700;color:var(--navy);margin:6px 0 2px;line-height:1.1">${value}</div>
+          ${sub ? `<div class="k-mc-meta" style="margin-top:4px"><span>${sub}</span></div>` : ''}
+          ${badge ? `<div style="margin-top:6px">${badge}</div>` : ''}
+        </div>
       </div>
+      <div style="margin-top:10px;font-size:12px;color:var(--navy);font-weight:600">View →</div>
+    </div>`;
+}
 
-      <div class="k-section-hdr">
-        <h2>Recent Meetings</h2>
-        <button class="kbtn kbtn-primary" onclick="Kpsc.startNewMeeting()">+ New Meeting</button>
+// Returns the set of extra dashboard sections (below primary card) for each role.
+function dashboardCardsForRole(role, ctx) {
+  const r = String(role || 'committee_viewer').toLowerCase();
+
+  if (r === 'acting_chairman') {
+    return `
+      ${dashCardOpenMeeting(ctx)}
+      <div class="k-section-hdr" style="margin-top:20px"><h2>At a Glance</h2></div>
+      <div class="k-meeting-list">
+        ${dashTile({
+          title: 'Action Items I Assigned',
+          value: ctx.myOpenActions.length,
+          sub: 'open items not yet done',
+          onclick: "Kpsc.navigate('archive')",
+        })}
+        ${dashTile({
+          title: 'Quorum Status This Month',
+          value: `${ctx.enrolledCount}/${ctx.totalMembers}`,
+          sub: ctx.lastAttendancePct !== null
+            ? `Last meeting: ${ctx.lastAttendancePct}% attended`
+            : 'No meeting attendance yet',
+          onclick: "Kpsc.navigate('members')",
+        })}
+        ${dashTile({
+          title: 'Pending Project Decisions',
+          value: ctx.proposedProjects.length,
+          sub: 'projects proposed, awaiting approval',
+          onclick: "Kpsc.navigate('projects')",
+          highlight: ctx.proposedProjects.length > 0,
+        })}
       </div>
-
-      ${recent.length === 0
-        ? `<div class="k-empty">No meetings yet. Start your first meeting above.</div>`
-        : `<div class="k-meeting-list">${recent.map(m => meetingCard(m)).join('')}</div>`}
-
-      ${recentResolutions.length ? `
+      ${ctx.recentResolutions.length ? `
       <div class="k-section-hdr" style="margin-top:24px">
         <h2>Recent Resolutions</h2>
         <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('archive')">View All</button>
       </div>
       <div class="k-meeting-list">
-        ${recentResolutions.map(r => `
+        ${ctx.recentResolutions.slice(0, 5).map(r2 => `
           <div class="k-meeting-card" style="cursor:default">
-            <div class="k-mc-top">
-              <div style="flex:1">
-                <div style="font-size:13px;color:var(--text2);line-height:1.5">${esc(r.text)}</div>
-                <div class="k-mc-meta" style="margin-top:4px">
-                  <span>${esc(r.meetingTitle)}</span>
-                  <span>${esc(fmtDate(r.meetingDate))}</span>
-                  ${r.approved === true ? '<span class="kbadge badge-green">Approved</span>' : r.approved === false ? '<span class="kbadge badge-red">Rejected</span>' : '<span class="kbadge badge-amber">Pending</span>'}
-                </div>
+            <div class="k-mc-top"><div style="flex:1">
+              <div style="font-size:13px;color:var(--text2);line-height:1.5">${esc(r2.text)}</div>
+              <div class="k-mc-meta" style="margin-top:4px">
+                <span>${esc(r2.meetingTitle)}</span>
+                <span>${esc(fmtDate(r2.meetingDate))}</span>
+                ${r2.approved === true ? '<span class="kbadge badge-green">Approved</span>' : r2.approved === false ? '<span class="kbadge badge-red">Rejected</span>' : '<span class="kbadge badge-amber">Pending</span>'}
               </div>
-            </div>
+            </div></div>
           </div>`).join('')}
-      </div>` : ''}
+      </div>` : ''}`;
+  }
 
-      ${pendingActions.length ? `
+  if (r === 'general_secretary') {
+    return `
+      ${dashCardOpenMeeting(ctx)}
+      <div class="k-section-hdr" style="margin-top:20px"><h2>At a Glance</h2></div>
+      <div class="k-meeting-list">
+        ${ctx.needsReview ? dashTile({
+          title: 'Last Meeting Needs Review',
+          value: esc(ctx.needsReview.title),
+          sub: `Processed ${esc(fmtDate(ctx.needsReview.processedAt || ctx.needsReview.meetingDate))} — AI draft not yet reviewed`,
+          onclick: `Kpsc.openMeeting('${ctx.needsReview.id}')`,
+          highlight: true,
+        }) : ''}
+        ${dashTile({
+          title: 'Drafts Pending Distribution',
+          value: ctx.pendingDistribution.length,
+          sub: 'processed meetings not yet distributed',
+          onclick: "Kpsc.navigate('archive')",
+          highlight: ctx.pendingDistribution.length > 0,
+        })}
+      </div>
+      ${ctx.recentResolutions.length ? `
       <div class="k-section-hdr" style="margin-top:24px">
-        <h2>Pending Action Items</h2>
+        <h2>Recent Resolutions</h2>
         <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('archive')">View All</button>
       </div>
       <div class="k-meeting-list">
-        ${pendingActions.map(a => `
+        ${ctx.recentResolutions.slice(0, 5).map(r2 => `
           <div class="k-meeting-card" style="cursor:default">
-            <div class="k-mc-top">
-              <div style="flex:1">
-                <div style="font-size:13px;color:var(--text2)">${esc(a.task)}</div>
-                <div class="k-mc-meta" style="margin-top:4px">
-                  <span>Owner: ${esc(a.assignee || 'Unassigned')}</span>
-                  ${a.dueDate ? `<span>Due: ${esc(a.dueDate)}</span>` : ''}
-                  <span>${esc(a.meetingTitle)}</span>
-                </div>
+            <div class="k-mc-top"><div style="flex:1">
+              <div style="font-size:13px;color:var(--text2);line-height:1.5">${esc(r2.text)}</div>
+              <div class="k-mc-meta" style="margin-top:4px">
+                <span>${esc(r2.meetingTitle)}</span>
+                <span>${esc(fmtDate(r2.meetingDate))}</span>
+                ${r2.approved === true ? '<span class="kbadge badge-green">Approved</span>' : r2.approved === false ? '<span class="kbadge badge-red">Rejected</span>' : '<span class="kbadge badge-amber">Pending</span>'}
               </div>
-            </div>
+            </div></div>
           </div>`).join('')}
-      </div>` : ''}
+      </div>` : ''}`;
+  }
 
-      ${activeProjects.length ? `
+  if (r === 'financial_secretary' || r === 'treasurer') {
+    return `
+      <div class="k-section-hdr" style="margin-top:4px"><h2>Finance At a Glance</h2></div>
+      <div class="k-meeting-list">
+        ${dashTile({
+          title: 'Unreconciled Bank Items',
+          value: ctx.unreconciledCount,
+          sub: 'income entries this month without a reference',
+          onclick: "Kpsc.navigate('finance')",
+          highlight: ctx.unreconciledCount > 0,
+        })}
+        ${dashTile({
+          title: 'Unpaid Partners This Month',
+          value: ctx.unpaidThisMonth.length,
+          sub: `of ${ctx.activePartners.length} active partners`,
+          onclick: "Kpsc.navigate('reminders')",
+          highlight: ctx.unpaidThisMonth.length > 0,
+        })}
+        <div class="k-meeting-card" style="cursor:pointer" onclick="Kpsc.navigate('finance')">
+          <div class="k-mc-top"><div style="flex:1">
+            <div class="k-mc-title">This Month P&amp;L</div>
+            <div style="margin:6px 0 2px">
+              <div style="font-size:20px;font-weight:700;color:var(--green)">₦${ctx.incomeThisMonth.toLocaleString('en-NG')} <span style="font-size:13px;font-weight:500;color:var(--text3)">income</span></div>
+              <div style="font-size:20px;font-weight:700;color:var(--red)">₦${ctx.expenseThisMonth.toLocaleString('en-NG')} <span style="font-size:13px;font-weight:500;color:var(--text3)">expense</span></div>
+            </div>
+            <div class="k-mc-meta" style="margin-top:4px">
+              <span style="font-weight:600;color:${ctx.incomeThisMonth - ctx.expenseThisMonth >= 0 ? 'var(--green)' : 'var(--red)'}">
+                Net: ₦${Math.abs(ctx.incomeThisMonth - ctx.expenseThisMonth).toLocaleString('en-NG')} ${ctx.incomeThisMonth - ctx.expenseThisMonth >= 0 ? 'surplus' : 'deficit'}
+              </span>
+            </div>
+          </div></div>
+          <div style="margin-top:10px;font-size:12px;color:var(--navy);font-weight:600">View →</div>
+        </div>
+      </div>
+      ${ctx.recentFinance.length ? `
       <div class="k-section-hdr" style="margin-top:24px">
-        <h2>Active Projects</h2>
-        <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('projects')">View All</button>
+        <h2>Recent Finance Entries</h2>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('finance')">View All</button>
       </div>
       <div class="k-meeting-list">
-        ${activeProjects.map(p => `
-          <div class="k-meeting-card" style="cursor:default" onclick="Kpsc.navigate('projects')">
-            <div class="k-mc-top">
-              <div style="flex:1">
-                <div class="k-mc-title">${esc(p.title)}</div>
-                <div class="k-mc-meta">
-                  ${p.estimatedCost ? `<span>₦${Number(p.estimatedCost).toLocaleString('en-NG')}</span>` : ''}
-                  <span class="kbadge badge-amber">In Progress</span>
-                </div>
+        ${ctx.recentFinance.map(e => `
+          <div class="k-meeting-card" style="cursor:default">
+            <div class="k-mc-top"><div style="flex:1">
+              <div class="k-mc-title">${esc(catLabel(e.category))} — ₦${Number(e.amount || 0).toLocaleString('en-NG')}</div>
+              <div class="k-mc-meta" style="margin-top:4px">
+                <span>${esc(fmtDate(e.date))}</span>
+                <span class="kbadge ${e.entryType === 'income' ? 'badge-green' : 'badge-red'}">${esc(e.entryType)}</span>
+                ${e.reference ? `<span>Ref: ${esc(e.reference)}</span>` : ''}
               </div>
-            </div>
+            </div></div>
           </div>`).join('')}
-      </div>` : ''}
+      </div>` : ''}`;
+  }
+
+  // committee_viewer (default)
+  return `
+    <div class="k-section-hdr" style="margin-top:4px"><h2>Committee Overview</h2></div>
+    <div class="k-meeting-list">
+      ${ctx.latestProcessed ? `
+        <div class="k-meeting-card ka-card-primary" onclick="Kpsc.openMeeting('${ctx.latestProcessed.id}')">
+          <div class="k-mc-top"><div style="flex:1">
+            <div class="k-mc-title" style="font-size:15px">Latest Minutes</div>
+            <div class="k-mc-meta" style="margin-top:6px">
+              <span>${esc(ctx.latestProcessed.title)}</span>
+              <span>${esc(fmtDate(ctx.latestProcessed.meetingDate))}</span>
+            </div>
+          </div></div>
+          <div style="margin-top:10px;font-size:12px;color:var(--navy);font-weight:600">View →</div>
+        </div>` : '<div class="k-empty">No processed minutes yet.</div>'}
+      ${dashTile({
+        title: 'Projects in Progress',
+        value: ctx.inProgressProjects.length,
+        sub: ctx.inProgressProjects.slice(0, 3).map(p => esc(p.title)).join(', ') || 'None',
+        onclick: "Kpsc.navigate('projects')",
+      })}
+      ${dashTile({
+        title: 'Partner Progress This Year',
+        value: `${ctx.partnerYearPct}%`,
+        sub: `${ctx.activePartners.length} active partners`,
+        onclick: "Kpsc.navigate('partners')",
+      })}
+    </div>`;
+}
+
+async function renderDashboard(main) {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth() + 1;
+
+  // Load all data needed for any role in parallel
+  const [meetingsRes, settingsRes, dashboardRes, projectsRes, financeRes, partnersRes, paymentsRes] = await Promise.all([
+    apiGet('ai-secretary-meetings'),
+    apiGet('settings'),
+    apiGet(`kpsc-dashboard?year=${year}&month=${month}`),
+    apiGet('kpsc-projects'),
+    apiGet(`kpsc-finance?year=${year}&month=${month}`),
+    apiGet('kpsc-partners'),
+    apiGet(`kpsc-partner-payments?year=${year}`),
+  ]);
+  if (meetingsRes?.error) throw new Error(meetingsRes.error);
+  S.meetings        = Array.isArray(meetingsRes)            ? meetingsRes            : [];
+  S.members         = Array.isArray(settingsRes?.kpsc_members) ? settingsRes.kpsc_members : [];
+  S.dashboard       = dashboardRes?.totals || null;
+  S.projects        = Array.isArray(projectsRes)            ? projectsRes            : [];
+  S.financeEntries  = Array.isArray(financeRes)             ? financeRes             : [];
+  S.partners        = Array.isArray(partnersRes)            ? partnersRes            : [];
+  S.partnerPayments = Array.isArray(paymentsRes)            ? paymentsRes            : [];
+
+  // Load distributed-meeting-ids from settings (stored as JSON string)
+  const rawDistributed = Array.isArray(settingsRes?.kpsc_distributed_meeting_ids)
+    ? settingsRes.kpsc_distributed_meeting_ids
+    : (Array.isArray(S._distributedMeetingIds) ? S._distributedMeetingIds : []);
+  S._distributedMeetingIds = rawDistributed;
+
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const ctx  = buildDashboardContext();
+
+  main.innerHTML = `
+    <div class="k-page">
+      ${dashboardCardsForRole(role, ctx)}
     </div>`;
 }
 
 function canDeleteMeeting(m) {
   const role = String(S.user?.role || '').toLowerCase();
-  if (role === 'admin' || role === 'it_administrator') return true;
+  if (role === 'acting_chairman' || role === 'general_secretary') return true;
   return !!S.user?.name && S.user.name === (m.createdBy || '');
 }
 
@@ -1684,11 +2346,17 @@ function meetingCard(m) {
 
 function startNewMeeting() {
   S.activeMeeting = null;
+  S._isNewMeeting = true;
   S.page = 'meeting';
+  S.group = 'meetings';
+  S.subTab = null;
   Rec.status = 'idle';
-  document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.ka-nav-item').forEach(b => {
+    b.classList.toggle('active', b.dataset.group === 'meetings');
+  });
   document.getElementById('kpsc-back-btn').style.display = '';
   document.getElementById('kpsc-page-title').textContent = 'New Meeting';
+  updateFab();
   renderPage('meeting');
 }
 
@@ -1696,11 +2364,17 @@ async function openMeeting(id) {
   const res = await apiGet(`ai-secretary-meetings/${id}`);
   if (res.error) { showToast(res.error, 'error'); return; }
   S.activeMeeting = res;
+  S._isNewMeeting = false;
   S.page = 'meeting';
+  S.group = 'meetings';
+  S.subTab = null;
   Rec.status = 'idle';
-  document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.ka-nav-item').forEach(b => {
+    b.classList.toggle('active', b.dataset.group === 'meetings');
+  });
   document.getElementById('kpsc-back-btn').style.display = '';
   document.getElementById('kpsc-page-title').textContent = 'Meeting Room';
+  updateFab();
   renderPage('meeting');
 }
 
@@ -1709,53 +2383,79 @@ async function renderMeetingRoom(main) {
   if (!S.members.length) {
     const settingsRes = await apiGet('settings');
     S.members = settingsRes.kpsc_members || [];
+    if (settingsRes.kpsc_meeting_cadence) S.kpscMeetingCadence = settingsRes.kpsc_meeting_cadence;
   }
 
   const m  = S.activeMeeting;
+  // Default review-edit mode: show editor if not yet reviewed, summary if reviewed.
+  if (m?.status === 'processed') {
+    S._reviewEditMode = !m.reviewedAt;
+  }
   const id = m?.id || '';
   const status = m?.status || 'draft';
   const isProcessed = status === 'processed';
   const isEnded     = status === 'ended' || isProcessed;
   const canRecord   = !isEnded;
+  const phase = isProcessed ? 'review' : status === 'ended' ? 'ended' : status === 'recording' ? 'live' : 'setup';
 
-  // Build attendance rows from roster, merged with saved participants
+  // Pre-fill defaults for never-saved drafts. Title/date follow the configured cadence;
+  // attendance defaults to "everyone present" so secretaries uncheck absentees instead of
+  // checking each present member.
+  const isFresh = S._isNewMeeting && !m;
+  const cadence = S.kpscMeetingCadence || 'none';
+  const prefillDate = isFresh ? nextMeetingDate(cadence) : (m?.meetingDate || today());
+  const prefillTitle = isFresh ? prefilledMeetingTitle(cadence, prefillDate) : (m?.title || 'KPSC Meeting');
+  const prefillType = m?.meetingType || 'routine';
+
+  // Build attendance rows from roster, merged with saved participants.
   const savedParts = m?.participants || [];
-  const attendanceRows = buildAttendanceRows(savedParts);
+  const attendanceRows = buildAttendanceRows(savedParts, isFresh);
+
+  const detailsSummary = `${esc(prefillTitle)} · ${esc(fmtDate(prefillDate))} · ${esc((MEETING_TYPES.find(t=>t.value===prefillType)||{}).label||'')}`;
+  const presentInitial = isFresh ? S.members.length : savedParts.filter(p => p.present).length;
+  const attendanceSummary = `${presentInitial} present of ${S.members.length}`;
 
   main.innerHTML = `
-    <div class="k-page k-room">
+    <div class="k-page k-room" data-phase="${phase}">
       <div id="km-stepper">${stepper(status)}</div>
 
-      <section class="k-section">
-        <h3 class="k-sec-title">Meeting Details</h3>
+      <details class="k-collapsible" id="km-details-section" ${phase === 'setup' ? 'open' : ''}>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">Meeting Details</span>
+          <span class="k-collapsible-summary" id="km-details-summary">${detailsSummary}</span>
+        </summary>
         <input type="hidden" id="km-status" value="${status}" />
         <div class="k-field-row">
           <div class="k-field">
             <label class="k-label">Title</label>
-            <input class="k-input" id="km-title" type="text" value="${esc(m?.title || 'KPSC Meeting')}" ${isProcessed ? 'readonly' : ''} />
+            <input class="k-input" id="km-title" type="text" value="${esc(prefillTitle)}" ${isProcessed ? 'readonly' : ''} />
           </div>
           <div class="k-field k-field-sm">
             <label class="k-label">Date</label>
-            <input class="k-input" id="km-date" type="date" value="${m?.meetingDate || today()}" ${isProcessed ? 'readonly' : ''} />
+            <input class="k-input" id="km-date" type="date" value="${prefillDate}" ${isProcessed ? 'readonly' : ''} />
           </div>
         </div>
         <div class="k-field">
           <label class="k-label">Meeting Type</label>
           <select class="k-input" id="km-type" ${isProcessed ? 'disabled' : ''}>
-            ${MEETING_TYPES.map(t => `<option value="${t.value}" ${(m?.meetingType || 'routine') === t.value ? 'selected' : ''}>${t.label}</option>`).join('')}
+            ${MEETING_TYPES.map(t => `<option value="${t.value}" ${prefillType === t.value ? 'selected' : ''}>${t.label}</option>`).join('')}
           </select>
         </div>
-      </section>
+      </details>
 
-      <section class="k-section">
-        <h3 class="k-sec-title">Attendance</h3>
+      <details class="k-collapsible" id="km-attendance-section" ${phase === 'setup' ? 'open' : ''}>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">Attendance</span>
+          <span class="k-collapsible-summary" id="km-attendance-summary">${attendanceSummary}</span>
+        </summary>
         <div id="km-attendance" class="k-attendance">
           ${attendanceRows}
         </div>
-      </section>
+      </details>
 
       <section class="k-section">
         <h3 class="k-sec-title">Live Audio & Realtime Transcript</h3>
+        ${phase === 'setup' ? `<p class="k-quick-hint">Confirm the details above, then tap 🎙 Start Meeting below to begin recording. Everything saves automatically.</p>` : ''}
         <div class="k-tabs" style="margin-bottom:16px">
           <button class="k-tab ${S._meetingTab !== 'upload' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('record')">🎙 Live Recording</button>
           <button class="k-tab ${S._meetingTab === 'upload' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('upload')">📷 Upload Notes</button>
@@ -1787,7 +2487,6 @@ async function renderMeetingRoom(main) {
       </section>
 
       <div class="k-room-actions">
-        ${!isProcessed ? `<button class="kbtn" onclick="Kpsc.saveMeeting(this)">💾 Save</button>` : ''}
         ${!isProcessed ? `<span id="km-autosave-status" class="k-autosave-status" aria-live="polite"></span>` : ''}
         ${status === 'recording' ? `<button class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
         ${status === 'ended' ? `<button class="kbtn kbtn-primary" onclick="Kpsc.processMeeting(this)">✨ Generate Minutes</button>` : ''}
@@ -1800,9 +2499,29 @@ async function renderMeetingRoom(main) {
   if (canRecord) recRenderUI();
   recRenderTranscript();
   if (!isProcessed) bindAutoSave();
+  // Re-apply mic badges for any members already voice-ticked this session.
+  restoreVoiceTickBadges();
 }
 
-function buildAttendanceRows(savedParts) {
+// Walk Rec.voiceTicked and re-inject mic badges into the freshly-rendered DOM.
+// Called after every attendance re-render so the badges survive innerHTML resets.
+function restoreVoiceTickBadges() {
+  for (const key of Rec.voiceTicked) {
+    const checkbox = document.getElementById(`att_present_${key}`);
+    if (!checkbox) continue;
+    const label = checkbox.closest('label');
+    const nameSpan = label?.querySelector('.k-att-name');
+    if (nameSpan && !nameSpan.querySelector('.k-att-voice-tick')) {
+      const badge = document.createElement('span');
+      badge.className = 'k-att-voice-tick';
+      badge.title = 'Auto-ticked from voice transcript';
+      badge.textContent = '🎙';
+      nameSpan.appendChild(badge);
+    }
+  }
+}
+
+function buildAttendanceRows(savedParts, defaultPresent = false) {
   // Build a name-keyed lookup so each roster member can be matched individually
   const savedByName = new Map((savedParts || []).map(p => [p.name, p]));
   const membersByGroup = new Map(GROUPS.map(g => [g.key, []]));
@@ -1816,7 +2535,7 @@ function buildAttendanceRows(savedParts) {
       ? groupMembers.map((mem, i) => {
           const presentKey = `att_present_${g.key}_${i}`;
           const saved = savedByName.get(mem.name);
-          const isPresent = saved ? !!saved.present : false;
+          const isPresent = saved ? !!saved.present : defaultPresent;
           return `
             <label class="k-att-member">
               <input type="checkbox" id="${presentKey}" data-group="${g.key}" data-idx="${i}"
@@ -1879,12 +2598,27 @@ function formatResolutionAmount(amount) {
 
 
 function renderReviewPanel(m) {
+  // If already reviewed and not in edit mode, show compact summary.
+  if (m.reviewedAt && !S._reviewEditMode) {
+    const reviewer = m.reviewedBy || S.user?.name || 'Unknown';
+    const at = m.reviewedAt ? new Date(m.reviewedAt).toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' }) : '';
+    return `
+      <div class="k-review-panel k-review-done" id="kr-panel">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+          <span style="font-weight:700;color:var(--green)">✓ Reviewed by ${esc(reviewer)}${at ? ` at ${esc(at)}` : ''}</span>
+          <button class="kbtn kbtn-sm" onclick="Kpsc.openReviewEditor()">Edit again</button>
+        </div>
+      </div>`;
+  }
+
+  // Inline editable review panel.
   const resolutions = m.resolutions || [];
   const actionItems = m.actionItems || [];
+  const policyFlags = m.policyFlags || [];
   return `
-    <details class="k-review-panel">
-      <summary>✍️ Review & Correct AI Draft Before Filing</summary>
-      <p class="k-review-hint">AI output is a draft. Confirm approvals, vote wording, owners, deadlines, and the final minutes text before sharing or filing.</p>
+    <div class="k-review-panel" id="kr-panel">
+      <h4 class="k-sub-title" style="margin-top:0">✍️ Review & Correct AI Draft</h4>
+      <p class="k-review-hint">AI output is a draft. Confirm approvals, vote wording, owners, deadlines, and the final minutes text before approving.</p>
       <div class="k-form-group">
         <label class="k-label">Short Summary</label>
         <textarea class="k-input k-review-textarea" id="kr-summary-short">${esc(m.summaryShort || '')}</textarea>
@@ -1897,8 +2631,12 @@ function renderReviewPanel(m) {
         <label class="k-label">Minutes Markdown</label>
         <textarea class="k-input k-review-minutes" id="kr-minutes">${esc(m.minutesMarkdown || '')}</textarea>
       </div>
+      <div class="k-form-group">
+        <label class="k-label">Markdown Preview (read-only)</label>
+        <div class="k-minutes-body" style="border:1.5px solid #e0e0e0;border-radius:8px;padding:12px;background:#fafafa;font-size:13px">${minutesHtml(m.minutesMarkdown || '')}</div>
+      </div>
 
-      <h4 class="k-sub-title">Review Resolutions</h4>
+      <h4 class="k-sub-title">Resolutions</h4>
       <div class="k-review-list" id="kr-resolutions">
         ${resolutions.length ? resolutions.map((r, i) => `
           <div class="k-review-row" data-idx="${i}">
@@ -1918,7 +2656,7 @@ function renderReviewPanel(m) {
           </div>`).join('') : '<div class="k-empty">No resolutions detected. Add them in the minutes text if needed.</div>'}
       </div>
 
-      <h4 class="k-sub-title">Review Action Items</h4>
+      <h4 class="k-sub-title">Action Items</h4>
       <div class="k-review-list" id="kr-actions">
         ${actionItems.length ? actionItems.map((a, i) => `
           <div class="k-review-row" data-idx="${i}">
@@ -1933,8 +2671,18 @@ function renderReviewPanel(m) {
             </div>
           </div>`).join('') : '<div class="k-empty">No action items detected. Add them in the minutes text if needed.</div>'}
       </div>
-      <button class="kbtn kbtn-primary" onclick="Kpsc.saveMinutesReview(this)">Save Review Corrections</button>
-    </details>`;
+
+      ${policyFlags.length ? `
+      <h4 class="k-sub-title">Policy Flags (read-only)</h4>
+      <div class="k-flags-list">
+        ${policyFlags.map(f => `
+          <div class="k-flag k-flag-${f.severity || 'info'}">
+            <strong>${esc(f.type)}</strong> — ${esc(f.message)}
+          </div>`).join('')}
+      </div>` : ''}
+
+      <button class="kbtn kbtn-primary" style="margin-top:8px" onclick="Kpsc.saveMinutesReview(this)">Approve &amp; Save Review</button>
+    </div>`;
 }
 
 function renderMinutesPanel(m) {
@@ -1948,11 +2696,15 @@ function renderMinutesPanel(m) {
       <h3 class="k-sec-title">Meeting Minutes</h3>
       ${m.summaryShort ? `<div class="k-summary">${esc(m.summaryShort)}</div>` : ''}
       ${m.summaryLong ? `<details class="k-summary-detail"><summary>Detailed summary</summary><pre>${esc(m.summaryLong)}</pre></details>` : ''}
+
       ${renderReviewPanel(m)}
-      <div class="k-room-actions" style="margin-bottom:12px">
+
+      <div class="k-room-actions" style="margin-bottom:12px;margin-top:16px">
         <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')">🖨 Print / Save PDF</button>
         ${canManageProjects() && m.status === 'processed' ? `<button class="kbtn kbtn-sm" onclick="Kpsc.extractProjectsFromMeetingUI('${m.id}', this)">🤖 Extract Projects</button>` : ''}
       </div>
+
+      <h4 class="k-sub-title">Minutes Preview</h4>
       <div class="k-minutes-body">${minutesHtml(m.minutesMarkdown)}</div>
 
       ${resolutions.length ? `
@@ -2024,7 +2776,7 @@ async function saveMinutesReview(btn) {
   if (!S.activeMeeting) return;
   const orig = btn.textContent;
   btn.disabled = true;
-  btn.textContent = 'Saving review…';
+  btn.textContent = 'Saving…';
   try {
     const res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
       summaryShort: document.getElementById('kr-summary-short')?.value || '',
@@ -2035,14 +2787,36 @@ async function saveMinutesReview(btn) {
       policyFlags: S.activeMeeting.policyFlags || [],
     });
     if (res.error) { showToast(res.error, 'error'); return; }
-    S.activeMeeting = res;
-    renderPage('meeting');
-    showToast('Review corrections saved', 'success');
+    // Mark as reviewed locally (no DB column — tracked in client state).
+    S.activeMeeting = {
+      ...res,
+      reviewedAt: new Date().toISOString(),
+      reviewedBy: S.user?.name || '',
+    };
+    S._reviewEditMode = false;
+    // Re-render only the review panel in-place.
+    const panel = document.getElementById('kr-panel');
+    if (panel) {
+      panel.outerHTML = renderReviewPanel(S.activeMeeting);
+    } else {
+      renderPage('meeting');
+    }
+    showToast('Review approved and saved', 'success');
   } catch {
     showToast('Review save failed. Check your connection.', 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
+  }
+}
+
+function openReviewEditor() {
+  S._reviewEditMode = true;
+  const panel = document.getElementById('kr-panel');
+  if (panel && S.activeMeeting) {
+    panel.outerHTML = renderReviewPanel(S.activeMeeting);
+  } else if (S.activeMeeting) {
+    renderPage('meeting');
   }
 }
 
@@ -2104,6 +2878,7 @@ async function autoSaveNow() {
     } else {
       S.activeMeeting = res;
       Draft.meetingId = res.id;
+      S._isNewMeeting = false;
       setAutoSaveStatus(`Saved · ${fmtClock(new Date())}`, 'ok');
     }
   } catch {
@@ -2127,7 +2902,7 @@ function bindAutoSave() {
   Draft.dirty = false;
   Draft.meetingId = S.activeMeeting?.id || null;
 
-  const fire = () => scheduleAutoSave();
+  const fire = () => { scheduleAutoSave(); updateCollapsibleSummaries(); };
   const form = document.getElementById('km-title')?.closest('.k-page');
   if (!form) return;
   for (const sel of ['#km-title', '#km-transcript']) {
@@ -2145,16 +2920,32 @@ function bindAutoSave() {
   }
 }
 
+function updateCollapsibleSummaries() {
+  const detailsSum = document.getElementById('km-details-summary');
+  if (detailsSum) {
+    const title = document.getElementById('km-title')?.value.trim() || 'KPSC Meeting';
+    const date  = document.getElementById('km-date')?.value || today();
+    const type  = document.getElementById('km-type')?.value || 'routine';
+    const typeLabel = (MEETING_TYPES.find(t => t.value === type) || {}).label || '';
+    detailsSum.textContent = `${title} · ${fmtDate(date)} · ${typeLabel}`;
+  }
+  const attSum = document.getElementById('km-attendance-summary');
+  if (attSum) {
+    const present = readAttendance().filter(p => p.present).length;
+    attSum.textContent = `${present} present of ${S.members.length}`;
+  }
+}
+
 // ── MEETING ACTIONS ───────────────────────────────────────────────
 async function deleteMeetingDraft(id, event) {
   if (event) { event.stopPropagation(); event.preventDefault(); }
   const m = S.meetings.find(x => x.id === id);
   if (!m) return;
   const role = String(S.user?.role || '').toLowerCase();
-  const isAdmin = role === 'admin' || role === 'it_administrator';
+  const isChair = role === 'acting_chairman' || role === 'general_secretary';
   const isAuthor = !!S.user?.name && S.user.name === (m.createdBy || '');
-  if (!isAdmin && !isAuthor) {
-    showToast('Only the meeting author or an administrator can delete this draft.', 'error');
+  if (!isChair && !isAuthor) {
+    showToast('Only the meeting author, Acting Chairman, or General Secretary can delete this draft.', 'error');
     return;
   }
   if (!confirm(`Delete "${m.title || 'this meeting'}"? It will be hidden from the list.`)) return;
@@ -2198,6 +2989,7 @@ async function saveMeeting(btn) {
     }
     if (res.error) { showToast(res.error, 'error'); return; }
     S.activeMeeting = res;
+    S._isNewMeeting = false;
     document.getElementById('kpsc-page-title').textContent = 'Meeting Room';
     document.getElementById('km-status').value = res.status;
     updateStepperUI(res.status);
@@ -2818,6 +3610,13 @@ async function openPartnerDetail(partnerId) {
   main.innerHTML = '<div class="k-loading">Loading partner history…</div>';
   document.getElementById('kpsc-back-btn').style.display = '';
   document.getElementById('kpsc-page-title').textContent = 'Partner History';
+  S.page = 'partnerDetail';
+  S.group = 'money';
+  S.subTab = null;
+  document.querySelectorAll('.ka-nav-item').forEach(b => {
+    b.classList.toggle('active', b.dataset.group === 'money');
+  });
+  updateFab();
   S._partnerDetailId = partnerId;
   S._partnerDetailYear = S.partnersYear;
   await loadPartnerData(S._partnerDetailYear);
@@ -2952,6 +3751,7 @@ async function renderFinance(main) {
           <label class="k-label">Bank Statement PDF</label>
           <input id="krec-pdf-input" type="file" accept=".pdf,application/pdf" class="k-input" style="padding:8px" />
           <p class="k-hint">Upload a digital PDF (not scanned). The AI will extract the transaction lines automatically.</p>
+          <div id="krec-stepper" style="display:none" aria-live="polite"></div>
           <div class="k-room-actions" style="margin-top:10px">
             <button class="kbtn kbtn-primary" onclick="Kpsc.runPdfReconciliation(this)">🤖 Upload &amp; Reconcile</button>
           </div>
@@ -2984,6 +3784,12 @@ async function openFinanceModal(entryToEdit = null) {
     <div class="k-modal">
       <div class="k-modal-hdr"><span class="k-modal-title">New Finance Entry</span><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeFinanceModal()">✕</button></div>
       <div class="k-modal-body">
+        <div class="kf-scan-block">
+          <input type="file" id="kf-receipt-file" accept="image/*" capture="environment" style="display:none" onchange="Kpsc.scanReceiptPhoto(this)" />
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('kf-receipt-file').click()">📷 Scan Receipt</button>
+          <span id="kf-scan-status" class="k-hint" style="margin-left:8px"></span>
+          <div id="kf-receipt-preview"></div>
+        </div>
         <label class="k-label">Date</label>
         <input id="kf-date" type="date" class="k-input" value="${today()}" />
         <label class="k-label">Entry Type</label>
@@ -3015,6 +3821,97 @@ async function openFinanceModal(entryToEdit = null) {
   document.body.appendChild(modal);
   modal._incomeOpts = incomeOpts;
   modal._expenseOpts = expenseOpts;
+}
+
+// Pure helper — maps raw OCR receipt response → form-field values.
+// Canonical source: src/js/receipt-ocr-utils.js (ES module version used by unit tests).
+function mapReceiptOcrToFormFields(ocr) {
+  // date: accept YYYY-MM-DD only
+  let date = null;
+  if (typeof ocr?.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(ocr.date.trim())) {
+    date = ocr.date.trim();
+  }
+
+  // amount: parse numbers permissively (strip commas, reject negative)
+  let amount = null;
+  if (ocr?.amount !== null && ocr?.amount !== undefined) {
+    const raw = String(ocr.amount).replace(/,/g, '').trim();
+    const n = parseFloat(raw);
+    if (!isNaN(n) && n >= 0) amount = n;
+  }
+
+  // reference: prefer receipt reference, fall back to vendor
+  let ref = null;
+  if (typeof ocr?.reference === 'string' && ocr.reference.trim()) ref = ocr.reference.trim();
+  else if (typeof ocr?.vendor === 'string' && ocr.vendor.trim()) ref = ocr.vendor.trim();
+
+  // note: "vendor — itemsSummary"
+  const parts = [
+    typeof ocr?.vendor === 'string' && ocr.vendor.trim() ? ocr.vendor.trim() : null,
+    typeof ocr?.itemsSummary === 'string' && ocr.itemsSummary.trim() ? ocr.itemsSummary.trim() : null,
+  ].filter(Boolean);
+  const note = parts.join(' — ') || null;
+
+  return { date, amount, ref, note };
+}
+
+async function scanReceiptPhoto(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+
+  const preview = document.getElementById('kf-receipt-preview');
+  const status = document.getElementById('kf-scan-status');
+
+  // Show thumbnail preview while scanning
+  const dataUrl = await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = e => resolve(e.target.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+  if (preview) preview.innerHTML = `<img src="${dataUrl}" class="kf-receipt-thumb kf-receipt-thumb--scanning" alt="Receipt preview" />`;
+  if (status) status.textContent = 'Scanning…';
+
+  try {
+    const base64 = dataUrl.split(',')[1];
+    const mimeType = file.type || 'image/jpeg';
+    const res = await apiPost('kpsc-ocr-receipt', { imageBase64: base64, mimeType });
+
+    if (preview) preview.querySelector('img')?.classList.remove('kf-receipt-thumb--scanning');
+    if (status) status.textContent = '';
+
+    if (res?.error) {
+      showToast('Could not read receipt. Please enter manually.', 'warn');
+      return;
+    }
+
+    const fields = mapReceiptOcrToFormFields(res);
+    if (fields.date) {
+      const dateEl = document.getElementById('kf-date');
+      if (dateEl) dateEl.value = fields.date;
+    }
+    if (fields.amount !== null) {
+      const amtEl = document.getElementById('kf-amount');
+      if (amtEl) amtEl.value = fields.amount;
+    }
+    if (fields.ref) {
+      const refEl = document.getElementById('kf-ref');
+      if (refEl) refEl.value = fields.ref;
+    }
+    if (fields.note) {
+      const noteEl = document.getElementById('kf-note');
+      if (noteEl) noteEl.value = fields.note;
+    }
+    if (fields.date || fields.amount !== null || fields.ref || fields.note) {
+      showToast('Receipt scanned — please review and correct if needed.', 'info');
+    } else {
+      showToast('Could not read receipt. Please enter manually.', 'warn');
+    }
+  } catch (_) {
+    if (preview) preview.querySelector('img')?.classList.remove('kf-receipt-thumb--scanning');
+    if (status) status.textContent = '';
+    showToast('Could not read receipt. Please enter manually.', 'warn');
+  }
 }
 
 function closeFinanceModal() {
@@ -3115,7 +4012,7 @@ async function renderReminders(main) {
         <h3 class="k-sec-title">Partner Reminder Workflow — ${monthName(month)} ${year}</h3>
         <p class="k-hint">${unpaid.length} unpaid active partner(s) for ${monthName(month)} ${year}.</p>
         <label class="k-label">Reminder Message Template</label>
-        <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message">${esc(defaultTemplate)}</textarea>
+        <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message" oninput="Kpsc.debouncedSaveReminderTemplate(this)">${esc(defaultTemplate)}</textarea>
         <p class="k-hint">Use <code>{{name}}</code> for partner name and <code>{{month}}</code> for month name.</p>
         <div class="k-room-actions" style="margin-top:10px">
           <button class="kbtn kbtn-primary" onclick="Kpsc.sendBulkReminders(this)">Send Bulk Reminders (${unpaid.length})</button>
@@ -3208,6 +4105,20 @@ async function sendBulkReminders(btn) {
     showToast(`Reminders sent to ${responses.length} partner(s).`, 'success');
   }
   await renderReminders(document.getElementById('kpsc-main'));
+}
+
+let _reminderTemplateSaveTimer = null;
+function debouncedSaveReminderTemplate(textarea) {
+  clearTimeout(_reminderTemplateSaveTimer);
+  _reminderTemplateSaveTimer = setTimeout(async () => {
+    const template = textarea.value.trim();
+    const res = await apiPost('settings', { kpsc_reminder_template: template });
+    if (res?.error) {
+      showToast('Could not save template: ' + res.error, 'error');
+    } else {
+      showToast('Template saved.', 'success');
+    }
+  }, 500);
 }
 
 async function renderReports(main) {
@@ -3441,6 +4352,7 @@ function renderKpscAccountsCard(accounts) {
               </div>
               <div class="k-mc-badges">
                 <button class="kbtn kbtn-sm" onclick="Kpsc.openAccountEditor('${a.id}')">Edit</button>
+                ${String(S.user?.role || '') === 'acting_chairman' ? `<button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.confirmDeleteKpscAccount('${a.id}','${esc(a.name)}')">Delete</button>` : ''}
               </div>
             </div>
           </div>`).join('') : '<div class="k-empty">No KPSC accounts found.</div>'}
@@ -3516,6 +4428,38 @@ async function saveAccountEditor(id, btn) {
   showToast('Account saved.', 'success');
 }
 
+function confirmDeleteKpscAccount(id, name) {
+  document.getElementById('kpsc-delete-account-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'kpsc-delete-account-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr"><span class="k-modal-title">Delete Account</span><button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('kpsc-delete-account-modal')?.remove()">✕</button></div>
+      <div class="k-modal-body">
+        <p>Delete account for <strong>${esc(name)}</strong>? They will lose access immediately. This cannot be undone.</p>
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('kpsc-delete-account-modal')?.remove()">Cancel</button>
+        <button class="kbtn kbtn-danger" onclick="Kpsc.executeDeleteKpscAccount('${id}', this)">Delete Account</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function executeDeleteKpscAccount(id, btn) {
+  btn.disabled = true;
+  const res = await apiDelete(`kpsc-accounts/${id}`);
+  btn.disabled = false;
+  document.getElementById('kpsc-delete-account-modal')?.remove();
+  if (res?.error) {
+    showToast(res.error, 'error');
+    return;
+  }
+  showToast('Account deleted.', 'success');
+  await renderSettings(document.getElementById('kpsc-main'));
+}
+
 async function renderSettings(main) {
   const [res, apiStatus, accountsRes] = await Promise.all([
     apiGet('settings'),
@@ -3532,6 +4476,25 @@ async function renderSettings(main) {
   const reminderTemplate = res?.kpsc_reminder_template || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge. God bless you.';
   const incomeCategories = Array.isArray(res?.kpsc_income_categories) ? res.kpsc_income_categories.join('\n') : '';
   const expenseCategories = Array.isArray(res?.kpsc_expense_categories) ? res.kpsc_expense_categories.join('\n') : '';
+  const meetingCadence = res?.kpsc_meeting_cadence || 'none';
+  S.kpscMeetingCadence = meetingCadence;
+  const cadenceOptions = [
+    { value: 'none',              label: 'No fixed cadence' },
+    { value: 'weekly:sun',        label: 'Weekly on Sunday' },
+    { value: 'weekly:mon',        label: 'Weekly on Monday' },
+    { value: 'weekly:tue',        label: 'Weekly on Tuesday' },
+    { value: 'weekly:wed',        label: 'Weekly on Wednesday' },
+    { value: 'weekly:thu',        label: 'Weekly on Thursday' },
+    { value: 'weekly:fri',        label: 'Weekly on Friday' },
+    { value: 'weekly:sat',        label: 'Weekly on Saturday' },
+    { value: 'monthly:first-sun', label: 'First Sunday of the month' },
+    { value: 'monthly:first-mon', label: 'First Monday of the month' },
+    { value: 'monthly:first-tue', label: 'First Tuesday of the month' },
+    { value: 'monthly:first-wed', label: 'First Wednesday of the month' },
+    { value: 'monthly:first-thu', label: 'First Thursday of the month' },
+    { value: 'monthly:first-fri', label: 'First Friday of the month' },
+    { value: 'monthly:first-sat', label: 'First Saturday of the month' },
+  ];
 
   main.innerHTML = `
     <div class="k-page">
@@ -3539,6 +4502,13 @@ async function renderSettings(main) {
       <div class="k-card" style="margin-bottom:16px">
         <h2 class="k-card-title">KPSC Operations Settings</h2>
         <p class="k-card-sub">Configure partnership categories, finance categories, and reminder templates for the KPSC portal.</p>
+        <div class="k-form-group">
+          <label class="k-label">Meeting Cadence</label>
+          <select id="ks-meeting-cadence" class="k-input">
+            ${cadenceOptions.map(o => `<option value="${o.value}" ${meetingCadence === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+          </select>
+          <p class="k-hint">Used to pre-fill the date and title when you start a new meeting. Set to "No fixed cadence" if your committee meets ad-hoc.</p>
+        </div>
         <div class="k-form-group">
           <label class="k-label">SMS/WhatsApp Reminder Template</label>
           <textarea id="ks-reminder-template" class="k-input k-textarea" style="min-height:80px">${esc(reminderTemplate)}</textarea>
@@ -3578,10 +4548,12 @@ async function renderSettings(main) {
         <div class="k-form-group">
           <label class="k-label">DeepSeek Model</label>
           <select id="ks-deepseek-model" class="k-input">
-            <option value="deepseek-chat" ${(res?.ai_deepseek_model||'deepseek-chat')==='deepseek-chat'?'selected':''}>deepseek-chat — DeepSeek V3 (Fast, Recommended)</option>
-            <option value="deepseek-reasoner" ${(res?.ai_deepseek_model||'')==='deepseek-reasoner'?'selected':''}>deepseek-reasoner — DeepSeek R1 (Deep reasoning, slower)</option>
+            <option value="deepseek-v4-flash" ${(res?.ai_deepseek_model||'deepseek-v4-flash')==='deepseek-v4-flash'?'selected':''}>deepseek-v4-flash — V4 Flash (Fast, Recommended)</option>
+            <option value="deepseek-v4-pro" ${(res?.ai_deepseek_model||'')==='deepseek-v4-pro'?'selected':''}>deepseek-v4-pro — V4 Pro (Deep reasoning, 1M context)</option>
+            <option value="deepseek-chat" ${(res?.ai_deepseek_model||'')==='deepseek-chat'?'selected':''}>deepseek-chat — V3 (Deprecated · removed 2026-07-24)</option>
+            <option value="deepseek-reasoner" ${(res?.ai_deepseek_model||'')==='deepseek-reasoner'?'selected':''}>deepseek-reasoner — R1 (Deprecated · removed 2026-07-24)</option>
           </select>
-          <p class="k-hint"><strong>deepseek-chat</strong> (DeepSeek V3) is the recommended model — fast, accurate, and cost-efficient. Use <strong>deepseek-reasoner</strong> (R1) for complex analysis tasks.</p>
+          <p class="k-hint"><strong>deepseek-v4-flash</strong> is recommended for meeting minutes (fast, cheap, 1M context). Use <strong>deepseek-v4-pro</strong> for complex analysis. Legacy V3/R1 models will be removed by DeepSeek on 2026-07-24 — please migrate.</p>
         </div>
 
         <div class="k-form-group">
@@ -3660,7 +4632,7 @@ async function saveSettings() {
   const openaiKey   = document.getElementById('ks-openai-key')?.value.trim()   || '';
   const policyUrl   = document.getElementById('ks-policy-url')?.value.trim()   || '';
   const policyNotes = document.getElementById('ks-policy-notes')?.value.trim() || '';
-  const deepseekModel = document.getElementById('ks-deepseek-model')?.value || 'deepseek-chat';
+  const deepseekModel = document.getElementById('ks-deepseek-model')?.value || 'deepseek-v4-flash';
 
   btn.disabled = true;
   btn.textContent = 'Saving…';
@@ -3700,13 +4672,16 @@ async function saveKpscOpsSettings() {
   const template = document.getElementById('ks-reminder-template')?.value.trim() || '';
   const incomeText = document.getElementById('ks-income-cats')?.value || '';
   const expenseText = document.getElementById('ks-expense-cats')?.value || '';
+  const cadence = document.getElementById('ks-meeting-cadence')?.value || 'none';
   const incomeCategories = incomeText.split(/[\n,]/).map(s=>s.trim().toLowerCase().replace(/\s+/g,'_')).filter(Boolean);
   const expenseCategories = expenseText.split(/[\n,]/).map(s=>s.trim().toLowerCase().replace(/\s+/g,'_')).filter(Boolean);
   const res = await apiPost('settings', {
     kpsc_reminder_template: template,
     kpsc_income_categories: incomeCategories,
     kpsc_expense_categories: expenseCategories,
+    kpsc_meeting_cadence: cadence,
   });
+  if (!res?.error) S.kpscMeetingCadence = cadence;
   if (res?.error) {
     msg.className = 'k-settings-msg k-msg-error';
     msg.textContent = res.error;
@@ -4025,6 +5000,25 @@ function setReconciliationTab(tab) {
   if (jsonTab) jsonTab.classList.toggle('active', tab !== 'pdf');
 }
 
+const PDF_RECONCILIATION_STEPS = [
+  { label: 'Extracting text', key: 'extract' },
+  { label: 'Parsing transactions', key: 'parse' },
+  { label: 'Matching to ledger', key: 'match' },
+];
+
+function renderPdfStepper(stepperEl, activeIdx, errorIdx, errorMsg) {
+  if (!stepperEl) return;
+  stepperEl.style.display = '';
+  stepperEl.innerHTML = `<div class="krec-stepper">${PDF_RECONCILIATION_STEPS.map((s, i) => {
+    let cls = 'krec-step';
+    let icon = String(i + 1);
+    if (i < activeIdx) { cls += ' krec-step-done'; icon = '✓'; }
+    else if (i === activeIdx) { cls += ' krec-step-active'; }
+    if (i === errorIdx) { cls += ' krec-step-error'; icon = '✕'; }
+    return `<div class="${cls}"><span class="krec-step-pip">${icon}</span><span class="krec-step-label">${s.label}</span></div>${i < PDF_RECONCILIATION_STEPS.length - 1 ? '<div class="krec-step-connector"></div>' : ''}`;
+  }).join('')}${errorMsg ? `<p class="krec-step-error-msg">${esc(errorMsg)}</p>` : ''}</div>`;
+}
+
 async function runPdfReconciliation(btn) {
   const input = document.getElementById('krec-pdf-input');
   const file = input?.files?.[0];
@@ -4034,43 +5028,45 @@ async function runPdfReconciliation(btn) {
   }
 
   btn.disabled = true;
-  btn.textContent = 'Reading PDF…';
+  btn.textContent = 'Processing…';
 
   const out = document.getElementById('krec-result');
-  if (out) out.innerHTML = '<div class="k-loading" style="padding:16px">📄 Extracting text from PDF…</div>';
+  const stepperEl = document.getElementById('krec-stepper');
+  if (out) out.innerHTML = '';
+  renderPdfStepper(stepperEl, 0, -1, null);
+
+  const resetBtn = () => {
+    btn.disabled = false;
+    btn.textContent = '🤖 Upload & Reconcile';
+  };
+  const stepError = (stepIdx, msg) => {
+    renderPdfStepper(stepperEl, stepIdx, stepIdx, msg);
+    resetBtn();
+  };
 
   try {
+    // Step 1: Extract text
     const pdfText = await extractPdfText(file);
     if (!pdfText.trim()) {
-      showToast('Could not extract text from this PDF. It may be a scanned image. Try the JSON tab instead.', 'warn');
-      btn.disabled = false;
-      btn.textContent = '🤖 Upload & Reconcile';
-      if (out) out.innerHTML = '';
+      stepError(0, 'No text could be extracted. This PDF may be a scanned image — use the JSON tab to paste transactions manually, or ask your bank for a digital statement.');
       return;
     }
 
-    if (out) out.innerHTML = '<div class="k-loading" style="padding:16px">🤖 AI is parsing transactions…</div>';
-    btn.textContent = 'Parsing…';
-
+    // Step 2: Parse transactions
+    renderPdfStepper(stepperEl, 1, -1, null);
     const parseRes = await apiPost('kpsc-parse-statement', { statementText: pdfText });
     if (parseRes?.error) {
-      showToast(parseRes.error, 'error');
-      btn.disabled = false;
-      btn.textContent = '🤖 Upload & Reconcile';
-      if (out) out.innerHTML = '';
+      stepError(1, parseRes.error);
       return;
     }
-
     const items = parseRes.items || [];
     if (!items.length) {
-      showToast('No transactions found in the PDF. Check the file or try the JSON tab.', 'warn');
-      btn.disabled = false;
-      btn.textContent = '🤖 Upload & Reconcile';
-      if (out) out.innerHTML = '';
+      stepError(1, 'No transactions found in the PDF. Check the file content or try the JSON tab.');
       return;
     }
 
-    btn.textContent = 'Reconciling…';
+    // Step 3: Reconcile
+    renderPdfStepper(stepperEl, 2, -1, null);
     const recRes = await apiPost('kpsc-reconciliation', {
       statementYear: S.financeYear,
       statementMonth: S.financeMonth || 0,
@@ -4078,17 +5074,20 @@ async function runPdfReconciliation(btn) {
       createdBy: S.user?.name || '',
     });
 
-    btn.disabled = false;
-    btn.textContent = '🤖 Upload & Reconcile';
+    if (recRes?.error) {
+      stepError(2, recRes.error);
+      return;
+    }
 
-    if (recRes?.error) { showToast(recRes.error, 'error'); return; }
+    // All done — mark all steps complete and show results
+    renderPdfStepper(stepperEl, 3, -1, null);
     showToast(`PDF parsed: ${items.length} transaction(s) found.`, 'success');
-
     renderReconciliationResult(out, recRes);
+    resetBtn();
   } catch (e) {
     showToast('Error processing PDF: ' + e.message, 'error');
-    btn.disabled = false;
-    btn.textContent = '🤖 Upload & Reconcile';
+    if (stepperEl) stepperEl.style.display = 'none';
+    resetBtn();
     if (out) out.innerHTML = '';
   }
 }
@@ -4205,6 +5204,203 @@ function printMinutes(meetingId) {
   win.document.close();
 }
 
+// ── GLOBAL SEARCH ─────────────────────────────────────────────────
+let _searchDebounceTimer = null;
+
+function toggleSearch() {
+  const overlay = document.getElementById('kpsc-search-overlay');
+  if (!overlay) return;
+  const isOpen = overlay.style.display !== 'none';
+  if (isOpen) {
+    closeSearch();
+  } else {
+    overlay.style.display = '';
+    const input = document.getElementById('kpsc-search-input');
+    if (input) { input.value = ''; input.focus(); }
+    document.getElementById('kpsc-search-results').innerHTML = '';
+  }
+}
+
+function onSearchInput(query) {
+  clearTimeout(_searchDebounceTimer);
+  if (!String(query || '').trim()) {
+    document.getElementById('kpsc-search-results').innerHTML = '';
+    return;
+  }
+  _searchDebounceTimer = setTimeout(() => globalSearch(query), 300);
+}
+
+function closeSearch() {
+  const overlay = document.getElementById('kpsc-search-overlay');
+  if (overlay) overlay.style.display = 'none';
+  const input = document.getElementById('kpsc-search-input');
+  if (input) input.value = '';
+  const results = document.getElementById('kpsc-search-results');
+  if (results) results.innerHTML = '';
+  clearTimeout(_searchDebounceTimer);
+}
+
+// Escape a string for use in a regex (for highlight matching).
+function escapeRegex(s) {
+  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Return an HTML-escaped string with the matched substring wrapped in <mark>.
+function highlightMatch(text, query) {
+  const escaped = esc(text);
+  const escapedQuery = esc(query);
+  // Rebuild: search within the escaped text for the escaped query.
+  const re = new RegExp(`(${escapeRegex(escapedQuery)})`, 'gi');
+  return escaped.replace(re, '<mark>$1</mark>');
+}
+
+// Trigger a one-time background fetch of data that may not be loaded yet.
+async function ensureSearchDataLoaded() {
+  const loads = [];
+  if (!S.partners.length) {
+    loads.push(apiGet('kpsc-partners').then(r => { if (Array.isArray(r)) S.partners = r; }));
+  }
+  if (!S.projects.length) {
+    loads.push(apiGet('kpsc-projects').then(r => { if (Array.isArray(r)) S.projects = r; }));
+  }
+  if (!S.meetings.length) {
+    loads.push(apiGet('ai-secretary-meetings').then(r => {
+      const arr = r?.meetings || r;
+      if (Array.isArray(arr)) S.meetings = arr;
+    }));
+  }
+  if (!S.members.length) {
+    loads.push(apiGet('settings').then(r => {
+      if (Array.isArray(r?.kpsc_members)) S.members = r.kpsc_members;
+    }));
+  }
+  if (loads.length) await Promise.all(loads).catch(() => {});
+}
+
+async function globalSearch(query) {
+  const resultsEl = document.getElementById('kpsc-search-results');
+  if (!resultsEl) return;
+  const q = String(query || '').trim();
+  if (!q) { resultsEl.innerHTML = ''; return; }
+
+  // Show a brief loading indicator while data is being fetched.
+  resultsEl.innerHTML = '<div class="ka-search-loading">Searching…</div>';
+  await ensureSearchDataLoaded();
+
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const lq = q.toLowerCase();
+  const MAX_PER_GROUP = 5;
+  const sections = [];
+
+  // ── Members (hidden for committee_viewer) ─────────────────────
+  if (role !== 'committee_viewer') {
+    const hits = [];
+    for (const m of S.members) {
+      if (hits.length >= MAX_PER_GROUP) break;
+      const searchIn = [m.name, m.role, m.group, m.position].filter(Boolean).join(' ').toLowerCase();
+      if (searchIn.includes(lq)) {
+        const snippet = m.position ? `${esc(m.position)} · ${esc(m.group)}` : esc(m.group || '');
+        hits.push(`
+          <div class="ka-search-result" onclick="Kpsc.navigate('members');Kpsc.closeSearch()">
+            <span class="ka-search-badge ka-badge-member">Member</span>
+            <span class="ka-search-title">${highlightMatch(m.name || '', q)}</span>
+            <span class="ka-search-sub">${snippet}</span>
+          </div>`);
+      }
+    }
+    if (hits.length) sections.push(`<div class="ka-search-group">${hits.join('')}</div>`);
+  }
+
+  // ── Partners ──────────────────────────────────────────────────
+  {
+    const hits = [];
+    for (const p of S.partners) {
+      if (hits.length >= MAX_PER_GROUP) break;
+      const searchIn = [p.fullName, p.phone, p.email, p.partnershipType, p.group].filter(Boolean).join(' ').toLowerCase();
+      if (searchIn.includes(lq)) {
+        hits.push(`
+          <div class="ka-search-result" onclick="Kpsc.navigate('partners');Kpsc.closeSearch()">
+            <span class="ka-search-badge ka-badge-partner">Partner</span>
+            <span class="ka-search-title">${highlightMatch(p.fullName || '', q)}</span>
+            <span class="ka-search-sub">${esc(p.partnershipType ? p.partnershipType.replace(/_/g, ' ') : '')}</span>
+          </div>`);
+      }
+    }
+    if (hits.length) sections.push(`<div class="ka-search-group">${hits.join('')}</div>`);
+  }
+
+  // ── Meetings ──────────────────────────────────────────────────
+  {
+    const hits = [];
+    for (const m of S.meetings) {
+      if (hits.length >= MAX_PER_GROUP) break;
+      const resText = (m.resolutions || []).map(r => [r.text, r.voteSummary].filter(Boolean).join(' ')).join(' ');
+      const actText = (m.actionItems || []).map(a => [a.description, a.task, a.assignee].filter(Boolean).join(' ')).join(' ');
+      const searchIn = [m.title, m.meetingDate, m.summaryShort, m.summaryLong, m.transcriptText, resText, actText].filter(Boolean).join(' ').toLowerCase();
+      if (searchIn.includes(lq)) {
+        // Find the first field that matched for the snippet.
+        const fields = [
+          { label: m.title, text: m.title },
+          { label: 'Summary', text: m.summaryShort },
+          { label: 'Transcript', text: m.transcriptText },
+        ];
+        let snippet = '';
+        for (const f of fields) {
+          if (f.text && f.text.toLowerCase().includes(lq)) {
+            const idx = f.text.toLowerCase().indexOf(lq);
+            const start = Math.max(0, idx - 30);
+            const end   = Math.min(f.text.length, idx + q.length + 30);
+            snippet = (start > 0 ? '…' : '') + highlightMatch(f.text.slice(start, end), q) + (end < f.text.length ? '…' : '');
+            break;
+          }
+        }
+        const meetingId = esc(m.id || '');
+        hits.push(`
+          <div class="ka-search-result" onclick="Kpsc.openMeeting('${meetingId}');Kpsc.closeSearch()">
+            <span class="ka-search-badge ka-badge-meeting">Meeting</span>
+            <span class="ka-search-title">${highlightMatch(m.title || '', q)}</span>
+            ${snippet ? `<span class="ka-search-sub">${snippet}</span>` : `<span class="ka-search-sub">${esc(m.meetingDate || '')}</span>`}
+          </div>`);
+      }
+    }
+    if (hits.length) sections.push(`<div class="ka-search-group">${hits.join('')}</div>`);
+  }
+
+  // ── Projects ──────────────────────────────────────────────────
+  {
+    const hits = [];
+    for (const p of S.projects) {
+      if (hits.length >= MAX_PER_GROUP) break;
+      const searchIn = [p.title, p.name, p.description, p.status, p.owner, p.createdBy].filter(Boolean).join(' ').toLowerCase();
+      if (searchIn.includes(lq)) {
+        hits.push(`
+          <div class="ka-search-result" onclick="Kpsc.navigate('projects');Kpsc.closeSearch()">
+            <span class="ka-search-badge ka-badge-project">Project</span>
+            <span class="ka-search-title">${highlightMatch(p.title || p.name || '', q)}</span>
+            <span class="ka-search-sub">${esc(p.status || '')}</span>
+          </div>`);
+      }
+    }
+    if (hits.length) sections.push(`<div class="ka-search-group">${hits.join('')}</div>`);
+  }
+
+  if (sections.length) {
+    resultsEl.innerHTML = sections.join('<hr class="ka-search-divider" />');
+  } else {
+    resultsEl.innerHTML = `<div class="ka-search-empty">No results for <strong>${esc(q)}</strong></div>`;
+  }
+}
+
+// Close search on outside click
+document.addEventListener('click', e => {
+  const overlay = document.getElementById('kpsc-search-overlay');
+  if (!overlay || overlay.style.display === 'none') return;
+  const toggle = document.getElementById('kpsc-search-toggle');
+  if (!overlay.contains(e.target) && e.target !== toggle) {
+    closeSearch();
+  }
+}, true);
+
 // ── BOOT ──────────────────────────────────────────────────────────
 function init() {
   const session = loadSession();
@@ -4227,6 +5423,11 @@ window.Kpsc = {
   submitPinChange,
   navigate,
   goBack,
+  fabAction,
+  toggleSearch,
+  onSearchInput,
+  closeSearch,
+  globalSearch,
   startNewMeeting,
   openMeeting,
   saveMeeting,
@@ -4234,6 +5435,7 @@ window.Kpsc = {
   endMeeting,
   processMeeting,
   saveMinutesReview,
+  openReviewEditor,
   addMember,
   removeMember,
   memberFieldChange,
@@ -4252,12 +5454,15 @@ window.Kpsc = {
   closeFinanceModal,
   saveFinanceEntry,
   updateFinanceCategoryOptions,
+  scanReceiptPhoto,
+  mapReceiptOcrToFormFields,
   setFinanceYear,
   setFinanceMonth,
   deleteFinanceEntry,
   runReconciliation,
   sendBulkReminders,
   copyReminderMessage,
+  debouncedSaveReminderTemplate,
   setReportsYear,
   saveKpscOpsSettings,
   partnerTypeLabel,
@@ -4266,6 +5471,8 @@ window.Kpsc = {
   openAccountEditor,
   closeAccountEditor,
   saveAccountEditor,
+  confirmDeleteKpscAccount,
+  executeDeleteKpscAccount,
   saveSettings,
   clearAiKeys,
   refreshApiStatus,
@@ -4305,8 +5512,12 @@ document.addEventListener('DOMContentLoaded', init);
 window.addEventListener('popstate', e => {
   const page = e.state?.page || window.location.hash.replace('#', '') || 'dashboard';
   if (page && page !== S.page) {
-    S.page = page;
-    document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.toggle('active', b.dataset.page === page));
+    const mapping = PAGE_TO_GROUP[page] || { group: 'home', subTab: null };
+    S.page   = page;
+    S.group  = mapping.group;
+    S.subTab = mapping.subTab;
+    document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.toggle('active', b.dataset.group === S.group));
+    updateFab();
     renderPage(page);
   }
 });

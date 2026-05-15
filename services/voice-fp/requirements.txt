@@ -1,0 +1,15 @@
+# KPSC Voice FP service — pinned Python dependencies
+# NOTE: torch and torchaudio CPU wheels are installed via --index-url in the Dockerfile.
+# They are listed here for reference but will be overridden by the Dockerfile install order.
+
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+speechbrain==1.0.2
+# torch and torchaudio: CPU wheel installed from pytorch.org in Dockerfile (see Stage 1).
+# Pinned here so pip lock is clear; Dockerfile installs CPU builds before this file.
+torch==2.5.1
+torchaudio==2.5.1
+soundfile==0.12.1
+librosa==0.10.2.post1
+numpy==1.26.4
