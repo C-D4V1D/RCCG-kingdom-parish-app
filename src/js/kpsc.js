@@ -128,6 +128,10 @@ const Rec = {
   voiceTicked: new Set(),   // members auto-ticked from transcript this session
   _nameIndex: null,         // lazily built Map<token, [{groupKey, idx, fullName}]>
   _nameIndexSize: -1,       // S.members.length when _nameIndex was last built
+  // VF-4 voice-identification state
+  speakerIdentified: new Set(), // speaker indices for which we've already attempted voice-id
+  voiceIdServiceDown: false,    // true after 2 consecutive 503s from /api/voice-identify
+  _voiceIdConsecutive503: 0,    // internal counter for 503 detection
 };
 
 // ── DIARIZER (Deepgram speaker diarization) ────────────────────────
@@ -327,6 +331,11 @@ function recAppendTranscript(text, itemId = '', speaker = null) {
   if (speaker !== null && speaker !== undefined && !Rec.seenSpeakers.has(speaker)) {
     Rec.seenSpeakers.add(speaker);
     recRenderSpeakerMap();
+    // VF-4: attempt voice fingerprint identification for this new speaker.
+    if (!Rec.speakerIdentified.has(speaker) && !Rec.voiceIdServiceDown && !Rec.speakerMap.has(speaker)) {
+      // Defer by one event loop tick to allow speakerRanges to accumulate.
+      setTimeout(() => voiceIdTriggerForSpeaker(speaker), 0);
+    }
   }
   const entry = { itemId, timestamp: recTimestamp(), text: clean, speaker: speaker ?? null };
   Rec.transcriptEntries.push(entry);
@@ -560,6 +569,10 @@ async function recStart(btn) {
     Rec.manualStop = false;
     Rec.reconnectAttempts = 0;
     Rec.status = 'recording';
+    // Reset voice-id state for the new session (VF-4).
+    Rec.speakerIdentified      = new Set();
+    Rec.voiceIdServiceDown     = false;
+    Rec._voiceIdConsecutive503 = 0;
     // Reset per-speaker identification state for the new session.
     Diarizer.speakerRanges   = new Map();
     Diarizer.identifyPending = new Set();
@@ -774,6 +787,9 @@ function recReset() {
   Rec.voiceTicked = new Set();
   Rec._nameIndex = null;
   Rec._nameIndexSize = -1;
+  Rec.speakerIdentified      = new Set();
+  Rec.voiceIdServiceDown     = false;
+  Rec._voiceIdConsecutive503 = 0;
   Diarizer.status = 'offline';
   Diarizer.reconnectAttempts = 0;
   Diarizer.speakerRanges   = new Map();
@@ -1229,6 +1245,144 @@ async function diarizerTriggerIdentify(speakerIdx) {
   }
 }
 
+// ── VF-4: VOICE FINGERPRINT IDENTIFICATION DURING MEETINGS ───────────
+
+/**
+ * Pure helper — given a /api/voice-identify response and a members array,
+ * returns { groupKey, idx } of the matching member, or null if no match.
+ * Exported so unit tests can exercise it without DOM dependencies.
+ */
+function shouldAutoTickFromIdentify(identifyResponse, members) {
+  if (!identifyResponse || !identifyResponse.match || !identifyResponse.memberName) return null;
+  const name = identifyResponse.memberName;
+  for (const g of GROUPS) {
+    const groupMembers = members.filter(m => m.group === g.key);
+    for (let i = 0; i < groupMembers.length; i++) {
+      if (groupMembers[i].name === name) return { groupKey: g.key, idx: i };
+    }
+  }
+  return null;
+}
+
+/**
+ * VF-4 hook: called when a new Deepgram speaker index is first seen.
+ * Buffers ~3.5 s of PCM from the ring buffer, encodes as WAV, calls
+ * /api/voice-identify, and auto-assigns the speaker if a match is found.
+ */
+async function voiceIdTriggerForSpeaker(speakerIdx) {
+  // Guard: only attempt once per speaker per session.
+  if (Rec.speakerIdentified.has(speakerIdx)) return;
+  if (Rec.voiceIdServiceDown) return;
+  if (Rec.speakerMap.has(speakerIdx)) return; // already assigned manually
+
+  Rec.speakerIdentified.add(speakerIdx);
+
+  try {
+    // Extract ~3.5 s of audio for this speaker from the ring buffer.
+    const targetSamples = Math.round(3.5 * (Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE));
+    const ranges = Diarizer.speakerRanges.get(speakerIdx) || [];
+
+    let float32 = null;
+    if (ranges.length > 0 && Diarizer.pcmSampleRate) {
+      // Take the most recent audio up to targetSamples
+      let accumulated = 0;
+      const toExtract = [];
+      for (let i = ranges.length - 1; i >= 0 && accumulated < targetSamples; i--) {
+        toExtract.unshift(ranges[i]);
+        accumulated += ranges[i].endSample - ranges[i].startSample;
+      }
+      const chunks = toExtract
+        .map(r => diarizerExtractPcmRange(r.startSample, r.endSample))
+        .filter(Boolean);
+      if (chunks.length > 0) {
+        const totalLen = Math.min(chunks.reduce((a, c) => a + c.length, 0), targetSamples);
+        float32 = new Float32Array(totalLen);
+        let pos = 0;
+        for (const c of chunks) {
+          if (pos >= float32.length) break;
+          const take = Math.min(c.length, float32.length - pos);
+          float32.set(c.subarray(0, take), pos);
+          pos += take;
+        }
+      }
+    }
+
+    if (!float32 || float32.length < 1.5 * (Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE)) {
+      // Not enough audio yet — let Azure identify handle it next time
+      Rec.speakerIdentified.delete(speakerIdx); // allow retry
+      return;
+    }
+
+    // Resample to 16 kHz and encode as WAV using Int16 path.
+    const resampled = resampleTo16k(float32, Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE);
+    const int16     = new Int16Array(resampled.length);
+    for (let i = 0; i < resampled.length; i++) {
+      int16[i] = Math.max(-32768, Math.min(32767, Math.round(resampled[i] * 32767)));
+    }
+    const wavBuf  = pcm16ToWav(int16, 16000);
+    const wavBlob = new Blob([wavBuf], { type: 'audio/wav' });
+
+    const form = new FormData();
+    form.append('audio', wavBlob, 'speaker-id.wav');
+
+    const res = await fetch(`${API}/voice-identify`, {
+      method: 'POST',
+      headers: { ...kpscSessionHeader() },
+      body: form,
+    });
+
+    if (res.status === 503) {
+      Rec._voiceIdConsecutive503 = (Rec._voiceIdConsecutive503 || 0) + 1;
+      if (Rec._voiceIdConsecutive503 >= 2) {
+        Rec.voiceIdServiceDown = true;
+        console.warn('Voice identification service unavailable; falling back to manual speaker assignment.');
+      }
+      return;
+    }
+    Rec._voiceIdConsecutive503 = 0;
+
+    if (!res.ok) { console.warn('[voice-id] identify failed', res.status); return; }
+
+    const data = await res.json();
+    if (data.error) { console.warn('[voice-id] identify error:', data.error); return; }
+
+    if (data.match && data.memberName) {
+      if (Rec.speakerMap.has(speakerIdx)) return; // assigned manually while we waited
+      assignSpeaker(speakerIdx, data.memberName);
+
+      // Add voice-id badge to the speaker row in the UI.
+      const panel = document.getElementById('kpsc-speaker-map');
+      if (panel) {
+        const rows = panel.querySelectorAll('.k-spk-row');
+        const indices = [...Rec.seenSpeakers].sort((a, b) => a - b);
+        const rowIdx = indices.indexOf(speakerIdx);
+        if (rowIdx >= 0 && rows[rowIdx]) {
+          const existing = rows[rowIdx].querySelector('.k-spk-voice-badge');
+          if (!existing) {
+            const badge = document.createElement('span');
+            badge.className = 'k-spk-voice-badge';
+            badge.title = `Voice-identified (score ${data.score?.toFixed(2) ?? '?'})`;
+            badge.textContent = `🎙 voice-id'd (${data.score?.toFixed(2) ?? '?'})`;
+            rows[rowIdx].appendChild(badge);
+          }
+        }
+      }
+
+      // C2: B3 integration — auto-tick attendance for this member.
+      const target = shouldAutoTickFromIdentify(data, S.members);
+      if (target) {
+        autoTickMember(target.groupKey, target.idx);
+      }
+
+      showToast(`🎙 Voice-identified: ${data.memberName} (${(data.score * 100).toFixed(0)}% match)`, 'success');
+    }
+  } catch (e) {
+    console.warn('[voice-id] voiceIdTriggerForSpeaker error:', e);
+    // Allow retry on unexpected errors
+    Rec.speakerIdentified.delete(speakerIdx);
+  }
+}
+
 
 function kpscSessionHeader() {
   const user = S.user;
@@ -1514,6 +1668,36 @@ function pcmToWav(float32, sampleRate) {
   for (let i = 0; i < float32.length; i++) {
     int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
   }
+  const dataLen = int16.length * 2;
+  const buf     = new ArrayBuffer(44 + dataLen);
+  const view    = new DataView(buf);
+  // RIFF header
+  'RIFF'.split('').forEach((c, i) => view.setUint8(i,      c.charCodeAt(0)));
+  view.setUint32(4,  36 + dataLen, true);
+  'WAVE'.split('').forEach((c, i) => view.setUint8(8  + i, c.charCodeAt(0)));
+  // fmt  chunk
+  'fmt '.split('').forEach((c, i) => view.setUint8(12 + i, c.charCodeAt(0)));
+  view.setUint32(16, 16,              true); // chunk size
+  view.setUint16(20,  1,              true); // PCM
+  view.setUint16(22,  1,              true); // mono
+  view.setUint32(24, sampleRate,      true);
+  view.setUint32(28, sampleRate * 2,  true); // byte rate
+  view.setUint16(32,  2,              true); // block align
+  view.setUint16(34, 16,              true); // bits per sample
+  // data chunk
+  'data'.split('').forEach((c, i) => view.setUint8(36 + i, c.charCodeAt(0)));
+  view.setUint32(40, dataLen, true);
+  new Int16Array(buf, 44).set(int16);
+  return buf;
+}
+
+/**
+ * Build a standard WAV (PCM 16-bit mono) ArrayBuffer from an Int16Array.
+ * This is the counterpart of pcmToWav but accepts int16 input directly,
+ * so callers that already have int16 samples (e.g. from diarizerFloat32ToInt16)
+ * don't need to convert back to Float32.
+ */
+function pcm16ToWav(int16, sampleRate) {
   const dataLen = int16.length * 2;
   const buf     = new ArrayBuffer(44 + dataLen);
   const view    = new DataView(buf);
@@ -3119,11 +3303,35 @@ function renderMembersList() {
   }).join('') || `<div class="k-empty">No members yet.</div>`;
 }
 
+/**
+ * Return a stable D1 ID for a member. Uses an existing voice_member_id if
+ * present, otherwise generates one from group + name slug and stores it back
+ * on the in-memory member object (will persist on next saveMembers call).
+ */
+function memberVoiceId(mem) {
+  if (mem.voice_member_id) return mem.voice_member_id;
+  const slug = String(mem.name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  const id = `vfp_${mem.group || 'x'}_${slug || 'unknown'}`;
+  mem.voice_member_id = id;
+  return id;
+}
+
 function memberRow(idx, mem) {
   const enrolled    = !!mem.azureSpeakerProfileId;
   const enrollClass = enrolled ? 'kbtn kbtn-sm k-enroll-btn k-enrolled' : 'kbtn kbtn-sm kbtn-ghost k-enroll-btn';
   const enrollTitle = enrolled ? 'Voice enrolled — click to re-enrol' : 'Enrol voice fingerprint for auto-identification';
   const enrollIcon  = enrolled ? '🎙✓' : '🎙';
+
+  // VF-3: voice fingerprint enrollment status badge
+  const vfpEnrolled = !!mem.voice_enrolled_at;
+  const vfpBadge = vfpEnrolled
+    ? `<span class="k-vfp-badge k-vfp-enrolled" title="Voice fingerprint enrolled ${esc(mem.voice_enrolled_at || '')}">🎙&#xFE0F; FP</span>`
+    : '';
+
   return `
     <div class="k-mem-row" id="kmem-row-${idx}">
       <select class="k-input k-input-sm k-mem-group" data-idx="${idx}" onchange="Kpsc.memberFieldChange(${idx},'group',this.value)">
@@ -3133,6 +3341,10 @@ function memberRow(idx, mem) {
         value="${esc(mem.name || '')}" onchange="Kpsc.memberFieldChange(${idx},'name',this.value)" />
       <input class="k-input k-input-sm k-mem-pos" type="text" placeholder="Position (optional)"
         value="${esc(mem.position || '')}" onchange="Kpsc.memberFieldChange(${idx},'position',this.value)" />
+      ${vfpBadge}
+      <button class="kbtn kbtn-sm kbtn-ghost k-vfp-enroll-btn" onclick="Kpsc.showVoiceFpEnrollModal(${idx})" title="${vfpEnrolled ? 'Re-enroll voice fingerprint (KPSC AI system)' : 'Enroll voice fingerprint for meeting identification'}">
+        ${vfpEnrolled ? '🔁 FP' : '🎙 FP'}
+      </button>
       <button class="${enrollClass}" onclick="Kpsc.enrollMemberVoice(${idx})" title="${enrollTitle}">${enrollIcon}</button>
       <button class="kbtn kbtn-sm kbtn-ghost kbtn-remove" onclick="Kpsc.removeMember(${idx})">✕</button>
     </div>`;
@@ -3389,6 +3601,227 @@ async function finishEnrollRecording() {
   }
 }
 
+
+// ── VF-3 VOICE FINGERPRINT ENROLLMENT (new /api/voice-enroll path) ───────
+
+const VFP_RECORD_DURATION_SEC = 5;
+
+// State for the VF-3 enrollment modal recording.
+const VfpRec = {
+  stream: null,
+  mediaRecorder: null,
+  chunks: [],
+  blob: null,
+  blobUrl: null,
+  timer: null,
+  elapsed: 0,
+  memberIdx: -1,
+};
+
+function vfpCleanup() {
+  clearInterval(VfpRec.timer);
+  VfpRec.timer = null;
+  if (VfpRec.stream) { VfpRec.stream.getTracks().forEach(t => t.stop()); VfpRec.stream = null; }
+  if (VfpRec.blobUrl) { URL.revokeObjectURL(VfpRec.blobUrl); VfpRec.blobUrl = null; }
+  VfpRec.chunks = [];
+  VfpRec.blob = null;
+  VfpRec.elapsed = 0;
+}
+
+function showVoiceFpEnrollModal(idx) {
+  const member = S.members[idx];
+  if (!member || !member.name.trim()) {
+    showToast('Please save the member name first.', 'warn');
+    return;
+  }
+
+  document.getElementById('k-vfp-modal')?.remove();
+  vfpCleanup();
+  VfpRec.memberIdx = idx;
+
+  const alreadyEnrolled = !!member.voice_enrolled_at;
+  const modal = document.createElement('div');
+  modal.id        = 'k-vfp-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">🎙 Voice Enrollment — ${esc(member.name)}</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeVoiceFpModal()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p class="k-enroll-instruction">Voice enrollment stores a mathematical representation of <strong>${esc(member.name)}</strong>'s voice (192 numbers) that lets KPSC identify them in meetings. The raw recording is not kept. You can delete this data at any time. By proceeding you confirm <strong>${esc(member.name)}</strong> has consented to this enrollment.</p>
+        ${alreadyEnrolled ? `<div class="k-enroll-warn">⚠ Already enrolled (${esc(new Date(member.voice_enrolled_at).toLocaleDateString())}${member.voice_sample_count ? ` · ${member.voice_sample_count} sample(s)` : ''}). Recording again will replace the existing data.</div>` : ''}
+        <div id="k-vfp-status"></div>
+        <div id="k-vfp-recording-ui" style="display:none">
+          <div class="k-vfp-rec-indicator">
+            <span class="k-vfp-dot"></span>
+            <span id="k-vfp-countdown" class="k-enroll-timer">5</span>
+          </div>
+        </div>
+        <div id="k-vfp-playback-ui" style="display:none">
+          <audio id="k-vfp-audio" controls style="width:100%;margin-top:8px;"></audio>
+        </div>
+      </div>
+      <div class="k-modal-footer" id="k-vfp-footer">
+        <button class="kbtn kbtn-record" id="k-vfp-record-btn" onclick="Kpsc.startVoiceFpRecording()">🔴 Record 5 seconds</button>
+        <button class="kbtn kbtn-primary" id="k-vfp-submit-btn" onclick="Kpsc.submitVoiceFpEnrollment()" disabled>Submit</button>
+        ${alreadyEnrolled ? `<button class="kbtn kbtn-danger-outline" onclick="Kpsc.removeVoiceFpEnrollment(${idx})">🗑 Remove voice data</button>` : ''}
+        <button class="kbtn kbtn-ghost" onclick="Kpsc.closeVoiceFpModal()">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function closeVoiceFpModal() {
+  vfpCleanup();
+  if (VfpRec.mediaRecorder && VfpRec.mediaRecorder.state !== 'inactive') {
+    try { VfpRec.mediaRecorder.stop(); } catch (_) { /* noop */ }
+  }
+  VfpRec.mediaRecorder = null;
+  document.getElementById('k-vfp-modal')?.remove();
+}
+
+async function startVoiceFpRecording() {
+  const recordBtn  = document.getElementById('k-vfp-record-btn');
+  const submitBtn  = document.getElementById('k-vfp-submit-btn');
+  const statusEl   = document.getElementById('k-vfp-status');
+  const recUi      = document.getElementById('k-vfp-recording-ui');
+  const playbackUi = document.getElementById('k-vfp-playback-ui');
+
+  if (recordBtn) { recordBtn.disabled = true; recordBtn.textContent = '🎙 Recording…'; }
+  if (submitBtn) submitBtn.disabled = true;
+  vfpCleanup();
+
+  try {
+    VfpRec.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    VfpRec.chunks = [];
+    VfpRec.elapsed = 0;
+
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+    VfpRec.mediaRecorder = new MediaRecorder(VfpRec.stream, mimeType ? { mimeType } : undefined);
+    VfpRec.mediaRecorder.ondataavailable = e => { if (e.data.size > 0) VfpRec.chunks.push(e.data); };
+    VfpRec.mediaRecorder.onstop = () => {
+      VfpRec.blob = new Blob(VfpRec.chunks, { type: mimeType || 'audio/webm' });
+      if (VfpRec.blobUrl) URL.revokeObjectURL(VfpRec.blobUrl);
+      VfpRec.blobUrl = URL.createObjectURL(VfpRec.blob);
+      const audio = document.getElementById('k-vfp-audio');
+      if (audio) { audio.src = VfpRec.blobUrl; }
+      if (playbackUi) playbackUi.style.display = '';
+      if (recUi) recUi.style.display = 'none';
+      if (recordBtn) { recordBtn.disabled = false; recordBtn.textContent = '🔄 Re-record'; }
+      if (submitBtn) submitBtn.disabled = false;
+    };
+    VfpRec.mediaRecorder.start();
+
+    if (recUi) recUi.style.display = '';
+    const countdownEl = document.getElementById('k-vfp-countdown');
+    if (countdownEl) countdownEl.textContent = String(VFP_RECORD_DURATION_SEC);
+
+    VfpRec.timer = setInterval(() => {
+      VfpRec.elapsed++;
+      const remaining = VFP_RECORD_DURATION_SEC - VfpRec.elapsed;
+      if (countdownEl) countdownEl.textContent = String(Math.max(0, remaining));
+      if (VfpRec.elapsed >= VFP_RECORD_DURATION_SEC) {
+        clearInterval(VfpRec.timer);
+        VfpRec.timer = null;
+        if (VfpRec.mediaRecorder && VfpRec.mediaRecorder.state !== 'inactive') {
+          VfpRec.mediaRecorder.stop();
+        }
+        VfpRec.stream.getTracks().forEach(t => t.stop());
+        VfpRec.stream = null;
+      }
+    }, 1000);
+
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = `<div class="k-enroll-error">❌ Microphone error: ${esc(e.message)}</div>`;
+    if (recordBtn) { recordBtn.disabled = false; recordBtn.textContent = '🔴 Record 5 seconds'; }
+  }
+}
+
+async function submitVoiceFpEnrollment() {
+  const submitBtn = document.getElementById('k-vfp-submit-btn');
+  const statusEl  = document.getElementById('k-vfp-status');
+
+  if (!VfpRec.blob) { showToast('Please record audio first.', 'warn'); return; }
+  const idx    = VfpRec.memberIdx;
+  const member = S.members[idx];
+  if (!member) return;
+
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Submitting…'; }
+
+  try {
+    // Step 1: sync the member to D1.
+    const vid = memberVoiceId(member);
+    const syncRes = await fetch(`${API}/voice-member-sync/${encodeURIComponent(vid)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
+      body: JSON.stringify({ name: member.name, group: member.group || '', position: member.position || '' }),
+    });
+    const syncData = await syncRes.json();
+    if (syncData.error) throw new Error(syncData.error);
+
+    // Step 2: enroll the audio.
+    const form = new FormData();
+    form.append('audio', VfpRec.blob, 'enrollment.webm');
+    const enrollRes = await fetch(`${API}/voice-enroll/${encodeURIComponent(vid)}`, {
+      method: 'POST',
+      headers: { ...kpscSessionHeader() },
+      body: form,
+    });
+    const enrollData = await enrollRes.json();
+    if (enrollData.error) throw new Error(enrollData.error);
+
+    // Step 3: persist enrollment metadata back on the JSON member.
+    S.members[idx].voice_enrolled_at  = enrollData.enrolledAt;
+    S.members[idx].voice_sample_count = enrollData.sampleCount;
+    S.members[idx].voice_member_id    = vid;
+    await apiPost('settings', { kpsc_members: S.members });
+
+    showToast(`Voice enrolled for ${member.name}`, 'success');
+    closeVoiceFpModal();
+
+    // Refresh the member list row.
+    const list = document.getElementById('km-members-list');
+    if (list) list.innerHTML = renderMembersList();
+
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = `<div class="k-enroll-error">❌ ${esc(e.message)}</div>`;
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Submit'; }
+  }
+}
+
+async function removeVoiceFpEnrollment(idx) {
+  const member = S.members[idx];
+  if (!member) return;
+  if (!confirm(`This permanently deletes the voice enrollment for ${member.name}. Continue?`)) return;
+
+  const vid = member.voice_member_id || memberVoiceId(member);
+  try {
+    const res = await fetch(`${API}/voice-enrollment/${encodeURIComponent(vid)}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    // Clear local state.
+    delete S.members[idx].voice_enrolled_at;
+    delete S.members[idx].voice_sample_count;
+    await apiPost('settings', { kpsc_members: S.members });
+
+    showToast('Voice data removed', 'success');
+    closeVoiceFpModal();
+
+    const list = document.getElementById('km-members-list');
+    if (list) list.innerHTML = renderMembersList();
+  } catch (e) {
+    showToast(`Failed to remove: ${e.message}`, 'error');
+  }
+}
 
 
 function currentYear() {
@@ -5519,6 +5952,12 @@ window.Kpsc = {
   showEnrollModal,
   closeEnrollModal,
   startEnrollRecording,
+  // VF-3 voice fingerprint enrollment
+  showVoiceFpEnrollModal,
+  closeVoiceFpModal,
+  startVoiceFpRecording,
+  submitVoiceFpEnrollment,
+  removeVoiceFpEnrollment,
   // Projects
   renderProjects,
   setProjectsFilter,

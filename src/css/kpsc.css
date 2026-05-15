@@ -612,3 +612,15 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 @media print {
   #ka-fab, .ka-subtabs, .ka-search-overlay, .ka-search-toggle { display: none !important; }
 }
+
+/* ── VF-3: voice fingerprint enrollment (new KPSC embedder path) ─── */
+.k-vfp-badge{display:inline-flex;align-items:center;font-size:11px;padding:2px 6px;border-radius:999px;margin-right:4px;}
+.k-vfp-enrolled{background:#d1fae5;color:#065f46;border:1px solid #6ee7b7;}
+.k-vfp-enroll-btn{font-size:12px;padding:5px 9px;}
+.k-vfp-rec-indicator{display:flex;align-items:center;gap:10px;padding:14px 0 8px;}
+.k-vfp-dot{width:14px;height:14px;border-radius:50%;background:var(--red);animation:vfp-pulse 1s infinite;}
+@keyframes vfp-pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.4;transform:scale(1.25);}}
+
+/* ── VF-4: speaker-map voice-id badge ────────────────────────────── */
+.k-spk-voice-badge{font-size:11px;background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;
+  border-radius:999px;padding:2px 7px;margin-left:8px;white-space:nowrap;}
