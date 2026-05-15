@@ -181,6 +181,132 @@ class TestEmbedSuccess:
 
 
 # ---------------------------------------------------------------------------
+# Tests — ffmpeg fallback path (webm/opus from MediaRecorder)
+# ---------------------------------------------------------------------------
+
+class TestEmbedFfmpegFallback:
+    """
+    When the browser's MediaRecorder uploads webm/opus, the primary
+    torchaudio.load call cannot parse the container directly. The decoder
+    falls back to piping the bytes through ffmpeg via stdin -> stdout and
+    re-loads the resulting WAV. These tests exercise that fallback path.
+    """
+    VALID_HEADERS = {"Authorization": "Bearer test-secret-token"}
+
+    def test_torchaudio_failure_triggers_ffmpeg_fallback(self, client, monkeypatch):
+        """Simulate torchaudio.load raising on the first attempt and ffmpeg
+        returning a valid 3s WAV; the endpoint should succeed via the fallback."""
+        import app.main as main_module
+
+        # Build a real 3s WAV that the ffmpeg subprocess "returns".
+        wav_bytes = _make_wav(3.0)
+
+        # Track how the primary load is called so we can fail it ONCE then
+        # let the post-ffmpeg load succeed.
+        calls = {"load": 0}
+        original_load = main_module.torchaudio.load
+
+        def flaky_load(buf):
+            calls["load"] += 1
+            if calls["load"] == 1:
+                raise RuntimeError("simulated webm/opus decode failure")
+            return original_load(buf)
+
+        monkeypatch.setattr(main_module.torchaudio, "load", flaky_load)
+
+        # Mock subprocess.run so we don't actually invoke ffmpeg in unit tests.
+        class FakeCompletedProcess:
+            stdout = wav_bytes
+            stderr = b""
+            returncode = 0
+
+        captured_args = {}
+
+        def fake_run(cmd, **kwargs):
+            captured_args["cmd"] = cmd
+            captured_args["input_len"] = len(kwargs.get("input", b""))
+            captured_args["timeout"] = kwargs.get("timeout")
+            return FakeCompletedProcess()
+
+        import subprocess
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        # Use webm content type to mirror what MediaRecorder produces.
+        resp = client.post(
+            "/embed",
+            files={"audio": ("recording.webm", wav_bytes, "audio/webm")},
+            headers=self.VALID_HEADERS,
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body["embedding"]) == 192
+        # Verify ffmpeg was actually invoked with the expected pipeline shape.
+        cmd = captured_args["cmd"]
+        assert cmd[0] == "ffmpeg"
+        assert "pipe:0" in cmd
+        assert "pipe:1" in cmd
+        assert "pcm_s16le" in cmd
+        assert captured_args["input_len"] == len(wav_bytes)
+        assert captured_args["timeout"] == 20
+
+    def test_ffmpeg_failure_returns_422(self, client, monkeypatch):
+        """If ffmpeg exits non-zero (truly unrecognised format), the endpoint
+        must return HTTP 422 with a friendly message, not 500."""
+        import app.main as main_module
+
+        def always_fail_load(buf):
+            raise RuntimeError("torchaudio cannot decode this")
+
+        monkeypatch.setattr(main_module.torchaudio, "load", always_fail_load)
+
+        import subprocess
+
+        def fake_run(cmd, **kwargs):
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=cmd,
+                output=b"",
+                stderr=b"Invalid data found when processing input",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        resp = client.post(
+            "/embed",
+            files={"audio": ("garbage.bin", b"\x00\x01\x02not_audio", "application/octet-stream")},
+            headers=self.VALID_HEADERS,
+        )
+        assert resp.status_code == 422
+        assert "Could not decode" in resp.json()["detail"]
+
+    def test_ffmpeg_missing_binary_returns_500(self, client, monkeypatch):
+        """If ffmpeg isn't installed in the runtime image we should surface a
+        clear 500 server-misconfigured error rather than a vague decode error."""
+        import app.main as main_module
+
+        def always_fail_load(buf):
+            raise RuntimeError("torchaudio cannot decode this")
+
+        monkeypatch.setattr(main_module.torchaudio, "load", always_fail_load)
+
+        import subprocess
+
+        def fake_run(cmd, **kwargs):
+            raise FileNotFoundError("ffmpeg")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        resp = client.post(
+            "/embed",
+            files={"audio": ("clip.webm", b"abc", "audio/webm")},
+            headers=self.VALID_HEADERS,
+        )
+        assert resp.status_code == 500
+        assert "ffmpeg not installed" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
 # Slow / integration tests (require real ECAPA model + network or cache)
 # ---------------------------------------------------------------------------
 

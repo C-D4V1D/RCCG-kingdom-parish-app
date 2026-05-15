@@ -323,6 +323,11 @@ export async function onRequest(context) {
       if (auth instanceof Response) return auth;
       return await parseStatementWithAI(env, DB, body);
     }
+    if (route === 'kpsc-reminder-personalize' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await personalizeKpscReminder(DB, env, body);
+    }
     if (route === 'change-pin' && method === 'POST') {
       return await changeUserPin(DB, body);
     }
@@ -398,21 +403,6 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) return await createDeepgramTranscriptionToken(env);
     }
 
-    // ── /api/azure-speaker-profiles ────────────────────────────
-    // Proxy to Azure Cognitive Services Speaker Recognition v2.0.
-    // Create, enrol, and delete speaker profiles that power persistent
-    // voice fingerprinting across meetings.
-    if (route === 'azure-speaker-profiles') {
-      if (method === 'POST'   && !param)                    return await azureCreateSpeakerProfile(env);
-      if (method === 'POST'   &&  param && parts[2] === 'enroll') return await azureEnrollSpeaker(env, param, body);
-      if (method === 'DELETE' &&  param && !parts[2])       return await azureDeleteSpeakerProfile(env, param);
-    }
-
-    // ── /api/azure-speaker-identify ────────────────────────────
-    if (route === 'azure-speaker-identify') {
-      if (method === 'POST' && !param) return await azureIdentifySpeaker(env, body);
-    }
-
     // ── /api/voice-enroll/:memberId ─────────────────────────────
     if (route === 'voice-enroll' && param && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -477,6 +467,11 @@ export async function onRequest(context) {
         if (auth instanceof Response) return auth;
         return await processAiSecretaryMeeting(DB, param);
       }
+      if (method === 'POST' && parts[2] === 'translate-plain-english') {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await translateAiSecretaryMeetingPlainEnglish(DB, env, param);
+      }
     }
 
     // ── /api/admin ─────────────────────────────────────────────
@@ -485,6 +480,29 @@ export async function onRequest(context) {
       if (method === 'POST' && param === 'clear-data') return await adminClearDataOnly(DB);
       if (method === 'POST' && param === 'import') return await adminImport(DB, body);
     }
+
+    // ── B5: /api/kpsc-followups ────────────────────────────────
+    if (route === 'kpsc-followups') {
+      if (method === 'GET' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getFollowups(DB, url);
+      }
+      if (method === 'PATCH' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await patchFollowup(DB, param, body, auth);
+      }
+    }
+
+    // ── B5+B6: internal cron endpoints (Bearer CRON_SECRET) ────
+    if (route === 'internal') {
+      if (method === 'POST' && param === 'run-followups')  return await runFollowups(DB, env, request);
+      if (method === 'POST' && param === 'run-prebriefs')  return await runPrebriefs(DB, env, request);
+    }
+
+    // ── B6: scheduled_for field on ai-secretary-meetings ───────
+    // (handled inline in updateAiSecretaryMeeting via body.scheduledFor)
 
     return err(`Route not found: ${method} /api/${path}`, 404);
 
@@ -764,6 +782,21 @@ async function handleInit(DB) {
       voice_enrolled_at     TEXT,
       voice_sample_count    INTEGER DEFAULT 0
     )`,
+    // B5: follow-up nudge queue
+    `CREATE TABLE IF NOT EXISTS kpsc_followups (
+      id               TEXT PRIMARY KEY,
+      meeting_id       TEXT NOT NULL,
+      action_id        TEXT NOT NULL,
+      assignee         TEXT,
+      task             TEXT,
+      due_date         TEXT,
+      draft_message    TEXT NOT NULL DEFAULT '',
+      status           TEXT NOT NULL DEFAULT 'pending',
+      generated_at     TEXT DEFAULT (datetime('now')),
+      approved_at      TEXT,
+      approved_by      TEXT,
+      UNIQUE(meeting_id, action_id)
+    )`,
   ];
 
   // Run all CREATE TABLE statements first
@@ -808,18 +841,25 @@ async function handleInit(DB) {
     // Soft-delete for AI secretary meeting drafts.
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_at TEXT DEFAULT ''`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_by TEXT DEFAULT ''`,
+    // Plain English minutes cache
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN plain_english_minutes_md TEXT DEFAULT ''`,
     // Wave 3 VF-2: voice fingerprinting columns on kpsc_members.
     `ALTER TABLE kpsc_members ADD COLUMN voice_embedding BLOB`,
     `ALTER TABLE kpsc_members ADD COLUMN voice_enrolled_at TEXT`,
     `ALTER TABLE kpsc_members ADD COLUMN voice_sample_count INTEGER DEFAULT 0`,
     // Suggested projects extracted during AI minutes generation (pending secretary approval).
     `ALTER TABLE ai_secretary_meetings ADD COLUMN suggested_projects_json TEXT DEFAULT '[]'`,
+    // B6: scheduling + pre-meeting brief on ai_secretary_meetings.
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN scheduled_for TEXT`,
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN pre_brief_markdown TEXT`,
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN pre_brief_generated_at TEXT`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
   }
 
   await DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_kpsc_partner_payment_period ON kpsc_partner_payments(partner_id, year, month, payment_type)`).run();
+  try { await DB.prepare(`CREATE INDEX IF NOT EXISTS idx_followups_status ON kpsc_followups(status)`).run(); } catch { /* safe */ }
 
   // Migrate legacy: remove goFishing from saved quotas setting
   try {
@@ -1679,9 +1719,9 @@ function getApiStatus(env) {
       keyName: 'DEEPGRAM_API_KEY',
     },
     speakerRecognition: {
-      ...maskedKeyStatus(env.AZURE_SPEAKER_KEY),
-      keyName: 'AZURE_SPEAKER_KEY',
-      region: String(env.AZURE_SPEAKER_REGION || 'eastus').trim(),
+      ...maskedKeyStatus(env.VOICE_FP_TOKEN),
+      keyName: 'VOICE_FP_TOKEN',
+      url: String(env.VOICE_FP_URL || '').trim(),
     },
   });
 }
@@ -2083,6 +2123,178 @@ async function createKpscReminder(DB, data) {
     out.push({ id, partnerId, channel, status: 'sent', year, month });
   }
   return ok({ sent: out.length, reminders: out });
+}
+
+// ── SMART REMINDER PERSONALISATION (B4) ──────────────────────────
+/**
+ * Classify a partner's payment behaviour into a tone bucket.
+ * Pure function — exported for unit tests.
+ * @param {object} partner  - row from kpsc_partners (must have .id, .full_name)
+ * @param {Array}  payments - rows from kpsc_partner_payments for this partner (last 12 months, paid=1)
+ * @param {number} currentYear
+ * @param {number} currentMonth  (1-12)
+ * @returns {string} 'first_miss' | 'chronic' | 'dormant' | 'new' | 'default'
+ */
+function classifyPartnerTone(partner, payments, currentYear, currentMonth) {
+  // Build a set of paid (year, month) tuples for quick lookup
+  const paidSet = new Set(payments.map(p => `${p.year}-${p.month}`));
+
+  // Helper: how many of the last N months (not including current) did they pay?
+  function paidInLast(n) {
+    let count = 0;
+    let y = currentYear;
+    let m = currentMonth - 1; // start from the month before current
+    for (let i = 0; i < n; i++) {
+      if (m < 1) { m = 12; y--; }
+      if (paidSet.has(`${y}-${m}`)) count++;
+      m--;
+    }
+    return count;
+  }
+
+  const totalPaid = payments.length;
+
+  // 'new': fewer than 3 payment records total
+  if (totalPaid < 3) return 'new';
+
+  const paidLast6 = paidInLast(6);
+  const missedLast6 = 6 - paidLast6;
+
+  // 'chronic': 3+ missed months in the last 6
+  if (missedLast6 >= 3) return 'chronic';
+
+  // 'dormant': paid regularly for 6+ consecutive months then stopped for 3+ months
+  // "stopped for 3+" means the last 3 months they have not paid
+  const paidLast3 = paidInLast(3);
+  if (paidLast3 === 0) {
+    // Check they had 6+ consecutive paid months before that
+    let consecutive = 0;
+    let y = currentYear;
+    let m = currentMonth - 4; // start 4 months back (skipping the 3 missed)
+    for (let i = 0; i < 6; i++) {
+      if (m < 1) { m += 12; y--; }
+      if (paidSet.has(`${y}-${m}`)) { consecutive++; } else { consecutive = 0; }
+      m--;
+    }
+    if (consecutive >= 6) return 'dormant';
+    // Even without exactly 6 consecutive, if they're a long-payer who stopped: dormant
+    if (totalPaid >= 6 && paidLast6 >= 4) return 'dormant';
+  }
+
+  // 'first_miss': paid at least 80% of expected months, first miss in 6+ months
+  if (paidLast3 >= 2 && paidLast6 >= 5) {
+    // They've been paying but missed this current month
+    if (!paidSet.has(`${currentYear}-${currentMonth}`)) {
+      return 'first_miss';
+    }
+  }
+
+  return 'default';
+}
+
+async function personalizeKpscReminder(DB, env, data) {
+  const partnerId = String(data?.partnerId || '').trim();
+  const year = normalizeYear(data?.year);
+  const month = normalizeMonth(data?.month) || (new Date().getUTCMonth() + 1);
+  const fallbackTemplate = String(data?.fallbackTemplate || '').trim()
+    || 'Dear {{name}}, this is a reminder to pay your {{month}} partnership pledge. God bless you.';
+
+  if (!partnerId) return err('partnerId is required', 400);
+
+  // Load partner
+  const partner = await DB.prepare(`SELECT * FROM kpsc_partners WHERE id=?`).bind(partnerId).first();
+  if (!partner) return err('Partner not found', 404);
+
+  // Load last 12 months of payments
+  let payments = [];
+  try {
+    // Compute the start year/month for a 12-month window
+    let startYear = year;
+    let startMonth = month - 11;
+    if (startMonth < 1) { startMonth += 12; startYear--; }
+    const { results: payRows } = await DB.prepare(`
+      SELECT year, month, amount, paid_at
+      FROM kpsc_partner_payments
+      WHERE partner_id=? AND paid=1
+        AND ((year > ?) OR (year = ? AND month >= ?))
+      ORDER BY year, month
+    `).bind(partnerId, startYear, startYear, startMonth).all();
+    payments = payRows || [];
+  } catch (_) { payments = []; }
+
+  const toneBucket = classifyPartnerTone(partner, payments, year, month);
+
+  // Build a human-readable payment summary
+  const MONTH_ABBR = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const paidMonths = payments.map(p => `${MONTH_ABBR[p.month] || p.month} ${p.year}`).join(', ') || 'none';
+  const partnerName = partner.full_name || 'Partner';
+  const monthLabel = MONTH_ABBR[month] || String(month);
+  const toneInstructions = {
+    first_miss: 'Use a warm, encouraging tone — acknowledge their faithfulness and gently remind them about this one missed month.',
+    chronic: 'Use a firm but respectful tone — acknowledge the ongoing gap and appeal to their commitment to the partnership.',
+    dormant: 'Use a caring, re-engagement tone — acknowledge their past faithfulness and warmly invite them back.',
+    new: 'Use a welcoming, friendly tone — they are relatively new to the partnership.',
+    default: 'Use a standard, friendly reminder tone.',
+  };
+
+  // Load DeepSeek key + model from settings
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-v4-flash';
+  try {
+    const { results: sr } = await DB.prepare(
+      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
+    ).all();
+    const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
+    deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    // Auto-migrate legacy DeepSeek model names discontinued 2026-07-24.
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
+  } catch (_) {}
+
+  if (!deepseekKey) {
+    return ok({ variants: [fallbackTemplate], toneBucket, error: 'DeepSeek API key not configured' });
+  }
+
+  const prompt = `You are helping a church committee secretary personalise a WhatsApp/SMS payment reminder.
+
+Partner name: ${partnerName}
+Month: ${monthLabel} ${year}
+Payment history (last 12 months, paid months): ${paidMonths}
+Tone bucket: ${toneBucket}
+Tone instruction: ${toneInstructions[toneBucket] || toneInstructions.default}
+Reference template: "${fallbackTemplate}"
+
+Write exactly 3 short reminder variants (each 1-2 sentences, WhatsApp/SMS-friendly, max 160 characters each). Use {{name}} for the partner's name and {{month}} for the month name. Keep them natural, warm, and church-appropriate.
+
+Respond ONLY with a JSON array of 3 strings, no markdown, no prose. Example: ["variant1","variant2","variant3"]`;
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 500, temperature: 0.4 }),
+    });
+
+    if (!resp.ok) {
+      return ok({ variants: [fallbackTemplate], toneBucket, error: `DeepSeek API error: ${resp.status}` });
+    }
+
+    const aiData = await resp.json();
+    const rawText = String(aiData.choices?.[0]?.message?.content || '').trim();
+    const cleaned = rawText.replace(/```json?\s*/gi, '').replace(/```\s*/gi, '').trim();
+    const parsed = safeJsonParse(cleaned, null);
+
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      const variants = parsed.map(v => String(v || '').trim()).filter(Boolean);
+      if (variants.length > 0) return ok({ variants, toneBucket });
+    }
+
+    // Parsing failure
+    return ok({ variants: [fallbackTemplate], toneBucket, error: 'Could not parse AI response' });
+  } catch (e) {
+    return ok({ variants: [fallbackTemplate], toneBucket, error: `DeepSeek request failed: ${e.message}` });
+  }
 }
 
 async function getKpscDashboard(DB, url) {
@@ -2759,6 +2971,9 @@ function aiSecretaryMeetingFromRow(row) {
     createdAt: row.created_at || '',
     deletedAt: row.deleted_at || '',
     deletedBy: row.deleted_by || '',
+    scheduledFor: row.scheduled_for || null,
+    preBriefMarkdown: row.pre_brief_markdown || null,
+    preBriefGeneratedAt: row.pre_brief_generated_at || null,
   };
 }
 
@@ -3177,8 +3392,8 @@ async function createAiSecretaryMeeting(DB, data) {
   const now = new Date().toISOString();
   await DB.prepare(`
     INSERT INTO ai_secretary_meetings
-      (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,created_by,started_at,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?)
+      (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,created_by,started_at,created_at,scheduled_for)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     String(data.title || 'KPSC Meeting').trim(),
@@ -3190,6 +3405,7 @@ async function createAiSecretaryMeeting(DB, data) {
     data.createdBy || '',
     data.startedAt || '',
     now,
+    data.scheduledFor ? String(data.scheduledFor).trim() : null,
   ).run();
   return await getAiSecretaryMeeting(DB, id);
 }
@@ -3232,10 +3448,14 @@ async function updateAiSecretaryMeeting(DB, id, data) {
     ? dedupeAiSecretaryFlags(data.policyFlags)
     : safeJsonParse(existing.policy_flags_json, []);
 
+  const scheduledFor = data.scheduledFor !== undefined
+    ? (data.scheduledFor ? String(data.scheduledFor).trim() : null)
+    : (existing.scheduled_for || null);
   await DB.prepare(`
     UPDATE ai_secretary_meetings SET
       title=?, meeting_type=?, meeting_date=?, status=?, participants_json=?, transcript_text=?, ended_at=?,
-      summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?
+      summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?,
+      scheduled_for=?
     WHERE id=?
   `).bind(
     data.title !== undefined ? String(data.title).trim() : existing.title,
@@ -3251,6 +3471,7 @@ async function updateAiSecretaryMeeting(DB, id, data) {
     JSON.stringify(resolutions),
     JSON.stringify(actionItems),
     JSON.stringify(policyFlags),
+    scheduledFor,
     id,
   ).run();
   return await getAiSecretaryMeeting(DB, id);
@@ -3353,6 +3574,76 @@ async function processAiSecretaryMeeting(DB, id) {
   return getAiSecretaryMeeting(DB, id);
 }
 
+async function translateAiSecretaryMeetingPlainEnglish(DB, env, id) {
+  const row = await DB.prepare(
+    `SELECT minutes_markdown, plain_english_minutes_md FROM ai_secretary_meetings WHERE id=?`
+  ).bind(id).first();
+  if (!row) return err('Meeting not found', 404);
+
+  const minutesMarkdown = row.minutes_markdown || '';
+  if (!minutesMarkdown.trim()) return err('No minutes to translate', 400);
+
+  // If cached, return it
+  if (row.plain_english_minutes_md && row.plain_english_minutes_md.trim()) {
+    return ok({ plainEnglish: row.plain_english_minutes_md, fromCache: true });
+  }
+
+  // Get DeepSeek key and model
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-v4-flash';
+  try {
+    const { results: sr } = await DB.prepare(
+      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
+    ).all();
+    const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
+    deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    // Auto-migrate legacy DeepSeek model names that are being discontinued 2026-07-24.
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
+  } catch (_) {}
+
+  if (!deepseekKey) return err('AI key not configured', 503);
+
+  // Call DeepSeek with plain English prompt
+  const prompt = `Rewrite the following meeting minutes at an 8th-grade reading level. Keep every fact, decision, person name, amount, and date exactly. Drop formal language, jargon, and unnecessary verbiage. Use short sentences. Don't add anything that isn't in the original. Return only the rewritten minutes, no preamble.
+
+${minutesMarkdown}`;
+
+  let plainEnglish = '';
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({
+        model: deepseekModel,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.2,
+        max_tokens: 2500,
+      }),
+    });
+    if (!resp.ok) {
+      const errBody = await resp.json().catch(() => ({}));
+      return err(`DeepSeek API error: ${errBody.error?.message || resp.status}`, 502);
+    }
+    const data = await resp.json();
+    plainEnglish = (data.choices?.[0]?.message?.content || '').trim();
+    if (!plainEnglish) return err('DeepSeek returned empty response', 502);
+  } catch (e) {
+    return err(`DeepSeek call failed: ${e.message}`, 502);
+  }
+
+  // Cache the result
+  try {
+    await DB.prepare(
+      `UPDATE ai_secretary_meetings SET plain_english_minutes_md=? WHERE id=?`
+    ).bind(plainEnglish, id).run();
+  } catch (_) {
+    // Safe to ignore if update fails; we still return the translation
+  }
+
+  return ok({ plainEnglish, fromCache: false });
+}
 
 async function createRealtimeTranscriptionToken(env) {
   const apiKey = String(env.OPENAI_API_KEY || '').trim();
@@ -3567,121 +3858,6 @@ async function voiceDeleteEnrollment(DB, memberId) {
   return ok({ ok: true, deleted: true });
 }
 
-// ── AZURE SPEAKER RECOGNITION ──────────────────────────────────────
-// These four functions proxy requests to Azure Cognitive Services
-// Speaker Recognition v2.0 (text-independent).
-// Required env vars:
-//   AZURE_SPEAKER_KEY    – Azure Cognitive Services key
-//   AZURE_SPEAKER_REGION – Azure region slug, default: eastus
-
-// Azure returns this UUID when the identification API finds no matching profile.
-const AZURE_NIL_UUID = '00000000-0000-0000-0000-000000000000';
-// Standard UUID format: 8-4-4-4-12 hex digits.
-const AZURE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// Max length of a UUID string after sanitization (36 chars + small safety margin).
-const AZURE_UUID_MAX_LEN = 50;
-
-function azureBase(env) {
-  const key    = String(env.AZURE_SPEAKER_KEY    || '').trim();
-  const region = String(env.AZURE_SPEAKER_REGION || 'eastus').trim();
-  return { key, region, base: `https://${region}.api.cognitive.microsoft.com/speaker/identification/v2.0/text-independent` };
-}
-
-async function azureCreateSpeakerProfile(env) {
-  const { key, base } = azureBase(env);
-  if (!key) return err('AZURE_SPEAKER_KEY is not configured. Add it in Cloudflare Pages → Settings → Environment Variables.', 503);
-
-  const res  = await fetch(`${base}/profiles`, {
-    method: 'POST',
-    headers: { 'Ocp-Apim-Subscription-Key': key, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ locale: 'en-us' }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) return err(data.error?.message || `Azure error (${res.status}).`, res.status);
-  return ok({ profileId: data.profileId });
-}
-
-async function azureEnrollSpeaker(env, profileId, body) {
-  const { key, base } = azureBase(env);
-  if (!key) return err('AZURE_SPEAKER_KEY is not configured.', 503);
-  if (!profileId) return err('Missing profile ID.', 400);
-
-  const audioBase64 = String(body?.audioBase64 || '');
-  if (!audioBase64) return err('Missing audio data.', 400);
-
-  let audioBytes;
-  try {
-    audioBytes = Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0));
-  } catch {
-    return err('Invalid audio data encoding.', 400);
-  }
-
-  const res  = await fetch(`${base}/profiles/${encodeURIComponent(profileId)}/enrollments`, {
-    method: 'POST',
-    headers: { 'Ocp-Apim-Subscription-Key': key, 'Content-Type': 'audio/wav' },
-    body: audioBytes,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) return err(data.error?.message || `Azure enrollment error (${res.status}).`, res.status);
-  return ok({
-    enrolled: true,
-    enrollmentStatus: data.enrollmentStatus || 'Enrolling',
-    remainingEnrollmentSpeechLength: data.remainingEnrollmentSpeechLength ?? 0,
-  });
-}
-
-async function azureDeleteSpeakerProfile(env, profileId) {
-  const { key, base } = azureBase(env);
-  if (!key) return err('AZURE_SPEAKER_KEY is not configured.', 503);
-
-  const res = await fetch(`${base}/profiles/${encodeURIComponent(profileId)}`, {
-    method: 'DELETE',
-    headers: { 'Ocp-Apim-Subscription-Key': key },
-  });
-  if (res.status === 204 || res.ok) return ok({ deleted: true });
-  const data = await res.json().catch(() => ({}));
-  return err(data.error?.message || `Azure delete error (${res.status}).`, res.status);
-}
-
-async function azureIdentifySpeaker(env, body) {
-  const { key, base } = azureBase(env);
-  if (!key) return err('AZURE_SPEAKER_KEY is not configured.', 503);
-
-  const profileIds = Array.isArray(body?.profileIds) ? body.profileIds : [];
-  if (!profileIds.length) return err('No profile IDs provided.', 400);
-  if (profileIds.length > 50) return err('Maximum 50 profile IDs per request.', 400);
-
-  const audioBase64 = String(body?.audioBase64 || '');
-  if (!audioBase64) return err('Missing audio data.', 400);
-
-  // Sanitise and validate UUIDs (8-4-4-4-12 hex format).
-  const safeIds = profileIds
-    .map(id => String(id).replace(/[^a-fA-F0-9-]/g, ''))
-    .filter(id => id.length <= AZURE_UUID_MAX_LEN && AZURE_UUID_RE.test(id));
-  if (!safeIds.length) return err('No valid profile IDs provided.', 400);
-
-  let audioBytes;
-  try {
-    audioBytes = Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0));
-  } catch {
-    return err('Invalid audio data encoding.', 400);
-  }
-
-  const res  = await fetch(`${base}/profiles/identify/multipart?profileIds=${safeIds.join(',')}`, {
-    method: 'POST',
-    headers: { 'Ocp-Apim-Subscription-Key': key, 'Content-Type': 'audio/wav' },
-    body: audioBytes,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) return err(data.error?.message || `Azure identify error (${res.status}).`, res.status);
-
-  const identified = data.identifiedProfile;
-  const profileId  = identified?.profileId || null;
-  const score      = identified?.score ?? 0;
-  // Azure returns the nil UUID when no profile matches.
-  const isNilUuid = !profileId || profileId === AZURE_NIL_UUID;
-  return ok({ profileId: isNilUuid ? null : profileId, score });
-}
 
 async function uploadAiSecretaryAudioChunk(env, request) {
   const form = await request.formData();
@@ -3838,7 +4014,247 @@ async function voiceGetEnrollment(DB, memberId) {
   return ok({ enrolled: true, enrolledAt: row.voice_enrolled_at, sampleCount: row.voice_sample_count || 0 });
 }
 
+// ── B5: FOLLOW-UP NUDGES ──────────────────────────────────────────────
+
+/**
+ * Pure helper: given an array of meetings and a today-string (YYYY-MM-DD),
+ * return the list of overdue action items that need a follow-up generated.
+ * Already-followed-up items (passed in `existingFollowupKeys` set of
+ * "meetingId:actionId" strings) are excluded.
+ */
+function classifyOverdueActionItems(meetings, todayStr, existingFollowupKeys = new Set()) {
+  const results = [];
+  for (const m of meetings) {
+    if (m.status !== 'processed') continue;
+    const items = Array.isArray(m.action_items) ? m.action_items
+      : (Array.isArray(m.actionItems) ? m.actionItems : []);
+    for (const item of items) {
+      if (!item || !item.id) continue;
+      if (item.status === 'done' || item.status === 'cancelled') continue;
+      if (!item.dueDate) continue;
+      if (item.dueDate >= todayStr) continue;
+      const key = `${m.id}:${item.id}`;
+      if (existingFollowupKeys.has(key)) continue;
+      results.push({
+        meetingId: m.id,
+        meetingTitle: m.title || '',
+        meetingDate: m.meeting_date || m.meetingDate || '',
+        actionId: item.id,
+        task: item.task || '',
+        assignee: item.assignee || 'Unassigned',
+        dueDate: item.dueDate,
+      });
+    }
+  }
+  return results;
+}
+
+/** Verify Bearer CRON_SECRET. Returns null on success, or a Response on failure. */
+function requireCronSecret(env, request) {
+  const secret = String(env.CRON_SECRET || '').trim();
+  if (!secret) return err('CRON_SECRET env var not configured', 503);
+  const auth = request.headers.get('Authorization') || '';
+  if (auth !== `Bearer ${secret}`) return err('Unauthorized', 401);
+  return null;
+}
+
+async function runFollowups(DB, env, request) {
+  const authErr = requireCronSecret(env, request);
+  if (authErr) return authErr;
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  // Load all processed meetings
+  const { results: meetingRows } = await DB.prepare(
+    `SELECT id, title, meeting_date, status, action_items_json FROM ai_secretary_meetings WHERE status='processed'`
+  ).all();
+
+  // Load existing followup keys to avoid double-nudging
+  const { results: existingRows } = await DB.prepare(
+    `SELECT meeting_id, action_id FROM kpsc_followups`
+  ).all();
+  const existingFollowupKeys = new Set((existingRows || []).map(r => `${r.meeting_id}:${r.action_id}`));
+
+  // Build meeting objects expected by classifyOverdueActionItems
+  const meetings = (meetingRows || []).map(r => ({
+    id: r.id,
+    title: r.title,
+    meeting_date: r.meeting_date,
+    status: r.status,
+    action_items: safeJsonParse(r.action_items_json, []),
+  }));
+
+  const overdue = classifyOverdueActionItems(meetings, todayStr, existingFollowupKeys);
+
+  // Get DeepSeek key from settings
+  let deepseekKey = '';
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='ai_deepseek_key'`).first();
+    deepseekKey = row ? String(row.value || '').trim() : '';
+  } catch { /* ignore */ }
+
+  let generated = 0;
+  let skipped = 0;
+
+  for (const item of overdue) {
+    // Double-check no race condition
+    const existing = await DB.prepare(
+      `SELECT id FROM kpsc_followups WHERE meeting_id=? AND action_id=?`
+    ).bind(item.meetingId, item.actionId).first();
+    if (existing) { skipped++; continue; }
+
+    let draftMessage = '';
+    const firstName = (item.assignee || 'Team').split(/[\s,]+/)[0];
+    const fallbackMsg = `Hi ${firstName}, just a gentle reminder that the task "${item.task}" from the KPSC meeting on ${item.meetingDate} was due on ${item.dueDate} and is now overdue. We understand you're busy — where are we on this?`;
+
+    if (deepseekKey) {
+      try {
+        const prompt = `Generate a one-paragraph WhatsApp message to ${firstName}: a gentle reminder that the task "${item.task}" from the KPSC meeting on ${item.meetingDate} was due on ${item.dueDate} and is now overdue. Be respectful and assume they're busy, not negligent. End with a clear ask: "Where are we?". Do not use a formal greeting like "Dear". Use their first name: ${firstName}.`;
+        const resp = await fetch('https://api.deepseek.com/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+          body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: prompt }], max_tokens: 200, temperature: 0.5 }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          draftMessage = (data.choices?.[0]?.message?.content || '').trim();
+        }
+      } catch { /* fall back to template */ }
+    }
+
+    if (!draftMessage) draftMessage = fallbackMsg;
+
+    const followupId = newId('FU-');
+    await DB.prepare(
+      `INSERT OR IGNORE INTO kpsc_followups (id, meeting_id, action_id, assignee, task, due_date, draft_message, status, generated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`
+    ).bind(followupId, item.meetingId, item.actionId, item.assignee, item.task, item.dueDate, draftMessage).run();
+    generated++;
+  }
+
+  return ok({ ok: true, generated, skipped });
+}
+
+async function getFollowups(DB, url) {
+  const status = url.searchParams.get('status') || 'pending';
+  const { results } = await DB.prepare(
+    `SELECT f.*, m.title AS meeting_title, m.meeting_date
+     FROM kpsc_followups f
+     LEFT JOIN ai_secretary_meetings m ON m.id = f.meeting_id
+     WHERE f.status = ?
+     ORDER BY f.generated_at DESC`
+  ).bind(status).all();
+  return ok(results || []);
+}
+
+async function patchFollowup(DB, id, body, account) {
+  const row = await DB.prepare(`SELECT id FROM kpsc_followups WHERE id=?`).bind(id).first();
+  if (!row) return err('Follow-up not found', 404);
+
+  const newStatus = String(body?.status || '').trim();
+  const editedMessage = body?.editedMessage !== undefined ? String(body.editedMessage).trim() : undefined;
+
+  const validStatuses = ['approved', 'skipped', 'pending'];
+  if (newStatus && !validStatuses.includes(newStatus)) {
+    return err(`Invalid status '${newStatus}'. Must be one of: ${validStatuses.join(', ')}`, 400);
+  }
+
+  const now = new Date().toISOString();
+  if (newStatus === 'approved') {
+    await DB.prepare(
+      `UPDATE kpsc_followups SET status='approved', approved_at=?, approved_by=?${editedMessage !== undefined ? ', draft_message=?' : ''} WHERE id=?`
+    ).bind(...[now, account.name, ...(editedMessage !== undefined ? [editedMessage] : []), id]).run();
+  } else if (newStatus === 'skipped') {
+    await DB.prepare(`UPDATE kpsc_followups SET status='skipped' WHERE id=?`).bind(id).run();
+  } else if (editedMessage !== undefined) {
+    await DB.prepare(`UPDATE kpsc_followups SET draft_message=? WHERE id=?`).bind(editedMessage, id).run();
+  }
+
+  const updated = await DB.prepare(`SELECT * FROM kpsc_followups WHERE id=?`).bind(id).first();
+  return ok(updated);
+}
+
+// ── B6: PRE-MEETING BRIEFS ────────────────────────────────────────────
+
+async function runPrebriefs(DB, env, request) {
+  const authErr = requireCronSecret(env, request);
+  if (authErr) return authErr;
+
+  // Find meetings scheduled within the next 24 hours that don't have a brief yet
+  const { results: upcoming } = await DB.prepare(
+    `SELECT id, title, scheduled_for FROM ai_secretary_meetings
+     WHERE scheduled_for IS NOT NULL
+       AND pre_brief_markdown IS NULL
+       AND scheduled_for BETWEEN datetime('now') AND datetime('now', '+24 hours')`
+  ).all();
+
+  if (!upcoming || upcoming.length === 0) return ok({ ok: true, generated: 0 });
+
+  // Get DeepSeek key
+  let deepseekKey = '';
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='ai_deepseek_key'`).first();
+    deepseekKey = row ? String(row.value || '').trim() : '';
+  } catch { /* ignore */ }
+
+  // Load the most recent processed meeting for context
+  const prevRow = await DB.prepare(
+    `SELECT title, meeting_date, minutes_markdown, action_items_json FROM ai_secretary_meetings
+     WHERE status='processed' ORDER BY meeting_date DESC, processed_at DESC LIMIT 1`
+  ).first();
+
+  let generated = 0;
+  for (const meeting of upcoming) {
+    let brief = '';
+    if (deepseekKey && prevRow) {
+      try {
+        const openItems = safeJsonParse(prevRow.action_items_json, [])
+          .filter(a => a.status !== 'done' && a.status !== 'cancelled')
+          .map(a => `- ${a.task} (${a.assignee || 'Unassigned'}, due: ${a.dueDate || 'unset'})`)
+          .join('\n') || '(none)';
+        const prompt = `Generate a pre-meeting brief in markdown for a KPSC committee meeting titled "${meeting.title}" scheduled for ${meeting.scheduled_for}. Use the following context from the last processed meeting (${prevRow.title}, ${prevRow.meeting_date}):
+
+Minutes excerpt:
+${(prevRow.minutes_markdown || '').slice(0, 2000)}
+
+Open action items:
+${openItems}
+
+Include exactly four sections in your response:
+## Open Action Items
+## Decisions from the Last Meeting
+## Overdue Items
+## Suggested Agenda
+
+Keep the total brief under 400 words. Cite specifics (names, dates, amounts) — do not be vague. Return only markdown.`;
+        const resp = await fetch('https://api.deepseek.com/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+          body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: prompt }], max_tokens: 800, temperature: 0.3 }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          brief = (data.choices?.[0]?.message?.content || '').trim();
+        }
+      } catch { /* fall back */ }
+    }
+
+    if (!brief) {
+      brief = `# Pre-Meeting Brief: ${meeting.title}\n\nScheduled: ${meeting.scheduled_for}\n\n` +
+        (prevRow ? `## Decisions from the Last Meeting\nSee previous meeting (${prevRow.title}, ${prevRow.meeting_date}) for context.\n\n## Open Action Items\nReview the action items from the previous meeting.\n\n## Overdue Items\nCheck action items with passed due dates.\n\n## Suggested Agenda\nTo be confirmed by the secretary.` : '## No previous meeting context available.');
+    }
+
+    const now = new Date().toISOString();
+    await DB.prepare(
+      `UPDATE ai_secretary_meetings SET pre_brief_markdown=?, pre_brief_generated_at=? WHERE id=?`
+    ).bind(brief, now, meeting.id).run();
+    generated++;
+  }
+
+  return ok({ ok: true, generated });
+}
+
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding };
+export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems };

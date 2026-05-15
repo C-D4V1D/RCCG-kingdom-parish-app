@@ -26,13 +26,13 @@ const STATUS_CONFIG = {
 };
 
 const KPSC_PERMISSIONS = {
-  acting_chairman:    ['dashboard', 'projects', 'partners', 'finance', 'reminders', 'members', 'archive', 'reports', 'settings'],
-  general_secretary:  ['dashboard', 'projects', 'partners', 'reminders', 'members', 'archive', 'reports', 'settings'],
-  financial_secretary:['dashboard', 'projects', 'partners', 'finance', 'reminders', 'archive', 'reports'],
-  treasurer:          ['dashboard', 'projects', 'partners', 'finance', 'reminders', 'archive', 'reports'],
-  committee_viewer:   ['dashboard', 'projects', 'partners', 'reports', 'archive'],
+  acting_chairman:    ['dashboard', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'archive', 'reports', 'settings'],
+  general_secretary:  ['dashboard', 'projects', 'partners', 'partner-progress', 'reminders', 'members', 'archive', 'reports', 'settings'],
+  financial_secretary:['dashboard', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
+  treasurer:          ['dashboard', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
+  committee_viewer:   ['dashboard', 'projects', 'partners', 'partner-progress', 'reports', 'archive'],
   // IT admin: full read access + account/settings management; no operational write actions.
-  it_admin:           ['dashboard', 'archive', 'projects', 'partners', 'finance', 'reminders', 'members', 'reports', 'settings'],
+  it_admin:           ['dashboard', 'archive', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'reports', 'settings'],
 };
 const PIN_REGEX = /^\d{4,6}$/;
 
@@ -41,7 +41,8 @@ const PIN_REGEX = /^\d{4,6}$/;
 const PAGE_TO_GROUP = {
   dashboard: { group: 'home',     subTab: null         },
   archive:   { group: 'meetings', subTab: 'archive'    },
-  reports:   { group: 'money',    subTab: 'reports'    },
+  reports:   { group: 'meetings', subTab: 'reports'    },
+  'partner-progress': { group: 'money', subTab: 'partner-progress' },
   projects:  { group: 'meetings', subTab: 'projects'   },
   finance:   { group: 'money',    subTab: 'finance'    },
   partners:  { group: 'money',    subTab: 'partners'   },
@@ -80,6 +81,7 @@ const S = {
   dashboard: null,
   projects: [],
   projectsFilter: 'all',
+  followups: [],
   archiveSearch: '',
   archiveQuickFilter: 'all',
   partnersYear: new Date().getUTCFullYear(),
@@ -164,39 +166,16 @@ const Diarizer = {
   reconnectTimer: null,
   reconnectAttempts: 0,
   manualStop: false,
-  // PCM ring buffer — raw Float32 samples from the AudioWorklet, used to
-  // extract per-speaker audio slices for Azure Speaker Recognition.
+  // PCM ring buffer — raw Float32 samples from the AudioWorklet. Used by
+  // VF-4 to extract per-speaker audio slices for voice fingerprinting.
   pcmChunks: [],        // Array of {offset: number, data: Float32Array}
   pcmSampleOffset: 0,   // Total samples written since Diarizer was constructed
   pcmSampleRate: 0,     // Set from AudioContext.sampleRate on connection
   dgTimeOffset: 0,      // pcmSampleOffset when the current WS connection was opened;
                         // adds to Deepgram's 0-based timestamps to get absolute offsets
   speakerRanges: new Map(), // Map<speakerIdx, {startSample, endSample}[]>
-  identifyPending: new Set(), // speaker indices currently being identified by Azure
 };
 
-// ── VOICE ENROLLMENT ───────────────────────────────────────────────
-// Captures a ~30-second voice sample from a member and enrolls it
-// with Azure Speaker Recognition for automatic future identification.
-const Enrolling = {
-  stream: null,
-  audioCtx: null,
-  workletNode: null,
-  workletUrl: null,
-  samples: [],      // Float32Array chunks collected during enrollment
-  sampleRate: 0,
-  timer: null,
-  elapsed: 0,
-  memberIdx: -1,
-  active: false,
-};
-
-// ── AZURE SPEAKER RECOGNITION CONSTANTS ───────────────────────────
-const AZURE_IDENTIFY_THRESHOLD_SEC = 5;   // seconds of speech needed before triggering auto-ID
-const AZURE_IDENTIFY_MIN_AUDIO_SEC  = 4;  // minimum seconds Azure needs for a reliable match
-const AZURE_IDENTIFY_MAX_AUDIO_SEC  = 10; // max seconds of audio to send per identification call
-const AZURE_IDENTIFY_MIN_SCORE = 0.5;     // minimum confidence (0–1) to accept auto-assignment
-const AZURE_ENROLL_DURATION_SEC = 30;     // seconds of audio to capture for enrollment
 const DEFAULT_PCM_SAMPLE_RATE   = 48000;  // fallback rate before the AudioContext is created
 const BASE64_CHUNK_SIZE         = 32768;  // chars per chunk when encoding large buffers
 const PCM_BUFFER_DURATION_SEC   = 60;     // seconds of PCM audio to retain in the ring buffer
@@ -581,7 +560,6 @@ async function recStart(btn) {
     Rec._voiceIdConsecutive503 = 0;
     // Reset per-speaker identification state for the new session.
     Diarizer.speakerRanges   = new Map();
-    Diarizer.identifyPending = new Set();
 
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
@@ -799,7 +777,6 @@ function recReset() {
   Diarizer.status = 'offline';
   Diarizer.reconnectAttempts = 0;
   Diarizer.speakerRanges   = new Map();
-  Diarizer.identifyPending = new Set();
   recRenderUI();
   recRenderTranscript();
   recRenderSpeakerMap();
@@ -993,7 +970,7 @@ async function diarizerConnect() {
       if (Diarizer.ws?.readyState === WebSocket.OPEN) {
         Diarizer.ws.send(diarizerFloat32ToInt16(e.data).buffer);
       }
-      // Buffer a copy of the raw PCM for Azure speaker identification.
+      // Buffer a copy of the raw PCM for VF-4 voice identification.
       diarizerBufferPcm(e.data);
     };
     source.connect(workletNode);
@@ -1109,7 +1086,6 @@ function diarizerClose(markManual) {
     Diarizer.pcmChunks       = [];
     Diarizer.pcmSampleOffset = 0;
     Diarizer.speakerRanges   = new Map();
-    Diarizer.identifyPending = new Set();
   }
   clearTimeout(Diarizer.reconnectTimer);
   Diarizer.reconnectTimer = null;
@@ -1163,33 +1139,8 @@ function diarizerExtractPcmRange(startSample, endSample) {
   return out;
 }
 
-// Collect up to AZURE_IDENTIFY_MAX_AUDIO_SEC of audio for a speaker index from the ring buffer.
-function diarizerExtractSpeakerAudio(speakerIdx) {
-  const ranges = Diarizer.speakerRanges.get(speakerIdx) || [];
-  if (!ranges.length || !Diarizer.pcmSampleRate) return null;
-  const maxSamples = AZURE_IDENTIFY_MAX_AUDIO_SEC * Diarizer.pcmSampleRate;
-  let accumulated = 0;
-  const toExtract = [];
-  for (let i = ranges.length - 1; i >= 0 && accumulated < maxSamples; i--) {
-    toExtract.unshift(ranges[i]);
-    accumulated += ranges[i].endSample - ranges[i].startSample;
-  }
-  const chunks = toExtract.map(r => diarizerExtractPcmRange(r.startSample, r.endSample)).filter(Boolean);
-  if (!chunks.length) return null;
-  const totalLen = Math.min(chunks.reduce((a, c) => a + c.length, 0), maxSamples);
-  const out = new Float32Array(totalLen);
-  let pos = 0;
-  for (const c of chunks) {
-    if (pos >= out.length) break;
-    const take = Math.min(c.length, out.length - pos);
-    out.set(c.subarray(0, take), pos);
-    pos += take;
-  }
-  return out;
-}
-
 // Record the time range spoken by a Deepgram speaker index (in absolute PCM samples).
-// Triggers Azure identification once AZURE_IDENTIFY_THRESHOLD_SEC of audio is collected.
+// VF-4 reads Diarizer.speakerRanges to extract audio for /api/voice-identify.
 function diarizerAccumulateSpeakerRange(speakerIdx, startSec, endSec) {
   if (!Diarizer.pcmSampleRate) return;
   const sr          = Diarizer.pcmSampleRate;
@@ -1197,58 +1148,6 @@ function diarizerAccumulateSpeakerRange(speakerIdx, startSec, endSec) {
   const endSample   = Math.ceil(endSec   * sr) + Diarizer.dgTimeOffset;
   if (!Diarizer.speakerRanges.has(speakerIdx)) Diarizer.speakerRanges.set(speakerIdx, []);
   Diarizer.speakerRanges.get(speakerIdx).push({ startSample, endSample });
-
-  const totalSamples = Diarizer.speakerRanges.get(speakerIdx)
-    .reduce((a, r) => a + (r.endSample - r.startSample), 0);
-  if (!Diarizer.identifyPending.has(speakerIdx) &&
-      totalSamples >= AZURE_IDENTIFY_THRESHOLD_SEC * sr) {
-    diarizerTriggerIdentify(speakerIdx).catch(e => console.warn('Auto-identify error:', e));
-  }
-}
-
-// Return true if a member's attendance checkbox is ticked in the current meeting.
-function isMemberPresent(mem) {
-  const groupMembers = S.members.filter(m => m.group === mem.group);
-  const groupIdx     = groupMembers.indexOf(mem);
-  if (groupIdx < 0) return false;
-  const el = document.getElementById(`att_present_${mem.group}_${groupIdx}`);
-  return el?.checked === true;
-}
-
-// Attempt to auto-identify a Deepgram speaker index using Azure Speaker Recognition.
-// Silently skips if Azure is not configured or no enrolled members are present.
-async function diarizerTriggerIdentify(speakerIdx) {
-  if (Rec.speakerMap.has(speakerIdx)) return; // already assigned manually
-  const enrolledPresent = S.members.filter(m => m.azureSpeakerProfileId && isMemberPresent(m));
-  if (!enrolledPresent.length) return;
-
-  Diarizer.identifyPending.add(speakerIdx);
-  try {
-    const audio = diarizerExtractSpeakerAudio(speakerIdx);
-    // Azure needs at least AZURE_IDENTIFY_MIN_AUDIO_SEC of speech for a reliable match.
-    if (!audio || audio.length < AZURE_IDENTIFY_MIN_AUDIO_SEC * Diarizer.pcmSampleRate) return;
-
-    const resampled   = resampleTo16k(audio, Diarizer.pcmSampleRate);
-    const wavBuffer   = pcmToWav(resampled, 16000);
-    const audioBase64 = arrayBufferToBase64(wavBuffer);
-    const profileIds  = enrolledPresent.map(m => m.azureSpeakerProfileId);
-
-    const res = await apiPost('azure-speaker-identify', { profileIds, audioBase64 });
-    if (res.error) { console.warn('Speaker identification:', res.error); return; }
-
-    if (res.profileId && res.score >= AZURE_IDENTIFY_MIN_SCORE) {
-      if (Rec.speakerMap.has(speakerIdx)) return; // assigned while we waited
-      const matched = enrolledPresent.find(m => m.azureSpeakerProfileId === res.profileId);
-      if (matched) {
-        assignSpeaker(speakerIdx, matched.name);
-        showToast(`🎙 Auto-identified: ${matched.name} (${Math.round(res.score * 100)}% match)`, 'success');
-      }
-    }
-  } catch (e) {
-    console.warn('diarizerTriggerIdentify error:', e);
-  } finally {
-    Diarizer.identifyPending.delete(speakerIdx);
-  }
 }
 
 // ── VF-4: VOICE FINGERPRINT IDENTIFICATION DURING MEETINGS ───────────
@@ -1314,7 +1213,7 @@ async function voiceIdTriggerForSpeaker(speakerIdx) {
     }
 
     if (!float32 || float32.length < 1.5 * (Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE)) {
-      // Not enough audio yet — let Azure identify handle it next time
+      // Not enough audio yet — allow another identify attempt on next speaker turn.
       Rec.speakerIdentified.delete(speakerIdx); // allow retry
       return;
     }
@@ -1446,6 +1345,17 @@ async function apiDelete(path, body) {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
     body: JSON.stringify(body || {}),
+  });
+  const data = await r.json();
+  handleKpscAuthFailure(data);
+  return data;
+}
+
+async function apiPatch(path, body) {
+  const r = await fetch(`${API}/${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
+    body: JSON.stringify(body),
   });
   const data = await r.json();
   handleKpscAuthFailure(data);
@@ -1655,7 +1565,7 @@ function esc(s) {
 
 // ── PCM AUDIO HELPERS ────────────────────────────────────────────
 // Linearly resample a Float32 PCM array from `fromRate` to 16 kHz.
-// Azure Speaker Recognition requires 8/16/32 kHz WAV input.
+// 16 kHz is the required input rate for the SpeechBrain ECAPA-TDNN model.
 // Linear interpolation is sufficient for speaker identification — the model
 // is robust to minor resampling artefacts, and higher-quality algorithms
 // (e.g. polyphase filters) are not worth the added complexity here.
@@ -2087,7 +1997,7 @@ function moneySubTabStrip() {
   const tabs = [];
   if (canAccess('finance')) tabs.push({ key: 'finance',   label: 'Finance'   });
   tabs.push({ key: 'partners',  label: 'Partners'  });
-  if (canAccess('reports')) tabs.push({ key: 'reports', label: 'Reports' });
+  if (canAccess('partner-progress')) tabs.push({ key: 'partner-progress', label: 'Progress' });
   if (canAccess('reminders')) tabs.push({ key: 'reminders', label: 'Reminders' });
   return `<div class="ka-subtabs">${tabs.map(t =>
     `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
@@ -2112,6 +2022,9 @@ async function renderPage(page) {
       prependSubTabs(main, meetingsSubTabStrip());
     } else if (page === 'reports') {
       await renderReports(main);
+      prependSubTabs(main, meetingsSubTabStrip());
+    } else if (page === 'partner-progress') {
+      await renderPartnerProgress(main);
       prependSubTabs(main, moneySubTabStrip());
     } else if (page === 'projects') {
       await renderProjects(main);
@@ -2232,7 +2145,7 @@ function buildDashboardContext() {
   );
 
   // Quorum: members with voice enrolled (proxy for "voice" quorum) vs total
-  const enrolledCount = S.members.filter(m => m.azureSpeakerProfileId).length;
+  const enrolledCount = S.members.filter(m => m.voice_enrolled_at).length;
   const totalMembers  = S.members.length;
 
   // Last meeting attendance %
@@ -2284,6 +2197,17 @@ function buildDashboardContext() {
     .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
     .slice(0, 5);
 
+  // B5: pending follow-ups
+  const pendingFollowups = Array.isArray(S.followups) ? S.followups.filter(f => f.status === 'pending') : [];
+
+  // B6: upcoming meeting with pre-brief (within next 24h)
+  const now2 = new Date();
+  const in24h = new Date(now2.getTime() + 24 * 60 * 60 * 1000).toISOString();
+  const upcomingBriefMeeting = S.meetings.find(m =>
+    m.scheduledFor && m.preBriefMarkdown &&
+    m.scheduledFor >= now2.toISOString() && m.scheduledFor <= in24h
+  ) || null;
+
   return {
     recent, total, monthCount, pending,
     latestProcessed, recentResolutions, pendingActions,
@@ -2294,6 +2218,8 @@ function buildDashboardContext() {
     unreconciledCount, unpaidThisMonth, activePartners,
     partnerYearPct, recentFinance,
     activeProjects: inProgressProjects.slice(0, 5),
+    pendingFollowups,
+    upcomingBriefMeeting,
   };
 }
 
@@ -2345,11 +2271,87 @@ function dashTile({ title, value, sub, badge, onclick, highlight }) {
 }
 
 // Returns the set of extra dashboard sections (below primary card) for each role.
+// ── B5: Follow-up card helpers ─────────────────────────────────────
+
+function daysAgoLabel(dueDateStr) {
+  const due = new Date(dueDateStr);
+  const now = new Date();
+  const diff = Math.floor((now - due) / (1000 * 60 * 60 * 24));
+  if (diff <= 0) return 'Due today';
+  if (diff === 1) return 'Due 1 day ago';
+  return `Due ${diff} days ago`;
+}
+
+function renderFollowupRow(f) {
+  const rowId = `fu-row-${f.id}`;
+  return `
+    <div class="k-fu-row" id="${rowId}" style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px">
+      <div class="k-mc-top" style="margin-bottom:8px">
+        <div style="flex:1">
+          <div style="font-weight:600;font-size:14px">${esc(f.assignee || 'Unassigned')}</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:2px">${esc(f.task || '')}</div>
+        </div>
+        <span class="kbadge badge-red" style="align-self:flex-start">${esc(daysAgoLabel(f.due_date))}</span>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px">
+        ${esc(f.meeting_title || '')} · ${esc(fmtDate(f.meeting_date || ''))}
+      </div>
+      <textarea class="k-input k-textarea" id="fu-msg-${f.id}" style="min-height:80px;font-size:13px;margin-bottom:8px">${esc(f.draft_message || '')}</textarea>
+      <div class="k-fu-actions" style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.approveFollowup('${f.id}')">Approve &amp; copy</button>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.saveFollowupEdit('${f.id}')">Save edit</button>
+        <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.skipFollowup('${f.id}')">Skip</button>
+      </div>
+    </div>`;
+}
+
+function dashCardFollowups(ctx) {
+  const items = ctx.pendingFollowups || [];
+  const count = items.length;
+  const open = count > 0 ? 'open' : '';
+  return `
+    <details class="k-collapsible k-fu-card" ${open} style="margin-bottom:16px;border:1px solid var(--border);border-radius:10px;overflow:hidden">
+      <summary class="k-collapsible-hdr" style="padding:14px 16px;background:var(--card);cursor:pointer">
+        <span class="k-collapsible-title" style="font-size:15px;font-weight:600">Follow-ups (${count})</span>
+        ${count > 0 ? '<span class="kbadge badge-red" style="margin-left:8px">Action needed</span>' : ''}
+      </summary>
+      <div style="padding:12px 16px 16px">
+        ${count === 0
+          ? '<p class="k-hint" style="margin:0;text-align:center">No overdue action items — great job!</p>'
+          : items.map(renderFollowupRow).join('')}
+      </div>
+    </details>`;
+}
+
+// ── B6: Pre-brief card ─────────────────────────────────────────────
+
+function dashCardPreBrief(ctx) {
+  const m = ctx.upcomingBriefMeeting;
+  if (!m) return '';
+  return `
+    <div class="k-meeting-card" style="border-left:4px solid var(--navy);margin-bottom:16px">
+      <div class="k-mc-top">
+        <div style="flex:1">
+          <div class="k-mc-title" style="font-size:15px">Tomorrow's Meeting: ${esc(m.title)}</div>
+          <div class="k-mc-meta" style="margin-top:4px">
+            <span>${esc(fmtDateTime(m.scheduledFor))}</span>
+          </div>
+        </div>
+      </div>
+      <details style="margin-top:10px">
+        <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--navy)">Read full brief</summary>
+        <div style="margin-top:10px;white-space:pre-wrap;font-size:12px;line-height:1.6;color:var(--text1)">${esc(m.preBriefMarkdown)}</div>
+      </details>
+    </div>`;
+}
+
 function dashboardCardsForRole(role, ctx) {
   const r = String(role || 'committee_viewer').toLowerCase();
 
   if (r === 'acting_chairman') {
     return `
+      ${dashCardPreBrief(ctx)}
+      ${dashCardFollowups(ctx)}
       ${dashCardOpenMeeting(ctx)}
       <div class="k-section-hdr" style="margin-top:20px"><h2>At a Glance</h2></div>
       <div class="k-meeting-list">
@@ -2397,6 +2399,8 @@ function dashboardCardsForRole(role, ctx) {
 
   if (r === 'general_secretary') {
     return `
+      ${dashCardPreBrief(ctx)}
+      ${dashCardFollowups(ctx)}
       ${dashCardOpenMeeting(ctx)}
       <div class="k-section-hdr" style="margin-top:20px"><h2>At a Glance</h2></div>
       <div class="k-meeting-list">
@@ -2523,9 +2527,11 @@ async function renderDashboard(main) {
   const now = new Date();
   const year = now.getUTCFullYear();
   const month = now.getUTCMonth() + 1;
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const isChairOrSecretary = role === 'acting_chairman' || role === 'general_secretary';
 
   // Load all data needed for any role in parallel
-  const [meetingsRes, settingsRes, dashboardRes, projectsRes, financeRes, partnersRes, paymentsRes] = await Promise.all([
+  const loadPromises = [
     apiGet('ai-secretary-meetings'),
     apiGet('settings'),
     apiGet(`kpsc-dashboard?year=${year}&month=${month}`),
@@ -2533,7 +2539,13 @@ async function renderDashboard(main) {
     apiGet(`kpsc-finance?year=${year}&month=${month}`),
     apiGet('kpsc-partners'),
     apiGet(`kpsc-partner-payments?year=${year}`),
-  ]);
+  ];
+  // B5: only load followups for chairman/secretary
+  if (isChairOrSecretary) loadPromises.push(apiGet('kpsc-followups?status=pending'));
+
+  const [meetingsRes, settingsRes, dashboardRes, projectsRes, financeRes, partnersRes, paymentsRes, followupsRes] =
+    await Promise.all(loadPromises);
+
   if (meetingsRes?.error) throw new Error(meetingsRes.error);
   S.meetings        = Array.isArray(meetingsRes)            ? meetingsRes            : [];
   S.members         = Array.isArray(settingsRes?.kpsc_members) ? settingsRes.kpsc_members : [];
@@ -2542,6 +2554,7 @@ async function renderDashboard(main) {
   S.financeEntries  = Array.isArray(financeRes)             ? financeRes             : [];
   S.partners        = Array.isArray(partnersRes)            ? partnersRes            : [];
   S.partnerPayments = Array.isArray(paymentsRes)            ? paymentsRes            : [];
+  S.followups       = Array.isArray(followupsRes)           ? followupsRes           : [];
 
   // Load distributed-meeting-ids from settings (stored as JSON string)
   const rawDistributed = Array.isArray(settingsRes?.kpsc_distributed_meeting_ids)
@@ -2549,7 +2562,6 @@ async function renderDashboard(main) {
     : (Array.isArray(S._distributedMeetingIds) ? S._distributedMeetingIds : []);
   S._distributedMeetingIds = rawDistributed;
 
-  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
   const ctx  = buildDashboardContext();
 
   main.innerHTML = `
@@ -2654,9 +2666,20 @@ async function renderMeetingRoom(main) {
   const presentInitial = isFresh ? S.members.length : savedParts.filter(p => p.present).length;
   const attendanceSummary = `${presentInitial} present of ${S.members.length}`;
 
+  // B6: pre-meeting brief card (show if brief exists, for all phases)
+  const preBriefHtml = (m?.preBriefMarkdown) ? `
+    <details class="k-collapsible" id="km-prebrief-section" style="margin-bottom:12px">
+      <summary class="k-collapsible-hdr">
+        <span class="k-collapsible-title">📋 Pre-Meeting Brief</span>
+        <span class="k-collapsible-summary">Generated ${esc(fmtDate((m.preBriefGeneratedAt || '').slice(0, 10)))}</span>
+      </summary>
+      <div class="k-pre-brief-body" id="km-prebrief-body" style="padding:12px 0;white-space:pre-wrap;font-size:13px;line-height:1.6;color:var(--text1)">${esc(m.preBriefMarkdown)}</div>
+    </details>` : '';
+
   main.innerHTML = `
     <div class="k-page k-room" data-phase="${phase}">
       <div id="km-stepper">${stepper(status)}</div>
+      ${preBriefHtml}
 
       <details class="k-collapsible" id="km-details-section" ${phase === 'setup' ? 'open' : ''}>
         <summary class="k-collapsible-hdr">
@@ -2679,6 +2702,10 @@ async function renderMeetingRoom(main) {
           <select class="k-input" id="km-type" ${isProcessed ? 'disabled' : ''}>
             ${MEETING_TYPES.map(t => `<option value="${t.value}" ${prefillType === t.value ? 'selected' : ''}>${t.label}</option>`).join('')}
           </select>
+        </div>
+        <div class="k-field">
+          <label class="k-label">Scheduled For <span class="k-label-hint">(optional — enables pre-meeting brief)</span></label>
+          <input class="k-input" id="km-scheduled-for" type="datetime-local" value="${esc(m?.scheduledFor ? m.scheduledFor.slice(0, 16) : '')}" ${isProcessed ? 'readonly' : ''} />
         </div>
       </details>
 
@@ -3000,10 +3027,12 @@ function renderMinutesPanel(m) {
       <div class="k-room-actions" style="margin-bottom:12px;margin-top:16px">
         <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')">🖨 Print / Save PDF</button>
         <button class="kbtn kbtn-sm" onclick="Kpsc.shareMinutesWhatsApp('${m.id}')">📲 Share via WhatsApp</button>
+        <button class="kbtn kbtn-sm" id="btn-plain-english-${m.id}" onclick="Kpsc.togglePlainEnglish('${m.id}')" data-plain-english="false">📖 Read in plain English</button>
       </div>
 
       <h4 class="k-sub-title">Minutes Preview</h4>
-      <div class="k-minutes-body">${minutesHtml(m.minutesMarkdown)}</div>
+      <div class="k-minutes-body" id="minutes-body-${m.id}">${minutesHtml(m.minutesMarkdown)}</div>
+      <div class="k-plain-english-indicator" id="pe-indicator-${m.id}" style="display:none;font-size:0.9em;color:#666;margin-top:8px;padding:8px;background:#f5f5f5;border-radius:4px;">📖 Showing plain English version</div>
 
       ${resolutions.length ? `
         <h4 class="k-sub-title">Decision & Resolution Register (${resolutions.length})</h4>
@@ -3195,17 +3224,18 @@ async function autoSaveNow() {
   const trans = document.getElementById('km-transcript')?.value || '';
   const status = document.getElementById('km-status')?.value || 'draft';
   const participants = readAttendance();
+  const scheduledFor = document.getElementById('km-scheduled-for')?.value || null;
 
   try {
     let res;
     if (S.activeMeeting) {
       res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
-        title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
+        title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants, scheduledFor,
       });
     } else {
       res = await apiPost('ai-secretary-meetings', {
         title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
-        createdBy: S.user?.name || '',
+        createdBy: S.user?.name || '', scheduledFor,
       });
     }
     if (res?.error) {
@@ -3244,7 +3274,7 @@ function bindAutoSave() {
     const el = form.querySelector(sel);
     if (el) el.addEventListener('input', fire);
   }
-  for (const sel of ['#km-date', '#km-type']) {
+  for (const sel of ['#km-date', '#km-type', '#km-scheduled-for']) {
     const el = form.querySelector(sel);
     if (el) el.addEventListener('change', fire);
   }
@@ -3442,12 +3472,6 @@ function memberVoiceId(mem) {
 }
 
 function memberRow(idx, mem) {
-  const enrolled    = !!mem.azureSpeakerProfileId;
-  const enrollClass = enrolled ? 'kbtn kbtn-sm k-enroll-btn k-enrolled' : 'kbtn kbtn-sm kbtn-ghost k-enroll-btn';
-  const enrollTitle = enrolled ? 'Voice enrolled — click to re-enrol' : 'Enrol voice fingerprint for auto-identification';
-  const enrollIcon  = enrolled ? '🎙✓' : '🎙';
-
-  // VF-3: voice fingerprint enrollment status badge
   const vfpEnrolled = !!mem.voice_enrolled_at;
   const vfpBadge = vfpEnrolled
     ? `<span class="k-vfp-badge k-vfp-enrolled" title="Voice fingerprint enrolled ${esc(mem.voice_enrolled_at || '')}">🎙&#xFE0F; FP</span>`
@@ -3463,10 +3487,9 @@ function memberRow(idx, mem) {
       <input class="k-input k-input-sm k-mem-pos" type="text" placeholder="Position (optional)"
         value="${esc(mem.position || '')}" onchange="Kpsc.memberFieldChange(${idx},'position',this.value)" />
       ${vfpBadge}
-      <button class="kbtn kbtn-sm kbtn-ghost k-vfp-enroll-btn" onclick="Kpsc.showVoiceFpEnrollModal(${idx})" title="${vfpEnrolled ? 'Re-enroll voice fingerprint (KPSC AI system)' : 'Enroll voice fingerprint for meeting identification'}">
+      <button class="kbtn kbtn-sm kbtn-ghost k-vfp-enroll-btn" onclick="Kpsc.showVoiceFpEnrollModal(${idx})" title="${vfpEnrolled ? 'Re-enroll voice fingerprint' : 'Enroll voice fingerprint for meeting identification'}">
         ${vfpEnrolled ? '🔁 FP' : '🎙 FP'}
       </button>
-      <button class="${enrollClass}" onclick="Kpsc.enrollMemberVoice(${idx})" title="${enrollTitle}">${enrollIcon}</button>
       <button class="kbtn kbtn-sm kbtn-ghost kbtn-remove" onclick="Kpsc.removeMember(${idx})">✕</button>
     </div>`;
 }
@@ -3518,210 +3541,6 @@ async function saveMembers(btn) {
     btn.textContent = orig;
   }
 }
-
-// ── VOICE ENROLLMENT UI ───────────────────────────────────────────
-
-function enrollMemberVoice(idx) {
-  const member = S.members[idx];
-  if (!member || !member.name.trim()) {
-    showToast('Please save the member name first.', 'warn');
-    return;
-  }
-  showEnrollModal(idx);
-}
-
-function showEnrollModal(idx) {
-  const member  = S.members[idx];
-  if (!member) return;
-  const alreadyEnrolled = !!member.azureSpeakerProfileId;
-
-  document.getElementById('k-enroll-modal')?.remove();
-
-  const modal = document.createElement('div');
-  modal.id        = 'k-enroll-modal';
-  modal.className = 'k-modal-overlay';
-  modal.innerHTML = `
-    <div class="k-modal">
-      <div class="k-modal-hdr">
-        <span class="k-modal-title">🎙 Enrol Voice — ${esc(member.name)}</span>
-        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeEnrollModal()">✕</button>
-      </div>
-      <div class="k-modal-body">
-        ${alreadyEnrolled ? '<p class="k-enroll-warn">⚠ This member already has a voice enrolled. Recording again will replace it.</p>' : ''}
-        <p class="k-enroll-instruction">Ask <strong>${esc(member.name)}</strong> to speak naturally for <strong>30 seconds</strong>.</p>
-        <p class="k-hint">They can read aloud, count numbers, or talk about anything. At least 20 seconds of clear speech is needed.</p>
-        <div id="k-enroll-status"></div>
-        <div id="k-enroll-progress" style="display:none">
-          <div class="k-enroll-timer" id="k-enroll-timer">0:00 / 0:30</div>
-          <div class="k-enroll-bar-bg"><div class="k-enroll-bar" id="k-enroll-bar"></div></div>
-        </div>
-      </div>
-      <div class="k-modal-footer" id="k-enroll-footer">
-        <button class="kbtn kbtn-record" id="k-enroll-start-btn" onclick="Kpsc.startEnrollRecording(${idx})">🔴 Start Recording</button>
-        <button class="kbtn kbtn-ghost" onclick="Kpsc.closeEnrollModal()">Cancel</button>
-      </div>
-    </div>`;
-  document.body.appendChild(modal);
-}
-
-function closeEnrollModal() {
-  enrollCleanupAudio();
-  Enrolling.active  = false;
-  Enrolling.samples = [];
-  document.getElementById('k-enroll-modal')?.remove();
-}
-
-function enrollCleanupAudio() {
-  clearInterval(Enrolling.timer);
-  Enrolling.timer = null;
-  if (Enrolling.workletNode) {
-    try { Enrolling.workletNode.disconnect(); } catch (_) {}
-    Enrolling.workletNode = null;
-  }
-  if (Enrolling.audioCtx && Enrolling.audioCtx.state !== 'closed') {
-    Enrolling.audioCtx.close().catch(() => {});
-    Enrolling.audioCtx = null;
-  } else {
-    Enrolling.audioCtx = null;
-  }
-  if (Enrolling.workletUrl) {
-    URL.revokeObjectURL(Enrolling.workletUrl);
-    Enrolling.workletUrl = null;
-  }
-  if (Enrolling.stream) {
-    Enrolling.stream.getTracks().forEach(t => t.stop());
-    Enrolling.stream = null;
-  }
-}
-
-async function startEnrollRecording(idx) {
-  const startBtn   = document.getElementById('k-enroll-start-btn');
-  const statusEl   = document.getElementById('k-enroll-status');
-  const progressEl = document.getElementById('k-enroll-progress');
-  const footerEl   = document.getElementById('k-enroll-footer');
-
-  if (startBtn) { startBtn.disabled = true; startBtn.textContent = '🎙 Recording…'; }
-  if (footerEl) {
-    // Replace Cancel button to abort the recording and clean up resources.
-    const cancelBtn = footerEl.querySelector('.kbtn-ghost');
-    if (cancelBtn) {
-      cancelBtn.textContent = '✕ Abort';
-      cancelBtn.onclick = () => { closeEnrollModal(); };
-    }
-  }
-
-  try {
-    Enrolling.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    });
-    Enrolling.memberIdx  = idx;
-    Enrolling.samples    = [];
-    Enrolling.elapsed    = 0;
-    Enrolling.active     = true;
-
-    Enrolling.audioCtx   = new AudioContext();
-    Enrolling.sampleRate = Enrolling.audioCtx.sampleRate;
-
-    const blob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
-    Enrolling.workletUrl = URL.createObjectURL(blob);
-    await Enrolling.audioCtx.audioWorklet.addModule(Enrolling.workletUrl);
-
-    const source = Enrolling.audioCtx.createMediaStreamSource(Enrolling.stream);
-    Enrolling.workletNode = new AudioWorkletNode(Enrolling.audioCtx, 'pcm-capture-processor');
-    Enrolling.workletNode.port.onmessage = (e) => {
-      if (Enrolling.active) Enrolling.samples.push(e.data.slice());
-    };
-    source.connect(Enrolling.workletNode);
-    Enrolling.workletNode.connect(Enrolling.audioCtx.createMediaStreamDestination());
-
-    if (progressEl) progressEl.style.display = '';
-
-    Enrolling.timer = setInterval(() => {
-      Enrolling.elapsed++;
-      const m      = Math.floor(Enrolling.elapsed / 60);
-      const s      = Enrolling.elapsed % 60;
-      const timerEl = document.getElementById('k-enroll-timer');
-      const barEl   = document.getElementById('k-enroll-bar');
-      if (timerEl) timerEl.textContent = `${m}:${String(s).padStart(2, '0')} / 0:30`;
-      if (barEl)   barEl.style.width   = `${Math.min(100, (Enrolling.elapsed / AZURE_ENROLL_DURATION_SEC) * 100)}%`;
-      if (Enrolling.elapsed >= AZURE_ENROLL_DURATION_SEC) {
-        clearInterval(Enrolling.timer);
-        Enrolling.timer = null;
-        finishEnrollRecording();
-      }
-    }, 1000);
-
-  } catch (e) {
-    if (statusEl) statusEl.innerHTML = `<div class="k-enroll-error">❌ Microphone access error: ${esc(e.message)}</div>`;
-    if (startBtn) { startBtn.disabled = false; startBtn.textContent = '🔴 Start Recording'; }
-    enrollCleanupAudio();
-  }
-}
-
-async function finishEnrollRecording() {
-  const statusEl = document.getElementById('k-enroll-status');
-  const footerEl = document.getElementById('k-enroll-footer');
-
-  Enrolling.active = false;
-  enrollCleanupAudio();
-
-  if (statusEl) statusEl.innerHTML = '<div class="k-enroll-info">⏳ Processing voice data — please wait…</div>';
-  if (footerEl) footerEl.innerHTML = '';
-
-  try {
-    const idx    = Enrolling.memberIdx;
-    const member = S.members[idx];
-    if (!member) throw new Error('Member not found.');
-
-    if (!Enrolling.samples.length) throw new Error('No audio was captured.');
-
-    // Merge all captured PCM chunks into one Float32Array.
-    const totalLen = Enrolling.samples.reduce((a, c) => a + c.length, 0);
-    const merged   = new Float32Array(totalLen);
-    let pos = 0;
-    for (const chunk of Enrolling.samples) { merged.set(chunk, pos); pos += chunk.length; }
-    Enrolling.samples = []; // free memory
-
-    // Resample to 16 kHz and encode as WAV.
-    const resampled   = resampleTo16k(merged, Enrolling.sampleRate);
-    const wavBuffer   = pcmToWav(resampled, 16000);
-    const audioBase64 = arrayBufferToBase64(wavBuffer);
-
-    // Delete the old Azure profile if one exists (best-effort; a failure won't block re-enrolment).
-    if (member.azureSpeakerProfileId) {
-      await fetch(`${API}/azure-speaker-profiles/${encodeURIComponent(member.azureSpeakerProfileId)}`,
-        { method: 'DELETE' }).catch(e => console.warn('Could not delete old Azure profile:', e));
-    }
-
-    // Create a new Azure speaker profile.
-    const createRes = await apiPost('azure-speaker-profiles', {});
-    if (createRes.error) throw new Error(createRes.error);
-    const profileId = createRes.profileId;
-    if (!profileId) throw new Error('Azure did not return a profile ID.');
-
-    // Enroll the recorded audio.
-    const enrollRes = await apiPost(`azure-speaker-profiles/${profileId}/enroll`, { audioBase64 });
-    if (enrollRes.error) throw new Error(enrollRes.error);
-
-    // Persist the profile ID on the member (azureSpeakerProfileId survives saveMembers).
-    S.members[idx].azureSpeakerProfileId = profileId;
-    await apiPost('settings', { kpsc_members: S.members });
-
-    if (statusEl) statusEl.innerHTML =
-      `<div class="k-enroll-ok">✅ Voice enrolled for <strong>${esc(member.name)}</strong>! Future meetings will auto-identify this speaker.</div>`;
-    if (footerEl) footerEl.innerHTML =
-      `<button class="kbtn kbtn-primary" onclick="Kpsc.closeEnrollModal()">Done</button>`;
-
-    // Refresh the member list so the ✓ badge appears.
-    const list = document.getElementById('km-members-list');
-    if (list) list.innerHTML = renderMembersList();
-
-  } catch (e) {
-    if (statusEl) statusEl.innerHTML = `<div class="k-enroll-error">❌ Enrollment failed: ${esc(e.message)}</div>`;
-    if (footerEl) footerEl.innerHTML = `<button class="kbtn kbtn-ghost" onclick="Kpsc.closeEnrollModal()">Close</button>`;
-  }
-}
-
 
 // ── VF-3 VOICE FINGERPRINT ENROLLMENT (new /api/voice-enroll path) ───────
 
@@ -4618,8 +4437,12 @@ async function renderReminders(main) {
                     ${p.phone ? `<span>📞 ${esc(p.phone)}</span>` : ''}
                     <span class="kbadge badge-gray">${esc(p.reminderPreference || 'sms')}</span>
                   </div>
+                  <div id="krem-ai-hint-${esc(p.id)}" style="display:none;font-size:12px;color:#888;margin-top:4px"></div>
                 </div>
-                <button class="kbtn kbtn-sm" onclick="Kpsc.copyReminderMessage('${esc(p.id)}')">📋 Copy</button>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <button class="kbtn kbtn-sm kbtn-ghost" id="krem-personalize-${esc(p.id)}" onclick="Kpsc.personalizeReminder('${esc(p.id)}', this)" title="Generate AI-personalized reminder variants">✨ Personalize</button>
+                  <button class="kbtn kbtn-sm" onclick="Kpsc.copyReminderMessage('${esc(p.id)}')">📋 Copy</button>
+                </div>
               </div>
             </div>`).join('')}
         </div>
@@ -4640,18 +4463,127 @@ async function renderReminders(main) {
     </div>`;
 }
 
+// Per-partner personalized message overrides: Map<partnerId, resolvedMessageString>
+const _personalizedMessages = new Map();
+
 function copyReminderMessage(partnerId) {
   const partner = S.partners.find(p => p.id === partnerId);
   if (!partner) return;
-  const template = document.getElementById('krem-message')?.value.trim() || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge.';
-  const message = template
-    .replace(/\{\{name\}\}/g, partner.fullName)
-    .replace(/\{\{month\}\}/g, monthName(currentMonth()));
+  let message;
+  if (_personalizedMessages.has(partnerId)) {
+    // Use the approved personalized variant (already has name/month substituted)
+    message = _personalizedMessages.get(partnerId);
+  } else {
+    const template = document.getElementById('krem-message')?.value.trim() || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge.';
+    message = template
+      .replace(/\{\{name\}\}/g, partner.fullName)
+      .replace(/\{\{month\}\}/g, monthName(currentMonth()));
+  }
   navigator.clipboard.writeText(message).then(() => {
     showToast(`Reminder copied for ${partner.fullName}`, 'success');
   }).catch(() => {
     showToast('Could not copy. Please copy manually.', 'warn');
   });
+}
+
+async function personalizeReminder(partnerId, btn) {
+  const partner = S.partners.find(p => p.id === partnerId);
+  if (!partner) return;
+  const month = currentMonth();
+  const year = currentYear();
+  const fallbackTemplate = document.getElementById('krem-message')?.value.trim()
+    || 'Dear {{name}}, this is a reminder to pay your {{month}} partnership pledge. God bless you.';
+
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ …'; }
+
+  const res = await apiPost('kpsc-reminder-personalize', { partnerId, year, month, fallbackTemplate });
+
+  if (btn) { btn.disabled = false; btn.textContent = '✨ Personalize'; }
+
+  if (res?.error && (!Array.isArray(res?.variants) || res.variants.length === 0)) {
+    showToast('AI personalisation failed. Using template.', 'warn');
+    return;
+  }
+
+  // Show inline hint if AI couldn't personalize but returned fallback
+  if (res?.error) {
+    const hintEl = document.getElementById(`krem-ai-hint-${partnerId}`);
+    if (hintEl) {
+      hintEl.textContent = 'AI couldn\'t personalize this one — using template.';
+      hintEl.style.display = 'block';
+    }
+  }
+
+  openPersonalizeModal(partner, res?.variants || [fallbackTemplate], fallbackTemplate, month, year);
+}
+
+function openPersonalizeModal(partner, variants, fallbackTemplate, month, year) {
+  document.getElementById('k-personalize-modal')?.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'k-personalize-modal';
+  modal.className = 'k-modal-overlay';
+
+  const variantCards = variants.map((v, i) => {
+    const resolved = v.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month));
+    return `
+      <div class="k-remind-variant-card">
+        <div class="k-remind-variant-text">${esc(resolved)}</div>
+        <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.useReminderVariant('${esc(partner.id)}', ${i})">Use this</button>
+      </div>`;
+  }).join('');
+
+  const fallbackResolved = fallbackTemplate
+    .replace(/\{\{name\}\}/g, partner.fullName)
+    .replace(/\{\{month\}\}/g, monthName(month));
+
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">✨ Personalize Reminder — ${esc(partner.fullName)}</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closePersonalizeModal()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p class="k-hint" style="margin-bottom:12px">Choose a variant to use for this partner's reminder. The secretary can still edit it in the copy/send step.</p>
+        <div class="k-remind-variants">${variantCards}</div>
+        <div class="k-remind-variant-card k-remind-variant-fallback">
+          <div class="k-remind-variant-text" style="color:#888">${esc(fallbackResolved)}</div>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.useReminderVariant('${esc(partner.id)}', -1)">Use my template</button>
+        </div>
+      </div>
+    </div>`;
+
+  // Store resolved variants on the modal element for retrieval
+  modal._variants = variants.map(v => v.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month)));
+  modal._fallback = fallbackResolved;
+
+  document.body.appendChild(modal);
+}
+
+function useReminderVariant(partnerId, variantIndex) {
+  const modal = document.getElementById('k-personalize-modal');
+  if (!modal) return;
+  let chosen;
+  if (variantIndex === -1) {
+    chosen = modal._fallback;
+    _personalizedMessages.delete(partnerId);
+  } else {
+    chosen = modal._variants[variantIndex] || modal._fallback;
+    _personalizedMessages.set(partnerId, chosen);
+  }
+  closePersonalizeModal();
+
+  // Visual confirmation on the partner row
+  const hintEl = document.getElementById(`krem-ai-hint-${partnerId}`);
+  if (hintEl) {
+    hintEl.textContent = variantIndex === -1 ? 'Using template.' : 'AI variant selected — click Copy to use it.';
+    hintEl.style.display = 'block';
+    hintEl.style.color = variantIndex === -1 ? '#888' : '#2a6';
+  }
+}
+
+function closePersonalizeModal() {
+  document.getElementById('k-personalize-modal')?.remove();
 }
 
 async function sendBulkReminders(btn) {
@@ -4669,14 +4601,20 @@ async function sendBulkReminders(btn) {
     return;
   }
   btn.disabled = true;
-  const responses = await Promise.all(unpaidPartners.map(partner => apiPost('kpsc-reminders', {
-    partnerId: partner.id,
-    year,
-    month,
-    channel: partner.reminderPreference || 'sms',
-    sentBy: S.user?.name || '',
-    message: template.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month)),
-  })));
+  const responses = await Promise.all(unpaidPartners.map(partner => {
+    // Use personalized message if the secretary approved one, else fall back to template
+    const message = _personalizedMessages.has(partner.id)
+      ? _personalizedMessages.get(partner.id)
+      : template.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month));
+    return apiPost('kpsc-reminders', {
+      partnerId: partner.id,
+      year,
+      month,
+      channel: partner.reminderPreference || 'sms',
+      sentBy: S.user?.name || '',
+      message,
+    });
+  }));
   btn.disabled = false;
   const failed = responses.filter(r => r?.error);
   if (failed.length) {
@@ -5052,10 +4990,76 @@ async function renderReports(main) {
     </div>`;
 }
 
+async function renderPartnerProgress(main) {
+  const year = S.reportsYear;
+  await loadPartnerData(year);
+  const month = currentMonth();
+  const nowYear = currentYear();
+  const yearOpts = [nowYear, nowYear-1, nowYear-2].map(y=>`<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
+
+  const activePartners = S.partners.filter(p => p.status === 'active');
+  const allPaidThisMonth = activePartners.filter(p => partnerMonthlyPaid(p.id, month, year)).length;
+  const allUnpaidThisMonth = activePartners.length - allPaidThisMonth;
+  const expectedMonthlyIncome = activePartners.reduce((sum, p) => sum + Number(p.monthlyPledge || 0), 0);
+  const months = [1,2,3,4,5,6,7,8,9,10,11,12];
+
+  const progressRows = activePartners.map(partner => {
+    const monthsPaid = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
+    const pct = Math.round((monthsPaid / 12) * 100);
+    const dotRow = months.map(m => {
+      const isPaid = partnerMonthlyPaid(partner.id, m, year);
+      const isFuture = year > nowYear || (year === nowYear && m > month);
+      return `<span class="k-dot-cell ${isPaid ? 'k-dot-paid' : isFuture ? 'k-dot-future' : 'k-dot-unpaid'}" title="${monthName(m)}: ${isPaid ? 'Paid' : isFuture ? 'Future' : 'Unpaid'}"></span>`;
+    }).join('');
+    return `
+      <div class="k-meeting-card" style="cursor:default">
+        <div class="k-mc-top">
+          <div style="flex:1">
+            <div class="k-mc-title">${esc(partner.fullName)}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+              <span class="kbadge badge-type">${esc(partnerTypeLabel(partner.partnershipType))}</span>
+              <span class="kbadge ${partnerMonthlyPaid(partner.id, month, year) ? 'badge-green' : 'badge-amber'}">${partnerMonthlyPaid(partner.id, month, year) ? '✓ Current' : 'Unpaid'}</span>
+            </div>
+            <div class="k-dot-row" style="margin-top:8px">${dotRow}</div>
+            <div class="k-progress-row">
+              <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
+              <span class="k-progress-label">${monthsPaid}/12 (${pct}%)</span>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-section-hdr">
+        <h2>Partner Progress Report</h2>
+        <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setReportsYear(this.value)">${yearOpts}</select>
+      </div>
+      <p class="k-page-hint">Progress view — pledge amounts are private and not shown here.</p>
+      <div class="k-dash-stats">
+        <div class="k-stat"><div class="k-stat-val">${activePartners.length}</div><div class="k-stat-lbl">Active Partners</div></div>
+        <div class="k-stat"><div class="k-stat-val">${allPaidThisMonth}</div><div class="k-stat-lbl">Paid This Month</div></div>
+        <div class="k-stat k-stat-highlight"><div class="k-stat-val">${allUnpaidThisMonth}</div><div class="k-stat-lbl">Unpaid This Month</div></div>
+        <div class="k-stat"><div class="k-stat-val">₦${expectedMonthlyIncome.toLocaleString('en-NG')}</div><div class="k-stat-lbl">Expected Monthly Income</div></div>
+      </div>
+      <div class="k-dot-legend">
+        <span><span class="k-dot-cell k-dot-paid"></span> Paid</span>
+        <span><span class="k-dot-cell k-dot-unpaid"></span> Unpaid</span>
+        <span><span class="k-dot-cell k-dot-future"></span> Future</span>
+      </div>
+      <div class="k-meeting-list">${progressRows || '<div class="k-empty">No active partners available.</div>'}</div>
+    </div>`;
+}
+
 let _insightsSearchTimer = null;
 
 function setReportsYear(year) {
   S.reportsYear = Number(year) || currentYear();
+  if (S.page === 'partner-progress') {
+    renderPage('partner-progress');
+    return;
+  }
   rerenderInsightsList();
 }
 
@@ -5214,7 +5218,7 @@ function apiStatusPill(status) {
 function renderApiStatusCard(apiStatus) {
   const live = apiStatus?.liveTranscription || {};
   const dg = apiStatus?.diarization || {};
-  const azure = apiStatus?.speakerRecognition || {};
+  const voiceFp = apiStatus?.speakerRecognition || {};
   return `
     <div class="k-api-status-card ${live.active ? 'k-api-card-active' : 'k-api-card-missing'}">
       <div class="k-api-status-head">
@@ -5238,8 +5242,8 @@ function renderApiStatusCard(apiStatus) {
           <span>${apiStatusPill(dg)} <code>${esc(dg.keyName || 'DEEPGRAM_API_KEY')}</code></span>
         </div>
         <div class="k-api-status-row">
-          <span class="k-api-label">Voice recognition</span>
-          <span>${apiStatusPill(azure)} <code>${esc(azure.keyName || 'AZURE_SPEAKER_KEY')}</code> <small>Region: ${esc(azure.region || 'eastus')}</small></span>
+          <span class="k-api-label">Voice fingerprinting</span>
+          <span>${apiStatusPill(voiceFp)} <code>${esc(voiceFp.keyName || 'VOICE_FP_TOKEN')}</code> ${voiceFp.url ? `<small>${esc(voiceFp.url)}</small>` : '<small>not configured</small>'}</span>
         </div>
       </div>
       <p class="k-api-message">${esc(live.message || apiStatus?.error || 'Status unavailable.')}</p>
@@ -5570,19 +5574,19 @@ async function renderSettings(main) {
           <span class="k-env-desc">Powers speaker diarization — identifies who is speaking and labels each transcript turn. Get a key at <a href="https://console.deepgram.com" target="_blank" rel="noopener">console.deepgram.com</a>.</span>
         </div>
         <div class="k-env-row">
-          <code class="k-env-key">AZURE_SPEAKER_KEY</code>
-          <span class="k-env-desc">Azure Cognitive Services key for persistent voice fingerprinting. Enables one-time voice enrolment per member and automatic speaker identification across meetings. Get a key at <a href="https://portal.azure.com" target="_blank" rel="noopener">portal.azure.com</a> (Speech service → Keys and Endpoint).</span>
+          <code class="k-env-key">VOICE_FP_URL</code>
+          <span class="k-env-desc">URL of the self-hosted SpeechBrain voice-fingerprinting service (Cloud Run). Replaces the retired Azure Speaker Recognition. See <code>services/voice-fp/README.md</code> for deploy instructions.</span>
         </div>
         <div class="k-env-row">
-          <code class="k-env-key">AZURE_SPEAKER_REGION</code>
-          <span class="k-env-desc">Azure region for the Speech service (e.g. <code>eastus</code>, <code>westeurope</code>). Defaults to <code>eastus</code> if not set.</span>
+          <code class="k-env-key">VOICE_FP_TOKEN</code>
+          <span class="k-env-desc">Bearer secret used by the Worker to authenticate against the voice-fingerprinting service. Generate with <code>openssl rand -hex 32</code> and set the same value on the Cloud Run service.</span>
         </div>
         <p class="k-hint" style="margin-top:12px">
           Set these in the Cloudflare Pages dashboard → Settings → Environment Variables.
           If either key is absent, that feature degrades gracefully: transcription falls back to
           OpenAI-only (without speaker labels) when Deepgram is absent, and to chunk-based
           upload only when both are absent. Voice fingerprinting is silently skipped when
-          AZURE_SPEAKER_KEY is absent.
+          VOICE_FP_URL or VOICE_FP_TOKEN are absent.
         </p>
       </div>
 
@@ -6513,8 +6517,6 @@ function printMinutes(meetingId) {
 async function shareMinutesWhatsApp(meetingId) {
   const meeting = S.activeMeeting;
   if (!meeting?.minutesMarkdown) { showToast('No minutes to share. Process the meeting first.', 'warn'); return; }
-
-  const title   = meeting.title || 'KPSC Meeting';
   const date    = meeting.meetingDate || '';
   const summary = meeting.summaryShort || 'Please find the meeting minutes in the KPSC portal.';
   const resCount = (meeting.resolutions || []).length;
@@ -6689,6 +6691,79 @@ function applyDiarizedTranscriptRaw() {
   showToast('Transcript applied.', 'success');
   setMeetingTab('record');
   _diarizedUtterances = [];
+}
+
+// ── PLAIN ENGLISH TOGGLE ──────────────────────────────────────────
+let _plainEnglishCache = {}; // Cache {meetingId: plainEnglishText}
+
+async function togglePlainEnglish(meetingId) {
+  const btn = document.getElementById(`btn-plain-english-${meetingId}`);
+  const minutesBody = document.getElementById(`minutes-body-${meetingId}`);
+  const indicator = document.getElementById(`pe-indicator-${meetingId}`);
+  if (!btn || !minutesBody) return;
+
+  const isPlainEnglish = btn.dataset.plainEnglish === 'true';
+  const meeting = S.activeMeeting;
+  if (!meeting?.minutesMarkdown) return;
+
+  if (isPlainEnglish) {
+    // Toggle off: revert to original minutes
+    btn.dataset.plainEnglish = 'false';
+    btn.textContent = '📖 Read in plain English';
+    btn.style.opacity = '1';
+    minutesBody.innerHTML = minutesHtml(meeting.minutesMarkdown);
+    if (indicator) indicator.style.display = 'none';
+  } else {
+    // Toggle on: show plain English version
+    btn.dataset.plainEnglish = 'true';
+    btn.textContent = '📖 Reading in plain English...';
+    btn.style.opacity = '0.6';
+    btn.disabled = true;
+
+    try {
+      // Check cache first
+      if (_plainEnglishCache[meetingId]) {
+        minutesBody.innerHTML = minutesHtml(_plainEnglishCache[meetingId]);
+        btn.textContent = '📖 Reading in plain English';
+        if (indicator) indicator.style.display = '';
+      } else {
+        // Fetch from API
+        const response = await fetch(
+          `/api/ai-secretary-meetings/${meetingId}/translate-plain-english`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...kpscSessionHeader()
+            }
+          }
+        );
+        const data = await response.json();
+
+        if (!response.ok) {
+          showToast(`Failed to translate: ${data.error || 'Unknown error'}`, 'error');
+          btn.dataset.plainEnglish = 'false';
+          btn.textContent = '📖 Read in plain English';
+          btn.style.opacity = '1';
+          btn.disabled = false;
+          return;
+        }
+
+        // Cache the plain English version
+        _plainEnglishCache[meetingId] = data.plainEnglish;
+        minutesBody.innerHTML = minutesHtml(data.plainEnglish);
+        btn.textContent = `📖 Reading in plain English${data.fromCache ? ' (cached)' : ''}`;
+        if (indicator) indicator.style.display = '';
+      }
+    } catch (e) {
+      showToast(`Error: ${e.message}`, 'error');
+      btn.dataset.plainEnglish = 'false';
+      btn.textContent = '📖 Read in plain English';
+      btn.style.opacity = '1';
+    }
+
+    btn.disabled = false;
+  }
 }
 
 // ── GLOBAL SEARCH ─────────────────────────────────────────────────
@@ -6904,6 +6979,49 @@ function init() {
 }
 
 // ── PUBLIC API ────────────────────────────────────────────────────
+// ── B5: Follow-up actions ──────────────────────────────────────────
+
+async function approveFollowup(id) {
+  const msgEl = document.getElementById(`fu-msg-${id}`);
+  const editedMessage = msgEl ? msgEl.value.trim() : '';
+  const res = await apiPatch(`kpsc-followups/${id}`, { status: 'approved', editedMessage });
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  // Copy to clipboard
+  try {
+    await navigator.clipboard.writeText(editedMessage);
+    showToast('Approved and copied to clipboard!', 'success');
+  } catch {
+    showToast('Approved! (clipboard copy failed — copy manually)', 'info');
+  }
+  // Remove the row from DOM
+  const row = document.getElementById(`fu-row-${id}`);
+  if (row) row.remove();
+  // Update S.followups
+  S.followups = (S.followups || []).filter(f => f.id !== id);
+  // Update card title count
+  const title = document.querySelector('.k-fu-card summary .k-collapsible-title');
+  if (title) title.textContent = `Follow-ups (${S.followups.filter(f => f.status === 'pending').length})`;
+}
+
+async function saveFollowupEdit(id) {
+  const msgEl = document.getElementById(`fu-msg-${id}`);
+  const editedMessage = msgEl ? msgEl.value.trim() : '';
+  const res = await apiPatch(`kpsc-followups/${id}`, { editedMessage });
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  showToast('Draft message saved.', 'success');
+}
+
+async function skipFollowup(id) {
+  const res = await apiPatch(`kpsc-followups/${id}`, { status: 'skipped' });
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  const row = document.getElementById(`fu-row-${id}`);
+  if (row) row.remove();
+  S.followups = (S.followups || []).filter(f => f.id !== id);
+  showToast('Follow-up skipped.', 'info');
+  const title = document.querySelector('.k-fu-card summary .k-collapsible-title');
+  if (title) title.textContent = `Follow-ups (${S.followups.filter(f => f.status === 'pending').length})`;
+}
+
 window.Kpsc = {
   login,
   logout,
@@ -6949,6 +7067,9 @@ window.Kpsc = {
   runReconciliation,
   sendBulkReminders,
   copyReminderMessage,
+  personalizeReminder,
+  useReminderVariant,
+  closePersonalizeModal,
   debouncedSaveReminderTemplate,
   setReportsYear,
   setReportsMonth,
@@ -6977,10 +7098,6 @@ window.Kpsc = {
   recStop,
   recReset,
   assignSpeaker,
-  enrollMemberVoice,
-  showEnrollModal,
-  closeEnrollModal,
-  startEnrollRecording,
   // VF-3 voice fingerprint enrollment
   showVoiceFpEnrollModal,
   closeVoiceFpModal,
@@ -7015,6 +7132,11 @@ window.Kpsc = {
   // Minutes PDF + WhatsApp sharing
   printMinutes,
   shareMinutesWhatsApp,
+  togglePlainEnglish,
+  // B5: Follow-up nudges
+  approveFollowup,
+  saveFollowupEdit,
+  skipFollowup,
 };
 
 document.addEventListener('DOMContentLoaded', init);
