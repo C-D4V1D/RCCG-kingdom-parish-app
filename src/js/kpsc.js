@@ -3634,8 +3634,9 @@ function vfpCleanup() {
 
 function showVoiceFpEnrollModal(idx) {
   const member = S.members[idx];
-  const memberName = String(member?.name || '').trim();
-  if (!member || !memberName) {
+  if (!member) return;
+  const memberName = String(member.name || '').trim();
+  if (!memberName) {
     showToast('Please save the member name first.', 'warn');
     return;
   }
