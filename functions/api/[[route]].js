@@ -1718,11 +1718,23 @@ function getApiStatus(env) {
       ...maskedKeyStatus(env.DEEPGRAM_API_KEY),
       keyName: 'DEEPGRAM_API_KEY',
     },
-    speakerRecognition: {
-      ...maskedKeyStatus(env.VOICE_FP_TOKEN),
-      keyName: 'VOICE_FP_TOKEN',
-      url: String(env.VOICE_FP_URL || '').trim(),
-    },
+    speakerRecognition: (() => {
+      const tokenStatus = maskedKeyStatus(env.VOICE_FP_TOKEN);
+      const url = String(env.VOICE_FP_URL || '').trim();
+      const configured = tokenStatus.configured && url.length > 0;
+      return {
+        configured,
+        active: configured,
+        masked: tokenStatus.masked,
+        keyName: 'VOICE_FP_TOKEN',
+        url,
+        message: configured
+          ? 'VOICE_FP_TOKEN and VOICE_FP_URL are configured.'
+          : !tokenStatus.configured
+            ? 'VOICE_FP_TOKEN is missing. Speaker recognition will not work.'
+            : 'VOICE_FP_URL is missing. Speaker recognition will not work.',
+      };
+    })(),
   });
 }
 
