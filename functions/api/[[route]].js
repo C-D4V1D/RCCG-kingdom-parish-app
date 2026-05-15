@@ -846,7 +846,7 @@ async function handleInit(DB) {
     }),
     kpsc_default_pin: '1234',
     ai_transcription_model: 'gpt-4o-transcribe',
-    ai_ocr_model: 'gpt-4o',
+    ai_ocr_model: 'gpt-5-mini',
     kpsc_partnership_types: JSON.stringify([
       { key: 'gods_kingdom_partner', label: "God's Kingdom Partner" },
       { key: 'covenant_partner', label: 'Covenant Partner' },
@@ -2414,7 +2414,7 @@ async function ocrHandwrittenNotes(env, data, DB) {
   if (!imageBase64) return err('imageBase64 is required', 400);
 
   // Read the configured vision/OCR model from settings (defaults to gpt-4o).
-  let ocrModel = 'gpt-4o';
+  let ocrModel = 'gpt-5-mini';
   try {
     const sr = await DB.prepare(`SELECT value FROM settings WHERE key='ai_ocr_model'`).first();
     if (sr?.value) ocrModel = String(sr.value).trim();

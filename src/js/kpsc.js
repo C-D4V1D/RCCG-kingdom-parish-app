@@ -5322,7 +5322,7 @@ async function renderSettings(main) {
   const hasDeepseek = !!deepseekKey;
   const hasOpenai   = !!openaiKey;
   const transcriptionModel = res?.ai_transcription_model || 'gpt-4o-transcribe';
-  const ocrModel           = res?.ai_ocr_model           || 'gpt-4o';
+  const ocrModel           = res?.ai_ocr_model           || 'gpt-5-mini';
   const deepseekModel      = res?.ai_deepseek_model      || 'deepseek-v4-flash';
   const reminderTemplate = res?.kpsc_reminder_template || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge. God bless you.';
   const incomeCategories = Array.isArray(res?.kpsc_income_categories) ? res.kpsc_income_categories.join('\n') : '';
@@ -5378,10 +5378,11 @@ async function renderSettings(main) {
         <div class="k-form-group">
           <label class="k-label">Vision / OCR Model (OpenAI)</label>
           <select id="ks-ocr-model" class="k-input">
-            <option value="gpt-4o" ${ocrModel === 'gpt-4o' ? 'selected' : ''}>gpt-4o (Best accuracy, Recommended)</option>
+            <option value="gpt-5-mini" ${ocrModel === 'gpt-5-mini' ? 'selected' : ''}>gpt-5-mini (Best · Recommended)</option>
+            <option value="gpt-4o" ${ocrModel === 'gpt-4o' ? 'selected' : ''}>gpt-4o (High accuracy)</option>
             <option value="gpt-4o-mini" ${ocrModel === 'gpt-4o-mini' ? 'selected' : ''}>gpt-4o-mini (Faster · lower cost)</option>
           </select>
-          <p class="k-hint">Used for handwritten notes OCR and receipt scanning. <strong>gpt-4o</strong> reads difficult handwriting most reliably. Switch to <strong>gpt-4o-mini</strong> if cost is a priority and the handwriting is clear.</p>
+          <p class="k-hint">Used for handwritten notes OCR and receipt scanning. <strong>gpt-5-mini</strong> gives the best accuracy at competitive cost. Use <strong>gpt-4o</strong> if gpt-5-mini is unavailable in your region. Switch to <strong>gpt-4o-mini</strong> to minimise cost on clear handwriting.</p>
         </div>
 
         <div id="ks-ai-models-save-msg" class="k-settings-msg" style="display:none"></div>
@@ -5508,7 +5509,7 @@ async function saveAiModels() {
   const msg = document.getElementById('ks-ai-models-save-msg');
   const deepseekModel      = document.getElementById('ks-deepseek-model')?.value      || 'deepseek-v4-flash';
   const transcriptionModel = document.getElementById('ks-transcription-model')?.value || 'gpt-4o-transcribe';
-  const ocrModel           = document.getElementById('ks-ocr-model')?.value           || 'gpt-4o';
+  const ocrModel           = document.getElementById('ks-ocr-model')?.value           || 'gpt-5-mini';
   const res = await apiPost('settings', {
     ai_deepseek_model: deepseekModel,
     ai_transcription_model: transcriptionModel,
