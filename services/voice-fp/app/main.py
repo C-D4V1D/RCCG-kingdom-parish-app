@@ -111,39 +111,73 @@ def _decode_audio(data: bytes, filename: str) -> tuple:
     Decode audio bytes to a (1, N) mono float32 tensor at TARGET_SR.
 
     Returns (waveform, duration_seconds).
-    Supports WAV, webm/opus, mp3, m4a via torchaudio (ffmpeg backend) with a
-    soundfile+librosa fallback for formats torchaudio can't handle directly.
+
+    Strategy:
+      1. Try torchaudio.load on the BytesIO. This handles WAV/FLAC/etc directly.
+      2. If that fails (WebM, Opus, MP3, M4A from MediaRecorder), pipe the bytes
+         through ffmpeg via stdin -> stdout to convert to 16-bit PCM WAV, then
+         load that with torchaudio. This is rock-solid for any container format
+         because ffmpeg is the gold standard for audio decoding and the pipe
+         avoids the soundfile/librosa "BytesIO vs file path" pitfall that
+         caused production-side decode failures.
     """
     buf = io.BytesIO(data)
-
     waveform = None
     sr = None
 
-    # --- primary: torchaudio (uses ffmpeg when available) ---
+    # --- primary: torchaudio direct (works for WAV) ---
     try:
         waveform, sr = torchaudio.load(buf)
     except Exception as ta_err:
-        logger.warning(f"torchaudio.load failed ({ta_err}); falling back to librosa")
-        buf.seek(0)
-        try:
-            import soundfile as sf  # noqa: F401
-            import librosa
+        logger.warning(f"torchaudio.load failed ({ta_err}); piping through ffmpeg")
 
-            # librosa handles webm/opus via ffmpeg subprocess
-            y, sr_lib = librosa.load(buf, sr=None, mono=False)
-            if y.ndim == 1:
-                y = y[np.newaxis, :]
-            waveform = torch.from_numpy(y.astype(np.float32))
-            sr = sr_lib
-        except Exception as lb_err:
-            logger.error(f"librosa fallback also failed: {lb_err}")
-            raise HTTPException(status_code=422, detail=f"Could not decode audio: {lb_err}")
+        # --- fallback: ffmpeg subprocess (handles WebM/Opus/MP3/M4A/AAC/OGG/etc) ---
+        # Convert any input format to mono 16-bit PCM WAV at TARGET_SR.
+        # Reading stdin / writing stdout avoids the temp-file dance and any
+        # BytesIO-vs-path issues that plague soundfile + librosa for WebM.
+        import subprocess
+        try:
+            proc = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner", "-loglevel", "error",
+                    "-i", "pipe:0",        # read from stdin
+                    "-f", "wav",           # output WAV container
+                    "-acodec", "pcm_s16le",
+                    "-ac", "1",            # mono
+                    "-ar", str(TARGET_SR), # already at our target rate
+                    "pipe:1",              # write to stdout
+                ],
+                input=data,
+                capture_output=True,
+                check=True,
+                timeout=20,
+            )
+            wav_buf = io.BytesIO(proc.stdout)
+            waveform, sr = torchaudio.load(wav_buf)
+        except subprocess.CalledProcessError as ff_err:
+            stderr_msg = ff_err.stderr.decode("utf-8", errors="ignore")[:500]
+            logger.error(f"ffmpeg decode failed: {stderr_msg}")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Could not decode audio: ffmpeg rejected input. {stderr_msg.splitlines()[-1] if stderr_msg else ''}".strip(),
+            )
+        except subprocess.TimeoutExpired:
+            logger.error("ffmpeg decode timed out after 20s")
+            raise HTTPException(status_code=422, detail="Audio decode timed out")
+        except FileNotFoundError:
+            # ffmpeg should be present in the runtime image; surface clearly if not.
+            logger.error("ffmpeg binary not found in container")
+            raise HTTPException(status_code=500, detail="Server misconfigured: ffmpeg not installed")
+        except Exception as e:
+            logger.error(f"ffmpeg fallback unexpected error: {e}")
+            raise HTTPException(status_code=422, detail=f"Could not decode audio: {e}")
 
     # Convert to mono
     if waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)
 
-    # Resample to TARGET_SR
+    # Resample to TARGET_SR if ffmpeg gave us a different rate (shouldn't, but defensive)
     if sr != TARGET_SR:
         resampler = T.Resample(orig_freq=sr, new_freq=TARGET_SR)
         waveform = resampler(waveform)
