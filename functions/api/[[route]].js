@@ -12,11 +12,12 @@ const CORS_HEADERS = {
 };
 
 // ── KPSC ROLE GROUPS ────────────────────────────────────────────────
-const KPSC_WRITE_ROLES   = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer'];
-const KPSC_FINANCE_ROLES = ['acting_chairman', 'financial_secretary', 'treasurer'];
-const KPSC_ADMIN_ROLES   = ['acting_chairman', 'general_secretary'];
-// All roles that can log in to the portal (including read-only viewer).
-const KPSC_READ_ROLES    = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'committee_viewer'];
+const KPSC_WRITE_ROLES    = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer'];
+const KPSC_FINANCE_ROLES  = ['acting_chairman', 'financial_secretary', 'treasurer'];
+// Account management: it_admin can create/update/delete accounts without operational permissions.
+const KPSC_ADMIN_ROLES    = ['acting_chairman', 'general_secretary', 'it_admin'];
+// All roles that can log in to the portal (including read-only viewer and IT admin).
+const KPSC_READ_ROLES     = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'committee_viewer', 'it_admin'];
 
 // KPSC_SESSION_TTL_MS: 8 hours
 const KPSC_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -201,7 +202,7 @@ export async function onRequest(context) {
         return await updateKpscAccount(DB, param, body);
       }
       if (method === 'DELETE' && param) {
-        const auth = await requireKpscRole(DB, request, ['acting_chairman']);
+        const auth = await requireKpscRole(DB, request, ['acting_chairman', 'it_admin']);
         if (auth instanceof Response) return auth;
         return await deleteKpscAccount(DB, param, auth);
       }
@@ -295,12 +296,12 @@ export async function onRequest(context) {
     if (route === 'kpsc-ocr-notes' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
-      return await ocrHandwrittenNotes(env, body);
+      return await ocrHandwrittenNotes(env, body, DB);
     }
     if (route === 'kpsc-transcribe-audio' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
-      return await transcribeAudioWithWhisper(env, request);
+      return await transcribeAudioWithWhisper(env, request, DB);
     }
     if (route === 'kpsc-ocr-receipt' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -844,6 +845,8 @@ async function handleInit(DB) {
       provinceRebate:0.20
     }),
     kpsc_default_pin: '1234',
+    ai_transcription_model: 'gpt-4o-transcribe',
+    ai_ocr_model: 'gpt-4o',
     kpsc_partnership_types: JSON.stringify([
       { key: 'gods_kingdom_partner', label: "God's Kingdom Partner" },
       { key: 'covenant_partner', label: 'Covenant Partner' },
@@ -891,6 +894,7 @@ async function handleInit(DB) {
     { id: 'ka3', name: 'Financial Secretary', role: 'financial_secretary', pin: seededKpscDefaultPin },
     { id: 'ka4', name: 'Treasurer', role: 'treasurer', pin: seededKpscDefaultPin },
     { id: 'ka5', name: 'Committee Viewer', role: 'committee_viewer', pin: seededKpscDefaultPin },
+    { id: 'ka6', name: 'IT Administrator', role: 'it_admin', pin: seededKpscDefaultPin },
   ];
   for (const acct of defaultKpscAccounts) {
     const hashedPin = await hashPin(acct.pin);
@@ -983,7 +987,7 @@ async function changeUserPin(DB, data) {
   return ok({ success: true, id: userId });
 }
 
-const KPSC_ROLES = new Set(['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'committee_viewer']);
+const KPSC_ROLES = new Set(['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'committee_viewer', 'it_admin']);
 
 function publicKpscAccount(row) {
   return {
@@ -2404,10 +2408,17 @@ async function extractProjectsFromMeeting(DB, env, data) {
   return ok({ extracted: inserted.length, projects: inserted });
 }
 
-async function ocrHandwrittenNotes(env, data) {
+async function ocrHandwrittenNotes(env, data, DB) {
   const imageBase64 = String(data?.imageBase64 || '').trim();
   const mimeType = String(data?.mimeType || 'image/jpeg').trim();
   if (!imageBase64) return err('imageBase64 is required', 400);
+
+  // Read the configured vision/OCR model from settings (defaults to gpt-4o).
+  let ocrModel = 'gpt-4o';
+  try {
+    const sr = await DB.prepare(`SELECT value FROM settings WHERE key='ai_ocr_model'`).first();
+    if (sr?.value) ocrModel = String(sr.value).trim();
+  } catch (_) {}
 
   const openaiKey = String(env.OPENAI_API_KEY || '').trim();
   if (openaiKey) {
@@ -2416,7 +2427,7 @@ async function ocrHandwrittenNotes(env, data) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
         body: JSON.stringify({
-          model: 'gpt-4o',
+          model: ocrModel,
           messages: [{
             role: 'user',
             content: [
@@ -2438,11 +2449,18 @@ async function ocrHandwrittenNotes(env, data) {
   return ok({ transcript: '', method: 'none', error: 'No vision-capable AI key is configured. Please configure OPENAI_API_KEY in Cloudflare environment variables to enable OCR.' });
 }
 
-async function transcribeAudioWithWhisper(env, request) {
+async function transcribeAudioWithWhisper(env, request, DB) {
   const openaiKey = String(env.OPENAI_API_KEY || '').trim();
   if (!openaiKey) {
     return ok({ transcript: '', method: 'none', error: 'No transcription key configured. Please set OPENAI_API_KEY in Cloudflare environment variables.' });
   }
+
+  // Read the configured transcription model from settings (defaults to gpt-4o-transcribe).
+  let transcriptionModel = 'gpt-4o-transcribe';
+  try {
+    const sr = await DB.prepare(`SELECT value FROM settings WHERE key='ai_transcription_model'`).first();
+    if (sr?.value) transcriptionModel = String(sr.value).trim();
+  } catch (_) {}
 
   let form;
   try {
@@ -2462,8 +2480,9 @@ async function transcribeAudioWithWhisper(env, request) {
 
   const whisperForm = new FormData();
   whisperForm.append('file', audio, filename);
-  whisperForm.append('model', 'whisper-1');
+  whisperForm.append('model', transcriptionModel);
 
+  const methodLabel = transcriptionModel === 'whisper-1' ? 'openai_whisper' : 'openai_gpt4o';
   try {
     const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
@@ -2472,14 +2491,14 @@ async function transcribeAudioWithWhisper(env, request) {
     });
     if (!resp.ok) {
       const errText = await resp.text().catch(() => `HTTP ${resp.status}`);
-      return ok({ transcript: '', method: 'openai_whisper', error: `Transcription failed: ${errText}` });
+      return ok({ transcript: '', method: methodLabel, error: `Transcription failed: ${errText}` });
     }
     const data = await resp.json();
     const text = String(data.text || '').trim();
-    if (!text) return ok({ transcript: '', method: 'openai_whisper', error: 'No speech detected in the audio file.' });
-    return ok({ transcript: text, method: 'openai_whisper' });
+    if (!text) return ok({ transcript: '', method: methodLabel, error: 'No speech detected in the audio file.' });
+    return ok({ transcript: text, method: methodLabel });
   } catch (e) {
-    return ok({ transcript: '', method: 'openai_whisper', error: `Transcription error: ${e.message}` });
+    return ok({ transcript: '', method: methodLabel, error: `Transcription error: ${e.message}` });
   }
 }
 

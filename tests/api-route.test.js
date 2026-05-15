@@ -1025,6 +1025,24 @@ test('delete kpsc account: 403 for non-chairman caller', async () => {
   assert.match(body.error, /not permitted/i);
 });
 
+test('delete kpsc account: it_admin can delete a non-admin account', async () => {
+  const DB = createDeleteAccountDB({
+    callerAccountId: 'ka-itadmin', callerRole: 'it_admin',
+    targetId: 'ka-viewer', targetRole: 'committee_viewer',
+    chairmanCount: 1,
+  });
+  const sessionHeader = JSON.stringify({ accountId: 'ka-itadmin', token: 'ks-tok' });
+  const req = new Request('https://example.com/api/kpsc-accounts/ka-viewer', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+    body: JSON.stringify({}),
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  assert.equal(body.success, true);
+});
+
 test('AI secretary deepseek model migration: empty ai_deepseek_model defaults to deepseek-v4-flash', async () => {
   const originalFetch = globalThis.fetch;
   let capturedModel = null;

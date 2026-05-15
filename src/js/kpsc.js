@@ -31,6 +31,8 @@ const KPSC_PERMISSIONS = {
   financial_secretary:['dashboard', 'projects', 'partners', 'finance', 'reminders', 'archive', 'reports'],
   treasurer:          ['dashboard', 'projects', 'partners', 'finance', 'reminders', 'archive', 'reports'],
   committee_viewer:   ['dashboard', 'projects', 'partners', 'reports', 'archive'],
+  // IT admin: full read access + account/settings management; no operational write actions.
+  it_admin:           ['dashboard', 'archive', 'projects', 'partners', 'finance', 'reminders', 'members', 'reports', 'settings'],
 };
 const PIN_REGEX = /^\d{4,6}$/;
 
@@ -1456,6 +1458,7 @@ function roleLabel(role) {
     financial_secretary: 'Financial Secretary',
     treasurer: 'Treasurer',
     committee_viewer: 'Committee Viewer',
+    it_admin: 'IT Administrator',
   };
   return map[String(role || '').toLowerCase()] || 'Committee Viewer';
 }
@@ -5197,7 +5200,7 @@ function renderKpscAccountsCard(accounts) {
               </div>
               <div class="k-mc-badges">
                 <button class="kbtn kbtn-sm" onclick="Kpsc.openAccountEditor('${a.id}')">Edit</button>
-                ${String(S.user?.role || '') === 'acting_chairman' ? `<button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.confirmDeleteKpscAccount('${a.id}','${esc(a.name)}')">Delete</button>` : ''}
+                ${['acting_chairman','it_admin'].includes(String(S.user?.role || '')) ? `<button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.confirmDeleteKpscAccount('${a.id}','${esc(a.name)}')">Delete</button>` : ''}
               </div>
             </div>
           </div>`).join('') : '<div class="k-empty">No KPSC accounts found.</div>'}
@@ -5222,7 +5225,7 @@ async function openAccountEditor(id) {
         <input id="ka-name" class="k-input" value="${esc(existing?.name || '')}" />
         <label class="k-label">Role</label>
         <select id="ka-role" class="k-input">
-          ${['acting_chairman','general_secretary','financial_secretary','treasurer','committee_viewer'].map(role => `<option value="${role}" ${existing?.role === role ? 'selected' : ''}>${esc(roleLabel(role))}</option>`).join('')}
+          ${['acting_chairman','general_secretary','financial_secretary','treasurer','committee_viewer','it_admin'].map(role => `<option value="${role}" ${existing?.role === role ? 'selected' : ''}>${esc(roleLabel(role))}</option>`).join('')}
         </select>
         <label class="k-label">Status</label>
         <select id="ka-status" class="k-input">
@@ -5318,6 +5321,9 @@ async function renderSettings(main) {
   const policyNotes = res?.kpsc_policy_notes || '';
   const hasDeepseek = !!deepseekKey;
   const hasOpenai   = !!openaiKey;
+  const transcriptionModel = res?.ai_transcription_model || 'gpt-4o-transcribe';
+  const ocrModel           = res?.ai_ocr_model           || 'gpt-4o';
+  const deepseekModel      = res?.ai_deepseek_model      || 'deepseek-v4-flash';
   const reminderTemplate = res?.kpsc_reminder_template || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge. God bless you.';
   const incomeCategories = Array.isArray(res?.kpsc_income_categories) ? res.kpsc_income_categories.join('\n') : '';
   const expenseCategories = Array.isArray(res?.kpsc_expense_categories) ? res.kpsc_expense_categories.join('\n') : '';
@@ -5344,6 +5350,88 @@ async function renderSettings(main) {
   main.innerHTML = `
     <div class="k-page">
       ${renderKpscAccountsCard(S.accounts)}
+
+      <div class="k-card" style="margin-bottom:16px">
+        <h2 class="k-card-title">AI Models</h2>
+        <p class="k-card-sub">Choose which AI model powers each feature. Changing a model here takes effect immediately on the next request — no redeployment needed.</p>
+
+        <div class="k-form-group">
+          <label class="k-label">Meeting Minutes Model (DeepSeek)</label>
+          <select id="ks-deepseek-model" class="k-input">
+            <option value="deepseek-v4-flash" ${deepseekModel === 'deepseek-v4-flash' ? 'selected' : ''}>deepseek-v4-flash — V4 Flash (Fast, Recommended)</option>
+            <option value="deepseek-v4-pro" ${deepseekModel === 'deepseek-v4-pro' ? 'selected' : ''}>deepseek-v4-pro — V4 Pro (Deep reasoning, 1M context)</option>
+            <option value="deepseek-chat" ${deepseekModel === 'deepseek-chat' ? 'selected' : ''}>deepseek-chat — V3 (Deprecated · removed 2026-07-24)</option>
+            <option value="deepseek-reasoner" ${deepseekModel === 'deepseek-reasoner' ? 'selected' : ''}>deepseek-reasoner — R1 (Deprecated · removed 2026-07-24)</option>
+          </select>
+          <p class="k-hint">Used to generate and structure meeting minutes. <strong>deepseek-v4-flash</strong> is recommended — fast, cheap, 1M token context. Use <strong>deepseek-v4-pro</strong> for complex multi-page analyses. Legacy V3/R1 will be removed by DeepSeek on 2026-07-24.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Audio Transcription Model (OpenAI)</label>
+          <select id="ks-transcription-model" class="k-input">
+            <option value="gpt-4o-transcribe" ${transcriptionModel === 'gpt-4o-transcribe' ? 'selected' : ''}>gpt-4o-transcribe — GPT-4o (Best quality, Recommended)</option>
+            <option value="whisper-1" ${transcriptionModel === 'whisper-1' ? 'selected' : ''}>whisper-1 — Whisper v2 (Legacy · lower cost)</option>
+          </select>
+          <p class="k-hint">Used when you upload an audio file for transcription. <strong>gpt-4o-transcribe</strong> produces higher accuracy transcripts especially for accented speech and multi-speaker audio. <strong>whisper-1</strong> costs less per minute and is a good fallback.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Vision / OCR Model (OpenAI)</label>
+          <select id="ks-ocr-model" class="k-input">
+            <option value="gpt-4o" ${ocrModel === 'gpt-4o' ? 'selected' : ''}>gpt-4o (Best accuracy, Recommended)</option>
+            <option value="gpt-4o-mini" ${ocrModel === 'gpt-4o-mini' ? 'selected' : ''}>gpt-4o-mini (Faster · lower cost)</option>
+          </select>
+          <p class="k-hint">Used for handwritten notes OCR and receipt scanning. <strong>gpt-4o</strong> reads difficult handwriting most reliably. Switch to <strong>gpt-4o-mini</strong> if cost is a priority and the handwriting is clear.</p>
+        </div>
+
+        <div id="ks-ai-models-save-msg" class="k-settings-msg" style="display:none"></div>
+        <button class="kbtn kbtn-primary" onclick="Kpsc.saveAiModels()">Save AI Models</button>
+      </div>
+
+      <div class="k-card" style="margin-bottom:16px">
+        <h2 class="k-card-title">AI Provider Keys</h2>
+        <p class="k-card-sub">
+          API keys are stored securely in the church database and are only used for processing
+          meeting minutes, transcription, and OCR. Without a key the portal uses a built-in rule-based engine.
+        </p>
+        <div class="k-settings-status ${hasDeepseek || hasOpenai ? 'k-status-ai' : 'k-status-rule'}">
+          ${hasDeepseek || hasOpenai ? '🤖 AI-powered mode active' : '⚙️ Rule-based mode (no API key set)'}
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">DeepSeek API Key</label>
+          <input type="password" id="ks-deepseek-key" class="k-input"
+            placeholder="${hasDeepseek ? '••••••••••••••••' : 'sk-...'}"
+            autocomplete="off" value="${esc(deepseekKey)}" />
+          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at <a href="https://platform.deepseek.com" target="_blank" rel="noopener">platform.deepseek.com</a></p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">OpenAI API Key</label>
+          <input type="password" id="ks-openai-key" class="k-input"
+            placeholder="${hasOpenai ? '••••••••••••••••' : 'sk-...'}"
+            autocomplete="off" value="${esc(openaiKey)}" />
+          <p class="k-hint">Required for audio transcription, notes OCR, and receipt scanning. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a></p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">KPSC Bylaw / Policy URL</label>
+          <input type="url" id="ks-policy-url" class="k-input"
+            placeholder="https://..." value="${esc(policyUrl)}" />
+          <p class="k-hint">Optional link to the current KPSC bylaws or governance document for secretary review.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Policy Notes for AI Secretary</label>
+          <textarea id="ks-policy-notes" class="k-input k-textarea" placeholder="Paste key KPSC rules here, e.g. quorum, approval thresholds, welfare privacy rules...">${esc(policyNotes)}</textarea>
+          <p class="k-hint">Optional. These notes are included in provider-backed minutes processing and kept available for human review.</p>
+        </div>
+
+        <div id="ks-save-msg" class="k-settings-msg" style="display:none"></div>
+        <button class="kbtn kbtn-primary" id="ks-save-btn" onclick="Kpsc.saveSettings()">Save API Keys &amp; Policy</button>
+        ${hasDeepseek || hasOpenai ? `<button class="kbtn kbtn-danger-outline" style="margin-left:8px" onclick="Kpsc.clearAiKeys()">Clear Keys</button>` : ''}
+      </div>
+
       <div class="k-card" style="margin-bottom:16px">
         <h2 class="k-card-title">KPSC Operations Settings</h2>
         <p class="k-card-sub">Configure partnership categories, finance categories, and reminder templates for the KPSC portal.</p>
@@ -5372,60 +5460,6 @@ async function renderSettings(main) {
         <div id="ks-ops-save-msg" class="k-settings-msg" style="display:none"></div>
         <button class="kbtn kbtn-primary" onclick="Kpsc.saveKpscOpsSettings()">Save Operations Settings</button>
       </div>
-      <div class="k-card">
-        <h2 class="k-card-title">AI Provider Keys</h2>
-        <p class="k-card-sub">
-          API keys are stored securely in the church database and are only used for processing
-          meeting minutes. Without a key the portal uses a built-in rule-based engine.
-        </p>
-        <div class="k-settings-status ${hasDeepseek || hasOpenai ? 'k-status-ai' : 'k-status-rule'}">
-          ${hasDeepseek || hasOpenai ? '🤖 AI-powered mode active' : '⚙️ Rule-based mode (no API key set)'}
-        </div>
-
-        <div class="k-form-group">
-          <label class="k-label">DeepSeek API Key</label>
-          <input type="password" id="ks-deepseek-key" class="k-input"
-            placeholder="${hasDeepseek ? '••••••••••••••••' : 'sk-...'}"
-            autocomplete="off" value="${esc(deepseekKey)}" />
-          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at <a href="https://platform.deepseek.com" target="_blank" rel="noopener">platform.deepseek.com</a></p>
-        </div>
-
-        <div class="k-form-group">
-          <label class="k-label">DeepSeek Model</label>
-          <select id="ks-deepseek-model" class="k-input">
-            <option value="deepseek-v4-flash" ${(res?.ai_deepseek_model||'deepseek-v4-flash')==='deepseek-v4-flash'?'selected':''}>deepseek-v4-flash — V4 Flash (Fast, Recommended)</option>
-            <option value="deepseek-v4-pro" ${(res?.ai_deepseek_model||'')==='deepseek-v4-pro'?'selected':''}>deepseek-v4-pro — V4 Pro (Deep reasoning, 1M context)</option>
-            <option value="deepseek-chat" ${(res?.ai_deepseek_model||'')==='deepseek-chat'?'selected':''}>deepseek-chat — V3 (Deprecated · removed 2026-07-24)</option>
-            <option value="deepseek-reasoner" ${(res?.ai_deepseek_model||'')==='deepseek-reasoner'?'selected':''}>deepseek-reasoner — R1 (Deprecated · removed 2026-07-24)</option>
-          </select>
-          <p class="k-hint"><strong>deepseek-v4-flash</strong> is recommended for meeting minutes (fast, cheap, 1M context). Use <strong>deepseek-v4-pro</strong> for complex analysis. Legacy V3/R1 models will be removed by DeepSeek on 2026-07-24 — please migrate.</p>
-        </div>
-
-        <div class="k-form-group">
-          <label class="k-label">OpenAI API Key</label>
-          <input type="password" id="ks-openai-key" class="k-input"
-            placeholder="${hasOpenai ? '••••••••••••••••' : 'sk-...'}"
-            autocomplete="off" value="${esc(openaiKey)}" />
-          <p class="k-hint">Optional alternative AI provider for meeting minutes. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a></p>
-        </div>
-
-        <div class="k-form-group">
-          <label class="k-label">KPSC Bylaw / Policy URL</label>
-          <input type="url" id="ks-policy-url" class="k-input"
-            placeholder="https://..." value="${esc(policyUrl)}" />
-          <p class="k-hint">Optional link to the current KPSC bylaws or governance document for secretary review.</p>
-        </div>
-
-        <div class="k-form-group">
-          <label class="k-label">Policy Notes for AI Secretary</label>
-          <textarea id="ks-policy-notes" class="k-input k-textarea" placeholder="Paste key KPSC rules here, e.g. quorum, approval thresholds, welfare privacy rules...">${esc(policyNotes)}</textarea>
-          <p class="k-hint">Optional. These notes are included in provider-backed minutes processing and kept available for human review.</p>
-        </div>
-
-        <div id="ks-save-msg" class="k-settings-msg" style="display:none"></div>
-        <button class="kbtn kbtn-primary" id="ks-save-btn" onclick="Kpsc.saveSettings()">Save Settings</button>
-        ${hasDeepseek || hasOpenai ? `<button class="kbtn kbtn-danger-outline" style="margin-left:8px" onclick="Kpsc.clearAiKeys()">Clear Keys</button>` : ''}
-      </div>
 
       <div class="k-card" style="margin-top:16px">
         <h2 class="k-card-title">Live Transcription &amp; Diarization</h2>
@@ -5437,7 +5471,7 @@ async function renderSettings(main) {
         <div id="k-api-status-panel">${renderApiStatusCard(apiStatus)}</div>
         <div class="k-env-row">
           <code class="k-env-key">OPENAI_API_KEY</code>
-          <span class="k-env-desc">Powers live interim transcription (OpenAI gpt-4o-transcribe via WebRTC). Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a>.</span>
+          <span class="k-env-desc">Powers live interim transcription (OpenAI gpt-4o-transcribe via WebRTC), audio file upload transcription, and handwritten notes OCR. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a>.</span>
         </div>
         <div class="k-env-row">
           <code class="k-env-key">DEEPGRAM_API_KEY</code>
@@ -5470,6 +5504,27 @@ async function renderSettings(main) {
     </div>`;
 }
 
+async function saveAiModels() {
+  const msg = document.getElementById('ks-ai-models-save-msg');
+  const deepseekModel      = document.getElementById('ks-deepseek-model')?.value      || 'deepseek-v4-flash';
+  const transcriptionModel = document.getElementById('ks-transcription-model')?.value || 'gpt-4o-transcribe';
+  const ocrModel           = document.getElementById('ks-ocr-model')?.value           || 'gpt-4o';
+  const res = await apiPost('settings', {
+    ai_deepseek_model: deepseekModel,
+    ai_transcription_model: transcriptionModel,
+    ai_ocr_model: ocrModel,
+  });
+  if (res?.error) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = res.error;
+  } else {
+    msg.className = 'k-settings-msg k-msg-ok';
+    msg.textContent = 'AI models saved.';
+  }
+  msg.style.display = 'block';
+  setTimeout(() => { if (msg) msg.style.display = 'none'; }, 3000);
+}
+
 async function saveSettings() {
   const btn = document.getElementById('ks-save-btn');
   const msg = document.getElementById('ks-save-msg');
@@ -5477,7 +5532,6 @@ async function saveSettings() {
   const openaiKey   = document.getElementById('ks-openai-key')?.value.trim()   || '';
   const policyUrl   = document.getElementById('ks-policy-url')?.value.trim()   || '';
   const policyNotes = document.getElementById('ks-policy-notes')?.value.trim() || '';
-  const deepseekModel = document.getElementById('ks-deepseek-model')?.value || 'deepseek-v4-flash';
 
   btn.disabled = true;
   btn.textContent = 'Saving…';
@@ -5486,7 +5540,6 @@ async function saveSettings() {
   const res = await apiPost('settings', {
     ai_deepseek_key: deepseekKey,
     ai_openai_key: openaiKey,
-    ai_deepseek_model: deepseekModel,
     kpsc_policy_url: policyUrl,
     kpsc_policy_notes: policyNotes,
   });
@@ -5496,14 +5549,14 @@ async function saveSettings() {
     msg.textContent = res.error;
   } else {
     msg.className = 'k-settings-msg k-msg-ok';
-    msg.textContent = 'Settings saved.';
+    msg.textContent = 'API keys & policy saved.';
     await renderSettings(document.getElementById('kpsc-main'));
     return;
   }
 
   msg.style.display = 'block';
   btn.disabled = false;
-  btn.textContent = 'Save Keys';
+  btn.textContent = 'Save API Keys & Policy';
 }
 
 async function clearAiKeys() {
@@ -6500,6 +6553,7 @@ window.Kpsc = {
   confirmDeleteKpscAccount,
   executeDeleteKpscAccount,
   saveSettings,
+  saveAiModels,
   clearAiKeys,
   refreshApiStatus,
   updateAttGroup,
