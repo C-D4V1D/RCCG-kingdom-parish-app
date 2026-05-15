@@ -95,6 +95,7 @@ const S = {
   _reviewEditMode: false, // true = show inline review editor; false = show reviewed summary
   _isNewMeeting: false,   // true when the room is hosting a fresh, never-saved draft
   kpscMeetingCadence: 'none',
+  rolePermissions: null, // loaded from DB; null means use KPSC_PERMISSIONS defaults
 };
 
 // ── AUDIO RECORDER + REALTIME TRANSCRIPTION ───────────────────────
@@ -1463,11 +1464,16 @@ function roleLabel(role) {
   return map[String(role || '').toLowerCase()] || 'Committee Viewer';
 }
 
+function effectiveRolePermissions() {
+  return S.rolePermissions || KPSC_PERMISSIONS;
+}
+
 function canAccess(page) {
   // Group-level navigation names are always accessible (groups are always shown).
   if (['home', 'meetings', 'money', 'more'].includes(page)) return true;
   const role = String(S.user?.role || 'committee_viewer').toLowerCase();
-  const allowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
+  const perms = effectiveRolePermissions();
+  const allowed = perms[role] || KPSC_PERMISSIONS.committee_viewer;
   return allowed.includes(page);
 }
 
@@ -1490,7 +1496,8 @@ function applyNavPermissions() {
 
 function defaultPageForRole() {
   const role = String(S.user?.role || 'committee_viewer').toLowerCase();
-  const allowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
+  const perms = effectiveRolePermissions();
+  const allowed = perms[role] || KPSC_PERMISSIONS.committee_viewer;
   return allowed[0] || 'dashboard';
 }
 
@@ -1897,13 +1904,21 @@ function logout() {
   loadLoginOptions();
 }
 
-function enterApp() {
+async function enterApp() {
   document.getElementById('kpsc-login-screen').style.display = 'none';
   document.getElementById('kpsc-app').style.display = '';
   const userLabel = `${S.user.name} (${roleLabel(S.user.role)})`;
   const userNameEl = document.getElementById('kpsc-user-name');
   userNameEl.textContent = userLabel;
   userNameEl.title = userLabel;
+  // Load role permissions from DB so canAccess() uses current settings
+  try {
+    const settingsRes = await apiGet('settings');
+    const saved = settingsRes?.kpsc_role_permissions;
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      S.rolePermissions = saved;
+    }
+  } catch { /* fall back to hardcoded KPSC_PERMISSIONS */ }
   applyNavPermissions();
   S._navStack = [];
   const hashPage = window.location.hash.replace('#', '');
@@ -5318,6 +5333,11 @@ async function renderSettings(main) {
     apiGet('kpsc-accounts').catch(() => []),
   ]);
   S.accounts = Array.isArray(accountsRes) ? accountsRes : [];
+  // Hydrate role permissions from DB so canAccess() reflects any saved customisations
+  const savedPerms = res?.kpsc_role_permissions;
+  if (savedPerms && typeof savedPerms === 'object' && !Array.isArray(savedPerms)) {
+    S.rolePermissions = savedPerms;
+  }
   const deepseekKey = res?.ai_deepseek_key || '';
   const openaiKey   = res?.ai_openai_key   || '';
   const policyUrl   = res?.kpsc_policy_url  || '';
@@ -5353,6 +5373,8 @@ async function renderSettings(main) {
   main.innerHTML = `
     <div class="k-page">
       ${renderKpscAccountsCard(S.accounts)}
+
+      ${renderRolePermissionsCard()}
 
       <div class="k-card" style="margin-bottom:16px">
         <h2 class="k-card-title">AI Models</h2>
@@ -5593,6 +5615,115 @@ async function saveKpscOpsSettings() {
   }
   msg.style.display = 'block';
   setTimeout(() => { if(msg) msg.style.display = 'none'; }, 3000);
+}
+
+// ── ROLE PERMISSIONS ─────────────────────────────────────────────
+
+const PERM_ROLES = [
+  { key: 'acting_chairman',    label: 'Acting Chairman' },
+  { key: 'general_secretary',  label: 'General Secretary' },
+  { key: 'financial_secretary',label: 'Financial Secretary' },
+  { key: 'treasurer',          label: 'Treasurer' },
+  { key: 'committee_viewer',   label: 'Committee Viewer' },
+  { key: 'it_admin',           label: 'IT Administrator' },
+];
+
+const PERM_PAGES = [
+  { key: 'dashboard',  label: 'Dashboard' },
+  { key: 'archive',    label: 'Archive' },
+  { key: 'projects',   label: 'Projects' },
+  { key: 'partners',   label: 'Partners' },
+  { key: 'finance',    label: 'Finance' },
+  { key: 'reminders',  label: 'Reminders' },
+  { key: 'reports',    label: 'Reports' },
+  { key: 'members',    label: 'Members' },
+  { key: 'settings',   label: 'Settings' },
+];
+
+function isPermForced(roleKey, pageKey) {
+  // Dashboard is always accessible to every role
+  if (pageKey === 'dashboard') return true;
+  // Acting Chairman must always keep access to Settings (prevents self-lockout)
+  if (roleKey === 'acting_chairman' && pageKey === 'settings') return true;
+  return false;
+}
+
+function renderRolePermissionsCard() {
+  const perms = effectiveRolePermissions();
+  return `
+    <div class="k-card" style="margin-bottom:16px">
+      <h2 class="k-card-title">Role Permissions</h2>
+      <p class="k-card-sub">Control which sections each role can access. Greyed checkboxes are always enforced and cannot be changed.</p>
+      <div style="overflow-x:auto">
+        <table class="k-perm-table">
+          <thead>
+            <tr>
+              <th class="k-perm-role-col">Role</th>
+              ${PERM_PAGES.map(p => `<th class="k-perm-page-col">${p.label}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${PERM_ROLES.map(role => {
+              const allowed = Array.isArray(perms[role.key]) ? perms[role.key] : (KPSC_PERMISSIONS[role.key] || []);
+              return `<tr>
+                <td class="k-perm-role-name">${role.label}</td>
+                ${PERM_PAGES.map(page => {
+                  const forced  = isPermForced(role.key, page.key);
+                  const checked = forced || allowed.includes(page.key);
+                  return `<td class="k-perm-check-cell">
+                    <input type="checkbox" id="kp-${role.key}-${page.key}"
+                      ${checked ? 'checked' : ''}
+                      ${forced  ? 'disabled title="Always enabled"' : ''}
+                    />
+                  </td>`;
+                }).join('')}
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div id="ks-perms-save-msg" class="k-settings-msg" style="display:none"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.saveRolePermissions()">Save Role Permissions</button>
+        <button class="kbtn" onclick="Kpsc.resetRolePermissions()">Reset to Defaults</button>
+      </div>
+    </div>`;
+}
+
+async function saveRolePermissions() {
+  const perms = {};
+  for (const role of PERM_ROLES) {
+    perms[role.key] = PERM_PAGES
+      .filter(page => isPermForced(role.key, page.key) || document.getElementById(`kp-${role.key}-${page.key}`)?.checked)
+      .map(page => page.key);
+  }
+  const msg = document.getElementById('ks-perms-save-msg');
+  const res = await apiPost('settings', { kpsc_role_permissions: perms });
+  if (res?.error) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = res.error;
+  } else {
+    S.rolePermissions = perms;
+    msg.className = 'k-settings-msg k-msg-ok';
+    msg.textContent = 'Role permissions saved.';
+  }
+  msg.style.display = 'block';
+  setTimeout(() => { if (msg) msg.style.display = 'none'; }, 3000);
+}
+
+async function resetRolePermissions() {
+  if (!confirm('Reset all role permissions to defaults? This will undo any customisations.')) return;
+  const msg = document.getElementById('ks-perms-save-msg');
+  const res = await apiPost('settings', { kpsc_role_permissions: KPSC_PERMISSIONS });
+  if (res?.error) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = res.error;
+    msg.style.display = 'block';
+    setTimeout(() => { if (msg) msg.style.display = 'none'; }, 3000);
+  } else {
+    S.rolePermissions = null; // null triggers fallback to KPSC_PERMISSIONS in effectiveRolePermissions()
+    await renderSettings(document.getElementById('kpsc-main'));
+  }
 }
 
 // ── PROJECTS ─────────────────────────────────────────────────────
@@ -6548,6 +6679,8 @@ window.Kpsc = {
   setReportsSearch,
   updateReportActionStatus,
   saveKpscOpsSettings,
+  saveRolePermissions,
+  resetRolePermissions,
   partnerTypeLabel,
   filterArchive,
   setArchiveQuickFilter,
