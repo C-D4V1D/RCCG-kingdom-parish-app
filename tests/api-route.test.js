@@ -792,8 +792,8 @@ test('settings api-status reports configured realtime API keys without exposing 
       DB: createDBMock({ onPrepare: () => ({}) }),
       OPENAI_API_KEY: 'sk-test-openai-secret',
       DEEPGRAM_API_KEY: 'dg-test-secret',
-      AZURE_SPEAKER_KEY: 'az-test-secret',
-      AZURE_SPEAKER_REGION: 'westeurope'
+      VOICE_FP_TOKEN: 'vfp-test-secret',
+      VOICE_FP_URL: 'https://voice-fp.example.com'
     }
   });
   const body = await readJson(response);
@@ -804,7 +804,8 @@ test('settings api-status reports configured realtime API keys without exposing 
   assert.equal(body.liveTranscription.keyName, 'OPENAI_API_KEY');
   assert.equal(body.liveTranscription.masked.includes('secret'), false);
   assert.equal(body.diarization.configured, true);
-  assert.equal(body.speakerRecognition.region, 'westeurope');
+  assert.equal(body.speakerRecognition.keyName, 'VOICE_FP_TOKEN');
+  assert.equal(body.speakerRecognition.url, 'https://voice-fp.example.com');
 });
 
 test('settings api-status reports missing realtime API key', async () => {
