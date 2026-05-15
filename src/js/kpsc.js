@@ -1236,12 +1236,12 @@ function kpscSessionHeader() {
   return { 'X-KPSC-Session': JSON.stringify({ accountId: user.id, token: user.sessionToken }) };
 }
 
-function isKpscSessionError(errorMessage) {
+function isKpscSessionErrorMessage(errorMessage) {
   return KPSC_SESSION_ERRORS.has(String(errorMessage || ''));
 }
 
 function handleKpscAuthFailure(data) {
-  if (!isKpscSessionError(data?.error)) return;
+  if (!isKpscSessionErrorMessage(data?.error)) return;
   if (!S.user?.sessionToken || S._authRecoveryInProgress) return;
   S._authRecoveryInProgress = true;
   try {
