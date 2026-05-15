@@ -470,6 +470,29 @@ export async function onRequest(context) {
       if (method === 'POST' && param === 'import') return await adminImport(DB, body);
     }
 
+    // ── B5: /api/kpsc-followups ────────────────────────────────
+    if (route === 'kpsc-followups') {
+      if (method === 'GET' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getFollowups(DB, url);
+      }
+      if (method === 'PATCH' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await patchFollowup(DB, param, body, auth);
+      }
+    }
+
+    // ── B5+B6: internal cron endpoints (Bearer CRON_SECRET) ────
+    if (route === 'internal') {
+      if (method === 'POST' && param === 'run-followups')  return await runFollowups(DB, env, request);
+      if (method === 'POST' && param === 'run-prebriefs')  return await runPrebriefs(DB, env, request);
+    }
+
+    // ── B6: scheduled_for field on ai-secretary-meetings ───────
+    // (handled inline in updateAiSecretaryMeeting via body.scheduledFor)
+
     return err(`Route not found: ${method} /api/${path}`, 404);
 
   } catch (e) {
@@ -748,6 +771,21 @@ async function handleInit(DB) {
       voice_enrolled_at     TEXT,
       voice_sample_count    INTEGER DEFAULT 0
     )`,
+    // B5: follow-up nudge queue
+    `CREATE TABLE IF NOT EXISTS kpsc_followups (
+      id               TEXT PRIMARY KEY,
+      meeting_id       TEXT NOT NULL,
+      action_id        TEXT NOT NULL,
+      assignee         TEXT,
+      task             TEXT,
+      due_date         TEXT,
+      draft_message    TEXT NOT NULL DEFAULT '',
+      status           TEXT NOT NULL DEFAULT 'pending',
+      generated_at     TEXT DEFAULT (datetime('now')),
+      approved_at      TEXT,
+      approved_by      TEXT,
+      UNIQUE(meeting_id, action_id)
+    )`,
   ];
 
   // Run all CREATE TABLE statements first
@@ -796,12 +834,17 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_members ADD COLUMN voice_embedding BLOB`,
     `ALTER TABLE kpsc_members ADD COLUMN voice_enrolled_at TEXT`,
     `ALTER TABLE kpsc_members ADD COLUMN voice_sample_count INTEGER DEFAULT 0`,
+    // B6: scheduling + pre-meeting brief on ai_secretary_meetings.
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN scheduled_for TEXT`,
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN pre_brief_markdown TEXT`,
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN pre_brief_generated_at TEXT`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
   }
 
   await DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_kpsc_partner_payment_period ON kpsc_partner_payments(partner_id, year, month, payment_type)`).run();
+  try { await DB.prepare(`CREATE INDEX IF NOT EXISTS idx_followups_status ON kpsc_followups(status)`).run(); } catch { /* safe */ }
 
   // Migrate legacy: remove goFishing from saved quotas setting
   try {
@@ -2578,6 +2621,9 @@ function aiSecretaryMeetingFromRow(row) {
     createdAt: row.created_at || '',
     deletedAt: row.deleted_at || '',
     deletedBy: row.deleted_by || '',
+    scheduledFor: row.scheduled_for || null,
+    preBriefMarkdown: row.pre_brief_markdown || null,
+    preBriefGeneratedAt: row.pre_brief_generated_at || null,
   };
 }
 
@@ -2989,8 +3035,8 @@ async function createAiSecretaryMeeting(DB, data) {
   const now = new Date().toISOString();
   await DB.prepare(`
     INSERT INTO ai_secretary_meetings
-      (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,created_by,started_at,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?)
+      (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,created_by,started_at,created_at,scheduled_for)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     String(data.title || 'KPSC Meeting').trim(),
@@ -3002,6 +3048,7 @@ async function createAiSecretaryMeeting(DB, data) {
     data.createdBy || '',
     data.startedAt || '',
     now,
+    data.scheduledFor ? String(data.scheduledFor).trim() : null,
   ).run();
   return await getAiSecretaryMeeting(DB, id);
 }
@@ -3044,10 +3091,14 @@ async function updateAiSecretaryMeeting(DB, id, data) {
     ? dedupeAiSecretaryFlags(data.policyFlags)
     : safeJsonParse(existing.policy_flags_json, []);
 
+  const scheduledFor = data.scheduledFor !== undefined
+    ? (data.scheduledFor ? String(data.scheduledFor).trim() : null)
+    : (existing.scheduled_for || null);
   await DB.prepare(`
     UPDATE ai_secretary_meetings SET
       title=?, meeting_type=?, meeting_date=?, status=?, participants_json=?, transcript_text=?, ended_at=?,
-      summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?
+      summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?,
+      scheduled_for=?
     WHERE id=?
   `).bind(
     data.title !== undefined ? String(data.title).trim() : existing.title,
@@ -3063,6 +3114,7 @@ async function updateAiSecretaryMeeting(DB, id, data) {
     JSON.stringify(resolutions),
     JSON.stringify(actionItems),
     JSON.stringify(policyFlags),
+    scheduledFor,
     id,
   ).run();
   return await getAiSecretaryMeeting(DB, id);
@@ -3642,7 +3694,247 @@ async function voiceGetEnrollment(DB, memberId) {
   return ok({ enrolled: true, enrolledAt: row.voice_enrolled_at, sampleCount: row.voice_sample_count || 0 });
 }
 
+// ── B5: FOLLOW-UP NUDGES ──────────────────────────────────────────────
+
+/**
+ * Pure helper: given an array of meetings and a today-string (YYYY-MM-DD),
+ * return the list of overdue action items that need a follow-up generated.
+ * Already-followed-up items (passed in `existingFollowupKeys` set of
+ * "meetingId:actionId" strings) are excluded.
+ */
+function classifyOverdueActionItems(meetings, todayStr, existingFollowupKeys = new Set()) {
+  const results = [];
+  for (const m of meetings) {
+    if (m.status !== 'processed') continue;
+    const items = Array.isArray(m.action_items) ? m.action_items
+      : (Array.isArray(m.actionItems) ? m.actionItems : []);
+    for (const item of items) {
+      if (!item || !item.id) continue;
+      if (item.status === 'done' || item.status === 'cancelled') continue;
+      if (!item.dueDate) continue;
+      if (item.dueDate >= todayStr) continue;
+      const key = `${m.id}:${item.id}`;
+      if (existingFollowupKeys.has(key)) continue;
+      results.push({
+        meetingId: m.id,
+        meetingTitle: m.title || '',
+        meetingDate: m.meeting_date || m.meetingDate || '',
+        actionId: item.id,
+        task: item.task || '',
+        assignee: item.assignee || 'Unassigned',
+        dueDate: item.dueDate,
+      });
+    }
+  }
+  return results;
+}
+
+/** Verify Bearer CRON_SECRET. Returns null on success, or a Response on failure. */
+function requireCronSecret(env, request) {
+  const secret = String(env.CRON_SECRET || '').trim();
+  if (!secret) return err('CRON_SECRET env var not configured', 503);
+  const auth = request.headers.get('Authorization') || '';
+  if (auth !== `Bearer ${secret}`) return err('Unauthorized', 401);
+  return null;
+}
+
+async function runFollowups(DB, env, request) {
+  const authErr = requireCronSecret(env, request);
+  if (authErr) return authErr;
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  // Load all processed meetings
+  const { results: meetingRows } = await DB.prepare(
+    `SELECT id, title, meeting_date, status, action_items_json FROM ai_secretary_meetings WHERE status='processed'`
+  ).all();
+
+  // Load existing followup keys to avoid double-nudging
+  const { results: existingRows } = await DB.prepare(
+    `SELECT meeting_id, action_id FROM kpsc_followups`
+  ).all();
+  const existingFollowupKeys = new Set((existingRows || []).map(r => `${r.meeting_id}:${r.action_id}`));
+
+  // Build meeting objects expected by classifyOverdueActionItems
+  const meetings = (meetingRows || []).map(r => ({
+    id: r.id,
+    title: r.title,
+    meeting_date: r.meeting_date,
+    status: r.status,
+    action_items: safeJsonParse(r.action_items_json, []),
+  }));
+
+  const overdue = classifyOverdueActionItems(meetings, todayStr, existingFollowupKeys);
+
+  // Get DeepSeek key from settings
+  let deepseekKey = '';
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='ai_deepseek_key'`).first();
+    deepseekKey = row ? String(row.value || '').trim() : '';
+  } catch { /* ignore */ }
+
+  let generated = 0;
+  let skipped = 0;
+
+  for (const item of overdue) {
+    // Double-check no race condition
+    const existing = await DB.prepare(
+      `SELECT id FROM kpsc_followups WHERE meeting_id=? AND action_id=?`
+    ).bind(item.meetingId, item.actionId).first();
+    if (existing) { skipped++; continue; }
+
+    let draftMessage = '';
+    const firstName = (item.assignee || 'Team').split(/[\s,]+/)[0];
+    const fallbackMsg = `Hi ${firstName}, just a gentle reminder that the task "${item.task}" from the KPSC meeting on ${item.meetingDate} was due on ${item.dueDate} and is now overdue. We understand you're busy — where are we on this?`;
+
+    if (deepseekKey) {
+      try {
+        const prompt = `Generate a one-paragraph WhatsApp message to ${firstName}: a gentle reminder that the task "${item.task}" from the KPSC meeting on ${item.meetingDate} was due on ${item.dueDate} and is now overdue. Be respectful and assume they're busy, not negligent. End with a clear ask: "Where are we?". Do not use a formal greeting like "Dear". Use their first name: ${firstName}.`;
+        const resp = await fetch('https://api.deepseek.com/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+          body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: prompt }], max_tokens: 200, temperature: 0.5 }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          draftMessage = (data.choices?.[0]?.message?.content || '').trim();
+        }
+      } catch { /* fall back to template */ }
+    }
+
+    if (!draftMessage) draftMessage = fallbackMsg;
+
+    const followupId = newId('FU-');
+    await DB.prepare(
+      `INSERT OR IGNORE INTO kpsc_followups (id, meeting_id, action_id, assignee, task, due_date, draft_message, status, generated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`
+    ).bind(followupId, item.meetingId, item.actionId, item.assignee, item.task, item.dueDate, draftMessage).run();
+    generated++;
+  }
+
+  return ok({ ok: true, generated, skipped });
+}
+
+async function getFollowups(DB, url) {
+  const status = url.searchParams.get('status') || 'pending';
+  const { results } = await DB.prepare(
+    `SELECT f.*, m.title AS meeting_title, m.meeting_date
+     FROM kpsc_followups f
+     LEFT JOIN ai_secretary_meetings m ON m.id = f.meeting_id
+     WHERE f.status = ?
+     ORDER BY f.generated_at DESC`
+  ).bind(status).all();
+  return ok(results || []);
+}
+
+async function patchFollowup(DB, id, body, account) {
+  const row = await DB.prepare(`SELECT id FROM kpsc_followups WHERE id=?`).bind(id).first();
+  if (!row) return err('Follow-up not found', 404);
+
+  const newStatus = String(body?.status || '').trim();
+  const editedMessage = body?.editedMessage !== undefined ? String(body.editedMessage).trim() : undefined;
+
+  const validStatuses = ['approved', 'skipped', 'pending'];
+  if (newStatus && !validStatuses.includes(newStatus)) {
+    return err(`Invalid status '${newStatus}'. Must be one of: ${validStatuses.join(', ')}`, 400);
+  }
+
+  const now = new Date().toISOString();
+  if (newStatus === 'approved') {
+    await DB.prepare(
+      `UPDATE kpsc_followups SET status='approved', approved_at=?, approved_by=?${editedMessage !== undefined ? ', draft_message=?' : ''} WHERE id=?`
+    ).bind(...[now, account.name, ...(editedMessage !== undefined ? [editedMessage] : []), id]).run();
+  } else if (newStatus === 'skipped') {
+    await DB.prepare(`UPDATE kpsc_followups SET status='skipped' WHERE id=?`).bind(id).run();
+  } else if (editedMessage !== undefined) {
+    await DB.prepare(`UPDATE kpsc_followups SET draft_message=? WHERE id=?`).bind(editedMessage, id).run();
+  }
+
+  const updated = await DB.prepare(`SELECT * FROM kpsc_followups WHERE id=?`).bind(id).first();
+  return ok(updated);
+}
+
+// ── B6: PRE-MEETING BRIEFS ────────────────────────────────────────────
+
+async function runPrebriefs(DB, env, request) {
+  const authErr = requireCronSecret(env, request);
+  if (authErr) return authErr;
+
+  // Find meetings scheduled within the next 24 hours that don't have a brief yet
+  const { results: upcoming } = await DB.prepare(
+    `SELECT id, title, scheduled_for FROM ai_secretary_meetings
+     WHERE scheduled_for IS NOT NULL
+       AND pre_brief_markdown IS NULL
+       AND scheduled_for BETWEEN datetime('now') AND datetime('now', '+24 hours')`
+  ).all();
+
+  if (!upcoming || upcoming.length === 0) return ok({ ok: true, generated: 0 });
+
+  // Get DeepSeek key
+  let deepseekKey = '';
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='ai_deepseek_key'`).first();
+    deepseekKey = row ? String(row.value || '').trim() : '';
+  } catch { /* ignore */ }
+
+  // Load the most recent processed meeting for context
+  const prevRow = await DB.prepare(
+    `SELECT title, meeting_date, minutes_markdown, action_items_json FROM ai_secretary_meetings
+     WHERE status='processed' ORDER BY meeting_date DESC, processed_at DESC LIMIT 1`
+  ).first();
+
+  let generated = 0;
+  for (const meeting of upcoming) {
+    let brief = '';
+    if (deepseekKey && prevRow) {
+      try {
+        const openItems = safeJsonParse(prevRow.action_items_json, [])
+          .filter(a => a.status !== 'done' && a.status !== 'cancelled')
+          .map(a => `- ${a.task} (${a.assignee || 'Unassigned'}, due: ${a.dueDate || 'unset'})`)
+          .join('\n') || '(none)';
+        const prompt = `Generate a pre-meeting brief in markdown for a KPSC committee meeting titled "${meeting.title}" scheduled for ${meeting.scheduled_for}. Use the following context from the last processed meeting (${prevRow.title}, ${prevRow.meeting_date}):
+
+Minutes excerpt:
+${(prevRow.minutes_markdown || '').slice(0, 2000)}
+
+Open action items:
+${openItems}
+
+Include exactly four sections in your response:
+## Open Action Items
+## Decisions from the Last Meeting
+## Overdue Items
+## Suggested Agenda
+
+Keep the total brief under 400 words. Cite specifics (names, dates, amounts) — do not be vague. Return only markdown.`;
+        const resp = await fetch('https://api.deepseek.com/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+          body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: prompt }], max_tokens: 800, temperature: 0.3 }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          brief = (data.choices?.[0]?.message?.content || '').trim();
+        }
+      } catch { /* fall back */ }
+    }
+
+    if (!brief) {
+      brief = `# Pre-Meeting Brief: ${meeting.title}\n\nScheduled: ${meeting.scheduled_for}\n\n` +
+        (prevRow ? `## Decisions from the Last Meeting\nSee previous meeting (${prevRow.title}, ${prevRow.meeting_date}) for context.\n\n## Open Action Items\nReview the action items from the previous meeting.\n\n## Overdue Items\nCheck action items with passed due dates.\n\n## Suggested Agenda\nTo be confirmed by the secretary.` : '## No previous meeting context available.');
+    }
+
+    const now = new Date().toISOString();
+    await DB.prepare(
+      `UPDATE ai_secretary_meetings SET pre_brief_markdown=?, pre_brief_generated_at=? WHERE id=?`
+    ).bind(brief, now, meeting.id).run();
+    generated++;
+  }
+
+  return ok({ ok: true, generated });
+}
+
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding };
+export { cosineSim, embeddingToBlob, blobToEmbedding, classifyOverdueActionItems };
