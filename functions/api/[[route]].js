@@ -297,6 +297,11 @@ export async function onRequest(context) {
       if (auth instanceof Response) return auth;
       return await ocrHandwrittenNotes(env, body);
     }
+    if (route === 'kpsc-transcribe-audio' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await transcribeAudioWithWhisper(env, request);
+    }
     if (route === 'kpsc-ocr-receipt' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
@@ -2431,6 +2436,51 @@ async function ocrHandwrittenNotes(env, data) {
   }
 
   return ok({ transcript: '', method: 'none', error: 'No vision-capable AI key is configured. Please configure OPENAI_API_KEY in Cloudflare environment variables to enable OCR.' });
+}
+
+async function transcribeAudioWithWhisper(env, request) {
+  const openaiKey = String(env.OPENAI_API_KEY || '').trim();
+  if (!openaiKey) {
+    return ok({ transcript: '', method: 'none', error: 'No transcription key configured. Please set OPENAI_API_KEY in Cloudflare environment variables.' });
+  }
+
+  let form;
+  try {
+    form = await request.formData();
+  } catch (_) {
+    return err('Expected multipart form data with an "audio" field.', 400);
+  }
+
+  const audio = form.get('audio');
+  if (!audio || typeof audio.arrayBuffer !== 'function') {
+    return err('Missing or invalid audio field.', 400);
+  }
+
+  const mimeType = String(form.get('mimeType') || audio.type || 'audio/webm');
+  const ext = mimeType.split('/')[1]?.split(';')[0] || 'webm';
+  const filename = `recording.${ext}`;
+
+  const whisperForm = new FormData();
+  whisperForm.append('file', audio, filename);
+  whisperForm.append('model', 'whisper-1');
+
+  try {
+    const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${openaiKey}` },
+      body: whisperForm,
+    });
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => `HTTP ${resp.status}`);
+      return ok({ transcript: '', method: 'openai_whisper', error: `Transcription failed: ${errText}` });
+    }
+    const data = await resp.json();
+    const text = String(data.text || '').trim();
+    if (!text) return ok({ transcript: '', method: 'openai_whisper', error: 'No speech detected in the audio file.' });
+    return ok({ transcript: text, method: 'openai_whisper' });
+  } catch (e) {
+    return ok({ transcript: '', method: 'openai_whisper', error: `Transcription error: ${e.message}` });
+  }
 }
 
 async function ocrReceipt(env, data) {

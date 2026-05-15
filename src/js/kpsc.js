@@ -2675,10 +2675,11 @@ async function renderMeetingRoom(main) {
         <h3 class="k-sec-title">Live Audio & Realtime Transcript</h3>
         ${phase === 'setup' ? `<p class="k-quick-hint">Confirm the details above, then tap 🎙 Start Meeting below to begin recording. Everything saves automatically.</p>` : ''}
         <div class="k-tabs" style="margin-bottom:16px">
-          <button class="k-tab ${S._meetingTab !== 'upload' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('record')">🎙 Live Recording</button>
+          <button class="k-tab ${S._meetingTab === 'record' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('record')">🎙 Live Recording</button>
+          <button class="k-tab ${S._meetingTab === 'audio' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('audio')">🎵 Upload Audio</button>
           <button class="k-tab ${S._meetingTab === 'upload' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('upload')">📷 Upload Notes</button>
         </div>
-        <div id="km-rec-panel" style="${S._meetingTab === 'upload' ? 'display:none' : ''}">
+        <div id="km-rec-panel" style="${S._meetingTab !== 'record' ? 'display:none' : ''}">
         ${canRecord ? `<div id="kpsc-rec-ui" class="k-rec-ui"></div>` : ''}
         <div id="kpsc-speaker-map"></div>
         <div class="k-live-transcript" id="kpsc-live-transcript">
@@ -2693,6 +2694,35 @@ async function renderMeetingRoom(main) {
         </div>
         <label class="k-label k-transcript-label" for="km-transcript">Saved Transcript / Notes</label>
         <textarea class="k-input k-textarea" id="km-transcript" placeholder="Type notes here, or start the meeting to append live transcript entries…" ${isProcessed ? 'readonly' : ''}>${esc(m?.transcriptText || '')}</textarea>
+        ${!isProcessed ? `
+        <details class="k-collapsible" style="margin-top:16px">
+          <summary class="k-collapsible-hdr">
+            <span class="k-collapsible-title">📷 Also upload handwritten notes (optional)</span>
+          </summary>
+          <p class="k-hint" style="margin-top:8px">Take a photo of your handwritten notes. The AI will extract the text and append it to the transcript above.</p>
+          <label class="k-label">Photo of Handwritten Notes</label>
+          <input id="km-rec-notes-photo" type="file" accept="image/*" capture="environment" class="k-input" style="padding:8px" onchange="Kpsc.previewRecNotesPhoto(this)" />
+          <div id="km-rec-notes-preview" style="margin-top:12px"></div>
+          <div id="km-rec-notes-status"></div>
+        </details>` : ''}
+        </div>
+        <div id="km-audio-panel" style="${S._meetingTab !== 'audio' ? 'display:none' : ''}">
+          <div class="k-section">
+            <p class="k-hint">Upload a pre-recorded audio file. The AI will transcribe it and add the text to the transcript. Supported formats: mp3, mp4, m4a, wav, webm, ogg (max 25 MB).</p>
+            <label class="k-label">Audio Recording</label>
+            <input id="km-audio-file" type="file" accept="audio/*" class="k-input" style="padding:8px" onchange="Kpsc.previewAudioFile(this)" />
+            <div id="km-audio-preview" style="margin-top:8px"></div>
+            <div id="km-audio-status" style="margin-top:8px"></div>
+          </div>
+          <details class="k-collapsible" style="margin-top:4px">
+            <summary class="k-collapsible-hdr">
+              <span class="k-collapsible-title">📷 Also attach handwritten notes (optional)</span>
+            </summary>
+            <p class="k-hint" style="margin-top:8px">If you also have handwritten notes, upload a photo here. Both the audio transcript and the notes will be combined before processing.</p>
+            <label class="k-label">Photo of Handwritten Notes</label>
+            <input id="km-audio-notes-photo" type="file" accept="image/*" capture="environment" class="k-input" style="padding:8px" onchange="Kpsc.previewAudioNotesPhoto(this)" />
+            <div id="km-audio-notes-preview" style="margin-top:12px"></div>
+          </details>
         </div>
         <div id="km-upload-panel" style="${S._meetingTab !== 'upload' ? 'display:none' : ''}">
           <div class="k-section">
@@ -5731,10 +5761,12 @@ async function extractProjectsFromMeetingUI(meetingId, btn) {
 
 function setMeetingTab(tab) {
   S._meetingTab = tab;
-  const recPanel = document.getElementById('km-rec-panel');
+  const recPanel   = document.getElementById('km-rec-panel');
+  const audioPanel = document.getElementById('km-audio-panel');
   const uploadPanel = document.getElementById('km-upload-panel');
-  if (recPanel) recPanel.style.display = tab === 'upload' ? 'none' : '';
-  if (uploadPanel) uploadPanel.style.display = tab !== 'upload' ? 'none' : '';
+  if (recPanel)   recPanel.style.display   = tab === 'record' ? '' : 'none';
+  if (audioPanel) audioPanel.style.display = tab === 'audio'  ? '' : 'none';
+  if (uploadPanel) uploadPanel.style.display = tab === 'upload' ? '' : 'none';
   document.querySelectorAll('.k-tab').forEach(b => {
     const onclick = b.getAttribute('onclick') || '';
     b.classList.toggle('active', onclick.includes(`'${tab}'`));
@@ -5797,6 +5829,181 @@ async function ocrNotesPhoto() {
     if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Text extracted successfully. See the transcript section above.</div>`;
 
     setMeetingTab('record');
+  } catch (e) {
+    if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── MEETING UPLOAD AUDIO ──────────────────────────────────────────
+
+const NOTES_SEPARATOR = "\n\n---\nSecretary's Handwritten Notes:\n";
+
+function previewAudioFile(input) {
+  const file = input.files?.[0];
+  const preview = document.getElementById('km-audio-preview');
+  const status  = document.getElementById('km-audio-status');
+  if (!preview) return;
+  if (!file) { preview.innerHTML = ''; return; }
+  const mb = (file.size / 1024 / 1024).toFixed(1);
+  preview.innerHTML = `
+    <div style="background:var(--surface,#f8fafc);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:10px">
+      🎵 <strong>${esc(file.name)}</strong> &nbsp;·&nbsp; ${mb} MB
+    </div>
+    <div class="k-room-actions">
+      <button class="kbtn kbtn-primary" onclick="Kpsc.transcribeAudioFile()">🤖 Transcribe with AI</button>
+    </div>`;
+  if (status) status.innerHTML = '';
+}
+
+async function transcribeAudioFile() {
+  const audioInput = document.getElementById('km-audio-file');
+  const audioFile  = audioInput?.files?.[0];
+  const status     = document.getElementById('km-audio-status');
+  if (!audioFile) { showToast('Please select an audio file first.', 'error'); return; }
+
+  if (status) status.innerHTML = '<div class="k-loading" style="padding:16px">🤖 Transcribing audio…</div>';
+
+  const notesInput = document.getElementById('km-audio-notes-photo');
+  const notesFile  = notesInput?.files?.[0];
+
+  try {
+    // Build audio formData for multipart POST (no Content-Type header — browser sets boundary)
+    const audioForm = new FormData();
+    audioForm.append('audio', audioFile, audioFile.name);
+    audioForm.append('mimeType', audioFile.type || 'audio/webm');
+
+    // Kick off audio transcription (and optional OCR) in parallel
+    const audioPromise = fetch(`${API}/kpsc-transcribe-audio`, {
+      method: 'POST',
+      headers: { ...kpscSessionHeader() },
+      body: audioForm,
+    }).then(r => r.json());
+
+    let ocrPromise = Promise.resolve(null);
+    let ocrError = null;
+    if (notesFile) {
+      ocrPromise = new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+          try {
+            const base64 = e.target.result.split(',')[1];
+            const mimeType = notesFile.type || 'image/jpeg';
+            const res = await apiPost('kpsc-ocr-notes', { imageBase64: base64, mimeType });
+            resolve(res);
+          } catch (err) { ocrError = err.message; resolve(null); }
+        };
+        reader.onerror = () => { ocrError = 'Failed to read the notes photo.'; resolve(null); };
+        reader.readAsDataURL(notesFile);
+      });
+    }
+
+    const [audioRes, ocrRes] = await Promise.all([audioPromise, ocrPromise]);
+
+    handleKpscAuthFailure(audioRes);
+
+    if (audioRes?.error && !audioRes?.transcript) {
+      if (status) status.innerHTML = `<div class="k-error-box">${esc(audioRes.error)}</div>`;
+      return;
+    }
+
+    const audioText = (audioRes?.transcript || '').trim();
+    if (!audioText) {
+      if (status) status.innerHTML = `<div class="k-error-box">No speech was detected in the audio file. Please check the recording and try again.</div>`;
+      return;
+    }
+
+    const ocrText = (ocrRes?.transcript || '').trim();
+    const ocrFailed = notesFile && !ocrText;
+    const combined = ocrText
+      ? `${audioText}${NOTES_SEPARATOR}${ocrText}`
+      : audioText;
+
+    const transcriptEl = document.getElementById('km-transcript');
+    if (transcriptEl) {
+      transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + combined;
+    }
+
+    let successMsg = ocrText
+      ? '✓ Audio transcribed and handwritten notes combined successfully.'
+      : '✓ Audio transcribed successfully.';
+    if (ocrFailed) {
+      const reason = ocrError || ocrRes?.error || 'could not extract text from the notes photo';
+      successMsg += ` (Note: handwritten notes were skipped — ${esc(reason)}.)`;
+    }
+    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">${successMsg} Review the transcript before generating minutes.</div>`;
+    showToast(ocrText ? 'Audio and notes combined! Review before processing.' : 'Audio transcribed! Review before processing.', 'success');
+    setMeetingTab('record');
+  } catch (e) {
+    if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+async function previewAudioNotesPhoto(input) {
+  const file = input.files?.[0];
+  const preview = document.getElementById('km-audio-notes-preview');
+  if (!preview) return;
+  if (!file) { preview.innerHTML = ''; return; }
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    preview.innerHTML = `<img src="${e.target.result}" style="max-width:100%;border-radius:10px;border:1px solid var(--border)" alt="Notes preview" />`;
+  };
+  reader.readAsDataURL(file);
+}
+
+// ── MEETING LIVE RECORDING — also upload notes ────────────────────
+
+async function previewRecNotesPhoto(input) {
+  const file = input.files?.[0];
+  const preview = document.getElementById('km-rec-notes-preview');
+  if (!preview) return;
+  if (!file) { preview.innerHTML = ''; return; }
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    preview.innerHTML = `
+      <img src="${e.target.result}" style="max-width:100%;border-radius:10px;border:1px solid var(--border);margin-bottom:12px" alt="Notes preview" />
+      <div class="k-room-actions">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.ocrRecNotesPhoto()">🤖 Extract Text with AI</button>
+      </div>
+      <div id="km-rec-notes-status"></div>`;
+  };
+  reader.readAsDataURL(file);
+}
+
+async function ocrRecNotesPhoto() {
+  const input = document.getElementById('km-rec-notes-photo');
+  const file  = input?.files?.[0];
+  if (!file) return;
+  const status = document.getElementById('km-rec-notes-status');
+  if (status) status.innerHTML = '<div class="k-loading" style="padding:16px">🤖 Analysing handwriting…</div>';
+
+  try {
+    const base64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = e => resolve(e.target.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    const mimeType = file.type || 'image/jpeg';
+    const res = await apiPost('kpsc-ocr-notes', { imageBase64: base64, mimeType });
+
+    if (res?.error) {
+      if (status) status.innerHTML = `<div class="k-error-box">${esc(res.error)}</div>`;
+      return;
+    }
+
+    if (!res.transcript) {
+      if (status) status.innerHTML = `<div class="k-error-box">No text could be extracted. Please ensure the image is clear.</div>`;
+      return;
+    }
+
+    const transcriptEl = document.getElementById('km-transcript');
+    if (transcriptEl) {
+      transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + res.transcript;
+      showToast('Handwritten notes appended to transcript!', 'success');
+    }
+
+    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Text extracted and appended to the transcript above.</div>`;
   } catch (e) {
     if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
   }
@@ -6325,6 +6532,13 @@ window.Kpsc = {
   setMeetingTab,
   previewNotesPhoto,
   ocrNotesPhoto,
+  // Meeting - upload audio (+ combined mode)
+  previewAudioFile,
+  transcribeAudioFile,
+  previewAudioNotesPhoto,
+  // Meeting - live recording notes upload
+  previewRecNotesPhoto,
+  ocrRecNotesPhoto,
   // Finance - PDF reconciliation
   setReconciliationTab,
   runPdfReconciliation,
