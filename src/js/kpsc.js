@@ -26,11 +26,11 @@ const STATUS_CONFIG = {
 };
 
 const KPSC_PERMISSIONS = {
-  acting_chairman:    ['dashboard', 'projects', 'partners', 'finance', 'reminders', 'members', 'archive', 'reports', 'settings'],
-  general_secretary:  ['dashboard', 'projects', 'partners', 'reminders', 'members', 'archive', 'reports', 'settings'],
-  financial_secretary:['dashboard', 'projects', 'partners', 'finance', 'reminders', 'archive', 'reports'],
-  treasurer:          ['dashboard', 'projects', 'partners', 'finance', 'reminders', 'archive', 'reports'],
-  committee_viewer:   ['dashboard', 'projects', 'partners', 'reports', 'archive'],
+  acting_chairman:    ['dashboard', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'archive', 'reports', 'settings'],
+  general_secretary:  ['dashboard', 'projects', 'partners', 'partner-progress', 'reminders', 'members', 'archive', 'reports', 'settings'],
+  financial_secretary:['dashboard', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
+  treasurer:          ['dashboard', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
+  committee_viewer:   ['dashboard', 'projects', 'partners', 'partner-progress', 'reports', 'archive'],
 };
 const PIN_REGEX = /^\d{4,6}$/;
 
@@ -40,6 +40,7 @@ const PAGE_TO_GROUP = {
   dashboard: { group: 'home',     subTab: null         },
   archive:   { group: 'meetings', subTab: 'archive'    },
   reports:   { group: 'money',    subTab: 'reports'    },
+  'partner-progress': { group: 'money', subTab: 'partner-progress' },
   projects:  { group: 'meetings', subTab: 'projects'   },
   finance:   { group: 'money',    subTab: 'finance'    },
   partners:  { group: 'money',    subTab: 'partners'   },
@@ -2066,7 +2067,8 @@ function moneySubTabStrip() {
   const tabs = [];
   if (canAccess('finance')) tabs.push({ key: 'finance',   label: 'Finance'   });
   tabs.push({ key: 'partners',  label: 'Partners'  });
-  if (canAccess('reports')) tabs.push({ key: 'reports', label: 'Reports' });
+  if (canAccess('partner-progress')) tabs.push({ key: 'partner-progress', label: 'Progress' });
+  if (canAccess('reports')) tabs.push({ key: 'reports', label: 'Insights' });
   if (canAccess('reminders')) tabs.push({ key: 'reminders', label: 'Reminders' });
   return `<div class="ka-subtabs">${tabs.map(t =>
     `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
@@ -2091,6 +2093,9 @@ async function renderPage(page) {
       prependSubTabs(main, meetingsSubTabStrip());
     } else if (page === 'reports') {
       await renderReports(main);
+      prependSubTabs(main, moneySubTabStrip());
+    } else if (page === 'partner-progress') {
+      await renderPartnerProgress(main);
       prependSubTabs(main, moneySubTabStrip());
     } else if (page === 'projects') {
       await renderProjects(main);
@@ -4935,10 +4940,76 @@ async function renderReports(main) {
     </div>`;
 }
 
+async function renderPartnerProgress(main) {
+  const year = S.reportsYear;
+  await loadPartnerData(year);
+  const month = currentMonth();
+  const nowYear = currentYear();
+  const yearOpts = [nowYear, nowYear-1, nowYear-2].map(y=>`<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
+
+  const activePartners = S.partners.filter(p => p.status === 'active');
+  const allPaidThisMonth = activePartners.filter(p => partnerMonthlyPaid(p.id, month, year)).length;
+  const allUnpaidThisMonth = activePartners.length - allPaidThisMonth;
+  const expectedMonthlyIncome = activePartners.reduce((sum, p) => sum + Number(p.monthlyPledge || 0), 0);
+  const months = [1,2,3,4,5,6,7,8,9,10,11,12];
+
+  const progressRows = activePartners.map(partner => {
+    const monthsPaid = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
+    const pct = Math.round((monthsPaid / 12) * 100);
+    const dotRow = months.map(m => {
+      const isPaid = partnerMonthlyPaid(partner.id, m, year);
+      const isFuture = year > nowYear || (year === nowYear && m > month);
+      return `<span class="k-dot-cell ${isPaid ? 'k-dot-paid' : isFuture ? 'k-dot-future' : 'k-dot-unpaid'}" title="${monthName(m)}: ${isPaid ? 'Paid' : isFuture ? 'Future' : 'Unpaid'}"></span>`;
+    }).join('');
+    return `
+      <div class="k-meeting-card" style="cursor:default">
+        <div class="k-mc-top">
+          <div style="flex:1">
+            <div class="k-mc-title">${esc(partner.fullName)}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+              <span class="kbadge badge-type">${esc(partnerTypeLabel(partner.partnershipType))}</span>
+              <span class="kbadge ${partnerMonthlyPaid(partner.id, month, year) ? 'badge-green' : 'badge-amber'}">${partnerMonthlyPaid(partner.id, month, year) ? '✓ Current' : 'Unpaid'}</span>
+            </div>
+            <div class="k-dot-row" style="margin-top:8px">${dotRow}</div>
+            <div class="k-progress-row">
+              <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
+              <span class="k-progress-label">${monthsPaid}/12 (${pct}%)</span>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-section-hdr">
+        <h2>Partner Progress Report</h2>
+        <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setReportsYear(this.value)">${yearOpts}</select>
+      </div>
+      <p class="k-page-hint">Progress view — pledge amounts are private and not shown here.</p>
+      <div class="k-dash-stats">
+        <div class="k-stat"><div class="k-stat-val">${activePartners.length}</div><div class="k-stat-lbl">Active Partners</div></div>
+        <div class="k-stat"><div class="k-stat-val">${allPaidThisMonth}</div><div class="k-stat-lbl">Paid This Month</div></div>
+        <div class="k-stat k-stat-highlight"><div class="k-stat-val">${allUnpaidThisMonth}</div><div class="k-stat-lbl">Unpaid This Month</div></div>
+        <div class="k-stat"><div class="k-stat-val">₦${expectedMonthlyIncome.toLocaleString('en-NG')}</div><div class="k-stat-lbl">Expected Monthly Income</div></div>
+      </div>
+      <div class="k-dot-legend">
+        <span><span class="k-dot-cell k-dot-paid"></span> Paid</span>
+        <span><span class="k-dot-cell k-dot-unpaid"></span> Unpaid</span>
+        <span><span class="k-dot-cell k-dot-future"></span> Future</span>
+      </div>
+      <div class="k-meeting-list">${progressRows || '<div class="k-empty">No active partners available.</div>'}</div>
+    </div>`;
+}
+
 let _insightsSearchTimer = null;
 
 function setReportsYear(year) {
   S.reportsYear = Number(year) || currentYear();
+  if (S.page === 'partner-progress') {
+    renderPage('partner-progress');
+    return;
+  }
   rerenderInsightsList();
 }
 
