@@ -4185,7 +4185,7 @@ async function runPrebriefs(DB, env, request) {
     `SELECT id, title, scheduled_for FROM ai_secretary_meetings
      WHERE scheduled_for IS NOT NULL
        AND pre_brief_markdown IS NULL
-       AND scheduled_for BETWEEN datetime('now') AND datetime('now', '+24 hours')`
+       AND datetime(replace(scheduled_for, 'T', ' ')) BETWEEN datetime('now') AND datetime('now', '+24 hours')`
   ).all();
 
   if (!upcoming || upcoming.length === 0) return ok({ ok: true, generated: 0 });
