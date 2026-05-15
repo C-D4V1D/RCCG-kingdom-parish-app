@@ -24,5 +24,8 @@ build/
 # Wrangler local development state (dev-only SQLite caches)
 .wrangler/
 
+# Claude Code harness local state (agent worktrees, session caches)
+.claude/
+
 # Logs
 *.log
