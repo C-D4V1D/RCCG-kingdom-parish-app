@@ -39,7 +39,7 @@ const PIN_REGEX = /^\d{4,6}$/;
 const PAGE_TO_GROUP = {
   dashboard: { group: 'home',     subTab: null         },
   archive:   { group: 'meetings', subTab: 'archive'    },
-  reports:   { group: 'money',    subTab: 'reports'    },
+  reports:   { group: 'meetings', subTab: 'reports'    },
   'partner-progress': { group: 'money', subTab: 'partner-progress' },
   projects:  { group: 'meetings', subTab: 'projects'   },
   finance:   { group: 'money',    subTab: 'finance'    },
@@ -2068,7 +2068,6 @@ function moneySubTabStrip() {
   if (canAccess('finance')) tabs.push({ key: 'finance',   label: 'Finance'   });
   tabs.push({ key: 'partners',  label: 'Partners'  });
   if (canAccess('partner-progress')) tabs.push({ key: 'partner-progress', label: 'Progress' });
-  if (canAccess('reports')) tabs.push({ key: 'reports', label: 'Insights' });
   if (canAccess('reminders')) tabs.push({ key: 'reminders', label: 'Reminders' });
   return `<div class="ka-subtabs">${tabs.map(t =>
     `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
@@ -2093,7 +2092,7 @@ async function renderPage(page) {
       prependSubTabs(main, meetingsSubTabStrip());
     } else if (page === 'reports') {
       await renderReports(main);
-      prependSubTabs(main, moneySubTabStrip());
+      prependSubTabs(main, meetingsSubTabStrip());
     } else if (page === 'partner-progress') {
       await renderPartnerProgress(main);
       prependSubTabs(main, moneySubTabStrip());
