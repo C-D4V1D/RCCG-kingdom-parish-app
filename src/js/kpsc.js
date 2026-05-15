@@ -1900,7 +1900,10 @@ function logout() {
 function enterApp() {
   document.getElementById('kpsc-login-screen').style.display = 'none';
   document.getElementById('kpsc-app').style.display = '';
-  document.getElementById('kpsc-user-name').textContent = `${S.user.name} (${roleLabel(S.user.role)})`;
+  const userLabel = `${S.user.name} (${roleLabel(S.user.role)})`;
+  const userNameEl = document.getElementById('kpsc-user-name');
+  userNameEl.textContent = userLabel;
+  userNameEl.title = userLabel;
   applyNavPermissions();
   S._navStack = [];
   const hashPage = window.location.hash.replace('#', '');
