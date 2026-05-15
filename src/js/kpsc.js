@@ -3756,7 +3756,10 @@ async function submitVoiceFpEnrollment() {
   const member = S.members[idx];
   if (!member) return;
   const memberName = String(member.name || '').trim();
-  if (!memberName) { showToast('Please save the member name first.', 'warn'); return; }
+  if (!memberName) {
+    showToast('Please save the member name first.', 'warn');
+    return;
+  }
 
   if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Submitting…'; }
 
