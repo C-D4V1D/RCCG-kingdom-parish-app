@@ -6,6 +6,10 @@ fastapi==0.115.5
 uvicorn[standard]==0.32.1
 python-multipart==0.0.12
 speechbrain==1.0.2
+# huggingface-hub 1.x removed the deprecated `use_auth_token` parameter that
+# speechbrain 1.0.2 still passes to hf_hub_download(). Pin to the last 0.x
+# release that still accepts it. Bump speechbrain before relaxing this.
+huggingface-hub==0.26.5
 # torch and torchaudio: CPU wheel installed from pytorch.org in Dockerfile (see Stage 1).
 # Pinned here so pip lock is clear; Dockerfile installs CPU builds before this file.
 torch==2.5.1
