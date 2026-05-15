@@ -1024,3 +1024,307 @@ test('delete kpsc account: 403 for non-chairman caller', async () => {
   assert.equal(response.status, 403);
   assert.match(body.error, /not permitted/i);
 });
+
+test('AI secretary deepseek model migration: empty ai_deepseek_model defaults to deepseek-v4-flash', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedModel = null;
+  globalThis.fetch = async (url, opts) => {
+    if (/deepseek\.com/.test(url)) {
+      const body = JSON.parse(opts.body);
+      capturedModel = body.model;
+    }
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        summaryShort: 'Test.',
+        summaryLong: 'Test.',
+        minutesMarkdown: '# Test',
+        resolutions: [],
+        actionItems: [],
+        policyFlags: []
+      }) } }]
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  let dbState = {
+    id: 'AIM-test-empty',
+    title: 'Test Meeting',
+    meeting_type: 'routine',
+    meeting_date: '2026-05-15',
+    status: 'ended',
+    participants_json: '[]',
+    transcript_text: 'Test transcript',
+    summary_short: '',
+    summary_long: '',
+    minutes_markdown: '',
+    resolutions_json: '[]',
+    action_items_json: '[]',
+    policy_flags_json: '[]',
+    created_by: 'Secretary',
+    started_at: '',
+    ended_at: '',
+    processed_at: '',
+    created_at: '2026-05-15T00:00:00.000Z'
+  };
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) {
+          statement._bound = args;
+          return statement;
+        },
+        async first() {
+          if (/SELECT \* FROM ai_secretary_meetings WHERE id=\?/.test(sql)) return { ...dbState };
+          throw new Error(`Unexpected SQL in first(): ${sql}`);
+        },
+        async all() {
+          if (/SELECT key,value FROM settings/.test(sql)) return { results: [{ key: 'ai_deepseek_key', value: 'test-key' }] };
+          return { results: [] };
+        },
+        async run() {
+          if (/UPDATE ai_secretary_meetings SET/.test(sql)) dbState = { ...dbState, status: 'processed' };
+          return { success: true };
+        }
+      };
+      return statement;
+    })
+  });
+
+  try {
+    await onRequest({
+      request: createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-test-empty/process', 'POST'),
+      env: { DB }
+    });
+    assert.equal(capturedModel, 'deepseek-v4-flash');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('AI secretary deepseek model migration: deepseek-chat migrates to deepseek-v4-flash', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedModel = null;
+  globalThis.fetch = async (url, opts) => {
+    if (/deepseek\.com/.test(url)) {
+      const body = JSON.parse(opts.body);
+      capturedModel = body.model;
+    }
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        summaryShort: 'Test.',
+        summaryLong: 'Test.',
+        minutesMarkdown: '# Test',
+        resolutions: [],
+        actionItems: [],
+        policyFlags: []
+      }) } }]
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  let dbState = {
+    id: 'AIM-test-chat',
+    title: 'Test Meeting',
+    meeting_type: 'routine',
+    meeting_date: '2026-05-15',
+    status: 'ended',
+    participants_json: '[]',
+    transcript_text: 'Test transcript',
+    summary_short: '',
+    summary_long: '',
+    minutes_markdown: '',
+    resolutions_json: '[]',
+    action_items_json: '[]',
+    policy_flags_json: '[]',
+    created_by: 'Secretary',
+    started_at: '',
+    ended_at: '',
+    processed_at: '',
+    created_at: '2026-05-15T00:00:00.000Z'
+  };
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) {
+          statement._bound = args;
+          return statement;
+        },
+        async first() {
+          if (/SELECT \* FROM ai_secretary_meetings WHERE id=\?/.test(sql)) return { ...dbState };
+          throw new Error(`Unexpected SQL in first(): ${sql}`);
+        },
+        async all() {
+          if (/SELECT key,value FROM settings/.test(sql)) return { results: [{ key: 'ai_deepseek_key', value: 'test-key' }, { key: 'ai_deepseek_model', value: 'deepseek-chat' }] };
+          return { results: [] };
+        },
+        async run() {
+          if (/UPDATE ai_secretary_meetings SET/.test(sql)) dbState = { ...dbState, status: 'processed' };
+          return { success: true };
+        }
+      };
+      return statement;
+    })
+  });
+
+  try {
+    await onRequest({
+      request: createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-test-chat/process', 'POST'),
+      env: { DB }
+    });
+    assert.equal(capturedModel, 'deepseek-v4-flash');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('AI secretary deepseek model migration: deepseek-reasoner migrates to deepseek-v4-pro', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedModel = null;
+  globalThis.fetch = async (url, opts) => {
+    if (/deepseek\.com/.test(url)) {
+      const body = JSON.parse(opts.body);
+      capturedModel = body.model;
+    }
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        summaryShort: 'Test.',
+        summaryLong: 'Test.',
+        minutesMarkdown: '# Test',
+        resolutions: [],
+        actionItems: [],
+        policyFlags: []
+      }) } }]
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  let dbState = {
+    id: 'AIM-test-reasoner',
+    title: 'Test Meeting',
+    meeting_type: 'routine',
+    meeting_date: '2026-05-15',
+    status: 'ended',
+    participants_json: '[]',
+    transcript_text: 'Test transcript',
+    summary_short: '',
+    summary_long: '',
+    minutes_markdown: '',
+    resolutions_json: '[]',
+    action_items_json: '[]',
+    policy_flags_json: '[]',
+    created_by: 'Secretary',
+    started_at: '',
+    ended_at: '',
+    processed_at: '',
+    created_at: '2026-05-15T00:00:00.000Z'
+  };
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) {
+          statement._bound = args;
+          return statement;
+        },
+        async first() {
+          if (/SELECT \* FROM ai_secretary_meetings WHERE id=\?/.test(sql)) return { ...dbState };
+          throw new Error(`Unexpected SQL in first(): ${sql}`);
+        },
+        async all() {
+          if (/SELECT key,value FROM settings/.test(sql)) return { results: [{ key: 'ai_deepseek_key', value: 'test-key' }, { key: 'ai_deepseek_model', value: 'deepseek-reasoner' }] };
+          return { results: [] };
+        },
+        async run() {
+          if (/UPDATE ai_secretary_meetings SET/.test(sql)) dbState = { ...dbState, status: 'processed' };
+          return { success: true };
+        }
+      };
+      return statement;
+    })
+  });
+
+  try {
+    await onRequest({
+      request: createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-test-reasoner/process', 'POST'),
+      env: { DB }
+    });
+    assert.equal(capturedModel, 'deepseek-v4-pro');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('AI secretary deepseek model migration: deepseek-v4-pro remains unchanged', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedModel = null;
+  globalThis.fetch = async (url, opts) => {
+    if (/deepseek\.com/.test(url)) {
+      const body = JSON.parse(opts.body);
+      capturedModel = body.model;
+    }
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        summaryShort: 'Test.',
+        summaryLong: 'Test.',
+        minutesMarkdown: '# Test',
+        resolutions: [],
+        actionItems: [],
+        policyFlags: []
+      }) } }]
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  let dbState = {
+    id: 'AIM-test-v4pro',
+    title: 'Test Meeting',
+    meeting_type: 'routine',
+    meeting_date: '2026-05-15',
+    status: 'ended',
+    participants_json: '[]',
+    transcript_text: 'Test transcript',
+    summary_short: '',
+    summary_long: '',
+    minutes_markdown: '',
+    resolutions_json: '[]',
+    action_items_json: '[]',
+    policy_flags_json: '[]',
+    created_by: 'Secretary',
+    started_at: '',
+    ended_at: '',
+    processed_at: '',
+    created_at: '2026-05-15T00:00:00.000Z'
+  };
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) {
+          statement._bound = args;
+          return statement;
+        },
+        async first() {
+          if (/SELECT \* FROM ai_secretary_meetings WHERE id=\?/.test(sql)) return { ...dbState };
+          throw new Error(`Unexpected SQL in first(): ${sql}`);
+        },
+        async all() {
+          if (/SELECT key,value FROM settings/.test(sql)) return { results: [{ key: 'ai_deepseek_key', value: 'test-key' }, { key: 'ai_deepseek_model', value: 'deepseek-v4-pro' }] };
+          return { results: [] };
+        },
+        async run() {
+          if (/UPDATE ai_secretary_meetings SET/.test(sql)) dbState = { ...dbState, status: 'processed' };
+          return { success: true };
+        }
+      };
+      return statement;
+    })
+  });
+
+  try {
+    await onRequest({
+      request: createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-test-v4pro/process', 'POST'),
+      env: { DB }
+    });
+    assert.equal(capturedModel, 'deepseek-v4-pro');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

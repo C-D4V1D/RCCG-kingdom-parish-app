@@ -2246,12 +2246,15 @@ async function extractProjectsFromMeeting(DB, env, data) {
   if (!row) return err('Meeting not found', 404);
 
   let deepseekKey = '';
-  let deepseekModel = 'deepseek-chat';
+  let deepseekModel = 'deepseek-v4-flash';
   try {
     const { results: sr } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
     const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
     deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
-    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-chat';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    // Auto-migrate legacy DeepSeek model names that are being discontinued 2026-07-24.
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
   } catch (_) {}
 
   const transcript = row.transcript_text || '';
@@ -2421,12 +2424,15 @@ async function parseStatementWithAI(env, DB, data) {
   if (!statementText) return err('statementText is required', 400);
 
   let deepseekKey = '';
-  let deepseekModel = 'deepseek-chat';
+  let deepseekModel = 'deepseek-v4-flash';
   try {
     const { results: sr } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
     const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
     deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
-    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-chat';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    // Auto-migrate legacy DeepSeek model names that are being discontinued 2026-07-24.
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
   } catch (_) {}
 
   if (!deepseekKey) {
@@ -3023,7 +3029,7 @@ Return only valid JSON, no markdown fences.`;
   const resp = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: ['deepseek-chat','deepseek-reasoner'].includes(meeting.deepseekModel) ? meeting.deepseekModel : 'deepseek-chat', messages: [{ role: 'user', content: prompt }], max_tokens: 3000, temperature: 0.3 }),
+    body: JSON.stringify({ model: meeting.deepseekModel || 'deepseek-v4-flash', messages: [{ role: 'user', content: prompt }], max_tokens: 3000, temperature: 0.3 }),
   });
   if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
   const data = await resp.json();
@@ -3040,7 +3046,10 @@ async function processAiSecretaryMeeting(DB, id) {
     const { results: settingsRows } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model','kpsc_policy_url','kpsc_policy_notes')`).all();
     const settings = Object.fromEntries((settingsRows || []).map(item => [item.key, String(item.value || '')]));
     deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
-    meeting.deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-chat';
+    meeting.deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    // Auto-migrate legacy DeepSeek model names that are being discontinued 2026-07-24.
+    if (meeting.deepseekModel === 'deepseek-chat')     meeting.deepseekModel = 'deepseek-v4-flash';
+    if (meeting.deepseekModel === 'deepseek-reasoner') meeting.deepseekModel = 'deepseek-v4-pro';
     meeting.policyContext = [
       settings.kpsc_policy_url ? `Policy URL: ${settings.kpsc_policy_url}` : '',
       settings.kpsc_policy_notes || '',

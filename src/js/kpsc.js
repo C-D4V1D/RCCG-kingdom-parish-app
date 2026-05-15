@@ -4548,10 +4548,12 @@ async function renderSettings(main) {
         <div class="k-form-group">
           <label class="k-label">DeepSeek Model</label>
           <select id="ks-deepseek-model" class="k-input">
-            <option value="deepseek-chat" ${(res?.ai_deepseek_model||'deepseek-chat')==='deepseek-chat'?'selected':''}>deepseek-chat — DeepSeek V3 (Fast, Recommended)</option>
-            <option value="deepseek-reasoner" ${(res?.ai_deepseek_model||'')==='deepseek-reasoner'?'selected':''}>deepseek-reasoner — DeepSeek R1 (Deep reasoning, slower)</option>
+            <option value="deepseek-v4-flash" ${(res?.ai_deepseek_model||'deepseek-v4-flash')==='deepseek-v4-flash'?'selected':''}>deepseek-v4-flash — V4 Flash (Fast, Recommended)</option>
+            <option value="deepseek-v4-pro" ${(res?.ai_deepseek_model||'')==='deepseek-v4-pro'?'selected':''}>deepseek-v4-pro — V4 Pro (Deep reasoning, 1M context)</option>
+            <option value="deepseek-chat" ${(res?.ai_deepseek_model||'')==='deepseek-chat'?'selected':''}>deepseek-chat — V3 (Deprecated · removed 2026-07-24)</option>
+            <option value="deepseek-reasoner" ${(res?.ai_deepseek_model||'')==='deepseek-reasoner'?'selected':''}>deepseek-reasoner — R1 (Deprecated · removed 2026-07-24)</option>
           </select>
-          <p class="k-hint"><strong>deepseek-chat</strong> (DeepSeek V3) is the recommended model — fast, accurate, and cost-efficient. Use <strong>deepseek-reasoner</strong> (R1) for complex analysis tasks.</p>
+          <p class="k-hint"><strong>deepseek-v4-flash</strong> is recommended for meeting minutes (fast, cheap, 1M context). Use <strong>deepseek-v4-pro</strong> for complex analysis. Legacy V3/R1 models will be removed by DeepSeek on 2026-07-24 — please migrate.</p>
         </div>
 
         <div class="k-form-group">
@@ -4630,7 +4632,7 @@ async function saveSettings() {
   const openaiKey   = document.getElementById('ks-openai-key')?.value.trim()   || '';
   const policyUrl   = document.getElementById('ks-policy-url')?.value.trim()   || '';
   const policyNotes = document.getElementById('ks-policy-notes')?.value.trim() || '';
-  const deepseekModel = document.getElementById('ks-deepseek-model')?.value || 'deepseek-chat';
+  const deepseekModel = document.getElementById('ks-deepseek-model')?.value || 'deepseek-v4-flash';
 
   btn.disabled = true;
   btn.textContent = 'Saving…';
