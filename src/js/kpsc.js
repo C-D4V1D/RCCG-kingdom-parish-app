@@ -118,6 +118,10 @@ const Rec = {
   failedChunks: 0,
   speakerMap: new Map(),    // Map<number, string>: Deepgram speaker idx → member name
   seenSpeakers: new Set(),  // Set<number>: all Deepgram speaker indices encountered so far
+  // Voice-attendance state — keyed by "${groupKey}_${memberIdx}" (same format as checkbox id suffix)
+  voiceTicked: new Set(),   // members auto-ticked from transcript this session
+  _nameIndex: null,         // lazily built Map<token, [{groupKey, idx, fullName}]>
+  _nameIndexSize: -1,       // S.members.length when _nameIndex was last built
 };
 
 // ── DIARIZER (Deepgram speaker diarization) ────────────────────────
@@ -320,6 +324,8 @@ function recAppendTranscript(text, itemId = '', speaker = null) {
   }
   const entry = { itemId, timestamp: recTimestamp(), text: clean, speaker: speaker ?? null };
   Rec.transcriptEntries.push(entry);
+  // Auto-tick attendance when a roster member's name is spoken.
+  voiceAutoTick(clean);
   const textarea = document.getElementById('km-transcript');
   if (textarea) {
     const speakerTag = speaker !== null && speaker !== undefined ? ` [${speakerDisplayName(speaker)}]` : '';
@@ -419,6 +425,104 @@ function assignSpeaker(idx, name) {
   recRenderSpeakerMap();
 }
 
+// ── VOICE-DRIVEN ATTENDANCE ────────────────────────────────────────
+
+// Normalise a name string into a single first-name token used for matching.
+// Strips diacritics, keeps only lowercase a-z, returns the first word.
+// Returns '' if the result is shorter than 3 characters (too ambiguous).
+function _normToken(str) {
+  const tok = String(str || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')  // strip combining diacritics
+    .replace(/[^a-z\s]/g, ' ')
+    .trim()
+    .split(/\s+/)[0] || '';
+  return tok.length >= 3 ? tok : '';
+}
+
+// Build Map<token, [{groupKey, idx, fullName}]> from the current roster.
+// Multiple members with the same first-name token land in the same array so
+// we can detect ambiguity and skip the auto-tick (see voiceAutoTick).
+function buildAttendanceNameIndex(members) {
+  const index = new Map();
+  for (const g of GROUPS) {
+    const groupMembers = members.filter(m => m.group === g.key);
+    groupMembers.forEach((mem, i) => {
+      const token = _normToken(mem.name);
+      if (!token) return;
+      if (!index.has(token)) index.set(token, []);
+      index.get(token).push({ groupKey: g.key, idx: i, fullName: mem.name });
+    });
+  }
+  return index;
+}
+
+// Pure decision function — returns [{groupKey, idx}] for members that should
+// be auto-ticked based on the transcript text.  Exported for unit testing.
+// alreadyTicked is a Set of "${groupKey}_${idx}" strings.
+function pickAutoTickTargets(text, nameIndex, alreadyTicked) {
+  const results = [];
+  const seenKeys = new Set();
+  // Tokenise the incoming text the same way as the index keys.
+  const words = String(text || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z\s]/g, ' ')
+    .trim()
+    .split(/\s+/);
+  const unique = [...new Set(words.filter(w => w.length >= 3))];
+  for (const word of unique) {
+    const matches = nameIndex.get(word);
+    if (!matches || matches.length === 0) continue;
+    if (matches.length > 1) continue; // ambiguous — skip
+    const { groupKey, idx } = matches[0];
+    const key = `${groupKey}_${idx}`;
+    if (alreadyTicked.has(key)) continue; // already voice-ticked
+    if (seenKeys.has(key)) continue;       // duplicate token in same utterance
+    seenKeys.add(key);
+    results.push({ groupKey, idx });
+  }
+  return results;
+}
+
+// Apply a single voice-tick to the DOM checkbox for the given member.
+function autoTickMember(groupKey, idx) {
+  const checkbox = document.getElementById(`att_present_${groupKey}_${idx}`);
+  if (!checkbox) return; // attendance panel not rendered (user navigated away)
+  const key = `${groupKey}_${idx}`;
+  // If already checked manually (not by voice), leave it alone — don't badge it.
+  if (checkbox.checked && !Rec.voiceTicked.has(key)) return;
+  checkbox.checked = true;
+  checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+  Rec.voiceTicked.add(key);
+  // Inject mic badge into the member row's name span — idempotent.
+  const label = checkbox.closest('label');
+  const nameSpan = label?.querySelector('.k-att-name');
+  if (nameSpan && !nameSpan.querySelector('.k-att-voice-tick')) {
+    const badge = document.createElement('span');
+    badge.className = 'k-att-voice-tick';
+    badge.title = 'Auto-ticked from voice transcript';
+    badge.textContent = '🎙';
+    nameSpan.appendChild(badge);
+  }
+}
+
+// Called from recAppendTranscript for each incoming line of transcript.
+// Lazily builds/rebuilds the name index when roster size changes.
+function voiceAutoTick(clean) {
+  if (!clean) return;
+  // Lazily (re)build the name index if the roster has changed size.
+  if (Rec._nameIndex === null || Rec._nameIndexSize !== S.members.length) {
+    Rec._nameIndex     = buildAttendanceNameIndex(S.members);
+    Rec._nameIndexSize = S.members.length;
+  }
+  const targets = pickAutoTickTargets(clean, Rec._nameIndex, Rec.voiceTicked);
+  for (const { groupKey, idx } of targets) {
+    autoTickMember(groupKey, idx);
+  }
+}
 
 async function recStart(btn) {
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
@@ -661,6 +765,9 @@ function recReset() {
   Rec.failedChunks = 0;
   Rec.speakerMap = new Map();
   Rec.seenSpeakers = new Set();
+  Rec.voiceTicked = new Set();
+  Rec._nameIndex = null;
+  Rec._nameIndexSize = -1;
   Diarizer.status = 'offline';
   Diarizer.reconnectAttempts = 0;
   Diarizer.speakerRanges   = new Map();
@@ -2392,6 +2499,26 @@ async function renderMeetingRoom(main) {
   if (canRecord) recRenderUI();
   recRenderTranscript();
   if (!isProcessed) bindAutoSave();
+  // Re-apply mic badges for any members already voice-ticked this session.
+  restoreVoiceTickBadges();
+}
+
+// Walk Rec.voiceTicked and re-inject mic badges into the freshly-rendered DOM.
+// Called after every attendance re-render so the badges survive innerHTML resets.
+function restoreVoiceTickBadges() {
+  for (const key of Rec.voiceTicked) {
+    const checkbox = document.getElementById(`att_present_${key}`);
+    if (!checkbox) continue;
+    const label = checkbox.closest('label');
+    const nameSpan = label?.querySelector('.k-att-name');
+    if (nameSpan && !nameSpan.querySelector('.k-att-voice-tick')) {
+      const badge = document.createElement('span');
+      badge.className = 'k-att-voice-tick';
+      badge.title = 'Auto-ticked from voice transcript';
+      badge.textContent = '🎙';
+      nameSpan.appendChild(badge);
+    }
+  }
 }
 
 function buildAttendanceRows(savedParts, defaultPresent = false) {
