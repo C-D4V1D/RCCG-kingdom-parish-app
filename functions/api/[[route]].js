@@ -275,6 +275,11 @@ export async function onRequest(context) {
       if (auth instanceof Response) return auth;
       return await ocrHandwrittenNotes(env, body);
     }
+    if (route === 'kpsc-ocr-receipt' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await ocrReceipt(env, body);
+    }
     if (route === 'kpsc-parse-statement' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
       if (auth instanceof Response) return auth;
@@ -2352,6 +2357,63 @@ async function ocrHandwrittenNotes(env, data) {
   }
 
   return ok({ transcript: '', method: 'none', error: 'No vision-capable AI key is configured. Please configure OPENAI_API_KEY in Cloudflare environment variables to enable OCR.' });
+}
+
+async function ocrReceipt(env, data) {
+  const imageBase64 = String(data?.imageBase64 || '').trim();
+  const mimeType = String(data?.mimeType || 'image/jpeg').trim();
+  if (!imageBase64) return err('imageBase64 is required', 400);
+
+  const openaiKey = String(env.OPENAI_API_KEY || '').trim();
+  if (openaiKey) {
+    try {
+      const prompt = `You are a receipt OCR assistant. Analyse this receipt image and extract the following fields. Respond ONLY with a JSON object — no prose, no markdown fences.
+{
+  "vendor": "string or null — business/vendor name",
+  "date": "YYYY-MM-DD or null — date on receipt",
+  "amount": "number or null — total amount in major currency units (e.g. 12500.00 for ₦12,500)",
+  "currency": "NGN|USD|GBP|EUR or null",
+  "reference": "string or null — receipt or invoice number",
+  "items_summary": "string or null — one-line description of goods/services purchased"
+}`;
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+        body: JSON.stringify({
+          model: 'gpt-4o',
+          response_format: { type: 'json_object' },
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
+            ],
+          }],
+          max_tokens: 500,
+        }),
+      });
+      if (resp.ok) {
+        const aiData = await resp.json();
+        const raw = aiData.choices?.[0]?.message?.content || '';
+        try {
+          const parsed = JSON.parse(raw);
+          return ok({
+            vendor: parsed.vendor ?? null,
+            date: parsed.date ?? null,
+            amount: parsed.amount ?? null,
+            currency: parsed.currency ?? null,
+            reference: parsed.reference ?? null,
+            itemsSummary: parsed.items_summary ?? null,
+            method: 'openai_vision',
+          });
+        } catch (_) {
+          return ok({ error: 'Could not parse receipt', method: 'openai_vision' });
+        }
+      }
+    } catch (_) {}
+  }
+
+  return ok({ vendor: null, date: null, amount: null, currency: null, reference: null, itemsSummary: null, method: 'none', error: 'No vision-capable AI key is configured. Please configure OPENAI_API_KEY to enable receipt scanning.' });
 }
 
 async function parseStatementWithAI(env, DB, data) {
