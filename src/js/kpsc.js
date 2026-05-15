@@ -39,7 +39,7 @@ const PIN_REGEX = /^\d{4,6}$/;
 const PAGE_TO_GROUP = {
   dashboard: { group: 'home',     subTab: null         },
   archive:   { group: 'meetings', subTab: 'archive'    },
-  reports:   { group: 'meetings', subTab: 'reports'    },
+  reports:   { group: 'money',    subTab: 'reports'    },
   projects:  { group: 'meetings', subTab: 'projects'   },
   finance:   { group: 'money',    subTab: 'finance'    },
   partners:  { group: 'money',    subTab: 'partners'   },
@@ -85,6 +85,7 @@ const S = {
   financeYear: new Date().getUTCFullYear(),
   financeMonth: new Date().getUTCMonth() + 1,
   reportsYear: new Date().getUTCFullYear(),
+  _authRecoveryInProgress: false,
   _meetingTab: 'record',
   _reviewEditMode: false, // true = show inline review editor; false = show reviewed summary
   _isNewMeeting: false,   // true when the room is hosting a fresh, never-saved draft
@@ -95,6 +96,11 @@ const S = {
 const REC_CHUNK_MS = 5000;
 const REC_RETRY_BASE_MS = 1200;
 const REC_MAX_RETRIES = 5;
+const KPSC_SESSION_ERRORS = new Set([
+  'KPSC session required',
+  'KPSC session not found or expired',
+  'KPSC session expired',
+]);
 
 const Rec = {
   mediaRecorder: null,
@@ -1230,9 +1236,27 @@ function kpscSessionHeader() {
   return { 'X-KPSC-Session': JSON.stringify({ accountId: user.id, token: user.sessionToken }) };
 }
 
+function isKpscSessionErrorMessage(errorMessage) {
+  return KPSC_SESSION_ERRORS.has(String(errorMessage || ''));
+}
+
+function handleKpscAuthFailure(data) {
+  if (!isKpscSessionErrorMessage(data?.error)) return;
+  if (!S.user?.sessionToken || S._authRecoveryInProgress) return;
+  S._authRecoveryInProgress = true;
+  try {
+    showToast('KPSC session expired. Please sign in again.', 'warn');
+    logout();
+  } finally {
+    S._authRecoveryInProgress = false;
+  }
+}
+
 async function apiGet(path) {
   const r = await fetch(`${API}/${path}`, { headers: { ...kpscSessionHeader() } });
-  return r.json();
+  const data = await r.json();
+  handleKpscAuthFailure(data);
+  return data;
 }
 
 async function apiPost(path, body) {
@@ -1241,7 +1265,9 @@ async function apiPost(path, body) {
     headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
     body: JSON.stringify(body),
   });
-  return r.json();
+  const data = await r.json();
+  handleKpscAuthFailure(data);
+  return data;
 }
 
 async function apiPut(path, body) {
@@ -1250,7 +1276,9 @@ async function apiPut(path, body) {
     headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
     body: JSON.stringify(body),
   });
-  return r.json();
+  const data = await r.json();
+  handleKpscAuthFailure(data);
+  return data;
 }
 
 async function apiDelete(path, body) {
@@ -1259,7 +1287,9 @@ async function apiDelete(path, body) {
     headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
     body: JSON.stringify(body || {}),
   });
-  return r.json();
+  const data = await r.json();
+  handleKpscAuthFailure(data);
+  return data;
 }
 
 function roleLabel(role) {
@@ -1835,7 +1865,6 @@ function meetingsSubTabStrip() {
   const cur = S.subTab || 'archive';
   const tabs = [
     { key: 'archive',  label: 'Archive' },
-    { key: 'reports',  label: 'Reports' },
     { key: 'projects', label: 'Projects' },
   ];
   return `<div class="ka-subtabs">${tabs.map(t =>
@@ -1849,6 +1878,7 @@ function moneySubTabStrip() {
   const tabs = [];
   if (canAccess('finance')) tabs.push({ key: 'finance',   label: 'Finance'   });
   tabs.push({ key: 'partners',  label: 'Partners'  });
+  if (canAccess('reports')) tabs.push({ key: 'reports', label: 'Reports' });
   if (canAccess('reminders')) tabs.push({ key: 'reminders', label: 'Reminders' });
   return `<div class="ka-subtabs">${tabs.map(t =>
     `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
@@ -1873,7 +1903,7 @@ async function renderPage(page) {
       prependSubTabs(main, meetingsSubTabStrip());
     } else if (page === 'reports') {
       await renderReports(main);
-      prependSubTabs(main, meetingsSubTabStrip());
+      prependSubTabs(main, moneySubTabStrip());
     } else if (page === 'projects') {
       await renderProjects(main);
       prependSubTabs(main, meetingsSubTabStrip());
@@ -4131,6 +4161,7 @@ async function renderReports(main) {
   const activePartners = S.partners.filter(p => p.status === 'active');
   const allPaidThisMonth = activePartners.filter(p => partnerMonthlyPaid(p.id, month, year)).length;
   const allUnpaidThisMonth = activePartners.length - allPaidThisMonth;
+  const expectedMonthlyIncome = activePartners.reduce((sum, p) => sum + Number(p.monthlyPledge || 0), 0);
   const months = [1,2,3,4,5,6,7,8,9,10,11,12];
 
   const progressRows = activePartners.map(partner => {
@@ -4171,6 +4202,7 @@ async function renderReports(main) {
         <div class="k-stat"><div class="k-stat-val">${activePartners.length}</div><div class="k-stat-lbl">Active Partners</div></div>
         <div class="k-stat"><div class="k-stat-val">${allPaidThisMonth}</div><div class="k-stat-lbl">Paid This Month</div></div>
         <div class="k-stat k-stat-highlight"><div class="k-stat-val">${allUnpaidThisMonth}</div><div class="k-stat-lbl">Unpaid This Month</div></div>
+        <div class="k-stat"><div class="k-stat-val">₦${expectedMonthlyIncome.toLocaleString('en-NG')}</div><div class="k-stat-lbl">Expected Monthly Income</div></div>
       </div>
       <div class="k-dot-legend">
         <span><span class="k-dot-cell k-dot-paid"></span> Paid</span>
