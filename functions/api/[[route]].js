@@ -411,11 +411,25 @@ export async function onRequest(context) {
       return await voiceIdentify(DB, env, request);
     }
 
-    // ── /api/voice-enrollment/:memberId (DELETE) ─────────────────
-    if (route === 'voice-enrollment' && param && method === 'DELETE') {
+    // ── /api/voice-enrollment/:memberId ────────────────────────
+    if (route === 'voice-enrollment' && param) {
+      if (method === 'GET') {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await voiceGetEnrollment(DB, param);
+      }
+      if (method === 'DELETE') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await voiceDeleteEnrollment(DB, param);
+      }
+    }
+
+    // ── /api/voice-member-sync/:memberId ───────────────────────
+    if (route === 'voice-member-sync' && param && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
-      return await voiceDeleteEnrollment(DB, param);
+      return await voiceMemberSync(DB, param, body);
     }
 
     // ── /api/ai-secretary-meetings ─────────────────────────────
@@ -3595,6 +3609,37 @@ async function adminImport(DB, data) {
 async function markAllRead(DB) {
   await DB.prepare(`UPDATE notifications SET is_read=1 WHERE is_read=0`).run();
   return ok({ marked: true });
+}
+
+// ── VOICE FINGERPRINTING VF-3 ENDPOINTS ──────────────────────────────
+
+/** POST /api/voice-member-sync/:memberId — upsert JSON-roster member into D1 */
+async function voiceMemberSync(DB, memberId, body) {
+  const name     = String(body?.name     || '').trim();
+  const grp      = String(body?.group    || body?.grp || '').trim();
+  const position = String(body?.position || '').trim();
+
+  if (!name) return err('name is required', 400);
+
+  await DB.prepare(
+    `INSERT INTO kpsc_members(id, name, grp, position)
+     VALUES(?,?,?,?)
+     ON CONFLICT(id) DO UPDATE SET name=excluded.name, grp=excluded.grp, position=excluded.position`
+  ).bind(memberId, name, grp, position).run();
+
+  return ok({ ok: true, memberId });
+}
+
+/** GET /api/voice-enrollment/:memberId — returns enrollment status */
+async function voiceGetEnrollment(DB, memberId) {
+  const row = await DB.prepare(
+    `SELECT id, voice_enrolled_at, voice_sample_count FROM kpsc_members WHERE id=?`
+  ).bind(memberId).first();
+
+  if (!row || !row.voice_enrolled_at) {
+    return ok({ enrolled: false });
+  }
+  return ok({ enrolled: true, enrolledAt: row.voice_enrolled_at, sampleCount: row.voice_sample_count || 0 });
 }
 
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
