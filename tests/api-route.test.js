@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { onRequest } from '../functions/api/[[route]].js';
+import { onRequest, cosineSim, embeddingToBlob, blobToEmbedding } from '../functions/api/[[route]].js';
 
 async function readJson(response) {
   return JSON.parse(await response.text());
@@ -1327,4 +1327,564 @@ test('AI secretary deepseek model migration: deepseek-v4-pro remains unchanged',
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// ── WAVE 3 VF-2: VOICE FINGERPRINTING TESTS ──────────────────────────
+
+// ── cosineSim unit tests ──────────────────────────────────────────────
+
+test('cosineSim: identical vectors return 1.0', () => {
+  const v = [1, 2, 3, 4];
+  const result = cosineSim(v, v);
+  assert.ok(Math.abs(result - 1.0) < 1e-9, `Expected ~1.0, got ${result}`);
+});
+
+test('cosineSim: orthogonal vectors return 0.0', () => {
+  const a = [1, 0, 0];
+  const b = [0, 1, 0];
+  const result = cosineSim(a, b);
+  assert.ok(Math.abs(result - 0.0) < 1e-9, `Expected ~0.0, got ${result}`);
+});
+
+test('cosineSim: anti-parallel vectors return -1.0', () => {
+  const a = [1, 2, 3];
+  const b = [-1, -2, -3];
+  const result = cosineSim(a, b);
+  assert.ok(Math.abs(result - (-1.0)) < 1e-9, `Expected ~-1.0, got ${result}`);
+});
+
+test('cosineSim: mismatched length vectors return -1 (error indicator)', () => {
+  const a = [1, 2, 3];
+  const b = [1, 2];
+  assert.equal(cosineSim(a, b), -1);
+});
+
+// ── embeddingToBlob / blobToEmbedding round-trip ──────────────────────
+
+test('embeddingToBlob and blobToEmbedding round-trip a 192-float array', () => {
+  const original = Array.from({ length: 192 }, (_, i) => i * 0.01);
+  const buf = embeddingToBlob(original);
+  assert.ok(buf instanceof ArrayBuffer, 'embeddingToBlob should return an ArrayBuffer');
+  assert.equal(buf.byteLength, 192 * 4);
+  const restored = blobToEmbedding(buf);
+  assert.equal(restored.length, 192);
+  for (let i = 0; i < restored.length; i++) {
+    assert.ok(Math.abs(restored[i] - original[i]) < 1e-5, `Mismatch at index ${i}`);
+  }
+});
+
+// ── voice-enroll endpoint tests ───────────────────────────────────────
+
+// Helper: build a multipart-like Request with an audio field for enroll/identify tests.
+// Node's built-in fetch supports FormData so we use it directly.
+function createMultipartKpscRequest(url, formData) {
+  const req = new Request(url, {
+    method: 'POST',
+    headers: { 'X-KPSC-Session': TEST_KPSC_SESSION_HEADER },
+    body: formData,
+  });
+  return req;
+}
+
+// Stub 192-float embedding returned by the mock Cloud Run service.
+const MOCK_EMBEDDING_192 = Array(192).fill(0.1);
+
+test('voice-enroll: happy path stores embedding and returns enrolledAt + sampleCount', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (/\/embed$/.test(url)) {
+      return new Response(JSON.stringify({ embedding: MOCK_EMBEDDING_192, duration_s: 3.0, model: 'ecapa' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  const runs = [];
+  let storedEmbedding = null;
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...a) { st._bound = a; return st; },
+        async first() {
+          if (/SELECT id, name, voice_sample_count FROM kpsc_members WHERE id=\?/.test(sql)) {
+            return { id: 'km1', name: 'Test Member', voice_sample_count: 0 };
+          }
+          throw new Error(`Unexpected first(): ${sql}`);
+        },
+        async run() {
+          if (/UPDATE kpsc_members SET voice_embedding/.test(sql)) {
+            storedEmbedding = st._bound[0];
+          }
+          runs.push({ sql, bound: st._bound });
+          return { success: true };
+        },
+      };
+      return st;
+    }),
+  });
+
+  const form = new FormData();
+  form.append('audio', new Blob(['fake-audio'], { type: 'audio/webm' }), 'sample.webm');
+
+  try {
+    const response = await onRequest({
+      request: createMultipartKpscRequest('https://example.com/api/voice-enroll/km1', form),
+      env: { DB, VOICE_FP_URL: 'https://voice-fp.example.com', VOICE_FP_TOKEN: 'test-token' },
+    });
+    const body = await readJson(response);
+
+    assert.equal(response.status, 200);
+    assert.equal(body.ok, true);
+    assert.ok(body.enrolledAt, 'should have enrolledAt');
+    assert.equal(body.sampleCount, 1);
+    assert.equal(body.embeddingDim, 192);
+    assert.ok(storedEmbedding instanceof ArrayBuffer, 'embedding should be stored as ArrayBuffer');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('voice-enroll: no auth header returns 401', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      return { bind() { return this; }, async first() { return null; }, async run() {} };
+    }),
+  });
+
+  // Request without X-KPSC-Session header
+  const form = new FormData();
+  form.append('audio', new Blob(['fake'], { type: 'audio/webm' }), 'a.webm');
+  const req = new Request('https://example.com/api/voice-enroll/km1', {
+    method: 'POST',
+    body: form,
+  });
+
+  const response = await onRequest({
+    request: req,
+    env: { DB, VOICE_FP_URL: 'https://voice-fp.example.com', VOICE_FP_TOKEN: 'tok' },
+  });
+  assert.equal(response.status, 401);
+});
+
+test('voice-enroll: member not found returns 404', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (/\/embed$/.test(url)) {
+      return new Response(JSON.stringify({ embedding: MOCK_EMBEDDING_192 }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...a) { st._bound = a; return st; },
+        async first() {
+          if (/SELECT id, name, voice_sample_count FROM kpsc_members/.test(sql)) return null;
+          throw new Error(`Unexpected first(): ${sql}`);
+        },
+        async run() { return { success: true }; },
+      };
+      return st;
+    }),
+  });
+
+  const form = new FormData();
+  form.append('audio', new Blob(['fake'], { type: 'audio/webm' }), 'a.webm');
+
+  try {
+    const response = await onRequest({
+      request: createMultipartKpscRequest('https://example.com/api/voice-enroll/missing-id', form),
+      env: { DB, VOICE_FP_URL: 'https://voice-fp.example.com', VOICE_FP_TOKEN: 'tok' },
+    });
+    assert.equal(response.status, 404);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('voice-enroll: upstream Cloud Run 400 (e.g. audio too short) is passed through', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (/\/embed$/.test(url)) {
+      return new Response(JSON.stringify({ detail: 'Audio too short: need at least 1s' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...a) { st._bound = a; return st; },
+        async first() {
+          if (/SELECT id, name, voice_sample_count FROM kpsc_members/.test(sql)) {
+            return { id: 'km1', name: 'Test Member', voice_sample_count: 0 };
+          }
+          throw new Error(`Unexpected first(): ${sql}`);
+        },
+        async run() { return { success: true }; },
+      };
+      return st;
+    }),
+  });
+
+  const form = new FormData();
+  form.append('audio', new Blob(['x'], { type: 'audio/webm' }), 'a.webm');
+
+  try {
+    const response = await onRequest({
+      request: createMultipartKpscRequest('https://example.com/api/voice-enroll/km1', form),
+      env: { DB, VOICE_FP_URL: 'https://voice-fp.example.com', VOICE_FP_TOKEN: 'tok' },
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 400);
+    assert.match(body.error, /too short/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('voice-enroll: VOICE_FP_URL not configured returns 503', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...a) { st._bound = a; return st; },
+        async first() {
+          if (/SELECT id, name, voice_sample_count FROM kpsc_members/.test(sql)) {
+            return { id: 'km1', name: 'Test Member', voice_sample_count: 0 };
+          }
+          throw new Error(`Unexpected first(): ${sql}`);
+        },
+        async run() { return { success: true }; },
+      };
+      return st;
+    }),
+  });
+
+  const form = new FormData();
+  form.append('audio', new Blob(['x'], { type: 'audio/webm' }), 'a.webm');
+
+  const response = await onRequest({
+    request: createMultipartKpscRequest('https://example.com/api/voice-enroll/km1', form),
+    env: { DB },  // no VOICE_FP_URL / VOICE_FP_TOKEN
+  });
+  const body = await readJson(response);
+  assert.equal(response.status, 503);
+  assert.match(body.error, /not configured/i);
+});
+
+// ── voice-identify endpoint tests ─────────────────────────────────────
+
+test('voice-identify: one enrolled member with identical embedding returns match:true', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (/\/embed$/.test(url)) {
+      return new Response(JSON.stringify({ embedding: MOCK_EMBEDDING_192, duration_s: 3.0, model: 'ecapa' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  // Pre-build a stored embedding that matches MOCK_EMBEDDING_192 exactly.
+  const storedBuf = embeddingToBlob(MOCK_EMBEDDING_192);
+
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...a) { st._bound = a; return st; },
+        async all() {
+          if (/SELECT id, name, voice_embedding FROM kpsc_members WHERE voice_embedding IS NOT NULL/.test(sql)) {
+            return { results: [{ id: 'km1', name: 'Alice', voice_embedding: storedBuf }] };
+          }
+          throw new Error(`Unexpected all(): ${sql}`);
+        },
+        async first() { throw new Error(`Unexpected first(): ${sql}`); },
+        async run() { return { success: true }; },
+      };
+      return st;
+    }, { role: 'committee_viewer' }),
+  });
+
+  const form = new FormData();
+  form.append('audio', new Blob(['fake-audio'], { type: 'audio/webm' }), 'sample.webm');
+
+  try {
+    const response = await onRequest({
+      request: createMultipartKpscRequest('https://example.com/api/voice-identify', form),
+      env: { DB, VOICE_FP_URL: 'https://voice-fp.example.com', VOICE_FP_TOKEN: 'tok' },
+    });
+    const body = await readJson(response);
+
+    assert.equal(response.status, 200);
+    assert.equal(body.match, true);
+    assert.equal(body.memberId, 'km1');
+    assert.equal(body.memberName, 'Alice');
+    assert.ok(body.score >= 0.99, `Expected score ~1.0, got ${body.score}`);
+    assert.equal(body.threshold, 0.65);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('voice-identify: orthogonal embedding returns match:false (below threshold)', async () => {
+  const originalFetch = globalThis.fetch;
+  // Return a query embedding orthogonal to the stored one.
+  const queryEmbedding = Array(192).fill(0);
+  queryEmbedding[0] = 1;  // only first component is non-zero
+
+  globalThis.fetch = async (url) => {
+    if (/\/embed$/.test(url)) {
+      return new Response(JSON.stringify({ embedding: queryEmbedding }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  // Stored embedding is all-zeros except last component.
+  const storedEmbedding = Array(192).fill(0);
+  storedEmbedding[191] = 1;
+  const storedBuf = embeddingToBlob(storedEmbedding);
+
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...a) { st._bound = a; return st; },
+        async all() {
+          if (/SELECT id, name, voice_embedding FROM kpsc_members WHERE voice_embedding IS NOT NULL/.test(sql)) {
+            return { results: [{ id: 'km2', name: 'Bob', voice_embedding: storedBuf }] };
+          }
+          throw new Error(`Unexpected all(): ${sql}`);
+        },
+        async first() { throw new Error(`Unexpected first(): ${sql}`); },
+        async run() { return { success: true }; },
+      };
+      return st;
+    }, { role: 'committee_viewer' }),
+  });
+
+  const form = new FormData();
+  form.append('audio', new Blob(['fake'], { type: 'audio/webm' }), 'a.webm');
+
+  try {
+    const response = await onRequest({
+      request: createMultipartKpscRequest('https://example.com/api/voice-identify', form),
+      env: { DB, VOICE_FP_URL: 'https://voice-fp.example.com', VOICE_FP_TOKEN: 'tok' },
+    });
+    const body = await readJson(response);
+
+    assert.equal(response.status, 200);
+    assert.equal(body.match, false);
+    assert.ok(body.score < 0.65, `Expected score < 0.65, got ${body.score}`);
+    assert.equal(body.threshold, 0.65);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('voice-identify: no enrolled members returns match:false with no_enrolled_members reason', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    // Should NOT reach the embedder when there are no enrolled members.
+    // But if it does, return a valid response.
+    if (/\/embed$/.test(url)) {
+      return new Response(JSON.stringify({ embedding: MOCK_EMBEDDING_192 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...a) { st._bound = a; return st; },
+        async all() {
+          if (/SELECT id, name, voice_embedding FROM kpsc_members WHERE voice_embedding IS NOT NULL/.test(sql)) {
+            return { results: [] };
+          }
+          throw new Error(`Unexpected all(): ${sql}`);
+        },
+        async first() { throw new Error(`Unexpected first(): ${sql}`); },
+        async run() { return { success: true }; },
+      };
+      return st;
+    }, { role: 'committee_viewer' }),
+  });
+
+  const form = new FormData();
+  form.append('audio', new Blob(['fake'], { type: 'audio/webm' }), 'a.webm');
+
+  try {
+    const response = await onRequest({
+      request: createMultipartKpscRequest('https://example.com/api/voice-identify', form),
+      env: { DB, VOICE_FP_URL: 'https://voice-fp.example.com', VOICE_FP_TOKEN: 'tok' },
+    });
+    const body = await readJson(response);
+
+    assert.equal(response.status, 200);
+    assert.equal(body.match, false);
+    assert.equal(body.score, 0);
+    assert.equal(body.reason, 'no_enrolled_members');
+    assert.equal(body.threshold, 0.65);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ── voice-enrollment DELETE tests ─────────────────────────────────────
+
+test('voice-enrollment DELETE: clears voice data and returns ok:true', async () => {
+  const runs = [];
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...a) { st._bound = a; return st; },
+        async first() {
+          if (/SELECT id FROM kpsc_members WHERE id=\?/.test(sql)) {
+            return { id: 'km1' };
+          }
+          throw new Error(`Unexpected first(): ${sql}`);
+        },
+        async run() {
+          runs.push({ sql, bound: st._bound });
+          return { success: true };
+        },
+      };
+      return st;
+    }),
+  });
+
+  const req = new Request('https://example.com/api/voice-enrollment/km1', {
+    method: 'DELETE',
+    headers: { 'X-KPSC-Session': TEST_KPSC_SESSION_HEADER },
+  });
+
+  const response = await onRequest({
+    request: req,
+    env: { DB },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.deleted, true);
+
+  const updateRun = runs.find(r => /UPDATE kpsc_members SET voice_embedding=NULL/.test(r.sql));
+  assert.ok(updateRun, 'should have run UPDATE to clear voice data');
+  assert.equal(updateRun.bound[0], 'km1');
+});
+
+// ── VF-3A: voice-member-sync endpoint tests ───────────────────────
+
+test('voice-member-sync: inserts new member into D1', async () => {
+  const runs = [];
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async run() { runs.push({ sql, bound: statement._bound }); return { success: true }; },
+        async first() { return null; }
+      };
+      return statement;
+    })
+  });
+
+  const sessionHeader = JSON.stringify({ accountId: 'ka-test', token: 'ks-test-token' });
+  const req = new Request('https://example.com/api/voice-member-sync/vfp_men_brother-ade', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+    body: JSON.stringify({ name: 'Brother Ade', group: 'men', position: 'Men President' }),
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.memberId, 'vfp_men_brother-ade');
+  const syncRun = runs.find(r => /INSERT INTO kpsc_members/.test(r.sql));
+  assert.ok(syncRun, 'should have run an INSERT INTO kpsc_members');
+  assert.match(syncRun.sql, /ON CONFLICT\(id\) DO UPDATE/);
+  assert.equal(syncRun.bound[0], 'vfp_men_brother-ade');
+  assert.equal(syncRun.bound[1], 'Brother Ade');
+});
+
+test('voice-member-sync: update-existing updates name via ON CONFLICT', async () => {
+  const runs = [];
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async run() { runs.push({ sql, bound: statement._bound }); return { success: true }; },
+        async first() { return null; }
+      };
+      return statement;
+    })
+  });
+
+  const sessionHeader = JSON.stringify({ accountId: 'ka-test', token: 'ks-test-token' });
+  const req = new Request('https://example.com/api/voice-member-sync/vfp_women_sister-bisi', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+    body: JSON.stringify({ name: 'Sister Bisi Renamed', group: 'women', position: '' }),
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  // The ON CONFLICT upsert should include the new name in bound params
+  const syncRun = runs.find(r => /INSERT INTO kpsc_members/.test(r.sql));
+  assert.ok(syncRun, 'should have run upsert');
+  assert.equal(syncRun.bound[1], 'Sister Bisi Renamed');
+});
+
+// ── VF-3B: GET voice-enrollment/:memberId ────────────────────────
+
+test('voice-enrollment GET: returns enrolled:false when member has no enrollment', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT id, voice_enrolled_at, voice_sample_count FROM kpsc_members/.test(sql)) {
+            return { id: 'vfp_men_test', voice_enrolled_at: null, voice_sample_count: 0 };
+          }
+          return null;
+        }
+      };
+      return statement;
+    })
+  });
+
+  const sessionHeader = JSON.stringify({ accountId: 'ka-test', token: 'ks-test-token' });
+  const req = new Request('https://example.com/api/voice-enrollment/vfp_men_test', {
+    method: 'GET',
+    headers: { 'X-KPSC-Session': sessionHeader },
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.enrolled, false);
 });
