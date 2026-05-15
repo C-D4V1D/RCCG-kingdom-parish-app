@@ -451,6 +451,11 @@ export async function onRequest(context) {
         if (auth instanceof Response) return auth;
         return await processAiSecretaryMeeting(DB, param);
       }
+      if (method === 'POST' && parts[2] === 'translate-plain-english') {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await translateAiSecretaryMeetingPlainEnglish(DB, env, param);
+      }
     }
 
     // ── /api/admin ─────────────────────────────────────────────
@@ -782,6 +787,8 @@ async function handleInit(DB) {
     // Soft-delete for AI secretary meeting drafts.
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_at TEXT DEFAULT ''`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_by TEXT DEFAULT ''`,
+    // Plain English minutes cache
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN plain_english_minutes_md TEXT DEFAULT ''`,
     // Wave 3 VF-2: voice fingerprinting columns on kpsc_members.
     `ALTER TABLE kpsc_members ADD COLUMN voice_embedding BLOB`,
     `ALTER TABLE kpsc_members ADD COLUMN voice_enrolled_at TEXT`,
@@ -3319,6 +3326,76 @@ async function processAiSecretaryMeeting(DB, id) {
   return getAiSecretaryMeeting(DB, id);
 }
 
+async function translateAiSecretaryMeetingPlainEnglish(DB, env, id) {
+  const row = await DB.prepare(
+    `SELECT minutes_markdown, plain_english_minutes_md FROM ai_secretary_meetings WHERE id=?`
+  ).bind(id).first();
+  if (!row) return err('Meeting not found', 404);
+
+  const minutesMarkdown = row.minutes_markdown || '';
+  if (!minutesMarkdown.trim()) return err('No minutes to translate', 400);
+
+  // If cached, return it
+  if (row.plain_english_minutes_md && row.plain_english_minutes_md.trim()) {
+    return ok({ plainEnglish: row.plain_english_minutes_md, fromCache: true });
+  }
+
+  // Get DeepSeek key and model
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-v4-flash';
+  try {
+    const { results: sr } = await DB.prepare(
+      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
+    ).all();
+    const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
+    deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    // Auto-migrate legacy DeepSeek model names that are being discontinued 2026-07-24.
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
+  } catch (_) {}
+
+  if (!deepseekKey) return err('AI key not configured', 503);
+
+  // Call DeepSeek with plain English prompt
+  const prompt = `Rewrite the following meeting minutes at an 8th-grade reading level. Keep every fact, decision, person name, amount, and date exactly. Drop formal language, jargon, and unnecessary verbiage. Use short sentences. Don't add anything that isn't in the original. Return only the rewritten minutes, no preamble.
+
+${minutesMarkdown}`;
+
+  let plainEnglish = '';
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({
+        model: deepseekModel,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.2,
+        max_tokens: 2500,
+      }),
+    });
+    if (!resp.ok) {
+      const errBody = await resp.json().catch(() => ({}));
+      return err(`DeepSeek API error: ${errBody.error?.message || resp.status}`, 502);
+    }
+    const data = await resp.json();
+    plainEnglish = (data.choices?.[0]?.message?.content || '').trim();
+    if (!plainEnglish) return err('DeepSeek returned empty response', 502);
+  } catch (e) {
+    return err(`DeepSeek call failed: ${e.message}`, 502);
+  }
+
+  // Cache the result
+  try {
+    await DB.prepare(
+      `UPDATE ai_secretary_meetings SET plain_english_minutes_md=? WHERE id=?`
+    ).bind(plainEnglish, id).run();
+  } catch (_) {
+    // Safe to ignore if update fails; we still return the translation
+  }
+
+  return ok({ plainEnglish, fromCache: false });
+}
 
 async function createRealtimeTranscriptionToken(env) {
   const apiKey = String(env.OPENAI_API_KEY || '').trim();
