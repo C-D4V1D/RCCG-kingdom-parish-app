@@ -307,6 +307,11 @@ export async function onRequest(context) {
       if (auth instanceof Response) return auth;
       return await parseStatementWithAI(env, DB, body);
     }
+    if (route === 'kpsc-reminder-personalize' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await personalizeKpscReminder(DB, env, body);
+    }
     if (route === 'change-pin' && method === 'POST') {
       return await changeUserPin(DB, body);
     }
@@ -2049,6 +2054,178 @@ async function createKpscReminder(DB, data) {
   return ok({ sent: out.length, reminders: out });
 }
 
+// ── SMART REMINDER PERSONALISATION (B4) ──────────────────────────
+/**
+ * Classify a partner's payment behaviour into a tone bucket.
+ * Pure function — exported for unit tests.
+ * @param {object} partner  - row from kpsc_partners (must have .id, .full_name)
+ * @param {Array}  payments - rows from kpsc_partner_payments for this partner (last 12 months, paid=1)
+ * @param {number} currentYear
+ * @param {number} currentMonth  (1-12)
+ * @returns {string} 'first_miss' | 'chronic' | 'dormant' | 'new' | 'default'
+ */
+function classifyPartnerTone(partner, payments, currentYear, currentMonth) {
+  // Build a set of paid (year, month) tuples for quick lookup
+  const paidSet = new Set(payments.map(p => `${p.year}-${p.month}`));
+
+  // Helper: how many of the last N months (not including current) did they pay?
+  function paidInLast(n) {
+    let count = 0;
+    let y = currentYear;
+    let m = currentMonth - 1; // start from the month before current
+    for (let i = 0; i < n; i++) {
+      if (m < 1) { m = 12; y--; }
+      if (paidSet.has(`${y}-${m}`)) count++;
+      m--;
+    }
+    return count;
+  }
+
+  const totalPaid = payments.length;
+
+  // 'new': fewer than 3 payment records total
+  if (totalPaid < 3) return 'new';
+
+  const paidLast6 = paidInLast(6);
+  const missedLast6 = 6 - paidLast6;
+
+  // 'chronic': 3+ missed months in the last 6
+  if (missedLast6 >= 3) return 'chronic';
+
+  // 'dormant': paid regularly for 6+ consecutive months then stopped for 3+ months
+  // "stopped for 3+" means the last 3 months they have not paid
+  const paidLast3 = paidInLast(3);
+  if (paidLast3 === 0) {
+    // Check they had 6+ consecutive paid months before that
+    let consecutive = 0;
+    let y = currentYear;
+    let m = currentMonth - 4; // start 4 months back (skipping the 3 missed)
+    for (let i = 0; i < 6; i++) {
+      if (m < 1) { m += 12; y--; }
+      if (paidSet.has(`${y}-${m}`)) { consecutive++; } else { consecutive = 0; }
+      m--;
+    }
+    if (consecutive >= 6) return 'dormant';
+    // Even without exactly 6 consecutive, if they're a long-payer who stopped: dormant
+    if (totalPaid >= 6 && paidLast6 >= 4) return 'dormant';
+  }
+
+  // 'first_miss': paid at least 80% of expected months, first miss in 6+ months
+  if (paidLast3 >= 2 && paidLast6 >= 5) {
+    // They've been paying but missed this current month
+    if (!paidSet.has(`${currentYear}-${currentMonth}`)) {
+      return 'first_miss';
+    }
+  }
+
+  return 'default';
+}
+
+async function personalizeKpscReminder(DB, env, data) {
+  const partnerId = String(data?.partnerId || '').trim();
+  const year = normalizeYear(data?.year);
+  const month = normalizeMonth(data?.month) || (new Date().getUTCMonth() + 1);
+  const fallbackTemplate = String(data?.fallbackTemplate || '').trim()
+    || 'Dear {{name}}, this is a reminder to pay your {{month}} partnership pledge. God bless you.';
+
+  if (!partnerId) return err('partnerId is required', 400);
+
+  // Load partner
+  const partner = await DB.prepare(`SELECT * FROM kpsc_partners WHERE id=?`).bind(partnerId).first();
+  if (!partner) return err('Partner not found', 404);
+
+  // Load last 12 months of payments
+  let payments = [];
+  try {
+    // Compute the start year/month for a 12-month window
+    let startYear = year;
+    let startMonth = month - 11;
+    if (startMonth < 1) { startMonth += 12; startYear--; }
+    const { results: payRows } = await DB.prepare(`
+      SELECT year, month, amount, paid_at
+      FROM kpsc_partner_payments
+      WHERE partner_id=? AND paid=1
+        AND ((year > ?) OR (year = ? AND month >= ?))
+      ORDER BY year, month
+    `).bind(partnerId, startYear, startYear, startMonth).all();
+    payments = payRows || [];
+  } catch (_) { payments = []; }
+
+  const toneBucket = classifyPartnerTone(partner, payments, year, month);
+
+  // Build a human-readable payment summary
+  const MONTH_ABBR = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const paidMonths = payments.map(p => `${MONTH_ABBR[p.month] || p.month} ${p.year}`).join(', ') || 'none';
+  const partnerName = partner.full_name || 'Partner';
+  const monthLabel = MONTH_ABBR[month] || String(month);
+  const toneInstructions = {
+    first_miss: 'Use a warm, encouraging tone — acknowledge their faithfulness and gently remind them about this one missed month.',
+    chronic: 'Use a firm but respectful tone — acknowledge the ongoing gap and appeal to their commitment to the partnership.',
+    dormant: 'Use a caring, re-engagement tone — acknowledge their past faithfulness and warmly invite them back.',
+    new: 'Use a welcoming, friendly tone — they are relatively new to the partnership.',
+    default: 'Use a standard, friendly reminder tone.',
+  };
+
+  // Load DeepSeek key + model from settings
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-v4-flash';
+  try {
+    const { results: sr } = await DB.prepare(
+      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
+    ).all();
+    const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
+    deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    // Auto-migrate legacy DeepSeek model names discontinued 2026-07-24.
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
+  } catch (_) {}
+
+  if (!deepseekKey) {
+    return ok({ variants: [fallbackTemplate], toneBucket, error: 'DeepSeek API key not configured' });
+  }
+
+  const prompt = `You are helping a church committee secretary personalise a WhatsApp/SMS payment reminder.
+
+Partner name: ${partnerName}
+Month: ${monthLabel} ${year}
+Payment history (last 12 months, paid months): ${paidMonths}
+Tone bucket: ${toneBucket}
+Tone instruction: ${toneInstructions[toneBucket] || toneInstructions.default}
+Reference template: "${fallbackTemplate}"
+
+Write exactly 3 short reminder variants (each 1-2 sentences, WhatsApp/SMS-friendly, max 160 characters each). Use {{name}} for the partner's name and {{month}} for the month name. Keep them natural, warm, and church-appropriate.
+
+Respond ONLY with a JSON array of 3 strings, no markdown, no prose. Example: ["variant1","variant2","variant3"]`;
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 500, temperature: 0.4 }),
+    });
+
+    if (!resp.ok) {
+      return ok({ variants: [fallbackTemplate], toneBucket, error: `DeepSeek API error: ${resp.status}` });
+    }
+
+    const aiData = await resp.json();
+    const rawText = String(aiData.choices?.[0]?.message?.content || '').trim();
+    const cleaned = rawText.replace(/```json?\s*/gi, '').replace(/```\s*/gi, '').trim();
+    const parsed = safeJsonParse(cleaned, null);
+
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      const variants = parsed.map(v => String(v || '').trim()).filter(Boolean);
+      if (variants.length > 0) return ok({ variants, toneBucket });
+    }
+
+    // Parsing failure
+    return ok({ variants: [fallbackTemplate], toneBucket, error: 'Could not parse AI response' });
+  } catch (e) {
+    return ok({ variants: [fallbackTemplate], toneBucket, error: `DeepSeek request failed: ${e.message}` });
+  }
+}
+
 async function getKpscDashboard(DB, url) {
   const year = normalizeYear(url.searchParams.get('year'));
   const month = normalizeOptionalMonth(url.searchParams.get('month')) || (new Date().getUTCMonth() + 1);
@@ -3515,4 +3692,4 @@ async function voiceGetEnrollment(DB, memberId) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding };
+export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone };

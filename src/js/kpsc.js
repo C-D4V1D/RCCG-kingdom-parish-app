@@ -4191,8 +4191,12 @@ async function renderReminders(main) {
                     ${p.phone ? `<span>📞 ${esc(p.phone)}</span>` : ''}
                     <span class="kbadge badge-gray">${esc(p.reminderPreference || 'sms')}</span>
                   </div>
+                  <div id="krem-ai-hint-${esc(p.id)}" style="display:none;font-size:12px;color:#888;margin-top:4px"></div>
                 </div>
-                <button class="kbtn kbtn-sm" onclick="Kpsc.copyReminderMessage('${esc(p.id)}')">📋 Copy</button>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <button class="kbtn kbtn-sm kbtn-ghost" id="krem-personalize-${esc(p.id)}" onclick="Kpsc.personalizeReminder('${esc(p.id)}', this)" title="Generate AI-personalized reminder variants">✨ Personalize</button>
+                  <button class="kbtn kbtn-sm" onclick="Kpsc.copyReminderMessage('${esc(p.id)}')">📋 Copy</button>
+                </div>
               </div>
             </div>`).join('')}
         </div>
@@ -4213,18 +4217,127 @@ async function renderReminders(main) {
     </div>`;
 }
 
+// Per-partner personalized message overrides: Map<partnerId, resolvedMessageString>
+const _personalizedMessages = new Map();
+
 function copyReminderMessage(partnerId) {
   const partner = S.partners.find(p => p.id === partnerId);
   if (!partner) return;
-  const template = document.getElementById('krem-message')?.value.trim() || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge.';
-  const message = template
-    .replace(/\{\{name\}\}/g, partner.fullName)
-    .replace(/\{\{month\}\}/g, monthName(currentMonth()));
+  let message;
+  if (_personalizedMessages.has(partnerId)) {
+    // Use the approved personalized variant (already has name/month substituted)
+    message = _personalizedMessages.get(partnerId);
+  } else {
+    const template = document.getElementById('krem-message')?.value.trim() || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge.';
+    message = template
+      .replace(/\{\{name\}\}/g, partner.fullName)
+      .replace(/\{\{month\}\}/g, monthName(currentMonth()));
+  }
   navigator.clipboard.writeText(message).then(() => {
     showToast(`Reminder copied for ${partner.fullName}`, 'success');
   }).catch(() => {
     showToast('Could not copy. Please copy manually.', 'warn');
   });
+}
+
+async function personalizeReminder(partnerId, btn) {
+  const partner = S.partners.find(p => p.id === partnerId);
+  if (!partner) return;
+  const month = currentMonth();
+  const year = currentYear();
+  const fallbackTemplate = document.getElementById('krem-message')?.value.trim()
+    || 'Dear {{name}}, this is a reminder to pay your {{month}} partnership pledge. God bless you.';
+
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ …'; }
+
+  const res = await apiPost('kpsc-reminder-personalize', { partnerId, year, month, fallbackTemplate });
+
+  if (btn) { btn.disabled = false; btn.textContent = '✨ Personalize'; }
+
+  if (res?.error && (!Array.isArray(res?.variants) || res.variants.length === 0)) {
+    showToast('AI personalisation failed. Using template.', 'warn');
+    return;
+  }
+
+  // Show inline hint if AI couldn't personalize but returned fallback
+  if (res?.error) {
+    const hintEl = document.getElementById(`krem-ai-hint-${partnerId}`);
+    if (hintEl) {
+      hintEl.textContent = 'AI couldn\'t personalize this one — using template.';
+      hintEl.style.display = 'block';
+    }
+  }
+
+  openPersonalizeModal(partner, res?.variants || [fallbackTemplate], fallbackTemplate, month, year);
+}
+
+function openPersonalizeModal(partner, variants, fallbackTemplate, month, year) {
+  document.getElementById('k-personalize-modal')?.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'k-personalize-modal';
+  modal.className = 'k-modal-overlay';
+
+  const variantCards = variants.map((v, i) => {
+    const resolved = v.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month));
+    return `
+      <div class="k-remind-variant-card">
+        <div class="k-remind-variant-text">${esc(resolved)}</div>
+        <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.useReminderVariant('${esc(partner.id)}', ${i})">Use this</button>
+      </div>`;
+  }).join('');
+
+  const fallbackResolved = fallbackTemplate
+    .replace(/\{\{name\}\}/g, partner.fullName)
+    .replace(/\{\{month\}\}/g, monthName(month));
+
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">✨ Personalize Reminder — ${esc(partner.fullName)}</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closePersonalizeModal()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p class="k-hint" style="margin-bottom:12px">Choose a variant to use for this partner's reminder. The secretary can still edit it in the copy/send step.</p>
+        <div class="k-remind-variants">${variantCards}</div>
+        <div class="k-remind-variant-card k-remind-variant-fallback">
+          <div class="k-remind-variant-text" style="color:#888">${esc(fallbackResolved)}</div>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.useReminderVariant('${esc(partner.id)}', -1)">Use my template</button>
+        </div>
+      </div>
+    </div>`;
+
+  // Store resolved variants on the modal element for retrieval
+  modal._variants = variants.map(v => v.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month)));
+  modal._fallback = fallbackResolved;
+
+  document.body.appendChild(modal);
+}
+
+function useReminderVariant(partnerId, variantIndex) {
+  const modal = document.getElementById('k-personalize-modal');
+  if (!modal) return;
+  let chosen;
+  if (variantIndex === -1) {
+    chosen = modal._fallback;
+    _personalizedMessages.delete(partnerId);
+  } else {
+    chosen = modal._variants[variantIndex] || modal._fallback;
+    _personalizedMessages.set(partnerId, chosen);
+  }
+  closePersonalizeModal();
+
+  // Visual confirmation on the partner row
+  const hintEl = document.getElementById(`krem-ai-hint-${partnerId}`);
+  if (hintEl) {
+    hintEl.textContent = variantIndex === -1 ? 'Using template.' : 'AI variant selected — click Copy to use it.';
+    hintEl.style.display = 'block';
+    hintEl.style.color = variantIndex === -1 ? '#888' : '#2a6';
+  }
+}
+
+function closePersonalizeModal() {
+  document.getElementById('k-personalize-modal')?.remove();
 }
 
 async function sendBulkReminders(btn) {
@@ -4242,14 +4355,20 @@ async function sendBulkReminders(btn) {
     return;
   }
   btn.disabled = true;
-  const responses = await Promise.all(unpaidPartners.map(partner => apiPost('kpsc-reminders', {
-    partnerId: partner.id,
-    year,
-    month,
-    channel: partner.reminderPreference || 'sms',
-    sentBy: S.user?.name || '',
-    message: template.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month)),
-  })));
+  const responses = await Promise.all(unpaidPartners.map(partner => {
+    // Use personalized message if the secretary approved one, else fall back to template
+    const message = _personalizedMessages.has(partner.id)
+      ? _personalizedMessages.get(partner.id)
+      : template.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month));
+    return apiPost('kpsc-reminders', {
+      partnerId: partner.id,
+      year,
+      month,
+      channel: partner.reminderPreference || 'sms',
+      sentBy: S.user?.name || '',
+      message,
+    });
+  }));
   btn.disabled = false;
   const failed = responses.filter(r => r?.error);
   if (failed.length) {
@@ -6033,6 +6152,9 @@ window.Kpsc = {
   runReconciliation,
   sendBulkReminders,
   copyReminderMessage,
+  personalizeReminder,
+  useReminderVariant,
+  closePersonalizeModal,
   debouncedSaveReminderTemplate,
   setReportsYear,
   setReportsMonth,
