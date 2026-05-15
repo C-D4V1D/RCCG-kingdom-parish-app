@@ -4126,13 +4126,13 @@ function debouncedSaveReminderTemplate(textarea) {
 
 function reportsCategoryOptions() {
   return [
-    { key: 'all', label: 'All items' },
-    { key: 'resolutions', label: 'Resolutions' },
-    { key: 'financial', label: 'Financial approvals' },
-    { key: 'amendments', label: 'Amendments' },
-    { key: 'rejections', label: 'Rejections' },
-    { key: 'motions', label: 'Motions / proposals' },
-    { key: 'action_items', label: 'Action items' },
+    { key: 'all',          label: 'All items'           },
+    { key: 'resolutions',  label: 'Resolutions'         },
+    { key: 'financial',    label: 'Financial approvals' },
+    { key: 'amendments',   label: 'Amendments'          },
+    { key: 'rejections',   label: 'Rejections'          },
+    { key: 'motions',      label: 'Motions / proposals' },
+    { key: 'action_items', label: 'Action items'        },
   ];
 }
 
@@ -4156,7 +4156,8 @@ function classifyResolutionInsight(item) {
   if (type === 'financial_approval' || String(item?.category || '').toLowerCase() === 'financial' || item?.amount) return 'financial';
   if (type === 'amendment' || /\bamend(?:ment|ed)?\b/i.test(text)) return 'amendments';
   if (type === 'rejection' || item?.approved === false || /\breject(?:ed|ion)?\b/i.test(text)) return 'rejections';
-  if (type === 'motion' || /\bmotion|proposal|proposed\b/i.test(text)) return 'motions';
+  // Fix: use non-capturing group so \b anchors all three alternatives.
+  if (type === 'motion' || /\b(?:motion|proposal|proposed)\b/i.test(text)) return 'motions';
   return 'resolutions';
 }
 
@@ -4194,7 +4195,7 @@ function buildMeetingInsights(meetings) {
         meetingTitle: m.title || 'KPSC Meeting',
         meetingDate,
         createdAt,
-        actionId: normalizeActionId(a, idx).trim(),
+        actionId: normalizeActionId(a, idx),
         text: String(a.task || '').trim(),
         assignee: String(a.assignee || 'Unassigned').trim() || 'Unassigned',
         dueDate: String(a.dueDate || '').trim(),
@@ -4209,18 +4210,17 @@ function buildMeetingInsights(meetings) {
   });
 }
 
-function filterMeetingInsights(entries) {
+// Filters entries by year + month + search + optional category override.
+// Pass categoryOverride = 'all' to count across all categories for chip counts.
+function filterMeetingInsights(entries, categoryOverride) {
   const year = Number(S.reportsYear) || currentYear();
   const month = Number(S.reportsMonth) || 0;
-  const category = S.reportsFilter || 'all';
+  const category = categoryOverride !== undefined ? categoryOverride : (S.reportsFilter || 'all');
   const q = String(S.reportsSearch || '').trim().toLowerCase();
   return entries.filter(entry => {
     const stamp = entry.meetingDate || entry.createdAt;
     if (year && !String(stamp).startsWith(String(year))) return false;
-    if (month) {
-      const mm = Number(String(stamp).slice(5, 7));
-      if (mm !== month) return false;
-    }
+    if (month && Number(String(stamp).slice(5, 7)) !== month) return false;
     if (category !== 'all' && entry.category !== category) return false;
     if (!q) return true;
     const hay = [
@@ -4240,18 +4240,71 @@ function filterMeetingInsights(entries) {
   });
 }
 
+// Color-coded badge for action item completion status.
+function insightsStatusBadge(status) {
+  const s = String(status || 'pending').toLowerCase();
+  if (s === 'done')        return '<span class="kbadge badge-green">done</span>';
+  if (s === 'in_progress') return '<span class="kbadge badge-blue">in progress</span>';
+  if (s === 'cancelled')   return '<span class="kbadge badge-gray">cancelled</span>';
+  return '<span class="kbadge badge-amber">pending</span>';
+}
+
+// Returns an HTML snippet for the due-date field, with overdue highlighting.
+// Both dueDate and today() return ISO 8601 (YYYY-MM-DD) strings, so lexicographic
+// comparison is equivalent to chronological comparison for this format.
+function insightsDueDateLabel(dueDate, status) {
+  if (!dueDate) return '<span class="k-insight-dim">No deadline</span>';
+  const s = String(status || '').toLowerCase();
+  if (s !== 'done' && s !== 'cancelled' && dueDate < today()) {
+    return `<span class="k-insight-overdue">📅 ${esc(dueDate)} — overdue</span>`;
+  }
+  return `<span>📅 ${esc(dueDate)}</span>`;
+}
+
+// Context-aware empty state: differentiates "no meetings processed" vs "AI found nothing" vs "filter mismatch".
+function buildInsightsEmptyState(allEntries, meetings) {
+  const processed = (meetings || []).filter(m => m.status === 'processed');
+  if (!processed.length) {
+    return `
+      <div class="k-empty">
+        <div style="font-size:32px;margin-bottom:8px">📋</div>
+        <div style="font-weight:600;margin-bottom:6px;color:var(--text)">No processed meetings yet</div>
+        <div>After a meeting is recorded and processed by the AI Secretary, resolutions, action items, and other insights will appear here automatically.</div>
+      </div>`;
+  }
+  if (!allEntries.length) {
+    return `
+      <div class="k-empty">
+        <div style="font-size:32px;margin-bottom:8px">🔍</div>
+        <div style="font-weight:600;margin-bottom:6px;color:var(--text)">No structured items found</div>
+        <div>The AI did not detect any resolutions or action items in the processed meetings. Ensure meetings have full transcript content when processed.</div>
+      </div>`;
+  }
+  return `
+    <div class="k-empty">
+      <div style="font-weight:600;margin-bottom:6px;color:var(--text)">No items match this filter</div>
+      <div>Try a different category, a wider date range, or clear the search term.</div>
+    </div>`;
+}
+
 function renderMeetingInsightCard(entry) {
+  // Meeting IDs are crypto.randomUUID() values ([0-9a-f-] only) — safe for direct
+  // use in onclick, consistent with meetingCard() and openMeeting() elsewhere.
+  const safeMid = String(entry.meetingId || '');
+  const viewLink = `<div class="k-insight-view-link" onclick="Kpsc.openMeeting('${safeMid}')">View full minutes →</div>`;
+
   if (entry.kind === 'action_item') {
     const canEdit = canEditInsightsActionStatus();
     const meetingIdSafe = encodeURIComponent(String(entry.meetingId || ''));
     const actionIdSafe = encodeURIComponent(String(entry.actionId || ''));
+    const dueDateHtml = insightsDueDateLabel(entry.dueDate, entry.status);
     return `
       <div class="k-meeting-card" style="cursor:default">
         <div class="k-mc-top">
-          <div>
+          <div style="flex:1">
             <div class="k-mc-title">${esc(entry.text)}</div>
             <div class="k-mc-meta">
-              <span>${esc(entry.meetingDate || 'No date')}</span>
+              <span>${esc(fmtDate(entry.meetingDate) || entry.meetingDate || 'No date')}</span>
               <span>${esc(entry.meetingTitle)}</span>
             </div>
           </div>
@@ -4259,31 +4312,33 @@ function renderMeetingInsightCard(entry) {
         </div>
         <div class="k-action-meta">
           <span>👤 ${esc(entry.assignee || 'Unassigned')}</span>
-          <span>📅 ${esc(entry.dueDate || 'No deadline')}</span>
+          ${dueDateHtml}
           ${canEdit
-            ? `<label class="k-insight-status-wrap">Status
-                 <select class="k-input k-input-sm k-insight-status-select" onchange="Kpsc.updateReportActionStatus('${meetingIdSafe}','${actionIdSafe}',this.value,this)">
-                   ${['pending','in_progress','done','cancelled'].map(st => `<option value="${st}" ${entry.status === st ? 'selected' : ''}>${st.replace(/_/g, ' ')}</option>`).join('')}
-                 </select>
-               </label>`
-            : `<span class="kbadge badge-gray">${esc((entry.status || 'pending').replace(/_/g, ' '))}</span>`
+            ? `<select class="k-input k-input-sm k-insight-status-select" aria-label="Update action status"
+                 onchange="Kpsc.updateReportActionStatus('${meetingIdSafe}','${actionIdSafe}',this.value,this)">
+                 ${['pending','in_progress','done','cancelled'].map(st =>
+                   `<option value="${st}" ${entry.status === st ? 'selected' : ''}>${st.replace(/_/g, ' ')}</option>`
+                 ).join('')}
+               </select>`
+            : insightsStatusBadge(entry.status)
           }
         </div>
+        ${viewLink}
       </div>`;
   }
 
   const statusBadge = entry.approval === 'approved'
-    ? '<span class="kbadge badge-green">Approved</span>'
+    ? '<span class="kbadge badge-green">✓ Approved</span>'
     : entry.approval === 'rejected'
-      ? '<span class="kbadge badge-red">Rejected</span>'
+      ? '<span class="kbadge badge-red">✗ Rejected</span>'
       : '<span class="kbadge badge-amber">Needs confirmation</span>';
   return `
     <div class="k-meeting-card" style="cursor:default">
       <div class="k-mc-top">
-        <div>
+        <div style="flex:1">
           <div class="k-mc-title">${esc(entry.text)}</div>
           <div class="k-mc-meta">
-            <span>${esc(entry.meetingDate || 'No date')}</span>
+            <span>${esc(fmtDate(entry.meetingDate) || entry.meetingDate || 'No date')}</span>
             <span>${esc(entry.meetingTitle)}</span>
           </div>
         </div>
@@ -4295,20 +4350,58 @@ function renderMeetingInsightCard(entry) {
       </div>
       ${entry.motionBy || entry.secondedBy || entry.voteSummary ? `
         <div class="k-action-meta">
-          ${entry.motionBy ? `<span>Moved by: ${esc(entry.motionBy)}</span>` : ''}
-          ${entry.secondedBy ? `<span>Seconded by: ${esc(entry.secondedBy)}</span>` : ''}
+          ${entry.motionBy ? `<span>🗣 Moved: ${esc(entry.motionBy)}</span>` : ''}
+          ${entry.secondedBy ? `<span>Seconded: ${esc(entry.secondedBy)}</span>` : ''}
           ${entry.voteSummary ? `<span>${esc(entry.voteSummary)}</span>` : ''}
         </div>` : ''}
+      ${viewLink}
     </div>`;
+}
+
+// Re-renders chips + count + list from cached S.meetings — no API call.
+function rerenderInsightsList() {
+  const allEntries = buildMeetingInsights(S.meetings);
+  // Counts respect year + month + search but ignore the category chip (standard faceted behaviour).
+  const baseFiltered = filterMeetingInsights(allEntries, 'all');
+  const filtered = filterMeetingInsights(allEntries);
+  const categories = reportsCategoryOptions();
+  const counts = categories.reduce((acc, c) => ({
+    ...acc,
+    [c.key]: c.key === 'all' ? baseFiltered.length : baseFiltered.filter(item => item.category === c.key).length,
+  }), {});
+
+  const chipsEl = document.getElementById('k-insights-chips');
+  if (chipsEl) {
+    chipsEl.innerHTML = categories.map(c =>
+      `<button class="k-filter ${S.reportsFilter === c.key ? 'active' : ''}" onclick="Kpsc.setReportsFilter('${c.key}')">${c.label} (${counts[c.key] || 0})</button>`
+    ).join('');
+  }
+
+  const total = baseFiltered.length;
+  const countEl = document.getElementById('k-insights-count');
+  if (countEl) {
+    countEl.textContent = filtered.length === total
+      ? `${filtered.length} item${filtered.length !== 1 ? 's' : ''}`
+      : `${filtered.length} of ${total} item${total !== 1 ? 's' : ''}`;
+  }
+
+  const listEl = document.getElementById('k-insights-list');
+  if (listEl) {
+    listEl.innerHTML = filtered.length
+      ? filtered.map(renderMeetingInsightCard).join('')
+      : buildInsightsEmptyState(allEntries, S.meetings);
+  }
 }
 
 async function renderReports(main) {
   const res = await apiGet('ai-secretary-meetings');
   S.meetings = res.meetings || res || [];
-  const entries = buildMeetingInsights(S.meetings);
-  const filtered = filterMeetingInsights(entries);
+  const allEntries = buildMeetingInsights(S.meetings);
+  // Counts: respect current year + month + search, but ignore category filter for chip counts.
+  const baseFiltered = filterMeetingInsights(allEntries, 'all');
+  const filtered = filterMeetingInsights(allEntries);
 
-  // Set(...) keeps unique years so the dropdown does not duplicate values across many meetings.
+  // Set(...) keeps unique years so the dropdown does not duplicate values.
   const years = [...new Set([currentYear(), ...S.meetings.map(m => extractYearFromStamp(m.meetingDate)).filter(Boolean)])]
     .sort((a, b) => b - a);
   const yearOpts = years.map(y => `<option value="${y}" ${Number(S.reportsYear) === Number(y) ? 'selected' : ''}>${y}</option>`).join('');
@@ -4316,48 +4409,89 @@ async function renderReports(main) {
     const month = i + 1;
     return `<option value="${month}" ${Number(S.reportsMonth) === month ? 'selected' : ''}>${monthName(month)}</option>`;
   })].join('');
+
   const categories = reportsCategoryOptions();
-  const counts = categories.reduce((acc, c) => ({ ...acc, [c.key]: c.key === 'all' ? entries.length : entries.filter(item => item.category === c.key).length }), {});
+  const counts = categories.reduce((acc, c) => ({
+    ...acc,
+    [c.key]: c.key === 'all' ? baseFiltered.length : baseFiltered.filter(item => item.category === c.key).length,
+  }), {});
+
+  // Summary stats drawn from ALL entries (not just the current filtered view).
+  const todayStr = today();
+  const pendingActions  = allEntries.filter(e => e.kind === 'action_item' && e.status === 'pending').length;
+  const overdueActions  = allEntries.filter(e => e.kind === 'action_item' && e.dueDate && e.dueDate < todayStr && e.status !== 'done' && e.status !== 'cancelled').length;
+  const financialCount  = allEntries.filter(e => e.category === 'financial').length;
+  const resolutionCount = allEntries.filter(e => e.kind === 'resolution').length;
+
+  const statBar = allEntries.length ? `
+    <div class="k-insight-stats">
+      <div class="k-insight-stat">
+        <span class="k-insight-stat-val">${resolutionCount}</span>
+        <span class="k-insight-stat-lbl">Resolutions</span>
+      </div>
+      <div class="k-insight-stat">
+        <span class="k-insight-stat-val">${financialCount}</span>
+        <span class="k-insight-stat-lbl">Financial</span>
+      </div>
+      <div class="k-insight-stat${pendingActions ? ' k-insight-stat-warn' : ''}">
+        <span class="k-insight-stat-val">${pendingActions}</span>
+        <span class="k-insight-stat-lbl">Pending actions</span>
+      </div>
+      ${overdueActions ? `
+      <div class="k-insight-stat k-insight-stat-alert">
+        <span class="k-insight-stat-val">${overdueActions}</span>
+        <span class="k-insight-stat-lbl">Overdue</span>
+      </div>` : ''}
+    </div>` : '';
+
+  const total = baseFiltered.length;
+  const countText = filtered.length === total
+    ? `${filtered.length} item${filtered.length !== 1 ? 's' : ''}`
+    : `${filtered.length} of ${total} item${total !== 1 ? 's' : ''}`;
 
   main.innerHTML = `
     <div class="k-page">
       <div class="k-section-hdr">
         <h2>AI Meeting Insights</h2>
       </div>
-      <p class="k-page-hint">AI extracts resolutions, amendments, motions/proposals, financial approvals, rejections, and action items from each meeting. Items are shown newest first.</p>
+      <p class="k-page-hint">AI automatically extracts resolutions, amendments, motions, financial approvals, rejections, and action items from each processed meeting — newest first.</p>
+      ${statBar}
       <div class="k-insight-filters">
         <select class="k-input k-input-sm" onchange="Kpsc.setReportsYear(this.value)">${yearOpts}</select>
         <select class="k-input k-input-sm" onchange="Kpsc.setReportsMonth(this.value)">${monthOpts}</select>
-        <input class="k-input k-input-sm" type="search" placeholder="Search text, proposer, assignee, amount…" value="${esc(S.reportsSearch)}" oninput="Kpsc.setReportsSearch(this.value)" />
+        <input class="k-input k-input-sm" type="search" placeholder="Search text, proposer, assignee…" value="${esc(S.reportsSearch)}" oninput="Kpsc.setReportsSearch(this.value)" />
       </div>
-      <div class="k-quick-filters">
-        ${categories.map(c => {
-          const filterSafe = encodeURIComponent(String(c.key || 'all'));
-          return `<button class="k-filter ${S.reportsFilter === c.key ? 'active' : ''}" onclick="Kpsc.setReportsFilter('${filterSafe}')">${c.label} (${counts[c.key] || 0})</button>`;
-        }).join('')}
+      <div class="k-quick-filters" id="k-insights-chips">
+        ${categories.map(c =>
+          `<button class="k-filter ${S.reportsFilter === c.key ? 'active' : ''}" onclick="Kpsc.setReportsFilter('${c.key}')">${c.label} (${counts[c.key] || 0})</button>`
+        ).join('')}
       </div>
-      <div class="k-meeting-list">${filtered.length ? filtered.map(renderMeetingInsightCard).join('') : '<div class="k-empty">No extracted items match this filter.</div>'}</div>
+      <div class="k-insight-count-row"><span id="k-insights-count">${countText}</span></div>
+      <div class="k-meeting-list" id="k-insights-list">${filtered.length ? filtered.map(renderMeetingInsightCard).join('') : buildInsightsEmptyState(allEntries, S.meetings)}</div>
     </div>`;
 }
 
-async function setReportsYear(year) {
+let _insightsSearchTimer = null;
+
+function setReportsYear(year) {
   S.reportsYear = Number(year) || currentYear();
-  await renderReports(document.getElementById('kpsc-main'));
+  rerenderInsightsList();
 }
 
-async function setReportsMonth(month) {
+function setReportsMonth(month) {
   S.reportsMonth = Number(month) || 0;
-  await renderReports(document.getElementById('kpsc-main'));
+  rerenderInsightsList();
 }
 
-async function setReportsFilter(filter) {
-  S.reportsFilter = decodeURIComponent(String(filter || 'all')) || 'all';
-  await renderReports(document.getElementById('kpsc-main'));
+function setReportsFilter(filter) {
+  S.reportsFilter = String(filter || 'all');
+  rerenderInsightsList();
 }
 
-async function setReportsSearch(search) {
+function setReportsSearch(search) {
   S.reportsSearch = search || '';
-  await renderReports(document.getElementById('kpsc-main'));
+  clearTimeout(_insightsSearchTimer);
+  _insightsSearchTimer = setTimeout(() => rerenderInsightsList(), 250);
 }
 
 async function updateReportActionStatus(meetingId, actionId, status, selectEl) {
@@ -4391,7 +4525,8 @@ async function updateReportActionStatus(meetingId, actionId, status, selectEl) {
     }
     S.meetings = (S.meetings || []).map(item => item.id === decodedMeetingId ? updated : item);
     showToast('Action status updated.', 'success');
-    await renderReports(document.getElementById('kpsc-main'));
+    // Re-render in place — no API call, no scroll-to-top.
+    rerenderInsightsList();
   } catch (err) {
     console.error('Failed to update action status', err);
     if (selectEl) selectEl.value = priorStatus;
@@ -4400,6 +4535,7 @@ async function updateReportActionStatus(meetingId, actionId, status, selectEl) {
     if (selectEl) selectEl.disabled = false;
   }
 }
+
 
 function archiveQuickFilters() {
   return [

@@ -409,10 +409,26 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-filter{border:1px solid var(--border);background:var(--white);border-radius:999px;padding:6px 11px;font-size:12px;color:var(--text2);cursor:pointer;}
 .k-filter.active{background:var(--navy);border-color:var(--navy);color:#fff;}
 .k-insight-filters{display:grid;grid-template-columns:150px 170px 1fr;gap:8px;margin-bottom:12px;}
-.k-insight-status-wrap{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text3);}
 .k-insight-status-select{width:auto;min-width:130px;}
+/* ── INSIGHT STATS BAR ─────────────────────────────────────────── */
+.k-insight-stats{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 16px;padding:10px 12px;background:var(--white);border:1px solid var(--border);border-radius:10px;}
+.k-insight-stat{display:flex;flex-direction:column;align-items:center;min-width:72px;flex:1;}
+.k-insight-stat-val{font-size:22px;font-weight:700;color:var(--navy);line-height:1.1;}
+.k-insight-stat-lbl{font-size:11px;color:var(--text3);margin-top:2px;text-align:center;}
+.k-insight-stat-warn .k-insight-stat-val{color:#92400e;}
+.k-insight-stat-warn .k-insight-stat-lbl{color:#92400e;}
+.k-insight-stat-alert .k-insight-stat-val{color:#991b1b;}
+.k-insight-stat-alert .k-insight-stat-lbl{color:#991b1b;}
+/* ── INSIGHT CARD EXTRAS ────────────────────────────────────────── */
+.k-insight-overdue{color:#b91c1c;font-size:12px;font-weight:600;}
+.k-insight-dim{color:var(--text3);font-size:12px;}
+.k-insight-view-link{margin-top:8px;font-size:12px;font-weight:600;color:var(--navy);cursor:pointer;text-align:right;}
+.k-insight-view-link:hover{text-decoration:underline;}
+/* ── INSIGHT RESULT COUNT ───────────────────────────────────────── */
+.k-insight-count-row{font-size:12px;color:var(--text3);margin-bottom:8px;}
 @media (max-width: 720px){.k-review-grid{grid-template-columns:1fr;}}
 @media (max-width: 720px){.k-insight-filters{grid-template-columns:1fr;}}
+@media (max-width: 480px){.k-insight-stats{gap:6px;}.k-insight-stat-val{font-size:18px;}}
 
 /* ── PARTNER CONTROLS ──────────────────────────────────────────── */
 .k-partners-controls{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;}
