@@ -3634,7 +3634,8 @@ function vfpCleanup() {
 
 function showVoiceFpEnrollModal(idx) {
   const member = S.members[idx];
-  if (!member || !member.name.trim()) {
+  const memberName = String(member?.name || '').trim();
+  if (!member || !memberName) {
     showToast('Please save the member name first.', 'warn');
     return;
   }
@@ -3753,6 +3754,8 @@ async function submitVoiceFpEnrollment() {
   const idx    = VfpRec.memberIdx;
   const member = S.members[idx];
   if (!member) return;
+  const memberName = String(member.name || '').trim();
+  if (!memberName) { showToast('Please save the member name first.', 'warn'); return; }
 
   if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Submitting…'; }
 
@@ -3762,7 +3765,7 @@ async function submitVoiceFpEnrollment() {
     const syncRes = await fetch(`${API}/voice-member-sync/${encodeURIComponent(vid)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
-      body: JSON.stringify({ name: member.name, group: member.group || '', position: member.position || '' }),
+      body: JSON.stringify({ name: memberName, group: member.group || '', position: member.position || '' }),
     });
     const syncData = await syncRes.json();
     if (syncData.error) throw new Error(syncData.error);
