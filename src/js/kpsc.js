@@ -6523,7 +6523,7 @@ async function shareMinutesWhatsApp(meetingId) {
   const actCount = (meeting.actionItems || []).length;
 
   const msg = [
-    `*KPSC Meeting Minutes — ${title}*`,
+    `*KPSC Meeting Minutes — ${meeting.title || 'KPSC Meeting'}*`,
     date ? `📅 Date: ${date}` : '',
     '',
     summary,
