@@ -1328,9 +1328,6 @@ async function voiceIdTriggerForSpeaker(speakerIdx) {
       (data.reason ? ` reason=${data.reason}` : '') +
       (data.memberName ? ` member=${data.memberName}` : '')
     );
-    if (data._diag) {
-      console.info('[voice-id] diag:', JSON.stringify(data._diag));
-    }
 
     if (!data.match && typeof data.score === 'number' && data.score >= (data.threshold - 0.10)) {
       // Close-but-no-match: surface a hint so user can re-enroll or check mic.

@@ -1774,6 +1774,21 @@ test('blobToEmbedding handles Uint8Array (D1 BLOB return type)', () => {
   }
 });
 
+test('blobToEmbedding handles Array<number> (D1 Pages Functions BLOB return type)', () => {
+  // D1 in Cloudflare Pages Functions returns BLOB columns as a plain JS Array
+  // of byte values, e.g. [0, 12, 5, 240, ...]. This is the actual production
+  // behaviour confirmed by live diagnostics on PR #82.
+  const original = Array.from({ length: 192 }, (_, i) => (i + 0.5) * 0.003);
+  const buf = embeddingToBlob(original);
+  const asArray = Array.from(new Uint8Array(buf));  // 768-element Array<number>
+  assert.equal(asArray.length, 768);
+  const restored = blobToEmbedding(asArray);
+  assert.equal(restored.length, 192, 'Array<byte> must decode to 192 floats');
+  for (let i = 0; i < restored.length; i++) {
+    assert.ok(Math.abs(restored[i] - original[i]) < 1e-5, `Mismatch at index ${i}`);
+  }
+});
+
 test('blobToEmbedding handles null/undefined gracefully', () => {
   assert.deepEqual(blobToEmbedding(null), []);
   assert.deepEqual(blobToEmbedding(undefined), []);

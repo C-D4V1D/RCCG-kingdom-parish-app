@@ -87,19 +87,23 @@ function cosineSim(a, b) {
 function embeddingToBlob(arr)  { return new Float32Array(arr).buffer; }
 
 // Convert a D1 BLOB column back to a JS number array.
-// D1 returns BLOB as Uint8Array (not ArrayBuffer), so new Float32Array(uint8array)
-// would reinterpret each byte as a float element (768 items instead of 192).
-// We must extract the underlying buffer first.
+// D1 (in Cloudflare Pages Functions) returns BLOB columns as a plain JS Array
+// of byte values (0-255) — not ArrayBuffer or Uint8Array. Handle every form
+// defensively so this keeps working if the runtime ever changes:
+//   - ArrayBuffer            → use directly
+//   - Uint8Array (any view)  → slice the underlying buffer
+//   - Array<number>          → wrap into a Uint8Array and use its buffer
+//   - base64 string          → decode to bytes
 function blobToEmbedding(blob) {
   if (!blob) return [];
   let buffer;
   if (blob instanceof ArrayBuffer) {
     buffer = blob;
   } else if (ArrayBuffer.isView(blob)) {
-    // Handles Uint8Array and any other typed-array view D1 might return
     buffer = blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength);
+  } else if (Array.isArray(blob)) {
+    buffer = new Uint8Array(blob).buffer;
   } else if (typeof blob === 'string') {
-    // Safety net: base64-encoded blob (older D1 SDK versions)
     const binary = atob(blob);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -4084,29 +4088,14 @@ async function voiceIdentify(DB, env, request) {
   // Find the best match.
   let bestScore  = -1;
   let bestMember = null;
-  // Diagnostic capture — surfaced in the response so the frontend console can
-  // see what D1 actually returns for the BLOB column without needing Worker logs.
-  const diag = { enrolledCount: enrolled.length, queryLen: queryEmbedding.length, rows: [] };
   for (const row of enrolled) {
-    const rawBlob = row.voice_embedding;
-    const storedEmbedding = blobToEmbedding(rawBlob);
-    const blobType   = Object.prototype.toString.call(rawBlob);
-    const byteLength = rawBlob && rawBlob.byteLength !== undefined ? rawBlob.byteLength
-                     : (typeof rawBlob === 'string' ? rawBlob.length : -1);
+    const storedEmbedding = blobToEmbedding(row.voice_embedding);
     const score = cosineSim(queryEmbedding, storedEmbedding);
-    diag.rows.push({
-      memberId: row.id,
-      blobType,
-      byteLength,
-      storedLen: storedEmbedding.length,
-      score: Number.isFinite(score) ? Number(score.toFixed(4)) : score,
-    });
     if (score > bestScore) {
       bestScore  = score;
       bestMember = row;
     }
   }
-  console.log(`[voice-id] diag: ${JSON.stringify(diag)}`);
 
   if (bestScore >= VOICE_IDENTIFY_THRESHOLD) {
     return ok({
@@ -4115,10 +4104,9 @@ async function voiceIdentify(DB, env, request) {
       memberName: bestMember.name,
       score:      bestScore,
       threshold:  VOICE_IDENTIFY_THRESHOLD,
-      _diag:      diag,
     });
   }
-  return ok({ match: false, score: bestScore, threshold: VOICE_IDENTIFY_THRESHOLD, _diag: diag });
+  return ok({ match: false, score: bestScore, threshold: VOICE_IDENTIFY_THRESHOLD });
 }
 
 async function voiceDeleteEnrollment(DB, memberId) {
