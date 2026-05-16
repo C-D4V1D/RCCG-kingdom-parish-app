@@ -3238,10 +3238,12 @@ function appendAiSecretaryMandatoryChecks(markdown, flags) {
   return /mandatory governance checks|policy checks/i.test(markdown) ? markdown : `${markdown}${section}`;
 }
 
+const AI_MINUTES_TIMESTAMP_LINE_RE = /^\s*(?:\*\*)?\s*(generated(?:\s+(?:at|on))?|timestamp)\s*(?:\*\*)?\s*[:\-]\s*(?:\d{4}-\d{2}-\d{2}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}:\d{2})/i;
+
 function stripAiMinutesTimestampLines(markdown) {
   return String(markdown || '')
     .split('\n')
-    .filter(line => !/^\s*(?:\*\*)?\s*(generated(?:\s+(?:at|on))?|timestamp)\s*(?:\*\*)?\s*[:\-]\s*(?:\d{4}-\d{2}-\d{2}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}:\d{2})/i.test(line.trim()))
+    .filter(line => !AI_MINUTES_TIMESTAMP_LINE_RE.test(line.trim()))
     .join('\n')
     .trim();
 }
@@ -3446,7 +3448,7 @@ async function createAiSecretaryMeetingPublicLink(DB, request, id) {
   ).bind(id).first();
   if (!row || row.deleted_at) return err('Meeting not found', 404);
   if (!String(row.minutes_markdown || '').trim()) return err('Minutes are not available for sharing yet.', 400);
-  if (!String(row.reviewed_at || '').trim()) return err('Minutes review must be approved before sharing.', 409);
+  if (!String(row.reviewed_at || '').trim()) return err('Minutes review must be approved before sharing.', 412);
   const token = String(row.public_share_token || '').trim() || newId('kpub_');
   if (!row.public_share_token) {
     await DB.prepare(`UPDATE ai_secretary_meetings SET public_share_token=? WHERE id=?`).bind(token, id).run();
@@ -3468,7 +3470,7 @@ async function getAiSecretaryMeetingPublicView(DB, token) {
      WHERE public_share_token=? AND COALESCE(deleted_at,'')=''`
   ).bind(cleanToken).first();
   if (!row) return err('Public minutes link not found', 404);
-  if (!String(row.reviewed_at || '').trim()) return err('Minutes review is not approved for public sharing.', 409);
+  if (!String(row.reviewed_at || '').trim()) return err('Minutes review is not approved for public sharing.', 412);
   return ok({
     id: row.id,
     title: row.title || 'KPSC Meeting',

@@ -2752,7 +2752,7 @@ async function renderMeetingRoom(main) {
             <span class="k-collapsible-title">📷 Also upload handwritten notes (optional)</span>
           </summary>
           <p class="k-hint" style="margin-top:8px">Upload one or more photos of your handwritten notes from camera or gallery. The AI will extract the text and append it to the transcript above.</p>
-          <label class="k-label">Photos of Handwritten Notes</label>
+          <label class="k-label" for="km-rec-notes-photo">Photos of Handwritten Notes</label>
           <input id="km-rec-notes-photo" type="file" accept="image/*" multiple class="k-input" style="padding:8px" onchange="Kpsc.previewRecNotesPhoto(this)" />
           <div id="km-rec-notes-preview" style="margin-top:12px"></div>
           <div id="km-rec-notes-status"></div>
@@ -2776,7 +2776,7 @@ async function renderMeetingRoom(main) {
               <span class="k-collapsible-title">📷 Also attach handwritten notes (optional)</span>
             </summary>
             <p class="k-hint" style="margin-top:8px">If you also have handwritten notes, upload one or more photos here from camera or gallery. Both the audio transcript and the notes will be combined before processing.</p>
-            <label class="k-label">Photos of Handwritten Notes</label>
+            <label class="k-label" for="km-audio-notes-photo">Photos of Handwritten Notes</label>
             <input id="km-audio-notes-photo" type="file" accept="image/*" multiple class="k-input" style="padding:8px" onchange="Kpsc.previewAudioNotesPhoto(this)" />
             <div id="km-audio-notes-preview" style="margin-top:12px"></div>
           </details>
@@ -2784,7 +2784,7 @@ async function renderMeetingRoom(main) {
         <div id="km-upload-panel" style="${S._meetingTab !== 'upload' ? 'display:none' : ''}">
           <div class="k-section">
             <p class="k-hint">Upload one or more photos of your handwritten meeting notes from camera or gallery. The AI will transcribe the handwriting and use it to generate meeting minutes.</p>
-            <label class="k-label">Upload Photos of Handwritten Notes</label>
+            <label class="k-label" for="km-notes-photo">Upload Photos of Handwritten Notes</label>
             <input id="km-notes-photo" type="file" accept="image/*" multiple class="k-input" style="padding:8px" onchange="Kpsc.previewNotesPhoto(this)" />
             <div id="km-notes-preview" style="margin-top:12px"></div>
           </div>
@@ -3007,8 +3007,8 @@ function renderMinutesPanel(m) {
       ${renderReviewPanel(m)}
 
       <div class="k-room-actions" style="margin-bottom:12px;margin-top:16px">
-        <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')" ${reviewGuard}>🖨 Print / Save PDF</button>
-        <button class="kbtn kbtn-sm" onclick="Kpsc.shareMinutesWhatsApp('${m.id}')" ${reviewGuard}>📲 Share via WhatsApp</button>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${reviewGuard}>🖨 Print / Save PDF</button>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.shareMinutesWhatsApp('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${reviewGuard}>📲 Share via WhatsApp</button>
         <button class="kbtn kbtn-sm" id="btn-plain-english-${m.id}" onclick="Kpsc.togglePlainEnglish('${m.id}')" data-plain-english="false">📖 Read in plain English</button>
       </div>
       ${reviewed ? '' : '<p class="k-hint" style="margin-top:-6px;margin-bottom:12px">Approve and save the review first before printing or sharing minutes.</p>'}
@@ -5980,7 +5980,11 @@ function setMeetingTab(tab) {
 }
 
 function getSelectedImageFiles(input) {
-  return Array.from(input?.files || []).filter(file => /^image\//i.test(file.type || '') || /\.(png|jpe?g|webp|gif|bmp)$/i.test(file.name || ''));
+  return Array.from(input?.files || []).filter(isImageFile);
+}
+
+function isImageFile(file) {
+  return /^image\//i.test(file?.type || '') || /\.(png|jpe?g|webp|gif|bmp)$/i.test(file?.name || '');
 }
 
 function readFileAsDataURL(file) {
@@ -5996,8 +6000,9 @@ async function renderNotesPreview(previewEl, files, actionHandler, statusElement
   if (!previewEl) return;
   if (!files.length) { previewEl.innerHTML = ''; return; }
   const dataUrls = await Promise.all(files.map(readFileAsDataURL));
+  const total = dataUrls.length;
   const thumbs = dataUrls.map((url, idx) => `
-    <img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)" alt="Notes preview ${idx + 1}" />
+    <img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)" alt="Handwritten notes photo ${idx + 1} of ${total}" />
   `).join('');
   const cols = files.length > 1 ? 'grid-template-columns:repeat(auto-fit,minmax(140px,1fr));' : '';
   previewEl.innerHTML = `
@@ -6190,7 +6195,8 @@ async function previewAudioNotesPhoto(input) {
   if (!preview) return;
   if (!files.length) { preview.innerHTML = ''; return; }
   const dataUrls = await Promise.all(files.map(readFileAsDataURL));
-  const thumbs = dataUrls.map((url, idx) => `<img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)" alt="Audio notes preview ${idx + 1}" />`).join('');
+  const total = dataUrls.length;
+  const thumbs = dataUrls.map((url, idx) => `<img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)" alt="Audio notes photo ${idx + 1} of ${total}" />`).join('');
   const cols = files.length > 1 ? 'grid-template-columns:repeat(auto-fit,minmax(140px,1fr));' : '';
   preview.innerHTML = `<div style="display:grid;${cols}gap:10px">${thumbs}</div>`;
 }

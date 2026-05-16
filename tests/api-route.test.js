@@ -1028,7 +1028,7 @@ test('public link endpoint rejects unapproved minutes', async () => {
   const req = createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-PUB-2/public-link', 'POST', {});
   const response = await onRequest({ request: req, env: { DB } });
   const body = await readJson(response);
-  assert.equal(response.status, 409);
+  assert.equal(response.status, 412);
   assert.match(body.error, /review must be approved/i);
 });
 
