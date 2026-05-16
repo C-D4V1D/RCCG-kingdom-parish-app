@@ -355,6 +355,11 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-card-sub{font-size:13px;color:var(--text3);margin:0 0 16px;}
 .k-settings-status{padding:10px 14px;border-radius:8px;font-size:13.5px;font-weight:500;margin-bottom:20px;}
 .k-status-ai{background:#d1fae5;color:#065f46;border-left:3px solid var(--green);}
+.k-key-test-row{display:flex;align-items:center;gap:10px;margin:8px 0 4px;}
+.k-key-test-btn{flex-shrink:0;}
+.k-key-status{font-size:13px;font-weight:500;line-height:1.4;}
+.k-key-ok{color:#065f46;}
+.k-key-fail{color:#b91c1c;}
 .k-status-rule{background:var(--surface2);color:var(--text2);border-left:3px solid var(--border);}
 .k-form-group{margin-bottom:20px;}
 .k-hint{font-size:12px;color:var(--text3);margin:4px 0 0;}

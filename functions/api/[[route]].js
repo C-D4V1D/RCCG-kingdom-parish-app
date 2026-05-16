@@ -411,9 +411,19 @@ export async function onRequest(context) {
 
     // ── /api/settings ──────────────────────────────────────────
     if (route === 'settings') {
-      if (method === 'GET'  && param === 'api-status') return getApiStatus(env);
-      if (method === 'GET'  && !param) return await getSettings(DB);
-      if (method === 'POST' && !param) return await saveSettings(DB, body);
+      if (method === 'GET'  && param === 'api-status')       return getApiStatus(env);
+      if (method === 'GET'  && !param)                       return await getSettings(DB);
+      if (method === 'POST' && !param)                       return await saveSettings(DB, body);
+      if (method === 'POST' && param === 'test-deepseek') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await testDeepseekKey(DB, body);
+      }
+      if (method === 'POST' && param === 'test-openai') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await testOpenaiKey(DB, env, body);
+      }
     }
 
     // ── /api/notifications ─────────────────────────────────────
@@ -1816,6 +1826,49 @@ function getApiStatus(env) {
       };
     })(),
   });
+}
+
+async function testDeepseekKey(DB, body) {
+  let key = String(body?.key || '').trim();
+  if (!key) {
+    try {
+      const row = await DB.prepare(`SELECT value FROM settings WHERE key='ai_deepseek_key'`).first();
+      key = row?.value ? String(row.value).trim() : '';
+    } catch (_) {}
+  }
+  if (!key) return ok({ ok: false, message: 'No DeepSeek API key provided or saved.' });
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+      body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1 }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) return ok({ ok: true, message: 'Connected — DeepSeek key is valid and working.' });
+    const reason = data?.error?.message || data?.error?.code || `HTTP ${resp.status}`;
+    return ok({ ok: false, message: `DeepSeek error: ${reason}` });
+  } catch (e) {
+    return ok({ ok: false, message: `Connection failed: ${e.message}` });
+  }
+}
+
+async function testOpenaiKey(DB, env, body) {
+  let key = String(body?.key || '').trim();
+  if (!key) key = await resolveOpenAiKey(env, DB);
+  if (!key) return ok({ ok: false, message: 'No OpenAI API key provided or saved.' });
+
+  try {
+    const resp = await fetch('https://api.openai.com/v1/models', {
+      headers: { 'Authorization': `Bearer ${key}` },
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) return ok({ ok: true, message: 'Connected — OpenAI key is valid and working.' });
+    const reason = data?.error?.message || data?.error?.code || `HTTP ${resp.status}`;
+    return ok({ ok: false, message: `OpenAI error: ${reason}` });
+  } catch (e) {
+    return ok({ ok: false, message: `Connection failed: ${e.message}` });
+  }
 }
 
 async function getSettings(DB) {

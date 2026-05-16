@@ -6003,6 +6003,10 @@ async function renderSettings(main) {
           <input type="password" id="ks-deepseek-key" class="k-input"
             placeholder="${hasDeepseek ? '••••••••••••••••' : 'sk-...'}"
             autocomplete="off" value="${esc(deepseekKey)}" />
+          <div class="k-key-test-row">
+            <button class="kbtn kbtn-sm k-key-test-btn" onclick="Kpsc.testDeepseekKey(this)">Test connection</button>
+            <span class="k-key-status" id="ks-deepseek-status"></span>
+          </div>
           <p class="k-hint">Used to generate meeting minutes with AI. Get a key at <a href="https://platform.deepseek.com" target="_blank" rel="noopener">platform.deepseek.com</a></p>
         </div>
 
@@ -6011,6 +6015,10 @@ async function renderSettings(main) {
           <input type="password" id="ks-openai-key" class="k-input"
             placeholder="${hasOpenai ? '••••••••••••••••' : 'sk-...'}"
             autocomplete="off" value="${esc(openaiKey)}" />
+          <div class="k-key-test-row">
+            <button class="kbtn kbtn-sm k-key-test-btn" onclick="Kpsc.testOpenaiKey(this)">Test connection</button>
+            <span class="k-key-status" id="ks-openai-status"></span>
+          </div>
           <p class="k-hint">Required for audio transcription, notes OCR, and receipt scanning. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a></p>
         </div>
 
@@ -6163,6 +6171,48 @@ async function clearAiKeys() {
   if (!confirm('Remove all AI API keys? The portal will fall back to rule-based processing.')) return;
   await apiPost('settings', { ai_deepseek_key: '', ai_openai_key: '' });
   await renderSettings(document.getElementById('kpsc-main'));
+}
+
+async function testDeepseekKey(btn) {
+  const key = document.getElementById('ks-deepseek-key')?.value.trim() || '';
+  const statusEl = document.getElementById('ks-deepseek-status');
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Testing…';
+  if (statusEl) { statusEl.textContent = ''; statusEl.className = 'k-key-status'; }
+  try {
+    const res = await apiPost('settings/test-deepseek', { key });
+    if (statusEl) {
+      statusEl.textContent = res.ok ? `✓ ${res.message}` : `✗ ${res.message || res.error}`;
+      statusEl.className = `k-key-status ${res.ok ? 'k-key-ok' : 'k-key-fail'}`;
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = `✗ Test failed: ${e.message}`; statusEl.className = 'k-key-status k-key-fail'; }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+async function testOpenaiKey(btn) {
+  const key = document.getElementById('ks-openai-key')?.value.trim() || '';
+  const statusEl = document.getElementById('ks-openai-status');
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Testing…';
+  if (statusEl) { statusEl.textContent = ''; statusEl.className = 'k-key-status'; }
+  try {
+    const res = await apiPost('settings/test-openai', { key });
+    if (statusEl) {
+      statusEl.textContent = res.ok ? `✓ ${res.message}` : `✗ ${res.message || res.error}`;
+      statusEl.className = `k-key-status ${res.ok ? 'k-key-ok' : 'k-key-fail'}`;
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = `✗ Test failed: ${e.message}`; statusEl.className = 'k-key-status k-key-fail'; }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
 }
 
 async function saveKpscOpsSettings() {
@@ -7740,6 +7790,8 @@ window.Kpsc = {
   saveSettings,
   saveAiModels,
   clearAiKeys,
+  testDeepseekKey,
+  testOpenaiKey,
   refreshApiStatus,
   updateAttGroup,
   recStart,
