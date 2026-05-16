@@ -14,6 +14,7 @@ const CORS_HEADERS = {
 // ── KPSC ROLE GROUPS ────────────────────────────────────────────────
 const KPSC_WRITE_ROLES    = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'it_admin'];
 const KPSC_FINANCE_ROLES  = ['acting_chairman', 'financial_secretary', 'treasurer', 'it_admin'];
+const KPSC_FINANCE_DELETE_ROLES = ['acting_chairman', 'it_admin'];
 // Account management: it_admin can create/update/delete accounts without operational permissions.
 const KPSC_ADMIN_ROLES    = ['acting_chairman', 'general_secretary', 'it_admin'];
 // All roles that can log in to the portal (including read-only viewer and IT admin).
@@ -222,7 +223,7 @@ export async function onRequest(context) {
       if (method === 'DELETE' && param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
-        return await deleteKpscPartner(DB, param);
+        return await deleteKpscPartner(DB, param, auth);
       }
     }
     if (route === 'kpsc-partner-payments') {
@@ -235,7 +236,7 @@ export async function onRequest(context) {
       if (method === 'DELETE' && param) {
         const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
         if (auth instanceof Response) return auth;
-        return await deleteKpscPartnerPayment(DB, param);
+        return await deleteKpscPartnerPayment(DB, param, auth);
       }
     }
     if (route === 'kpsc-finance') {
@@ -243,17 +244,17 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
         if (auth instanceof Response) return auth;
-        return await createKpscFinanceEntry(DB, body);
+        return await createKpscFinanceEntry(DB, body, auth);
       }
       if (method === 'PUT'  &&  param) {
         const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
         if (auth instanceof Response) return auth;
-        return await updateKpscFinanceEntry(DB, param, body);
+        return await updateKpscFinanceEntry(DB, param, body, auth);
       }
       if (method === 'DELETE' && param) {
-        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_DELETE_ROLES);
         if (auth instanceof Response) return auth;
-        return await deleteKpscFinanceEntry(DB, param);
+        return await deleteKpscFinanceEntry(DB, param, auth);
       }
     }
     if (route === 'kpsc-reminders') {
@@ -285,7 +286,7 @@ export async function onRequest(context) {
       if (method === 'DELETE' && param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
-        return await deleteKpscProject(DB, param);
+        return await deleteKpscProject(DB, param, auth);
       }
     }
     if (route === 'kpsc-extract-projects' && method === 'POST') {
@@ -344,7 +345,11 @@ export async function onRequest(context) {
       if (method === 'GET'  && !param) return await getExpenses(DB);
       if (method === 'POST' && !param) return await createExpense(DB, body);
       if (method === 'PUT'  &&  param) return await updateExpense(DB, param, body);
-      if (method === 'DELETE' && param) return await deleteExpense(DB, param);
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteExpense(DB, param);
+      }
     }
 
     // ── /api/petty ─────────────────────────────────────────────
@@ -445,22 +450,30 @@ export async function onRequest(context) {
         if (auth instanceof Response) return auth;
         return await uploadAiSecretaryAudioChunk(env, request);
       }
-      if (method === 'GET'  && !param) return await getAiSecretaryMeetings(DB);
+      if (method === 'GET'  && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getAiSecretaryMeetings(DB);
+      }
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
-        return await createAiSecretaryMeeting(DB, body);
+        return await createAiSecretaryMeeting(DB, body, auth);
       }
-      if (method === 'GET'  &&  param) return await getAiSecretaryMeeting(DB, param);
+      if (method === 'GET'  &&  param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getAiSecretaryMeeting(DB, param);
+      }
       if (method === 'PUT'  &&  param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
-        return await updateAiSecretaryMeeting(DB, param, body);
+        return await updateAiSecretaryMeeting(DB, param, body, auth);
       }
       if (method === 'DELETE' && param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
-        return await deleteAiSecretaryMeeting(DB, param, body);
+        return await deleteAiSecretaryMeeting(DB, param, auth);
       }
       if (method === 'POST' && parts[2] === 'process') {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -476,6 +489,11 @@ export async function onRequest(context) {
         const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
         if (auth instanceof Response) return auth;
         return await createAiSecretaryMeetingPublicLink(DB, request, param);
+      }
+      if (method === 'POST' && parts[2] === 'revoke-public-link') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await revokeAiSecretaryMeetingPublicLink(DB, param, auth);
       }
     }
     if (route === 'kpsc-public-minutes' && method === 'GET' && param) {
@@ -674,14 +692,22 @@ async function handleInit(DB) {
       resolutions_json  TEXT DEFAULT '[]',
       action_items_json TEXT DEFAULT '[]',
       policy_flags_json TEXT DEFAULT '[]',
+      suggested_projects_json TEXT DEFAULT '[]',
+      plain_english_minutes_md TEXT DEFAULT '',
       created_by        TEXT DEFAULT '',
+      created_by_account_id TEXT DEFAULT '',
       started_at        TEXT DEFAULT '',
       ended_at          TEXT DEFAULT '',
+      scheduled_for     TEXT,
+      pre_brief_markdown TEXT,
+      pre_brief_generated_at TEXT,
       reviewed_at       TEXT DEFAULT '',
       reviewed_by       TEXT DEFAULT '',
       public_share_token TEXT DEFAULT '',
       processed_at      TEXT DEFAULT '',
-      created_at        TEXT DEFAULT (datetime('now'))
+      created_at        TEXT DEFAULT (datetime('now')),
+      deleted_at        TEXT DEFAULT '',
+      deleted_by        TEXT DEFAULT ''
     )`,
     `CREATE TABLE IF NOT EXISTS kpsc_accounts (
       id                TEXT PRIMARY KEY,
@@ -852,6 +878,7 @@ async function handleInit(DB) {
     // Soft-delete for AI secretary meeting drafts.
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_at TEXT DEFAULT ''`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_by TEXT DEFAULT ''`,
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN created_by_account_id TEXT DEFAULT ''`,
     // Plain English minutes cache
     `ALTER TABLE ai_secretary_meetings ADD COLUMN plain_english_minutes_md TEXT DEFAULT ''`,
     // Wave 3 VF-2: voice fingerprinting columns on kpsc_members.
@@ -867,6 +894,15 @@ async function handleInit(DB) {
     `ALTER TABLE ai_secretary_meetings ADD COLUMN reviewed_at TEXT DEFAULT ''`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN reviewed_by TEXT DEFAULT ''`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN public_share_token TEXT DEFAULT ''`,
+    // Soft-delete audit columns for KPSC finance, partners, partner payments, and projects.
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN deleted_at TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN deleted_by TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_partners ADD COLUMN deleted_at TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_partners ADD COLUMN deleted_by TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_partner_payments ADD COLUMN deleted_at TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_partner_payments ADD COLUMN deleted_by TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_projects ADD COLUMN deleted_at TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_projects ADD COLUMN deleted_by TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -1779,6 +1815,7 @@ async function getKpscPartners(DB) {
   const { results } = await DB.prepare(`
     SELECT *
     FROM kpsc_partners
+    WHERE COALESCE(deleted_at,'') = ''
     ORDER BY full_name
   `).all();
   return ok((results || []).map(row => ({
@@ -1891,7 +1928,7 @@ async function getKpscPartnerPayments(DB, url) {
     SELECT p.*, kp.full_name AS partner_name, kp.partnership_type, kp.status AS partner_status
     FROM kpsc_partner_payments p
     LEFT JOIN kpsc_partners kp ON kp.id = p.partner_id
-    WHERE ${filters.join(' AND ')}
+    WHERE ${filters.join(' AND ')} AND COALESCE(p.deleted_at,'') = ''
     ORDER BY p.year DESC, p.month DESC, partner_name
   `).bind(...binds).all();
   return ok((results || []).map(row => ({
@@ -1967,20 +2004,50 @@ async function upsertKpscPartnerPayment(DB, data) {
   });
 }
 
-async function deleteKpscPartnerPayment(DB, id) {
-  await DB.prepare(`DELETE FROM kpsc_partner_payments WHERE id=?`).bind(id).run();
+async function deleteKpscPartnerPayment(DB, id, auth) {
+  const existing = await DB.prepare(`SELECT id FROM kpsc_partner_payments WHERE id=?`).bind(id).first();
+  if (!existing) return err('Partner payment not found', 404);
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE kpsc_partner_payments SET deleted_at=?, deleted_by=? WHERE id=?`
+  ).bind(now, auth.name, id).run();
   return ok({ deleted: id });
 }
 
-async function deleteKpscPartner(DB, id) {
-  await DB.prepare(`DELETE FROM kpsc_partner_payments WHERE partner_id=?`).bind(id).run();
+async function deleteKpscPartner(DB, id, auth) {
+  const existing = await DB.prepare(`SELECT id FROM kpsc_partners WHERE id=?`).bind(id).first();
+  if (!existing) return err('Partner not found', 404);
+  const now = new Date().toISOString();
+  // Cascade soft-delete to the partner's payments. Reminders are transient queued items —
+  // hard-delete them as they are no longer actionable for a deleted partner.
+  await DB.prepare(
+    `UPDATE kpsc_partner_payments SET deleted_at=?, deleted_by=? WHERE partner_id=? AND COALESCE(deleted_at,'')=''`
+  ).bind(now, auth.name, id).run();
   await DB.prepare(`DELETE FROM kpsc_reminders WHERE partner_id=?`).bind(id).run();
-  await DB.prepare(`DELETE FROM kpsc_partners WHERE id=?`).bind(id).run();
+  await DB.prepare(
+    `UPDATE kpsc_partners SET deleted_at=?, deleted_by=? WHERE id=?`
+  ).bind(now, auth.name, id).run();
   return ok({ deleted: id });
 }
 
-async function deleteKpscFinanceEntry(DB, id) {
-  await DB.prepare(`DELETE FROM kpsc_finance_entries WHERE id=?`).bind(id).run();
+async function deleteKpscFinanceEntry(DB, id, auth) {
+  const existing = await DB.prepare(
+    `SELECT id,date,entry_type,category,amount FROM kpsc_finance_entries WHERE id=?`
+  ).bind(id).first();
+  if (!existing) return err('Finance entry not found', 404);
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE kpsc_finance_entries SET deleted_at=?, deleted_by=? WHERE id=?`
+  ).bind(now, auth.name, id).run();
+  await DB.prepare(
+    `INSERT INTO notifications (id,title,body,type,ts) VALUES (?,?,?,?,?)`
+  ).bind(
+    newId('N'),
+    'KPSC finance entry deleted',
+    `"${String(existing.category || existing.entry_type || 'finance entry').replace(/"/g, '\\"')}" on ${existing.date || 'unknown date'} for ₦${Number(existing.amount || 0).toLocaleString('en-NG')} was deleted by ${auth.name} (${auth.role}).`,
+    'warn',
+    now,
+  ).run();
   return ok({ deleted: id });
 }
 
@@ -2002,7 +2069,7 @@ async function getKpscFinanceEntries(DB, url) {
     SELECT f.*, p.full_name AS partner_name
     FROM kpsc_finance_entries f
     LEFT JOIN kpsc_partners p ON p.id = f.partner_id
-    WHERE ${where.join(' AND ')}
+    WHERE ${where.join(' AND ')} AND COALESCE(f.deleted_at,'') = ''
     ORDER BY date DESC, created_at DESC
   `).bind(...binds).all();
   return ok((results || []).map(row => ({
@@ -2025,7 +2092,7 @@ async function getKpscFinanceEntries(DB, url) {
   })));
 }
 
-async function createKpscFinanceEntry(DB, data) {
+async function createKpscFinanceEntry(DB, data, auth) {
   const date = String(data?.date || '').trim();
   const entryType = String(data?.entryType || '').trim().toLowerCase();
   const category = String(data?.category || '').trim();
@@ -2048,7 +2115,7 @@ async function createKpscFinanceEntry(DB, data) {
     String(data?.reference || '').trim(),
     String(data?.narration || '').trim(),
     String(data?.partnerId || '').trim(),
-    String(data?.recordedBy || '').trim(),
+    String(auth?.name || data?.recordedBy || '').trim(),
     String(data?.approvedBy || '').trim(),
     String(data?.approvalStatus || 'recorded').trim() || 'recorded',
     String(data?.attachmentName || '').trim(),
@@ -2056,7 +2123,7 @@ async function createKpscFinanceEntry(DB, data) {
   return await getKpscFinanceEntryById(DB, id);
 }
 
-async function updateKpscFinanceEntry(DB, id, data) {
+async function updateKpscFinanceEntry(DB, id, data, auth) {
   const row = await DB.prepare(`SELECT * FROM kpsc_finance_entries WHERE id=?`).bind(id).first();
   if (!row) return err('KPSC finance entry not found', 404);
   await DB.prepare(`
@@ -2073,7 +2140,7 @@ async function updateKpscFinanceEntry(DB, id, data) {
     data?.reference !== undefined ? String(data.reference || '').trim() : row.reference,
     data?.narration !== undefined ? String(data.narration || '').trim() : row.narration,
     data?.partnerId !== undefined ? String(data.partnerId || '').trim() : row.partner_id,
-    data?.recordedBy !== undefined ? String(data.recordedBy || '').trim() : row.recorded_by,
+    data?.recordedBy !== undefined ? String(auth?.name || data.recordedBy || '').trim() : row.recorded_by,
     data?.approvedBy !== undefined ? String(data.approvedBy || '').trim() : row.approved_by,
     data?.approvalStatus !== undefined ? String(data.approvalStatus || 'recorded').trim() : row.approval_status,
     data?.attachmentName !== undefined ? String(data.attachmentName || '').trim() : row.attachment_name,
@@ -2500,13 +2567,13 @@ function kpscProjectFromRow(row) {
 
 async function getKpscProjects(DB, url) {
   const status = String(url.searchParams.get('status') || '').trim().toLowerCase();
-  let where = '';
+  const where = ["COALESCE(deleted_at,'') = ''"];
   const binds = [];
   if (status && status !== 'all') {
-    where = 'WHERE status=?';
+    where.push('status=?');
     binds.push(status);
   }
-  const { results } = await DB.prepare(`SELECT * FROM kpsc_projects ${where} ORDER BY priority DESC, created_at DESC`).bind(...binds).all();
+  const { results } = await DB.prepare(`SELECT * FROM kpsc_projects WHERE ${where.join(' AND ')} ORDER BY priority DESC, created_at DESC`).bind(...binds).all();
   return ok((results || []).map(kpscProjectFromRow));
 }
 
@@ -2563,8 +2630,13 @@ async function updateKpscProject(DB, id, data) {
   return ok(kpscProjectFromRow(updated));
 }
 
-async function deleteKpscProject(DB, id) {
-  await DB.prepare(`DELETE FROM kpsc_projects WHERE id=?`).bind(id).run();
+async function deleteKpscProject(DB, id, auth) {
+  const existing = await DB.prepare(`SELECT id FROM kpsc_projects WHERE id=?`).bind(id).first();
+  if (!existing) return err('Project not found', 404);
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE kpsc_projects SET deleted_at=?, deleted_by=? WHERE id=?`
+  ).bind(now, auth.name, id).run();
   return ok({ deleted: id });
 }
 
@@ -2991,6 +3063,7 @@ function aiSecretaryMeetingFromRow(row) {
     policyFlags: safeJsonParse(row.policy_flags_json, []),
     suggestedProjects: safeJsonParse(row.suggested_projects_json, []),
     createdBy: row.created_by || '',
+    createdByAccountId: row.created_by_account_id || '',
     startedAt: row.started_at || '',
     endedAt: row.ended_at || '',
     reviewedAt: row.reviewed_at || '',
@@ -3413,31 +3486,54 @@ async function getAiSecretaryMeetings(DB) {
   return ok((results || []).map(aiSecretaryMeetingFromRow));
 }
 
-async function deleteAiSecretaryMeeting(DB, id, data) {
-  const existing = await DB.prepare(`SELECT id, created_by, deleted_at FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
+async function deleteAiSecretaryMeeting(DB, id, auth) {
+  const existing = await DB.prepare(
+    `SELECT id, title, created_by, created_by_account_id, status, deleted_at FROM ai_secretary_meetings WHERE id=?`
+  ).bind(id).first();
   if (!existing) return err('AI secretary meeting not found', 404);
+  // Already soft-deleted — return idempotently.
   if (existing.deleted_at) return ok({ id, deletedAt: existing.deleted_at });
 
-  // Author-or-admin authorization. The frontend is trusted to forward the
-  // logged-in user's name and role (same trust model as createdBy on POST).
-  const userName = String(data?.userName || '').trim();
-  const userRole = String(data?.userRole || '').trim().toLowerCase();
-  const isAdmin = userRole === 'admin' || userRole === 'it_administrator' || userRole === 'it_admin';
-  const isAuthor = !!userName && userName === (existing.created_by || '');
+  // Authorisation is derived entirely from the verified session (auth param),
+  // never from untrusted client-supplied body fields.
+  const isAdmin = auth.role === 'acting_chairman' ||
+                  auth.role === 'general_secretary' ||
+                  auth.role === 'it_admin';
+  const isAuthor = (!!auth.id && auth.id === (existing.created_by_account_id || ''))
+    || (!existing.created_by_account_id && !!auth.name && auth.name === (existing.created_by || ''));
+
   if (!isAdmin && !isAuthor) {
-    return err('Only the meeting author or an administrator can delete this draft.', 403);
+    return err('Only the meeting author or an administrator can delete this meeting.', 403);
+  }
+  // Meeting authors may only delete meetings that are still in draft or recording phase.
+  // Once a meeting has been ended or processed it becomes part of the official record;
+  // removing it requires administrator privileges.
+  if (!isAdmin && !['draft', 'recording'].includes(existing.status)) {
+    return err('Only an administrator can delete a meeting that has already been ended or processed.', 403);
   }
 
   const now = new Date().toISOString();
   await DB.prepare(
     `UPDATE ai_secretary_meetings SET deleted_at=?, deleted_by=? WHERE id=?`
-  ).bind(now, userName || (isAdmin ? 'admin' : ''), id).run();
+  ).bind(now, auth.name, id).run();
+
+  // Write an audit notification so all administrators can see what was deleted and by whom.
+  await DB.prepare(
+    `INSERT INTO notifications (id,title,body,type,ts) VALUES (?,?,?,?,?)`
+  ).bind(
+    newId('N'),
+    'Meeting record deleted',
+    `"${String(existing.title || id).replace(/"/g, '\\"')}" (status: ${existing.status}) was deleted by ${auth.name} (${auth.role}).`,
+    'warn',
+    now,
+  ).run();
+
   return ok({ id, deletedAt: now });
 }
 
 async function getAiSecretaryMeeting(DB, id) {
   const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
-  if (!row) return err('AI secretary meeting not found', 404);
+  if (!row || row.deleted_at) return err('AI secretary meeting not found', 404);
   return ok(aiSecretaryMeetingFromRow(row));
 }
 
@@ -3461,6 +3557,28 @@ async function createAiSecretaryMeetingPublicLink(DB, request, id) {
   });
 }
 
+async function revokeAiSecretaryMeetingPublicLink(DB, id, auth) {
+  const row = await DB.prepare(
+    `SELECT id,title,public_share_token,deleted_at FROM ai_secretary_meetings WHERE id=?`
+  ).bind(id).first();
+  if (!row || row.deleted_at) return err('Meeting not found', 404);
+  if (!String(row.public_share_token || '').trim()) {
+    return ok({ meetingId: id, revoked: false, alreadyRevoked: true });
+  }
+  await DB.prepare(`UPDATE ai_secretary_meetings SET public_share_token='' WHERE id=?`).bind(id).run();
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `INSERT INTO notifications (id,title,body,type,ts) VALUES (?,?,?,?,?)`
+  ).bind(
+    newId('N'),
+    'KPSC minutes public link revoked',
+    `Public minutes link for "${String(row.title || id).replace(/"/g, '\\"')}" was revoked by ${auth.name} (${auth.role}).`,
+    'warn',
+    now,
+  ).run();
+  return ok({ meetingId: id, revoked: true });
+}
+
 async function getAiSecretaryMeetingPublicView(DB, token) {
   const cleanToken = String(token || '').trim();
   if (!cleanToken) return err('token is required', 400);
@@ -3482,14 +3600,17 @@ async function getAiSecretaryMeetingPublicView(DB, token) {
   });
 }
 
-async function createAiSecretaryMeeting(DB, data) {
+async function createAiSecretaryMeeting(DB, data, auth) {
   const id = data.id || newId('AIM-');
   const participants = normalizeAiParticipants(data.participants);
   const now = new Date().toISOString();
+  // INSERT OR IGNORE makes the create idempotent: if the client retries a POST
+  // with the same pre-generated ID (e.g. after a network error), the duplicate
+  // INSERT is silently skipped and the existing row is returned unchanged.
   await DB.prepare(`
-    INSERT INTO ai_secretary_meetings
-      (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,created_by,started_at,created_at,scheduled_for)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    INSERT OR IGNORE INTO ai_secretary_meetings
+      (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,created_by,created_by_account_id,started_at,created_at,scheduled_for)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     String(data.title || 'KPSC Meeting').trim(),
@@ -3498,7 +3619,8 @@ async function createAiSecretaryMeeting(DB, data) {
     data.status || 'draft',
     JSON.stringify(participants),
     data.transcriptText || '',
-    data.createdBy || '',
+    auth?.name || '',
+    auth?.id || '',
     data.startedAt || '',
     now,
     data.scheduledFor ? String(data.scheduledFor).trim() : null,
@@ -3506,9 +3628,9 @@ async function createAiSecretaryMeeting(DB, data) {
   return await getAiSecretaryMeeting(DB, id);
 }
 
-async function updateAiSecretaryMeeting(DB, id, data) {
+async function updateAiSecretaryMeeting(DB, id, data, auth) {
   const existing = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
-  if (!existing) return err('AI secretary meeting not found', 404);
+  if (!existing || existing.deleted_at) return err('AI secretary meeting not found', 404);
   const participants = data.participants !== undefined ? normalizeAiParticipants(data.participants) : safeJsonParse(existing.participants_json, []);
   const resolutions = data.resolutions !== undefined
     ? aiSecretaryArray(data.resolutions).map((item, index) => {
@@ -3557,7 +3679,7 @@ async function updateAiSecretaryMeeting(DB, id, data) {
     UPDATE ai_secretary_meetings SET
       title=?, meeting_type=?, meeting_date=?, status=?, participants_json=?, transcript_text=?, ended_at=?,
       summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?,
-      scheduled_for=?, reviewed_at=?, reviewed_by=?
+      scheduled_for=?, reviewed_at=?, reviewed_by=?, created_by_account_id=?
     WHERE id=?
   `).bind(
     data.title !== undefined ? String(data.title).trim() : existing.title,
@@ -3576,6 +3698,7 @@ async function updateAiSecretaryMeeting(DB, id, data) {
     scheduledFor,
     reviewedAt,
     reviewedBy,
+    existing.created_by_account_id || (auth?.name && auth.name === (existing.created_by || '') ? auth.id : ''),
     id,
   ).run();
   return await getAiSecretaryMeeting(DB, id);
@@ -3635,7 +3758,7 @@ Return only valid JSON, no markdown fences.`;
 
 async function processAiSecretaryMeeting(DB, id) {
   const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
-  if (!row) return err('AI secretary meeting not found', 404);
+  if (!row || row.deleted_at) return err('AI secretary meeting not found', 404);
   const meeting = aiSecretaryMeetingFromRow(row);
   let deepseekKey = '';
   try {
@@ -3685,9 +3808,9 @@ async function processAiSecretaryMeeting(DB, id) {
 
 async function translateAiSecretaryMeetingPlainEnglish(DB, env, id) {
   const row = await DB.prepare(
-    `SELECT minutes_markdown, plain_english_minutes_md FROM ai_secretary_meetings WHERE id=?`
+    `SELECT minutes_markdown, plain_english_minutes_md, deleted_at FROM ai_secretary_meetings WHERE id=?`
   ).bind(id).first();
-  if (!row) return err('Meeting not found', 404);
+  if (!row || row.deleted_at) return err('Meeting not found', 404);
 
   const minutesMarkdown = row.minutes_markdown || '';
   if (!minutesMarkdown.trim()) return err('No minutes to translate', 400);

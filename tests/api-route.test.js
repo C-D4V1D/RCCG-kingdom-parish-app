@@ -794,6 +794,169 @@ test('AI secretary meeting update persists reviewed minutes corrections', async 
   assert.equal(body.reviewedBy, 'General Secretary');
 });
 
+test('AI secretary meeting GET returns 404 for soft-deleted records', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT \* FROM ai_secretary_meetings WHERE id=\?/.test(sql)) {
+            return {
+              id: 'AIM-del-get',
+              title: 'Deleted meeting',
+              deleted_at: '2026-05-16T00:00:00.000Z',
+            };
+          }
+          return null;
+        },
+      };
+      return statement;
+    })
+  });
+
+  const response = await onRequest({
+    request: createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-del-get', 'GET'),
+    env: { DB }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 404);
+  assert.match(body.error, /not found/i);
+});
+
+test('AI secretary meeting update returns 404 for soft-deleted records', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT \* FROM ai_secretary_meetings WHERE id=\?/.test(sql)) {
+            return {
+              id: 'AIM-del-put',
+              title: 'Deleted meeting',
+              deleted_at: '2026-05-16T00:00:00.000Z',
+            };
+          }
+          return null;
+        },
+      };
+      return statement;
+    })
+  });
+
+  const response = await onRequest({
+    request: createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-del-put', 'PUT', { title: 'Should fail' }),
+    env: { DB }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 404);
+  assert.match(body.error, /not found/i);
+});
+
+test('AI secretary meeting process returns 404 for soft-deleted records', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT \* FROM ai_secretary_meetings WHERE id=\?/.test(sql)) {
+            return {
+              id: 'AIM-del-process',
+              title: 'Deleted meeting',
+              deleted_at: '2026-05-16T00:00:00.000Z',
+            };
+          }
+          return null;
+        },
+      };
+      return statement;
+    })
+  });
+
+  const response = await onRequest({
+    request: createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-del-process/process', 'POST'),
+    env: { DB }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 404);
+  assert.match(body.error, /not found/i);
+});
+
+test('AI secretary meeting create derives author from authenticated session', async () => {
+  let insertBinds = null;
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT \* FROM ai_secretary_meetings WHERE id=\?/.test(sql)) {
+            return {
+              id: 'AIM-auth-1',
+              title: 'Authenticated Meeting',
+              meeting_type: 'routine',
+              meeting_date: '2026-05-16',
+              status: 'draft',
+              participants_json: '[]',
+              transcript_text: '',
+              summary_short: '',
+              summary_long: '',
+              minutes_markdown: '',
+              resolutions_json: '[]',
+              action_items_json: '[]',
+              policy_flags_json: '[]',
+              suggested_projects_json: '[]',
+              created_by: 'Test User',
+              created_by_account_id: 'ka-test',
+              started_at: '',
+              ended_at: '',
+              reviewed_at: '',
+              reviewed_by: '',
+              public_share_token: '',
+              processed_at: '',
+              created_at: '2026-05-16T00:00:00.000Z',
+              deleted_at: '',
+              deleted_by: '',
+              scheduled_for: null,
+              pre_brief_markdown: null,
+              pre_brief_generated_at: null,
+            };
+          }
+          throw new Error(`Unexpected SQL in first(): ${sql}`);
+        },
+        async run() {
+          if (/INSERT OR IGNORE INTO ai_secretary_meetings/.test(sql)) {
+            insertBinds = [...statement._bound];
+          }
+          return { success: true };
+        }
+      };
+      return statement;
+    }, { role: 'general_secretary' })
+  });
+
+  const response = await onRequest({
+    request: createKpscRequest('https://example.com/api/ai-secretary-meetings', 'POST', {
+      id: 'AIM-auth-1',
+      title: 'Authenticated Meeting',
+      createdBy: 'Spoofed User',
+    }),
+    env: { DB }
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.createdBy, 'Test User');
+  assert.equal(body.createdByAccountId, 'ka-test');
+  assert.equal(insertBinds[7], 'Test User');
+  assert.equal(insertBinds[8], 'ka-test');
+});
+
 test('settings api-status reports configured realtime API keys without exposing secrets', async () => {
   const response = await onRequest({
     request: createRequest('https://example.com/api/settings/api-status', 'GET'),
@@ -967,6 +1130,24 @@ test('kpsc mutating endpoint with it_admin role returns success', async () => {
   assert.equal(response.status, 200);
 });
 
+test('finance delete endpoint rejects non-admin finance roles', async () => {
+  const sessionToken = 'ks-finsec-token';
+  const DB = createKpscSessionDB({
+    accountId: 'ka-fin',
+    token: sessionToken,
+    accountRole: 'financial_secretary',
+  });
+  const sessionHeader = JSON.stringify({ accountId: 'ka-fin', token: sessionToken });
+  const req = new Request('https://example.com/api/kpsc-finance/kfe-locked', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+  assert.equal(response.status, 403);
+  assert.match(body.error, /not permitted/i);
+});
+
 test('public link endpoint returns public URL only when review is approved', async () => {
   const DB = createDBMock({
     onPrepare: withKpscSessionMock(function(sql) {
@@ -1030,6 +1211,82 @@ test('public link endpoint rejects unapproved minutes', async () => {
   const body = await readJson(response);
   assert.equal(response.status, 412);
   assert.match(body.error, /review must be approved/i);
+});
+
+test('public link revoke endpoint clears an active token', async () => {
+  let revokedMeetingId = null;
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT id,title,public_share_token,deleted_at FROM ai_secretary_meetings/.test(sql)) {
+            return {
+              id: 'AIM-PUB-3',
+              title: 'KPSC Public Meeting',
+              public_share_token: 'kpub_live_token',
+              deleted_at: '',
+            };
+          }
+          return null;
+        },
+        async run() {
+          if (/UPDATE ai_secretary_meetings SET public_share_token=''/i.test(sql)) {
+            revokedMeetingId = statement._bound[0];
+          }
+          return { success: true };
+        }
+      };
+      return statement;
+    })
+  });
+
+  const req = createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-PUB-3/revoke-public-link', 'POST', {});
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  assert.equal(body.revoked, true);
+  assert.equal(revokedMeetingId, 'AIM-PUB-3');
+});
+
+test('meeting delete authorisation follows account id even after display name changes', async () => {
+  let deletedId = null;
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT id, title, created_by, created_by_account_id, status, deleted_at FROM ai_secretary_meetings/.test(sql)) {
+            return {
+              id: 'AIM-own-1',
+              title: 'Renamed Author Meeting',
+              created_by: 'Old Secretary Name',
+              created_by_account_id: 'ka-test',
+              status: 'draft',
+              deleted_at: '',
+            };
+          }
+          return null;
+        },
+        async run() {
+          if (/UPDATE ai_secretary_meetings SET deleted_at=\?, deleted_by=\? WHERE id=\?/.test(sql)) {
+            deletedId = statement._bound[2];
+          }
+          return { success: true };
+        }
+      };
+      return statement;
+    }, { role: 'general_secretary' })
+  });
+
+  const req = createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-own-1', 'DELETE');
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  assert.equal(body.id, 'AIM-own-1');
+  assert.equal(deletedId, 'AIM-own-1');
 });
 
 // ── KPSC account deletion tests ───────────────────────────────────────
@@ -2245,10 +2502,11 @@ test('plain-english translation returns cached result without calling DeepSeek',
         _bound: [],
         bind(...args) { statement._bound = args; return statement; },
         async first() {
-          if (/SELECT minutes_markdown, plain_english_minutes_md FROM ai_secretary_meetings/.test(sql)) {
+          if (/SELECT minutes_markdown, plain_english_minutes_md, deleted_at FROM ai_secretary_meetings/.test(sql)) {
             return {
               minutes_markdown: '## Meeting Minutes\nStuff happened.',
-              plain_english_minutes_md: 'Stuff happened.' // cached result
+              plain_english_minutes_md: 'Stuff happened.', // cached result
+              deleted_at: '',
             };
           }
           return null;
@@ -2277,10 +2535,11 @@ test('plain-english translation returns 400 when minutes are empty', async () =>
         _bound: [],
         bind(...args) { statement._bound = args; return statement; },
         async first() {
-          if (/SELECT minutes_markdown, plain_english_minutes_md FROM ai_secretary_meetings/.test(sql)) {
+          if (/SELECT minutes_markdown, plain_english_minutes_md, deleted_at FROM ai_secretary_meetings/.test(sql)) {
             return {
               minutes_markdown: '', // empty
-              plain_english_minutes_md: ''
+              plain_english_minutes_md: '',
+              deleted_at: '',
             };
           }
           return null;
@@ -2296,6 +2555,35 @@ test('plain-english translation returns 400 when minutes are empty', async () =>
 
   assert.equal(response.status, 400);
   assert.match(body.error, /No minutes to translate/);
+});
+
+test('plain-english translation returns 404 for soft-deleted meeting', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT minutes_markdown, plain_english_minutes_md, deleted_at FROM ai_secretary_meetings/.test(sql)) {
+            return {
+              minutes_markdown: '## Meeting Minutes\nStuff happened.',
+              plain_english_minutes_md: '',
+              deleted_at: '2026-05-16T00:00:00.000Z',
+            };
+          }
+          return null;
+        }
+      };
+      return statement;
+    })
+  });
+
+  const req = createKpscRequest('https://example.com/api/ai-secretary-meetings/test-123/translate-plain-english');
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 404);
+  assert.match(body.error, /Meeting not found/);
 });
 
 // ── B5: classifyOverdueActionItems (pure helper) ──────────────────────
