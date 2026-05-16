@@ -3241,7 +3241,7 @@ function appendAiSecretaryMandatoryChecks(markdown, flags) {
 function stripAiMinutesTimestampLines(markdown) {
   return String(markdown || '')
     .split('\n')
-    .filter(line => !/^\s*(generated|generated at|generated on|timestamp)\s*[:\-]/i.test(line.trim()))
+    .filter(line => !/^\s*(?:\*\*)?\s*(generated(?:\s+(?:at|on))?|timestamp)\s*(?:\*\*)?\s*[:\-]\s*(?:\d{4}-\d{2}-\d{2}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}:\d{2})/i.test(line.trim()))
     .join('\n')
     .trim();
 }

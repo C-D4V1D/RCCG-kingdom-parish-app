@@ -5997,7 +5997,7 @@ async function renderNotesPreview(previewEl, files, actionHandler, statusElement
   if (!files.length) { previewEl.innerHTML = ''; return; }
   const dataUrls = await Promise.all(files.map(readFileAsDataURL));
   const thumbs = dataUrls.map((url, idx) => `
-    <img src="${url}" style="width:100%;border-radius:10px;border:1px solid var(--border)" alt="Notes preview ${idx + 1}" />
+    <img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)" alt="Notes preview ${idx + 1}" />
   `).join('');
   const cols = files.length > 1 ? 'grid-template-columns:repeat(auto-fit,minmax(140px,1fr));' : '';
   previewEl.innerHTML = `
@@ -6190,7 +6190,7 @@ async function previewAudioNotesPhoto(input) {
   if (!preview) return;
   if (!files.length) { preview.innerHTML = ''; return; }
   const dataUrls = await Promise.all(files.map(readFileAsDataURL));
-  const thumbs = dataUrls.map((url, idx) => `<img src="${url}" style="width:100%;border-radius:10px;border:1px solid var(--border)" alt="Audio notes preview ${idx + 1}" />`).join('');
+  const thumbs = dataUrls.map((url, idx) => `<img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)" alt="Audio notes preview ${idx + 1}" />`).join('');
   const cols = files.length > 1 ? 'grid-template-columns:repeat(auto-fit,minmax(140px,1fr));' : '';
   preview.innerHTML = `<div style="display:grid;${cols}gap:10px">${thumbs}</div>`;
 }
