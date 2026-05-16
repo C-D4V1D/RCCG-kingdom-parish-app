@@ -2956,7 +2956,7 @@ async function ocrHandwrittenNotes(env, data, DB) {
             { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
           ],
         }],
-        max_tokens: 2000,
+        max_completion_tokens: 2000,
       }),
     });
     const aiData = await resp.json();
@@ -3055,7 +3055,7 @@ async function ocrReceipt(env, data, DB) {
               { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
             ],
           }],
-          max_tokens: 500,
+          max_completion_tokens: 500,
         }),
       });
       if (resp.ok) {
