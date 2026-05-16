@@ -144,6 +144,8 @@ const Rec = {
   voiceIdLastAttempt: new Map(),// speakerIdx → ms timestamp of last attempt (debounce)
   voiceIdInFlight: new Set(),   // speakerIdx currently being processed (lock)
   voiceIdHistory: new Map(),    // speakerIdx → [{memberId, memberName, score}] (last 3, for EMA smoothing)
+  voiceIdAttemptCount: new Map(), // speakerIdx → number of /api/voice-identify calls made (cap at MAX)
+  voiceIdGaveUp: new Set(),     // speakerIdx for which we hit the retry cap
 };
 
 // ── DIARIZER (Deepgram speaker diarization) ────────────────────────
@@ -597,6 +599,8 @@ async function recStart(btn) {
     Rec.voiceIdLastAttempt     = new Map();
     Rec.voiceIdInFlight        = new Set();
     Rec.voiceIdHistory         = new Map();
+    Rec.voiceIdAttemptCount    = new Map();
+    Rec.voiceIdGaveUp          = new Set();
     // Reset per-speaker identification state for the new session.
     Diarizer.speakerRanges   = new Map();
 
@@ -769,6 +773,13 @@ async function recResume() {
     Rec.status = 'recording';
     Rec.manualStop = false;
     Diarizer.manualStop = false;
+    // Cancel any in-flight reconnect timers so we don't double-connect when
+    // the explicit reconnect calls below race the scheduled retry.
+    if (Rec.reconnectTimer) { clearTimeout(Rec.reconnectTimer); Rec.reconnectTimer = null; }
+    if (Diarizer.reconnectTimer) { clearTimeout(Diarizer.reconnectTimer); Diarizer.reconnectTimer = null; }
+    Rec.reconnectAttempts = 0;
+    Diarizer.reconnectAttempts = 0;
+    Diarizer._stableSince = 0;
     recStartTimer();
     recRenderUI();
     try { await recConnectRealtime(); }
@@ -976,112 +987,129 @@ function diarizerExtractSpeakerTurns(words) {
 
 async function diarizerConnect() {
   if (!Rec.stream || Diarizer.manualStop) return;
+  // Lock against concurrent connects (e.g. resume + scheduled reconnect race).
+  if (Diarizer._connecting) return;
+  Diarizer._connecting = true;
   diarizerClose(false);
   Diarizer.status = Diarizer.reconnectAttempts > 0 ? 'reconnecting' : 'connecting';
+  Diarizer._stableSince = 0;
   recRenderUI();
 
-  console.info('[diarizer] requesting token from server');
-  const tokenRes = await apiPost('deepgram-transcription-token', {});
-  if (tokenRes.error) throw new Error(tokenRes.error);
-  const accessToken = tokenRes.key;
-  if (!accessToken) throw new Error('Deepgram access token was not returned by the server.');
-  console.info('[diarizer] token received, length =', accessToken.length);
+  try {
+    console.info('[diarizer] requesting token from server');
+    const tokenRes = await apiPost('deepgram-transcription-token', {});
+    if (tokenRes.error) throw new Error(tokenRes.error);
+    const accessToken = tokenRes.key;
+    if (!accessToken) throw new Error('Deepgram access token was not returned by the server.');
+    console.info('[diarizer] token received, length =', accessToken.length);
 
-  // Build AudioContext and AudioWorklet pipeline for raw PCM streaming.
-  const audioCtx = new AudioContext();
-  Diarizer.audioCtx = audioCtx;
-  // AudioContext starts suspended when created outside an active user
-  // gesture (e.g. after awaiting the token fetch). Without this resume,
-  // no PCM reaches the worklet until the user pauses and resumes.
-  if (audioCtx.state === 'suspended') {
-    try { await audioCtx.resume(); } catch (_) { /* noop */ }
-  }
+    // Build AudioContext and AudioWorklet pipeline for raw PCM streaming.
+    const audioCtx = new AudioContext();
+    Diarizer.audioCtx = audioCtx;
+    // AudioContext starts suspended when created outside an active user
+    // gesture (e.g. after awaiting the token fetch). Without this resume,
+    // no PCM reaches the worklet until the user pauses and resumes.
+    if (audioCtx.state === 'suspended') {
+      try { await audioCtx.resume(); } catch (_) { /* noop */ }
+    }
 
-  // Register the inline worklet processor via a Blob URL.
-  const blob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
-  const workletUrl = URL.createObjectURL(blob);
-  Diarizer.workletUrl = workletUrl;
-  await audioCtx.audioWorklet.addModule(workletUrl);
+    // Register the inline worklet processor via a Blob URL.
+    const blob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
+    const workletUrl = URL.createObjectURL(blob);
+    Diarizer.workletUrl = workletUrl;
+    try {
+      await audioCtx.audioWorklet.addModule(workletUrl);
+    } catch (e) {
+      throw new Error(`AudioWorklet module load failed: ${e.message || e}. ` +
+        `This usually means the browser blocked the inline worker — try Chrome/Edge or disable strict CSP.`);
+    }
 
-  const source = audioCtx.createMediaStreamSource(Rec.stream);
-  const workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture-processor');
-  Diarizer.workletNode = workletNode;
+    const source = audioCtx.createMediaStreamSource(Rec.stream);
+    const workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture-processor');
+    Diarizer.workletNode = workletNode;
 
-  // Build the Deepgram WebSocket URL with required parameters.
-  const sampleRate = audioCtx.sampleRate;
-  const dgParams = new URLSearchParams({
-    model: 'nova-2-general',
-    diarize: 'true',
-    punctuate: 'true',
-    interim_results: 'true',
-    smart_format: 'true',
-    encoding: 'linear16',
-    sample_rate: String(Math.round(sampleRate)),
-    channels: '1',
-    language: 'en',
-  });
-  // Deepgram authenticates browser WebSocket connections via the
-  // Sec-WebSocket-Protocol subprotocol ('token', <api-key>). Query
-  // parameters like ?token=... are NOT accepted and silently fail.
-  console.info('[diarizer] opening WebSocket to Deepgram');
-  // Temporary access token from /v1/auth/grant uses the Bearer scheme;
-  // browsers can't set the Authorization header on a WebSocket, so the
-  // scheme + token ride in the Sec-WebSocket-Protocol subprotocols list.
-  const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, ['bearer', accessToken]);
-  Diarizer.ws = ws;
-  ws.binaryType = 'arraybuffer';
+    // Build the Deepgram WebSocket URL with required parameters.
+    const sampleRate = audioCtx.sampleRate;
+    const dgParams = new URLSearchParams({
+      model: 'nova-2-general',
+      diarize: 'true',
+      punctuate: 'true',
+      interim_results: 'true',
+      smart_format: 'true',
+      encoding: 'linear16',
+      sample_rate: String(Math.round(sampleRate)),
+      channels: '1',
+      language: 'en',
+    });
+    // Deepgram authenticates browser WebSocket connections via the
+    // Sec-WebSocket-Protocol subprotocol ('bearer', <token>). Query
+    // parameters like ?token=... are NOT accepted and silently fail.
+    console.info('[diarizer] opening WebSocket to Deepgram');
+    const ws = new WebSocket(`wss://api.deepgram.com/v1/listen?${dgParams}`, ['bearer', accessToken]);
+    Diarizer.ws = ws;
+    ws.binaryType = 'arraybuffer';
 
-  ws.onopen = () => {
-    Diarizer.status = 'connected';
-    // Don't reset reconnectAttempts here — Deepgram sometimes opens the socket
-    // then closes it immediately (auth race, model mismatch). Resetting on open
-    // would create an infinite reconnect loop. We reset only after the first
-    // real Results message arrives in diarizerHandleMessage().
-    // Record the PCM sample offset at the moment this WS connection opened.
-    // Deepgram timestamps restart from 0 on each new connection; dgTimeOffset
-    // converts them to absolute positions in the PCM ring buffer.
-    Diarizer.dgTimeOffset  = Diarizer.pcmSampleOffset;
-    Diarizer.pcmSampleRate = audioCtx.sampleRate;
-    recRenderUI();
-    // Wire audio only after socket is open to avoid dropping early packets.
-    workletNode.port.onmessage = (e) => {
-      if (Diarizer.ws?.readyState === WebSocket.OPEN) {
-        Diarizer.ws.send(diarizerFloat32ToInt16(e.data).buffer);
-      }
-      // Buffer a copy of the raw PCM for VF-4 voice identification.
-      diarizerBufferPcm(e.data);
-    };
-    source.connect(workletNode);
-    // Worklet must be connected to something in the audio graph to keep processing.
-    workletNode.connect(audioCtx.createMediaStreamDestination());
-  };
-
-  ws.onmessage = (e) => diarizerHandleMessage(e.data);
-
-  ws.onclose = (e) => {
-    console.warn('[diarizer] WS closed', { code: e.code, reason: e.reason, wasClean: e.wasClean });
-    if (!Diarizer.manualStop && Rec.status === 'recording') {
-      diarizerScheduleReconnect();
-    } else {
-      Diarizer.status = 'offline';
+    ws.onopen = () => {
+      Diarizer.status = 'connected';
+      // Record the PCM sample offset at the moment this WS connection opened.
+      // Deepgram timestamps restart from 0 on each new connection; dgTimeOffset
+      // converts them to absolute positions in the PCM ring buffer.
+      Diarizer.dgTimeOffset  = Diarizer.pcmSampleOffset;
+      Diarizer.pcmSampleRate = audioCtx.sampleRate;
       recRenderUI();
-    }
-  };
+      // Wire audio only after socket is open to avoid dropping early packets.
+      workletNode.port.onmessage = (e) => {
+        if (Diarizer.ws?.readyState === WebSocket.OPEN) {
+          Diarizer.ws.send(diarizerFloat32ToInt16(e.data).buffer);
+        }
+        // Buffer a copy of the raw PCM for VF-4 voice identification.
+        diarizerBufferPcm(e.data);
+      };
+      source.connect(workletNode);
+      // Worklet must be connected to something in the audio graph to keep processing.
+      workletNode.connect(audioCtx.createMediaStreamDestination());
+    };
 
-  ws.onerror = (e) => {
-    console.error('[diarizer] WS error', e);
-    if (!Diarizer.manualStop && Rec.status === 'recording') {
-      diarizerScheduleReconnect();
-    }
-  };
+    ws.onmessage = (e) => diarizerHandleMessage(e.data);
+
+    // ws.onerror always fires immediately before ws.onclose for the same
+    // disconnect — we only schedule the reconnect from onclose to avoid
+    // double-scheduling. (diarizerScheduleReconnect is also idempotent
+    // via its reconnectTimer guard, but this keeps logs cleaner.)
+    ws.onclose = (e) => {
+      console.warn('[diarizer] WS closed', { code: e.code, reason: e.reason, wasClean: e.wasClean });
+      if (!Diarizer.manualStop && Rec.status === 'recording') {
+        diarizerScheduleReconnect();
+      } else {
+        Diarizer.status = 'offline';
+        recRenderUI();
+      }
+    };
+
+    ws.onerror = (e) => {
+      console.error('[diarizer] WS error', e);
+      // Defer to onclose for reconnect scheduling.
+    };
+  } finally {
+    Diarizer._connecting = false;
+  }
 }
 
 function diarizerHandleMessage(raw) {
   let msg;
   try { msg = JSON.parse(raw); } catch { return; }
 
-  // Any well-formed message means the connection is genuinely working — safe to reset retry counter.
-  if (Diarizer.reconnectAttempts !== 0) Diarizer.reconnectAttempts = 0;
+  // Reset the retry counter only once the connection has been STABLE for a
+  // few seconds — Deepgram occasionally sends a Metadata message then 1011-
+  // closes when its server-side audio buffer empties, and resetting on every
+  // message would let the reconnect storm continue indefinitely.
+  if (Diarizer.reconnectAttempts !== 0) {
+    if (!Diarizer._stableSince) Diarizer._stableSince = Date.now();
+    if (Date.now() - Diarizer._stableSince >= 8000) {
+      Diarizer.reconnectAttempts = 0;
+      Diarizer._stableSince = 0;
+    }
+  }
 
   if (msg.type === 'Results') {
     const alt = msg.channel?.alternatives?.[0];
@@ -1247,20 +1275,46 @@ function shouldAutoTickFromIdentify(identifyResponse, members) {
   return null;
 }
 
+// Maximum /api/voice-identify calls per speaker per session. After this many
+// failed attempts the speaker is presumed unenrolled and we stop retrying —
+// otherwise the network upload + Cloud Run inference flood can starve the
+// Deepgram WebSocket of audio (resulting in code 1011 "no audio received"
+// closes) on slower connections.
+const VOICE_ID_MAX_ATTEMPTS = 5;
+
 /**
- * Debounced trigger: fires voiceIdTriggerForSpeaker at most once per 4 seconds
+ * Debounced trigger: fires voiceIdTriggerForSpeaker with adaptive throttling
  * per speaker, and never concurrently for the same speaker. Called on every
  * transcript event for any unidentified speaker, so once enough audio
  * accumulates the trigger will succeed.
+ *
+ * Throttle adapts to score history: very low scores (< 0.30, suggesting the
+ * speaker is not enrolled) push the next attempt out further so we don't
+ * flood the API for unrecognized voices.
  */
 function maybeFireVoiceId(speakerIdx) {
   if (Rec.voiceIdServiceDown) return;
   if (Rec.speakerMap.has(speakerIdx)) return;       // manually assigned
   if (Rec.speakerIdentified.has(speakerIdx)) return; // already matched
+  if (Rec.voiceIdGaveUp.has(speakerIdx)) return;     // hit retry cap
   if (Rec.voiceIdInFlight.has(speakerIdx)) return;   // request in flight
-  const now = Date.now();
+
+  const attempts = Rec.voiceIdAttemptCount.get(speakerIdx) || 0;
+  if (attempts >= VOICE_ID_MAX_ATTEMPTS) {
+    Rec.voiceIdGaveUp.add(speakerIdx);
+    console.info(`[voice-id] speaker ${speakerIdx}: gave up after ${attempts} attempts — likely unenrolled. Use the manual dropdown to assign.`);
+    return;
+  }
+
+  // Adaptive debounce: 4s default, grows to 8s if recent scores are very low.
+  const hist  = Rec.voiceIdHistory.get(speakerIdx) || [];
+  const recent = hist.slice(-2);
+  const allLow = recent.length >= 2 && recent.every(h => h.score < 0.30);
+  const debounceMs = allLow ? 8000 : 4000;
+
+  const now  = Date.now();
   const last = Rec.voiceIdLastAttempt.get(speakerIdx) || 0;
-  if (now - last < 4000) return;                     // debounce
+  if (now - last < debounceMs) return;
   Rec.voiceIdLastAttempt.set(speakerIdx, now);
   setTimeout(() => voiceIdTriggerForSpeaker(speakerIdx), 0);
 }
@@ -1327,7 +1381,9 @@ async function voiceIdTriggerForSpeaker(speakerIdx) {
     const form = new FormData();
     form.append('audio', wavBlob, 'speaker-id.wav');
 
-    console.info(`[voice-id] speaker ${speakerIdx}: sending ${haveSamples} samples (${(haveSamples/sr).toFixed(2)}s) to /api/voice-identify`);
+    const attemptNum = (Rec.voiceIdAttemptCount.get(speakerIdx) || 0) + 1;
+    Rec.voiceIdAttemptCount.set(speakerIdx, attemptNum);
+    console.info(`[voice-id] speaker ${speakerIdx}: sending ${haveSamples} samples (${(haveSamples/sr).toFixed(2)}s) to /api/voice-identify (attempt ${attemptNum}/${VOICE_ID_MAX_ATTEMPTS})`);
 
     const res = await fetch(`${API}/voice-identify`, {
       method: 'POST',
@@ -7026,7 +7082,122 @@ async function transcribeAudioWithDiarization_UI(audioFile, status) {
   }
 
   if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Diarization complete — ${_diarizedSpeakerCount} speaker(s) detected. Assign names above, then click "Apply".</div>`;
+
+  // Fire-and-forget: try to auto-fill the speaker name dropdowns by running
+  // each detected speaker's audio through the voice fingerprint matcher.
+  // Failures are silent (manual assignment still works) — we just light up
+  // the boxes that match an enrolled member.
+  autoIdentifySpeakersFromUpload(audioFile, _diarizedUtterances).catch(e => {
+    console.warn('[upload-voice-id] failed:', e);
+  });
+
   return null; // transcript will be applied via applyDiarizedTranscript()
+}
+
+// Decode an uploaded audio file in the browser, slice each detected speaker's
+// first ~3.5s of speech, mono-mix, resample to 16 kHz, encode WAV, and POST
+// to /api/voice-identify. Pre-fills the speaker assignment dropdowns with
+// matched member names so the user only has to confirm.
+async function autoIdentifySpeakersFromUpload(audioFile, utterances) {
+  if (!audioFile || !utterances?.length) return;
+
+  // Decode the whole file once via Web Audio.
+  let decoded;
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  try {
+    const arrayBuf = await audioFile.arrayBuffer();
+    decoded = await audioCtx.decodeAudioData(arrayBuf);
+  } catch (e) {
+    console.warn('[upload-voice-id] decodeAudioData failed:', e?.message || e);
+    try { await audioCtx.close(); } catch (_) { /* noop */ }
+    return;
+  }
+
+  const sampleRate = decoded.sampleRate;
+  const speakerNums = [...new Set(utterances.map(u => Number(u.speaker)))].sort((a, b) => a - b);
+  console.info(`[upload-voice-id] processing ${speakerNums.length} speaker(s) from uploaded audio (${decoded.duration.toFixed(1)}s @ ${sampleRate}Hz)`);
+
+  const TARGET_SEC = 3.5;
+  const MIN_SEC    = 1.5;
+
+  for (const speakerIdx of speakerNums) {
+    const segs = utterances.filter(u => Number(u.speaker) === speakerIdx);
+    // Concatenate the first ~3.5s of this speaker's audio (across utterances).
+    const slices = [];
+    let collected = 0;
+    for (const u of segs) {
+      const startSec = Number(u.start);
+      const endSec   = Number(u.end);
+      if (!(endSec > startSec)) continue;
+      const dur = endSec - startSec;
+      const take = Math.min(dur, TARGET_SEC - collected);
+      slices.push({ start: startSec, end: startSec + take });
+      collected += take;
+      if (collected >= TARGET_SEC) break;
+    }
+    if (collected < MIN_SEC) {
+      console.info(`[upload-voice-id] speaker ${speakerIdx}: only ${collected.toFixed(2)}s of speech — skipping`);
+      continue;
+    }
+
+    // Extract Float32, mono mixdown, then resample.
+    const totalSamples = slices.reduce((a, s) => a + Math.round((s.end - s.start) * sampleRate), 0);
+    const float32 = new Float32Array(totalSamples);
+    const ch0 = decoded.getChannelData(0);
+    const ch1 = decoded.numberOfChannels > 1 ? decoded.getChannelData(1) : null;
+    let pos = 0;
+    for (const s of slices) {
+      const startSample = Math.max(0, Math.round(s.start * sampleRate));
+      const length = Math.round((s.end - s.start) * sampleRate);
+      for (let i = 0; i < length && pos < float32.length; i++) {
+        const idx = startSample + i;
+        if (idx >= ch0.length) break;
+        float32[pos++] = ch1 ? (ch0[idx] + ch1[idx]) / 2 : ch0[idx];
+      }
+    }
+
+    const resampled = resampleTo16k(float32, sampleRate);
+    const int16     = new Int16Array(resampled.length);
+    for (let i = 0; i < resampled.length; i++) {
+      int16[i] = Math.max(-32768, Math.min(32767, Math.round(resampled[i] * 32767)));
+    }
+    const wavBuf  = pcm16ToWav(int16, 16000);
+    const wavBlob = new Blob([wavBuf], { type: 'audio/wav' });
+
+    const form = new FormData();
+    form.append('audio', wavBlob, `upload-speaker-${speakerIdx}.wav`);
+
+    try {
+      const res = await fetch(`${API}/voice-identify`, {
+        method: 'POST',
+        headers: { ...kpscSessionHeader() },
+        body: form,
+      });
+      if (!res.ok) {
+        console.warn(`[upload-voice-id] speaker ${speakerIdx}: HTTP ${res.status}`);
+        continue;
+      }
+      const data = await res.json();
+      console.info(
+        `[upload-voice-id] speaker ${speakerIdx} → match=${data.match}` +
+        ` score=${typeof data.score === 'number' ? data.score.toFixed(3) : 'n/a'}` +
+        (data.memberName ? ` member=${data.memberName}` : '')
+      );
+      if (data.match && data.memberName) {
+        const input = document.getElementById(`km-spk-name-${speakerIdx}`);
+        if (input && !input.value) {
+          input.value = data.memberName;
+          input.style.background  = '#d1fae5';
+          input.style.borderColor = '#34d399';
+          input.title = `🎙 Auto-matched (score ${data.score.toFixed(2)}). Edit if incorrect.`;
+        }
+      }
+    } catch (e) {
+      console.warn(`[upload-voice-id] speaker ${speakerIdx} error:`, e?.message || e);
+    }
+  }
+
+  try { await audioCtx.close(); } catch (_) { /* noop */ }
 }
 
 function buildDiarizedTranscript(nameMap) {

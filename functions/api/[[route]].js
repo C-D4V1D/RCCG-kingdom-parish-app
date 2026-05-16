@@ -4136,11 +4136,18 @@ async function uploadAiSecretaryAudioChunk(env, request) {
   const key = `kpsc-audio/${meetingId}/${uploadSessionId}/${sequence}.webm`;
   const bucket = env.KPSC_AUDIO_BUCKET || env.AUDIO_BUCKET;
   if (bucket?.put) {
-    await bucket.put(key, audio.stream(), {
-      httpMetadata: { contentType: mimeType },
-      customMetadata: { meetingId, uploadSessionId, sequence, createdAt },
-    });
-    return ok({ uploaded: true, stored: true, key, sequence: Number(sequence) });
+    try {
+      await bucket.put(key, audio.stream(), {
+        httpMetadata: { contentType: mimeType },
+        customMetadata: { meetingId, uploadSessionId, sequence, createdAt },
+      });
+      return ok({ uploaded: true, stored: true, key, sequence: Number(sequence) });
+    } catch (e) {
+      // R2 transient failures (network, throttling) bubble as 502 so the
+      // client retries via its existing recFlushUploads backoff. We do not
+      // 500 because the chunk itself was valid — only persistence failed.
+      return err(`Audio bucket write failed: ${e.message || e}`, 502);
+    }
   }
 
   // Accept chunks even before an R2 bucket is bound so the browser can keep streaming
