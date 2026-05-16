@@ -2953,6 +2953,8 @@ async function renderMeetingRoom(main) {
   const isEditable  = !isEnded;
   const canRecord   = !isEnded;
   const phase = isProcessed ? 'review' : status === 'ended' ? 'ended' : status === 'recording' ? 'live' : 'setup';
+  // Tabs are hidden for ended/processed meetings; reset to default so stale 'audio' or 'upload'
+  // state doesn't leak into the next editable meeting opened in this session.
   if (!isEditable && S._meetingTab !== 'record') {
     S._meetingTab = 'record';
     persistMeetingUiState();
@@ -3035,7 +3037,7 @@ async function renderMeetingRoom(main) {
 
       <section class="k-section">
         <h3 class="k-sec-title">Live Audio & Realtime Transcript</h3>
-        ${phase === 'setup' ? `<p class="k-quick-hint">Confirm the details above, then tap 🎙 Start Meeting below to begin recording. Everything saves automatically.</p>` : ''}
+        ${phase === 'setup' ? `<p class="k-quick-hint">Confirm the details above, then open the <strong>Live Recording</strong> tab and tap 🎙 Start Meeting to begin. Or use <strong>Upload Audio</strong> / <strong>Upload Notes</strong> to add transcript content, then click <strong>End Meeting</strong> below to proceed.</p>` : ''}
         ${isEditable ? `<div class="k-tabs" style="margin-bottom:16px">
           <button class="k-tab ${S._meetingTab === 'record' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('record')">🎙 Live Recording</button>
           <button class="k-tab ${S._meetingTab === 'audio' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('audio')">🎵 Upload Audio</button>
@@ -3106,7 +3108,7 @@ async function renderMeetingRoom(main) {
       <div class="k-room-actions">
         ${isEditable ? `<span id="km-autosave-status" class="k-autosave-status" aria-live="polite"></span>` : ''}
         ${(status === 'draft' || status === 'recording') && (m ? canDeleteMeeting(m) : S._isNewMeeting) ? `<button class="kbtn kbtn-ghost kbtn-sm" style="color:var(--danger,#dc2626)" onclick="Kpsc.discardMeetingFromRoom()">🗑 Discard</button>` : ''}
-        ${status === 'recording' ? `<button id="km-end-meeting-btn" class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
+        ${(status === 'recording' || (status === 'draft' && m)) ? `<button id="km-end-meeting-btn" class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
         ${status === 'ended' ? `<button class="kbtn kbtn-primary" onclick="Kpsc.processMeeting(this)">✨ Generate Minutes</button>` : ''}
         ${isProcessed ? `<div class="k-processed-note">✅ Minutes have been generated and finalised.</div>` : ''}
       </div>
@@ -3114,6 +3116,7 @@ async function renderMeetingRoom(main) {
       ${isProcessed && m ? renderMinutesPanel(m) : ''}
     </div>`;
 
+  setMeetingTab(S._meetingTab || 'record');
   if (canRecord) recRenderUI();
   recRenderTranscript();
   if (isEditable) bindAutoSave();
@@ -3830,7 +3833,10 @@ async function processMeeting(btn) {
     if (res.error) { showToast(res.error, 'error'); return; }
     S.activeMeeting = res;
     renderPage('meeting');
-    showToast('Minutes generated successfully', 'success');
+    showToast('Minutes generated! Scroll down to review and approve.', 'success');
+    setTimeout(() => {
+      document.getElementById('kr-review-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 150);
   } catch {
     showToast('Processing failed. Check your connection.', 'error');
   } finally {
@@ -6670,8 +6676,7 @@ async function ocrNotesPhoto() {
       showToast('Handwritten notes transcribed! Review and adjust before processing.', 'success');
     }
     const note = ocr.errors.length ? ` (${ocr.errors.length} photo${ocr.errors.length === 1 ? '' : 's'} skipped due to OCR errors.)` : '';
-    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Extracted text from ${ocr.successCount} of ${ocr.totalCount} photo${ocr.totalCount === 1 ? '' : 's'}${note}</div>`;
-    setMeetingTab('record');
+    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Extracted text from ${ocr.successCount} of ${ocr.totalCount} photo${ocr.totalCount === 1 ? '' : 's'}${note} Review the transcript, then click <strong>End Meeting</strong> below to proceed.</div>`;
   } catch (e) {
     if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
   }
@@ -6722,9 +6727,8 @@ async function transcribeAudioFile() {
         if (transcriptEl) {
           transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + diarizedTranscript;
         }
-        if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Audio transcribed. Review the transcript before generating minutes.</div>`;
+        if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Audio transcribed. Review the transcript, then click <strong>End Meeting</strong> below to proceed.</div>`;
         showToast('Audio transcribed!', 'success');
-        setMeetingTab('record');
       }
       // If null is returned, speaker assignment UI is showing — no further action here.
     } catch (e) {
@@ -6788,9 +6792,8 @@ async function transcribeAudioFile() {
     } else if (ocrRes?.errors?.length) {
       successMsg += ` (${ocrRes.errors.length} photo${ocrRes.errors.length === 1 ? '' : 's'} skipped due to OCR errors.)`;
     }
-    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">${successMsg} Review the transcript before generating minutes.</div>`;
+    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">${successMsg} Review the transcript, then click <strong>End Meeting</strong> below to proceed.</div>`;
     showToast(ocrText ? 'Audio and notes combined! Review before processing.' : 'Audio transcribed! Review before processing.', 'success');
-    setMeetingTab('record');
   } catch (e) {
     if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
   }
@@ -7370,9 +7373,8 @@ function applyDiarizedTranscript() {
   const speakerMapEl = document.getElementById('km-speaker-map');
   if (speakerMapEl) speakerMapEl.innerHTML = '';
   const status = document.getElementById('km-audio-status');
-  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Speaker-labelled transcript added. Review before generating minutes.</div>`;
+  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Speaker-labelled transcript added. Review the transcript, then click <strong>End Meeting</strong> below to proceed.</div>`;
   showToast('Diarized transcript applied!', 'success');
-  setMeetingTab('record');
   _diarizedUtterances = [];
 }
 
@@ -7383,9 +7385,8 @@ function applyDiarizedTranscriptRaw() {
   const speakerMapEl = document.getElementById('km-speaker-map');
   if (speakerMapEl) speakerMapEl.innerHTML = '';
   const status = document.getElementById('km-audio-status');
-  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Transcript added with speaker labels. Review before generating minutes.</div>`;
+  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Transcript added with speaker labels. Review the transcript, then click <strong>End Meeting</strong> below to proceed.</div>`;
   showToast('Transcript applied.', 'success');
-  setMeetingTab('record');
   _diarizedUtterances = [];
 }
 // ── PLAIN ENGLISH TOGGLE ──────────────────────────────────────────
