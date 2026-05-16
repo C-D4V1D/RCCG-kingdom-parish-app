@@ -2886,32 +2886,37 @@ async function ocrHandwrittenNotes(env, data, DB) {
   } catch (_) {}
 
   const openaiKey = await resolveOpenAiKey(env, DB);
-  if (openaiKey) {
-    try {
-      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
-        body: JSON.stringify({
-          model: ocrModel,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'text', text: 'This is a photo of handwritten meeting notes from a church committee meeting. Please transcribe the text exactly as written, preserving structure and formatting. If the writing mentions names, amounts (naira), dates, resolutions, or action items, preserve them accurately. Return only the transcribed text, nothing else.' },
-              { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
-            ],
-          }],
-          max_tokens: 2000,
-        }),
-      });
-      if (resp.ok) {
-        const aiData = await resp.json();
-        const text = aiData.choices?.[0]?.message?.content || '';
-        if (text.trim()) return ok({ transcript: text.trim(), method: 'openai_vision' });
-      }
-    } catch (_) {}
+  if (!openaiKey) {
+    return ok({ transcript: '', method: 'none', error: 'No OpenAI API key is configured. Add your key in Settings → AI Provider Keys.' });
   }
 
-  return ok({ transcript: '', method: 'none', error: 'No vision-capable AI key is configured. Add your OpenAI API key in Settings → AI Provider Keys.' });
+  try {
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+      body: JSON.stringify({
+        model: ocrModel,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'This is a photo of handwritten meeting notes from a church committee meeting. Please transcribe the text exactly as written, preserving structure and formatting. If the writing mentions names, amounts (naira), dates, resolutions, or action items, preserve them accurately. Return only the transcribed text, nothing else.' },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
+          ],
+        }],
+        max_tokens: 2000,
+      }),
+    });
+    const aiData = await resp.json();
+    if (!resp.ok) {
+      const reason = aiData?.error?.message || `OpenAI error ${resp.status}`;
+      return ok({ transcript: '', method: 'none', error: `OCR failed: ${reason}` });
+    }
+    const text = (aiData.choices?.[0]?.message?.content || '').trim();
+    if (text) return ok({ transcript: text, method: 'openai_vision' });
+    return ok({ transcript: '', method: 'none', error: 'OCR returned no text. Please use a clearer, well-lit photo.' });
+  } catch (e) {
+    return ok({ transcript: '', method: 'none', error: `OCR request failed: ${e.message}` });
+  }
 }
 
 async function transcribeAudioWithWhisper(env, request, DB) {
