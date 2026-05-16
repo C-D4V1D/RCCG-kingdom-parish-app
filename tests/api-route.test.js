@@ -547,7 +547,7 @@ test('AI secretary keeps deterministic governance flags when provider omits them
     assert.ok(body.policyFlags.some(f => f.type === 'meeting_not_ended'));
     assert.ok(body.policyFlags.some(f => f.type === 'threshold_review'));
     assert.ok(body.policyFlags.some(f => f.type === 'prompt_injection_risk'));
-    assert.match(body.minutesMarkdown, /Mandatory Governance Checks/);
+    assert.match(body.minutesMarkdown, /## Policy Checks/);
     assert.match(body.minutesMarkdown, /Missing required representative group/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -723,6 +723,8 @@ test('AI secretary meeting update persists reviewed minutes corrections', async 
     resolutions_json: '[]',
     action_items_json: '[]',
     policy_flags_json: '[]',
+    reviewed_at: '',
+    reviewed_by: '',
     created_by: 'Secretary',
     started_at: '',
     ended_at: '',
@@ -750,7 +752,9 @@ test('AI secretary meeting update persists reviewed minutes corrections', async 
               minutes_markdown: statement._bound[9],
               resolutions_json: statement._bound[10],
               action_items_json: statement._bound[11],
-              policy_flags_json: statement._bound[12]
+              policy_flags_json: statement._bound[12],
+              reviewed_at: statement._bound[14],
+              reviewed_by: statement._bound[15]
             };
           }
           return { success: true };
