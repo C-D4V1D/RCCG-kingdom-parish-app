@@ -3533,7 +3533,7 @@ async function deleteAiSecretaryMeeting(DB, id, auth) {
 
 async function getAiSecretaryMeeting(DB, id) {
   const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
-  if (!row) return err('AI secretary meeting not found', 404);
+  if (!row || row.deleted_at) return err('AI secretary meeting not found', 404);
   return ok(aiSecretaryMeetingFromRow(row));
 }
 
@@ -3630,7 +3630,7 @@ async function createAiSecretaryMeeting(DB, data, auth) {
 
 async function updateAiSecretaryMeeting(DB, id, data, auth) {
   const existing = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
-  if (!existing) return err('AI secretary meeting not found', 404);
+  if (!existing || existing.deleted_at) return err('AI secretary meeting not found', 404);
   const participants = data.participants !== undefined ? normalizeAiParticipants(data.participants) : safeJsonParse(existing.participants_json, []);
   const resolutions = data.resolutions !== undefined
     ? aiSecretaryArray(data.resolutions).map((item, index) => {
@@ -3758,7 +3758,7 @@ Return only valid JSON, no markdown fences.`;
 
 async function processAiSecretaryMeeting(DB, id) {
   const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
-  if (!row) return err('AI secretary meeting not found', 404);
+  if (!row || row.deleted_at) return err('AI secretary meeting not found', 404);
   const meeting = aiSecretaryMeetingFromRow(row);
   let deepseekKey = '';
   try {
@@ -3808,9 +3808,9 @@ async function processAiSecretaryMeeting(DB, id) {
 
 async function translateAiSecretaryMeetingPlainEnglish(DB, env, id) {
   const row = await DB.prepare(
-    `SELECT minutes_markdown, plain_english_minutes_md FROM ai_secretary_meetings WHERE id=?`
+    `SELECT minutes_markdown, plain_english_minutes_md, deleted_at FROM ai_secretary_meetings WHERE id=?`
   ).bind(id).first();
-  if (!row) return err('Meeting not found', 404);
+  if (!row || row.deleted_at) return err('Meeting not found', 404);
 
   const minutesMarkdown = row.minutes_markdown || '';
   if (!minutesMarkdown.trim()) return err('No minutes to translate', 400);

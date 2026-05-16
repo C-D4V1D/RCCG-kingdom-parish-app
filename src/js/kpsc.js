@@ -885,24 +885,46 @@ async function recUploadChunk(chunk, useKeepalive) {
   if (data.error) throw new Error(data.error);
 }
 
+function flushMeetingKeepaliveDraft() {
+  const mid = S.activeMeeting?.id;
+  if (!mid) return;
+  const transEl = document.getElementById('km-transcript');
+  if (!transEl) return;
+  const title = document.getElementById('km-title')?.value.trim();
+  const meetingDate = document.getElementById('km-date')?.value;
+  const meetingType = document.getElementById('km-type')?.value;
+  const status = document.getElementById('km-status')?.value;
+  const scheduledFor = document.getElementById('km-scheduled-for')?.value || null;
+  const payload = {
+    title: title || undefined,
+    meetingDate: meetingDate || undefined,
+    meetingType: meetingType || undefined,
+    status: status || undefined,
+    transcriptText: transEl.value,
+    participants: document.getElementById('km-attendance') ? readAttendance() : undefined,
+    scheduledFor,
+  };
+  try {
+    fetch(`${API}/ai-secretary-meetings/${mid}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    });
+  } catch (_) { /* noop */ }
+}
+
 window.addEventListener('beforeunload', () => {
   if (Rec.status === 'recording' && Rec.mediaRecorder?.state === 'recording') {
     try { Rec.mediaRecorder.requestData(); } catch (_) { /* noop */ }
   }
-  // Flush in-memory transcript text to the server using a keepalive request so
-  // live transcript entries are not lost when the user refreshes or closes the tab.
-  const mid = S.activeMeeting?.id;
-  const trans = document.getElementById('km-transcript')?.value;
-  if (mid && (Rec.status === 'recording' || Rec.status === 'paused' || Rec.status === 'stopped') && trans !== undefined) {
-    try {
-      fetch(`${API}/ai-secretary-meetings/${mid}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
-        body: JSON.stringify({ transcriptText: trans }),
-        keepalive: true,
-      });
-    } catch (_) { /* noop */ }
-  }
+  // Flush in-memory meeting-room fields via keepalive so late transcript/details edits
+  // are less likely to be lost during refresh/close/navigation away.
+  flushMeetingKeepaliveDraft();
+});
+
+window.addEventListener('pagehide', () => {
+  flushMeetingKeepaliveDraft();
 });
 
 document.addEventListener('visibilitychange', () => {
