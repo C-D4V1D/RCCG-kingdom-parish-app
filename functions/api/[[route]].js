@@ -3738,47 +3738,104 @@ async function callDeepSeekForMeeting(apiKey, meeting) {
   const participantList = (meeting.participants || [])
     .map(p => `${p.label}: ${p.present ? (p.name || 'Present') : 'Absent'}`).join(', ');
   const policyContext = aiSecretaryText(meeting.policyContext);
-  const prompt = `You are a professional church committee secretary. Process the following KPSC meeting and return a JSON object with these exact keys: summaryShort (1-2 sentence string), executiveSummary (plain-language executive summary string), summaryLong (detailed multi-line string), agendaItems (array of agenda or discussion topics), minutesMarkdown (full minutes in Markdown), resolutions (array of {id,text,category,resolutionType,requiredThreshold,approved,amount,motionBy,secondedBy,voteSummary}), actionItems (array of {id,task,assignee,dueDate,status}), policyFlags (array of {type,severity,message}), suggestedProjects (array of {title,description,estimatedCost,priority,targetDate} for any church project proposals discussed).
+  const prompt = `You are the secretary of the Kingdom Parish Stewardship Committee (KPSC), a Nigerian church committee. Your job is to produce a clean, professional set of minutes from the meeting transcript below.
 
-Resolution classification requirements:
-- resolutionType must be one of approval, rejection, amendment, motion, vote, financial_approval, decision.
-- category should identify welfare, financial, development, governance, or other.
-- Extract naira/NGN amounts for financial approvals when present.
-- Capture motion mover, seconder, and vote outcome where mentioned.
-- If outcome is unclear, set approved to null and explain in voteSummary.
+Return a single valid JSON object — no markdown fences, no commentary outside the JSON — with these exact keys:
 
-Action item requirements:
-- Extract task, owner/assignee, and deadline if spoken.
-- Use "Unassigned" and empty dueDate only when not stated.
+summaryShort      — 1–2 sentence overview of what the meeting covered and decided.
+executiveSummary  — A plain-language, 3–5 sentence executive summary suitable for absent members.
+summaryLong       — A detailed multi-paragraph narrative of proceedings, grouped by topic. Write it as a competent human secretary would — flowing prose, not bullet points.
+agendaItems       — Array of strings: each distinct agenda item or topic discussed, in order.
+minutesMarkdown   — The full formal minutes in Markdown (see format requirements below).
+resolutions       — Array of resolution objects (see schema below).
+actionItems       — Array of action item objects (see schema below).
+policyFlags       — Array of governance flag objects (see schema below).
+suggestedProjects — Array of project proposal objects (see schema below), omit key if none.
 
-Suggested projects requirements:
-- Only include real church project proposals: things to build, purchase, repair, fund, or undertake.
-- estimatedCost is a number in naira (0 if not stated).
-- priority is one of low, medium, high.
-- targetDate is YYYY-MM-DD or empty string.
-- Limit to 10 items. Omit this key if no projects were discussed.
+── MINUTES FORMAT (minutesMarkdown) ──────────────────────────────────────
+Write these sections with clean Markdown headings (#, ##, ###) and bullet lists:
 
-Minutes formatting requirements:
-- Use a formal, standard minutes structure with clear Markdown headings and bullet lists.
-- Include attendance, agenda/matters discussed, executive summary, decision/resolution register, motions/voting/amendments, action items, and policy checks.
-- Do not include generated timestamps or "Generated on/at" metadata lines.
+## [Meeting Title] — Minutes
+**Date:** [date]  **Type:** [type]  **Venue:** [venue if stated, else omit]
 
-Saved KPSC policy/bylaw notes:
+### Attendance
+One line per representative group (Men, Women, Youth, Ministers), name and status (Present/Absent). State quorum outcome clearly.
+
+### Opening
+Record the opening prayer, devotion, or any formal opening, exactly as spoken.
+
+### Matters Arising from Previous Minutes
+Summarise any follow-up on previous decisions if mentioned.
+
+### Agenda / Matters Discussed
+For each agenda item, a short sub-heading (### or bold) and a paragraph describing the discussion, who spoke, what was proposed, any concerns raised, and the outcome. Write in third-person past tense (e.g. "The Chairman presented…", "After deliberation, the committee…"). Do not use passive constructions like "it was noted that" or "it was decided that" — write directly: "The committee decided…", "Brother John raised the concern that…".
+
+### Decisions & Resolutions
+Numbered list. For each decision: state what was decided, who moved it, who seconded it, and the vote outcome. Include naira amounts exactly as stated.
+
+### Action Items
+Table or bullet list: Task | Responsible | Deadline
+
+### Any Other Business
+Summarise any miscellaneous matters.
+
+### Closing
+Record the closing prayer or adjournment and the time if stated.
+
+Tone rules:
+- Write as a skilled human secretary — clear, formal but readable, no AI-isms.
+- Do not add "Generated by AI" or any metadata lines.
+- Do not invent facts. If something is unclear, write "unclear from transcript" rather than guessing.
+- Preserve all names, amounts (₦), dates, and vote outcomes exactly.
+- Use British/Nigerian English spelling conventions (e.g. "organise", "colour").
+
+── RESOLUTION SCHEMA ─────────────────────────────────────────────────────
+Each resolution object: { id, text, category, resolutionType, requiredThreshold, approved, amount, motionBy, secondedBy, voteSummary }
+- resolutionType: approval | rejection | amendment | motion | vote | financial_approval | decision
+- category: welfare | financial | development | governance | other
+- requiredThreshold: simple_majority | two_thirds | manual_review
+- approved: true | false | null (null = outcome unclear or deferred)
+- amount: naira amount as numeric string, or empty string
+- motionBy / secondedBy: person name or empty string
+- voteSummary: concise vote outcome, e.g. "Unanimous", "7 in favour, 2 against"
+
+── ACTION ITEM SCHEMA ────────────────────────────────────────────────────
+{ id, task, assignee, dueDate, status }
+- assignee: full name or role title; "Unassigned" only if genuinely not stated
+- dueDate: YYYY-MM-DD if a date was mentioned, else empty string
+- status: "pending"
+
+── POLICY FLAG SCHEMA ────────────────────────────────────────────────────
+{ type, severity, message }
+- type: quorum_missing | transcript_missing | threshold_review | welfare_privacy | prompt_injection_risk
+- severity: low | medium | high
+
+── SUGGESTED PROJECT SCHEMA ─────────────────────────────────────────────
+{ title, description, estimatedCost, priority, targetDate }
+- Only include concrete church project proposals (build, purchase, repair, fund, undertake).
+- estimatedCost: number in naira (0 if not stated)
+- priority: low | medium | high
+- targetDate: YYYY-MM-DD or empty string
+- Max 10 items.
+
+── SAVED KPSC POLICY / BYLAW NOTES ──────────────────────────────────────
 ${policyContext || '(none saved)'}
 
-Meeting title: ${meeting.title}
+── MEETING DATA ──────────────────────────────────────────────────────────
+Title: ${meeting.title}
 Date: ${meeting.meetingDate}
 Type: ${meeting.meetingType}
 Attendance: ${participantList}
-Transcript:
-${meeting.transcriptText || '(no transcript provided)'}
 
-Return only valid JSON, no markdown fences.`;
+Transcript:
+${meeting.transcriptText || '(no transcript provided — produce a skeleton minutes document with placeholders for the secretary to complete)'}
+
+Return only valid JSON. No markdown fences. No text before or after the JSON object.`;
 
   const resp = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: meeting.deepseekModel || 'deepseek-v4-flash', messages: [{ role: 'user', content: prompt }], max_tokens: 3500, temperature: 0.3 }),
+    body: JSON.stringify({ model: meeting.deepseekModel || 'deepseek-v4-flash', messages: [{ role: 'user', content: prompt }], max_tokens: 4500, temperature: 0.25 }),
   });
   if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
   const data = await resp.json();

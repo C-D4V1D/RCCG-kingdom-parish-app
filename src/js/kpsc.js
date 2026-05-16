@@ -3261,8 +3261,17 @@ function renderReviewPanel(m) {
       <div class="k-review-step-label">Step 3 — AI Corrections (optional)</div>
       <div class="k-form-group">
         <label class="k-label">Secretary's Notes to AI</label>
-        <textarea class="k-input k-review-textarea" id="kr-secretary-notes" placeholder="Describe any corrections in plain English, e.g. &quot;Bro. Emmanuel proposed the motion, not the Chairman. Change the welfare amount to ₦25,000. Remove the paragraph about building plans.&quot;"></textarea>
-        <p class="k-review-hint" style="margin-top:4px">AI will integrate these notes into the minutes when you click <strong>AI Proofread</strong> below. Notes are not saved — they are used once and cleared.</p>
+        <div class="k-sn-toolbar">
+          <label class="kbtn kbtn-sm k-sn-upload-lbl" title="Upload a photo of handwritten notes — AI will read the text">
+            📎 Upload notes
+            <input type="file" accept="image/*" multiple style="display:none" onchange="Kpsc.krNotesUploadPhoto(this)">
+          </label>
+          <button class="kbtn kbtn-sm" id="kr-voice-btn" onclick="Kpsc.krNotesToggleVoice(this)">🎙 Record voice</button>
+          <span class="k-sn-voice-status" id="kr-voice-status"></span>
+        </div>
+        <div id="kr-notes-upload-status"></div>
+        <textarea class="k-input k-review-textarea k-sn-textarea" id="kr-secretary-notes" placeholder="Describe corrections in plain English — or upload/record above and AI will fill this in. e.g. &quot;Bro. Emmanuel proposed the motion, not the Chairman. Change the welfare amount to ₦25,000. Remove the paragraph about building plans.&quot;"></textarea>
+        <p class="k-review-hint" style="margin-top:4px">AI will integrate these notes into the minutes when you click <strong>AI Proofread</strong> below. Notes are not saved — used once and cleared.</p>
       </div>
       <div style="margin-bottom:14px">
         <button class="kbtn kbtn-ai" onclick="Kpsc.aiProofreadMinutes(this)">🤖 AI Proofread &amp; Apply Notes</button>
@@ -3458,6 +3467,87 @@ async function aiProofreadMinutes(btn) {
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
+  }
+}
+
+// ── SECRETARY NOTES — UPLOAD & VOICE RECORD ──────────────────────
+
+const KrVoice = { mediaRecorder: null, chunks: [], stream: null };
+
+async function krNotesUploadPhoto(input) {
+  const files = getSelectedImageFiles(input);
+  if (!files.length) return;
+  const statusEl = document.getElementById('kr-notes-upload-status');
+  if (statusEl) statusEl.innerHTML = `<div class="k-loading" style="padding:10px 0">🤖 Reading handwritten notes…</div>`;
+  try {
+    const ocr = await ocrNotesImages(files);
+    if (!ocr.transcript) {
+      if (statusEl) statusEl.innerHTML = `<div class="k-error-box">${esc(ocr.errors[0] || 'Could not read the image. Please use a clear, well-lit photo.')}</div>`;
+      return;
+    }
+    const ta = document.getElementById('kr-secretary-notes');
+    if (ta) ta.value = (ta.value ? ta.value + '\n' : '') + ocr.transcript;
+    const note = ocr.errors.length ? ` (${ocr.errors.length} photo(s) skipped)` : '';
+    if (statusEl) statusEl.innerHTML = `<div class="k-sn-success">✓ Text extracted from ${ocr.successCount} photo(s)${note}. Review and edit above before running AI Proofread.</div>`;
+    input.value = '';
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+async function krNotesToggleVoice(btn) {
+  if (KrVoice.mediaRecorder && KrVoice.mediaRecorder.state === 'recording') {
+    KrVoice.mediaRecorder.stop();
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    showToast('Microphone not available on this device.', 'error'); return;
+  }
+  const statusEl = document.getElementById('kr-voice-status');
+  try {
+    KrVoice.chunks = [];
+    KrVoice.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+    KrVoice.mediaRecorder = new MediaRecorder(KrVoice.stream, mimeType ? { mimeType } : undefined);
+    KrVoice.mediaRecorder.ondataavailable = e => { if (e.data?.size > 0) KrVoice.chunks.push(e.data); };
+    KrVoice.mediaRecorder.onstop = () => krNotesTranscribeVoice(btn, statusEl);
+    KrVoice.mediaRecorder.start(250);
+    btn.textContent = '⏹ Stop recording';
+    btn.classList.add('kbtn-recording');
+    if (statusEl) statusEl.textContent = '● Recording…';
+  } catch (e) {
+    showToast('Could not access microphone: ' + e.message, 'error');
+  }
+}
+
+async function krNotesTranscribeVoice(btn, statusEl) {
+  KrVoice.stream?.getTracks().forEach(t => t.stop());
+  btn.textContent = '🎙 Record voice';
+  btn.classList.remove('kbtn-recording');
+  if (statusEl) statusEl.textContent = 'Transcribing…';
+  try {
+    const blob = new Blob(KrVoice.chunks, { type: KrVoice.mediaRecorder?.mimeType || 'audio/webm' });
+    const form = new FormData();
+    form.append('audio', blob, 'notes.webm');
+    form.append('mimeType', blob.type);
+    const res = await fetch(`${API}/kpsc-transcribe-audio`, {
+      method: 'POST',
+      headers: { ...kpscSessionHeader() },
+      body: form,
+    }).then(r => r.json());
+    if (res?.error || !res?.transcript) {
+      if (statusEl) statusEl.textContent = '';
+      showToast(res?.error || 'Transcription returned empty. Please try again.', 'error');
+      return;
+    }
+    const ta = document.getElementById('kr-secretary-notes');
+    if (ta) ta.value = (ta.value ? ta.value + '\n' : '') + res.transcript.trim();
+    if (statusEl) statusEl.textContent = '✓ Voice transcribed';
+    setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 3500);
+  } catch (e) {
+    if (statusEl) statusEl.textContent = '';
+    showToast('Voice transcription failed: ' + e.message, 'error');
   }
 }
 
@@ -7597,6 +7687,10 @@ window.Kpsc = {
   processMeeting,
   saveMinutesReview,
   openReviewEditor,
+  updateMinutesPreview,
+  aiProofreadMinutes,
+  krNotesUploadPhoto,
+  krNotesToggleVoice,
   addMember,
   removeMember,
   memberFieldChange,
