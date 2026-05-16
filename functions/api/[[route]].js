@@ -342,7 +342,7 @@ export async function onRequest(context) {
     if (route === 'kpsc-ocr-receipt' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
-      return await ocrReceipt(env, body);
+      return await ocrReceipt(env, body, DB);
     }
     if (route === 'kpsc-parse-statement' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
@@ -2859,6 +2859,20 @@ async function transcribeAudioWithDiarization(env, request) {
   return ok({ transcript, utterances, speakerCount: speakerNums.length, speakers: speakerNums });
 }
 
+// Returns the OpenAI API key — prefers the Cloudflare env var (OPENAI_API_KEY),
+// falls back to the value stored in DB settings (ai_openai_key) so that keys
+// entered via the Settings → AI Provider Keys UI work without a redeploy.
+async function resolveOpenAiKey(env, DB) {
+  const envKey = String(env?.OPENAI_API_KEY || '').trim();
+  if (envKey) return envKey;
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='ai_openai_key'`).first();
+    return row?.value ? String(row.value).trim() : '';
+  } catch (_) {
+    return '';
+  }
+}
+
 async function ocrHandwrittenNotes(env, data, DB) {
   const imageBase64 = String(data?.imageBase64 || '').trim();
   const mimeType = String(data?.mimeType || 'image/jpeg').trim();
@@ -2871,7 +2885,7 @@ async function ocrHandwrittenNotes(env, data, DB) {
     if (sr?.value) ocrModel = String(sr.value).trim();
   } catch (_) {}
 
-  const openaiKey = String(env.OPENAI_API_KEY || '').trim();
+  const openaiKey = await resolveOpenAiKey(env, DB);
   if (openaiKey) {
     try {
       const resp = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -2897,13 +2911,13 @@ async function ocrHandwrittenNotes(env, data, DB) {
     } catch (_) {}
   }
 
-  return ok({ transcript: '', method: 'none', error: 'No vision-capable AI key is configured. Please configure OPENAI_API_KEY in Cloudflare environment variables to enable OCR.' });
+  return ok({ transcript: '', method: 'none', error: 'No vision-capable AI key is configured. Add your OpenAI API key in Settings → AI Provider Keys.' });
 }
 
 async function transcribeAudioWithWhisper(env, request, DB) {
-  const openaiKey = String(env.OPENAI_API_KEY || '').trim();
+  const openaiKey = await resolveOpenAiKey(env, DB);
   if (!openaiKey) {
-    return ok({ transcript: '', method: 'none', error: 'No transcription key configured. Please set OPENAI_API_KEY in Cloudflare environment variables.' });
+    return ok({ transcript: '', method: 'none', error: 'No transcription key configured. Add your OpenAI API key in Settings → AI Provider Keys.' });
   }
 
   // Read the configured transcription model from settings (defaults to gpt-4o-transcribe).
@@ -2953,12 +2967,12 @@ async function transcribeAudioWithWhisper(env, request, DB) {
   }
 }
 
-async function ocrReceipt(env, data) {
+async function ocrReceipt(env, data, DB) {
   const imageBase64 = String(data?.imageBase64 || '').trim();
   const mimeType = String(data?.mimeType || 'image/jpeg').trim();
   if (!imageBase64) return err('imageBase64 is required', 400);
 
-  const openaiKey = String(env.OPENAI_API_KEY || '').trim();
+  const openaiKey = await resolveOpenAiKey(env, DB);
   if (openaiKey) {
     try {
       const prompt = `You are a receipt OCR assistant. Analyse this receipt image and extract the following fields. Respond ONLY with a JSON object — no prose, no markdown fences.
@@ -3007,7 +3021,7 @@ async function ocrReceipt(env, data) {
     } catch (_) {}
   }
 
-  return ok({ vendor: null, date: null, amount: null, currency: null, reference: null, itemsSummary: null, method: 'none', error: 'No vision-capable AI key is configured. Please configure OPENAI_API_KEY to enable receipt scanning.' });
+  return ok({ vendor: null, date: null, amount: null, currency: null, reference: null, itemsSummary: null, method: 'none', error: 'No vision-capable AI key is configured. Add your OpenAI API key in Settings → AI Provider Keys.' });
 }
 
 async function parseStatementWithAI(env, DB, data) {
