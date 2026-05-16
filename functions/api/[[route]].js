@@ -86,8 +86,29 @@ function cosineSim(a, b) {
 // Convert a JS number array to an ArrayBuffer (Float32 little-endian) for D1 BLOB storage.
 function embeddingToBlob(arr)  { return new Float32Array(arr).buffer; }
 
-// Convert an ArrayBuffer (Float32 little-endian) back to a JS number array.
-function blobToEmbedding(blob) { return Array.from(new Float32Array(blob)); }
+// Convert a D1 BLOB column back to a JS number array.
+// D1 returns BLOB as Uint8Array (not ArrayBuffer), so new Float32Array(uint8array)
+// would reinterpret each byte as a float element (768 items instead of 192).
+// We must extract the underlying buffer first.
+function blobToEmbedding(blob) {
+  if (!blob) return [];
+  let buffer;
+  if (blob instanceof ArrayBuffer) {
+    buffer = blob;
+  } else if (ArrayBuffer.isView(blob)) {
+    // Handles Uint8Array and any other typed-array view D1 might return
+    buffer = blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength);
+  } else if (typeof blob === 'string') {
+    // Safety net: base64-encoded blob (older D1 SDK versions)
+    const binary = atob(blob);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    buffer = bytes.buffer;
+  } else {
+    return [];
+  }
+  return Array.from(new Float32Array(buffer));
+}
 
 function isValidPin(pin) {
   return /^\d{4,6}$/.test(String(pin || ''));
@@ -4065,6 +4086,10 @@ async function voiceIdentify(DB, env, request) {
   let bestMember = null;
   for (const row of enrolled) {
     const storedEmbedding = blobToEmbedding(row.voice_embedding);
+    // Log first row only to help diagnose BLOB type issues without spamming
+    if (bestScore === -1) {
+      console.log(`[voice-id] blob type=${Object.prototype.toString.call(row.voice_embedding)} storedLen=${storedEmbedding.length} queryLen=${queryEmbedding.length}`);
+    }
     const score = cosineSim(queryEmbedding, storedEmbedding);
     if (score > bestScore) {
       bestScore  = score;

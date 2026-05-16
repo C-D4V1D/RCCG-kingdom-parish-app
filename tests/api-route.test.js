@@ -1761,6 +1761,24 @@ test('embeddingToBlob and blobToEmbedding round-trip a 192-float array', () => {
   }
 });
 
+test('blobToEmbedding handles Uint8Array (D1 BLOB return type)', () => {
+  // D1 returns BLOB columns as Uint8Array; new Float32Array(uint8array) would give
+  // 768 elements (one per byte) instead of 192. Verify the fix extracts the buffer.
+  const original = Array.from({ length: 192 }, (_, i) => (i + 1) * 0.005);
+  const buf = embeddingToBlob(original);
+  const asUint8 = new Uint8Array(buf);
+  const restored = blobToEmbedding(asUint8);
+  assert.equal(restored.length, 192, 'Should have 192 floats, not 768 bytes');
+  for (let i = 0; i < restored.length; i++) {
+    assert.ok(Math.abs(restored[i] - original[i]) < 1e-5, `Mismatch at index ${i}`);
+  }
+});
+
+test('blobToEmbedding handles null/undefined gracefully', () => {
+  assert.deepEqual(blobToEmbedding(null), []);
+  assert.deepEqual(blobToEmbedding(undefined), []);
+});
+
 // ── voice-enroll endpoint tests ───────────────────────────────────────
 
 // Helper: build a multipart-like Request with an audio field for enroll/identify tests.
@@ -2021,6 +2039,62 @@ test('voice-identify: one enrolled member with identical embedding returns match
     assert.equal(body.memberName, 'Alice');
     assert.ok(body.score >= 0.99, `Expected score ~1.0, got ${body.score}`);
     assert.equal(body.threshold, 0.50);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('voice-identify: D1 BLOB returned as Uint8Array is decoded correctly (score ~1.0)', async () => {
+  // Regression test: D1 returns BLOB columns as Uint8Array.
+  // Before the fix, new Float32Array(uint8array) gave 768 elements instead of 192,
+  // cosineSim returned -1 due to length mismatch, and no speaker was ever matched.
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (/\/embed$/.test(url)) {
+      return new Response(JSON.stringify({ embedding: MOCK_EMBEDDING_192, duration_s: 3.0, model: 'ecapa' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  // Simulate D1 returning a Uint8Array (the actual runtime behaviour).
+  const storedBuf = embeddingToBlob(MOCK_EMBEDDING_192);
+  const storedUint8 = new Uint8Array(storedBuf);  // <-- this is what D1 actually returns
+
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const st = {
+        _bound: [],
+        bind(...a) { st._bound = a; return st; },
+        async all() {
+          if (/SELECT id, name, voice_embedding FROM kpsc_members WHERE voice_embedding IS NOT NULL/.test(sql)) {
+            return { results: [{ id: 'km1', name: 'Alice', voice_embedding: storedUint8 }] };
+          }
+          throw new Error(`Unexpected all(): ${sql}`);
+        },
+        async first() { throw new Error(`Unexpected first(): ${sql}`); },
+        async run() { return { success: true }; },
+      };
+      return st;
+    }, { role: 'committee_viewer' }),
+  });
+
+  const form = new FormData();
+  form.append('audio', new Blob(['fake-audio'], { type: 'audio/webm' }), 'sample.webm');
+
+  try {
+    const response = await onRequest({
+      request: createMultipartKpscRequest('https://example.com/api/voice-identify', form),
+      env: { DB, VOICE_FP_URL: 'https://voice-fp.example.com', VOICE_FP_TOKEN: 'tok' },
+    });
+    const body = await readJson(response);
+
+    assert.equal(response.status, 200, `Expected 200, got ${response.status}: ${JSON.stringify(body)}`);
+    assert.equal(body.match, true, `Expected match:true but got score=${body.score}`);
+    assert.equal(body.memberId, 'km1');
+    assert.ok(body.score >= 0.99, `Expected score ~1.0, got ${body.score}`);
   } finally {
     globalThis.fetch = originalFetch;
   }
