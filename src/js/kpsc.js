@@ -1329,7 +1329,7 @@ async function voiceIdTriggerForSpeaker(speakerIdx) {
       (data.memberName ? ` member=${data.memberName}` : '')
     );
     if (data._diag) {
-      console.info('[voice-id] diag:', data._diag);
+      console.info('[voice-id] diag:', JSON.stringify(data._diag));
     }
 
     if (!data.match && typeof data.score === 'number' && data.score >= (data.threshold - 0.10)) {
