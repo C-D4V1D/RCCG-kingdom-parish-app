@@ -3620,12 +3620,27 @@ async function autoSaveNow() {
     if (res?.error) {
       setAutoSaveStatus(`Save failed: ${res.error}`, 'error');
     } else {
+      const wasNew = !Draft.meetingId;
       S.activeMeeting = res;
       Draft.meetingId = res.id;
       Draft.pendingId = null; // ID is now committed; subsequent saves will use PUT
       S._isNewMeeting = false;
       persistMeetingUiState();
       setAutoSaveStatus(`Saved · ${fmtClock(new Date())}`, 'ok');
+      // First save: meeting now has a DB id — inject End Meeting button into the
+      // already-rendered action bar so upload-only secretaries can advance the meeting
+      // without a full page re-render (which would discard any file input selections).
+      if (wasNew && res.status === 'draft') {
+        const actBar = document.querySelector('.k-room-actions');
+        if (actBar && !document.getElementById('km-end-meeting-btn')) {
+          const endBtn = document.createElement('button');
+          endBtn.id = 'km-end-meeting-btn';
+          endBtn.className = 'kbtn kbtn-amber';
+          endBtn.setAttribute('onclick', 'Kpsc.endMeeting(this)');
+          endBtn.textContent = '🔒 End Meeting';
+          actBar.appendChild(endBtn);
+        }
+      }
     }
   } catch {
     setAutoSaveStatus('Offline — will retry on next change', 'error');
