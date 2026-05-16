@@ -3230,13 +3230,13 @@ function renderReviewPanel(m) {
   }
 
   // Inline editable review panel.
-  const resolutions = m.resolutions || [];
-  const actionItems = m.actionItems || [];
   const policyFlags = m.policyFlags || [];
   return `
     <div class="k-review-panel" id="kr-panel">
-      <h4 class="k-sub-title" style="margin-top:0">✍️ Review & Correct AI Draft</h4>
-      <p class="k-review-hint">AI output is a draft. Confirm approvals, vote wording, owners, deadlines, and the final minutes text before approving.</p>
+      <h4 class="k-sub-title" style="margin-top:0">✍️ Review &amp; Correct Minutes Draft</h4>
+      <p class="k-review-hint">Read through the AI-generated draft below. Edit the text directly, or describe any corrections in the notes box and let AI apply them for you.</p>
+
+      <div class="k-review-step-label">Step 1 — Summaries</div>
       <div class="k-form-group">
         <label class="k-label">Short Summary</label>
         <textarea class="k-input k-review-textarea" id="kr-summary-short">${esc(m.summaryShort || '')}</textarea>
@@ -3245,61 +3245,39 @@ function renderReviewPanel(m) {
         <label class="k-label">Detailed Summary</label>
         <textarea class="k-input k-review-textarea" id="kr-summary-long">${esc(m.summaryLong || '')}</textarea>
       </div>
-      <div class="k-form-group">
-        <label class="k-label">Minutes Markdown</label>
-        <textarea class="k-input k-review-minutes" id="kr-minutes">${esc(m.minutesMarkdown || '')}</textarea>
-      </div>
-      <div class="k-form-group">
-        <label class="k-label">Markdown Preview (read-only)</label>
-        <div class="k-minutes-body" style="border:1.5px solid #e0e0e0;border-radius:8px;padding:12px;background:#fafafa;font-size:13px">${minutesHtml(m.minutesMarkdown || '')}</div>
+
+      <div class="k-review-step-label">Step 2 — Minutes Draft</div>
+      <div class="k-review-minutes-wrap">
+        <div class="k-form-group" style="flex:1;min-width:0">
+          <label class="k-label">Edit Minutes</label>
+          <textarea class="k-input k-review-minutes" id="kr-minutes" oninput="Kpsc.updateMinutesPreview()">${esc(m.minutesMarkdown || '')}</textarea>
+        </div>
+        <div class="k-form-group" style="flex:1;min-width:0">
+          <label class="k-label">Live Preview</label>
+          <div class="k-minutes-body k-review-preview" id="kr-minutes-preview">${minutesHtml(m.minutesMarkdown || '')}</div>
+        </div>
       </div>
 
-      <h4 class="k-sub-title">Resolutions</h4>
-      <div class="k-review-list" id="kr-resolutions">
-        ${resolutions.length ? resolutions.map((r, i) => `
-          <div class="k-review-row" data-idx="${i}">
-            <label class="k-label">Resolution Text</label>
-            <textarea class="k-input" id="kr-res-text-${i}">${esc(r.text || '')}</textarea>
-            <div class="k-review-grid">
-              <input class="k-input" id="kr-res-type-${i}" value="${esc(r.resolutionType || '')}" placeholder="Type e.g. financial_approval" />
-              <input class="k-input" id="kr-res-category-${i}" value="${esc(r.category || '')}" placeholder="Category" />
-              <select class="k-input" id="kr-res-approved-${i}">
-                <option value="null" ${r.approved === null || r.approved === undefined ? 'selected' : ''}>Needs confirmation</option>
-                <option value="true" ${r.approved === true ? 'selected' : ''}>Approved</option>
-                <option value="false" ${r.approved === false ? 'selected' : ''}>Rejected</option>
-              </select>
-              <input class="k-input" id="kr-res-amount-${i}" value="${esc(r.amount || '')}" placeholder="Amount" />
-            </div>
-            <input class="k-input" id="kr-res-vote-${i}" value="${esc(r.voteSummary || '')}" placeholder="Vote summary" />
-          </div>`).join('') : '<div class="k-empty">No resolutions detected. Add them in the minutes text if needed.</div>'}
+      <div class="k-review-step-label">Step 3 — AI Corrections (optional)</div>
+      <div class="k-form-group">
+        <label class="k-label">Secretary's Notes to AI</label>
+        <textarea class="k-input k-review-textarea" id="kr-secretary-notes" placeholder="Describe any corrections in plain English, e.g. &quot;Bro. Emmanuel proposed the motion, not the Chairman. Change the welfare amount to ₦25,000. Remove the paragraph about building plans.&quot;"></textarea>
+        <p class="k-review-hint" style="margin-top:4px">AI will integrate these notes into the minutes when you click <strong>AI Proofread</strong> below. Notes are not saved — they are used once and cleared.</p>
       </div>
-
-      <h4 class="k-sub-title">Action Items</h4>
-      <div class="k-review-list" id="kr-actions">
-        ${actionItems.length ? actionItems.map((a, i) => `
-          <div class="k-review-row" data-idx="${i}">
-            <label class="k-label">Task</label>
-            <textarea class="k-input" id="kr-act-task-${i}">${esc(a.task || '')}</textarea>
-            <div class="k-review-grid">
-              <input class="k-input" id="kr-act-assignee-${i}" value="${esc(a.assignee || '')}" placeholder="Owner" />
-              <input class="k-input" id="kr-act-due-${i}" value="${esc(a.dueDate || '')}" placeholder="Deadline" />
-              <select class="k-input" id="kr-act-status-${i}">
-                ${['pending','in_progress','done','cancelled'].map(st => `<option value="${st}" ${(a.status || 'pending') === st ? 'selected' : ''}>${st.replace('_', ' ')}</option>`).join('')}
-              </select>
-            </div>
-          </div>`).join('') : '<div class="k-empty">No action items detected. Add them in the minutes text if needed.</div>'}
+      <div style="margin-bottom:14px">
+        <button class="kbtn kbtn-ai" onclick="Kpsc.aiProofreadMinutes(this)">🤖 AI Proofread &amp; Apply Notes</button>
       </div>
 
       ${policyFlags.length ? `
-      <h4 class="k-sub-title">Policy Flags (read-only)</h4>
-      <div class="k-flags-list">
+      <div class="k-review-step-label">Policy Flags</div>
+      <div class="k-flags-list" style="margin-bottom:14px">
         ${policyFlags.map(f => `
           <div class="k-flag k-flag-${f.severity || 'info'}">
             <strong>${esc(f.type)}</strong> — ${esc(f.message)}
           </div>`).join('')}
       </div>` : ''}
 
-      <button class="kbtn kbtn-primary" style="margin-top:8px" onclick="Kpsc.saveMinutesReview(this)">Approve &amp; Save Review</button>
+      <button class="kbtn kbtn-primary" style="margin-top:4px" onclick="Kpsc.saveMinutesReview(this)">✓ Approve &amp; Save</button>
     </div>`;
 }
 
@@ -3409,8 +3387,8 @@ async function saveMinutesReview(btn) {
       summaryShort: document.getElementById('kr-summary-short')?.value || '',
       summaryLong: document.getElementById('kr-summary-long')?.value || '',
       minutesMarkdown: document.getElementById('kr-minutes')?.value || '',
-      resolutions: readReviewResolutions(),
-      actionItems: readReviewActions(),
+      resolutions: S.activeMeeting.resolutions || [],
+      actionItems: S.activeMeeting.actionItems || [],
       policyFlags: S.activeMeeting.policyFlags || [],
       reviewedAt,
       reviewedBy: S.user?.name || '',
@@ -3447,6 +3425,39 @@ function openReviewEditor() {
     panel.outerHTML = renderReviewPanel(S.activeMeeting);
   } else if (S.activeMeeting) {
     renderPage('meeting');
+  }
+}
+
+function updateMinutesPreview() {
+  const md = document.getElementById('kr-minutes')?.value || '';
+  const preview = document.getElementById('kr-minutes-preview');
+  if (preview) preview.innerHTML = minutesHtml(md);
+}
+
+async function aiProofreadMinutes(btn) {
+  if (!S.activeMeeting) return;
+  const minutesMarkdown = document.getElementById('kr-minutes')?.value || '';
+  const secretaryNotes  = (document.getElementById('kr-secretary-notes')?.value || '').trim();
+  if (!minutesMarkdown.trim()) { showToast('No minutes draft to proofread.', 'error'); return; }
+
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'AI is proofreading…';
+  try {
+    const res = await apiPost(`ai-secretary-meetings/${S.activeMeeting.id}/ai-proofread`, {
+      minutesMarkdown,
+      secretaryNotes,
+    });
+    if (res.error) { showToast(res.error, 'error'); return; }
+    document.getElementById('kr-minutes').value = res.minutesMarkdown;
+    updateMinutesPreview();
+    if (secretaryNotes) document.getElementById('kr-secretary-notes').value = '';
+    showToast(secretaryNotes ? 'Notes integrated and minutes polished ✓' : 'Minutes polished ✓', 'success');
+  } catch {
+    showToast('AI proofread failed. Check your connection.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
   }
 }
 

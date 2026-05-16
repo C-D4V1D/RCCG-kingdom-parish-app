@@ -510,6 +510,11 @@ export async function onRequest(context) {
         if (auth instanceof Response) return auth;
         return await translateAiSecretaryMeetingPlainEnglish(DB, env, param);
       }
+      if (method === 'POST' && parts[2] === 'ai-proofread') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await proofreadAiSecretaryMinutes(DB, env, param, body);
+      }
       if (method === 'POST' && parts[2] === 'public-link') {
         const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
         if (auth instanceof Response) return auth;
@@ -3900,6 +3905,77 @@ ${minutesMarkdown}`;
   }
 
   return ok({ plainEnglish, fromCache: false });
+}
+
+async function proofreadAiSecretaryMinutes(DB, env, id, body) {
+  const minutesMarkdown = String(body?.minutesMarkdown || '').trim();
+  const secretaryNotes  = String(body?.secretaryNotes  || '').trim();
+  if (!minutesMarkdown) return err('No minutes provided', 400);
+
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-v4-flash';
+  try {
+    const { results: sr } = await DB.prepare(
+      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
+    ).all();
+    const s = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
+    deepseekKey  = s.ai_deepseek_key  ? String(s.ai_deepseek_key).trim()  : '';
+    deepseekModel = s.ai_deepseek_model ? String(s.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
+  } catch (_) {}
+
+  if (!deepseekKey) return err('AI key not configured', 503);
+
+  const notesBlock = secretaryNotes
+    ? `\n\nSecretary's corrections to apply:\n${secretaryNotes}`
+    : '';
+
+  const prompt = `You are a skilled church committee secretary. Proofread and refine the following meeting minutes draft.${secretaryNotes ? " First, carefully apply all the secretary's corrections listed below." : ''}
+
+Rules:
+- Write in clear, professional but natural English that does not read as AI-generated
+- Preserve every fact, name, resolution, naira amount, date, and vote outcome exactly
+- Fix grammar, awkward phrasing, and formatting inconsistencies
+- Maintain the existing Markdown structure (headings, bold, lists)
+- Do NOT add, invent, or remove any factual content beyond the specified corrections
+- Return only the improved minutes Markdown, with no preamble or commentary
+${notesBlock}
+
+Current minutes draft:
+${minutesMarkdown}`;
+
+  let improved = '';
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({
+        model: deepseekModel,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.25,
+        max_tokens: 3500,
+      }),
+    });
+    if (!resp.ok) {
+      const errBody = await resp.json().catch(() => ({}));
+      return err(`DeepSeek API error: ${errBody.error?.message || resp.status}`, 502);
+    }
+    const data = await resp.json();
+    improved = (data.choices?.[0]?.message?.content || '').trim();
+    if (!improved) return err('AI returned empty response', 502);
+  } catch (e) {
+    return err(`AI proofread failed: ${e.message}`, 502);
+  }
+
+  // Persist improved markdown and clear stale plain-English cache
+  try {
+    await DB.prepare(
+      `UPDATE ai_secretary_meetings SET minutes_markdown=?, plain_english_minutes_md='' WHERE id=?`
+    ).bind(improved, id).run();
+  } catch (_) {}
+
+  return ok({ minutesMarkdown: improved });
 }
 
 async function createRealtimeTranscriptionToken(env) {
