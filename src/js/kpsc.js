@@ -143,6 +143,7 @@ const Rec = {
   _voiceIdConsecutive503: 0,    // internal counter for 503 detection
   voiceIdLastAttempt: new Map(),// speakerIdx → ms timestamp of last attempt (debounce)
   voiceIdInFlight: new Set(),   // speakerIdx currently being processed (lock)
+  voiceIdHistory: new Map(),    // speakerIdx → [{memberId, memberName, score}] (last 3, for EMA smoothing)
 };
 
 // ── DIARIZER (Deepgram speaker diarization) ────────────────────────
@@ -595,6 +596,7 @@ async function recStart(btn) {
     Rec._voiceIdConsecutive503 = 0;
     Rec.voiceIdLastAttempt     = new Map();
     Rec.voiceIdInFlight        = new Set();
+    Rec.voiceIdHistory         = new Map();
     // Reset per-speaker identification state for the new session.
     Diarizer.speakerRanges   = new Map();
 
@@ -1365,6 +1367,45 @@ async function voiceIdTriggerForSpeaker(speakerIdx) {
       (data.reason ? ` reason=${data.reason}` : '') +
       (data.memberName ? ` member=${data.memberName}` : '')
     );
+
+    // ── Score smoothing across attempts ────────────────────────────────
+    // Record the result, then check if a member has been the top match
+    // consistently across multiple recent attempts with a mean score that
+    // crosses the threshold. This handles the common case where individual
+    // attempts hover at 0.40-0.48 (just below 0.50) due to acoustic noise:
+    // requiring consistency keeps false-positives low while letting the
+    // identification trigger faster on a coherent signal.
+    const HIST_MAX = 3;
+    const hist = Rec.voiceIdHistory.get(speakerIdx) || [];
+    if (data.memberId && typeof data.score === 'number' && Number.isFinite(data.score)) {
+      hist.push({ memberId: data.memberId, memberName: data.memberName, score: data.score });
+      while (hist.length > HIST_MAX) hist.shift();
+      Rec.voiceIdHistory.set(speakerIdx, hist);
+    }
+    if (!data.match && hist.length >= 2 && typeof data.threshold === 'number') {
+      // Bucket the recent attempts by memberId and find the best mean.
+      const byMember = new Map();
+      for (const h of hist) {
+        if (!byMember.has(h.memberId)) byMember.set(h.memberId, []);
+        byMember.get(h.memberId).push(h);
+      }
+      for (const [, attempts] of byMember) {
+        if (attempts.length < 2) continue;  // require consistency
+        const mean = attempts.reduce((a, h) => a + h.score, 0) / attempts.length;
+        if (mean >= data.threshold) {
+          console.info(
+            `[voice-id] speaker ${speakerIdx} → SMOOTHED match: ` +
+            `mean ${mean.toFixed(3)} across ${attempts.length} attempts (≥${data.threshold})` +
+            ` member=${attempts[0].memberName}`
+          );
+          data.match      = true;
+          data.memberId   = attempts[0].memberId;
+          data.memberName = attempts[0].memberName;
+          data.score      = mean;
+          break;
+        }
+      }
+    }
 
     if (!data.match && typeof data.score === 'number' && data.score >= (data.threshold - 0.10)) {
       // Close-but-no-match: surface a hint so user can re-enroll or check mic.
@@ -3770,11 +3811,19 @@ async function saveMembers(btn) {
 const VFP_RECORD_DURATION_SEC = 5;
 
 // State for the VF-3 enrollment modal recording.
+// Uses raw PCM capture via AudioWorklet (same as the meeting room) so the
+// enrollment signal matches identification — no Opus encoding in between.
+// This eliminates the cross-codec cosine-similarity drop (~0.10-0.15)
+// documented in ECAPA-TDNN research.
 const VfpRec = {
   stream: null,
-  mediaRecorder: null,
-  chunks: [],
-  blob: null,
+  audioCtx: null,
+  sourceNode: null,
+  workletNode: null,
+  pcmChunks: [],          // Float32Array[] of raw mic samples at source rate
+  sourceSampleRate: 0,    // AudioContext.sampleRate at capture time
+  recording: false,
+  blob: null,             // final 16 kHz WAV ready for upload
   blobUrl: null,
   timer: null,
   elapsed: 0,
@@ -3784,9 +3833,18 @@ const VfpRec = {
 function vfpCleanup() {
   clearInterval(VfpRec.timer);
   VfpRec.timer = null;
+  VfpRec.recording = false;
+  try { VfpRec.workletNode?.disconnect(); } catch (_) { /* noop */ }
+  try { VfpRec.sourceNode?.disconnect(); } catch (_) { /* noop */ }
+  VfpRec.workletNode = null;
+  VfpRec.sourceNode  = null;
   if (VfpRec.stream) { VfpRec.stream.getTracks().forEach(t => t.stop()); VfpRec.stream = null; }
+  if (VfpRec.audioCtx && VfpRec.audioCtx.state !== 'closed') {
+    VfpRec.audioCtx.close().catch(() => {});
+  }
+  VfpRec.audioCtx = null;
   if (VfpRec.blobUrl) { URL.revokeObjectURL(VfpRec.blobUrl); VfpRec.blobUrl = null; }
-  VfpRec.chunks = [];
+  VfpRec.pcmChunks = [];
   VfpRec.blob = null;
   VfpRec.elapsed = 0;
 }
@@ -3850,34 +3908,43 @@ async function startVoiceFpRecording() {
   const submitBtn  = document.getElementById('k-vfp-submit-btn');
   const statusEl   = document.getElementById('k-vfp-status');
   const recUi      = document.getElementById('k-vfp-recording-ui');
-  const playbackUi = document.getElementById('k-vfp-playback-ui');
 
   if (recordBtn) { recordBtn.disabled = true; recordBtn.textContent = '🎙 Recording…'; }
   if (submitBtn) submitBtn.disabled = true;
   vfpCleanup();
 
   try {
-    VfpRec.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    VfpRec.chunks = [];
-    VfpRec.elapsed = 0;
+    VfpRec.stream    = await navigator.mediaDevices.getUserMedia({ audio: true });
+    VfpRec.pcmChunks = [];
+    VfpRec.elapsed   = 0;
+    VfpRec.recording = true;
 
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus'
-      : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
-    VfpRec.mediaRecorder = new MediaRecorder(VfpRec.stream, mimeType ? { mimeType } : undefined);
-    VfpRec.mediaRecorder.ondataavailable = e => { if (e.data.size > 0) VfpRec.chunks.push(e.data); };
-    VfpRec.mediaRecorder.onstop = () => {
-      VfpRec.blob = new Blob(VfpRec.chunks, { type: mimeType || 'audio/webm' });
-      if (VfpRec.blobUrl) URL.revokeObjectURL(VfpRec.blobUrl);
-      VfpRec.blobUrl = URL.createObjectURL(VfpRec.blob);
-      const audio = document.getElementById('k-vfp-audio');
-      if (audio) { audio.src = VfpRec.blobUrl; }
-      if (playbackUi) playbackUi.style.display = '';
-      if (recUi) recUi.style.display = 'none';
-      if (recordBtn) { recordBtn.disabled = false; recordBtn.textContent = '🔄 Re-record'; }
-      if (submitBtn) submitBtn.disabled = false;
+    // Set up an AudioContext + AudioWorklet that streams raw Float32 PCM
+    // chunks to us. Identical pipeline to the meeting-room diarizer, so
+    // enrolled embeddings live in the same acoustic space as live ones.
+    VfpRec.audioCtx = new AudioContext();
+    if (VfpRec.audioCtx.state === 'suspended') {
+      try { await VfpRec.audioCtx.resume(); } catch (_) { /* noop */ }
+    }
+    VfpRec.sourceSampleRate = VfpRec.audioCtx.sampleRate;
+
+    const workletBlob = new Blob([DG_WORKLET_CODE], { type: 'application/javascript' });
+    const workletUrl  = URL.createObjectURL(workletBlob);
+    try {
+      await VfpRec.audioCtx.audioWorklet.addModule(workletUrl);
+    } finally {
+      URL.revokeObjectURL(workletUrl);
+    }
+
+    VfpRec.sourceNode  = VfpRec.audioCtx.createMediaStreamSource(VfpRec.stream);
+    VfpRec.workletNode = new AudioWorkletNode(VfpRec.audioCtx, 'pcm-capture-processor');
+    VfpRec.workletNode.port.onmessage = (e) => {
+      if (VfpRec.recording && e.data && e.data.length) {
+        VfpRec.pcmChunks.push(new Float32Array(e.data));
+      }
     };
-    VfpRec.mediaRecorder.start();
+    VfpRec.sourceNode.connect(VfpRec.workletNode);
+    VfpRec.workletNode.connect(VfpRec.audioCtx.createMediaStreamDestination());
 
     if (recUi) recUi.style.display = '';
     const countdownEl = document.getElementById('k-vfp-countdown');
@@ -3890,11 +3957,7 @@ async function startVoiceFpRecording() {
       if (VfpRec.elapsed >= VFP_RECORD_DURATION_SEC) {
         clearInterval(VfpRec.timer);
         VfpRec.timer = null;
-        if (VfpRec.mediaRecorder && VfpRec.mediaRecorder.state !== 'inactive') {
-          VfpRec.mediaRecorder.stop();
-        }
-        VfpRec.stream.getTracks().forEach(t => t.stop());
-        VfpRec.stream = null;
+        finishVoiceFpRecording();
       }
     }, 1000);
 
@@ -3902,6 +3965,62 @@ async function startVoiceFpRecording() {
     if (statusEl) statusEl.innerHTML = `<div class="k-enroll-error">❌ Microphone error: ${esc(e.message)}</div>`;
     if (recordBtn) { recordBtn.disabled = false; recordBtn.textContent = '🔴 Record 5 seconds'; }
   }
+}
+
+// Concatenate captured Float32 → resample to 16 kHz → encode as 16-bit WAV.
+// Matches the identification path exactly, so enrollment and identification
+// produce ECAPA-TDNN embeddings in the same acoustic space.
+function finishVoiceFpRecording() {
+  VfpRec.recording = false;
+
+  const recordBtn  = document.getElementById('k-vfp-record-btn');
+  const submitBtn  = document.getElementById('k-vfp-submit-btn');
+  const playbackUi = document.getElementById('k-vfp-playback-ui');
+  const recUi      = document.getElementById('k-vfp-recording-ui');
+  const statusEl   = document.getElementById('k-vfp-status');
+
+  const totalLen = VfpRec.pcmChunks.reduce((a, c) => a + c.length, 0);
+  if (totalLen === 0) {
+    if (statusEl) statusEl.innerHTML = `<div class="k-enroll-error">❌ No audio captured. Please check your microphone and retry.</div>`;
+    if (recordBtn) { recordBtn.disabled = false; recordBtn.textContent = '🔴 Record 5 seconds'; }
+    vfpCleanup();
+    return;
+  }
+
+  const float32 = new Float32Array(totalLen);
+  let pos = 0;
+  for (const c of VfpRec.pcmChunks) { float32.set(c, pos); pos += c.length; }
+
+  const fromRate  = VfpRec.sourceSampleRate || DEFAULT_PCM_SAMPLE_RATE;
+  const resampled = resampleTo16k(float32, fromRate);
+  const int16     = new Int16Array(resampled.length);
+  for (let i = 0; i < resampled.length; i++) {
+    int16[i] = Math.max(-32768, Math.min(32767, Math.round(resampled[i] * 32767)));
+  }
+  const wavBuf = pcm16ToWav(int16, 16000);
+  VfpRec.blob  = new Blob([wavBuf], { type: 'audio/wav' });
+  if (VfpRec.blobUrl) URL.revokeObjectURL(VfpRec.blobUrl);
+  VfpRec.blobUrl = URL.createObjectURL(VfpRec.blob);
+
+  const audio = document.getElementById('k-vfp-audio');
+  if (audio) audio.src = VfpRec.blobUrl;
+
+  // Tear down the capture pipeline but keep the encoded blob for playback + submit.
+  try { VfpRec.workletNode?.disconnect(); } catch (_) { /* noop */ }
+  try { VfpRec.sourceNode?.disconnect(); } catch (_) { /* noop */ }
+  VfpRec.workletNode = null;
+  VfpRec.sourceNode  = null;
+  if (VfpRec.stream) { VfpRec.stream.getTracks().forEach(t => t.stop()); VfpRec.stream = null; }
+  if (VfpRec.audioCtx && VfpRec.audioCtx.state !== 'closed') {
+    VfpRec.audioCtx.close().catch(() => {});
+  }
+  VfpRec.audioCtx = null;
+  VfpRec.pcmChunks = [];
+
+  if (playbackUi) playbackUi.style.display = '';
+  if (recUi) recUi.style.display = 'none';
+  if (recordBtn) { recordBtn.disabled = false; recordBtn.textContent = '🔄 Re-record'; }
+  if (submitBtn) submitBtn.disabled = false;
 }
 
 async function submitVoiceFpEnrollment() {
@@ -3926,9 +4045,9 @@ async function submitVoiceFpEnrollment() {
     const syncData = await syncRes.json();
     if (syncData.error) throw new Error(syncData.error);
 
-    // Step 2: enroll the audio.
+    // Step 2: enroll the audio (16 kHz WAV — same codec as identification).
     const form = new FormData();
-    form.append('audio', VfpRec.blob, 'enrollment.webm');
+    form.append('audio', VfpRec.blob, 'enrollment.wav');
     const enrollRes = await fetch(`${API}/voice-enroll/${encodeURIComponent(vid)}`, {
       method: 'POST',
       headers: { ...kpscSessionHeader() },
