@@ -547,7 +547,7 @@ test('AI secretary keeps deterministic governance flags when provider omits them
     assert.ok(body.policyFlags.some(f => f.type === 'meeting_not_ended'));
     assert.ok(body.policyFlags.some(f => f.type === 'threshold_review'));
     assert.ok(body.policyFlags.some(f => f.type === 'prompt_injection_risk'));
-    assert.match(body.minutesMarkdown, /Mandatory Governance Checks/);
+    assert.match(body.minutesMarkdown, /## Policy Checks/);
     assert.match(body.minutesMarkdown, /Missing required representative group/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -701,6 +701,7 @@ test('AI secretary classifies resolutions and extracts action owners/deadlines',
   assert.equal(response.status, 200);
   assert.match(body.minutesMarkdown, /Agenda \/ Matters Discussed/);
   assert.match(body.minutesMarkdown, /Executive Summary/);
+  assert.doesNotMatch(body.minutesMarkdown, /^\s*(Generated|Timestamp)\s*:/im);
   assert.ok(body.resolutions.some(r => r.resolutionType === 'financial_approval' && r.amount === '250000'));
   assert.ok(body.resolutions.some(r => r.resolutionType === 'rejection' && r.approved === false));
   assert.ok(body.resolutions.some(r => r.resolutionType === 'amendment'));
@@ -722,6 +723,8 @@ test('AI secretary meeting update persists reviewed minutes corrections', async 
     resolutions_json: '[]',
     action_items_json: '[]',
     policy_flags_json: '[]',
+    reviewed_at: '',
+    reviewed_by: '',
     created_by: 'Secretary',
     started_at: '',
     ended_at: '',
@@ -749,7 +752,9 @@ test('AI secretary meeting update persists reviewed minutes corrections', async 
               minutes_markdown: statement._bound[9],
               resolutions_json: statement._bound[10],
               action_items_json: statement._bound[11],
-              policy_flags_json: statement._bound[12]
+              policy_flags_json: statement._bound[12],
+              reviewed_at: statement._bound[14],
+              reviewed_by: statement._bound[15]
             };
           }
           return { success: true };
@@ -770,7 +775,9 @@ test('AI secretary meeting update persists reviewed minutes corrections', async 
         minutesMarkdown: '# Reviewed Minutes',
         resolutions: [{ text: 'Reviewed approval', resolutionType: 'approval', category: 'financial', approved: true, amount: '50000' }],
         actionItems: [{ task: 'Treasurer to file receipt', assignee: 'Treasurer', dueDate: 'Friday', status: 'pending' }],
-        policyFlags: [{ type: 'manual_review', severity: 'medium', message: 'Secretary reviewed.' }]
+        policyFlags: [{ type: 'manual_review', severity: 'medium', message: 'Secretary reviewed.' }],
+        reviewedAt: '2026-05-14T10:00:00.000Z',
+        reviewedBy: 'General Secretary',
       }),
     }),
     env: { DB }
@@ -783,6 +790,8 @@ test('AI secretary meeting update persists reviewed minutes corrections', async 
   assert.equal(body.resolutions[0].amount, '50000');
   assert.equal(body.actionItems[0].assignee, 'Treasurer');
   assert.equal(body.policyFlags[0].type, 'manual_review');
+  assert.equal(body.reviewedAt, '2026-05-14T10:00:00.000Z');
+  assert.equal(body.reviewedBy, 'General Secretary');
 });
 
 test('settings api-status reports configured realtime API keys without exposing secrets', async () => {
@@ -918,6 +927,109 @@ test('kpsc mutating endpoint with allowed role returns success', async () => {
   });
   const response = await onRequest({ request: req, env: { DB } });
   assert.equal(response.status, 200);
+});
+
+test('kpsc mutating endpoint with it_admin role returns success', async () => {
+  const sessionToken = 'ks-it-admin-token';
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) {
+          statement._bound = args;
+          return statement;
+        },
+        async first() {
+          if (/SELECT account_id, expires_at FROM kpsc_sessions/.test(sql)) {
+            return { account_id: 'ka-it', expires_at: Date.now() + 3600_000 };
+          }
+          if (/SELECT id, name, role, status FROM kpsc_accounts/.test(sql)) {
+            return { id: 'ka-it', name: 'IT Admin', role: 'it_admin', status: 'active' };
+          }
+          if (/SELECT \* FROM kpsc_projects WHERE id=\?/.test(sql)) {
+            return { id: 'kprj1', title: 'Router Upgrade', description: '', estimated_cost: 50000, actual_cost: 0, status: 'proposed', priority: 'medium', target_date: '', source_meeting_id: '', source: 'manual', notes: '', created_by: 'IT Admin', created_at: '', updated_at: '' };
+          }
+          return null;
+        },
+        async run() { return { success: true }; },
+        async all() { return { results: [] }; }
+      };
+      return statement;
+    }
+  });
+  const sessionHeader = JSON.stringify({ accountId: 'ka-it', token: sessionToken });
+  const req = new Request('https://example.com/api/kpsc-projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': sessionHeader },
+    body: JSON.stringify({ title: 'Router Upgrade', estimatedCost: 50000 }),
+  });
+  const response = await onRequest({ request: req, env: { DB } });
+  assert.equal(response.status, 200);
+});
+
+test('public link endpoint returns public URL only when review is approved', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT id,title,meeting_date,minutes_markdown,reviewed_at,public_share_token,deleted_at/.test(sql)) {
+            return {
+              id: 'AIM-PUB-1',
+              title: 'KPSC Public Meeting',
+              meeting_date: '2026-05-15',
+              minutes_markdown: '# Minutes',
+              reviewed_at: '2026-05-15T09:00:00.000Z',
+              public_share_token: '',
+              deleted_at: '',
+            };
+          }
+          return null;
+        },
+        async run() { return { success: true }; }
+      };
+      return statement;
+    })
+  });
+
+  const req = createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-PUB-1/public-link', 'POST', {});
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  assert.match(body.publicUrl, /^https:\/\/example\.com\/kpsc\/minutes\/\?token=/);
+});
+
+test('public link endpoint rejects unapproved minutes', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(function(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT id,title,meeting_date,minutes_markdown,reviewed_at,public_share_token,deleted_at/.test(sql)) {
+            return {
+              id: 'AIM-PUB-2',
+              title: 'KPSC Draft Meeting',
+              meeting_date: '2026-05-15',
+              minutes_markdown: '# Minutes',
+              reviewed_at: '',
+              public_share_token: '',
+              deleted_at: '',
+            };
+          }
+          return null;
+        }
+      };
+      return statement;
+    })
+  });
+
+  const req = createKpscRequest('https://example.com/api/ai-secretary-meetings/AIM-PUB-2/public-link', 'POST', {});
+  const response = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(response);
+  assert.equal(response.status, 412);
+  assert.match(body.error, /review must be approved/i);
 });
 
 // ── KPSC account deletion tests ───────────────────────────────────────

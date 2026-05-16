@@ -1388,11 +1388,11 @@ function canAccess(page) {
 }
 
 function canManagePartners() {
-  return ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer'].includes(String(S.user?.role || '').toLowerCase());
+  return ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'it_admin'].includes(String(S.user?.role || '').toLowerCase());
 }
 
 function canManageFinance() {
-  return ['acting_chairman', 'financial_secretary', 'treasurer'].includes(String(S.user?.role || '').toLowerCase());
+  return ['acting_chairman', 'financial_secretary', 'treasurer', 'it_admin'].includes(String(S.user?.role || '').toLowerCase());
 }
 
 function applyNavPermissions() {
@@ -2751,9 +2751,9 @@ async function renderMeetingRoom(main) {
           <summary class="k-collapsible-hdr">
             <span class="k-collapsible-title">📷 Also upload handwritten notes (optional)</span>
           </summary>
-          <p class="k-hint" style="margin-top:8px">Take a photo of your handwritten notes. The AI will extract the text and append it to the transcript above.</p>
-          <label class="k-label">Photo of Handwritten Notes</label>
-          <input id="km-rec-notes-photo" type="file" accept="image/*" capture="environment" class="k-input" style="padding:8px" onchange="Kpsc.previewRecNotesPhoto(this)" />
+          <p class="k-hint" style="margin-top:8px">Upload one or more photos of your handwritten notes from camera or gallery. The AI will extract the text and append it to the transcript above.</p>
+          <label class="k-label" for="km-rec-notes-photo">Photos of Handwritten Notes</label>
+          <input id="km-rec-notes-photo" type="file" accept="image/*" multiple class="k-input" style="padding:8px" onchange="Kpsc.previewRecNotesPhoto(this)" />
           <div id="km-rec-notes-preview" style="margin-top:12px"></div>
           <div id="km-rec-notes-status"></div>
         </details>` : ''}
@@ -2775,17 +2775,17 @@ async function renderMeetingRoom(main) {
             <summary class="k-collapsible-hdr">
               <span class="k-collapsible-title">📷 Also attach handwritten notes (optional)</span>
             </summary>
-            <p class="k-hint" style="margin-top:8px">If you also have handwritten notes, upload a photo here. Both the audio transcript and the notes will be combined before processing.</p>
-            <label class="k-label">Photo of Handwritten Notes</label>
-            <input id="km-audio-notes-photo" type="file" accept="image/*" capture="environment" class="k-input" style="padding:8px" onchange="Kpsc.previewAudioNotesPhoto(this)" />
+            <p class="k-hint" style="margin-top:8px">If you also have handwritten notes, upload one or more photos here from camera or gallery. Both the audio transcript and the notes will be combined before processing.</p>
+            <label class="k-label" for="km-audio-notes-photo">Photos of Handwritten Notes</label>
+            <input id="km-audio-notes-photo" type="file" accept="image/*" multiple class="k-input" style="padding:8px" onchange="Kpsc.previewAudioNotesPhoto(this)" />
             <div id="km-audio-notes-preview" style="margin-top:12px"></div>
           </details>
         </div>
         <div id="km-upload-panel" style="${S._meetingTab !== 'upload' ? 'display:none' : ''}">
           <div class="k-section">
-            <p class="k-hint">Take a photo of your handwritten meeting notes. The AI will transcribe the handwriting and use it to generate meeting minutes.</p>
-            <label class="k-label">Upload Photo of Handwritten Notes</label>
-            <input id="km-notes-photo" type="file" accept="image/*" capture="environment" class="k-input" style="padding:8px" onchange="Kpsc.previewNotesPhoto(this)" />
+            <p class="k-hint">Upload one or more photos of your handwritten meeting notes from camera or gallery. The AI will transcribe the handwriting and use it to generate meeting minutes.</p>
+            <label class="k-label" for="km-notes-photo">Upload Photos of Handwritten Notes</label>
+            <input id="km-notes-photo" type="file" accept="image/*" multiple class="k-input" style="padding:8px" onchange="Kpsc.previewNotesPhoto(this)" />
             <div id="km-notes-preview" style="margin-top:12px"></div>
           </div>
         </div>
@@ -2920,7 +2920,6 @@ function renderReviewPanel(m) {
   const resolutions = m.resolutions || [];
   const actionItems = m.actionItems || [];
   const policyFlags = m.policyFlags || [];
-  const suggestedProjects = m.suggestedProjects || [];
   return `
     <div class="k-review-panel" id="kr-panel">
       <h4 class="k-sub-title" style="margin-top:0">✍️ Review & Correct AI Draft</h4>
@@ -2987,29 +2986,6 @@ function renderReviewPanel(m) {
           </div>`).join('')}
       </div>` : ''}
 
-      <h4 class="k-sub-title">🏗️ Suggested Projects</h4>
-      <p class="k-review-hint">AI detected the following project proposals in this meeting. Review each one — tick the checkbox to approve and save it to the Project Tracker, or leave it unticked to discard.</p>
-      <div class="k-review-list" id="kr-projects">
-        ${suggestedProjects.length ? suggestedProjects.map((p, i) => `
-          <div class="k-review-row" data-idx="${i}" style="border-left:3px solid var(--warning,#f59e0b)">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-              <input type="checkbox" id="kr-proj-approve-${i}" checked style="width:16px;height:16px;cursor:pointer" />
-              <label for="kr-proj-approve-${i}" class="k-label" style="margin:0;font-weight:700;cursor:pointer">Approve this project</label>
-            </div>
-            <label class="k-label">Project Title</label>
-            <input class="k-input" id="kr-proj-title-${i}" value="${esc(p.title || '')}" placeholder="Project title" />
-            <label class="k-label" style="margin-top:6px">Description</label>
-            <textarea class="k-input" id="kr-proj-desc-${i}" rows="2">${esc(p.description || '')}</textarea>
-            <div class="k-review-grid" style="margin-top:6px">
-              <input class="k-input" id="kr-proj-cost-${i}" value="${esc(String(p.estimatedCost || '0'))}" placeholder="Estimated cost (₦)" type="number" min="0" />
-              <select class="k-input" id="kr-proj-priority-${i}">
-                ${['low','medium','high'].map(v => `<option value="${v}" ${(p.priority || 'medium') === v ? 'selected' : ''}>${v.charAt(0).toUpperCase()+v.slice(1)}</option>`).join('')}
-              </select>
-              <input class="k-input" id="kr-proj-date-${i}" value="${esc(p.targetDate || '')}" placeholder="Target date (YYYY-MM-DD)" type="date" />
-            </div>
-          </div>`).join('') : '<div class="k-empty">No project proposals detected by the AI in this meeting. You can add projects manually from the Projects page.</div>'}
-      </div>
-
       <button class="kbtn kbtn-primary" style="margin-top:8px" onclick="Kpsc.saveMinutesReview(this)">Approve &amp; Save Review</button>
     </div>`;
 }
@@ -3019,6 +2995,8 @@ function renderMinutesPanel(m) {
   const resolutions = m.resolutions || [];
   const actionItems = m.actionItems || [];
   const policyFlags = m.policyFlags || [];
+  const reviewed = !!m.reviewedAt;
+  const reviewGuard = reviewed ? '' : 'disabled title="Approve and save the review before this action is available."';
 
   return `
     <section class="k-section k-minutes-section">
@@ -3029,10 +3007,11 @@ function renderMinutesPanel(m) {
       ${renderReviewPanel(m)}
 
       <div class="k-room-actions" style="margin-bottom:12px;margin-top:16px">
-        <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')">🖨 Print / Save PDF</button>
-        <button class="kbtn kbtn-sm" onclick="Kpsc.shareMinutesWhatsApp('${m.id}')">📲 Share via WhatsApp</button>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${reviewGuard}>🖨 Print / Save PDF</button>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.shareMinutesWhatsApp('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${reviewGuard}>📲 Share via WhatsApp</button>
         <button class="kbtn kbtn-sm" id="btn-plain-english-${m.id}" onclick="Kpsc.togglePlainEnglish('${m.id}')" data-plain-english="false">📖 Read in plain English</button>
       </div>
+      ${reviewed ? '' : '<p class="k-hint" style="margin-top:-6px;margin-bottom:12px">Approve and save the review first before printing or sharing minutes.</p>'}
 
       <h4 class="k-sub-title">Minutes Preview</h4>
       <div class="k-minutes-body" id="minutes-body-${m.id}">${minutesHtml(m.minutesMarkdown)}</div>
@@ -3103,27 +3082,13 @@ function readReviewActions() {
   })).filter(a => a.task);
 }
 
-function readReviewProjects() {
-  const projects = S.activeMeeting?.suggestedProjects || [];
-  return projects.map((p, i) => {
-    const approved = document.getElementById(`kr-proj-approve-${i}`)?.checked;
-    if (!approved) return null;
-    return {
-      title: document.getElementById(`kr-proj-title-${i}`)?.value.trim() || p.title || '',
-      description: document.getElementById(`kr-proj-desc-${i}`)?.value.trim() || p.description || '',
-      estimatedCost: Number(document.getElementById(`kr-proj-cost-${i}`)?.value || 0),
-      priority: document.getElementById(`kr-proj-priority-${i}`)?.value || p.priority || 'medium',
-      targetDate: document.getElementById(`kr-proj-date-${i}`)?.value.trim() || p.targetDate || '',
-    };
-  }).filter(Boolean);
-}
-
 async function saveMinutesReview(btn) {
   if (!S.activeMeeting) return;
   const orig = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'Saving…';
   try {
+    const reviewedAt = new Date().toISOString();
     const res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
       summaryShort: document.getElementById('kr-summary-short')?.value || '',
       summaryLong: document.getElementById('kr-summary-long')?.value || '',
@@ -3131,32 +3096,11 @@ async function saveMinutesReview(btn) {
       resolutions: readReviewResolutions(),
       actionItems: readReviewActions(),
       policyFlags: S.activeMeeting.policyFlags || [],
+      reviewedAt,
+      reviewedBy: S.user?.name || '',
     });
     if (res.error) { showToast(res.error, 'error'); return; }
-
-    // Save approved suggested projects to the Project Tracker.
-    const approvedProjects = readReviewProjects();
-    if (approvedProjects.length) {
-      const projRes = await apiPost('kpsc-approve-meeting-projects', {
-        meetingId: S.activeMeeting.id,
-        projects: approvedProjects,
-        createdBy: S.user?.name || '',
-      });
-      if (projRes?.saved > 0) {
-        showToast(`${projRes.saved} project(s) added to the Project Tracker.`, 'success');
-        // Refresh projects list in state.
-        const projList = await apiGet('kpsc-projects');
-        if (Array.isArray(projList)) S.projects = projList;
-      }
-    }
-
-    // Mark as reviewed locally (no DB column — tracked in client state).
-    S.activeMeeting = {
-      ...res,
-      suggestedProjects: [],       // cleared after approval
-      reviewedAt: new Date().toISOString(),
-      reviewedBy: S.user?.name || '',
-    };
+    S.activeMeeting = { ...res };
     S._reviewEditMode = false;
     // Re-render only the review panel in-place.
     const panel = document.getElementById('kr-panel');
@@ -3311,10 +3255,10 @@ async function deleteMeetingDraft(id, event) {
   const m = S.meetings.find(x => x.id === id);
   if (!m) return;
   const role = String(S.user?.role || '').toLowerCase();
-  const isChair = role === 'acting_chairman' || role === 'general_secretary';
+  const isChair = role === 'acting_chairman' || role === 'general_secretary' || role === 'it_admin';
   const isAuthor = !!S.user?.name && S.user.name === (m.createdBy || '');
   if (!isChair && !isAuthor) {
-    showToast('Only the meeting author, Acting Chairman, or General Secretary can delete this draft.', 'error');
+    showToast('Only the meeting author, Acting Chairman, General Secretary, or IT Administrator can delete this draft.', 'error');
     return;
   }
   if (!confirm(`Delete "${m.title || 'this meeting'}"? It will be hidden from the list.`)) return;
@@ -5804,7 +5748,7 @@ async function resetRolePermissions() {
 
 function canManageProjects() {
   const role = String(S.user?.role || '').toLowerCase();
-  return ['acting_chairman','general_secretary','financial_secretary','treasurer'].includes(role);
+  return ['acting_chairman','general_secretary','financial_secretary','treasurer','it_admin'].includes(role);
 }
 
 const PROJECT_STATUSES = [
@@ -6035,61 +5979,91 @@ function setMeetingTab(tab) {
   });
 }
 
-async function previewNotesPhoto(input) {
-  const file = input.files?.[0];
-  if (!file) return;
-  const preview = document.getElementById('km-notes-preview');
-  if (!preview) return;
+function getSelectedImageFiles(input) {
+  return Array.from(input?.files || []).filter(isImageFile);
+}
 
-  const reader = new FileReader();
-  reader.onload = async (e) => {
-    const dataUrl = e.target.result;
-    preview.innerHTML = `
-      <img src="${dataUrl}" style="max-width:100%;border-radius:10px;border:1px solid var(--border);margin-bottom:12px" alt="Notes preview" />
-      <div class="k-room-actions">
-        <button class="kbtn kbtn-primary" onclick="Kpsc.ocrNotesPhoto()">🤖 Extract Text with AI</button>
-      </div>
-      <div id="km-ocr-status"></div>`;
+function isImageFile(file) {
+  return /^image\//i.test(file?.type || '') || /\.(png|jpe?g|webp|gif|bmp)$/i.test(file?.name || '');
+}
+
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(String(e.target?.result || ''));
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function renderNotesPreview(previewEl, files, actionHandler, statusElementId = 'km-ocr-status') {
+  if (!previewEl) return;
+  if (!files.length) { previewEl.innerHTML = ''; return; }
+  const dataUrls = await Promise.all(files.map(readFileAsDataURL));
+  const total = dataUrls.length;
+  const thumbs = dataUrls.map((url, idx) => `
+    <img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)" alt="Handwritten notes photo ${idx + 1} of ${total}" />
+  `).join('');
+  const cols = files.length > 1 ? 'grid-template-columns:repeat(auto-fit,minmax(140px,1fr));' : '';
+  previewEl.innerHTML = `
+    <div style="display:grid;${cols}gap:10px;margin-bottom:12px">${thumbs}</div>
+    <div class="k-room-actions">
+      <button class="kbtn kbtn-primary" onclick="${actionHandler}">🤖 Extract Text with AI</button>
+    </div>
+    <div id="${statusElementId}"></div>`;
+}
+
+async function ocrNotesImages(files) {
+  const items = await Promise.all(files.map(async (file) => {
+    try {
+      const dataUrl = await readFileAsDataURL(file);
+      const base64 = dataUrl.split(',')[1] || '';
+      if (!base64) return { transcript: '', error: `Failed to read ${file.name || 'image'}` };
+      const mimeType = file.type || 'image/jpeg';
+      const res = await apiPost('kpsc-ocr-notes', { imageBase64: base64, mimeType });
+      return { transcript: String(res?.transcript || '').trim(), error: res?.error ? String(res.error) : '' };
+    } catch (e) {
+      return { transcript: '', error: e?.message || 'OCR failed' };
+    }
+  }));
+  const transcripts = items.map(i => i.transcript).filter(Boolean);
+  const errors = items.map(i => i.error).filter(Boolean);
+  return {
+    transcript: transcripts.join('\n\n'),
+    successCount: transcripts.length,
+    totalCount: files.length,
+    errors,
   };
-  reader.readAsDataURL(file);
+}
+
+async function previewNotesPhoto(input) {
+  const preview = document.getElementById('km-notes-preview');
+  const files = getSelectedImageFiles(input);
+  if (!files.length) { if (preview) preview.innerHTML = ''; return; }
+  await renderNotesPreview(preview, files, 'Kpsc.ocrNotesPhoto()', 'km-ocr-status');
 }
 
 async function ocrNotesPhoto() {
   const input = document.getElementById('km-notes-photo');
-  const file = input?.files?.[0];
-  if (!file) return;
+  const files = getSelectedImageFiles(input);
+  if (!files.length) return;
   const status = document.getElementById('km-ocr-status');
-  if (status) status.innerHTML = '<div class="k-loading" style="padding:16px">🤖 Analysing handwriting…</div>';
+  if (status) status.innerHTML = `<div class="k-loading" style="padding:16px">🤖 Analysing ${files.length} handwritten note photo${files.length === 1 ? '' : 's'}…</div>`;
 
   try {
-    const base64 = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = e => resolve(e.target.result.split(',')[1]);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-
-    const mimeType = file.type || 'image/jpeg';
-    const res = await apiPost('kpsc-ocr-notes', { imageBase64: base64, mimeType });
-
-    if (res?.error) {
-      if (status) status.innerHTML = `<div class="k-error-box">${esc(res.error)}</div>`;
+    const ocr = await ocrNotesImages(files);
+    if (!ocr.transcript) {
+      const details = ocr.errors.length ? ` Details: ${ocr.errors.slice(0, 3).join(' | ')}` : '';
+      if (status) status.innerHTML = `<div class="k-error-box">${esc((ocr.errors[0] || 'No text could be extracted. Please ensure the images are clear.') + details)}</div>`;
       return;
     }
-
-    if (!res.transcript) {
-      if (status) status.innerHTML = `<div class="k-error-box">${esc(res.error || 'No text could be extracted. Please ensure the image is clear.')}</div>`;
-      return;
-    }
-
     const transcriptEl = document.getElementById('km-transcript');
     if (transcriptEl) {
-      transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + res.transcript;
+      transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + ocr.transcript;
       showToast('Handwritten notes transcribed! Review and adjust before processing.', 'success');
     }
-
-    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Text extracted successfully. See the transcript section above.</div>`;
-
+    const note = ocr.errors.length ? ` (${ocr.errors.length} photo${ocr.errors.length === 1 ? '' : 's'} skipped due to OCR errors.)` : '';
+    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Extracted text from ${ocr.successCount} of ${ocr.totalCount} photo${ocr.totalCount === 1 ? '' : 's'}${note}</div>`;
     setMeetingTab('record');
   } catch (e) {
     if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
@@ -6155,7 +6129,7 @@ async function transcribeAudioFile() {
   // ── Standard (non-diarized) path ──────────────────────────────
 
   const notesInput = document.getElementById('km-audio-notes-photo');
-  const notesFile  = notesInput?.files?.[0];
+  const notesFiles = getSelectedImageFiles(notesInput);
 
   try {
     // Build audio formData for multipart POST (no Content-Type header — browser sets boundary)
@@ -6170,23 +6144,7 @@ async function transcribeAudioFile() {
       body: audioForm,
     }).then(r => r.json());
 
-    let ocrPromise = Promise.resolve(null);
-    let ocrError = null;
-    if (notesFile) {
-      ocrPromise = new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = async (e) => {
-          try {
-            const base64 = e.target.result.split(',')[1];
-            const mimeType = notesFile.type || 'image/jpeg';
-            const res = await apiPost('kpsc-ocr-notes', { imageBase64: base64, mimeType });
-            resolve(res);
-          } catch (err) { ocrError = err.message; resolve(null); }
-        };
-        reader.onerror = () => { ocrError = 'Failed to read the notes photo.'; resolve(null); };
-        reader.readAsDataURL(notesFile);
-      });
-    }
+    const ocrPromise = notesFiles.length ? ocrNotesImages(notesFiles) : Promise.resolve(null);
 
     const [audioRes, ocrRes] = await Promise.all([audioPromise, ocrPromise]);
 
@@ -6203,8 +6161,8 @@ async function transcribeAudioFile() {
       return;
     }
 
-    const ocrText = (ocrRes?.transcript || '').trim();
-    const ocrFailed = notesFile && !ocrText;
+    const ocrText = String(ocrRes?.transcript || '').trim();
+    const ocrFailed = notesFiles.length > 0 && !ocrText;
     const combined = ocrText
       ? `${audioText}${NOTES_SEPARATOR}${ocrText}`
       : audioText;
@@ -6215,11 +6173,13 @@ async function transcribeAudioFile() {
     }
 
     let successMsg = ocrText
-      ? '✓ Audio transcribed and handwritten notes combined successfully.'
+      ? `✓ Audio transcribed and handwritten notes combined successfully (${ocrRes.successCount}/${ocrRes.totalCount} photo${ocrRes.totalCount === 1 ? '' : 's'}).`
       : '✓ Audio transcribed successfully.';
     if (ocrFailed) {
-      const reason = ocrError || ocrRes?.error || 'could not extract text from the notes photo';
+      const reason = ocrRes?.errors?.[0] || 'could not extract text from any notes photo';
       successMsg += ` (Note: handwritten notes were skipped — ${esc(reason)}.)`;
+    } else if (ocrRes?.errors?.length) {
+      successMsg += ` (${ocrRes.errors.length} photo${ocrRes.errors.length === 1 ? '' : 's'} skipped due to OCR errors.)`;
     }
     if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">${successMsg} Review the transcript before generating minutes.</div>`;
     showToast(ocrText ? 'Audio and notes combined! Review before processing.' : 'Audio transcribed! Review before processing.', 'success');
@@ -6230,71 +6190,49 @@ async function transcribeAudioFile() {
 }
 
 async function previewAudioNotesPhoto(input) {
-  const file = input.files?.[0];
   const preview = document.getElementById('km-audio-notes-preview');
+  const files = getSelectedImageFiles(input);
   if (!preview) return;
-  if (!file) { preview.innerHTML = ''; return; }
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    preview.innerHTML = `<img src="${e.target.result}" style="max-width:100%;border-radius:10px;border:1px solid var(--border)" alt="Notes preview" />`;
-  };
-  reader.readAsDataURL(file);
+  if (!files.length) { preview.innerHTML = ''; return; }
+  const dataUrls = await Promise.all(files.map(readFileAsDataURL));
+  const total = dataUrls.length;
+  const thumbs = dataUrls.map((url, idx) => `<img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)" alt="Audio notes photo ${idx + 1} of ${total}" />`).join('');
+  const cols = files.length > 1 ? 'grid-template-columns:repeat(auto-fit,minmax(140px,1fr));' : '';
+  preview.innerHTML = `<div style="display:grid;${cols}gap:10px">${thumbs}</div>`;
 }
 
 // ── MEETING LIVE RECORDING — also upload notes ────────────────────
 
 async function previewRecNotesPhoto(input) {
-  const file = input.files?.[0];
   const preview = document.getElementById('km-rec-notes-preview');
+  const files = getSelectedImageFiles(input);
   if (!preview) return;
-  if (!file) { preview.innerHTML = ''; return; }
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    preview.innerHTML = `
-      <img src="${e.target.result}" style="max-width:100%;border-radius:10px;border:1px solid var(--border);margin-bottom:12px" alt="Notes preview" />
-      <div class="k-room-actions">
-        <button class="kbtn kbtn-primary" onclick="Kpsc.ocrRecNotesPhoto()">🤖 Extract Text with AI</button>
-      </div>
-      <div id="km-rec-notes-status"></div>`;
-  };
-  reader.readAsDataURL(file);
+  if (!files.length) { preview.innerHTML = ''; return; }
+  await renderNotesPreview(preview, files, 'Kpsc.ocrRecNotesPhoto()', 'km-rec-notes-status');
 }
 
 async function ocrRecNotesPhoto() {
   const input = document.getElementById('km-rec-notes-photo');
-  const file  = input?.files?.[0];
-  if (!file) return;
+  const files = getSelectedImageFiles(input);
+  if (!files.length) return;
   const status = document.getElementById('km-rec-notes-status');
-  if (status) status.innerHTML = '<div class="k-loading" style="padding:16px">🤖 Analysing handwriting…</div>';
+  if (status) status.innerHTML = `<div class="k-loading" style="padding:16px">🤖 Analysing ${files.length} handwritten note photo${files.length === 1 ? '' : 's'}…</div>`;
 
   try {
-    const base64 = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = e => resolve(e.target.result.split(',')[1]);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-
-    const mimeType = file.type || 'image/jpeg';
-    const res = await apiPost('kpsc-ocr-notes', { imageBase64: base64, mimeType });
-
-    if (res?.error) {
-      if (status) status.innerHTML = `<div class="k-error-box">${esc(res.error)}</div>`;
-      return;
-    }
-
-    if (!res.transcript) {
-      if (status) status.innerHTML = `<div class="k-error-box">No text could be extracted. Please ensure the image is clear.</div>`;
+    const ocr = await ocrNotesImages(files);
+    if (!ocr.transcript) {
+      const details = ocr.errors.length ? ` Details: ${ocr.errors.slice(0, 3).join(' | ')}` : '';
+      if (status) status.innerHTML = `<div class="k-error-box">${esc((ocr.errors[0] || 'No text could be extracted. Please ensure the images are clear.') + details)}</div>`;
       return;
     }
 
     const transcriptEl = document.getElementById('km-transcript');
     if (transcriptEl) {
-      transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + res.transcript;
+      transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + ocr.transcript;
       showToast('Handwritten notes appended to transcript!', 'success');
     }
-
-    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Text extracted and appended to the transcript above.</div>`;
+    const note = ocr.errors.length ? ` (${ocr.errors.length} photo${ocr.errors.length === 1 ? '' : 's'} skipped due to OCR errors.)` : '';
+    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Extracted text from ${ocr.successCount} of ${ocr.totalCount} photo${ocr.totalCount === 1 ? '' : 's'}${note} and appended to the transcript above.</div>`;
   } catch (e) {
     if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
   }
@@ -6465,6 +6403,7 @@ function renderReconciliationResult(out, res) {
 function printMinutes(meetingId) {
   const meeting = S.activeMeeting;
   if (!meeting?.minutesMarkdown) { showToast('No minutes to print. Process the meeting first.', 'warn'); return; }
+  if (!meeting?.reviewedAt) { showToast('Approve and save the review before printing.', 'warn'); return; }
 
   function mdToHtml(md) {
     // Escape HTML entities first to prevent XSS before applying markdown transforms
@@ -6503,8 +6442,7 @@ function printMinutes(meetingId) {
 </head>
 <body>
   <div class="header-meta">
-    <strong>RCCG Kingdom Parish — Kingdom Parish Stewardship Committee</strong><br>
-    Generated: ${new Date().toLocaleDateString('en-NG', { day:'numeric', month:'long', year:'numeric' })}
+    <strong>RCCG Kingdom Parish — Kingdom Parish Stewardship Committee</strong>
   </div>
   ${mdToHtml(meeting.minutesMarkdown)}
   <script>window.onload = () => { window.print(); }<\/script>
@@ -6521,10 +6459,16 @@ function printMinutes(meetingId) {
 async function shareMinutesWhatsApp(meetingId) {
   const meeting = S.activeMeeting;
   if (!meeting?.minutesMarkdown) { showToast('No minutes to share. Process the meeting first.', 'warn'); return; }
+  if (!meeting?.reviewedAt) { showToast('Approve and save the review before sharing.', 'warn'); return; }
   const date    = meeting.meetingDate || '';
   const summary = meeting.summaryShort || 'Please find the meeting minutes in the KPSC portal.';
   const resCount = (meeting.resolutions || []).length;
   const actCount = (meeting.actionItems || []).length;
+  const linkRes = await apiPost(`ai-secretary-meetings/${meetingId}/public-link`, {});
+  if (linkRes?.error || !linkRes?.publicUrl) {
+    showToast(linkRes?.error || 'Failed to generate public minutes link.', 'error');
+    return;
+  }
 
   const msg = [
     `*KPSC Meeting Minutes — ${meeting.title || 'KPSC Meeting'}*`,
@@ -6534,8 +6478,9 @@ async function shareMinutesWhatsApp(meetingId) {
     '',
     resCount ? `📋 Resolutions: ${resCount}` : '',
     actCount ? `✅ Action Items: ${actCount}` : '',
+    `🔗 Public minutes: ${linkRes.publicUrl}`,
     '',
-    'Full minutes are available in the Kingdom Parish Stewardship Committee portal. Please log in to review and access the complete document.',
+    'Full minutes are available at the public link above.',
   ].filter(line => line !== undefined && line !== null).join('\n').trim();
 
   const waUrl = `https://wa.me/?text=${encodeURIComponent(msg)}`;
