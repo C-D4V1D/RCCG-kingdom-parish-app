@@ -4168,6 +4168,8 @@ ${minutesMarkdown}`;
 async function proofreadAiSecretaryMinutes(DB, env, id, body) {
   const minutesMarkdown = String(body?.minutesMarkdown || '').trim();
   const secretaryNotes  = String(body?.secretaryNotes  || '').trim();
+  const summaryShort    = String(body?.summaryShort    || '').trim();
+  const summaryLong     = String(body?.summaryLong     || '').trim();
   if (!minutesMarkdown) return err('No minutes provided', 400);
 
   let deepseekKey = '';
@@ -4186,24 +4188,37 @@ async function proofreadAiSecretaryMinutes(DB, env, id, body) {
   if (!deepseekKey) return err('AI key not configured', 503);
 
   const notesBlock = secretaryNotes
-    ? `\n\nSecretary's corrections to apply:\n${secretaryNotes}`
+    ? `\nSecretary's corrections to apply first:\n${secretaryNotes}\n`
     : '';
 
-  const prompt = `You are a skilled church committee secretary. Proofread and refine the following meeting minutes draft.${secretaryNotes ? " First, carefully apply all the secretary's corrections listed below." : ''}
-
-Rules:
-- Write in clear, professional but natural English that does not read as AI-generated
-- Preserve every fact, name, resolution, naira amount, date, and vote outcome exactly
-- Fix grammar, awkward phrasing, and formatting inconsistencies
-- Maintain the existing Markdown structure (headings, bold, lists)
-- Do NOT add, invent, or remove any factual content beyond the specified corrections
-- Return only the improved minutes Markdown, with no preamble or commentary
+  const prompt = `You are an expert meeting minutes writer. Correct transcription errors intelligently based on context. Produce structured minutes with sections: Attendance, Opening, Matters Arising from Previous Minutes, Agenda and Matters Discussed, Decisions and Resolutions, Action Items (with owners & deadlines), Any Other Business, Closing and Adjournment. Use simple language.
 ${notesBlock}
+Rules:
+- Preserve every name, resolution, naira amount, date, and vote outcome exactly
+- Fix grammar, awkward phrasing, and formatting inconsistencies
+- Maintain the existing Markdown structure (headings, numbered lists, bold text)
+- Do NOT invent or remove factual content beyond the specified corrections
+- Use formal but readable church committee language throughout
+
+Also review the two summaries provided below. Update them ONLY if the corrections significantly changed the meeting content — for example, a decision was corrected, attendance changed, or a major agenda item was added or removed. For minor corrections (grammar or phrasing only), return the summaries exactly as provided.
+
+Return ONLY a valid JSON object. No markdown fences. No text before or after the JSON:
+{
+  "minutesMarkdown": "<the full corrected minutes in Markdown>",
+  "summaryShort": "<1–2 sentence summary — copy the original exactly if changes are minor>",
+  "summaryLong": "<detailed narrative summary — copy the original exactly if changes are minor>"
+}
 
 Current minutes draft:
-${minutesMarkdown}`;
+${minutesMarkdown}
 
-  let improved = '';
+Current short summary:
+${summaryShort || '(none)'}
+
+Current detailed summary:
+${summaryLong || '(none)'}`;
+
+  let parsed;
   try {
     const resp = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
@@ -4212,7 +4227,7 @@ ${minutesMarkdown}`;
         model: deepseekModel,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.25,
-        max_tokens: 3500,
+        max_tokens: 5000,
       }),
     });
     if (!resp.ok) {
@@ -4220,20 +4235,26 @@ ${minutesMarkdown}`;
       return err(`DeepSeek API error: ${errBody.error?.message || resp.status}`, 502);
     }
     const data = await resp.json();
-    improved = (data.choices?.[0]?.message?.content || '').trim();
-    if (!improved) return err('AI returned empty response', 502);
+    const raw = (data.choices?.[0]?.message?.content || '').trim();
+    if (!raw) return err('AI returned empty response', 502);
+    parsed = parseAiSecretaryJson(raw);
+    if (!parsed?.minutesMarkdown) return err('AI returned unexpected format', 502);
   } catch (e) {
     return err(`AI proofread failed: ${e.message}`, 502);
   }
 
-  // Persist improved markdown and clear stale plain-English cache
+  const improvedMarkdown = String(parsed.minutesMarkdown || '').trim();
+  const improvedShort    = String(parsed.summaryShort    || summaryShort).trim();
+  const improvedLong     = String(parsed.summaryLong     || summaryLong).trim();
+
+  // Persist improved content and clear stale plain-English cache
   try {
     await DB.prepare(
-      `UPDATE ai_secretary_meetings SET minutes_markdown=?, plain_english_minutes_md='' WHERE id=?`
-    ).bind(improved, id).run();
+      `UPDATE ai_secretary_meetings SET minutes_markdown=?, summary_short=?, summary_long=?, plain_english_minutes_md='' WHERE id=?`
+    ).bind(improvedMarkdown, improvedShort, improvedLong, id).run();
   } catch (_) {}
 
-  return ok({ minutesMarkdown: improved });
+  return ok({ minutesMarkdown: improvedMarkdown, summaryShort: improvedShort, summaryLong: improvedLong });
 }
 
 async function createRealtimeTranscriptionToken(env) {

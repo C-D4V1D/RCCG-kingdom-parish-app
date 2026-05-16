@@ -3056,8 +3056,6 @@ async function renderMeetingRoom(main) {
           </div>
           <div class="lt-list" id="kpsc-live-transcript-list"></div>
         </div>
-        <label class="k-label k-transcript-label" for="km-transcript">Saved Transcript / Notes</label>
-        <textarea class="k-input k-textarea" id="km-transcript" placeholder="Type notes here, or start the meeting to append live transcript entries…" ${!isEditable ? 'readonly' : ''}>${esc(m?.transcriptText || '')}</textarea>
         ${isEditable ? `
         <details class="k-collapsible" style="margin-top:16px">
           <summary class="k-collapsible-hdr">
@@ -3103,6 +3101,11 @@ async function renderMeetingRoom(main) {
             <div id="km-notes-preview" style="margin-top:12px"></div>
           </div>` : ''}
         </div>
+
+      <div style="margin-top:16px">
+        <label class="k-label k-transcript-label" for="km-transcript">Saved Transcript / Notes</label>
+        <textarea class="k-input k-textarea" id="km-transcript" placeholder="Transcript from all inputs appears here — live recording, uploaded audio, or handwritten notes. You may also type directly." ${!isEditable ? 'readonly' : ''}>${esc(m?.transcriptText || '')}</textarea>
+      </div>
       </section>
 
       <div class="k-room-actions">
@@ -3450,6 +3453,8 @@ async function aiProofreadMinutes(btn) {
   if (!S.activeMeeting) return;
   const minutesMarkdown = document.getElementById('kr-minutes')?.value || '';
   const secretaryNotes  = (document.getElementById('kr-secretary-notes')?.value || '').trim();
+  const summaryShort    = document.getElementById('kr-summary-short')?.value || '';
+  const summaryLong     = document.getElementById('kr-summary-long')?.value  || '';
   if (!minutesMarkdown.trim()) { showToast('No minutes draft to proofread.', 'error'); return; }
 
   const orig = btn.textContent;
@@ -3457,14 +3462,27 @@ async function aiProofreadMinutes(btn) {
   btn.textContent = 'AI is proofreading…';
   try {
     const res = await apiPost(`ai-secretary-meetings/${S.activeMeeting.id}/ai-proofread`, {
-      minutesMarkdown,
-      secretaryNotes,
+      minutesMarkdown, secretaryNotes, summaryShort, summaryLong,
     });
     if (res.error) { showToast(res.error, 'error'); return; }
     document.getElementById('kr-minutes').value = res.minutesMarkdown;
     updateMinutesPreview();
     if (secretaryNotes) document.getElementById('kr-secretary-notes').value = '';
-    showToast(secretaryNotes ? 'Notes integrated and minutes polished ✓' : 'Minutes polished ✓', 'success');
+    let summariesChanged = false;
+    if (res.summaryShort && res.summaryShort !== summaryShort) {
+      document.getElementById('kr-summary-short').value = res.summaryShort;
+      if (S.activeMeeting) S.activeMeeting.summaryShort = res.summaryShort;
+      summariesChanged = true;
+    }
+    if (res.summaryLong && res.summaryLong !== summaryLong) {
+      document.getElementById('kr-summary-long').value = res.summaryLong;
+      if (S.activeMeeting) S.activeMeeting.summaryLong = res.summaryLong;
+      summariesChanged = true;
+    }
+    const msg = secretaryNotes
+      ? (summariesChanged ? 'Notes integrated — minutes and summaries updated ✓' : 'Notes integrated and minutes polished ✓')
+      : (summariesChanged ? 'Minutes and summaries updated ✓' : 'Minutes polished ✓');
+    showToast(msg, 'success');
   } catch {
     showToast('AI proofread failed. Check your connection.', 'error');
   } finally {
