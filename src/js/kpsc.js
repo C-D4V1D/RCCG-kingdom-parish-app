@@ -786,6 +786,9 @@ function recStop() {
   Rec.status = 'stopped';
   Rec.realtimeStatus = 'offline';
   recRenderUI();
+  // Immediately flush the transcript to the server so any last-second entries
+  // are not lost if the user refreshes or navigates before the debounced autosave fires.
+  autoSaveNow();
 }
 
 function recReset() {
@@ -2896,6 +2899,7 @@ async function renderMeetingRoom(main) {
           <div class="lt-list" id="kpsc-live-transcript-list"></div>
         </div>
         <label class="k-label k-transcript-label" for="km-transcript">Saved Transcript / Notes</label>
+        <p class="k-hint" style="margin-bottom:6px">This is the source text used to generate minutes. Live recording entries are automatically appended here and saved to the server.</p>
         <textarea class="k-input k-textarea" id="km-transcript" placeholder="Type notes here, or start the meeting to append live transcript entries…" ${!isEditable ? 'readonly' : ''}>${esc(m?.transcriptText || '')}</textarea>
         ${isEditable ? `
         <details class="k-collapsible" style="margin-top:16px">
@@ -2948,7 +2952,7 @@ async function renderMeetingRoom(main) {
         ${isEditable ? `<span id="km-autosave-status" class="k-autosave-status" aria-live="polite"></span>` : ''}
         ${(status === 'draft' || status === 'recording') && (m ? canDeleteMeeting(m) : S._isNewMeeting) ? `<button class="kbtn kbtn-ghost kbtn-sm" style="color:var(--danger,#dc2626)" onclick="Kpsc.discardMeetingFromRoom()">🗑 Discard</button>` : ''}
         ${status === 'recording' ? `<button id="km-end-meeting-btn" class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
-        ${status === 'ended' ? `<button class="kbtn kbtn-primary" onclick="Kpsc.processMeeting(this)">✨ Generate Minutes</button>` : ''}
+        ${status === 'ended' ? `<div style="flex:1"><button class="kbtn kbtn-primary" onclick="Kpsc.processMeeting(this)">✨ Generate Minutes</button><p class="k-hint" style="margin-top:6px">Minutes are generated from the Saved Transcript above. For best results ensure the transcript captures all key decisions and actions discussed.</p></div>` : ''}
         ${isProcessed ? `<div class="k-processed-note">✅ Minutes have been generated and finalised.</div>` : ''}
       </div>
 
