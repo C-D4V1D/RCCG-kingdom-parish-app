@@ -138,9 +138,11 @@ const Rec = {
   _nameIndex: null,         // lazily built Map<token, [{groupKey, idx, fullName}]>
   _nameIndexSize: -1,       // S.members.length when _nameIndex was last built
   // VF-4 voice-identification state
-  speakerIdentified: new Set(), // speaker indices for which we've already attempted voice-id
+  speakerIdentified: new Set(), // speaker indices for which a positive match was confirmed
   voiceIdServiceDown: false,    // true after 2 consecutive 503s from /api/voice-identify
   _voiceIdConsecutive503: 0,    // internal counter for 503 detection
+  voiceIdLastAttempt: new Map(),// speakerIdx → ms timestamp of last attempt (debounce)
+  voiceIdInFlight: new Set(),   // speakerIdx currently being processed (lock)
 };
 
 // ── DIARIZER (Deepgram speaker diarization) ────────────────────────
@@ -331,15 +333,16 @@ function recRenderTranscript() {
 function recAppendTranscript(text, itemId = '', speaker = null) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) return;
-  // Track newly seen speakers so the identity panel can be updated.
-  if (speaker !== null && speaker !== undefined && !Rec.seenSpeakers.has(speaker)) {
-    Rec.seenSpeakers.add(speaker);
-    recRenderSpeakerMap();
-    // VF-4: attempt voice fingerprint identification for this new speaker.
-    if (!Rec.speakerIdentified.has(speaker) && !Rec.voiceIdServiceDown && !Rec.speakerMap.has(speaker)) {
-      // Defer by one event loop tick to allow speakerRanges to accumulate.
-      setTimeout(() => voiceIdTriggerForSpeaker(speaker), 0);
+  if (speaker !== null && speaker !== undefined) {
+    // Track newly seen speakers so the identity panel can be updated.
+    if (!Rec.seenSpeakers.has(speaker)) {
+      Rec.seenSpeakers.add(speaker);
+      recRenderSpeakerMap();
     }
+    // VF-4: try voice fingerprint identification on EVERY transcript event.
+    // The function debounces (~once per 4s) and locks against concurrent
+    // requests, so this is safe even with rapid diarizer updates.
+    maybeFireVoiceId(speaker);
   }
   const entry = { itemId, timestamp: recTimestamp(), text: clean, speaker: speaker ?? null };
   Rec.transcriptEntries.push(entry);
@@ -590,6 +593,8 @@ async function recStart(btn) {
     Rec.speakerIdentified      = new Set();
     Rec.voiceIdServiceDown     = false;
     Rec._voiceIdConsecutive503 = 0;
+    Rec.voiceIdLastAttempt     = new Map();
+    Rec.voiceIdInFlight        = new Set();
     // Reset per-speaker identification state for the new session.
     Diarizer.speakerRanges   = new Map();
 
@@ -807,6 +812,8 @@ function recReset() {
   Rec.speakerIdentified      = new Set();
   Rec.voiceIdServiceDown     = false;
   Rec._voiceIdConsecutive503 = 0;
+  Rec.voiceIdLastAttempt     = new Map();
+  Rec.voiceIdInFlight        = new Set();
   Diarizer.status = 'offline';
   Diarizer.reconnectAttempts = 0;
   Diarizer.speakerRanges   = new Map();
@@ -1239,26 +1246,42 @@ function shouldAutoTickFromIdentify(identifyResponse, members) {
 }
 
 /**
- * VF-4 hook: called when a new Deepgram speaker index is first seen.
- * Buffers ~3.5 s of PCM from the ring buffer, encodes as WAV, calls
- * /api/voice-identify, and auto-assigns the speaker if a match is found.
+ * Debounced trigger: fires voiceIdTriggerForSpeaker at most once per 4 seconds
+ * per speaker, and never concurrently for the same speaker. Called on every
+ * transcript event for any unidentified speaker, so once enough audio
+ * accumulates the trigger will succeed.
+ */
+function maybeFireVoiceId(speakerIdx) {
+  if (Rec.voiceIdServiceDown) return;
+  if (Rec.speakerMap.has(speakerIdx)) return;       // manually assigned
+  if (Rec.speakerIdentified.has(speakerIdx)) return; // already matched
+  if (Rec.voiceIdInFlight.has(speakerIdx)) return;   // request in flight
+  const now = Date.now();
+  const last = Rec.voiceIdLastAttempt.get(speakerIdx) || 0;
+  if (now - last < 4000) return;                     // debounce
+  Rec.voiceIdLastAttempt.set(speakerIdx, now);
+  setTimeout(() => voiceIdTriggerForSpeaker(speakerIdx), 0);
+}
+
+/**
+ * VF-4: extract recent PCM for `speakerIdx` from the diarizer ring buffer,
+ * encode as 16 kHz WAV, and call /api/voice-identify. Logs every code path
+ * so failures are never silent. Locks via Rec.voiceIdInFlight to prevent
+ * concurrent calls. Only sets Rec.speakerIdentified on a positive match —
+ * non-matches and insufficient-audio early-exits remain eligible for retry.
  */
 async function voiceIdTriggerForSpeaker(speakerIdx) {
-  // Guard: only attempt once per speaker per session.
-  if (Rec.speakerIdentified.has(speakerIdx)) return;
-  if (Rec.voiceIdServiceDown) return;
-  if (Rec.speakerMap.has(speakerIdx)) return; // already assigned manually
-
-  Rec.speakerIdentified.add(speakerIdx);
+  if (Rec.voiceIdInFlight.has(speakerIdx)) return;
+  Rec.voiceIdInFlight.add(speakerIdx);
 
   try {
-    // Extract ~3.5 s of audio for this speaker from the ring buffer.
-    const targetSamples = Math.round(3.5 * (Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE));
-    const ranges = Diarizer.speakerRanges.get(speakerIdx) || [];
+    const sr            = Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE;
+    const targetSamples = Math.round(3.5 * sr);
+    const minSamples    = Math.round(1.5 * sr);
+    const ranges        = Diarizer.speakerRanges.get(speakerIdx) || [];
 
     let float32 = null;
     if (ranges.length > 0 && Diarizer.pcmSampleRate) {
-      // Take the most recent audio up to targetSamples
       let accumulated = 0;
       const toExtract = [];
       for (let i = ranges.length - 1; i >= 0 && accumulated < targetSamples; i--) {
@@ -1281,9 +1304,12 @@ async function voiceIdTriggerForSpeaker(speakerIdx) {
       }
     }
 
-    if (!float32 || float32.length < 1.5 * (Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE)) {
-      // Not enough audio yet — allow another identify attempt on next speaker turn.
-      Rec.speakerIdentified.delete(speakerIdx); // allow retry
+    const haveSamples = float32 ? float32.length : 0;
+    if (haveSamples < minSamples) {
+      console.info(
+        `[voice-id] speaker ${speakerIdx}: deferring — only ${haveSamples}/${minSamples} samples buffered ` +
+        `(${ranges.length} ranges, sr=${sr}). Will retry on next utterance.`
+      );
       return;
     }
 
@@ -1299,6 +1325,8 @@ async function voiceIdTriggerForSpeaker(speakerIdx) {
     const form = new FormData();
     form.append('audio', wavBlob, 'speaker-id.wav');
 
+    console.info(`[voice-id] speaker ${speakerIdx}: sending ${haveSamples} samples (${(haveSamples/sr).toFixed(2)}s) to /api/voice-identify`);
+
     const res = await fetch(`${API}/voice-identify`, {
       method: 'POST',
       headers: { ...kpscSessionHeader() },
@@ -1309,16 +1337,25 @@ async function voiceIdTriggerForSpeaker(speakerIdx) {
       Rec._voiceIdConsecutive503 = (Rec._voiceIdConsecutive503 || 0) + 1;
       if (Rec._voiceIdConsecutive503 >= 2) {
         Rec.voiceIdServiceDown = true;
-        console.warn('Voice identification service unavailable; falling back to manual speaker assignment.');
+        console.warn('[voice-id] service down after 2 consecutive 503s; falling back to manual.');
+      } else {
+        console.warn(`[voice-id] speaker ${speakerIdx}: 503 from server (${Rec._voiceIdConsecutive503}/2)`);
       }
       return;
     }
     Rec._voiceIdConsecutive503 = 0;
 
-    if (!res.ok) { console.warn('[voice-id] identify failed', res.status); return; }
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.warn(`[voice-id] speaker ${speakerIdx}: HTTP ${res.status} — ${body.slice(0, 200)}`);
+      return;
+    }
 
     const data = await res.json();
-    if (data.error) { console.warn('[voice-id] identify error:', data.error); return; }
+    if (data.error) {
+      console.warn(`[voice-id] speaker ${speakerIdx}: server error — ${data.error}`);
+      return;
+    }
 
     // Always log the result so we can tune the threshold based on real data.
     console.info(
@@ -1339,6 +1376,7 @@ async function voiceIdTriggerForSpeaker(speakerIdx) {
 
     if (data.match && data.memberName) {
       if (Rec.speakerMap.has(speakerIdx)) return; // assigned manually while we waited
+      Rec.speakerIdentified.add(speakerIdx); // lock in the match — no more retries
       assignSpeaker(speakerIdx, data.memberName);
 
       // Add voice-id badge to the speaker row in the UI.
@@ -1367,10 +1405,12 @@ async function voiceIdTriggerForSpeaker(speakerIdx) {
 
       showToast(`🎙 Voice-identified: ${data.memberName} (${(data.score * 100).toFixed(0)}% match)`, 'success');
     }
+    // Non-matches and close-misses leave Rec.speakerIdentified empty so a
+    // later, cleaner utterance can retry. The 4s debounce prevents API spam.
   } catch (e) {
-    console.warn('[voice-id] voiceIdTriggerForSpeaker error:', e);
-    // Allow retry on unexpected errors
-    Rec.speakerIdentified.delete(speakerIdx);
+    console.warn(`[voice-id] speaker ${speakerIdx}: unexpected error —`, e);
+  } finally {
+    Rec.voiceIdInFlight.delete(speakerIdx);
   }
 }
 
