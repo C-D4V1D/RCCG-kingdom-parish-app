@@ -222,7 +222,7 @@ export async function onRequest(context) {
       if (method === 'DELETE' && param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
-        return await deleteKpscPartner(DB, param);
+        return await deleteKpscPartner(DB, param, auth);
       }
     }
     if (route === 'kpsc-partner-payments') {
@@ -235,7 +235,7 @@ export async function onRequest(context) {
       if (method === 'DELETE' && param) {
         const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
         if (auth instanceof Response) return auth;
-        return await deleteKpscPartnerPayment(DB, param);
+        return await deleteKpscPartnerPayment(DB, param, auth);
       }
     }
     if (route === 'kpsc-finance') {
@@ -253,7 +253,7 @@ export async function onRequest(context) {
       if (method === 'DELETE' && param) {
         const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
         if (auth instanceof Response) return auth;
-        return await deleteKpscFinanceEntry(DB, param);
+        return await deleteKpscFinanceEntry(DB, param, auth);
       }
     }
     if (route === 'kpsc-reminders') {
@@ -285,7 +285,7 @@ export async function onRequest(context) {
       if (method === 'DELETE' && param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
-        return await deleteKpscProject(DB, param);
+        return await deleteKpscProject(DB, param, auth);
       }
     }
     if (route === 'kpsc-extract-projects' && method === 'POST') {
@@ -344,7 +344,11 @@ export async function onRequest(context) {
       if (method === 'GET'  && !param) return await getExpenses(DB);
       if (method === 'POST' && !param) return await createExpense(DB, body);
       if (method === 'PUT'  &&  param) return await updateExpense(DB, param, body);
-      if (method === 'DELETE' && param) return await deleteExpense(DB, param);
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteExpense(DB, param);
+      }
     }
 
     // ── /api/petty ─────────────────────────────────────────────
@@ -445,13 +449,21 @@ export async function onRequest(context) {
         if (auth instanceof Response) return auth;
         return await uploadAiSecretaryAudioChunk(env, request);
       }
-      if (method === 'GET'  && !param) return await getAiSecretaryMeetings(DB);
+      if (method === 'GET'  && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getAiSecretaryMeetings(DB);
+      }
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
         return await createAiSecretaryMeeting(DB, body);
       }
-      if (method === 'GET'  &&  param) return await getAiSecretaryMeeting(DB, param);
+      if (method === 'GET'  &&  param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getAiSecretaryMeeting(DB, param);
+      }
       if (method === 'PUT'  &&  param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
@@ -460,7 +472,7 @@ export async function onRequest(context) {
       if (method === 'DELETE' && param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
-        return await deleteAiSecretaryMeeting(DB, param, body);
+        return await deleteAiSecretaryMeeting(DB, param, auth);
       }
       if (method === 'POST' && parts[2] === 'process') {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -867,6 +879,15 @@ async function handleInit(DB) {
     `ALTER TABLE ai_secretary_meetings ADD COLUMN reviewed_at TEXT DEFAULT ''`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN reviewed_by TEXT DEFAULT ''`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN public_share_token TEXT DEFAULT ''`,
+    // Soft-delete audit columns for KPSC finance, partners, partner payments, and projects.
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN deleted_at TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN deleted_by TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_partners ADD COLUMN deleted_at TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_partners ADD COLUMN deleted_by TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_partner_payments ADD COLUMN deleted_at TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_partner_payments ADD COLUMN deleted_by TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_projects ADD COLUMN deleted_at TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_projects ADD COLUMN deleted_by TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -1779,6 +1800,7 @@ async function getKpscPartners(DB) {
   const { results } = await DB.prepare(`
     SELECT *
     FROM kpsc_partners
+    WHERE COALESCE(deleted_at,'') = ''
     ORDER BY full_name
   `).all();
   return ok((results || []).map(row => ({
@@ -1891,7 +1913,7 @@ async function getKpscPartnerPayments(DB, url) {
     SELECT p.*, kp.full_name AS partner_name, kp.partnership_type, kp.status AS partner_status
     FROM kpsc_partner_payments p
     LEFT JOIN kpsc_partners kp ON kp.id = p.partner_id
-    WHERE ${filters.join(' AND ')}
+    WHERE ${filters.join(' AND ')} AND COALESCE(p.deleted_at,'') = ''
     ORDER BY p.year DESC, p.month DESC, partner_name
   `).bind(...binds).all();
   return ok((results || []).map(row => ({
@@ -1967,20 +1989,39 @@ async function upsertKpscPartnerPayment(DB, data) {
   });
 }
 
-async function deleteKpscPartnerPayment(DB, id) {
-  await DB.prepare(`DELETE FROM kpsc_partner_payments WHERE id=?`).bind(id).run();
+async function deleteKpscPartnerPayment(DB, id, auth) {
+  const existing = await DB.prepare(`SELECT id FROM kpsc_partner_payments WHERE id=?`).bind(id).first();
+  if (!existing) return err('Partner payment not found', 404);
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE kpsc_partner_payments SET deleted_at=?, deleted_by=? WHERE id=?`
+  ).bind(now, auth.name, id).run();
   return ok({ deleted: id });
 }
 
-async function deleteKpscPartner(DB, id) {
-  await DB.prepare(`DELETE FROM kpsc_partner_payments WHERE partner_id=?`).bind(id).run();
+async function deleteKpscPartner(DB, id, auth) {
+  const existing = await DB.prepare(`SELECT id FROM kpsc_partners WHERE id=?`).bind(id).first();
+  if (!existing) return err('Partner not found', 404);
+  const now = new Date().toISOString();
+  // Cascade soft-delete to the partner's payments. Reminders are transient queued items —
+  // hard-delete them as they are no longer actionable for a deleted partner.
+  await DB.prepare(
+    `UPDATE kpsc_partner_payments SET deleted_at=?, deleted_by=? WHERE partner_id=? AND COALESCE(deleted_at,'')=''`
+  ).bind(now, auth.name, id).run();
   await DB.prepare(`DELETE FROM kpsc_reminders WHERE partner_id=?`).bind(id).run();
-  await DB.prepare(`DELETE FROM kpsc_partners WHERE id=?`).bind(id).run();
+  await DB.prepare(
+    `UPDATE kpsc_partners SET deleted_at=?, deleted_by=? WHERE id=?`
+  ).bind(now, auth.name, id).run();
   return ok({ deleted: id });
 }
 
-async function deleteKpscFinanceEntry(DB, id) {
-  await DB.prepare(`DELETE FROM kpsc_finance_entries WHERE id=?`).bind(id).run();
+async function deleteKpscFinanceEntry(DB, id, auth) {
+  const existing = await DB.prepare(`SELECT id FROM kpsc_finance_entries WHERE id=?`).bind(id).first();
+  if (!existing) return err('Finance entry not found', 404);
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE kpsc_finance_entries SET deleted_at=?, deleted_by=? WHERE id=?`
+  ).bind(now, auth.name, id).run();
   return ok({ deleted: id });
 }
 
@@ -2002,7 +2043,7 @@ async function getKpscFinanceEntries(DB, url) {
     SELECT f.*, p.full_name AS partner_name
     FROM kpsc_finance_entries f
     LEFT JOIN kpsc_partners p ON p.id = f.partner_id
-    WHERE ${where.join(' AND ')}
+    WHERE ${where.join(' AND ')} AND COALESCE(f.deleted_at,'') = ''
     ORDER BY date DESC, created_at DESC
   `).bind(...binds).all();
   return ok((results || []).map(row => ({
@@ -2500,13 +2541,13 @@ function kpscProjectFromRow(row) {
 
 async function getKpscProjects(DB, url) {
   const status = String(url.searchParams.get('status') || '').trim().toLowerCase();
-  let where = '';
+  const where = ["COALESCE(deleted_at,'') = ''"];
   const binds = [];
   if (status && status !== 'all') {
-    where = 'WHERE status=?';
+    where.push('status=?');
     binds.push(status);
   }
-  const { results } = await DB.prepare(`SELECT * FROM kpsc_projects ${where} ORDER BY priority DESC, created_at DESC`).bind(...binds).all();
+  const { results } = await DB.prepare(`SELECT * FROM kpsc_projects WHERE ${where.join(' AND ')} ORDER BY priority DESC, created_at DESC`).bind(...binds).all();
   return ok((results || []).map(kpscProjectFromRow));
 }
 
@@ -2563,8 +2604,13 @@ async function updateKpscProject(DB, id, data) {
   return ok(kpscProjectFromRow(updated));
 }
 
-async function deleteKpscProject(DB, id) {
-  await DB.prepare(`DELETE FROM kpsc_projects WHERE id=?`).bind(id).run();
+async function deleteKpscProject(DB, id, auth) {
+  const existing = await DB.prepare(`SELECT id FROM kpsc_projects WHERE id=?`).bind(id).first();
+  if (!existing) return err('Project not found', 404);
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE kpsc_projects SET deleted_at=?, deleted_by=? WHERE id=?`
+  ).bind(now, auth.name, id).run();
   return ok({ deleted: id });
 }
 
@@ -3413,25 +3459,47 @@ async function getAiSecretaryMeetings(DB) {
   return ok((results || []).map(aiSecretaryMeetingFromRow));
 }
 
-async function deleteAiSecretaryMeeting(DB, id, data) {
-  const existing = await DB.prepare(`SELECT id, created_by, deleted_at FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
+async function deleteAiSecretaryMeeting(DB, id, auth) {
+  const existing = await DB.prepare(
+    `SELECT id, title, created_by, status, deleted_at FROM ai_secretary_meetings WHERE id=?`
+  ).bind(id).first();
   if (!existing) return err('AI secretary meeting not found', 404);
+  // Already soft-deleted — return idempotently.
   if (existing.deleted_at) return ok({ id, deletedAt: existing.deleted_at });
 
-  // Author-or-admin authorization. The frontend is trusted to forward the
-  // logged-in user's name and role (same trust model as createdBy on POST).
-  const userName = String(data?.userName || '').trim();
-  const userRole = String(data?.userRole || '').trim().toLowerCase();
-  const isAdmin = userRole === 'admin' || userRole === 'it_administrator' || userRole === 'it_admin';
-  const isAuthor = !!userName && userName === (existing.created_by || '');
+  // Authorisation is derived entirely from the verified session (auth param),
+  // never from untrusted client-supplied body fields.
+  const isAdmin = auth.role === 'acting_chairman' ||
+                  auth.role === 'general_secretary' ||
+                  auth.role === 'it_admin';
+  const isAuthor = !!auth.name && auth.name === (existing.created_by || '');
+
   if (!isAdmin && !isAuthor) {
-    return err('Only the meeting author or an administrator can delete this draft.', 403);
+    return err('Only the meeting author or an administrator can delete this meeting.', 403);
+  }
+  // Meeting authors may only delete meetings that are still in draft or recording phase.
+  // Once a meeting has been ended or processed it becomes part of the official record;
+  // removing it requires administrator privileges.
+  if (!isAdmin && !['draft', 'recording'].includes(existing.status)) {
+    return err('Only an administrator can delete a meeting that has already been ended or processed.', 403);
   }
 
   const now = new Date().toISOString();
   await DB.prepare(
     `UPDATE ai_secretary_meetings SET deleted_at=?, deleted_by=? WHERE id=?`
-  ).bind(now, userName || (isAdmin ? 'admin' : ''), id).run();
+  ).bind(now, auth.name, id).run();
+
+  // Write an audit notification so all administrators can see what was deleted and by whom.
+  await DB.prepare(
+    `INSERT INTO notifications (id,title,body,type,ts) VALUES (?,?,?,?,?)`
+  ).bind(
+    newId('N'),
+    'Meeting record deleted',
+    `"${String(existing.title || id).replace(/"/g, '\\"')}" (status: ${existing.status}) was deleted by ${auth.name} (${auth.role}).`,
+    'warn',
+    now,
+  ).run();
+
   return ok({ id, deletedAt: now });
 }
 
@@ -3486,8 +3554,11 @@ async function createAiSecretaryMeeting(DB, data) {
   const id = data.id || newId('AIM-');
   const participants = normalizeAiParticipants(data.participants);
   const now = new Date().toISOString();
+  // INSERT OR IGNORE makes the create idempotent: if the client retries a POST
+  // with the same pre-generated ID (e.g. after a network error), the duplicate
+  // INSERT is silently skipped and the existing row is returned unchanged.
   await DB.prepare(`
-    INSERT INTO ai_secretary_meetings
+    INSERT OR IGNORE INTO ai_secretary_meetings
       (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,created_by,started_at,created_at,scheduled_for)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)
   `).bind(

@@ -2593,8 +2593,14 @@ async function renderDashboard(main) {
 
 function canDeleteMeeting(m) {
   const role = String(S.user?.role || '').toLowerCase();
-  if (role === 'acting_chairman' || role === 'general_secretary') return true;
-  return !!S.user?.name && S.user.name === (m.createdBy || '');
+  // Administrators (acting chairman, general secretary, IT admin) may delete any meeting.
+  if (role === 'acting_chairman' || role === 'general_secretary' || role === 'it_admin') return true;
+  // The original author may only delete meetings that are still in draft or recording phase —
+  // once a meeting has been ended or processed it is part of the official record.
+  if (!!S.user?.name && S.user.name === (m.createdBy || '')) {
+    return m.status === 'draft' || m.status === 'recording';
+  }
+  return false;
 }
 
 function meetingCard(m) {
@@ -2605,7 +2611,7 @@ function meetingCard(m) {
         <div class="k-mc-title">${esc(m.title)}</div>
         <div class="k-mc-badges">
           ${typeBadge(m.meetingType)} ${statusBadge(m.status)}
-          ${showDelete ? `<button class="k-mc-del" title="Delete draft" aria-label="Delete draft" onclick="Kpsc.deleteMeetingDraft('${m.id}', event)">🗑</button>` : ''}
+          ${showDelete ? `<button class="k-mc-del" title="Delete meeting" aria-label="Delete meeting" onclick="Kpsc.deleteMeetingDraft('${m.id}', event)">🗑</button>` : ''}
         </div>
       </div>
       <div class="k-mc-meta">
@@ -2619,6 +2625,9 @@ function meetingCard(m) {
 function startNewMeeting() {
   S.activeMeeting = null;
   S._isNewMeeting = true;
+  // Pre-generate a stable ID for this new-meeting session so all autosave POSTs
+  // carry the same ID, making create idempotent against network retries.
+  Draft.pendingId = 'AIM-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   S.page = 'meeting';
   S.group = 'meetings';
   S.subTab = null;
@@ -2810,6 +2819,7 @@ async function renderMeetingRoom(main) {
 
       <div class="k-room-actions">
         ${!isProcessed ? `<span id="km-autosave-status" class="k-autosave-status" aria-live="polite"></span>` : ''}
+        ${(status === 'draft' || status === 'recording') && (m ? canDeleteMeeting(m) : S._isNewMeeting) ? `<button class="kbtn kbtn-ghost kbtn-sm" style="color:var(--danger,#dc2626)" onclick="Kpsc.discardMeetingFromRoom()">🗑 Discard</button>` : ''}
         ${status === 'recording' ? `<button class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
         ${status === 'ended' ? `<button class="kbtn kbtn-primary" onclick="Kpsc.processMeeting(this)">✨ Generate Minutes</button>` : ''}
         ${isProcessed ? `<div class="k-processed-note">✅ Minutes have been generated and finalised.</div>` : ''}
@@ -3159,7 +3169,8 @@ const Draft = {
   timer: null,
   inflight: false,
   dirty: false,
-  meetingId: null, // matches S.activeMeeting?.id when bound; used to detect re-bind
+  meetingId: null,   // matches S.activeMeeting?.id when bound; used to detect re-bind
+  pendingId: null,   // stable client-generated ID for the in-progress first POST of a new meeting
 };
 
 function setAutoSaveStatus(text, kind) {
@@ -3198,7 +3209,14 @@ async function autoSaveNow() {
         title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants, scheduledFor,
       });
     } else {
+      // Include a stable client-generated ID on the first POST. This makes the
+      // create idempotent: if the network drops and the request is retried, the
+      // server's INSERT OR IGNORE prevents a duplicate row being created.
+      if (!Draft.pendingId) {
+        Draft.pendingId = 'AIM-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      }
       res = await apiPost('ai-secretary-meetings', {
+        id: Draft.pendingId,
         title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
         createdBy: S.user?.name || '', scheduledFor,
       });
@@ -3208,6 +3226,7 @@ async function autoSaveNow() {
     } else {
       S.activeMeeting = res;
       Draft.meetingId = res.id;
+      Draft.pendingId = null; // ID is now committed; subsequent saves will use PUT
       S._isNewMeeting = false;
       setAutoSaveStatus(`Saved · ${fmtClock(new Date())}`, 'ok');
     }
@@ -3231,6 +3250,9 @@ function bindAutoSave() {
   Draft.inflight = false;
   Draft.dirty = false;
   Draft.meetingId = S.activeMeeting?.id || null;
+  // If we're opening an existing meeting, discard any leftover pendingId from a
+  // prior new-meeting session so we never accidentally POST with a stale ID.
+  if (S.activeMeeting) Draft.pendingId = null;
 
   const fire = () => { scheduleAutoSave(); updateCollapsibleSummaries(); };
   const form = document.getElementById('km-title')?.closest('.k-page');
@@ -3272,22 +3294,53 @@ async function deleteMeetingDraft(id, event) {
   const m = S.meetings.find(x => x.id === id);
   if (!m) return;
   const role = String(S.user?.role || '').toLowerCase();
-  const isChair = role === 'acting_chairman' || role === 'general_secretary' || role === 'it_admin';
+  const isAdmin = role === 'acting_chairman' || role === 'general_secretary' || role === 'it_admin';
   const isAuthor = !!S.user?.name && S.user.name === (m.createdBy || '');
-  if (!isChair && !isAuthor) {
-    showToast('Only the meeting author, Acting Chairman, General Secretary, or IT Administrator can delete this draft.', 'error');
+  const authorCanDelete = isAuthor && (m.status === 'draft' || m.status === 'recording');
+  if (!isAdmin && !authorCanDelete) {
+    showToast(
+      isAuthor
+        ? 'Authors can only delete meetings that are still in draft or recording phase.'
+        : 'Only the meeting author, Acting Chairman, General Secretary, or IT Administrator can delete this meeting.',
+      'error'
+    );
     return;
   }
-  if (!confirm(`Delete "${m.title || 'this meeting'}"? It will be hidden from the list.`)) return;
-  const res = await apiDelete(`ai-secretary-meetings/${id}`, {
-    userName: S.user?.name || '',
-    userRole: S.user?.role || '',
-  });
+  if (!confirm(`Delete "${m.title || 'this meeting'}"? This action cannot be undone.`)) return;
+  // No need to forward userName/userRole in the body — the session header carries
+  // the verified identity and the server reads it from the authenticated session.
+  const res = await apiDelete(`ai-secretary-meetings/${id}`);
   if (res?.error) { showToast(res.error, 'error'); return; }
   S.meetings = S.meetings.filter(x => x.id !== id);
   const main = document.getElementById('kpsc-main');
   if (main) await renderDashboard(main);
-  showToast('Draft deleted', 'success');
+  showToast('Meeting deleted.', 'success');
+}
+
+// Called from the Discard button inside the meeting room itself.
+// For an unsaved new meeting: resets draft state and navigates back.
+// For a saved draft/recording meeting: soft-deletes via API then navigates back.
+async function discardMeetingFromRoom() {
+  const m = S.activeMeeting;
+  if (!m) {
+    // Brand-new, never-saved meeting — just cancel and go back.
+    Draft.pendingId = null;
+    S._isNewMeeting = false;
+    goBack();
+    return;
+  }
+  if (!canDeleteMeeting(m)) {
+    showToast('You do not have permission to discard this meeting.', 'error');
+    return;
+  }
+  if (!confirm(`Discard "${m.title || 'this meeting'}"? This action cannot be undone.`)) return;
+  const res = await apiDelete(`ai-secretary-meetings/${m.id}`);
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  S.meetings = S.meetings.filter(x => x.id !== m.id);
+  S.activeMeeting = null;
+  Draft.pendingId = null;
+  showToast('Meeting discarded.', 'success');
+  goBack();
 }
 
 async function saveMeeting(btn) {
@@ -7002,6 +7055,7 @@ window.Kpsc = {
   openMeeting,
   saveMeeting,
   deleteMeetingDraft,
+  discardMeetingFromRoom,
   endMeeting,
   processMeeting,
   saveMinutesReview,
