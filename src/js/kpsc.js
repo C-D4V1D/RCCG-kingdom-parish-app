@@ -5992,7 +5992,7 @@ function readFileAsDataURL(file) {
   });
 }
 
-async function renderNotesPreview(previewEl, files, actionHandler) {
+async function renderNotesPreview(previewEl, files, actionHandler, statusElementId = 'km-ocr-status') {
   if (!previewEl) return;
   if (!files.length) { previewEl.innerHTML = ''; return; }
   const dataUrls = await Promise.all(files.map(readFileAsDataURL));
@@ -6005,7 +6005,7 @@ async function renderNotesPreview(previewEl, files, actionHandler) {
     <div class="k-room-actions">
       <button class="kbtn kbtn-primary" onclick="${actionHandler}">🤖 Extract Text with AI</button>
     </div>
-    <div id="${previewEl.id.includes('rec') ? 'km-rec-notes-status' : 'km-ocr-status'}"></div>`;
+    <div id="${statusElementId}"></div>`;
 }
 
 async function ocrNotesImages(files) {
@@ -6035,7 +6035,7 @@ async function previewNotesPhoto(input) {
   const preview = document.getElementById('km-notes-preview');
   const files = getSelectedImageFiles(input);
   if (!files.length) { if (preview) preview.innerHTML = ''; return; }
-  await renderNotesPreview(preview, files, 'Kpsc.ocrNotesPhoto()');
+  await renderNotesPreview(preview, files, 'Kpsc.ocrNotesPhoto()', 'km-ocr-status');
 }
 
 async function ocrNotesPhoto() {
@@ -6048,7 +6048,8 @@ async function ocrNotesPhoto() {
   try {
     const ocr = await ocrNotesImages(files);
     if (!ocr.transcript) {
-      if (status) status.innerHTML = `<div class="k-error-box">${esc(ocr.errors[0] || 'No text could be extracted. Please ensure the images are clear.')}</div>`;
+      const details = ocr.errors.length ? ` Details: ${ocr.errors.slice(0, 3).join(' | ')}` : '';
+      if (status) status.innerHTML = `<div class="k-error-box">${esc((ocr.errors[0] || 'No text could be extracted. Please ensure the images are clear.') + details)}</div>`;
       return;
     }
     const transcriptEl = document.getElementById('km-transcript');
@@ -6201,7 +6202,7 @@ async function previewRecNotesPhoto(input) {
   const files = getSelectedImageFiles(input);
   if (!preview) return;
   if (!files.length) { preview.innerHTML = ''; return; }
-  await renderNotesPreview(preview, files, 'Kpsc.ocrRecNotesPhoto()');
+  await renderNotesPreview(preview, files, 'Kpsc.ocrRecNotesPhoto()', 'km-rec-notes-status');
 }
 
 async function ocrRecNotesPhoto() {
@@ -6214,7 +6215,8 @@ async function ocrRecNotesPhoto() {
   try {
     const ocr = await ocrNotesImages(files);
     if (!ocr.transcript) {
-      if (status) status.innerHTML = `<div class="k-error-box">${esc(ocr.errors[0] || 'No text could be extracted. Please ensure the image is clear.')}</div>`;
+      const details = ocr.errors.length ? ` Details: ${ocr.errors.slice(0, 3).join(' | ')}` : '';
+      if (status) status.innerHTML = `<div class="k-error-box">${esc((ocr.errors[0] || 'No text could be extracted. Please ensure the images are clear.') + details)}</div>`;
       return;
     }
 
