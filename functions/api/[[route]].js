@@ -3425,14 +3425,13 @@ function stripAiMinutesTimestampLines(markdown) {
 
 function hasStandardMinutesStructure(markdown) {
   const text = String(markdown || '').toLowerCase();
-  const required = [
-    '## attendance',
-    '## agenda / matters discussed',
-    '## executive summary',
-    '## decision & resolution register',
-    '## action items',
-  ];
-  return required.every(section => text.includes(section));
+  // Accept both legacy section names and the current numbered format (e.g. "## 4. Agenda…")
+  return (
+    /## (?:\d+\.\s+)?attendance/.test(text) &&
+    /## (?:\d+\.\s+)?(?:agenda|matters discussed)/.test(text) &&
+    /## (?:\d+\.\s+)?(?:decision|resolution)/.test(text) &&
+    /## (?:\d+\.\s+)?action items?/.test(text)
+  );
 }
 
 function sanitizeAiSecretaryOutput(rawOutput, meeting, deterministicOutput) {
@@ -3507,74 +3506,163 @@ function parseAiSecretaryJson(text) {
 }
 
 function buildAiSecretaryOutput(meeting, options = {}) {
-  const transcript = meeting.transcriptText || '';
   const { normalized: participants, missingGroups, quorumMet } = aiSecretaryParticipantCoverage(meeting.participants);
   const present = participants.filter(p => p.present);
   const governanceFlags = buildAiSecretaryGovernanceFlags(meeting);
-  const majorProject = governanceFlags.some(flag => flag.type === 'threshold_review');
-  const welfare = /welfare|support|assistance|benevolence/i.test(transcript);
-  const policyContext = aiSecretaryText(meeting.policyContext);
-  const agendaItems = extractAgendaItems(transcript);
-  const resolutions = extractResolutions(transcript, governanceFlags);
-  const actionItems = extractActionItems(transcript);
-  const approvedCount = resolutions.filter(r => r.approved === true).length;
-  const rejectedCount = resolutions.filter(r => r.approved === false).length;
-  const deferredCount = resolutions.filter(r => r.approved === null).length;
-  const financialCount = resolutions.filter(r => r.category === 'financial' || r.resolutionType === 'financial_approval').length;
-  const attendanceText = present.map(p => `${p.label}${p.name ? ` (${p.name})` : ''}`).join(', ') || 'No representatives marked present';
-  const summaryShort = `${meeting.title || 'KPSC meeting'} captured ${present.length} attendee(s) across ${new Set(present.map(p => p.group)).size} of 4 required representative groups. ${resolutions.length} decision item(s), ${financialCount} financial/welfare approval item(s), and ${actionItems.length} action item(s) were identified.`;
-  const executiveSummary = [
-    quorumMet ? 'Quorum appears met across Men, Women, Youth, and Ministers.' : `Quorum needs attention: missing ${missingGroups.join(', ')} representative group(s).`,
-    resolutions.length
-      ? `Decision register: ${approvedCount} approved, ${rejectedCount} rejected, ${deferredCount} deferred/needs confirmation.`
-      : 'No explicit decision register items were detected; secretary review is required.',
-    actionItems.length
-      ? `${actionItems.length} follow-up task(s) were extracted for tracking.`
-      : 'No explicit follow-up task was detected; secretary should confirm manually.',
-  ].join(' ');
+  const agendaItems = extractAgendaItems(meeting.transcriptText || '');
+  const resolutions = extractResolutions(meeting.transcriptText || '', governanceFlags);
+  const actionItems = extractActionItems(meeting.transcriptText || '');
+
+  // Format a human-readable date heading
+  let dateHeading = meeting.meetingDate || 'Date not recorded';
+  try {
+    const d = new Date((meeting.meetingDate || '') + 'T12:00:00');
+    if (!isNaN(d.getTime())) {
+      const day = d.getDate();
+      const suffix = (day >= 11 && day <= 13) ? 'th' : ['th','st','nd','rd','th'][Math.min(day % 10, 4)];
+      const weekday = d.toLocaleDateString('en-GB', { weekday: 'long' });
+      const month = d.toLocaleDateString('en-GB', { month: 'long' });
+      dateHeading = `${weekday}, ${day}${suffix} ${month} ${d.getFullYear()}`;
+    }
+  } catch (_) {}
+
+  const typeLabels = { routine: 'Routine', emergency: 'Emergency', special: 'Special', agm: 'Annual General Meeting' };
+  const typeLabel = typeLabels[meeting.meetingType] || (meeting.meetingType ? meeting.meetingType.charAt(0).toUpperCase() + meeting.meetingType.slice(1) : 'Routine');
+
+  // Group attendance by the 4 required groups (multiple members per group are supported)
+  const groupedAttendance = AI_SECRETARY_REQUIRED_GROUPS.map(req => {
+    const presentMembers = participants.filter(p => p.group === req.group && p.present);
+    return { label: req.label, present: presentMembers.length > 0, names: presentMembers.map(p => p.name).filter(Boolean) };
+  });
+
+  const presentGroupLabels = groupedAttendance.filter(g => g.present).map(g => g.label);
+  const allPresentNames = present.filter(p => p.name).map(p => p.name);
+
+  // ── Summary fields ──────────────────────────────────────────────────────────
+  const summaryShort = present.length === 0
+    ? `The ${meeting.title || 'KPSC meeting'} was held on ${meeting.meetingDate || 'the scheduled date'}. No attendance records are available — please complete the minutes before filing.`
+    : `The ${meeting.title || 'KPSC meeting'} was held on ${meeting.meetingDate || 'the scheduled date'} with ${present.length} member(s) present from the ${presentGroupLabels.join(', ')} group(s). ${resolutions.length ? `${resolutions.length} decision(s) were recorded.` : 'The matters discussed are summarised below.'}`;
+
+  const quorumStatement = quorumMet
+    ? 'Quorum was met, with all four representative groups present.'
+    : `Quorum was not met — the ${missingGroups.join(', ')} group(s) had no representative present. Any approvals taken may require subsequent ratification by the full committee.`;
+
   const summaryLong = [
-    `Meeting type: ${meeting.meetingType || 'routine'}.`,
-    `Attendance: ${attendanceText}.`,
-    quorumMet ? 'Quorum check: Men, Women, Youth, and Ministers are all represented.' : `Quorum check: missing ${missingGroups.join(', ')} representative group(s); approvals should be deferred or ratified later.`,
-    majorProject ? 'Governance note: capital/project language was detected, so two-thirds approval may apply.' : 'Governance note: no major capital-project language was detected by the draft processor.',
-    welfare ? 'Welfare note: welfare-related language was detected; keep KPSC records focused on funds and avoid unnecessary beneficiary names.' : 'Welfare note: no welfare-specific issue was detected.',
-    financialCount ? `Financial note: ${financialCount} financial or welfare approval-related item(s) should be cross-checked with the finance records.` : 'Financial note: no explicit financial approval amount was detected by the draft processor.',
-    policyContext ? 'Policy reference note: saved KPSC policy notes are available for review and provider-backed processing.' : 'Policy reference note: no extra KPSC policy notes were saved in settings.',
-  ].join('\n');
+    `The ${typeLabel.toLowerCase()} meeting of the Kingdom Parish Stewardship Committee (KPSC) was held on ${dateHeading}.`,
+    present.length
+      ? (allPresentNames.length
+          ? `In attendance: ${allPresentNames.join(', ')}.`
+          : `${present.length} member(s) were present from the ${presentGroupLabels.join(', ')} group(s).`)
+      : 'No attendance was recorded for this meeting.',
+    quorumStatement,
+    agendaItems.length ? `Matters discussed included: ${agendaItems.join('; ')}.` : '',
+    resolutions.filter(r => r.approved === true).length
+      ? `${resolutions.filter(r => r.approved === true).length} decision(s) were approved.`
+      : '',
+    resolutions.filter(r => r.approved === null).length
+      ? `${resolutions.filter(r => r.approved === null).length} matter(s) were deferred pending confirmation.`
+      : '',
+    actionItems.length ? `${actionItems.length} follow-up action item(s) were identified.` : '',
+  ].filter(Boolean).join(' ');
+
+  // ── Attendance block — grouped, not one line per individual ────────────────
+  const attendanceLines = groupedAttendance.map(g => {
+    if (!g.present) return `- **${g.label}:** Absent`;
+    return `- **${g.label}:** ${g.names.length ? g.names.join(', ') : 'Present'}`;
+  });
+  const quorumNote = quorumMet
+    ? '*All four representative groups were present — quorum was met.*'
+    : `*Quorum was not met — ${missingGroups.join(', ')} had no representative. Decisions may require subsequent ratification.*`;
+
+  // ── Decisions — natural English, no metadata parentheses ──────────────────
+  const decisionLines = resolutions.length
+    ? resolutions.map((r, i) => {
+        const motionParts = [];
+        if (r.motionBy) motionParts.push(`Moved by ${r.motionBy}`);
+        if (r.secondedBy) motionParts.push(`seconded by ${r.secondedBy}`);
+        const vote = r.voteSummary && r.voteSummary !== 'Manual vote review required.' ? r.voteSummary : '';
+        if (vote) motionParts.push(vote);
+        const statusNote = r.approved === true ? '*(Approved)*' : r.approved === false ? '*(Rejected)*' : '*(Outcome to be confirmed)*';
+        const motionStr = motionParts.length ? ` — ${motionParts.join('; ')}.` : '.';
+        const amountStr = r.amount ? ` Amount: ₦${Number(r.amount).toLocaleString('en-NG')}.` : '';
+        return `${i + 1}. ${r.text}${amountStr}${motionStr} ${statusNote}`;
+      })
+    : ['*(No resolutions were extracted from the transcript. Please review and add any decisions before filing.)*'];
+
+  // ── Action items ──────────────────────────────────────────────────────────
+  const actionLines = actionItems.length
+    ? actionItems.map((a, i) => {
+        let line = `${i + 1}. ${a.task}`;
+        if (a.assignee && a.assignee !== 'Unassigned') line += ` — *Responsible: ${a.assignee}*`;
+        if (a.dueDate) line += ` (by ${a.dueDate})`;
+        return line;
+      })
+    : ['*(No action items were extracted. Please review the transcript and add any follow-up tasks.)*'];
+
+  // ── Agenda ────────────────────────────────────────────────────────────────
+  const agendaLines = agendaItems.length
+    ? agendaItems.map(item => `- ${item}`)
+    : ['*(Agenda items to be confirmed from transcript — please review and insert before filing.)*'];
+
+  // ── Full minutes markdown ─────────────────────────────────────────────────
   const minutesMarkdown = [
-    `# ${meeting.title || 'KPSC Meeting'} Minutes`,
-    `**Date:** ${meeting.meetingDate || 'Not specified'}`,
-    `**Type:** ${meeting.meetingType || 'routine'}`,
-    `**Quorum:** ${quorumMet ? 'Met' : `Not met (${missingGroups.join(', ')} missing)`}`,
+    `# ${meeting.title || 'KPSC Meeting'}`,
+    `## Minutes of ${typeLabel} Meeting — ${dateHeading}`,
     '',
-    '## Attendance',
-    ...participants.map(p => `- ${p.label}: ${p.present ? `Present${p.name ? ` — ${p.name}` : ''}` : 'Absent'}`),
+    '> *Draft minutes prepared by the AI secretary — please review, correct, and approve before filing.*',
     '',
-    '## Agenda / Matters Discussed',
-    ...(agendaItems.length ? agendaItems.map(item => `- ${item}`) : ['- No explicit agenda was detected. Use transcript review to confirm the agenda before final filing.']),
+    '---',
     '',
-    '## Executive Summary',
-    executiveSummary,
+    '## 1. Attendance',
     '',
-    '## Detailed Summary',
-    summaryLong,
+    ...attendanceLines,
     '',
-    '## Decision & Resolution Register',
-    ...(resolutions.length ? resolutions.map(r => {
-      const status = r.approved === true ? 'Approved' : r.approved === false ? 'Rejected' : 'Deferred / confirm outcome';
-      const amount = r.amount ? `; Amount: ₦${Number(r.amount).toLocaleString('en-NG')}` : '';
-      return `- **${titleCaseAiSecretary(r.resolutionType)}** (${status}; ${titleCaseAiSecretary(r.category)}; ${r.requiredThreshold.replace('_', ' ')}${amount}) — ${r.text}`;
-    }) : ['- No explicit resolutions detected. Review transcript and add approved decisions manually.']),
+    quorumNote,
     '',
-    '## Motions, Voting & Amendments',
-    ...(resolutions.length ? resolutions.map(r => `- ${r.voteSummary || 'Manual vote review required.'}${r.motionBy ? ` Motion by: ${r.motionBy}.` : ''}${r.secondedBy ? ` Seconded by: ${r.secondedBy}.` : ''}`) : ['- No explicit motion, seconding, amendment, or voting outcome was detected.']),
+    '---',
     '',
-    '## Action Items',
-    ...(actionItems.length ? actionItems.map(a => `- ${a.task} — Owner: ${a.assignee || 'Unassigned'}${a.dueDate ? `; Due: ${a.dueDate}` : '; Due: Not stated'}`) : ['- No explicit action items detected. Review transcript and add follow-up tasks manually.']),
+    '## 2. Opening',
     '',
-    '## Policy Checks',
-    ...(governanceFlags.length ? governanceFlags.map(f => `- ${f.severity.toUpperCase()}: ${f.message}`) : ['- No policy flags detected by the draft processor.']),
+    '*(To be confirmed from transcript or recording.)*',
+    '',
+    '---',
+    '',
+    '## 3. Matters Arising from Previous Minutes',
+    '',
+    '*(None recorded in this transcript, or to be confirmed by the Secretary.)*',
+    '',
+    '---',
+    '',
+    '## 4. Agenda and Matters Discussed',
+    '',
+    ...agendaLines,
+    '',
+    '---',
+    '',
+    '## 5. Decisions and Resolutions',
+    '',
+    ...decisionLines,
+    '',
+    '---',
+    '',
+    '## 6. Action Items',
+    '',
+    ...actionLines,
+    '',
+    '---',
+    '',
+    '## 7. Any Other Business',
+    '',
+    '*(To be confirmed from transcript.)*',
+    '',
+    '---',
+    '',
+    '## 8. Closing and Adjournment',
+    '',
+    '*(To be confirmed from transcript.)*',
   ].join('\n');
+
+  const executiveSummary = summaryLong; // not stored separately in DB; kept for schema compatibility
   const output = { summaryShort, executiveSummary, summaryLong, agendaItems, minutesMarkdown, resolutions, actionItems, policyFlags: governanceFlags };
   return options.skipSanitize ? output : sanitizeAiSecretaryOutput(output, meeting, output);
 }
@@ -3825,41 +3913,82 @@ policyFlags       — Array of governance flag objects (see schema below).
 suggestedProjects — Array of project proposal objects (see schema below), omit key if none.
 
 ── MINUTES FORMAT (minutesMarkdown) ──────────────────────────────────────
-Write these sections with clean Markdown headings (#, ##, ###) and bullet lists:
+Use exactly this numbered-section structure with Markdown headings:
 
-## [Meeting Title] — Minutes
-**Date:** [date]  **Type:** [type]  **Venue:** [venue if stated, else omit]
+# [Meeting Title]
+## Minutes of [Type] Meeting — [day, Nth Month Year]
 
-### Attendance
-One line per representative group (Men, Women, Youth, Ministers), name and status (Present/Absent). State quorum outcome clearly.
+> *Draft minutes — for secretary review before approval and filing.*
 
-### Opening
-Record the opening prayer, devotion, or any formal opening, exactly as spoken.
+---
 
-### Matters Arising from Previous Minutes
-Summarise any follow-up on previous decisions if mentioned.
+## 1. Attendance
 
-### Agenda / Matters Discussed
-For each agenda item, a short sub-heading (### or bold) and a paragraph describing the discussion, who spoke, what was proposed, any concerns raised, and the outcome. Write in third-person past tense (e.g. "The Chairman presented…", "After deliberation, the committee…"). Do not use passive constructions like "it was noted that" or "it was decided that" — write directly: "The committee decided…", "Brother John raised the concern that…".
+- **Men:** [name(s), or "Absent"]
+- **Women:** [name(s), or "Absent"]
+- **Youth:** [name(s), or "Absent"]
+- **Ministers:** [name(s), or "Absent"]
 
-### Decisions & Resolutions
-Numbered list. For each decision: state what was decided, who moved it, who seconded it, and the vote outcome. Include naira amounts exactly as stated.
+*[One sentence on quorum outcome — e.g. "Quorum was met." or "Quorum was not met — the Men and Women groups had no representative; decisions may require ratification."]*
 
-### Action Items
-Table or bullet list: Task | Responsible | Deadline
+---
 
-### Any Other Business
-Summarise any miscellaneous matters.
+## 2. Opening
 
-### Closing
-Record the closing prayer or adjournment and the time if stated.
+[Opening prayer / devotion / formal opening, as stated in transcript. If not mentioned, write "(Not recorded in transcript.)".]
+
+---
+
+## 3. Matters Arising from Previous Minutes
+
+[Any follow-up on prior decisions. If none, write "(None recorded.)"]
+
+---
+
+## 4. Agenda and Matters Discussed
+
+[For each topic: a **bold sub-heading** then 1–3 sentences in third-person past tense describing the discussion — who raised it, what was proposed, concerns voiced, and the outcome. Example: "**Parish Fund Management** — The Chairman reported that both funds remained in separate bank accounts. The committee agreed that a single oversight committee would manage both funds going forward."]
+
+---
+
+## 5. Decisions and Resolutions
+
+[Numbered list. For each decision write one sentence: what was resolved, who moved it, who seconded, and the vote outcome. Include naira amounts exactly as stated. Example: "1. The committee approved the printing of 100 copies of the partnership card — moved by the Chairman, adopted unanimously. *(Approved)*"]
+
+---
+
+## 6. Action Items
+
+[Numbered list: task, responsible person, deadline. Example: "1. Print 100 partnership cards — *Responsible: Secretary* (by next meeting)"]
+
+---
+
+## 7. Any Other Business
+
+[Any miscellaneous matters. If none, write "(None raised.)"]
+
+---
+
+## 8. Closing and Adjournment
+
+[Closing prayer, adjournment motion (mover + seconder), time if stated.]
+
+──────────────────────────────────────────────────────────────────────────
 
 Tone rules:
-- Write as a skilled human secretary — clear, formal but readable, no AI-isms.
-- Do not add "Generated by AI" or any metadata lines.
-- Do not invent facts. If something is unclear, write "unclear from transcript" rather than guessing.
-- Preserve all names, amounts (₦), dates, and vote outcomes exactly.
-- Use British/Nigerian English spelling conventions (e.g. "organise", "colour").
+- Write as a skilled, professional human secretary. The output must be indistinguishable from minutes written by an experienced Nigerian church administrator.
+- STRICTLY FORBIDDEN — never write any of these:
+    • "was detected" / "were detected" / "has been detected"
+    • "by the draft processor" / "the draft processor"
+    • "No explicit X was detected" / "no explicit Y was found"
+    • "Governance note:" / "Welfare note:" / "Financial note:" / "Policy reference note:"
+    • "may apply" — state what the transcript says; if uncertain, write "[Secretary to confirm]"
+    • Any reference to AI, automation, or processing (e.g. "AI-generated", "automated")
+    • Mechanical checklist notes that are not actual meeting content
+- If a section has no content from the transcript, omit the section or write "[Secretary to confirm]" — never write a sentence explaining what the system failed to find.
+- Do not add "Generated by AI" or any metadata.
+- Do not invent facts. Preserve all names, amounts (₦), dates, and vote outcomes exactly.
+- Use British/Nigerian English spelling (e.g. "organise", "honour", "colour").
 
 ── RESOLUTION SCHEMA ─────────────────────────────────────────────────────
 Each resolution object: { id, text, category, resolutionType, requiredThreshold, approved, amount, motionBy, secondedBy, voteSummary }
@@ -3907,7 +4036,7 @@ Return only valid JSON. No markdown fences. No text before or after the JSON obj
   const resp = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: meeting.deepseekModel || 'deepseek-v4-flash', messages: [{ role: 'user', content: prompt }], max_tokens: 4500, temperature: 0.25 }),
+    body: JSON.stringify({ model: meeting.deepseekModel || 'deepseek-v4-flash', messages: [{ role: 'user', content: prompt }], max_tokens: 6000, temperature: 0.25 }),
   });
   if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
   const data = await resp.json();
