@@ -3,6 +3,7 @@
 
 const API = '/api';
 const SESSION_KEY = 'kpsc_session';
+const MEETING_UI_STATE_KEY = 'kpsc_meeting_ui_state';
 
 const GROUPS = [
   { key: 'men',       label: 'Men',       icon: '👔' },
@@ -529,18 +530,28 @@ async function recStart(btn) {
     showToast('This browser does not support live audio recording.', 'error');
     return;
   }
+  let stream = null;
   try {
     if (btn) btn.disabled = true;
-    // Auto-persist the meeting so End/Generate Minutes have a backing record. No toast on success.
+    const concurrent = findOtherActiveMeeting(S.activeMeeting?.id || '');
+    if (concurrent && !S.activeMeeting) {
+      const resume = confirm(`Another active meeting already exists: "${concurrent.title || 'Untitled meeting'}". Open it instead?`);
+      if (resume) await openMeeting(concurrent.id);
+      else showToast('Resume or discard the existing active meeting before starting another recording.', 'warn');
+      return;
+    }
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    // Auto-persist the meeting only after microphone access succeeds so a denied prompt
+    // does not leave behind a ghost draft. No toast on success.
     if (!S.activeMeeting) {
       await autoSaveNow();
       if (!S.activeMeeting) {
+        stream.getTracks().forEach(t => t.stop());
         showToast('Could not save the meeting. Check your connection and try again.', 'error');
-        if (btn) btn.disabled = false;
         return;
       }
     }
-    Rec.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    Rec.stream = stream;
     Rec.chunkSeq = 0;
     Rec.uploadSessionId = `kpsc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     Rec.elapsed = 0;
@@ -597,6 +608,7 @@ async function recStart(btn) {
       updateStepperUI('recording');
     }
   } catch (e) {
+    if (stream && stream !== Rec.stream) stream.getTracks().forEach(t => t.stop());
     recStopTracks();
     Rec.status = 'idle';
     Rec.realtimeStatus = 'error';
@@ -1412,6 +1424,10 @@ function canManageFinance() {
   return ['acting_chairman', 'financial_secretary', 'treasurer', 'it_admin'].includes(String(S.user?.role || '').toLowerCase());
 }
 
+function canDeleteFinanceEntries() {
+  return ['acting_chairman', 'it_admin'].includes(String(S.user?.role || '').toLowerCase());
+}
+
 function applyNavPermissions() {
   // All 4 top-level groups are visible to every role.
   // Individual sub-tabs are hidden per-role when the group page renders.
@@ -1442,6 +1458,52 @@ function saveSession(user) {
 
 function clearSession() {
   sessionStorage.removeItem(SESSION_KEY);
+}
+
+function loadMeetingUiStateMap() {
+  try {
+    const raw = sessionStorage.getItem(MEETING_UI_STATE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveMeetingUiStateMap(map) {
+  sessionStorage.setItem(MEETING_UI_STATE_KEY, JSON.stringify(map || {}));
+}
+
+function activeMeetingUiKey() {
+  return String(S.activeMeeting?.id || Draft.pendingId || '').trim();
+}
+
+function persistMeetingUiState() {
+  const key = activeMeetingUiKey();
+  if (!key) return;
+  const map = loadMeetingUiStateMap();
+  map[key] = {
+    meetingTab: S._meetingTab || 'record',
+    reviewEditMode: !!S._reviewEditMode,
+  };
+  saveMeetingUiStateMap(map);
+}
+
+function restoreMeetingUiState(key, fallback = {}) {
+  const cleanKey = String(key || '').trim();
+  const saved = cleanKey ? loadMeetingUiStateMap()[cleanKey] : null;
+  S._meetingTab = saved?.meetingTab || fallback.meetingTab || 'record';
+  S._reviewEditMode = typeof saved?.reviewEditMode === 'boolean'
+    ? saved.reviewEditMode
+    : !!fallback.reviewEditMode;
+}
+
+function clearMeetingUiState(key) {
+  const cleanKey = String(key || '').trim();
+  if (!cleanKey) return;
+  const map = loadMeetingUiStateMap();
+  delete map[cleanKey];
+  saveMeetingUiStateMap(map);
 }
 
 // ── TOAST ─────────────────────────────────────────────────────────
@@ -2247,6 +2309,7 @@ function buildDashboardContext() {
 // Returns HTML for the "Open / Resume meeting" primary action card.
 function dashCardOpenMeeting(ctx) {
   const draft = [...S.meetings].find(m => m.status === 'draft' || m.status === 'recording');
+  const showDelete = draft && canDeleteMeeting(draft);
   if (draft) {
     return `
       <div class="k-meeting-card ka-card-primary" onclick="Kpsc.openMeeting('${draft.id}')">
@@ -2259,6 +2322,7 @@ function dashCardOpenMeeting(ctx) {
               ${statusBadge(draft.status)}
             </div>
           </div>
+          ${showDelete ? `<button class="k-mc-del" title="Delete meeting" aria-label="Delete meeting" onclick="Kpsc.deleteMeeting('${draft.id}', event)">🗑</button>` : ''}
         </div>
       </div>`;
   }
@@ -2591,13 +2655,23 @@ async function renderDashboard(main) {
     </div>`;
 }
 
+function isMeetingAuthor(m) {
+  return (!!S.user?.id && S.user.id === (m.createdByAccountId || ''))
+    || (!m.createdByAccountId && !!S.user?.name && S.user.name === (m.createdBy || ''));
+}
+
+function findOtherActiveMeeting(excludeId = '') {
+  const skipId = String(excludeId || '').trim();
+  return [...S.meetings].find(m => (m.status === 'draft' || m.status === 'recording') && m.id !== skipId) || null;
+}
+
 function canDeleteMeeting(m) {
   const role = String(S.user?.role || '').toLowerCase();
   // Administrators (acting chairman, general secretary, IT admin) may delete any meeting.
   if (role === 'acting_chairman' || role === 'general_secretary' || role === 'it_admin') return true;
   // The original author may only delete meetings that are still in draft or recording phase —
   // once a meeting has been ended or processed it is part of the official record.
-  if (!!S.user?.name && S.user.name === (m.createdBy || '')) {
+  if (isMeetingAuthor(m)) {
     return m.status === 'draft' || m.status === 'recording';
   }
   return false;
@@ -2623,11 +2697,20 @@ function meetingCard(m) {
 }
 
 function startNewMeeting() {
+  const existing = findOtherActiveMeeting(S.activeMeeting?.id || '');
+  if (existing) {
+    const resume = confirm(`Another active meeting already exists: "${existing.title || 'Untitled meeting'}". Open it instead?`);
+    if (resume) openMeeting(existing.id);
+    else showToast('Resume or discard the existing active meeting before opening another one.', 'warn');
+    return;
+  }
   S.activeMeeting = null;
   S._isNewMeeting = true;
   // Pre-generate a stable ID for this new-meeting session so all autosave POSTs
   // carry the same ID, making create idempotent against network retries.
   Draft.pendingId = 'AIM-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  restoreMeetingUiState(Draft.pendingId, { meetingTab: 'record', reviewEditMode: false });
+  persistMeetingUiState();
   S.page = 'meeting';
   S.group = 'meetings';
   S.subTab = null;
@@ -2646,6 +2729,7 @@ async function openMeeting(id) {
   if (res.error) { showToast(res.error, 'error'); return; }
   S.activeMeeting = res;
   S._isNewMeeting = false;
+  restoreMeetingUiState(res.id, { meetingTab: 'record', reviewEditMode: !res.reviewedAt });
   S.page = 'meeting';
   S.group = 'meetings';
   S.subTab = null;
@@ -2668,16 +2752,17 @@ async function renderMeetingRoom(main) {
   }
 
   const m  = S.activeMeeting;
-  // Default review-edit mode: show editor if not yet reviewed, summary if reviewed.
-  if (m?.status === 'processed') {
-    S._reviewEditMode = !m.reviewedAt;
-  }
   const id = m?.id || '';
   const status = m?.status || 'draft';
   const isProcessed = status === 'processed';
   const isEnded     = status === 'ended' || isProcessed;
+  const isEditable  = !isEnded;
   const canRecord   = !isEnded;
   const phase = isProcessed ? 'review' : status === 'ended' ? 'ended' : status === 'recording' ? 'live' : 'setup';
+  if (!isEditable && S._meetingTab !== 'record') {
+    S._meetingTab = 'record';
+    persistMeetingUiState();
+  }
 
   // Pre-fill defaults for never-saved drafts. Title/date follow the configured cadence;
   // attendance defaults to "everyone present" so secretaries uncheck absentees instead of
@@ -2690,7 +2775,7 @@ async function renderMeetingRoom(main) {
 
   // Build attendance rows from roster, merged with saved participants.
   const savedParts = m?.participants || [];
-  const attendanceRows = buildAttendanceRows(savedParts, isFresh);
+  const attendanceRows = buildAttendanceRows(savedParts, isFresh, !isEditable);
 
   const detailsSummary = `${esc(prefillTitle)} · ${esc(fmtDate(prefillDate))} · ${esc((MEETING_TYPES.find(t=>t.value===prefillType)||{}).label||'')}`;
   const presentInitial = isFresh ? S.members.length : savedParts.filter(p => p.present).length;
@@ -2704,12 +2789,16 @@ async function renderMeetingRoom(main) {
         <span class="k-collapsible-summary">Generated ${esc(fmtDate((m.preBriefGeneratedAt || '').slice(0, 10)))}</span>
       </summary>
       <div class="k-pre-brief-body" id="km-prebrief-body" style="padding:12px 0;white-space:pre-wrap;font-size:13px;line-height:1.6;color:var(--text1)">${esc(m.preBriefMarkdown)}</div>
-    </details>` : '';
+     </details>` : '';
+  const endedNotice = status === 'ended'
+    ? `<div class="k-quick-hint" style="margin-bottom:12px">This meeting has been ended and the room is now read-only. Generate minutes to continue the workflow.</div>`
+    : '';
 
   main.innerHTML = `
     <div class="k-page k-room" data-phase="${phase}">
       <div id="km-stepper">${stepper(status)}</div>
       ${preBriefHtml}
+      ${endedNotice}
 
       <details class="k-collapsible" id="km-details-section" ${phase === 'setup' ? 'open' : ''}>
         <summary class="k-collapsible-hdr">
@@ -2720,22 +2809,23 @@ async function renderMeetingRoom(main) {
         <div class="k-field-row">
           <div class="k-field">
             <label class="k-label">Title</label>
-            <input class="k-input" id="km-title" type="text" value="${esc(prefillTitle)}" ${isProcessed ? 'readonly' : ''} />
+            <input class="k-input" id="km-title" type="text" value="${esc(prefillTitle)}" ${!isEditable ? 'readonly' : ''} />
           </div>
           <div class="k-field k-field-sm">
             <label class="k-label">Date</label>
-            <input class="k-input" id="km-date" type="date" value="${prefillDate}" ${isProcessed ? 'readonly' : ''} />
+            <input class="k-input" id="km-date" type="date" value="${prefillDate}" ${!isEditable ? 'readonly' : ''} />
           </div>
         </div>
         <div class="k-field">
           <label class="k-label">Meeting Type</label>
-          <select class="k-input" id="km-type" ${isProcessed ? 'disabled' : ''}>
+          <select class="k-input" id="km-type" ${!isEditable ? 'disabled' : ''}>
             ${MEETING_TYPES.map(t => `<option value="${t.value}" ${prefillType === t.value ? 'selected' : ''}>${t.label}</option>`).join('')}
           </select>
+          ${isEditable ? '<p class="k-hint" style="margin-top:6px">Changes to meeting details save automatically.</p>' : ''}
         </div>
         <div class="k-field">
           <label class="k-label">Scheduled For <span class="k-label-hint">(optional — enables pre-meeting brief)</span></label>
-          <input class="k-input" id="km-scheduled-for" type="datetime-local" value="${esc(m?.scheduledFor ? m.scheduledFor.slice(0, 16) : '')}" ${isProcessed ? 'readonly' : ''} />
+          <input class="k-input" id="km-scheduled-for" type="datetime-local" value="${esc(m?.scheduledFor ? m.scheduledFor.slice(0, 16) : '')}" ${!isEditable ? 'readonly' : ''} />
         </div>
       </details>
 
@@ -2752,11 +2842,11 @@ async function renderMeetingRoom(main) {
       <section class="k-section">
         <h3 class="k-sec-title">Live Audio & Realtime Transcript</h3>
         ${phase === 'setup' ? `<p class="k-quick-hint">Confirm the details above, then tap 🎙 Start Meeting below to begin recording. Everything saves automatically.</p>` : ''}
-        <div class="k-tabs" style="margin-bottom:16px">
+        ${isEditable ? `<div class="k-tabs" style="margin-bottom:16px">
           <button class="k-tab ${S._meetingTab === 'record' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('record')">🎙 Live Recording</button>
           <button class="k-tab ${S._meetingTab === 'audio' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('audio')">🎵 Upload Audio</button>
           <button class="k-tab ${S._meetingTab === 'upload' ? 'active' : ''}" onclick="Kpsc.setMeetingTab('upload')">📷 Upload Notes</button>
-        </div>
+        </div>` : '<p class="k-hint" style="margin-bottom:16px">Recording and upload tools are disabled after a meeting is ended.</p>'}
         <div id="km-rec-panel" style="${S._meetingTab !== 'record' ? 'display:none' : ''}">
         ${canRecord ? `<div id="kpsc-rec-ui" class="k-rec-ui"></div>` : ''}
         <div id="kpsc-speaker-map"></div>
@@ -2771,8 +2861,8 @@ async function renderMeetingRoom(main) {
           <div class="lt-list" id="kpsc-live-transcript-list"></div>
         </div>
         <label class="k-label k-transcript-label" for="km-transcript">Saved Transcript / Notes</label>
-        <textarea class="k-input k-textarea" id="km-transcript" placeholder="Type notes here, or start the meeting to append live transcript entries…" ${isProcessed ? 'readonly' : ''}>${esc(m?.transcriptText || '')}</textarea>
-        ${!isProcessed ? `
+        <textarea class="k-input k-textarea" id="km-transcript" placeholder="Type notes here, or start the meeting to append live transcript entries…" ${!isEditable ? 'readonly' : ''}>${esc(m?.transcriptText || '')}</textarea>
+        ${isEditable ? `
         <details class="k-collapsible" style="margin-top:16px">
           <summary class="k-collapsible-hdr">
             <span class="k-collapsible-title">📷 Also upload handwritten notes (optional)</span>
@@ -2785,6 +2875,7 @@ async function renderMeetingRoom(main) {
         </details>` : ''}
         </div>
         <div id="km-audio-panel" style="${S._meetingTab !== 'audio' ? 'display:none' : ''}">
+          ${isEditable ? `
           <div class="k-section">
             <p class="k-hint">Upload a pre-recorded audio file. The AI will transcribe it and add the text to the transcript. Supported formats: mp3, mp4, m4a, wav, webm, ogg (max 25 MB).</p>
             <label class="k-label">Audio Recording</label>
@@ -2805,20 +2896,21 @@ async function renderMeetingRoom(main) {
             <label class="k-label" for="km-audio-notes-photo">Photos of Handwritten Notes</label>
             <input id="km-audio-notes-photo" type="file" accept="image/*" multiple class="k-input" style="padding:8px" onchange="Kpsc.previewAudioNotesPhoto(this)" />
             <div id="km-audio-notes-preview" style="margin-top:12px"></div>
-          </details>
+          </details>` : ''}
         </div>
         <div id="km-upload-panel" style="${S._meetingTab !== 'upload' ? 'display:none' : ''}">
+          ${isEditable ? `
           <div class="k-section">
             <p class="k-hint">Upload one or more photos of your handwritten meeting notes from camera or gallery. The AI will transcribe the handwriting and use it to generate meeting minutes.</p>
             <label class="k-label" for="km-notes-photo">Upload Photos of Handwritten Notes</label>
             <input id="km-notes-photo" type="file" accept="image/*" multiple class="k-input" style="padding:8px" onchange="Kpsc.previewNotesPhoto(this)" />
             <div id="km-notes-preview" style="margin-top:12px"></div>
-          </div>
+          </div>` : ''}
         </div>
       </section>
 
       <div class="k-room-actions">
-        ${!isProcessed ? `<span id="km-autosave-status" class="k-autosave-status" aria-live="polite"></span>` : ''}
+        ${isEditable ? `<span id="km-autosave-status" class="k-autosave-status" aria-live="polite"></span>` : ''}
         ${(status === 'draft' || status === 'recording') && (m ? canDeleteMeeting(m) : S._isNewMeeting) ? `<button class="kbtn kbtn-ghost kbtn-sm" style="color:var(--danger,#dc2626)" onclick="Kpsc.discardMeetingFromRoom()">🗑 Discard</button>` : ''}
         ${status === 'recording' ? `<button class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
         ${status === 'ended' ? `<button class="kbtn kbtn-primary" onclick="Kpsc.processMeeting(this)">✨ Generate Minutes</button>` : ''}
@@ -2830,7 +2922,7 @@ async function renderMeetingRoom(main) {
 
   if (canRecord) recRenderUI();
   recRenderTranscript();
-  if (!isProcessed) bindAutoSave();
+  if (isEditable) bindAutoSave();
   // Re-apply mic badges for any members already voice-ticked this session.
   restoreVoiceTickBadges();
 }
@@ -2853,7 +2945,7 @@ function restoreVoiceTickBadges() {
   }
 }
 
-function buildAttendanceRows(savedParts, defaultPresent = false) {
+function buildAttendanceRows(savedParts, defaultPresent = false, disabled = false) {
   // Build a name-keyed lookup so each roster member can be matched individually
   const savedByName = new Map((savedParts || []).map(p => [p.name, p]));
   const membersByGroup = new Map(GROUPS.map(g => [g.key, []]));
@@ -2871,7 +2963,7 @@ function buildAttendanceRows(savedParts, defaultPresent = false) {
           return `
             <label class="k-att-member">
               <input type="checkbox" id="${presentKey}" data-group="${g.key}" data-idx="${i}"
-                ${isPresent ? 'checked' : ''} onchange="Kpsc.updateAttGroup('${g.key}')"/>
+                ${isPresent ? 'checked' : ''} ${disabled ? 'disabled' : ''} onchange="Kpsc.updateAttGroup('${g.key}')"/>
               <span class="k-att-name">${esc(mem.name)}</span>
               ${mem.position ? `<span class="k-att-pos">${esc(mem.position)}</span>` : ''}
             </label>`;
@@ -3024,6 +3116,7 @@ function renderMinutesPanel(m) {
   const policyFlags = m.policyFlags || [];
   const reviewed = !!m.reviewedAt;
   const reviewGuard = reviewed ? '' : 'disabled title="Approve and save the review before this action is available."';
+  const publicUrl = m.publicShareToken ? `${window.location.origin}/kpsc/minutes/?token=${encodeURIComponent(m.publicShareToken)}` : '';
 
   return `
     <section class="k-section k-minutes-section">
@@ -3036,9 +3129,11 @@ function renderMinutesPanel(m) {
       <div class="k-room-actions" style="margin-bottom:12px;margin-top:16px">
         <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${reviewGuard}>🖨 Print / Save PDF</button>
         <button class="kbtn kbtn-sm" onclick="Kpsc.shareMinutesWhatsApp('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${reviewGuard}>📲 Share via WhatsApp</button>
+        ${m.publicShareToken ? `<button class="kbtn kbtn-sm" onclick="Kpsc.revokeMinutesPublicLink('${m.id}')">🔒 Revoke Public Link</button>` : ''}
         <button class="kbtn kbtn-sm" id="btn-plain-english-${m.id}" onclick="Kpsc.togglePlainEnglish('${m.id}')" data-plain-english="false">📖 Read in plain English</button>
       </div>
       ${reviewed ? '' : '<p class="k-hint" style="margin-top:-6px;margin-bottom:12px">Approve and save the review first before printing or sharing minutes.</p>'}
+      ${m.publicShareToken ? `<div class="k-hint" style="margin-top:-4px;margin-bottom:12px">Public minutes link is active: <a href="${esc(publicUrl)}" target="_blank" rel="noopener noreferrer">${esc(publicUrl)}</a></div>` : ''}
 
       <h4 class="k-sub-title">Minutes Preview</h4>
       <div class="k-minutes-body" id="minutes-body-${m.id}">${minutesHtml(m.minutesMarkdown)}</div>
@@ -3129,6 +3224,7 @@ async function saveMinutesReview(btn) {
     if (res.error) { showToast(res.error, 'error'); return; }
     S.activeMeeting = { ...res };
     S._reviewEditMode = false;
+    persistMeetingUiState();
     // Re-render only the review panel in-place.
     const panel = document.getElementById('kr-panel');
     if (panel) {
@@ -3151,6 +3247,7 @@ async function saveMinutesReview(btn) {
 
 function openReviewEditor() {
   S._reviewEditMode = true;
+  persistMeetingUiState();
   const panel = document.getElementById('kr-panel');
   if (panel && S.activeMeeting) {
     panel.outerHTML = renderReviewPanel(S.activeMeeting);
@@ -3181,14 +3278,15 @@ function setAutoSaveStatus(text, kind) {
 }
 
 function scheduleAutoSave() {
-  // Skip auto-save for processed meetings (form is readonly anyway).
-  if (S.activeMeeting?.status === 'processed') return;
+  // Skip auto-save for locked meetings (form is readonly anyway).
+  if (S.activeMeeting?.status === 'processed' || S.activeMeeting?.status === 'ended') return;
   clearTimeout(Draft.timer);
   setAutoSaveStatus('Unsaved changes…', 'pending');
   Draft.timer = setTimeout(() => { autoSaveNow(); }, AUTOSAVE_DEBOUNCE_MS);
 }
 
 async function autoSaveNow() {
+  if (S.activeMeeting?.status === 'processed' || S.activeMeeting?.status === 'ended') return;
   if (Draft.inflight) { Draft.dirty = true; return; }
   Draft.inflight = true;
   Draft.dirty = false;
@@ -3228,6 +3326,7 @@ async function autoSaveNow() {
       Draft.meetingId = res.id;
       Draft.pendingId = null; // ID is now committed; subsequent saves will use PUT
       S._isNewMeeting = false;
+      persistMeetingUiState();
       setAutoSaveStatus(`Saved · ${fmtClock(new Date())}`, 'ok');
     }
   } catch {
@@ -3254,7 +3353,11 @@ function bindAutoSave() {
   // prior new-meeting session so we never accidentally POST with a stale ID.
   if (S.activeMeeting) Draft.pendingId = null;
 
-  const fire = () => { scheduleAutoSave(); updateCollapsibleSummaries(); };
+  const fire = () => { scheduleAutoSave(); updateCollapsibleSummaries(); persistMeetingUiState(); };
+  const fireDetailChange = () => {
+    setAutoSaveStatus('Meeting details changed… saving…', 'pending');
+    fire();
+  };
   const form = document.getElementById('km-title')?.closest('.k-page');
   if (!form) return;
   for (const sel of ['#km-title', '#km-transcript']) {
@@ -3263,7 +3366,7 @@ function bindAutoSave() {
   }
   for (const sel of ['#km-date', '#km-type', '#km-scheduled-for']) {
     const el = form.querySelector(sel);
-    if (el) el.addEventListener('change', fire);
+    if (el) el.addEventListener('change', fireDetailChange);
   }
   const att = form.querySelector('#km-attendance');
   if (att) {
@@ -3295,7 +3398,7 @@ async function deleteMeeting(id, event) {
   if (!m) return;
   const role = String(S.user?.role || '').toLowerCase();
   const isAdmin = role === 'acting_chairman' || role === 'general_secretary' || role === 'it_admin';
-  const isAuthor = !!S.user?.name && S.user.name === (m.createdBy || '');
+  const isAuthor = isMeetingAuthor(m);
   const authorCanDelete = isAuthor && (m.status === 'draft' || m.status === 'recording');
   if (!isAdmin && !authorCanDelete) {
     showToast(
@@ -3306,11 +3409,13 @@ async function deleteMeeting(id, event) {
     );
     return;
   }
-  if (!confirm(`Delete "${m.title || 'this meeting'}"? This action cannot be undone.`)) return;
+  const publicLinkWarning = m.publicShareToken ? ' This meeting currently has a public minutes link; deleting it will immediately break that shared link.' : '';
+  if (!confirm(`Delete "${m.title || 'this meeting'}"? This action cannot be undone.${publicLinkWarning}`)) return;
   // No need to forward userName/userRole in the body — the session header carries
   // the verified identity and the server reads it from the authenticated session.
   const res = await apiDelete(`ai-secretary-meetings/${id}`);
   if (res?.error) { showToast(res.error, 'error'); return; }
+  clearMeetingUiState(id);
   S.meetings = S.meetings.filter(x => x.id !== id);
   const main = document.getElementById('kpsc-main');
   if (main) await renderDashboard(main);
@@ -3324,6 +3429,7 @@ async function discardMeetingFromRoom() {
   const m = S.activeMeeting;
   if (!m) {
     // Brand-new, never-saved meeting — just cancel and go back.
+    clearMeetingUiState(Draft.pendingId);
     Draft.pendingId = null;
     S._isNewMeeting = false;
     goBack();
@@ -3333,9 +3439,11 @@ async function discardMeetingFromRoom() {
     showToast('You do not have permission to discard this meeting.', 'error');
     return;
   }
-  if (!confirm(`Discard "${m.title || 'this meeting'}"? This action cannot be undone.`)) return;
+  const publicLinkWarning = m.publicShareToken ? ' This meeting currently has a public minutes link; discarding it will immediately break that shared link.' : '';
+  if (!confirm(`Discard "${m.title || 'this meeting'}"? This action cannot be undone.${publicLinkWarning}`)) return;
   const res = await apiDelete(`ai-secretary-meetings/${m.id}`);
   if (res?.error) { showToast(res.error, 'error'); return; }
+  clearMeetingUiState(m.id);
   S.meetings = S.meetings.filter(x => x.id !== m.id);
   S.activeMeeting = null;
   Draft.pendingId = null;
@@ -3387,7 +3495,7 @@ async function saveMeeting(btn) {
 
 async function endMeeting(btn) {
   if (!S.activeMeeting) { showToast('Save the meeting first.', 'error'); return; }
-  if (!confirm('Mark this meeting as ended? You will not be able to edit attendance or the transcript after this.')) return;
+  if (!confirm('Mark this meeting as ended? Meeting details, attendance, transcript, and uploads will become read-only after this step.')) return;
 
   const orig = btn.textContent;
   btn.disabled = true;
@@ -4117,6 +4225,7 @@ async function renderFinance(main) {
   S.financeEntries = Array.isArray(financeRes) ? financeRes : [];
   S.partners = Array.isArray(partnersRes) ? partnersRes : [];
   const canManage = canManageFinance();
+  const canDelete = canDeleteFinanceEntries();
   const incomeTotal = S.financeEntries.filter(e => e.entryType === 'income').reduce((sum, e) => sum + Number(e.amount || 0), 0);
   const expenseTotal = S.financeEntries.filter(e => e.entryType === 'expense').reduce((sum, e) => sum + Number(e.amount || 0), 0);
   const net = incomeTotal - expenseTotal;
@@ -4156,7 +4265,7 @@ async function renderFinance(main) {
                 ${e.partnerName ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Partner: ${esc(e.partnerName)}</div>` : ''}
                 ${e.recordedBy ? `<div style="font-size:11px;color:var(--text3)">Recorded by: ${esc(e.recordedBy)}</div>` : ''}
               </div>
-              ${canManage ? `<button class="kbtn kbtn-sm kbtn-danger" style="flex-shrink:0;align-self:flex-start" onclick="Kpsc.deleteFinanceEntry('${e.id}')">🗑</button>` : ''}
+              ${canDelete ? `<button class="kbtn kbtn-sm kbtn-danger" style="flex-shrink:0;align-self:flex-start" onclick="Kpsc.deleteFinanceEntry('${e.id}')">🗑</button>` : ''}
             </div>
           </div>`).join('') : '<div class="k-empty">No entries for the selected period.</div>'}
       </div>
@@ -4381,7 +4490,11 @@ async function setFinanceMonth(month) {
 }
 
 async function deleteFinanceEntry(id) {
-  if (!confirm('Delete this finance entry?')) return;
+  if (!canDeleteFinanceEntries()) {
+    showToast('Only the Acting Chairman or IT Administrator may delete finance entries.', 'error');
+    return;
+  }
+  if (!confirm('Delete this finance entry? This is reserved for audited correction cases only.')) return;
   const res = await apiDelete(`kpsc-finance/${id}`);
   if (res?.error) { showToast(res.error, 'error'); return; }
   await renderFinance(document.getElementById('kpsc-main'));
@@ -6037,6 +6150,7 @@ async function extractProjectsFromMeetingUI(meetingId, btn) {
 
 function setMeetingTab(tab) {
   S._meetingTab = tab;
+  persistMeetingUiState();
   const recPanel   = document.getElementById('km-rec-panel');
   const audioPanel = document.getElementById('km-audio-panel');
   const uploadPanel = document.getElementById('km-upload-panel');
@@ -6539,6 +6653,13 @@ async function shareMinutesWhatsApp(meetingId) {
     showToast(linkRes?.error || 'Failed to generate public minutes link.', 'error');
     return;
   }
+  if (S.activeMeeting?.id === meetingId) {
+    S.activeMeeting.publicShareToken = linkRes.token || '';
+  }
+  const meetingIdx = S.meetings.findIndex(m => m.id === meetingId);
+  if (meetingIdx >= 0) {
+    S.meetings[meetingIdx] = { ...S.meetings[meetingIdx], publicShareToken: linkRes.token || '' };
+  }
 
   const msg = [
     `*KPSC Meeting Minutes — ${meeting.title || 'KPSC Meeting'}*`,
@@ -6563,7 +6684,25 @@ async function shareMinutesWhatsApp(meetingId) {
     S._distributedMeetingIds = updated;
     await apiPost('settings', { kpsc_distributed_meeting_ids: updated }).catch(() => {});
   }
+  renderPage('meeting');
   showToast('WhatsApp message prepared. Select recipients in WhatsApp to send.', 'success');
+}
+
+async function revokeMinutesPublicLink(meetingId) {
+  const meeting = S.activeMeeting;
+  if (!meeting?.publicShareToken) { showToast('No public minutes link is active for this meeting.', 'info'); return; }
+  if (!confirm('Revoke the public minutes link? Anyone with the old link will lose access immediately.')) return;
+  const res = await apiPost(`ai-secretary-meetings/${meetingId}/revoke-public-link`, {});
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  if (S.activeMeeting?.id === meetingId) {
+    S.activeMeeting.publicShareToken = '';
+  }
+  const meetingIdx = S.meetings.findIndex(m => m.id === meetingId);
+  if (meetingIdx >= 0) {
+    S.meetings[meetingIdx] = { ...S.meetings[meetingIdx], publicShareToken: '' };
+  }
+  renderPage('meeting');
+  showToast('Public minutes link revoked.', 'success');
 }
 
 // ── ACTION ITEM WHATSAPP NOTIFICATIONS ────────────────────────────
@@ -7151,6 +7290,7 @@ window.Kpsc = {
   // Minutes PDF + WhatsApp sharing
   printMinutes,
   shareMinutesWhatsApp,
+  revokeMinutesPublicLink,
   togglePlainEnglish,
   // B5: Follow-up nudges
   approveFollowup,

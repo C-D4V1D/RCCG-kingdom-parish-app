@@ -14,6 +14,7 @@ const CORS_HEADERS = {
 // ── KPSC ROLE GROUPS ────────────────────────────────────────────────
 const KPSC_WRITE_ROLES    = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'it_admin'];
 const KPSC_FINANCE_ROLES  = ['acting_chairman', 'financial_secretary', 'treasurer', 'it_admin'];
+const KPSC_FINANCE_DELETE_ROLES = ['acting_chairman', 'it_admin'];
 // Account management: it_admin can create/update/delete accounts without operational permissions.
 const KPSC_ADMIN_ROLES    = ['acting_chairman', 'general_secretary', 'it_admin'];
 // All roles that can log in to the portal (including read-only viewer and IT admin).
@@ -243,15 +244,15 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
         if (auth instanceof Response) return auth;
-        return await createKpscFinanceEntry(DB, body);
+        return await createKpscFinanceEntry(DB, body, auth);
       }
       if (method === 'PUT'  &&  param) {
         const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
         if (auth instanceof Response) return auth;
-        return await updateKpscFinanceEntry(DB, param, body);
+        return await updateKpscFinanceEntry(DB, param, body, auth);
       }
       if (method === 'DELETE' && param) {
-        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_DELETE_ROLES);
         if (auth instanceof Response) return auth;
         return await deleteKpscFinanceEntry(DB, param, auth);
       }
@@ -457,7 +458,7 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
-        return await createAiSecretaryMeeting(DB, body);
+        return await createAiSecretaryMeeting(DB, body, auth);
       }
       if (method === 'GET'  &&  param) {
         const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
@@ -467,7 +468,7 @@ export async function onRequest(context) {
       if (method === 'PUT'  &&  param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
-        return await updateAiSecretaryMeeting(DB, param, body);
+        return await updateAiSecretaryMeeting(DB, param, body, auth);
       }
       if (method === 'DELETE' && param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -488,6 +489,11 @@ export async function onRequest(context) {
         const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
         if (auth instanceof Response) return auth;
         return await createAiSecretaryMeetingPublicLink(DB, request, param);
+      }
+      if (method === 'POST' && parts[2] === 'revoke-public-link') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await revokeAiSecretaryMeetingPublicLink(DB, param, auth);
       }
     }
     if (route === 'kpsc-public-minutes' && method === 'GET' && param) {
@@ -686,14 +692,22 @@ async function handleInit(DB) {
       resolutions_json  TEXT DEFAULT '[]',
       action_items_json TEXT DEFAULT '[]',
       policy_flags_json TEXT DEFAULT '[]',
+      suggested_projects_json TEXT DEFAULT '[]',
+      plain_english_minutes_md TEXT DEFAULT '',
       created_by        TEXT DEFAULT '',
+      created_by_account_id TEXT DEFAULT '',
       started_at        TEXT DEFAULT '',
       ended_at          TEXT DEFAULT '',
+      scheduled_for     TEXT,
+      pre_brief_markdown TEXT,
+      pre_brief_generated_at TEXT,
       reviewed_at       TEXT DEFAULT '',
       reviewed_by       TEXT DEFAULT '',
       public_share_token TEXT DEFAULT '',
       processed_at      TEXT DEFAULT '',
-      created_at        TEXT DEFAULT (datetime('now'))
+      created_at        TEXT DEFAULT (datetime('now')),
+      deleted_at        TEXT DEFAULT '',
+      deleted_by        TEXT DEFAULT ''
     )`,
     `CREATE TABLE IF NOT EXISTS kpsc_accounts (
       id                TEXT PRIMARY KEY,
@@ -864,6 +878,7 @@ async function handleInit(DB) {
     // Soft-delete for AI secretary meeting drafts.
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_at TEXT DEFAULT ''`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_by TEXT DEFAULT ''`,
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN created_by_account_id TEXT DEFAULT ''`,
     // Plain English minutes cache
     `ALTER TABLE ai_secretary_meetings ADD COLUMN plain_english_minutes_md TEXT DEFAULT ''`,
     // Wave 3 VF-2: voice fingerprinting columns on kpsc_members.
@@ -2016,12 +2031,23 @@ async function deleteKpscPartner(DB, id, auth) {
 }
 
 async function deleteKpscFinanceEntry(DB, id, auth) {
-  const existing = await DB.prepare(`SELECT id FROM kpsc_finance_entries WHERE id=?`).bind(id).first();
+  const existing = await DB.prepare(
+    `SELECT id,date,entry_type,category,amount FROM kpsc_finance_entries WHERE id=?`
+  ).bind(id).first();
   if (!existing) return err('Finance entry not found', 404);
   const now = new Date().toISOString();
   await DB.prepare(
     `UPDATE kpsc_finance_entries SET deleted_at=?, deleted_by=? WHERE id=?`
   ).bind(now, auth.name, id).run();
+  await DB.prepare(
+    `INSERT INTO notifications (id,title,body,type,ts) VALUES (?,?,?,?,?)`
+  ).bind(
+    newId('N'),
+    'KPSC finance entry deleted',
+    `"${String(existing.category || existing.entry_type || 'finance entry').replace(/"/g, '\\"')}" on ${existing.date || 'unknown date'} for ₦${Number(existing.amount || 0).toLocaleString('en-NG')} was deleted by ${auth.name} (${auth.role}).`,
+    'warn',
+    now,
+  ).run();
   return ok({ deleted: id });
 }
 
@@ -2066,7 +2092,7 @@ async function getKpscFinanceEntries(DB, url) {
   })));
 }
 
-async function createKpscFinanceEntry(DB, data) {
+async function createKpscFinanceEntry(DB, data, auth) {
   const date = String(data?.date || '').trim();
   const entryType = String(data?.entryType || '').trim().toLowerCase();
   const category = String(data?.category || '').trim();
@@ -2089,7 +2115,7 @@ async function createKpscFinanceEntry(DB, data) {
     String(data?.reference || '').trim(),
     String(data?.narration || '').trim(),
     String(data?.partnerId || '').trim(),
-    String(data?.recordedBy || '').trim(),
+    String(auth?.name || data?.recordedBy || '').trim(),
     String(data?.approvedBy || '').trim(),
     String(data?.approvalStatus || 'recorded').trim() || 'recorded',
     String(data?.attachmentName || '').trim(),
@@ -2097,7 +2123,7 @@ async function createKpscFinanceEntry(DB, data) {
   return await getKpscFinanceEntryById(DB, id);
 }
 
-async function updateKpscFinanceEntry(DB, id, data) {
+async function updateKpscFinanceEntry(DB, id, data, auth) {
   const row = await DB.prepare(`SELECT * FROM kpsc_finance_entries WHERE id=?`).bind(id).first();
   if (!row) return err('KPSC finance entry not found', 404);
   await DB.prepare(`
@@ -2114,7 +2140,7 @@ async function updateKpscFinanceEntry(DB, id, data) {
     data?.reference !== undefined ? String(data.reference || '').trim() : row.reference,
     data?.narration !== undefined ? String(data.narration || '').trim() : row.narration,
     data?.partnerId !== undefined ? String(data.partnerId || '').trim() : row.partner_id,
-    data?.recordedBy !== undefined ? String(data.recordedBy || '').trim() : row.recorded_by,
+    data?.recordedBy !== undefined ? String(auth?.name || data.recordedBy || '').trim() : row.recorded_by,
     data?.approvedBy !== undefined ? String(data.approvedBy || '').trim() : row.approved_by,
     data?.approvalStatus !== undefined ? String(data.approvalStatus || 'recorded').trim() : row.approval_status,
     data?.attachmentName !== undefined ? String(data.attachmentName || '').trim() : row.attachment_name,
@@ -3037,6 +3063,7 @@ function aiSecretaryMeetingFromRow(row) {
     policyFlags: safeJsonParse(row.policy_flags_json, []),
     suggestedProjects: safeJsonParse(row.suggested_projects_json, []),
     createdBy: row.created_by || '',
+    createdByAccountId: row.created_by_account_id || '',
     startedAt: row.started_at || '',
     endedAt: row.ended_at || '',
     reviewedAt: row.reviewed_at || '',
@@ -3461,7 +3488,7 @@ async function getAiSecretaryMeetings(DB) {
 
 async function deleteAiSecretaryMeeting(DB, id, auth) {
   const existing = await DB.prepare(
-    `SELECT id, title, created_by, status, deleted_at FROM ai_secretary_meetings WHERE id=?`
+    `SELECT id, title, created_by, created_by_account_id, status, deleted_at FROM ai_secretary_meetings WHERE id=?`
   ).bind(id).first();
   if (!existing) return err('AI secretary meeting not found', 404);
   // Already soft-deleted — return idempotently.
@@ -3472,7 +3499,8 @@ async function deleteAiSecretaryMeeting(DB, id, auth) {
   const isAdmin = auth.role === 'acting_chairman' ||
                   auth.role === 'general_secretary' ||
                   auth.role === 'it_admin';
-  const isAuthor = !!auth.name && auth.name === (existing.created_by || '');
+  const isAuthor = (!!auth.id && auth.id === (existing.created_by_account_id || ''))
+    || (!existing.created_by_account_id && !!auth.name && auth.name === (existing.created_by || ''));
 
   if (!isAdmin && !isAuthor) {
     return err('Only the meeting author or an administrator can delete this meeting.', 403);
@@ -3529,6 +3557,28 @@ async function createAiSecretaryMeetingPublicLink(DB, request, id) {
   });
 }
 
+async function revokeAiSecretaryMeetingPublicLink(DB, id, auth) {
+  const row = await DB.prepare(
+    `SELECT id,title,public_share_token,deleted_at FROM ai_secretary_meetings WHERE id=?`
+  ).bind(id).first();
+  if (!row || row.deleted_at) return err('Meeting not found', 404);
+  if (!String(row.public_share_token || '').trim()) {
+    return ok({ meetingId: id, revoked: false, alreadyRevoked: true });
+  }
+  await DB.prepare(`UPDATE ai_secretary_meetings SET public_share_token='' WHERE id=?`).bind(id).run();
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `INSERT INTO notifications (id,title,body,type,ts) VALUES (?,?,?,?,?)`
+  ).bind(
+    newId('N'),
+    'KPSC minutes public link revoked',
+    `Public minutes link for "${String(row.title || id).replace(/"/g, '\\"')}" was revoked by ${auth.name} (${auth.role}).`,
+    'warn',
+    now,
+  ).run();
+  return ok({ meetingId: id, revoked: true });
+}
+
 async function getAiSecretaryMeetingPublicView(DB, token) {
   const cleanToken = String(token || '').trim();
   if (!cleanToken) return err('token is required', 400);
@@ -3550,7 +3600,7 @@ async function getAiSecretaryMeetingPublicView(DB, token) {
   });
 }
 
-async function createAiSecretaryMeeting(DB, data) {
+async function createAiSecretaryMeeting(DB, data, auth) {
   const id = data.id || newId('AIM-');
   const participants = normalizeAiParticipants(data.participants);
   const now = new Date().toISOString();
@@ -3559,8 +3609,8 @@ async function createAiSecretaryMeeting(DB, data) {
   // INSERT is silently skipped and the existing row is returned unchanged.
   await DB.prepare(`
     INSERT OR IGNORE INTO ai_secretary_meetings
-      (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,created_by,started_at,created_at,scheduled_for)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,created_by,created_by_account_id,started_at,created_at,scheduled_for)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     String(data.title || 'KPSC Meeting').trim(),
@@ -3569,7 +3619,8 @@ async function createAiSecretaryMeeting(DB, data) {
     data.status || 'draft',
     JSON.stringify(participants),
     data.transcriptText || '',
-    data.createdBy || '',
+    auth?.name || '',
+    auth?.id || '',
     data.startedAt || '',
     now,
     data.scheduledFor ? String(data.scheduledFor).trim() : null,
@@ -3577,7 +3628,7 @@ async function createAiSecretaryMeeting(DB, data) {
   return await getAiSecretaryMeeting(DB, id);
 }
 
-async function updateAiSecretaryMeeting(DB, id, data) {
+async function updateAiSecretaryMeeting(DB, id, data, auth) {
   const existing = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
   if (!existing) return err('AI secretary meeting not found', 404);
   const participants = data.participants !== undefined ? normalizeAiParticipants(data.participants) : safeJsonParse(existing.participants_json, []);
@@ -3628,7 +3679,7 @@ async function updateAiSecretaryMeeting(DB, id, data) {
     UPDATE ai_secretary_meetings SET
       title=?, meeting_type=?, meeting_date=?, status=?, participants_json=?, transcript_text=?, ended_at=?,
       summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?,
-      scheduled_for=?, reviewed_at=?, reviewed_by=?
+      scheduled_for=?, reviewed_at=?, reviewed_by=?, created_by_account_id=?
     WHERE id=?
   `).bind(
     data.title !== undefined ? String(data.title).trim() : existing.title,
@@ -3647,6 +3698,7 @@ async function updateAiSecretaryMeeting(DB, id, data) {
     scheduledFor,
     reviewedAt,
     reviewedBy,
+    existing.created_by_account_id || (auth?.name && auth.name === (existing.created_by || '') ? auth.id : ''),
     id,
   ).run();
   return await getAiSecretaryMeeting(DB, id);
