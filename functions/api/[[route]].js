@@ -86,8 +86,33 @@ function cosineSim(a, b) {
 // Convert a JS number array to an ArrayBuffer (Float32 little-endian) for D1 BLOB storage.
 function embeddingToBlob(arr)  { return new Float32Array(arr).buffer; }
 
-// Convert an ArrayBuffer (Float32 little-endian) back to a JS number array.
-function blobToEmbedding(blob) { return Array.from(new Float32Array(blob)); }
+// Convert a D1 BLOB column back to a JS number array.
+// D1 (in Cloudflare Pages Functions) returns BLOB columns as a plain JS Array
+// of byte values (0-255) — not ArrayBuffer or Uint8Array. Handle every form
+// defensively so this keeps working if the runtime ever changes:
+//   - ArrayBuffer            → use directly
+//   - Uint8Array (any view)  → slice the underlying buffer
+//   - Array<number>          → wrap into a Uint8Array and use its buffer
+//   - base64 string          → decode to bytes
+function blobToEmbedding(blob) {
+  if (!blob) return [];
+  let buffer;
+  if (blob instanceof ArrayBuffer) {
+    buffer = blob;
+  } else if (ArrayBuffer.isView(blob)) {
+    buffer = blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength);
+  } else if (Array.isArray(blob)) {
+    buffer = new Uint8Array(blob).buffer;
+  } else if (typeof blob === 'string') {
+    const binary = atob(blob);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    buffer = bytes.buffer;
+  } else {
+    return [];
+  }
+  return Array.from(new Float32Array(buffer));
+}
 
 function isValidPin(pin) {
   return /^\d{4,6}$/.test(String(pin || ''));
@@ -4111,11 +4136,18 @@ async function uploadAiSecretaryAudioChunk(env, request) {
   const key = `kpsc-audio/${meetingId}/${uploadSessionId}/${sequence}.webm`;
   const bucket = env.KPSC_AUDIO_BUCKET || env.AUDIO_BUCKET;
   if (bucket?.put) {
-    await bucket.put(key, audio.stream(), {
-      httpMetadata: { contentType: mimeType },
-      customMetadata: { meetingId, uploadSessionId, sequence, createdAt },
-    });
-    return ok({ uploaded: true, stored: true, key, sequence: Number(sequence) });
+    try {
+      await bucket.put(key, audio.stream(), {
+        httpMetadata: { contentType: mimeType },
+        customMetadata: { meetingId, uploadSessionId, sequence, createdAt },
+      });
+      return ok({ uploaded: true, stored: true, key, sequence: Number(sequence) });
+    } catch (e) {
+      // R2 transient failures (network, throttling) bubble as 502 so the
+      // client retries via its existing recFlushUploads backoff. We do not
+      // 500 because the chunk itself was valid — only persistence failed.
+      return err(`Audio bucket write failed: ${e.message || e}`, 502);
+    }
   }
 
   // Accept chunks even before an R2 bucket is bound so the browser can keep streaming
