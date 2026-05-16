@@ -274,6 +274,24 @@ function recRenderUI() {
   }
   const transcriptPanel = document.getElementById('kpsc-live-transcript');
   if (transcriptPanel) transcriptPanel.toggleAttribute('data-recording', liveDisabled === '');
+
+  // When the meeting was opened as 'draft' and recording was started in the same
+  // session, renderMeetingRoom() did not produce an "End Meeting" button (because
+  // the DB status was still 'draft' at render time). Inject it now so the button
+  // is always available once any live recording session has been initiated.
+  const roomActions = document.querySelector('.k-room-actions');
+  if (roomActions) {
+    const needsEndBtn = Rec.status === 'recording' || Rec.status === 'paused' || Rec.status === 'stopped';
+    let endBtn = document.getElementById('km-end-meeting-btn');
+    if (needsEndBtn && !endBtn) {
+      endBtn = document.createElement('button');
+      endBtn.id = 'km-end-meeting-btn';
+      endBtn.className = 'kbtn kbtn-amber';
+      endBtn.textContent = '🔒 End Meeting';
+      endBtn.onclick = function () { Kpsc.endMeeting(this); };
+      roomActions.appendChild(endBtn);
+    }
+  }
 }
 
 // Return the display name for a Deepgram speaker index.
@@ -333,6 +351,9 @@ function recAppendTranscript(text, itemId = '', speaker = null) {
     const line = `[${entry.timestamp}]${speakerTag} ${entry.text}`;
     textarea.value = textarea.value ? `${textarea.value}\n${line}` : line;
     textarea.scrollTop = textarea.scrollHeight;
+    // Programmatic textarea updates don't fire 'input' events, so trigger autosave
+    // explicitly so live transcript entries are persisted to the server.
+    scheduleAutoSave();
   }
   recRenderTranscript();
 }
@@ -867,6 +888,20 @@ async function recUploadChunk(chunk, useKeepalive) {
 window.addEventListener('beforeunload', () => {
   if (Rec.status === 'recording' && Rec.mediaRecorder?.state === 'recording') {
     try { Rec.mediaRecorder.requestData(); } catch (_) { /* noop */ }
+  }
+  // Flush in-memory transcript text to the server using a keepalive request so
+  // live transcript entries are not lost when the user refreshes or closes the tab.
+  const mid = S.activeMeeting?.id;
+  const trans = document.getElementById('km-transcript')?.value;
+  if (mid && (Rec.status === 'recording' || Rec.status === 'paused' || Rec.status === 'stopped') && trans !== undefined) {
+    try {
+      fetch(`${API}/ai-secretary-meetings/${mid}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...kpscSessionHeader() },
+        body: JSON.stringify({ transcriptText: trans }),
+        keepalive: true,
+      });
+    } catch (_) { /* noop */ }
   }
 });
 
@@ -1955,7 +1990,7 @@ function navigate(page, opts) {
   S._partnerDetailId = null;
   S._partnerDetailYear = null;
   // Flush in-memory transcript before the meeting-room DOM unmounts.
-  if ((Rec.status === 'recording' || Rec.status === 'paused') && document.getElementById('km-transcript')) {
+  if ((Rec.status === 'recording' || Rec.status === 'paused' || Rec.status === 'stopped') && document.getElementById('km-transcript')) {
     autoSaveNow();
   }
   recStop();
@@ -2912,7 +2947,7 @@ async function renderMeetingRoom(main) {
       <div class="k-room-actions">
         ${isEditable ? `<span id="km-autosave-status" class="k-autosave-status" aria-live="polite"></span>` : ''}
         ${(status === 'draft' || status === 'recording') && (m ? canDeleteMeeting(m) : S._isNewMeeting) ? `<button class="kbtn kbtn-ghost kbtn-sm" style="color:var(--danger,#dc2626)" onclick="Kpsc.discardMeetingFromRoom()">🗑 Discard</button>` : ''}
-        ${status === 'recording' ? `<button class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
+        ${status === 'recording' ? `<button id="km-end-meeting-btn" class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
         ${status === 'ended' ? `<button class="kbtn kbtn-primary" onclick="Kpsc.processMeeting(this)">✨ Generate Minutes</button>` : ''}
         ${isProcessed ? `<div class="k-processed-note">✅ Minutes have been generated and finalised.</div>` : ''}
       </div>
