@@ -1248,6 +1248,23 @@ async function voiceIdTriggerForSpeaker(speakerIdx) {
     const data = await res.json();
     if (data.error) { console.warn('[voice-id] identify error:', data.error); return; }
 
+    // Always log the result so we can tune the threshold based on real data.
+    console.info(
+      `[voice-id] speaker ${speakerIdx} → match=${data.match}` +
+      ` score=${typeof data.score === 'number' ? data.score.toFixed(3) : 'n/a'}` +
+      ` threshold=${data.threshold ?? 'n/a'}` +
+      (data.reason ? ` reason=${data.reason}` : '') +
+      (data.memberName ? ` member=${data.memberName}` : '')
+    );
+
+    if (!data.match && typeof data.score === 'number' && data.score >= (data.threshold - 0.10)) {
+      // Close-but-no-match: surface a hint so user can re-enroll or check mic.
+      showToast(
+        `🎙 Voice nearly matched (score ${data.score.toFixed(2)} vs threshold ${data.threshold}) — re-enrolling in better audio conditions may help.`,
+        'warn'
+      );
+    }
+
     if (data.match && data.memberName) {
       if (Rec.speakerMap.has(speakerIdx)) return; // assigned manually while we waited
       assignSpeaker(speakerIdx, data.memberName);

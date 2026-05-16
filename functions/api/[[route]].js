@@ -3518,7 +3518,12 @@ async function createDeepgramTranscriptionToken(env) {
 
 // ── VOICE FINGERPRINTING ENDPOINTS (Wave 3 VF-2) ─────────────────────
 // Uses a stateless Cloud Run embedder at ${VOICE_FP_URL} (VF-1).
-const VOICE_IDENTIFY_THRESHOLD = 0.65;
+// Threshold tuned for cross-codec matching: enrollment captures webm/opus from
+// MediaRecorder (lossy, ~12-24 kbps), identification captures raw PCM. Opus
+// compression typically drops same-speaker cosine similarity by 0.10-0.15
+// versus PCM-to-PCM. 0.50 matches published ECAPA-TDNN VoxCeleb-O thresholds
+// for first-pass identification with real-world acoustic variance.
+const VOICE_IDENTIFY_THRESHOLD = 0.50;
 
 /**
  * Forward audio to the VF-1 embedder and return the parsed JSON response.
