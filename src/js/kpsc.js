@@ -2611,7 +2611,7 @@ function meetingCard(m) {
         <div class="k-mc-title">${esc(m.title)}</div>
         <div class="k-mc-badges">
           ${typeBadge(m.meetingType)} ${statusBadge(m.status)}
-          ${showDelete ? `<button class="k-mc-del" title="Delete meeting" aria-label="Delete meeting" onclick="Kpsc.deleteMeetingDraft('${m.id}', event)">🗑</button>` : ''}
+          ${showDelete ? `<button class="k-mc-del" title="Delete meeting" aria-label="Delete meeting" onclick="Kpsc.deleteMeeting('${m.id}', event)">🗑</button>` : ''}
         </div>
       </div>
       <div class="k-mc-meta">
@@ -3289,7 +3289,7 @@ function updateCollapsibleSummaries() {
 }
 
 // ── MEETING ACTIONS ───────────────────────────────────────────────
-async function deleteMeetingDraft(id, event) {
+async function deleteMeeting(id, event) {
   if (event) { event.stopPropagation(); event.preventDefault(); }
   const m = S.meetings.find(x => x.id === id);
   if (!m) return;
@@ -7054,7 +7054,7 @@ window.Kpsc = {
   startNewMeeting,
   openMeeting,
   saveMeeting,
-  deleteMeetingDraft,
+  deleteMeeting,
   discardMeetingFromRoom,
   endMeeting,
   processMeeting,
