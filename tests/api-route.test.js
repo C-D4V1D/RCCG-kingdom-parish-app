@@ -1763,7 +1763,7 @@ test('voice-identify: one enrolled member with identical embedding returns match
     assert.equal(body.memberId, 'km1');
     assert.equal(body.memberName, 'Alice');
     assert.ok(body.score >= 0.99, `Expected score ~1.0, got ${body.score}`);
-    assert.equal(body.threshold, 0.65);
+    assert.equal(body.threshold, 0.50);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1820,8 +1820,8 @@ test('voice-identify: orthogonal embedding returns match:false (below threshold)
 
     assert.equal(response.status, 200);
     assert.equal(body.match, false);
-    assert.ok(body.score < 0.65, `Expected score < 0.65, got ${body.score}`);
-    assert.equal(body.threshold, 0.65);
+    assert.ok(body.score < 0.50, `Expected score < 0.50, got ${body.score}`);
+    assert.equal(body.threshold, 0.50);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1873,7 +1873,7 @@ test('voice-identify: no enrolled members returns match:false with no_enrolled_m
     assert.equal(body.match, false);
     assert.equal(body.score, 0);
     assert.equal(body.reason, 'no_enrolled_members');
-    assert.equal(body.threshold, 0.65);
+    assert.equal(body.threshold, 0.50);
   } finally {
     globalThis.fetch = originalFetch;
   }
