@@ -12,8 +12,8 @@ const CORS_HEADERS = {
 };
 
 // ── KPSC ROLE GROUPS ────────────────────────────────────────────────
-const KPSC_WRITE_ROLES    = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer'];
-const KPSC_FINANCE_ROLES  = ['acting_chairman', 'financial_secretary', 'treasurer'];
+const KPSC_WRITE_ROLES    = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'it_admin'];
+const KPSC_FINANCE_ROLES  = ['acting_chairman', 'financial_secretary', 'treasurer', 'it_admin'];
 // Account management: it_admin can create/update/delete accounts without operational permissions.
 const KPSC_ADMIN_ROLES    = ['acting_chairman', 'general_secretary', 'it_admin'];
 // All roles that can log in to the portal (including read-only viewer and IT admin).
@@ -472,6 +472,14 @@ export async function onRequest(context) {
         if (auth instanceof Response) return auth;
         return await translateAiSecretaryMeetingPlainEnglish(DB, env, param);
       }
+      if (method === 'POST' && parts[2] === 'public-link') {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createAiSecretaryMeetingPublicLink(DB, request, param);
+      }
+    }
+    if (route === 'kpsc-public-minutes' && method === 'GET' && param) {
+      return await getAiSecretaryMeetingPublicView(DB, param);
     }
 
     // ── /api/admin ─────────────────────────────────────────────
@@ -669,6 +677,9 @@ async function handleInit(DB) {
       created_by        TEXT DEFAULT '',
       started_at        TEXT DEFAULT '',
       ended_at          TEXT DEFAULT '',
+      reviewed_at       TEXT DEFAULT '',
+      reviewed_by       TEXT DEFAULT '',
+      public_share_token TEXT DEFAULT '',
       processed_at      TEXT DEFAULT '',
       created_at        TEXT DEFAULT (datetime('now'))
     )`,
@@ -853,6 +864,9 @@ async function handleInit(DB) {
     `ALTER TABLE ai_secretary_meetings ADD COLUMN scheduled_for TEXT`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN pre_brief_markdown TEXT`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN pre_brief_generated_at TEXT`,
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN reviewed_at TEXT DEFAULT ''`,
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN reviewed_by TEXT DEFAULT ''`,
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN public_share_token TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -2979,6 +2993,9 @@ function aiSecretaryMeetingFromRow(row) {
     createdBy: row.created_by || '',
     startedAt: row.started_at || '',
     endedAt: row.ended_at || '',
+    reviewedAt: row.reviewed_at || '',
+    reviewedBy: row.reviewed_by || '',
+    publicShareToken: row.public_share_token || '',
     processedAt: row.processed_at || '',
     createdAt: row.created_at || '',
     deletedAt: row.deleted_at || '',
@@ -3221,6 +3238,26 @@ function appendAiSecretaryMandatoryChecks(markdown, flags) {
   return /mandatory governance checks|policy checks/i.test(markdown) ? markdown : `${markdown}${section}`;
 }
 
+function stripAiMinutesTimestampLines(markdown) {
+  return String(markdown || '')
+    .split('\n')
+    .filter(line => !/^\s*(generated|generated at|generated on|timestamp)\s*[:\-]/i.test(line.trim()))
+    .join('\n')
+    .trim();
+}
+
+function hasStandardMinutesStructure(markdown) {
+  const text = String(markdown || '').toLowerCase();
+  const required = [
+    '## attendance',
+    '## agenda / matters discussed',
+    '## executive summary',
+    '## decision & resolution register',
+    '## action items',
+  ];
+  return required.every(section => text.includes(section));
+}
+
 function sanitizeAiSecretaryOutput(rawOutput, meeting, deterministicOutput) {
   const raw = rawOutput && typeof rawOutput === 'object' ? rawOutput : {};
   const deterministic = deterministicOutput || buildAiSecretaryOutput(meeting, { skipSanitize: true });
@@ -3273,6 +3310,10 @@ function sanitizeAiSecretaryOutput(rawOutput, meeting, deterministicOutput) {
   };
   if (!output.agendaItems.length) output.agendaItems = deterministic.agendaItems || extractAgendaItems(meeting.transcriptText || '');
   if (!output.minutesMarkdown) output.minutesMarkdown = deterministic.minutesMarkdown;
+  output.minutesMarkdown = stripAiMinutesTimestampLines(output.minutesMarkdown);
+  if (!hasStandardMinutesStructure(output.minutesMarkdown)) {
+    output.minutesMarkdown = deterministic.minutesMarkdown;
+  }
   output.minutesMarkdown = appendAiSecretaryMandatoryChecks(output.minutesMarkdown, governanceFlags);
   return output;
 }
@@ -3379,7 +3420,7 @@ async function deleteAiSecretaryMeeting(DB, id, data) {
   // logged-in user's name and role (same trust model as createdBy on POST).
   const userName = String(data?.userName || '').trim();
   const userRole = String(data?.userRole || '').trim().toLowerCase();
-  const isAdmin = userRole === 'admin' || userRole === 'it_administrator';
+  const isAdmin = userRole === 'admin' || userRole === 'it_administrator' || userRole === 'it_admin';
   const isAuthor = !!userName && userName === (existing.created_by || '');
   if (!isAdmin && !isAuthor) {
     return err('Only the meeting author or an administrator can delete this draft.', 403);
@@ -3396,6 +3437,47 @@ async function getAiSecretaryMeeting(DB, id) {
   const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
   if (!row) return err('AI secretary meeting not found', 404);
   return ok(aiSecretaryMeetingFromRow(row));
+}
+
+async function createAiSecretaryMeetingPublicLink(DB, request, id) {
+  const row = await DB.prepare(
+    `SELECT id,title,meeting_date,minutes_markdown,reviewed_at,public_share_token,deleted_at
+     FROM ai_secretary_meetings WHERE id=?`
+  ).bind(id).first();
+  if (!row || row.deleted_at) return err('Meeting not found', 404);
+  if (!String(row.minutes_markdown || '').trim()) return err('Minutes are not available for sharing yet.', 400);
+  if (!String(row.reviewed_at || '').trim()) return err('Minutes review must be approved before sharing.', 409);
+  const token = String(row.public_share_token || '').trim() || newId('kpub_');
+  if (!row.public_share_token) {
+    await DB.prepare(`UPDATE ai_secretary_meetings SET public_share_token=? WHERE id=?`).bind(token, id).run();
+  }
+  const origin = new URL(request.url).origin;
+  return ok({
+    meetingId: id,
+    token,
+    publicUrl: `${origin}/kpsc/minutes/?token=${encodeURIComponent(token)}`,
+  });
+}
+
+async function getAiSecretaryMeetingPublicView(DB, token) {
+  const cleanToken = String(token || '').trim();
+  if (!cleanToken) return err('token is required', 400);
+  const row = await DB.prepare(
+    `SELECT id,title,meeting_date,meeting_type,summary_short,summary_long,minutes_markdown,reviewed_at
+     FROM ai_secretary_meetings
+     WHERE public_share_token=? AND COALESCE(deleted_at,'')=''`
+  ).bind(cleanToken).first();
+  if (!row) return err('Public minutes link not found', 404);
+  if (!String(row.reviewed_at || '').trim()) return err('Minutes review is not approved for public sharing.', 409);
+  return ok({
+    id: row.id,
+    title: row.title || 'KPSC Meeting',
+    meetingDate: row.meeting_date || '',
+    meetingType: row.meeting_type || 'routine',
+    summaryShort: row.summary_short || '',
+    summaryLong: row.summary_long || '',
+    minutesMarkdown: row.minutes_markdown || '',
+  });
 }
 
 async function createAiSecretaryMeeting(DB, data) {
@@ -3463,11 +3545,17 @@ async function updateAiSecretaryMeeting(DB, id, data) {
   const scheduledFor = data.scheduledFor !== undefined
     ? (data.scheduledFor ? String(data.scheduledFor).trim() : null)
     : (existing.scheduled_for || null);
+  const reviewedAt = data.reviewedAt !== undefined
+    ? String(data.reviewedAt || '').trim()
+    : (existing.reviewed_at || '');
+  const reviewedBy = data.reviewedBy !== undefined
+    ? String(data.reviewedBy || '').trim()
+    : (existing.reviewed_by || '');
   await DB.prepare(`
     UPDATE ai_secretary_meetings SET
       title=?, meeting_type=?, meeting_date=?, status=?, participants_json=?, transcript_text=?, ended_at=?,
       summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?,
-      scheduled_for=?
+      scheduled_for=?, reviewed_at=?, reviewed_by=?
     WHERE id=?
   `).bind(
     data.title !== undefined ? String(data.title).trim() : existing.title,
@@ -3484,6 +3572,8 @@ async function updateAiSecretaryMeeting(DB, id, data) {
     JSON.stringify(actionItems),
     JSON.stringify(policyFlags),
     scheduledFor,
+    reviewedAt,
+    reviewedBy,
     id,
   ).run();
   return await getAiSecretaryMeeting(DB, id);
@@ -3512,6 +3602,11 @@ Suggested projects requirements:
 - priority is one of low, medium, high.
 - targetDate is YYYY-MM-DD or empty string.
 - Limit to 10 items. Omit this key if no projects were discussed.
+
+Minutes formatting requirements:
+- Use a formal, standard minutes structure with clear Markdown headings and bullet lists.
+- Include attendance, agenda/matters discussed, executive summary, decision/resolution register, motions/voting/amendments, action items, and policy checks.
+- Do not include generated timestamps or "Generated on/at" metadata lines.
 
 Saved KPSC policy/bylaw notes:
 ${policyContext || '(none saved)'}
@@ -3570,7 +3665,7 @@ async function processAiSecretaryMeeting(DB, id) {
   const processedAt = new Date().toISOString();
   await DB.prepare(`
     UPDATE ai_secretary_meetings SET
-      status='processed', summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?, suggested_projects_json=?, processed_at=?
+      status='processed', summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?, suggested_projects_json=?, reviewed_at='', reviewed_by='', processed_at=?
     WHERE id=?
   `).bind(
     output.summaryShort || '',

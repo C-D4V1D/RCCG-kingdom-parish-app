@@ -17,6 +17,13 @@ test('KPSC portal directory page uses root-relative assets', async () => {
   assert.match(html, /id="kpsc-account-select"/);
 });
 
+test('KPSC public minutes page uses root-relative assets', async () => {
+  const html = await readFile(new URL('../kpsc/minutes/index.html', import.meta.url), 'utf8');
+
+  assert.match(html, /<link rel="stylesheet" href="\/src\/css\/kpsc\.css" \/>/);
+  assert.match(html, /<script src="\/src\/js\/kpsc-public-minutes\.js"><\/script>/);
+});
+
 test('Cloudflare redirects do not rewrite KPSC back to an .html file', async () => {
   const redirects = await readFile(new URL('../_redirects', import.meta.url), 'utf8');
 
