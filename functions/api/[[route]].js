@@ -4084,18 +4084,29 @@ async function voiceIdentify(DB, env, request) {
   // Find the best match.
   let bestScore  = -1;
   let bestMember = null;
+  // Diagnostic capture — surfaced in the response so the frontend console can
+  // see what D1 actually returns for the BLOB column without needing Worker logs.
+  const diag = { enrolledCount: enrolled.length, queryLen: queryEmbedding.length, rows: [] };
   for (const row of enrolled) {
-    const storedEmbedding = blobToEmbedding(row.voice_embedding);
-    // Log first row only to help diagnose BLOB type issues without spamming
-    if (bestScore === -1) {
-      console.log(`[voice-id] blob type=${Object.prototype.toString.call(row.voice_embedding)} storedLen=${storedEmbedding.length} queryLen=${queryEmbedding.length}`);
-    }
+    const rawBlob = row.voice_embedding;
+    const storedEmbedding = blobToEmbedding(rawBlob);
+    const blobType   = Object.prototype.toString.call(rawBlob);
+    const byteLength = rawBlob && rawBlob.byteLength !== undefined ? rawBlob.byteLength
+                     : (typeof rawBlob === 'string' ? rawBlob.length : -1);
     const score = cosineSim(queryEmbedding, storedEmbedding);
+    diag.rows.push({
+      memberId: row.id,
+      blobType,
+      byteLength,
+      storedLen: storedEmbedding.length,
+      score: Number.isFinite(score) ? Number(score.toFixed(4)) : score,
+    });
     if (score > bestScore) {
       bestScore  = score;
       bestMember = row;
     }
   }
+  console.log(`[voice-id] diag: ${JSON.stringify(diag)}`);
 
   if (bestScore >= VOICE_IDENTIFY_THRESHOLD) {
     return ok({
@@ -4104,9 +4115,10 @@ async function voiceIdentify(DB, env, request) {
       memberName: bestMember.name,
       score:      bestScore,
       threshold:  VOICE_IDENTIFY_THRESHOLD,
+      _diag:      diag,
     });
   }
-  return ok({ match: false, score: bestScore, threshold: VOICE_IDENTIFY_THRESHOLD });
+  return ok({ match: false, score: bestScore, threshold: VOICE_IDENTIFY_THRESHOLD, _diag: diag });
 }
 
 async function voiceDeleteEnrollment(DB, memberId) {
