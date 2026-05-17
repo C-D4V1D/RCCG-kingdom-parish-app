@@ -4,7 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#1e3a5f" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="KPSC" />
   <title>KPSC Meeting Portal — Kingdom Parish</title>
+  <link rel="manifest" href="/kpsc/manifest.json" />
+  <link rel="apple-touch-icon" href="/kpsc/icons/icon-180.png" />
   <link rel="stylesheet" href="/src/css/kpsc.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
@@ -93,5 +98,10 @@
 </div>
 
 <script src="/src/js/kpsc.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/kpsc/sw.js', { scope: '/kpsc/' });
+  }
+</script>
 </body>
 </html>
