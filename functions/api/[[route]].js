@@ -3410,7 +3410,7 @@ function appendAiSecretaryMandatoryChecks(markdown, flags) {
     '## Mandatory Governance Checks',
     ...mandatoryFlags.map(flag => `- ${flag.severity.toUpperCase()}: ${flag.message}`),
   ].join('\n');
-  return /mandatory governance checks|policy checks/i.test(markdown) ? markdown : `${markdown}${section}`;
+  return /^##\s+(?:mandatory governance|policy) checks/im.test(markdown) ? markdown : `${markdown}${section}`;
 }
 
 const AI_MINUTES_TIMESTAMP_LINE_RE = /^\s*(?:\*\*)?\s*(generated(?:\s+(?:at|on))?|timestamp)\s*(?:\*\*)?\s*[:\-]\s*(?:\d{4}-\d{2}-\d{2}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}:\d{2})/i;
@@ -3898,7 +3898,7 @@ async function callDeepSeekForMeeting(apiKey, meeting) {
   const participantList = (meeting.participants || [])
     .map(p => `${p.label}: ${p.present ? (p.name || 'Present') : 'Absent'}`).join(', ');
   const policyContext = aiSecretaryText(meeting.policyContext);
-  const prompt = `You are the secretary of the Kingdom Parish Stewardship Committee (KPSC), a Nigerian church committee. Your job is to produce a clean, professional set of minutes from the meeting transcript below.
+  const prompt = `You are an expert meeting minutes writer for the Kingdom Parish Stewardship Committee (KPSC), a Nigerian church committee. Correct transcription errors intelligently based on context. Your job is to produce a clean, professional set of structured minutes from the meeting rough transcript below.
 
 Return a single valid JSON object — no markdown fences, no commentary outside the JSON — with these exact keys:
 
@@ -4191,16 +4191,16 @@ async function proofreadAiSecretaryMinutes(DB, env, id, body) {
     ? `\nSecretary's corrections to apply first:\n${secretaryNotes}\n`
     : '';
 
-  const prompt = `You are an expert meeting minutes writer. Correct transcription errors intelligently based on context. Produce structured minutes with sections: Attendance, Opening, Matters Arising from Previous Minutes, Agenda and Matters Discussed, Decisions and Resolutions, Action Items (with owners & deadlines), Any Other Business, Closing and Adjournment. Use simple language.
+  const prompt = `You are a skilled church committee secretary. Proofread and refine the following meeting minutes draft.${secretaryNotes ? " First, carefully apply all the secretary's corrections listed below." : ''}
 ${notesBlock}
 Rules:
-- Preserve every name, resolution, naira amount, date, and vote outcome exactly
+- Write in clear, professional but natural English that does not read as AI-generated
+- Preserve every fact, name, resolution, naira amount, date, and vote outcome exactly
 - Fix grammar, awkward phrasing, and formatting inconsistencies
-- Maintain the existing Markdown structure (headings, numbered lists, bold text)
-- Do NOT invent or remove factual content beyond the specified corrections
-- Use formal but readable church committee language throughout
+- Maintain the existing Markdown structure (headings, bold, lists)
+- Do NOT add, invent, or remove any factual content beyond the specified corrections
 
-Also review the two summaries provided below. Update them ONLY if the corrections significantly changed the meeting content — for example, a decision was corrected, attendance changed, or a major agenda item was added or removed. For minor corrections (grammar or phrasing only), return the summaries exactly as provided.
+Also review the two summaries provided below. Update them ONLY if the corrections significantly changed the meeting content (e.g. a decision changed, attendance corrected, major agenda item added or removed). For minor corrections (grammar or phrasing only), return the summaries exactly as provided.
 
 Return ONLY a valid JSON object. No markdown fences. No text before or after the JSON:
 {
