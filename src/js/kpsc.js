@@ -27,29 +27,30 @@ const STATUS_CONFIG = {
 };
 
 const KPSC_PERMISSIONS = {
-  acting_chairman:    ['dashboard', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'archive', 'reports', 'settings'],
-  general_secretary:  ['dashboard', 'projects', 'partners', 'partner-progress', 'reminders', 'members', 'archive', 'reports', 'settings'],
-  financial_secretary:['dashboard', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
-  treasurer:          ['dashboard', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
-  committee_viewer:   ['dashboard', 'projects', 'partners', 'partner-progress', 'reports', 'archive'],
+  acting_chairman:    ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'archive', 'reports', 'settings'],
+  general_secretary:  ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'reminders', 'members', 'archive', 'reports', 'settings'],
+  financial_secretary:['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
+  treasurer:          ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
+  committee_viewer:   ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'reports', 'archive'],
   // IT admin: full read access + account/settings management; no operational write actions.
-  it_admin:           ['dashboard', 'archive', 'projects', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'reports', 'settings'],
+  it_admin:           ['dashboard', 'archive', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'reports', 'settings'],
 };
 const PIN_REGEX = /^\d{4,6}$/;
 
 // ── NAV GROUP / SUB-TAB MAPPING ────────────────────────────────────
 // Maps old page names to (group, subTab) pairs for backwards compat.
 const PAGE_TO_GROUP = {
-  dashboard: { group: 'home',     subTab: null         },
-  archive:   { group: 'meetings', subTab: 'archive'    },
-  reports:   { group: 'meetings', subTab: 'reports'    },
+  dashboard:    { group: 'home',     subTab: null              },
+  archive:      { group: 'meetings', subTab: 'archive'         },
+  reports:      { group: 'meetings', subTab: 'reports'         },
   'partner-progress': { group: 'money', subTab: 'partner-progress' },
-  projects:  { group: 'meetings', subTab: 'projects'   },
-  finance:   { group: 'money',    subTab: 'finance'    },
-  partners:  { group: 'money',    subTab: 'partners'   },
-  reminders: { group: 'money',    subTab: 'reminders'  },
-  members:   { group: 'more',     subTab: 'members'    },
-  settings:  { group: 'more',     subTab: 'settings'   },
+  projects:     { group: 'meetings', subTab: 'projects'        },
+  action_items: { group: 'meetings', subTab: 'action_items'    },
+  finance:      { group: 'money',    subTab: 'finance'         },
+  partners:     { group: 'money',    subTab: 'partners'        },
+  reminders:    { group: 'money',    subTab: 'reminders'       },
+  members:      { group: 'more',     subTab: 'members'         },
+  settings:     { group: 'more',     subTab: 'settings'        },
   // Group-level pseudo-pages (rendered inline by their own renderer)
   more:         { group: 'more',     subTab: null },
   // Sub-pages (reachable from within a group; nav highlight stays on group)
@@ -97,6 +98,18 @@ const S = {
   reportsApproval: 'all',
   insightsViewMode: 'list',
   insightsDigestOpen: false,
+  // Action Items page state
+  actionItems: [],
+  actionItemsLoaded: false,
+  actionItemsFilter: 'all',
+  actionItemsViewMode: 'list',
+  actionItemsYear: 0,
+  actionItemsMonth: 0,
+  actionItemsAssignee: '',
+  actionItemsMeeting: '',
+  actionItemsPriority: '',
+  actionItemsSearch: '',
+  actionItemsSelected: [],
   _authRecoveryInProgress: false,
   _meetingTab: 'record',
   _reviewEditMode: false, // true = show inline review editor; false = show reviewed summary
@@ -2184,6 +2197,7 @@ function navigate(page, opts) {
   const titles = {
     dashboard: 'Home',
     projects: 'Projects',
+    action_items: 'Action Items',
     partners: 'Partners',
     finance: 'Finance',
     reminders: 'Reminders',
@@ -2268,12 +2282,15 @@ function fabAction() {
 // ── SUB-TAB STRIPS ─────────────────────────────────────────────────
 
 function meetingsSubTabStrip() {
-  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
   const cur = S.subTab || 'archive';
+  const allItems = buildActionItems(S.meetings, S.actionItems);
+  const overdueCount = allItems.filter(e => e.isOverdue).length;
+  const overdueIndicator = overdueCount ? ` <span class="k-ai-tab-badge">${overdueCount}</span>` : '';
   const tabs = [
-    { key: 'archive',  label: 'Archive' },
-    { key: 'reports',  label: 'Insights' },
-    { key: 'projects', label: 'Projects' },
+    { key: 'archive',      label: 'Archive' },
+    { key: 'reports',      label: 'Insights' },
+    { key: 'projects',     label: 'Projects' },
+    { key: 'action_items', label: `Action Items${overdueIndicator}` },
   ];
   return `<div class="ka-subtabs">${tabs.map(t =>
     `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
@@ -2317,6 +2334,9 @@ async function renderPage(page) {
       prependSubTabs(main, moneySubTabStrip());
     } else if (page === 'projects') {
       await renderProjects(main);
+      prependSubTabs(main, meetingsSubTabStrip());
+    } else if (page === 'action_items') {
+      await renderActionItems(main);
       prependSubTabs(main, meetingsSubTabStrip());
     } else if (page === 'finance') {
       await renderFinance(main);
@@ -6178,6 +6198,894 @@ async function renderReports(main) {
     </div>`;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// ACTION ITEMS PAGE
+// ═══════════════════════════════════════════════════════════════════
+
+// ── Filter setters ─────────────────────────────────────────────────
+function setActionItemsFilter(key)     { S.actionItemsFilter   = key;       rerenderActionItemsList(); }
+function setActionItemsYear(v)         { S.actionItemsYear     = Number(v); rerenderActionItemsList(); }
+function setActionItemsMonth(v)        { S.actionItemsMonth    = Number(v); rerenderActionItemsList(); }
+function setActionItemsAssignee(v)     { S.actionItemsAssignee = v;         rerenderActionItemsList(); }
+function setActionItemsMeeting(v)      { S.actionItemsMeeting  = v;         rerenderActionItemsList(); }
+function setActionItemsPriority(v)     { S.actionItemsPriority = v;         rerenderActionItemsList(); }
+function setActionItemsSearch(v)       { S.actionItemsSearch   = v;         rerenderActionItemsList(); }
+function setActionItemsViewMode(m)     { S.actionItemsViewMode = m;         rerenderActionItemsList(); }
+
+// ── Data builders ──────────────────────────────────────────────────
+
+function buildActionItems(meetings, standalone) {
+  const todayStr = today();
+  const items = [];
+  for (const m of meetings || []) {
+    const actArr = m.actionItems || [];
+    for (let i = 0; i < actArr.length; i++) {
+      const a = actArr[i];
+      if (!a?.task) continue;
+      const id = normalizeActionId(a, i);
+      const isOverdue = !!(a.dueDate && a.dueDate < todayStr && a.status !== 'done' && a.status !== 'cancelled');
+      items.push({
+        id, task: a.task,
+        assignee: a.assignee || 'Unassigned',
+        dueDate: a.dueDate || '',
+        status: a.status || 'pending',
+        priority: a.priority || 'medium',
+        notes: a.notes || '',
+        source: 'meeting',
+        meetingId: m.id,
+        meetingTitle: m.title || m.meetingType || 'Meeting',
+        meetingDate: m.meetingDate || '',
+        projectId: '',
+        createdBy: '',
+        createdAt: m.meetingDate || '',
+        updatedAt: '',
+        isOverdue,
+      });
+    }
+  }
+  for (const a of standalone || []) {
+    const isOverdue = !!(a.due_date && a.due_date < todayStr && a.status !== 'done' && a.status !== 'cancelled');
+    const mtg = (meetings || []).find(m => m.id === a.meeting_id);
+    items.push({
+      id: a.id, task: a.task,
+      assignee: a.assignee || 'Unassigned',
+      dueDate: a.due_date || '',
+      status: a.status || 'pending',
+      priority: a.priority || 'medium',
+      notes: a.notes || '',
+      source: 'manual',
+      meetingId: a.meeting_id || '',
+      meetingTitle: mtg ? (mtg.title || mtg.meetingType || 'Meeting') : '',
+      meetingDate: mtg?.meetingDate || a.created_at?.slice(0,10) || '',
+      projectId: a.project_id || '',
+      createdBy: a.created_by || '',
+      createdAt: a.created_at || '',
+      updatedAt: a.updated_at || '',
+      isOverdue,
+    });
+  }
+  return items;
+}
+
+function filterActionItems(entries, catOverride) {
+  const cat      = catOverride !== undefined ? catOverride : S.actionItemsFilter;
+  const year     = Number(S.actionItemsYear);
+  const month    = Number(S.actionItemsMonth);
+  const assignee = S.actionItemsAssignee;
+  const meetingF = S.actionItemsMeeting;
+  const priority = S.actionItemsPriority;
+  const search   = String(S.actionItemsSearch || '').toLowerCase().trim();
+  const myName   = String(S.user?.name || '').trim().toLowerCase();
+
+  return entries.filter(e => {
+    const dateStr = e.meetingDate || e.createdAt || '';
+    if (year  && dateStr && Number(dateStr.slice(0,4)) !== year)  return false;
+    if (month && dateStr && Number(dateStr.slice(5,7)) !== month) return false;
+    if (assignee && e.assignee !== assignee) return false;
+    if (meetingF && e.meetingId !== meetingF) return false;
+    if (priority && e.priority !== priority) return false;
+    if (search) {
+      const hay = [e.task, e.assignee, e.meetingTitle, e.notes].join(' ').toLowerCase();
+      if (!hay.includes(search)) return false;
+    }
+    if (cat === 'all')        return true;
+    if (cat === 'pending')    return e.status === 'pending';
+    if (cat === 'in_progress')return e.status === 'in_progress';
+    if (cat === 'done')       return e.status === 'done';
+    if (cat === 'cancelled')  return e.status === 'cancelled';
+    if (cat === 'overdue')    return e.isOverdue;
+    if (cat === 'my_tasks')   return myName && String(e.assignee || '').toLowerCase().includes(myName);
+    if (cat === 'unassigned') return !e.assignee || e.assignee === 'Unassigned';
+    if (cat === 'manual')     return e.source === 'manual';
+    return true;
+  });
+}
+
+function sortActionItems(entries) {
+  const statusOrd = { pending: 0, in_progress: 1, done: 2, cancelled: 3 };
+  return [...entries].sort((a, b) => {
+    if (a.isOverdue && !b.isOverdue) return -1;
+    if (!a.isOverdue && b.isOverdue) return 1;
+    const so = (statusOrd[a.status] ?? 4) - (statusOrd[b.status] ?? 4);
+    if (so !== 0) return so;
+    if (a.dueDate && b.dueDate) return a.dueDate.localeCompare(b.dueDate);
+    if (a.dueDate) return -1;
+    if (b.dueDate)  return 1;
+    return 0;
+  });
+}
+
+function actionItemChipOptions() {
+  const myName = String(S.user?.name || '').trim();
+  const chips = [
+    { key: 'all',        label: 'All'        },
+    { key: 'pending',    label: 'Pending'    },
+    { key: 'in_progress',label: 'In Progress'},
+    { key: 'done',       label: 'Done'       },
+    { key: 'overdue',    label: '⏰ Overdue' },
+    { key: 'unassigned', label: 'Unassigned' },
+    { key: 'manual',     label: 'Manual'     },
+  ];
+  if (myName) chips.splice(5, 0, { key: 'my_tasks', label: 'My Tasks' });
+  return chips;
+}
+
+function aiPriorityBadge(priority) {
+  const conf = {
+    urgent: { label: 'URGENT', cls: 'badge-red'    },
+    high:   { label: 'HIGH',   cls: 'badge-red'    },
+    medium: { label: 'Medium', cls: 'badge-blue'   },
+    low:    { label: 'Low',    cls: 'badge-gray'   },
+  };
+  const p = conf[priority] || conf.medium;
+  return `<span class="kbadge ${p.cls}">${p.label}</span>`;
+}
+
+function aiStatusBadge(status) {
+  const conf = {
+    pending:     { label: 'Pending',     cls: 'badge-amber' },
+    in_progress: { label: 'In Progress', cls: 'badge-blue'  },
+    done:        { label: 'Done',        cls: 'badge-green' },
+    cancelled:   { label: 'Cancelled',   cls: 'badge-gray'  },
+  };
+  const s = conf[status] || conf.pending;
+  return `<span class="kbadge ${s.cls}">${s.label}</span>`;
+}
+
+function aiAccentClass(entry) {
+  if (entry.isOverdue)              return 'k-mc-accent-red';
+  if (entry.status === 'done')      return 'k-mc-accent-green';
+  if (entry.status === 'in_progress') return 'k-mc-accent-blue';
+  if (entry.status === 'cancelled') return 'k-mc-accent-grey';
+  return 'k-mc-accent-amber';
+}
+
+// ── Card renderer ──────────────────────────────────────────────────
+
+function renderActionItemCard(entry) {
+  const canEdit = canEditInsightsActionStatus();
+  const accent  = aiAccentClass(entry);
+  const eid     = encodeURIComponent(entry.id);
+  const emid    = encodeURIComponent(entry.meetingId || '');
+  const esrc    = entry.source;
+
+  const titleHtml = insightTruncText(entry.task, 120);
+  const overdueBadge = entry.isOverdue
+    ? `<span class="kbadge badge-red">⏰ Overdue</span>` : '';
+  const sourceBadge = entry.source === 'manual'
+    ? `<span class="kbadge badge-purple">Manual</span>` : '';
+
+  const statusEl = canEdit
+    ? `<select class="k-input k-input-sm k-ai-status-select" onchange="Kpsc.updateActionItemStatusById('${eid}','${esrc}','${emid}',this.value,this)">
+        ${['pending','in_progress','done','cancelled'].map(s =>
+          `<option value="${s}" ${entry.status === s ? 'selected' : ''}>${s === 'in_progress' ? 'In Progress' : s.charAt(0).toUpperCase() + s.slice(1)}</option>`
+        ).join('')}
+       </select>`
+    : aiStatusBadge(entry.status);
+
+  const dueBit = entry.dueDate
+    ? `<span>📅 ${entry.isOverdue ? `<span class="k-insight-overdue">Due ${entry.dueDate}</span>` : `Due ${entry.dueDate}`}</span>` : '';
+  const assigneeBit = `<span>👤 ${esc(entry.assignee)}</span>`;
+  const meetingPill = entry.meetingId
+    ? `<span class="k-insight-mtg-link" onclick="Kpsc.navigate('archive');setTimeout(()=>Kpsc.openMeeting('${encodeURIComponent(entry.meetingId)}'),300)">📋 ${esc(entry.meetingTitle || 'Meeting')}</span>` : '';
+
+  const notesBit = entry.notes
+    ? `<div class="k-ic-info"><span class="k-insight-dim">📝 ${esc(entry.notes)}</span></div>` : '';
+
+  const isSelected = S.actionItemsSelected.includes(entry.id);
+  const checkboxEl = canEdit
+    ? `<input type="checkbox" class="k-ai-checkbox" ${isSelected ? 'checked' : ''} onchange="Kpsc.toggleActionItemCheck('${esc(entry.id)}')" title="Select item" />` : '';
+
+  const doneBtn = canEdit && entry.status !== 'done' && entry.status !== 'cancelled'
+    ? `<button class="kbtn kbtn-sm kbtn-success k-insight-edit-btn" onclick="Kpsc.toggleActionItemDone('${eid}','${esrc}','${emid}')">✓ Done</button>` : '';
+  const editBtn = canEdit
+    ? `<button class="kbtn kbtn-sm k-insight-edit-btn" onclick="Kpsc.openActionItemEdit('${eid}','${esrc}','${emid}')">Edit</button>` : '';
+  const deleteBtn = canEdit
+    ? `<button class="kbtn kbtn-sm kbtn-danger k-insight-edit-btn" onclick="Kpsc.deleteActionItemById('${eid}','${esrc}','${emid}')">Delete</button>` : '';
+  const viewInsightsLink = entry.meetingId
+    ? `<span class="k-insight-view-link" onclick="Kpsc.navigate('reports');setTimeout(()=>Kpsc.setReportsFilter('action_items'),300)">View in Insights →</span>` : '';
+
+  return `
+    <div class="k-meeting-card k-insight-card ${accent}" id="k-ai-card-${CSS.escape ? CSS.escape(entry.id) : entry.id.replace(/[^a-zA-Z0-9]/g,'-')}">
+      <div class="k-ai-card-hdr">
+        ${checkboxEl}
+        <div class="k-ic-badges">
+          ${aiPriorityBadge(entry.priority)}
+          ${overdueBadge}
+          ${sourceBadge}
+          ${statusEl}
+        </div>
+      </div>
+      <div class="k-ic-title">${titleHtml}</div>
+      <div class="k-ic-meta">
+        ${assigneeBit}
+        ${dueBit}
+        ${meetingPill}
+      </div>
+      ${notesBit}
+      <div class="k-ic-footer">
+        ${doneBtn}
+        ${editBtn}
+        ${deleteBtn}
+        ${viewInsightsLink}
+      </div>
+    </div>`;
+}
+
+// ── Grouped views ──────────────────────────────────────────────────
+
+function renderActionItemsByAssignee(filtered) {
+  const groups = new Map();
+  for (const e of filtered) {
+    const key = e.assignee || 'Unassigned';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(e);
+  }
+  const sorted = [...groups.entries()].sort(([a],[b]) => {
+    if (a === 'Unassigned') return 1;
+    if (b === 'Unassigned') return -1;
+    return a.localeCompare(b);
+  });
+  return sorted.map(([name, items]) => {
+    const overdue = items.filter(e => e.isOverdue).length;
+    const meta = overdue ? `<span class="k-insight-group-hdr-meta">${overdue} overdue</span>` : '';
+    return `
+      <div class="k-insight-group">
+        <div class="k-insight-group-hdr">
+          <span class="k-insight-group-hdr-title">👤 ${esc(name)}</span>
+          ${meta}
+          <span class="k-insight-group-hdr-count">${items.length}</span>
+        </div>
+        <div class="k-insight-group-cards">${sortActionItems(items).map(renderActionItemCard).join('')}</div>
+      </div>`;
+  }).join('');
+}
+
+function renderActionItemsByMeeting(filtered) {
+  const groups = new Map();
+  for (const e of filtered) {
+    const key = e.meetingId || '__manual__';
+    if (!groups.has(key)) groups.set(key, { title: e.meetingTitle || (e.source === 'manual' ? 'Manual Items' : 'Unknown Meeting'), date: e.meetingDate, items: [] });
+    groups.get(key).items.push(e);
+  }
+  const sorted = [...groups.entries()].sort(([,a],[,b]) => (b.date || '').localeCompare(a.date || ''));
+  return sorted.map(([meetingId, grp]) => {
+    const overdue = grp.items.filter(e => e.isOverdue).length;
+    const meta = [grp.date ? grp.date.slice(0,10) : '', overdue ? `${overdue} overdue` : ''].filter(Boolean).join(' · ');
+    return `
+      <div class="k-insight-group">
+        <div class="k-insight-group-hdr">
+          <span class="k-insight-group-hdr-title">📋 ${esc(grp.title)}</span>
+          ${meta ? `<span class="k-insight-group-hdr-meta">${meta}</span>` : ''}
+          <span class="k-insight-group-hdr-count">${grp.items.length}</span>
+        </div>
+        <div class="k-insight-group-cards">${sortActionItems(grp.items).map(renderActionItemCard).join('')}</div>
+      </div>`;
+  }).join('');
+}
+
+// ── Stats bar ──────────────────────────────────────────────────────
+
+function buildActionItemsStats(all) {
+  const todayStr = today();
+  const total    = all.length;
+  const pending  = all.filter(e => e.status === 'pending').length;
+  const inProg   = all.filter(e => e.status === 'in_progress').length;
+  const done     = all.filter(e => e.status === 'done').length;
+  const cancelled= all.filter(e => e.status === 'cancelled').length;
+  const active   = total - cancelled;
+  const overdue  = all.filter(e => e.isOverdue).length;
+  const unassigned = all.filter(e => !e.assignee || e.assignee === 'Unassigned').length;
+  const donePct  = active > 0 ? Math.round((done / active) * 100) : 0;
+  if (!total) return '';
+  return `
+    <div class="k-insight-stats k-ai-stats">
+      <div class="k-insight-stat">
+        <span class="k-insight-stat-val">${total}</span>
+        <span class="k-insight-stat-lbl">Total</span>
+      </div>
+      <div class="k-insight-stat${pending ? ' k-insight-stat-warn' : ''}">
+        <span class="k-insight-stat-val">${pending}</span>
+        <span class="k-insight-stat-lbl">Pending</span>
+      </div>
+      <div class="k-insight-stat">
+        <span class="k-insight-stat-val">${inProg}</span>
+        <span class="k-insight-stat-lbl">In Progress</span>
+      </div>
+      <div class="k-insight-stat k-insight-stat-green">
+        <span class="k-insight-stat-val">${donePct}%</span>
+        <span class="k-insight-stat-lbl">Done rate</span>
+      </div>
+      ${overdue ? `
+      <div class="k-insight-stat k-insight-stat-alert">
+        <span class="k-insight-stat-val">${overdue}</span>
+        <span class="k-insight-stat-lbl">Overdue</span>
+      </div>` : ''}
+      ${unassigned ? `
+      <div class="k-insight-stat">
+        <span class="k-insight-stat-val">${unassigned}</span>
+        <span class="k-insight-stat-lbl">Unassigned</span>
+      </div>` : ''}
+    </div>`;
+}
+
+// ── Create form ────────────────────────────────────────────────────
+
+function buildActionItemCreateForm(meetings) {
+  const mtgOpts = meetings.map(m =>
+    `<option value="${esc(m.id)}">${esc(m.title || m.meetingType || 'Meeting')} — ${(m.meetingDate||'').slice(0,10)}</option>`
+  ).join('');
+  const memberNames = [...new Set((S.members || []).filter(m => m.name).map(m => String(m.name).trim()))].sort();
+  const memberOpts  = memberNames.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  return `
+    <div class="k-ai-create-form" id="k-ai-create-form">
+      <div class="k-section-hdr" style="margin-bottom:10px">
+        <h3>New Action Item</h3>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.closeActionItemCreateForm()">✕ Cancel</button>
+      </div>
+      <div class="k-ai-form-grid">
+        <div style="grid-column:1/-1">
+          <label class="k-insight-edit-lbl">Task *</label>
+          <textarea class="k-input k-review-textarea" id="k-ai-new-task" placeholder="Describe the action item…" rows="2"></textarea>
+        </div>
+        <div>
+          <label class="k-insight-edit-lbl">Assignee</label>
+          <select class="k-input" id="k-ai-new-assignee">
+            <option value="">— Unassigned —</option>
+            ${memberOpts}
+          </select>
+        </div>
+        <div>
+          <label class="k-insight-edit-lbl">Due Date</label>
+          <input type="date" class="k-input" id="k-ai-new-due" />
+        </div>
+        <div>
+          <label class="k-insight-edit-lbl">Priority</label>
+          <select class="k-input" id="k-ai-new-priority">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+            <option value="urgent">Urgent</option>
+          </select>
+        </div>
+        <div>
+          <label class="k-insight-edit-lbl">Link to Meeting</label>
+          <select class="k-input" id="k-ai-new-meeting">
+            <option value="">— None —</option>
+            ${mtgOpts}
+          </select>
+        </div>
+        <div style="grid-column:1/-1">
+          <label class="k-insight-edit-lbl">Notes</label>
+          <input type="text" class="k-input" id="k-ai-new-notes" placeholder="Optional notes…" />
+        </div>
+      </div>
+      <div class="k-insight-edit-actions" style="margin-top:12px">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.submitActionItemCreate(this)">Create Action Item</button>
+      </div>
+    </div>`;
+}
+
+function openActionItemCreateForm() {
+  const el = document.getElementById('k-ai-create-form');
+  if (el) { el.style.display = 'block'; el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  const listEl = document.getElementById('k-ai-list-wrap');
+  if (!listEl) return;
+  const form = document.createElement('div');
+  form.innerHTML = buildActionItemCreateForm(S.meetings);
+  listEl.parentNode.insertBefore(form.firstElementChild, listEl);
+}
+
+function closeActionItemCreateForm() {
+  const el = document.getElementById('k-ai-create-form');
+  if (el) el.remove();
+}
+
+async function submitActionItemCreate(btn) {
+  const task = document.getElementById('k-ai-new-task')?.value.trim();
+  if (!task) { showToast('Task is required.', 'warn'); return; }
+  const data = {
+    task,
+    assignee:  document.getElementById('k-ai-new-assignee')?.value || '',
+    dueDate:   document.getElementById('k-ai-new-due')?.value || '',
+    priority:  document.getElementById('k-ai-new-priority')?.value || 'medium',
+    meetingId: document.getElementById('k-ai-new-meeting')?.value || '',
+    notes:     document.getElementById('k-ai-new-notes')?.value || '',
+  };
+  btn.disabled = true;
+  try {
+    const created = await apiPost('action-items', data);
+    if (created?.error) { showToast(created.error, 'error'); return; }
+    S.actionItems = [...(S.actionItems || []), created];
+    showToast('Action item created.', 'success');
+    closeActionItemCreateForm();
+    rerenderActionItemsList();
+  } catch (e) {
+    showToast('Failed to create action item.', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Inline edit ────────────────────────────────────────────────────
+
+function openActionItemEdit(encodedId, source, encodedMeetingId) {
+  const id        = decodeURIComponent(encodedId);
+  const meetingId = decodeURIComponent(encodedMeetingId || '');
+  const all       = buildActionItems(S.meetings, S.actionItems);
+  const entry     = all.find(e => e.id === id);
+  if (!entry) { showToast('Item not found.', 'error'); return; }
+  const cardId = 'k-ai-card-' + id.replace(/[^a-zA-Z0-9]/g,'-');
+  const card   = document.getElementById(cardId);
+  if (!card)   { showToast('Card not found.', 'error'); return; }
+
+  const memberNames = [...new Set((S.members || []).filter(m => m.name).map(m => String(m.name).trim()))].sort();
+  const assigneeOpts = ['', ...memberNames].map(n =>
+    `<option value="${esc(n)}" ${entry.assignee === n || (n === '' && entry.assignee === 'Unassigned') ? 'selected' : ''}>${n || '— Unassigned —'}</option>`
+  ).join('');
+
+  const eid  = encodeURIComponent(id);
+  const esrc = source;
+  const emid = encodeURIComponent(meetingId);
+
+  const editHtml = `
+    <div class="k-insight-edit-form" id="k-ai-edit-${id.replace(/[^a-zA-Z0-9]/g,'-')}">
+      <div class="k-insight-edit-lbl">Task</div>
+      <textarea class="k-input k-review-textarea" id="k-ai-edit-task-${id.replace(/[^a-zA-Z0-9]/g,'-')}" rows="2">${esc(entry.task)}</textarea>
+      <div class="k-insight-edit-row">
+        <div>
+          <div class="k-insight-edit-lbl">Assignee</div>
+          <select class="k-input" id="k-ai-edit-asgn-${id.replace(/[^a-zA-Z0-9]/g,'-')}">${assigneeOpts}</select>
+        </div>
+        <div>
+          <div class="k-insight-edit-lbl">Due Date</div>
+          <input type="date" class="k-input" id="k-ai-edit-due-${id.replace(/[^a-zA-Z0-9]/g,'-')}" value="${esc(entry.dueDate)}" />
+        </div>
+        <div>
+          <div class="k-insight-edit-lbl">Priority</div>
+          <select class="k-input" id="k-ai-edit-pri-${id.replace(/[^a-zA-Z0-9]/g,'-')}">
+            ${['low','medium','high','urgent'].map(p => `<option value="${p}" ${entry.priority===p?'selected':''}>${p.charAt(0).toUpperCase()+p.slice(1)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <div class="k-insight-edit-lbl">Notes</div>
+          <input type="text" class="k-input" id="k-ai-edit-notes-${id.replace(/[^a-zA-Z0-9]/g,'-')}" value="${esc(entry.notes)}" />
+        </div>
+      </div>
+      <div class="k-insight-edit-actions">
+        <button class="kbtn kbtn-sm" onclick="Kpsc.closeActionItemEdit('${eid}')">Cancel</button>
+        <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.submitActionItemEdit('${eid}','${esrc}','${emid}',this)">Save</button>
+      </div>
+    </div>`;
+  const existing = document.getElementById(`k-ai-edit-${id.replace(/[^a-zA-Z0-9]/g,'-')}`);
+  if (existing) { existing.remove(); return; }
+  card.insertAdjacentHTML('beforeend', editHtml);
+}
+
+function closeActionItemEdit(encodedId) {
+  const id = decodeURIComponent(encodedId);
+  const el = document.getElementById(`k-ai-edit-${id.replace(/[^a-zA-Z0-9]/g,'-')}`);
+  if (el) el.remove();
+}
+
+async function submitActionItemEdit(encodedId, source, encodedMeetingId, btn) {
+  const id        = decodeURIComponent(encodedId);
+  const meetingId = decodeURIComponent(encodedMeetingId || '');
+  const safeId    = id.replace(/[^a-zA-Z0-9]/g,'-');
+  const task      = document.getElementById(`k-ai-edit-task-${safeId}`)?.value.trim();
+  const assignee  = document.getElementById(`k-ai-edit-asgn-${safeId}`)?.value || '';
+  const dueDate   = document.getElementById(`k-ai-edit-due-${safeId}`)?.value  || '';
+  const priority  = document.getElementById(`k-ai-edit-pri-${safeId}`)?.value  || 'medium';
+  const notes     = document.getElementById(`k-ai-edit-notes-${safeId}`)?.value || '';
+  if (!task) { showToast('Task cannot be empty.', 'warn'); return; }
+  btn.disabled = true;
+  try {
+    if (source === 'meeting') {
+      const meeting = (S.meetings || []).find(m => m.id === meetingId);
+      if (!meeting) { showToast('Meeting not found.', 'error'); return; }
+      const nextActions = (meeting.actionItems || []).map((a, idx) => {
+        const aid = normalizeActionId(a, idx);
+        return aid === id ? { ...a, id: aid, task, assignee, dueDate, priority, notes } : { ...a, id: aid };
+      });
+      const updated = await apiPut(`ai-secretary-meetings/${meetingId}`, { actionItems: nextActions });
+      if (updated?.error) { showToast(updated.error, 'error'); return; }
+      S.meetings = (S.meetings || []).map(m => m.id === meetingId ? updated : m);
+    } else {
+      const updated = await apiPut(`action-items/${id}`, { task, assignee, dueDate, priority, notes });
+      if (updated?.error) { showToast(updated.error, 'error'); return; }
+      S.actionItems = (S.actionItems || []).map(a => a.id === id ? updated : a);
+    }
+    showToast('Action item updated.', 'success');
+    rerenderActionItemsList();
+  } catch (e) {
+    showToast('Failed to save edit.', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Status update ──────────────────────────────────────────────────
+
+async function updateActionItemStatusById(encodedId, source, encodedMeetingId, newStatus, selectEl) {
+  if (!canEditInsightsActionStatus()) {
+    showToast('Only chairman or secretary can update action status.', 'warn');
+    if (selectEl) selectEl.value = selectEl.dataset.prior || 'pending';
+    return;
+  }
+  const id        = decodeURIComponent(String(encodedId || ''));
+  const meetingId = decodeURIComponent(String(encodedMeetingId || ''));
+  const status    = String(newStatus || 'pending');
+  let priorStatus = 'pending';
+  if (selectEl) { priorStatus = selectEl.dataset.prior || selectEl.value; selectEl.disabled = true; }
+  try {
+    if (source === 'meeting') {
+      const meeting = (S.meetings || []).find(m => m.id === meetingId);
+      if (!meeting) { showToast('Meeting not found.', 'error'); return; }
+      const nextActions = (meeting.actionItems || []).map((a, idx) => {
+        const aid = normalizeActionId(a, idx);
+        if (aid === id) priorStatus = a.status || 'pending';
+        return aid === id ? { ...a, id: aid, status } : { ...a, id: aid };
+      });
+      const updated = await apiPut(`ai-secretary-meetings/${meetingId}`, { actionItems: nextActions });
+      if (updated?.error) { if (selectEl) selectEl.value = priorStatus; showToast(updated.error, 'error'); return; }
+      S.meetings = (S.meetings || []).map(m => m.id === meetingId ? updated : m);
+    } else {
+      const updated = await apiPut(`action-items/${id}`, { status });
+      if (updated?.error) { if (selectEl) selectEl.value = priorStatus; showToast(updated.error, 'error'); return; }
+      S.actionItems = (S.actionItems || []).map(a => a.id === id ? updated : a);
+    }
+    showToast('Status updated.', 'success');
+    rerenderActionItemsList();
+  } catch (e) {
+    if (selectEl) selectEl.value = priorStatus;
+    showToast('Could not update status.', 'error');
+  } finally {
+    if (selectEl) selectEl.disabled = false;
+  }
+}
+
+async function toggleActionItemDone(encodedId, source, encodedMeetingId) {
+  await updateActionItemStatusById(encodedId, source, encodedMeetingId, 'done', null);
+}
+
+async function deleteActionItemById(encodedId, source, encodedMeetingId) {
+  const id        = decodeURIComponent(String(encodedId || ''));
+  const meetingId = decodeURIComponent(String(encodedMeetingId || ''));
+  if (!confirm('Delete this action item?')) return;
+  try {
+    if (source === 'meeting') {
+      const meeting = (S.meetings || []).find(m => m.id === meetingId);
+      if (!meeting) { showToast('Meeting not found.', 'error'); return; }
+      const nextActions = (meeting.actionItems || [])
+        .filter((a, idx) => normalizeActionId(a, idx) !== id)
+        .map((a, idx) => ({ ...a, id: normalizeActionId(a, idx) }));
+      const updated = await apiPut(`ai-secretary-meetings/${meetingId}`, { actionItems: nextActions });
+      if (updated?.error) { showToast(updated.error, 'error'); return; }
+      S.meetings = (S.meetings || []).map(m => m.id === meetingId ? updated : m);
+    } else {
+      const result = await apiDelete(`action-items/${id}`);
+      if (result?.error) { showToast(result.error, 'error'); return; }
+      S.actionItems = (S.actionItems || []).filter(a => a.id !== id);
+    }
+    S.actionItemsSelected = S.actionItemsSelected.filter(sid => sid !== id);
+    showToast('Action item deleted.', 'success');
+    rerenderActionItemsList();
+  } catch (e) {
+    showToast('Failed to delete action item.', 'error');
+  }
+}
+
+// ── Bulk selection ─────────────────────────────────────────────────
+
+function toggleActionItemCheck(id) {
+  const idx = S.actionItemsSelected.indexOf(id);
+  if (idx >= 0) S.actionItemsSelected.splice(idx, 1);
+  else           S.actionItemsSelected.push(id);
+  rerenderActionItemsBulkBar();
+}
+
+function rerenderActionItemsBulkBar() {
+  const barEl = document.getElementById('k-ai-bulk-bar');
+  if (!barEl) return;
+  const n = S.actionItemsSelected.length;
+  if (n === 0) { barEl.style.display = 'none'; return; }
+  barEl.style.display = 'flex';
+  barEl.querySelector('.k-ai-bulk-count').textContent = `${n} selected`;
+}
+
+async function bulkActionItemsAction(action, extra) {
+  if (!S.actionItemsSelected.length) return;
+  const all = buildActionItems(S.meetings, S.actionItems);
+  const targets = all.filter(e => S.actionItemsSelected.includes(e.id));
+  if (!targets.length) return;
+
+  if (action === 'done' || action === 'status') {
+    const newStatus = action === 'done' ? 'done' : (extra || 'pending');
+    for (const entry of targets) {
+      await updateActionItemStatusById(
+        encodeURIComponent(entry.id), entry.source,
+        encodeURIComponent(entry.meetingId || ''), newStatus, null
+      );
+    }
+    S.actionItemsSelected = [];
+    showToast(`${targets.length} item(s) updated.`, 'success');
+    rerenderActionItemsList();
+  } else if (action === 'delete') {
+    if (!confirm(`Delete ${targets.length} selected item(s)?`)) return;
+    for (const entry of targets) {
+      await deleteActionItemById(
+        encodeURIComponent(entry.id), entry.source,
+        encodeURIComponent(entry.meetingId || '')
+      );
+    }
+  }
+}
+
+// ── Export ─────────────────────────────────────────────────────────
+
+function exportActionItemsCsv() {
+  const all      = buildActionItems(S.meetings, S.actionItems);
+  const filtered = sortActionItems(filterActionItems(all));
+  const hdr = ['Task','Assignee','Due Date','Status','Priority','Meeting','Source','Created At'];
+  const rows = filtered.map(e => [
+    e.task, e.assignee, e.dueDate, e.status, e.priority,
+    e.meetingTitle || '', e.source, (e.createdAt||'').slice(0,10),
+  ].map(v => `"${String(v||'').replace(/"/g,'""')}"`).join(','));
+  const csv = [hdr.join(','), ...rows].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = 'kpsc-action-items.csv'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportActionItemsMd() {
+  const all      = buildActionItems(S.meetings, S.actionItems);
+  const filtered = sortActionItems(filterActionItems(all));
+  const lines = [`# KPSC Action Items — ${new Date().toLocaleDateString('en-NG',{dateStyle:'long'})}\n`];
+  for (const e of filtered) {
+    const due  = e.dueDate ? ` · Due: ${e.dueDate}` : '';
+    const flag = e.isOverdue ? ' ⏰' : '';
+    lines.push(`- [${e.status === 'done' ? 'x' : ' '}] **${e.task}** — ${e.assignee}${due}${flag}`);
+  }
+  navigator.clipboard?.writeText(lines.join('\n')).then(
+    ()  => showToast('Copied to clipboard.', 'success'),
+    ()  => showToast('Clipboard not available.', 'warn'),
+  );
+}
+
+// ── WhatsApp notifications ─────────────────────────────────────────
+
+function notifyAllPendingActionItems() {
+  const all = buildActionItems(S.meetings, S.actionItems);
+  const pending = all.filter(e => e.status !== 'done' && e.status !== 'cancelled');
+  if (!pending.length) { showToast('No pending action items.', 'warn'); return; }
+  const byAssignee = new Map();
+  for (const e of pending) {
+    if (!byAssignee.has(e.assignee)) byAssignee.set(e.assignee, []);
+    byAssignee.get(e.assignee).push(e);
+  }
+  const lines = [`*KPSC Action Items — ${new Date().toLocaleDateString('en-NG',{dateStyle:'long'})}*\n`];
+  for (const [assignee, items] of [...byAssignee.entries()].sort(([a],[b])=>a.localeCompare(b))) {
+    lines.push(`\n*${assignee}:*`);
+    items.forEach((e, i) => {
+      const due = e.dueDate ? ` (due ${e.dueDate})` : '';
+      const flag = e.isOverdue ? ' ⏰' : '';
+      lines.push(`${i+1}. ${e.task}${due}${flag}`);
+    });
+  }
+  window.open(`https://wa.me/?text=${encodeURIComponent(lines.join('\n'))}`, '_blank');
+}
+
+// ── Empty state ────────────────────────────────────────────────────
+
+function buildActionItemsEmptyState(all) {
+  if (!all.length)
+    return `<div class="k-empty-state"><p>No action items found. Meeting action items appear here automatically after processing. You can also create manual items with the button above.</p></div>`;
+  const f = S.actionItemsFilter;
+  if (f === 'overdue') return `<div class="k-empty-state"><p>No overdue items — great job! 🎉</p></div>`;
+  if (f === 'my_tasks') return `<div class="k-empty-state"><p>No action items assigned to you.</p></div>`;
+  return `<div class="k-empty-state"><p>No items match the current filters.</p></div>`;
+}
+
+// ── Main page renderer ─────────────────────────────────────────────
+
+async function renderActionItems(main) {
+  // Load standalone items if not yet loaded
+  if (!S.actionItemsLoaded) {
+    try {
+      const res = await apiGet('action-items');
+      S.actionItems = res.items || [];
+      S.actionItemsLoaded = true;
+    } catch (_) {
+      S.actionItems = [];
+      S.actionItemsLoaded = true;
+    }
+  }
+  // Ensure meetings are loaded (may already be in S.meetings from Insights/Archive)
+  if (!S.meetings?.length) {
+    try {
+      const res2 = await apiGet('ai-secretary-meetings');
+      S.meetings = res2.meetings || res2 || [];
+    } catch (_) {}
+  }
+
+  const all      = buildActionItems(S.meetings, S.actionItems);
+  const filtered = sortActionItems(filterActionItems(all));
+  const canEdit  = canEditInsightsActionStatus();
+
+  const chips    = actionItemChipOptions();
+  const counts   = chips.reduce((acc, c) => {
+    acc[c.key] = c.key === 'all' ? all.length : filterActionItems(all, c.key).length;
+    return acc;
+  }, {});
+
+  const yearVal  = S.actionItemsYear || '';
+  const years    = [...new Set([new Date().getFullYear(), ...S.meetings.map(m => Number((m.meetingDate||'').slice(0,4))).filter(Boolean)])].sort((a,b)=>b-a);
+  const yearOpts = `<option value="">All years</option>` + years.map(y => `<option value="${y}" ${Number(yearVal)===y?'selected':''}>${y}</option>`).join('');
+  const monthOpts = `<option value="">All months</option>` + Array.from({length:12},(_,i) =>
+    `<option value="${i+1}" ${Number(S.actionItemsMonth)===i+1?'selected':''}>${monthName(i+1)}</option>`
+  ).join('');
+
+  const assignees = [...new Set(all.map(e => e.assignee).filter(a => a && a !== 'Unassigned'))].sort();
+  const assigneeOpts = `<option value="">All assignees</option>` + assignees.map(a =>
+    `<option value="${esc(a)}" ${S.actionItemsAssignee===a?'selected':''}>${esc(a)}</option>`
+  ).join('');
+
+  const meetings = S.meetings.filter(m => (m.actionItems||[]).length > 0);
+  const meetingOpts = `<option value="">All meetings</option>` + meetings.map(m =>
+    `<option value="${esc(m.id)}" ${S.actionItemsMeeting===m.id?'selected':''}>${esc(m.title||m.meetingType||'Meeting')} — ${(m.meetingDate||'').slice(0,10)}</option>`
+  ).join('');
+
+  const priorityOpts = `<option value="">All priorities</option>` + ['urgent','high','medium','low'].map(p =>
+    `<option value="${p}" ${S.actionItemsPriority===p?'selected':''}>${p.charAt(0).toUpperCase()+p.slice(1)}</option>`
+  ).join('');
+
+  const total     = all.length;
+  const countText = filtered.length === total
+    ? `${filtered.length} item${filtered.length !== 1 ? 's' : ''}`
+    : `${filtered.length} of ${total} item${total !== 1 ? 's' : ''}`;
+
+  const listHtml = !filtered.length
+    ? buildActionItemsEmptyState(all)
+    : S.actionItemsViewMode === 'by_assignee'
+      ? renderActionItemsByAssignee(filtered)
+      : S.actionItemsViewMode === 'by_meeting'
+        ? renderActionItemsByMeeting(filtered)
+        : filtered.map(renderActionItemCard).join('');
+
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-section-hdr">
+        <h2>Action Items</h2>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          ${canEdit ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.openActionItemCreateForm()">+ New Item</button>` : ''}
+          <div class="k-ai-export-wrap">
+            <button class="kbtn kbtn-sm" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='block'?'none':'block'">Export ▾</button>
+            <div class="k-ai-export-menu" style="display:none">
+              <button onclick="window.print()">🖨 Print</button>
+              <button onclick="Kpsc.exportActionItemsMd()">📋 Copy as Markdown</button>
+              <button onclick="Kpsc.exportActionItemsCsv()">⬇ Download CSV</button>
+            </div>
+          </div>
+          <button class="kbtn kbtn-sm" onclick="Kpsc.notifyAllPendingActionItems()" title="Send WhatsApp summary of all pending items">📲 Notify All</button>
+        </div>
+      </div>
+      <p class="k-page-hint">Track all committee action items from meetings and manual entries. Mark tasks done, reassign, and notify assignees via WhatsApp.</p>
+      ${buildActionItemsStats(all)}
+      <div class="k-insight-filters k-ai-filters">
+        <select class="k-input k-input-sm" onchange="Kpsc.setActionItemsYear(this.value)">${yearOpts}</select>
+        <select class="k-input k-input-sm" onchange="Kpsc.setActionItemsMonth(this.value)">${monthOpts}</select>
+        <select class="k-input k-input-sm" onchange="Kpsc.setActionItemsAssignee(this.value)">${assigneeOpts}</select>
+        <select class="k-input k-input-sm" onchange="Kpsc.setActionItemsMeeting(this.value)">${meetingOpts}</select>
+        <select class="k-input k-input-sm" onchange="Kpsc.setActionItemsPriority(this.value)">${priorityOpts}</select>
+        <input class="k-input k-input-sm" type="search" placeholder="Search task, assignee…" value="${esc(S.actionItemsSearch)}" oninput="Kpsc.setActionItemsSearch(this.value)" style="grid-column:1/-1" />
+      </div>
+      <div class="k-quick-filters" id="k-ai-chips" style="flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch">
+        ${chips.map(c => {
+          const cnt = counts[c.key] || 0;
+          const warn = c.key === 'overdue' && cnt > 0 ? ' style="background:#991b1b;border-color:#991b1b;color:#fff"' : '';
+          return `<button class="k-filter ${S.actionItemsFilter === c.key ? 'active' : ''}" onclick="Kpsc.setActionItemsFilter('${c.key}')"${warn}>${c.label} (${cnt})</button>`;
+        }).join('')}
+      </div>
+      <div class="k-insight-count-row">
+        <span id="k-ai-count-text">${countText}</span>
+        <div class="k-insight-view-toggle">
+          <button class="k-insight-view-btn ${S.actionItemsViewMode==='list'?'active':''}" onclick="Kpsc.setActionItemsViewMode('list')" title="List view">≡ List</button>
+          <button class="k-insight-view-btn ${S.actionItemsViewMode==='by_assignee'?'active':''}" onclick="Kpsc.setActionItemsViewMode('by_assignee')" title="By assignee">👤 Assignee</button>
+          <button class="k-insight-view-btn ${S.actionItemsViewMode==='by_meeting'?'active':''}" onclick="Kpsc.setActionItemsViewMode('by_meeting')" title="By meeting">📋 Meeting</button>
+        </div>
+      </div>
+      <div class="k-ai-bulk-bar" id="k-ai-bulk-bar" style="display:none">
+        <span class="k-ai-bulk-count">0 selected</span>
+        <button class="kbtn kbtn-sm kbtn-success" onclick="Kpsc.bulkActionItemsAction('done')">✓ Mark Done</button>
+        <select class="k-input k-input-sm" onchange="if(this.value)Kpsc.bulkActionItemsAction('status',this.value);this.value=''">
+          <option value="">Set status…</option>
+          <option value="pending">Pending</option>
+          <option value="in_progress">In Progress</option>
+          <option value="done">Done</option>
+          <option value="cancelled">Cancelled</option>
+        </select>
+        <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.bulkActionItemsAction('delete')">Delete</button>
+        <button class="kbtn kbtn-sm" onclick="S.actionItemsSelected=[];Kpsc.rerenderActionItemsList()">✕ Clear</button>
+      </div>
+      <div id="k-ai-list-wrap">
+        <div class="k-meeting-list" id="k-ai-list">${listHtml}</div>
+      </div>
+    </div>`;
+}
+
+function rerenderActionItemsList() {
+  const listEl  = document.getElementById('k-ai-list');
+  const countEl = document.getElementById('k-ai-count-text');
+  const chipsEl = document.getElementById('k-ai-chips');
+  if (!listEl) return;
+
+  const all      = buildActionItems(S.meetings, S.actionItems);
+  const filtered = sortActionItems(filterActionItems(all));
+  const canEdit  = canEditInsightsActionStatus();
+
+  if (listEl) listEl.innerHTML = !filtered.length
+    ? buildActionItemsEmptyState(all)
+    : S.actionItemsViewMode === 'by_assignee'
+      ? renderActionItemsByAssignee(filtered)
+      : S.actionItemsViewMode === 'by_meeting'
+        ? renderActionItemsByMeeting(filtered)
+        : filtered.map(renderActionItemCard).join('');
+
+  if (countEl) {
+    const total = all.length;
+    countEl.textContent = filtered.length === total
+      ? `${filtered.length} item${filtered.length !== 1 ? 's' : ''}`
+      : `${filtered.length} of ${total} item${total !== 1 ? 's' : ''}`;
+  }
+
+  if (chipsEl) {
+    const chips = actionItemChipOptions();
+    const counts = chips.reduce((acc, c) => {
+      acc[c.key] = c.key === 'all' ? all.length : filterActionItems(all, c.key).length;
+      return acc;
+    }, {});
+    chipsEl.innerHTML = chips.map(c => {
+      const cnt = counts[c.key] || 0;
+      const warn = c.key === 'overdue' && cnt > 0 ? ' style="background:#991b1b;border-color:#991b1b;color:#fff"' : '';
+      return `<button class="k-filter ${S.actionItemsFilter === c.key ? 'active' : ''}" onclick="Kpsc.setActionItemsFilter('${c.key}')"${warn}>${c.label} (${cnt})</button>`;
+    }).join('');
+  }
+
+  rerenderActionItemsBulkBar();
+  // Also update the sub-tab badge
+  const tabs = document.querySelectorAll('.ka-subtab');
+  tabs.forEach(t => {
+    if (t.textContent.includes('Action Items')) {
+      const allItems = buildActionItems(S.meetings, S.actionItems);
+      const overdueCount = allItems.filter(e => e.isOverdue).length;
+      const badge = overdueCount ? ` <span class="k-ai-tab-badge">${overdueCount}</span>` : '';
+      t.innerHTML = `Action Items${badge}`;
+    }
+  });
+}
+
 async function renderPartnerProgress(main) {
   const year = S.reportsYear;
   await loadPartnerData(year);
@@ -8767,6 +9675,30 @@ window.Kpsc = {
   approveFollowup,
   saveFollowupEdit,
   skipFollowup,
+  // Action Items page
+  setActionItemsFilter,
+  setActionItemsYear,
+  setActionItemsMonth,
+  setActionItemsAssignee,
+  setActionItemsMeeting,
+  setActionItemsPriority,
+  setActionItemsSearch,
+  setActionItemsViewMode,
+  updateActionItemStatusById,
+  toggleActionItemDone,
+  deleteActionItemById,
+  openActionItemEdit,
+  closeActionItemEdit,
+  submitActionItemEdit,
+  openActionItemCreateForm,
+  closeActionItemCreateForm,
+  submitActionItemCreate,
+  toggleActionItemCheck,
+  bulkActionItemsAction,
+  exportActionItemsCsv,
+  exportActionItemsMd,
+  notifyAllPendingActionItems,
+  rerenderActionItemsList,
 };
 
 document.addEventListener('DOMContentLoaded', init);

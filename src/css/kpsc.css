@@ -539,6 +539,28 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 @media (max-width: 480px){.k-insight-edit-row{grid-template-columns:1fr;}}
 @media (max-width: 480px){.k-insight-view-btn{padding:4px 7px;font-size:11px;}}
 
+/* ── ACTION ITEMS PAGE ──────────────────────────────────────────── */
+.k-mc-accent-grey{border-left:3px solid #9ca3af!important;}
+.k-ai-tab-badge{display:inline-block;background:#dc2626;color:#fff;border-radius:999px;padding:1px 6px;font-size:10px;font-weight:700;margin-left:4px;vertical-align:middle;}
+.k-ai-stats{}
+.k-ai-filters{}
+.k-ai-card-hdr{display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;}
+.k-ai-checkbox{width:16px;height:16px;cursor:pointer;flex-shrink:0;margin-top:4px;}
+.k-ai-status-select{display:inline-block;width:auto;min-width:110px;padding:3px 6px;font-size:12px;}
+.k-ai-bulk-bar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:10px 14px;background:var(--navy-light);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;}
+.k-ai-bulk-count{font-size:13px;font-weight:700;color:var(--navy);white-space:nowrap;}
+.k-ai-create-form{background:var(--white);border:1.5px solid var(--navy-mid);border-radius:12px;padding:16px;margin-bottom:16px;}
+.k-ai-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:4px;}
+.k-ai-export-wrap{position:relative;}
+.k-ai-export-menu{position:absolute;right:0;top:calc(100% + 4px);background:#fff;border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);z-index:50;min-width:170px;display:flex;flex-direction:column;overflow:hidden;}
+.k-ai-export-menu button{display:block;width:100%;padding:10px 14px;background:none;border:none;border-bottom:1px solid var(--border);font-size:13px;font-family:'DM Sans',sans-serif;color:var(--text);cursor:pointer;text-align:left;}
+.k-ai-export-menu button:last-child{border-bottom:none;}
+.k-ai-export-menu button:hover{background:var(--navy-light);}
+.kbtn-success{background:#059669;color:#fff;border-color:#059669;}
+.kbtn-success:hover:not(:disabled){background:#047857;}
+@media(max-width:600px){.k-ai-form-grid{grid-template-columns:1fr;}}
+@media(max-width:480px){.k-ai-filters{grid-template-columns:1fr 1fr;}}
+
 /* ── PARTNER CONTROLS ──────────────────────────────────────────── */
 .k-partners-controls{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;}
 .k-year-select{width:auto!important;}

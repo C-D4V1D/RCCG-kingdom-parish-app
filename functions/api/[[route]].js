@@ -390,6 +390,26 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) return await updatePettyConfig(DB, body);
     }
 
+    // ── /api/action-items ─────────────────────────────────────
+    if (route === 'action-items') {
+      if (method === 'GET'  && !param) return await getActionItems(DB);
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createActionItem(DB, body, auth);
+      }
+      if (method === 'PUT'  &&  param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateActionItem(DB, param, body);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteActionItem(DB, param);
+      }
+    }
+
     // ── /api/remittances ───────────────────────────────────────
     if (route === 'remittances') {
       if (method === 'GET'  && !param) return await getRemittances(DB);
@@ -873,6 +893,20 @@ async function handleInit(DB) {
       approved_at      TEXT,
       approved_by      TEXT,
       UNIQUE(meeting_id, action_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_action_items (
+      id          TEXT PRIMARY KEY,
+      task        TEXT NOT NULL,
+      assignee    TEXT DEFAULT '',
+      created_by  TEXT DEFAULT '',
+      meeting_id  TEXT DEFAULT '',
+      due_date    TEXT DEFAULT '',
+      status      TEXT DEFAULT 'pending',
+      priority    TEXT DEFAULT 'medium',
+      notes       TEXT DEFAULT '',
+      project_id  TEXT DEFAULT '',
+      created_at  TEXT DEFAULT (datetime('now')),
+      updated_at  TEXT DEFAULT (datetime('now'))
     )`,
   ];
 
@@ -2848,6 +2882,57 @@ async function approveMeetingProjects(DB, data) {
   await DB.prepare(`UPDATE ai_secretary_meetings SET suggested_projects_json='[]' WHERE id=?`).bind(meetingId).run();
 
   return ok({ saved: inserted.length, projects: inserted });
+}
+
+// ── ACTION ITEMS CRUD ────────────────────────────────────────────────────────
+
+async function getActionItems(DB) {
+  const result = await DB.prepare(
+    `SELECT * FROM kpsc_action_items ORDER BY due_date ASC, created_at DESC`
+  ).all();
+  return ok({ items: result.results || [] });
+}
+
+async function createActionItem(DB, body, auth) {
+  const task = String(body?.task || '').trim();
+  if (!task) return err('task is required', 400);
+  const id = newId('kai');
+  const assignee   = String(body?.assignee   || '').trim();
+  const dueDate    = String(body?.dueDate    || '').trim();
+  const priority   = ['low','medium','high','urgent'].includes(body?.priority) ? body.priority : 'medium';
+  const notes      = String(body?.notes      || '').trim();
+  const meetingId  = String(body?.meetingId  || '').trim();
+  const projectId  = String(body?.projectId  || '').trim();
+  await DB.prepare(`
+    INSERT INTO kpsc_action_items (id,task,assignee,created_by,meeting_id,due_date,priority,notes,project_id)
+    VALUES (?,?,?,?,?,?,?,?,?)
+  `).bind(id, task, assignee, auth.name || '', meetingId, dueDate, priority, notes, projectId).run();
+  const item = await DB.prepare(`SELECT * FROM kpsc_action_items WHERE id=?`).bind(id).first();
+  return ok(item);
+}
+
+async function updateActionItem(DB, id, body) {
+  const existing = await DB.prepare(`SELECT * FROM kpsc_action_items WHERE id=?`).bind(id).first();
+  if (!existing) return err('Action item not found', 404);
+  const task      = body?.task      !== undefined ? String(body.task).trim()      : existing.task;
+  const assignee  = body?.assignee  !== undefined ? String(body.assignee).trim()  : existing.assignee;
+  const dueDate   = body?.dueDate   !== undefined ? String(body.dueDate).trim()   : existing.due_date;
+  const status    = ['pending','in_progress','done','cancelled'].includes(body?.status) ? body.status : existing.status;
+  const priority  = ['low','medium','high','urgent'].includes(body?.priority) ? body.priority : existing.priority;
+  const notes     = body?.notes     !== undefined ? String(body.notes).trim()     : existing.notes;
+  const projectId = body?.projectId !== undefined ? String(body.projectId).trim() : existing.project_id;
+  await DB.prepare(`
+    UPDATE kpsc_action_items SET task=?,assignee=?,due_date=?,status=?,priority=?,notes=?,project_id=?,updated_at=datetime('now')
+    WHERE id=?
+  `).bind(task, assignee, dueDate, status, priority, notes, projectId, id).run();
+  const updated = await DB.prepare(`SELECT * FROM kpsc_action_items WHERE id=?`).bind(id).first();
+  return ok(updated);
+}
+
+async function deleteActionItem(DB, id) {
+  const { meta } = await DB.prepare(`DELETE FROM kpsc_action_items WHERE id=?`).bind(id).run();
+  if (!meta.changes) return err('Action item not found', 404);
+  return ok({ deleted: id });
 }
 
 // ── DEEPGRAM BATCH DIARIZATION ───────────────────────────────────────────────
