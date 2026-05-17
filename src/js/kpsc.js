@@ -5622,7 +5622,6 @@ function rerenderInsightsList() {
   const headerActionsEl = document.getElementById('k-insights-header-actions');
   if (headerActionsEl) headerActionsEl.innerHTML = buildInsightsHeaderActions(filtered);
 
-
   const total = baseFiltered.length;
   const countEl = document.getElementById('k-insights-count-text');
   if (countEl) {
