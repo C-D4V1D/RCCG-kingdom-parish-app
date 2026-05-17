@@ -5432,6 +5432,15 @@ function buildInsightsEmptyState(allEntries, meetings) {
     </div>`;
 }
 
+function buildInsightsHeaderActions(filteredEntries) {
+  const hasItems = filteredEntries.length > 0;
+  const showShare = hasItems && canEditInsightsActionStatus() && (S.reportsFilter === 'action_items' || S.reportsFilter === 'my_tasks');
+  return `
+    ${hasItems ? `<button class="kbtn kbtn-sm" onclick="Kpsc.printInsightsReport()" title="Print filtered insights">🖨 Print</button>` : ''}
+    ${showShare ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.shareInsightActions()" title="Share pending actions via WhatsApp">📲 Share</button>` : ''}
+  `;
+}
+
 function insightMtgPill(entry) {
   const safeMid = String(entry.meetingId || '');
   const label = esc(entry.meetingTitle);
@@ -5608,6 +5617,10 @@ function rerenderInsightsList() {
     btn.classList.toggle('active', btn.dataset.mode === S.insightsViewMode);
   });
 
+  // Keep the header actions (Print / Share) in sync with the current filter state.
+  const headerActionsEl = document.getElementById('k-insights-header-actions');
+  if (headerActionsEl) headerActionsEl.innerHTML = buildInsightsHeaderActions(filtered);
+
   const total = baseFiltered.length;
   const countEl = document.getElementById('k-insights-count-text');
   if (countEl) {
@@ -5659,20 +5672,21 @@ async function renderReports(main) {
   const todayStr = today();
   const actionEntries    = allEntries.filter(e => e.kind === 'action_item');
   const resolutionCount  = allEntries.filter(e => e.kind === 'resolution').length;
-  const financialEntries = allEntries.filter(e => e.category === 'financial');
-  const financialCount   = financialEntries.length;
-  const pendingActions   = actionEntries.filter(e => e.status === 'pending').length;
-  const overdueActions   = actionEntries.filter(e => e.dueDate && e.dueDate < todayStr && e.status !== 'done' && e.status !== 'cancelled').length;
-  const doneActions      = actionEntries.filter(e => e.status === 'done').length;
-  const totalActions     = actionEntries.length;
-  const flagCount        = allEntries.filter(e => e.kind === 'policy_flag').length;
-  const highFlagCount    = allEntries.filter(e => e.kind === 'policy_flag' && e.severity === 'high').length;
-  const completionPct    = totalActions ? Math.round((doneActions / totalActions) * 100) : 0;
-  const totalFinancial   = financialEntries.reduce((sum, e) => {
+  const financialEntries         = allEntries.filter(e => e.category === 'financial');
+  const financialCount           = financialEntries.length;
+  const pendingActions           = actionEntries.filter(e => e.status === 'pending').length;
+  const overdueActions           = actionEntries.filter(e => e.dueDate && e.dueDate < todayStr && e.status !== 'done' && e.status !== 'cancelled').length;
+  const doneActions              = actionEntries.filter(e => e.status === 'done').length;
+  const totalActions             = actionEntries.length;
+  const flagCount                = allEntries.filter(e => e.kind === 'policy_flag').length;
+  const highFlagCount            = allEntries.filter(e => e.kind === 'policy_flag' && e.severity === 'high').length;
+  const completionPct            = totalActions ? Math.round((doneActions / totalActions) * 100) : 0;
+  // Only sum amounts for *approved* financial resolutions — rejected/deferred proposals must not inflate this figure.
+  const totalFinancial           = financialEntries.filter(e => e.approval === 'approved').reduce((sum, e) => {
     const n = Number(String(e.amount || '').replace(/,/g, ''));
     return sum + (Number.isFinite(n) ? n : 0);
   }, 0);
-  const financialDisplay = totalFinancial > 0 ? `₦${totalFinancial.toLocaleString('en-NG')}` : `${financialCount}`;
+  const financialDisplay         = totalFinancial > 0 ? `₦${totalFinancial.toLocaleString('en-NG')}` : `${financialCount}`;
 
   const statBar = allEntries.length ? `
     <div class="k-insight-stats">
@@ -5735,9 +5749,8 @@ async function renderReports(main) {
     <div class="k-page">
       <div class="k-section-hdr">
         <h2>AI Meeting Insights</h2>
-        <div style="display:flex;gap:8px;align-items:center">
-          ${filtered.length ? `<button class="kbtn kbtn-sm" onclick="Kpsc.printInsightsReport()" title="Print filtered insights">🖨 Print</button>` : ''}
-          ${filtered.length && canEditInsightsActionStatus() && (S.reportsFilter === 'action_items' || S.reportsFilter === 'my_tasks') ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.shareInsightActions()" title="Share pending actions via WhatsApp">📲 Share</button>` : ''}
+        <div id="k-insights-header-actions" style="display:flex;gap:8px;align-items:center">
+          ${buildInsightsHeaderActions(filtered)}
         </div>
       </div>
       <p class="k-page-hint">AI extracts resolutions, motions, financial approvals, action items, governance alerts, and project suggestions from each processed meeting.</p>
