@@ -3319,6 +3319,20 @@ const IR_RES_CATS   = ['financial','welfare','development','governance','amendme
 const IR_ACT_STATUSES = ['pending','in_progress','done','cancelled'];
 const IR_SEVERITIES = ['low','medium','high'];
 
+// Build <datalist> elements for attendee name suggestions in insight review forms.
+function irAttendeeDatalistHtml() {
+  const participants = S.activeMeeting?.participants || [];
+  const names = [...new Set(
+    participants.filter(p => p.present && p.name).map(p => String(p.name).trim()).filter(Boolean)
+  )];
+  if (!names.length) return '';
+  const opts = names.map(n => `<option value="${esc(n)}">`).join('');
+  return `
+    <datalist id="kir-atd-motion">${opts}</datalist>
+    <datalist id="kir-atd-seconded">${opts}</datalist>
+    <datalist id="kir-atd-assignee">${opts}</datalist>`;
+}
+
 // Resolution sub-categories matching the global Insights page filter chips
 const IR_RES_SUB_CATS = [
   { cat: 'resolutions', label: 'General Resolutions', emoji: '📋', defaultType: 'decision'           },
@@ -3358,6 +3372,7 @@ function renderInsightsReviewSection(m) {
 
   return `
     <section class="k-section k-insights-review-section" id="k-insights-review">
+      ${irAttendeeDatalistHtml()}
       <div class="k-review-step-label" style="border-top:none;padding-top:0;margin-top:16px">Step 4 — Review &amp; Edit Insights</div>
       <p class="k-review-hint" style="margin-bottom:14px">Verify the AI-extracted insights below. Each category is editable. Click <strong>Save Insights</strong> when done — this saves separately from the minutes review above.</p>
 
@@ -3431,11 +3446,11 @@ function renderIrResSubCatRows(resolutions, cat, defaultType) {
       <div class="k-ir-row-3col">
         <div>
           <div class="k-ir-lbl">Moved by</div>
-          <input class="k-input k-input-sm" type="text" id="kir-res-${cat}-motion-${i}" placeholder="Name" value="${esc(r.motionBy||'')}">
+          <input class="k-input k-input-sm" type="text" id="kir-res-${cat}-motion-${i}" list="kir-atd-motion" placeholder="Name" value="${esc(r.motionBy||'')}">
         </div>
         <div>
           <div class="k-ir-lbl">Seconded by</div>
-          <input class="k-input k-input-sm" type="text" id="kir-res-${cat}-seconded-${i}" placeholder="Name" value="${esc(r.secondedBy||'')}">
+          <input class="k-input k-input-sm" type="text" id="kir-res-${cat}-seconded-${i}" list="kir-atd-seconded" placeholder="Name" value="${esc(r.secondedBy||'')}">
         </div>
         <div>
           <div class="k-ir-lbl">Vote summary</div>
@@ -3460,7 +3475,7 @@ function renderIrActionRows(actions) {
       <div class="k-ir-row-3col">
         <div>
           <div class="k-ir-lbl">Assigned to</div>
-          <input class="k-input k-input-sm" type="text" id="kir-act-assignee-${i}" placeholder="Full name" value="${esc(a.assignee||'')}">
+          <input class="k-input k-input-sm" type="text" id="kir-act-assignee-${i}" list="kir-atd-assignee" placeholder="Full name" value="${esc(a.assignee||'')}">
         </div>
         <div>
           <div class="k-ir-lbl">Due date</div>
@@ -3726,10 +3741,20 @@ async function promoteInsightProject(btn, meetingId, title, description, estimat
 
 // ───────────────────────────────────────────────────────────────────
 
+function minutesActionsHtml(m) {
+  const reviewed = !!m.reviewedAt;
+  const rg = reviewed ? '' : 'disabled title="Approve and save the review before this action is available."';
+  return `
+    <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${rg}>🖨 Print / Save PDF</button>
+    <button class="kbtn kbtn-sm" onclick="Kpsc.shareMinutesWhatsApp('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${rg}>📲 Share via WhatsApp</button>
+    ${m.publicShareToken ? `<button class="kbtn kbtn-sm" onclick="Kpsc.revokeMinutesPublicLink('${m.id}')">🔒 Revoke Public Link</button>` : ''}
+    <button class="kbtn kbtn-sm" id="btn-plain-english-${m.id}" onclick="Kpsc.togglePlainEnglish('${m.id}')" data-plain-english="false">📖 Read in plain English</button>
+  `;
+}
+
 function renderMinutesPanel(m) {
   if (!m?.minutesMarkdown) return '';
   const reviewed = !!m.reviewedAt;
-  const reviewGuard = reviewed ? '' : 'disabled title="Approve and save the review before this action is available."';
   const publicUrl = m.publicShareToken ? `${window.location.origin}/kpsc/minutes/?token=${encodeURIComponent(m.publicShareToken)}` : '';
 
   return `
@@ -3740,20 +3765,22 @@ function renderMinutesPanel(m) {
 
       ${renderReviewPanel(m)}
 
-      ${renderInsightsReviewSection(m)}
-
-      <div class="k-room-actions" style="margin-bottom:12px;margin-top:16px">
-        <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${reviewGuard}>🖨 Print / Save PDF</button>
-        <button class="kbtn kbtn-sm" onclick="Kpsc.shareMinutesWhatsApp('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${reviewGuard}>📲 Share via WhatsApp</button>
-        ${m.publicShareToken ? `<button class="kbtn kbtn-sm" onclick="Kpsc.revokeMinutesPublicLink('${m.id}')">🔒 Revoke Public Link</button>` : ''}
-        <button class="kbtn kbtn-sm" id="btn-plain-english-${m.id}" onclick="Kpsc.togglePlainEnglish('${m.id}')" data-plain-english="false">📖 Read in plain English</button>
+      <div id="k-minutes-actions" class="k-room-actions" style="margin-bottom:4px;margin-top:16px">
+        ${minutesActionsHtml(m)}
       </div>
-      ${reviewed ? '' : '<p class="k-hint" style="margin-top:-6px;margin-bottom:12px">Approve and save the review first before printing or sharing minutes.</p>'}
+      <p id="k-minutes-review-hint" class="k-hint" style="margin-top:4px;margin-bottom:12px;${reviewed ? 'display:none' : ''}">Approve and save the review first before printing or sharing minutes.</p>
       ${m.publicShareToken ? `<div class="k-hint" style="margin-top:-4px;margin-bottom:12px">Public minutes link is active: <a href="${esc(publicUrl)}" target="_blank" rel="noopener noreferrer">${esc(publicUrl)}</a></div>` : ''}
 
-      <h4 class="k-sub-title">Minutes Preview</h4>
-      <div class="k-minutes-body" id="minutes-body-${m.id}">${minutesHtml(m.minutesMarkdown)}</div>
-      <div class="k-plain-english-indicator" id="pe-indicator-${m.id}" style="display:none;font-size:0.9em;color:#666;margin-top:8px;padding:8px;background:#f5f5f5;border-radius:4px;">📖 Showing plain English version</div>
+      <details class="k-collapsible" open>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">📄 Minutes Preview</span>
+          <span class="k-collapsible-summary">${reviewed ? '✓ Approved' : 'Draft'}</span>
+        </summary>
+        <div class="k-minutes-body" id="minutes-body-${m.id}">${minutesHtml(m.minutesMarkdown)}</div>
+        <div class="k-plain-english-indicator" id="pe-indicator-${m.id}" style="display:none;font-size:0.9em;color:#666;margin-top:8px;padding:8px;background:#f5f5f5;border-radius:4px;">📖 Showing plain English version</div>
+      </details>
+
+      ${renderInsightsReviewSection(m)}
     </section>`;
 }
 
@@ -3811,6 +3838,11 @@ async function saveMinutesReview(btn) {
     } else {
       renderPage('meeting');
     }
+    // Unlock Print / Share buttons immediately — no need to leave and return.
+    const actionsEl = document.getElementById('k-minutes-actions');
+    if (actionsEl) actionsEl.innerHTML = minutesActionsHtml(S.activeMeeting);
+    const hintEl = document.getElementById('k-minutes-review-hint');
+    if (hintEl) hintEl.style.display = 'none';
     // Refresh insights review section with the latest API data so any AI-driven
     // changes to resolutions/actionItems/policyFlags from the updated minutes are visible.
     const irSection = document.getElementById('k-insights-review');
@@ -5832,10 +5864,10 @@ function insightMtgPill(entry) {
 }
 
 function insightTruncText(text, maxLen) {
-  if (!text || text.length <= maxLen) return `<div class="k-mc-title">${esc(text || '')}</div>`;
+  if (!text || text.length <= maxLen) return `<div class="k-ic-title">${esc(text || '')}</div>`;
   return `
     <details class="k-insight-expand">
-      <summary class="k-mc-title">${esc(text.slice(0, maxLen))}… <span class="k-insight-show-more">show more</span></summary>
+      <summary class="k-ic-title">${esc(text.slice(0, maxLen))}… <span class="k-insight-show-more">show more</span></summary>
       <div class="k-insight-full-text">${esc(text)}</div>
     </details>`;
 }
@@ -5855,19 +5887,12 @@ function renderMeetingInsightCard(entry) {
         : '<span class="kbadge badge-blue">LOW</span>';
     const typeLabel = String(entry.flagType || '').replace(/_/g, ' ');
     return `
-      <div class="k-meeting-card ${sevCls}" style="cursor:default">
-        <div class="k-mc-top">
-          <div style="flex:1">
-            <div class="k-mc-title">🚩 ${esc(typeLabel || 'Governance alert')}</div>
-            <div class="k-mc-meta">
-              <span>${dateStr}</span>
-              ${insightMtgPill(entry)}
-            </div>
-          </div>
-          <div class="k-mc-badges">${sevBadge}<span class="kbadge badge-type">Policy flag</span></div>
-        </div>
+      <div class="k-meeting-card k-insight-card ${sevCls}" style="cursor:default">
+        <div class="k-ic-title">🚩 ${esc(typeLabel || 'Governance alert')}</div>
+        <div class="k-ic-badges">${sevBadge}<span class="kbadge badge-type">Policy flag</span></div>
+        <div class="k-ic-meta"><span>${dateStr}</span>${insightMtgPill(entry)}</div>
         ${entry.text ? `<div class="k-insight-flag-msg">${esc(entry.text)}</div>` : ''}
-        ${viewLink}
+        <div class="k-ic-footer">${viewLink}</div>
       </div>`;
   }
 
@@ -5882,22 +5907,15 @@ function renderMeetingInsightCard(entry) {
     const pPri   = String(entry.priority || 'medium');
     const pDate  = String(entry.targetDate || '');
     return `
-      <div class="k-meeting-card k-mc-accent-purple k-insight-project-card" style="cursor:default">
-        <div class="k-mc-top">
-          <div style="flex:1">
-            <div class="k-mc-title">💡 ${esc(entry.projectTitle || entry.text)}</div>
-            <div class="k-mc-meta">
-              <span>${dateStr}</span>
-              ${insightMtgPill(entry)}
-            </div>
-          </div>
-          <div class="k-mc-badges">${costHtml}<span class="kbadge badge-type">AI suggestion</span></div>
-        </div>
+      <div class="k-meeting-card k-insight-card k-mc-accent-purple k-insight-project-card" style="cursor:default">
+        <div class="k-ic-title">💡 ${esc(entry.projectTitle || entry.text)}</div>
+        <div class="k-ic-badges">${costHtml}<span class="kbadge badge-type">AI suggestion</span></div>
+        <div class="k-ic-meta"><span>${dateStr}</span>${insightMtgPill(entry)}</div>
         ${entry.projectDescription && entry.projectDescription !== entry.projectTitle
           ? `<div class="k-insight-flag-msg">${esc(entry.projectDescription)}</div>` : ''}
-        <div class="k-mc-footer" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-          ${viewLink}
+        <div class="k-ic-footer">
           ${canPromote ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.promoteInsightProject(this,'${mId}','${pTitle}','${pDesc}','${pCost}','${pPri}','${pDate}')">➕ Promote to project</button>` : ''}
+          ${viewLink}
         </div>
       </div>`;
   }
@@ -5911,18 +5929,11 @@ function renderMeetingInsightCard(entry) {
     const accentCls = entry.status === 'done' ? 'k-mc-accent-green' : entry.status === 'cancelled' ? 'k-mc-accent-gray' : 'k-mc-accent-blue';
     const safeEntryId = esc(entry.id);
     return `
-      <div class="k-meeting-card ${accentCls}" style="cursor:default" id="k-ic-${safeEntryId.replace(/[^a-z0-9]/gi,'_')}">
-        <div class="k-mc-top">
-          <div style="flex:1">
-            ${insightTruncText(entry.text, 130)}
-            <div class="k-mc-meta" style="margin-top:4px">
-              <span>${dateStr}</span>
-              ${insightMtgPill(entry)}
-            </div>
-          </div>
-          <div class="k-mc-badges"><span class="kbadge badge-type">Action item</span></div>
-        </div>
-        <div class="k-action-meta">
+      <div class="k-meeting-card k-insight-card ${accentCls}" style="cursor:default" id="k-ic-${safeEntryId.replace(/[^a-z0-9]/gi,'_')}">
+        ${insightTruncText(entry.text, 130)}
+        <div class="k-ic-badges"><span class="kbadge badge-type">Action item</span></div>
+        <div class="k-ic-meta"><span>${dateStr}</span>${insightMtgPill(entry)}</div>
+        <div class="k-ic-info">
           <span>👤 ${esc(entry.assignee || 'Unassigned')}</span>
           ${dueDateHtml}
           ${canEdit
@@ -5937,7 +5948,7 @@ function renderMeetingInsightCard(entry) {
           ${canEdit ? `<button class="kbtn kbtn-sm kbtn-ghost k-insight-edit-btn" onclick="Kpsc.toggleInsightEdit('${esc(entry.id)}','${meetingIdSafe}','${actionIdSafe}')">✏️ Edit</button>` : ''}
         </div>
         <div id="k-ie-form-${safeEntryId.replace(/[^a-z0-9]/gi,'_')}" style="display:none"></div>
-        ${viewLink}
+        <div class="k-ic-footer">${viewLink}</div>
       </div>`;
   }
 
@@ -5949,28 +5960,21 @@ function renderMeetingInsightCard(entry) {
       : '<span class="kbadge badge-amber">Needs confirmation</span>';
   const accentCls = entry.approval === 'approved' ? 'k-mc-accent-green' : entry.approval === 'rejected' ? 'k-mc-accent-red' : entry.category === 'financial' ? 'k-mc-accent-orange' : entry.category === 'motions' ? 'k-mc-accent-purple' : entry.category === 'amendments' ? 'k-mc-accent-blue' : 'k-mc-accent-amber';
   return `
-    <div class="k-meeting-card ${accentCls}" style="cursor:default">
-      <div class="k-mc-top">
-        <div style="flex:1">
-          ${insightTruncText(entry.text, 130)}
-          <div class="k-mc-meta" style="margin-top:4px">
-            <span>${dateStr}</span>
-            ${insightMtgPill(entry)}
-          </div>
-        </div>
-        <div class="k-mc-badges">
-          ${statusBadge}
-          <span class="kbadge badge-type">${esc(String(entry.resolutionType || 'decision').replace(/_/g, ' '))}</span>
-          ${entry.amount ? `<span class="kbadge badge-green">${esc(formatResolutionAmount(entry.amount))}</span>` : ''}
-        </div>
+    <div class="k-meeting-card k-insight-card ${accentCls}" style="cursor:default">
+      ${insightTruncText(entry.text, 130)}
+      <div class="k-ic-badges">
+        ${statusBadge}
+        <span class="kbadge badge-type">${esc(String(entry.resolutionType || 'decision').replace(/_/g, ' '))}</span>
+        ${entry.amount ? `<span class="kbadge badge-green">${esc(formatResolutionAmount(entry.amount))}</span>` : ''}
       </div>
+      <div class="k-ic-meta"><span>${dateStr}</span>${insightMtgPill(entry)}</div>
       ${entry.motionBy || entry.secondedBy || entry.voteSummary ? `
-        <div class="k-action-meta">
+        <div class="k-ic-info">
           ${entry.motionBy ? `<span>🗣 Moved: ${esc(entry.motionBy)}</span>` : ''}
           ${entry.secondedBy ? `<span>Seconded: ${esc(entry.secondedBy)}</span>` : ''}
           ${entry.voteSummary ? `<span>${esc(entry.voteSummary)}</span>` : ''}
         </div>` : ''}
-      ${viewLink}
+      <div class="k-ic-footer">${viewLink}</div>
     </div>`;
 }
 
