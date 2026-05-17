@@ -1606,8 +1606,20 @@ function canAccess(page) {
   if (['home', 'meetings', 'money', 'more'].includes(page)) return true;
   const role = String(S.user?.role || 'committee_viewer').toLowerCase();
   const perms = effectiveRolePermissions();
-  const allowed = perms[role] || KPSC_PERMISSIONS.committee_viewer;
-  return allowed.includes(page);
+  // Use saved permissions for this role if available; fall back to hardcoded defaults.
+  // This ensures any page key added after a role-permissions save still works.
+  const saved   = perms[role];
+  const allowed = (Array.isArray(saved) && saved.length > 0)
+    ? saved
+    : (KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer);
+  // If the page is in KPSC_PERMISSIONS for this role but was omitted from an older
+  // saved snapshot (e.g. partner-progress before it was added to PERM_PAGES),
+  // fall back to the hardcoded default so the tab is never silently hidden.
+  if (!allowed.includes(page)) {
+    const defaultAllowed = KPSC_PERMISSIONS[role] || KPSC_PERMISSIONS.committee_viewer;
+    return defaultAllowed.includes(page);
+  }
+  return true;
 }
 
 function canManagePartners() {
@@ -6292,15 +6304,16 @@ const PERM_ROLES = [
 ];
 
 const PERM_PAGES = [
-  { key: 'dashboard',  label: 'Dashboard' },
-  { key: 'archive',    label: 'Archive' },
-  { key: 'projects',   label: 'Projects' },
-  { key: 'partners',   label: 'Partners' },
-  { key: 'finance',    label: 'Finance' },
-  { key: 'reminders',  label: 'Reminders' },
-  { key: 'reports',    label: 'Reports' },
-  { key: 'members',    label: 'Members' },
-  { key: 'settings',   label: 'Settings' },
+  { key: 'dashboard',        label: 'Dashboard' },
+  { key: 'archive',          label: 'Archive' },
+  { key: 'projects',         label: 'Projects' },
+  { key: 'partners',         label: 'Partners' },
+  { key: 'partner-progress', label: 'Progress' },
+  { key: 'finance',          label: 'Finance' },
+  { key: 'reminders',        label: 'Reminders' },
+  { key: 'reports',          label: 'Reports' },
+  { key: 'members',          label: 'Members' },
+  { key: 'settings',         label: 'Settings' },
 ];
 
 function isPermForced(roleKey, pageKey) {
