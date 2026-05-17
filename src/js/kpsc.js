@@ -3314,7 +3314,7 @@ function renderReviewPanel(m) {
 
 // ── INSIGHTS REVIEW STEP (Step 4) ──────────────────────────────────
 
-const IR_RES_TYPES  = ['decision','financial_approval','rejection','motion','amendment'];
+const IR_RES_TYPES  = ['decision','approval','financial_approval','rejection','amendment','motion','vote'];
 const IR_RES_CATS   = ['financial','welfare','development','governance','amendments','other'];
 const IR_ACT_STATUSES = ['pending','in_progress','done','cancelled'];
 const IR_SEVERITIES = ['low','medium','high'];
@@ -3683,6 +3683,41 @@ async function saveInsightsReview(btn) {
     if (irSection) irSection.outerHTML = renderInsightsReviewSection(S.activeMeeting);
   } catch {
     showToast('Could not save insights. Check your connection.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+// ── Promote a suggested project to the KPSC Projects page ──────────
+
+async function promoteInsightProject(btn, meetingId, title, description, estimatedCost, priority, targetDate) {
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Promoting…';
+  try {
+    const res = await apiPost('kpsc-approve-meeting-projects', {
+      meetingId,
+      projects: [{ title, description, estimatedCost: estimatedCost || 0, priority: priority || 'medium', targetDate: targetDate || '' }],
+      createdBy: S.user?.name || '',
+    });
+    if (res?.error) { showToast(res.error, 'error'); return; }
+    showToast(`"${title}" added to Projects.`, 'success');
+    // Remove from S.meetings suggested projects cache
+    if (S.meetings?.length) {
+      S.meetings = S.meetings.map(m => {
+        if (String(m.id) !== String(meetingId)) return m;
+        return { ...m, suggestedProjects: (m.suggestedProjects || []).filter(p => p.title !== title) };
+      });
+    }
+    // Append new project to S.projects cache if it's loaded
+    if (Array.isArray(res?.projects) && res.projects.length && Array.isArray(S.projects)) {
+      S.projects = [...S.projects, ...res.projects];
+    }
+    // Re-render insights so the promoted card disappears
+    rerenderInsightsList();
+  } catch {
+    showToast('Could not promote project. Check your connection.', 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
@@ -5578,13 +5613,16 @@ function extractYearFromStamp(stamp) {
 
 function classifyResolutionInsight(item) {
   const type = String(item?.resolutionType || '').toLowerCase();
+  const cat  = String(item?.category || '').toLowerCase();
   const text = String(item?.text || '');
-  // Priority is intentional: financial > amendment > rejection > motion/proposal > generic resolution.
-  if (type === 'financial_approval' || String(item?.category || '').toLowerCase() === 'financial' || item?.amount) return 'financial';
+  // Priority: financial > amendment > rejection > motion/proposal > generic resolution.
+  // 'financial' stored category is authoritative alongside the resolutionType and amount signals.
+  if (type === 'financial_approval' || cat === 'financial' || (item?.amount && String(item.amount).trim())) return 'financial';
   if (type === 'amendment' || /\bamend(?:ment|ed)?\b/i.test(text)) return 'amendments';
   if (type === 'rejection' || item?.approved === false || /\breject(?:ed|ion)?\b/i.test(text)) return 'rejections';
-  // Fix: use non-capturing group so \b anchors all three alternatives.
+  // 'vote' type without other signals is a general voted resolution.
   if (type === 'motion' || /\b(?:motion|proposal|proposed)\b/i.test(text)) return 'motions';
+  // 'approval', 'vote', 'decision' all map to the general resolutions bucket.
   return 'resolutions';
 }
 
@@ -5836,6 +5874,13 @@ function renderMeetingInsightCard(entry) {
   // ── SUGGESTED PROJECT CARD ────────────────────────────────────
   if (entry.kind === 'suggested_project') {
     const costHtml = entry.estimatedCost ? `<span class="kbadge badge-type">Est. ${esc(formatResolutionAmount(entry.estimatedCost))}</span>` : '';
+    const canPromote = canEditInsightsActionStatus();
+    const mId = esc(String(entry.meetingId || ''));
+    const pTitle = String(entry.projectTitle || entry.text || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const pDesc  = String(entry.projectDescription || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const pCost  = String(entry.estimatedCost || '0');
+    const pPri   = String(entry.priority || 'medium');
+    const pDate  = String(entry.targetDate || '');
     return `
       <div class="k-meeting-card k-mc-accent-purple k-insight-project-card" style="cursor:default">
         <div class="k-mc-top">
@@ -5850,7 +5895,10 @@ function renderMeetingInsightCard(entry) {
         </div>
         ${entry.projectDescription && entry.projectDescription !== entry.projectTitle
           ? `<div class="k-insight-flag-msg">${esc(entry.projectDescription)}</div>` : ''}
-        ${viewLink}
+        <div class="k-mc-footer" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          ${viewLink}
+          ${canPromote ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.promoteInsightProject(this,'${mId}','${pTitle}','${pDesc}','${pCost}','${pPri}','${pDate}')">➕ Promote to project</button>` : ''}
+        </div>
       </div>`;
   }
 
@@ -8650,6 +8698,7 @@ window.Kpsc = {
   addIrResRow,
   removeIrResRow,
   saveInsightsReview,
+  promoteInsightProject,
   saveKpscOpsSettings,
   saveRolePermissions,
   resetRolePermissions,
