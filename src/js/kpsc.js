@@ -3319,24 +3319,49 @@ const IR_RES_CATS   = ['financial','welfare','development','governance','amendme
 const IR_ACT_STATUSES = ['pending','in_progress','done','cancelled'];
 const IR_SEVERITIES = ['low','medium','high'];
 
+// Resolution sub-categories matching the global Insights page filter chips
+const IR_RES_SUB_CATS = [
+  { cat: 'resolutions', label: 'General Resolutions', emoji: '📋', defaultType: 'decision'           },
+  { cat: 'financial',   label: 'Financial Approvals', emoji: '💰', defaultType: 'financial_approval' },
+  { cat: 'amendments',  label: 'Amendments',          emoji: '✏️',  defaultType: 'amendment'          },
+  { cat: 'rejections',  label: 'Rejections',          emoji: '✗',  defaultType: 'rejection'          },
+  { cat: 'motions',     label: 'Motions / Proposals', emoji: '🗣',  defaultType: 'motion'             },
+];
+
 function renderInsightsReviewSection(m) {
-  const resolutions       = m.resolutions || [];
+  const allResolutions    = m.resolutions || [];
   const actionItems       = m.actionItems || [];
   const policyFlags       = m.policyFlags || [];
   const suggestedProjects = m.suggestedProjects || [];
+
+  // Partition resolutions into sub-category buckets
+  const resByCat = {};
+  IR_RES_SUB_CATS.forEach(sc => { resByCat[sc.cat] = []; });
+  allResolutions.forEach(r => {
+    const cat = classifyResolutionInsight(r);
+    (resByCat[cat] || resByCat['resolutions']).push(r);
+  });
+
+  const resolutionSections = IR_RES_SUB_CATS.map(({ cat, label, emoji, defaultType }) => {
+    const items = resByCat[cat] || [];
+    const count = items.length;
+    return `
+      <details class="k-collapsible" ${count ? 'open' : ''}>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">${emoji} ${label}</span>
+          <span class="k-collapsible-summary" id="kir-res-${cat}-count-lbl">${count} item${count !== 1 ? 's' : ''}</span>
+        </summary>
+        <div id="k-ir-res-${cat}-body" class="k-ir-body">${renderIrResSubCatRows(items, cat, defaultType)}</div>
+        <div class="k-ir-add-row"><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.addIrResRow('${cat}','${defaultType}')">+ Add ${label.toLowerCase()}</button></div>
+      </details>`;
+  }).join('');
+
   return `
     <section class="k-section k-insights-review-section" id="k-insights-review">
       <div class="k-review-step-label" style="border-top:none;padding-top:0;margin-top:16px">Step 4 — Review &amp; Edit Insights</div>
       <p class="k-review-hint" style="margin-bottom:14px">Verify the AI-extracted insights below. Each category is editable. Click <strong>Save Insights</strong> when done — this saves separately from the minutes review above.</p>
 
-      <details class="k-collapsible" ${resolutions.length ? 'open' : ''}>
-        <summary class="k-collapsible-hdr">
-          <span class="k-collapsible-title">📋 Resolutions</span>
-          <span class="k-collapsible-summary" id="kir-res-count-lbl">${resolutions.length} item${resolutions.length !== 1 ? 's' : ''}</span>
-        </summary>
-        <div id="k-ir-res-body" class="k-ir-body">${renderIrResolutionRows(resolutions)}</div>
-        <div class="k-ir-add-row"><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.addIrRow('resolutions')">+ Add resolution</button></div>
-      </details>
+      ${resolutionSections}
 
       <details class="k-collapsible" ${actionItems.length ? 'open' : ''}>
         <summary class="k-collapsible-hdr">
@@ -3371,59 +3396,54 @@ function renderInsightsReviewSection(m) {
     </section>`;
 }
 
-function renderIrResolutionRows(resolutions) {
-  if (!resolutions.length) return '<div class="k-ir-empty">No resolutions extracted yet. Add one below.</div>';
+function renderIrResSubCatRows(resolutions, cat, defaultType) {
+  const sc = IR_RES_SUB_CATS.find(s => s.cat === cat);
+  const label = sc ? sc.label.toLowerCase() : 'resolution';
+  if (!resolutions.length) return `<div class="k-ir-empty">No ${label} extracted yet. Add one below.</div>`;
   return resolutions.map((r, i) => `
-    <div class="k-ir-row" data-kir="res" data-idx="${i}">
-      <input type="hidden" id="kir-res-id-${i}" value="${esc(String(r.id || ''))}">
+    <div class="k-ir-row" data-kir="res" data-res-cat="${cat}" data-idx="${i}">
+      <input type="hidden" id="kir-res-${cat}-id-${i}" value="${esc(String(r.id || ''))}">
       <div>
         <div class="k-ir-lbl">Resolution text</div>
-        <textarea class="k-input k-input-sm" id="kir-res-text-${i}" rows="2" style="resize:vertical">${esc(r.text || '')}</textarea>
+        <textarea class="k-input k-input-sm" id="kir-res-${cat}-text-${i}" rows="2" style="resize:vertical">${esc(r.text || '')}</textarea>
       </div>
       <div class="k-ir-row-2col">
         <div>
           <div class="k-ir-lbl">Type</div>
-          <select class="k-input k-input-sm" id="kir-res-type-${i}">
-            ${IR_RES_TYPES.map(t => `<option value="${t}" ${(r.resolutionType||'decision')===t?'selected':''}>${t.replace(/_/g,' ')}</option>`).join('')}
+          <select class="k-input k-input-sm" id="kir-res-${cat}-type-${i}">
+            ${IR_RES_TYPES.map(t => `<option value="${t}" ${(r.resolutionType||defaultType||'decision')===t?'selected':''}>${t.replace(/_/g,' ')}</option>`).join('')}
           </select>
         </div>
-        <div>
-          <div class="k-ir-lbl">Category</div>
-          <select class="k-input k-input-sm" id="kir-res-cat-${i}">
-            ${IR_RES_CATS.map(c => `<option value="${c}" ${(r.category||'other')===c?'selected':''}>${c}</option>`).join('')}
-          </select>
-        </div>
-      </div>
-      <div class="k-ir-row-2col">
         <div>
           <div class="k-ir-lbl">Approval</div>
-          <select class="k-input k-input-sm" id="kir-res-approved-${i}">
+          <select class="k-input k-input-sm" id="kir-res-${cat}-approved-${i}">
             <option value="null" ${r.approved==null?'selected':''}>Needs confirmation</option>
             <option value="true" ${r.approved===true?'selected':''}>Approved</option>
             <option value="false" ${r.approved===false?'selected':''}>Rejected</option>
           </select>
         </div>
-        <div>
-          <div class="k-ir-lbl">Amount (if financial)</div>
-          <input class="k-input k-input-sm" type="text" id="kir-res-amount-${i}" placeholder="e.g. 50000" value="${esc(r.amount||'')}">
-        </div>
       </div>
+      ${cat === 'financial' ? `
+      <div>
+        <div class="k-ir-lbl">Amount</div>
+        <input class="k-input k-input-sm" type="text" id="kir-res-${cat}-amount-${i}" placeholder="e.g. 50000" value="${esc(r.amount||'')}">
+      </div>` : `<input type="hidden" id="kir-res-${cat}-amount-${i}" value="${esc(r.amount||'')}">`}
       <div class="k-ir-row-3col">
         <div>
           <div class="k-ir-lbl">Moved by</div>
-          <input class="k-input k-input-sm" type="text" id="kir-res-motion-${i}" placeholder="Name" value="${esc(r.motionBy||'')}">
+          <input class="k-input k-input-sm" type="text" id="kir-res-${cat}-motion-${i}" placeholder="Name" value="${esc(r.motionBy||'')}">
         </div>
         <div>
           <div class="k-ir-lbl">Seconded by</div>
-          <input class="k-input k-input-sm" type="text" id="kir-res-seconded-${i}" placeholder="Name" value="${esc(r.secondedBy||'')}">
+          <input class="k-input k-input-sm" type="text" id="kir-res-${cat}-seconded-${i}" placeholder="Name" value="${esc(r.secondedBy||'')}">
         </div>
         <div>
           <div class="k-ir-lbl">Vote summary</div>
-          <input class="k-input k-input-sm" type="text" id="kir-res-vote-${i}" placeholder="e.g. Unanimously approved" value="${esc(r.voteSummary||'')}">
+          <input class="k-input k-input-sm" type="text" id="kir-res-${cat}-vote-${i}" placeholder="e.g. Unanimously approved" value="${esc(r.voteSummary||'')}">
         </div>
       </div>
       <div class="k-ir-row-actions">
-        <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.removeIrRow('resolutions',${i})">✕ Remove</button>
+        <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.removeIrResRow('${cat}',${i})">✕ Remove</button>
       </div>
     </div>`).join('');
 }
@@ -3513,21 +3533,26 @@ function renderIrProjectRows(projects) {
 
 // ── Read all current DOM values for each insight category ───────────
 
-function readIrResolutions() {
-  return [...document.querySelectorAll('[data-kir="res"]')].map((_, i) => {
-    const approvedRaw = document.getElementById(`kir-res-approved-${i}`)?.value || 'null';
+function readIrResForCat(cat) {
+  const rows = [...document.querySelectorAll(`[data-kir="res"][data-res-cat="${cat}"]`)];
+  return rows.map((_, i) => {
+    const approvedRaw = document.getElementById(`kir-res-${cat}-approved-${i}`)?.value || 'null';
     return {
-      id: document.getElementById(`kir-res-id-${i}`)?.value || null,
-      text: document.getElementById(`kir-res-text-${i}`)?.value.trim() || '',
-      resolutionType: document.getElementById(`kir-res-type-${i}`)?.value || 'decision',
-      category: document.getElementById(`kir-res-cat-${i}`)?.value || 'other',
-      approved: approvedRaw === 'true' ? true : approvedRaw === 'false' ? false : null,
-      amount: document.getElementById(`kir-res-amount-${i}`)?.value.trim() || '',
-      motionBy: document.getElementById(`kir-res-motion-${i}`)?.value.trim() || '',
-      secondedBy: document.getElementById(`kir-res-seconded-${i}`)?.value.trim() || '',
-      voteSummary: document.getElementById(`kir-res-vote-${i}`)?.value.trim() || '',
+      id:             document.getElementById(`kir-res-${cat}-id-${i}`)?.value || null,
+      text:           document.getElementById(`kir-res-${cat}-text-${i}`)?.value.trim() || '',
+      resolutionType: document.getElementById(`kir-res-${cat}-type-${i}`)?.value || 'decision',
+      category:       cat,
+      approved:       approvedRaw === 'true' ? true : approvedRaw === 'false' ? false : null,
+      amount:         document.getElementById(`kir-res-${cat}-amount-${i}`)?.value?.trim() || '',
+      motionBy:       document.getElementById(`kir-res-${cat}-motion-${i}`)?.value.trim() || '',
+      secondedBy:     document.getElementById(`kir-res-${cat}-seconded-${i}`)?.value.trim() || '',
+      voteSummary:    document.getElementById(`kir-res-${cat}-vote-${i}`)?.value.trim() || '',
     };
   }).filter(r => r.text);
+}
+
+function readIrAllResolutions() {
+  return IR_RES_SUB_CATS.flatMap(({ cat }) => readIrResForCat(cat));
 }
 
 function readIrActions() {
@@ -3562,20 +3587,18 @@ function readIrProjects() {
 
 function irKindConfig(kind) {
   const cfg = {
-    resolutions: [readIrResolutions, renderIrResolutionRows, 'k-ir-res-body',  'kir-res-count-lbl'],
-    actions:     [readIrActions,     renderIrActionRows,     'k-ir-act-body',  'kir-act-count-lbl'],
-    flags:       [readIrFlags,       renderIrFlagRows,       'k-ir-flag-body', 'kir-flag-count-lbl'],
-    projects:    [readIrProjects,    renderIrProjectRows,    'k-ir-proj-body', 'kir-proj-count-lbl'],
+    actions:  [readIrActions,  renderIrActionRows,  'k-ir-act-body',  'kir-act-count-lbl'],
+    flags:    [readIrFlags,    renderIrFlagRows,    'k-ir-flag-body', 'kir-flag-count-lbl'],
+    projects: [readIrProjects, renderIrProjectRows, 'k-ir-proj-body', 'kir-proj-count-lbl'],
   };
   return cfg[kind] || null;
 }
 
 function irEmptyItem(kind) {
   const empty = {
-    resolutions: { text:'', resolutionType:'decision', category:'other', approved:null, amount:'', motionBy:'', secondedBy:'', voteSummary:'' },
-    actions:     { task:'', assignee:'', dueDate:'', status:'pending' },
-    flags:       { type:'', severity:'low', message:'' },
-    projects:    { title:'', description:'', estimatedCost:'' },
+    actions:  { task:'', assignee:'', dueDate:'', status:'pending' },
+    flags:    { type:'', severity:'low', message:'' },
+    projects: { title:'', description:'', estimatedCost:'' },
   };
   return empty[kind] || {};
 }
@@ -3607,11 +3630,37 @@ function removeIrRow(kind, idx) {
   if (lbl) lbl.textContent = `${current.length} item${current.length !== 1 ? 's' : ''}`;
 }
 
+function addIrResRow(cat, defaultType) {
+  const bodyId  = `k-ir-res-${cat}-body`;
+  const countId = `kir-res-${cat}-count-lbl`;
+  const current = readIrResForCat(cat);
+  current.push({ text:'', resolutionType: defaultType || 'decision', category: cat, approved: null, amount:'', motionBy:'', secondedBy:'', voteSummary:'' });
+  const bodyEl = document.getElementById(bodyId);
+  if (bodyEl) bodyEl.innerHTML = renderIrResSubCatRows(current, cat, defaultType || 'decision');
+  const lbl = document.getElementById(countId);
+  if (lbl) lbl.textContent = `${current.length} item${current.length !== 1 ? 's' : ''}`;
+  const lastRow = bodyEl?.querySelector('[data-kir]:last-child textarea, [data-kir]:last-child input[type="text"]');
+  lastRow?.focus();
+}
+
+function removeIrResRow(cat, idx) {
+  const sc = IR_RES_SUB_CATS.find(s => s.cat === cat);
+  const defaultType = sc?.defaultType || 'decision';
+  const bodyId  = `k-ir-res-${cat}-body`;
+  const countId = `kir-res-${cat}-count-lbl`;
+  const current = readIrResForCat(cat);
+  current.splice(idx, 1);
+  const bodyEl = document.getElementById(bodyId);
+  if (bodyEl) bodyEl.innerHTML = renderIrResSubCatRows(current, cat, defaultType);
+  const lbl = document.getElementById(countId);
+  if (lbl) lbl.textContent = `${current.length} item${current.length !== 1 ? 's' : ''}`;
+}
+
 // ── Save all insights to the API ────────────────────────────────────
 
 async function saveInsightsReview(btn) {
   if (!S.activeMeeting) return;
-  const resolutions       = readIrResolutions();
+  const resolutions       = readIrAllResolutions();
   const actionItems       = readIrActions();
   const policyFlags       = readIrFlags();
   const suggestedProjects = readIrProjects();
@@ -8598,6 +8647,8 @@ window.Kpsc = {
   // Insights Review (Step 4)
   addIrRow,
   removeIrRow,
+  addIrResRow,
+  removeIrResRow,
   saveInsightsReview,
   saveKpscOpsSettings,
   saveRolePermissions,
