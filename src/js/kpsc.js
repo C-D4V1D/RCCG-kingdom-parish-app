@@ -5441,6 +5441,7 @@ function buildInsightsHeaderActions(filteredEntries) {
   `;
 }
 
+
 function insightMtgPill(entry) {
   const safeMid = String(entry.meetingId || '');
   const label = esc(entry.meetingTitle);
@@ -5620,6 +5621,7 @@ function rerenderInsightsList() {
   // Keep the header actions (Print / Share) in sync with the current filter state.
   const headerActionsEl = document.getElementById('k-insights-header-actions');
   if (headerActionsEl) headerActionsEl.innerHTML = buildInsightsHeaderActions(filtered);
+
 
   const total = baseFiltered.length;
   const countEl = document.getElementById('k-insights-count-text');
