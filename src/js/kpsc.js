@@ -3312,11 +3312,422 @@ function renderReviewPanel(m) {
     </div>`;
 }
 
+// ── INSIGHTS REVIEW STEP (Step 4) ──────────────────────────────────
+
+const IR_RES_TYPES  = ['decision','approval','financial_approval','rejection','amendment','motion','vote'];
+const IR_RES_CATS   = ['financial','welfare','development','governance','amendments','other'];
+const IR_ACT_STATUSES = ['pending','in_progress','done','cancelled'];
+const IR_SEVERITIES = ['low','medium','high'];
+
+// Resolution sub-categories matching the global Insights page filter chips
+const IR_RES_SUB_CATS = [
+  { cat: 'resolutions', label: 'General Resolutions', emoji: '📋', defaultType: 'decision'           },
+  { cat: 'financial',   label: 'Financial Approvals', emoji: '💰', defaultType: 'financial_approval' },
+  { cat: 'amendments',  label: 'Amendments',          emoji: '✏️',  defaultType: 'amendment'          },
+  { cat: 'rejections',  label: 'Rejections',          emoji: '✗',  defaultType: 'rejection'          },
+  { cat: 'motions',     label: 'Motions / Proposals', emoji: '🗣',  defaultType: 'motion'             },
+];
+
+function renderInsightsReviewSection(m) {
+  const allResolutions    = m.resolutions || [];
+  const actionItems       = m.actionItems || [];
+  const policyFlags       = m.policyFlags || [];
+  const suggestedProjects = m.suggestedProjects || [];
+
+  // Partition resolutions into sub-category buckets
+  const resByCat = {};
+  IR_RES_SUB_CATS.forEach(sc => { resByCat[sc.cat] = []; });
+  allResolutions.forEach(r => {
+    const cat = classifyResolutionInsight(r);
+    (resByCat[cat] || resByCat['resolutions']).push(r);
+  });
+
+  const resolutionSections = IR_RES_SUB_CATS.map(({ cat, label, emoji, defaultType }) => {
+    const items = resByCat[cat] || [];
+    const count = items.length;
+    return `
+      <details class="k-collapsible" ${count ? 'open' : ''}>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">${emoji} ${label}</span>
+          <span class="k-collapsible-summary" id="kir-res-${cat}-count-lbl">${count} item${count !== 1 ? 's' : ''}</span>
+        </summary>
+        <div id="k-ir-res-${cat}-body" class="k-ir-body">${renderIrResSubCatRows(items, cat, defaultType)}</div>
+        <div class="k-ir-add-row"><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.addIrResRow('${cat}','${defaultType}')">+ Add ${label.toLowerCase()}</button></div>
+      </details>`;
+  }).join('');
+
+  return `
+    <section class="k-section k-insights-review-section" id="k-insights-review">
+      <div class="k-review-step-label" style="border-top:none;padding-top:0;margin-top:16px">Step 4 — Review &amp; Edit Insights</div>
+      <p class="k-review-hint" style="margin-bottom:14px">Verify the AI-extracted insights below. Each category is editable. Click <strong>Save Insights</strong> when done — this saves separately from the minutes review above.</p>
+
+      ${resolutionSections}
+
+      <details class="k-collapsible" ${actionItems.length ? 'open' : ''}>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">✅ Action Items</span>
+          <span class="k-collapsible-summary" id="kir-act-count-lbl">${actionItems.length} item${actionItems.length !== 1 ? 's' : ''}</span>
+        </summary>
+        <div id="k-ir-act-body" class="k-ir-body">${renderIrActionRows(actionItems)}</div>
+        <div class="k-ir-add-row"><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.addIrRow('actions')">+ Add action item</button></div>
+      </details>
+
+      <details class="k-collapsible" ${policyFlags.length ? 'open' : ''}>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">🚩 Governance Flags</span>
+          <span class="k-collapsible-summary" id="kir-flag-count-lbl">${policyFlags.length} item${policyFlags.length !== 1 ? 's' : ''}</span>
+        </summary>
+        <div id="k-ir-flag-body" class="k-ir-body">${renderIrFlagRows(policyFlags)}</div>
+        <div class="k-ir-add-row"><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.addIrRow('flags')">+ Add flag</button></div>
+      </details>
+
+      <details class="k-collapsible" ${suggestedProjects.length ? 'open' : ''}>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">💡 Project Suggestions</span>
+          <span class="k-collapsible-summary" id="kir-proj-count-lbl">${suggestedProjects.length} item${suggestedProjects.length !== 1 ? 's' : ''}</span>
+        </summary>
+        <div id="k-ir-proj-body" class="k-ir-body">${renderIrProjectRows(suggestedProjects)}</div>
+        <div class="k-ir-add-row"><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.addIrRow('projects')">+ Add project suggestion</button></div>
+      </details>
+
+      <div class="k-ir-save-row">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.saveInsightsReview(this)">💾 Save Insights</button>
+      </div>
+    </section>`;
+}
+
+function renderIrResSubCatRows(resolutions, cat, defaultType) {
+  const sc = IR_RES_SUB_CATS.find(s => s.cat === cat);
+  const label = sc ? sc.label.toLowerCase() : 'resolution';
+  if (!resolutions.length) return `<div class="k-ir-empty">No ${label} extracted yet. Add one below.</div>`;
+  return resolutions.map((r, i) => `
+    <div class="k-ir-row" data-kir="res" data-res-cat="${cat}" data-idx="${i}">
+      <input type="hidden" id="kir-res-${cat}-id-${i}" value="${esc(String(r.id || ''))}">
+      <div>
+        <div class="k-ir-lbl">Resolution text</div>
+        <textarea class="k-input k-input-sm" id="kir-res-${cat}-text-${i}" rows="2" style="resize:vertical">${esc(r.text || '')}</textarea>
+      </div>
+      <div class="k-ir-row-2col">
+        <div>
+          <div class="k-ir-lbl">Type</div>
+          <select class="k-input k-input-sm" id="kir-res-${cat}-type-${i}">
+            ${IR_RES_TYPES.map(t => `<option value="${t}" ${(r.resolutionType||defaultType||'decision')===t?'selected':''}>${t.replace(/_/g,' ')}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <div class="k-ir-lbl">Approval</div>
+          <select class="k-input k-input-sm" id="kir-res-${cat}-approved-${i}">
+            <option value="null" ${r.approved==null?'selected':''}>Needs confirmation</option>
+            <option value="true" ${r.approved===true?'selected':''}>Approved</option>
+            <option value="false" ${r.approved===false?'selected':''}>Rejected</option>
+          </select>
+        </div>
+      </div>
+      ${cat === 'financial' ? `
+      <div>
+        <div class="k-ir-lbl">Amount</div>
+        <input class="k-input k-input-sm" type="text" id="kir-res-${cat}-amount-${i}" placeholder="e.g. 50000" value="${esc(r.amount||'')}">
+      </div>` : `<input type="hidden" id="kir-res-${cat}-amount-${i}" value="${esc(r.amount||'')}">`}
+      <div class="k-ir-row-3col">
+        <div>
+          <div class="k-ir-lbl">Moved by</div>
+          <input class="k-input k-input-sm" type="text" id="kir-res-${cat}-motion-${i}" placeholder="Name" value="${esc(r.motionBy||'')}">
+        </div>
+        <div>
+          <div class="k-ir-lbl">Seconded by</div>
+          <input class="k-input k-input-sm" type="text" id="kir-res-${cat}-seconded-${i}" placeholder="Name" value="${esc(r.secondedBy||'')}">
+        </div>
+        <div>
+          <div class="k-ir-lbl">Vote summary</div>
+          <input class="k-input k-input-sm" type="text" id="kir-res-${cat}-vote-${i}" placeholder="e.g. Unanimously approved" value="${esc(r.voteSummary||'')}">
+        </div>
+      </div>
+      <div class="k-ir-row-actions">
+        <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.removeIrResRow('${cat}',${i})">✕ Remove</button>
+      </div>
+    </div>`).join('');
+}
+
+function renderIrActionRows(actions) {
+  if (!actions.length) return '<div class="k-ir-empty">No action items extracted yet. Add one below.</div>';
+  return actions.map((a, i) => `
+    <div class="k-ir-row" data-kir="act" data-idx="${i}">
+      <input type="hidden" id="kir-act-id-${i}" value="${esc(String(a.id || ''))}">
+      <div>
+        <div class="k-ir-lbl">Task</div>
+        <textarea class="k-input k-input-sm" id="kir-act-task-${i}" rows="2" style="resize:vertical">${esc(a.task||'')}</textarea>
+      </div>
+      <div class="k-ir-row-3col">
+        <div>
+          <div class="k-ir-lbl">Assigned to</div>
+          <input class="k-input k-input-sm" type="text" id="kir-act-assignee-${i}" placeholder="Full name" value="${esc(a.assignee||'')}">
+        </div>
+        <div>
+          <div class="k-ir-lbl">Due date</div>
+          <input class="k-input k-input-sm" type="date" id="kir-act-due-${i}" value="${esc(a.dueDate||'')}">
+        </div>
+        <div>
+          <div class="k-ir-lbl">Status</div>
+          <select class="k-input k-input-sm" id="kir-act-status-${i}">
+            ${IR_ACT_STATUSES.map(s => `<option value="${s}" ${(a.status||'pending')===s?'selected':''}>${s.replace(/_/g,' ')}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="k-ir-row-actions">
+        <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.removeIrRow('actions',${i})">✕ Remove</button>
+      </div>
+    </div>`).join('');
+}
+
+function renderIrFlagRows(flags) {
+  if (!flags.length) return '<div class="k-ir-empty">No governance flags detected. Add one below.</div>';
+  return flags.map((f, i) => `
+    <div class="k-ir-row" data-kir="flag" data-idx="${i}">
+      <input type="hidden" id="kir-flag-id-${i}" value="${esc(String(f.id || ''))}">
+      <div class="k-ir-row-2col">
+        <div>
+          <div class="k-ir-lbl">Flag type</div>
+          <input class="k-input k-input-sm" type="text" id="kir-flag-type-${i}" placeholder="e.g. quorum_missing" value="${esc(f.type||'')}">
+        </div>
+        <div>
+          <div class="k-ir-lbl">Severity</div>
+          <select class="k-input k-input-sm" id="kir-flag-sev-${i}">
+            ${IR_SEVERITIES.map(s => `<option value="${s}" ${(f.severity||'low')===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div>
+        <div class="k-ir-lbl">Message</div>
+        <textarea class="k-input k-input-sm" id="kir-flag-msg-${i}" rows="2" style="resize:vertical">${esc(f.message||'')}</textarea>
+      </div>
+      <div class="k-ir-row-actions">
+        <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.removeIrRow('flags',${i})">✕ Remove</button>
+      </div>
+    </div>`).join('');
+}
+
+function renderIrProjectRows(projects) {
+  if (!projects.length) return '<div class="k-ir-empty">No project suggestions found. Add one below.</div>';
+  return projects.map((p, i) => `
+    <div class="k-ir-row" data-kir="proj" data-idx="${i}">
+      <input type="hidden" id="kir-proj-id-${i}" value="${esc(String(p.id || ''))}">
+      <div class="k-ir-row-2col">
+        <div>
+          <div class="k-ir-lbl">Title</div>
+          <input class="k-input k-input-sm" type="text" id="kir-proj-title-${i}" placeholder="Project name" value="${esc(p.title||'')}">
+        </div>
+        <div>
+          <div class="k-ir-lbl">Estimated cost</div>
+          <input class="k-input k-input-sm" type="text" id="kir-proj-cost-${i}" placeholder="e.g. 500000" value="${esc(p.estimatedCost||p.estimated_cost||'')}">
+        </div>
+      </div>
+      <div>
+        <div class="k-ir-lbl">Description</div>
+        <textarea class="k-input k-input-sm" id="kir-proj-desc-${i}" rows="2" style="resize:vertical">${esc(p.description||'')}</textarea>
+      </div>
+      <div class="k-ir-row-actions">
+        <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.removeIrRow('projects',${i})">✕ Remove</button>
+      </div>
+    </div>`).join('');
+}
+
+// ── Read all current DOM values for each insight category ───────────
+
+function readIrResForCat(cat) {
+  const rows = [...document.querySelectorAll(`[data-kir="res"][data-res-cat="${cat}"]`)];
+  return rows.map((_, i) => {
+    const approvedRaw = document.getElementById(`kir-res-${cat}-approved-${i}`)?.value || 'null';
+    return {
+      id:             document.getElementById(`kir-res-${cat}-id-${i}`)?.value || null,
+      text:           document.getElementById(`kir-res-${cat}-text-${i}`)?.value.trim() || '',
+      resolutionType: document.getElementById(`kir-res-${cat}-type-${i}`)?.value || 'decision',
+      category:       cat,
+      approved:       approvedRaw === 'true' ? true : approvedRaw === 'false' ? false : null,
+      amount:         document.getElementById(`kir-res-${cat}-amount-${i}`)?.value?.trim() || '',
+      motionBy:       document.getElementById(`kir-res-${cat}-motion-${i}`)?.value.trim() || '',
+      secondedBy:     document.getElementById(`kir-res-${cat}-seconded-${i}`)?.value.trim() || '',
+      voteSummary:    document.getElementById(`kir-res-${cat}-vote-${i}`)?.value.trim() || '',
+    };
+  }).filter(r => r.text);
+}
+
+function readIrAllResolutions() {
+  return IR_RES_SUB_CATS.flatMap(({ cat }) => readIrResForCat(cat));
+}
+
+function readIrActions() {
+  return [...document.querySelectorAll('[data-kir="act"]')].map((_, i) => ({
+    id: document.getElementById(`kir-act-id-${i}`)?.value || null,
+    task: document.getElementById(`kir-act-task-${i}`)?.value.trim() || '',
+    assignee: document.getElementById(`kir-act-assignee-${i}`)?.value.trim() || 'Unassigned',
+    dueDate: document.getElementById(`kir-act-due-${i}`)?.value.trim() || '',
+    status: document.getElementById(`kir-act-status-${i}`)?.value || 'pending',
+  })).filter(a => a.task);
+}
+
+function readIrFlags() {
+  return [...document.querySelectorAll('[data-kir="flag"]')].map((_, i) => ({
+    id: document.getElementById(`kir-flag-id-${i}`)?.value || null,
+    type: document.getElementById(`kir-flag-type-${i}`)?.value.trim() || '',
+    severity: document.getElementById(`kir-flag-sev-${i}`)?.value || 'low',
+    message: document.getElementById(`kir-flag-msg-${i}`)?.value.trim() || '',
+  })).filter(f => f.type || f.message);
+}
+
+function readIrProjects() {
+  return [...document.querySelectorAll('[data-kir="proj"]')].map((_, i) => ({
+    id: document.getElementById(`kir-proj-id-${i}`)?.value || null,
+    title: document.getElementById(`kir-proj-title-${i}`)?.value.trim() || '',
+    description: document.getElementById(`kir-proj-desc-${i}`)?.value.trim() || '',
+    estimatedCost: document.getElementById(`kir-proj-cost-${i}`)?.value.trim() || '',
+  })).filter(p => p.title || p.description);
+}
+
+// ── Add / Remove insight rows ───────────────────────────────────────
+
+function irKindConfig(kind) {
+  const cfg = {
+    actions:  [readIrActions,  renderIrActionRows,  'k-ir-act-body',  'kir-act-count-lbl'],
+    flags:    [readIrFlags,    renderIrFlagRows,    'k-ir-flag-body', 'kir-flag-count-lbl'],
+    projects: [readIrProjects, renderIrProjectRows, 'k-ir-proj-body', 'kir-proj-count-lbl'],
+  };
+  return cfg[kind] || null;
+}
+
+function irEmptyItem(kind) {
+  const empty = {
+    actions:  { task:'', assignee:'', dueDate:'', status:'pending' },
+    flags:    { type:'', severity:'low', message:'' },
+    projects: { title:'', description:'', estimatedCost:'' },
+  };
+  return empty[kind] || {};
+}
+
+function addIrRow(kind) {
+  const cfg = irKindConfig(kind);
+  if (!cfg) return;
+  const [readFn, renderFn, bodyId, countId] = cfg;
+  const current = readFn();
+  current.push(irEmptyItem(kind));
+  const bodyEl = document.getElementById(bodyId);
+  if (bodyEl) bodyEl.innerHTML = renderFn(current);
+  const lbl = document.getElementById(countId);
+  if (lbl) lbl.textContent = `${current.length} item${current.length !== 1 ? 's' : ''}`;
+  // Focus the last new text field
+  const lastRow = bodyEl?.querySelector('[data-kir]:last-child textarea, [data-kir]:last-child input[type="text"]');
+  lastRow?.focus();
+}
+
+function removeIrRow(kind, idx) {
+  const cfg = irKindConfig(kind);
+  if (!cfg) return;
+  const [readFn, renderFn, bodyId, countId] = cfg;
+  const current = readFn();
+  current.splice(idx, 1);
+  const bodyEl = document.getElementById(bodyId);
+  if (bodyEl) bodyEl.innerHTML = renderFn(current);
+  const lbl = document.getElementById(countId);
+  if (lbl) lbl.textContent = `${current.length} item${current.length !== 1 ? 's' : ''}`;
+}
+
+function addIrResRow(cat, defaultType) {
+  const bodyId  = `k-ir-res-${cat}-body`;
+  const countId = `kir-res-${cat}-count-lbl`;
+  const current = readIrResForCat(cat);
+  current.push({ text:'', resolutionType: defaultType || 'decision', category: cat, approved: null, amount:'', motionBy:'', secondedBy:'', voteSummary:'' });
+  const bodyEl = document.getElementById(bodyId);
+  if (bodyEl) bodyEl.innerHTML = renderIrResSubCatRows(current, cat, defaultType || 'decision');
+  const lbl = document.getElementById(countId);
+  if (lbl) lbl.textContent = `${current.length} item${current.length !== 1 ? 's' : ''}`;
+  const lastRow = bodyEl?.querySelector('[data-kir]:last-child textarea, [data-kir]:last-child input[type="text"]');
+  lastRow?.focus();
+}
+
+function removeIrResRow(cat, idx) {
+  const sc = IR_RES_SUB_CATS.find(s => s.cat === cat);
+  const defaultType = sc?.defaultType || 'decision';
+  const bodyId  = `k-ir-res-${cat}-body`;
+  const countId = `kir-res-${cat}-count-lbl`;
+  const current = readIrResForCat(cat);
+  current.splice(idx, 1);
+  const bodyEl = document.getElementById(bodyId);
+  if (bodyEl) bodyEl.innerHTML = renderIrResSubCatRows(current, cat, defaultType);
+  const lbl = document.getElementById(countId);
+  if (lbl) lbl.textContent = `${current.length} item${current.length !== 1 ? 's' : ''}`;
+}
+
+// ── Save all insights to the API ────────────────────────────────────
+
+async function saveInsightsReview(btn) {
+  if (!S.activeMeeting) return;
+  const resolutions       = readIrAllResolutions();
+  const actionItems       = readIrActions();
+  const policyFlags       = readIrFlags();
+  const suggestedProjects = readIrProjects();
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const updated = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
+      resolutions, actionItems, policyFlags, suggestedProjects,
+    });
+    if (updated?.error) { showToast(updated.error, 'error'); return; }
+    S.activeMeeting = { ...updated };
+    // Also sync S.meetings cache if loaded
+    if (S.meetings?.length) {
+      S.meetings = S.meetings.map(m => m.id === S.activeMeeting.id ? S.activeMeeting : m);
+    }
+    showToast('Insights saved.', 'success');
+    // Re-render section in-place with confirmed server data
+    const irSection = document.getElementById('k-insights-review');
+    if (irSection) irSection.outerHTML = renderInsightsReviewSection(S.activeMeeting);
+  } catch {
+    showToast('Could not save insights. Check your connection.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+// ── Promote a suggested project to the KPSC Projects page ──────────
+
+async function promoteInsightProject(btn, meetingId, title, description, estimatedCost, priority, targetDate) {
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Promoting…';
+  try {
+    const res = await apiPost('kpsc-approve-meeting-projects', {
+      meetingId,
+      projects: [{ title, description, estimatedCost: estimatedCost || 0, priority: priority || 'medium', targetDate: targetDate || '' }],
+      createdBy: S.user?.name || '',
+    });
+    if (res?.error) { showToast(res.error, 'error'); return; }
+    showToast(`"${title}" added to Projects.`, 'success');
+    // Remove from S.meetings suggested projects cache
+    if (S.meetings?.length) {
+      S.meetings = S.meetings.map(m => {
+        if (String(m.id) !== String(meetingId)) return m;
+        return { ...m, suggestedProjects: (m.suggestedProjects || []).filter(p => p.title !== title) };
+      });
+    }
+    // Append new project to S.projects cache if it's loaded
+    if (Array.isArray(res?.projects) && res.projects.length && Array.isArray(S.projects)) {
+      S.projects = [...S.projects, ...res.projects];
+    }
+    // Re-render insights so the promoted card disappears
+    rerenderInsightsList();
+  } catch {
+    showToast('Could not promote project. Check your connection.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────
+
 function renderMinutesPanel(m) {
   if (!m?.minutesMarkdown) return '';
-  const resolutions = m.resolutions || [];
-  const actionItems = m.actionItems || [];
-  const policyFlags = m.policyFlags || [];
   const reviewed = !!m.reviewedAt;
   const reviewGuard = reviewed ? '' : 'disabled title="Approve and save the review before this action is available."';
   const publicUrl = m.publicShareToken ? `${window.location.origin}/kpsc/minutes/?token=${encodeURIComponent(m.publicShareToken)}` : '';
@@ -3328,6 +3739,8 @@ function renderMinutesPanel(m) {
       ${m.summaryLong ? `<details class="k-summary-detail"><summary>Detailed summary</summary><pre>${esc(m.summaryLong)}</pre></details>` : ''}
 
       ${renderReviewPanel(m)}
+
+      ${renderInsightsReviewSection(m)}
 
       <div class="k-room-actions" style="margin-bottom:12px;margin-top:16px">
         <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${reviewGuard}>🖨 Print / Save PDF</button>
@@ -3341,43 +3754,6 @@ function renderMinutesPanel(m) {
       <h4 class="k-sub-title">Minutes Preview</h4>
       <div class="k-minutes-body" id="minutes-body-${m.id}">${minutesHtml(m.minutesMarkdown)}</div>
       <div class="k-plain-english-indicator" id="pe-indicator-${m.id}" style="display:none;font-size:0.9em;color:#666;margin-top:8px;padding:8px;background:#f5f5f5;border-radius:4px;">📖 Showing plain English version</div>
-
-      ${resolutions.length ? `
-        <h4 class="k-sub-title">Decision & Resolution Register (${resolutions.length})</h4>
-        <div class="k-res-list">${resolutions.map(r => {
-          const status = resolutionStatus(r);
-          return `
-          <div class="k-res-item">
-            <span class="kbadge ${status.cls}">${status.label}</span>
-            ${r.resolutionType ? `<span class="kbadge badge-gray">${esc(String(r.resolutionType).replace(/_/g, ' '))}</span>` : ''}
-            ${r.category ? `<span class="kbadge badge-type">${esc(r.category)}</span>` : ''}
-            ${r.amount ? `<span class="kbadge badge-green">${esc(formatResolutionAmount(r.amount))}</span>` : ''}
-            <div>${esc(r.text)}</div>
-            ${r.voteSummary ? `<small>${esc(r.voteSummary)}</small>` : ''}
-          </div>`;
-        }).join('')}
-        </div>` : ''}
-
-      ${actionItems.length ? `
-        <h4 class="k-sub-title">Action Items (${actionItems.length})</h4>
-        <div class="k-action-list">${actionItems.map(a => `
-          <div class="k-action-item">
-            <div class="k-action-task">${esc(a.task)}</div>
-            <div class="k-action-meta">
-              ${a.assignee ? `<span>👤 ${esc(a.assignee)}</span>` : '<span>👤 Unassigned</span>'}
-              ${a.dueDate  ? `<span>📅 ${esc(a.dueDate)}</span>` : '<span>📅 No deadline stated</span>'}
-              <span class="kbadge badge-gray">${a.status || 'pending'}</span>
-            </div>
-          </div>`).join('')}
-        </div>` : ''}
-
-      ${policyFlags.length ? `
-        <h4 class="k-sub-title">Policy Flags</h4>
-        <div class="k-flags-list">${policyFlags.map(f => `
-          <div class="k-flag k-flag-${f.severity || 'info'}">
-            <strong>${esc(f.type)}</strong> — ${esc(f.message)}
-          </div>`).join('')}
-        </div>` : ''}
     </section>`;
 }
 
@@ -3428,13 +3804,17 @@ async function saveMinutesReview(btn) {
     S.activeMeeting = { ...res };
     S._reviewEditMode = false;
     persistMeetingUiState();
-    // Re-render only the review panel in-place.
+    // Re-render review panel in-place.
     const panel = document.getElementById('kr-panel');
     if (panel) {
       panel.outerHTML = renderReviewPanel(S.activeMeeting);
     } else {
       renderPage('meeting');
     }
+    // Refresh insights review section with the latest API data so any AI-driven
+    // changes to resolutions/actionItems/policyFlags from the updated minutes are visible.
+    const irSection = document.getElementById('k-insights-review');
+    if (irSection) irSection.outerHTML = renderInsightsReviewSection(S.activeMeeting);
     showToast('Review approved and saved', 'success');
 
     // Show action item WhatsApp notification links if any action items exist.
@@ -5233,13 +5613,16 @@ function extractYearFromStamp(stamp) {
 
 function classifyResolutionInsight(item) {
   const type = String(item?.resolutionType || '').toLowerCase();
+  const cat  = String(item?.category || '').toLowerCase();
   const text = String(item?.text || '');
-  // Priority is intentional: financial > amendment > rejection > motion/proposal > generic resolution.
-  if (type === 'financial_approval' || String(item?.category || '').toLowerCase() === 'financial' || item?.amount) return 'financial';
+  // Priority: financial > amendment > rejection > motion/proposal > generic resolution.
+  // 'financial' stored category is authoritative alongside the resolutionType and amount signals.
+  if (type === 'financial_approval' || cat === 'financial' || (item?.amount && String(item.amount).trim())) return 'financial';
   if (type === 'amendment' || /\bamend(?:ment|ed)?\b/i.test(text)) return 'amendments';
   if (type === 'rejection' || item?.approved === false || /\breject(?:ed|ion)?\b/i.test(text)) return 'rejections';
-  // Fix: use non-capturing group so \b anchors all three alternatives.
+  // 'vote' type without other signals is a general voted resolution.
   if (type === 'motion' || /\b(?:motion|proposal|proposed)\b/i.test(text)) return 'motions';
+  // 'approval', 'vote', 'decision' all map to the general resolutions bucket.
   return 'resolutions';
 }
 
@@ -5441,6 +5824,7 @@ function buildInsightsHeaderActions(filteredEntries) {
   `;
 }
 
+
 function insightMtgPill(entry) {
   const safeMid = String(entry.meetingId || '');
   const label = esc(entry.meetingTitle);
@@ -5490,6 +5874,13 @@ function renderMeetingInsightCard(entry) {
   // ── SUGGESTED PROJECT CARD ────────────────────────────────────
   if (entry.kind === 'suggested_project') {
     const costHtml = entry.estimatedCost ? `<span class="kbadge badge-type">Est. ${esc(formatResolutionAmount(entry.estimatedCost))}</span>` : '';
+    const canPromote = canEditInsightsActionStatus();
+    const mId = esc(String(entry.meetingId || ''));
+    const pTitle = String(entry.projectTitle || entry.text || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const pDesc  = String(entry.projectDescription || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const pCost  = String(entry.estimatedCost || '0');
+    const pPri   = String(entry.priority || 'medium');
+    const pDate  = String(entry.targetDate || '');
     return `
       <div class="k-meeting-card k-mc-accent-purple k-insight-project-card" style="cursor:default">
         <div class="k-mc-top">
@@ -5504,7 +5895,10 @@ function renderMeetingInsightCard(entry) {
         </div>
         ${entry.projectDescription && entry.projectDescription !== entry.projectTitle
           ? `<div class="k-insight-flag-msg">${esc(entry.projectDescription)}</div>` : ''}
-        ${viewLink}
+        <div class="k-mc-footer" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          ${viewLink}
+          ${canPromote ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.promoteInsightProject(this,'${mId}','${pTitle}','${pDesc}','${pCost}','${pPri}','${pDate}')">➕ Promote to project</button>` : ''}
+        </div>
       </div>`;
   }
 
@@ -8298,6 +8692,13 @@ window.Kpsc = {
   printInsightsReport,
   shareInsightActions,
   updateReportActionStatus,
+  // Insights Review (Step 4)
+  addIrRow,
+  removeIrRow,
+  addIrResRow,
+  removeIrResRow,
+  saveInsightsReview,
+  promoteInsightProject,
   saveKpscOpsSettings,
   saveRolePermissions,
   resetRolePermissions,
