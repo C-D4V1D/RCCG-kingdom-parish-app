@@ -93,6 +93,10 @@ const S = {
   reportsMonth: 0,
   reportsFilter: 'all',
   reportsSearch: '',
+  reportsAssignee: '',
+  reportsApproval: 'all',
+  insightsViewMode: 'list',
+  insightsDigestOpen: false,
   _authRecoveryInProgress: false,
   _meetingTab: 'record',
   _reviewEditMode: false, // true = show inline review editor; false = show reviewed summary
@@ -5199,15 +5203,19 @@ function debouncedSaveReminderTemplate(textarea) {
 }
 
 function reportsCategoryOptions() {
-  return [
-    { key: 'all',          label: 'All items'           },
-    { key: 'resolutions',  label: 'Resolutions'         },
-    { key: 'financial',    label: 'Financial approvals' },
-    { key: 'amendments',   label: 'Amendments'          },
-    { key: 'rejections',   label: 'Rejections'          },
-    { key: 'motions',      label: 'Motions / proposals' },
-    { key: 'action_items', label: 'Action items'        },
+  const opts = [
+    { key: 'all',               label: 'All items'           },
+    { key: 'resolutions',       label: 'Resolutions'         },
+    { key: 'financial',         label: 'Financial approvals' },
+    { key: 'amendments',        label: 'Amendments'          },
+    { key: 'rejections',        label: 'Rejections'          },
+    { key: 'motions',           label: 'Motions / proposals' },
+    { key: 'action_items',      label: 'Action items'        },
+    { key: 'policy_flags',      label: 'Governance alerts'   },
+    { key: 'suggested_projects',label: 'Project suggestions' },
   ];
+  if (S.user?.name) opts.push({ key: 'my_tasks', label: 'My tasks' });
+  return opts;
 }
 
 function canEditInsightsActionStatus() {
@@ -5239,6 +5247,7 @@ function buildMeetingInsights(meetings) {
   const entries = [];
   for (const m of (meetings || [])) {
     const meetingDate = String(m.meetingDate || '').trim();
+    const meetingType = String(m.meetingType || '').trim();
     const createdAt = String(m.createdAt || '').trim();
     for (const [idx, r] of (m.resolutions || []).entries()) {
       if (!r?.text) continue;
@@ -5248,6 +5257,7 @@ function buildMeetingInsights(meetings) {
         category: classifyResolutionInsight(r),
         meetingId: m.id,
         meetingTitle: m.title || 'KPSC Meeting',
+        meetingType,
         meetingDate,
         createdAt,
         text: String(r.text || '').trim(),
@@ -5267,6 +5277,7 @@ function buildMeetingInsights(meetings) {
         category: 'action_items',
         meetingId: m.id,
         meetingTitle: m.title || 'KPSC Meeting',
+        meetingType,
         meetingDate,
         createdAt,
         actionId: normalizeActionId(a, idx),
@@ -5274,6 +5285,39 @@ function buildMeetingInsights(meetings) {
         assignee: String(a.assignee || 'Unassigned').trim() || 'Unassigned',
         dueDate: String(a.dueDate || '').trim(),
         status: String(a.status || 'pending').trim() || 'pending',
+      });
+    }
+    for (const [idx, f] of (m.policyFlags || []).entries()) {
+      if (!f?.message && !f?.type) continue;
+      entries.push({
+        id: `${m.id}:flag-${idx}`,
+        kind: 'policy_flag',
+        category: 'policy_flags',
+        meetingId: m.id,
+        meetingTitle: m.title || 'KPSC Meeting',
+        meetingType,
+        meetingDate,
+        createdAt,
+        text: String(f.message || f.type || '').trim(),
+        flagType: String(f.type || '').trim(),
+        severity: String(f.severity || 'low').trim(),
+      });
+    }
+    for (const [idx, p] of (m.suggestedProjects || []).entries()) {
+      if (!p?.title && !p?.description) continue;
+      entries.push({
+        id: `${m.id}:proj-${idx}`,
+        kind: 'suggested_project',
+        category: 'suggested_projects',
+        meetingId: m.id,
+        meetingTitle: m.title || 'KPSC Meeting',
+        meetingType,
+        meetingDate,
+        createdAt,
+        text: String(p.title || p.description || '').trim(),
+        projectTitle: String(p.title || '').trim(),
+        projectDescription: String(p.description || '').trim(),
+        estimatedCost: String(p.estimatedCost || p.estimated_cost || '').trim(),
       });
     }
   }
@@ -5291,11 +5335,34 @@ function filterMeetingInsights(entries, categoryOverride) {
   const month = Number(S.reportsMonth) || 0;
   const category = categoryOverride !== undefined ? categoryOverride : (S.reportsFilter || 'all');
   const q = String(S.reportsSearch || '').trim().toLowerCase();
+  const assigneeFilter = String(S.reportsAssignee || '').trim().toLowerCase();
+  const approvalFilter = String(S.reportsApproval || 'all');
+  const myName = String(S.user?.name || '').trim().toLowerCase();
+
   return entries.filter(entry => {
     const stamp = entry.meetingDate || entry.createdAt;
     if (year && !String(stamp).startsWith(String(year))) return false;
     if (month && Number(String(stamp).slice(5, 7)) !== month) return false;
-    if (category !== 'all' && entry.category !== category) return false;
+
+    // Handle special 'my_tasks' category: action items assigned to current user
+    if (category === 'my_tasks') {
+      if (entry.kind !== 'action_item') return false;
+      if (!myName) return false;
+      if (!String(entry.assignee || '').toLowerCase().includes(myName)) return false;
+    } else if (category !== 'all' && entry.category !== category) {
+      return false;
+    }
+
+    // Assignee dropdown filter (action items only)
+    if (assigneeFilter && entry.kind === 'action_item') {
+      if (!String(entry.assignee || '').toLowerCase().includes(assigneeFilter)) return false;
+    }
+
+    // Approval status filter (resolutions only)
+    if (approvalFilter !== 'all' && entry.kind === 'resolution') {
+      if (entry.approval !== approvalFilter) return false;
+    }
+
     if (!q) return true;
     const hay = [
       entry.meetingTitle,
@@ -5309,6 +5376,10 @@ function filterMeetingInsights(entries, categoryOverride) {
       entry.assignee,
       entry.dueDate,
       entry.status,
+      entry.flagType,
+      entry.severity,
+      entry.projectTitle,
+      entry.projectDescription,
     ].filter(Boolean).join(' ').toLowerCase();
     return hay.includes(q);
   });
@@ -5361,25 +5432,98 @@ function buildInsightsEmptyState(allEntries, meetings) {
     </div>`;
 }
 
-function renderMeetingInsightCard(entry) {
-  // Meeting IDs are crypto.randomUUID() values ([0-9a-f-] only) — safe for direct
-  // use in onclick, consistent with meetingCard() and openMeeting() elsewhere.
+function buildInsightsHeaderActions(filteredEntries) {
+  const hasItems = filteredEntries.length > 0;
+  const showShare = hasItems && canEditInsightsActionStatus() && (S.reportsFilter === 'action_items' || S.reportsFilter === 'my_tasks');
+  return `
+    ${hasItems ? `<button class="kbtn kbtn-sm" onclick="Kpsc.printInsightsReport()" title="Print filtered insights">🖨 Print</button>` : ''}
+    ${showShare ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.shareInsightActions()" title="Share pending actions via WhatsApp">📲 Share</button>` : ''}
+  `;
+}
+
+function insightMtgPill(entry) {
   const safeMid = String(entry.meetingId || '');
+  const label = esc(entry.meetingTitle);
+  return `<span class="k-insight-mtg-link" onclick="event.stopPropagation();Kpsc.openMeeting('${safeMid}')" title="Open full minutes">📋 ${label}</span>`;
+}
+
+function insightTruncText(text, maxLen) {
+  if (!text || text.length <= maxLen) return `<div class="k-mc-title">${esc(text || '')}</div>`;
+  return `
+    <details class="k-insight-expand">
+      <summary class="k-mc-title">${esc(text.slice(0, maxLen))}… <span class="k-insight-show-more">show more</span></summary>
+      <div class="k-insight-full-text">${esc(text)}</div>
+    </details>`;
+}
+
+function renderMeetingInsightCard(entry) {
+  const safeMid = String(entry.meetingId || '');
+  const dateStr = esc(fmtDate(entry.meetingDate) || entry.meetingDate || 'No date');
   const viewLink = `<div class="k-insight-view-link" onclick="Kpsc.openMeeting('${safeMid}')">View full minutes →</div>`;
 
+  // ── POLICY FLAG CARD ──────────────────────────────────────────
+  if (entry.kind === 'policy_flag') {
+    const sevCls = entry.severity === 'high' ? 'k-insight-flag-high' : entry.severity === 'medium' ? 'k-insight-flag-medium' : 'k-insight-flag-low';
+    const sevBadge = entry.severity === 'high'
+      ? '<span class="kbadge badge-red">HIGH</span>'
+      : entry.severity === 'medium'
+        ? '<span class="kbadge badge-amber">MEDIUM</span>'
+        : '<span class="kbadge badge-blue">LOW</span>';
+    const typeLabel = String(entry.flagType || '').replace(/_/g, ' ');
+    return `
+      <div class="k-meeting-card ${sevCls}" style="cursor:default">
+        <div class="k-mc-top">
+          <div style="flex:1">
+            <div class="k-mc-title">🚩 ${esc(typeLabel || 'Governance alert')}</div>
+            <div class="k-mc-meta">
+              <span>${dateStr}</span>
+              ${insightMtgPill(entry)}
+            </div>
+          </div>
+          <div class="k-mc-badges">${sevBadge}<span class="kbadge badge-type">Policy flag</span></div>
+        </div>
+        ${entry.text ? `<div class="k-insight-flag-msg">${esc(entry.text)}</div>` : ''}
+        ${viewLink}
+      </div>`;
+  }
+
+  // ── SUGGESTED PROJECT CARD ────────────────────────────────────
+  if (entry.kind === 'suggested_project') {
+    const costHtml = entry.estimatedCost ? `<span class="kbadge badge-type">Est. ${esc(formatResolutionAmount(entry.estimatedCost))}</span>` : '';
+    return `
+      <div class="k-meeting-card k-mc-accent-purple k-insight-project-card" style="cursor:default">
+        <div class="k-mc-top">
+          <div style="flex:1">
+            <div class="k-mc-title">💡 ${esc(entry.projectTitle || entry.text)}</div>
+            <div class="k-mc-meta">
+              <span>${dateStr}</span>
+              ${insightMtgPill(entry)}
+            </div>
+          </div>
+          <div class="k-mc-badges">${costHtml}<span class="kbadge badge-type">AI suggestion</span></div>
+        </div>
+        ${entry.projectDescription && entry.projectDescription !== entry.projectTitle
+          ? `<div class="k-insight-flag-msg">${esc(entry.projectDescription)}</div>` : ''}
+        ${viewLink}
+      </div>`;
+  }
+
+  // ── ACTION ITEM CARD ──────────────────────────────────────────
   if (entry.kind === 'action_item') {
     const canEdit = canEditInsightsActionStatus();
     const meetingIdSafe = encodeURIComponent(String(entry.meetingId || ''));
     const actionIdSafe = encodeURIComponent(String(entry.actionId || ''));
     const dueDateHtml = insightsDueDateLabel(entry.dueDate, entry.status);
+    const accentCls = entry.status === 'done' ? 'k-mc-accent-green' : entry.status === 'cancelled' ? 'k-mc-accent-gray' : 'k-mc-accent-blue';
+    const safeEntryId = esc(entry.id);
     return `
-      <div class="k-meeting-card" style="cursor:default">
+      <div class="k-meeting-card ${accentCls}" style="cursor:default" id="k-ic-${safeEntryId.replace(/[^a-z0-9]/gi,'_')}">
         <div class="k-mc-top">
           <div style="flex:1">
-            <div class="k-mc-title">${esc(entry.text)}</div>
-            <div class="k-mc-meta">
-              <span>${esc(fmtDate(entry.meetingDate) || entry.meetingDate || 'No date')}</span>
-              <span>${esc(entry.meetingTitle)}</span>
+            ${insightTruncText(entry.text, 130)}
+            <div class="k-mc-meta" style="margin-top:4px">
+              <span>${dateStr}</span>
+              ${insightMtgPill(entry)}
             </div>
           </div>
           <div class="k-mc-badges"><span class="kbadge badge-type">Action item</span></div>
@@ -5396,24 +5540,28 @@ function renderMeetingInsightCard(entry) {
                </select>`
             : insightsStatusBadge(entry.status)
           }
+          ${canEdit ? `<button class="kbtn kbtn-sm kbtn-ghost k-insight-edit-btn" onclick="Kpsc.toggleInsightEdit('${esc(entry.id)}','${meetingIdSafe}','${actionIdSafe}')">✏️ Edit</button>` : ''}
         </div>
+        <div id="k-ie-form-${safeEntryId.replace(/[^a-z0-9]/gi,'_')}" style="display:none"></div>
         ${viewLink}
       </div>`;
   }
 
+  // ── RESOLUTION CARD ───────────────────────────────────────────
   const statusBadge = entry.approval === 'approved'
     ? '<span class="kbadge badge-green">✓ Approved</span>'
     : entry.approval === 'rejected'
       ? '<span class="kbadge badge-red">✗ Rejected</span>'
       : '<span class="kbadge badge-amber">Needs confirmation</span>';
+  const accentCls = entry.approval === 'approved' ? 'k-mc-accent-green' : entry.approval === 'rejected' ? 'k-mc-accent-red' : entry.category === 'financial' ? 'k-mc-accent-orange' : entry.category === 'motions' ? 'k-mc-accent-purple' : entry.category === 'amendments' ? 'k-mc-accent-blue' : 'k-mc-accent-amber';
   return `
-    <div class="k-meeting-card" style="cursor:default">
+    <div class="k-meeting-card ${accentCls}" style="cursor:default">
       <div class="k-mc-top">
         <div style="flex:1">
-          <div class="k-mc-title">${esc(entry.text)}</div>
-          <div class="k-mc-meta">
-            <span>${esc(fmtDate(entry.meetingDate) || entry.meetingDate || 'No date')}</span>
-            <span>${esc(entry.meetingTitle)}</span>
+          ${insightTruncText(entry.text, 130)}
+          <div class="k-mc-meta" style="margin-top:4px">
+            <span>${dateStr}</span>
+            ${insightMtgPill(entry)}
           </div>
         </div>
         <div class="k-mc-badges">
@@ -5439,10 +5587,14 @@ function rerenderInsightsList() {
   const baseFiltered = filterMeetingInsights(allEntries, 'all');
   const filtered = filterMeetingInsights(allEntries);
   const categories = reportsCategoryOptions();
-  const counts = categories.reduce((acc, c) => ({
-    ...acc,
-    [c.key]: c.key === 'all' ? baseFiltered.length : baseFiltered.filter(item => item.category === c.key).length,
-  }), {});
+  const counts = categories.reduce((acc, c) => {
+    if (c.key === 'all') return { ...acc, all: baseFiltered.length };
+    if (c.key === 'my_tasks') {
+      const myName = String(S.user?.name || '').trim().toLowerCase();
+      return { ...acc, my_tasks: myName ? baseFiltered.filter(e => e.kind === 'action_item' && String(e.assignee || '').toLowerCase().includes(myName)).length : 0 };
+    }
+    return { ...acc, [c.key]: baseFiltered.filter(item => item.category === c.key).length };
+  }, {});
 
   const chipsEl = document.getElementById('k-insights-chips');
   if (chipsEl) {
@@ -5451,8 +5603,26 @@ function rerenderInsightsList() {
     ).join('');
   }
 
+  // Rebuild assignee dropdown from current action item data
+  const assigneeEl = document.getElementById('k-insights-assignee');
+  if (assigneeEl) {
+    const assignees = [...new Set(allEntries.filter(e => e.kind === 'action_item').map(e => e.assignee).filter(a => a && a !== 'Unassigned'))].sort();
+    const curAssignee = S.reportsAssignee || '';
+    assigneeEl.innerHTML = `<option value="">All assignees</option>` +
+      assignees.map(a => `<option value="${esc(a)}" ${curAssignee === a ? 'selected' : ''}>${esc(a)}</option>`).join('');
+  }
+
+  // Update view mode toggle button states
+  document.querySelectorAll('.k-insight-view-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === S.insightsViewMode);
+  });
+
+  // Keep the header actions (Print / Share) in sync with the current filter state.
+  const headerActionsEl = document.getElementById('k-insights-header-actions');
+  if (headerActionsEl) headerActionsEl.innerHTML = buildInsightsHeaderActions(filtered);
+
   const total = baseFiltered.length;
-  const countEl = document.getElementById('k-insights-count');
+  const countEl = document.getElementById('k-insights-count-text');
   if (countEl) {
     countEl.textContent = filtered.length === total
       ? `${filtered.length} item${filtered.length !== 1 ? 's' : ''}`
@@ -5461,9 +5631,15 @@ function rerenderInsightsList() {
 
   const listEl = document.getElementById('k-insights-list');
   if (listEl) {
-    listEl.innerHTML = filtered.length
-      ? filtered.map(renderMeetingInsightCard).join('')
-      : buildInsightsEmptyState(allEntries, S.meetings);
+    if (!filtered.length) {
+      listEl.innerHTML = buildInsightsEmptyState(allEntries, S.meetings);
+    } else if (S.insightsViewMode === 'by_meeting') {
+      listEl.innerHTML = renderInsightsByMeeting(filtered);
+    } else if (S.insightsViewMode === 'by_assignee') {
+      listEl.innerHTML = renderInsightsByAssignee(filtered);
+    } else {
+      listEl.innerHTML = filtered.map(renderMeetingInsightCard).join('');
+    }
   }
 }
 
@@ -5485,17 +5661,32 @@ async function renderReports(main) {
   })].join('');
 
   const categories = reportsCategoryOptions();
-  const counts = categories.reduce((acc, c) => ({
-    ...acc,
-    [c.key]: c.key === 'all' ? baseFiltered.length : baseFiltered.filter(item => item.category === c.key).length,
-  }), {});
+  const myName = String(S.user?.name || '').trim().toLowerCase();
+  const counts = categories.reduce((acc, c) => {
+    if (c.key === 'all') return { ...acc, all: baseFiltered.length };
+    if (c.key === 'my_tasks') return { ...acc, my_tasks: myName ? baseFiltered.filter(e => e.kind === 'action_item' && String(e.assignee || '').toLowerCase().includes(myName)).length : 0 };
+    return { ...acc, [c.key]: baseFiltered.filter(item => item.category === c.key).length };
+  }, {});
 
-  // Summary stats drawn from ALL entries (not just the current filtered view).
+  // ── Enhanced stats (computed from ALL entries, all-time) ──────────
   const todayStr = today();
-  const pendingActions  = allEntries.filter(e => e.kind === 'action_item' && e.status === 'pending').length;
-  const overdueActions  = allEntries.filter(e => e.kind === 'action_item' && e.dueDate && e.dueDate < todayStr && e.status !== 'done' && e.status !== 'cancelled').length;
-  const financialCount  = allEntries.filter(e => e.category === 'financial').length;
-  const resolutionCount = allEntries.filter(e => e.kind === 'resolution').length;
+  const actionEntries    = allEntries.filter(e => e.kind === 'action_item');
+  const resolutionCount  = allEntries.filter(e => e.kind === 'resolution').length;
+  const financialEntries         = allEntries.filter(e => e.category === 'financial');
+  const financialCount           = financialEntries.length;
+  const pendingActions           = actionEntries.filter(e => e.status === 'pending').length;
+  const overdueActions           = actionEntries.filter(e => e.dueDate && e.dueDate < todayStr && e.status !== 'done' && e.status !== 'cancelled').length;
+  const doneActions              = actionEntries.filter(e => e.status === 'done').length;
+  const totalActions             = actionEntries.length;
+  const flagCount                = allEntries.filter(e => e.kind === 'policy_flag').length;
+  const highFlagCount            = allEntries.filter(e => e.kind === 'policy_flag' && e.severity === 'high').length;
+  const completionPct            = totalActions ? Math.round((doneActions / totalActions) * 100) : 0;
+  // Only sum amounts for *approved* financial resolutions — rejected/deferred proposals must not inflate this figure.
+  const totalFinancial           = financialEntries.filter(e => e.approval === 'approved').reduce((sum, e) => {
+    const n = Number(String(e.amount || '').replace(/,/g, ''));
+    return sum + (Number.isFinite(n) ? n : 0);
+  }, 0);
+  const financialDisplay         = totalFinancial > 0 ? `₦${totalFinancial.toLocaleString('en-NG')}` : `${financialCount}`;
 
   const statBar = allEntries.length ? `
     <div class="k-insight-stats">
@@ -5503,9 +5694,13 @@ async function renderReports(main) {
         <span class="k-insight-stat-val">${resolutionCount}</span>
         <span class="k-insight-stat-lbl">Resolutions</span>
       </div>
-      <div class="k-insight-stat">
-        <span class="k-insight-stat-val">${financialCount}</span>
-        <span class="k-insight-stat-lbl">Financial</span>
+      <div class="k-insight-stat k-insight-stat-gold">
+        <span class="k-insight-stat-val">${financialDisplay}</span>
+        <span class="k-insight-stat-lbl">Financial approved</span>
+      </div>
+      <div class="k-insight-stat k-insight-stat-green">
+        <span class="k-insight-stat-val">${completionPct}%</span>
+        <span class="k-insight-stat-lbl">Actions done</span>
       </div>
       <div class="k-insight-stat${pendingActions ? ' k-insight-stat-warn' : ''}">
         <span class="k-insight-stat-val">${pendingActions}</span>
@@ -5516,32 +5711,72 @@ async function renderReports(main) {
         <span class="k-insight-stat-val">${overdueActions}</span>
         <span class="k-insight-stat-lbl">Overdue</span>
       </div>` : ''}
+      ${flagCount ? `
+      <div class="k-insight-stat${highFlagCount ? ' k-insight-stat-alert' : ' k-insight-stat-warn'}">
+        <span class="k-insight-stat-val">${flagCount}</span>
+        <span class="k-insight-stat-lbl">Gov. alerts</span>
+      </div>` : ''}
     </div>` : '';
+
+  // ── AI Digest panel ───────────────────────────────────────────
+  const digestPanel = buildInsightsDigest(S.meetings);
+
+  // ── Assignee dropdown for filter row ─────────────────────────
+  const assignees = [...new Set(allEntries.filter(e => e.kind === 'action_item').map(e => e.assignee).filter(a => a && a !== 'Unassigned'))].sort();
+  const assigneeOpts = `<option value="">All assignees</option>` +
+    assignees.map(a => `<option value="${esc(a)}" ${S.reportsAssignee === a ? 'selected' : ''}>${esc(a)}</option>`).join('');
+  const approvalOpts = [
+    ['all', 'All approvals'],
+    ['approved', 'Approved'],
+    ['rejected', 'Rejected'],
+    ['needs_confirmation', 'Needs confirmation'],
+  ].map(([v, l]) => `<option value="${v}" ${S.reportsApproval === v ? 'selected' : ''}>${l}</option>`).join('');
 
   const total = baseFiltered.length;
   const countText = filtered.length === total
     ? `${filtered.length} item${filtered.length !== 1 ? 's' : ''}`
     : `${filtered.length} of ${total} item${total !== 1 ? 's' : ''}`;
 
+  const listHtml = !filtered.length
+    ? buildInsightsEmptyState(allEntries, S.meetings)
+    : S.insightsViewMode === 'by_meeting'
+      ? renderInsightsByMeeting(filtered)
+      : S.insightsViewMode === 'by_assignee'
+        ? renderInsightsByAssignee(filtered)
+        : filtered.map(renderMeetingInsightCard).join('');
+
   main.innerHTML = `
     <div class="k-page">
       <div class="k-section-hdr">
         <h2>AI Meeting Insights</h2>
+        <div id="k-insights-header-actions" style="display:flex;gap:8px;align-items:center">
+          ${buildInsightsHeaderActions(filtered)}
+        </div>
       </div>
-      <p class="k-page-hint">AI automatically extracts resolutions, amendments, motions, financial approvals, rejections, and action items from each processed meeting — newest first.</p>
+      <p class="k-page-hint">AI extracts resolutions, motions, financial approvals, action items, governance alerts, and project suggestions from each processed meeting.</p>
       ${statBar}
+      ${digestPanel}
       <div class="k-insight-filters">
         <select class="k-input k-input-sm" onchange="Kpsc.setReportsYear(this.value)">${yearOpts}</select>
         <select class="k-input k-input-sm" onchange="Kpsc.setReportsMonth(this.value)">${monthOpts}</select>
-        <input class="k-input k-input-sm" type="search" placeholder="Search text, proposer, assignee…" value="${esc(S.reportsSearch)}" oninput="Kpsc.setReportsSearch(this.value)" />
+        <select class="k-input k-input-sm" id="k-insights-assignee" onchange="Kpsc.setReportsAssignee(this.value)">${assigneeOpts}</select>
+        <select class="k-input k-input-sm" onchange="Kpsc.setReportsApproval(this.value)">${approvalOpts}</select>
+        <input class="k-input k-input-sm" type="search" placeholder="Search text, proposer, assignee…" value="${esc(S.reportsSearch)}" oninput="Kpsc.setReportsSearch(this.value)" style="grid-column:1/-1" />
       </div>
       <div class="k-quick-filters" id="k-insights-chips">
         ${categories.map(c =>
           `<button class="k-filter ${S.reportsFilter === c.key ? 'active' : ''}" onclick="Kpsc.setReportsFilter('${c.key}')">${c.label} (${counts[c.key] || 0})</button>`
         ).join('')}
       </div>
-      <div class="k-insight-count-row"><span id="k-insights-count">${countText}</span></div>
-      <div class="k-meeting-list" id="k-insights-list">${filtered.length ? filtered.map(renderMeetingInsightCard).join('') : buildInsightsEmptyState(allEntries, S.meetings)}</div>
+      <div class="k-insight-count-row">
+        <span id="k-insights-count-text">${countText}</span>
+        <div class="k-insight-view-toggle">
+          <button class="k-insight-view-btn ${S.insightsViewMode === 'list' ? 'active' : ''}" data-mode="list" onclick="Kpsc.setInsightsViewMode('list')" title="List view">≡ List</button>
+          <button class="k-insight-view-btn ${S.insightsViewMode === 'by_meeting' ? 'active' : ''}" data-mode="by_meeting" onclick="Kpsc.setInsightsViewMode('by_meeting')" title="Group by meeting">⊞ By Meeting</button>
+          <button class="k-insight-view-btn ${S.insightsViewMode === 'by_assignee' ? 'active' : ''}" data-mode="by_assignee" onclick="Kpsc.setInsightsViewMode('by_assignee')" title="Group by assignee">👤 By Assignee</button>
+        </div>
+      </div>
+      <div class="k-meeting-list" id="k-insights-list">${listHtml}</div>
     </div>`;
 }
 
@@ -5676,6 +5911,238 @@ async function updateReportActionStatus(meetingId, actionId, status, selectEl) {
   }
 }
 
+
+// ── NEW INSIGHTS FILTER SETTERS ────────────────────────────────────
+
+function setReportsAssignee(name) {
+  S.reportsAssignee = name || '';
+  rerenderInsightsList();
+}
+
+function setReportsApproval(approval) {
+  S.reportsApproval = approval || 'all';
+  rerenderInsightsList();
+}
+
+function setInsightsViewMode(mode) {
+  S.insightsViewMode = mode || 'list';
+  rerenderInsightsList();
+}
+
+// ── GROUPED VIEW RENDERERS ──────────────────────────────────────────
+
+function renderInsightsByMeeting(entries) {
+  const groups = new Map();
+  for (const entry of entries) {
+    if (!groups.has(entry.meetingId)) {
+      groups.set(entry.meetingId, { title: entry.meetingTitle, date: entry.meetingDate, type: entry.meetingType || '', items: [] });
+    }
+    groups.get(entry.meetingId).items.push(entry);
+  }
+  if (!groups.size) return '';
+  return [...groups.entries()].map(([, g]) => `
+    <div class="k-insight-group">
+      <div class="k-insight-group-hdr">
+        <div>
+          <div class="k-insight-group-hdr-title">${esc(g.title)}</div>
+          <div class="k-insight-group-hdr-meta">${esc(fmtDate(g.date) || g.date)}${g.type ? ' · ' + esc(g.type) : ''}</div>
+        </div>
+        <span class="k-insight-group-hdr-count">${g.items.length}</span>
+      </div>
+      <div class="k-insight-group-cards">${g.items.map(renderMeetingInsightCard).join('')}</div>
+    </div>`).join('');
+}
+
+function renderInsightsByAssignee(entries) {
+  const actionItems = entries.filter(e => e.kind === 'action_item');
+  const others = entries.filter(e => e.kind !== 'action_item');
+  const groups = new Map();
+  for (const entry of actionItems) {
+    const key = entry.assignee || 'Unassigned';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  }
+  const assigneeHtml = [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([assignee, items]) => `
+      <div class="k-insight-group">
+        <div class="k-insight-group-hdr">
+          <div>
+            <div class="k-insight-group-hdr-title">👤 ${esc(assignee)}</div>
+            <div class="k-insight-group-hdr-meta">${items.filter(i => i.status !== 'done' && i.status !== 'cancelled').length} open · ${items.filter(i => i.status === 'done').length} done</div>
+          </div>
+          <span class="k-insight-group-hdr-count">${items.length}</span>
+        </div>
+        <div class="k-insight-group-cards">${items.map(renderMeetingInsightCard).join('')}</div>
+      </div>`).join('');
+  const othersHtml = others.length ? `
+    <div class="k-insight-group">
+      <div class="k-insight-group-hdr">
+        <div><div class="k-insight-group-hdr-title">Other items</div><div class="k-insight-group-hdr-meta">Resolutions, flags, suggestions</div></div>
+        <span class="k-insight-group-hdr-count">${others.length}</span>
+      </div>
+      <div class="k-insight-group-cards">${others.map(renderMeetingInsightCard).join('')}</div>
+    </div>` : '';
+  return assigneeHtml + othersHtml;
+}
+
+// ── AI DIGEST PANEL ─────────────────────────────────────────────────
+
+function buildInsightsDigest(meetings) {
+  const year = Number(S.reportsYear) || currentYear();
+  const month = Number(S.reportsMonth) || 0;
+  const relevant = (meetings || []).filter(m => {
+    if (!m.summaryShort || m.status !== 'processed') return false;
+    const stamp = String(m.meetingDate || '');
+    if (year && !stamp.startsWith(String(year))) return false;
+    if (month && Number(stamp.slice(5, 7)) !== month) return false;
+    return true;
+  });
+  if (!relevant.length) return '';
+  const snippets = relevant.slice(0, 5).map(m => `
+    <li>
+      <span style="color:var(--text3);flex-shrink:0;font-size:11px">${esc(fmtDate(m.meetingDate) || m.meetingDate)}</span>
+      <span>${esc(m.summaryShort)}</span>
+    </li>`).join('');
+  const more = relevant.length > 5 ? `<li style="color:var(--text3);font-size:12px">…and ${relevant.length - 5} more meeting${relevant.length - 5 !== 1 ? 's' : ''}</li>` : '';
+  const openAttr = S.insightsDigestOpen ? 'open' : '';
+  return `
+    <details class="k-collapsible k-insight-digest" id="k-insights-digest" ${openAttr} ontoggle="Kpsc.toggleInsightsDigest(this.open)">
+      <summary class="k-collapsible-hdr">
+        <span class="k-collapsible-title">✨ AI Period Summary</span>
+        <span class="k-collapsible-summary">${relevant.length} meeting${relevant.length !== 1 ? 's' : ''} · click to expand</span>
+      </summary>
+      <div class="k-insight-digest-body">
+        <ul class="k-insight-digest-list">${snippets}${more}</ul>
+      </div>
+    </details>`;
+}
+
+function toggleInsightsDigest(open) {
+  S.insightsDigestOpen = !!open;
+}
+
+// ── INLINE ACTION ITEM EDITING ──────────────────────────────────────
+
+function toggleInsightEdit(entryId, meetingIdEncoded, actionIdEncoded) {
+  const safeId = String(entryId || '').replace(/[^a-z0-9]/gi, '_');
+  const formEl = document.getElementById(`k-ie-form-${safeId}`);
+  if (!formEl) return;
+  if (formEl.style.display !== 'none') {
+    formEl.style.display = 'none';
+    return;
+  }
+  // Find the current action item entry from live data
+  const allEntries = buildMeetingInsights(S.meetings);
+  const entry = allEntries.find(e => e.id === entryId);
+  if (!entry) return;
+  formEl.style.display = 'block';
+  formEl.innerHTML = `
+    <div class="k-insight-edit-form">
+      <div>
+        <div class="k-insight-edit-lbl">Task description</div>
+        <textarea class="k-input k-input-sm" id="k-ie-task-${safeId}" rows="2" style="resize:vertical">${esc(entry.text)}</textarea>
+      </div>
+      <div class="k-insight-edit-row">
+        <div>
+          <div class="k-insight-edit-lbl">Assignee</div>
+          <input class="k-input k-input-sm" id="k-ie-assignee-${safeId}" type="text" value="${esc(entry.assignee || '')}" placeholder="Full name" />
+        </div>
+        <div>
+          <div class="k-insight-edit-lbl">Due date</div>
+          <input class="k-input k-input-sm" id="k-ie-due-${safeId}" type="date" value="${esc(entry.dueDate || '')}" />
+        </div>
+      </div>
+      <div class="k-insight-edit-actions">
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.toggleInsightEdit('${esc(entryId)}','','')">Cancel</button>
+        <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.saveInsightActionEdit('${esc(entryId)}','${meetingIdEncoded}','${actionIdEncoded}',this)">Save changes</button>
+      </div>
+    </div>`;
+}
+
+async function saveInsightActionEdit(entryId, meetingIdEncoded, actionIdEncoded, btn) {
+  const safeId = String(entryId || '').replace(/[^a-z0-9]/gi, '_');
+  const decodedMeetingId = decodeURIComponent(String(meetingIdEncoded || ''));
+  const decodedActionId = decodeURIComponent(String(actionIdEncoded || ''));
+  const taskEl = document.getElementById(`k-ie-task-${safeId}`);
+  const assigneeEl = document.getElementById(`k-ie-assignee-${safeId}`);
+  const dueEl = document.getElementById(`k-ie-due-${safeId}`);
+  const task = (taskEl?.value || '').trim();
+  const assignee = (assigneeEl?.value || '').trim() || 'Unassigned';
+  const dueDate = (dueEl?.value || '').trim();
+  if (!task) { showToast('Task description cannot be empty.', 'warn'); return; }
+  const meeting = (S.meetings || []).find(m => m.id === decodedMeetingId);
+  if (!meeting) { showToast('Meeting not found. Refresh and try again.', 'error'); return; }
+  const nextActions = (meeting.actionItems || []).map((action, idx) => {
+    const normId = normalizeActionId(action, idx);
+    return normId === decodedActionId
+      ? { ...action, id: normId, task, assignee, dueDate }
+      : { ...action, id: normId };
+  });
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    const updated = await apiPut(`ai-secretary-meetings/${decodedMeetingId}`, { actionItems: nextActions });
+    if (updated?.error) { showToast(updated.error, 'error'); return; }
+    S.meetings = (S.meetings || []).map(m => m.id === decodedMeetingId ? updated : m);
+    showToast('Action item updated.', 'success');
+    rerenderInsightsList();
+  } catch {
+    showToast('Could not save changes.', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save changes'; }
+  }
+}
+
+// ── PRINT INSIGHTS REPORT ───────────────────────────────────────────
+
+function printInsightsReport() {
+  const allEntries = buildMeetingInsights(S.meetings);
+  const filtered = filterMeetingInsights(allEntries);
+  const yearLabel = S.reportsYear || currentYear();
+  const monthLabel = S.reportsMonth ? monthName(S.reportsMonth) : 'All months';
+  const catLabel = (reportsCategoryOptions().find(c => c.key === S.reportsFilter) || { label: 'All items' }).label;
+  const rows = filtered.map(e => {
+    if (e.kind === 'policy_flag') return `<tr><td>${esc(fmtDate(e.meetingDate)||e.meetingDate)}</td><td>${esc(e.meetingTitle)}</td><td>🚩 ${esc(e.flagType||'')}</td><td>${esc(e.text)}</td><td>${esc(e.severity)}</td></tr>`;
+    if (e.kind === 'suggested_project') return `<tr><td>${esc(fmtDate(e.meetingDate)||e.meetingDate)}</td><td>${esc(e.meetingTitle)}</td><td>💡 Project suggestion</td><td>${esc(e.projectTitle||e.text)}</td><td>—</td></tr>`;
+    if (e.kind === 'action_item') return `<tr><td>${esc(fmtDate(e.meetingDate)||e.meetingDate)}</td><td>${esc(e.meetingTitle)}</td><td>${esc(e.assignee)}</td><td>${esc(e.text)}</td><td>${esc(e.status.replace(/_/g,' '))}${e.dueDate?' · '+esc(e.dueDate):''}</td></tr>`;
+    return `<tr><td>${esc(fmtDate(e.meetingDate)||e.meetingDate)}</td><td>${esc(e.meetingTitle)}</td><td>${esc((e.resolutionType||'').replace(/_/g,' '))}</td><td>${esc(e.text)}</td><td>${esc(e.approval||'')}${e.amount?' · '+esc(formatResolutionAmount(e.amount)):''}</td></tr>`;
+  }).join('');
+  const win = window.open('', '_blank');
+  if (!win) { showToast('Pop-up blocked. Allow pop-ups to print.', 'warn'); return; }
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>KPSC Insights Report</title>
+  <style>body{font-family:system-ui,sans-serif;font-size:13px;color:#111;padding:24px 32px}h1{font-size:18px;margin:0 0 4px}p{color:#555;margin:0 0 16px}table{width:100%;border-collapse:collapse}th{background:#1e3a5f;color:#fff;text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.5px}td{padding:8px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top}tr:last-child td{border-bottom:none}@media print{@page{margin:2cm}}</style>
+  </head><body>
+  <h1>RCCG Kingdom Parish — AI Meeting Insights</h1>
+  <p>Period: ${esc(String(yearLabel))} / ${esc(monthLabel)} · Filter: ${esc(catLabel)} · ${filtered.length} item${filtered.length!==1?'s':''} · Printed ${new Date().toLocaleDateString('en-NG',{dateStyle:'long'})}</p>
+  <table><thead><tr><th>Date</th><th>Meeting</th><th>Type / Assignee</th><th>Item</th><th>Status / Outcome</th></tr></thead><tbody>${rows}</tbody></table>
+  <script>window.onload=()=>window.print()<\/script></body></html>`);
+  win.document.close();
+}
+
+// ── WHATSAPP SHARE ACTIONS ──────────────────────────────────────────
+
+function shareInsightActions() {
+  const allEntries = buildMeetingInsights(S.meetings);
+  const actionEntries = filterMeetingInsights(allEntries).filter(e => e.kind === 'action_item' && e.status !== 'done' && e.status !== 'cancelled');
+  if (!actionEntries.length) { showToast('No pending action items to share.', 'warn'); return; }
+  const byAssignee = new Map();
+  for (const e of actionEntries) {
+    if (!byAssignee.has(e.assignee)) byAssignee.set(e.assignee, []);
+    byAssignee.get(e.assignee).push(e);
+  }
+  const lines = [`*KPSC Action Items — ${new Date().toLocaleDateString('en-NG',{dateStyle:'long'})}*\n`];
+  for (const [assignee, items] of [...byAssignee.entries()].sort(([a],[b])=>a.localeCompare(b))) {
+    lines.push(`\n*${assignee}:*`);
+    items.forEach((e, i) => {
+      const due = e.dueDate ? ` (due ${e.dueDate})` : '';
+      lines.push(`${i+1}. ${e.text}${due}`);
+    });
+  }
+  const msg = lines.join('\n');
+  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
+}
+
+// ───────────────────────────────────────────────────────────────────
 
 function archiveQuickFilters() {
   return [
@@ -7822,6 +8289,14 @@ window.Kpsc = {
   setReportsMonth,
   setReportsFilter,
   setReportsSearch,
+  setReportsAssignee,
+  setReportsApproval,
+  setInsightsViewMode,
+  toggleInsightsDigest,
+  toggleInsightEdit,
+  saveInsightActionEdit,
+  printInsightsReport,
+  shareInsightActions,
   updateReportActionStatus,
   saveKpscOpsSettings,
   saveRolePermissions,
