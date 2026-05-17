@@ -71,16 +71,16 @@ function drawKpscIcon(x, y, size) {
   // Outside circle → transparent
   if (dist >= half) return [0, 0, 0, 0];
 
-  // Cross dimensions (proportional)
-  const vHalfW = size * 0.065; // vertical arm half-width
-  const hHalfW = size * 0.065; // horizontal arm half-height
-  const vTop   = -half * 0.55; // vertical arm top (above center)
-  const vBot   =  half * 0.42; // vertical arm bottom (below center)
-  const hLeft  = -half * 0.42; // horizontal arm left
-  const hRight =  half * 0.42; // horizontal arm right
+  // Cross dimensions — matches SVG proportions (bar at ~40% from top = upright Latin cross)
+  const vHalfW = size * 0.065;  // vertical arm half-width
+  const hHalfH = size * 0.065;  // horizontal arm half-height
+  const vTop   = -half * 0.68;  // arm extends 68% of half-radius above center (short top)
+  const vBot   =  half * 0.45;  // arm extends 45% of half-radius below center (long bottom)
+  const hBarY  = -half * 0.23;  // bar centred 23% above image centre (above centre of circle)
+  const hSpan  =  half * 0.45;  // horizontal arm half-span
 
-  const inVert  = dx > -vHalfW && dx < vHalfW && dy > vTop   && dy < vBot;
-  const inHoriz = dy > -hHalfW && dy < hHalfW && dx > hLeft  && dx < hRight;
+  const inVert  = Math.abs(dx) < vHalfW && dy > vTop && dy < vBot;
+  const inHoriz = Math.abs(dy - hBarY) < hHalfH && Math.abs(dx) < hSpan;
 
   if (inVert || inHoriz) return [255, 255, 255, 255]; // white cross
   return [30, 58, 95, 255]; // #1e3a5f navy
