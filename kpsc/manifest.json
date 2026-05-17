@@ -1,0 +1,38 @@
+{
+  "name": "KPSC Meeting Portal",
+  "short_name": "KPSC",
+  "description": "Kingdom Parish Stewardship Committee — secure workspace for recording, processing, and archiving committee meetings.",
+  "start_url": "/kpsc/",
+  "scope": "/kpsc/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#1e3a5f",
+  "background_color": "#1e3a5f",
+  "categories": ["productivity", "business"],
+  "icons": [
+    {
+      "src": "/kpsc/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/kpsc/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/kpsc/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/kpsc/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
