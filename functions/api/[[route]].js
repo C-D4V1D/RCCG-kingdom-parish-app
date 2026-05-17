@@ -3410,7 +3410,7 @@ function appendAiSecretaryMandatoryChecks(markdown, flags) {
     '## Mandatory Governance Checks',
     ...mandatoryFlags.map(flag => `- ${flag.severity.toUpperCase()}: ${flag.message}`),
   ].join('\n');
-  return /mandatory governance checks|policy checks/i.test(markdown) ? markdown : `${markdown}${section}`;
+  return /^##\s+(?:mandatory governance|policy) checks/im.test(markdown) ? markdown : `${markdown}${section}`;
 }
 
 const AI_MINUTES_TIMESTAMP_LINE_RE = /^\s*(?:\*\*)?\s*(generated(?:\s+(?:at|on))?|timestamp)\s*(?:\*\*)?\s*[:\-]\s*(?:\d{4}-\d{2}-\d{2}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}:\d{2})/i;

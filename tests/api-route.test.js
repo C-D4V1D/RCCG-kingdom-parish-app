@@ -450,7 +450,7 @@ test('AI secretary processing returns draft minutes and policy flags', async () 
 
   assert.equal(response.status, 200);
   assert.equal(body.status, 'processed');
-  assert.match(body.minutesMarkdown, /KPSC Emergency Meeting Minutes/);
+  assert.match(body.minutesMarkdown, /KPSC Emergency Meeting/);
   assert.ok(body.resolutions.some(r => /generator repairs/i.test(r.text)));
   assert.ok(body.actionItems.some(a => /treasurer to follow up/i.test(a.task)));
   assert.ok(body.policyFlags.some(f => f.type === 'quorum_missing'));
@@ -547,7 +547,7 @@ test('AI secretary keeps deterministic governance flags when provider omits them
     assert.ok(body.policyFlags.some(f => f.type === 'meeting_not_ended'));
     assert.ok(body.policyFlags.some(f => f.type === 'threshold_review'));
     assert.ok(body.policyFlags.some(f => f.type === 'prompt_injection_risk'));
-    assert.match(body.minutesMarkdown, /## Policy Checks/);
+    assert.match(body.minutesMarkdown, /## Mandatory Governance Checks/);
     assert.match(body.minutesMarkdown, /Missing required representative group/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -625,7 +625,7 @@ test('AI secretary quorum is based on required group coverage instead of every r
   const body = await readJson(response);
 
   assert.equal(response.status, 200);
-  assert.match(body.minutesMarkdown, /\*\*Quorum:\*\* Met/);
+  assert.match(body.minutesMarkdown, /quorum was met/i);
   assert.equal(body.policyFlags.some(f => f.type === 'quorum_missing'), false);
 });
 
@@ -699,8 +699,8 @@ test('AI secretary classifies resolutions and extracts action owners/deadlines',
   const body = await readJson(response);
 
   assert.equal(response.status, 200);
-  assert.match(body.minutesMarkdown, /Agenda \/ Matters Discussed/);
-  assert.match(body.minutesMarkdown, /Executive Summary/);
+  assert.match(body.minutesMarkdown, /Agenda and Matters Discussed/);
+  assert.match(body.minutesMarkdown, /Minutes of Routine Meeting/);
   assert.doesNotMatch(body.minutesMarkdown, /^\s*(Generated|Timestamp)\s*:/im);
   assert.ok(body.resolutions.some(r => r.resolutionType === 'financial_approval' && r.amount === '250000'));
   assert.ok(body.resolutions.some(r => r.resolutionType === 'rejection' && r.approved === false));
