@@ -4176,12 +4176,15 @@ async function printRemittanceReport(fromOverride, toOverride){
       desc: l.isTg
         ? `Thanksgiving Offering → National HQ (${Math.round(rr.tgNational*100)}%)`
         : `${l.label} → National HQ`,
-      type:'% Based', amount:l.national||0
+      type: l.isTg
+        ? `${Math.round(rr.tgNational*100)}% Based`
+        : `${l.total>0?Math.round((l.national/l.total)*100):'0'}% Based`,
+      amount:l.national||0
     })).filter(r=>r.amount>0),
     // Province Rebate (% of local retained tithes)
     ...(rem.provinceRebate>0?[{
       desc:`Province Rebate — ${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes (Members' + Ministers' Tithe: ${fmt(rem.localTithe)})`,
-      type:'% Based', amount:rem.provinceRebate
+      type:`${Math.round(rr.provinceRebate*100)}% Based`, amount:rem.provinceRebate
     }]:[]),
     // Fixed RCCG quotas (excluding pastoral Zonal Mummy Stipend)
     ...rccgQuotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 })).filter(r=>r.amount>0)
@@ -4190,10 +4193,10 @@ async function printRemittanceReport(fromOverride, toOverride){
 
   // ─── PART B: OTHER DISBURSEMENTS ─────────────────────────────────
   const partBRows=[
-    { desc:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,       type:'% Based', amount:rem.totalArea||0 },
-    { desc:`Thanksgiving → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,          type:'% Based', amount:rem.totalPastor||0 },
-    { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,     type:'% Based', amount:rem.totalMinisters||0 },
-    { desc:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`,  type:'% Based', amount:rem.totalSeed||0 },
+    { desc:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,       type:`${Math.round(rr.tgArea*100)}% Based`, amount:rem.totalArea||0 },
+    { desc:`Thanksgiving → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,          type:`${Math.round(rr.tgPastor*100)}% Based`, amount:rem.totalPastor||0 },
+    { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,     type:`${Math.round(rr.tgMinisters*100)}% Based`, amount:rem.totalMinisters||0 },
+    { desc:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`,  type:`${Math.round(rr.tgSeed*100)}% Based`, amount:rem.totalSeed||0 },
     ...mummyQuotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 }))
   ].filter(r=>r.amount>0);
   const subTotalB=partBRows.reduce((s,r)=>s+r.amount,0);
