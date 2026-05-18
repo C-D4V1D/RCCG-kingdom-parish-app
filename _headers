@@ -1,6 +1,9 @@
 # Always revalidate JS and CSS so browsers never serve stale assets after a deployment.
 # Cloudflare will respond with 304 Not Modified (fast) if the file hasn't changed,
 # or send the new file if it has — no manual cache-clearing needed by users.
+/kpsc/*
+  Cache-Control: no-cache, must-revalidate
+
 /src/js/*
   Cache-Control: no-cache, must-revalidate
 
