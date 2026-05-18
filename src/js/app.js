@@ -233,6 +233,7 @@ const state = {
   year: new Date().getFullYear(),
   loginBusy: false,
   aiSecretaryActiveId: null,
+  dashPeriodMode: 'remittance', // 'remittance' | 'calendar'
 };
 
 // ──────────────────────────────────────────
@@ -395,6 +396,38 @@ function filterByDateRange(arr, fromDate, toDate){
     const d = ymdLocal(raw);
     return d >= fromDate && d <= toDate;
   });
+}
+
+function computeRemPeriodDates(settings, allRems, year, month){
+  const cutoffConfig = getRemCutoffDates(settings, year);
+  const cutoffYear   = cutoffConfig ? Number(cutoffConfig.year) : null;
+  const cutoffDay    = (cutoffConfig && cutoffYear === year && Number.isInteger(cutoffConfig.dates[month]))
+    ? cutoffConfig.dates[month] : null;
+  if(cutoffDay){
+    const to = ymdLocal(new Date(year, month, cutoffDay));
+    const prevMonth = month === 0 ? 11 : month - 1;
+    const prevYear  = month === 0 ? year - 1 : year;
+    const prevCfg   = getRemCutoffDates(settings, prevYear);
+    const prevDay   = (prevCfg && Number.isInteger(prevCfg.dates[prevMonth]) && Number(prevCfg.year) === prevYear)
+      ? prevCfg.dates[prevMonth] : null;
+    let from;
+    if(prevDay){
+      const d = new Date(prevYear, prevMonth, prevDay);
+      d.setDate(d.getDate() + 1);
+      from = ymdLocal(d);
+    } else {
+      from = ymdLocal(new Date(year, month, 1));
+    }
+    return { from, to };
+  }
+  // Fallback: day after last paid remittance, or first of month
+  const lastPaid = (allRems||[]).filter(r=>r.status==='paid')
+    .sort((a,b)=>new Date(b.paidDate||b.createdAt||0)-new Date(a.paidDate||a.createdAt||0))[0];
+  if(lastPaid){
+    const d = new Date(lastPaid.paidDate||lastPaid.createdAt||0);
+    if(!isNaN(d.getTime())){ d.setDate(d.getDate()+1); return { from: ymdLocal(d), to: ymdLocal(new Date()) }; }
+  }
+  return { from: ymdLocal(new Date(year, month, 1)), to: ymdLocal(new Date(year, month+1, 0)) };
 }
 
 /** Return the quota list as an array of {label, amount} objects.
@@ -1592,10 +1625,13 @@ async function calcChurchBalance(){
 
 async function renderDashboard(){
   const [allIncomeDash,allExpensesDash,pettyHistDash,settingsDash,allRemsDash,pettyConfigDash,remRatesDash] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getPetty(),DB.getSettings(),DB.getRemittances(),DB.getPettyConfig(),getRemRates()]);
-  const income = filterByMonth(allIncomeDash);
-  const expenses = filterByMonth(allExpensesDash);
-  const petty = { history: pettyHistDash, float: pettyConfigDash.float, max: pettyConfigDash.max };
   const settings = settingsDash;
+  const { from: dashPeriodFrom, to: dashPeriodTo } =
+    computeRemPeriodDates(settings, allRemsDash, state.year, state.month);
+  const useRemPeriod = state.dashPeriodMode === 'remittance';
+  const income   = useRemPeriod ? filterByDateRange(allIncomeDash,   dashPeriodFrom, dashPeriodTo) : filterByMonth(allIncomeDash);
+  const expenses = useRemPeriod ? filterByDateRange(allExpensesDash, dashPeriodFrom, dashPeriodTo) : filterByMonth(allExpensesDash);
+  const petty = { history: pettyHistDash, float: pettyConfigDash.float, max: pettyConfigDash.max };
   const allIncome = allIncomeDash;
   const allExpenses = allExpensesDash;
 
@@ -1677,6 +1713,12 @@ async function renderDashboard(){
   const dashSpendable = dashTotalFunds - dashOutstandingRems;
   const dashSpendLow = parseFloat(settingsDash?.spendableLow||0)||20000;
   const dashSpendColor = dashSpendable < 0 ? 'var(--danger)' : dashSpendable < dashSpendLow ? '#B8860B' : 'var(--success)';
+
+  // Reconciliation card figures
+  const totalPeriodApprExpenses = expenses
+    .filter(e => e.status === 'approved')
+    .reduce((s, e) => s + (e.amount || 0), 0);
+  const dashCarriedForward = churchBal.total - totalIncome + totalPeriodApprExpenses;
 
   // Feed items — richer detail for Recent Transactions card
   const recentIncome = allIncome.slice(0,4);
@@ -1849,7 +1891,15 @@ async function renderDashboard(){
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
-      <div><div class="page-title">Welcome, ${state.user?.name?.split(' ')[0]||'User'} 👋</div><div class="page-sub">${monthLabel()} Financial Overview</div></div>
+      <div>
+        <div class="page-title">Welcome, ${state.user?.name?.split(' ')[0]||'User'} 👋</div>
+        <div class="page-sub">${monthLabel()} Financial Overview</div>
+        <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
+          <button onclick="App.setDashPeriodMode('remittance')" class="btn btn-sm${useRemPeriod?' btn-primary':''}" title="Filter by remittance cut-off period">📅 Rem. Period</button>
+          <button onclick="App.setDashPeriodMode('calendar')" class="btn btn-sm${!useRemPeriod?' btn-primary':''}" title="Filter by calendar month">🗓 Calendar</button>
+          ${useRemPeriod?`<span style="font-size:11px;color:var(--text3)">${fmtDate(dashPeriodFrom)} – ${fmtDate(dashPeriodTo)}</span>`:''}
+        </div>
+      </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${canAction('income_record')?`<button class="btn btn-primary" onclick="App.navigate('income')">📥 Record Income</button>`:''}
         ${!canAction('income_record')&&canAction('expense_log')?`<button class="btn btn-primary" onclick="App.navigate('expenses')">💸 Log Expenses</button>`:''}
@@ -1871,18 +1921,48 @@ async function renderDashboard(){
         <div class="kpi-val">${fmt(dashTotalRemDueKpi)}</div>
         <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
         ${dashMonthsElapsed>1?`<div class="kpi-delta warn" style="font-size:11px">⚠ Accumulated unpaid since ${fmtDate(dashFirstIncRec.date||dashFirstIncRec.createdAt)}</div>`:''}
-        <div class="kpi-delta warn">↑ ${dashUnpaidPeriodIncome>0?Math.round(dashTotalRemDueKpi/dashUnpaidPeriodIncome*100):0}% of income</div>
+        <div class="kpi-delta warn">${dashUnpaidPeriodIncome>0?Math.round(dashTotalRemDueKpi/dashUnpaidPeriodIncome*100):0}% of unpaid period income</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
         <div class="kpi-label">Local Retained Funds</div>
         <div class="kpi-val">${fmt(netLocal)}</div>
-        <div class="kpi-delta up">After all remittances</div>
+        <div class="kpi-delta up">Parish's share of period income</div>
         ${dashChildrenTeacherTotal > 0 ? `<div style="margin-top:8px;padding:7px 9px;border-radius:6px;background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.25);font-size:11px;line-height:1.5">
           <div style="color:#BA7517;font-weight:600">🧒 ${fmt(dashChildrenTeacherTotal)} with Children Teacher</div>
           <div style="color:var(--text3);font-size:10px;margin-top:1px">65% of Teen/Children's Offering (for refreshments)</div>
           <button class="btn btn-sm" onclick="App.showChildrenTeacherModal()" aria-label="View breakdown of children teacher funds" style="margin-top:5px;font-size:10px;padding:2px 8px">View Breakdown →</button>
         </div>` : ''}
+      </div>
+      <div class="kpi kpi-balance" style="grid-column:span 1">
+        <div class="kpi-icon" style="background:#EEF2FF">🧮</div>
+        <div class="kpi-label">How Spendable is Calculated</div>
+        <div style="font-size:11px;color:var(--text3);line-height:2.1;margin-top:6px">
+          <div style="display:flex;justify-content:space-between">
+            <span>Carried forward balance</span>
+            <span style="font-weight:600;color:${dashCarriedForward<0?'var(--danger)':'var(--text)'}">${fmt(dashCarriedForward)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between">
+            <span>+ Income (this period)</span>
+            <span style="font-weight:600;color:var(--primary)">${fmt(totalIncome)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;border-bottom:1.5px solid var(--border);padding-bottom:4px">
+            <span>− Expenses (this period)</span>
+            <span style="font-weight:600;color:var(--danger)">−${fmt(totalPeriodApprExpenses)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-weight:700;font-size:12px;padding-top:2px">
+            <span>= Total Church Balance</span>
+            <span>${fmt(churchBal.total)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;border-bottom:1.5px solid var(--border);padding-bottom:4px">
+            <span>− HQ Remittances Due</span>
+            <span style="color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-weight:800;font-size:14px;color:${dashSpendColor};padding-top:2px">
+            <span>= Spendable</span>
+            <span>${fmt(dashSpendable)}</span>
+          </div>
+        </div>
       </div>
       <div class="kpi kpi-balance" style="grid-column:span 1">
         <div class="kpi-icon" style="background:#EAF3DE">🏛️</div>
@@ -8048,6 +8128,11 @@ function submitKPSCAlert(){
   }
 })();
 
+function setDashPeriodMode(mode){
+  state.dashPeriodMode = mode;
+  navigate('dashboard');
+}
+
 // ──────────────────────────────────────────
 // 9. PUBLIC API
 // ──────────────────────────────────────────
@@ -8067,6 +8152,7 @@ return {
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange,
   setAdminTab, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
+  setDashPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert
 };
 
