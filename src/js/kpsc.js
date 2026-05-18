@@ -2101,8 +2101,6 @@ function logout() {
     apiPost('kpsc-logout', { sessionToken }).catch(() => {});
   }
   clearSession();
-  // Signal that the next login should reload the page to pick up any new JS/CSS.
-  localStorage.setItem('kpsc_needs_reload', '1');
   S.user = null;
   S.page = 'dashboard';
   S.group = 'home';
@@ -2119,13 +2117,6 @@ function logout() {
 }
 
 async function enterApp() {
-  // If the user just signed out, force a hard reload so any new JS/CSS is picked up.
-  // The session is already saved so init() will auto-login after the reload.
-  if (localStorage.getItem('kpsc_needs_reload')) {
-    localStorage.removeItem('kpsc_needs_reload');
-    window.location.reload();
-    return;
-  }
   document.getElementById('kpsc-login-screen').style.display = 'none';
   document.getElementById('kpsc-app').style.display = '';
   const userLabel = `${S.user.name} (${roleLabel(S.user.role)})`;

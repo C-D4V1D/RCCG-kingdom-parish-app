@@ -12,8 +12,8 @@ test('homepage KPSC portal button links to real directory route', async () => {
 test('KPSC portal directory page uses root-relative assets', async () => {
   const html = await readFile(new URL('../kpsc/index.html', import.meta.url), 'utf8');
 
-  assert.match(html, /<link rel="stylesheet" href="\/src\/css\/kpsc\.css" \/>/);
-  assert.match(html, /<script src="\/src\/js\/kpsc\.js"><\/script>/);
+  assert.match(html, /<link rel="stylesheet" href="\/src\/css\/kpsc\.css(\?v=\d+)?" \/>/);
+  assert.match(html, /<script src="\/src\/js\/kpsc\.js(\?v=\d+)?"><\/script>/);
   assert.match(html, /id="kpsc-account-select"/);
 });
 
