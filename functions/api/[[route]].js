@@ -547,6 +547,11 @@ export async function onRequest(context) {
         if (auth instanceof Response) return auth;
         return await proofreadAiSecretaryMinutes(DB, env, param, body);
       }
+      if (method === 'POST' && parts[2] === 'reconcile-insights') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await reconcileAiSecretaryInsights(DB, env, param, body);
+      }
       if (method === 'POST' && parts[2] === 'public-link') {
         const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
         if (auth instanceof Response) return auth;
@@ -4000,6 +4005,16 @@ async function updateAiSecretaryMeeting(DB, id, data, auth) {
   const policyFlags = data.policyFlags !== undefined
     ? dedupeAiSecretaryFlags(data.policyFlags)
     : safeJsonParse(existing.policy_flags_json, []);
+  const suggestedProjects = data.suggestedProjects !== undefined
+    ? aiSecretaryArray(data.suggestedProjects).map((item, i) => ({
+        id: aiSecretaryText(item?.id, `proj-${i + 1}`),
+        title: aiSecretaryText(item?.title || item?.projectTitle),
+        description: aiSecretaryText(item?.description || item?.projectDescription),
+        estimatedCost: aiSecretaryText(item?.estimatedCost || item?.estimated_cost),
+        priority: aiSecretaryText(item?.priority, 'medium') || 'medium',
+        targetDate: aiSecretaryText(item?.targetDate || item?.target_date),
+      })).filter(p => p.title || p.description).slice(0, 10)
+    : safeJsonParse(existing.suggested_projects_json, []);
 
   const scheduledFor = data.scheduledFor !== undefined
     ? (data.scheduledFor ? String(data.scheduledFor).trim() : null)
@@ -4014,7 +4029,7 @@ async function updateAiSecretaryMeeting(DB, id, data, auth) {
     UPDATE ai_secretary_meetings SET
       title=?, meeting_type=?, meeting_date=?, status=?, participants_json=?, transcript_text=?, ended_at=?,
       summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?,
-      scheduled_for=?, reviewed_at=?, reviewed_by=?, created_by_account_id=?
+      suggested_projects_json=?, scheduled_for=?, reviewed_at=?, reviewed_by=?, created_by_account_id=?
     WHERE id=?
   `).bind(
     data.title !== undefined ? String(data.title).trim() : existing.title,
@@ -4030,6 +4045,7 @@ async function updateAiSecretaryMeeting(DB, id, data, auth) {
     JSON.stringify(resolutions),
     JSON.stringify(actionItems),
     JSON.stringify(policyFlags),
+    JSON.stringify(suggestedProjects),
     scheduledFor,
     reviewedAt,
     reviewedBy,
@@ -4400,6 +4416,124 @@ ${summaryLong || '(none)'}`;
   } catch (_) {}
 
   return ok({ minutesMarkdown: improvedMarkdown, summaryShort: improvedShort, summaryLong: improvedLong });
+}
+
+async function reconcileAiSecretaryInsights(DB, env, id, body) {
+  const minutesMarkdown = String(body?.minutesMarkdown || '').trim();
+  if (!minutesMarkdown) return err('No minutes provided', 400);
+
+  const existing = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
+  if (!existing || existing.deleted_at) return err('Meeting not found', 404);
+
+  const resolutions       = safeJsonParse(existing.resolutions_json, []);
+  const actionItems       = safeJsonParse(existing.action_items_json, []);
+  const policyFlags       = safeJsonParse(existing.policy_flags_json, []);
+  const suggestedProjects = safeJsonParse(existing.suggested_projects_json, []);
+
+  const hasInsights = resolutions.length || actionItems.length || policyFlags.length;
+  if (!hasInsights) {
+    return ok({ resolutions, actionItems, policyFlags, suggestedProjects, changes: 'No existing insights to reconcile.' });
+  }
+
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-v4-flash';
+  try {
+    const { results: sr } = await DB.prepare(
+      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
+    ).all();
+    const s = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
+    deepseekKey   = s.ai_deepseek_key   ? String(s.ai_deepseek_key).trim()   : '';
+    deepseekModel = s.ai_deepseek_model ? String(s.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
+  } catch (_) {}
+
+  if (!deepseekKey) {
+    return ok({ resolutions, actionItems, policyFlags, suggestedProjects, changes: 'AI key not configured — insights left unchanged.' });
+  }
+
+  const prompt = `You are an AI secretary for a Nigerian church committee (KPSC). The secretary has just approved the final minutes draft. Your task is to reconcile the saved insight items against those final minutes.
+
+Check each category and make ONLY clearly warranted changes:
+- Remove an item only if it is completely absent from the minutes (not just worded differently)
+- Modify an item only if the minutes clearly contradict it (e.g. different vote outcome, different assignee)
+- Add an item only if the minutes explicitly state something important that is entirely missing
+- Leave items unchanged if they reasonably reflect what is in the minutes, even with minor wording differences
+- Preserve all existing IDs
+
+Return ONLY a valid JSON object (no markdown fences, no text outside the JSON):
+{
+  "resolutions": [...],
+  "actionItems": [...],
+  "policyFlags": [...],
+  "suggestedProjects": [...],
+  "changes": "One or two sentence summary of what was changed, or exactly the string 'No changes needed' if nothing changed."
+}
+
+Final approved minutes:
+${minutesMarkdown}
+
+Current resolutions:
+${JSON.stringify(resolutions, null, 2)}
+
+Current action items:
+${JSON.stringify(actionItems, null, 2)}
+
+Current governance flags:
+${JSON.stringify(policyFlags, null, 2)}
+
+Current project suggestions:
+${JSON.stringify(suggestedProjects, null, 2)}`;
+
+  let parsed;
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({
+        model: deepseekModel,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.15,
+        max_tokens: 4000,
+      }),
+    });
+    if (!resp.ok) {
+      const errBody = await resp.json().catch(() => ({}));
+      return ok({ resolutions, actionItems, policyFlags, suggestedProjects, changes: `AI check skipped: ${errBody.error?.message || resp.status}` });
+    }
+    const data = await resp.json();
+    const raw = (data.choices?.[0]?.message?.content || '').trim();
+    if (!raw) return ok({ resolutions, actionItems, policyFlags, suggestedProjects, changes: 'AI returned empty response — insights left unchanged.' });
+    parsed = parseAiSecretaryJson(raw);
+  } catch (e) {
+    return ok({ resolutions, actionItems, policyFlags, suggestedProjects, changes: `AI check failed: ${e.message}` });
+  }
+
+  const changes = String(parsed?.changes || 'No changes needed').trim();
+  const noChange = changes.toLowerCase().includes('no changes');
+
+  if (noChange) {
+    return ok({ resolutions, actionItems, policyFlags, suggestedProjects, changes });
+  }
+
+  const updResolutions = Array.isArray(parsed?.resolutions) ? parsed.resolutions : resolutions;
+  const updActions     = Array.isArray(parsed?.actionItems) ? parsed.actionItems : actionItems;
+  const updFlags       = Array.isArray(parsed?.policyFlags) ? parsed.policyFlags : policyFlags;
+  const updProjects    = Array.isArray(parsed?.suggestedProjects) ? parsed.suggestedProjects : suggestedProjects;
+
+  try {
+    await DB.prepare(
+      `UPDATE ai_secretary_meetings SET resolutions_json=?, action_items_json=?, policy_flags_json=?, suggested_projects_json=? WHERE id=?`
+    ).bind(
+      JSON.stringify(updResolutions),
+      JSON.stringify(updActions),
+      JSON.stringify(updFlags),
+      JSON.stringify(updProjects),
+      id,
+    ).run();
+  } catch (_) {}
+
+  return ok({ resolutions: updResolutions, actionItems: updActions, policyFlags: updFlags, suggestedProjects: updProjects, changes });
 }
 
 async function createRealtimeTranscriptionToken(env) {
