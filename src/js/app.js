@@ -1828,7 +1828,9 @@ async function renderDashboard(){
   const histMonthRetention=await Promise.all([3,2,1].map(async i=>{
     let m=state.month-i,y=state.year;
     if(m<0){m+=12;y--;}
-    const mInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});
+    let mInc;
+    if(useRemPeriod){const{from:pf,to:pt}=computeRemPeriodDates(settings,allRemsDash,y,m);mInc=filterByDateRange(allIncomeDash,pf,pt);}
+    else{mInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});}
     const mTotal=mInc.reduce((s,r)=>s+(r.totalCollection||0),0);
     if(!mTotal) return {netLocal:0,retentionRate:null};
     const mRem=await calcRemittancesFromRecords(mInc);
@@ -1839,8 +1841,15 @@ async function renderDashboard(){
   for(let i=3;i>=0;i--){
     let m=state.month-i; let y=state.year;
     if(m<0){m+=12;y--;}
-    const mIncome=(allIncomeDash).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
-    const mExpenses=(allExpensesDash).filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    let mIncome,mExpenses;
+    if(useRemPeriod){
+      const{from:pf,to:pt}=computeRemPeriodDates(settings,allRemsDash,y,m);
+      mIncome=filterByDateRange(allIncomeDash,pf,pt);
+      mExpenses=filterByDateRange(allExpensesDash,pf,pt);
+    }else{
+      mIncome=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+      mExpenses=allExpensesDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
+    }
     const mNetLocal=i===0?netLocal:(histMonthRetention[3-i]?.netLocal||0);
     trendData.push({label:MONTHS[m].slice(0,3),income:mIncome.reduce((s,r)=>s+(r.totalCollection||0),0),expenses:mExpenses.reduce((s,r)=>s+(r.amount||0),0),netLocal:mNetLocal});
   }
@@ -1852,7 +1861,9 @@ async function renderDashboard(){
   const remainingSundays=Math.max(0,totalSundaysFullMonth-sundayCount);
   const histMonths=[];
   for(let i=3;i>=1;i--){let m=state.month-i,y=state.year;if(m<0){m+=12;y--;}
-    const hInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});
+    let hInc;
+    if(useRemPeriod){const{from:pf,to:pt}=computeRemPeriodDates(settings,allRemsDash,y,m);hInc=filterByDateRange(allIncomeDash,pf,pt);}
+    else{hInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});}
     const hSundayRecs=hInc.filter(r=>!r.source||r.source==='sunday_collection');
     const hSundays=hSundayRecs.length>0?hSundayRecs.length:fullMonthSundays(y,m);
     histMonths.push({income:trendData[3-i].income,expenses:trendData[3-i].expenses,sundays:hSundays});}
@@ -1945,16 +1956,15 @@ async function renderDashboard(){
 
     <div class="dash-flow" style="display:flex;flex-direction:column;margin-bottom:16px">
 
-      <!-- 1. Carried Forward Balance -->
-      <div class="flow-card" style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 20px;position:relative;overflow:hidden">
-        <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:#6366F1"></div>
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
-          <div style="flex:1;min-width:0">
-            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">${dashCarriedFwdLabel}</div>
-            <div style="font-size:26px;font-weight:800;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'};letter-spacing:-0.5px;line-height:1.15">${fmt(dashCarriedForward)}</div>
-            <div style="font-size:12px;color:var(--text3);margin-top:5px">Opening balance at the start of this period</div>
+      <!-- 1. Opening Balance — compact ledger anchor, not the headline figure -->
+      <div style="background:rgba(99,102,241,0.05);border:1px solid rgba(99,102,241,0.2);border-radius:10px;padding:10px 16px 10px 20px;position:relative;overflow:hidden">
+        <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:#6366F1;border-radius:3px 0 0 3px"></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+          <div style="min-width:0;flex:1">
+            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:#6366F1;margin-bottom:1px">${dashCarriedFwdLabel}</div>
+            <div style="font-size:11px;color:var(--text3)">Opening balance at the start of this period</div>
           </div>
-          <div style="width:44px;height:44px;border-radius:12px;background:#EEF2FF;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">⏮</div>
+          <div style="font-size:20px;font-weight:800;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'};letter-spacing:-0.5px;white-space:nowrap;flex-shrink:0">${fmt(dashCarriedForward)}</div>
         </div>
       </div>
 
@@ -1975,7 +1985,18 @@ async function renderDashboard(){
           </div>
           <div style="width:44px;height:44px;border-radius:12px;background:#E1F5EE;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">📥</div>
         </div>
-        ${dashChildrenTeacherTotal > 0 ? `<div style="margin-top:12px;padding:8px 10px;border-radius:8px;background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.22);font-size:11.5px;line-height:1.5;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        ${totalIncome > 0 ? `<div style="margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(29,158,117,0.06);border:1px dashed rgba(29,158,117,0.3)">
+          <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:7px">How this income splits</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;margin-bottom:5px">
+            <span style="color:var(--text2)">🏛 Parish retains</span>
+            <span style="font-weight:700;color:#1D9E75">${fmt(Math.max(0,netLocal))} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${Math.round(Math.max(0,netLocal)/totalIncome*100)}%)</span></span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px">
+            <span style="color:var(--text2)">📤 RCCG HQ share</span>
+            <span style="font-weight:600;color:var(--text3)">${fmt(Math.max(0,totalIncome-Math.max(0,netLocal)))}</span>
+          </div>
+        </div>` : ''}
+        ${dashChildrenTeacherTotal > 0 ? `<div style="margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.22);font-size:11.5px;line-height:1.5;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <span style="color:#BA7517;font-weight:600;flex:1;min-width:0">🧒 ${fmt(dashChildrenTeacherTotal)} with Children Teacher</span>
           <button class="btn btn-sm" onclick="App.showChildrenTeacherModal()" style="font-size:11px;padding:3px 10px">View →</button>
         </div>` : ''}
