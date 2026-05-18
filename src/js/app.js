@@ -1577,10 +1577,7 @@ async function calcChurchBalance(){
   // --- BANK BALANCE ---
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
   const cashDepositedToBank = cashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
-  // Pending expenses are included: every logged expense is an actual payment already made.
-  // "Pending" means awaiting admin approval, not awaiting payment. This matches how petty
-  // cash already works — the float is reduced the moment an expense is logged.
-  const bankExpenses = allExpenses.filter(e=>e.status==='approved'||e.status==='pending').reduce((s,e)=>{
+  const bankExpenses = allExpenses.filter(e=>e.status==='approved').reduce((s,e)=>{
     if(e.paymentMethod==='bank_transfer') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.bankAmount||0);
     return s;
@@ -1601,7 +1598,7 @@ async function calcChurchBalance(){
     return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
   }, 0);
   const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
-  const cashExpenses = allExpenses.filter(e=>e.status==='approved'||e.status==='pending').reduce((s,e)=>{
+  const cashExpenses = allExpenses.filter(e=>e.status==='approved').reduce((s,e)=>{
     if(e.paymentMethod==='cash') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.cashAmount||0);
     return s;
@@ -1736,8 +1733,9 @@ async function renderDashboard(){
     .filter(e => e.status === 'pending')
     .reduce((s, e) => s + (e.amount || 0), 0);
   const totalPeriodAllExpenses = totalPeriodApprExpenses + totalPeriodPendingExpenses;
-  // Carried forward = churchBal − (income − all-expenses for period). Algebraically exact.
-  const dashCarriedForward = churchBal.total - totalIncome + totalPeriodAllExpenses;
+  // Carried forward = churchBal − (income − approved-expenses for period).
+  // Must use approved-only to match calcChurchBalance (pending expenses don't reduce balances yet).
+  const dashCarriedForward = churchBal.total - totalIncome + totalPeriodApprExpenses;
   const dashPrevMonthName = MONTHS[state.month === 0 ? 11 : state.month - 1];
   // Label for the Carried Forward card — "after last remittance (19 Apr)" or "after last month (31 Mar)"
   const _pStart = new Date(dashPeriodFrom + 'T00:00:00');
@@ -2133,10 +2131,14 @@ async function renderDashboard(){
             <span style="color:var(--text3)">+ Total Income</span>
             <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(totalIncome)}</span>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-            <span style="color:var(--text3)">− Total Expenses ${totalPeriodPendingExpenses>0?'(incl. pending)':''}</span>
-            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodAllExpenses)}</span>
+          <div style="display:flex;justify-content:space-between;align-items:center${totalPeriodPendingExpenses>0?'':';border-bottom:1.5px dashed var(--border);padding-bottom:6px'}">
+            <span style="color:var(--text3)">− Approved Expenses</span>
+            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodApprExpenses)}</span>
           </div>
+          ${totalPeriodPendingExpenses>0?`<div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px;font-size:11px">
+            <span style="color:var(--text3)">⏳ + ${expenses.filter(e=>e.status==='pending').length} pending (not yet in balances)</span>
+            <span style="font-family:ui-monospace,monospace;color:#B8860B">+${fmt(totalPeriodPendingExpenses)}</span>
+          </div>`:''}
           <div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:13px;padding-top:2px">
             <span>= Total Church Balance</span>
             <span style="font-family:ui-monospace,monospace;color:#185FA5">${fmt(churchBal.total)}</span>
@@ -2151,7 +2153,7 @@ async function renderDashboard(){
           </div>
         </div>
         <div style="margin-top:12px;font-size:11px;color:var(--text3);line-height:1.6;border-top:1px solid var(--border);padding-top:10px">
-          Each row matches a card above. Use a calculator to verify any figure end-to-end.
+          Each row matches a card above. Pending expenses are shown separately — they don't reduce bank/cash balances until approved.
         </div>
       </div>
     </details>
@@ -5282,7 +5284,7 @@ async function renderBank(){
   // Calculate bank balance components
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
   const cashDepositedToBank = allCashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
-  const bankExpenses = allExpenses.filter(e=>e.status==='approved'||e.status==='pending').reduce((sum,e)=>{
+  const bankExpenses = allExpenses.filter(e=>e.status==='approved').reduce((sum,e)=>{
     if(e.paymentMethod==='bank_transfer') return sum+(e.amount||0);
     if(e.paymentMethod==='split') return sum+(e.bankAmount||0);
     return sum;
@@ -5302,7 +5304,7 @@ async function renderBank(){
     return s+Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
   },0);
   const bankToAccountantRB = allCashTx.filter(t=>t.type==='withdrawal'&&t.destination==='accountant_cash').reduce((s,t)=>s+(t.amount||0),0);
-  const cashExpensesRB = allExpenses.filter(e=>e.status==='approved'||e.status==='pending').reduce((s,e)=>{
+  const cashExpensesRB = allExpenses.filter(e=>e.status==='approved').reduce((s,e)=>{
     if(e.paymentMethod==='cash') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.cashAmount||0);
     return s;
