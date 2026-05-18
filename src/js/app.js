@@ -7266,7 +7266,7 @@ async function renderAdmin(){
     DB.getAudit(),
     DB.getPettyConfig()
   ]);
-  const settingsForView = { ...settings, pettyMax: pettyConfig?.max ?? settings.pettyMax };
+  const settingsForView = { ...settings, pettyMax: pettyConfig?.max ?? settings.pettyMax, pettyFloat: pettyConfig?.float ?? 0 };
   const tab=state.adminTab||'users';
 
   document.getElementById('pageContent').innerHTML=`
@@ -7314,6 +7314,7 @@ function renderAdminUsers(users){
 }
 
 function renderAdminSettings(s){
+  const floatColor = s.pettyFloat < 0 ? 'var(--danger)' : 'var(--success)';
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:1rem">Church Information</div>
     <div class="form-group"><label class="form-label">Church Name</label><input type="text" id="set_name" class="form-input" value="${s.churchName||''}" /></div>
@@ -7322,6 +7323,20 @@ function renderAdminSettings(s){
     <div class="form-group"><label class="form-label">Petty Cash Max Float (₦)</label><input type="number" id="set_petty" class="form-input" value="${s.pettyMax||50000}" /></div>
     <div class="form-group"><label class="form-label">Spendable Balance — Low Warning Threshold (₦)</label><input type="number" id="set_spendable_low" class="form-input" value="${s.spendableLow||20000}" /><div class="form-hint">Dashboard and Expenses page will show an amber warning when Spendable Balance falls below this amount. Default: ₦20,000.</div></div>
     <button class="btn btn-primary" onclick="App.saveSettings(this)">Save Settings</button>
+  </div>
+  <div class="card" style="margin-top:16px;border:1.5px solid var(--border)">
+    <div class="modal-title" style="font-size:15px;margin-bottom:4px">🔧 Petty Float Override</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Use this to correct the petty cash float when a deletion or data error has left it at the wrong value. A negative number means the church owes the Admin Officer that amount.</p>
+    <div style="background:var(--bg);border-radius:8px;padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:12px;color:var(--text2)">Current float</span>
+      <span style="font-weight:700;font-size:15px;color:${floatColor}">${s.pettyFloat<0?'−'+fmt(Math.abs(s.pettyFloat)):fmt(s.pettyFloat)}${s.pettyFloat<0?' (Owes Admin Officer)':''}</span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Set Float To (₦) — use negative to indicate church owes Admin Officer</label>
+      <input type="number" id="override_petty_float" class="form-input" value="${s.pettyFloat}" step="0.01" placeholder="e.g. -5000" />
+      <div class="form-hint">Example: enter <strong>-5000</strong> if the Admin Officer is owed ₦5,000. Enter <strong>0</strong> to clear. Enter a positive number if cash is on hand.</div>
+    </div>
+    <button class="btn btn-danger" onclick="App.confirmPettyFloatOverride(this)">Override Float (requires PIN)</button>
   </div>`;
 }
 
@@ -7526,6 +7541,53 @@ async function saveSettings(btn=null){
   } catch(err) {
     restore();
     showAlert(`Failed to save settings: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+function confirmPettyFloatOverride(){
+  const newFloat = parseFloat(document.getElementById('override_petty_float')?.value);
+  if(!Number.isFinite(newFloat)){ showAlert('Please enter a valid number.','danger'); return; }
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🔧 Confirm Petty Float Override</div>
+    <div class="alert alert-warn" style="margin-bottom:16px"><span class="alert-icon">⚠</span><span>You are setting the petty float to <strong>${newFloat < 0 ? '−'+fmt(Math.abs(newFloat))+' (Owes Admin Officer)' : fmt(newFloat)}</strong>. This directly overwrites the current balance — use only to fix data errors.</span></div>
+    <div class="form-group">
+      <label class="form-label">Enter your IT Admin PIN to confirm</label>
+      <input type="password" id="petty_float_pin" class="form-input" maxlength="6" placeholder="••••••" inputmode="numeric"
+        onkeydown="if(event.key==='Enter')App.submitPettyFloatOverride(${newFloat},document.getElementById('petty_float_override_btn'))" />
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button id="petty_float_override_btn" class="btn btn-danger" onclick="App.submitPettyFloatOverride(${newFloat},this)">Confirm Override</button>
+    </div>`);
+  setTimeout(()=>document.getElementById('petty_float_pin')?.focus(),100);
+}
+
+async function submitPettyFloatOverride(newFloat, btn=null){
+  const pin = document.getElementById('petty_float_pin')?.value?.trim();
+  if(!pin){ showAlert('Please enter your PIN.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Verifying…');
+  try {
+    await DB.login({ role:'it_admin', userId: state.user.id, pin });
+  } catch(e){
+    restore();
+    const msg = String(e?.message||'');
+    showAlert(msg.toLowerCase().includes('invalid credentials') ? 'Incorrect PIN. Please try again.' : 'PIN verification failed: '+msg, 'danger');
+    document.getElementById('petty_float_pin')?.select();
+    return;
+  }
+  try {
+    btn.innerHTML = '<span class="btn-spinner-sm"></span> Saving…';
+    const cfg = await DB.getPettyConfig();
+    const oldFloat = cfg?.float ?? 0;
+    await DB.savePettyConfig({ float: newFloat, max: cfg?.max ?? 50000 });
+    DB.addAudit('petty_float_override', `Petty float manually overridden from ${fmt(oldFloat)} to ${fmt(newFloat)} by IT Admin`, state.user?.name);
+    closeModal();
+    showAlert(`Petty float set to ${newFloat < 0 ? '−'+fmt(Math.abs(newFloat))+' (Owes Admin Officer)' : fmt(newFloat)}.`, 'success');
+    renderAdmin();
+  } catch(err){
+    restore();
+    showAlert('Failed to save: '+(err?.message||'Unknown error'), 'danger');
   }
 }
 
@@ -8003,7 +8065,7 @@ return {
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange,
-  setAdminTab, saveSettings, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
+  setAdminTab, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert
 };
