@@ -1908,72 +1908,53 @@ async function renderDashboard(){
 
     ${alerts}
 
-    <div class="kpi-grid">
-      <div class="kpi">
+    <div class="kpi-grid" style="grid-template-columns:repeat(3,minmax(0,1fr));row-gap:10px">
+
+      <!-- ── BLOCK 1: Components that build the church balance ── -->
+      <div class="kpi" style="border-top:3px solid #6366F1">
+        <div class="kpi-icon" style="background:#EEF2FF">⏮</div>
+        <div class="kpi-label">Carried Forward Balance</div>
+        <div class="kpi-val" style="color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'}">${fmt(dashCarriedForward)}</div>
+        <div class="kpi-delta" style="color:var(--text3)">Balance before this period</div>
+      </div>
+
+      <div class="kpi" style="border-top:3px solid var(--success)">
         <div class="kpi-icon" style="background:#E1F5EE">📥</div>
-        <div class="kpi-label">Total Income (${MONTHS[state.month].slice(0,3)})</div>
-        <div class="kpi-val">${fmt(totalIncome)}</div>
-        <div class="kpi-delta up">↑ ${income.length} record(s) this month</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-icon" style="background:#FCEBEB">📤</div>
-        <div class="kpi-label">RCCG Remittances Due</div>
-        <div class="kpi-val">${fmt(dashTotalRemDueKpi)}</div>
-        <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
-        ${dashMonthsElapsed>1?`<div class="kpi-delta warn" style="font-size:11px">⚠ Accumulated unpaid since ${fmtDate(dashFirstIncRec.date||dashFirstIncRec.createdAt)}</div>`:''}
-        <div class="kpi-delta warn">${dashUnpaidPeriodIncome>0?Math.round(dashTotalRemDueKpi/dashUnpaidPeriodIncome*100):0}% of unpaid period income</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-icon" style="background:#E1F5EE">🏦</div>
-        <div class="kpi-label">Local Retained Funds</div>
-        <div class="kpi-val">${fmt(netLocal)}</div>
-        <div class="kpi-delta up">Parish's share of period income</div>
-        ${dashChildrenTeacherTotal > 0 ? `<div style="margin-top:8px;padding:7px 9px;border-radius:6px;background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.25);font-size:11px;line-height:1.5">
-          <div style="color:#BA7517;font-weight:600">🧒 ${fmt(dashChildrenTeacherTotal)} with Children Teacher</div>
-          <div style="color:var(--text3);font-size:10px;margin-top:1px">65% of Teen/Children's Offering (for refreshments)</div>
-          <button class="btn btn-sm" onclick="App.showChildrenTeacherModal()" aria-label="View breakdown of children teacher funds" style="margin-top:5px;font-size:10px;padding:2px 8px">View Breakdown →</button>
+        <div class="kpi-label">+ Total Income</div>
+        <div class="kpi-val" style="color:var(--success)">${fmt(totalIncome)}</div>
+        <div class="kpi-delta up">↑ ${income.length} record(s) · ${useRemPeriod?MONTHS[state.month].slice(0,3)+' Rem. Period':MONTHS[state.month]+' '+state.year}</div>
+        ${dashChildrenTeacherTotal > 0 ? `<div style="margin-top:8px;padding:6px 8px;border-radius:6px;background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.22);font-size:10.5px;line-height:1.5">
+          <span style="color:#BA7517;font-weight:600">🧒 ${fmt(dashChildrenTeacherTotal)} with Children Teacher</span>
+          <button class="btn btn-sm" onclick="App.showChildrenTeacherModal()" style="margin-left:6px;font-size:10px;padding:1px 7px">View →</button>
         </div>` : ''}
       </div>
-      <div class="kpi kpi-balance" style="grid-column:span 1">
-        <div class="kpi-icon" style="background:#EEF2FF">🧮</div>
-        <div class="kpi-label">How Spendable is Calculated</div>
-        <div style="font-size:11px;color:var(--text3);line-height:2.1;margin-top:6px">
-          <div style="display:flex;justify-content:space-between">
-            <span>Carried forward balance</span>
-            <span style="font-weight:600;color:${dashCarriedForward<0?'var(--danger)':'var(--text)'}">${fmt(dashCarriedForward)}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between">
-            <span>+ Income (this period)</span>
-            <span style="font-weight:600;color:var(--primary)">${fmt(totalIncome)}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;border-bottom:1.5px solid var(--border);padding-bottom:4px">
-            <span>− Expenses (this period)</span>
-            <span style="font-weight:600;color:var(--danger)">−${fmt(totalPeriodApprExpenses)}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-weight:700;font-size:12px;padding-top:2px">
-            <span>= Total Church Balance</span>
-            <span>${fmt(churchBal.total)}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;border-bottom:1.5px solid var(--border);padding-bottom:4px">
-            <span>− HQ Remittances Due</span>
-            <span style="color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-weight:800;font-size:14px;color:${dashSpendColor};padding-top:2px">
-            <span>= Spendable</span>
-            <span>${fmt(dashSpendable)}</span>
-          </div>
-        </div>
+
+      <div class="kpi" style="border-top:3px solid var(--danger)">
+        <div class="kpi-icon" style="background:#FCEBEB">💸</div>
+        <div class="kpi-label">− Total Expenses</div>
+        <div class="kpi-val" style="color:var(--danger)">−${fmt(totalPeriodApprExpenses)}</div>
+        <div class="kpi-delta down">${expenses.filter(e=>e.status==='approved').length} approved expense(s)</div>
+        ${expenses.filter(e=>e.status==='pending').length>0?`<div class="kpi-delta warn" style="font-size:10.5px">⏳ ${expenses.filter(e=>e.status==='pending').length} pending approval</div>`:''}
       </div>
-      <div class="kpi kpi-balance" style="grid-column:span 1">
+
+      <!-- ── Separator: visually shows the = relationship ── -->
+      <div style="grid-column:1/-1;display:flex;align-items:center;gap:10px;margin:2px 0">
+        <div style="flex:1;height:1.5px;background:var(--border)"></div>
+        <div style="font-size:10px;font-weight:700;letter-spacing:1px;color:var(--text3);white-space:nowrap;text-transform:uppercase">= Total Church Balance</div>
+        <div style="flex:1;height:1.5px;background:var(--border)"></div>
+      </div>
+
+      <!-- ── BLOCK 2: Church balance → deductions → what's left ── -->
+      <div class="kpi kpi-balance" style="border-top:3px solid #185FA5">
         <div class="kpi-icon" style="background:#EAF3DE">🏛️</div>
         <div class="kpi-label">Total Church Balance</div>
-        <div class="kpi-val" style="color:${churchBal.total<0?'var(--danger)':'var(--primary)'}">${fmt(churchBal.total)}</div>
-        <div style="margin-top:6px;font-size:11px;color:var(--text3);line-height:1.8">
+        <div class="kpi-val" style="color:${churchBal.total<0?'var(--danger)':'#185FA5'}">${fmt(churchBal.total)}</div>
+        <div style="margin-top:8px;font-size:11px;color:var(--text3);line-height:1.9">
           <a onclick="App.navigate('bank')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:4px"></span>Bank: ${fmt(churchBal.bankBalance)}</a>
           <a onclick="App.setIncomeTab('all');App.navigate('income')" style="cursor:pointer;text-decoration:none;color:inherit;display:block">
             <span style="display:inline-block;width:8px;height:8px;background:${churchBal.cashDeficit>0?'var(--danger)':'#BA7517'};border-radius:50%;margin-right:4px"></span>
             ${churchBal.cashDeficit>0
-              ? `<span style="color:var(--danger);font-weight:600">🔴 Cash with Accountant: - ${fmt(churchBal.cashDeficit)} ⚠ Owes Accountant</span>`
+              ? `<span style="color:var(--danger);font-weight:600">🔴 Cash with Accountant: −${fmt(churchBal.cashDeficit)} ⚠ Owes Accountant</span>`
               : `Cash with Accountant: ${fmt(churchBal.cashWithAccountant)}`}
           </a>
           <a onclick="App.navigate('petty_cash')" style="cursor:pointer;text-decoration:none;color:inherit;display:block">
@@ -1983,25 +1964,30 @@ async function renderDashboard(){
               : `Petty Cash: ${fmt(churchBal.pettyFloat)}`}
           </a>
         </div>
-        <!-- Spendable — catchy coloured block -->
-        <div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:${dashSpendable<0?'rgba(163,45,45,0.09)':dashSpendable<20000?'rgba(186,117,23,0.09)':'rgba(29,158,117,0.09)'};border:1.5px solid ${dashSpendColor}33">
-          <div style="font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--text3);margin-bottom:6px">After Remittances</div>
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-            <div>
-              <div style="font-size:22px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.5px;line-height:1">${fmt(dashSpendable)}</div>
-              <div style="font-size:10px;color:var(--text3);margin-top:3px">${fmt(dashOutstandingRems)} still due to HQ</div>
-            </div>
-            <div style="text-align:center;flex-shrink:0">
-              <div style="font-size:22px">${dashSpendable<0?'🔴':dashSpendable<20000?'🟡':'🟢'}</div>
-              <div style="font-size:10px;font-weight:600;color:${dashSpendColor};margin-top:2px">${dashSpendable<0?'Deficit':dashSpendable<20000?'Low':'Spendable'}</div>
-            </div>
-          </div>
-          <div style="margin-top:8px;height:3px;background:${dashSpendColor}33;border-radius:2px;overflow:hidden">
-            <div style="height:3px;width:${dashTotalFunds>0?Math.min(100,Math.max(0,dashSpendable/dashTotalFunds*100)).toFixed(1):0}%;background:${dashSpendColor};border-radius:2px"></div>
-          </div>
-        </div>
       </div>
+
+      <div class="kpi" style="border-top:3px solid var(--amber)">
+        <div class="kpi-icon" style="background:#FCEBEB">📤</div>
+        <div class="kpi-label">− RCCG Remittances Due</div>
+        <div class="kpi-val" style="color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</div>
+        <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
+        ${dashMonthsElapsed>1?`<div class="kpi-delta warn" style="font-size:11px">⚠ Accumulated since ${fmtDate(dashFirstIncRec.date||dashFirstIncRec.createdAt)}</div>`:''}
+        <div class="kpi-delta warn" style="font-size:10.5px">${dashUnpaidPeriodIncome>0?Math.round(dashTotalRemDueKpi/dashUnpaidPeriodIncome*100):0}% of unpaid period income</div>
+      </div>
+
+      <div class="kpi" style="border-top:3px solid ${dashSpendColor}">
+        <div class="kpi-icon" style="background:${dashSpendable<0?'rgba(163,45,45,0.12)':dashSpendable<dashSpendLow?'rgba(184,134,11,0.12)':'rgba(29,158,117,0.12)'}">${dashSpendable<0?'🔴':dashSpendable<dashSpendLow?'🟡':'🟢'}</div>
+        <div class="kpi-label">= Actual Local Balance</div>
+        <div class="kpi-val" style="color:${dashSpendColor};font-size:${dashSpendable<-999999||dashSpendable>9999999?'16px':'20px'}">${fmt(dashSpendable)}</div>
+        <div class="kpi-delta" style="color:${dashSpendColor};font-weight:600;font-size:11px">${dashSpendable<0?'Deficit — seek support':dashSpendable<dashSpendLow?'Low — spend carefully':'Available to spend'}</div>
+        <div style="margin-top:10px;height:4px;background:${dashSpendColor}22;border-radius:2px;overflow:hidden">
+          <div style="height:4px;width:${dashTotalFunds>0?Math.min(100,Math.max(0,dashSpendable/dashTotalFunds*100)).toFixed(1):0}%;background:${dashSpendColor};border-radius:2px;transition:width 0.4s"></div>
+        </div>
+        <div style="margin-top:6px;font-size:10px;color:var(--text3)">${fmt(dashOutstandingRems)} still due to HQ</div>
+      </div>
+
     </div>
+
 
     ${(canAction('income_record')||canAction('expense_log')||canAction('petty_request')||canAccessPage('reports')||canAccessPage('remittances'))?`
     <div class="card">
