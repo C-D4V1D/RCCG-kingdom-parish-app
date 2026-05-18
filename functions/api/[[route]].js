@@ -383,6 +383,7 @@ export async function onRequest(context) {
       if (method === 'GET'  && !param) return await getPetty(DB);
       if (method === 'POST' && !param) return await createPettyEntry(DB, body);
       if (method === 'PUT'  &&  param) return await updatePettyEntry(DB, param, body);
+      if (method === 'DELETE' && param) return await deletePettyEntry(DB, param);
     }
 
     // ── /api/petty-config ──────────────────────────────────────
@@ -1721,6 +1722,31 @@ async function updatePettyEntry(DB, id, data) {
   vals.push(id);
   await DB.prepare(`UPDATE petty_cash SET ${sets.join(',')} WHERE id=?`).bind(...vals).run();
   return ok({ id, updated: true });
+}
+
+async function deletePettyEntry(DB, id) {
+  const row = await DB.prepare(`SELECT type, amount, status FROM petty_cash WHERE id=?`).bind(id).first();
+  if (!row) return err('Petty cash entry not found', 404);
+
+  // Adjust the petty float to reverse the effect of this entry.
+  const cfg = await DB.prepare(`SELECT float_amount FROM petty_config WHERE id='main'`).first();
+  if (cfg) {
+    let delta = 0;
+    if (row.type === 'refill') {
+      // Refill added to the float — reverse it.
+      delta = -Number(row.amount);
+    } else if (row.status === 'settled') {
+      // A settled advance reduced the float — restore it.
+      delta = Number(row.amount);
+    }
+    if (delta !== 0) {
+      const newFloat = Math.max(0, Number(cfg.float_amount) + delta);
+      await DB.prepare(`UPDATE petty_config SET float_amount=? WHERE id='main'`).bind(newFloat).run();
+    }
+  }
+
+  await DB.prepare(`DELETE FROM petty_cash WHERE id=?`).bind(id).run();
+  return ok({ id, deleted: true });
 }
 
 // ── REMITTANCES ───────────────────────────────────────────────────

@@ -34,6 +34,7 @@ const PERMISSION_DEFS = [
   { key:'income',           label:'Record Income',          group:'Finance'    },
   { key:'income_view',      label:'View Income Records',    group:'Finance'    },
   { key:'income_delete',    label:'Delete Income Records',  group:'Finance'    },
+  { key:'petty_delete',     label:'Delete Petty Cash Records', group:'Petty Cash' },
   { key:'remittances',      label:'Manage Remittances',     group:'Finance'    },
   { key:'remittances_view', label:'View Remittances',       group:'Finance'    },
   { key:'rem_cutoff_edit',  label:'Edit Remittance Cut-Off Dates', group:'Finance' },
@@ -186,6 +187,7 @@ const DB = {
   savePettyConfig(d)           { return apiFetch('petty-config','POST',d); },
   addPettyEntry(d)             { return apiFetch('petty','POST',d); },
   updatePettyEntry(id,d)       { return apiFetch(`petty/${id}`,'PUT',d); },
+  deletePettyEntry(id)         { return apiFetch(`petty/${id}`,'DELETE'); },
 
   getRemittances()             { return apiFetch('remittances'); },
   addRemittance(d)             { return apiFetch('remittances','POST',d); },
@@ -349,6 +351,7 @@ const ACCESS_RULES = {
     petty_topup_payment: ['income'],
     petty_approve_or_view: ['income','petty_approve'],
     income_delete: { roles:['it_admin'] },
+    petty_delete:  { roles:['it_admin'] },
     expense_edit_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_approved: ['expense_delete_approved'],
@@ -5875,8 +5878,63 @@ function showPettyDetail(id){
           <td style="padding:8px 0 8px 8px;font-size:13px;color:var(--text);vertical-align:top">${val}</td>
         </tr>`).join('')}
     </table>
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
+    <div class="modal-footer">
+    ${canAction('petty_delete')?`<button class="btn btn-danger" style="margin-right:auto" onclick="closeModal();App.confirmDeletePetty('${r.id}')">🗑 Delete</button>`:''}
+    <button class="btn" onclick="closeModal()">Close</button></div>`);
 }
+
+function confirmDeletePetty(id){
+  if(!canAction('petty_delete')){ showAlert('Access denied.','danger'); return; }
+  const all = state._pettyAll || [];
+  const r = all.find(x=>x.id===id);
+  if(!r) return;
+  const isRefill = r.type==='refill';
+  const floatNote = isRefill
+    ? `The petty float will be reduced by <strong>${fmt(r.amount)}</strong> to reverse this refill.`
+    : (r.status==='settled' ? `The petty float will be increased by <strong>${fmt(r.amount)}</strong> to restore this advance.` : '');
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🗑 Delete Petty Cash Record</div>
+    <div class="alert alert-warn" style="margin-bottom:16px"><span class="alert-icon">⚠</span><span><strong>This is permanent.</strong> ${floatNote ? floatNote+' ' : ''}This cannot be undone.</span></div>
+    <div class="form-group">
+      <label class="form-label">Enter your IT Admin PIN to confirm</label>
+      <input type="password" id="del_petty_pin" class="form-input" maxlength="6" placeholder="••••••" inputmode="numeric"
+        onkeydown="if(event.key==='Enter')App.submitDeletePetty('${id}',document.getElementById('del_petty_confirm_btn'))" />
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button id="del_petty_confirm_btn" class="btn btn-danger" onclick="App.submitDeletePetty('${id}',this)">Confirm Delete</button>
+    </div>`);
+  setTimeout(()=>document.getElementById('del_petty_pin')?.focus(),100);
+}
+
+async function submitDeletePetty(id, btn=null){
+  if(!canAction('petty_delete')){ showAlert('Access denied.','danger'); return; }
+  const pin = document.getElementById('del_petty_pin')?.value?.trim();
+  if(!pin){ showAlert('Please enter your PIN.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Verifying…');
+  try {
+    await DB.login({ role:'it_admin', userId: state.user.id, pin });
+  } catch(e){
+    restore();
+    const msg = String(e?.message||'');
+    showAlert(msg.toLowerCase().includes('invalid credentials') ? 'Incorrect PIN. Please try again.' : 'PIN verification failed: '+msg, 'danger');
+    document.getElementById('del_petty_pin')?.select();
+    return;
+  }
+  try {
+    btn.innerHTML = '<span class="btn-spinner-sm"></span> Deleting…';
+    await DB.deletePettyEntry(id);
+    DB.addAudit('petty_deleted', `Petty cash record deleted: ${id}`, state.user?.name);
+    closeModal();
+    showAlert('Petty cash record deleted.', 'warn');
+    renderPettyCash();
+  } catch(err){
+    restore();
+    showAlert('Failed to delete: '+(err?.message||'Unknown error'), 'danger');
+  }
+}
+
 // ── TOP-UP REQUEST (Admin Officer: wallet is low, based on expenses already logged) ──
 async function showTopUpRequest(){
   if(!canAction('petty_request')){ showAlert('You do not have permission to request petty cash top-up.','danger'); return; }
@@ -7941,7 +7999,7 @@ return {
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
-  renderPettyCash, showPettyDetail, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
+  renderPettyCash, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange,
