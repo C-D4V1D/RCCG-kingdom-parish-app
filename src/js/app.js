@@ -1988,6 +1988,45 @@ async function renderDashboard(){
 
     </div>
 
+    <!-- Collapsible calculation breakdown -->
+    <details style="margin-top:4px;margin-bottom:4px">
+      <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--rl);font-size:12px;font-weight:600;color:var(--text2);user-select:none">
+        <span style="font-size:14px">🧮</span>
+        <span>How is Actual Local Balance calculated?</span>
+        <span style="margin-left:auto;font-size:10px;color:var(--text3)">Tap to expand ▾</span>
+      </summary>
+      <div style="padding:14px 16px;background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--rl) var(--rl)">
+        <div style="font-size:11px;line-height:2.2;color:var(--text2)">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="color:var(--text3)">Carried Forward Balance</span>
+            <span style="font-weight:600;font-family:monospace;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'}">${fmt(dashCarriedForward)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="color:var(--text3)">+ Total Income (this period)</span>
+            <span style="font-weight:600;font-family:monospace;color:var(--success)">${fmt(totalIncome)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+            <span style="color:var(--text3)">− Total Expenses (this period)</span>
+            <span style="font-weight:600;font-family:monospace;color:var(--danger)">−${fmt(totalPeriodApprExpenses)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:12px;padding-top:2px">
+            <span>= Total Church Balance</span>
+            <span style="font-family:monospace;color:#185FA5">${fmt(churchBal.total)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+            <span style="color:var(--text3)">− RCCG Remittances Due</span>
+            <span style="font-weight:600;font-family:monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:13px;padding-top:2px">
+            <span>= Actual Local Balance</span>
+            <span style="font-family:monospace;color:${dashSpendColor}">${fmt(dashSpendable)}</span>
+          </div>
+        </div>
+        <div style="margin-top:10px;font-size:10px;color:var(--text3);line-height:1.6;border-top:1px solid var(--border);padding-top:8px">
+          Tip: each row corresponds to a card above — you can verify any figure with a calculator.
+        </div>
+      </div>
+    </details>
 
     ${(canAction('income_record')||canAction('expense_log')||canAction('petty_request')||canAccessPage('reports')||canAccessPage('remittances'))?`
     <div class="card">
