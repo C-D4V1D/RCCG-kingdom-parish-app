@@ -2065,7 +2065,7 @@ async function renderDashboard(){
       </div>
 
       <!-- 6. Available Fund After All Deductions (final answer) -->
-      <div class="flow-card" style="background:${dashSpendable<0?'rgba(163,45,45,0.04)':dashSpendable<dashSpendLow?'rgba(184,134,11,0.04)':'rgba(29,158,117,0.04)'};border:1.5px solid ${dashSpendColor}55;border-radius:14px;padding:18px 20px;position:relative;overflow:hidden">
+      <div class="flow-card" style="background:${dashSpendable<0?'rgba(163,45,45,0.04)':dashSpendable<dashSpendModerate?'rgba(184,134,11,0.04)':'rgba(29,158,117,0.04)'};border:1.5px solid ${dashSpendColor}55;border-radius:14px;padding:18px 20px;position:relative;overflow:hidden">
         <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:${dashSpendColor}"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
@@ -4281,7 +4281,7 @@ async function renderExpenses(){
   const outstandingRems = Math.max(0, allTimeIncomeRemDue + accumQuotas - paidRems);
   const totalChurch = churchBal.total;
   const spendable = totalChurch - outstandingRems;
-  const spendLow = parseFloat(settings?.spendableLow||0)||20000;
+  const spendLow = parseFloat(settings?.spendableModerate||0)||20000;
   const spendColor = spendable < 0 ? 'var(--danger)' : spendable < spendLow ? 'var(--amber)' : 'var(--success)';
   const spendLabel = spendable < 0 ? 'Deficit — remittances exceed available funds' : spendable < spendLow ? `Low — under ${fmt(spendLow)} threshold` : 'Sufficient';
 
@@ -7530,8 +7530,7 @@ function renderAdminSettings(s){
     <div class="form-group"><label class="form-label">Bank Name</label><input type="text" id="set_bank" class="form-input" value="${s.bankName||''}" /></div>
     <div class="form-group"><label class="form-label">Account Number</label><input type="text" id="set_acct" class="form-input" value="${s.accountNo||''}" /></div>
     <div class="form-group"><label class="form-label">Petty Cash Max Float (₦)</label><input type="number" id="set_petty" class="form-input" value="${s.pettyMax||50000}" /></div>
-    <div class="form-group"><label class="form-label">Spendable Balance — Low Warning Threshold (₦)</label><input type="number" id="set_spendable_low" class="form-input" value="${s.spendableLow||20000}" /><div class="form-hint">Expenses page shows an amber warning when Available Balance falls below this amount. Default: ₦20,000.</div></div>
-    <div style="margin-top:18px;margin-bottom:8px;font-size:13px;font-weight:700;color:var(--text2);border-top:1px solid var(--border);padding-top:14px">Dashboard Status Thresholds</div>
+    <div style="margin-top:18px;margin-bottom:8px;font-size:13px;font-weight:700;color:var(--text2);border-top:1px solid var(--border);padding-top:14px">Available Balance Status Thresholds</div>
     <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Control what status label appears on the Actual Balance card (Strong / Moderate / Low / Very Low / Deficit - Critical).</p>
     <div class="form-group"><label class="form-label">Strong threshold (₦)</label><input type="number" id="set_spendable_strong" class="form-input" value="${s.spendableStrong||40000}" /><div class="form-hint">Shows "Strong" when Actual Balance is at or above this amount. Default: ₦40,000.</div></div>
     <div class="form-group"><label class="form-label">Moderate threshold (₦)</label><input type="number" id="set_spendable_moderate" class="form-input" value="${s.spendableModerate||20000}" /><div class="form-hint">Shows "Moderate" when at or above this amount but below Strong. Default: ₦20,000.</div></div>
@@ -7743,7 +7742,6 @@ async function saveSettings(btn=null){
   s.accountNo=document.getElementById('set_acct')?.value;
   const pettyMax = parseFloat(document.getElementById('set_petty')?.value)||50000;
   s.pettyMax=pettyMax;
-  s.spendableLow=parseFloat(document.getElementById('set_spendable_low')?.value)||20000;
   s.spendableStrong=parseFloat(document.getElementById('set_spendable_strong')?.value)||40000;
   s.spendableModerate=parseFloat(document.getElementById('set_spendable_moderate')?.value)||20000;
   s.spendableVeryLow=parseFloat(document.getElementById('set_spendable_very_low')?.value)||10000;
