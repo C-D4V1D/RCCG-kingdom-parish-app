@@ -3759,8 +3759,6 @@ function buildAiSecretaryOutput(meeting, options = {}) {
     `# ${meeting.title || 'KPSC Meeting'}`,
     `## Minutes of ${typeLabel} Meeting — ${dateHeading}`,
     '',
-    '> *Draft minutes prepared by the AI secretary — please review, correct, and approve before filing.*',
-    '',
     '---',
     '',
     '## 1. Attendance',
@@ -4078,8 +4076,6 @@ Use exactly this numbered-section structure with Markdown headings:
 
 # [Meeting Title]
 ## Minutes of [Type] Meeting — [day, Nth Month Year]
-
-> *Draft minutes — for secretary review before approval and filing.*
 
 ---
 

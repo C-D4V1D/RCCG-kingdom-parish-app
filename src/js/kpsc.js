@@ -1946,6 +1946,52 @@ function pcm16ToWav(int16, sampleRate) {
   return buf;
 }
 
+// Wrap a Float32 PCM array as a 16-bit mono WAV Blob, reusing pcm16ToWav.
+function float32ToWavBlob(float32, sampleRate) {
+  const int16 = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    int16[i] = s < 0 ? s * 32768 : s * 32767;
+  }
+  return new Blob([pcm16ToWav(int16, sampleRate)], { type: 'audio/wav' });
+}
+
+// Decode a large audio file in the browser, resample to 16 kHz mono, and return
+// an array of WAV Blobs split into 8-minute chunks (each ≈15 MB — safely under the
+// 25 MB OpenAI transcription limit). Called before upload for files > 20 MB.
+async function resampleAndChunkAudio(file, onStatus) {
+  const TARGET_RATE = 16000;
+  const CHUNK_SECS  = 8 * 60; // 8 min → ~15.4 MB WAV per chunk
+
+  onStatus('Decoding audio…');
+  const raw = await file.arrayBuffer();
+
+  onStatus('Resampling to speech quality (16 kHz mono)…');
+  const tmpCtx = new AudioContext();
+  let decoded;
+  try {
+    decoded = await tmpCtx.decodeAudioData(raw);
+  } finally {
+    await tmpCtx.close().catch(() => {});
+  }
+
+  const outLen  = Math.ceil(decoded.duration * TARGET_RATE);
+  const offline = new OfflineAudioContext(1, outLen, TARGET_RATE);
+  const src     = offline.createBufferSource();
+  src.buffer    = decoded;
+  src.connect(offline.destination);
+  src.start(0);
+  const rendered = await offline.startRendering();
+  const pcm      = rendered.getChannelData(0);
+
+  const chunkSize = TARGET_RATE * CHUNK_SECS;
+  const blobs     = [];
+  for (let i = 0; i < pcm.length; i += chunkSize) {
+    blobs.push(float32ToWavBlob(pcm.slice(i, Math.min(i + chunkSize, pcm.length)), TARGET_RATE));
+  }
+  return blobs;
+}
+
 // Convert an ArrayBuffer to a base64 string (handles large buffers safely).
 // Chunks are collected into an array and joined once to avoid O(n²) string copies.
 function arrayBufferToBase64(buffer) {
@@ -3107,7 +3153,7 @@ async function renderMeetingRoom(main) {
         <div id="km-audio-panel" style="${S._meetingTab !== 'audio' ? 'display:none' : ''}">
           ${isEditable ? `
           <div class="k-section">
-            <p class="k-hint">Upload a pre-recorded audio file. The AI will transcribe it and add the text to the transcript. Supported formats: mp3, mp4, m4a, wav, webm, ogg (max 25 MB).</p>
+            <p class="k-hint">Upload a pre-recorded audio file. The AI will transcribe it and add the text to the transcript. Supported formats: mp3, mp4, m4a, wav, webm, ogg (max 70 MB — large files are auto-compressed before transcription).</p>
             <label class="k-label">Audio Recording</label>
             <input id="km-audio-file" type="file" accept="audio/*" class="k-input" style="padding:8px" onchange="Kpsc.previewAudioFile(this)" />
             <div style="margin-top:10px;display:flex;align-items:center;gap:8px">
@@ -8816,31 +8862,58 @@ async function transcribeAudioFile() {
   const notesInput = document.getElementById('km-audio-notes-photo');
   const notesFiles = getSelectedImageFiles(notesInput);
 
+  const DIRECT_LIMIT = 20 * 1024 * 1024; // files over 20 MB are compressed and chunked
+
   try {
-    // Build audio formData for multipart POST (no Content-Type header — browser sets boundary)
-    const audioForm = new FormData();
-    audioForm.append('audio', audioFile, audioFile.name);
-    audioForm.append('mimeType', audioFile.type || 'audio/webm');
+    let audioText = '';
 
-    // Kick off audio transcription (and optional OCR) in parallel
-    const audioPromise = fetch(`${API}/kpsc-transcribe-audio`, {
-      method: 'POST',
-      headers: { ...kpscSessionHeader() },
-      body: audioForm,
-    }).then(r => r.json());
+    if (audioFile.size > DIRECT_LIMIT) {
+      // ── Large file: resample to 16 kHz mono WAV, split into 8-min chunks ──
+      let chunks;
+      try {
+        chunks = await resampleAndChunkAudio(audioFile, msg => {
+          if (status) status.innerHTML = `<div class="k-loading" style="padding:16px">🎵 ${esc(msg)}</div>`;
+        });
+      } catch (e) {
+        if (status) status.innerHTML = `<div class="k-error-box">Could not prepare audio: ${esc(e.message)}. Try converting the file to MP3 first.</div>`;
+        return;
+      }
 
-    const ocrPromise = notesFiles.length ? ocrNotesImages(notesFiles) : Promise.resolve(null);
-
-    const [audioRes, ocrRes] = await Promise.all([audioPromise, ocrPromise]);
-
-    handleKpscAuthFailure(audioRes);
-
-    if (audioRes?.error && !audioRes?.transcript) {
-      if (status) status.innerHTML = `<div class="k-error-box">${esc(audioRes.error)}</div>`;
-      return;
+      for (let i = 0; i < chunks.length; i++) {
+        if (status) status.innerHTML = `<div class="k-loading" style="padding:16px">🤖 Transcribing part ${i + 1} of ${chunks.length}…</div>`;
+        const chunkForm = new FormData();
+        chunkForm.append('audio', chunks[i], `recording-part${i + 1}.wav`);
+        chunkForm.append('mimeType', 'audio/wav');
+        const res = await fetch(`${API}/kpsc-transcribe-audio`, {
+          method: 'POST',
+          headers: { ...kpscSessionHeader() },
+          body: chunkForm,
+        }).then(r => r.json());
+        handleKpscAuthFailure(res);
+        if (res?.error && !res?.transcript) throw new Error(res.error);
+        if (res?.transcript) audioText += (audioText ? ' ' : '') + res.transcript.trim();
+      }
+    } else {
+      // ── Small file: upload directly ───────────────────────────────────────
+      const audioForm = new FormData();
+      audioForm.append('audio', audioFile, audioFile.name);
+      audioForm.append('mimeType', audioFile.type || 'audio/webm');
+      const res = await fetch(`${API}/kpsc-transcribe-audio`, {
+        method: 'POST',
+        headers: { ...kpscSessionHeader() },
+        body: audioForm,
+      }).then(r => r.json());
+      handleKpscAuthFailure(res);
+      if (res?.error && !res?.transcript) {
+        if (status) status.innerHTML = `<div class="k-error-box">${esc(res.error)}</div>`;
+        return;
+      }
+      audioText = (res?.transcript || '').trim();
     }
 
-    const audioText = (audioRes?.transcript || '').trim();
+    // ── OCR notes in parallel (only kicked off here, after audio completes) ─
+    const ocrRes = notesFiles.length ? await ocrNotesImages(notesFiles) : null;
+
     if (!audioText) {
       if (status) status.innerHTML = `<div class="k-error-box">No speech was detected in the audio file. Please check the recording and try again.</div>`;
       return;
