@@ -363,6 +363,7 @@ export async function onRequest(context) {
       if (method === 'GET'  && !param) return await getIncome(DB);
       if (method === 'POST' && !param) return await createIncome(DB, body);
       if (method === 'PUT'  &&  param) return await updateIncome(DB, param, body);
+      if (method === 'DELETE' && param) return await deleteIncome(DB, param);
     }
 
     // ── /api/expenses ──────────────────────────────────────────
@@ -1481,6 +1482,11 @@ async function updateIncome(DB, id, data) {
     ).run();
   }
   return ok({ id, updated: true });
+}
+
+async function deleteIncome(DB, id) {
+  await DB.prepare(`DELETE FROM income WHERE id=?`).bind(id).run();
+  return ok({ id, deleted: true });
 }
 
 // ── EXPENSES ──────────────────────────────────────────────────────
