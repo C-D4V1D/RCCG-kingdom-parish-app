@@ -1686,6 +1686,15 @@ async function renderDashboard(){
     .reduce((s,q)=>s+(q.amount||0),0);
   const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
   const netLocal = remittances.netLocal - dashAllQuotasAmt;
+  // Other Income recorded under the "Local Church Use Only" category has no INCOME_TYPES
+  // field populated, so it contributes zero to remittance but inflates totalIncome.
+  // Pull it out explicitly so the split card doesn't quietly fold it into the HQ share.
+  const otherUnremittedIncome = income
+    .filter(r => r.source && r.source !== 'sunday_collection')
+    .filter(r => INCOME_TYPES.reduce((s,t)=>s+(r[t.key]||0),0) === 0)
+    .reduce((s,r) => s + (r.totalCollection||0), 0);
+  const parishRetains      = Math.max(0, netLocal);
+  const rccgAuthorityShare = Math.max(0, totalIncome - parishRetains - otherUnremittedIncome);
   const dashRemRates = remRatesDash?.rates || DEFAULT_REMITTANCE_RATES;
   const dashSundayRecs = income.filter(r => !r.source || r.source === 'sunday_collection');
   const dashChildrenTeacherTotal = dashSundayRecs.reduce((s, r) => s + getChildrenTeacherHeldCash(r, dashRemRates), 0);
@@ -1993,18 +2002,20 @@ async function renderDashboard(){
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
       <div>
-        <div class="page-title">Welcome, ${state.user?.name?.split(' ')[0]||'User'} 👋</div>
+        <div class="page-title">Welcome, ${(state.user?.name?.split(/\s+/).slice(0,2).join(' '))||'User'} 👋</div>
         <div class="page-sub">${monthLabel()} Financial Overview</div>
         <div style="margin-top:10px">
-          <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px">Select Period Type</div>
-          <div style="display:flex;border-radius:10px;overflow:hidden;border:1.5px solid var(--border);background:var(--bg)">
-            <button onclick="App.setDashPeriodMode('remittance')" style="flex:1;padding:9px 12px;border:none;border-right:1.5px solid var(--border);background:${useRemPeriod?'var(--surface)':'transparent'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s">
+          <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px;text-align:center">Select Period Type</div>
+          <div style="display:flex;gap:8px">
+            <button onclick="App.setDashPeriodMode('remittance')" style="flex:1;padding:10px 12px;border-radius:10px;border:1.5px solid ${useRemPeriod?'var(--primary)':'var(--border)'};background:${useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
               <div style="font-size:12.5px;font-weight:700;color:${useRemPeriod?'var(--primary)':'var(--text2)'}">${MONTHS[state.month]} Remittance Period</div>
-              <div style="font-size:10.5px;color:var(--text3);margin-top:2px">the custom RCCG period (${fmtDate(dashPeriodFrom)} – ${fmtDate(dashPeriodTo)})</div>
+              <div style="font-size:10.5px;color:var(--text3);margin-top:2px">the custom RCCG period</div>
+              <div style="margin-top:6px"><span style="display:inline-block;padding:3px 9px;border-radius:12px;background:${useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${useRemPeriod?'#fff':'var(--text2)'};font-size:10.5px;font-weight:700;letter-spacing:0.2px">${fmtDate(dashPeriodFrom)} – ${fmtDate(dashPeriodTo)}</span></div>
             </button>
-            <button onclick="App.setDashPeriodMode('calendar')" style="flex:1;padding:9px 12px;border:none;background:${!useRemPeriod?'var(--surface)':'transparent'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s">
+            <button onclick="App.setDashPeriodMode('calendar')" style="flex:1;padding:10px 12px;border-radius:10px;border:1.5px solid ${!useRemPeriod?'var(--primary)':'var(--border)'};background:${!useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${!useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
               <div style="font-size:12.5px;font-weight:700;color:${!useRemPeriod?'var(--primary)':'var(--text2)'}">${MONTHS[state.month]} Calendar Period</div>
-              <div style="font-size:10.5px;color:var(--text3);margin-top:2px">the normal month period (1 ${MONTHS[state.month].slice(0,3)} – ${new Date(state.year,state.month+1,0).getDate()} ${MONTHS[state.month].slice(0,3)})</div>
+              <div style="font-size:10.5px;color:var(--text3);margin-top:2px">the normal month period</div>
+              <div style="margin-top:6px"><span style="display:inline-block;padding:3px 9px;border-radius:12px;background:${!useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${!useRemPeriod?'#fff':'var(--text2)'};font-size:10.5px;font-weight:700;letter-spacing:0.2px">1 ${MONTHS[state.month].slice(0,3)} – ${new Date(state.year,state.month+1,0).getDate()} ${MONTHS[state.month].slice(0,3)}</span></div>
             </button>
           </div>
         </div>
@@ -2027,7 +2038,7 @@ async function renderDashboard(){
             <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:#6366F1;margin-bottom:1px">${dashCarriedFwdLabel}</div>
             <div style="font-size:11px;color:var(--text3)">Opening balance at the start of this period</div>
           </div>
-          <div style="font-size:20px;font-weight:800;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'};letter-spacing:-0.5px;white-space:nowrap;flex-shrink:0">${fmt(dashCarriedForward)}</div>
+          <div style="font-size:18px;font-weight:800;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'};letter-spacing:-0.5px;white-space:nowrap;flex-shrink:0">${fmt(dashCarriedForward)}</div>
         </div>
       </div>
 
@@ -2043,21 +2054,26 @@ async function renderDashboard(){
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
             <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Income (This Period)</div>
-            <div style="font-size:26px;font-weight:800;color:var(--success);letter-spacing:-0.5px;line-height:1.15">${fmt(totalIncome)}</div>
-            <div style="font-size:12px;color:var(--text3);margin-top:5px">↑ ${income.length} record(s) received</div>
+            <div style="font-size:22px;font-weight:800;color:var(--success);letter-spacing:-0.5px;line-height:1.15">${fmt(totalIncome)}</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:5px">Collections and other income</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:2px">↑ ${income.length} record(s) received</div>
           </div>
           <div style="width:44px;height:44px;border-radius:12px;background:#E1F5EE;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">📥</div>
         </div>
         ${totalIncome > 0 ? `<div style="margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(29,158,117,0.06);border:1px dashed rgba(29,158,117,0.3)">
           <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:7px">How this income splits</div>
           <div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;margin-bottom:5px">
+            <span style="color:var(--text2)">📤 RCCG Authority share</span>
+            <span style="font-weight:600;color:var(--text3)">${fmt(rccgAuthorityShare)} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${Math.round(rccgAuthorityShare/totalIncome*100)}%)</span></span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;margin-bottom:${otherUnremittedIncome>0?'5px':'0'}">
             <span style="color:var(--text2)">🏛 Parish retains</span>
-            <span style="font-weight:700;color:#1D9E75">${fmt(Math.max(0,netLocal))} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${Math.round(Math.max(0,netLocal)/totalIncome*100)}%)</span></span>
+            <span style="font-weight:700;color:#1D9E75">${fmt(parishRetains)} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${Math.round(parishRetains/totalIncome*100)}%)</span></span>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px">
-            <span style="color:var(--text2)">📤 RCCG HQ share</span>
-            <span style="font-weight:600;color:var(--text3)">${fmt(Math.max(0,totalIncome-Math.max(0,netLocal)))}</span>
-          </div>
+          ${otherUnremittedIncome>0?`<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px">
+            <span style="color:var(--text2)">🤝 Other unremitted income</span>
+            <span style="font-weight:700;color:#1D9E75">${fmt(otherUnremittedIncome)} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${Math.round(otherUnremittedIncome/totalIncome*100)}%)</span></span>
+          </div>`:''}
         </div>` : ''}
         ${dashChildrenTeacherTotal > 0 ? `<div style="margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.22);font-size:11.5px;line-height:1.5;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <span style="color:#BA7517;font-weight:600;flex:1;min-width:0">🧒 ${fmt(dashChildrenTeacherTotal)} with Children Teacher</span>
@@ -2077,8 +2093,8 @@ async function renderDashboard(){
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
             <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Expenses (This Period)</div>
-            <div style="font-size:26px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(totalPeriodAllExpenses)}</div>
-            <div style="font-size:12px;color:var(--text3);margin-top:5px">${expenses.filter(e=>e.status==='approved'&&!e.pettyRef).length} approved${totalPeriodPendingExpenses>0?` · <span style="color:var(--amber);font-weight:600">${expenses.filter(e=>isPendingExpense(e)&&!e.pettyRef).length} pending (${fmt(totalPeriodPendingExpenses)})</span>`:''}</div>
+            <div style="font-size:22px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(totalPeriodAllExpenses)}</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:5px">${expenses.filter(e=>e.status==='approved'&&!e.pettyRef).length} approved${totalPeriodPendingExpenses>0?` · <span style="color:var(--amber);font-weight:600">${expenses.filter(e=>isPendingExpense(e)&&!e.pettyRef).length} pending approval (${fmt(totalPeriodPendingExpenses)})</span>`:''}</div>
             ${totalPeriodPettyAdvanceSpend>0?`<div style="margin-top:8px;padding:7px 10px;border-radius:8px;background:rgba(186,117,23,0.08);border:1px dashed rgba(186,117,23,0.3);font-size:11.5px;line-height:1.5;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
               <span style="color:#BA7517">💳 Includes ${fmt(totalPeriodPettyAdvanceSpend)} via petty cash${pendingPettyAdvanceCount>0?` <span style="color:var(--text3)">(${pendingPettyAdvanceCount} awaiting receipt)</span>`:''}</span>
             </div>`:''}
@@ -2101,22 +2117,22 @@ async function renderDashboard(){
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
             <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Church Balance</div>
-            <div style="font-size:28px;font-weight:800;color:${churchBal.total<0?'var(--danger)':'#185FA5'};letter-spacing:-0.5px;line-height:1.15">${fmt(churchBal.total)}</div>
+            <div style="font-size:24px;font-weight:800;color:${churchBal.total<0?'var(--danger)':'#185FA5'};letter-spacing:-0.5px;line-height:1.15">${fmt(churchBal.total)}</div>
             <div style="font-size:12px;color:var(--text3);margin-top:5px">Actual money on hand right now</div>
           </div>
           <div style="width:44px;height:44px;border-radius:12px;background:#EAF3DE;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">🏛️</div>
         </div>
         <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border);font-size:12.5px;color:var(--text2);line-height:1.9">
           <a onclick="App.navigate('bank')" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between">
-            <span><span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:8px"></span>Bank</span>
+            <span><span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:8px"></span><span style="text-decoration:underline dotted #185FA5;text-underline-offset:3px">Bank</span></span>
             <span style="font-weight:600">${fmt(churchBal.bankBalance)}</span>
           </a>
           <a onclick="App.setIncomeTab('all');App.navigate('income')" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between">
-            <span><span style="display:inline-block;width:8px;height:8px;background:${churchBal.cashDeficit>0?'var(--danger)':'#BA7517'};border-radius:50%;margin-right:8px"></span>${churchBal.cashDeficit>0?'<span style="color:var(--danger);font-weight:600">Cash with Accountant ⚠ Owes</span>':'Cash with Accountant'}</span>
+            <span><span style="display:inline-block;width:8px;height:8px;background:${churchBal.cashDeficit>0?'var(--danger)':'#BA7517'};border-radius:50%;margin-right:8px"></span>${churchBal.cashDeficit>0?`<span style="color:var(--danger);font-weight:600;text-decoration:underline dotted var(--danger);text-underline-offset:3px">Cash with Accountant ⚠ Owes</span>`:`<span style="text-decoration:underline dotted #BA7517;text-underline-offset:3px">Cash with Accountant</span>`}</span>
             <span style="font-weight:600;color:${churchBal.cashDeficit>0?'var(--danger)':'inherit'}">${churchBal.cashDeficit>0?'−'+fmt(churchBal.cashDeficit):fmt(churchBal.cashWithAccountant)}</span>
           </a>
           <a onclick="App.navigate('petty_cash')" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between">
-            <span><span style="display:inline-block;width:8px;height:8px;background:${churchBal.pettyFloat<0?'var(--danger)':'#1D9E75'};border-radius:50%;margin-right:8px"></span>${churchBal.pettyFloat<0?'<span style="color:var(--danger);font-weight:600">Petty Cash ⚠ Owes Admin Officer</span>':'Petty Cash'}</span>
+            <span><span style="display:inline-block;width:8px;height:8px;background:${churchBal.pettyFloat<0?'var(--danger)':'#1D9E75'};border-radius:50%;margin-right:8px"></span>${churchBal.pettyFloat<0?`<span style="color:var(--danger);font-weight:600;text-decoration:underline dotted var(--danger);text-underline-offset:3px">Petty Cash ⚠ Owes Admin Officer</span>`:`<span style="text-decoration:underline dotted #1D9E75;text-underline-offset:3px">Petty Cash</span>`}</span>
             <span style="font-weight:600;color:${churchBal.pettyFloat<0?'var(--danger)':'inherit'}">${fmt(churchBal.pettyFloat)}</span>
           </a>
         </div>
@@ -2157,14 +2173,12 @@ async function renderDashboard(){
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
             <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Available Fund After All Deductions</div>
-            <div style="font-size:32px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.8px;line-height:1.1">${fmt(dashSpendable)}</div>
-            <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <span style="display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;background:${dashSpendColor}22;font-size:11.5px;font-weight:700;color:${dashSpendColor}">
-                ${dashSpendLabel}
-              </span>
-            </div>
+            <div style="font-size:26px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.8px;line-height:1.1">${fmt(dashSpendable)}</div>
           </div>
-          <div style="width:44px;height:44px;border-radius:12px;background:${dashSpendColor}22;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">${dashSpendable<0?'🔴':dashSpendable<dashSpendVeryLow?'🟠':dashSpendable<dashSpendModerate?'🟡':dashSpendable<dashSpendStrong?'🟩':'🟢'}</div>
+          <div style="display:flex;flex-direction:column;align-items:center;gap:8px;flex-shrink:0">
+            <div style="width:44px;height:44px;border-radius:12px;background:${dashSpendColor}22;display:flex;align-items:center;justify-content:center;font-size:22px">${dashSpendable<0?'🔴':dashSpendable<dashSpendVeryLow?'🟠':dashSpendable<dashSpendModerate?'🟡':dashSpendable<dashSpendStrong?'🟩':'🟢'}</div>
+            <span style="display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;background:${dashSpendColor}22;font-size:11.5px;font-weight:700;color:${dashSpendColor};white-space:nowrap">${dashSpendLabel}</span>
+          </div>
         </div>
         <div style="margin-top:14px;padding-top:12px;border-top:1px dashed ${dashSpendColor}33">
           <div style="height:8px;background:var(--bg);border-radius:4px;overflow:hidden;border:1.5px solid ${dashSpendColor}55">
