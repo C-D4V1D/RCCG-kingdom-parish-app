@@ -1508,7 +1508,7 @@ async function deleteIncome(DB, id) {
     // Restore the petty float.
     const cfg = await DB.prepare(`SELECT float_amount FROM petty_config WHERE id='main'`).first();
     if (cfg) {
-      const newFloat = Math.max(0, Number(cfg.float_amount) - Number(row.direct_petty_cash));
+      const newFloat = Number(cfg.float_amount) - Number(row.direct_petty_cash);
       await DB.prepare(`UPDATE petty_config SET float_amount=? WHERE id='main'`).bind(newFloat).run();
     }
   }
@@ -1740,7 +1740,7 @@ async function deletePettyEntry(DB, id) {
       delta = Number(row.amount);
     }
     if (delta !== 0) {
-      const newFloat = Math.max(0, Number(cfg.float_amount) + delta);
+      const newFloat = Number(cfg.float_amount) + delta;
       await DB.prepare(`UPDATE petty_config SET float_amount=? WHERE id='main'`).bind(newFloat).run();
     }
   }
