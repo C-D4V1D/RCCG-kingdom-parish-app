@@ -398,6 +398,41 @@ function filterByDateRange(arr, fromDate, toDate){
   });
 }
 
+// Expense status helpers.
+// Admin Officer expenses are saved with 'pending_approval'; other roles save with 'approved'.
+// 'pending' is treated as a legacy alias of 'pending_approval'. Both pending statuses still
+// represent payments already made (the bank/cash/petty float was debited the moment the
+// expense was logged) — so for balance and period totals we treat them the same as approved.
+function isLoggedExpense(e){
+  if(!e) return false;
+  return e.status === 'approved' || e.status === 'pending' || e.status === 'pending_approval';
+}
+function isPendingExpense(e){
+  if(!e) return false;
+  return e.status === 'pending' || e.status === 'pending_approval';
+}
+
+// A petty cash advance debits the float at approval time but the expense record is only
+// created when the Admin Officer settles with a receipt (and then it carries a pettyRef).
+// To compute period totals correctly we count the advance ONCE — at the float-debit moment —
+// and exclude the duplicate settle-expense via its pettyRef.
+function isApprovedOrSettledAdvance(h){
+  return h && h.type === 'advance' && (h.status === 'approved' || h.status === 'settled');
+}
+// The date a petty cash advance actually moved money. Falls back to createdAt for older
+// records that may pre-date the approvedAt field.
+function pettyAdvanceImpactDate(h){
+  return (h?.approvedAt || h?.createdAt || h?.date || '').slice(0,10);
+}
+function pettyAdvanceImpactAmount(h){
+  if(!h) return 0;
+  // Settled advances may have an actualAmount that differs from the originally approved
+  // amount (under/overspend) — use the actual when present.
+  return h.status === 'settled'
+    ? (h.actualAmount != null ? h.actualAmount : (h.amount||0))
+    : (h.amount||0);
+}
+
 function computeRemPeriodDates(settings, allRems, year, month){
   const cutoffConfig = getRemCutoffDates(settings, year);
   const cutoffYear   = cutoffConfig ? Number(cutoffConfig.year) : null;
@@ -1580,7 +1615,7 @@ async function calcChurchBalance(){
   // Pending expenses are included: every logged expense is an actual payment already made.
   // "Pending" means awaiting admin approval, not awaiting payment. This matches how petty
   // cash already works — the float is reduced the moment an expense is logged.
-  const bankExpenses = allExpenses.filter(e=>e.status==='approved'||e.status==='pending').reduce((s,e)=>{
+  const bankExpenses = allExpenses.filter(isLoggedExpense).reduce((s,e)=>{
     if(e.paymentMethod==='bank_transfer') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.bankAmount||0);
     return s;
@@ -1601,7 +1636,7 @@ async function calcChurchBalance(){
     return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
   }, 0);
   const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
-  const cashExpenses = allExpenses.filter(e=>e.status==='approved'||e.status==='pending').reduce((s,e)=>{
+  const cashExpenses = allExpenses.filter(isLoggedExpense).reduce((s,e)=>{
     if(e.paymentMethod==='cash') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.cashAmount||0);
     return s;
@@ -1728,15 +1763,40 @@ async function renderDashboard(){
     : dashSpendable < dashSpendStrong   ? '#2d7f5e'
     : 'var(--success)';
 
-  // Reconciliation card figures — include ALL expenses (approved + pending) for the period
+  // Reconciliation card figures — include EVERY balance-affecting expense for the period:
+  //   1. Logged expenses (approved + pending_approval), EXCLUDING those auto-created when an
+  //      advance is settled. Those carry a pettyRef and are bookkeeping duplicates of the
+  //      original advance — counting both double-counts the same petty cash spend.
+  //   2. Approved/settled petty cash advances dated in this period. The float was debited
+  //      at approval time, so the cash has already left the church's coffers; this is the
+  //      moment the expense really happens, regardless of when (or whether) the receipt
+  //      is later attached. For settled advances we use actualAmount so over-/under-spend
+  //      is captured. The advance's approval date drives period membership.
   const totalPeriodApprExpenses = expenses
-    .filter(e => e.status === 'approved')
+    .filter(e => e.status === 'approved' && !e.pettyRef)
     .reduce((s, e) => s + (e.amount || 0), 0);
   const totalPeriodPendingExpenses = expenses
-    .filter(e => e.status === 'pending')
+    .filter(e => isPendingExpense(e) && !e.pettyRef)
     .reduce((s, e) => s + (e.amount || 0), 0);
-  const totalPeriodAllExpenses = totalPeriodApprExpenses + totalPeriodPendingExpenses;
-  // Carried forward = churchBal − (income − all-expenses for period). Algebraically exact.
+  const totalPeriodLoggedExpenses = totalPeriodApprExpenses + totalPeriodPendingExpenses;
+
+  const pettyAdvanceInPeriod = (h) => {
+    if(!isApprovedOrSettledAdvance(h)) return false;
+    const d = pettyAdvanceImpactDate(h);
+    if(!d) return false;
+    if(useRemPeriod) return d >= dashPeriodFrom && d <= dashPeriodTo;
+    const dt = new Date(d);
+    return dt.getMonth() === state.month && dt.getFullYear() === state.year;
+  };
+  const periodPettyAdvances = pettyHistDash.filter(pettyAdvanceInPeriod);
+  const totalPeriodPettyAdvanceSpend = periodPettyAdvances
+    .reduce((s, h) => s + pettyAdvanceImpactAmount(h), 0);
+  const pendingPettyAdvanceCount = periodPettyAdvances
+    .filter(h => h.status === 'approved' && !h.receiptNo).length;
+
+  const totalPeriodAllExpenses = totalPeriodLoggedExpenses + totalPeriodPettyAdvanceSpend;
+  // Carried forward = churchBal − (income − all-expenses for period). Algebraically exact
+  // once "all-expenses" reflects EVERY real outflow, including unsettled advances.
   const dashCarriedForward = churchBal.total - totalIncome + totalPeriodAllExpenses;
   const dashPrevMonthName = MONTHS[state.month === 0 ? 11 : state.month - 1];
   // Label for the Carried Forward card — "after last remittance (19 Apr)" or "after last month (31 Mar)"
@@ -2018,7 +2078,10 @@ async function renderDashboard(){
           <div style="flex:1;min-width:0">
             <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Expenses (This Period)</div>
             <div style="font-size:26px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(totalPeriodAllExpenses)}</div>
-            <div style="font-size:12px;color:var(--text3);margin-top:5px">${expenses.filter(e=>e.status==='approved').length} approved${totalPeriodPendingExpenses>0?` · <span style="color:var(--amber);font-weight:600">${expenses.filter(e=>e.status==='pending').length} pending (${fmt(totalPeriodPendingExpenses)})</span>`:''}</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:5px">${expenses.filter(e=>e.status==='approved'&&!e.pettyRef).length} approved${totalPeriodPendingExpenses>0?` · <span style="color:var(--amber);font-weight:600">${expenses.filter(e=>isPendingExpense(e)&&!e.pettyRef).length} pending (${fmt(totalPeriodPendingExpenses)})</span>`:''}</div>
+            ${totalPeriodPettyAdvanceSpend>0?`<div style="margin-top:8px;padding:7px 10px;border-radius:8px;background:rgba(186,117,23,0.08);border:1px dashed rgba(186,117,23,0.3);font-size:11.5px;line-height:1.5;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <span style="color:#BA7517">💳 Includes ${fmt(totalPeriodPettyAdvanceSpend)} via petty cash${pendingPettyAdvanceCount>0?` <span style="color:var(--text3)">(${pendingPettyAdvanceCount} awaiting receipt)</span>`:''}</span>
+            </div>`:''}
           </div>
           <div style="width:44px;height:44px;border-radius:12px;background:#FCEBEB;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">💸</div>
         </div>
@@ -2948,7 +3011,7 @@ async function confirmBulkDeposit(){
 
   // Cash expenses (approved + pending — all are actual payments already made)
   const cashExpenseItems = allExpenses
-    .filter(e=>(e.status==='approved'||e.status==='pending')&&(e.paymentMethod==='cash'||(e.paymentMethod==='split'&&(e.cashAmount||0)>0)))
+    .filter(e=>isLoggedExpense(e)&&(e.paymentMethod==='cash'||(e.paymentMethod==='split'&&(e.cashAmount||0)>0)))
     .sort((a,b)=>new Date(a.date||a.createdAt)-new Date(b.date||b.createdAt));
 
   // Petty cash top-ups paid from accountant's cash (negative)
@@ -5282,7 +5345,7 @@ async function renderBank(){
   // Calculate bank balance components
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
   const cashDepositedToBank = allCashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
-  const bankExpenses = allExpenses.filter(e=>e.status==='approved'||e.status==='pending').reduce((sum,e)=>{
+  const bankExpenses = allExpenses.filter(isLoggedExpense).reduce((sum,e)=>{
     if(e.paymentMethod==='bank_transfer') return sum+(e.amount||0);
     if(e.paymentMethod==='split') return sum+(e.bankAmount||0);
     return sum;
@@ -5302,7 +5365,7 @@ async function renderBank(){
     return s+Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
   },0);
   const bankToAccountantRB = allCashTx.filter(t=>t.type==='withdrawal'&&t.destination==='accountant_cash').reduce((s,t)=>s+(t.amount||0),0);
-  const cashExpensesRB = allExpenses.filter(e=>e.status==='approved'||e.status==='pending').reduce((s,e)=>{
+  const cashExpensesRB = allExpenses.filter(isLoggedExpense).reduce((s,e)=>{
     if(e.paymentMethod==='cash') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.cashAmount||0);
     return s;
