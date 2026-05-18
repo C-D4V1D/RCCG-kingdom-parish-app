@@ -7115,8 +7115,7 @@ async function renderReports(){
     const prevCutoffDay = (prevCC && Number.isInteger(prevCC.dates[prevMonth]) && Number(prevCC.year)===prevYear)
       ? prevCC.dates[prevMonth] : null;
     if(prevCutoffDay){
-      const d=new Date(prevYear,prevMonth,prevCutoffDay); d.setDate(d.getDate()+1);
-      state.reportFromDate=ymdLocal(d);
+      state.reportFromDate=ymdLocal(new Date(prevYear,prevMonth,prevCutoffDay));
     } else {
       state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
     }
