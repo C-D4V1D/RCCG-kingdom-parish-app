@@ -1711,8 +1711,19 @@ async function renderDashboard(){
   const dashOutstandingRems = dashTotalRemDueKpi;
   const dashTotalFunds = churchBal.total;
   const dashSpendable = dashTotalFunds - dashOutstandingRems;
-  const dashSpendLow = parseFloat(settingsDash?.spendableLow||0)||20000;
-  const dashSpendColor = dashSpendable < 0 ? 'var(--danger)' : dashSpendable < dashSpendLow ? '#B8860B' : 'var(--success)';
+  const dashSpendStrong   = parseFloat(settingsDash?.spendableStrong||0)||40000;
+  const dashSpendModerate = parseFloat(settingsDash?.spendableModerate||0)||20000;
+  const dashSpendVeryLow  = parseFloat(settingsDash?.spendableVeryLow||0)||10000;
+  const dashSpendLabel = dashSpendable < 0 ? 'Deficit - Critical'
+    : dashSpendable < dashSpendVeryLow  ? 'Very Low'
+    : dashSpendable < dashSpendModerate ? 'Low'
+    : dashSpendable < dashSpendStrong   ? 'Moderate'
+    : 'Strong';
+  const dashSpendColor = dashSpendable < 0 ? 'var(--danger)'
+    : dashSpendable < dashSpendVeryLow  ? '#D97706'
+    : dashSpendable < dashSpendModerate ? '#B8860B'
+    : dashSpendable < dashSpendStrong   ? '#2d7f5e'
+    : 'var(--success)';
 
   // Reconciliation card figures — include ALL expenses (approved + pending) for the period
   const totalPeriodApprExpenses = expenses
@@ -1725,6 +1736,16 @@ async function renderDashboard(){
   // Carried forward = churchBal − (income − all-expenses for period). Algebraically exact.
   const dashCarriedForward = churchBal.total - totalIncome + totalPeriodAllExpenses;
   const dashPrevMonthName = MONTHS[state.month === 0 ? 11 : state.month - 1];
+  // Label for the Carried Forward card — "after last remittance (19 Apr)" or "after last month (31 Mar)"
+  const _pStart = new Date(dashPeriodFrom + 'T00:00:00');
+  const _dayBefore = new Date(_pStart); _dayBefore.setDate(_dayBefore.getDate() - 1);
+  const _lastDayPrevMo = new Date(state.year, state.month, 0);
+  const dashCarriedFwdDateStr = useRemPeriod
+    ? `${_dayBefore.getDate()} ${MONTHS[_dayBefore.getMonth()].slice(0,3)}`
+    : `${_lastDayPrevMo.getDate()} ${MONTHS[_lastDayPrevMo.getMonth()].slice(0,3)}`;
+  const dashCarriedFwdLabel = useRemPeriod
+    ? `Balance after last remittance (${dashCarriedFwdDateStr})`
+    : `Balance after last month (${dashCarriedFwdDateStr})`;
 
   // Feed items — richer detail for Recent Transactions card
   const recentIncome = allIncome.slice(0,4);
@@ -1900,10 +1921,18 @@ async function renderDashboard(){
       <div>
         <div class="page-title">Welcome, ${state.user?.name?.split(' ')[0]||'User'} 👋</div>
         <div class="page-sub">${monthLabel()} Financial Overview</div>
-        <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
-          <button onclick="App.setDashPeriodMode('remittance')" class="btn btn-sm${useRemPeriod?' btn-primary':''}" title="Filter by remittance cut-off period">📅 Rem. Period</button>
-          <button onclick="App.setDashPeriodMode('calendar')" class="btn btn-sm${!useRemPeriod?' btn-primary':''}" title="Filter by calendar month">🗓 Calendar</button>
-          ${useRemPeriod?`<span style="font-size:11px;color:var(--text3)">${fmtDate(dashPeriodFrom)} – ${fmtDate(dashPeriodTo)}</span>`:''}
+        <div style="margin-top:10px">
+          <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px">Select Period Type</div>
+          <div style="display:flex;border-radius:10px;overflow:hidden;border:1.5px solid var(--border);background:var(--bg)">
+            <button onclick="App.setDashPeriodMode('remittance')" style="flex:1;padding:9px 12px;border:none;border-right:1.5px solid var(--border);background:${useRemPeriod?'var(--surface)':'transparent'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s">
+              <div style="font-size:12.5px;font-weight:700;color:${useRemPeriod?'var(--primary)':'var(--text2)'}">${MONTHS[state.month]} Remittance Period</div>
+              <div style="font-size:10.5px;color:var(--text3);margin-top:2px">the custom RCCG period (${fmtDate(dashPeriodFrom)} – ${fmtDate(dashPeriodTo)})</div>
+            </button>
+            <button onclick="App.setDashPeriodMode('calendar')" style="flex:1;padding:9px 12px;border:none;background:${!useRemPeriod?'var(--surface)':'transparent'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s">
+              <div style="font-size:12.5px;font-weight:700;color:${!useRemPeriod?'var(--primary)':'var(--text2)'}">${MONTHS[state.month]} Calendar Period</div>
+              <div style="font-size:10.5px;color:var(--text3);margin-top:2px">the normal month period (1 ${MONTHS[state.month].slice(0,3)} – ${new Date(state.year,state.month+1,0).getDate()} ${MONTHS[state.month].slice(0,3)})</div>
+            </button>
+          </div>
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -1921,9 +1950,9 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:#6366F1"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
-            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Carried Forward Balance (${dashPrevMonthName})</div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">${dashCarriedFwdLabel}</div>
             <div style="font-size:26px;font-weight:800;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'};letter-spacing:-0.5px;line-height:1.15">${fmt(dashCarriedForward)}</div>
-            <div style="font-size:12px;color:var(--text3);margin-top:5px">Balance brought forward from ${dashPrevMonthName}</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:5px">Opening balance at the start of this period</div>
           </div>
           <div style="width:44px;height:44px;border-radius:12px;background:#EEF2FF;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">⏮</div>
         </div>
@@ -1940,7 +1969,7 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--success)"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
-            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Income</div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Income (This Period)</div>
             <div style="font-size:26px;font-weight:800;color:var(--success);letter-spacing:-0.5px;line-height:1.15">${fmt(totalIncome)}</div>
             <div style="font-size:12px;color:var(--text3);margin-top:5px">↑ ${income.length} record(s) received</div>
           </div>
@@ -1963,7 +1992,7 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--danger)"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
-            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Expenses</div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Expenses (This Period)</div>
             <div style="font-size:26px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(totalPeriodAllExpenses)}</div>
             <div style="font-size:12px;color:var(--text3);margin-top:5px">${expenses.filter(e=>e.status==='approved').length} approved${totalPeriodPendingExpenses>0?` · <span style="color:var(--amber);font-weight:600">${expenses.filter(e=>e.status==='pending').length} pending (${fmt(totalPeriodPendingExpenses)})</span>`:''}</div>
           </div>
@@ -2031,7 +2060,7 @@ async function renderDashboard(){
       <div style="display:flex;justify-content:center;align-items:center;height:36px;position:relative">
         <div style="position:absolute;left:50%;top:0;bottom:0;width:1.5px;background:var(--border);transform:translateX(-50%)"></div>
         <div style="background:var(--surface);border:1.5px solid ${dashSpendColor};border-radius:14px;padding:4px 12px;font-size:11px;font-weight:700;color:${dashSpendColor};letter-spacing:0.8px;text-transform:uppercase;z-index:1;position:relative;display:flex;align-items:center;gap:6px">
-          <span style="font-size:14px">=</span><span>Available Fund</span>
+          <span style="font-size:14px">=</span><span>Actual Balance</span>
         </div>
       </div>
 
@@ -2043,17 +2072,16 @@ async function renderDashboard(){
             <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Available Fund After All Deductions</div>
             <div style="font-size:32px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.8px;line-height:1.1">${fmt(dashSpendable)}</div>
             <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;background:${dashSpendColor}22;font-size:11.5px;font-weight:700;color:${dashSpendColor}">
-                ${dashSpendable<0?'🔴 Deficit':dashSpendable<dashSpendLow?'🟡 Low':'🟢 Healthy'}
+              <span style="display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;background:${dashSpendColor}22;font-size:11.5px;font-weight:700;color:${dashSpendColor}">
+                ${dashSpendLabel}
               </span>
-              <span style="font-size:11.5px;color:var(--text3)">${dashSpendable<0?'Seek support':dashSpendable<dashSpendLow?'Spend carefully':'Free to spend'}</span>
             </div>
           </div>
-          <div style="width:44px;height:44px;border-radius:12px;background:${dashSpendColor}22;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">${dashSpendable<0?'🔴':dashSpendable<dashSpendLow?'🟡':'🟢'}</div>
+          <div style="width:44px;height:44px;border-radius:12px;background:${dashSpendColor}22;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">${dashSpendable<0?'🔴':dashSpendable<dashSpendVeryLow?'🟠':dashSpendable<dashSpendModerate?'🟡':dashSpendable<dashSpendStrong?'🟩':'🟢'}</div>
         </div>
         <div style="margin-top:14px;padding-top:12px;border-top:1px dashed ${dashSpendColor}33">
-          <div style="height:6px;background:${dashSpendColor}22;border-radius:3px;overflow:hidden">
-            <div style="height:6px;width:${dashTotalFunds>0?Math.min(100,Math.max(0,dashSpendable/dashTotalFunds*100)).toFixed(1):0}%;background:${dashSpendColor};border-radius:3px;transition:width 0.5s"></div>
+          <div style="height:8px;background:var(--bg);border-radius:4px;overflow:hidden;border:1.5px solid ${dashSpendColor}55">
+            <div style="height:100%;width:${dashTotalFunds>0?Math.min(100,Math.max(0,dashSpendable/dashTotalFunds*100)).toFixed(1):0}%;background:${dashSpendColor};border-radius:4px;transition:width 0.5s"></div>
           </div>
           <div style="margin-top:6px;font-size:11px;color:var(--text3);display:flex;justify-content:space-between">
             <span>${fmt(dashOutstandingRems)} still due to HQ</span>
@@ -2068,13 +2096,13 @@ async function renderDashboard(){
     <details style="margin-bottom:16px">
       <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--rl);font-size:12.5px;font-weight:600;color:var(--text2);user-select:none">
         <span style="font-size:16px">🧮</span>
-        <span>How is Available Fund calculated?</span>
+        <span>How is Actual Balance calculated?</span>
         <span style="margin-left:auto;font-size:11px;color:var(--text3)">Tap to expand ▾</span>
       </summary>
       <div style="padding:16px 18px;background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--rl) var(--rl)">
         <div style="font-size:12px;line-height:2.3;color:var(--text2)">
           <div style="display:flex;justify-content:space-between;align-items:center">
-            <span style="color:var(--text3)">Carried Forward Balance (${dashPrevMonthName})</span>
+            <span style="color:var(--text3)">${dashCarriedFwdLabel}</span>
             <span style="font-weight:600;font-family:ui-monospace,monospace;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'}">${fmt(dashCarriedForward)}</span>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center">
@@ -2094,7 +2122,7 @@ async function renderDashboard(){
             <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
-            <span>= Available Fund</span>
+            <span>= Actual Balance</span>
             <span style="font-family:ui-monospace,monospace;color:${dashSpendColor}">${fmt(dashSpendable)}</span>
           </div>
         </div>
@@ -7502,7 +7530,12 @@ function renderAdminSettings(s){
     <div class="form-group"><label class="form-label">Bank Name</label><input type="text" id="set_bank" class="form-input" value="${s.bankName||''}" /></div>
     <div class="form-group"><label class="form-label">Account Number</label><input type="text" id="set_acct" class="form-input" value="${s.accountNo||''}" /></div>
     <div class="form-group"><label class="form-label">Petty Cash Max Float (₦)</label><input type="number" id="set_petty" class="form-input" value="${s.pettyMax||50000}" /></div>
-    <div class="form-group"><label class="form-label">Spendable Balance — Low Warning Threshold (₦)</label><input type="number" id="set_spendable_low" class="form-input" value="${s.spendableLow||20000}" /><div class="form-hint">Dashboard and Expenses page will show an amber warning when Spendable Balance falls below this amount. Default: ₦20,000.</div></div>
+    <div class="form-group"><label class="form-label">Spendable Balance — Low Warning Threshold (₦)</label><input type="number" id="set_spendable_low" class="form-input" value="${s.spendableLow||20000}" /><div class="form-hint">Expenses page shows an amber warning when Available Balance falls below this amount. Default: ₦20,000.</div></div>
+    <div style="margin-top:18px;margin-bottom:8px;font-size:13px;font-weight:700;color:var(--text2);border-top:1px solid var(--border);padding-top:14px">Dashboard Status Thresholds</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Control what status label appears on the Actual Balance card (Strong / Moderate / Low / Very Low / Deficit - Critical).</p>
+    <div class="form-group"><label class="form-label">Strong threshold (₦)</label><input type="number" id="set_spendable_strong" class="form-input" value="${s.spendableStrong||40000}" /><div class="form-hint">Shows "Strong" when Actual Balance is at or above this amount. Default: ₦40,000.</div></div>
+    <div class="form-group"><label class="form-label">Moderate threshold (₦)</label><input type="number" id="set_spendable_moderate" class="form-input" value="${s.spendableModerate||20000}" /><div class="form-hint">Shows "Moderate" when at or above this amount but below Strong. Default: ₦20,000.</div></div>
+    <div class="form-group"><label class="form-label">Low threshold (₦)</label><input type="number" id="set_spendable_very_low" class="form-input" value="${s.spendableVeryLow||10000}" /><div class="form-hint">Shows "Low" when at or above this amount. Below this shows "Very Low". Default: ₦10,000.</div></div>
     <button class="btn btn-primary" onclick="App.saveSettings(this)">Save Settings</button>
   </div>
   <div class="card" style="margin-top:16px;border:1.5px solid var(--border)">
@@ -7711,6 +7744,9 @@ async function saveSettings(btn=null){
   const pettyMax = parseFloat(document.getElementById('set_petty')?.value)||50000;
   s.pettyMax=pettyMax;
   s.spendableLow=parseFloat(document.getElementById('set_spendable_low')?.value)||20000;
+  s.spendableStrong=parseFloat(document.getElementById('set_spendable_strong')?.value)||40000;
+  s.spendableModerate=parseFloat(document.getElementById('set_spendable_moderate')?.value)||20000;
+  s.spendableVeryLow=parseFloat(document.getElementById('set_spendable_very_low')?.value)||10000;
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.saveSettings(s);
