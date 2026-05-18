@@ -1577,7 +1577,10 @@ async function calcChurchBalance(){
   // --- BANK BALANCE ---
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
   const cashDepositedToBank = cashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
-  const bankExpenses = allExpenses.filter(e=>e.status==='approved').reduce((s,e)=>{
+  // Pending expenses are included: every logged expense is an actual payment already made.
+  // "Pending" means awaiting admin approval, not awaiting payment. This matches how petty
+  // cash already works — the float is reduced the moment an expense is logged.
+  const bankExpenses = allExpenses.filter(e=>e.status==='approved'||e.status==='pending').reduce((s,e)=>{
     if(e.paymentMethod==='bank_transfer') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.bankAmount||0);
     return s;
@@ -1598,7 +1601,7 @@ async function calcChurchBalance(){
     return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
   }, 0);
   const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
-  const cashExpenses = allExpenses.filter(e=>e.status==='approved').reduce((s,e)=>{
+  const cashExpenses = allExpenses.filter(e=>e.status==='approved'||e.status==='pending').reduce((s,e)=>{
     if(e.paymentMethod==='cash') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.cashAmount||0);
     return s;
@@ -1614,8 +1617,8 @@ async function calcChurchBalance(){
 
   return {
     cashWithAccountant: Math.max(0, cashWithAccountantRaw),
-    // cashDeficit > 0 means approved cash outflows exceed recorded cash inflows —
-    // the accountant has spent more than was received in cash (data entry review may be needed)
+    // cashDeficit > 0 means cash outflows (approved + pending) exceed recorded cash inflows —
+    // accountant has disbursed more cash than received; pending expenses awaiting approval contribute here
     cashDeficit: Math.max(0, -cashWithAccountantRaw),
     bankBalance,
     pettyFloat,
@@ -2943,9 +2946,9 @@ async function confirmBulkDeposit(){
     .filter(t=>t.type==='withdrawal'&&t.destination==='accountant_cash')
     .sort((a,b)=>new Date(a.date||a.createdAt)-new Date(b.date||b.createdAt));
 
-  // Approved cash expenses (negative)
+  // Cash expenses (approved + pending — all are actual payments already made)
   const cashExpenseItems = allExpenses
-    .filter(e=>e.status==='approved'&&(e.paymentMethod==='cash'||(e.paymentMethod==='split'&&(e.cashAmount||0)>0)))
+    .filter(e=>(e.status==='approved'||e.status==='pending')&&(e.paymentMethod==='cash'||(e.paymentMethod==='split'&&(e.cashAmount||0)>0)))
     .sort((a,b)=>new Date(a.date||a.createdAt)-new Date(b.date||b.createdAt));
 
   // Petty cash top-ups paid from accountant's cash (negative)
@@ -5279,7 +5282,7 @@ async function renderBank(){
   // Calculate bank balance components
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
   const cashDepositedToBank = allCashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
-  const bankExpenses = allExpenses.filter(e=>e.status==='approved').reduce((sum,e)=>{
+  const bankExpenses = allExpenses.filter(e=>e.status==='approved'||e.status==='pending').reduce((sum,e)=>{
     if(e.paymentMethod==='bank_transfer') return sum+(e.amount||0);
     if(e.paymentMethod==='split') return sum+(e.bankAmount||0);
     return sum;
@@ -5299,7 +5302,7 @@ async function renderBank(){
     return s+Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
   },0);
   const bankToAccountantRB = allCashTx.filter(t=>t.type==='withdrawal'&&t.destination==='accountant_cash').reduce((s,t)=>s+(t.amount||0),0);
-  const cashExpensesRB = allExpenses.filter(e=>e.status==='approved').reduce((s,e)=>{
+  const cashExpensesRB = allExpenses.filter(e=>e.status==='approved'||e.status==='pending').reduce((s,e)=>{
     if(e.paymentMethod==='cash') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.cashAmount||0);
     return s;
