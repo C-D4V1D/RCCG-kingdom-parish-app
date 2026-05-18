@@ -303,6 +303,11 @@ function fmtDate(d){
   if(!dt) return '—';
   return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric',timeZone:NIGERIA_TIMEZONE});
 }
+function fmtDateShort(d){
+  const dt = parseDisplayDate(d);
+  if(!dt) return '—';
+  return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',timeZone:NIGERIA_TIMEZONE});
+}
 function fmtTime(d){
   if(!d || !hasExplicitTime(d)) return '—';
   const dt = parseDisplayDate(d);
@@ -2010,7 +2015,7 @@ async function renderDashboard(){
             <button onclick="App.setDashPeriodMode('remittance')" style="flex:1;padding:10px 12px;border-radius:10px;border:1.5px solid ${useRemPeriod?'var(--primary)':'var(--border)'};background:${useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
               <div style="font-size:12.5px;font-weight:700;color:${useRemPeriod?'var(--primary)':'var(--text2)'}">${MONTHS[state.month]} Remittance Period</div>
               <div style="font-size:10.5px;color:var(--text3);margin-top:2px">the custom RCCG period</div>
-              <div style="margin-top:6px"><span style="display:inline-block;padding:3px 9px;border-radius:12px;background:${useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${useRemPeriod?'#fff':'var(--text2)'};font-size:10.5px;font-weight:700;letter-spacing:0.2px">${fmtDate(dashPeriodFrom)} – ${fmtDate(dashPeriodTo)}</span></div>
+              <div style="margin-top:6px"><span style="display:inline-block;padding:3px 9px;border-radius:12px;background:${useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${useRemPeriod?'#fff':'var(--text2)'};font-size:10.5px;font-weight:700;letter-spacing:0.2px">${fmtDateShort(dashPeriodFrom)} – ${fmtDateShort(dashPeriodTo)}</span></div>
             </button>
             <button onclick="App.setDashPeriodMode('calendar')" style="flex:1;padding:10px 12px;border-radius:10px;border:1.5px solid ${!useRemPeriod?'var(--primary)':'var(--border)'};background:${!useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${!useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
               <div style="font-size:12.5px;font-weight:700;color:${!useRemPeriod?'var(--primary)':'var(--text2)'}">${MONTHS[state.month]} Calendar Period</div>
@@ -2019,10 +2024,6 @@ async function renderDashboard(){
             </button>
           </div>
         </div>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${canAction('income_record')?`<button class="btn btn-primary" onclick="App.navigate('income')">📥 Record Income</button>`:''}
-        ${!canAction('income_record')&&canAction('expense_log')?`<button class="btn btn-primary" onclick="App.navigate('expenses')">💸 Log Expenses</button>`:''}
       </div>
     </div>
 
@@ -3703,14 +3704,14 @@ async function renderRemittances(){
       <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">🏠</div><div class="kpi-label">Net Local Retained</div><div class="kpi-val">${fmt(trueNetLocal)}</div></div>
     </div>
 
-    ${income.length===0?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>No income records found</strong> for the selected period (${fmtDate(fromDate)} – ${fmtDate(toDate)}). Please adjust the date range above or record income first.</span></div>`:''}
+    ${income.length===0?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>No income records found</strong> for the selected period (${fmtDateShort(fromDate)} – ${fmtDateShort(toDate)}). Please adjust the date range above or record income first.</span></div>`:''}
 
     <div class="grid-6040">
       <!-- LEFT: Breakdown Table -->
       <div class="card">
         <div class="card-header">
           <span class="card-title">Full Remittance Breakdown</span>
-          <span style="font-size:11px;color:var(--text3)">${fmtDate(fromDate)} – ${fmtDate(toDate)}</span>
+          <span style="font-size:11px;color:var(--text3)">${fmtDateShort(fromDate)} – ${fmtDateShort(toDate)}</span>
         </div>
         <div class="table-wrap"><table style="width:100%">
           <tr><th>Description</th><th style="width:100px">Type</th><th class="td-right" style="width:130px">Amount Due (₦)</th></tr>
