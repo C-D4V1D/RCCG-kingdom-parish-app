@@ -753,8 +753,8 @@ test('AI secretary meeting update persists reviewed minutes corrections', async 
               resolutions_json: statement._bound[10],
               action_items_json: statement._bound[11],
               policy_flags_json: statement._bound[12],
-              reviewed_at: statement._bound[14],
-              reviewed_by: statement._bound[15]
+              reviewed_at: statement._bound[15],
+              reviewed_by: statement._bound[16]
             };
           }
           return { success: true };
