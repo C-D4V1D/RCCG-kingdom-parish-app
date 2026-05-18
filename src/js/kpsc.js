@@ -8778,12 +8778,11 @@ function previewAudioFile(input) {
       <strong style="color:#dc2626">⚠️ File exceeds the 25 MB limit.</strong><br>
       Compress it first using the free <strong>M4A Audio Compressor</strong> app (Play Store), then re-upload.<br><br>
       <strong>Recommended settings:</strong><br>
-      &nbsp;• Mode: <strong>Advanced</strong><br>
       &nbsp;• Bit rate: <strong>32k</strong><br>
-      &nbsp;• Sample rate: <strong>16000 Hz</strong><br>
-      &nbsp;• Channels: <strong>2</strong><br>
+      &nbsp;• Sample rate: <strong>16000 Hz / 16 kHz</strong><br>
+      &nbsp;• Channels: <strong>1 (Mono)</strong><br>
       &nbsp;• Profile: <strong>HE_AAC</strong><br><br>
-      <span style="color:#6b7280">A 78 MB file compresses to ≈ 20 MB with these settings — well under the limit and with no loss in transcription accuracy.</span>
+      <span style="color:#6b7280">A 78 MB file compresses to ≈ 10 MB with these settings — well under the limit with no loss in transcription accuracy.</span>
     </div>` : `
     <div class="k-room-actions">
       <button class="kbtn kbtn-primary" onclick="Kpsc.transcribeAudioFile()">🤖 Transcribe with AI</button>
