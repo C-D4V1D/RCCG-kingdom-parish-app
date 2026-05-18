@@ -383,6 +383,7 @@ export async function onRequest(context) {
       if (method === 'GET'  && !param) return await getPetty(DB);
       if (method === 'POST' && !param) return await createPettyEntry(DB, body);
       if (method === 'PUT'  &&  param) return await updatePettyEntry(DB, param, body);
+      if (method === 'DELETE' && param) return await deletePettyEntry(DB, param);
     }
 
     // ── /api/petty-config ──────────────────────────────────────
@@ -1485,6 +1486,34 @@ async function updateIncome(DB, id, data) {
 }
 
 async function deleteIncome(DB, id) {
+  // Fetch the income row so we can reverse linked records.
+  const row = await DB.prepare(`SELECT date, direct_petty_cash FROM income WHERE id=?`).bind(id).first();
+
+  // 1. Remove cash deposit transactions linked to this income record.
+  await DB.prepare(`DELETE FROM cash_transactions WHERE income_ref=?`).bind(id).run();
+
+  // 2. Reverse any petty-cash refill that was auto-created from this income.
+  //    The refill reference is "From Sunday collection <formatted-date>".
+  //    Re-produce that same formatted date so we can match the row.
+  if (row && Number(row.direct_petty_cash) > 0) {
+    const fmtDate = new Intl.DateTimeFormat('en-NG', {
+      day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Africa/Lagos'
+    }).format(new Date(row.date + 'T12:00:00Z'));
+    const expectedRef = `From Sunday collection ${fmtDate}`;
+
+    await DB.prepare(
+      `DELETE FROM petty_cash WHERE type='refill' AND reference=?`
+    ).bind(expectedRef).run();
+
+    // Restore the petty float.
+    const cfg = await DB.prepare(`SELECT float_amount FROM petty_config WHERE id='main'`).first();
+    if (cfg) {
+      const newFloat = Math.max(0, Number(cfg.float_amount) - Number(row.direct_petty_cash));
+      await DB.prepare(`UPDATE petty_config SET float_amount=? WHERE id='main'`).bind(newFloat).run();
+    }
+  }
+
+  // 3. Delete the income record itself.
   await DB.prepare(`DELETE FROM income WHERE id=?`).bind(id).run();
   return ok({ id, deleted: true });
 }
@@ -1693,6 +1722,31 @@ async function updatePettyEntry(DB, id, data) {
   vals.push(id);
   await DB.prepare(`UPDATE petty_cash SET ${sets.join(',')} WHERE id=?`).bind(...vals).run();
   return ok({ id, updated: true });
+}
+
+async function deletePettyEntry(DB, id) {
+  const row = await DB.prepare(`SELECT type, amount, status FROM petty_cash WHERE id=?`).bind(id).first();
+  if (!row) return err('Petty cash entry not found', 404);
+
+  // Adjust the petty float to reverse the effect of this entry.
+  const cfg = await DB.prepare(`SELECT float_amount FROM petty_config WHERE id='main'`).first();
+  if (cfg) {
+    let delta = 0;
+    if (row.type === 'refill') {
+      // Refill added to the float — reverse it.
+      delta = -Number(row.amount);
+    } else if (row.status === 'settled') {
+      // A settled advance reduced the float — restore it.
+      delta = Number(row.amount);
+    }
+    if (delta !== 0) {
+      const newFloat = Math.max(0, Number(cfg.float_amount) + delta);
+      await DB.prepare(`UPDATE petty_config SET float_amount=? WHERE id='main'`).bind(newFloat).run();
+    }
+  }
+
+  await DB.prepare(`DELETE FROM petty_cash WHERE id=?`).bind(id).run();
+  return ok({ id, deleted: true });
 }
 
 // ── REMITTANCES ───────────────────────────────────────────────────
