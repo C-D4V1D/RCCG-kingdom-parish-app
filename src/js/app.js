@@ -33,6 +33,7 @@ const PERMISSION_DEFS = [
   { key:'transactions',     label:'Transactions',           group:'General'    },
   { key:'income',           label:'Record Income',          group:'Finance'    },
   { key:'income_view',      label:'View Income Records',    group:'Finance'    },
+  { key:'income_delete',    label:'Delete Income Records',  group:'Finance'    },
   { key:'remittances',      label:'Manage Remittances',     group:'Finance'    },
   { key:'remittances_view', label:'View Remittances',       group:'Finance'    },
   { key:'rem_cutoff_edit',  label:'Edit Remittance Cut-Off Dates', group:'Finance' },
@@ -173,6 +174,7 @@ const DB = {
   getIncome()                  { return apiFetch('income'); },
   addIncome(d)                 { return apiFetch('income','POST',d); },
   updateIncome(id,d)           { return apiFetch(`income/${id}`,'PUT',d); },
+  deleteIncome(id)             { return apiFetch(`income/${id}`,'DELETE'); },
 
   getExpenses()                { return apiFetch('expenses'); },
   addExpense(d)                { return apiFetch('expenses','POST',d); },
@@ -346,6 +348,7 @@ const ACCESS_RULES = {
     petty_request: ['petty_request'],
     petty_topup_payment: ['income'],
     petty_approve_or_view: ['income','petty_approve'],
+    income_delete: { roles:['it_admin'] },
     expense_edit_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_approved: ['expense_delete_approved'],
@@ -2514,8 +2517,56 @@ async function viewIncome(id){
     <hr class="divider">
     <div class="fs-12 text-muted">Recorded by: ${r.recordedBy||'—'} · ${isSunday?'Counted with: '+r.usher:'Donor: '+(r.donorName||'—')}</div>
     ${deposits.length?`<div class="fs-12 text-muted">Deposit records: ${deposits.map(d=>`${fmt(d.amount)} via ${d.depositMethod?.replace('_',' ')||'—'} on ${fmtDate(d.date)} (Ref: ${d.reference||'—'})`).join('; ')}</div>`:''}
-    <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button>
+    <div class="modal-footer">
+    ${canAction('income_delete')?`<button class="btn btn-danger" style="margin-right:auto" onclick="closeModal();App.confirmDeleteIncome('${r.id}')">🗑 Delete</button>`:''}
+    <button class="btn" onclick="closeModal()">Close</button>
     ${canAction('income_deposit')&&cashHeld>depositedTotal?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
+}
+
+function confirmDeleteIncome(id){
+  if(!canAction('income_delete')){ showAlert('Access denied.','danger'); return; }
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🗑 Delete Income Record</div>
+    <div class="alert alert-warn" style="margin-bottom:16px"><span class="alert-icon">⚠</span><span><strong>This is permanent.</strong> Deleting this record will also remove its remittance and cash deposit references from calculations. This cannot be undone.</span></div>
+    <div class="form-group">
+      <label class="form-label">Enter your IT Admin PIN to confirm</label>
+      <input type="password" id="del_income_pin" class="form-input" maxlength="6" placeholder="••••••" inputmode="numeric"
+        onkeydown="if(event.key==='Enter')App.submitDeleteIncome('${id}',document.getElementById('del_income_confirm_btn'))" />
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button id="del_income_confirm_btn" class="btn btn-danger" onclick="App.submitDeleteIncome('${id}',this)">Confirm Delete</button>
+    </div>`);
+  setTimeout(()=>document.getElementById('del_income_pin')?.focus(),100);
+}
+
+async function submitDeleteIncome(id, btn=null){
+  if(!canAction('income_delete')){ showAlert('Access denied.','danger'); return; }
+  const pin = document.getElementById('del_income_pin')?.value?.trim();
+  if(!pin){ showAlert('Please enter your PIN.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Verifying…');
+  try {
+    await DB.login({ role:'it_admin', userId: state.user.id, pin });
+  } catch(e){
+    restore();
+    const msg = String(e?.message||'');
+    showAlert(msg.toLowerCase().includes('invalid credentials') ? 'Incorrect PIN. Please try again.' : 'PIN verification failed: '+msg, 'danger');
+    document.getElementById('del_income_pin')?.select();
+    return;
+  }
+  try {
+    btn.innerHTML = '<span class="btn-spinner-sm"></span> Deleting…';
+    await DB.deleteIncome(id);
+    DB.addAudit('income_deleted', `Income record deleted: ${id}`, state.user?.name);
+    DB.addNotification('Income Deleted', `Income record deleted by ${state.user?.name}`, 'warn');
+    closeModal();
+    showAlert('Income record deleted.', 'warn');
+    renderIncome();
+  } catch(err){
+    restore();
+    showAlert('Failed to delete: '+(err?.message||'Unknown error'), 'danger');
+  }
 }
 
 function _previewDepPhoto(input, previewId){
@@ -7884,7 +7935,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
+  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, submitEditExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
