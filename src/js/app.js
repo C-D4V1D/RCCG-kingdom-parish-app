@@ -1714,11 +1714,17 @@ async function renderDashboard(){
   const dashSpendLow = parseFloat(settingsDash?.spendableLow||0)||20000;
   const dashSpendColor = dashSpendable < 0 ? 'var(--danger)' : dashSpendable < dashSpendLow ? '#B8860B' : 'var(--success)';
 
-  // Reconciliation card figures
+  // Reconciliation card figures — include ALL expenses (approved + pending) for the period
   const totalPeriodApprExpenses = expenses
     .filter(e => e.status === 'approved')
     .reduce((s, e) => s + (e.amount || 0), 0);
-  const dashCarriedForward = churchBal.total - totalIncome + totalPeriodApprExpenses;
+  const totalPeriodPendingExpenses = expenses
+    .filter(e => e.status === 'pending')
+    .reduce((s, e) => s + (e.amount || 0), 0);
+  const totalPeriodAllExpenses = totalPeriodApprExpenses + totalPeriodPendingExpenses;
+  // Carried forward = churchBal − (income − all-expenses for period). Algebraically exact.
+  const dashCarriedForward = churchBal.total - totalIncome + totalPeriodAllExpenses;
+  const dashPrevMonthName = MONTHS[state.month === 0 ? 11 : state.month - 1];
 
   // Feed items — richer detail for Recent Transactions card
   const recentIncome = allIncome.slice(0,4);
@@ -1908,122 +1914,192 @@ async function renderDashboard(){
 
     ${alerts}
 
-    <div class="kpi-grid" style="grid-template-columns:repeat(3,minmax(0,1fr));row-gap:10px">
+    <div class="dash-flow" style="display:flex;flex-direction:column;margin-bottom:16px">
 
-      <!-- ── BLOCK 1: Components that build the church balance ── -->
-      <div class="kpi" style="border-top:3px solid #6366F1">
-        <div class="kpi-icon" style="background:#EEF2FF">⏮</div>
-        <div class="kpi-label">Carried Forward Balance</div>
-        <div class="kpi-val" style="color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'}">${fmt(dashCarriedForward)}</div>
-        <div class="kpi-delta" style="color:var(--text3)">Balance before this period</div>
+      <!-- 1. Carried Forward Balance -->
+      <div class="flow-card" style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 20px;position:relative;overflow:hidden">
+        <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:#6366F1"></div>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Carried Forward Balance (${dashPrevMonthName})</div>
+            <div style="font-size:26px;font-weight:800;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'};letter-spacing:-0.5px;line-height:1.15">${fmt(dashCarriedForward)}</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:5px">Balance brought forward from ${dashPrevMonthName}</div>
+          </div>
+          <div style="width:44px;height:44px;border-radius:12px;background:#EEF2FF;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">⏮</div>
+        </div>
       </div>
 
-      <div class="kpi" style="border-top:3px solid var(--success)">
-        <div class="kpi-icon" style="background:#E1F5EE">📥</div>
-        <div class="kpi-label">+ Total Income</div>
-        <div class="kpi-val" style="color:var(--success)">${fmt(totalIncome)}</div>
-        <div class="kpi-delta up">↑ ${income.length} record(s) · ${useRemPeriod?MONTHS[state.month].slice(0,3)+' Rem. Period':MONTHS[state.month]+' '+state.year}</div>
-        ${dashChildrenTeacherTotal > 0 ? `<div style="margin-top:8px;padding:6px 8px;border-radius:6px;background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.22);font-size:10.5px;line-height:1.5">
-          <span style="color:#BA7517;font-weight:600">🧒 ${fmt(dashChildrenTeacherTotal)} with Children Teacher</span>
-          <button class="btn btn-sm" onclick="App.showChildrenTeacherModal()" style="margin-left:6px;font-size:10px;padding:1px 7px">View →</button>
+      <!-- + connector -->
+      <div style="display:flex;justify-content:center;align-items:center;height:30px;position:relative">
+        <div style="position:absolute;left:50%;top:0;bottom:0;width:1.5px;background:var(--border);transform:translateX(-50%)"></div>
+        <div style="width:32px;height:32px;border-radius:50%;background:var(--surface);border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:var(--success);z-index:1;flex-shrink:0;position:relative">+</div>
+      </div>
+
+      <!-- 2. Total Income -->
+      <div class="flow-card" style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 20px;position:relative;overflow:hidden">
+        <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--success)"></div>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Income</div>
+            <div style="font-size:26px;font-weight:800;color:var(--success);letter-spacing:-0.5px;line-height:1.15">${fmt(totalIncome)}</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:5px">↑ ${income.length} record(s) received</div>
+          </div>
+          <div style="width:44px;height:44px;border-radius:12px;background:#E1F5EE;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">📥</div>
+        </div>
+        ${dashChildrenTeacherTotal > 0 ? `<div style="margin-top:12px;padding:8px 10px;border-radius:8px;background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.22);font-size:11.5px;line-height:1.5;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="color:#BA7517;font-weight:600;flex:1;min-width:0">🧒 ${fmt(dashChildrenTeacherTotal)} with Children Teacher</span>
+          <button class="btn btn-sm" onclick="App.showChildrenTeacherModal()" style="font-size:11px;padding:3px 10px">View →</button>
         </div>` : ''}
       </div>
 
-      <div class="kpi" style="border-top:3px solid var(--danger)">
-        <div class="kpi-icon" style="background:#FCEBEB">💸</div>
-        <div class="kpi-label">− Total Expenses</div>
-        <div class="kpi-val" style="color:var(--danger)">−${fmt(totalPeriodApprExpenses)}</div>
-        <div class="kpi-delta down">${expenses.filter(e=>e.status==='approved').length} approved expense(s)</div>
-        ${expenses.filter(e=>e.status==='pending').length>0?`<div class="kpi-delta warn" style="font-size:10.5px">⏳ ${expenses.filter(e=>e.status==='pending').length} pending approval</div>`:''}
+      <!-- − connector -->
+      <div style="display:flex;justify-content:center;align-items:center;height:30px;position:relative">
+        <div style="position:absolute;left:50%;top:0;bottom:0;width:1.5px;background:var(--border);transform:translateX(-50%)"></div>
+        <div style="width:32px;height:32px;border-radius:50%;background:var(--surface);border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:var(--danger);z-index:1;flex-shrink:0;position:relative">−</div>
       </div>
 
-      <!-- ── Separator: visually shows the = relationship ── -->
-      <div style="grid-column:1/-1;display:flex;align-items:center;gap:10px;margin:2px 0">
-        <div style="flex:1;height:1.5px;background:var(--border)"></div>
-        <div style="font-size:10px;font-weight:700;letter-spacing:1px;color:var(--text3);white-space:nowrap;text-transform:uppercase">= Total Church Balance</div>
-        <div style="flex:1;height:1.5px;background:var(--border)"></div>
+      <!-- 3. Total Expenses -->
+      <div class="flow-card" style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 20px;position:relative;overflow:hidden">
+        <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--danger)"></div>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Expenses</div>
+            <div style="font-size:26px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(totalPeriodAllExpenses)}</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:5px">${expenses.filter(e=>e.status==='approved').length} approved${totalPeriodPendingExpenses>0?` · <span style="color:var(--amber);font-weight:600">${expenses.filter(e=>e.status==='pending').length} pending (${fmt(totalPeriodPendingExpenses)})</span>`:''}</div>
+          </div>
+          <div style="width:44px;height:44px;border-radius:12px;background:#FCEBEB;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">💸</div>
+        </div>
       </div>
 
-      <!-- ── BLOCK 2: Church balance → deductions → what's left ── -->
-      <div class="kpi kpi-balance" style="border-top:3px solid #185FA5">
-        <div class="kpi-icon" style="background:#EAF3DE">🏛️</div>
-        <div class="kpi-label">Total Church Balance</div>
-        <div class="kpi-val" style="color:${churchBal.total<0?'var(--danger)':'#185FA5'}">${fmt(churchBal.total)}</div>
-        <div style="margin-top:8px;font-size:11px;color:var(--text3);line-height:1.9">
-          <a onclick="App.navigate('bank')" style="cursor:pointer;text-decoration:none;color:inherit;display:block"><span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:4px"></span>Bank: ${fmt(churchBal.bankBalance)}</a>
-          <a onclick="App.setIncomeTab('all');App.navigate('income')" style="cursor:pointer;text-decoration:none;color:inherit;display:block">
-            <span style="display:inline-block;width:8px;height:8px;background:${churchBal.cashDeficit>0?'var(--danger)':'#BA7517'};border-radius:50%;margin-right:4px"></span>
-            ${churchBal.cashDeficit>0
-              ? `<span style="color:var(--danger);font-weight:600">🔴 Cash with Accountant: −${fmt(churchBal.cashDeficit)} ⚠ Owes Accountant</span>`
-              : `Cash with Accountant: ${fmt(churchBal.cashWithAccountant)}`}
+      <!-- = connector to Total Church Balance -->
+      <div style="display:flex;justify-content:center;align-items:center;height:36px;position:relative">
+        <div style="position:absolute;left:50%;top:0;bottom:0;width:1.5px;background:var(--border);transform:translateX(-50%)"></div>
+        <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:14px;padding:4px 12px;font-size:11px;font-weight:700;color:#185FA5;letter-spacing:0.8px;text-transform:uppercase;z-index:1;position:relative;display:flex;align-items:center;gap:6px">
+          <span style="font-size:14px">=</span><span>Total Church Balance</span>
+        </div>
+      </div>
+
+      <!-- 4. Total Church Balance -->
+      <div class="flow-card" style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 20px;position:relative;overflow:hidden">
+        <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:#185FA5"></div>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Church Balance</div>
+            <div style="font-size:28px;font-weight:800;color:${churchBal.total<0?'var(--danger)':'#185FA5'};letter-spacing:-0.5px;line-height:1.15">${fmt(churchBal.total)}</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:5px">Actual money on hand right now</div>
+          </div>
+          <div style="width:44px;height:44px;border-radius:12px;background:#EAF3DE;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">🏛️</div>
+        </div>
+        <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border);font-size:12.5px;color:var(--text2);line-height:1.9">
+          <a onclick="App.navigate('bank')" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between">
+            <span><span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:8px"></span>Bank</span>
+            <span style="font-weight:600">${fmt(churchBal.bankBalance)}</span>
           </a>
-          <a onclick="App.navigate('petty_cash')" style="cursor:pointer;text-decoration:none;color:inherit;display:block">
-            <span style="display:inline-block;width:8px;height:8px;background:${churchBal.pettyFloat<0?'var(--danger)':'#1D9E75'};border-radius:50%;margin-right:4px"></span>
-            ${churchBal.pettyFloat<0
-              ? `<span style="color:var(--danger);font-weight:600">Petty Cash: ${fmt(churchBal.pettyFloat)} ⚠ Owes Admin Officer</span>`
-              : `Petty Cash: ${fmt(churchBal.pettyFloat)}`}
+          <a onclick="App.setIncomeTab('all');App.navigate('income')" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between">
+            <span><span style="display:inline-block;width:8px;height:8px;background:${churchBal.cashDeficit>0?'var(--danger)':'#BA7517'};border-radius:50%;margin-right:8px"></span>${churchBal.cashDeficit>0?'<span style="color:var(--danger);font-weight:600">Cash with Accountant ⚠ Owes</span>':'Cash with Accountant'}</span>
+            <span style="font-weight:600;color:${churchBal.cashDeficit>0?'var(--danger)':'inherit'}">${churchBal.cashDeficit>0?'−'+fmt(churchBal.cashDeficit):fmt(churchBal.cashWithAccountant)}</span>
+          </a>
+          <a onclick="App.navigate('petty_cash')" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between">
+            <span><span style="display:inline-block;width:8px;height:8px;background:${churchBal.pettyFloat<0?'var(--danger)':'#1D9E75'};border-radius:50%;margin-right:8px"></span>${churchBal.pettyFloat<0?'<span style="color:var(--danger);font-weight:600">Petty Cash ⚠ Owes Admin Officer</span>':'Petty Cash'}</span>
+            <span style="font-weight:600;color:${churchBal.pettyFloat<0?'var(--danger)':'inherit'}">${fmt(churchBal.pettyFloat)}</span>
           </a>
         </div>
       </div>
 
-      <div class="kpi" style="border-top:3px solid var(--amber)">
-        <div class="kpi-icon" style="background:#FCEBEB">📤</div>
-        <div class="kpi-label">− RCCG Remittances Due</div>
-        <div class="kpi-val" style="color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</div>
-        <div class="kpi-delta" style="color:var(--text3)">📅 ${dashDueLabel}</div>
-        ${dashMonthsElapsed>1?`<div class="kpi-delta warn" style="font-size:11px">⚠ Accumulated since ${fmtDate(dashFirstIncRec.date||dashFirstIncRec.createdAt)}</div>`:''}
-        <div class="kpi-delta warn" style="font-size:10.5px">${dashUnpaidPeriodIncome>0?Math.round(dashTotalRemDueKpi/dashUnpaidPeriodIncome*100):0}% of unpaid period income</div>
+      <!-- − connector -->
+      <div style="display:flex;justify-content:center;align-items:center;height:30px;position:relative">
+        <div style="position:absolute;left:50%;top:0;bottom:0;width:1.5px;background:var(--border);transform:translateX(-50%)"></div>
+        <div style="width:32px;height:32px;border-radius:50%;background:var(--surface);border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:var(--danger);z-index:1;flex-shrink:0;position:relative">−</div>
       </div>
 
-      <div class="kpi" style="border-top:3px solid ${dashSpendColor}">
-        <div class="kpi-icon" style="background:${dashSpendable<0?'rgba(163,45,45,0.12)':dashSpendable<dashSpendLow?'rgba(184,134,11,0.12)':'rgba(29,158,117,0.12)'}">${dashSpendable<0?'🔴':dashSpendable<dashSpendLow?'🟡':'🟢'}</div>
-        <div class="kpi-label">= Actual Local Balance</div>
-        <div class="kpi-val" style="color:${dashSpendColor};font-size:${dashSpendable<-999999||dashSpendable>9999999?'16px':'20px'}">${fmt(dashSpendable)}</div>
-        <div class="kpi-delta" style="color:${dashSpendColor};font-weight:600;font-size:11px">${dashSpendable<0?'Deficit — seek support':dashSpendable<dashSpendLow?'Low — spend carefully':'Available to spend'}</div>
-        <div style="margin-top:10px;height:4px;background:${dashSpendColor}22;border-radius:2px;overflow:hidden">
-          <div style="height:4px;width:${dashTotalFunds>0?Math.min(100,Math.max(0,dashSpendable/dashTotalFunds*100)).toFixed(1):0}%;background:${dashSpendColor};border-radius:2px;transition:width 0.4s"></div>
+      <!-- 5. RCCG Remittances Due -->
+      <div class="flow-card" style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 20px;position:relative;overflow:hidden">
+        <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--amber)"></div>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">RCCG Remittances Due</div>
+            <div style="font-size:26px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(dashTotalRemDueKpi)}</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:5px">📅 ${dashDueLabel}</div>
+            ${dashMonthsElapsed>1?`<div style="margin-top:6px;font-size:11.5px;color:var(--amber);font-weight:600">⚠ Accumulated since ${fmtDate(dashFirstIncRec.date||dashFirstIncRec.createdAt)}</div>`:''}
+            <div style="margin-top:4px;font-size:11.5px;color:var(--amber)">${dashUnpaidPeriodIncome>0?Math.round(dashTotalRemDueKpi/dashUnpaidPeriodIncome*100):0}% of unpaid period income</div>
+          </div>
+          <div style="width:44px;height:44px;border-radius:12px;background:#FCEBEB;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">📤</div>
         </div>
-        <div style="margin-top:6px;font-size:10px;color:var(--text3)">${fmt(dashOutstandingRems)} still due to HQ</div>
+      </div>
+
+      <!-- = connector to Final -->
+      <div style="display:flex;justify-content:center;align-items:center;height:36px;position:relative">
+        <div style="position:absolute;left:50%;top:0;bottom:0;width:1.5px;background:var(--border);transform:translateX(-50%)"></div>
+        <div style="background:var(--surface);border:1.5px solid ${dashSpendColor};border-radius:14px;padding:4px 12px;font-size:11px;font-weight:700;color:${dashSpendColor};letter-spacing:0.8px;text-transform:uppercase;z-index:1;position:relative;display:flex;align-items:center;gap:6px">
+          <span style="font-size:14px">=</span><span>Available Fund</span>
+        </div>
+      </div>
+
+      <!-- 6. Available Fund After All Deductions (final answer) -->
+      <div class="flow-card" style="background:${dashSpendable<0?'rgba(163,45,45,0.04)':dashSpendable<dashSpendLow?'rgba(184,134,11,0.04)':'rgba(29,158,117,0.04)'};border:1.5px solid ${dashSpendColor}55;border-radius:14px;padding:18px 20px;position:relative;overflow:hidden">
+        <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:${dashSpendColor}"></div>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Available Fund After All Deductions</div>
+            <div style="font-size:32px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.8px;line-height:1.1">${fmt(dashSpendable)}</div>
+            <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;background:${dashSpendColor}22;font-size:11.5px;font-weight:700;color:${dashSpendColor}">
+                ${dashSpendable<0?'🔴 Deficit':dashSpendable<dashSpendLow?'🟡 Low':'🟢 Healthy'}
+              </span>
+              <span style="font-size:11.5px;color:var(--text3)">${dashSpendable<0?'Seek support':dashSpendable<dashSpendLow?'Spend carefully':'Free to spend'}</span>
+            </div>
+          </div>
+          <div style="width:44px;height:44px;border-radius:12px;background:${dashSpendColor}22;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">${dashSpendable<0?'🔴':dashSpendable<dashSpendLow?'🟡':'🟢'}</div>
+        </div>
+        <div style="margin-top:14px;padding-top:12px;border-top:1px dashed ${dashSpendColor}33">
+          <div style="height:6px;background:${dashSpendColor}22;border-radius:3px;overflow:hidden">
+            <div style="height:6px;width:${dashTotalFunds>0?Math.min(100,Math.max(0,dashSpendable/dashTotalFunds*100)).toFixed(1):0}%;background:${dashSpendColor};border-radius:3px;transition:width 0.5s"></div>
+          </div>
+          <div style="margin-top:6px;font-size:11px;color:var(--text3);display:flex;justify-content:space-between">
+            <span>${fmt(dashOutstandingRems)} still due to HQ</span>
+            <span>${dashTotalFunds>0?Math.round(dashSpendable/dashTotalFunds*100):0}% of balance</span>
+          </div>
+        </div>
       </div>
 
     </div>
 
-    <!-- Collapsible calculation breakdown -->
-    <details style="margin-top:4px;margin-bottom:4px">
-      <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--rl);font-size:12px;font-weight:600;color:var(--text2);user-select:none">
-        <span style="font-size:14px">🧮</span>
-        <span>How is Actual Local Balance calculated?</span>
-        <span style="margin-left:auto;font-size:10px;color:var(--text3)">Tap to expand ▾</span>
+    <!-- Collapsible full calculation breakdown -->
+    <details style="margin-bottom:16px">
+      <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--rl);font-size:12.5px;font-weight:600;color:var(--text2);user-select:none">
+        <span style="font-size:16px">🧮</span>
+        <span>How is Available Fund calculated?</span>
+        <span style="margin-left:auto;font-size:11px;color:var(--text3)">Tap to expand ▾</span>
       </summary>
-      <div style="padding:14px 16px;background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--rl) var(--rl)">
-        <div style="font-size:11px;line-height:2.2;color:var(--text2)">
+      <div style="padding:16px 18px;background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--rl) var(--rl)">
+        <div style="font-size:12px;line-height:2.3;color:var(--text2)">
           <div style="display:flex;justify-content:space-between;align-items:center">
-            <span style="color:var(--text3)">Carried Forward Balance</span>
-            <span style="font-weight:600;font-family:monospace;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'}">${fmt(dashCarriedForward)}</span>
+            <span style="color:var(--text3)">Carried Forward Balance (${dashPrevMonthName})</span>
+            <span style="font-weight:600;font-family:ui-monospace,monospace;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'}">${fmt(dashCarriedForward)}</span>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center">
-            <span style="color:var(--text3)">+ Total Income (this period)</span>
-            <span style="font-weight:600;font-family:monospace;color:var(--success)">${fmt(totalIncome)}</span>
+            <span style="color:var(--text3)">+ Total Income</span>
+            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(totalIncome)}</span>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-            <span style="color:var(--text3)">− Total Expenses (this period)</span>
-            <span style="font-weight:600;font-family:monospace;color:var(--danger)">−${fmt(totalPeriodApprExpenses)}</span>
+            <span style="color:var(--text3)">− Total Expenses ${totalPeriodPendingExpenses>0?'(incl. pending)':''}</span>
+            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodAllExpenses)}</span>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:12px;padding-top:2px">
+          <div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:13px;padding-top:2px">
             <span>= Total Church Balance</span>
-            <span style="font-family:monospace;color:#185FA5">${fmt(churchBal.total)}</span>
+            <span style="font-family:ui-monospace,monospace;color:#185FA5">${fmt(churchBal.total)}</span>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
             <span style="color:var(--text3)">− RCCG Remittances Due</span>
-            <span style="font-weight:600;font-family:monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
+            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:13px;padding-top:2px">
-            <span>= Actual Local Balance</span>
-            <span style="font-family:monospace;color:${dashSpendColor}">${fmt(dashSpendable)}</span>
+          <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
+            <span>= Available Fund</span>
+            <span style="font-family:ui-monospace,monospace;color:${dashSpendColor}">${fmt(dashSpendable)}</span>
           </div>
         </div>
-        <div style="margin-top:10px;font-size:10px;color:var(--text3);line-height:1.6;border-top:1px solid var(--border);padding-top:8px">
-          Tip: each row corresponds to a card above — you can verify any figure with a calculator.
+        <div style="margin-top:12px;font-size:11px;color:var(--text3);line-height:1.6;border-top:1px solid var(--border);padding-top:10px">
+          Each row matches a card above. Use a calculator to verify any figure end-to-end.
         </div>
       </div>
     </details>
