@@ -428,6 +428,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-ir-row-actions{display:flex;justify-content:flex-end;padding-top:4px;}
 .k-ir-add-row{padding:10px 16px 14px;}
 .k-ir-save-row{padding:14px 16px 2px;border-top:1px solid var(--border);}
+.k-ir-saved-cards{display:flex;flex-direction:column;gap:10px;padding:12px 16px 16px;}
 @media(max-width:600px){.k-ir-row-2col,.k-ir-row-3col{grid-template-columns:1fr;}}
 .k-review-textarea{min-height:76px;}
 .k-review-minutes{min-height:260px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;}

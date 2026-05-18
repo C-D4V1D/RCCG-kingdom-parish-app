@@ -3431,6 +3431,229 @@ function renderInsightsReviewSection(m) {
     </section>`;
 }
 
+// ── Saved / Card view for Step 4 ────────────────────────────────────
+
+function renderIrSavedResCard(r, cat, idx, canEdit) {
+  const accentCls = r.approved === true ? 'k-mc-accent-green' : r.approved === false ? 'k-mc-accent-red'
+    : cat === 'financial' ? 'k-mc-accent-orange' : cat === 'motions' ? 'k-mc-accent-purple'
+    : cat === 'amendments' ? 'k-mc-accent-blue' : 'k-mc-accent-amber';
+  const statusBadge = r.approved === true
+    ? '<span class="kbadge badge-green">✓ Approved</span>'
+    : r.approved === false
+      ? '<span class="kbadge badge-red">✗ Rejected</span>'
+      : '<span class="kbadge badge-amber">Needs confirmation</span>';
+  const typeBadge = `<span class="kbadge badge-type">${esc(String(r.resolutionType || 'decision').replace(/_/g, ' '))}</span>`;
+  const amountBadge = r.amount ? `<span class="kbadge badge-green">${esc(formatResolutionAmount(r.amount))}</span>` : '';
+  const metaRow = (r.motionBy || r.secondedBy || r.voteSummary) ? `
+    <div class="k-ic-info">
+      ${r.motionBy   ? `<span>🗣 Moved: ${esc(r.motionBy)}</span>` : ''}
+      ${r.secondedBy ? `<span>Seconded: ${esc(r.secondedBy)}</span>` : ''}
+      ${r.voteSummary ? `<span>${esc(r.voteSummary)}</span>` : ''}
+    </div>` : '';
+  const actionBtns = canEdit ? `
+    <div class="k-ic-footer" style="margin-top:8px">
+      <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.irEditInsightItem('res','${cat}',${idx})">✏️ Edit</button>
+      <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.irRemoveInsightItem('res','${cat}',${idx})">✕ Remove</button>
+    </div>` : '';
+  return `
+    <div class="k-meeting-card k-insight-card ${accentCls}" style="cursor:default">
+      ${insightTruncText(r.text || '', 130)}
+      <div class="k-ic-badges">${statusBadge}${typeBadge}${amountBadge}</div>
+      ${metaRow}
+      ${actionBtns}
+    </div>`;
+}
+
+function renderIrSavedActionCard(a, idx, canEdit) {
+  const accentCls = a.status === 'done' ? 'k-mc-accent-green' : a.status === 'cancelled' ? 'k-mc-accent-gray' : 'k-mc-accent-blue';
+  const actionBtns = canEdit ? `
+    <div class="k-ic-footer" style="margin-top:8px">
+      <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.irEditInsightItem('actions',null,${idx})">✏️ Edit</button>
+      <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.irRemoveInsightItem('actions',null,${idx})">✕ Remove</button>
+    </div>` : '';
+  return `
+    <div class="k-meeting-card k-insight-card ${accentCls}" style="cursor:default">
+      ${insightTruncText(a.task || '', 130)}
+      <div class="k-ic-badges"><span class="kbadge badge-type">Action item</span></div>
+      <div class="k-ic-info">
+        <span>👤 ${esc(a.assignee || 'Unassigned')}</span>
+        ${insightsDueDateLabel(a.dueDate, a.status)}
+        ${insightsStatusBadge(a.status)}
+      </div>
+      ${actionBtns}
+    </div>`;
+}
+
+function renderIrSavedFlagCard(f, idx, canEdit) {
+  const sevCls = f.severity === 'high' ? 'k-insight-flag-high' : f.severity === 'medium' ? 'k-insight-flag-medium' : 'k-insight-flag-low';
+  const sevBadge = f.severity === 'high'   ? '<span class="kbadge badge-red">HIGH</span>'
+    : f.severity === 'medium' ? '<span class="kbadge badge-amber">MEDIUM</span>'
+    : '<span class="kbadge badge-blue">LOW</span>';
+  const actionBtns = canEdit ? `
+    <div class="k-ic-footer" style="margin-top:8px">
+      <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.irEditInsightItem('flags',null,${idx})">✏️ Edit</button>
+      <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.irRemoveInsightItem('flags',null,${idx})">✕ Remove</button>
+    </div>` : '';
+  return `
+    <div class="k-meeting-card k-insight-card ${sevCls}" style="cursor:default">
+      <div class="k-ic-title">🚩 ${esc(String(f.type || '').replace(/_/g, ' ') || 'Governance alert')}</div>
+      <div class="k-ic-badges">${sevBadge}<span class="kbadge badge-type">Policy flag</span></div>
+      ${f.message ? `<div class="k-insight-flag-msg">${esc(f.message)}</div>` : ''}
+      ${actionBtns}
+    </div>`;
+}
+
+function renderIrSavedProjectCard(p, idx, canEdit) {
+  const costHtml = p.estimatedCost ? `<span class="kbadge badge-type">Est. ${esc(formatResolutionAmount(p.estimatedCost))}</span>` : '';
+  const actionBtns = canEdit ? `
+    <div class="k-ic-footer" style="margin-top:8px">
+      <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.irEditInsightItem('projects',null,${idx})">✏️ Edit</button>
+      <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.irRemoveInsightItem('projects',null,${idx})">✕ Remove</button>
+    </div>` : '';
+  return `
+    <div class="k-meeting-card k-insight-card k-mc-accent-purple k-insight-project-card" style="cursor:default">
+      <div class="k-ic-title">💡 ${esc(p.title || p.description || 'Project suggestion')}</div>
+      <div class="k-ic-badges">${costHtml}<span class="kbadge badge-type">AI suggestion</span></div>
+      ${p.description && p.description !== p.title ? `<div class="k-insight-flag-msg">${esc(p.description)}</div>` : ''}
+      ${actionBtns}
+    </div>`;
+}
+
+function renderInsightsReviewSavedView(m) {
+  const canEdit = canEditInsightsActionStatus();
+  const allResolutions    = m.resolutions    || [];
+  const actionItems       = m.actionItems    || [];
+  const policyFlags       = m.policyFlags    || [];
+  const suggestedProjects = m.suggestedProjects || [];
+
+  const resByCat = {};
+  IR_RES_SUB_CATS.forEach(sc => { resByCat[sc.cat] = []; });
+  allResolutions.forEach(r => {
+    const cat = classifyResolutionInsight(r);
+    (resByCat[cat] || resByCat['resolutions']).push(r);
+  });
+
+  const resolutionSections = IR_RES_SUB_CATS.map(({ cat, label, emoji }) => {
+    const items = resByCat[cat] || [];
+    if (!items.length) return '';
+    const cards = items.map((r, i) => renderIrSavedResCard(r, cat, i, canEdit)).join('');
+    return `
+      <details class="k-collapsible" open>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">${emoji} ${label}</span>
+          <span class="k-collapsible-summary">${items.length} item${items.length !== 1 ? 's' : ''}</span>
+        </summary>
+        <div class="k-ir-saved-cards">${cards}</div>
+      </details>`;
+  }).filter(Boolean).join('');
+
+  const actionCards   = actionItems.length       ? actionItems.map((a, i) => renderIrSavedActionCard(a, i, canEdit)).join('')    : '<div class="k-ir-empty">No action items.</div>';
+  const flagCards     = policyFlags.length       ? policyFlags.map((f, i) => renderIrSavedFlagCard(f, i, canEdit)).join('')     : '<div class="k-ir-empty">No governance flags.</div>';
+  const projectCards  = suggestedProjects.length ? suggestedProjects.map((p, i) => renderIrSavedProjectCard(p, i, canEdit)).join('') : '<div class="k-ir-empty">No project suggestions.</div>';
+
+  const editAllBtn = canEdit
+    ? `<button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.irOpenEditMode()" style="margin-left:auto;font-size:0.85em">✏️ Edit insights</button>`
+    : '';
+
+  return `
+    <section class="k-section k-insights-review-section" id="k-insights-review">
+      <div class="k-review-step-label" style="border-top:none;padding-top:0;margin-top:16px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span>Step 4 — Insights</span>
+        <span class="kbadge badge-green" style="font-size:0.75em;vertical-align:middle">✓ Saved</span>
+        ${editAllBtn}
+      </div>
+      <p class="k-review-hint" style="margin-bottom:14px">Insights extracted from this meeting. ${canEdit ? 'Use the Edit or Remove buttons to modify individual items, or <em>Edit insights</em> to update everything.' : ''}</p>
+
+      ${resolutionSections || '<p class="k-ir-empty" style="padding:0 0 8px">No resolutions recorded.</p>'}
+
+      <details class="k-collapsible" ${actionItems.length ? 'open' : ''}>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">✅ Action Items</span>
+          <span class="k-collapsible-summary">${actionItems.length} item${actionItems.length !== 1 ? 's' : ''}</span>
+        </summary>
+        <div class="k-ir-saved-cards">${actionCards}</div>
+      </details>
+
+      <details class="k-collapsible" ${policyFlags.length ? 'open' : ''}>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">🚩 Governance Flags</span>
+          <span class="k-collapsible-summary">${policyFlags.length} item${policyFlags.length !== 1 ? 's' : ''}</span>
+        </summary>
+        <div class="k-ir-saved-cards">${flagCards}</div>
+      </details>
+
+      <details class="k-collapsible" ${suggestedProjects.length ? 'open' : ''}>
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">💡 Project Suggestions</span>
+          <span class="k-collapsible-summary">${suggestedProjects.length} item${suggestedProjects.length !== 1 ? 's' : ''}</span>
+        </summary>
+        <div class="k-ir-saved-cards">${projectCards}</div>
+      </details>
+    </section>`;
+}
+
+// ── Saved view interaction handlers ─────────────────────────────────
+
+function irOpenEditMode() {
+  const irSection = document.getElementById('k-insights-review');
+  if (irSection && S.activeMeeting) irSection.outerHTML = renderInsightsReviewSection(S.activeMeeting);
+}
+
+function irEditInsightItem(kind, cat, idx) {
+  irOpenEditMode();
+  const dataKir = kind === 'res' ? 'res' : kind === 'actions' ? 'act' : kind === 'flags' ? 'flag' : 'proj';
+  const selector = kind === 'res'
+    ? `[data-kir="res"][data-res-cat="${cat}"][data-idx="${idx}"]`
+    : `[data-kir="${dataKir}"][data-idx="${idx}"]`;
+  requestAnimationFrame(() => {
+    const el = document.querySelector(selector);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+}
+
+async function irRemoveInsightItem(kind, cat, idx) {
+  if (!S.activeMeeting) return;
+  if (!confirm('Remove this insight item?')) return;
+
+  const resolutions       = (S.activeMeeting.resolutions    || []).slice();
+  const actionItems       = (S.activeMeeting.actionItems    || []).slice();
+  const policyFlags       = (S.activeMeeting.policyFlags    || []).slice();
+  const suggestedProjects = (S.activeMeeting.suggestedProjects || []).slice();
+
+  if (kind === 'res') {
+    const resByCat = {};
+    IR_RES_SUB_CATS.forEach(sc => { resByCat[sc.cat] = []; });
+    resolutions.forEach((r, i) => {
+      const c = classifyResolutionInsight(r);
+      (resByCat[c] || resByCat['resolutions']).push({ _origIdx: i });
+    });
+    const toRemove = (resByCat[cat] || [])[idx];
+    if (toRemove != null) resolutions.splice(toRemove._origIdx, 1);
+  } else if (kind === 'actions') {
+    actionItems.splice(idx, 1);
+  } else if (kind === 'flags') {
+    policyFlags.splice(idx, 1);
+  } else if (kind === 'projects') {
+    suggestedProjects.splice(idx, 1);
+  }
+
+  try {
+    const updated = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
+      resolutions, actionItems, policyFlags, suggestedProjects,
+    });
+    if (updated?.error) { showToast(updated.error, 'error'); return; }
+    S.activeMeeting = { ...updated };
+    if (S.meetings?.length) S.meetings = S.meetings.map(m => m.id === S.activeMeeting.id ? S.activeMeeting : m);
+    showToast('Insight item removed.', 'success');
+    const irSection = document.getElementById('k-insights-review');
+    if (irSection) irSection.outerHTML = renderInsightsReviewSavedView(S.activeMeeting);
+  } catch {
+    showToast('Could not remove item. Check your connection.', 'error');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+
 function renderIrResSubCatRows(resolutions, cat, defaultType) {
   const sc = IR_RES_SUB_CATS.find(s => s.cat === cat);
   const label = sc ? sc.label.toLowerCase() : 'resolution';
@@ -3713,9 +3936,9 @@ async function saveInsightsReview(btn) {
       S.meetings = S.meetings.map(m => m.id === S.activeMeeting.id ? S.activeMeeting : m);
     }
     showToast('Insights saved.', 'success');
-    // Re-render section in-place with confirmed server data
+    // Switch to the card display view
     const irSection = document.getElementById('k-insights-review');
-    if (irSection) irSection.outerHTML = renderInsightsReviewSection(S.activeMeeting);
+    if (irSection) irSection.outerHTML = renderInsightsReviewSavedView(S.activeMeeting);
   } catch {
     showToast('Could not save insights. Check your connection.', 'error');
   } finally {
@@ -3863,21 +4086,53 @@ async function saveMinutesReview(btn) {
     if (actionsEl) actionsEl.innerHTML = minutesActionsHtml(S.activeMeeting);
     const hintEl = document.getElementById('k-minutes-review-hint');
     if (hintEl) hintEl.style.display = 'none';
-    // Refresh insights review section with the latest API data so any AI-driven
-    // changes to resolutions/actionItems/policyFlags from the updated minutes are visible.
+    // Show the saved card view for insights
     const irSection = document.getElementById('k-insights-review');
-    if (irSection) irSection.outerHTML = renderInsightsReviewSection(S.activeMeeting);
+    if (irSection) irSection.outerHTML = renderInsightsReviewSavedView(S.activeMeeting);
     showToast('Review approved and saved', 'success');
 
     // Show action item WhatsApp notification links if any action items exist.
     const actions = S.activeMeeting.actionItems || [];
     if (actions.length) renderActionNotifications(actions, S.activeMeeting);
+
+    // Trigger AI reconciliation of insights against the approved minutes in the background
+    const approvedMinutes = res.minutesMarkdown || document.getElementById('kr-minutes')?.value || '';
+    const hasInsights = (res.resolutions?.length || res.actionItems?.length || res.policyFlags?.length);
+    if (approvedMinutes && hasInsights) {
+      reconcileInsightsAfterApproval(S.activeMeeting.id, approvedMinutes);
+    }
   } catch {
     showToast('Review save failed. Check your connection.', 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
   }
+}
+
+async function reconcileInsightsAfterApproval(meetingId, minutesMarkdown) {
+  try {
+    const result = await apiPost(`ai-secretary-meetings/${meetingId}/reconcile-insights`, { minutesMarkdown });
+    if (!result || result.error) return;
+    const changes = String(result.changes || '').trim();
+    const noChange = !changes || changes.toLowerCase().includes('no changes');
+    if (noChange) {
+      showToast('Insights verified against approved minutes ✓', 'success');
+      return;
+    }
+    // Apply AI-updated insights to the active meeting
+    S.activeMeeting = {
+      ...S.activeMeeting,
+      resolutions:       result.resolutions       ?? S.activeMeeting.resolutions,
+      actionItems:       result.actionItems        ?? S.activeMeeting.actionItems,
+      policyFlags:       result.policyFlags        ?? S.activeMeeting.policyFlags,
+      suggestedProjects: result.suggestedProjects  ?? S.activeMeeting.suggestedProjects,
+    };
+    if (S.meetings?.length) S.meetings = S.meetings.map(m => m.id === meetingId ? S.activeMeeting : m);
+    // Re-render insights card view with the updated data
+    const irSection = document.getElementById('k-insights-review');
+    if (irSection) irSection.outerHTML = renderInsightsReviewSavedView(S.activeMeeting);
+    showToast(`AI updated insights: ${changes}`, 'info');
+  } catch { /* silent — reconciliation is best-effort */ }
 }
 
 function openReviewEditor() {
@@ -8510,15 +8765,28 @@ function previewAudioFile(input) {
   const preview = document.getElementById('km-audio-preview');
   const status  = document.getElementById('km-audio-status');
   if (!preview) return;
-  if (!file) { preview.innerHTML = ''; return; }
+  if (!file) { preview.innerHTML = ''; if (status) status.innerHTML = ''; return; }
   const mb = (file.size / 1024 / 1024).toFixed(1);
+  const tooBig = file.size > 24 * 1024 * 1024;
   preview.innerHTML = `
-    <div style="background:var(--surface,#f8fafc);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:10px">
+    <div style="background:var(--surface,#f8fafc);border:1px solid ${tooBig ? '#fca5a5' : 'var(--border)'};border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:10px">
       🎵 <strong>${esc(file.name)}</strong> &nbsp;·&nbsp; ${mb} MB
+      ${tooBig ? `<span style="color:#dc2626;font-weight:600;margin-left:6px">— too large</span>` : ''}
     </div>
+    ${tooBig ? `
+    <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:14px;font-size:13px;line-height:1.6;margin-bottom:10px">
+      <strong style="color:#dc2626">⚠️ File exceeds the 25 MB limit.</strong><br>
+      Compress it first using the free <strong>M4A Audio Compressor</strong> app (Play Store), then re-upload.<br><br>
+      <strong>Recommended settings:</strong><br>
+      &nbsp;• Bit rate: <strong>32k</strong><br>
+      &nbsp;• Sample rate: <strong>16000 Hz / 16 kHz</strong><br>
+      &nbsp;• Channels: <strong>1 (Mono)</strong><br>
+      &nbsp;• Profile: <strong>HE_AAC</strong><br><br>
+      <span style="color:#6b7280">A 78 MB file compresses to ≈ 10 MB with these settings — well under the limit with no loss in transcription accuracy.</span>
+    </div>` : `
     <div class="k-room-actions">
       <button class="kbtn kbtn-primary" onclick="Kpsc.transcribeAudioFile()">🤖 Transcribe with AI</button>
-    </div>`;
+    </div>`}`;
   if (status) status.innerHTML = '';
 }
 
@@ -8575,7 +8843,6 @@ async function transcribeAudioFile() {
     }).then(r => r.json());
 
     const ocrPromise = notesFiles.length ? ocrNotesImages(notesFiles) : Promise.resolve(null);
-
     const [audioRes, ocrRes] = await Promise.all([audioPromise, ocrPromise]);
 
     handleKpscAuthFailure(audioRes);
@@ -9610,6 +9877,9 @@ window.Kpsc = {
   addIrResRow,
   removeIrResRow,
   saveInsightsReview,
+  irOpenEditMode,
+  irEditInsightItem,
+  irRemoveInsightItem,
   promoteInsightProject,
   saveKpscOpsSettings,
   saveRolePermissions,
