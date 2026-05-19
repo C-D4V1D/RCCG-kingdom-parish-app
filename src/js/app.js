@@ -1705,25 +1705,33 @@ function deleteTxView(idx){
 }
 
 // ── DASHBOARD ────────────────────────────
-// Signed contribution of a petty-history entry to the petty float. Used to walk
-// the history when reconstructing the float at a past date.
-function pettyFloatDelta(h){
-  if(!h) return 0;
+// A petty-history entry can move the float on more than one date — an advance hits
+// on `approvedAt`, then the settlement adjustment (change returned or extra spent)
+// hits later on `settledAt`. Return each impact as its own {date, delta} so the
+// historical unwind can decide per-event whether it falls after the as-of date.
+//
+// IMPORTANT: dateNeeded is the "when the requester needs it" hint and can be set
+// well before approval — using it as an impact date would carry future approvals
+// back into a historical snapshot. Only use real impact timestamps here.
+function pettyFloatEvents(h){
+  if(!h) return [];
   if(h.type === 'refill' && (h.status === 'approved' || h.status === 'settled')){
-    return +(h.amount || 0);
+    return [{ date: String(h.createdAt || h.date || '').slice(0,10), delta: +(h.amount || 0) }];
   }
   if(h.type === 'advance' && (h.status === 'approved' || h.status === 'settled')){
-    let delta = -(h.amount || 0);
+    const approvalDate = String(h.approvedAt || h.createdAt || '').slice(0,10);
+    const events = [{ date: approvalDate, delta: -(h.amount || 0) }];
     if(h.status === 'settled'){
-      delta += (h.changeReturned || 0);
-      delta -= (h.extraSpent || 0);
+      const settleDate = String(h.settledAt || approvalDate).slice(0,10);
+      if(h.changeReturned) events.push({ date: settleDate, delta: +h.changeReturned });
+      if(h.extraSpent)    events.push({ date: settleDate, delta: -h.extraSpent });
     }
-    return delta;
+    return events;
   }
   if(h.type === 'disbursement' && h.status === 'approved'){
-    return -(h.amount || 0);
+    return [{ date: String(h.date || h.createdAt || '').slice(0,10), delta: -(h.amount || 0) }];
   }
-  return 0;
+  return [];
 }
 
 /** Cash position. Pass `asOfDate` (YYYY-MM-DD) to get a historical snapshot —
@@ -1783,16 +1791,16 @@ async function calcChurchBalance(asOfDate){
 
   // --- PETTY CASH (with Admin Officer) ---
   // pettyFloat can be negative — means Admin Officer spent personal money and church owes them.
-  // For historical view: unwind from current float by reversing every event that happened AFTER asOfDate.
-  // This is more reliable than walking from epoch because pettyConfig.float absorbs bootstrap/manual
-  // adjustments that don't always leave history entries.
+  // For historical view: unwind from current float by reversing every event whose IMPACT date
+  // falls after asOfDate. Each refill / advance approval / settlement adjustment / disbursement
+  // is its own event with its own date, so an advance approved in May can't accidentally
+  // contaminate a March snapshot via the requester's "dateNeeded" hint.
   let pettyFloat = pettyConfig.float;
   if(asOfDate){
-    const afterAsOf = h => {
-      const d = String(h?.date || h?.dateNeeded || h?.createdAt || '').slice(0,10);
-      return d && d > asOfDate;
-    };
-    const reverseDelta = pettyHistory.filter(afterAsOf).reduce((s,h)=>s+pettyFloatDelta(h), 0);
+    const reverseDelta = pettyHistory
+      .flatMap(pettyFloatEvents)
+      .filter(e => e.date && e.date > asOfDate)
+      .reduce((s,e) => s + e.delta, 0);
     pettyFloat = pettyConfig.float - reverseDelta;
   }
 
@@ -2312,7 +2320,7 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:#185FA5"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
-            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Church Balance <span style="text-transform:none;letter-spacing:0;font-weight:600">(As of ${dashAsOfLabel})</span></div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Church Balance${dashIsPastPeriod?` <span style="text-transform:none;letter-spacing:0;font-weight:600">(As of ${dashAsOfLabel})</span>`:''}</div>
             <div style="font-size:24px;font-weight:800;color:${churchBal.total<0?'var(--danger)':'#185FA5'};letter-spacing:-0.5px;line-height:1.15">${fmt(churchBal.total)}</div>
             <div style="font-size:12px;color:var(--text3);margin-top:5px">${dashIsPastPeriod?`Snapshot at end of period`:`Actual money on hand right now`}</div>
           </div>
@@ -2372,7 +2380,7 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:${dashSpendColor}"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
-            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Available Fund After All Deductions <span style="text-transform:none;letter-spacing:0;font-weight:600">(As of ${dashAsOfLabel})</span></div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Available Fund After All Deductions${dashIsPastPeriod?` <span style="text-transform:none;letter-spacing:0;font-weight:600">(As of ${dashAsOfLabel})</span>`:''}</div>
             <div style="font-size:26px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.8px;line-height:1.1">${fmt(dashSpendable)}</div>
           </div>
           <div style="display:flex;flex-direction:column;align-items:center;gap:8px;flex-shrink:0">
