@@ -578,6 +578,12 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-progress-bar{height:6px;background:var(--navy);border-radius:3px;transition:width .3s;}
 .k-progress-label{font-size:12px;color:var(--text3);white-space:nowrap;flex-shrink:0;}
 
+/* Indeterminate bar — used while we wait on the server with no
+   measurable progress (e.g. OpenAI is transcribing the uploaded file). */
+.k-indeterminate-bar{position:relative;height:6px;background:#e0e0e0;border-radius:3px;overflow:hidden;}
+.k-indeterminate-bar span{position:absolute;top:0;left:0;height:6px;width:40%;background:var(--navy);border-radius:3px;animation:k-indet 1.4s cubic-bezier(.4,0,.2,1) infinite;}
+@keyframes k-indet{0%{left:-40%;}60%{left:100%;}100%{left:100%;}}
+
 /* ── 12-MONTH PAYMENT GRID ─────────────────────────────────────── */
 .k-payment-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px;}
 @media(max-width:400px){.k-payment-grid{grid-template-columns:repeat(3,1fr);}}
