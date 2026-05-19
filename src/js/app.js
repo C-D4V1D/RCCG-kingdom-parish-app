@@ -2123,23 +2123,25 @@ async function renderDashboard(){
       <div>
         <div class="page-title">Welcome, ${(state.user?.name?.split(/\s+/).slice(0,2).join(' '))||'User'} 👋</div>
         <div class="page-sub">${monthLabel()} Financial Overview</div>
-        <div style="margin-top:10px;margin-left:-1rem;margin-right:-1rem;padding:0 8px">
-          <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px;text-align:center">Select Period Type</div>
-          <div style="display:flex;gap:6px">
-            <button onclick="App.setDashPeriodMode('remittance')" style="flex:1;min-width:0;padding:10px;border-radius:10px;border:1.5px solid ${useRemPeriod?'var(--primary)':'var(--border)'};background:${useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
-              <div style="font-size:12px;font-weight:700;color:${useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.2">${MONTHS[state.month]} Remittance Period</div>
-              <div style="font-size:10.5px;color:var(--text3);margin-top:2px">the custom RCCG period</div>
-              <div style="margin-top:6px"><span style="display:inline-block;padding:3px 9px;border-radius:12px;background:${useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${useRemPeriod?'#fff':'var(--text2)'};font-size:10.5px;font-weight:700;letter-spacing:0.2px">${fmtDateShort(dashPeriodFrom)} – ${fmtDateShort(dashPeriodTo)}</span></div>
-            </button>
-            <button onclick="App.setDashPeriodMode('calendar')" style="flex:1;min-width:0;padding:10px;border-radius:10px;border:1.5px solid ${!useRemPeriod?'var(--primary)':'var(--border)'};background:${!useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${!useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
-              <div style="font-size:12px;font-weight:700;color:${!useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.2">${MONTHS[state.month]} Calendar Period</div>
-              <div style="font-size:10.5px;color:var(--text3);margin-top:2px">the normal month period</div>
-              <div style="margin-top:6px"><span style="display:inline-block;padding:3px 9px;border-radius:12px;background:${!useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${!useRemPeriod?'#fff':'var(--text2)'};font-size:10.5px;font-weight:700;letter-spacing:0.2px">1 ${MONTHS[state.month].slice(0,3)} – ${new Date(state.year,state.month+1,0).getDate()} ${MONTHS[state.month].slice(0,3)}</span></div>
-            </button>
-          </div>
-        </div>
       </div>
     </div>
+
+    <!-- Period selector — full-width block so the two cards span the device edge-to-edge -->
+    <section style="margin:0 0 18px">
+      <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px;text-align:center">Select Period Type</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <button onclick="App.setDashPeriodMode('remittance')" style="min-width:0;padding:12px 14px;border-radius:12px;border:1.5px solid ${useRemPeriod?'var(--primary)':'var(--border)'};background:${useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
+          <div style="font-size:13px;font-weight:700;color:${useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${MONTHS[state.month]} Remittance Period</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">the custom RCCG period</div>
+          <div style="margin-top:8px"><span style="display:inline-block;padding:4px 10px;border-radius:12px;background:${useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${useRemPeriod?'#fff':'var(--text2)'};font-size:11px;font-weight:700;letter-spacing:0.2px">${fmtDateShort(dashPeriodFrom)} – ${fmtDateShort(dashPeriodTo)}</span></div>
+        </button>
+        <button onclick="App.setDashPeriodMode('calendar')" style="min-width:0;padding:12px 14px;border-radius:12px;border:1.5px solid ${!useRemPeriod?'var(--primary)':'var(--border)'};background:${!useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${!useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
+          <div style="font-size:13px;font-weight:700;color:${!useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${MONTHS[state.month]} Calendar Period</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">the normal month period</div>
+          <div style="margin-top:8px"><span style="display:inline-block;padding:4px 10px;border-radius:12px;background:${!useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${!useRemPeriod?'#fff':'var(--text2)'};font-size:11px;font-weight:700;letter-spacing:0.2px">1 ${MONTHS[state.month].slice(0,3)} – ${new Date(state.year,state.month+1,0).getDate()} ${MONTHS[state.month].slice(0,3)}</span></div>
+        </button>
+      </div>
+    </section>
 
     ${alerts}
 
