@@ -658,6 +658,30 @@ export async function onRequest(context) {
       }
     }
 
+    // ── Agenda Builder: /api/kpsc-agenda-templates ─────────────
+    if (route === 'kpsc-agenda-templates') {
+      if (method === 'GET' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getAgendaTemplates(DB);
+      }
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createAgendaTemplate(DB, body, auth);
+      }
+      if (method === 'PUT' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateAgendaTemplate(DB, param, body);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteAgendaTemplate(DB, param);
+      }
+    }
+
     // ── B5+B6: internal cron endpoints (Bearer CRON_SECRET) ────
     if (route === 'internal') {
       if (method === 'POST' && param === 'run-followups')  return await runFollowups(DB, env, request);
@@ -1012,6 +1036,15 @@ async function handleInit(DB) {
       created_at          TEXT DEFAULT (datetime('now')),
       updated_at          TEXT DEFAULT (datetime('now'))
     )`,
+    // Agenda Templates: reusable agenda structures for recurring meetings
+    `CREATE TABLE IF NOT EXISTS kpsc_agenda_templates (
+      id          TEXT PRIMARY KEY,
+      title       TEXT NOT NULL DEFAULT '',
+      items_json  TEXT DEFAULT '[]',
+      created_by  TEXT DEFAULT '',
+      created_at  TEXT DEFAULT (datetime('now')),
+      updated_at  TEXT DEFAULT (datetime('now'))
+    )`,
   ];
 
   // Run all CREATE TABLE statements first
@@ -1083,6 +1116,8 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_projects ADD COLUMN deleted_by TEXT DEFAULT ''`,
     // Agenda Builder: structured agenda attached to a meeting
     `ALTER TABLE ai_secretary_meetings ADD COLUMN agenda_text TEXT DEFAULT ''`,
+    // Agenda Templates (additional features): prep checklist state on drafts
+    `ALTER TABLE kpsc_whatsapp_drafts ADD COLUMN prep_checklist_json TEXT DEFAULT '[]'`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -2719,6 +2754,27 @@ async function getKpscDashboard(DB, url) {
     WHERE year=? AND month=?
   `).bind(year, month).first();
 
+  // Load the next upcoming meeting from whatsapp drafts (saved/finalized with a future date).
+  // This powers the "Upcoming Meeting" card shown to all committee members on the dashboard.
+  const today = new Date().toISOString().slice(0, 10);
+  const upcomingDraft = await DB.prepare(`
+    SELECT id, meeting_title, meeting_date, meeting_time, venue, agenda_items_json, linked_meeting_id
+    FROM kpsc_whatsapp_drafts
+    WHERE status IN ('saved','finalized') AND meeting_date >= ?
+    ORDER BY meeting_date ASC
+    LIMIT 1
+  `).bind(today).first();
+
+  const upcomingMeeting = upcomingDraft ? {
+    id: upcomingDraft.id,
+    meetingTitle: upcomingDraft.meeting_title || '',
+    meetingDate: upcomingDraft.meeting_date || '',
+    meetingTime: upcomingDraft.meeting_time || '',
+    venue: upcomingDraft.venue || '',
+    agendaItems: safeJsonParse(upcomingDraft.agenda_items_json, []),
+    linkedMeetingId: upcomingDraft.linked_meeting_id || '',
+  } : null;
+
   return ok({
     month,
     year,
@@ -2732,6 +2788,7 @@ async function getKpscDashboard(DB, url) {
       unpaidPartners: Number(unpaidPartnersRow?.unpaid_count || 0),
       remindersSent: Number(remindersRow?.sent_count || 0),
     },
+    upcomingMeeting,
   });
 }
 
@@ -5495,6 +5552,7 @@ function whatsappDraftFromRow(row) {
     messageText: row.message_text || '',
     status: row.status || 'draft',
     linkedMeetingId: row.linked_meeting_id || '',
+    prepChecklist: safeJsonParse(row.prep_checklist_json, []),
     createdBy: row.created_by || '',
     createdAt: row.created_at || '',
     updatedAt: row.updated_at || '',
@@ -5508,12 +5566,24 @@ async function getWhatsappDrafts(DB) {
   return ok((results || []).map(whatsappDraftFromRow));
 }
 
+// Default prep checklist items every secretary should verify before a meeting.
+const DEFAULT_PREP_CHECKLIST = [
+  { id: 'venue',       label: 'Venue confirmed and arranged',         done: false },
+  { id: 'attendance',  label: 'Attendance sheet prepared',            done: false },
+  { id: 'minutes',     label: 'Previous minutes distributed',         done: false },
+  { id: 'agenda_copy', label: 'Printed agenda copies ready',          done: false },
+  { id: 'sound',       label: 'Sound system / microphone checked',    done: false },
+  { id: 'projector',   label: 'Projector / whiteboard available',     done: false },
+  { id: 'refresh',     label: 'Refreshments arranged',                done: false },
+];
+
 async function createWhatsappDraft(DB, data, auth) {
   const id = newId('WAD-');
   const now = new Date().toISOString();
+  const prepChecklist = data.prepChecklist?.length ? data.prepChecklist : DEFAULT_PREP_CHECKLIST;
   await DB.prepare(
-    `INSERT INTO kpsc_whatsapp_drafts (id,agenda_items_json,meeting_title,meeting_date,meeting_time,venue,urgency,tag_all,message_text,status,created_by,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO kpsc_whatsapp_drafts (id,agenda_items_json,meeting_title,meeting_date,meeting_time,venue,urgency,tag_all,message_text,status,prep_checklist_json,created_by,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     id,
     JSON.stringify(data.agendaItems || []),
@@ -5525,6 +5595,7 @@ async function createWhatsappDraft(DB, data, auth) {
     data.tagAll ? 1 : 0,
     String(data.messageText || ''),
     'draft',
+    JSON.stringify(prepChecklist),
     auth?.name || '',
     now, now,
   ).run();
@@ -5537,7 +5608,7 @@ async function updateWhatsappDraft(DB, id, data) {
   if (!existing) return err('WhatsApp draft not found', 404);
   const now = new Date().toISOString();
   await DB.prepare(
-    `UPDATE kpsc_whatsapp_drafts SET agenda_items_json=?, meeting_title=?, meeting_date=?, meeting_time=?, venue=?, urgency=?, tag_all=?, message_text=?, status=?, updated_at=? WHERE id=?`
+    `UPDATE kpsc_whatsapp_drafts SET agenda_items_json=?, meeting_title=?, meeting_date=?, meeting_time=?, venue=?, urgency=?, tag_all=?, message_text=?, status=?, prep_checklist_json=?, updated_at=? WHERE id=?`
   ).bind(
     JSON.stringify(data.agendaItems !== undefined ? data.agendaItems : safeJsonParse(existing.agenda_items_json, [])),
     data.meetingTitle !== undefined ? String(data.meetingTitle) : (existing.meeting_title || ''),
@@ -5548,6 +5619,7 @@ async function updateWhatsappDraft(DB, id, data) {
     data.tagAll !== undefined ? (data.tagAll ? 1 : 0) : existing.tag_all,
     data.messageText !== undefined ? String(data.messageText) : existing.message_text,
     data.status !== undefined ? data.status : existing.status,
+    JSON.stringify(data.prepChecklist !== undefined ? data.prepChecklist : safeJsonParse(existing.prep_checklist_json, DEFAULT_PREP_CHECKLIST)),
     now, id,
   ).run();
   const row = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).first();
@@ -5558,6 +5630,60 @@ async function deleteWhatsappDraft(DB, id) {
   const existing = await DB.prepare(`SELECT id FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).first();
   if (!existing) return err('WhatsApp draft not found', 404);
   await DB.prepare(`DELETE FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).run();
+  return ok({ id, deleted: true });
+}
+
+// ── Agenda Templates CRUD ─────────────────────────────────────────
+
+function agendaTemplateFromRow(row) {
+  return {
+    id: row.id,
+    title: row.title || '',
+    items: safeJsonParse(row.items_json, []),
+    createdBy: row.created_by || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || '',
+  };
+}
+
+async function getAgendaTemplates(DB) {
+  const { results } = await DB.prepare(
+    `SELECT * FROM kpsc_agenda_templates ORDER BY title ASC`
+  ).all();
+  return ok((results || []).map(agendaTemplateFromRow));
+}
+
+async function createAgendaTemplate(DB, data, auth) {
+  const title = String(data.title || '').trim();
+  if (!title) return err('Template title is required.', 400);
+  const items = Array.isArray(data.items) ? data.items : [];
+  if (!items.length) return err('Template must have at least one agenda item.', 400);
+  const id = newId('TPL-');
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `INSERT INTO kpsc_agenda_templates (id,title,items_json,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?)`
+  ).bind(id, title, JSON.stringify(items), auth?.name || '', now, now).run();
+  const row = await DB.prepare(`SELECT * FROM kpsc_agenda_templates WHERE id=?`).bind(id).first();
+  return ok(agendaTemplateFromRow(row));
+}
+
+async function updateAgendaTemplate(DB, id, data) {
+  const existing = await DB.prepare(`SELECT * FROM kpsc_agenda_templates WHERE id=?`).bind(id).first();
+  if (!existing) return err('Template not found', 404);
+  const title = data.title !== undefined ? String(data.title).trim() : existing.title;
+  const items = data.items !== undefined ? data.items : safeJsonParse(existing.items_json, []);
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE kpsc_agenda_templates SET title=?, items_json=?, updated_at=? WHERE id=?`
+  ).bind(title, JSON.stringify(items), now, id).run();
+  const row = await DB.prepare(`SELECT * FROM kpsc_agenda_templates WHERE id=?`).bind(id).first();
+  return ok(agendaTemplateFromRow(row));
+}
+
+async function deleteAgendaTemplate(DB, id) {
+  const existing = await DB.prepare(`SELECT id FROM kpsc_agenda_templates WHERE id=?`).bind(id).first();
+  if (!existing) return err('Template not found', 404);
+  await DB.prepare(`DELETE FROM kpsc_agenda_templates WHERE id=?`).bind(id).run();
   return ok({ id, deleted: true });
 }
 

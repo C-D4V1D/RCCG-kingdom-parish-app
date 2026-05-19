@@ -107,6 +107,9 @@ const S = {
   agendaBuilderDraftId: null,
   agendaBuilderMessage: '',
   agendaBuilderNotesRec: null,       // MediaRecorder for voice note recording
+  agendaBuilderTemplates: [],        // loaded agenda templates
+  agendaBuilderChecklist: [],        // prep checklist state for current draft
+  agendaBuilderDraftsHistory: [],    // recent saved drafts for history panel
   // Action Items page state
   actionItems: [],
   actionItemsLoaded: false,
@@ -2555,6 +2558,7 @@ function buildDashboardContext() {
     activeProjects: inProgressProjects.slice(0, 5),
     pendingFollowups,
     upcomingBriefMeeting,
+    upcomingMeeting: S._upcomingMeeting || null,
   };
 }
 
@@ -2682,12 +2686,65 @@ function dashCardPreBrief(ctx) {
     </div>`;
 }
 
+// ── Upcoming Meeting card (from Agenda Builder) ────────────────
+// Shown to ALL roles on the dashboard so every member knows about the next meeting.
+
+function dashCardUpcomingMeeting(ctx) {
+  const um = ctx.upcomingMeeting;
+  if (!um || !um.meetingDate) return '';
+
+  // Format meeting date
+  let dateDisplay = um.meetingDate;
+  try {
+    const d = new Date(um.meetingDate + 'T12:00:00');
+    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    dateDisplay = `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+  } catch { /* use raw */ }
+
+  const timeDisplay = um.meetingTime ? ` · ${um.meetingTime}` : '';
+  const venue = um.venue || '';
+  const items = Array.isArray(um.agendaItems) ? um.agendaItems : [];
+  const title = um.meetingTitle || 'Upcoming KPSC Meeting';
+
+  const role = String(S.user?.role || '').toLowerCase();
+  const canBuildAgenda = role === 'acting_chairman' || role === 'general_secretary' || role === 'it_admin';
+
+  return `
+    <div class="k-meeting-card" style="border-left:4px solid #25d366;margin-bottom:16px;background:var(--card)">
+      <div class="k-mc-top">
+        <div style="flex:1">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#25d366;margin-bottom:4px">📅 Next Meeting</div>
+          <div class="k-mc-title" style="font-size:15px">${esc(title)}</div>
+          <div class="k-mc-meta" style="margin-top:4px">
+            <span>${esc(dateDisplay)}${esc(timeDisplay)}</span>
+            ${venue ? `<span>📍 ${esc(venue)}</span>` : ''}
+          </div>
+        </div>
+      </div>
+      ${items.length ? `
+      <details style="margin-top:10px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--navy)">${items.length} agenda items</summary>
+        <ol style="margin:8px 0 0 16px;padding:0;font-size:12px;line-height:1.8;color:var(--text1)">
+          ${items.slice(0, 8).map(i => `<li>${esc(typeof i === 'string' ? i : (i.topic || ''))}</li>`).join('')}
+          ${items.length > 8 ? `<li style="color:var(--text2)">… and ${items.length - 8} more</li>` : ''}
+        </ol>
+      </details>` : ''}
+      ${canBuildAgenda ? `
+      <div style="margin-top:10px">
+        <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('agenda_builder')">📋 Edit Agenda</button>
+        ${um.linkedMeetingId ? `<button class="kbtn kbtn-sm kbtn-primary" style="margin-left:8px" onclick="Kpsc.openMeeting('${esc(um.linkedMeetingId)}')">▶ Open Meeting Draft</button>` : ''}
+      </div>` : ''}
+    </div>`;
+}
+
 function dashboardCardsForRole(role, ctx) {
   const r = String(role || 'committee_viewer').toLowerCase();
 
   if (r === 'acting_chairman') {
     return `
       ${dashCardPreBrief(ctx)}
+      ${dashCardUpcomingMeeting(ctx)}
       ${dashCardFollowups(ctx)}
       ${dashCardOpenMeeting(ctx)}
       <div class="k-section-hdr" style="margin-top:20px"><h2>At a Glance</h2></div>
@@ -2737,6 +2794,7 @@ function dashboardCardsForRole(role, ctx) {
   if (r === 'general_secretary') {
     return `
       ${dashCardPreBrief(ctx)}
+      ${dashCardUpcomingMeeting(ctx)}
       ${dashCardFollowups(ctx)}
       ${dashCardOpenMeeting(ctx)}
       <div class="k-section-hdr" style="margin-top:20px"><h2>At a Glance</h2></div>
@@ -2778,6 +2836,7 @@ function dashboardCardsForRole(role, ctx) {
 
   if (r === 'financial_secretary' || r === 'treasurer') {
     return `
+      ${dashCardUpcomingMeeting(ctx)}
       <div class="k-section-hdr" style="margin-top:4px"><h2>Finance At a Glance</h2></div>
       <div class="k-meeting-list">
         ${dashTile({
@@ -2832,6 +2891,7 @@ function dashboardCardsForRole(role, ctx) {
 
   // committee_viewer (default)
   return `
+    ${dashCardUpcomingMeeting(ctx)}
     <div class="k-section-hdr" style="margin-top:4px"><h2>Committee Overview</h2></div>
     <div class="k-meeting-list">
       ${ctx.latestProcessed ? `
@@ -2887,6 +2947,7 @@ async function renderDashboard(main) {
   S.meetings        = Array.isArray(meetingsRes)            ? meetingsRes            : [];
   S.members         = Array.isArray(settingsRes?.kpsc_members) ? settingsRes.kpsc_members : [];
   S.dashboard       = dashboardRes?.totals || null;
+  S._upcomingMeeting = dashboardRes?.upcomingMeeting || null;
   S.projects        = Array.isArray(projectsRes)            ? projectsRes            : [];
   S.financeEntries  = Array.isArray(financeRes)             ? financeRes             : [];
   S.partners        = Array.isArray(partnersRes)            ? partnersRes            : [];
@@ -10169,9 +10230,10 @@ async function renderAgendaBuilder(main) {
   const notesRes = await apiGet('kpsc-agenda-notes');
   S.agendaNotes = Array.isArray(notesRes) ? notesRes : [];
 
-  // Load recent WhatsApp drafts
+  // Load recent WhatsApp drafts (used for history panel and restoring state)
   const draftsRes = await apiGet('kpsc-whatsapp-draft');
   const drafts = Array.isArray(draftsRes) ? draftsRes : [];
+  S.agendaBuilderDraftsHistory = drafts;
   const latestDraft = drafts[0] || null;
   if (latestDraft && !S.agendaBuilderDraftId) {
     S.agendaBuilderDraftId = latestDraft.id;
@@ -10181,7 +10243,14 @@ async function renderAgendaBuilder(main) {
     if (latestDraft.messageText && !S.agendaBuilderMessage) {
       S.agendaBuilderMessage = latestDraft.messageText;
     }
+    if (latestDraft.prepChecklist?.length && !S.agendaBuilderChecklist.length) {
+      S.agendaBuilderChecklist = latestDraft.prepChecklist;
+    }
   }
+
+  // Load agenda templates
+  const templatesRes = await apiGet('kpsc-agenda-templates');
+  S.agendaBuilderTemplates = Array.isArray(templatesRes) ? templatesRes : [];
 
   const step = S.agendaBuilderStep || 'notes';
   const unusedNotes = S.agendaNotes.filter(n => !n.is_used);
@@ -10217,12 +10286,12 @@ async function renderAgendaBuilder(main) {
         ${renderAbSelectStep()}
       </div>
 
-      <!-- Step 3: Meeting Settings -->
+      <!-- Step 3: Meeting Settings + Prep Checklist -->
       <div id="ab-step-settings" style="${step !== 'settings' ? 'display:none' : ''}">
         ${renderAbSettingsStep(latestDraft)}
       </div>
 
-      <!-- Step 4: WhatsApp Draft Builder -->
+      <!-- Step 4: WhatsApp Draft Builder + History -->
       <div id="ab-step-draft" style="${step !== 'draft' ? 'display:none' : ''}">
         ${renderAbDraftStep(latestDraft)}
       </div>
@@ -10289,17 +10358,37 @@ function renderAbNotesStep(unusedNotes) {
 function renderAbSelectStep() {
   const suggestions = S.agendaBuilderSuggestions;
   const selected = S.agendaBuilderSelected;
+  const templates = S.agendaBuilderTemplates;
+
+  const templatesHtml = templates.length ? `
+    <div id="ab-templates-panel" style="margin-bottom:16px;background:var(--surface,#f8fafc);border:1px solid var(--border);border-radius:8px;padding:12px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:12px;font-weight:600;color:var(--text2)">📂 Templates:</span>
+        <select class="k-input" id="ab-template-select" style="flex:1;min-width:160px;font-size:12px">
+          <option value="">— Choose a template to load —</option>
+          ${templates.map(t => `<option value="${esc(t.id)}">${esc(t.title)} (${Array.isArray(t.items) ? t.items.length : 0} items)</option>`).join('')}
+        </select>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.abLoadTemplate()">Load</button>
+        ${templates.map(t => `
+          <button class="kbtn kbtn-sm kbtn-ghost" style="font-size:11px;color:var(--danger,#dc2626)" title="Delete template: ${esc(t.title)}" onclick="Kpsc.abDeleteTemplate('${esc(t.id)}','${esc(t.title)}')">✕ ${esc(t.title)}</button>
+        `).join('')}
+      </div>
+    </div>` : '';
 
   return `
     <div class="k-section">
       <h3 class="k-sec-title">📋 Build Your Agenda</h3>
       <p class="k-page-hint">AI analyses past meetings and your notes to suggest agenda items. Select, reorder, or add your own.</p>
 
+      ${templatesHtml}
+
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
         <button class="kbtn kbtn-ai" id="ab-suggest-btn" onclick="Kpsc.abSuggestAgenda(this)">
           🤖 AI Suggest Agenda Items
         </button>
         <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.abClearSuggestions()">Clear</button>
+        ${selected.length >= 2 ? `<button class="kbtn kbtn-sm" onclick="Kpsc.abSaveAsTemplate()">💾 Save as Template</button>` : ''}
+        <button class="kbtn kbtn-sm" onclick="Kpsc.abPrintAgenda()">🖨️ Print Agenda</button>
       </div>
 
       ${suggestions.length ? `
@@ -10367,6 +10456,22 @@ function renderAbSelectedList(selected) {
 
 function renderAbSettingsStep(latestDraft) {
   const d = latestDraft || {};
+  // Use in-memory checklist state (kept in sync when toggled); fall back to draft's checklist or defaults.
+  const DEFAULT_CHECKLIST = [
+    { id: 'venue',       label: 'Venue confirmed and arranged',         done: false },
+    { id: 'attendance',  label: 'Attendance sheet prepared',            done: false },
+    { id: 'minutes',     label: 'Previous minutes distributed to members', done: false },
+    { id: 'agenda_copy', label: 'Printed agenda copies ready',          done: false },
+    { id: 'sound',       label: 'Sound system / microphone checked',    done: false },
+    { id: 'projector',   label: 'Projector / whiteboard available',     done: false },
+    { id: 'refresh',     label: 'Refreshments arranged',                done: false },
+  ];
+  const checklist = S.agendaBuilderChecklist.length
+    ? S.agendaBuilderChecklist
+    : (d.prepChecklist?.length ? d.prepChecklist : DEFAULT_CHECKLIST);
+
+  const doneCount = checklist.filter(c => c.done).length;
+
   return `
     <div class="k-section">
       <h3 class="k-sec-title">⚙️ Meeting Settings</h3>
@@ -10409,6 +10514,28 @@ function renderAbSettingsStep(latestDraft) {
         </label>
       </div>
 
+      <!-- Pre-Meeting Prep Checklist -->
+      <details class="k-collapsible" ${doneCount < checklist.length ? 'open' : ''} style="margin-top:20px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+        <summary class="k-collapsible-hdr" style="padding:12px 14px;background:var(--card);cursor:pointer">
+          <span class="k-collapsible-title" style="font-size:14px;font-weight:600">
+            ✅ Pre-Meeting Prep Checklist
+            <span class="kbadge ${doneCount === checklist.length ? 'badge-green' : 'badge-amber'}" style="margin-left:8px">${doneCount}/${checklist.length} done</span>
+          </span>
+        </summary>
+        <div style="padding:12px 14px 16px;background:var(--surface,#f8fafc)">
+          <p class="k-hint" style="margin:0 0 10px">Tick each item as you complete your meeting preparations.</p>
+          <div id="ab-checklist-items">
+            ${checklist.map((item, i) => `
+              <label class="k-att-member" style="gap:10px;cursor:pointer;margin-bottom:10px;display:flex;align-items:center">
+                <input type="checkbox" id="ab-chk-${i}" ${item.done ? 'checked' : ''} onchange="Kpsc.abToggleChecklist(${i})"
+                  style="width:16px;height:16px;flex-shrink:0" />
+                <span style="font-size:13px;${item.done ? 'text-decoration:line-through;color:var(--text2)' : ''}">${esc(item.label)}</span>
+              </label>`).join('')}
+          </div>
+          <button class="kbtn kbtn-sm kbtn-ghost" style="margin-top:4px" onclick="Kpsc.abResetChecklist()">Reset all</button>
+        </div>
+      </details>
+
       <div style="margin-top:20px;display:flex;gap:8px">
         <button class="kbtn" onclick="Kpsc.abSetStep('select')">← Agenda</button>
         <button class="kbtn kbtn-primary" onclick="Kpsc.abGoToDraft(this)">Next: Generate Message →</button>
@@ -10419,6 +10546,12 @@ function renderAbSettingsStep(latestDraft) {
 function renderAbDraftStep(latestDraft) {
   const msg = S.agendaBuilderMessage || (latestDraft?.messageText || '');
   const hasDraft = !!S.agendaBuilderDraftId;
+
+  // Past notifications history (saved/finalized drafts, excluding current draft)
+  const history = (S.agendaBuilderDraftsHistory || [])
+    .filter(d => (d.status === 'saved' || d.status === 'finalized') && d.id !== S.agendaBuilderDraftId)
+    .slice(0, 5);
+
   return `
     <div class="k-section">
       <h3 class="k-sec-title">💬 WhatsApp Notification</h3>
@@ -10433,7 +10566,7 @@ function renderAbDraftStep(latestDraft) {
       ${msg ? `
       <div class="k-form-group">
         <label class="k-label">Message</label>
-        <textarea class="k-input" id="ab-message-text" rows="14" style="font-family:monospace;font-size:13px;line-height:1.6">${esc(msg)}</textarea>
+        <textarea class="k-input" id="ab-message-text" rows="14" style="font-family:monospace;font-size:13px;line-height:1.6" oninput="Kpsc.abUpdateWaPreview()">${esc(msg)}</textarea>
       </div>
 
       <div class="k-review-step-label" style="margin-top:12px">AI Refinement Tools</div>
@@ -10458,6 +10591,7 @@ function renderAbDraftStep(latestDraft) {
         </button>
         <button class="kbtn kbtn-primary" onclick="Kpsc.abCopyMessage()">📋 Copy Message</button>
         <button class="kbtn" onclick="Kpsc.abSaveDraft(this)">💾 Save Draft</button>
+        <button class="kbtn" onclick="Kpsc.abPrintAgenda()">🖨️ Print Agenda</button>
       </div>
 
       <div style="margin-top:16px">
@@ -10467,6 +10601,35 @@ function renderAbDraftStep(latestDraft) {
         <p class="k-hint" style="margin-top:6px;text-align:center">Saves this notification and creates/opens a meeting draft with the agenda pre-filled.</p>
       </div>
       ` : `<p class="k-hint" style="padding:20px;text-align:center;background:var(--surface,#f8fafc);border:1px dashed var(--border);border-radius:6px">Click <strong>Generate WhatsApp Message</strong> above to draft the notification.</p>`}
+
+      <!-- Past Notifications History -->
+      ${history.length ? `
+      <details class="k-collapsible" style="margin-top:24px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+        <summary class="k-collapsible-hdr" style="padding:12px 14px;background:var(--card);cursor:pointer">
+          <span class="k-collapsible-title" style="font-size:13px;font-weight:600">📜 Past Notifications (${history.length})</span>
+        </summary>
+        <div style="padding:12px 14px 14px;background:var(--surface,#f8fafc)">
+          <p class="k-hint" style="margin:0 0 10px;font-size:12px">Previous saved meeting notifications — click to preview or copy.</p>
+          ${history.map(d => {
+            const label = d.meetingTitle || fmtDate(d.meetingDate) || 'Untitled';
+            const items = Array.isArray(d.agendaItems) ? d.agendaItems.length : 0;
+            const date = fmtDate(d.meetingDate || d.createdAt?.slice(0,10) || '');
+            return `
+              <div class="k-meeting-card" style="padding:10px 12px;margin-bottom:8px">
+                <div style="display:flex;align-items:flex-start;gap:8px">
+                  <div style="flex:1">
+                    <div style="font-size:13px;font-weight:600;color:var(--text1)">${esc(label)}</div>
+                    <div style="font-size:11px;color:var(--text2);margin-top:2px">${esc(date)} · ${items} agenda items</div>
+                    ${d.linkedMeetingId ? `<div style="font-size:11px;color:var(--navy);margin-top:2px;cursor:pointer" onclick="Kpsc.openMeeting('${esc(d.linkedMeetingId)}')">→ Open linked meeting</div>` : ''}
+                  </div>
+                  <div style="display:flex;gap:6px;flex-shrink:0">
+                    ${d.messageText ? `<button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.abCopyHistoryMessage(${esc(JSON.stringify(d.messageText))})">📋 Copy</button>` : ''}
+                  </div>
+                </div>
+              </div>`;
+          }).join('')}
+        </div>
+      </details>` : ''}
 
       <div style="margin-top:16px">
         <button class="kbtn" onclick="Kpsc.abSetStep('settings')">← Settings</button>
@@ -10649,20 +10812,28 @@ async function abGoToDraft(btn) {
   btn.disabled = true;
   btn.textContent = 'Saving…';
   try {
+    // Persist current checklist state if it has been touched
+    const prepChecklist = S.agendaBuilderChecklist.length ? S.agendaBuilderChecklist : undefined;
     let draftRes;
     if (S.agendaBuilderDraftId) {
       draftRes = await apiPut(`kpsc-whatsapp-draft/${S.agendaBuilderDraftId}`, {
         agendaItems: S.agendaBuilderSelected.map(t => ({ topic: t })),
         meetingDate, meetingTime, venue, meetingTitle, urgency, tagAll,
+        ...(prepChecklist ? { prepChecklist } : {}),
       });
     } else {
       draftRes = await apiPost('kpsc-whatsapp-draft', {
         agendaItems: S.agendaBuilderSelected.map(t => ({ topic: t })),
         meetingDate, meetingTime, venue, meetingTitle, urgency, tagAll,
+        ...(prepChecklist ? { prepChecklist } : {}),
       });
     }
     if (draftRes?.error) { showToast(draftRes.error, 'error'); return; }
     S.agendaBuilderDraftId = draftRes.id;
+    // Sync checklist from server response (includes defaults if first save)
+    if (draftRes.prepChecklist?.length && !S.agendaBuilderChecklist.length) {
+      S.agendaBuilderChecklist = draftRes.prepChecklist;
+    }
     abSetStep('draft');
     // Re-render draft step with latest data
     const draftEl = document.getElementById('ab-step-draft');
@@ -10798,6 +10969,8 @@ async function abFinalizeAndOpenMeeting(btn) {
     S.agendaBuilderMessage = '';
     S.agendaBuilderSuggestions = [];
     S.agendaBuilderStep = 'notes';
+    S.agendaBuilderChecklist = [];
+    S.agendaBuilderDraftsHistory = [];
     showToast('Agenda saved! Opening meeting draft…', 'success');
     if (linkedId) {
       // Reload meetings first
@@ -10813,6 +10986,207 @@ async function abFinalizeAndOpenMeeting(btn) {
     btn.disabled = false;
     btn.textContent = orig;
   }
+}
+
+// ── Agenda Builder: Templates ─────────────────────────────────
+
+async function abSaveAsTemplate() {
+  const items = [...S.agendaBuilderSelected];
+  if (items.length < 2) { showToast('Add at least 2 agenda items to save as a template.', 'warn'); return; }
+  const name = prompt('Template name (e.g. "Monthly Routine Meeting"):')?.trim();
+  if (!name) return;
+  const res = await apiPost('kpsc-agenda-templates', { title: name, items });
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  S.agendaBuilderTemplates.unshift(res);
+  showToast(`Template "${name}" saved.`, 'success');
+  // Refresh select step panel
+  const panel = document.getElementById('ab-step-select');
+  if (panel) panel.innerHTML = renderAbSelectStep();
+}
+
+function abLoadTemplate() {
+  const sel = document.getElementById('ab-template-select');
+  const id = sel?.value;
+  if (!id) { showToast('Please select a template to load.', 'warn'); return; }
+  const tpl = S.agendaBuilderTemplates.find(t => t.id === id);
+  if (!tpl) return;
+  const items = Array.isArray(tpl.items) ? tpl.items : [];
+  const existing = S.agendaBuilderSelected;
+  const toAdd = items.filter(i => !existing.includes(i));
+  if (!toAdd.length) { showToast('All items from this template are already in your agenda.', 'info'); return; }
+  S.agendaBuilderSelected = [...existing, ...toAdd];
+  showToast(`Loaded ${toAdd.length} item(s) from "${tpl.title}".`, 'success');
+  const listEl = document.getElementById('ab-selected-list');
+  if (listEl) listEl.innerHTML = renderAbSelectedList(S.agendaBuilderSelected);
+  if (sel) sel.value = '';
+}
+
+async function abDeleteTemplate(id, name) {
+  if (!confirm(`Delete template "${name}"? This cannot be undone.`)) return;
+  const res = await apiDelete(`kpsc-agenda-templates/${id}`);
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  S.agendaBuilderTemplates = S.agendaBuilderTemplates.filter(t => t.id !== id);
+  showToast(`Template "${name}" deleted.`, 'info');
+  const panel = document.getElementById('ab-step-select');
+  if (panel) panel.innerHTML = renderAbSelectStep();
+}
+
+// ── Agenda Builder: Pre-Meeting Checklist ─────────────────────
+
+function abToggleChecklist(idx) {
+  if (!S.agendaBuilderChecklist.length) {
+    // If not yet loaded, pull from the settings step defaults
+    const DEFAULT_CHECKLIST = [
+      { id: 'venue',       label: 'Venue confirmed and arranged',         done: false },
+      { id: 'attendance',  label: 'Attendance sheet prepared',            done: false },
+      { id: 'minutes',     label: 'Previous minutes distributed to members', done: false },
+      { id: 'agenda_copy', label: 'Printed agenda copies ready',          done: false },
+      { id: 'sound',       label: 'Sound system / microphone checked',    done: false },
+      { id: 'projector',   label: 'Projector / whiteboard available',     done: false },
+      { id: 'refresh',     label: 'Refreshments arranged',                done: false },
+    ];
+    S.agendaBuilderChecklist = DEFAULT_CHECKLIST;
+  }
+  if (idx >= 0 && idx < S.agendaBuilderChecklist.length) {
+    S.agendaBuilderChecklist[idx].done = !S.agendaBuilderChecklist[idx].done;
+    // Persist checklist to draft in background (non-blocking)
+    if (S.agendaBuilderDraftId) {
+      apiPut(`kpsc-whatsapp-draft/${S.agendaBuilderDraftId}`, { prepChecklist: S.agendaBuilderChecklist })
+        .catch(() => { /* silently ignore */ });
+    }
+    // Update badge counter without full re-render
+    const doneCount = S.agendaBuilderChecklist.filter(c => c.done).length;
+    const total = S.agendaBuilderChecklist.length;
+    const badge = document.querySelector('.k-collapsible-title .kbadge');
+    if (badge) {
+      badge.textContent = `${doneCount}/${total} done`;
+      badge.className = `kbadge ${doneCount === total ? 'badge-green' : 'badge-amber'}`;
+    }
+  }
+}
+
+function abResetChecklist() {
+  S.agendaBuilderChecklist = S.agendaBuilderChecklist.map(c => ({ ...c, done: false }));
+  if (S.agendaBuilderDraftId) {
+    apiPut(`kpsc-whatsapp-draft/${S.agendaBuilderDraftId}`, { prepChecklist: S.agendaBuilderChecklist })
+      .catch(() => { /* silently ignore */ });
+  }
+  // Re-render checklist items
+  const container = document.getElementById('ab-checklist-items');
+  if (container) {
+    container.innerHTML = S.agendaBuilderChecklist.map((item, i) => `
+      <label class="k-att-member" style="gap:10px;cursor:pointer;margin-bottom:10px;display:flex;align-items:center">
+        <input type="checkbox" id="ab-chk-${i}" onchange="Kpsc.abToggleChecklist(${i})" style="width:16px;height:16px;flex-shrink:0" />
+        <span style="font-size:13px">${esc(item.label)}</span>
+      </label>`).join('');
+  }
+  const badge = document.querySelector('.k-collapsible-title .kbadge');
+  if (badge) { badge.textContent = `0/${S.agendaBuilderChecklist.length} done`; badge.className = 'kbadge badge-amber'; }
+  showToast('Checklist reset.', 'info');
+}
+
+// ── Agenda Builder: Print Formal Agenda ──────────────────────
+
+function abPrintAgenda() {
+  const items = [...S.agendaBuilderSelected];
+  if (!items.length) { showToast('Add agenda items before printing.', 'warn'); return; }
+
+  // Gather meeting settings from DOM (if on settings step) or from latest draft state
+  const meetingDate = document.getElementById('ab-meeting-date')?.value || '';
+  const meetingTime = document.getElementById('ab-meeting-time')?.value || '';
+  const venue = document.getElementById('ab-venue')?.value?.trim() || 'Church Premises';
+  const meetingTitle = document.getElementById('ab-meeting-title')?.value?.trim()
+    || (S.agendaBuilderDraftsHistory[0]?.meetingTitle || 'KPSC Meeting');
+
+  // Format date for display
+  let dateDisplay = meetingDate;
+  if (meetingDate) {
+    try {
+      const d = new Date(meetingDate + 'T12:00:00');
+      const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+      const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      dateDisplay = `${days[d.getDay()]}, ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+    } catch { /* use raw */ }
+  }
+
+  const timeDisplay = meetingTime
+    ? (() => { try { const [h, m] = meetingTime.split(':'); const d = new Date(0, 0, 0, h, m); return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch { return meetingTime; } })()
+    : '';
+
+  const agendaLines = items.map((item, i) => `
+    <div style="display:flex;gap:14px;padding:10px 0;border-bottom:1px solid #e8ecf0">
+      <span style="font-weight:700;color:#1e3a5f;min-width:28px;font-size:14px">${i + 1}.</span>
+      <span style="font-size:14px;line-height:1.5">${esc(item)}</span>
+    </div>`).join('');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Meeting Agenda — ${esc(meetingTitle)}</title>
+<style>
+  @page { margin: 30mm 25mm; }
+  body { font-family: 'Times New Roman', serif; color: #111; }
+  .header { text-align: center; border-bottom: 3px double #1e3a5f; padding-bottom: 16px; margin-bottom: 24px; }
+  .org { font-size: 13px; font-weight: 700; color: #1e3a5f; letter-spacing: 1px; text-transform: uppercase; }
+  .title { font-size: 20px; font-weight: 700; margin: 8px 0 4px; }
+  .meta { font-size: 13px; color: #444; line-height: 1.8; }
+  .agenda-section { margin-top: 24px; }
+  .agenda-title { font-size: 15px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #1e3a5f; border-bottom: 1px solid #1e3a5f; padding-bottom: 4px; margin-bottom: 0; }
+  .footer { margin-top: 40px; text-align: center; font-size: 11px; color: #888; border-top: 1px solid #ddd; padding-top: 12px; }
+  @media print { body { -webkit-print-color-adjust: exact; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="org">Redeemed Christian Church of God · Kingdom Parish, Aguleri</div>
+  <div class="title">${esc(meetingTitle)}</div>
+  <div class="meta">
+    ${dateDisplay ? `<strong>Date:</strong> ${esc(dateDisplay)}` : ''}
+    ${timeDisplay ? ` &nbsp;|&nbsp; <strong>Time:</strong> ${esc(timeDisplay)}` : ''}
+    ${venue ? ` &nbsp;|&nbsp; <strong>Venue:</strong> ${esc(venue)}` : ''}
+  </div>
+</div>
+
+<div class="agenda-section">
+  <div class="agenda-title">Agenda</div>
+  ${agendaLines}
+</div>
+
+<div style="margin-top:32px">
+  <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <tr>
+      <td style="padding:8px 0;width:50%">Chaired by: __________________________</td>
+      <td style="padding:8px 0;width:50%">Minutes by: __________________________</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 0">Signed: __________________________</td>
+      <td style="padding:8px 0">Date: __________________________</td>
+    </tr>
+  </table>
+</div>
+
+<div class="footer">
+  This agenda was generated by the KPSC Portal · Kingdom Parish Secretary's Committee
+</div>
+</body>
+</html>`;
+
+  const win = window.open('', '_blank', 'width=700,height=900');
+  if (!win) { showToast('Could not open print window. Allow pop-ups for this site.', 'warn'); return; }
+  win.document.write(html);
+  win.document.close();
+  win.onload = () => win.print();
+}
+
+// ── Agenda Builder: History Copy ──────────────────────────────
+
+function abCopyHistoryMessage(msg) {
+  if (!msg) return;
+  navigator.clipboard.writeText(msg).then(
+    () => showToast('Copied to clipboard.', 'success'),
+    () => showToast('Could not copy. Please copy manually.', 'warn'),
+  );
 }
 
 // ── Agenda Builder Voice Note ───────────────────────────────────
@@ -11074,6 +11448,14 @@ window.Kpsc = {
   abShareWhatsApp,
   abFinalizeAndOpenMeeting,
   abToggleVoice,
+  // Agenda Builder: Additional Features
+  abSaveAsTemplate,
+  abLoadTemplate,
+  abDeleteTemplate,
+  abToggleChecklist,
+  abResetChecklist,
+  abPrintAgenda,
+  abCopyHistoryMessage,
 };
 
 document.addEventListener('DOMContentLoaded', init);
