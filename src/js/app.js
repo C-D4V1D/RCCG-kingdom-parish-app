@@ -519,7 +519,7 @@ function getQuotaLinesForPeriod(quotas, fromDate, toDate){
     const label=q?.label||'';
     const monthlyAmount=Number(q?.amount||0);
     if(!(monthlyAmount>0)) return null;
-    if(!canProrate || isMummyQuotaLabel(label)){
+    if(!canProrate){
       return { label, amount:monthlyAmount, section:'quota', monthlyAmount, isProrated:false, basis:'Fixed monthly amount' };
     }
     let amount=0;

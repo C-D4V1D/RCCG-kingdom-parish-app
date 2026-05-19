@@ -68,16 +68,19 @@ test('countSundaysInRange counts calendar Sundays inclusively', () => {
   assert.equal(App._countSundaysInRange('2026-02-22', '2026-03-08'), 3);
 });
 
-test('authority quotas are prorated by Sundays while mummy stipend remains fixed', () => {
+test('all fixed quotas are prorated by Sundays for the selected period', () => {
   const lines = App._getQuotaLinesForPeriod([
     { label: 'RMF (Camp Clearing)', amount: 4000 },
     { label: 'Regional Contribution', amount: 2000 },
-    { label: 'Zonal Mummy Stipend', amount: 8000 }
+    { label: 'Zonal Mummy Stipend', amount: 8000 },
+    { label: 'Future Fixed Quota', amount: 12000 }
   ], '2026-02-01', '2026-02-01');
 
   assertClose(lines.find(l => l.label === 'RMF (Camp Clearing)').amount, 1000);
   assertClose(lines.find(l => l.label === 'Regional Contribution').amount, 500);
-  assertClose(lines.find(l => l.label === 'Zonal Mummy Stipend').amount, 8000);
+  assertClose(lines.find(l => l.label === 'Zonal Mummy Stipend').amount, 2000);
+  assertClose(lines.find(l => l.label === 'Future Fixed Quota').amount, 3000);
+  assert.ok(lines.every(l => l.isProrated));
 });
 
 test('authority quota proration sums correctly across month boundaries', () => {
