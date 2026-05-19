@@ -1768,15 +1768,21 @@ async function renderDashboard(){
   const remittances = await calcRemittancesFromRecords(income);
   const dashQuotas = getQuotaList(settings);
   const now=new Date();
+  const dashTodayStr=ymdLocal(now);
   const dashMonthStart=ymdLocal(new Date(state.year,state.month,1));
   const dashMonthEnd=(state.year===now.getFullYear() && state.month===now.getMonth())
-    ? ymdLocal(now)
+    ? dashTodayStr
     : ymdLocal(new Date(state.year,state.month+1,0));
-  const dashQuotaLines=getQuotaLinesForPeriod(
-    dashQuotas,
-    useRemPeriod ? dashPeriodFrom : dashMonthStart,
-    useRemPeriod ? dashPeriodTo : dashMonthEnd
-  );
+  // Each Sunday's quota share is fixed on that Sunday; only elapsed Sundays
+  // (date ≤ today) are due. Cap the period upper bound at today so a future
+  // Sunday inside the remittance period doesn't pre-accrue. Calendar view's
+  // dashMonthEnd is already today-capped for the current month.
+  const dashQuotaFrom=useRemPeriod ? dashPeriodFrom : dashMonthStart;
+  const dashQuotaToRaw=useRemPeriod ? dashPeriodTo : dashMonthEnd;
+  const dashQuotaTo=dashQuotaToRaw < dashTodayStr ? dashQuotaToRaw : dashTodayStr;
+  const dashQuotaLines=(dashQuotaTo >= dashQuotaFrom)
+    ? getQuotaLinesForPeriod(dashQuotas, dashQuotaFrom, dashQuotaTo)
+    : [];
   const dashRegionalAmt  = dashQuotaLines.find(q=>q.label.toLowerCase().includes('regional contribution'))?.amount||0;
   const dashMummyAmt     = dashQuotaLines.find(q=>isMummyQuotaLabel(q.label))?.amount||0;
   const dashNatlQuotasAmt = dashQuotaLines
@@ -1817,12 +1823,13 @@ async function renderDashboard(){
   const dashFirstDateStr = (dashFirstIncRec ? (dashFirstIncRec.date||dashFirstIncRec.createdAt||'') : '').slice(0,10);
   // Sunday-prorate accumulated quotas so the all-time KPI uses the same basis as the
   // current-period split shown in the income card and on the Remittances page.
-  // Always anchor to the current remittance period's cut-off so the all-time outstanding
-  // is view-independent — switching between Remittance and Calendar period views shouldn't
-  // change "what's owed to HQ right now". The per-period split (this period vs prior)
-  // can still differ by view; only this total must match.
+  // Anchor the upper bound at TODAY (not the period cut-off) so only elapsed
+  // Sundays accrue. Each Sunday's share is fixed on that Sunday, so this total
+  // is view-independent — switching between Remittance and Calendar views
+  // shouldn't change "what's owed to HQ right now". The per-period split
+  // (this period vs prior) can still differ by view; only this total must match.
   const dashAccumQuotas = dashFirstIncRec
-    ? sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, dashFirstDateStr, dashPeriodTo))
+    ? sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, dashFirstDateStr, dashTodayStr))
     : 0;
   const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
@@ -4480,11 +4487,12 @@ async function renderExpenses(){
   const quotaList = getQuotaList(settings);
 
   // Sunday-prorate accumulated quotas (same basis as dashboard KPI + Remittances page).
+  // Anchor at today so only elapsed Sundays accrue — future Sundays in the
+  // current remittance period aren't yet due.
   const firstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
   const firstDateStr = (firstIncRec ? (firstIncRec.date||firstIncRec.createdAt||'') : '').slice(0,10);
-  const { to: expAccrualEnd } = computeRemPeriodDates(settings, allRems, state.year, state.month);
   const accumQuotas = firstIncRec
-    ? sumQuotaLines(getQuotaLinesForPeriod(quotaList, firstDateStr, expAccrualEnd))
+    ? sumQuotaLines(getQuotaLinesForPeriod(quotaList, firstDateStr, ymdLocal(new Date())))
     : 0;
   const paidRems = allRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   const outstandingRems = Math.max(0, allTimeIncomeRemDue + accumQuotas - paidRems);
