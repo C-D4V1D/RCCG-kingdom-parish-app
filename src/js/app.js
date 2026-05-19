@@ -300,7 +300,7 @@ function hasExplicitTime(value){
 const NIGERIA_TIMEZONE = 'Africa/Lagos';
 function fmtDate(d){
   // YYYY-MM-DD strings are calendar dates with no time/timezone — format them
-  // directly so a browser east of Africa/Lagos doesn't roll the display back a day.
+  // in UTC so a browser east of Africa/Lagos doesn't roll the display back a day.
   if(typeof d === 'string'){
     const ymdMatch = d.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
     if(ymdMatch){
@@ -311,6 +311,18 @@ function fmtDate(d){
   const dt = parseDisplayDate(d);
   if(!dt) return '—';
   return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric',timeZone:NIGERIA_TIMEZONE});
+}
+function fmtDateShort(d){
+  if(typeof d === 'string'){
+    const ymdMatch = d.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if(ymdMatch){
+      const dt = new Date(Date.UTC(Number(ymdMatch[1]), Number(ymdMatch[2])-1, Number(ymdMatch[3])));
+      return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',timeZone:'UTC'});
+    }
+  }
+  const dt = parseDisplayDate(d);
+  if(!dt) return '—';
+  return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',timeZone:NIGERIA_TIMEZONE});
 }
 function fmtTime(d){
   if(!d || !hasExplicitTime(d)) return '—';
@@ -483,6 +495,86 @@ function getQuotaList(s){
   return Object.entries(legacy)
     .filter(([k])=>k in QUOTA_LABELS)
     .map(([k,v])=>({ label:QUOTA_LABELS[k], amount:v||0 }));
+}
+
+function parseYmdDate(value){
+  const match=String(value||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(match) return new Date(Number(match[1]), Number(match[2])-1, Number(match[3]));
+  const d=new Date(value||'');
+  return isNaN(d.getTime()) ? null : new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function isMummyQuotaLabel(label){
+  return String(label||'').toLowerCase().includes('mummy');
+}
+
+function countSundaysInRange(fromValue, toValue){
+  const from=parseYmdDate(fromValue);
+  const to=parseYmdDate(toValue);
+  if(!from || !to || from>to) return 0;
+  let count=0;
+  for(let d=new Date(from.getFullYear(), from.getMonth(), from.getDate()); d<=to; d.setDate(d.getDate()+1)){
+    if(d.getDay()===0) count++;
+  }
+  return count;
+}
+
+function countSundaysInMonth(year, month){
+  return countSundaysInRange(
+    new Date(year, month, 1),
+    new Date(year, month+1, 0)
+  );
+}
+
+function getQuotaLinesForPeriod(quotas, fromDate, toDate){
+  const list=Array.isArray(quotas)?quotas:[];
+  const from=parseYmdDate(fromDate);
+  const toRaw=parseYmdDate(toDate);
+  // Each Sunday's prorated share accrues on that Sunday. Future Sundays haven't
+  // elapsed and aren't owed yet, so cap the upper bound at today across the app —
+  // dashboard KPIs, the remittance form, the printed slip, and reports all see
+  // the same "due as of now" number for any in-progress period.
+  const now=new Date();
+  const todayDate=new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const to=(toRaw && toRaw>todayDate) ? todayDate : toRaw;
+  // Entire range in the future → nothing has accrued yet.
+  if(from && to && from>to) return [];
+  const canProrate=!!from && !!to && from<=to;
+  return list.map(q=>{
+    const label=q?.label||'';
+    const monthlyAmount=Number(q?.amount||0);
+    if(!(monthlyAmount>0)) return null;
+    if(!canProrate){
+      return { label, amount:monthlyAmount, section:'quota', monthlyAmount, isProrated:false, basis:'Fixed monthly amount' };
+    }
+    let amount=0;
+    const segments=[];
+    let y=from.getFullYear(), m=from.getMonth();
+    // Walk each month touched by the selected period so each month's quota uses that month's Sunday count.
+    while(y<to.getFullYear() || (y===to.getFullYear() && m<=to.getMonth())){
+      const segFrom=(y===from.getFullYear() && m===from.getMonth()) ? from : new Date(y,m,1);
+      const segTo=(y===to.getFullYear() && m===to.getMonth()) ? to : new Date(y,m+1,0);
+      const sundaysInMonth=countSundaysInMonth(y,m);
+      const sundaysCovered=countSundaysInRange(segFrom, segTo);
+      if(sundaysCovered>0 && sundaysInMonth>0){
+        amount += monthlyAmount * (sundaysCovered / sundaysInMonth);
+        segments.push({ year:y, month:m, sundaysCovered, sundaysInMonth });
+      }
+      m++;
+      if(m>11){ m=0; y++; }
+    }
+    if(!(amount>0)) return null;
+    const totalSundaysCovered=segments.reduce((s,seg)=>s+seg.sundaysCovered,0);
+    const totalSundaysInMonths=segments.reduce((s,seg)=>s+seg.sundaysInMonth,0);
+    const basis = segments.length===1
+      ? `Proportion of ${segments[0].sundaysCovered} of ${segments[0].sundaysInMonth} Sundays in ${MONTHS[segments[0].month]} ${segments[0].year}`
+      : `Proportion of ${totalSundaysCovered} of ${totalSundaysInMonths} Sundays across ${segments.length} months`;
+    return { label, amount, section:'quota', monthlyAmount, isProrated:true, basis };
+  }).filter(Boolean);
+}
+
+function sumQuotaLines(lines){
+  return (lines||[]).reduce((s,l)=>s+(l.amount||0),0);
 }
 
 /** Escape special HTML characters to prevent XSS when inserting user data into innerHTML */
@@ -1751,12 +1843,23 @@ async function renderDashboard(){
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
   const remittances = await calcRemittancesFromRecords(income);
   const dashQuotas = getQuotaList(settings);
-  const dashRegionalQuota = dashQuotas.find(q=>q.label.toLowerCase().includes('regional contribution'));
-  const dashMummyQuota   = dashQuotas.find(q=>q.label.toLowerCase().includes('mummy'));
-  const dashRegionalAmt  = dashRegionalQuota ? (dashRegionalQuota.amount||0) : 0;
-  const dashMummyAmt     = dashMummyQuota    ? (dashMummyQuota.amount||0)    : 0;
-  const dashNatlQuotasAmt = dashQuotas
-    .filter(q=>q!==dashRegionalQuota && q!==dashMummyQuota)
+  const now=new Date();
+  const dashTodayStr=ymdLocal(now);
+  const dashMonthStart=ymdLocal(new Date(state.year,state.month,1));
+  const dashMonthEnd=(state.year===now.getFullYear() && state.month===now.getMonth())
+    ? dashTodayStr
+    : ymdLocal(new Date(state.year,state.month+1,0));
+  // getQuotaLinesForPeriod caps at today internally — future Sundays in the
+  // remittance period don't pre-accrue.
+  const dashQuotaLines=getQuotaLinesForPeriod(
+    dashQuotas,
+    useRemPeriod ? dashPeriodFrom : dashMonthStart,
+    useRemPeriod ? dashPeriodTo : dashMonthEnd
+  );
+  const dashRegionalAmt  = dashQuotaLines.find(q=>q.label.toLowerCase().includes('regional contribution'))?.amount||0;
+  const dashMummyAmt     = dashQuotaLines.find(q=>isMummyQuotaLabel(q.label))?.amount||0;
+  const dashNatlQuotasAmt = dashQuotaLines
+    .filter(q=>!q.label.toLowerCase().includes('regional contribution') && !isMummyQuotaLabel(q.label))
     .reduce((s,q)=>s+(q.amount||0),0);
   const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
   const netLocal = remittances.netLocal - dashAllQuotasAmt;
@@ -1789,37 +1892,32 @@ async function renderDashboard(){
   const dashAllTimeIncomeRemDue = (dashAllTimeRemittances.totalNatl||0)+(dashAllTimeRemittances.totalArea||0)
     +(dashAllTimeRemittances.totalPastor||0)+(dashAllTimeRemittances.totalMinisters||0)
     +(dashAllTimeRemittances.totalSeed||0)+(dashAllTimeRemittances.provinceRebate||0);
-  // Accumulate quotas by counting remittance PERIODS (cut-off to cut-off), not calendar months.
-  // A period ends on a monthly cut-off date; counting calendar months over-counts when one period
-  // spans two calendar months (e.g. Apr 20 – May 24 is ONE period, not two).
-  // Source array is `allIncome` (already date-filtered to ≤ asOfDate for past-period views)
-  // so a historical snapshot doesn't see income that didn't exist yet.
+  // Source array is `allIncome` (date-filtered to ≤ asOfDate for past-period views) so
+  // a historical snapshot doesn't see income that didn't exist yet.
   const dashFirstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
-  const dashFirstDate = dashFirstIncRec ? new Date(dashFirstIncRec.date||dashFirstIncRec.createdAt) : new Date(state.year, state.month, 1);
   const dashFirstDateStr = (dashFirstIncRec ? (dashFirstIncRec.date||dashFirstIncRec.createdAt||'') : '').slice(0,10);
-  let dashQuotaPeriods = 0;
-  if(dashFirstIncRec){
-    let fy=dashFirstDate.getFullYear(), fm=dashFirstDate.getMonth();
-    let y=fy, m=fm;
-    while(y<state.year||(y===state.year&&m<=state.month)){
-      // Try year-specific cut-off first, fall back to default (year-agnostic lookup via remCutoffDayForMonth)
-      const cd=getRemCutoffDates(settingsDash,y)||getRemCutoffDates(settingsDash);
-      const cutDay=cd?.dates?.[m]||null;
-      if(cutDay){
-        const cutStr=`${y}-${String(m+1).padStart(2,'0')}-${String(cutDay).padStart(2,'0')}`;
-        if(cutStr>dashFirstDateStr) dashQuotaPeriods++;
-      } else {
-        dashQuotaPeriods++; // no cut-off configured: treat each calendar month as one period
-      }
-      m++; if(m>11){m=0;y++;}
-    }
-    dashQuotaPeriods=Math.max(1,dashQuotaPeriods);
-  }
-  const dashMonthsElapsed = dashQuotaPeriods;
-  const dashAccumQuotas = dashAllQuotasAmt * dashQuotaPeriods;
+  // Sunday-prorate accumulated quotas so the all-time KPI uses the same basis as the
+  // current-period split shown in the income card and on the Remittances page.
+  // Anchor the upper bound at the as-of date — TODAY for current periods (so only
+  // elapsed Sundays accrue), or the period cut-off for historical snapshots.
+  // Each Sunday's share is fixed on that Sunday, so this total is view-independent
+  // for the live case — switching between Remittance and Calendar views shouldn't
+  // change "what's owed to HQ right now". The per-period split (this period vs
+  // prior) can still differ by view; only this total must match.
+  const dashAccumQuotas = dashFirstIncRec
+    ? sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, dashFirstDateStr, dashAsOfDate))
+    : 0;
   const dashAllPaidRems = allRemsForKpi.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
   const dashTotalRemDueKpi = Math.max(0, dashAllTimeIncomeRemDue + dashAccumQuotas - dashAllPaidRems);
+  // Split the all-time outstanding into "this period" vs "prior periods" so the dashboard
+  // can show the selected period in the headline and surface any carryover as a sub-line.
+  // The sum of the two always equals dashTotalRemDueKpi, so the Available Fund math is unchanged.
+  const dashThisPeriodUnpaid = Math.min(
+    Math.max(0, dashCurrentMonthRemDue - dashMonthPaidAmt),
+    dashTotalRemDueKpi
+  );
+  const dashPriorUnpaid = dashTotalRemDueKpi - dashThisPeriodUnpaid;
   // Income from periods not yet covered by a paid remittance — denominator for the % metric.
   const dashPaidPeriods = allRemsForKpi.filter(r=>r.status==='paid'&&r.periodFrom&&r.periodTo).map(r=>({from:r.periodFrom,to:r.periodTo}));
   const dashUnpaidPeriodIncome = allIncomeDash.filter(r=>{
@@ -1884,6 +1982,8 @@ async function renderDashboard(){
   // Carried forward = churchBal − (income − all-expenses for period). Algebraically exact
   // once "all-expenses" reflects EVERY real outflow, including unsettled advances.
   const dashCarriedForward = churchBal.total - totalIncome + totalPeriodAllExpenses;
+  // True opening = cash on hand minus the still-owed remittances from prior periods.
+  const dashActualOpening = dashCarriedForward - dashPriorUnpaid;
   const dashPrevMonthName = MONTHS[state.month === 0 ? 11 : state.month - 1];
   // Label for the Carried Forward card — "after last remittance (19 Apr)" or "after last month (31 Mar)"
   const _pStart = new Date(dashPeriodFrom + 'T00:00:00');
@@ -1892,9 +1992,13 @@ async function renderDashboard(){
   const dashCarriedFwdDateStr = useRemPeriod
     ? `${_dayBefore.getDate()} ${MONTHS[_dayBefore.getMonth()].slice(0,3)}`
     : `${_lastDayPrevMo.getDate()} ${MONTHS[_lastDayPrevMo.getMonth()].slice(0,3)}`;
+  // "Total" prefix distinguishes this from the Actual Balance variant shown alongside.
   const dashCarriedFwdLabel = useRemPeriod
-    ? `Balance after last remittance (${dashCarriedFwdDateStr})`
-    : `Balance after last month (${dashCarriedFwdDateStr})`;
+    ? `Total Balance after last remittance (${dashCarriedFwdDateStr})`
+    : `Total Balance after last month (${dashCarriedFwdDateStr})`;
+  const dashActualOpeningLabel = useRemPeriod
+    ? `Actual Balance after last remittance (${dashCarriedFwdDateStr})`
+    : `Actual Balance after last month (${dashCarriedFwdDateStr})`;
 
   // Feed items — richer detail for Recent Transactions card
   const recentIncome = allIncome.slice(0,4);
@@ -1981,13 +2085,20 @@ async function renderDashboard(){
   const histMonthRetention=await Promise.all([3,2,1].map(async i=>{
     let m=state.month-i,y=state.year;
     if(m<0){m+=12;y--;}
-    let mInc;
-    if(useRemPeriod){const{from:pf,to:pt}=computeRemPeriodDates(settings,allRemsDash,y,m);mInc=filterByDateRange(allIncomeDash,pf,pt);}
-    else{mInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});}
+    let mInc, quotaFrom, quotaTo;
+    if(useRemPeriod){
+      const { from:pf, to:pt } = computeRemPeriodDates(settings,allRemsDash,y,m);
+      mInc=filterByDateRange(allIncomeDash,pf,pt);
+      quotaFrom=pf; quotaTo=pt;
+    } else {
+      mInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});
+      quotaFrom=ymdLocal(new Date(y,m,1));
+      quotaTo=(y===now.getFullYear() && m===now.getMonth()) ? ymdLocal(now) : ymdLocal(new Date(y,m+1,0));
+    }
     const mTotal=mInc.reduce((s,r)=>s+(r.totalCollection||0),0);
     if(!mTotal) return {netLocal:0,retentionRate:null};
     const mRem=await calcRemittancesFromRecords(mInc);
-    const mNet=mRem.netLocal-dashAllQuotasAmt;
+    const mNet=mRem.netLocal-sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, quotaFrom, quotaTo));
     return {netLocal:mNet,retentionRate:mNet/mTotal};
   }));
   const trendData = [];
@@ -2086,27 +2197,25 @@ async function renderDashboard(){
       <div>
         <div class="page-title">Welcome, ${(state.user?.name?.split(/\s+/).slice(0,2).join(' '))||'User'} 👋</div>
         <div class="page-sub">${monthLabel()} Financial Overview</div>
-        <div style="margin-top:10px">
-          <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px;text-align:center">Select Period Type</div>
-          <div style="display:flex;gap:8px">
-            <button onclick="App.setDashPeriodMode('remittance')" style="flex:1;padding:10px 12px;border-radius:10px;border:1.5px solid ${useRemPeriod?'var(--primary)':'var(--border)'};background:${useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
-              <div style="font-size:12.5px;font-weight:700;color:${useRemPeriod?'var(--primary)':'var(--text2)'}">${MONTHS[state.month]} Remittance Period</div>
-              <div style="font-size:10.5px;color:var(--text3);margin-top:2px">the custom RCCG period</div>
-              <div style="margin-top:6px"><span style="display:inline-block;padding:3px 9px;border-radius:12px;background:${useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${useRemPeriod?'#fff':'var(--text2)'};font-size:10.5px;font-weight:700;letter-spacing:0.2px">${fmtDate(dashPeriodFrom)} – ${fmtDate(dashPeriodTo)}</span></div>
-            </button>
-            <button onclick="App.setDashPeriodMode('calendar')" style="flex:1;padding:10px 12px;border-radius:10px;border:1.5px solid ${!useRemPeriod?'var(--primary)':'var(--border)'};background:${!useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${!useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
-              <div style="font-size:12.5px;font-weight:700;color:${!useRemPeriod?'var(--primary)':'var(--text2)'}">${MONTHS[state.month]} Calendar Period</div>
-              <div style="font-size:10.5px;color:var(--text3);margin-top:2px">the normal month period</div>
-              <div style="margin-top:6px"><span style="display:inline-block;padding:3px 9px;border-radius:12px;background:${!useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${!useRemPeriod?'#fff':'var(--text2)'};font-size:10.5px;font-weight:700;letter-spacing:0.2px">1 ${MONTHS[state.month].slice(0,3)} – ${new Date(state.year,state.month+1,0).getDate()} ${MONTHS[state.month].slice(0,3)}</span></div>
-            </button>
-          </div>
-        </div>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${canAction('income_record')?`<button class="btn btn-primary" onclick="App.navigate('income')">📥 Record Income</button>`:''}
-        ${!canAction('income_record')&&canAction('expense_log')?`<button class="btn btn-primary" onclick="App.navigate('expenses')">💸 Log Expenses</button>`:''}
       </div>
     </div>
+
+    <!-- Period selector — full-width block so the two cards span the device edge-to-edge -->
+    <section style="margin:0 0 18px">
+      <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px;text-align:center">Select Period Type</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <button onclick="App.setDashPeriodMode('remittance')" style="min-width:0;padding:12px 14px;border-radius:12px;border:1.5px solid ${useRemPeriod?'var(--primary)':'var(--border)'};background:${useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
+          <div style="font-size:13px;font-weight:700;color:${useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${MONTHS[state.month]} Remittance Period</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">the custom RCCG period</div>
+          <div style="margin-top:8px"><span style="display:inline-block;padding:4px 10px;border-radius:12px;background:${useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${useRemPeriod?'#fff':'var(--text2)'};font-size:11px;font-weight:700;letter-spacing:0.2px">${fmtDateShort(dashPeriodFrom)} – ${fmtDateShort(dashPeriodTo)}</span></div>
+        </button>
+        <button onclick="App.setDashPeriodMode('calendar')" style="min-width:0;padding:12px 14px;border-radius:12px;border:1.5px solid ${!useRemPeriod?'var(--primary)':'var(--border)'};background:${!useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${!useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
+          <div style="font-size:13px;font-weight:700;color:${!useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${MONTHS[state.month]} Calendar Period</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">the normal month period</div>
+          <div style="margin-top:8px"><span style="display:inline-block;padding:4px 10px;border-radius:12px;background:${!useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${!useRemPeriod?'#fff':'var(--text2)'};font-size:11px;font-weight:700;letter-spacing:0.2px">1 ${MONTHS[state.month].slice(0,3)} – ${new Date(state.year,state.month+1,0).getDate()} ${MONTHS[state.month].slice(0,3)}</span></div>
+        </button>
+      </div>
+    </section>
 
     ${alerts}
 
@@ -2117,11 +2226,16 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:#6366F1;border-radius:3px 0 0 3px"></div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
           <div style="min-width:0;flex:1">
-            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:#6366F1;margin-bottom:1px">${dashCarriedFwdLabel}</div>
+            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:#6366F1;margin-bottom:1px">Total Balance after last period (${dashCarriedFwdDateStr})</div>
             <div style="font-size:11px;color:var(--text3)">Opening balance at the start of this period</div>
           </div>
           <div style="font-size:18px;font-weight:800;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'};letter-spacing:-0.5px;white-space:nowrap;flex-shrink:0">${fmt(dashCarriedForward)}</div>
         </div>
+        ${dashCarriedForward!==0 && dashPriorUnpaid>0?`
+        <div style="margin-top:8px;padding-top:8px;border-top:1px dashed rgba(99,102,241,0.25);display:flex;align-items:center;justify-content:space-between;gap:12px">
+          <div style="font-size:10.5px;color:var(--text3)">Actual balance <span style="color:var(--text3)">— after −${fmt(dashPriorUnpaid)} owed from previous period(s)</span></div>
+          <div style="font-size:14px;font-weight:700;color:${dashActualOpening<0?'var(--danger)':'var(--text2)'};white-space:nowrap;flex-shrink:0">${fmt(dashActualOpening)}</div>
+        </div>`:''}
       </div>
 
       <!-- + connector -->
@@ -2231,14 +2345,18 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--amber)"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
-            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">RCCG Remittances Due</div>
-            <div style="font-size:26px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(dashTotalRemDueKpi)}</div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">RCCG Remittance Due${dashPriorUnpaid>0?' <span style="color:var(--text3);font-weight:600">(this period)</span>':''}</div>
+            <div style="font-size:26px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(dashCurrentMonthRemDue)}</div>
             <div style="font-size:12px;color:var(--text3);margin-top:5px">📅 ${dashDueLabel}</div>
-            ${dashMonthsElapsed>1?`<div style="margin-top:6px;font-size:11.5px;color:var(--amber);font-weight:600">⚠ Accumulated since ${fmtDate(dashFirstIncRec.date||dashFirstIncRec.createdAt)}</div>`:''}
-            <div style="margin-top:4px;font-size:11.5px;color:var(--amber)">${dashUnpaidPeriodIncome>0?Math.round(dashTotalRemDueKpi/dashUnpaidPeriodIncome*100):0}% of unpaid period income</div>
+            ${totalIncome>0?`<div style="margin-top:4px;font-size:11.5px;color:var(--amber)">${Math.round(dashCurrentMonthRemDue/totalIncome*100)}% of period income</div>`:''}
           </div>
           <div style="width:44px;height:44px;border-radius:12px;background:#FCEBEB;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">📤</div>
         </div>
+        ${dashPriorUnpaid>0?`
+        <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(184,134,11,0.25);display:flex;align-items:center;justify-content:space-between;gap:12px">
+          <div style="font-size:10.5px;color:var(--text3)">Unpaid from previous period(s)</div>
+          <div style="font-size:14px;font-weight:700;color:var(--danger);white-space:nowrap;flex-shrink:0">+${fmt(dashPriorUnpaid)}</div>
+        </div>`:''}
       </div>
 
       <!-- = connector to Final -->
@@ -2275,42 +2393,90 @@ async function renderDashboard(){
 
     </div>
 
-    <!-- Collapsible full calculation breakdown -->
+    <!-- Collapsible full calculation breakdown — two slides, swipe left/right -->
     <details style="margin-bottom:16px">
       <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--rl);font-size:12.5px;font-weight:600;color:var(--text2);user-select:none">
         <span style="font-size:16px">🧮</span>
         <span>How is Actual Balance calculated?</span>
         <span style="margin-left:auto;font-size:11px;color:var(--text3)">Tap to expand ▾</span>
       </summary>
-      <div style="padding:16px 18px;background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--rl) var(--rl)">
-        <div style="font-size:12px;line-height:2.3;color:var(--text2)">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <span style="color:var(--text3)">${dashCarriedFwdLabel}</span>
-            <span style="font-weight:600;font-family:ui-monospace,monospace;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'}">${fmt(dashCarriedForward)}</span>
+      <div style="background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--rl) var(--rl);overflow:hidden">
+        <div class="dash-explain-slider" style="display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;-webkit-overflow-scrolling:touch">
+          <!-- Slide 1: From Total Balance -->
+          <div style="flex:0 0 100%;scroll-snap-align:start;padding:16px 18px;box-sizing:border-box">
+            <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px">From Total Balance</div>
+            <div style="font-size:12px;line-height:2.3;color:var(--text2)">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">${dashCarriedFwdLabel}</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'}">${fmt(dashCarriedForward)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">+ Total Income</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(totalIncome)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+                <span style="color:var(--text3)">− Total Expenses ${totalPeriodPendingExpenses>0?'(incl. pending)':''}</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodAllExpenses)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:13px;padding-top:2px">
+                <span>= Total Church Balance</span>
+                <span style="font-family:ui-monospace,monospace;color:#185FA5">${fmt(churchBal.total)}</span>
+              </div>
+              ${dashPriorUnpaid>0?`
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">− Unpaid remittance from previous period(s)</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashPriorUnpaid)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">− RCCG remittance due (this period)</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashThisPeriodUnpaid)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+                <span style="color:var(--text3)">= Total RCCG remittances</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
+              </div>`:`
+              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+                <span style="color:var(--text3)">− RCCG remittance due</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
+              </div>`}
+              <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
+                <span>= Actual Balance</span>
+                <span style="font-family:ui-monospace,monospace;color:${dashSpendColor}">${fmt(dashSpendable)}</span>
+              </div>
+            </div>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <span style="color:var(--text3)">+ Total Income</span>
-            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(totalIncome)}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-            <span style="color:var(--text3)">− Total Expenses ${totalPeriodPendingExpenses>0?'(incl. pending)':''}</span>
-            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodAllExpenses)}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:13px;padding-top:2px">
-            <span>= Total Church Balance</span>
-            <span style="font-family:ui-monospace,monospace;color:#185FA5">${fmt(churchBal.total)}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-            <span style="color:var(--text3)">− RCCG Remittances Due</span>
-            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
-            <span>= Actual Balance</span>
-            <span style="font-family:ui-monospace,monospace;color:${dashSpendColor}">${fmt(dashSpendable)}</span>
+          <!-- Slide 2: From Actual Balance — start net of prior remittances, add only what the parish keeps -->
+          <div style="flex:0 0 100%;scroll-snap-align:start;padding:16px 18px;box-sizing:border-box">
+            <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px">From Actual Balance</div>
+            <div style="font-size:12px;line-height:2.3;color:var(--text2)">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">${dashActualOpeningLabel}</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:${dashActualOpening<0?'var(--danger)':'var(--text2)'}">${fmt(dashActualOpening)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">+ Parish retains (this period)</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(parishRetains)}</span>
+              </div>
+              ${otherUnremittedIncome>0?`
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">+ Other unremitted income</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(otherUnremittedIncome)}</span>
+              </div>`:''}
+              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+                <span style="color:var(--text3)">− Total Expenses ${totalPeriodPendingExpenses>0?'(incl. pending)':''}</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodAllExpenses)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
+                <span>= Actual Balance</span>
+                <span style="font-family:ui-monospace,monospace;color:${dashSpendColor}">${fmt(dashSpendable)}</span>
+              </div>
+            </div>
           </div>
         </div>
-        <div style="margin-top:12px;font-size:11px;color:var(--text3);line-height:1.6;border-top:1px solid var(--border);padding-top:10px">
-          Each row matches a card above. Use a calculator to verify any figure end-to-end.
+        <div style="padding:10px 18px 14px;font-size:11px;color:var(--text3);line-height:1.6;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;justify-content:center">
+          <span style="font-size:13px">◀</span>
+          <span>Slide left or right to see the other way to calculate your Actual Balance.</span>
+          <span style="font-size:13px">▶</span>
         </div>
       </div>
     </details>
@@ -2616,7 +2782,11 @@ async function renderIncomeSummary(records){
   const rem = await calcRemittances(totals);
   const settings = await DB.getSettings();
   const quotas = getQuotaList(settings);
-  const quotasTotal = quotas.reduce((s,q)=>s+(q.amount||0),0);
+  const monthEnd=(state.year===new Date().getFullYear() && state.month===new Date().getMonth())
+    ? ymdLocal(new Date())
+    : ymdLocal(new Date(state.year,state.month+1,0));
+  const quotaLines = getQuotaLinesForPeriod(quotas, ymdLocal(new Date(state.year,state.month,1)), monthEnd);
+  const quotasTotal = sumQuotaLines(quotaLines);
   const trueNetLocal = rem.netLocal - quotasTotal;
   return `
     <div class="grid-2">
@@ -2655,9 +2825,9 @@ async function renderIncomeSummary(records){
         <div class="status-row" style="background:var(--amber-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
           <div class="status-row-label">Province Rebate (20%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div>
         </div>
-        ${quotas.filter(q=>(q.amount||0)>0).map(q=>`
+        ${quotaLines.map(q=>`
         <div class="status-row" style="background:var(--info-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
-          <div class="status-row-label" style="color:var(--info)">${esc(q.label)}</div>
+          <div><div class="status-row-label" style="color:var(--info)">${esc(q.label)}</div><div class="status-row-sub">${esc(q.basis||'Fixed monthly amount')}</div></div>
           <div class="status-row-amt" style="color:var(--info)">${fmt(q.amount)}</div>
         </div>`).join('')}
         <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(trueNetLocal)}</div></div>`:''}
@@ -3693,14 +3863,11 @@ async function renderRemittances(){
     { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`, amount:rem.provinceRebate, section:'province' }
   ]:[];
 
-  const activeQuotas=quotas;
-  const quotaLines=activeQuotas
-    .map(q=>({ label:q.label, amount:q.amount||0, section:'quota' }))
-    .filter(l=>l.amount>0);
+  const quotaLines=getQuotaLinesForPeriod(quotas, fromDate, toDate);
 
   const allLines=[...incomeLines,...tgLines,...provinceLines,...quotaLines];
   const totalDue=allLines.reduce((s,l)=>s+l.amount,0);
-  const quotasTotal=quotaLines.reduce((s,l)=>s+l.amount,0);
+  const quotasTotal=sumQuotaLines(quotaLines);
   const trueNetLocal=rem.netLocal-quotasTotal;
   // Only count income that goes through the remittance split (records with INCOME_TYPES fields)
   const totalCollection=income
@@ -3729,9 +3896,11 @@ async function renderRemittances(){
       <td style="padding:7px 12px">
         <strong>${l.label}</strong>
         ${l.pct!=null?`<span style="margin-left:6px;font-size:11px;color:var(--text3);font-weight:400">(${l.pct}%)</span>`:''}
+        ${l.basis?`<div style="font-size:11px;color:var(--text3);font-weight:400;margin-top:2px">${esc(l.basis)}</div>`:''}
+        ${l.section==='quota'&&l.isProrated&&l.monthlyAmount>l.amount?`<div style="font-size:11px;color:var(--text3);font-weight:400;margin-top:1px">Full monthly quota: <strong style="color:var(--text2)">${fmt(l.monthlyAmount)}</strong></div>`:''}
       </td>
       <td style="padding:7px 8px">
-        <span class="badge ${l.section==='quota'?'badge-info':'badge-purple'}">${l.section==='quota'?'Fixed Quota':'% Based'}</span>
+        <span class="badge ${l.section==='quota'?'badge-info':'badge-purple'}">${l.section==='quota'?(l.isProrated?'Partial':'Fixed Quota'):'% Based'}</span>
       </td>
       <td class="td-right td-bold td-red" style="padding:7px 12px">${fmt(l.amount)}</td>
     </tr>`).join('')}`:'';
@@ -3785,21 +3954,21 @@ async function renderRemittances(){
       <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">🏠</div><div class="kpi-label">Net Local Retained</div><div class="kpi-val">${fmt(trueNetLocal)}</div></div>
     </div>
 
-    ${income.length===0?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>No income records found</strong> for the selected period (${fmtDate(fromDate)} – ${fmtDate(toDate)}). Please adjust the date range above or record income first.</span></div>`:''}
+    ${income.length===0?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>No income records found</strong> for the selected period (${fmtDateShort(fromDate)} – ${fmtDateShort(toDate)}). Please adjust the date range above or record income first.</span></div>`:''}
 
     <div class="grid-6040">
       <!-- LEFT: Breakdown Table -->
       <div class="card">
         <div class="card-header">
           <span class="card-title">Full Remittance Breakdown</span>
-          <span style="font-size:11px;color:var(--text3)">${fmtDate(fromDate)} – ${fmtDate(toDate)}</span>
+          <span style="font-size:11px;color:var(--text3)">${fmtDateShort(fromDate)} – ${fmtDateShort(toDate)}</span>
         </div>
         <div class="table-wrap"><table style="width:100%">
           <tr><th>Description</th><th style="width:100px">Type</th><th class="td-right" style="width:130px">Amount Due (₦)</th></tr>
           ${renderSection(incomeLines,'Income-Based Remittances → National HQ (% of collections)')}
           ${renderSection(tgLines,'Thanksgiving — Pastoral & Local Distribution')}
           ${renderSection(provinceLines,'Province Rebate (20% of Local Retained Tithes)')}
-          ${renderSection(quotaLines,'Fixed Monthly Quotas')}
+          ${renderSection(quotaLines,'Fixed Quotas Due for This Period')}
           <tr style="border-top:2px solid var(--border)">
             <td colspan="2" class="td-bold" style="font-size:14px;padding:10px 12px">TOTAL REMITTANCES DUE</td>
             <td class="td-right td-bold" style="font-size:15px;color:var(--danger);padding:10px 12px">${fmt(totalDue)}</td>
@@ -3881,7 +4050,7 @@ async function renderRemittances(){
           </div>`:''}
           ${quotasTotal>0?`
           <div class="status-row" style="border-top:1px dashed var(--border)">
-            <div class="status-row-label" style="color:var(--amber)">Total Fixed Monthly Quotas (deducted)</div>
+            <div class="status-row-label" style="color:var(--amber)">Fixed Quotas Due This Period (deducted)</div>
             <div class="status-row-amt" style="color:var(--amber)">− ${fmt(quotasTotal)}</div>
           </div>`:''}
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px">
@@ -3891,7 +4060,7 @@ async function renderRemittances(){
         </div>
 
         <!-- Parish Pastor's Share card -->
-        ${(rem.totalPastor||0)+(rem.totalArea||0)+(rem.totalSeed||0)+(quotas.find(q=>q.label.toLowerCase().includes('mummy'))?.amount||0)>0?`
+        ${(rem.totalPastor||0)+(rem.totalArea||0)+(rem.totalSeed||0)+(quotaLines.find(q=>isMummyQuotaLabel(q.label))?.amount||0)>0?`
         <div class="card" style="margin-top:12px">
           <div class="card-header"><span class="card-title">👨‍💼 Parish Pastor's Share</span></div>
           <p style="font-size:11px;color:var(--text3);margin-bottom:10px">Thanksgiving portions and stipend due to the Pastor's family (as Zonal / Area Pastor).</p>
@@ -3910,14 +4079,14 @@ async function renderRemittances(){
             <div class="status-row-label">TG → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)</div>
             <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalSeed)}</div>
           </div>`:''}
-          ${(()=>{ const mq=quotas.find(q=>q.label.toLowerCase().includes('mummy')); return mq&&(mq.amount||0)>0?`
+          ${(()=>{ const mq=quotaLines.find(q=>isMummyQuotaLabel(q.label)); return mq&&(mq.amount||0)>0?`
           <div class="status-row">
-            <div class="status-row-label">${mq.label} (Fixed Monthly)</div>
+            <div><div class="status-row-label">${mq.label}</div><div class="status-row-sub">${esc(mq.basis||'Fixed monthly amount')}</div></div>
             <div class="status-row-amt" style="color:var(--primary)">${fmt(mq.amount)}</div>
           </div>`:'' })()}
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px">
             <div class="status-row-label fw-bold">TOTAL PASTOR'S FAMILY SHARE</div>
-            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt((rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalSeed||0)+(quotas.find(q=>q.label.toLowerCase().includes('mummy'))?.amount||0))}</div>
+            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt((rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalSeed||0)+(quotaLines.find(q=>isMummyQuotaLabel(q.label))?.amount||0))}</div>
           </div>
         </div>`:''}
       </div>
@@ -3933,6 +4102,7 @@ async function showRemittancePaymentModal(){
   const income=filterByDateRange(allIncome, fromDate, toDate);
   const rem=await calcRemittancesFromRecords(income);
   const rr=await getRemRates();
+  const quotaLines=getQuotaLinesForPeriod(quotas, fromDate, toDate);
 
   const lines=[
     ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0 })),
@@ -3941,7 +4111,7 @@ async function showRemittancePaymentModal(){
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters },
     { label:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0 },
     { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`, amount:rem.provinceRebate },
-    ...quotas.map(q=>({ label:q.label, amount:q.amount||0 }))
+    ...quotaLines.map(q=>({ label:q.label, amount:q.amount||0 }))
   ].filter(l=>l.amount>0);
 
   const totalDue=lines.reduce((s,l)=>s+l.amount,0);
@@ -4203,10 +4373,11 @@ async function printRemittanceReport(fromOverride, toOverride){
   const rem=await calcRemittancesFromRecords(income);
   const rr=await getRemRates();
   const churchName=settings.churchName||'RCCG Kingdom Parish, Aguleri';
+  const quotaLines=getQuotaLinesForPeriod(quotas, fromDate, toDate);
 
   // Separate "Zonal Mummy Stipend" (pastoral stipend) from RCCG-authority quotas
-  const rccgQuotas=quotas.filter(q=>!q.label.toLowerCase().includes('mummy'));
-  const mummyQuotas=quotas.filter(q=>q.label.toLowerCase().includes('mummy'));
+  const rccgQuotas=quotaLines.filter(q=>!isMummyQuotaLabel(q.label));
+  const mummyQuotas=quotaLines.filter(q=>isMummyQuotaLabel(q.label));
 
   // ─── COLLECTIONS SUMMARY ─────────────────────────────────────────
   const totalCollected=rem.lines.reduce((s,l)=>s+(l.total||0),0);
@@ -4248,7 +4419,7 @@ async function printRemittanceReport(fromOverride, toOverride){
         <sup style="color:#c0392b">†</sup> TG balance ${fmt(tgDistributed)} (${100-Math.round(rr.tgNational*100)}%) distributed — Area/Zonal: ${fmt(rem.totalArea)} · Pastor: ${fmt(rem.totalPastor)} · Ministers: ${fmt(rem.totalMinisters)} · Seed: ${fmt(rem.totalSeed||0)} — shown in Part B
       </td></tr>`:'';
 
-  const quotasTotal=quotas.reduce((s,q)=>s+(q.amount||0),0);
+  const quotasTotal=sumQuotaLines(quotaLines);
   const trueNetLocal=rem.netLocal-quotasTotal;
 
   // ─── PART A: RCCG AUTHORITY REMITTANCES ──────────────────────────
@@ -4269,7 +4440,7 @@ async function printRemittanceReport(fromOverride, toOverride){
       type:`${Math.round(rr.provinceRebate*100)}% Based`, amount:rem.provinceRebate
     }]:[]),
     // Fixed RCCG quotas (excluding pastoral Zonal Mummy Stipend)
-    ...rccgQuotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 })).filter(r=>r.amount>0)
+    ...rccgQuotas.map(q=>({ desc:q.label, type:q.isProrated?`Fixed • ${q.basis}`:'Fixed', amount:q.amount||0 })).filter(r=>r.amount>0)
   ];
   const subTotalA=partARows.reduce((s,r)=>s+r.amount,0);
 
@@ -4279,7 +4450,7 @@ async function printRemittanceReport(fromOverride, toOverride){
     { desc:`Thanksgiving → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,          type:`${Math.round(rr.tgPastor*100)}% Based`, amount:rem.totalPastor||0 },
     { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,     type:`${Math.round(rr.tgMinisters*100)}% Based`, amount:rem.totalMinisters||0 },
     { desc:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`,  type:`${Math.round(rr.tgSeed*100)}% Based`, amount:rem.totalSeed||0 },
-    ...mummyQuotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 }))
+    ...mummyQuotas.map(q=>({ desc:q.label, type:q.isProrated?`Fixed • ${q.basis}`:'Fixed', amount:q.amount||0 }))
   ].filter(r=>r.amount>0);
   const subTotalB=partBRows.reduce((s,r)=>s+r.amount,0);
 
@@ -4438,31 +4609,15 @@ async function renderExpenses(){
     +(allTimeRemittances.totalPastor||0)+(allTimeRemittances.totalMinisters||0)
     +(allTimeRemittances.totalSeed||0)+(allTimeRemittances.provinceRebate||0);
   const quotaList = getQuotaList(settings);
-  const allQuotasPerPeriod = quotaList.reduce((s,q)=>s+(q.amount||0),0);
 
-  // Count remittance periods from first income record up to viewed month, using configured cut-off dates.
+  // Sunday-prorate accumulated quotas (same basis as dashboard KPI + Remittances page).
+  // Anchor at today so only elapsed Sundays accrue — future Sundays in the
+  // current remittance period aren't yet due.
   const firstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
-  const firstDate = firstIncRec ? new Date(firstIncRec.date||firstIncRec.createdAt) : new Date(state.year, state.month, 1);
   const firstDateStr = (firstIncRec ? (firstIncRec.date||firstIncRec.createdAt||'') : '').slice(0,10);
-  let quotaPeriods = 0;
-  if(firstIncRec){
-    let fy=firstDate.getFullYear(), fm=firstDate.getMonth();
-    let y=fy, m=fm;
-    while(y<state.year||(y===state.year&&m<=state.month)){
-      const cd=getRemCutoffDates(settings,y)||getRemCutoffDates(settings);
-      const cutDay=cd?.dates?.[m]||null;
-      if(cutDay){
-        const cutStr=`${y}-${String(m+1).padStart(2,'0')}-${String(cutDay).padStart(2,'0')}`;
-        if(cutStr>firstDateStr) quotaPeriods++;
-      } else {
-        quotaPeriods++;
-      }
-      m++; if(m>11){m=0;y++;}
-    }
-    quotaPeriods=Math.max(1,quotaPeriods);
-  }
-
-  const accumQuotas = allQuotasPerPeriod * quotaPeriods;
+  const accumQuotas = firstIncRec
+    ? sumQuotaLines(getQuotaLinesForPeriod(quotaList, firstDateStr, ymdLocal(new Date())))
+    : 0;
   const paidRems = allRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   const outstandingRems = Math.max(0, allTimeIncomeRemDue + accumQuotas - paidRems);
   const totalChurch = churchBal.total;
@@ -7197,8 +7352,7 @@ async function renderReports(){
     const prevCutoffDay = (prevCC && Number.isInteger(prevCC.dates[prevMonth]) && Number(prevCC.year)===prevYear)
       ? prevCC.dates[prevMonth] : null;
     if(prevCutoffDay){
-      const d=new Date(prevYear,prevMonth,prevCutoffDay); d.setDate(d.getDate()+1);
-      state.reportFromDate=ymdLocal(d);
+      state.reportFromDate=ymdLocal(new Date(prevYear,prevMonth,prevCutoffDay));
     } else {
       state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
     }
@@ -7278,7 +7432,8 @@ async function generateMonthlyReport(){
   const paidRems=filterByDateRange(allRemittances,fromDate,toDate);
   const rem=await calcRemittancesFromRecords(income);
   const quotaList=getQuotaList(settings);
-  const totalFixedQuotas=quotaList.reduce((s,q)=>s+(q.amount||0),0);
+  const quotaLines=getQuotaLinesForPeriod(quotaList, fromDate, toDate);
+  const totalFixedQuotas=sumQuotaLines(quotaLines);
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
   const totalRemPaid=paidRems.reduce((s,r)=>s+(r.amount||0),0);
@@ -7334,7 +7489,7 @@ async function generateMonthlyReport(){
       ${rem.totalPastor>0?`<tr><td style="padding-left:16px">Thanksgiving → Parish Pastor's Share</td><td class="td-c">${Math.round(remRatesData.tgPastor*100)}% of TG</td><td class="td-r">${fmt(rem.totalPastor)}</td></tr>`:''}
       ${rem.totalMinisters>0?`<tr><td style="padding-left:16px">Thanksgiving → Ministers' Share</td><td class="td-c">${Math.round(remRatesData.tgMinisters*100)}% of TG</td><td class="td-r">${fmt(rem.totalMinisters)}</td></tr>`:''}
       ${(rem.totalSeed||0)>0?`<tr><td style="padding-left:16px">Thanksgiving → Seed (Pastor's Children)</td><td class="td-c">${Math.round((remRatesData.tgSeed||0)*100)}% of TG</td><td class="td-r">${fmt(rem.totalSeed)}</td></tr>`:''}
-      ${quotaList.filter(q=>q.amount>0).map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">Fixed Quota</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
+      ${quotaLines.map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">${esc(q.isProrated?`Fixed • ${q.basis}`:'Fixed Quota')}</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${fmt(totalRemDue)}</td></tr>
       ${totalRemPaid>0?`<tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Period</td><td class="td-r td-green">${fmt(totalRemPaid)}</td></tr>`:''}
       ${totalRemPaid<totalRemDue?`<tr><td colspan="2" style="padding-left:20px;color:var(--danger)">Outstanding Balance</td><td class="td-r td-red">− ${fmt(totalRemDue-totalRemPaid)}</td></tr>`:''}
@@ -8472,10 +8627,11 @@ return {
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange,
   setAdminTab, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
-  updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
-  setDashPeriodMode,
-  showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert
-};
+    updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
+    setDashPeriodMode,
+    showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
+    _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod
+  };
 
 })();
 
