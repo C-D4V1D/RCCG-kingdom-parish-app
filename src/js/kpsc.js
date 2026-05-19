@@ -2178,8 +2178,14 @@ function navigate(page, opts) {
   S._partnerDetailId = null;
   S._partnerDetailYear = null;
   // Flush in-memory transcript before the meeting-room DOM unmounts.
-  if ((Rec.status === 'recording' || Rec.status === 'paused' || Rec.status === 'stopped') && document.getElementById('km-transcript')) {
-    autoSaveNow();
+  // Previously this only fired during live recording, but AI flows
+  // (audio upload transcription, OCR, diarization) update the textarea
+  // programmatically, and those updates need to be pushed too.
+  if (document.getElementById('km-transcript')) {
+    // Snapshot to local buffer first so even a failed network save
+    // survives the navigation, then kick off the server PUT/POST.
+    saveTranscriptBuffer();
+    try { autoSaveNow(); } catch (_) { /* noop */ }
   }
   recStop();
   Rec.status = 'idle';
@@ -3107,7 +3113,7 @@ async function renderMeetingRoom(main) {
         <div id="km-audio-panel" style="${S._meetingTab !== 'audio' ? 'display:none' : ''}">
           ${isEditable ? `
           <div class="k-section">
-            <p class="k-hint">Upload a pre-recorded audio file. The AI will transcribe it and add the text to the transcript. Supported formats: mp3, mp4, m4a, wav, webm, ogg (max 25 MB).</p>
+            <p class="k-hint">Upload a pre-recorded audio file — the AI will transcribe it and save the text to your draft automatically. You can switch tabs or come back later; the transcript will be waiting. Supported formats: mp3, mp4, m4a, wav, webm, ogg (max 25 MB).</p>
             <label class="k-label">Audio Recording</label>
             <input id="km-audio-file" type="file" accept="audio/*" class="k-input" style="padding:8px" onchange="Kpsc.previewAudioFile(this)" />
             <div style="margin-top:10px;display:flex;align-items:center;gap:8px">
@@ -3159,6 +3165,10 @@ async function renderMeetingRoom(main) {
   if (canRecord) recRenderUI();
   recRenderTranscript();
   if (isEditable) bindAutoSave();
+  // Belt-and-suspenders: if an earlier AI append couldn't reach the
+  // server (poor network, navigated mid-save), restore it from the
+  // local buffer so the secretary doesn't see the text disappear.
+  if (isEditable) restoreTranscriptFromBuffer();
   // Re-apply mic badges for any members already voice-ticked this session.
   restoreVoiceTickBadges();
 }
@@ -4342,12 +4352,26 @@ async function autoSaveNow() {
       setAutoSaveStatus(`Save failed: ${res.error}`, 'error');
     } else {
       const wasNew = !Draft.meetingId;
+      const prevPendingId = Draft.pendingId;
       S.activeMeeting = res;
       Draft.meetingId = res.id;
       Draft.pendingId = null; // ID is now committed; subsequent saves will use PUT
       S._isNewMeeting = false;
       persistMeetingUiState();
       setAutoSaveStatus(`Saved · ${fmtClock(new Date())}`, 'ok');
+      // Server now has the transcript — drop the local safety buffer for
+      // both the pending and committed IDs (they can differ on the very
+      // first save when the server assigns a fresh ID). Skip the clear
+      // if the user kept typing while the save was in flight; the dirty
+      // flag will trigger another save and we want the buffer to survive
+      // until that one also lands.
+      if (!Draft.dirty) {
+        clearTranscriptBuffer(res.id);
+        if (prevPendingId && prevPendingId !== res.id) clearTranscriptBuffer(prevPendingId);
+      } else {
+        // Refresh the buffer with the latest text so it covers the new edits.
+        saveTranscriptBuffer();
+      }
       // First save: meeting now has a DB id — inject End Meeting button into the
       // already-rendered action bar so upload-only secretaries can advance the meeting
       // without a full page re-render (which would discard any file input selections).
@@ -4425,6 +4449,165 @@ function updateCollapsibleSummaries() {
   }
 }
 
+// ── TRANSCRIPT BUFFER & PROGRESS HELPERS ──────────────────────────
+// AI flows (audio upload transcription, OCR, diarization) update the
+// transcript textarea programmatically. Programmatic value changes do
+// not fire 'input' events, so the existing autosave never sees them.
+// appendTranscriptText() is the single funnel for those writes: it
+// mirrors the result to localStorage (so a poor-network save can't
+// silently lose the text) and then triggers autoSaveNow() to push to
+// the server immediately rather than after the 1.5 s debounce.
+const TRANSCRIPT_BUFFER_PREFIX = 'kpsc:transcript-buffer:';
+
+function transcriptBufferKey(idOverride) {
+  const id = idOverride || S.activeMeeting?.id || Draft.pendingId || Draft.meetingId;
+  return id ? TRANSCRIPT_BUFFER_PREFIX + id : '';
+}
+
+function saveTranscriptBuffer() {
+  const key = transcriptBufferKey();
+  if (!key) return;
+  const el = document.getElementById('km-transcript');
+  if (!el) return;
+  try { localStorage.setItem(key, el.value || ''); } catch (_) { /* quota — ignore */ }
+}
+
+function readTranscriptBuffer(id) {
+  if (!id) return '';
+  try { return localStorage.getItem(TRANSCRIPT_BUFFER_PREFIX + id) || ''; } catch (_) { return ''; }
+}
+
+function clearTranscriptBuffer(id) {
+  if (!id) return;
+  try { localStorage.removeItem(TRANSCRIPT_BUFFER_PREFIX + id); } catch (_) { /* noop */ }
+}
+
+// Append text to the transcript textarea, mirror to the local buffer,
+// and persist to the server immediately. Use this for every
+// programmatic append (audio transcription, OCR, diarization apply).
+function appendTranscriptText(text) {
+  const el = document.getElementById('km-transcript');
+  if (!el || !text) return;
+  el.value = (el.value ? el.value + '\n\n' : '') + String(text);
+  saveTranscriptBuffer();
+  // Fire-and-forget — runs the network call now without blocking the UI.
+  try { autoSaveNow(); } catch (_) { /* noop */ }
+}
+
+// On meeting-room render, if our local buffer is longer than what the
+// server returned (i.e. an earlier autosave didn't make it), restore
+// the buffered text into the textarea and re-trigger a save. Without
+// this, navigating away after an AI append could appear to "lose" the
+// transcript on return.
+function restoreTranscriptFromBuffer() {
+  const id = S.activeMeeting?.id || Draft.pendingId;
+  if (!id) return;
+  const buf = readTranscriptBuffer(id);
+  if (!buf) return;
+  const el = document.getElementById('km-transcript');
+  if (!el) return;
+  if (buf.length > (el.value || '').length) {
+    el.value = buf;
+    showToast('Restored unsaved transcript from this device.', 'info');
+    // Best-effort flush so the server now reflects what's on screen.
+    setTimeout(() => { try { autoSaveNow(); } catch (_) {} }, 300);
+  } else if (buf === el.value) {
+    // Server caught up; safe to clear local copy.
+    clearTranscriptBuffer(id);
+  }
+}
+
+// ── TRANSCRIBE PROGRESS UI ────────────────────────────────────────
+function formatDurationSec(sec) {
+  sec = Math.max(0, Math.round(Number(sec) || 0));
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return s ? `${m}m ${s}s` : `${m}m`;
+}
+
+function formatBytesPerSec(bps) {
+  if (!isFinite(bps) || bps <= 0) return '';
+  if (bps < 1024) return `${Math.round(bps)} B/s`;
+  if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
+  return `${(bps / 1024 / 1024).toFixed(2)} MB/s`;
+}
+
+function renderTranscribeProgress(statusEl, opts) {
+  if (!statusEl) return;
+  const { stage, message, percent, elapsedSec, etaSec, sub, kind } = opts || {};
+  const accent = kind === 'warn' ? '#92400e' : (kind === 'error' ? '#991b1b' : '#0369a1');
+  const bg     = kind === 'warn' ? '#fffbeb' : (kind === 'error' ? '#fef2f2' : '#f0f9ff');
+  const border = kind === 'warn' ? '#fcd34d' : (kind === 'error' ? '#fca5a5' : '#bae6fd');
+  const bar = percent != null ? `
+    <div class="k-progress-row" style="margin-top:8px">
+      <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${Math.max(0, Math.min(100, percent))}%"></div></div>
+      <div class="k-progress-label">${Math.round(percent)}%</div>
+    </div>` : `
+    <div class="k-indeterminate-bar" style="margin-top:8px" aria-hidden="true"><span></span></div>`;
+  statusEl.innerHTML = `
+    <div role="status" aria-live="polite" style="background:${bg};border:1px solid ${border};border-radius:10px;padding:14px;font-size:13px;line-height:1.5">
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div style="font-weight:600;color:${accent}">${stage || ''}</div>
+        ${elapsedSec != null ? `<div style="font-size:12px;color:${accent};opacity:.85">⏱ ${formatDurationSec(elapsedSec)}${etaSec != null && etaSec > 0 ? ` · est. ${formatDurationSec(etaSec)} left` : ''}</div>` : ''}
+      </div>
+      ${bar}
+      ${message ? `<div style="margin-top:8px;font-size:12px;color:${accent}">${message}</div>` : ''}
+      ${sub ? `<div style="margin-top:4px;font-size:11px;color:#64748b">${sub}</div>` : ''}
+    </div>`;
+}
+
+// XHR-based upload so we can surface a real upload-progress %.
+function uploadAudioXhr(endpoint, audioFile, mimeType, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const form = new FormData();
+    form.append('audio', audioFile, audioFile.name);
+    form.append('mimeType', mimeType || audioFile.type || 'audio/webm');
+    xhr.open('POST', `${API}/${endpoint}`);
+    for (const [k, v] of Object.entries(kpscSessionHeader())) xhr.setRequestHeader(k, v);
+    xhr.timeout = 5 * 60 * 1000; // 5 minutes — covers ~25 MB on a 1 Mbps link
+    xhr.upload.onprogress = e => {
+      if (onProgress) onProgress({ loaded: e.loaded, total: e.lengthComputable ? e.total : audioFile.size });
+    };
+    xhr.upload.onload = () => {
+      // Upload finished — fire one last 100% tick then let onload below handle the response.
+      if (onProgress) onProgress({ loaded: audioFile.size, total: audioFile.size, uploaded: true });
+    };
+    xhr.onload = () => {
+      try { resolve(JSON.parse(xhr.responseText || '{}')); }
+      catch (_) { reject(new Error('Server returned an unreadable response.')); }
+    };
+    xhr.onerror   = () => reject(new Error('Network error during upload.'));
+    xhr.ontimeout = () => reject(new Error('Upload timed out. Check your connection and try again.'));
+    xhr.onabort   = () => reject(new Error('Upload was cancelled.'));
+    xhr.send(form);
+  });
+}
+
+// Wrap uploadAudioXhr with exponential backoff retries for transient
+// network errors — important on the patchy mobile data this portal is
+// often used over. Server-side errors (anything that returned a JSON
+// body) are NOT retried — the caller handles them.
+async function uploadAudioWithRetry(endpoint, audioFile, mimeType, onProgress, onRetry) {
+  const backoff = [2000, 4000, 8000, 16000];
+  let lastErr;
+  for (let attempt = 0; attempt <= backoff.length; attempt++) {
+    try {
+      return await uploadAudioXhr(endpoint, audioFile, mimeType, onProgress);
+    } catch (e) {
+      lastErr = e;
+      // If the user navigated away or hit cancel, don't keep retrying.
+      const msg = String(e?.message || '');
+      if (msg.includes('cancelled')) throw e;
+      if (attempt >= backoff.length) break;
+      const waitMs = backoff[attempt];
+      if (onRetry) onRetry(attempt + 1, backoff.length + 1, waitMs, e);
+      await new Promise(r => setTimeout(r, waitMs));
+    }
+  }
+  throw lastErr || new Error('Upload failed after multiple retries.');
+}
+
 // ── MEETING ACTIONS ───────────────────────────────────────────────
 async function deleteMeeting(id, event) {
   if (event) { event.stopPropagation(); event.preventDefault(); }
@@ -4450,6 +4633,7 @@ async function deleteMeeting(id, event) {
   const res = await apiDelete(`ai-secretary-meetings/${id}`);
   if (res?.error) { showToast(res.error, 'error'); return; }
   clearMeetingUiState(id);
+  clearTranscriptBuffer(id);
   S.meetings = S.meetings.filter(x => x.id !== id);
   const main = document.getElementById('kpsc-main');
   if (main) await renderDashboard(main);
@@ -4464,6 +4648,7 @@ async function discardMeetingFromRoom() {
   if (!m) {
     // Brand-new, never-saved meeting — just cancel and go back.
     clearMeetingUiState(Draft.pendingId);
+    clearTranscriptBuffer(Draft.pendingId);
     Draft.pendingId = null;
     S._isNewMeeting = false;
     goBack();
@@ -4478,6 +4663,7 @@ async function discardMeetingFromRoom() {
   const res = await apiDelete(`ai-secretary-meetings/${m.id}`);
   if (res?.error) { showToast(res.error, 'error'); return; }
   clearMeetingUiState(m.id);
+  clearTranscriptBuffer(m.id);
   S.meetings = S.meetings.filter(x => x.id !== m.id);
   S.activeMeeting = null;
   Draft.pendingId = null;
@@ -7997,7 +8183,7 @@ async function renderSettings(main) {
   const policyNotes = res?.kpsc_policy_notes || '';
   const hasDeepseek = !!deepseekKey;
   const hasOpenai   = !!openaiKey;
-  const transcriptionModel = res?.ai_transcription_model || 'gpt-4o-transcribe';
+  const transcriptionModel = res?.ai_transcription_model || 'gpt-4o-mini-transcribe';
   const ocrModel           = res?.ai_ocr_model           || 'gpt-5-mini';
   const deepseekModel      = res?.ai_deepseek_model      || 'deepseek-v4-flash';
   const reminderTemplate = res?.kpsc_reminder_template || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge. God bless you.';
@@ -8047,10 +8233,11 @@ async function renderSettings(main) {
         <div class="k-form-group">
           <label class="k-label">Audio Transcription Model (OpenAI)</label>
           <select id="ks-transcription-model" class="k-input">
-            <option value="gpt-4o-transcribe" ${transcriptionModel === 'gpt-4o-transcribe' ? 'selected' : ''}>gpt-4o-transcribe — GPT-4o (Best quality, Recommended)</option>
-            <option value="whisper-1" ${transcriptionModel === 'whisper-1' ? 'selected' : ''}>whisper-1 — Whisper v2 (Legacy · lower cost)</option>
+            <option value="gpt-4o-mini-transcribe" ${transcriptionModel === 'gpt-4o-mini-transcribe' ? 'selected' : ''}>gpt-4o-mini-transcribe — GPT-4o mini (Best value · Recommended)</option>
+            <option value="gpt-4o-transcribe" ${transcriptionModel === 'gpt-4o-transcribe' ? 'selected' : ''}>gpt-4o-transcribe — GPT-4o (Highest accuracy · ~2× the cost)</option>
+            <option value="whisper-1" ${transcriptionModel === 'whisper-1' ? 'selected' : ''}>whisper-1 — Whisper v2 (Legacy fallback)</option>
           </select>
-          <p class="k-hint">Used when you upload an audio file for transcription. <strong>gpt-4o-transcribe</strong> produces higher accuracy transcripts especially for accented speech and multi-speaker audio. <strong>whisper-1</strong> costs less per minute and is a good fallback.</p>
+          <p class="k-hint">Used when you upload an audio file for transcription. <strong>gpt-4o-mini-transcribe</strong> is the recommended default — strong accuracy at roughly half the cost of gpt-4o-transcribe, ideal for typical committee meeting audio. Upgrade to <strong>gpt-4o-transcribe</strong> only for difficult audio (heavy crosstalk, very heavy accents, low SNR). <strong>whisper-1</strong> is kept as a legacy fallback.</p>
         </div>
 
         <div class="k-form-group">
@@ -8194,7 +8381,7 @@ async function renderSettings(main) {
 async function saveAiModels() {
   const msg = document.getElementById('ks-ai-models-save-msg');
   const deepseekModel      = document.getElementById('ks-deepseek-model')?.value      || 'deepseek-v4-flash';
-  const transcriptionModel = document.getElementById('ks-transcription-model')?.value || 'gpt-4o-transcribe';
+  const transcriptionModel = document.getElementById('ks-transcription-model')?.value || 'gpt-4o-mini-transcribe';
   const ocrModel           = document.getElementById('ks-ocr-model')?.value           || 'gpt-5-mini';
   const res = await apiPost('settings', {
     ai_deepseek_model: deepseekModel,
@@ -8744,13 +8931,10 @@ async function ocrNotesPhoto() {
       if (status) status.innerHTML = `<div class="k-error-box">${esc((ocr.errors[0] || 'No text could be extracted. Please ensure the images are clear.') + details)}</div>`;
       return;
     }
-    const transcriptEl = document.getElementById('km-transcript');
-    if (transcriptEl) {
-      transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + ocr.transcript;
-      showToast('Handwritten notes transcribed! Review and adjust before processing.', 'success');
-    }
+    appendTranscriptText(ocr.transcript);
+    showToast('Handwritten notes transcribed and saved to draft.', 'success');
     const note = ocr.errors.length ? ` (${ocr.errors.length} photo${ocr.errors.length === 1 ? '' : 's'} skipped due to OCR errors.)` : '';
-    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Extracted text from ${ocr.successCount} of ${ocr.totalCount} photo${ocr.totalCount === 1 ? '' : 's'}${note} Review the transcript, then click <strong>End Meeting</strong> below to proceed.</div>`;
+    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Extracted text from ${ocr.successCount} of ${ocr.totalCount} photo${ocr.totalCount === 1 ? '' : 's'}${note} Saved to draft — review, then click <strong>End Meeting</strong> below to proceed.</div>`;
   } catch (e) {
     if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
   }
@@ -8798,8 +8982,6 @@ async function transcribeAudioFile() {
 
   const useDiarize = document.getElementById('km-audio-diarize')?.checked;
 
-  if (status) status.innerHTML = '<div class="k-loading" style="padding:16px">🤖 Transcribing audio…</div>';
-
   // Clear any previous speaker map.
   const speakerMapEl = document.getElementById('km-speaker-map');
   if (speakerMapEl) speakerMapEl.innerHTML = '';
@@ -8810,11 +8992,8 @@ async function transcribeAudioFile() {
       const diarizedTranscript = await transcribeAudioWithDiarization_UI(audioFile, status);
       if (diarizedTranscript !== null) {
         // Plain transcript returned (no utterances) — treat same as regular.
-        const transcriptEl = document.getElementById('km-transcript');
-        if (transcriptEl) {
-          transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + diarizedTranscript;
-        }
-        if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Audio transcribed. Review the transcript, then click <strong>End Meeting</strong> below to proceed.</div>`;
+        appendTranscriptText(diarizedTranscript);
+        if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Audio transcribed and saved. Review the transcript, then click <strong>End Meeting</strong> below to proceed.</div>`;
         showToast('Audio transcribed!', 'success');
       }
       // If null is returned, speaker assignment UI is showing — no further action here.
@@ -8829,21 +9008,88 @@ async function transcribeAudioFile() {
   const notesInput = document.getElementById('km-audio-notes-photo');
   const notesFiles = getSelectedImageFiles(notesInput);
 
+  const sizeMB = audioFile.size / 1024 / 1024;
+  // Rough heuristic: the OpenAI transcribe endpoints process audio in
+  // a few seconds plus ~2s per MB on the server side once received.
+  // Used purely for the "estimated time left" hint — actual completion
+  // is what counts.
+  const estProcessSec = Math.max(6, Math.round(sizeMB * 2));
+
+  let uploadStartedAt = Date.now();
+  let processStartedAt = 0;
+  let phase = 'upload';
+  let lastBytes = 0;
+  let lastTickAt = uploadStartedAt;
+
+  const tick = setInterval(() => {
+    if (phase !== 'process') return;
+    const elapsed = Math.round((Date.now() - processStartedAt) / 1000);
+    const remaining = Math.max(0, estProcessSec - elapsed);
+    renderTranscribeProgress(status, {
+      stage: '🤖 AI is transcribing your audio…',
+      elapsedSec: elapsed,
+      etaSec: remaining,
+      message: 'The audio is uploaded; OpenAI is now generating the transcript.',
+      sub: `Typical wait: ~${formatDurationSec(estProcessSec)} for a ${sizeMB.toFixed(1)} MB file. The transcript will be saved to your draft automatically.`,
+    });
+  }, 1000);
+
   try {
-    // Build audio formData for multipart POST (no Content-Type header — browser sets boundary)
-    const audioForm = new FormData();
-    audioForm.append('audio', audioFile, audioFile.name);
-    audioForm.append('mimeType', audioFile.type || 'audio/webm');
+    renderTranscribeProgress(status, {
+      stage: '📤 Uploading audio…',
+      percent: 0,
+      message: 'Preparing to upload to the server.',
+      sub: `${sizeMB.toFixed(1)} MB · ${esc(audioFile.name)}`,
+    });
 
-    // Kick off audio transcription (and optional OCR) in parallel
-    const audioPromise = fetch(`${API}/kpsc-transcribe-audio`, {
-      method: 'POST',
-      headers: { ...kpscSessionHeader() },
-      body: audioForm,
-    }).then(r => r.json());
-
+    // OCR can run while the audio uploads — they hit different endpoints.
     const ocrPromise = notesFiles.length ? ocrNotesImages(notesFiles) : Promise.resolve(null);
-    const [audioRes, ocrRes] = await Promise.all([audioPromise, ocrPromise]);
+
+    const audioRes = await uploadAudioWithRetry(
+      'kpsc-transcribe-audio',
+      audioFile,
+      audioFile.type || 'audio/webm',
+      ({ loaded, total, uploaded }) => {
+        const now = Date.now();
+        const dt = (now - lastTickAt) / 1000;
+        const bps = dt > 0 ? (loaded - lastBytes) / dt : 0;
+        lastBytes = loaded; lastTickAt = now;
+        if (uploaded) {
+          phase = 'process';
+          processStartedAt = Date.now();
+          renderTranscribeProgress(status, {
+            stage: '🤖 AI is transcribing your audio…',
+            elapsedSec: 0,
+            etaSec: estProcessSec,
+            message: 'Upload complete. OpenAI is now generating the transcript.',
+            sub: 'You can keep this tab open — the transcript will be saved automatically.',
+          });
+          return;
+        }
+        const percent = total > 0 ? (loaded / total) * 100 : 0;
+        const remaining = bps > 0 && total > loaded ? Math.round((total - loaded) / bps) : null;
+        renderTranscribeProgress(status, {
+          stage: '📤 Uploading audio…',
+          percent,
+          elapsedSec: Math.round((now - uploadStartedAt) / 1000),
+          etaSec: remaining,
+          message: bps > 0 ? `Speed: ${formatBytesPerSec(bps)}` : 'Connecting…',
+          sub: `${(loaded / 1024 / 1024).toFixed(1)} / ${sizeMB.toFixed(1)} MB uploaded`,
+        });
+      },
+      (attempt, maxAttempts, waitMs, err) => {
+        renderTranscribeProgress(status, {
+          stage: `📡 Network hiccup — retrying upload (attempt ${attempt}/${maxAttempts})`,
+          kind: 'warn',
+          message: `Waiting ${Math.round(waitMs / 1000)}s before retrying. The retry happens automatically; no need to re-pick the file.`,
+          sub: err?.message ? `Last error: ${err.message}` : '',
+        });
+        lastBytes = 0; lastTickAt = Date.now(); uploadStartedAt = Date.now();
+        phase = 'upload';
+      }
+    );
+
+    clearInterval(tick);
 
     handleKpscAuthFailure(audioRes);
 
@@ -8858,16 +9104,15 @@ async function transcribeAudioFile() {
       return;
     }
 
+    // Wait for OCR if it was kicked off in parallel.
+    const ocrRes = await ocrPromise;
     const ocrText = String(ocrRes?.transcript || '').trim();
     const ocrFailed = notesFiles.length > 0 && !ocrText;
     const combined = ocrText
       ? `${audioText}${NOTES_SEPARATOR}${ocrText}`
       : audioText;
 
-    const transcriptEl = document.getElementById('km-transcript');
-    if (transcriptEl) {
-      transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + combined;
-    }
+    appendTranscriptText(combined);
 
     let successMsg = ocrText
       ? `✓ Audio transcribed and handwritten notes combined successfully (${ocrRes.successCount}/${ocrRes.totalCount} photo${ocrRes.totalCount === 1 ? '' : 's'}).`
@@ -8878,10 +9123,13 @@ async function transcribeAudioFile() {
     } else if (ocrRes?.errors?.length) {
       successMsg += ` (${ocrRes.errors.length} photo${ocrRes.errors.length === 1 ? '' : 's'} skipped due to OCR errors.)`;
     }
-    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">${successMsg} Review the transcript, then click <strong>End Meeting</strong> below to proceed.</div>`;
-    showToast(ocrText ? 'Audio and notes combined! Review before processing.' : 'Audio transcribed! Review before processing.', 'success');
+    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">${successMsg} Saved to draft — review the transcript, then click <strong>End Meeting</strong> below to proceed.</div>`;
+    showToast(ocrText ? 'Audio and notes combined! Saved to draft.' : 'Audio transcribed and saved to draft.', 'success');
   } catch (e) {
-    if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
+    clearInterval(tick);
+    if (status) status.innerHTML = `<div class="k-error-box">Transcription failed: ${esc(e?.message || String(e))}<br><span style="font-size:12px">Your file is still selected above — tap <strong>Transcribe with AI</strong> again to retry.</span></div>`;
+  } finally {
+    clearInterval(tick);
   }
 }
 
@@ -8922,13 +9170,10 @@ async function ocrRecNotesPhoto() {
       return;
     }
 
-    const transcriptEl = document.getElementById('km-transcript');
-    if (transcriptEl) {
-      transcriptEl.value = (transcriptEl.value ? transcriptEl.value + '\n\n' : '') + ocr.transcript;
-      showToast('Handwritten notes appended to transcript!', 'success');
-    }
+    appendTranscriptText(ocr.transcript);
+    showToast('Handwritten notes appended and saved to draft.', 'success');
     const note = ocr.errors.length ? ` (${ocr.errors.length} photo${ocr.errors.length === 1 ? '' : 's'} skipped due to OCR errors.)` : '';
-    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Extracted text from ${ocr.successCount} of ${ocr.totalCount} photo${ocr.totalCount === 1 ? '' : 's'}${note} and appended to the transcript above.</div>`;
+    if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Extracted text from ${ocr.successCount} of ${ocr.totalCount} photo${ocr.totalCount === 1 ? '' : 's'}${note} and saved to draft.</div>`;
   } catch (e) {
     if (status) status.innerHTML = `<div class="k-error-box">Error: ${esc(e.message)}</div>`;
   }
@@ -9265,17 +9510,84 @@ let _diarizedUtterances = [];
 let _diarizedSpeakerCount = 0;
 
 async function transcribeAudioWithDiarization_UI(audioFile, status) {
-  if (status) status.innerHTML = '<div class="k-loading" style="padding:16px">🎙️ Transcribing with speaker diarization…</div>';
+  const sizeMB = audioFile.size / 1024 / 1024;
+  // Diarization on Deepgram is generally fast — ~1s per 10s of audio
+  // after upload. Use a slightly more generous estimate than Whisper.
+  const estProcessSec = Math.max(8, Math.round(sizeMB * 3));
 
-  const form = new FormData();
-  form.append('audio', audioFile, audioFile.name);
-  form.append('mimeType', audioFile.type || 'audio/webm');
+  let uploadStartedAt = Date.now();
+  let processStartedAt = 0;
+  let phase = 'upload';
+  let lastBytes = 0;
+  let lastTickAt = uploadStartedAt;
 
-  const res = await fetch(`${API}/kpsc-transcribe-audio-diarize`, {
-    method: 'POST',
-    headers: { ...kpscSessionHeader() },
-    body: form,
-  }).then(r => r.json());
+  const tick = setInterval(() => {
+    if (phase !== 'process') return;
+    const elapsed = Math.round((Date.now() - processStartedAt) / 1000);
+    const remaining = Math.max(0, estProcessSec - elapsed);
+    renderTranscribeProgress(status, {
+      stage: '🎙️ Identifying speakers and transcribing…',
+      elapsedSec: elapsed,
+      etaSec: remaining,
+      message: 'Deepgram is running speaker diarization on the upload.',
+      sub: `Typical wait: ~${formatDurationSec(estProcessSec)} for a ${sizeMB.toFixed(1)} MB file.`,
+    });
+  }, 1000);
+
+  renderTranscribeProgress(status, {
+    stage: '📤 Uploading audio for diarization…',
+    percent: 0,
+    message: 'Preparing to upload.',
+    sub: `${sizeMB.toFixed(1)} MB · ${esc(audioFile.name)}`,
+  });
+
+  let res;
+  try {
+    res = await uploadAudioWithRetry(
+      'kpsc-transcribe-audio-diarize',
+      audioFile,
+      audioFile.type || 'audio/webm',
+      ({ loaded, total, uploaded }) => {
+        const now = Date.now();
+        const dt = (now - lastTickAt) / 1000;
+        const bps = dt > 0 ? (loaded - lastBytes) / dt : 0;
+        lastBytes = loaded; lastTickAt = now;
+        if (uploaded) {
+          phase = 'process';
+          processStartedAt = Date.now();
+          renderTranscribeProgress(status, {
+            stage: '🎙️ Identifying speakers and transcribing…',
+            elapsedSec: 0,
+            etaSec: estProcessSec,
+            message: 'Upload complete. Deepgram is now diarizing.',
+          });
+          return;
+        }
+        const percent = total > 0 ? (loaded / total) * 100 : 0;
+        const remaining = bps > 0 && total > loaded ? Math.round((total - loaded) / bps) : null;
+        renderTranscribeProgress(status, {
+          stage: '📤 Uploading audio for diarization…',
+          percent,
+          elapsedSec: Math.round((now - uploadStartedAt) / 1000),
+          etaSec: remaining,
+          message: bps > 0 ? `Speed: ${formatBytesPerSec(bps)}` : 'Connecting…',
+          sub: `${(loaded / 1024 / 1024).toFixed(1)} / ${sizeMB.toFixed(1)} MB uploaded`,
+        });
+      },
+      (attempt, maxAttempts, waitMs, err) => {
+        renderTranscribeProgress(status, {
+          stage: `📡 Network hiccup — retrying (attempt ${attempt}/${maxAttempts})`,
+          kind: 'warn',
+          message: `Waiting ${Math.round(waitMs / 1000)}s before retry. No need to re-pick the file.`,
+          sub: err?.message ? `Last error: ${err.message}` : '',
+        });
+        lastBytes = 0; lastTickAt = Date.now(); uploadStartedAt = Date.now();
+        phase = 'upload';
+      }
+    );
+  } finally {
+    clearInterval(tick);
+  }
 
   handleKpscAuthFailure(res);
 
@@ -9453,25 +9765,21 @@ function applyDiarizedTranscript() {
     const val = document.getElementById(`km-spk-name-${n}`)?.value.trim();
     if (val) nameMap[n] = val;
   }
-  const transcript = buildDiarizedTranscript(nameMap);
-  const el = document.getElementById('km-transcript');
-  if (el) el.value = (el.value ? el.value + '\n\n' : '') + transcript;
+  appendTranscriptText(buildDiarizedTranscript(nameMap));
   const speakerMapEl = document.getElementById('km-speaker-map');
   if (speakerMapEl) speakerMapEl.innerHTML = '';
   const status = document.getElementById('km-audio-status');
-  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Speaker-labelled transcript added. Review the transcript, then click <strong>End Meeting</strong> below to proceed.</div>`;
+  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Speaker-labelled transcript added and saved to draft. Review, then click <strong>End Meeting</strong> below to proceed.</div>`;
   showToast('Diarized transcript applied!', 'success');
   _diarizedUtterances = [];
 }
 
 function applyDiarizedTranscriptRaw() {
-  const transcript = buildDiarizedTranscript({});
-  const el = document.getElementById('km-transcript');
-  if (el) el.value = (el.value ? el.value + '\n\n' : '') + transcript;
+  appendTranscriptText(buildDiarizedTranscript({}));
   const speakerMapEl = document.getElementById('km-speaker-map');
   if (speakerMapEl) speakerMapEl.innerHTML = '';
   const status = document.getElementById('km-audio-status');
-  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Transcript added with speaker labels. Review the transcript, then click <strong>End Meeting</strong> below to proceed.</div>`;
+  if (status) status.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:12px;font-size:13px;color:#065f46;margin-top:8px">✓ Transcript added with speaker labels and saved to draft. Review, then click <strong>End Meeting</strong> below to proceed.</div>`;
   showToast('Transcript applied.', 'success');
   _diarizedUtterances = [];
 }

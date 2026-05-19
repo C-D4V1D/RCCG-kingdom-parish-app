@@ -1028,7 +1028,10 @@ async function handleInit(DB) {
       provinceRebate:0.20
     }),
     kpsc_default_pin: '1234',
-    ai_transcription_model: 'gpt-4o-transcribe',
+    // Default to the mini variant — ~half the cost of gpt-4o-transcribe
+    // with very similar accuracy on typical meeting-room speech. The
+    // Settings UI exposes the full transcribe model for tougher audio.
+    ai_transcription_model: 'gpt-4o-mini-transcribe',
     ai_ocr_model: 'gpt-5-mini',
     kpsc_partnership_types: JSON.stringify([
       { key: 'gods_kingdom_partner', label: "God's Kingdom Partner" },
@@ -3128,8 +3131,13 @@ async function transcribeAudioWithWhisper(env, request, DB) {
     return ok({ transcript: '', method: 'none', error: 'No transcription key configured. Add your OpenAI API key in Settings → AI Provider Keys.' });
   }
 
-  // Read the configured transcription model from settings (defaults to gpt-4o-transcribe).
-  let transcriptionModel = 'gpt-4o-transcribe';
+  // Read the configured transcription model from settings. Default to
+  // gpt-4o-mini-transcribe — best price/quality ratio for typical
+  // meeting audio. Auto-migrate the older default so existing settings
+  // rows that stored the verbatim default benefit from the cost saving
+  // without admin action; explicit selections (whisper-1, full
+  // gpt-4o-transcribe) are preserved.
+  let transcriptionModel = 'gpt-4o-mini-transcribe';
   try {
     const sr = await DB.prepare(`SELECT value FROM settings WHERE key='ai_transcription_model'`).first();
     if (sr?.value) transcriptionModel = String(sr.value).trim();
@@ -3155,7 +3163,9 @@ async function transcribeAudioWithWhisper(env, request, DB) {
   whisperForm.append('file', audio, filename);
   whisperForm.append('model', transcriptionModel);
 
-  const methodLabel = transcriptionModel === 'whisper-1' ? 'openai_whisper' : 'openai_gpt4o';
+  const methodLabel = transcriptionModel === 'whisper-1'
+    ? 'openai_whisper'
+    : (transcriptionModel === 'gpt-4o-mini-transcribe' ? 'openai_gpt4o_mini' : 'openai_gpt4o');
   try {
     const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
