@@ -497,7 +497,7 @@ function countSundaysInRange(fromValue, toValue){
   const to=parseYmdDate(toValue);
   if(!from || !to || from>to) return 0;
   let count=0;
-  for(const d=new Date(from.getFullYear(), from.getMonth(), from.getDate()); d<=to; d.setDate(d.getDate()+1)){
+  for(let d=new Date(from.getFullYear(), from.getMonth(), from.getDate()); d<=to; d.setDate(d.getDate()+1)){
     if(d.getDay()===0) count++;
   }
   return count;
@@ -525,6 +525,7 @@ function getQuotaLinesForPeriod(quotas, fromDate, toDate){
     let amount=0;
     const segments=[];
     let y=from.getFullYear(), m=from.getMonth();
+    // Walk each month touched by the selected period so each month's quota uses that month's Sunday count.
     while(y<to.getFullYear() || (y===to.getFullYear() && m<=to.getMonth())){
       const segFrom=(y===from.getFullYear() && m===from.getMonth()) ? from : new Date(y,m,1);
       const segTo=(y===to.getFullYear() && m===to.getMonth()) ? to : new Date(y,m+1,0);
