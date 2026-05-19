@@ -1813,32 +1813,9 @@ async function renderDashboard(){
   const dashAllTimeIncomeRemDue = (dashAllTimeRemittances.totalNatl||0)+(dashAllTimeRemittances.totalArea||0)
     +(dashAllTimeRemittances.totalPastor||0)+(dashAllTimeRemittances.totalMinisters||0)
     +(dashAllTimeRemittances.totalSeed||0)+(dashAllTimeRemittances.provinceRebate||0);
-  // Accumulate quotas by counting remittance PERIODS (cut-off to cut-off), not calendar months.
-  // A period ends on a monthly cut-off date; counting calendar months over-counts when one period
-  // spans two calendar months (e.g. Apr 20 – May 24 is ONE period, not two).
   const dashFirstIncRec = allIncomeDash.length > 0 ? allIncomeDash[allIncomeDash.length-1] : null;
-  const dashFirstDate = dashFirstIncRec ? new Date(dashFirstIncRec.date||dashFirstIncRec.createdAt) : new Date(state.year, state.month, 1);
   const dashFirstDateStr = (dashFirstIncRec ? (dashFirstIncRec.date||dashFirstIncRec.createdAt||'') : '').slice(0,10);
-  let dashQuotaPeriods = 0;
-  if(dashFirstIncRec){
-    let fy=dashFirstDate.getFullYear(), fm=dashFirstDate.getMonth();
-    let y=fy, m=fm;
-    while(y<state.year||(y===state.year&&m<=state.month)){
-      // Try year-specific cut-off first, fall back to default (year-agnostic lookup via remCutoffDayForMonth)
-      const cd=getRemCutoffDates(settingsDash,y)||getRemCutoffDates(settingsDash);
-      const cutDay=cd?.dates?.[m]||null;
-      if(cutDay){
-        const cutStr=`${y}-${String(m+1).padStart(2,'0')}-${String(cutDay).padStart(2,'0')}`;
-        if(cutStr>dashFirstDateStr) dashQuotaPeriods++;
-      } else {
-        dashQuotaPeriods++; // no cut-off configured: treat each calendar month as one period
-      }
-      m++; if(m>11){m=0;y++;}
-    }
-    dashQuotaPeriods=Math.max(1,dashQuotaPeriods);
-  }
-  const dashMonthsElapsed = dashQuotaPeriods;
-  // Sunday-prorate the accumulated quota too, so the KPI uses the same basis as the
+  // Sunday-prorate accumulated quotas so the all-time KPI uses the same basis as the
   // current-period split shown in the income card and on the Remittances page.
   const dashAccrualEnd = useRemPeriod ? dashPeriodTo : dashMonthEnd;
   const dashAccumQuotas = dashFirstIncRec
@@ -1847,6 +1824,14 @@ async function renderDashboard(){
   const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
   const dashTotalRemDueKpi = Math.max(0, dashAllTimeIncomeRemDue + dashAccumQuotas - dashAllPaidRems);
+  // Split the all-time outstanding into "this period" vs "prior periods" so the dashboard
+  // can show the selected period in the headline and surface any carryover as a sub-line.
+  // The sum of the two always equals dashTotalRemDueKpi, so the Available Fund math is unchanged.
+  const dashThisPeriodUnpaid = Math.min(
+    Math.max(0, dashCurrentMonthRemDue - dashMonthPaidAmt),
+    dashTotalRemDueKpi
+  );
+  const dashPriorUnpaid = dashTotalRemDueKpi - dashThisPeriodUnpaid;
   // Income from periods not yet covered by a paid remittance — denominator for the % metric.
   const dashPaidPeriods = allRemsDash.filter(r=>r.status==='paid'&&r.periodFrom&&r.periodTo).map(r=>({from:r.periodFrom,to:r.periodTo}));
   const dashUnpaidPeriodIncome = allIncomeDash.filter(r=>{
@@ -1910,6 +1895,8 @@ async function renderDashboard(){
   // Carried forward = churchBal − (income − all-expenses for period). Algebraically exact
   // once "all-expenses" reflects EVERY real outflow, including unsettled advances.
   const dashCarriedForward = churchBal.total - totalIncome + totalPeriodAllExpenses;
+  // True opening = cash on hand minus the still-owed remittances from prior periods.
+  const dashActualOpening = dashCarriedForward - dashPriorUnpaid;
   const dashPrevMonthName = MONTHS[state.month === 0 ? 11 : state.month - 1];
   // Label for the Carried Forward card — "after last remittance (19 Apr)" or "after last month (31 Mar)"
   const _pStart = new Date(dashPeriodFrom + 'T00:00:00');
@@ -2146,6 +2133,11 @@ async function renderDashboard(){
           </div>
           <div style="font-size:18px;font-weight:800;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'};letter-spacing:-0.5px;white-space:nowrap;flex-shrink:0">${fmt(dashCarriedForward)}</div>
         </div>
+        ${dashCarriedForward!==0 && dashPriorUnpaid>0?`
+        <div style="margin-top:8px;padding-top:8px;border-top:1px dashed rgba(99,102,241,0.25);display:flex;align-items:center;justify-content:space-between;gap:12px">
+          <div style="font-size:10.5px;color:var(--text3)">Actual balance <span style="color:var(--text3)">— after −${fmt(dashPriorUnpaid)} owed from previous period(s)</span></div>
+          <div style="font-size:14px;font-weight:700;color:${dashActualOpening<0?'var(--danger)':'var(--text2)'};white-space:nowrap;flex-shrink:0">${fmt(dashActualOpening)}</div>
+        </div>`:''}
       </div>
 
       <!-- + connector -->
@@ -2255,14 +2247,18 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--amber)"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
-            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">RCCG Remittances Due</div>
-            <div style="font-size:26px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(dashTotalRemDueKpi)}</div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">RCCG Remittance Due${dashPriorUnpaid>0?' <span style="color:var(--text3);font-weight:600">(this period)</span>':''}</div>
+            <div style="font-size:26px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(dashCurrentMonthRemDue)}</div>
             <div style="font-size:12px;color:var(--text3);margin-top:5px">📅 ${dashDueLabel}</div>
-            ${dashMonthsElapsed>1?`<div style="margin-top:6px;font-size:11.5px;color:var(--amber);font-weight:600">⚠ Accumulated since ${fmtDate(dashFirstIncRec.date||dashFirstIncRec.createdAt)}</div>`:''}
-            <div style="margin-top:4px;font-size:11.5px;color:var(--amber)">${dashUnpaidPeriodIncome>0?Math.round(dashTotalRemDueKpi/dashUnpaidPeriodIncome*100):0}% of unpaid period income</div>
+            ${totalIncome>0?`<div style="margin-top:4px;font-size:11.5px;color:var(--amber)">${Math.round(dashCurrentMonthRemDue/totalIncome*100)}% of period income</div>`:''}
           </div>
           <div style="width:44px;height:44px;border-radius:12px;background:#FCEBEB;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">📤</div>
         </div>
+        ${dashPriorUnpaid>0?`
+        <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(184,134,11,0.25);display:flex;align-items:center;justify-content:space-between;gap:12px">
+          <div style="font-size:10.5px;color:var(--text3)">Unpaid from previous period(s)</div>
+          <div style="font-size:14px;font-weight:700;color:var(--danger);white-space:nowrap;flex-shrink:0">+${fmt(dashPriorUnpaid)}</div>
+        </div>`:''}
       </div>
 
       <!-- = connector to Final -->
@@ -2324,10 +2320,23 @@ async function renderDashboard(){
             <span>= Total Church Balance</span>
             <span style="font-family:ui-monospace,monospace;color:#185FA5">${fmt(churchBal.total)}</span>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-            <span style="color:var(--text3)">− RCCG Remittances Due</span>
-            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
+          ${dashPriorUnpaid>0?`
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="color:var(--text3)">− Unpaid remittance from previous period(s)</span>
+            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashPriorUnpaid)}</span>
           </div>
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="color:var(--text3)">− RCCG remittance due (this period)</span>
+            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashThisPeriodUnpaid)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+            <span style="color:var(--text3)">= Total RCCG remittances</span>
+            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
+          </div>`:`
+          <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+            <span style="color:var(--text3)">− RCCG remittance due</span>
+            <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
+          </div>`}
           <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
             <span>= Actual Balance</span>
             <span style="font-family:ui-monospace,monospace;color:${dashSpendColor}">${fmt(dashSpendable)}</span>
