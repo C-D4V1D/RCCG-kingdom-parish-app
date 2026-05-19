@@ -1817,9 +1817,12 @@ async function renderDashboard(){
   const dashFirstDateStr = (dashFirstIncRec ? (dashFirstIncRec.date||dashFirstIncRec.createdAt||'') : '').slice(0,10);
   // Sunday-prorate accumulated quotas so the all-time KPI uses the same basis as the
   // current-period split shown in the income card and on the Remittances page.
-  const dashAccrualEnd = useRemPeriod ? dashPeriodTo : dashMonthEnd;
+  // Always anchor to the current remittance period's cut-off so the all-time outstanding
+  // is view-independent — switching between Remittance and Calendar period views shouldn't
+  // change "what's owed to HQ right now". The per-period split (this period vs prior)
+  // can still differ by view; only this total must match.
   const dashAccumQuotas = dashFirstIncRec
-    ? sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, dashFirstDateStr, dashAccrualEnd))
+    ? sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, dashFirstDateStr, dashPeriodTo))
     : 0;
   const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
