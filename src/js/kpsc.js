@@ -27,35 +27,36 @@ const STATUS_CONFIG = {
 };
 
 const KPSC_PERMISSIONS = {
-  acting_chairman:    ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'archive', 'reports', 'settings'],
-  general_secretary:  ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'reminders', 'members', 'archive', 'reports', 'settings'],
+  acting_chairman:    ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'archive', 'reports', 'agenda_builder', 'settings'],
+  general_secretary:  ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'reminders', 'members', 'archive', 'reports', 'agenda_builder', 'settings'],
   financial_secretary:['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
   treasurer:          ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
   committee_viewer:   ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'reports', 'archive'],
   // IT admin: full read access + account/settings management; no operational write actions.
-  it_admin:           ['dashboard', 'archive', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'reports', 'settings'],
+  it_admin:           ['dashboard', 'archive', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'reports', 'agenda_builder', 'settings'],
 };
 const PIN_REGEX = /^\d{4,6}$/;
 
 // ── NAV GROUP / SUB-TAB MAPPING ────────────────────────────────────
 // Maps old page names to (group, subTab) pairs for backwards compat.
 const PAGE_TO_GROUP = {
-  dashboard:    { group: 'home',     subTab: null              },
-  archive:      { group: 'meetings', subTab: 'archive'         },
-  reports:      { group: 'meetings', subTab: 'reports'         },
+  dashboard:       { group: 'home',     subTab: null              },
+  archive:         { group: 'meetings', subTab: 'archive'         },
+  reports:         { group: 'meetings', subTab: 'reports'         },
   'partner-progress': { group: 'money', subTab: 'partner-progress' },
-  projects:     { group: 'meetings', subTab: 'projects'        },
-  action_items: { group: 'meetings', subTab: 'action_items'    },
-  finance:      { group: 'money',    subTab: 'finance'         },
-  partners:     { group: 'money',    subTab: 'partners'        },
-  reminders:    { group: 'money',    subTab: 'reminders'       },
-  members:      { group: 'more',     subTab: 'members'         },
-  settings:     { group: 'more',     subTab: 'settings'        },
+  projects:        { group: 'meetings', subTab: 'projects'        },
+  action_items:    { group: 'meetings', subTab: 'action_items'    },
+  agenda_builder:  { group: 'meetings', subTab: 'agenda_builder'  },
+  finance:         { group: 'money',    subTab: 'finance'         },
+  partners:        { group: 'money',    subTab: 'partners'        },
+  reminders:       { group: 'money',    subTab: 'reminders'       },
+  members:         { group: 'more',     subTab: 'members'         },
+  settings:        { group: 'more',     subTab: 'settings'        },
   // Group-level pseudo-pages (rendered inline by their own renderer)
-  more:         { group: 'more',     subTab: null },
+  more:            { group: 'more',     subTab: null },
   // Sub-pages (reachable from within a group; nav highlight stays on group)
-  meeting:      { group: 'meetings', subTab: null },
-  partnerDetail:{ group: 'money',    subTab: null },
+  meeting:         { group: 'meetings', subTab: null },
+  partnerDetail:   { group: 'money',    subTab: null },
 };
 
 // Default sub-tabs when navigating to a group by name
@@ -98,6 +99,14 @@ const S = {
   reportsApproval: 'all',
   insightsViewMode: 'list',
   insightsDigestOpen: false,
+  // Agenda Builder state
+  agendaNotes: [],
+  agendaBuilderStep: 'notes',        // 'notes' | 'select' | 'settings' | 'draft'
+  agendaBuilderSuggestions: [],
+  agendaBuilderSelected: [],
+  agendaBuilderDraftId: null,
+  agendaBuilderMessage: '',
+  agendaBuilderNotesRec: null,       // MediaRecorder for voice note recording
   // Action Items page state
   actionItems: [],
   actionItemsLoaded: false,
@@ -2204,6 +2213,7 @@ function navigate(page, opts) {
     dashboard: 'Home',
     projects: 'Projects',
     action_items: 'Action Items',
+    agenda_builder: 'Agenda Builder',
     partners: 'Partners',
     finance: 'Finance',
     reminders: 'Reminders',
@@ -2293,11 +2303,14 @@ function meetingsSubTabStrip() {
   const overdueCount = allItems.filter(e => e.isOverdue).length;
   const overdueIndicator = overdueCount ? ` <span class="k-ai-tab-badge">${overdueCount}</span>` : '';
   const tabs = [
-    { key: 'archive',      label: 'Archive' },
-    { key: 'reports',      label: 'Insights' },
-    { key: 'projects',     label: 'Projects' },
-    { key: 'action_items', label: `Action Items${overdueIndicator}` },
+    { key: 'archive',        label: 'Archive' },
+    { key: 'reports',        label: 'Insights' },
+    { key: 'projects',       label: 'Projects' },
+    { key: 'action_items',   label: `Action Items${overdueIndicator}` },
   ];
+  if (canAccess('agenda_builder')) {
+    tabs.push({ key: 'agenda_builder', label: '📋 Agenda Builder' });
+  }
   return `<div class="ka-subtabs">${tabs.map(t =>
     `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
   ).join('')}</div>`;
@@ -2343,6 +2356,9 @@ async function renderPage(page) {
       prependSubTabs(main, meetingsSubTabStrip());
     } else if (page === 'action_items') {
       await renderActionItems(main);
+      prependSubTabs(main, meetingsSubTabStrip());
+    } else if (page === 'agenda_builder') {
+      await renderAgendaBuilder(main);
       prependSubTabs(main, meetingsSubTabStrip());
     } else if (page === 'finance') {
       await renderFinance(main);
@@ -3064,6 +3080,14 @@ async function renderMeetingRoom(main) {
         <div class="k-field">
           <label class="k-label">Scheduled For <span class="k-label-hint">(optional — enables pre-meeting brief)</span></label>
           <input class="k-input" id="km-scheduled-for" type="datetime-local" value="${esc(m?.scheduledFor ? m.scheduledFor.slice(0, 16) : '')}" ${!isEditable ? 'readonly' : ''} />
+        </div>
+        <div class="k-field">
+          <label class="k-label">Meeting Agenda <span class="k-label-hint">(optional — used by AI when generating minutes)</span></label>
+          ${m?.agendaText && !isEditable ? `
+          <div class="k-agenda-display" id="km-agenda-display" style="white-space:pre-wrap;font-size:13px;line-height:1.6;color:var(--text1);background:var(--surface,#f8fafc);border:1px solid var(--border);border-radius:6px;padding:10px 12px">${esc(m.agendaText)}</div>` : `
+          <textarea class="k-input k-agenda-textarea" id="km-agenda" rows="5" placeholder="Paste the meeting agenda here or use the Agenda Builder to generate and auto-populate it…" ${!isEditable ? 'readonly' : ''}>${esc(m?.agendaText || '')}</textarea>
+          ${isEditable && canAccess('agenda_builder') ? `<p class="k-hint" style="margin-top:4px">💡 Use the <button class="kbtn-link" onclick="Kpsc.navigate('agenda_builder')">Agenda Builder</button> to AI-generate an agenda, then click <em>Save &amp; Open Meeting Draft</em> to auto-fill this field.</p>` : ''}
+          `}
         </div>
       </details>
 
@@ -4328,12 +4352,14 @@ async function autoSaveNow() {
   const status = document.getElementById('km-status')?.value || 'draft';
   const participants = readAttendance();
   const scheduledFor = document.getElementById('km-scheduled-for')?.value || null;
+  const agendaText = document.getElementById('km-agenda')?.value?.trim() ?? undefined;
 
   try {
     let res;
     if (S.activeMeeting) {
       res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
         title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants, scheduledFor,
+        ...(agendaText !== undefined ? { agendaText } : {}),
       });
     } else {
       // Include a stable client-generated ID on the first POST. This makes the
@@ -4677,6 +4703,7 @@ async function saveMeeting(btn) {
   const type  = document.getElementById('km-type')?.value  || 'routine';
   const trans = document.getElementById('km-transcript')?.value || '';
   const rawStatus = document.getElementById('km-status')?.value || 'draft';
+  const agendaText = document.getElementById('km-agenda')?.value?.trim() ?? undefined;
 
   // Preserve draft→recording transitions from the Start Meeting control, including new meetings.
   const status = rawStatus;
@@ -4691,6 +4718,7 @@ async function saveMeeting(btn) {
     if (S.activeMeeting) {
       res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
         title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
+        ...(agendaText !== undefined ? { agendaText } : {}),
       });
     } else {
       res = await apiPost('ai-secretary-meetings', {
@@ -10112,6 +10140,741 @@ async function skipFollowup(id) {
   if (title) title.textContent = `Follow-ups (${S.followups.filter(f => f.status === 'pending').length})`;
 }
 
+// ── AGENDA BUILDER ────────────────────────────────────────────────
+
+const AB_TAGS = [
+  { key: 'general',   label: 'General',   cls: 'badge-gray'   },
+  { key: 'important', label: 'Important', cls: 'badge-amber'  },
+  { key: 'urgent',    label: 'Urgent',    cls: 'badge-red'    },
+];
+const AB_PRIORITY_COLORS = { high: '#dc2626', medium: '#d97706', low: '#16a34a' };
+
+function abTagBadge(tag) {
+  const t = AB_TAGS.find(x => x.key === tag) || AB_TAGS[0];
+  return `<span class="kbadge ${t.cls}" style="font-size:10px">${t.label}</span>`;
+}
+
+async function renderAgendaBuilder(main) {
+  // Reload notes from server
+  const notesRes = await apiGet('kpsc-agenda-notes');
+  S.agendaNotes = Array.isArray(notesRes) ? notesRes : [];
+
+  // Load recent WhatsApp drafts
+  const draftsRes = await apiGet('kpsc-whatsapp-draft');
+  const drafts = Array.isArray(draftsRes) ? draftsRes : [];
+  const latestDraft = drafts[0] || null;
+  if (latestDraft && !S.agendaBuilderDraftId) {
+    S.agendaBuilderDraftId = latestDraft.id;
+    if (latestDraft.agendaItems?.length && !S.agendaBuilderSelected.length) {
+      S.agendaBuilderSelected = latestDraft.agendaItems.map(i => typeof i === 'string' ? i : (i.topic || ''));
+    }
+    if (latestDraft.messageText && !S.agendaBuilderMessage) {
+      S.agendaBuilderMessage = latestDraft.messageText;
+    }
+  }
+
+  const step = S.agendaBuilderStep || 'notes';
+  const unusedNotes = S.agendaNotes.filter(n => !n.is_used);
+
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-section-hdr" style="margin-top:0">
+        <h2 style="font-size:16px;margin:0">📋 Meeting Agenda Builder</h2>
+        <p class="k-page-hint" style="margin:4px 0 0">Build your meeting agenda, generate an AI-powered WhatsApp notification, and auto-create your meeting draft — all in one place.</p>
+      </div>
+
+      <!-- Step progress bar -->
+      <div class="k-ab-steps" style="display:flex;gap:0;margin:16px 0;border-radius:8px;overflow:hidden;border:1px solid var(--border)">
+        ${[
+          { key: 'notes',    label: '1. Notes',    emoji: '📝' },
+          { key: 'select',   label: '2. Agenda',   emoji: '📋' },
+          { key: 'settings', label: '3. Settings', emoji: '⚙️' },
+          { key: 'draft',    label: '4. Message',  emoji: '💬' },
+        ].map(s => `
+          <button class="k-ab-step${step === s.key ? ' active' : ''}" onclick="Kpsc.abSetStep('${s.key}')"
+            style="flex:1;border:none;padding:10px 4px;font-size:12px;font-weight:600;cursor:pointer;background:${step === s.key ? 'var(--navy,#1e3a5f)' : 'var(--surface,#f8fafc)'};color:${step === s.key ? '#fff' : 'var(--text2)'};border-right:1px solid var(--border)">
+            ${s.emoji} ${s.label}
+          </button>`).join('')}
+      </div>
+
+      <!-- Step 1: Notes Notepad -->
+      <div id="ab-step-notes" style="${step !== 'notes' ? 'display:none' : ''}">
+        ${renderAbNotesStep(unusedNotes)}
+      </div>
+
+      <!-- Step 2: AI Suggestions + Agenda Selector -->
+      <div id="ab-step-select" style="${step !== 'select' ? 'display:none' : ''}">
+        ${renderAbSelectStep()}
+      </div>
+
+      <!-- Step 3: Meeting Settings -->
+      <div id="ab-step-settings" style="${step !== 'settings' ? 'display:none' : ''}">
+        ${renderAbSettingsStep(latestDraft)}
+      </div>
+
+      <!-- Step 4: WhatsApp Draft Builder -->
+      <div id="ab-step-draft" style="${step !== 'draft' ? 'display:none' : ''}">
+        ${renderAbDraftStep(latestDraft)}
+      </div>
+    </div>`;
+
+  // Bind autogrow to note textarea if visible
+  const noteTA = document.getElementById('ab-note-text');
+  if (noteTA) noteTA.addEventListener('input', () => { noteTA.style.height = 'auto'; noteTA.style.height = noteTA.scrollHeight + 'px'; });
+}
+
+function renderAbNotesStep(unusedNotes) {
+  const usedNotes = S.agendaNotes.filter(n => n.is_used);
+  return `
+    <div class="k-section">
+      <h3 class="k-sec-title">📝 Personal Agenda Notes</h3>
+      <p class="k-page-hint">Add quick notes for agenda items — typed or by voice. These become suggestions in Step 2.</p>
+
+      <div class="k-form-group">
+        <label class="k-label">New Note</label>
+        <textarea class="k-input" id="ab-note-text" rows="3" placeholder="e.g. Discuss generator fund. New partnership renewal dates. Welfare committee update…" style="resize:vertical"></textarea>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <select class="k-input" id="ab-note-tag" style="width:auto;flex-shrink:0">
+            ${AB_TAGS.map(t => `<option value="${t.key}">${t.label}</option>`).join('')}
+          </select>
+          <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.abSaveNote()">+ Add Note</button>
+          <button class="kbtn kbtn-sm ${S.agendaBuilderNotesRec ? 'kbtn-amber' : ''}" id="ab-voice-btn" onclick="Kpsc.abToggleVoice()">
+            ${S.agendaBuilderNotesRec ? '⏹ Stop Recording' : '🎙 Record Voice Note'}
+          </button>
+          <span class="k-hint" id="ab-voice-status" style="font-size:11px"></span>
+        </div>
+      </div>
+
+      <div id="ab-notes-list" style="margin-top:16px">
+        ${unusedNotes.length === 0 ? '<p class="k-hint">No notes yet. Add your first note above.</p>' : unusedNotes.map(n => `
+          <div class="k-meeting-card" style="padding:10px 12px;margin-bottom:8px" id="ab-note-row-${n.id}">
+            <div style="display:flex;align-items:flex-start;gap:8px">
+              <div style="flex:1;font-size:13px;color:var(--text1);line-height:1.5">${esc(n.text)}</div>
+              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+                ${abTagBadge(n.tag)}
+                <button class="kbtn kbtn-sm kbtn-ghost" style="color:var(--danger,#dc2626);padding:2px 6px" onclick="Kpsc.abDeleteNote('${n.id}')">✕</button>
+              </div>
+            </div>
+          </div>`).join('')}
+      </div>
+
+      ${usedNotes.length ? `
+      <details class="k-collapsible" style="margin-top:16px">
+        <summary class="k-collapsible-hdr"><span class="k-collapsible-title" style="font-size:12px;color:var(--text2)">Used notes (${usedNotes.length})</span></summary>
+        <div style="padding:8px 0">
+          ${usedNotes.map(n => `
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;opacity:0.55">
+              <span style="font-size:12px;flex:1;text-decoration:line-through">${esc(n.text)}</span>
+              ${abTagBadge(n.tag)}
+            </div>`).join('')}
+        </div>
+      </details>` : ''}
+
+      <div style="margin-top:20px;display:flex;gap:8px">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.abSetStep('select')">Next: Build Agenda →</button>
+      </div>
+    </div>`;
+}
+
+function renderAbSelectStep() {
+  const suggestions = S.agendaBuilderSuggestions;
+  const selected = S.agendaBuilderSelected;
+
+  return `
+    <div class="k-section">
+      <h3 class="k-sec-title">📋 Build Your Agenda</h3>
+      <p class="k-page-hint">AI analyses past meetings and your notes to suggest agenda items. Select, reorder, or add your own.</p>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+        <button class="kbtn kbtn-ai" id="ab-suggest-btn" onclick="Kpsc.abSuggestAgenda(this)">
+          🤖 AI Suggest Agenda Items
+        </button>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.abClearSuggestions()">Clear</button>
+      </div>
+
+      ${suggestions.length ? `
+      <div id="ab-suggestions-panel" style="margin-bottom:20px">
+        <div class="k-review-step-label" style="margin-top:0">AI Suggestions — click to add to your agenda</div>
+        <div id="ab-suggestions-list">
+          ${suggestions.map((s, i) => {
+            const label = typeof s === 'string' ? s : (s.topic || '');
+            const reason = (typeof s === 'object' && s.reason) ? s.reason : '';
+            const priority = (typeof s === 'object' && s.priority) ? s.priority : 'medium';
+            const src = (typeof s === 'object' && s.source) ? s.source : '';
+            const cf = (typeof s === 'object' && s.carryForward);
+            const alreadySelected = selected.includes(label);
+            const priColor = AB_PRIORITY_COLORS[priority] || '#666';
+            return `
+              <div class="k-meeting-card" id="ab-sug-${i}" style="padding:10px 12px;margin-bottom:6px;cursor:pointer;opacity:${alreadySelected ? '0.45' : '1'}"
+                onclick="Kpsc.abToggleSuggestion(${i})">
+                <div style="display:flex;align-items:flex-start;gap:8px">
+                  <span style="font-size:16px;flex-shrink:0">${alreadySelected ? '✅' : '⬜'}</span>
+                  <div style="flex:1">
+                    <div style="font-size:13px;font-weight:600;color:var(--text1);line-height:1.4">${esc(label)}</div>
+                    ${reason ? `<div style="font-size:11px;color:var(--text2);margin-top:2px">${esc(reason)}</div>` : ''}
+                    <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">
+                      <span style="font-size:10px;font-weight:600;color:${priColor}">● ${priority}</span>
+                      ${src ? `<span class="kbadge badge-gray" style="font-size:10px">${src.replace(/_/g,' ')}</span>` : ''}
+                      ${cf ? `<span class="kbadge badge-amber" style="font-size:10px">carry forward</span>` : ''}
+                    </div>
+                  </div>
+                </div>
+              </div>`;
+          }).join('')}
+        </div>
+      </div>` : `
+      <p class="k-hint" id="ab-suggestions-empty" style="margin-bottom:16px">Click <strong>AI Suggest Agenda Items</strong> to get smart agenda suggestions based on your past meetings and notes.</p>`}
+
+      <div class="k-review-step-label" style="margin-top:8px">Your Selected Agenda (drag to reorder)</div>
+      <div id="ab-selected-list" style="margin-bottom:12px">
+        ${renderAbSelectedList(selected)}
+      </div>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+        <input class="k-input" id="ab-custom-item" type="text" placeholder="Type a custom agenda item…" style="flex:1;min-width:160px" onkeydown="if(event.key==='Enter')Kpsc.abAddCustomItem()" />
+        <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.abAddCustomItem()">+ Add Item</button>
+      </div>
+
+      <div style="margin-top:20px;display:flex;gap:8px">
+        <button class="kbtn" onclick="Kpsc.abSetStep('notes')">← Notes</button>
+        <button class="kbtn kbtn-primary" onclick="Kpsc.abSetStep('settings')">Next: Settings →</button>
+      </div>
+    </div>`;
+}
+
+function renderAbSelectedList(selected) {
+  if (!selected.length) {
+    return '<p class="k-hint" style="padding:12px;text-align:center;background:var(--surface,#f8fafc);border:1px dashed var(--border);border-radius:6px">No items selected yet. Add suggestions above or type a custom item.</p>';
+  }
+  return selected.map((item, i) => `
+    <div class="k-meeting-card" id="ab-sel-${i}" style="padding:8px 12px;margin-bottom:5px;display:flex;align-items:center;gap:8px;cursor:grab" draggable="true"
+      ondragstart="Kpsc.abDragStart(${i})" ondragover="Kpsc.abDragOver(event,${i})" ondrop="Kpsc.abDrop(${i})">
+      <span style="font-size:14px;flex-shrink:0;color:var(--text2);cursor:grab">⠿</span>
+      <span style="flex:1;font-size:13px;color:var(--text1)">${esc(item)}</span>
+      <button class="kbtn kbtn-sm kbtn-ghost" style="color:var(--danger,#dc2626);padding:2px 6px;flex-shrink:0" onclick="Kpsc.abRemoveSelected(${i})">✕</button>
+    </div>`).join('');
+}
+
+function renderAbSettingsStep(latestDraft) {
+  const d = latestDraft || {};
+  return `
+    <div class="k-section">
+      <h3 class="k-sec-title">⚙️ Meeting Settings</h3>
+      <p class="k-page-hint">Configure the meeting details used in the WhatsApp notification.</p>
+
+      <div class="k-field-row">
+        <div class="k-field">
+          <label class="k-label">Meeting Date</label>
+          <input class="k-input" id="ab-meeting-date" type="date" value="${esc(d.meetingDate || today())}" />
+        </div>
+        <div class="k-field k-field-sm">
+          <label class="k-label">Time</label>
+          <input class="k-input" id="ab-meeting-time" type="time" value="${esc(d.meetingTime || '09:00')}" />
+        </div>
+      </div>
+
+      <div class="k-field">
+        <label class="k-label">Venue</label>
+        <input class="k-input" id="ab-venue" type="text" value="${esc(d.venue || 'Church Premises')}" placeholder="e.g. Church Main Hall" />
+      </div>
+
+      <div class="k-field">
+        <label class="k-label">Meeting Title (for draft)</label>
+        <input class="k-input" id="ab-meeting-title" type="text" value="${esc(d.meetingTitle || '')}" placeholder="e.g. KPSC Routine Monthly Meeting" />
+      </div>
+
+      <div class="k-field">
+        <label class="k-label">Urgency</label>
+        <select class="k-input" id="ab-urgency">
+          <option value="normal" ${(d.urgency || 'normal') === 'normal' ? 'selected' : ''}>Normal</option>
+          <option value="urgent" ${d.urgency === 'urgent' ? 'selected' : ''}>Urgent</option>
+          <option value="extraordinary" ${d.urgency === 'extraordinary' ? 'selected' : ''}>Extraordinary</option>
+        </select>
+      </div>
+
+      <div class="k-field">
+        <label class="k-att-member" style="gap:10px;cursor:pointer">
+          <input type="checkbox" id="ab-tag-all" ${d.tagAll ? 'checked' : ''} style="width:16px;height:16px" />
+          <span>Tag @all members in the WhatsApp message</span>
+        </label>
+      </div>
+
+      <div style="margin-top:20px;display:flex;gap:8px">
+        <button class="kbtn" onclick="Kpsc.abSetStep('select')">← Agenda</button>
+        <button class="kbtn kbtn-primary" onclick="Kpsc.abGoToDraft(this)">Next: Generate Message →</button>
+      </div>
+    </div>`;
+}
+
+function renderAbDraftStep(latestDraft) {
+  const msg = S.agendaBuilderMessage || (latestDraft?.messageText || '');
+  const hasDraft = !!S.agendaBuilderDraftId;
+  return `
+    <div class="k-section">
+      <h3 class="k-sec-title">💬 WhatsApp Notification</h3>
+      <p class="k-page-hint">Review your AI-generated WhatsApp message. Refine it, then share to WhatsApp and optionally open the meeting draft.</p>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <button class="kbtn kbtn-ai" id="ab-build-btn" onclick="Kpsc.abBuildMessage(this)" ${!hasDraft && !S.agendaBuilderSelected.length ? 'disabled' : ''}>
+          ${msg ? '🔄 Regenerate Message' : '🤖 Generate WhatsApp Message'}
+        </button>
+      </div>
+
+      ${msg ? `
+      <div class="k-form-group">
+        <label class="k-label">Message</label>
+        <textarea class="k-input" id="ab-message-text" rows="14" style="font-family:monospace;font-size:13px;line-height:1.6">${esc(msg)}</textarea>
+      </div>
+
+      <div class="k-review-step-label" style="margin-top:12px">AI Refinement Tools</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+        <button class="kbtn kbtn-sm kbtn-ai" onclick="Kpsc.abRefineMessage('proofread', this)">✏️ Proofread</button>
+        <button class="kbtn kbtn-sm kbtn-ai" onclick="Kpsc.abRefineMessage('tone_formal', this)">🎩 Formal</button>
+        <button class="kbtn kbtn-sm kbtn-ai" onclick="Kpsc.abRefineMessage('tone_warm', this)">💛 Warm</button>
+        <button class="kbtn kbtn-sm kbtn-ai" onclick="Kpsc.abRefineMessage('tone_urgent', this)">🚨 Urgent</button>
+        <button class="kbtn kbtn-sm kbtn-ai" onclick="Kpsc.abRefineMessage('shorten', this)">✂️ Shorten</button>
+        <button class="kbtn kbtn-sm kbtn-ai" onclick="Kpsc.abRefineMessage('expand', this)">📖 Expand</button>
+        <button class="kbtn kbtn-sm kbtn-ai" onclick="Kpsc.abRefineMessage('simplify', this)">🟢 Simplify</button>
+      </div>
+
+      <div class="k-review-step-label" style="margin-top:0">WhatsApp Preview</div>
+      <div id="ab-wa-preview" class="k-wa-preview" style="background:#e9f5e2;border-radius:10px 10px 10px 2px;padding:14px 16px;font-size:13px;line-height:1.65;white-space:pre-wrap;color:#111;max-height:280px;overflow-y:auto;border:1px solid #c5e0ba;box-shadow:0 1px 3px rgba(0,0,0,0.08)">
+        ${renderWaPreview(msg)}
+      </div>
+
+      <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="kbtn kbtn-primary" style="background:#25d366;border-color:#25d366;color:#fff" onclick="Kpsc.abShareWhatsApp()">
+          📲 Share via WhatsApp
+        </button>
+        <button class="kbtn kbtn-primary" onclick="Kpsc.abCopyMessage()">📋 Copy Message</button>
+        <button class="kbtn" onclick="Kpsc.abSaveDraft(this)">💾 Save Draft</button>
+      </div>
+
+      <div style="margin-top:16px">
+        <button class="kbtn kbtn-primary" style="width:100%" onclick="Kpsc.abFinalizeAndOpenMeeting(this)">
+          ✅ Save &amp; Open Meeting Draft
+        </button>
+        <p class="k-hint" style="margin-top:6px;text-align:center">Saves this notification and creates/opens a meeting draft with the agenda pre-filled.</p>
+      </div>
+      ` : `<p class="k-hint" style="padding:20px;text-align:center;background:var(--surface,#f8fafc);border:1px dashed var(--border);border-radius:6px">Click <strong>Generate WhatsApp Message</strong> above to draft the notification.</p>`}
+
+      <div style="margin-top:16px">
+        <button class="kbtn" onclick="Kpsc.abSetStep('settings')">← Settings</button>
+      </div>
+    </div>`;
+}
+
+function renderWaPreview(text) {
+  if (!text) return '';
+  // Convert WhatsApp *bold* and _italic_ to HTML
+  return esc(text)
+    .replace(/\*([^*\n]+)\*/g, '<strong>$1</strong>')
+    .replace(/_([^_\n]+)_/g, '<em>$1</em>');
+}
+
+// ── Agenda Builder Actions ────────────────────────────────────────
+
+function abSetStep(step) {
+  S.agendaBuilderStep = step;
+  ['notes','select','settings','draft'].forEach(s => {
+    const el = document.getElementById(`ab-step-${s}`);
+    if (el) el.style.display = s === step ? '' : 'none';
+  });
+  // Update step buttons
+  document.querySelectorAll('.k-ab-step').forEach(btn => {
+    const isActive = btn.getAttribute('onclick')?.includes(`'${step}'`);
+    btn.style.background = isActive ? 'var(--navy,#1e3a5f)' : 'var(--surface,#f8fafc)';
+    btn.style.color = isActive ? '#fff' : 'var(--text2)';
+  });
+  // Refresh agenda list when entering select step
+  if (step === 'select') {
+    const listEl = document.getElementById('ab-selected-list');
+    if (listEl) listEl.innerHTML = renderAbSelectedList(S.agendaBuilderSelected);
+  }
+}
+
+async function abSaveNote() {
+  const textEl = document.getElementById('ab-note-text');
+  const tagEl  = document.getElementById('ab-note-tag');
+  const text = textEl?.value?.trim() || '';
+  if (!text) { showToast('Please enter a note first.', 'warn'); return; }
+  const res = await apiPost('kpsc-agenda-notes', { text, tag: tagEl?.value || 'general', source: 'typed' });
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  S.agendaNotes.unshift(res);
+  if (textEl) textEl.value = '';
+  // Re-render notes list
+  const listEl = document.getElementById('ab-notes-list');
+  const unusedNotes = S.agendaNotes.filter(n => !n.is_used);
+  if (listEl) listEl.innerHTML = unusedNotes.length === 0
+    ? '<p class="k-hint">No notes yet. Add your first note above.</p>'
+    : unusedNotes.map(n => `
+        <div class="k-meeting-card" style="padding:10px 12px;margin-bottom:8px" id="ab-note-row-${n.id}">
+          <div style="display:flex;align-items:flex-start;gap:8px">
+            <div style="flex:1;font-size:13px;color:var(--text1);line-height:1.5">${esc(n.text)}</div>
+            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+              ${abTagBadge(n.tag)}
+              <button class="kbtn kbtn-sm kbtn-ghost" style="color:var(--danger,#dc2626);padding:2px 6px" onclick="Kpsc.abDeleteNote('${n.id}')">✕</button>
+            </div>
+          </div>
+        </div>`).join('');
+  showToast('Note added.', 'success');
+}
+
+async function abDeleteNote(id) {
+  if (!confirm('Delete this agenda note?')) return;
+  const res = await apiDelete(`kpsc-agenda-notes/${id}`);
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  S.agendaNotes = S.agendaNotes.filter(n => n.id !== id);
+  const row = document.getElementById(`ab-note-row-${id}`);
+  if (row) row.remove();
+  showToast('Note deleted.', 'info');
+}
+
+let _abDragIdx = null;
+function abDragStart(idx) { _abDragIdx = idx; }
+function abDragOver(e, idx) { e.preventDefault(); }
+function abDrop(targetIdx) {
+  if (_abDragIdx === null || _abDragIdx === targetIdx) return;
+  const arr = [...S.agendaBuilderSelected];
+  const [moved] = arr.splice(_abDragIdx, 1);
+  arr.splice(targetIdx, 0, moved);
+  S.agendaBuilderSelected = arr;
+  _abDragIdx = null;
+  const listEl = document.getElementById('ab-selected-list');
+  if (listEl) listEl.innerHTML = renderAbSelectedList(arr);
+}
+
+function abToggleSuggestion(idx) {
+  const sug = S.agendaBuilderSuggestions[idx];
+  if (!sug) return;
+  const label = typeof sug === 'string' ? sug : (sug.topic || '');
+  if (!label) return;
+  const pos = S.agendaBuilderSelected.indexOf(label);
+  if (pos >= 0) {
+    S.agendaBuilderSelected.splice(pos, 1);
+  } else {
+    S.agendaBuilderSelected.push(label);
+  }
+  // Toggle visual state
+  const el = document.getElementById(`ab-sug-${idx}`);
+  if (el) {
+    const isNowSelected = S.agendaBuilderSelected.includes(label);
+    el.style.opacity = isNowSelected ? '0.45' : '1';
+    const icon = el.querySelector('span');
+    if (icon) icon.textContent = isNowSelected ? '✅' : '⬜';
+  }
+  // Refresh selected list
+  const listEl = document.getElementById('ab-selected-list');
+  if (listEl) listEl.innerHTML = renderAbSelectedList(S.agendaBuilderSelected);
+}
+
+function abRemoveSelected(idx) {
+  S.agendaBuilderSelected.splice(idx, 1);
+  const listEl = document.getElementById('ab-selected-list');
+  if (listEl) listEl.innerHTML = renderAbSelectedList(S.agendaBuilderSelected);
+  // Un-highlight any corresponding suggestion
+  S.agendaBuilderSuggestions.forEach((s, i) => {
+    const label = typeof s === 'string' ? s : (s.topic || '');
+    const el = document.getElementById(`ab-sug-${i}`);
+    if (el && !S.agendaBuilderSelected.includes(label)) {
+      el.style.opacity = '1';
+      const icon = el.querySelector('span');
+      if (icon) icon.textContent = '⬜';
+    }
+  });
+}
+
+function abAddCustomItem() {
+  const input = document.getElementById('ab-custom-item');
+  const text = input?.value?.trim() || '';
+  if (!text) { showToast('Type an agenda item first.', 'warn'); return; }
+  if (S.agendaBuilderSelected.includes(text)) { showToast('Already in agenda.', 'info'); return; }
+  S.agendaBuilderSelected.push(text);
+  if (input) input.value = '';
+  const listEl = document.getElementById('ab-selected-list');
+  if (listEl) listEl.innerHTML = renderAbSelectedList(S.agendaBuilderSelected);
+}
+
+function abClearSuggestions() {
+  S.agendaBuilderSuggestions = [];
+  const panel = document.getElementById('ab-suggestions-panel');
+  if (panel) panel.innerHTML = '';
+  const empty = document.getElementById('ab-suggestions-empty');
+  if (empty) empty.style.display = '';
+}
+
+async function abSuggestAgenda(btn) {
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Generating…';
+  try {
+    const res = await apiPost('kpsc-agenda-suggest', {});
+    if (res?.error) { showToast(res.error, 'error'); return; }
+    S.agendaBuilderSuggestions = res.suggestions || [];
+    // Re-render suggestions panel
+    const panelContainer = document.getElementById('ab-step-select');
+    if (panelContainer) {
+      panelContainer.innerHTML = renderAbSelectStep();
+    }
+    const src = res.source === 'ai' ? 'AI' : 'template';
+    showToast(`${S.agendaBuilderSuggestions.length} agenda suggestions generated (${src}).`, 'success');
+  } catch (e) {
+    showToast('Could not generate suggestions. Try again.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+async function abGoToDraft(btn) {
+  // Save settings and create/update draft before going to draft step
+  const meetingDate = document.getElementById('ab-meeting-date')?.value || today();
+  const meetingTime = document.getElementById('ab-meeting-time')?.value || '09:00';
+  const venue = document.getElementById('ab-venue')?.value?.trim() || 'Church Premises';
+  const meetingTitle = document.getElementById('ab-meeting-title')?.value?.trim() || '';
+  const urgency = document.getElementById('ab-urgency')?.value || 'normal';
+  const tagAll = !!(document.getElementById('ab-tag-all')?.checked);
+
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    let draftRes;
+    if (S.agendaBuilderDraftId) {
+      draftRes = await apiPut(`kpsc-whatsapp-draft/${S.agendaBuilderDraftId}`, {
+        agendaItems: S.agendaBuilderSelected.map(t => ({ topic: t })),
+        meetingDate, meetingTime, venue, meetingTitle, urgency, tagAll,
+      });
+    } else {
+      draftRes = await apiPost('kpsc-whatsapp-draft', {
+        agendaItems: S.agendaBuilderSelected.map(t => ({ topic: t })),
+        meetingDate, meetingTime, venue, meetingTitle, urgency, tagAll,
+      });
+    }
+    if (draftRes?.error) { showToast(draftRes.error, 'error'); return; }
+    S.agendaBuilderDraftId = draftRes.id;
+    abSetStep('draft');
+    // Re-render draft step with latest data
+    const draftEl = document.getElementById('ab-step-draft');
+    if (draftEl) draftEl.innerHTML = renderAbDraftStep(draftRes);
+  } catch {
+    showToast('Could not save settings. Check your connection.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+async function abBuildMessage(btn) {
+  if (!S.agendaBuilderDraftId) { showToast('Please complete Step 3 first.', 'warn'); return; }
+  const currentMsg = document.getElementById('ab-message-text')?.value?.trim() || '';
+  // If the user has edited the text, first save it
+  if (currentMsg) {
+    await apiPut(`kpsc-whatsapp-draft/${S.agendaBuilderDraftId}`, { messageText: currentMsg });
+  }
+
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Generating…';
+  try {
+    const res = await apiPost(`kpsc-whatsapp-draft/${S.agendaBuilderDraftId}/build`, {});
+    if (res?.error) { showToast(res.error, 'error'); return; }
+    S.agendaBuilderMessage = res.messageText || '';
+    const ta = document.getElementById('ab-message-text');
+    if (ta) { ta.value = S.agendaBuilderMessage; } else {
+      const draftEl = document.getElementById('ab-step-draft');
+      if (draftEl) draftEl.innerHTML = renderAbDraftStep({ messageText: S.agendaBuilderMessage });
+    }
+    abUpdateWaPreview();
+    showToast('Message generated.', 'success');
+  } catch {
+    showToast('Could not generate message. Try again.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+function abUpdateWaPreview() {
+  const ta = document.getElementById('ab-message-text');
+  const text = ta?.value || S.agendaBuilderMessage || '';
+  const preview = document.getElementById('ab-wa-preview');
+  if (preview) preview.innerHTML = renderWaPreview(text);
+}
+
+async function abRefineMessage(action, btn) {
+  if (!S.agendaBuilderDraftId) { showToast('Please generate a message first.', 'warn'); return; }
+  const currentMsg = document.getElementById('ab-message-text')?.value?.trim() || S.agendaBuilderMessage || '';
+  if (!currentMsg) { showToast('Please generate a message first.', 'warn'); return; }
+
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳…';
+  try {
+    const res = await apiPost(`kpsc-whatsapp-draft/${S.agendaBuilderDraftId}/refine`, { action, messageText: currentMsg });
+    if (res?.error) { showToast(res.error, 'error'); return; }
+    S.agendaBuilderMessage = res.messageText || currentMsg;
+    const ta = document.getElementById('ab-message-text');
+    if (ta) ta.value = S.agendaBuilderMessage;
+    abUpdateWaPreview();
+    showToast('Message refined.', 'success');
+  } catch {
+    showToast('Could not refine message. Try again.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+async function abSaveDraft(btn) {
+  if (!S.agendaBuilderDraftId) { showToast('No draft to save.', 'warn'); return; }
+  const msg = document.getElementById('ab-message-text')?.value?.trim() || S.agendaBuilderMessage || '';
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const res = await apiPut(`kpsc-whatsapp-draft/${S.agendaBuilderDraftId}`, { messageText: msg, status: 'saved' });
+    if (res?.error) { showToast(res.error, 'error'); return; }
+    S.agendaBuilderMessage = msg;
+    showToast('Draft saved.', 'success');
+  } catch {
+    showToast('Could not save draft.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+function abCopyMessage() {
+  const msg = document.getElementById('ab-message-text')?.value?.trim() || S.agendaBuilderMessage || '';
+  if (!msg) { showToast('No message to copy.', 'warn'); return; }
+  navigator.clipboard.writeText(msg).then(
+    () => showToast('Message copied to clipboard!', 'success'),
+    () => showToast('Could not copy. Please copy manually.', 'warn'),
+  );
+}
+
+function abShareWhatsApp() {
+  const msg = document.getElementById('ab-message-text')?.value?.trim() || S.agendaBuilderMessage || '';
+  if (!msg) { showToast('Generate a message first.', 'warn'); return; }
+  const url = `https://wa.me/?text=${encodeURIComponent(msg)}`;
+  window.open(url, '_blank');
+  showToast('WhatsApp opened. Select recipients to send.', 'success');
+}
+
+async function abFinalizeAndOpenMeeting(btn) {
+  if (!S.agendaBuilderDraftId) { showToast('No draft to finalize.', 'warn'); return; }
+  const msg = document.getElementById('ab-message-text')?.value?.trim() || S.agendaBuilderMessage || '';
+  if (!msg) { showToast('Please generate a message before finalizing.', 'warn'); return; }
+
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Saving…';
+  try {
+    const res = await apiPost(`kpsc-whatsapp-draft/${S.agendaBuilderDraftId}/finalize`, {
+      messageText: msg,
+      meetingTitle: document.getElementById('ab-meeting-title')?.value?.trim() || '',
+    });
+    if (res?.error) { showToast(res.error, 'error'); return; }
+    const linkedId = res.linkedMeetingId;
+    // Mark notes as used
+    S.agendaNotes = S.agendaNotes.map(n => {
+      const used = res.agendaItems?.some(i => i?.noteId === n.id);
+      return used ? { ...n, is_used: 1 } : n;
+    });
+    // Reset builder state
+    S.agendaBuilderDraftId = null;
+    S.agendaBuilderSelected = [];
+    S.agendaBuilderMessage = '';
+    S.agendaBuilderSuggestions = [];
+    S.agendaBuilderStep = 'notes';
+    showToast('Agenda saved! Opening meeting draft…', 'success');
+    if (linkedId) {
+      // Reload meetings first
+      const meetingsRes = await apiGet('ai-secretary-meetings');
+      if (!meetingsRes?.error && Array.isArray(meetingsRes)) S.meetings = meetingsRes;
+      await openMeeting(linkedId);
+    } else {
+      navigate('archive');
+    }
+  } catch {
+    showToast('Could not finalize. Check your connection.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+// ── Agenda Builder Voice Note ───────────────────────────────────
+
+async function abToggleVoice() {
+  const btn = document.getElementById('ab-voice-btn');
+  const statusEl = document.getElementById('ab-voice-status');
+  if (S.agendaBuilderNotesRec) {
+    // Stop recording
+    S.agendaBuilderNotesRec.stop();
+    S.agendaBuilderNotesRec = null;
+    if (btn) btn.textContent = '🎙 Record Voice Note';
+    if (statusEl) statusEl.textContent = 'Processing…';
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const chunks = [];
+    const mr = new MediaRecorder(stream);
+    S.agendaBuilderNotesRec = mr;
+    mr.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+    mr.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      S.agendaBuilderNotesRec = null;
+      if (btn) { btn.textContent = '🎙 Record Voice Note'; btn.classList.remove('kbtn-amber'); }
+      if (statusEl) statusEl.textContent = 'Transcribing…';
+      try {
+        const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
+        const ext = (mr.mimeType || 'audio/webm').includes('ogg') ? 'ogg' : 'webm';
+        const formData = new FormData();
+        formData.append('file', blob, `note.${ext}`);
+        formData.append('model', 'whisper-1');
+        const openaiKey = await getOpenAiKey();
+        if (!openaiKey) { if (statusEl) statusEl.textContent = 'OpenAI key not set.'; return; }
+        const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${openaiKey}` },
+          body: formData,
+        });
+        if (!resp.ok) throw new Error(`Whisper error ${resp.status}`);
+        const data = await resp.json();
+        const transcribed = (data.text || '').trim();
+        if (transcribed) {
+          const ta = document.getElementById('ab-note-text');
+          if (ta) {
+            ta.value = ta.value ? `${ta.value}\n${transcribed}` : transcribed;
+            ta.style.height = 'auto';
+            ta.style.height = ta.scrollHeight + 'px';
+          }
+          if (statusEl) statusEl.textContent = '✓ Transcribed';
+        } else {
+          if (statusEl) statusEl.textContent = 'Nothing captured.';
+        }
+      } catch (e2) {
+        if (statusEl) statusEl.textContent = `Transcription failed: ${e2.message}`;
+      }
+    };
+    mr.start();
+    if (btn) { btn.textContent = '⏹ Stop Recording'; btn.classList.add('kbtn-amber'); }
+    if (statusEl) statusEl.textContent = '● Recording…';
+  } catch (e) {
+    showToast(`Microphone error: ${e.message}`, 'error');
+  }
+}
+
+async function getOpenAiKey() {
+  try {
+    const res = await apiGet('settings');
+    return res?.ai_openai_key?.trim() || '';
+  } catch { return ''; }
+}
+
 window.Kpsc = {
   login,
   logout,
@@ -10277,6 +11040,28 @@ window.Kpsc = {
   exportActionItemsMd,
   notifyAllPendingActionItems,
   rerenderActionItemsList,
+  // Agenda Builder
+  renderAgendaBuilder,
+  abSetStep,
+  abSaveNote,
+  abDeleteNote,
+  abDragStart,
+  abDragOver,
+  abDrop,
+  abToggleSuggestion,
+  abRemoveSelected,
+  abAddCustomItem,
+  abClearSuggestions,
+  abSuggestAgenda,
+  abGoToDraft,
+  abBuildMessage,
+  abUpdateWaPreview,
+  abRefineMessage,
+  abSaveDraft,
+  abCopyMessage,
+  abShareWhatsApp,
+  abFinalizeAndOpenMeeting,
+  abToggleVoice,
 };
 
 document.addEventListener('DOMContentLoaded', init);
