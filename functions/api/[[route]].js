@@ -659,6 +659,11 @@ export async function onRequest(context) {
         if (auth instanceof Response) return auth;
         return await finalizeWhatsappDraft(DB, param, body, auth);
       }
+      if (method === 'POST' && parts[2] === 'outcomes') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await saveAgendaOutcomes(DB, param, body);
+      }
     }
 
     // ── Agenda Builder: /api/kpsc-agenda-templates ─────────────
@@ -1121,6 +1126,11 @@ async function handleInit(DB) {
     `ALTER TABLE ai_secretary_meetings ADD COLUMN agenda_text TEXT DEFAULT ''`,
     // Agenda Templates (additional features): prep checklist state on drafts
     `ALTER TABLE kpsc_whatsapp_drafts ADD COLUMN prep_checklist_json TEXT DEFAULT '[]'`,
+    // Recurring agenda items: track which notes are pinned recurring items + how often each is used
+    `ALTER TABLE kpsc_agenda_notes ADD COLUMN is_recurring INTEGER DEFAULT 0`,
+    `ALTER TABLE kpsc_agenda_notes ADD COLUMN usage_count INTEGER DEFAULT 0`,
+    // Post-meeting closure: outcome statuses for each agenda item (discussed/carry_forward/not_discussed)
+    `ALTER TABLE kpsc_whatsapp_drafts ADD COLUMN agenda_outcomes_json TEXT DEFAULT '[]'`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -2778,6 +2788,21 @@ async function getKpscDashboard(DB, url) {
     linkedMeetingId: upcomingDraft.linked_meeting_id || '',
   } : null;
 
+  // Meeting frequency alert: find the last processed/active KPSC meeting date to compute days since.
+  const lastMeetingRow = await DB.prepare(`
+    SELECT meeting_date FROM ai_secretary_meetings
+    WHERE COALESCE(deleted_at,'') = '' AND status IN ('processed','active','draft')
+    ORDER BY meeting_date DESC LIMIT 1
+  `).first();
+  let daysSinceLastMeeting = null;
+  if (lastMeetingRow?.meeting_date) {
+    const lastMs = new Date(lastMeetingRow.meeting_date + 'T12:00:00').getTime();
+    const nowMs = new Date(today + 'T12:00:00').getTime();
+    if (!isNaN(lastMs) && !isNaN(nowMs)) {
+      daysSinceLastMeeting = Math.floor((nowMs - lastMs) / (1000 * 60 * 60 * 24));
+    }
+  }
+
   return ok({
     month,
     year,
@@ -2792,6 +2817,7 @@ async function getKpscDashboard(DB, url) {
       remindersSent: Number(remindersRow?.sent_count || 0),
     },
     upcomingMeeting,
+    daysSinceLastMeeting,
   });
 }
 
@@ -5355,7 +5381,8 @@ Keep the total brief under 400 words. Cite specifics (names, dates, amounts) —
 
 async function getAgendaNotes(DB) {
   const { results } = await DB.prepare(
-    `SELECT * FROM kpsc_agenda_notes ORDER BY created_at DESC`
+    // Recurring items first so UI can highlight them; then by most recently created
+    `SELECT * FROM kpsc_agenda_notes ORDER BY is_recurring DESC, created_at DESC`
   ).all();
   return ok(results || []);
 }
@@ -5377,12 +5404,17 @@ async function updateAgendaNote(DB, id, data) {
   const existing = await DB.prepare(`SELECT id FROM kpsc_agenda_notes WHERE id=?`).bind(id).first();
   if (!existing) return err('Agenda note not found', 404);
   const now = new Date().toISOString();
+  // Support incrementing usage_count (for tracking how often a note is used in agendas)
+  const usageCountClause = data.incrementUsage
+    ? 'usage_count = usage_count + 1,'
+    : '';
   await DB.prepare(
-    `UPDATE kpsc_agenda_notes SET text=COALESCE(?,text), tag=COALESCE(?,tag), is_used=COALESCE(?,is_used), updated_at=? WHERE id=?`
+    `UPDATE kpsc_agenda_notes SET ${usageCountClause} text=COALESCE(?,text), tag=COALESCE(?,tag), is_used=COALESCE(?,is_used), is_recurring=COALESCE(?,is_recurring), updated_at=? WHERE id=?`
   ).bind(
     data.text !== undefined ? String(data.text).trim() : null,
     data.tag !== undefined ? data.tag : null,
     data.isUsed !== undefined ? (data.isUsed ? 1 : 0) : null,
+    data.isRecurring !== undefined ? (data.isRecurring ? 1 : 0) : null,
     now, id,
   ).run();
   const row = await DB.prepare(`SELECT * FROM kpsc_agenda_notes WHERE id=?`).bind(id).first();
@@ -5407,7 +5439,7 @@ async function suggestAgendaItems(DB, env, body) {
 
   // Load personal agenda notes not yet used
   const { results: agendaNotes } = await DB.prepare(
-    `SELECT id,text,tag FROM kpsc_agenda_notes WHERE is_used=0 ORDER BY created_at DESC`
+    `SELECT id,text,tag,is_recurring,usage_count FROM kpsc_agenda_notes WHERE is_used=0 ORDER BY is_recurring DESC, created_at DESC`
   ).all();
 
   // Get DeepSeek key and model
@@ -5483,7 +5515,7 @@ Return only the JSON object, no markdown fences.`;
 
 function buildFallbackAgendaSuggestions(recentMeetings, agendaNotes) {
   const suggestions = [
-    { topic: 'Matters Arising from Previous Minutes', reason: 'Standard opening item to review and follow up on previous decisions.', priority: 'high', source: 'recurring', carryForward: false },
+    { topic: 'Matters Arising from Previous Minutes', reason: 'Standard opening item to review and follow up on previous decisions.', priority: 'high', source: 'recurring', carryForward: false, isPreTicked: true },
   ];
 
   // Open action items from last meeting
@@ -5498,12 +5530,27 @@ function buildFallbackAgendaSuggestions(recentMeetings, agendaNotes) {
         priority: 'high',
         source: 'action_item',
         carryForward: true,
+        isPreTicked: true,
       });
     }
   }
 
-  // Personal notes
-  for (const note of (agendaNotes || []).slice(0, 5)) {
+  // Recurring personal notes — always include and pre-tick them
+  const recurringNotes = (agendaNotes || []).filter(n => n.is_recurring);
+  for (const note of recurringNotes) {
+    suggestions.push({
+      topic: note.text.length > 60 ? note.text.slice(0, 57) + '…' : note.text,
+      reason: 'This is a recurring agenda item — always discussed at KPSC meetings.',
+      priority: 'high',
+      source: 'recurring',
+      carryForward: false,
+      isPreTicked: true,
+      noteId: note.id,
+    });
+  }
+
+  // Personal notes (non-recurring)
+  for (const note of (agendaNotes || []).filter(n => !n.is_recurring).slice(0, 5)) {
     suggestions.push({
       topic: note.text.length > 60 ? note.text.slice(0, 57) + '…' : note.text,
       reason: 'Added from your personal notes.',
@@ -5521,7 +5568,26 @@ function buildFallbackAgendaSuggestions(recentMeetings, agendaNotes) {
 function mergeNotesIntoSuggestions(aiSuggestions, agendaNotes) {
   const merged = Array.isArray(aiSuggestions) ? [...aiSuggestions] : [];
   const usedTexts = new Set(merged.map(s => String(s.topic || '').toLowerCase().trim()));
-  for (const note of (agendaNotes || [])) {
+  // First inject recurring notes (if AI didn't already include them)
+  for (const note of (agendaNotes || []).filter(n => n.is_recurring)) {
+    const key = note.text.toLowerCase().trim();
+    if (!usedTexts.has(key)) {
+      // Insert after "Matters Arising" (index 1) if that exists, else prepend
+      const insertIdx = merged.length > 0 ? 1 : 0;
+      merged.splice(insertIdx, 0, {
+        topic: note.text.length > 60 ? note.text.slice(0, 57) + '…' : note.text,
+        reason: 'This is a recurring agenda item — always discussed at KPSC meetings.',
+        priority: 'high',
+        source: 'recurring',
+        carryForward: false,
+        isPreTicked: true,
+        noteId: note.id,
+      });
+      usedTexts.add(key);
+    }
+  }
+  // Then inject non-recurring notes
+  for (const note of (agendaNotes || []).filter(n => !n.is_recurring)) {
     const key = note.text.toLowerCase().trim();
     if (!usedTexts.has(key)) {
       // Insert before the last item if there are at least 2 items; otherwise append.
@@ -5556,6 +5622,7 @@ function whatsappDraftFromRow(row) {
     status: row.status || 'draft',
     linkedMeetingId: row.linked_meeting_id || '',
     prepChecklist: safeJsonParse(row.prep_checklist_json, []),
+    agendaOutcomes: safeJsonParse(row.agenda_outcomes_json, []),
     createdBy: row.created_by || '',
     createdAt: row.created_at || '',
     updatedAt: row.updated_at || '',
@@ -5563,8 +5630,9 @@ function whatsappDraftFromRow(row) {
 }
 
 async function getWhatsappDrafts(DB) {
+  // Return all drafts (no limit) so the full Notification Log can show the complete history.
   const { results } = await DB.prepare(
-    `SELECT * FROM kpsc_whatsapp_drafts ORDER BY created_at DESC LIMIT 20`
+    `SELECT * FROM kpsc_whatsapp_drafts ORDER BY created_at DESC`
   ).all();
   return ok((results || []).map(whatsappDraftFromRow));
 }
@@ -5611,7 +5679,7 @@ async function updateWhatsappDraft(DB, id, data) {
   if (!existing) return err('WhatsApp draft not found', 404);
   const now = new Date().toISOString();
   await DB.prepare(
-    `UPDATE kpsc_whatsapp_drafts SET agenda_items_json=?, meeting_title=?, meeting_date=?, meeting_time=?, venue=?, urgency=?, tag_all=?, message_text=?, status=?, prep_checklist_json=?, updated_at=? WHERE id=?`
+    `UPDATE kpsc_whatsapp_drafts SET agenda_items_json=?, meeting_title=?, meeting_date=?, meeting_time=?, venue=?, urgency=?, tag_all=?, message_text=?, status=?, prep_checklist_json=?, agenda_outcomes_json=?, updated_at=? WHERE id=?`
   ).bind(
     JSON.stringify(data.agendaItems !== undefined ? data.agendaItems : safeJsonParse(existing.agenda_items_json, [])),
     data.meetingTitle !== undefined ? String(data.meetingTitle) : (existing.meeting_title || ''),
@@ -5623,6 +5691,7 @@ async function updateWhatsappDraft(DB, id, data) {
     data.messageText !== undefined ? String(data.messageText) : existing.message_text,
     data.status !== undefined ? data.status : existing.status,
     JSON.stringify(data.prepChecklist !== undefined ? data.prepChecklist : safeJsonParse(existing.prep_checklist_json, DEFAULT_PREP_CHECKLIST)),
+    JSON.stringify(data.agendaOutcomes !== undefined ? data.agendaOutcomes : safeJsonParse(existing.agenda_outcomes_json, [])),
     now, id,
   ).run();
   const row = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).first();
@@ -5906,6 +5975,34 @@ async function finalizeWhatsappDraft(DB, id, body, auth) {
 
   const row = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).first();
   return ok({ ...whatsappDraftFromRow(row), linkedMeetingId });
+}
+
+// ── Post-Meeting Agenda Outcomes ─────────────────────────────────────
+
+async function saveAgendaOutcomes(DB, draftId, body) {
+  // Accepts { outcomes: [{ topic, status: 'resolved'|'carry_forward'|'not_discussed' }] }
+  const existing = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(draftId).first();
+  if (!existing) return err('Draft not found', 404);
+  const outcomes = Array.isArray(body.outcomes) ? body.outcomes : [];
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE kpsc_whatsapp_drafts SET agenda_outcomes_json=?, status='finalized', updated_at=? WHERE id=?`
+  ).bind(JSON.stringify(outcomes), now, draftId).run();
+
+  // Increment usage_count on referenced agenda notes so recurring items build their frequency score
+  const agendaItems = safeJsonParse(existing.agenda_items_json, []);
+  for (const item of agendaItems) {
+    if (item && typeof item === 'object' && item.noteId) {
+      try {
+        await DB.prepare(
+          `UPDATE kpsc_agenda_notes SET usage_count = usage_count + 1, updated_at=? WHERE id=?`
+        ).bind(now, item.noteId).run();
+      } catch { /* safe */ }
+    }
+  }
+
+  const row = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(draftId).first();
+  return ok({ ...whatsappDraftFromRow(row), carryForwardItems: outcomes.filter(o => o.status === 'carry_forward' || o.status === 'not_discussed') });
 }
 
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────

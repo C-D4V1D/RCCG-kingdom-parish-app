@@ -47,6 +47,7 @@ const PAGE_TO_GROUP = {
   projects:        { group: 'meetings', subTab: 'projects'        },
   action_items:    { group: 'meetings', subTab: 'action_items'    },
   agenda_builder:  { group: 'meetings', subTab: 'agenda_builder'  },
+  notification_log: { group: 'meetings', subTab: 'agenda_builder' }, // Full notification history, stays in meetings group
   finance:         { group: 'money',    subTab: 'finance'         },
   partners:        { group: 'money',    subTab: 'partners'        },
   reminders:       { group: 'money',    subTab: 'reminders'       },
@@ -1633,6 +1634,8 @@ function effectiveRolePermissions() {
 function canAccess(page) {
   // Group-level navigation names are always accessible (groups are always shown).
   if (['home', 'meetings', 'money', 'more'].includes(page)) return true;
+  // notification_log is accessible to anyone who can access agenda_builder
+  if (page === 'notification_log') return canAccess('agenda_builder');
   const role = String(S.user?.role || 'committee_viewer').toLowerCase();
   const perms = effectiveRolePermissions();
   // Use saved permissions for this role if available; fall back to hardcoded defaults.
@@ -2217,6 +2220,7 @@ function navigate(page, opts) {
     projects: 'Projects',
     action_items: 'Action Items',
     agenda_builder: 'Agenda Builder',
+    notification_log: 'Notification Log',
     partners: 'Partners',
     finance: 'Finance',
     reminders: 'Reminders',
@@ -2363,6 +2367,11 @@ async function renderPage(page) {
     } else if (page === 'agenda_builder') {
       await renderAgendaBuilder(main);
       prependSubTabs(main, meetingsSubTabStrip());
+    } else if (page === 'notification_log') {
+      await renderNotificationLog(main);
+      prependSubTabs(main, meetingsSubTabStrip());
+      document.getElementById('kpsc-back-btn').style.display = '';
+      document.getElementById('kpsc-back-btn').onclick = () => navigate('agenda_builder');
     } else if (page === 'finance') {
       await renderFinance(main);
       prependSubTabs(main, moneySubTabStrip());
@@ -2744,6 +2753,7 @@ function dashboardCardsForRole(role, ctx) {
   if (r === 'acting_chairman') {
     return `
       ${dashCardPreBrief(ctx)}
+      ${dashCardMeetingFrequencyAlert(ctx)}
       ${dashCardUpcomingMeeting(ctx)}
       ${dashCardFollowups(ctx)}
       ${dashCardOpenMeeting(ctx)}
@@ -2794,6 +2804,7 @@ function dashboardCardsForRole(role, ctx) {
   if (r === 'general_secretary') {
     return `
       ${dashCardPreBrief(ctx)}
+      ${dashCardMeetingFrequencyAlert(ctx)}
       ${dashCardUpcomingMeeting(ctx)}
       ${dashCardFollowups(ctx)}
       ${dashCardOpenMeeting(ctx)}
@@ -10201,6 +10212,138 @@ async function skipFollowup(id) {
   if (title) title.textContent = `Follow-ups (${S.followups.filter(f => f.status === 'pending').length})`;
 }
 
+// ── NOTIFICATION LOG ──────────────────────────────────────────────
+// Full history of all saved/finalized WhatsApp meeting notifications.
+// Shows agenda items, usage frequency, outcome statuses, and options to
+// reuse a past notification as a starting point for a new draft.
+
+async function renderNotificationLog(main) {
+  main.innerHTML = '<div class="k-loading">Loading notification history…</div>';
+  const res = await apiGet('kpsc-whatsapp-draft');
+  const allDrafts = (Array.isArray(res) ? res : []).filter(d => d.status === 'saved' || d.status === 'finalized');
+  S.agendaBuilderDraftsHistory = Array.isArray(res) ? res : [];
+
+  // Build agenda item frequency map across all drafts
+  const itemFreq = new Map();
+  for (const d of allDrafts) {
+    const items = Array.isArray(d.agendaItems) ? d.agendaItems : [];
+    for (const item of items) {
+      const label = typeof item === 'string' ? item : (item.topic || '');
+      if (!label) continue;
+      const key = label.toLowerCase().trim();
+      itemFreq.set(key, (itemFreq.get(key) || 0) + 1);
+    }
+  }
+
+  if (!allDrafts.length) {
+    main.innerHTML = `
+      <div class="k-page">
+        <div class="k-section-hdr" style="margin-top:0">
+          <h2 style="font-size:16px;margin:0">📜 Notification Log</h2>
+        </div>
+        <div class="k-section">
+          <p class="k-hint" style="text-align:center;padding:24px">No saved meeting notifications yet. Build your first one in the <button class="kbtn-link" onclick="Kpsc.navigate('agenda_builder')">Agenda Builder</button>.</p>
+        </div>
+      </div>`;
+    return;
+  }
+
+  // Sort by most recent first (already ordered from API)
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-section-hdr" style="margin-top:0">
+        <h2 style="font-size:16px;margin:0">📜 Meeting Notification Log</h2>
+        <p class="k-page-hint" style="margin:4px 0 0">Complete history of all KPSC meeting notifications. Reuse any past notification as a starting point for a new draft.</p>
+      </div>
+
+      <!-- Agenda Item Frequency Summary -->
+      ${itemFreq.size > 0 ? `
+      <details class="k-collapsible" style="margin-bottom:16px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+        <summary class="k-collapsible-hdr" style="padding:12px 14px;background:var(--card);cursor:pointer">
+          <span class="k-collapsible-title" style="font-size:13px;font-weight:600">📊 Agenda Item Frequency</span>
+        </summary>
+        <div style="padding:12px 14px;background:var(--surface,#f8fafc)">
+          <p class="k-hint" style="margin:0 0 10px;font-size:12px">How often each topic has appeared across all meeting notifications.</p>
+          <div>
+            ${[...itemFreq.entries()]
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 15)
+              .map(([key, count]) => {
+                const pct = Math.round((count / allDrafts.length) * 100);
+                return `
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                    <div style="flex:1;font-size:12px;color:var(--text1);text-transform:capitalize">${esc(key)}</div>
+                    <div style="width:80px;height:6px;background:var(--border);border-radius:3px;overflow:hidden;flex-shrink:0">
+                      <div style="width:${pct}%;height:100%;background:var(--navy,#1e3a5f);border-radius:3px"></div>
+                    </div>
+                    <span class="kbadge badge-gray" style="font-size:10px;flex-shrink:0">${count}×</span>
+                  </div>`;
+              }).join('')}
+          </div>
+        </div>
+      </details>` : ''}
+
+      <!-- All Notifications -->
+      <div class="k-section" style="padding:0">
+        ${allDrafts.map(d => {
+          const label = d.meetingTitle || fmtDate(d.meetingDate) || 'Untitled';
+          const dateStr = fmtDate(d.meetingDate || d.createdAt?.slice(0,10) || '');
+          const timeStr = formatMeetingTime(d.meetingTime);
+          const items = Array.isArray(d.agendaItems) ? d.agendaItems : [];
+          const outcomes = Array.isArray(d.agendaOutcomes) ? d.agendaOutcomes : [];
+          const carryFwdCount = outcomes.filter(o => o.status === 'carry_forward' || o.status === 'not_discussed').length;
+          const resolvedCount = outcomes.filter(o => o.status === 'resolved').length;
+          const statusBadge = d.status === 'finalized'
+            ? '<span class="kbadge badge-green" style="font-size:10px">Finalized</span>'
+            : '<span class="kbadge badge-amber" style="font-size:10px">Saved</span>';
+          return `
+            <div class="k-meeting-card" style="padding:14px 16px;margin-bottom:10px">
+              <div style="display:flex;align-items:flex-start;gap:10px">
+                <div style="flex:1">
+                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
+                    <span style="font-size:14px;font-weight:700;color:var(--navy)">${esc(label)}</span>
+                    ${statusBadge}
+                  </div>
+                  <div style="font-size:12px;color:var(--text2);margin-bottom:6px">${dateStr}${timeStr ? ' · ' + esc(timeStr) : ''}${d.venue ? ' · ' + esc(d.venue) : ''}</div>
+
+                  <!-- Agenda items list (collapsed by default) -->
+                  ${items.length ? `
+                  <details style="margin-bottom:6px">
+                    <summary style="font-size:12px;color:var(--text2);cursor:pointer">${items.length} agenda items</summary>
+                    <ol style="margin:6px 0 0 16px;padding:0;font-size:12px;color:var(--text1)">
+                      ${items.map((item, i) => {
+                        const lbl = typeof item === 'string' ? item : (item.topic || '');
+                        const outcome = outcomes.find(o => (o.topic || '').toLowerCase().trim() === lbl.toLowerCase().trim());
+                        const outIcon = outcome ? ({ resolved: '✅', carry_forward: '🔁', not_discussed: '⏭️' }[outcome.status] || '') : '';
+                        const freq = itemFreq.get(lbl.toLowerCase().trim()) || 0;
+                        return `<li style="margin-bottom:3px">${outIcon} ${esc(lbl)}${freq > 1 ? ` <span style="color:var(--text2);font-size:10px">(${freq}×)</span>` : ''}</li>`;
+                      }).join('')}
+                    </ol>
+                  </details>` : ''}
+
+                  ${outcomes.length ? `
+                  <div style="font-size:11px;color:var(--text2)">
+                    Outcomes: ${resolvedCount} resolved · ${carryFwdCount} carry forward
+                  </div>` : ''}
+                  ${d.linkedMeetingId ? `
+                  <button class="kbtn-link" style="font-size:11px;margin-top:4px" onclick="Kpsc.openMeeting('${esc(d.linkedMeetingId)}')">→ Open linked meeting</button>` : ''}
+                </div>
+                <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">
+                  ${d.messageText ? `<button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.abCopyHistoryMessage(${esc(JSON.stringify(d.messageText))})">📋 Copy</button>` : ''}
+                  <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.abReuseAsDraft(${esc(JSON.stringify(d.id))});Kpsc.navigate('agenda_builder')">🔄 Reuse</button>
+                  ${d.messageText ? `<button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.abPrintFromDraft(${esc(JSON.stringify(d))})">🖨️ Print</button>` : ''}
+                </div>
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+
+      <div style="margin-top:4px;padding:0 0 20px">
+        <button class="kbtn" onclick="Kpsc.navigate('agenda_builder')">← Back to Agenda Builder</button>
+      </div>
+    </div>`;
+}
+
 // ── AGENDA BUILDER ────────────────────────────────────────────────
 
 const AB_TAGS = [
@@ -10316,10 +10459,11 @@ async function renderAgendaBuilder(main) {
 
 function renderAbNotesStep(unusedNotes) {
   const usedNotes = S.agendaNotes.filter(n => n.is_used);
+  const recurringCount = unusedNotes.filter(n => n.is_recurring).length;
   return `
     <div class="k-section">
       <h3 class="k-sec-title">📝 Personal Agenda Notes</h3>
-      <p class="k-page-hint">Add quick notes for agenda items — typed or by voice. These become suggestions in Step 2.</p>
+      <p class="k-page-hint">Add quick notes for agenda items — typed or by voice. These become suggestions in Step 2. Mark an item as <strong>Recurring</strong> so it's always pre-ticked in every meeting's agenda.</p>
 
       <div class="k-form-group">
         <label class="k-label">New Note</label>
@@ -10336,13 +10480,24 @@ function renderAbNotesStep(unusedNotes) {
         </div>
       </div>
 
-      <div id="ab-notes-list" style="margin-top:16px">
+      ${recurringCount > 0 ? `<p class="k-hint" style="margin-bottom:8px">🔁 <strong>${recurringCount} recurring item${recurringCount > 1 ? 's' : ''}</strong> will always be pre-ticked in Step 2.</p>` : ''}
+
+      <div id="ab-notes-list" style="margin-top:8px">
         ${unusedNotes.length === 0 ? '<p class="k-hint">No notes yet. Add your first note above.</p>' : unusedNotes.map(n => `
-          <div class="k-meeting-card" style="padding:10px 12px;margin-bottom:8px" id="ab-note-row-${n.id}">
+          <div class="k-meeting-card" style="padding:10px 12px;margin-bottom:8px;${n.is_recurring ? 'border-left:3px solid var(--navy)' : ''}" id="ab-note-row-${n.id}">
             <div style="display:flex;align-items:flex-start;gap:8px">
-              <div style="flex:1;font-size:13px;color:var(--text1);line-height:1.5">${esc(n.text)}</div>
-              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
-                ${abTagBadge(n.tag)}
+              <div style="flex:1">
+                <div style="font-size:13px;color:var(--text1);line-height:1.5">${esc(n.text)}</div>
+                <div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                  ${abTagBadge(n.tag)}
+                  ${n.is_recurring ? '<span class="kbadge badge-navy" style="font-size:10px;background:var(--navy,#1e3a5f);color:#fff">🔁 Recurring</span>' : ''}
+                  ${(n.usage_count || 0) > 0 ? `<span class="kbadge badge-gray" style="font-size:10px">Used ${n.usage_count}×</span>` : ''}
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;margin-top:2px">
+                <button class="kbtn kbtn-sm kbtn-ghost" style="font-size:11px;${n.is_recurring ? 'color:var(--navy)' : ''}" title="${n.is_recurring ? 'Remove recurring — will no longer be auto-added' : 'Mark as recurring — always pre-ticked in agenda'}" onclick="Kpsc.abToggleRecurring('${n.id}',${n.is_recurring ? 0 : 1})">
+                  ${n.is_recurring ? '🔁 Recurring' : '☆ Recurring'}
+                </button>
                 <button class="kbtn kbtn-sm kbtn-ghost" style="color:var(--danger,#dc2626);padding:2px 6px" onclick="Kpsc.abDeleteNote('${n.id}')">✕</button>
               </div>
             </div>
@@ -10357,12 +10512,14 @@ function renderAbNotesStep(unusedNotes) {
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;opacity:0.55">
               <span style="font-size:12px;flex:1;text-decoration:line-through">${esc(n.text)}</span>
               ${abTagBadge(n.tag)}
+              ${(n.usage_count || 0) > 0 ? `<span class="kbadge badge-gray" style="font-size:10px">${n.usage_count}×</span>` : ''}
             </div>`).join('')}
         </div>
       </details>` : ''}
 
       <div style="margin-top:20px;display:flex;gap:8px">
         <button class="kbtn kbtn-primary" onclick="Kpsc.abSetStep('select')">Next: Build Agenda →</button>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.navigate('notification_log')" title="View full notification history">📜 Notification Log</button>
       </div>
     </div>`;
 }
@@ -10406,6 +10563,7 @@ function renderAbSelectStep() {
       ${suggestions.length ? `
       <div id="ab-suggestions-panel" style="margin-bottom:20px">
         <div class="k-review-step-label" style="margin-top:0">AI Suggestions — click to add to your agenda</div>
+        <p class="k-hint" style="margin:0 0 8px;font-size:11px">Items marked <strong>🔁 Recurring</strong> or <strong>⬆️ Carry Forward</strong> are pre-ticked automatically.</p>
         <div id="ab-suggestions-list">
           ${suggestions.map((s, i) => {
             const label = typeof s === 'string' ? s : (s.topic || '');
@@ -10413,10 +10571,11 @@ function renderAbSelectStep() {
             const priority = (typeof s === 'object' && s.priority) ? s.priority : 'medium';
             const src = (typeof s === 'object' && s.source) ? s.source : '';
             const cf = (typeof s === 'object' && s.carryForward);
+            const isRecurring = (typeof s === 'object' && s.source === 'recurring');
             const alreadySelected = selected.includes(label);
             const priColor = AB_PRIORITY_COLORS[priority] || '#666';
             return `
-              <div class="k-meeting-card" id="ab-sug-${i}" style="padding:10px 12px;margin-bottom:6px;cursor:pointer;opacity:${alreadySelected ? '0.45' : '1'}"
+              <div class="k-meeting-card" id="ab-sug-${i}" style="padding:10px 12px;margin-bottom:6px;cursor:pointer;opacity:${alreadySelected ? '0.45' : '1'};${isRecurring ? 'border-left:3px solid var(--navy)' : cf ? 'border-left:3px solid #d97706' : ''}"
                 onclick="Kpsc.abToggleSuggestion(${i})">
                 <div style="display:flex;align-items:flex-start;gap:8px">
                   <span style="font-size:16px;flex-shrink:0">${alreadySelected ? '✅' : '⬜'}</span>
@@ -10425,8 +10584,8 @@ function renderAbSelectStep() {
                     ${reason ? `<div style="font-size:11px;color:var(--text2);margin-top:2px">${esc(reason)}</div>` : ''}
                     <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">
                       <span style="font-size:10px;font-weight:600;color:${priColor}">● ${priority}</span>
-                      ${src ? `<span class="kbadge badge-gray" style="font-size:10px">${src.replace(/_/g,' ')}</span>` : ''}
-                      ${cf ? `<span class="kbadge badge-amber" style="font-size:10px">carry forward</span>` : ''}
+                      ${isRecurring ? '<span class="kbadge" style="font-size:10px;background:var(--navy,#1e3a5f);color:#fff">🔁 Recurring</span>' : src ? `<span class="kbadge badge-gray" style="font-size:10px">${src.replace(/_/g,' ')}</span>` : ''}
+                      ${cf ? `<span class="kbadge badge-amber" style="font-size:10px">⬆️ carry forward</span>` : ''}
                     </div>
                   </div>
                 </div>
@@ -10614,37 +10773,41 @@ function renderAbDraftStep(latestDraft) {
       </div>
       ` : `<p class="k-hint" style="padding:20px;text-align:center;background:var(--surface,#f8fafc);border:1px dashed var(--border);border-radius:6px">Click <strong>Generate WhatsApp Message</strong> above to draft the notification.</p>`}
 
-      <!-- Past Notifications History -->
+      <!-- Past Notifications History (last 5, compact) -->
       ${history.length ? `
       <details class="k-collapsible" style="margin-top:24px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
         <summary class="k-collapsible-hdr" style="padding:12px 14px;background:var(--card);cursor:pointer">
-          <span class="k-collapsible-title" style="font-size:13px;font-weight:600">📜 Past Notifications (${history.length})</span>
+          <span class="k-collapsible-title" style="font-size:13px;font-weight:600">📜 Recent Notifications (${history.length})</span>
         </summary>
         <div style="padding:12px 14px 14px;background:var(--surface,#f8fafc)">
-          <p class="k-hint" style="margin:0 0 10px;font-size:12px">Previous saved meeting notifications — click to preview or copy.</p>
+          <p class="k-hint" style="margin:0 0 10px;font-size:12px">Previous saved meeting notifications — copy, adapt, or view full log.</p>
           ${history.map(d => {
             const label = d.meetingTitle || fmtDate(d.meetingDate) || 'Untitled';
             const items = Array.isArray(d.agendaItems) ? d.agendaItems.length : 0;
             const date = fmtDate(d.meetingDate || d.createdAt?.slice(0,10) || '');
+            const outcomes = Array.isArray(d.agendaOutcomes) ? d.agendaOutcomes : [];
             return `
               <div class="k-meeting-card" style="padding:10px 12px;margin-bottom:8px">
                 <div style="display:flex;align-items:flex-start;gap:8px">
                   <div style="flex:1">
                     <div style="font-size:13px;font-weight:600;color:var(--text1)">${esc(label)}</div>
-                    <div style="font-size:11px;color:var(--text2);margin-top:2px">${esc(date)} · ${items} agenda items</div>
+                    <div style="font-size:11px;color:var(--text2);margin-top:2px">${esc(date)} · ${items} agenda items${outcomes.length ? ` · ${outcomes.filter(o => o.status === 'carry_forward' || o.status === 'not_discussed').length} carry-forward` : ''}</div>
                     ${d.linkedMeetingId ? `<div style="font-size:11px;color:var(--navy);margin-top:2px;cursor:pointer" onclick="Kpsc.openMeeting('${esc(d.linkedMeetingId)}')">→ Open linked meeting</div>` : ''}
                   </div>
-                  <div style="display:flex;gap:6px;flex-shrink:0">
+                  <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
                     ${d.messageText ? `<button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.abCopyHistoryMessage(${esc(JSON.stringify(d.messageText))})">📋 Copy</button>` : ''}
+                    <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.abReuseAsDraft(${esc(JSON.stringify(d.id))})">🔄 Reuse</button>
                   </div>
                 </div>
               </div>`;
           }).join('')}
+          <button class="kbtn kbtn-sm kbtn-ghost" style="margin-top:4px;width:100%" onclick="Kpsc.navigate('notification_log')">📜 View Full Notification Log →</button>
         </div>
       </details>` : ''}
 
-      <div style="margin-top:16px">
+      <div style="margin-top:16px;display:flex;gap:8px">
         <button class="kbtn" onclick="Kpsc.abSetStep('settings')">← Settings</button>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.navigate('notification_log')">📜 Notification Log</button>
       </div>
     </div>`;
 }
@@ -10715,6 +10878,41 @@ async function abDeleteNote(id) {
   showToast('Note deleted.', 'info');
 }
 
+async function abToggleRecurring(id, makeRecurring) {
+  const res = await apiPut(`kpsc-agenda-notes/${id}`, { isRecurring: !!makeRecurring });
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  // Update in-memory state
+  const note = S.agendaNotes.find(n => n.id === id);
+  if (note) note.is_recurring = res.is_recurring;
+  // Re-render just the notes list
+  const unusedNotes = S.agendaNotes.filter(n => !n.is_used);
+  const listEl = document.getElementById('ab-notes-list');
+  if (listEl) {
+    listEl.innerHTML = unusedNotes.length === 0
+      ? '<p class="k-hint">No notes yet. Add your first note above.</p>'
+      : unusedNotes.map(n => `
+          <div class="k-meeting-card" style="padding:10px 12px;margin-bottom:8px;${n.is_recurring ? 'border-left:3px solid var(--navy)' : ''}" id="ab-note-row-${n.id}">
+            <div style="display:flex;align-items:flex-start;gap:8px">
+              <div style="flex:1">
+                <div style="font-size:13px;color:var(--text1);line-height:1.5">${esc(n.text)}</div>
+                <div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                  ${abTagBadge(n.tag)}
+                  ${n.is_recurring ? '<span class="kbadge" style="font-size:10px;background:var(--navy,#1e3a5f);color:#fff">🔁 Recurring</span>' : ''}
+                  ${(n.usage_count || 0) > 0 ? `<span class="kbadge badge-gray" style="font-size:10px">Used ${n.usage_count}×</span>` : ''}
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;margin-top:2px">
+                <button class="kbtn kbtn-sm kbtn-ghost" style="font-size:11px;${n.is_recurring ? 'color:var(--navy)' : ''}" onclick="Kpsc.abToggleRecurring('${n.id}',${n.is_recurring ? 0 : 1})">
+                  ${n.is_recurring ? '🔁 Recurring' : '☆ Recurring'}
+                </button>
+                <button class="kbtn kbtn-sm kbtn-ghost" style="color:var(--danger,#dc2626);padding:2px 6px" onclick="Kpsc.abDeleteNote('${n.id}')">✕</button>
+              </div>
+            </div>
+          </div>`).join('');
+  }
+  showToast(makeRecurring ? '🔁 Item marked as recurring — it will always be pre-ticked.' : 'Recurring flag removed.', 'success');
+}
+
 let _abDragIdx = null;
 function abDragStart(idx) { _abDragIdx = idx; }
 function abDragOver(e, idx) { e.preventDefault(); }
@@ -10773,7 +10971,22 @@ function abAddCustomItem() {
   const input = document.getElementById('ab-custom-item');
   const text = input?.value?.trim() || '';
   if (!text) { showToast('Type an agenda item first.', 'warn'); return; }
-  if (S.agendaBuilderSelected.includes(text)) { showToast('Already in agenda.', 'info'); return; }
+
+  // Smart deduplication: case-insensitive comparison against selected items and current suggestions
+  const normalise = s => String(s).toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+  const newKey = normalise(text);
+  const duplicate = S.agendaBuilderSelected.find(s => normalise(s) === newKey)
+    || S.agendaBuilderSuggestions.find(s => {
+      const label = typeof s === 'string' ? s : (s.topic || '');
+      return normalise(label) === newKey;
+    });
+  if (duplicate) {
+    const dupLabel = typeof duplicate === 'string' ? duplicate : (duplicate.topic || String(duplicate));
+    showToast(`"${dupLabel}" is already in your agenda.`, 'info');
+    if (input) input.value = '';
+    return;
+  }
+
   S.agendaBuilderSelected.push(text);
   if (input) input.value = '';
   const listEl = document.getElementById('ab-selected-list');
@@ -10796,13 +11009,26 @@ async function abSuggestAgenda(btn) {
     const res = await apiPost('kpsc-agenda-suggest', {});
     if (res?.error) { showToast(res.error, 'error'); return; }
     S.agendaBuilderSuggestions = res.suggestions || [];
+    // Auto-tick items marked as isPreTicked (recurring or carry-forward) if not already in selected list
+    for (const sug of S.agendaBuilderSuggestions) {
+      if (typeof sug === 'object' && sug.isPreTicked) {
+        const label = sug.topic || '';
+        if (label && !S.agendaBuilderSelected.includes(label)) {
+          S.agendaBuilderSelected.push(label);
+        }
+      }
+    }
     // Re-render suggestions panel
     const panelContainer = document.getElementById('ab-step-select');
     if (panelContainer) {
       panelContainer.innerHTML = renderAbSelectStep();
     }
     const src = res.source === 'ai' ? 'AI' : 'template';
-    showToast(`${S.agendaBuilderSuggestions.length} agenda suggestions generated (${src}).`, 'success');
+    const preTickedCount = S.agendaBuilderSuggestions.filter(s => typeof s === 'object' && s.isPreTicked).length;
+    const msg = preTickedCount > 0
+      ? `${S.agendaBuilderSuggestions.length} suggestions generated (${src}). ${preTickedCount} recurring/carry-forward item${preTickedCount > 1 ? 's' : ''} pre-ticked.`
+      : `${S.agendaBuilderSuggestions.length} agenda suggestions generated (${src}).`;
+    showToast(msg, 'success');
   } catch (e) {
     showToast('Could not generate suggestions. Try again.', 'error');
   } finally {
@@ -11191,12 +11417,50 @@ function abPrintAgenda() {
 
 // ── Agenda Builder: History Copy ──────────────────────────────
 
+// Print a formal agenda from a past draft object (for use from the notification log).
+function abPrintFromDraft(draft) {
+  if (!draft) return;
+  const items = (Array.isArray(draft.agendaItems) ? draft.agendaItems : []).map(i => typeof i === 'string' ? i : (i.topic || ''));
+  if (!items.length) { showToast('This draft has no agenda items to print.', 'warn'); return; }
+  // Temporarily populate the selected list so abPrintAgenda() can use it
+  const prev = S.agendaBuilderSelected;
+  const prevDraft = S.agendaBuilderDraftsHistory;
+  S.agendaBuilderSelected = items;
+  // Also push as first history entry so title/date/venue are picked up
+  S.agendaBuilderDraftsHistory = [draft, ...S.agendaBuilderDraftsHistory.filter(d => d.id !== draft.id)];
+  abPrintAgenda();
+  S.agendaBuilderSelected = prev;
+  S.agendaBuilderDraftsHistory = prevDraft;
+}
+
 function abCopyHistoryMessage(msg) {
   if (!msg) return;
   navigator.clipboard.writeText(msg).then(
     () => showToast('Copied to clipboard.', 'success'),
     () => showToast('Could not copy. Please copy manually.', 'warn'),
   );
+}
+
+// Load a past draft as the starting point for a new draft (Reuse / Adapt).
+// Copies the agenda items, settings, and message text into the builder state,
+// then creates a fresh draft so the original remains intact in the history.
+async function abReuseAsDraft(draftId) {
+  const past = (S.agendaBuilderDraftsHistory || []).find(d => d.id === draftId);
+  if (!past) { showToast('Past draft not found.', 'error'); return; }
+  if (!confirm(`Start a new draft based on "${past.meetingTitle || 'this past notification'}"?\n\nThe agenda items, settings, and message will be loaded as a starting point.`)) return;
+
+  // Clear current draft state and populate from past draft
+  S.agendaBuilderDraftId = null;
+  S.agendaBuilderSelected = (Array.isArray(past.agendaItems) ? past.agendaItems : [])
+    .map(i => typeof i === 'string' ? i : (i.topic || ''));
+  S.agendaBuilderMessage = past.messageText || '';
+  S.agendaBuilderChecklist = [];  // start fresh checklist for the new meeting
+
+  // Navigate to Step 2 so the user adjusts the agenda for the new meeting
+  abSetStep('select');
+  const listEl = document.getElementById('ab-selected-list');
+  if (listEl) listEl.innerHTML = renderAbSelectedList(S.agendaBuilderSelected);
+  showToast('Past draft loaded as a starting point. Adjust the agenda and proceed to Step 3 to set the new meeting date.', 'info');
 }
 
 // ── Agenda Builder Voice Note ───────────────────────────────────
