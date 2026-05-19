@@ -999,6 +999,7 @@ async function handleInit(DB) {
     `CREATE TABLE IF NOT EXISTS kpsc_whatsapp_drafts (
       id                  TEXT PRIMARY KEY,
       agenda_items_json   TEXT DEFAULT '[]',
+      meeting_title       TEXT DEFAULT '',
       meeting_date        TEXT DEFAULT '',
       meeting_time        TEXT DEFAULT '',
       venue               TEXT DEFAULT '',
@@ -1082,6 +1083,8 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_projects ADD COLUMN deleted_by TEXT DEFAULT ''`,
     // Agenda Builder: structured agenda attached to a meeting
     `ALTER TABLE ai_secretary_meetings ADD COLUMN agenda_text TEXT DEFAULT ''`,
+    // Agenda Builder: meeting_title on WhatsApp drafts (added after initial release)
+    `ALTER TABLE kpsc_whatsapp_drafts ADD COLUMN meeting_title TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -5447,7 +5450,9 @@ function mergeNotesIntoSuggestions(aiSuggestions, agendaNotes) {
   for (const note of (agendaNotes || [])) {
     const key = note.text.toLowerCase().trim();
     if (!usedTexts.has(key)) {
-      merged.splice(merged.length - 1, 0, { // Insert before the last "Any Other Business" item
+      // Insert before the last item if there are at least 2 items; otherwise append.
+      const insertIdx = merged.length > 1 ? merged.length - 1 : merged.length;
+      merged.splice(insertIdx, 0, {
         topic: note.text.length > 60 ? note.text.slice(0, 57) + '…' : note.text,
         reason: 'Added from your personal notes.',
         priority: note.tag === 'urgent' ? 'high' : note.tag === 'important' ? 'medium' : 'low',
@@ -5467,6 +5472,7 @@ function whatsappDraftFromRow(row) {
   return {
     id: row.id,
     agendaItems: safeJsonParse(row.agenda_items_json, []),
+    meetingTitle: row.meeting_title || '',
     meetingDate: row.meeting_date || '',
     meetingTime: row.meeting_time || '',
     venue: row.venue || '',
@@ -5492,11 +5498,12 @@ async function createWhatsappDraft(DB, data, auth) {
   const id = newId('WAD-');
   const now = new Date().toISOString();
   await DB.prepare(
-    `INSERT INTO kpsc_whatsapp_drafts (id,agenda_items_json,meeting_date,meeting_time,venue,urgency,tag_all,message_text,status,created_by,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO kpsc_whatsapp_drafts (id,agenda_items_json,meeting_title,meeting_date,meeting_time,venue,urgency,tag_all,message_text,status,created_by,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     id,
     JSON.stringify(data.agendaItems || []),
+    String(data.meetingTitle || ''),
     String(data.meetingDate || ''),
     String(data.meetingTime || ''),
     String(data.venue || 'Church Premises'),
@@ -5516,9 +5523,10 @@ async function updateWhatsappDraft(DB, id, data) {
   if (!existing) return err('WhatsApp draft not found', 404);
   const now = new Date().toISOString();
   await DB.prepare(
-    `UPDATE kpsc_whatsapp_drafts SET agenda_items_json=?, meeting_date=?, meeting_time=?, venue=?, urgency=?, tag_all=?, message_text=?, status=?, updated_at=? WHERE id=?`
+    `UPDATE kpsc_whatsapp_drafts SET agenda_items_json=?, meeting_title=?, meeting_date=?, meeting_time=?, venue=?, urgency=?, tag_all=?, message_text=?, status=?, updated_at=? WHERE id=?`
   ).bind(
     JSON.stringify(data.agendaItems !== undefined ? data.agendaItems : safeJsonParse(existing.agenda_items_json, [])),
+    data.meetingTitle !== undefined ? String(data.meetingTitle) : (existing.meeting_title || ''),
     data.meetingDate !== undefined ? String(data.meetingDate) : existing.meeting_date,
     data.meetingTime !== undefined ? String(data.meetingTime) : existing.meeting_time,
     data.venue !== undefined ? String(data.venue) : existing.venue,
@@ -5740,19 +5748,28 @@ async function finalizeWhatsappDraft(DB, id, body, auth) {
   let linkedMeetingId = existing.linked_meeting_id || '';
   if (!linkedMeetingId) {
     const meetingId = newId('AIM-');
+    // Build a clean plain-text agenda from the selected agenda items (not the WhatsApp message).
+    // The meeting's agenda_text field should hold the structured agenda, while message_text
+    // holds the WhatsApp notification (which includes greetings, emojis, and formatting).
+    const agendaForMeeting = agendaItems.map((item, i) => {
+      const label = typeof item === 'string' ? item : (item.topic || String(item));
+      return `${i + 1}. ${label}`;
+    }).join('\n');
+    const meetingTitle = body.meetingTitle || String(existing.meeting_title || '').trim()
+      || ('KPSC Meeting – ' + (existing.meeting_date || now.slice(0, 10)));
     await DB.prepare(`
       INSERT OR IGNORE INTO ai_secretary_meetings
         (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,agenda_text,created_by,created_by_account_id,started_at,created_at,scheduled_for)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).bind(
       meetingId,
-      body.meetingTitle || ('KPSC Meeting – ' + (existing.meeting_date || now.slice(0, 10))),
+      meetingTitle,
       'routine',
       existing.meeting_date || now.slice(0, 10),
       'draft',
       JSON.stringify([]),
       '',
-      messageText,
+      agendaForMeeting,
       auth?.name || '',
       auth?.id || '',
       '',
