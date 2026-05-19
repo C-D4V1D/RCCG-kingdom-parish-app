@@ -4195,8 +4195,12 @@ Date: ${meeting.meetingDate}
 Type: ${meeting.meetingType}
 Attendance: ${participantList}
 
+${meeting.transcriptText
+  ? `Transcript note: The following is a rough, error-heavy phonetic transcript produced by an AI transcriber. Many words are misspelled or misheard (e.g. Nigerian names mangled, naira amounts garbled, church/committee terms misrecognised). Use the surrounding conversational context to deduce the true meaning of unclear passages. Correct all technical jargon, proper nouns, and grammar errors as you draft the minutes — do not reproduce the transcript errors verbatim.
+
 Transcript:
-${meeting.transcriptText || '(no transcript provided — produce a skeleton minutes document with placeholders for the secretary to complete)'}
+${meeting.transcriptText}`
+  : `Transcript:\n(no transcript provided — produce a skeleton minutes document with placeholders for the secretary to complete)`}
 
 Return only valid JSON. No markdown fences. No text before or after the JSON object.`;
 
