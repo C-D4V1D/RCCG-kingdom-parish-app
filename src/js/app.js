@@ -497,6 +497,75 @@ function getQuotaList(s){
     .map(([k,v])=>({ label:QUOTA_LABELS[k], amount:v||0 }));
 }
 
+function parseYmdDate(value){
+  const match=String(value||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(match) return new Date(Number(match[1]), Number(match[2])-1, Number(match[3]));
+  const d=new Date(value||'');
+  return isNaN(d.getTime()) ? null : new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function isMummyQuotaLabel(label){
+  return String(label||'').toLowerCase().includes('mummy');
+}
+
+function countSundaysInRange(fromValue, toValue){
+  const from=parseYmdDate(fromValue);
+  const to=parseYmdDate(toValue);
+  if(!from || !to || from>to) return 0;
+  let count=0;
+  for(let d=new Date(from.getFullYear(), from.getMonth(), from.getDate()); d<=to; d.setDate(d.getDate()+1)){
+    if(d.getDay()===0) count++;
+  }
+  return count;
+}
+
+function countSundaysInMonth(year, month){
+  return countSundaysInRange(
+    new Date(year, month, 1),
+    new Date(year, month+1, 0)
+  );
+}
+
+function getQuotaLinesForPeriod(quotas, fromDate, toDate){
+  const list=Array.isArray(quotas)?quotas:[];
+  const from=parseYmdDate(fromDate);
+  const to=parseYmdDate(toDate);
+  const canProrate=!!from && !!to && from<=to;
+  return list.map(q=>{
+    const label=q?.label||'';
+    const monthlyAmount=Number(q?.amount||0);
+    if(!(monthlyAmount>0)) return null;
+    if(!canProrate){
+      return { label, amount:monthlyAmount, section:'quota', monthlyAmount, isProrated:false, basis:'Fixed monthly amount' };
+    }
+    let amount=0;
+    const segments=[];
+    let y=from.getFullYear(), m=from.getMonth();
+    // Walk each month touched by the selected period so each month's quota uses that month's Sunday count.
+    while(y<to.getFullYear() || (y===to.getFullYear() && m<=to.getMonth())){
+      const segFrom=(y===from.getFullYear() && m===from.getMonth()) ? from : new Date(y,m,1);
+      const segTo=(y===to.getFullYear() && m===to.getMonth()) ? to : new Date(y,m+1,0);
+      const sundaysInMonth=countSundaysInMonth(y,m);
+      const sundaysCovered=countSundaysInRange(segFrom, segTo);
+      if(sundaysCovered>0 && sundaysInMonth>0){
+        amount += monthlyAmount * (sundaysCovered / sundaysInMonth);
+        segments.push({ year:y, month:m, sundaysCovered, sundaysInMonth });
+      }
+      m++;
+      if(m>11){ m=0; y++; }
+    }
+    if(!(amount>0)) return null;
+    const basis = segments.length===1
+      ? `${segments[0].sundaysCovered}/${segments[0].sundaysInMonth} Sundays in ${MONTHS[segments[0].month]} ${segments[0].year}`
+      : `Prorated across ${segments.reduce((s,seg)=>s+seg.sundaysCovered,0)} Sundays in ${segments.length} month(s)`;
+    return { label, amount, section:'quota', monthlyAmount, isProrated:true, basis };
+  }).filter(Boolean);
+}
+
+function sumQuotaLines(lines){
+  return (lines||[]).reduce((s,l)=>s+(l.amount||0),0);
+}
+
 /** Escape special HTML characters to prevent XSS when inserting user data into innerHTML */
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') }
 
@@ -1698,14 +1767,23 @@ async function renderDashboard(){
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
   const remittances = await calcRemittancesFromRecords(income);
   const dashQuotas = getQuotaList(settings);
-  const dashRegionalQuota = dashQuotas.find(q=>q.label.toLowerCase().includes('regional contribution'));
-  const dashMummyQuota   = dashQuotas.find(q=>q.label.toLowerCase().includes('mummy'));
-  const dashRegionalAmt  = dashRegionalQuota ? (dashRegionalQuota.amount||0) : 0;
-  const dashMummyAmt     = dashMummyQuota    ? (dashMummyQuota.amount||0)    : 0;
-  const dashNatlQuotasAmt = dashQuotas
-    .filter(q=>q!==dashRegionalQuota && q!==dashMummyQuota)
+  const now=new Date();
+  const dashMonthStart=ymdLocal(new Date(state.year,state.month,1));
+  const dashMonthEnd=(state.year===now.getFullYear() && state.month===now.getMonth())
+    ? ymdLocal(now)
+    : ymdLocal(new Date(state.year,state.month+1,0));
+  const dashQuotaLines=getQuotaLinesForPeriod(
+    dashQuotas,
+    useRemPeriod ? dashPeriodFrom : dashMonthStart,
+    useRemPeriod ? dashPeriodTo : dashMonthEnd
+  );
+  const dashRegionalAmt  = dashQuotaLines.find(q=>q.label.toLowerCase().includes('regional contribution'))?.amount||0;
+  const dashMummyAmt     = dashQuotaLines.find(q=>isMummyQuotaLabel(q.label))?.amount||0;
+  const dashNatlQuotasAmt = dashQuotaLines
+    .filter(q=>!q.label.toLowerCase().includes('regional contribution') && !isMummyQuotaLabel(q.label))
     .reduce((s,q)=>s+(q.amount||0),0);
   const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
+  const dashAllMonthlyQuotasAmt = dashQuotas.reduce((s,q)=>s+(q.amount||0),0);
   const netLocal = remittances.netLocal - dashAllQuotasAmt;
   // Other Income recorded under the "Local Church Use Only" category has no INCOME_TYPES
   // field populated, so it contributes zero to remittance but inflates totalIncome.
@@ -1761,7 +1839,7 @@ async function renderDashboard(){
     dashQuotaPeriods=Math.max(1,dashQuotaPeriods);
   }
   const dashMonthsElapsed = dashQuotaPeriods;
-  const dashAccumQuotas = dashAllQuotasAmt * dashQuotaPeriods;
+  const dashAccumQuotas = dashAllMonthlyQuotasAmt * dashQuotaPeriods;
   const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
   const dashTotalRemDueKpi = Math.max(0, dashAllTimeIncomeRemDue + dashAccumQuotas - dashAllPaidRems);
@@ -1921,13 +1999,20 @@ async function renderDashboard(){
   const histMonthRetention=await Promise.all([3,2,1].map(async i=>{
     let m=state.month-i,y=state.year;
     if(m<0){m+=12;y--;}
-    let mInc;
-    if(useRemPeriod){const{from:pf,to:pt}=computeRemPeriodDates(settings,allRemsDash,y,m);mInc=filterByDateRange(allIncomeDash,pf,pt);}
-    else{mInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});}
+    let mInc, quotaFrom, quotaTo;
+    if(useRemPeriod){
+      const { from:pf, to:pt } = computeRemPeriodDates(settings,allRemsDash,y,m);
+      mInc=filterByDateRange(allIncomeDash,pf,pt);
+      quotaFrom=pf; quotaTo=pt;
+    } else {
+      mInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});
+      quotaFrom=ymdLocal(new Date(y,m,1));
+      quotaTo=(y===now.getFullYear() && m===now.getMonth()) ? ymdLocal(now) : ymdLocal(new Date(y,m+1,0));
+    }
     const mTotal=mInc.reduce((s,r)=>s+(r.totalCollection||0),0);
     if(!mTotal) return {netLocal:0,retentionRate:null};
     const mRem=await calcRemittancesFromRecords(mInc);
-    const mNet=mRem.netLocal-dashAllQuotasAmt;
+    const mNet=mRem.netLocal-sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, quotaFrom, quotaTo));
     return {netLocal:mNet,retentionRate:mNet/mTotal};
   }));
   const trendData = [];
@@ -2551,7 +2636,11 @@ async function renderIncomeSummary(records){
   const rem = await calcRemittances(totals);
   const settings = await DB.getSettings();
   const quotas = getQuotaList(settings);
-  const quotasTotal = quotas.reduce((s,q)=>s+(q.amount||0),0);
+  const monthEnd=(state.year===new Date().getFullYear() && state.month===new Date().getMonth())
+    ? ymdLocal(new Date())
+    : ymdLocal(new Date(state.year,state.month+1,0));
+  const quotaLines = getQuotaLinesForPeriod(quotas, ymdLocal(new Date(state.year,state.month,1)), monthEnd);
+  const quotasTotal = sumQuotaLines(quotaLines);
   const trueNetLocal = rem.netLocal - quotasTotal;
   return `
     <div class="grid-2">
@@ -2590,9 +2679,9 @@ async function renderIncomeSummary(records){
         <div class="status-row" style="background:var(--amber-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
           <div class="status-row-label">Province Rebate (20%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div>
         </div>
-        ${quotas.filter(q=>(q.amount||0)>0).map(q=>`
+        ${quotaLines.map(q=>`
         <div class="status-row" style="background:var(--info-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
-          <div class="status-row-label" style="color:var(--info)">${esc(q.label)}</div>
+          <div><div class="status-row-label" style="color:var(--info)">${esc(q.label)}</div><div class="status-row-sub">${esc(q.basis||'Fixed monthly amount')}</div></div>
           <div class="status-row-amt" style="color:var(--info)">${fmt(q.amount)}</div>
         </div>`).join('')}
         <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(trueNetLocal)}</div></div>`:''}
@@ -3628,14 +3717,11 @@ async function renderRemittances(){
     { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`, amount:rem.provinceRebate, section:'province' }
   ]:[];
 
-  const activeQuotas=quotas;
-  const quotaLines=activeQuotas
-    .map(q=>({ label:q.label, amount:q.amount||0, section:'quota' }))
-    .filter(l=>l.amount>0);
+  const quotaLines=getQuotaLinesForPeriod(quotas, fromDate, toDate);
 
   const allLines=[...incomeLines,...tgLines,...provinceLines,...quotaLines];
   const totalDue=allLines.reduce((s,l)=>s+l.amount,0);
-  const quotasTotal=quotaLines.reduce((s,l)=>s+l.amount,0);
+  const quotasTotal=sumQuotaLines(quotaLines);
   const trueNetLocal=rem.netLocal-quotasTotal;
   // Only count income that goes through the remittance split (records with INCOME_TYPES fields)
   const totalCollection=income
@@ -3664,9 +3750,10 @@ async function renderRemittances(){
       <td style="padding:7px 12px">
         <strong>${l.label}</strong>
         ${l.pct!=null?`<span style="margin-left:6px;font-size:11px;color:var(--text3);font-weight:400">(${l.pct}%)</span>`:''}
+        ${l.basis?`<div style="font-size:11px;color:var(--text3);font-weight:400;margin-top:2px">${esc(l.basis)}</div>`:''}
       </td>
       <td style="padding:7px 8px">
-        <span class="badge ${l.section==='quota'?'badge-info':'badge-purple'}">${l.section==='quota'?'Fixed Quota':'% Based'}</span>
+        <span class="badge ${l.section==='quota'?'badge-info':'badge-purple'}">${l.section==='quota'?(l.isProrated?'Prorated':'Fixed Quota'):'% Based'}</span>
       </td>
       <td class="td-right td-bold td-red" style="padding:7px 12px">${fmt(l.amount)}</td>
     </tr>`).join('')}`:'';
@@ -3734,7 +3821,7 @@ async function renderRemittances(){
           ${renderSection(incomeLines,'Income-Based Remittances → National HQ (% of collections)')}
           ${renderSection(tgLines,'Thanksgiving — Pastoral & Local Distribution')}
           ${renderSection(provinceLines,'Province Rebate (20% of Local Retained Tithes)')}
-          ${renderSection(quotaLines,'Fixed Monthly Quotas')}
+          ${renderSection(quotaLines,'Fixed Quotas Due for This Period')}
           <tr style="border-top:2px solid var(--border)">
             <td colspan="2" class="td-bold" style="font-size:14px;padding:10px 12px">TOTAL REMITTANCES DUE</td>
             <td class="td-right td-bold" style="font-size:15px;color:var(--danger);padding:10px 12px">${fmt(totalDue)}</td>
@@ -3816,7 +3903,7 @@ async function renderRemittances(){
           </div>`:''}
           ${quotasTotal>0?`
           <div class="status-row" style="border-top:1px dashed var(--border)">
-            <div class="status-row-label" style="color:var(--amber)">Total Fixed Monthly Quotas (deducted)</div>
+            <div class="status-row-label" style="color:var(--amber)">Fixed Quotas Due This Period (deducted)</div>
             <div class="status-row-amt" style="color:var(--amber)">− ${fmt(quotasTotal)}</div>
           </div>`:''}
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px">
@@ -3826,7 +3913,7 @@ async function renderRemittances(){
         </div>
 
         <!-- Parish Pastor's Share card -->
-        ${(rem.totalPastor||0)+(rem.totalArea||0)+(rem.totalSeed||0)+(quotas.find(q=>q.label.toLowerCase().includes('mummy'))?.amount||0)>0?`
+        ${(rem.totalPastor||0)+(rem.totalArea||0)+(rem.totalSeed||0)+(quotaLines.find(q=>isMummyQuotaLabel(q.label))?.amount||0)>0?`
         <div class="card" style="margin-top:12px">
           <div class="card-header"><span class="card-title">👨‍💼 Parish Pastor's Share</span></div>
           <p style="font-size:11px;color:var(--text3);margin-bottom:10px">Thanksgiving portions and stipend due to the Pastor's family (as Zonal / Area Pastor).</p>
@@ -3845,14 +3932,14 @@ async function renderRemittances(){
             <div class="status-row-label">TG → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)</div>
             <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalSeed)}</div>
           </div>`:''}
-          ${(()=>{ const mq=quotas.find(q=>q.label.toLowerCase().includes('mummy')); return mq&&(mq.amount||0)>0?`
+          ${(()=>{ const mq=quotaLines.find(q=>isMummyQuotaLabel(q.label)); return mq&&(mq.amount||0)>0?`
           <div class="status-row">
-            <div class="status-row-label">${mq.label} (Fixed Monthly)</div>
+            <div><div class="status-row-label">${mq.label}</div><div class="status-row-sub">${esc(mq.basis||'Fixed monthly amount')}</div></div>
             <div class="status-row-amt" style="color:var(--primary)">${fmt(mq.amount)}</div>
           </div>`:'' })()}
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px">
             <div class="status-row-label fw-bold">TOTAL PASTOR'S FAMILY SHARE</div>
-            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt((rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalSeed||0)+(quotas.find(q=>q.label.toLowerCase().includes('mummy'))?.amount||0))}</div>
+            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt((rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalSeed||0)+(quotaLines.find(q=>isMummyQuotaLabel(q.label))?.amount||0))}</div>
           </div>
         </div>`:''}
       </div>
@@ -3868,6 +3955,7 @@ async function showRemittancePaymentModal(){
   const income=filterByDateRange(allIncome, fromDate, toDate);
   const rem=await calcRemittancesFromRecords(income);
   const rr=await getRemRates();
+  const quotaLines=getQuotaLinesForPeriod(quotas, fromDate, toDate);
 
   const lines=[
     ...rem.lines.map(l=>({ label:l.label+' → National HQ', amount:l.national||0 })),
@@ -3876,7 +3964,7 @@ async function showRemittancePaymentModal(){
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters },
     { label:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0 },
     { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`, amount:rem.provinceRebate },
-    ...quotas.map(q=>({ label:q.label, amount:q.amount||0 }))
+    ...quotaLines.map(q=>({ label:q.label, amount:q.amount||0 }))
   ].filter(l=>l.amount>0);
 
   const totalDue=lines.reduce((s,l)=>s+l.amount,0);
@@ -4138,10 +4226,11 @@ async function printRemittanceReport(fromOverride, toOverride){
   const rem=await calcRemittancesFromRecords(income);
   const rr=await getRemRates();
   const churchName=settings.churchName||'RCCG Kingdom Parish, Aguleri';
+  const quotaLines=getQuotaLinesForPeriod(quotas, fromDate, toDate);
 
   // Separate "Zonal Mummy Stipend" (pastoral stipend) from RCCG-authority quotas
-  const rccgQuotas=quotas.filter(q=>!q.label.toLowerCase().includes('mummy'));
-  const mummyQuotas=quotas.filter(q=>q.label.toLowerCase().includes('mummy'));
+  const rccgQuotas=quotaLines.filter(q=>!isMummyQuotaLabel(q.label));
+  const mummyQuotas=quotaLines.filter(q=>isMummyQuotaLabel(q.label));
 
   // ─── COLLECTIONS SUMMARY ─────────────────────────────────────────
   const totalCollected=rem.lines.reduce((s,l)=>s+(l.total||0),0);
@@ -4183,7 +4272,7 @@ async function printRemittanceReport(fromOverride, toOverride){
         <sup style="color:#c0392b">†</sup> TG balance ${fmt(tgDistributed)} (${100-Math.round(rr.tgNational*100)}%) distributed — Area/Zonal: ${fmt(rem.totalArea)} · Pastor: ${fmt(rem.totalPastor)} · Ministers: ${fmt(rem.totalMinisters)} · Seed: ${fmt(rem.totalSeed||0)} — shown in Part B
       </td></tr>`:'';
 
-  const quotasTotal=quotas.reduce((s,q)=>s+(q.amount||0),0);
+  const quotasTotal=sumQuotaLines(quotaLines);
   const trueNetLocal=rem.netLocal-quotasTotal;
 
   // ─── PART A: RCCG AUTHORITY REMITTANCES ──────────────────────────
@@ -4204,7 +4293,7 @@ async function printRemittanceReport(fromOverride, toOverride){
       type:`${Math.round(rr.provinceRebate*100)}% Based`, amount:rem.provinceRebate
     }]:[]),
     // Fixed RCCG quotas (excluding pastoral Zonal Mummy Stipend)
-    ...rccgQuotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 })).filter(r=>r.amount>0)
+    ...rccgQuotas.map(q=>({ desc:q.label, type:q.isProrated?`Fixed • ${q.basis}`:'Fixed', amount:q.amount||0 })).filter(r=>r.amount>0)
   ];
   const subTotalA=partARows.reduce((s,r)=>s+r.amount,0);
 
@@ -4214,7 +4303,7 @@ async function printRemittanceReport(fromOverride, toOverride){
     { desc:`Thanksgiving → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,          type:`${Math.round(rr.tgPastor*100)}% Based`, amount:rem.totalPastor||0 },
     { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,     type:`${Math.round(rr.tgMinisters*100)}% Based`, amount:rem.totalMinisters||0 },
     { desc:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`,  type:`${Math.round(rr.tgSeed*100)}% Based`, amount:rem.totalSeed||0 },
-    ...mummyQuotas.map(q=>({ desc:q.label, type:'Fixed', amount:q.amount||0 }))
+    ...mummyQuotas.map(q=>({ desc:q.label, type:q.isProrated?`Fixed • ${q.basis}`:'Fixed', amount:q.amount||0 }))
   ].filter(r=>r.amount>0);
   const subTotalB=partBRows.reduce((s,r)=>s+r.amount,0);
 
@@ -7212,7 +7301,8 @@ async function generateMonthlyReport(){
   const paidRems=filterByDateRange(allRemittances,fromDate,toDate);
   const rem=await calcRemittancesFromRecords(income);
   const quotaList=getQuotaList(settings);
-  const totalFixedQuotas=quotaList.reduce((s,q)=>s+(q.amount||0),0);
+  const quotaLines=getQuotaLinesForPeriod(quotaList, fromDate, toDate);
+  const totalFixedQuotas=sumQuotaLines(quotaLines);
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
   const totalRemPaid=paidRems.reduce((s,r)=>s+(r.amount||0),0);
@@ -7268,7 +7358,7 @@ async function generateMonthlyReport(){
       ${rem.totalPastor>0?`<tr><td style="padding-left:16px">Thanksgiving → Parish Pastor's Share</td><td class="td-c">${Math.round(remRatesData.tgPastor*100)}% of TG</td><td class="td-r">${fmt(rem.totalPastor)}</td></tr>`:''}
       ${rem.totalMinisters>0?`<tr><td style="padding-left:16px">Thanksgiving → Ministers' Share</td><td class="td-c">${Math.round(remRatesData.tgMinisters*100)}% of TG</td><td class="td-r">${fmt(rem.totalMinisters)}</td></tr>`:''}
       ${(rem.totalSeed||0)>0?`<tr><td style="padding-left:16px">Thanksgiving → Seed (Pastor's Children)</td><td class="td-c">${Math.round((remRatesData.tgSeed||0)*100)}% of TG</td><td class="td-r">${fmt(rem.totalSeed)}</td></tr>`:''}
-      ${quotaList.filter(q=>q.amount>0).map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">Fixed Quota</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
+      ${quotaLines.map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">${esc(q.isProrated?`Fixed • ${q.basis}`:'Fixed Quota')}</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${fmt(totalRemDue)}</td></tr>
       ${totalRemPaid>0?`<tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Period</td><td class="td-r td-green">${fmt(totalRemPaid)}</td></tr>`:''}
       ${totalRemPaid<totalRemDue?`<tr><td colspan="2" style="padding-left:20px;color:var(--danger)">Outstanding Balance</td><td class="td-r td-red">− ${fmt(totalRemDue-totalRemPaid)}</td></tr>`:''}
@@ -8406,10 +8496,11 @@ return {
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange,
   setAdminTab, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
-  updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
-  setDashPeriodMode,
-  showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert
-};
+    updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
+    setDashPeriodMode,
+    showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
+    _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod
+  };
 
 })();
 
