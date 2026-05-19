@@ -299,6 +299,15 @@ function hasExplicitTime(value){
 }
 const NIGERIA_TIMEZONE = 'Africa/Lagos';
 function fmtDate(d){
+  // YYYY-MM-DD strings are calendar dates with no time/timezone — format them
+  // directly so a browser east of Africa/Lagos doesn't roll the display back a day.
+  if(typeof d === 'string'){
+    const ymdMatch = d.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if(ymdMatch){
+      const dt = new Date(Date.UTC(Number(ymdMatch[1]), Number(ymdMatch[2])-1, Number(ymdMatch[3])));
+      return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric',timeZone:'UTC'});
+    }
+  }
   const dt = parseDisplayDate(d);
   if(!dt) return '—';
   return dt.toLocaleDateString('en-NG',{day:'2-digit',month:'short',year:'numeric',timeZone:NIGERIA_TIMEZONE});
@@ -7115,7 +7124,8 @@ async function renderReports(){
     const prevCutoffDay = (prevCC && Number.isInteger(prevCC.dates[prevMonth]) && Number(prevCC.year)===prevYear)
       ? prevCC.dates[prevMonth] : null;
     if(prevCutoffDay){
-      state.reportFromDate=ymdLocal(new Date(prevYear,prevMonth,prevCutoffDay));
+      const d=new Date(prevYear,prevMonth,prevCutoffDay); d.setDate(d.getDate()+1);
+      state.reportFromDate=ymdLocal(d);
     } else {
       state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
     }
