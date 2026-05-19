@@ -10210,6 +10210,18 @@ const AB_TAGS = [
 ];
 const AB_PRIORITY_COLORS = { high: '#dc2626', medium: '#d97706', low: '#16a34a' };
 
+// Format an HH:MM string (24h) to a human-readable 12-hour time display, e.g. "09:00" → "09:00 AM".
+// Returns the raw value if parsing fails.
+function formatMeetingTime(hhmm) {
+  if (!hhmm) return '';
+  try {
+    const [h, m] = hhmm.split(':');
+    return new Date(0, 0, 0, h, m).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return hhmm;
+  }
+}
+
 // MIME type to file extension map for recorded audio. Used when uploading voice
 // notes to Whisper. Handles the main formats MediaRecorder can produce in modern browsers.
 const AUDIO_MIME_TO_EXT = {
@@ -11109,9 +11121,7 @@ function abPrintAgenda() {
     } catch { /* use raw */ }
   }
 
-  const timeDisplay = meetingTime
-    ? (() => { try { const [h, m] = meetingTime.split(':'); const d = new Date(0, 0, 0, h, m); return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch { return meetingTime; } })()
-    : '';
+  const timeDisplay = meetingTime ? formatMeetingTime(meetingTime) : '';
 
   const agendaLines = items.map((item, i) => `
     <div style="display:flex;gap:14px;padding:10px 0;border-bottom:1px solid #e8ecf0">

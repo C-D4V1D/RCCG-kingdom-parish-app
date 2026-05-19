@@ -66,6 +66,9 @@ const ok  = (data)       => new Response(JSON.stringify(data),        { status: 
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
+
+// Emoji number labels for WhatsApp agenda lists (items beyond 10 fall back to plain numerals).
+const EMOJI_NUMS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
 // Absolute naira tolerance when matching statement lines to recorded entries.
 const RECONCILIATION_AMOUNT_TOLERANCE_ABSOLUTE = 0.5;
 
@@ -5786,8 +5789,6 @@ ${lastMeetingContext ? `## Context from Last Meeting\n${lastMeetingContext}` : '
 }
 
 function buildFallbackWhatsappMessage({ agendaItems, dateDisplay, meetingTime, venue, urgency, tagAll, agendaList, urgencyNote, tagLine }) {
-  // Emoji number labels for up to 10 agenda items; items beyond 10 fall back to plain numerals.
-  const EMOJI_NUMS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
   const agendaLines = agendaItems.map((item, i) => {
     const label = typeof item === 'string' ? item : (item.topic || String(item));
     return `${EMOJI_NUMS[i] || `${i+1}.`} ${label}`;
