@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pathToFileURL } from 'node:url';
 
 function assertClose(actual, expected, epsilon = 1e-9) {
   assert.ok(Math.abs(actual - expected) < epsilon, `Expected ${actual} to be close to ${expected}`);
@@ -59,7 +58,7 @@ globalThis.window.localStorage = localStorageStub;
 globalThis.window.history = globalThis.history;
 globalThis.window.navigator = globalThis.navigator;
 
-await import(pathToFileURL('/home/runner/work/rccg-kingdom-parish-app/rccg-kingdom-parish-app/src/js/app.js').href + `?quota-test=${Date.now()}`);
+await import(new URL(`../src/js/app.js?quota-test=${Date.now()}`, import.meta.url).href);
 
 const App = globalThis.window.App;
 
