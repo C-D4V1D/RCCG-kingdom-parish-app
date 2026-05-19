@@ -1783,7 +1783,6 @@ async function renderDashboard(){
     .filter(q=>!q.label.toLowerCase().includes('regional contribution') && !isMummyQuotaLabel(q.label))
     .reduce((s,q)=>s+(q.amount||0),0);
   const dashAllQuotasAmt = dashNatlQuotasAmt + dashRegionalAmt + dashMummyAmt;
-  const dashAllMonthlyQuotasAmt = dashQuotas.reduce((s,q)=>s+(q.amount||0),0);
   const netLocal = remittances.netLocal - dashAllQuotasAmt;
   // Other Income recorded under the "Local Church Use Only" category has no INCOME_TYPES
   // field populated, so it contributes zero to remittance but inflates totalIncome.
@@ -1839,7 +1838,12 @@ async function renderDashboard(){
     dashQuotaPeriods=Math.max(1,dashQuotaPeriods);
   }
   const dashMonthsElapsed = dashQuotaPeriods;
-  const dashAccumQuotas = dashAllMonthlyQuotasAmt * dashQuotaPeriods;
+  // Sunday-prorate the accumulated quota too, so the KPI uses the same basis as the
+  // current-period split shown in the income card and on the Remittances page.
+  const dashAccrualEnd = useRemPeriod ? dashPeriodTo : dashMonthEnd;
+  const dashAccumQuotas = dashFirstIncRec
+    ? sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, dashFirstDateStr, dashAccrualEnd))
+    : 0;
   const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
   const dashTotalRemDueKpi = Math.max(0, dashAllTimeIncomeRemDue + dashAccumQuotas - dashAllPaidRems);
@@ -4462,31 +4466,14 @@ async function renderExpenses(){
     +(allTimeRemittances.totalPastor||0)+(allTimeRemittances.totalMinisters||0)
     +(allTimeRemittances.totalSeed||0)+(allTimeRemittances.provinceRebate||0);
   const quotaList = getQuotaList(settings);
-  const allQuotasPerPeriod = quotaList.reduce((s,q)=>s+(q.amount||0),0);
 
-  // Count remittance periods from first income record up to viewed month, using configured cut-off dates.
+  // Sunday-prorate accumulated quotas (same basis as dashboard KPI + Remittances page).
   const firstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
-  const firstDate = firstIncRec ? new Date(firstIncRec.date||firstIncRec.createdAt) : new Date(state.year, state.month, 1);
   const firstDateStr = (firstIncRec ? (firstIncRec.date||firstIncRec.createdAt||'') : '').slice(0,10);
-  let quotaPeriods = 0;
-  if(firstIncRec){
-    let fy=firstDate.getFullYear(), fm=firstDate.getMonth();
-    let y=fy, m=fm;
-    while(y<state.year||(y===state.year&&m<=state.month)){
-      const cd=getRemCutoffDates(settings,y)||getRemCutoffDates(settings);
-      const cutDay=cd?.dates?.[m]||null;
-      if(cutDay){
-        const cutStr=`${y}-${String(m+1).padStart(2,'0')}-${String(cutDay).padStart(2,'0')}`;
-        if(cutStr>firstDateStr) quotaPeriods++;
-      } else {
-        quotaPeriods++;
-      }
-      m++; if(m>11){m=0;y++;}
-    }
-    quotaPeriods=Math.max(1,quotaPeriods);
-  }
-
-  const accumQuotas = allQuotasPerPeriod * quotaPeriods;
+  const { to: expAccrualEnd } = computeRemPeriodDates(settings, allRems, state.year, state.month);
+  const accumQuotas = firstIncRec
+    ? sumQuotaLines(getQuotaLinesForPeriod(quotaList, firstDateStr, expAccrualEnd))
+    : 0;
   const paidRems = allRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   const outstandingRems = Math.max(0, allTimeIncomeRemDue + accumQuotas - paidRems);
   const totalChurch = churchBal.total;
