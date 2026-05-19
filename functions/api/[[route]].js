@@ -5576,6 +5576,7 @@ async function buildWhatsappMessage(DB, env, id, body) {
   let dateDisplay = meetingDate;
   if (meetingDate) {
     try {
+      // Use noon (T12:00:00) to avoid DST boundary issues when parsing YYYY-MM-DD strings.
       const d = new Date(meetingDate + 'T12:00:00');
       const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
       const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -5659,6 +5660,7 @@ ${lastMeetingContext ? `## Context from Last Meeting\n${lastMeetingContext}` : '
 }
 
 function buildFallbackWhatsappMessage({ agendaItems, dateDisplay, meetingTime, venue, urgency, tagAll, agendaList, urgencyNote, tagLine }) {
+  // Emoji number labels for up to 10 agenda items; items beyond 10 fall back to plain numerals.
   const EMOJI_NUMS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
   const agendaLines = agendaItems.map((item, i) => {
     const label = typeof item === 'string' ? item : (item.topic || String(item));

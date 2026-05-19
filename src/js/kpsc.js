@@ -10149,6 +10149,16 @@ const AB_TAGS = [
 ];
 const AB_PRIORITY_COLORS = { high: '#dc2626', medium: '#d97706', low: '#16a34a' };
 
+// MIME type to file extension map for recorded audio. Used when uploading voice
+// notes to Whisper. Handles the main formats MediaRecorder can produce in modern browsers.
+const AUDIO_MIME_TO_EXT = {
+  'audio/ogg':  'ogg',
+  'audio/webm': 'webm',
+  'audio/mp4':  'mp4',
+  'audio/mpeg': 'mp3',
+  'audio/wav':  'wav',
+};
+
 function abTagBadge(tag) {
   const t = AB_TAGS.find(x => x.key === tag) || AB_TAGS[0];
   return `<span class="kbadge ${t.cls}" style="font-size:10px">${t.label}</span>`;
@@ -10832,9 +10842,8 @@ async function abToggleVoice() {
       try {
         const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
         // Map MIME type to a file extension for the Whisper API upload.
-        const mimeToExt = { 'audio/ogg': 'ogg', 'audio/webm': 'webm', 'audio/mp4': 'mp4', 'audio/mpeg': 'mp3', 'audio/wav': 'wav' };
         const mime = (mr.mimeType || 'audio/webm').split(';')[0].trim().toLowerCase();
-        const ext = mimeToExt[mime] || 'webm';
+        const ext = AUDIO_MIME_TO_EXT[mime] || 'webm';
         const formData = new FormData();
         formData.append('file', blob, `note.${ext}`);
         formData.append('model', 'whisper-1');
