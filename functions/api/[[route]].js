@@ -1083,8 +1083,6 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_projects ADD COLUMN deleted_by TEXT DEFAULT ''`,
     // Agenda Builder: structured agenda attached to a meeting
     `ALTER TABLE ai_secretary_meetings ADD COLUMN agenda_text TEXT DEFAULT ''`,
-    // Agenda Builder: meeting_title on WhatsApp drafts (added after initial release)
-    `ALTER TABLE kpsc_whatsapp_drafts ADD COLUMN meeting_title TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -3767,6 +3765,33 @@ function parseAiSecretaryJson(text) {
   throw new Error('AI response did not contain valid JSON');
 }
 
+/**
+ * Normalise a DeepSeek model name, migrating legacy names that are being
+ * discontinued (deepseek-chat → deepseek-v4-flash, etc.).
+ */
+function normalizeDeepseekModel(raw) {
+  const m = String(raw || 'deepseek-v4-flash').trim() || 'deepseek-v4-flash';
+  if (m === 'deepseek-chat')     return 'deepseek-v4-flash';
+  if (m === 'deepseek-reasoner') return 'deepseek-v4-pro';
+  return m;
+}
+
+/**
+ * Load DeepSeek key + model from settings DB, returning { key, model }.
+ * Returns an object with empty key on error (callers should fall back gracefully).
+ */
+async function loadDeepseekSettings(DB) {
+  try {
+    const { results } = await DB.prepare(
+      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
+    ).all();
+    const s = Object.fromEntries((results || []).map(r => [r.key, String(r.value || '')]));
+    return { key: s.ai_deepseek_key?.trim() || '', model: normalizeDeepseekModel(s.ai_deepseek_model) };
+  } catch {
+    return { key: '', model: 'deepseek-v4-flash' };
+  }
+}
+
 function buildAiSecretaryOutput(meeting, options = {}) {
   const { normalized: participants, missingGroups, quorumMet } = aiSecretaryParticipantCoverage(meeting.participants);
   const present = participants.filter(p => p.present);
@@ -5326,18 +5351,7 @@ async function suggestAgendaItems(DB, env, body) {
   ).all();
 
   // Get DeepSeek key and model
-  let deepseekKey = '';
-  let deepseekModel = 'deepseek-v4-flash';
-  try {
-    const { results: settingsRows } = await DB.prepare(
-      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
-    ).all();
-    const settings = Object.fromEntries((settingsRows || []).map(r => [r.key, String(r.value || '')]));
-    deepseekKey = settings.ai_deepseek_key?.trim() || '';
-    deepseekModel = settings.ai_deepseek_model?.trim() || 'deepseek-v4-flash';
-    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
-    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
-  } catch { /* fall through */ }
+  const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
 
   // Build deterministic fallback suggestions from action items and past meetings
   const fallbackSuggestions = buildFallbackAgendaSuggestions(recentMeetings, agendaNotes);
@@ -5571,18 +5585,7 @@ async function buildWhatsappMessage(DB, env, id, body) {
   }
 
   // Get DeepSeek key
-  let deepseekKey = '';
-  let deepseekModel = 'deepseek-v4-flash';
-  try {
-    const { results: settingsRows } = await DB.prepare(
-      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
-    ).all();
-    const settings = Object.fromEntries((settingsRows || []).map(r => [r.key, String(r.value || '')]));
-    deepseekKey = settings.ai_deepseek_key?.trim() || '';
-    deepseekModel = settings.ai_deepseek_model?.trim() || 'deepseek-v4-flash';
-    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
-    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
-  } catch { /* fall through */ }
+  const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
 
   // Load last meeting's context for stylistic reference
   let lastMeetingContext = '';
@@ -5694,16 +5697,7 @@ async function refineWhatsappMessage(DB, env, id, body) {
 
   let deepseekKey = '';
   let deepseekModel = 'deepseek-v4-flash';
-  try {
-    const { results: settingsRows } = await DB.prepare(
-      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
-    ).all();
-    const settings = Object.fromEntries((settingsRows || []).map(r => [r.key, String(r.value || '')]));
-    deepseekKey = settings.ai_deepseek_key?.trim() || '';
-    deepseekModel = settings.ai_deepseek_model?.trim() || 'deepseek-v4-flash';
-    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
-    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
-  } catch { /* fall through */ }
+  { const ds = await loadDeepseekSettings(DB); deepseekKey = ds.key; deepseekModel = ds.model; }
 
   if (!deepseekKey) return err('AI key not configured. Please add your DeepSeek API key in Settings.', 503);
 

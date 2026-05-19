@@ -10831,7 +10831,10 @@ async function abToggleVoice() {
       if (statusEl) statusEl.textContent = 'Transcribing…';
       try {
         const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
-        const ext = (mr.mimeType || 'audio/webm').includes('ogg') ? 'ogg' : 'webm';
+        // Map MIME type to a file extension for the Whisper API upload.
+        const mimeToExt = { 'audio/ogg': 'ogg', 'audio/webm': 'webm', 'audio/mp4': 'mp4', 'audio/mpeg': 'mp3', 'audio/wav': 'wav' };
+        const mime = (mr.mimeType || 'audio/webm').split(';')[0].trim().toLowerCase();
+        const ext = mimeToExt[mime] || 'webm';
         const formData = new FormData();
         formData.append('file', blob, `note.${ext}`);
         formData.append('model', 'whisper-1');
