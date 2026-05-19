@@ -1705,51 +1705,96 @@ function deleteTxView(idx){
 }
 
 // ── DASHBOARD ────────────────────────────
-async function calcChurchBalance(){
+// Signed contribution of a petty-history entry to the petty float. Used to walk
+// the history when reconstructing the float at a past date.
+function pettyFloatDelta(h){
+  if(!h) return 0;
+  if(h.type === 'refill' && (h.status === 'approved' || h.status === 'settled')){
+    return +(h.amount || 0);
+  }
+  if(h.type === 'advance' && (h.status === 'approved' || h.status === 'settled')){
+    let delta = -(h.amount || 0);
+    if(h.status === 'settled'){
+      delta += (h.changeReturned || 0);
+      delta -= (h.extraSpent || 0);
+    }
+    return delta;
+  }
+  if(h.type === 'disbursement' && h.status === 'approved'){
+    return -(h.amount || 0);
+  }
+  return 0;
+}
+
+/** Cash position. Pass `asOfDate` (YYYY-MM-DD) to get a historical snapshot —
+ *  every input record is filtered by date ≤ asOfDate and the petty float is
+ *  unwound from the current stored value by reversing post-asOfDate events.
+ *  Pass nothing (or null) for the live "as of now" balance. */
+async function calcChurchBalance(asOfDate){
   const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory,pettyConfig] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getRemittances(),DB.getCashTransactions(),DB.getPetty(),DB.getPettyConfig()]);
-  const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
   const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
 
+  const recDate = r => String(r?.date || r?.dateNeeded || r?.createdAt || '').slice(0,10);
+  const onOrBefore = r => !asOfDate || (function(){ const d=recDate(r); return !d || d <= asOfDate; })();
+  const paidOnOrBefore = r => !asOfDate || (function(){ const d=String(r?.paidDate || r?.createdAt || '').slice(0,10); return !d || d <= asOfDate; })();
+
+  const income = allIncome.filter(onOrBefore);
+  const expenses = allExpenses.filter(onOrBefore);
+  const cashTxF = cashTx.filter(onOrBefore);
+  const pettyF = pettyHistory.filter(onOrBefore);
+  const paidRemsList = allRemittances.filter(r => r.status === 'paid' && paidOnOrBefore(r));
+
   // --- BANK BALANCE ---
-  const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
-  const cashDepositedToBank = cashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
+  const bankTransferIncome = income.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
+  const cashDepositedToBank = cashTxF.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
   // Pending expenses are included: every logged expense is an actual payment already made.
   // "Pending" means awaiting admin approval, not awaiting payment. This matches how petty
   // cash already works — the float is reduced the moment an expense is logged.
-  const bankExpenses = allExpenses.filter(isLoggedExpense).reduce((s,e)=>{
+  const bankExpenses = expenses.filter(isLoggedExpense).reduce((s,e)=>{
     if(e.paymentMethod==='bank_transfer') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.bankAmount||0);
     return s;
   }, 0);
-  const paidRems = allRemittances.filter(r=>r.status==='paid').reduce((s,r) => s+(r.amount||0), 0);
-  const bankWithdrawals = cashTx.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
+  const paidRems = paidRemsList.reduce((s,r) => s+(r.amount||0), 0);
+  const bankWithdrawals = cashTxF.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
   // Petty top-ups via bank transfer leave the bank account
-  const pettyBankTopups = pettyHistory.filter(h=>h.type==='refill'&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
+  const pettyBankTopups = pettyF.filter(h=>h.type==='refill'&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)),0);
   const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals - pettyBankTopups;
 
   // --- CASH WITH ACCOUNTANT ---
-  const cashFromCollections = allIncome.reduce((s,r) => {
+  const cashFromCollections = income.reduce((s,r) => {
     const isSunday = !r.source || r.source==='sunday_collection';
     if(isSunday) return s + getSundayCashWithAccountant(r, remRates);
     const btAmt = r.bankTransferAmount||0;
     const dpAmt = r.directPettyCash||0;
     return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
   }, 0);
-  const bankToAccountant = cashTx.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
-  const cashExpenses = allExpenses.filter(isLoggedExpense).reduce((s,e)=>{
+  const bankToAccountant = cashTxF.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
+  const cashExpenses = expenses.filter(isLoggedExpense).reduce((s,e)=>{
     if(e.paymentMethod==='cash') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.cashAmount||0);
     return s;
   }, 0);
   // Petty top-ups via accountant's cash reduce the accountant's cash holding
-  const pettyCashTopups = pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
+  const pettyCashTopups = pettyF.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.cashAmount||0):(h.amount||0)),0);
   const cashWithAccountantRaw = cashFromCollections - cashDepositedToBank + bankToAccountant - cashExpenses - pettyCashTopups;
 
   // --- PETTY CASH (with Admin Officer) ---
-  // pettyFloat can be negative — means Admin Officer spent personal money and church owes them
-  const pettyFloat = petty.float;
+  // pettyFloat can be negative — means Admin Officer spent personal money and church owes them.
+  // For historical view: unwind from current float by reversing every event that happened AFTER asOfDate.
+  // This is more reliable than walking from epoch because pettyConfig.float absorbs bootstrap/manual
+  // adjustments that don't always leave history entries.
+  let pettyFloat = pettyConfig.float;
+  if(asOfDate){
+    const afterAsOf = h => {
+      const d = String(h?.date || h?.dateNeeded || h?.createdAt || '').slice(0,10);
+      return d && d > asOfDate;
+    };
+    const reverseDelta = pettyHistory.filter(afterAsOf).reduce((s,h)=>s+pettyFloatDelta(h), 0);
+    pettyFloat = pettyConfig.float - reverseDelta;
+  }
 
   return {
     cashWithAccountant: Math.max(0, cashWithAccountantRaw),
@@ -1768,11 +1813,31 @@ async function renderDashboard(){
   const { from: dashPeriodFrom, to: dashPeriodTo } =
     computeRemPeriodDates(settings, allRemsDash, state.year, state.month);
   const useRemPeriod = state.dashPeriodMode === 'remittance';
+  // As-of date: every "current state" KPI on the dashboard is anchored here, so selecting
+  // a past period gives a true historical snapshot. For the current period the period end
+  // is in the future, so we cap at today (no future records exist).
+  const _nowForAsOf = new Date();
+  const dashTodayStrForAsOf = ymdLocal(_nowForAsOf);
+  const dashPeriodEnd = useRemPeriod ? dashPeriodTo : ymdLocal(new Date(state.year, state.month+1, 0));
+  const dashAsOfDate = dashPeriodEnd < dashTodayStrForAsOf ? dashPeriodEnd : dashTodayStrForAsOf;
+  const dashIsPastPeriod = dashPeriodEnd < dashTodayStrForAsOf;
+  const dashAsOfLabel = fmtDate(dashAsOfDate);
+  const _onOrBefore = r => {
+    const d = String(r?.date || r?.dateNeeded || r?.createdAt || '').slice(0,10);
+    return !d || d <= dashAsOfDate;
+  };
+  const _paidOnOrBefore = r => {
+    const d = String(r?.paidDate || r?.createdAt || '').slice(0,10);
+    return !d || d <= dashAsOfDate;
+  };
   const income   = useRemPeriod ? filterByDateRange(allIncomeDash,   dashPeriodFrom, dashPeriodTo) : filterByMonth(allIncomeDash);
   const expenses = useRemPeriod ? filterByDateRange(allExpensesDash, dashPeriodFrom, dashPeriodTo) : filterByMonth(allExpensesDash);
   const petty = { history: pettyHistDash, float: pettyConfigDash.float, max: pettyConfigDash.max };
-  const allIncome = allIncomeDash;
-  const allExpenses = allExpensesDash;
+  // For past periods, "all income/expenses" excludes records dated after the as-of date so
+  // the all-time accumulators (remittance due, etc.) only see what existed on that day.
+  const allIncome = dashIsPastPeriod ? allIncomeDash.filter(_onOrBefore) : allIncomeDash;
+  const allExpenses = dashIsPastPeriod ? allExpensesDash.filter(_onOrBefore) : allExpensesDash;
+  const allRemsForKpi = dashIsPastPeriod ? allRemsDash.filter(r => r.status === 'paid' ? _paidOnOrBefore(r) : _onOrBefore(r)) : allRemsDash;
 
   const totalIncome = income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
@@ -1813,7 +1878,7 @@ async function renderDashboard(){
   // Check if the current month's remittance has already been paid or partially paid.
   // A remittance is considered "for this month" when its periodTo falls within the viewed year/month.
   const dashMonthPrefix = `${state.year}-${String(state.month+1).padStart(2,'0')}`;
-  const dashMonthPaidRems = allRemsDash.filter(r=>r.status==='paid' && (r.periodTo||'').startsWith(dashMonthPrefix));
+  const dashMonthPaidRems = allRemsForKpi.filter(r=>r.status==='paid' && (r.periodTo||'').startsWith(dashMonthPrefix));
   const dashMonthPaidAmt = dashMonthPaidRems.reduce((s,r)=>s+(r.amount||0),0);
   // Current month due (used only for paid/partial status label).
   const dashCurrentMonthRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
@@ -1822,24 +1887,27 @@ async function renderDashboard(){
   const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
   const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
-  // Accumulated unpaid: remittances owed on ALL income ever collected, minus everything already paid.
-  const dashAllTimeRemittances = await calcRemittancesFromRecords(allIncomeDash);
+  // Accumulated unpaid: remittances owed on ALL income through the as-of date, minus everything already paid by then.
+  const dashAllTimeRemittances = await calcRemittancesFromRecords(allIncome);
   const dashAllTimeIncomeRemDue = (dashAllTimeRemittances.totalNatl||0)+(dashAllTimeRemittances.totalArea||0)
     +(dashAllTimeRemittances.totalPastor||0)+(dashAllTimeRemittances.totalMinisters||0)
     +(dashAllTimeRemittances.totalSeed||0)+(dashAllTimeRemittances.provinceRebate||0);
-  const dashFirstIncRec = allIncomeDash.length > 0 ? allIncomeDash[allIncomeDash.length-1] : null;
+  // Source array is `allIncome` (date-filtered to ≤ asOfDate for past-period views) so
+  // a historical snapshot doesn't see income that didn't exist yet.
+  const dashFirstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
   const dashFirstDateStr = (dashFirstIncRec ? (dashFirstIncRec.date||dashFirstIncRec.createdAt||'') : '').slice(0,10);
   // Sunday-prorate accumulated quotas so the all-time KPI uses the same basis as the
   // current-period split shown in the income card and on the Remittances page.
-  // Anchor the upper bound at TODAY (not the period cut-off) so only elapsed
-  // Sundays accrue. Each Sunday's share is fixed on that Sunday, so this total
-  // is view-independent — switching between Remittance and Calendar views
-  // shouldn't change "what's owed to HQ right now". The per-period split
-  // (this period vs prior) can still differ by view; only this total must match.
+  // Anchor the upper bound at the as-of date — TODAY for current periods (so only
+  // elapsed Sundays accrue), or the period cut-off for historical snapshots.
+  // Each Sunday's share is fixed on that Sunday, so this total is view-independent
+  // for the live case — switching between Remittance and Calendar views shouldn't
+  // change "what's owed to HQ right now". The per-period split (this period vs
+  // prior) can still differ by view; only this total must match.
   const dashAccumQuotas = dashFirstIncRec
-    ? sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, dashFirstDateStr, dashTodayStr))
+    ? sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, dashFirstDateStr, dashAsOfDate))
     : 0;
-  const dashAllPaidRems = allRemsDash.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
+  const dashAllPaidRems = allRemsForKpi.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
   const dashTotalRemDueKpi = Math.max(0, dashAllTimeIncomeRemDue + dashAccumQuotas - dashAllPaidRems);
   // Split the all-time outstanding into "this period" vs "prior periods" so the dashboard
@@ -1851,12 +1919,13 @@ async function renderDashboard(){
   );
   const dashPriorUnpaid = dashTotalRemDueKpi - dashThisPeriodUnpaid;
   // Income from periods not yet covered by a paid remittance — denominator for the % metric.
-  const dashPaidPeriods = allRemsDash.filter(r=>r.status==='paid'&&r.periodFrom&&r.periodTo).map(r=>({from:r.periodFrom,to:r.periodTo}));
+  const dashPaidPeriods = allRemsForKpi.filter(r=>r.status==='paid'&&r.periodFrom&&r.periodTo).map(r=>({from:r.periodFrom,to:r.periodTo}));
   const dashUnpaidPeriodIncome = allIncomeDash.filter(r=>{
     const d=r.date||r.createdAt||'';
     return !d||!dashPaidPeriods.some(p=>d>=p.from&&d<=p.to);
   }).reduce((s,r)=>s+(r.totalCollection||0),0);
-  const churchBal = await calcChurchBalance();
+  // Historical snapshot when a past period is selected; live balance otherwise.
+  const churchBal = await calcChurchBalance(dashIsPastPeriod ? dashAsOfDate : null);
   const pendingPetty = await getPettyCashPendingCount();
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
 
@@ -1934,8 +2003,8 @@ async function renderDashboard(){
   // Feed items — richer detail for Recent Transactions card
   const recentIncome = allIncome.slice(0,4);
   const recentExp = allExpenses.slice(0,4);
-  const recentRems = allRemsDash.filter(r=>r.status==='paid').slice(0,3);
-  const recentPetty = pettyHistDash.filter(h=>h.type==='disbursement'&&h.status==='approved').slice(0,2);
+  const recentRems = allRemsForKpi.filter(r=>r.status==='paid').slice(0,3);
+  const recentPetty = pettyHistDash.filter(h=>h.type==='disbursement'&&h.status==='approved'&&(!dashIsPastPeriod||_onOrBefore(h))).slice(0,2);
   const feedItems = [
     ...recentIncome.map(r=>{
       const isSunday = !r.source || r.source==='sunday_collection';
@@ -2001,11 +2070,15 @@ async function renderDashboard(){
   const topCats = Object.entries(expByCat).sort((a,b)=>b[1]-a[1]).slice(0,7);
   const maxCat = topCats[0]?.[1]||1;
 
-  // Alerts
+  // Alerts — only shown in the live view. For a historical snapshot they'd be misleading
+  // (an "overdue" or "low balance" warning rendered in retrospect implies action that's no
+  // longer possible) so they're suppressed when a past period is selected.
   let alerts='';
-  if(overdueRems>0) alerts+=`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span>${overdueRems} remittance(s) are <strong>overdue</strong>. Please process immediately.</span></div>`;
-  if(pendingPetty>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span>${pendingPetty} petty cash request(s) awaiting approval. <button class="btn btn-sm" onclick="App.navigate('petty_cash')" style="margin-left:8px">Review</button></span></div>`;
-  if(churchBal.bankBalance<50000 && churchBal.bankBalance>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Church balance is running low. Consider notifying the KPSC if remittances cannot be covered.</span></div>`;
+  if(!dashIsPastPeriod){
+    if(overdueRems>0) alerts+=`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span>${overdueRems} remittance(s) are <strong>overdue</strong>. Please process immediately.</span></div>`;
+    if(pendingPetty>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span>${pendingPetty} petty cash request(s) awaiting approval. <button class="btn btn-sm" onclick="App.navigate('petty_cash')" style="margin-left:8px">Review</button></span></div>`;
+    if(churchBal.bankBalance<50000 && churchBal.bankBalance>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Church balance is running low. Consider notifying the KPSC if remittances cannot be covered.</span></div>`;
+  }
 
   // Monthly trend (last 4 months) — income, expenses, and netLocal retained
   // Compute historical netLocal in parallel for accurate retention rates and chart visualisation
@@ -2069,7 +2142,8 @@ async function renderDashboard(){
   }
   let forecastIncome=null,forecastExpenses=null,forecastRetained=null;
   const forecastLabel=currentRate!==null&&validHist.length>0?`${validHist.length}-mo. + live`:currentRate!==null?'live data':validHist.length>0?`${validHist.length}-mo. trend`:'';
-  if(currentRate!==null||historicalRate!==null){
+  // Skip forecasting for past periods — the period is closed, projecting it is meaningless.
+  if(!dashIsPastPeriod && (currentRate!==null||historicalRate!==null)){
     // Blend: current month rate gains weight as more Sundays are recorded
     const cw=sundayCount*2, hw=Math.max(1,6-cw);
     const blendedRate=currentRate!==null&&historicalRate!==null
@@ -2238,9 +2312,9 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:#185FA5"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
-            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Church Balance</div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Church Balance <span style="text-transform:none;letter-spacing:0;font-weight:600">(As of ${dashAsOfLabel})</span></div>
             <div style="font-size:24px;font-weight:800;color:${churchBal.total<0?'var(--danger)':'#185FA5'};letter-spacing:-0.5px;line-height:1.15">${fmt(churchBal.total)}</div>
-            <div style="font-size:12px;color:var(--text3);margin-top:5px">Actual money on hand right now</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:5px">${dashIsPastPeriod?`Snapshot at end of period`:`Actual money on hand right now`}</div>
           </div>
           <div style="width:44px;height:44px;border-radius:12px;background:#EAF3DE;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">🏛️</div>
         </div>
@@ -2298,7 +2372,7 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:${dashSpendColor}"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
-            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Available Fund After All Deductions</div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Available Fund After All Deductions <span style="text-transform:none;letter-spacing:0;font-weight:600">(As of ${dashAsOfLabel})</span></div>
             <div style="font-size:26px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.8px;line-height:1.1">${fmt(dashSpendable)}</div>
           </div>
           <div style="display:flex;flex-direction:column;align-items:center;gap:8px;flex-shrink:0">
