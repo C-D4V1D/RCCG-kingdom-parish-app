@@ -529,7 +529,16 @@ function countSundaysInMonth(year, month){
 function getQuotaLinesForPeriod(quotas, fromDate, toDate){
   const list=Array.isArray(quotas)?quotas:[];
   const from=parseYmdDate(fromDate);
-  const to=parseYmdDate(toDate);
+  const toRaw=parseYmdDate(toDate);
+  // Each Sunday's prorated share accrues on that Sunday. Future Sundays haven't
+  // elapsed and aren't owed yet, so cap the upper bound at today across the app —
+  // dashboard KPIs, the remittance form, the printed slip, and reports all see
+  // the same "due as of now" number for any in-progress period.
+  const now=new Date();
+  const todayDate=new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const to=(toRaw && toRaw>todayDate) ? todayDate : toRaw;
+  // Entire range in the future → nothing has accrued yet.
+  if(from && to && from>to) return [];
   const canProrate=!!from && !!to && from<=to;
   return list.map(q=>{
     const label=q?.label||'';
@@ -1773,16 +1782,13 @@ async function renderDashboard(){
   const dashMonthEnd=(state.year===now.getFullYear() && state.month===now.getMonth())
     ? dashTodayStr
     : ymdLocal(new Date(state.year,state.month+1,0));
-  // Each Sunday's quota share is fixed on that Sunday; only elapsed Sundays
-  // (date ≤ today) are due. Cap the period upper bound at today so a future
-  // Sunday inside the remittance period doesn't pre-accrue. Calendar view's
-  // dashMonthEnd is already today-capped for the current month.
-  const dashQuotaFrom=useRemPeriod ? dashPeriodFrom : dashMonthStart;
-  const dashQuotaToRaw=useRemPeriod ? dashPeriodTo : dashMonthEnd;
-  const dashQuotaTo=dashQuotaToRaw < dashTodayStr ? dashQuotaToRaw : dashTodayStr;
-  const dashQuotaLines=(dashQuotaTo >= dashQuotaFrom)
-    ? getQuotaLinesForPeriod(dashQuotas, dashQuotaFrom, dashQuotaTo)
-    : [];
+  // getQuotaLinesForPeriod caps at today internally — future Sundays in the
+  // remittance period don't pre-accrue.
+  const dashQuotaLines=getQuotaLinesForPeriod(
+    dashQuotas,
+    useRemPeriod ? dashPeriodFrom : dashMonthStart,
+    useRemPeriod ? dashPeriodTo : dashMonthEnd
+  );
   const dashRegionalAmt  = dashQuotaLines.find(q=>q.label.toLowerCase().includes('regional contribution'))?.amount||0;
   const dashMummyAmt     = dashQuotaLines.find(q=>isMummyQuotaLabel(q.label))?.amount||0;
   const dashNatlQuotasAmt = dashQuotaLines
