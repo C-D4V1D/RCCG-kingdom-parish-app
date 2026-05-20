@@ -301,7 +301,12 @@
 
   // Register service worker (needed for Chrome install eligibility)
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/kpsc/sw.js', { scope: '/kpsc/' }).catch(() => {});
+    navigator.serviceWorker.register('/kpsc/sw.js', {
+      scope: '/kpsc/',
+      updateViaCache: 'none'
+    }).then(registration => {
+      registration.update().catch(() => {});
+    }).catch(() => {});
   }
 
   // ── Already installed as standalone app ─────────────────────────

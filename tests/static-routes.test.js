@@ -30,3 +30,27 @@ test('Cloudflare redirects do not rewrite KPSC back to an .html file', async () 
   assert.doesNotMatch(redirects, /^\/kpsc\/?\s+\/kpsc\.html\s+200$/m);
   assert.match(redirects, /^\/\* \/index\.html 200$/m);
 });
+
+test('cache headers force fresh HTML, manifest, and service worker after deploys', async () => {
+  const headers = await readFile(new URL('../_headers', import.meta.url), 'utf8');
+
+  assert.match(headers, /^\/\s*\n\s*Cache-Control: no-cache, no-store, must-revalidate$/m);
+  assert.match(headers, /^\/kpsc\/index\.html\s*\n\s*Cache-Control: no-cache, no-store, must-revalidate$/m);
+  assert.match(headers, /^\/kpsc\/manifest\.json\s*\n\s*Cache-Control: no-cache, no-store, must-revalidate$/m);
+  assert.match(headers, /^\/kpsc\/sw\.js\s*\n\s*Cache-Control: no-cache, no-store, must-revalidate$/m);
+});
+
+test('KPSC service worker prefers network for app shell updates', async () => {
+  const sw = await readFile(new URL('../kpsc/sw.js', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../kpsc/index.html', import.meta.url), 'utf8');
+
+  assert.match(sw, /const CACHE = 'kpsc-v3';/);
+  assert.match(sw, /const SHELL = \[/);
+  assert.match(sw, /'\/kpsc\/index\.html'/);
+  assert.match(sw, /'\/kpsc\/manifest\.json'/);
+  assert.match(sw, /'\/src\/css\/kpsc\.css'/);
+  assert.match(sw, /'\/src\/js\/kpsc\.js'/);
+  assert.match(sw, /networkFirst\(request, '\/kpsc\/index\.html'\)/);
+  assert.match(sw, /if \(isAppShellAsset\(url\.pathname\)\)/);
+  assert.match(html, /updateViaCache: 'none'/);
+});
