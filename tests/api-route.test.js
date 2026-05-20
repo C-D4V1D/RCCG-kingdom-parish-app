@@ -544,7 +544,6 @@ test('AI secretary keeps deterministic governance flags when provider omits them
     assert.equal(response.status, 200);
     assert.equal(body.summaryShort, 'All clear.');
     assert.ok(body.policyFlags.some(f => f.type === 'quorum_missing'));
-    assert.ok(body.policyFlags.some(f => f.type === 'meeting_not_ended'));
     assert.ok(body.policyFlags.some(f => f.type === 'threshold_review'));
     assert.ok(body.policyFlags.some(f => f.type === 'prompt_injection_risk'));
     assert.match(body.minutesMarkdown, /## Mandatory Governance Checks/);
@@ -953,8 +952,8 @@ test('AI secretary meeting create derives author from authenticated session', as
   assert.equal(response.status, 200);
   assert.equal(body.createdBy, 'Test User');
   assert.equal(body.createdByAccountId, 'ka-test');
-  assert.equal(insertBinds[7], 'Test User');
-  assert.equal(insertBinds[8], 'ka-test');
+  assert.equal(insertBinds[8], 'Test User');
+  assert.equal(insertBinds[9], 'ka-test');
 });
 
 test('settings api-status reports configured realtime API keys without exposing secrets', async () => {

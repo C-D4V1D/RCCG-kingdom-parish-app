@@ -4179,6 +4179,10 @@ async function createAiSecretaryMeeting(DB, data, auth) {
   const id = data.id || newId('AIM-');
   const participants = normalizeAiParticipants(data.participants);
   const now = new Date().toISOString();
+  // Author identity is always derived from the verified session — never from
+  // client-supplied body fields (data.createdBy is intentionally ignored).
+  const createdBy = auth?.name || '';
+  const createdByAccountId = auth?.id || '';
   // INSERT OR IGNORE makes the create idempotent: if the client retries a POST
   // with the same pre-generated ID (e.g. after a network error), the duplicate
   // INSERT is silently skipped and the existing row is returned unchanged.
@@ -4195,8 +4199,8 @@ async function createAiSecretaryMeeting(DB, data, auth) {
     JSON.stringify(participants),
     data.transcriptText || '',
     String(data.venue || '').trim(),
-    auth?.name || '',
-    auth?.id || '',
+    createdBy,
+    createdByAccountId,
     data.startedAt || '',
     now,
     data.scheduledFor ? String(data.scheduledFor).trim() : null,
