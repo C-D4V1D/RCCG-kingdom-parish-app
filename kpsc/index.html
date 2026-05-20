@@ -100,14 +100,9 @@
 <script src="/src/js/kpsc.js?v=2"></script>
 <script>
   if ('serviceWorker' in navigator) {
-    let refreshing = false;
-    const reloadOnServiceWorkerUpdate = () => {
-      if (refreshing) return;
-      refreshing = true;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
       window.location.reload();
-    };
-
-    navigator.serviceWorker.addEventListener('controllerchange', reloadOnServiceWorkerUpdate);
+    }, { once: true });
     navigator.serviceWorker.register('/kpsc/sw.js', {
       scope: '/kpsc/',
       updateViaCache: 'none'
