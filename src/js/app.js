@@ -66,6 +66,8 @@ const MONTHS = ['January','February','March','April','May','June','July','August
 const MAX_TRANSACTION_VIEW_NAME_LENGTH = 60;
 // Tolerance for considering a remittance "fully paid" (within 1% of due amount to allow for rounding)
 const PAYMENT_TOLERANCE_THRESHOLD = 0.99;
+// Tolerance for TG split validation — percentages must sum within ±0.1% to allow for floating-point rounding
+const TG_SUM_TOLERANCE = 0.001;
 
 const INCOME_TYPES = [
   { key:'membersTithe',    label:"Members' Tithe",         natl:0.58, local:0.42 },
@@ -340,6 +342,7 @@ function ymdLocal(d){
 function uid(){ return Date.now().toString(36) }
 function hasPermission(p){
   if(!state.user) return false;
+  // IT Admins have unrestricted access to all features — no permission lookup needed
   if(state.user.role === 'it_admin') return true;
   const rp = state.rolePermissions?.[state.user.role];
   const perms = rp || PERMISSIONS[state.user.role] || [];
@@ -8022,7 +8025,7 @@ async function saveRates(btn=null){
   // Validate TG split sums to 100%
   const tgKeys = ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed'];
   const tgSum = tgKeys.reduce((sum,k)=>sum+(r[k]??0),0);
-  if(Math.abs(tgSum-1) > 0.001){
+  if(Math.abs(tgSum-1) > TG_SUM_TOLERANCE){
     showAlert(`Thanksgiving (TG) split percentages must sum to 100% (currently ${Math.round(tgSum*1000)/10}%). Please correct before saving.`,'danger');
     return;
   }
@@ -8442,7 +8445,7 @@ async function exportData(btn=null){
   const restore = setBtnLoading(btn, 'Exporting…');
   try {
     const [usersRaw,income,remittances,expenses,petty,auditLog,settings,cashTransactions] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(),DB.getPetty(),DB.getAudit(),DB.getSettings(),DB.getCashTransactions()]);
-    // Strip PIN hashes — they must never leave the database in any export
+    // Strip sensitive auth data (PIN hashes) — they must never leave the database in any export
     const users = usersRaw.map(({pin:_pin, pinHash:_hash, ...u})=>u);
     const data={ users,income,remittances,expenses,petty,audit:auditLog,settings,cashTransactions, exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
     const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
