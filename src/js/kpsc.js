@@ -3185,6 +3185,10 @@ async function renderMeetingRoom(main) {
           ${isEditable ? '<p class="k-hint" style="margin-top:6px">Changes to meeting details save automatically.</p>' : ''}
         </div>
         <div class="k-field">
+          <label class="k-label">Venue <span class="k-label-hint">(optional — appears in minutes header)</span></label>
+          <input class="k-input" id="km-venue" type="text" placeholder="e.g. Parish Hall, RCCG Kingdom Parish" value="${esc(m?.venue || '')}" ${!isEditable ? 'readonly' : ''} />
+        </div>
+        <div class="k-field">
           <label class="k-label">Scheduled For <span class="k-label-hint">(optional — enables pre-meeting brief)</span></label>
           <input class="k-input" id="km-scheduled-for" type="datetime-local" value="${esc(m?.scheduledFor ? m.scheduledFor.slice(0, 16) : '')}" ${!isEditable ? 'readonly' : ''} />
         </div>
@@ -3382,7 +3386,7 @@ function readAttendance() {
     // Return each member separately so multiple attendance lines per group are preserved
     return groupMembers.map((mem, i) => {
       const el = document.getElementById(`att_present_${g.key}_${i}`);
-      return { group: g.key, label: g.label, present: !!(el?.checked), name: mem.name };
+      return { group: g.key, label: g.label, present: !!(el?.checked), name: mem.name, position: mem.position || '' };
     });
   }).flat();
 }
@@ -4540,13 +4544,14 @@ async function autoSaveNow() {
   const status = document.getElementById('km-status')?.value || 'draft';
   const participants = readAttendance();
   const scheduledFor = document.getElementById('km-scheduled-for')?.value || null;
+  const venue = document.getElementById('km-venue')?.value.trim() || '';
   const agendaText = document.getElementById('km-agenda')?.value?.trim() ?? undefined;
 
   try {
     let res;
     if (S.activeMeeting) {
       res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
-        title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants, scheduledFor,
+        title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants, scheduledFor, venue,
         ...(agendaText !== undefined ? { agendaText } : {}),
       });
     } else {
@@ -4559,7 +4564,7 @@ async function autoSaveNow() {
       res = await apiPost('ai-secretary-meetings', {
         id: Draft.pendingId,
         title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
-        createdBy: S.user?.name || '', scheduledFor,
+        createdBy: S.user?.name || '', scheduledFor, venue,
       });
     }
     if (res?.error) {
@@ -4896,6 +4901,7 @@ async function saveMeeting(btn) {
   // Preserve draft→recording transitions from the Start Meeting control, including new meetings.
   const status = rawStatus;
   const participants = readAttendance();
+  const venue = document.getElementById('km-venue')?.value.trim() || '';
 
   const orig = btn.textContent;
   btn.disabled = true;
@@ -4905,13 +4911,13 @@ async function saveMeeting(btn) {
     let res;
     if (S.activeMeeting) {
       res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
-        title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
+        title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants, venue,
         ...(agendaText !== undefined ? { agendaText } : {}),
       });
     } else {
       res = await apiPost('ai-secretary-meetings', {
         title, meetingDate: date, meetingType: type, status, transcriptText: trans, participants,
-        createdBy: S.user?.name || '',
+        createdBy: S.user?.name || '', venue,
       });
     }
     if (res.error) { showToast(res.error, 'error'); return; }

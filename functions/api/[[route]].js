@@ -874,6 +874,7 @@ async function handleInit(DB) {
       reviewed_by       TEXT DEFAULT '',
       public_share_token TEXT DEFAULT '',
       processed_at      TEXT DEFAULT '',
+      venue             TEXT DEFAULT '',
       created_at        TEXT DEFAULT (datetime('now')),
       deleted_at        TEXT DEFAULT '',
       deleted_by        TEXT DEFAULT ''
@@ -1113,6 +1114,7 @@ async function handleInit(DB) {
     `ALTER TABLE ai_secretary_meetings ADD COLUMN reviewed_at TEXT DEFAULT ''`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN reviewed_by TEXT DEFAULT ''`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN public_share_token TEXT DEFAULT ''`,
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN venue TEXT DEFAULT ''`,
     // Soft-delete audit columns for KPSC finance, partners, partner payments, and projects.
     `ALTER TABLE kpsc_finance_entries ADD COLUMN deleted_at TEXT DEFAULT ''`,
     `ALTER TABLE kpsc_finance_entries ADD COLUMN deleted_by TEXT DEFAULT ''`,
@@ -3478,18 +3480,19 @@ function normalizeAiParticipants(participants) {
   const incoming = Array.isArray(participants) ? participants : [];
   if (incoming.length === 0) {
     return [
-      { group: 'men',       label: 'Men',       present: false, name: '' },
-      { group: 'women',     label: 'Women',     present: false, name: '' },
-      { group: 'youth',     label: 'Youth',     present: false, name: '' },
-      { group: 'ministers', label: 'Ministers', present: false, name: '' },
+      { group: 'men',       label: 'Men',       present: false, name: '', position: '' },
+      { group: 'women',     label: 'Women',     present: false, name: '', position: '' },
+      { group: 'youth',     label: 'Youth',     present: false, name: '', position: '' },
+      { group: 'ministers', label: 'Ministers', present: false, name: '', position: '' },
     ];
   }
   // Preserve all entries as-is (supports multiple members per group from the KPSC portal)
   return incoming.map(p => ({
-    group:   String(p.group   || 'men').toLowerCase(),
-    label:   String(p.label   || p.group || ''),
-    present: !!p.present,
-    name:    String(p.name    || '').trim(),
+    group:    String(p.group || '').toLowerCase(),
+    label:    String(p.label || p.group || ''),
+    present:  !!p.present,
+    name:     String(p.name     || '').trim(),
+    position: String(p.position || '').trim(),
   }));
 }
 
@@ -3524,6 +3527,7 @@ function aiSecretaryMeetingFromRow(row) {
     scheduledFor: row.scheduled_for || null,
     preBriefMarkdown: row.pre_brief_markdown || null,
     preBriefGeneratedAt: row.pre_brief_generated_at || null,
+    venue: row.venue || '',
   };
 }
 
@@ -3711,16 +3715,22 @@ function aiSecretaryParticipantCoverage(participants) {
 
 function buildAiSecretaryGovernanceFlags(meeting) {
   const transcript = meeting.transcriptText || '';
-  const { missingGroups, quorumMet } = aiSecretaryParticipantCoverage(meeting.participants);
+  const rawParticipants = meeting.participants || [];
+  const { missingGroups, quorumMet } = aiSecretaryParticipantCoverage(rawParticipants);
   const flags = [];
+  // Only raise quorum_missing as high-severity when attendance was actually recorded.
+  // If no participant has a name or is marked present, the attendance form was never
+  // filled in — flag it as medium to prompt the secretary rather than alarming them.
   if (!quorumMet) {
-    flags.push({ type: 'quorum_missing', severity: 'high', message: `Missing required representative group(s): ${missingGroups.join(', ')}.` });
+    const hasRealAttendanceData = rawParticipants.some(p => p.present || String(p.name || '').trim());
+    if (hasRealAttendanceData) {
+      flags.push({ type: 'quorum_missing', severity: 'high', message: `Missing required representative group(s): ${missingGroups.join(', ')}.` });
+    } else {
+      flags.push({ type: 'quorum_missing', severity: 'medium', message: 'Attendance has not been recorded; please mark attendance before approving these minutes.' });
+    }
   }
   if (!String(transcript).trim()) {
     flags.push({ type: 'transcript_missing', severity: 'high', message: 'No transcript or secretary notes were provided; generated minutes require manual reconstruction from approved records.' });
-  }
-  if (!['ended', 'processed'].includes(String(meeting.status || '').toLowerCase())) {
-    flags.push({ type: 'meeting_not_ended', severity: 'medium', message: 'Meeting was processed before being marked ended; confirm the transcript is final before approval.' });
   }
   if (/building|land|capital|renovation|project|equipment/i.test(transcript)) {
     flags.push({ type: 'threshold_review', severity: 'medium', message: 'Potential major capital project detected; confirm whether two-thirds approval is required.' });
@@ -3835,6 +3845,10 @@ function sanitizeAiSecretaryOutput(rawOutput, meeting, deterministicOutput) {
   output.minutesMarkdown = stripAiMinutesTimestampLines(output.minutesMarkdown);
   if (!hasStandardMinutesStructure(output.minutesMarkdown)) {
     output.minutesMarkdown = deterministic.minutesMarkdown;
+    output.policyFlags = dedupeAiSecretaryFlags([
+      ...output.policyFlags,
+      { type: 'minutes_template_used', severity: 'low', message: 'AI-generated minutes did not meet the required 8-section structure; the standard template has been used instead. Please fill in all sections before approving.' },
+    ]);
   }
   output.minutesMarkdown = appendAiSecretaryMandatoryChecks(output.minutesMarkdown, governanceFlags);
   return output;
@@ -4170,8 +4184,8 @@ async function createAiSecretaryMeeting(DB, data, auth) {
   // INSERT is silently skipped and the existing row is returned unchanged.
   await DB.prepare(`
     INSERT OR IGNORE INTO ai_secretary_meetings
-      (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,created_by,created_by_account_id,started_at,created_at,scheduled_for)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,venue,created_by,created_by_account_id,started_at,created_at,scheduled_for)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     String(data.title || 'KPSC Meeting').trim(),
@@ -4180,6 +4194,7 @@ async function createAiSecretaryMeeting(DB, data, auth) {
     data.status || 'draft',
     JSON.stringify(participants),
     data.transcriptText || '',
+    String(data.venue || '').trim(),
     auth?.name || '',
     auth?.id || '',
     data.startedAt || '',
@@ -4246,11 +4261,14 @@ async function updateAiSecretaryMeeting(DB, id, data, auth) {
   const reviewedBy = data.reviewedBy !== undefined
     ? String(data.reviewedBy || '').trim()
     : (existing.reviewed_by || '');
+  const venue = data.venue !== undefined
+    ? String(data.venue || '').trim()
+    : (existing.venue || '');
   await DB.prepare(`
     UPDATE ai_secretary_meetings SET
       title=?, meeting_type=?, meeting_date=?, status=?, participants_json=?, transcript_text=?, ended_at=?,
       summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?,
-      suggested_projects_json=?, scheduled_for=?, reviewed_at=?, reviewed_by=?, created_by_account_id=?, agenda_text=?
+      suggested_projects_json=?, scheduled_for=?, reviewed_at=?, reviewed_by=?, venue=?, created_by_account_id=?, agenda_text=?
     WHERE id=?
   `).bind(
     data.title !== undefined ? String(data.title).trim() : existing.title,
@@ -4270,6 +4288,7 @@ async function updateAiSecretaryMeeting(DB, id, data, auth) {
     scheduledFor,
     reviewedAt,
     reviewedBy,
+    venue,
     existing.created_by_account_id || (auth?.name && auth.name === (existing.created_by || '') ? auth.id : ''),
     data.agendaText !== undefined ? String(data.agendaText || '').trim() : (existing.agenda_text || ''),
     id,
@@ -4278,8 +4297,39 @@ async function updateAiSecretaryMeeting(DB, id, data, auth) {
 }
 
 async function callDeepSeekForMeeting(apiKey, meeting) {
-  const participantList = (meeting.participants || [])
-    .map(p => `${p.label}: ${p.present ? (p.name || 'Present') : 'Absent'}`).join(', ');
+  // Build a structured, grouped attendance block so the AI knows exactly who
+  // attended and what role each person holds — essential for correct attribution
+  // of motions, seconds, and decisions in the minutes.
+  const GROUP_ORDER = ['men', 'women', 'youth', 'ministers'];
+  const GROUP_LABELS = { men: 'Men', women: 'Women', youth: 'Youth', ministers: 'Ministers' };
+  const fmtMember = p => p.position ? `${p.name || 'Unnamed'} (${p.position})` : (p.name || 'Unnamed');
+  const participantList = GROUP_ORDER.map(grp => {
+    const members = (meeting.participants || []).filter(p => p.group === grp);
+    if (members.length === 0) return `${GROUP_LABELS[grp]}: Absent`;
+    const present = members.filter(p => p.present);
+    const absent  = members.filter(p => !p.present);
+    const parts   = [];
+    if (present.length) parts.push(`Present — ${present.map(fmtMember).join(', ')}`);
+    if (absent.length)  parts.push(`Absent — ${absent.map(p => p.name || 'Unnamed').join(', ')}`);
+    return `${GROUP_LABELS[grp]}: ${parts.join(' | ')}`;
+  }).join('\n');
+
+  // Include meeting start/end times when available (from live recording timestamps).
+  const timingParts = [];
+  if (meeting.startedAt) {
+    try {
+      const d = new Date(meeting.startedAt);
+      if (!isNaN(d)) timingParts.push(`Meeting opened: ${d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`);
+    } catch (_) {}
+  }
+  if (meeting.endedAt) {
+    try {
+      const d = new Date(meeting.endedAt);
+      if (!isNaN(d)) timingParts.push(`Meeting closed: ${d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`);
+    } catch (_) {}
+  }
+  const timingInfo = timingParts.join(' | ');
+
   const policyContext = aiSecretaryText(meeting.policyContext);
   const prompt = `You are an expert meeting minutes writer for the Kingdom Parish Stewardship Committee (KPSC), a Nigerian church committee. Correct transcription errors intelligently based on context. Your job is to produce a clean, professional set of structured minutes from the meeting rough transcript below.
 
@@ -4300,6 +4350,7 @@ Use exactly this numbered-section structure with Markdown headings:
 
 # [Meeting Title]
 ## Minutes of [Type] Meeting — [day, Nth Month Year]
+### [Venue, if provided] | [Time opened] – [Time closed, if available]
 
 ---
 
@@ -4373,12 +4424,19 @@ Tone rules:
 
 ── RESOLUTION SCHEMA ─────────────────────────────────────────────────────
 Each resolution object: { id, text, category, resolutionType, requiredThreshold, approved, amount, motionBy, secondedBy, voteSummary }
-- resolutionType: approval | rejection | amendment | motion | vote | financial_approval | decision
+- resolutionType — choose the MOST specific value that applies:
+    financial_approval — any decision involving a naira amount, payment, fund disbursement, or budget
+    rejection          — item explicitly voted down, declined, or not approved
+    amendment          — change or modification to an existing policy, decision, or document
+    motion             — proposal formally put forward (whether passed, deferred, or pending a vote)
+    approval           — non-financial item confirmed or approved
+    vote               — a general ballot or show of hands not clearly fitting above
+    decision           — any other agreed-upon outcome
 - category: welfare | financial | development | governance | other
 - requiredThreshold: simple_majority | two_thirds | manual_review
 - approved: true | false | null (null = outcome unclear or deferred)
-- amount: naira amount as numeric string, or empty string
-- motionBy / secondedBy: person name or empty string
+- amount: naira amount as numeric string (digits only, no ₦ symbol), or empty string
+- motionBy / secondedBy: use the person's name as stated in the Attendance section above, or empty string
 - voteSummary: concise vote outcome, e.g. "Unanimous", "7 in favour, 2 against"
 
 ── ACTION ITEM SCHEMA ────────────────────────────────────────────────────
@@ -4407,10 +4465,19 @@ ${policyContext || '(none saved)'}
 Title: ${meeting.title}
 Date: ${meeting.meetingDate}
 Type: ${meeting.meetingType}
-Attendance: ${participantList}
+${meeting.venue ? `Venue: ${meeting.venue}` : ''}
+${timingInfo ? timingInfo : ''}
+Attendance:
+${participantList}
+
 ${meeting.agendaText ? `\nMeeting Agenda (pre-set by the Chairman):\n${meeting.agendaText}\n\nIMPORTANT: Use the agenda above to structure "## 4. Agenda and Matters Discussed". Each agenda item should appear as a sub-heading even if discussion is brief. Items not in the agenda but raised during the meeting should appear at the end of that section.\n` : ''}
+
+${meeting.transcriptText
+  ? `Transcript note: The following is a rough, error-heavy phonetic transcript produced by an AI transcriber. Many words are misspelled or misheard (e.g. Nigerian names mangled, naira amounts garbled, church/committee terms misrecognised). Use the surrounding conversational context to deduce the true meaning of unclear passages. Correct all technical jargon, proper nouns, and grammar errors as you draft the minutes — do not reproduce the transcript errors verbatim.
+
 Transcript:
-${meeting.transcriptText || '(no transcript provided — produce a skeleton minutes document with placeholders for the secretary to complete)'}
+${meeting.transcriptText}`
+  : `Transcript:\n(no transcript provided — produce a skeleton minutes document with placeholders for the secretary to complete)`}
 
 Return only valid JSON. No markdown fences. No text before or after the JSON object.`;
 
