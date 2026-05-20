@@ -42,7 +42,7 @@
           placeholder="••••••" inputmode="numeric"
           onkeydown="if(event.key==='Enter')Kpsc.login(this.closest('.kl-card').querySelector('.kl-submit'))" />
         <button class="kl-submit" onclick="Kpsc.login(this)">Sign In</button>
-        <a class="kl-install-btn" href="/kpsc/install/">Install App on this Device</a>
+        <a class="kl-install-btn" id="kpsc-install-link" href="/kpsc/install/">Install App on this Device</a>
         <p class="kl-hint">Contact the IT Administrator if you have forgotten your PIN.</p>
       </div>
     </div>
@@ -100,6 +100,33 @@
 
 <script src="/src/js/kpsc.js?v=2"></script>
 <script>
+  let deferredInstallPrompt = null;
+  const installLink = document.getElementById('kpsc-install-link');
+
+  window.addEventListener('beforeinstallprompt', event => {
+    event.preventDefault();
+    deferredInstallPrompt = event;
+  });
+
+  window.addEventListener('appinstalled', () => {
+    deferredInstallPrompt = null;
+  });
+
+  if (installLink) {
+    installLink.addEventListener('click', async event => {
+      if (!deferredInstallPrompt) return;
+      event.preventDefault();
+      try {
+        deferredInstallPrompt.prompt();
+        const { outcome } = await deferredInstallPrompt.userChoice;
+        deferredInstallPrompt = null;
+        if (outcome !== 'accepted') window.location.href = '/kpsc/install/';
+      } catch (_) {
+        window.location.href = '/kpsc/install/';
+      }
+    });
+  }
+
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       window.location.reload();
