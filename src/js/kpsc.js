@@ -2755,7 +2755,7 @@ function dashCardUpcomingMeeting(ctx) {
 function dashCardMeetingFrequencyAlert(ctx) {
   const days = ctx.daysSinceLastMeeting;
   // Only show alert if more than 14 days since last meeting and no upcoming meeting is already planned
-  if (days === null || days < 14) return '';
+  if (days === null || days < 0 || days < 14) return '';
   if (ctx.upcomingMeeting?.meetingDate) return ''; // already have something planned
 
   let weeksText;
@@ -11089,12 +11089,12 @@ function abAddCustomItem() {
   if (!text) { showToast('Type an agenda item first.', 'warn'); return; }
 
   // Smart deduplication: case-insensitive comparison against selected items and current suggestions
-  const normalise = s => String(s).toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
-  const newKey = normalise(text);
-  const duplicate = S.agendaBuilderSelected.find(s => normalise(s) === newKey)
+  const normalize = s => String(s).toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+  const newKey = normalize(text);
+  const duplicate = S.agendaBuilderSelected.find(s => normalize(s) === newKey)
     || S.agendaBuilderSuggestions.find(s => {
       const label = typeof s === 'string' ? s : (s.topic || '');
-      return normalise(label) === newKey;
+      return normalize(label) === newKey;
     });
   if (duplicate) {
     const dupLabel = typeof duplicate === 'string' ? duplicate : (duplicate.topic || String(duplicate));
