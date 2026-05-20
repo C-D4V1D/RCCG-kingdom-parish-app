@@ -53,6 +53,7 @@ const FINANCE_ANY_ROLE       = ['it_admin', 'accountant', 'admin_officer', 'past
 // Rate limiting: max failed login attempts before a 5-minute lockout
 const LOGIN_MAX_ATTEMPTS = 10;
 const LOGIN_WINDOW_MS    = 5 * 60 * 1000;  // 5 minutes
+const MONEY_TOLERANCE_KOBO = 0.01;
 
 /**
  * Verify a KPSC session token and check that the account has one of the
@@ -1497,7 +1498,8 @@ async function loginUser(DB, data, request) {
 
   // Rate limiting: check failed attempts for this IP
   const ip = (request?.headers?.get('CF-Connecting-IP') || '').split(',')[0].trim();
-  if (!ip) return err('Client IP unavailable', 400);
+  const cfRay = String(request?.headers?.get('CF-Ray') || '').trim();
+  if (!ip || !cfRay) return err('Cloudflare edge headers unavailable', 400);
   const now = Date.now();
   try {
     const attempt = await DB.prepare(`SELECT count, first_at, locked_until FROM login_attempts WHERE ip=?`).bind(ip).first();
@@ -1822,7 +1824,7 @@ async function createIncome(DB, data, caller) {
     const cashAmt      = total - bankTransfer - directPetty;
     // Monetary values are represented as floating-point numbers across the app.
     // Use a 1-kobo tolerance to absorb binary float noise at the split boundary.
-    if (cashAmt < -0.01) {
+    if (cashAmt < -MONEY_TOLERANCE_KOBO) {
       return err(`Income split invalid: bankTransfer (${bankTransfer}) + directPettyCash (${directPetty}) exceeds totalCollection (${total})`, 422);
     }
   }

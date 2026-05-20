@@ -11,7 +11,7 @@ async function readJson(response) {
 function createRequest(url, method = 'GET', body, extraHeaders = {}) {
   const init = {
     method,
-    headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.11', ...extraHeaders },
+    headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.11', 'CF-Ray': 'test-ray-auth', ...extraHeaders },
   };
   if (body !== undefined) init.body = JSON.stringify(body);
   return new Request(url, init);
