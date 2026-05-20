@@ -5,6 +5,7 @@
   --success:#3B6D11;--success-light:#EAF3DE;
   --info:#185FA5;--info-light:#E6F1FB;
   --purple:#534AB7;--purple-light:#EEEDFE;
+  /* text3 intentionally darker than prior value to improve muted-text readability contrast */
   --text:#1a1a1a;--text2:#555;--text3:#5c5c5c;
   --border:rgba(0,0,0,0.09);--border2:rgba(0,0,0,0.16);
   --bg:#f4f4f2;--card:#fff;--surface:#f8f8f6;

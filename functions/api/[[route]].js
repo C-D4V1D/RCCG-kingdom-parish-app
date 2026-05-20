@@ -509,7 +509,6 @@ export async function onRequest(context) {
         return await updateExpense(DB, param, body);
       }
       if (method === 'DELETE' && param) {
-        // Fixed: was incorrectly using requireKpscRole — now uses finance auth
         const auth = await requireFinanceRole(DB, request, FINANCE_ADMIN_ROLES);
         if (auth instanceof Response) return auth;
         return await deleteExpense(DB, param);
@@ -1823,7 +1822,8 @@ async function createIncome(DB, data, caller) {
     // Cash with accountant is whatever remains after bank and petty allocations
     const cashAmt      = total - bankTransfer - directPetty;
     // Monetary values are represented as floating-point numbers across the app.
-    // Use a 1-kobo tolerance to absorb binary float noise at the split boundary.
+    // cashAmt < -MONEY_TOLERANCE_KOBO means bankTransfer + directPettyCash
+    // exceeds totalCollection by more than 1 kobo (beyond rounding noise).
     if (cashAmt < -MONEY_TOLERANCE_KOBO) {
       const fmtNaira = (amt) => `₦${Number(amt || 0).toLocaleString('en-NG', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
       return err(`Income split invalid: bankTransfer (${fmtNaira(bankTransfer)}) + directPettyCash (${fmtNaira(directPetty)}) exceeds totalCollection (${fmtNaira(total)})`, 422);
