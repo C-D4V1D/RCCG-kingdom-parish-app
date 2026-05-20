@@ -1985,7 +1985,7 @@ async function calcChurchBalance(asOfDate){
     // numbers in the "Cash with Accountant" card while still allowing the total
     // balance to go negative when combined outflows exceed inflows.
     cashWithAccountant: Math.max(0, cashWithAccountantRaw),
-    // Preferred naming for new usage paths; legacy keys are retained for compatibility.
+    // Preferred naming for new usage paths; keep legacy keys until all callers are migrated.
     cashPosition: Math.max(0, cashWithAccountantRaw),
     // cashDeficit > 0 means cash outflows (approved + pending) exceed recorded cash inflows —
     // accountant has disbursed more cash than received; pending expenses awaiting approval contribute here

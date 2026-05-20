@@ -53,7 +53,7 @@ const FINANCE_ANY_ROLE       = ['it_admin', 'accountant', 'admin_officer', 'past
 // Rate limiting: max failed login attempts before a 5-minute lockout
 const LOGIN_MAX_ATTEMPTS = 10;
 const LOGIN_WINDOW_MS    = 5 * 60 * 1000;  // 5 minutes
-const MONEY_TOLERANCE_KOBO = 0.01;
+const MONEY_TOLERANCE_NAIRA = 0.01;
 
 /**
  * Verify a KPSC session token and check that the account has one of the
@@ -1822,9 +1822,9 @@ async function createIncome(DB, data, caller) {
     // Cash with accountant is whatever remains after bank and petty allocations
     const cashAmt      = total - bankTransfer - directPetty;
     // Monetary values are represented as floating-point numbers across the app.
-    // cashAmt < -MONEY_TOLERANCE_KOBO means bankTransfer + directPettyCash
+    // cashAmt < -MONEY_TOLERANCE_NAIRA means bankTransfer + directPettyCash
     // exceeds totalCollection by more than 1 kobo (beyond rounding noise).
-    if (cashAmt < -MONEY_TOLERANCE_KOBO) {
+    if (cashAmt < -MONEY_TOLERANCE_NAIRA) {
       const fmtNaira = (amt) => `₦${Number(amt || 0).toLocaleString('en-NG', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
       return err(`Income split invalid: bankTransfer (${fmtNaira(bankTransfer)}) + directPettyCash (${fmtNaira(directPetty)}) exceeds totalCollection (${fmtNaira(total)})`, 422);
     }
