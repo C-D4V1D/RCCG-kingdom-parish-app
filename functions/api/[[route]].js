@@ -123,10 +123,9 @@ async function requireFinanceRole(DB, request, allowedRoles) {
   return user;
 }
 
-// Per-request CORS headers, updated at the start of each onRequest call.
-// Note: this is a module-level mutable — acceptable for this app's traffic
-// patterns (low concurrency, all legitimate origins in the allowlist).
-let CORS_HEADERS = buildCorsHeaders('');
+// Static CORS headers use the primary allowed origin to avoid mutable
+// module-level response state across concurrent requests.
+const CORS_HEADERS = buildCorsHeaders(CORS_ALLOWED_ORIGINS[0]);
 
 const ok  = (data)       => new Response(JSON.stringify(data),        { status: 200, headers: CORS_HEADERS });
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
@@ -198,6 +197,12 @@ async function hashPin(pin) {
   return `sha256$${hex}`;
 }
 
+async function sha256Hex(value) {
+  const data = new TextEncoder().encode(String(value ?? ''));
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 async function verifyPin(storedPin, inputPin) {
   const stored = String(storedPin || '');
   const input = String(inputPin || '');
@@ -238,9 +243,6 @@ async function tableHasColumns(DB, table, cols) {
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
-
-  // Update per-request CORS headers based on the incoming origin
-  CORS_HEADERS = buildCorsHeaders(request.headers.get('origin') || '');
 
   // Handle CORS preflight
   if (request.method === 'OPTIONS') {
@@ -1494,7 +1496,8 @@ async function loginUser(DB, data, request) {
   if (!role || !pin) return err('role and pin are required', 400);
 
   // Rate limiting: check failed attempts for this IP
-  const ip = (request?.headers?.get('CF-Connecting-IP') || request?.headers?.get('X-Forwarded-For') || 'unknown').split(',')[0].trim();
+  const ip = (request?.headers?.get('CF-Connecting-IP') || '').split(',')[0].trim();
+  if (!ip) return err('Client IP unavailable', 400);
   const now = Date.now();
   try {
     const attempt = await DB.prepare(`SELECT count, first_at, locked_until FROM login_attempts WHERE ip=?`).bind(ip).first();
@@ -1817,6 +1820,8 @@ async function createIncome(DB, data, caller) {
     const directPetty  = Number(data.directPettyCash   || 0);
     // Cash with accountant is whatever remains after bank and petty allocations
     const cashAmt      = total - bankTransfer - directPetty;
+    // Monetary values are represented as floating-point numbers across the app.
+    // Use a 1-kobo tolerance to absorb binary float noise at the split boundary.
     if (cashAmt < -0.01) {
       return err(`Income split invalid: bankTransfer (${bankTransfer}) + directPettyCash (${directPetty}) exceeds totalCollection (${total})`, 422);
     }
@@ -2494,7 +2499,13 @@ async function saveSettings(DB, data, caller) {
     if (before !== stored) {
       const auditId = newId('A');
       const actor = caller?.name || 'System';
-      const detail = `Setting '${key}' changed` + (before !== null ? ` from '${String(before).slice(0, 80)}'` : '') + ` to '${String(stored).slice(0, 80)}'`;
+      const beforePreview = before !== null ? String(before).slice(0, 80) : '';
+      const afterPreview = String(stored).slice(0, 80);
+      const beforeHash = before !== null ? await sha256Hex(before) : '';
+      const afterHash = await sha256Hex(stored);
+      const detail = `Setting '${key}' changed`
+        + (before !== null ? ` from '${beforePreview}' [${beforeHash.slice(0, 12)}]` : '')
+        + ` to '${afterPreview}' [${afterHash.slice(0, 12)}]`;
       try {
         await DB.prepare(`INSERT INTO audit_log (id,type,detail,by_user,ts) VALUES (?,?,?,?,?)`)
           .bind(auditId, 'settings_change', detail, actor, new Date().toISOString()).run();

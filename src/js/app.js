@@ -164,8 +164,13 @@ async function apiFetch(path, method='GET', body=null){
   const opts = { method, headers };
   if(body !== null) opts.body = JSON.stringify(body);
   const res = await fetch('/api/'+path, opts);
-  const data = await res.json();
-  if(!res.ok) throw new Error(data.error || `API error ${res.status}`);
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok){
+    const e = new Error(data.error || `API error ${res.status}`);
+    e.status = res.status;
+    e.code = data.code || '';
+    throw e;
+  }
   return data;
 }
 
@@ -8749,7 +8754,7 @@ function submitKPSCAlert(){
       .then(s => { state.rolePermissions = s.rolePermissions || null; initApp(); })
       .catch(e => {
         // If the server returns 401, the stored session has expired — force re-login
-        if(String(e?.message||'').includes('401') || String(e?.message||'').toLowerCase().includes('session')) {
+        if(Number(e?.status) === 401) {
           try { localStorage.removeItem('rccgSession'); localStorage.removeItem('rccgFinanceSession'); } catch(_) {}
           state.user = null; state.sessionToken = '';
           if(loginEl) loginEl.style.display = 'flex';

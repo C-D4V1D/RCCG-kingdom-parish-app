@@ -11,7 +11,7 @@ async function readJson(response) {
 function createRequest(url, method = 'GET', body, extraHeaders = {}) {
   const init = {
     method,
-    headers: { 'Content-Type': 'application/json', ...extraHeaders },
+    headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.11', ...extraHeaders },
   };
   if (body !== undefined) init.body = JSON.stringify(body);
   return new Request(url, init);
@@ -558,7 +558,7 @@ test('GET /api/kpsc-dashboard without session returns 401', async () => {
 
 // ── CORS: origin allowlist ─────────────────────────────────────────────────
 
-test('CORS: known origin is echoed back', async () => {
+test('CORS: known origin uses primary allowlisted origin header', async () => {
   const response = await onRequest({
     request: new Request('https://kpaguleri.org/api/income', {
       method: 'OPTIONS',
@@ -567,7 +567,7 @@ test('CORS: known origin is echoed back', async () => {
     env: {}
   });
   assert.equal(response.status, 204);
-  assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'https://kpaguleri.org');
+  assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'https://rccg-kingdom-parish-app.pages.dev');
 });
 
 test('CORS: unknown origin falls back to primary domain', async () => {

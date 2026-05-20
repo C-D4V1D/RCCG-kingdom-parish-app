@@ -7,9 +7,9 @@ async function readJson(response) {
 }
 
 function createRequest(url, method = 'GET', body) {
-  const init = { method };
+  const init = { method, headers: { 'CF-Connecting-IP': '203.0.113.10' } };
   if (body !== undefined) {
-    init.headers = { 'Content-Type': 'application/json' };
+    init.headers = { ...init.headers, 'Content-Type': 'application/json' };
     init.body = JSON.stringify(body);
   }
   return new Request(url, init);
