@@ -326,7 +326,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-mem-group{margin-bottom:20px;}
 .k-mem-group-hdr{font-size:12px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;
   color:var(--navy);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border);}
-.k-mem-row{display:grid;grid-template-columns:110px 1fr 1fr 40px 34px;gap:8px;align-items:center;margin-bottom:8px;}
+.k-mem-row{display:grid;grid-template-columns:110px 1fr 1fr 120px 40px 34px;gap:8px;align-items:center;margin-bottom:8px;}
 .k-members-actions{margin-top:20px;padding-top:16px;border-top:1px solid var(--border);}
 
 /* ── ARCHIVE SEARCH ────────────────────────────────────────────── */
@@ -348,7 +348,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
   .kl-card{padding:28px 20px 20px;}
   .k-dash-stats{grid-template-columns:1fr 1fr;}.k-dash-stats .k-stat:last-child{grid-column:1/-1;}
   .k-field-row{grid-template-columns:1fr;}
-  .k-mem-row{grid-template-columns:100px 1fr 40px 28px;}.k-mem-pos{display:none;}
+  .k-mem-row{grid-template-columns:1fr 1fr;gap:6px;}.k-mem-row > *{min-width:0;}.k-mem-row select,.k-mem-row input[type=tel]{grid-column:1/-1;}.k-mem-row .k-vfp-enroll-btn,.k-mem-row .kbtn-remove{grid-column:auto;}
   .k-stepper{padding:12px 10px;}
   .k-step-label{font-size:9px;}
   .k-step-dot{width:24px;height:24px;font-size:11px;}
@@ -380,6 +380,16 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 /* ── ROLE PERMISSIONS TABLE ────────────────────────────────────── */
 .k-perm-table{width:100%;border-collapse:collapse;font-size:13px;}
 .k-perm-table th,.k-perm-table td{border:1px solid var(--border);padding:8px 10px;text-align:center;}
+/* ── ROLE PERMISSIONS CARD (new layout) ─────────────────────────── */
+.k-perm-roles-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-top:12px;}
+.k-perm-role-card{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.k-perm-role-hdr{background:var(--navy-light);color:var(--navy);font-weight:700;font-size:13px;padding:10px 14px;border-bottom:1px solid var(--border);}
+.k-perm-row{display:flex;align-items:center;padding:8px 14px;border-bottom:1px solid var(--border);gap:8px;}
+.k-perm-row:last-child{border-bottom:none;}
+.k-perm-page-name{flex:1;font-size:13px;color:var(--text2);}
+.k-perm-checks{display:flex;gap:10px;}
+.k-perm-check-lbl{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text3);cursor:pointer;white-space:nowrap;}
+.k-perm-check-lbl input{cursor:pointer;}
 .k-perm-role-col{text-align:left;min-width:150px;background:var(--surface2);font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--text3);}
 .k-perm-page-col{min-width:72px;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--text3);background:var(--surface2);}
 .k-perm-role-name{text-align:left;font-weight:500;color:var(--text2);white-space:nowrap;}
@@ -436,7 +446,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-ir-saved-cards{display:flex;flex-direction:column;gap:10px;padding:12px 16px 16px;}
 @media(max-width:600px){.k-ir-row-2col,.k-ir-row-3col{grid-template-columns:1fr;}}
 .k-review-textarea{min-height:76px;}
-.k-review-minutes{min-height:260px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;}
+.k-review-minutes{min-height:420px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;}
 .k-review-preview{min-height:260px;overflow-y:auto;border:1.5px solid #e0e0e0;border-radius:8px;padding:12px;background:#fafafa;font-size:13px;}
 .k-review-minutes-wrap{display:flex;gap:12px;margin-bottom:14px;}
 .k-review-list{display:flex;flex-direction:column;gap:10px;margin-bottom:14px;}
@@ -633,6 +643,13 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 /* ── FINANCE CARD DELETE BUTTON ─────────────────────────────────── */
 .k-meeting-card .kbtn-danger{opacity:.8;}
 .k-meeting-card .kbtn-danger:hover{opacity:1;}
+.k-mc-reminder{margin-top:8px;font-size:12px;color:var(--amber);font-weight:500;padding:5px 8px;background:var(--gold-light);border-radius:6px;border-left:3px solid var(--gold);}
+/* ── POST-MEETING OUTCOME ROWS ─────────────────────────────────── */
+.k-outcome-row{background:var(--white);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;}
+.k-outcome-topic{font-size:13px;font-weight:600;color:var(--text);line-height:1.4;margin-bottom:8px;}
+.k-outcome-btns{display:flex;gap:6px;flex-wrap:wrap;}
+.k-outcome-btns .kbtn{font-size:11px;}
+@media(max-width:560px){.k-outcome-btns{flex-direction:column;gap:4px;}.k-outcome-btns .kbtn{width:100%;justify-content:center;text-align:center;}}
 
 /* ── MOBILE RESPONSIVE IMPROVEMENTS ────────────────────────────── */
 @media (max-width: 480px) {
@@ -696,16 +713,16 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .ka-subtab:hover:not(.active){color:var(--navy);background:rgba(30,58,95,.06);}
 
 /* ── FLOATING ACTION BUTTON ─────────────────────────────────────── */
-#ka-fab{position:fixed;right:16px;bottom:72px;width:52px;height:52px;border-radius:50%;
-  background:var(--navy);color:#fff;border:none;font-size:22px;font-weight:300;
+#ka-fab{position:fixed;right:16px;bottom:72px;
+  background:var(--navy);color:#fff;border:none;
   line-height:1;cursor:pointer;z-index:200;
   box-shadow:0 4px 16px rgba(30,58,95,.35),0 2px 6px rgba(0,0,0,.15);
   display:flex;align-items:center;justify-content:center;
   transition:background .15s,transform .1s,box-shadow .15s;
-  font-family:'DM Sans',sans-serif;letter-spacing:0;padding:0;
-  /* Wide labels: shrink font and expand width */
-  width:auto;min-width:52px;height:52px;border-radius:26px;
-  padding:0 16px;font-size:14px;font-weight:700;white-space:nowrap;}
+  font-family:'DM Sans',sans-serif;letter-spacing:0;
+  min-width:52px;height:52px;border-radius:26px;
+  padding:0 14px;font-size:13px;font-weight:700;white-space:nowrap;
+  max-width:calc(100vw - 32px);overflow:hidden;text-overflow:ellipsis;}
 #ka-fab:hover{background:var(--navy-dark);box-shadow:0 6px 20px rgba(30,58,95,.45);}
 #ka-fab:active{transform:scale(.95);}
 

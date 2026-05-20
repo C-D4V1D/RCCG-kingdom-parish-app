@@ -112,6 +112,11 @@ async function getTermiiSettings(DB) {
     'kpsc_termii_lapsed_sms', 'kpsc_termii_premeeting_sms',
     'kpsc_termii_actionitem_sms', 'kpsc_termii_deadline_sms',
     'kpsc_sms_freq_cap', 'kpsc_sms_cooloff_days',
+    // System SMS message templates (editable in Settings)
+    'kpsc_sms_text_welcome', 'kpsc_sms_text_payment',
+    'kpsc_sms_text_newmonth', 'kpsc_sms_text_anniversary',
+    'kpsc_sms_text_milestone6', 'kpsc_sms_text_milestone12',
+    'kpsc_sms_text_premeeting', 'kpsc_sms_text_deadline',
   ];
   const placeholders = keys.map(() => '?').join(',');
   const { results } = await DB.prepare(
@@ -137,6 +142,15 @@ async function getTermiiSettings(DB) {
     deadlineSms:     map.kpsc_termii_deadline_sms     !== '0',
     freqCap:         parseInt(map.kpsc_sms_freq_cap    || '3',  10) || 3,
     cooloffDays:     parseInt(map.kpsc_sms_cooloff_days || '7', 10) || 7,
+    // SMS message text templates (with defaults if not set)
+    welcomeText:     String(map.kpsc_sms_text_welcome     || '').trim() || "Welcome to RCCG Kingdom Parish, {{name}}! We're delighted to have you as a {{partnerType}}. Your partnership is a blessing to the body of Christ. God bless you!",
+    paymentText:     String(map.kpsc_sms_text_payment     || '').trim() || 'Dear {{name}}, thank you for your {{month}} partnership payment{{amtText}}. Your seed is a blessing to the Kingdom. God will reward you abundantly! 🙏 — RCCG Kingdom Parish',
+    newmonthText:    String(map.kpsc_sms_text_newmonth    || '').trim() || 'Happy New Month, {{name}}! 🎉 We pray this new month brings you God\'s abundant blessings. We appreciate your faithfulness in partnering with RCCG Kingdom Parish. God bless you! — KPSC',
+    anniversaryText: String(map.kpsc_sms_text_anniversary || '').trim() || '🎉 Dear {{name}}, today marks your {{ordinal}} year of faithful partnership with RCCG Kingdom Parish! We celebrate you and your unwavering seed of faith. May God bless you exceedingly, abundantly, above all you ask or think! — RCCG Kingdom Parish 🙏',
+    milestone6Text:  String(map.kpsc_sms_text_milestone6  || '').trim() || '🎉 Congratulations {{name}}! You\'ve faithfully partnered with RCCG Kingdom Parish for 6 consecutive months! Your consistency is a testament to your love for God\'s Kingdom. We celebrate you! 🙏 — RCCG Kingdom Parish',
+    milestone12Text: String(map.kpsc_sms_text_milestone12 || '').trim() || '🏆 Praise God! Dear {{name}}, you have completed a FULL YEAR of faithful partnership with RCCG Kingdom Parish! Your commitment has been a tremendous blessing. May God reward you a hundredfold! 🙏 — RCCG Kingdom Parish',
+    premeetingText:  String(map.kpsc_sms_text_premeeting  || '').trim() || '📅 Reminder: KPSC Committee Meeting "{{meetingTitle}}" is scheduled for tomorrow ({{meetingDate}}{{meetingTime}}). {{venue}}Please come prepared. — RCCG Kingdom Parish Secretary',
+    deadlineText:    String(map.kpsc_sms_text_deadline     || '').trim() || '⏰ Reminder: Your action item "{{task}}" is due in 3 days ({{dueDate}}). Please ensure timely completion. — RCCG Kingdom Parish KPSC',
   };
 }
 
@@ -662,6 +676,11 @@ export async function onRequest(context) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
         return await proofreadAiSecretaryMinutes(DB, env, param, body);
+      }
+
+      if (method === 'POST' && parts[2] === 'suggest-outcomes') {
+        if (!param) return err('Missing meeting ID', 400);
+        return await suggestMeetingOutcomes(DB, env, param);
       }
       if (method === 'POST' && parts[2] === 'reconcile-insights') {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -1419,6 +1438,15 @@ async function handleInit(DB) {
     kpsc_termii_deadline_sms:     '1',    // action item 3-day deadline reminder (feature 9)
     kpsc_sms_freq_cap:            '3',    // max SMS per partner per 7 days (feature 17)
     kpsc_sms_cooloff_days:        '7',    // min days between reminders (feature 17)
+    // System SMS message text templates (editable in Settings)
+    kpsc_sms_text_welcome:    '',         // defaults to built-in text when empty
+    kpsc_sms_text_payment:    '',
+    kpsc_sms_text_newmonth:   '',
+    kpsc_sms_text_anniversary:'',
+    kpsc_sms_text_milestone6: '',
+    kpsc_sms_text_milestone12:'',
+    kpsc_sms_text_premeeting: '',
+    kpsc_sms_text_deadline:   '',
   };
   for (const [key, value] of Object.entries(defaultSettings)) {
     await DB.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).bind(key, value).run();
@@ -2420,7 +2448,9 @@ async function createKpscPartner(DB, data) {
       if (t.apiKey && t.welcomeSms) {
         const typeLabel = String(data?.partnershipType || '').toLowerCase().includes('covenant')
           ? "Covenant Partner" : "God's Kingdom Partner";
-        const welcomeMsg = `Welcome to RCCG Kingdom Parish, ${fullName}! We're delighted to have you as a ${typeLabel}. Your partnership is a blessing to the body of Christ. God bless you!`;
+        const welcomeMsg = t.welcomeText
+          .replace(/\{\{name\}\}/g, fullName)
+          .replace(/\{\{partnerType\}\}/g, typeLabel);
         await sendTermiiSms(t.apiKey, t.senderId, phone, welcomeMsg);
       }
     } catch { /* swallow — SMS failure must not break partner creation */ }
@@ -2574,7 +2604,10 @@ async function upsertKpscPartnerPayment(DB, data) {
           const monthName = MONTH_NAMES[(month - 1)] || '';
           const amount = Number(data?.amount || 0);
           const amtText = amount > 0 ? ` of ₦${amount.toLocaleString('en-NG')}` : '';
-          const msg = `Dear ${partner.full_name}, thank you for your ${monthName} partnership payment${amtText}. Your seed is a blessing to the Kingdom. God will reward you abundantly! 🙏 — RCCG Kingdom Parish`;
+          const msg = t.paymentText
+            .replace(/\{\{name\}\}/g, partner.full_name)
+            .replace(/\{\{month\}\}/g, monthName)
+            .replace(/\{\{amtText\}\}/g, amtText);
           await sendTermiiSms(t.apiKey, t.senderId, partner.phone, msg);
         }
       }
@@ -2599,9 +2632,9 @@ async function upsertKpscPartnerPayment(DB, data) {
           }
           let milestoneMsg = '';
           if (consecutive === 6) {
-            milestoneMsg = `🎉 Congratulations ${partner.full_name}! You've faithfully partnered with RCCG Kingdom Parish for 6 consecutive months! Your consistency is a testament to your love for God's Kingdom. We celebrate you! 🙏 — RCCG Kingdom Parish`;
+            milestoneMsg = t.milestone6Text.replace(/\{\{name\}\}/g, partner.full_name);
           } else if (consecutive === 12) {
-            milestoneMsg = `🏆 Praise God! Dear ${partner.full_name}, you have completed a FULL YEAR of faithful partnership with RCCG Kingdom Parish! Your commitment has been a tremendous blessing. May God reward you a hundredfold! 🙏 — RCCG Kingdom Parish`;
+            milestoneMsg = t.milestone12Text.replace(/\{\{name\}\}/g, partner.full_name);
           }
           if (milestoneMsg) {
             await sendTermiiSms(t.apiKey, t.senderId, partner.phone, milestoneMsg);
@@ -4917,6 +4950,7 @@ async function proofreadAiSecretaryMinutes(DB, env, id, body) {
   const secretaryNotes  = String(body?.secretaryNotes  || '').trim();
   const summaryShort    = String(body?.summaryShort    || '').trim();
   const summaryLong     = String(body?.summaryLong     || '').trim();
+  const grammarOnly     = !!body?.grammarOnly;
   if (!minutesMarkdown) return err('No minutes provided', 400);
 
   let deepseekKey = '';
@@ -4938,7 +4972,27 @@ async function proofreadAiSecretaryMinutes(DB, env, id, body) {
     ? `\nSecretary's corrections to apply first:\n${secretaryNotes}\n`
     : '';
 
-  const prompt = `You are a skilled church committee secretary. Proofread and refine the following meeting minutes draft.${secretaryNotes ? " First, carefully apply all the secretary's corrections listed below." : ''}
+  const prompt = grammarOnly
+    ? `You are a skilled church committee secretary proofreader. Correct ONLY grammar, spelling, and punctuation errors in the following meeting minutes. Do NOT change any facts, names, amounts, dates, or the structure of the content. Make only the minimum changes needed to fix language errors.
+
+Also review the two summaries: correct only grammar/spelling errors in them, do NOT change factual content.
+
+Return ONLY a valid JSON object. No markdown fences. No text before or after the JSON:
+{
+  "minutesMarkdown": "<the grammar-corrected minutes in Markdown>",
+  "summaryShort": "<grammar-corrected short summary — content unchanged>",
+  "summaryLong": "<grammar-corrected detailed summary — content unchanged>"
+}
+
+Current minutes draft:
+${minutesMarkdown}
+
+Current short summary:
+${summaryShort || '(none)'}
+
+Current detailed summary:
+${summaryLong || '(none)'}`
+    : `You are a skilled church committee secretary. Proofread and refine the following meeting minutes draft.${secretaryNotes ? " First, carefully apply all the secretary's corrections listed below." : ''}
 ${notesBlock}
 Rules:
 - Write in clear, professional but natural English that does not read as AI-generated
@@ -5002,6 +5056,99 @@ ${summaryLong || '(none)'}`;
   } catch (_) {}
 
   return ok({ minutesMarkdown: improvedMarkdown, summaryShort: improvedShort, summaryLong: improvedLong });
+}
+
+async function suggestMeetingOutcomes(DB, env, id) {
+  const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=? AND COALESCE(deleted_at,'')=''`).bind(id).first();
+  if (!row) return err('Meeting not found', 404);
+
+  const agendaText     = String(row.agenda_text     || '').trim();
+  const transcriptText = String(row.transcript_text || '').trim();
+  const minutesMarkdown = String(row.minutes_markdown || '').trim();
+  if (!agendaText) return err('No agenda found for this meeting', 400);
+  const context = minutesMarkdown || transcriptText;
+  if (!context) return err('No minutes or transcript available to analyse', 400);
+
+  // Parse agenda items
+  const rawLines = agendaText.split('\n').map(l => l.trim()).filter(Boolean);
+  const items = rawLines
+    .map(l => l.replace(/^[\d]+[.)]\s*/, '').replace(/^[-•*]\s*/, '').trim())
+    .filter(l => l.length > 1);
+  if (!items.length) return err('No agenda items found', 400);
+
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-v4-flash';
+  try {
+    const { results: sr } = await DB.prepare(
+      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
+    ).all();
+    const s = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
+    deepseekKey  = s.ai_deepseek_key ? String(s.ai_deepseek_key).trim() : '';
+    deepseekModel = s.ai_deepseek_model ? String(s.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
+  } catch (_) {}
+
+  if (!deepseekKey) return err('AI key not configured — please add a DeepSeek key in Settings', 503);
+
+  const itemsList = items.map((item, i) => `${i + 1}. ${item}`).join('\n');
+  const prompt = `You are a church committee secretary assistant. Based on the meeting minutes/transcript below, analyse each agenda item and determine its outcome.
+
+For each item, determine:
+- status: "resolved" (item was fully discussed and a decision/resolution was reached), "carry_forward" (item was discussed but no final decision, will continue next meeting), or "not_discussed" (item was not covered in the meeting)
+- confidence: "high" (clear evidence in the text), "medium" (implied or partially mentioned), "low" (no clear evidence, best guess)
+- needsHumanInput: true if confidence is "low" or if the evidence is ambiguous and human confirmation is needed
+- rationale: brief one-line explanation of why you chose this status
+
+Agenda items to classify:
+${itemsList}
+
+Meeting content:
+${context.slice(0, 8000)}
+
+Return ONLY a valid JSON array. No markdown, no extra text:
+[
+  { "topic": "<exact agenda item text>", "status": "resolved|carry_forward|not_discussed", "confidence": "high|medium|low", "needsHumanInput": false, "rationale": "<brief explanation>" }
+]`;
+
+  let parsed;
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({
+        model: deepseekModel,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.2,
+        max_tokens: 2000,
+      }),
+    });
+    if (!resp.ok) {
+      const errBody = await resp.json().catch(() => ({}));
+      return err(`DeepSeek API error: ${errBody.error?.message || resp.status}`, 502);
+    }
+    const data = await resp.json();
+    const raw = (data.choices?.[0]?.message?.content || '').trim();
+    if (!raw) return err('AI returned empty response', 502);
+    // Parse JSON array
+    const jsonMatch = raw.match(/\[[\s\S]*\]/);
+    parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(raw);
+    if (!Array.isArray(parsed)) return err('AI returned unexpected format', 502);
+  } catch (e) {
+    return err(`AI analysis failed: ${e.message}`, 502);
+  }
+
+  // Validate and normalise suggestions
+  const validStatuses = new Set(['resolved', 'carry_forward', 'not_discussed']);
+  const suggestions = parsed.map(s => ({
+    topic:          String(s.topic || '').trim(),
+    status:         validStatuses.has(s.status) ? s.status : 'not_discussed',
+    confidence:     ['high','medium','low'].includes(s.confidence) ? s.confidence : 'low',
+    needsHumanInput: !!s.needsHumanInput || s.confidence === 'low',
+    rationale:      String(s.rationale || '').trim(),
+  })).filter(s => s.topic);
+
+  return ok({ suggestions });
 }
 
 async function reconcileAiSecretaryInsights(DB, env, id, body) {
@@ -6849,7 +6996,10 @@ async function runAnniversarySms(DB, env, request) {
     const yearsOfPartnership = currentYear - startYear;
     if (yearsOfPartnership < 1) continue; // skip if it's their first year (welcome SMS already sent)
     const ordinal = yearsOfPartnership === 1 ? '1st' : yearsOfPartnership === 2 ? '2nd' : yearsOfPartnership === 3 ? '3rd' : `${yearsOfPartnership}th`;
-    const msg = `🎉 Dear ${p.full_name}, today marks your ${ordinal} year of faithful partnership with RCCG Kingdom Parish! We celebrate you and your unwavering seed of faith. May God bless you exceedingly, abundantly, above all you ask or think! — RCCG Kingdom Parish 🙏`;
+    const msg = t.anniversaryText
+      .replace(/\{\{name\}\}/g, p.full_name)
+      .replace(/\{\{ordinal\}\}/g, ordinal)
+      .replace(/\{\{years\}\}/g, String(yearsOfPartnership));
     const result = await sendTermiiSms(t.apiKey, t.senderId, p.phone, msg);
     if (result.ok) { sent++; } else { failed++; }
   }
@@ -6898,7 +7048,12 @@ async function runPremeetingSms(DB, env, request) {
     const meetingTime  = scheduledFor.slice(11, 16) || '';
     const venueText    = meeting.venue ? ` Venue: ${meeting.venue}.` : '';
     for (const member of membersWithPhone) {
-      const msg = `📅 Reminder: KPSC Committee Meeting "${meeting.title}" is scheduled for tomorrow (${meetingDate}${meetingTime ? ' at ' + meetingTime : ''}).${venueText} Please come prepared. — RCCG Kingdom Parish Secretary`;
+      const msg = t.premeetingText
+        .replace(/\{\{name\}\}/g, member.name || '')
+        .replace(/\{\{meetingTitle\}\}/g, meeting.title || '')
+        .replace(/\{\{meetingDate\}\}/g, meetingDate)
+        .replace(/\{\{meetingTime\}\}/g, meetingTime ? ' at ' + meetingTime : '')
+        .replace(/\{\{venue\}\}/g, venueText ? venueText + ' ' : '');
       const result = await sendTermiiSms(t.apiKey, t.senderId, member.phone, msg);
       if (result.ok) { sent++; } else { failed++; }
     }
@@ -6946,7 +7101,10 @@ async function runActionItemDeadlineSms(DB, env, request) {
     const assignee = String(item.assignee || '').trim();
     const phone = phoneByName.get(assignee.toLowerCase());
     if (!phone) { failed++; continue; }
-    const msg = `⏰ Reminder: Your action item "${item.task}" is due in 3 days (${item.due_date}). Please ensure timely completion. — RCCG Kingdom Parish KPSC`;
+    const msg = t.deadlineText
+      .replace(/\{\{name\}\}/g, assignee)
+      .replace(/\{\{task\}\}/g, item.task || '')
+      .replace(/\{\{dueDate\}\}/g, item.due_date || '');
     const result = await sendTermiiSms(t.apiKey, t.senderId, phone, msg);
     if (result.ok) { sent++; } else { failed++; }
   }
