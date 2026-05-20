@@ -5057,6 +5057,8 @@ function memberRow(idx, mem) {
         value="${esc(mem.name || '')}" onchange="Kpsc.memberFieldChange(${idx},'name',this.value)" />
       <input class="k-input k-input-sm k-mem-pos" type="text" placeholder="Position (optional)"
         value="${esc(mem.position || '')}" onchange="Kpsc.memberFieldChange(${idx},'position',this.value)" />
+      <input class="k-input k-input-sm k-mem-phone" type="tel" placeholder="Phone (for SMS)"
+        value="${esc(mem.phone || '')}" onchange="Kpsc.memberFieldChange(${idx},'phone',this.value)" />
       ${vfpBadge}
       <button class="kbtn kbtn-sm kbtn-ghost k-vfp-enroll-btn" onclick="Kpsc.showVoiceFpEnrollModal(${idx})" title="${vfpEnrolled ? 'Re-enroll voice fingerprint' : 'Enroll voice fingerprint for meeting identification'}">
         ${vfpEnrolled ? '🔁 FP' : '🎙 FP'}
@@ -5070,7 +5072,7 @@ function memberFieldChange(idx, field, value) {
 }
 
 function addMember() {
-  S.members.push({ group: 'men', name: '', position: '' });
+  S.members.push({ group: 'men', name: '', position: '', phone: '' });
   const list = document.getElementById('km-members-list');
   if (list) list.innerHTML = renderMembersList();
 }
@@ -5089,9 +5091,11 @@ async function saveMembers(btn) {
     const groupEl = row.querySelector('.k-mem-group');
     const nameEl  = row.querySelector('.k-mem-name');
     const posEl   = row.querySelector('.k-mem-pos');
+    const phoneEl = row.querySelector('.k-mem-phone');
     if (groupEl) S.members[idx].group    = groupEl.value;
     if (nameEl)  S.members[idx].name     = nameEl.value.trim();
     if (posEl)   S.members[idx].position = posEl.value.trim();
+    if (phoneEl) S.members[idx].phone    = phoneEl.value.trim();
   });
 
   const valid = S.members.filter(m => m.name.trim());
@@ -8413,6 +8417,15 @@ async function renderSettings(main) {
   const expenseCategories = Array.isArray(res?.kpsc_expense_categories) ? res.kpsc_expense_categories.join('\n') : '';
   const meetingCadence = res?.kpsc_meeting_cadence || 'none';
   S.kpscMeetingCadence = meetingCadence;
+  // Termii SMS settings
+  const termiiApiKey     = res?.kpsc_termii_api_key    || '';
+  const termiiSenderId   = res?.kpsc_termii_sender_id  || 'RCCG-KP';
+  const termiiWelcome    = res?.kpsc_termii_welcome_sms  !== '0';
+  const termiiPayment    = res?.kpsc_termii_payment_sms  !== '0';
+  const termiiNewMonth   = res?.kpsc_termii_newmonth_sms !== '0';
+  const termiiRemDay     = res?.kpsc_termii_reminder_day  || '10';
+  const termiiRemFreq    = res?.kpsc_termii_reminder_freq || 'monthly';
+  const hasTermii        = !!termiiApiKey;
   const cadenceOptions = [
     { value: 'none',              label: 'No fixed cadence' },
     { value: 'weekly:sun',        label: 'Weekly on Sunday' },
@@ -8526,6 +8539,71 @@ async function renderSettings(main) {
         <div id="ks-save-msg" class="k-settings-msg" style="display:none"></div>
         <button class="kbtn kbtn-primary" id="ks-save-btn" onclick="Kpsc.saveSettings()">Save API Keys &amp; Policy</button>
         ${hasDeepseek || hasOpenai ? `<button class="kbtn kbtn-danger-outline" style="margin-left:8px" onclick="Kpsc.clearAiKeys()">Clear Keys</button>` : ''}
+      </div>
+
+      <div class="k-card" style="margin-bottom:16px">
+        <h2 class="k-card-title">📱 SMS Automation (Termii)</h2>
+        <p class="k-card-sub">
+          Configure the Termii SMS gateway for automated partner and member notifications.
+          Get your API key at <a href="https://app.termii.com" target="_blank" rel="noopener">app.termii.com</a>.
+        </p>
+        <div class="k-settings-status ${hasTermii ? 'k-status-ai' : 'k-status-rule'}">
+          ${hasTermii ? '📲 SMS automation active' : '⚠️ No Termii API key — SMS features are disabled'}
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Termii API Key</label>
+          <input type="password" id="ks-termii-key" class="k-input"
+            placeholder="${hasTermii ? '••••••••••••••••' : 'TL_xxxxxxxxxxxxxxxxx'}"
+            autocomplete="off" value="${esc(termiiApiKey)}" />
+          <p class="k-hint">Your Termii secret API key. Never share this. <a href="https://app.termii.com" target="_blank" rel="noopener">Get a key →</a></p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Sender ID</label>
+          <input type="text" id="ks-termii-sender" class="k-input" maxlength="11"
+            placeholder="RCCG-KP" value="${esc(termiiSenderId)}" />
+          <p class="k-hint">Alphanumeric sender name shown to recipients (max 11 chars). Must be registered with Termii for your account.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label" style="font-weight:600;margin-bottom:8px">Automated SMS Triggers</label>
+          <label class="k-checkbox-row">
+            <input type="checkbox" id="ks-termii-welcome" ${termiiWelcome ? 'checked' : ''} />
+            <span>Welcome SMS when a new partner is added</span>
+          </label>
+          <label class="k-checkbox-row" style="margin-top:6px">
+            <input type="checkbox" id="ks-termii-payment" ${termiiPayment ? 'checked' : ''} />
+            <span>Thank-you SMS when a partner payment is recorded</span>
+          </label>
+          <label class="k-checkbox-row" style="margin-top:6px">
+            <input type="checkbox" id="ks-termii-newmonth" ${termiiNewMonth ? 'checked' : ''} />
+            <span>Happy New Month SMS to all active partners on the 1st of each month</span>
+          </label>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Payment Reminder Schedule</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <div>
+              <label class="k-label" style="font-size:12px">Day of month</label>
+              <input type="number" id="ks-termii-rem-day" class="k-input k-input-sm" min="1" max="28" value="${esc(termiiRemDay)}" style="width:70px" />
+            </div>
+            <div>
+              <label class="k-label" style="font-size:12px">Frequency</label>
+              <select id="ks-termii-rem-freq" class="k-input k-input-sm">
+                <option value="monthly" ${termiiRemFreq === 'monthly' ? 'selected' : ''}>Monthly (once on reminder day)</option>
+                <option value="biweekly" ${termiiRemFreq === 'biweekly' ? 'selected' : ''}>Bi-weekly (day N and N+14)</option>
+                <option value="weekly" ${termiiRemFreq === 'weekly' ? 'selected' : ''}>Weekly (every 7 days from day N)</option>
+              </select>
+            </div>
+          </div>
+          <p class="k-hint" style="margin-top:6px">Sends payment reminder SMS to active unpaid partners. Uses the <em>SMS/WhatsApp Reminder Template</em> below. The cron job runs every 30 minutes — only sends on matching days.</p>
+        </div>
+
+        <div id="ks-termii-save-msg" class="k-settings-msg" style="display:none"></div>
+        <button class="kbtn kbtn-primary" onclick="Kpsc.saveSmsSettings()">Save SMS Settings</button>
+        ${hasTermii ? `<button class="kbtn kbtn-danger-outline" style="margin-left:8px" onclick="Kpsc.clearSmsKey()">Clear Key</button>` : ''}
       </div>
 
       <div class="k-card" style="margin-bottom:16px">
@@ -8660,6 +8738,45 @@ async function clearAiKeys() {
   await apiPost('settings', { ai_deepseek_key: '', ai_openai_key: '' });
   await renderSettings(document.getElementById('kpsc-main'));
 }
+
+async function saveSmsSettings() {
+  const msg = document.getElementById('ks-termii-save-msg');
+  const apiKey   = document.getElementById('ks-termii-key')?.value.trim()    || '';
+  const senderId = document.getElementById('ks-termii-sender')?.value.trim() || 'RCCG-KP';
+  const welcome  = document.getElementById('ks-termii-welcome')?.checked  ? '1' : '0';
+  const payment  = document.getElementById('ks-termii-payment')?.checked  ? '1' : '0';
+  const newMonth = document.getElementById('ks-termii-newmonth')?.checked ? '1' : '0';
+  const remDay   = String(parseInt(document.getElementById('ks-termii-rem-day')?.value  || '10', 10) || 10);
+  const remFreq  = document.getElementById('ks-termii-rem-freq')?.value || 'monthly';
+  const res = await apiPost('settings', {
+    kpsc_termii_api_key:      apiKey,
+    kpsc_termii_sender_id:    senderId,
+    kpsc_termii_welcome_sms:  welcome,
+    kpsc_termii_payment_sms:  payment,
+    kpsc_termii_newmonth_sms: newMonth,
+    kpsc_termii_reminder_day: remDay,
+    kpsc_termii_reminder_freq: remFreq,
+  });
+  if (msg) {
+    if (res?.error) {
+      msg.className = 'k-settings-msg k-msg-error';
+      msg.textContent = res.error;
+    } else {
+      msg.className = 'k-settings-msg k-msg-ok';
+      msg.textContent = 'SMS settings saved.';
+      setTimeout(async () => { await renderSettings(document.getElementById('kpsc-main')); }, 1200);
+    }
+    msg.style.display = 'block';
+    setTimeout(() => { if (msg) msg.style.display = 'none'; }, 3500);
+  }
+}
+
+async function clearSmsKey() {
+  if (!confirm('Remove the Termii API key? All SMS automation will be disabled.')) return;
+  await apiPost('settings', { kpsc_termii_api_key: '' });
+  await renderSettings(document.getElementById('kpsc-main'));
+}
+
 
 async function testDeepseekKey(btn) {
   const key = document.getElementById('ks-deepseek-key')?.value.trim() || '';
@@ -10893,6 +11010,38 @@ function renderAbDraftStep(latestDraft) {
         </button>
         <p class="k-hint" style="margin-top:6px;text-align:center">Saves this notification and creates/opens a meeting draft with the agenda pre-filled.</p>
       </div>
+
+      <!-- SMS Blast to KPSC Members -->
+      <div class="k-section" style="margin-top:24px;border:1px solid var(--border);border-radius:8px;padding:16px">
+        <h3 class="k-sec-title" style="margin-top:0">📱 SMS Blast to Members</h3>
+        <p class="k-hint">AI will draft a compact SMS version of the meeting agenda for KPSC committee members. Members must have a phone number saved in the Roster.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+          <button class="kbtn kbtn-ai" id="ab-sms-draft-btn" onclick="Kpsc.abDraftMemberSms(this)">
+            🤖 Draft SMS Message
+          </button>
+        </div>
+        <div id="ab-sms-section" style="display:none">
+          <div class="k-form-group">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+              <label class="k-label" style="margin:0">SMS Message</label>
+              <span id="ab-sms-char-count" style="font-size:12px;color:var(--text2)">0 chars · 0 SMS pages</span>
+            </div>
+            <textarea class="k-input" id="ab-sms-text" rows="8" style="font-family:monospace;font-size:13px;line-height:1.55"
+              oninput="Kpsc.abUpdateSmsCharCount()"></textarea>
+            <p class="k-hint" style="margin-top:4px">Standard SMS: 160 chars per page. Unicode (emoji/special chars): 70 chars per page.</p>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+            <button class="kbtn kbtn-sm kbtn-ai" onclick="Kpsc.abRefineSmsMessage('proofread', this)">✏️ Proofread</button>
+            <button class="kbtn kbtn-sm kbtn-ai" onclick="Kpsc.abRefineSmsMessage('shorten', this)">✂️ Shorten</button>
+            <button class="kbtn kbtn-sm kbtn-ai" onclick="Kpsc.abRefineSmsMessage('formal', this)">🎩 Formal</button>
+            <button class="kbtn kbtn-sm" onclick="Kpsc.abCopySmsMessage()">📋 Copy SMS</button>
+          </div>
+          <button class="kbtn kbtn-primary" style="width:100%;background:var(--navy)" onclick="Kpsc.abSendBulkMemberSms(this)">
+            📤 Save &amp; Send Bulk SMS to Members
+          </button>
+          <p id="ab-sms-result" class="k-hint" style="margin-top:8px;display:none"></p>
+        </div>
+      </div>
       ` : `<p class="k-hint" style="padding:20px;text-align:center;background:var(--surface,#f8fafc);border:1px dashed var(--border);border-radius:6px">Click <strong>Generate WhatsApp Message</strong> above to draft the notification.</p>`}
 
       <!-- Past Notifications History (last 5, compact) -->
@@ -11342,6 +11491,195 @@ async function abFinalizeAndOpenMeeting(btn) {
     }
   } catch {
     showToast('Could not finalize. Check your connection.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+// ── Agenda Builder: Member SMS Blast ──────────────────────────────────
+
+/**
+ * Calls DeepSeek (or falls back to a local template) to draft a compact SMS
+ * version of the current agenda for KPSC committee members.
+ */
+async function abDraftMemberSms(btn) {
+  const agendaItems = S.agendaBuilderSelected || [];
+  const meetingTitle = document.getElementById('ab-meeting-title')?.value?.trim()
+    || document.getElementById('ab-settings-title')?.value?.trim()
+    || 'KPSC Committee Meeting';
+  const meetingDate = document.getElementById('ab-settings-date')?.value?.trim() || '';
+
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Drafting SMS…';
+
+  try {
+    const itemsList = agendaItems.length
+      ? agendaItems.map((it, i) => `${i + 1}. ${it}`).join('\n')
+      : '(Agenda items not yet selected)';
+
+    const prompt = `Draft a concise SMS notification for KPSC committee members about an upcoming meeting.
+Meeting title: "${meetingTitle}"
+Date: "${meetingDate || 'TBC'}"
+Agenda items:
+${itemsList}
+
+Rules:
+- Keep it under 320 characters (2 SMS pages max)
+- Church-appropriate, warm but professional tone
+- Must include: meeting title, date, and a brief agenda summary
+- End with: "— RCCG Kingdom Parish"
+- No markdown, no bullet symbols — plain text only
+Return only the SMS text, nothing else.`;
+
+    const settingsRes = await apiGet('settings');
+    const deepseekKey = settingsRes?.ai_deepseek_key || '';
+    const deepseekModel = settingsRes?.ai_deepseek_model || 'deepseek-v4-flash';
+
+    let smsText = '';
+
+    if (deepseekKey) {
+      try {
+        const resp = await fetch('https://api.deepseek.com/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+          body: JSON.stringify({
+            model: deepseekModel,
+            messages: [{ role: 'user', content: prompt }],
+            max_tokens: 200,
+            temperature: 0.4,
+          }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          smsText = (data.choices?.[0]?.message?.content || '').trim();
+        }
+      } catch { /* fall back to template */ }
+    }
+
+    if (!smsText) {
+      const items = agendaItems.slice(0, 3).join(', ') + (agendaItems.length > 3 ? ', & more' : '');
+      smsText = `Dear Member, you are invited to the ${meetingTitle}${meetingDate ? ' on ' + meetingDate : ''}. Agenda: ${items}. Your attendance is important. God bless you. — RCCG Kingdom Parish`;
+    }
+
+    const smsEl = document.getElementById('ab-sms-text');
+    if (smsEl) smsEl.value = smsText;
+    const smsSection = document.getElementById('ab-sms-section');
+    if (smsSection) smsSection.style.display = '';
+    abUpdateSmsCharCount();
+    showToast('SMS draft ready. Review and send when satisfied.', 'success');
+  } catch (e) {
+    showToast('Could not draft SMS: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+function abUpdateSmsCharCount() {
+  const smsEl = document.getElementById('ab-sms-text');
+  const countEl = document.getElementById('ab-sms-char-count');
+  if (!smsEl || !countEl) return;
+  const text = smsEl.value;
+  const len = text.length;
+  // Detect unicode (non-GSM7) characters
+  const isUnicode = /[^\u0000-\u007f\u00a0-\u00ff\u0100-\u01ff]/.test(text);
+  const pageSize = isUnicode ? 70 : 160;
+  const pages = len === 0 ? 0 : Math.ceil(len / pageSize);
+  const type = isUnicode ? 'Unicode' : 'GSM';
+  countEl.textContent = `${len} chars · ${pages} SMS page${pages !== 1 ? 's' : ''} (${type})`;
+  countEl.style.color = pages > 2 ? '#e45' : 'var(--text2)';
+}
+
+async function abRefineSmsMessage(action, btn) {
+  const smsEl = document.getElementById('ab-sms-text');
+  if (!smsEl?.value?.trim()) { showToast('Generate an SMS draft first.', 'warn'); return; }
+
+  const settingsRes = await apiGet('settings');
+  const deepseekKey = settingsRes?.ai_deepseek_key || '';
+  if (!deepseekKey) { showToast('DeepSeek API key required for AI refinement.', 'warn'); return; }
+
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳…';
+
+  const actionPrompts = {
+    proofread: `Proofread and fix grammar/spelling errors in this SMS. Keep length the same. Return only the corrected SMS text:\n\n`,
+    shorten: `Shorten this SMS to under 160 characters (1 SMS page) while keeping all key info. Return only the shortened text:\n\n`,
+    formal: `Rewrite this SMS in a more formal, professional church tone. Keep it under 320 characters. Return only the text:\n\n`,
+  };
+  const promptPrefix = actionPrompts[action] || actionPrompts.proofread;
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({
+        model: settingsRes?.ai_deepseek_model || 'deepseek-v4-flash',
+        messages: [{ role: 'user', content: promptPrefix + smsEl.value }],
+        max_tokens: 200,
+        temperature: 0.3,
+      }),
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      const refined = (data.choices?.[0]?.message?.content || '').trim();
+      if (refined) {
+        smsEl.value = refined;
+        abUpdateSmsCharCount();
+        showToast('SMS refined.', 'success');
+      }
+    }
+  } catch (e) {
+    showToast('Refinement failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+function abCopySmsMessage() {
+  const smsEl = document.getElementById('ab-sms-text');
+  const text = smsEl?.value?.trim();
+  if (!text) { showToast('No SMS message to copy.', 'warn'); return; }
+  navigator.clipboard.writeText(text).then(
+    () => showToast('SMS copied to clipboard!', 'success'),
+    () => showToast('Could not copy. Please copy manually.', 'warn'),
+  );
+}
+
+async function abSendBulkMemberSms(btn) {
+  const smsEl = document.getElementById('ab-sms-text');
+  const message = smsEl?.value?.trim();
+  if (!message) { showToast('Please draft an SMS message first.', 'warn'); return; }
+
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Sending…';
+
+  const resultEl = document.getElementById('ab-sms-result');
+
+  try {
+    const res = await apiPost('kpsc-sms-send', { message });
+    if (res?.error) {
+      showToast(res.error, 'error');
+      if (resultEl) {
+        resultEl.textContent = `❌ ${res.error}`;
+        resultEl.style.display = 'block';
+        resultEl.style.color = '#e45';
+      }
+    } else {
+      const msg = `✅ SMS sent to ${res.sent} member${res.sent !== 1 ? 's' : ''}${res.failed > 0 ? ` (${res.failed} failed)` : ''}.`;
+      showToast(msg, res.failed > 0 ? 'warn' : 'success');
+      if (resultEl) {
+        resultEl.textContent = msg;
+        resultEl.style.display = 'block';
+        resultEl.style.color = res.failed > 0 ? '#f80' : '#2a6';
+      }
+    }
+  } catch (e) {
+    showToast('Could not send SMS: ' + e.message, 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
@@ -11837,6 +12175,8 @@ window.Kpsc = {
   saveSettings,
   saveAiModels,
   clearAiKeys,
+  saveSmsSettings,
+  clearSmsKey,
   testDeepseekKey,
   testOpenaiKey,
   refreshApiStatus,
@@ -11932,6 +12272,12 @@ window.Kpsc = {
   abCopyMessage,
   abShareWhatsApp,
   abFinalizeAndOpenMeeting,
+  // Agenda Builder: Member SMS Blast
+  abDraftMemberSms,
+  abUpdateSmsCharCount,
+  abRefineSmsMessage,
+  abCopySmsMessage,
+  abSendBulkMemberSms,
   abToggleVoice,
   // Agenda Builder: Additional Features
   abSaveAsTemplate,

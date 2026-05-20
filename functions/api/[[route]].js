@@ -67,6 +67,61 @@ const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { statu
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
 
+// ── TERMII SMS HELPERS ────────────────────────────────────────────────
+/**
+ * Send a single SMS via the Termii API.
+ * Returns { ok: true, data } on success or { ok: false, error } on failure.
+ * No-ops silently when apiKey is absent — callers need not guard separately.
+ */
+async function sendTermiiSms(apiKey, senderId, to, sms) {
+  if (!apiKey) return { ok: false, error: 'Termii API key not configured' };
+  const phone = String(to || '').replace(/\D/g, '');
+  if (!phone) return { ok: false, error: 'invalid phone number' };
+  try {
+    const resp = await fetch('https://api.ng.termii.com/api/sms/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: apiKey,
+        to: phone,
+        from: senderId || 'N-Alert',
+        sms,
+        type: 'plain',
+        channel: 'generic',
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return { ok: resp.ok, data };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/** Load all Termii-related settings from the DB in one query. */
+async function getTermiiSettings(DB) {
+  const keys = [
+    'kpsc_termii_api_key', 'kpsc_termii_sender_id',
+    'kpsc_termii_welcome_sms', 'kpsc_termii_payment_sms',
+    'kpsc_termii_newmonth_sms', 'kpsc_termii_reminder_day',
+    'kpsc_termii_reminder_freq',
+  ];
+  const placeholders = keys.map(() => '?').join(',');
+  const { results } = await DB.prepare(
+    `SELECT key, value FROM settings WHERE key IN (${placeholders})`
+  ).bind(...keys).all();
+  const map = {};
+  for (const row of (results || [])) map[row.key] = row.value;
+  return {
+    apiKey:      String(map.kpsc_termii_api_key  || '').trim(),
+    senderId:    String(map.kpsc_termii_sender_id || 'N-Alert').trim(),
+    welcomeSms:  map.kpsc_termii_welcome_sms  !== '0',
+    paymentSms:  map.kpsc_termii_payment_sms  !== '0',
+    newMonthSms: map.kpsc_termii_newmonth_sms !== '0',
+    reminderDay: parseInt(map.kpsc_termii_reminder_day || '10', 10) || 10,
+    reminderFreq: String(map.kpsc_termii_reminder_freq || 'monthly').trim(),
+  };
+}
+
 // Emoji number labels for WhatsApp agenda lists (items beyond 10 fall back to plain numerals).
 const EMOJI_NUMS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
 // Absolute naira tolerance when matching statement lines to recorded entries.
@@ -692,8 +747,17 @@ export async function onRequest(context) {
 
     // ── B5+B6: internal cron endpoints (Bearer CRON_SECRET) ────
     if (route === 'internal') {
-      if (method === 'POST' && param === 'run-followups')  return await runFollowups(DB, env, request);
-      if (method === 'POST' && param === 'run-prebriefs')  return await runPrebriefs(DB, env, request);
+      if (method === 'POST' && param === 'run-followups')    return await runFollowups(DB, env, request);
+      if (method === 'POST' && param === 'run-prebriefs')    return await runPrebriefs(DB, env, request);
+      if (method === 'POST' && param === 'run-monthly-sms')  return await runMonthlySms(DB, env, request);
+      if (method === 'POST' && param === 'run-reminder-sms') return await runReminderSms(DB, env, request);
+    }
+
+    // ── Bulk SMS to KPSC members (meeting notification) ────────────
+    if (route === 'kpsc-sms-send' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await sendBulkMemberSms(DB, env, body);
     }
 
     // ── B6: scheduled_for field on ai-secretary-meetings ───────
@@ -1200,6 +1264,14 @@ async function handleInit(DB) {
       'committee_operations',
     ]),
     kpsc_reminder_template: 'Dear {{name}}, this is a reminder to pay your {{month}} partnership pledge. God bless you.',
+    // ── Termii SMS settings ──────────────────────────────────────────
+    kpsc_termii_api_key:      '',          // set in KPSC Settings → SMS
+    kpsc_termii_sender_id:    'RCCG-KP',  // max 11 chars, alphanumeric
+    kpsc_termii_welcome_sms:  '1',         // send welcome SMS on partner add
+    kpsc_termii_payment_sms:  '1',         // send thank-you SMS on payment record
+    kpsc_termii_newmonth_sms: '1',         // send Happy New Month SMS on 1st
+    kpsc_termii_reminder_day: '10',        // day of month to send payment reminders
+    kpsc_termii_reminder_freq: 'monthly',  // monthly | biweekly | weekly
   };
   for (const [key, value] of Object.entries(defaultSettings)) {
     await DB.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).bind(key, value).run();
@@ -2172,6 +2244,7 @@ async function createKpscPartner(DB, data) {
   const fullName = String(data?.fullName || '').trim();
   if (!fullName) return err('fullName is required', 400);
   const id = newId('kp');
+  const phone = String(data?.phone || '').trim();
   await DB.prepare(`
     INSERT INTO kpsc_partners (
       id,full_name,phone,partnership_type,start_date,monthly_pledge,status,reminder_preference,notes,created_by,updated_at
@@ -2179,7 +2252,7 @@ async function createKpscPartner(DB, data) {
   `).bind(
     id,
     fullName,
-    String(data?.phone || '').trim(),
+    phone,
     String(data?.partnershipType || 'gods_kingdom_partner').trim(),
     String(data?.startDate || '').trim(),
     Number(data?.monthlyPledge || 0),
@@ -2189,6 +2262,20 @@ async function createKpscPartner(DB, data) {
     String(data?.createdBy || '').trim(),
     new Date().toISOString(),
   ).run();
+
+  // ── Welcome SMS (fire-and-forget) ────────────────────────────────
+  if (phone) {
+    try {
+      const t = await getTermiiSettings(DB);
+      if (t.apiKey && t.welcomeSms) {
+        const typeLabel = String(data?.partnershipType || '').toLowerCase().includes('covenant')
+          ? "Covenant Partner" : "God's Kingdom Partner";
+        const welcomeMsg = `Welcome to RCCG Kingdom Parish, ${fullName}! We're delighted to have you as a ${typeLabel}. Your partnership is a blessing to the body of Christ. God bless you!`;
+        await sendTermiiSms(t.apiKey, t.senderId, phone, welcomeMsg);
+      }
+    } catch { /* swallow — SMS failure must not break partner creation */ }
+  }
+
   const row = await DB.prepare(`SELECT * FROM kpsc_partners WHERE id=?`).bind(id).first();
   return ok({
     id: row.id,
@@ -2319,6 +2406,25 @@ async function upsertKpscPartnerPayment(DB, data) {
     id,
     new Date().toISOString(),
   ).run();
+
+  // ── Thank-you SMS when payment is marked paid (fire-and-forget) ──
+  if (paid) {
+    try {
+      const t = await getTermiiSettings(DB);
+      if (t.apiKey && t.paymentSms) {
+        const partner = await DB.prepare(`SELECT full_name, phone FROM kpsc_partners WHERE id=?`).bind(partnerId).first();
+        if (partner?.phone) {
+          const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+          const monthName = MONTH_NAMES[(month - 1)] || '';
+          const amount = Number(data?.amount || 0);
+          const amtText = amount > 0 ? ` of ₦${amount.toLocaleString('en-NG')}` : '';
+          const msg = `Dear ${partner.full_name}, thank you for your ${monthName} partnership payment${amtText}. Your seed is a blessing to the Kingdom. God will reward you abundantly! 🙏 — RCCG Kingdom Parish`;
+          await sendTermiiSms(t.apiKey, t.senderId, partner.phone, msg);
+        }
+      }
+    } catch { /* swallow — SMS failure must not break payment recording */ }
+  }
+
   const row = await DB.prepare(`SELECT * FROM kpsc_partner_payments WHERE id=?`).bind(id).first();
   return ok({
     id: row.id,
@@ -5448,7 +5554,159 @@ Keep the total brief under 400 words. Cite specifics (names, dates, amounts) —
   return ok({ ok: true, generated });
 }
 
-// ── AGENDA BUILDER HANDLERS ───────────────────────────────────────────────
+// ── TERMII CRON: HAPPY NEW MONTH SMS (1st of every month) ─────────────────
+async function runMonthlySms(DB, env, request) {
+  const authErr = requireCronSecret(env, request);
+  if (authErr) return authErr;
+
+  const now = new Date();
+  const dayOfMonth = now.getUTCDate();
+  if (dayOfMonth !== 1) {
+    return ok({ ok: true, skipped: true, reason: 'Not the 1st of the month' });
+  }
+
+  const t = await getTermiiSettings(DB);
+  if (!t.apiKey || !t.newMonthSms) return ok({ ok: true, skipped: true, reason: 'New-month SMS disabled or no Termii key' });
+
+  const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const monthName = MONTH_NAMES[now.getUTCMonth()];
+  const year = now.getUTCFullYear();
+
+  const { results: partners } = await DB.prepare(
+    `SELECT full_name, phone FROM kpsc_partners WHERE COALESCE(deleted_at,'')='' AND status='active' AND phone != ''`
+  ).all();
+
+  let sent = 0;
+  let failed = 0;
+  for (const p of (partners || [])) {
+    const msg = `Happy New Month! 🎉 Dear ${p.full_name}, we celebrate with you as we step into ${monthName} ${year}. May this month bring you joy, peace, and abundant blessings. Thank you for your faithful partnership! — RCCG Kingdom Parish`;
+    const result = await sendTermiiSms(t.apiKey, t.senderId, p.phone, msg);
+    if (result.ok) sent++; else failed++;
+  }
+  return ok({ ok: true, sent, failed, total: (partners || []).length });
+}
+
+// ── TERMII CRON: PAYMENT REMINDER SMS ─────────────────────────────────────
+/**
+ * Sends payment reminder SMS to active partners who have not paid for the current month.
+ * Frequency is controlled by kpsc_termii_reminder_day (day to trigger) and
+ * kpsc_termii_reminder_freq:
+ *   monthly  — runs once on the configured day each month
+ *   biweekly — runs on day N and day N+14 (clamped to month end)
+ *   weekly   — runs every 7 days from day N onwards
+ */
+async function runReminderSms(DB, env, request) {
+  const authErr = requireCronSecret(env, request);
+  if (authErr) return authErr;
+
+  const t = await getTermiiSettings(DB);
+  if (!t.apiKey) return ok({ ok: true, skipped: true, reason: 'No Termii API key configured' });
+
+  const now = new Date();
+  const dayOfMonth = now.getUTCDate();
+  const month = now.getUTCMonth() + 1;
+  const year = now.getUTCFullYear();
+  const reminderDay = t.reminderDay;
+  const freq = t.reminderFreq;
+
+  // Decide whether today is a send day based on frequency
+  let isSendDay = false;
+  if (freq === 'monthly') {
+    isSendDay = (dayOfMonth === reminderDay);
+  } else if (freq === 'biweekly') {
+    isSendDay = (dayOfMonth === reminderDay) || (dayOfMonth === Math.min(reminderDay + 14, 28));
+  } else if (freq === 'weekly') {
+    // Every 7 days starting from reminderDay
+    const diff = dayOfMonth - reminderDay;
+    isSendDay = diff >= 0 && diff % 7 === 0;
+  }
+
+  if (!isSendDay) return ok({ ok: true, skipped: true, reason: `Not a reminder send day (day=${dayOfMonth}, freq=${freq}, reminderDay=${reminderDay})` });
+
+  // Get template
+  const templateRow = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_reminder_template'`).first();
+  const template = String(templateRow?.value || 'Dear {{name}}, this is a reminder to pay your {{month}} partnership pledge. God bless you.').trim();
+
+  const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const monthName = MONTH_NAMES[month - 1];
+
+  // Find active partners who haven't paid this month
+  const { results: unpaid } = await DB.prepare(`
+    SELECT kp.id, kp.full_name, kp.phone, kp.reminder_preference
+    FROM kpsc_partners kp
+    WHERE COALESCE(kp.deleted_at,'')='' AND kp.status='active' AND kp.phone != ''
+      AND kp.reminder_preference != 'none'
+      AND kp.id NOT IN (
+        SELECT DISTINCT partner_id FROM kpsc_partner_payments
+        WHERE year=? AND month=? AND payment_type='monthly_pledge' AND paid=1
+          AND COALESCE(deleted_at,'')=''
+      )
+  `).bind(year, month).all();
+
+  let sent = 0;
+  let failed = 0;
+  for (const p of (unpaid || [])) {
+    const msg = template
+      .replace(/\{\{name\}\}/g, p.full_name)
+      .replace(/\{\{month\}\}/g, monthName);
+    const result = await sendTermiiSms(t.apiKey, t.senderId, p.phone, msg);
+    if (result.ok) {
+      // Log to kpsc_reminders
+      const remId = newId('krm');
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,year,month,sent_by,sent_at) VALUES (?,?,?,?,?,?,?,?,?)`
+      ).bind(remId, p.id, 'sms', msg, 'sent', year, month, 'cron', now.toISOString()).run();
+      sent++;
+    } else {
+      failed++;
+    }
+  }
+  return ok({ ok: true, sent, failed, total: (unpaid || []).length });
+}
+
+// ── BULK MEMBER SMS (meeting notification) ────────────────────────────────
+/**
+ * POST /api/kpsc-sms-send
+ * Body: { message: string, memberPhones?: string[] }
+ * If memberPhones is omitted, sends to all KPSC roster members with a phone number.
+ */
+async function sendBulkMemberSms(DB, env, data) {
+  const message = String(data?.message || '').trim();
+  if (!message) return err('message is required', 400);
+
+  const t = await getTermiiSettings(DB);
+  if (!t.apiKey) return err('Termii API key not configured. Please add it in Settings → SMS.', 400);
+
+  // Collect target phone numbers
+  let phones = [];
+  if (Array.isArray(data?.memberPhones) && data.memberPhones.length > 0) {
+    phones = data.memberPhones.map(p => String(p || '').trim()).filter(Boolean);
+  } else {
+    // Read all member phones from settings JSON blob
+    const settingRow = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_members'`).first();
+    const members = settingRow?.value ? JSON.parse(settingRow.value) : [];
+    phones = (Array.isArray(members) ? members : [])
+      .map(m => String(m?.phone || '').trim())
+      .filter(Boolean);
+  }
+
+  if (!phones.length) return err('No phone numbers found. Add phone numbers to member profiles first.', 400);
+
+  let sent = 0;
+  let failed = 0;
+  const errors = [];
+  for (const phone of phones) {
+    const result = await sendTermiiSms(t.apiKey, t.senderId, phone, message);
+    if (result.ok) sent++;
+    else {
+      failed++;
+      if (errors.length < 5) errors.push({ phone, error: result.error || 'unknown' });
+    }
+  }
+  return ok({ ok: true, sent, failed, total: phones.length, errors });
+}
+
+
 
 async function getAgendaNotes(DB) {
   const { results } = await DB.prepare(
@@ -6079,4 +6337,4 @@ async function saveAgendaOutcomes(DB, draftId, body) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems };
+export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms };

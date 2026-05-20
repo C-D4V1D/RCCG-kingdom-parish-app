@@ -2971,3 +2971,136 @@ test('GET /api/kpsc-followups: returns pending follow-ups for authenticated user
   assert.equal(body[0].id, 'FU-1');
   assert.equal(body[0].assignee, 'Bro. Chukwuemeka');
 });
+
+// ── Termii SMS helper tests ───────────────────────────────────────────────
+
+import { sendTermiiSms } from '../functions/api/[[route]].js';
+
+test('sendTermiiSms: no-ops when apiKey is empty', async () => {
+  const result = await sendTermiiSms('', 'RCCG-KP', '2348012345678', 'Test message');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /API key not configured/i);
+});
+
+test('sendTermiiSms: no-ops when phone is empty', async () => {
+  const result = await sendTermiiSms('TL_test_key', 'RCCG-KP', '', 'Test message');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /invalid phone/i);
+});
+
+test('sendTermiiSms: strips non-digits from phone number', async () => {
+  // We don't call the real API but we can test the phone normalisation
+  // by checking it doesn't error on a formatted phone
+  let sentPhone = null;
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    const body = JSON.parse(opts.body);
+    sentPhone = body.to;
+    return { ok: true, json: async () => ({ message_id: 'test123' }) };
+  };
+  const result = await sendTermiiSms('TL_key', 'RCCG', '+234 (801) 234-5678', 'Hello');
+  globalThis.fetch = origFetch;
+  assert.equal(result.ok, true);
+  assert.equal(sentPhone, '2348012345678');
+});
+
+test('POST /api/kpsc-sms-send: returns 400 when message is missing', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock(() => {
+      throw new Error('Unexpected DB call');
+    }),
+  });
+  const req = createKpscRequest('https://example.com/api/kpsc-sms-send', 'POST', {});
+  const res = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(res);
+  assert.equal(res.status, 400);
+  assert.match(body.error, /message is required/i);
+});
+
+test('POST /api/kpsc-sms-send: returns 400 when no Termii key configured', async () => {
+  const DB = createDBMock({
+    onPrepare: withKpscSessionMock((sql) => {
+      // termii settings query
+      if (/SELECT key, value FROM settings/.test(sql)) {
+        return {
+          bind(...a) { return this; },
+          async all() { return { results: [] }; },
+        };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }),
+  });
+  const req = createKpscRequest('https://example.com/api/kpsc-sms-send', 'POST', { message: 'Hello members' });
+  const res = await onRequest({ request: req, env: { DB } });
+  const body = await readJson(res);
+  assert.equal(res.status, 400);
+  assert.match(body.error, /Termii API key not configured/i);
+});
+
+test('POST /api/internal/run-monthly-sms: skips when not 1st of month', async () => {
+  // Simulate a date that is NOT the 1st by checking the logic path via a cron secret
+  // We cannot easily mock Date, so we rely on the fact that in non-1st days it returns skipped.
+  // We use a real Date check: only passes if today IS the 1st.
+  const today = new Date().getUTCDate();
+  if (today !== 1) {
+    // Not the 1st — the endpoint should report skipped (no DB calls needed except cron auth)
+    const DB = createDBMock({
+      onPrepare: () => { throw new Error('DB should not be called when skipping'); },
+    });
+    const req = new Request('https://example.com/api/internal/run-monthly-sms', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-secret' },
+    });
+    const res = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-secret' } });
+    const body = await readJson(res);
+    assert.equal(res.status, 200);
+    assert.equal(body.skipped, true);
+  } else {
+    // On the 1st — still passes with skipped=true when no Termii key
+    const DB = createDBMock({
+      onPrepare: (sql) => {
+        if (/SELECT key, value FROM settings/.test(sql)) {
+          return { bind(...a) { return this; }, async all() { return { results: [] }; } };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    });
+    const req = new Request('https://example.com/api/internal/run-monthly-sms', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-secret' },
+    });
+    const res = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-secret' } });
+    const body = await readJson(res);
+    assert.equal(res.status, 200);
+    assert.equal(body.skipped, true);
+  }
+});
+
+test('POST /api/internal/run-reminder-sms: skips on wrong day', async () => {
+  const DB = createDBMock({
+    onPrepare: (sql) => {
+      if (/SELECT key, value FROM settings/.test(sql)) {
+        return {
+          bind(...a) { return this; },
+          async all() {
+            // Return a reminder day that won't match today (day 0 is impossible)
+            return { results: [
+              { key: 'kpsc_termii_api_key', value: 'TL_test' },
+              { key: 'kpsc_termii_reminder_day', value: '0' },
+              { key: 'kpsc_termii_reminder_freq', value: 'monthly' },
+            ]};
+          },
+        };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  });
+  const req = new Request('https://example.com/api/internal/run-reminder-sms', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-secret' },
+  });
+  const res = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-secret' } });
+  const body = await readJson(res);
+  assert.equal(res.status, 200);
+  assert.equal(body.skipped, true);
+});
