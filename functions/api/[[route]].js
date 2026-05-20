@@ -1499,7 +1499,7 @@ async function loginUser(DB, data, request) {
   // Rate limiting: check failed attempts for this IP
   const ip = (request?.headers?.get('CF-Connecting-IP') || '').split(',')[0].trim();
   const cfRay = String(request?.headers?.get('CF-Ray') || '').trim();
-  if (!ip || !cfRay) return err('Cloudflare edge headers unavailable', 400);
+  if (!ip || !cfRay) return err('Unable to process login request. Please try again.', 400);
   const now = Date.now();
   try {
     const attempt = await DB.prepare(`SELECT count, first_at, locked_until FROM login_attempts WHERE ip=?`).bind(ip).first();
@@ -1825,7 +1825,8 @@ async function createIncome(DB, data, caller) {
     // Monetary values are represented as floating-point numbers across the app.
     // Use a 1-kobo tolerance to absorb binary float noise at the split boundary.
     if (cashAmt < -MONEY_TOLERANCE_KOBO) {
-      return err(`Income split invalid: bankTransfer (${bankTransfer}) + directPettyCash (${directPetty}) exceeds totalCollection (${total})`, 422);
+      const fmtNaira = (amt) => `₦${Number(amt || 0).toLocaleString('en-NG', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+      return err(`Income split invalid: bankTransfer (${fmtNaira(bankTransfer)}) + directPettyCash (${fmtNaira(directPetty)}) exceeds totalCollection (${fmtNaira(total)})`, 422);
     }
   }
   const hasSplitCols = await tableHasColumns(DB, 'income', ['bank_transfer_amount', 'direct_petty_cash', 'source']);

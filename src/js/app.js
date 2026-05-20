@@ -728,7 +728,7 @@ function enableModalFocusTrap(overlay){
 
 function ensureTableAccessibility(root){
   const host = root || document;
-  const title = document.getElementById('topBarTitle')?.textContent?.trim() || 'Data';
+  const title = document.getElementById('topBarTitle')?.textContent?.trim() || 'Content';
   const tables = host.querySelectorAll ? host.querySelectorAll('table') : [];
   tables.forEach((table, idx)=>{
     if(!table.querySelector('caption')){
