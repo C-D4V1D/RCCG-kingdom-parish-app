@@ -118,10 +118,10 @@
       event.preventDefault();
       try {
         deferredInstallPrompt.prompt();
-        const { outcome } = await deferredInstallPrompt.userChoice;
+        await deferredInstallPrompt.userChoice;
         deferredInstallPrompt = null;
-        if (outcome !== 'accepted') window.location.href = '/kpsc/install/';
-      } catch (_) {
+      } catch (error) {
+        console.warn('PWA install prompt failed', error);
         window.location.href = '/kpsc/install/';
       }
     });
