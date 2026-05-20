@@ -19,7 +19,6 @@ const ROLES = {
 };
 
 const PERMISSIONS = {
-  it_admin:      ['all'],
   pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','petty_view','reports','audit','signoff','rem_cutoff_edit'],
   accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit','rem_cutoff_edit','expense_delete_approved'],
   admin_officer: ['dashboard','transactions','expenses','petty_request','petty_view','income_view'],
@@ -341,9 +340,14 @@ function ymdLocal(d){
 function uid(){ return Date.now().toString(36) }
 function hasPermission(p){
   if(!state.user) return false;
+  if(state.user.role === 'it_admin') return true;
   const rp = state.rolePermissions?.[state.user.role];
   const perms = rp || PERMISSIONS[state.user.role] || [];
   return perms.includes('all') || perms.includes(p);
+}
+function requireAdmin(){
+  if(state.user?.role !== 'it_admin'){ showAlert('Access denied. IT Administrators only.','danger'); return false; }
+  return true;
 }
 function can(...ps){ return ps.some(p=>hasPermission(p)) }
 function canCancelTopupRequest(request){
@@ -815,6 +819,16 @@ function initApp(){
 window.addEventListener('popstate', ()=>{
   if(!state.user) return;
   navigate(pageFromPath(), true);
+});
+
+// Handle hash changes for admin tab deep-linking
+window.addEventListener('hashchange', ()=>{
+  if(!state.user || state.page !== 'admin') return;
+  const hashTab = (window.location.hash||'').replace(/^#admin-/,'').trim();
+  if(hashTab && ['users','settings','quotas','rates','perms','backup'].includes(hashTab)){
+    state.adminTab = hashTab;
+    renderAdmin();
+  }
 });
 
 function buildMonthSelector(){
@@ -7818,6 +7832,13 @@ async function renderAudit(){
 // ── IT ADMIN ──────────────────────────────
 async function renderAdmin(){
   if(state.user?.role!=='it_admin'){ document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--danger)">Access denied. IT Administrators only.</p></div>'; return }
+  // Show loading skeleton immediately
+  document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--text3)">Loading admin panel…</p></div>';
+  // Sync tab state from URL hash (e.g. #admin-settings → 'settings')
+  const hashTab = (window.location.hash||'').replace(/^#admin-/,'').trim();
+  if(hashTab && ['users','settings','quotas','rates','perms','backup'].includes(hashTab)){
+    state.adminTab = hashTab;
+  }
   const [users, settings, auditLog, pettyConfig] = await Promise.all([
     DB.getUsers(),
     DB.getSettings(),
@@ -7846,21 +7867,30 @@ async function renderAdmin(){
   if(tab==='quotas') initQuotaDnd();
 }
 
-function setAdminTab(t){ state.adminTab=t; renderAdmin() }
+function setAdminTab(t){
+  state.adminTab=t;
+  history.replaceState(null, '', '#admin-'+t);
+  renderAdmin();
+}
+
+function setAdminUserSearch(q){ state.adminUserSearch=q; renderAdmin(); }
 
 function renderAdminUsers(users){
+  const q = (state.adminUserSearch||'').toLowerCase();
+  const filtered = q ? users.filter(u=>u.name.toLowerCase().includes(q)||(u.role||'').toLowerCase().includes(q)||(u.email||'').toLowerCase().includes(q)) : users;
   function permSummary(role){
     const rp = state.rolePermissions?.[role];
     const perms = rp || PERMISSIONS[role] || [];
-    if(perms.includes('all')) return '<span class="badge" style="background:#EEEDFE;color:#534AB7">Full Access</span>';
+    if(role === 'it_admin' || perms.includes('all')) return '<span class="badge" style="background:#EEEDFE;color:#534AB7">Full Access</span>';
     const labels = PERMISSION_DEFS.filter(d=>perms.includes(d.key)).map(d=>`<span class="badge" style="background:#f0f0f0;color:#444;font-size:10px;margin:1px">${d.label}</span>`);
     return labels.length ? labels.join(' ') : '<span style="color:var(--text3);font-size:12px">No permissions</span>';
   }
   return `<div class="card">
     <div class="card-header"><span class="card-title">User Accounts</span><button class="btn btn-primary btn-sm" onclick="App.showAddUser()">+ Add User</button></div>
+    <div style="margin-bottom:10px"><input type="search" class="form-input" placeholder="Search by name, role or email…" value="${esc(state.adminUserSearch||'')}" oninput="App.setAdminUserSearch(this.value)" style="max-width:320px" /></div>
     <div class="table-wrap"><table>
       <tr><th>Name</th><th>Role</th><th>Access / Permissions</th><th>Email</th><th>Actions</th></tr>
-      ${users.map(u=>{const r=ROLES[u.role]||{}; return`<tr>
+      ${filtered.map(u=>{const r=ROLES[u.role]||{}; return`<tr>
         <td><strong>${u.name}</strong></td>
         <td><span class="badge" style="background:${r.bg};color:${r.color}">${r.label||u.role}</span></td>
         <td style="max-width:260px;white-space:normal;line-height:1.6">${permSummary(u.role)}</td>
@@ -7868,6 +7898,7 @@ function renderAdminUsers(users){
         <td><button class="btn btn-sm" onclick="App.editUser('${u.id}')">Edit</button>
             <button class="btn btn-sm btn-danger" onclick="App.deleteUser('${u.id}', this)" style="margin-left:4px">Delete</button></td>
       </tr>`}).join('')}
+      ${filtered.length===0?`<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:16px">No users match your search.</td></tr>`:''}
     </table></div></div>`;
 }
 
@@ -7875,6 +7906,7 @@ function renderAdminSettings(s){
   const floatColor = s.pettyFloat < 0 ? 'var(--danger)' : 'var(--success)';
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:1rem">Church Information</div>
+    <input type="hidden" id="set_petty_float_current" value="${s.pettyFloat}" />
     <div class="form-group"><label class="form-label">Church Name</label><input type="text" id="set_name" class="form-input" value="${s.churchName||''}" /></div>
     <div class="form-group"><label class="form-label">Bank Name</label><input type="text" id="set_bank" class="form-input" value="${s.bankName||''}" /></div>
     <div class="form-group"><label class="form-label">Account Number</label><input type="text" id="set_acct" class="form-input" value="${s.accountNo||''}" /></div>
@@ -7914,6 +7946,7 @@ function renderAdminQuotas(s){
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Monthly Fixed Quotas</div>
     <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">These flat amounts are remitted monthly regardless of income fluctuations. They are included in the bulk remittance payment each month.</p>
+    <div class="alert alert-info" style="margin-bottom:10px"><span class="alert-icon">ℹ</span><span>Drag items using the ⠿ handle to reorder, then click <strong>Save Quotas</strong> to apply changes.</span></div>
     <div id="quota-rows-container">${rows}</div>
     <button class="btn" style="margin-top:4px;margin-bottom:12px" onclick="App.addQuotaRow()">➕ Add Quota</button><br/>
     <button class="btn btn-primary" onclick="App.saveQuotas(this)">Save Quotas</button>
@@ -7922,11 +7955,15 @@ function renderAdminQuotas(s){
 
 function renderAdminRates(s){
   const r = s.remittanceRates || DEFAULT_REMITTANCE_RATES;
+  const isCustom = !!s.remittanceRates;
+  const ratesBadge = isCustom
+    ? `<span class="badge" style="background:#E6F1FB;color:#185FA5;margin-left:8px">Custom Rates</span>`
+    : `<span class="badge" style="background:#f0f0f0;color:#444;margin-left:8px">Default RCCG Rates</span>`;
   const decToPct = v => Math.round((v??0)*1000)/10;
   const rateInput = (id, val) =>
     `<input type="number" id="${id}" class="form-input" value="${decToPct(val)}" min="0" max="100" step="0.1" style="width:80px;display:inline-block" /> %`;
   return `<div class="card">
-    <div class="modal-title" style="font-size:15px;margin-bottom:8px">Remittance Percentage Rates</div>
+    <div class="modal-title" style="font-size:15px;margin-bottom:8px">Remittance Percentage Rates ${ratesBadge}</div>
     <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">Configure what percentage of each income type goes to National HQ and what stays local. National + Local should sum to 100%. Changes take effect immediately for all new calculations.</p>
     <div class="table-wrap"><table>
       <tr><th>Income Type</th><th>→ National HQ %</th><th>→ Local Retained %</th></tr>
@@ -7958,6 +7995,7 @@ function renderAdminRates(s){
 }
 
 async function saveRates(btn=null){
+  if(!requireAdmin()) return;
   const s = await DB.getSettings();
   const r = s.remittanceRates || {};
   const pct2dec = id => { const el=document.getElementById(id); return el ? parseFloat(el.value||0)/100 : null; };
@@ -7981,11 +8019,20 @@ async function saveRates(btn=null){
     const v = pct2dec(`rate_${k}`);
     if(v!==null) r[k] = v;
   });
+  // Validate TG split sums to 100%
+  const tgKeys = ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed'];
+  const tgSum = tgKeys.reduce((sum,k)=>sum+(r[k]??0),0);
+  if(Math.abs(tgSum-1) > 0.001){
+    showAlert(`Thanksgiving (TG) split percentages must sum to 100% (currently ${Math.round(tgSum*1000)/10}%). Please correct before saving.`,'danger');
+    return;
+  }
   s.remittanceRates = r;
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.saveSettings(s);
+    DB.addAudit('rates_updated','Remittance rates updated',state.user?.name);
     showAlert('Remittance rates updated successfully!','success');
+    restore();
   } catch(err) {
     restore();
     showAlert(`Failed to save rates: ${err.message||'Unknown error'}. Please try again.`,'danger');
@@ -8030,6 +8077,7 @@ function renderAdminPerms(s){
 }
 
 async function saveRolePermissions(btn=null){
+  if(!requireAdmin()) return;
   const s = await DB.getSettings();
   const saved = {};
   Object.keys(ROLES).filter(r=>r!=='it_admin').forEach(r=>{
@@ -8050,7 +8098,9 @@ async function saveRolePermissions(btn=null){
 }
 
 async function resetRolePermissions(){
-  if(!confirm('Reset all role permissions to factory defaults?')) return;
+  if(!requireAdmin()) return;
+  const word = prompt('Type RESET to restore all role permissions to factory defaults:');
+  if(word !== 'RESET'){ if(word !== null) alert('Cancelled — you must type RESET exactly.'); return; }
   const s = await DB.getSettings();
   delete s.rolePermissions;
   await DB.saveSettings(s);
@@ -8085,6 +8135,7 @@ function renderAdminBackup(){
 
 
 async function saveSettings(btn=null){
+  if(!requireAdmin()) return;
   const s=await DB.getSettings();
   s.churchName=document.getElementById('set_name')?.value;
   s.bankName=document.getElementById('set_bank')?.value;
@@ -8097,9 +8148,11 @@ async function saveSettings(btn=null){
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.saveSettings(s);
-    const pettyCfg = await DB.getPettyConfig();
-    const currentFloat = Number.isFinite(pettyCfg?.float) ? pettyCfg.float : 50000;
+    // Use the float shown on screen (captured at render time) to avoid clobbering concurrent changes
+    const displayedFloat = parseFloat(document.getElementById('set_petty_float_current')?.value);
+    const currentFloat = Number.isFinite(displayedFloat) ? displayedFloat : (await DB.getPettyConfig())?.float ?? 0;
     await DB.savePettyConfig({ float: currentFloat, max: pettyMax });
+    DB.addAudit('settings_updated','Church settings updated',state.user?.name);
     showAlert('Settings saved!','success');
     restore();
   } catch(err) {
@@ -8262,6 +8315,7 @@ function initQuotaDnd(){
 }
 
 async function saveQuotas(btn=null){
+  if(!requireAdmin()) return;
   const container=document.getElementById('quota-rows-container');
   const list=[];
   if(container){
@@ -8279,6 +8333,7 @@ async function saveQuotas(btn=null){
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.saveSettings(s);
+    DB.addAudit('quotas_updated',`Monthly quotas updated (${list.length} quota${list.length===1?'':'s'})`,state.user?.name);
     showAlert('Monthly quotas updated!','success');
     restore();
   } catch(err) {
@@ -8301,11 +8356,18 @@ function showAddUser(){
 }
 
 async function addUser(btn=null){
+  if(!requireAdmin()) return;
   const name=document.getElementById('nu_name')?.value?.trim();
   const role=document.getElementById('nu_role')?.value;
   const email=document.getElementById('nu_email')?.value;
   const pin=document.getElementById('nu_pin')?.value;
   if(!name||!role||!pin||pin.length<4){ alert('Please fill name, role, and PIN (min 4 digits).'); return }
+  // Duplicate check
+  const existingUsers = await DB.getUsers();
+  const duplicate = existingUsers.find(u=>u.name.toLowerCase()===name.toLowerCase() && u.role===role);
+  if(duplicate){
+    if(!confirm(`A user named "${name}" with role "${ROLES[role]?.label||role}" already exists. Add anyway?`)) return;
+  }
   const restore = setBtnLoading(btn, 'Adding…');
   try {
     await DB.addUser({ name, role, email, pin });
@@ -8320,6 +8382,7 @@ async function addUser(btn=null){
 }
 
 async function editUser(id){
+  if(!requireAdmin()) return;
   const usersEU=await DB.getUsers();
   const u=usersEU.find(x=>x.id===id);
   if(!u) return;
@@ -8336,6 +8399,7 @@ async function editUser(id){
 }
 
 async function updateUser(id, btn=null){
+  if(!requireAdmin()) return;
   const updateData = { name:document.getElementById('eu_name')?.value, role:document.getElementById('eu_role')?.value, email:document.getElementById('eu_email')?.value, pin:document.getElementById('eu_pin')?.value };
   const restore = setBtnLoading(btn, 'Saving…');
   try {
@@ -8351,9 +8415,16 @@ async function updateUser(id, btn=null){
 }
 
 async function deleteUser(id, btn=null){
+  if(!requireAdmin()) return;
   const usersDelU=await DB.getUsers();
   const u=usersDelU.find(x=>x.id===id);
-  if(!u||!confirm(`Delete user "${u.name}"? This cannot be undone.`)) return;
+  if(!u) return;
+  // Block deletion of the last IT Admin
+  if(u.role==='it_admin' && usersDelU.filter(x=>x.role==='it_admin').length<=1){
+    showAlert('Cannot delete the only IT Administrator. Assign another user as IT Admin first.','danger');
+    return;
+  }
+  if(!confirm(`Delete user "${u.name}"? This cannot be undone.`)) return;
   const restore = setBtnLoading(btn, 'Deleting…');
   try {
     await DB.deleteUser(id);
@@ -8367,9 +8438,12 @@ async function deleteUser(id, btn=null){
 }
 
 async function exportData(btn=null){
+  if(!requireAdmin()) return;
   const restore = setBtnLoading(btn, 'Exporting…');
   try {
-    const [users,income,remittances,expenses,petty,auditLog,settings,cashTransactions] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(),DB.getPetty(),DB.getAudit(),DB.getSettings(),DB.getCashTransactions()]);
+    const [usersRaw,income,remittances,expenses,petty,auditLog,settings,cashTransactions] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(),DB.getPetty(),DB.getAudit(),DB.getSettings(),DB.getCashTransactions()]);
+    // Strip PIN hashes — they must never leave the database in any export
+    const users = usersRaw.map(({pin:_pin, pinHash:_hash, ...u})=>u);
     const data={ users,income,remittances,expenses,petty,audit:auditLog,settings,cashTransactions, exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
     const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
@@ -8385,6 +8459,7 @@ async function exportData(btn=null){
 }
 
 function importData(){
+  if(!requireAdmin()) return;
   const input=document.createElement('input'); input.type='file'; input.accept='.json';
   input.onchange=async e=>{
     const file=e.target.files[0]; if(!file) return;
@@ -8392,6 +8467,20 @@ function importData(){
     reader.onload=async ev=>{
       try{
         const data=JSON.parse(ev.target.result);
+        // Schema validation — must have at minimum users (array) and settings (object)
+        const warnings=[];
+        if(!data || typeof data !== 'object') throw new Error('Not a valid JSON object.');
+        if(!Array.isArray(data.users)) warnings.push('• Missing or invalid "users" array.');
+        if(!data.settings || typeof data.settings !== 'object') warnings.push('• Missing or invalid "settings" object.');
+        if(data.exportedAt){
+          const exportedDate = new Date(data.exportedAt).toLocaleDateString();
+          warnings.unshift(`Backup created: ${exportedDate}.`);
+        }
+        if(warnings.filter(w=>w.startsWith('•')).length>0){
+          alert('This backup file has validation issues and cannot be safely restored:\n\n'+warnings.join('\n')+'\n\nPlease use a valid RCCG backup file.');
+          return;
+        }
+        if(warnings.length && !confirm('Backup file info:\n\n'+warnings.join('\n')+'\n\nContinue?')) return;
         if(!confirm('This will overwrite all existing financial records (income, expenses, remittances, petty cash) with data from the backup.\n\nUser accounts and PINs will NOT be changed — any names or PINs you have updated will be preserved.\n\nAre you sure you want to proceed?')) return;
         await DB.importBackup(data);
         DB.addAudit('data_imported','Data restored from backup',state.user?.name);
@@ -8405,13 +8494,15 @@ function importData(){
 }
 
 async function clearDataOnly(){
+  if(!requireAdmin()) return;
   if(!confirm(
     'This will permanently delete all financial records:\n\n' +
     '• Income records\n• Expenses\n• Remittances\n• Petty cash history\n• Bank transactions\n• Audit log\n• Notifications\n\n' +
     'Your users, church settings, remittance rates, quotas, and role permissions will be KEPT.\n\n' +
     'Export a backup first if you need to keep the test data.\n\nProceed?'
   )) return;
-  if(!confirm('Last confirmation — this cannot be undone. Delete all financial data now?')) return;
+  const word=prompt('Type CLEAR DATA to confirm deletion of all financial records:');
+  if(word!=='CLEAR DATA'){ if(word!==null) alert('Cancelled — you must type CLEAR DATA exactly.'); return; }
   try {
     showAlert('Clearing data…', 'info');
     await DB.clearDataOnly();
@@ -8424,6 +8515,7 @@ async function clearDataOnly(){
 }
 
 async function clearAllData(){
+  if(!requireAdmin()) return;
   if(!confirm('⚠ This will permanently delete ALL church financial records. Type CONFIRM to proceed.')) return;
   const word=prompt('Type CONFIRM to delete everything:');
   if(word!=='CONFIRM'){ alert('Cancelled.'); return }
@@ -8634,7 +8726,7 @@ return {
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange,
-  setAdminTab, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
+  setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
     updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
     setDashPeriodMode,
     showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
