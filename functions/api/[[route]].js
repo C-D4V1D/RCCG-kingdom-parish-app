@@ -1817,7 +1817,7 @@ async function createIncome(DB, data, caller) {
     const directPetty  = Number(data.directPettyCash   || 0);
     // Cash with accountant is whatever remains after bank and petty allocations
     const cashAmt      = total - bankTransfer - directPetty;
-    if (Math.abs(cashAmt) > 0.01 && cashAmt < -0.01) {
+    if (cashAmt < -0.01) {
       return err(`Income split invalid: bankTransfer (${bankTransfer}) + directPettyCash (${directPetty}) exceeds totalCollection (${total})`, 422);
     }
   }
@@ -2153,7 +2153,7 @@ async function updatePettyEntry(DB, id, data, caller) {
       return err(`Role '${callerRole}' cannot change petty cash status`, 403);
     }
 
-    // Require required fields for each transition
+    // Require fields for each transition
     if (to === 'approved' && (!data.approvedBy || !data.approvedAt)) {
       return err('approvedBy and approvedAt are required when approving', 422);
     }

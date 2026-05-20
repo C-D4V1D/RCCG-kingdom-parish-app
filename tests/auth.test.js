@@ -355,7 +355,7 @@ test('petty cash status change from unknown → approved is rejected', async () 
             return { id: 'u-test', name: 'Accountant', role: 'accountant', email: '' };
           }
           if (/SELECT status FROM petty_cash WHERE id=\?/.test(sql)) {
-            return { status: 'settled' };  // can't go backwards
+            return { status: 'settled' };  // invalid transition to approved from settled
           }
           return null;
         },
