@@ -5103,7 +5103,7 @@ For each item, determine:
 Agenda items to classify:
 ${itemsList}
 
-Meeting content:
+Meeting content (truncated to 8 000 chars to stay within token budget):
 ${context.slice(0, 8000)}
 
 Return ONLY a valid JSON array. No markdown, no extra text:

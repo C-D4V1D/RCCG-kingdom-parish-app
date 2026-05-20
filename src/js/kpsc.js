@@ -8857,7 +8857,13 @@ async function renderSettings(main) {
 
       <div class="k-card" style="margin-bottom:16px">
         <h2 class="k-card-title">✏️ System SMS Message Templates</h2>
-        <p class="k-card-sub">Edit the text for each automated SMS the portal sends. Use these variables: <code>{{name}}</code>, <code>{{month}}</code>, <code>{{amount}}</code>, <code>{{partnerType}}</code>, <code>{{amtText}}</code>, <code>{{meetingTitle}}</code>, <code>{{meetingDate}}</code>, <code>{{meetingTime}}</code>, <code>{{venue}}</code>, <code>{{task}}</code>, <code>{{dueDate}}</code>, <code>{{ordinal}}</code>. Leave blank to use the built-in default text.</p>
+        <p class="k-card-sub">Edit the text for each automated SMS the portal sends. Leave blank to use the built-in default text. Available variables by template:<br>
+          <strong>Welcome:</strong> <code>{{name}}</code><br>
+          <strong>Payment:</strong> <code>{{name}}</code>, <code>{{month}}</code>, <code>{{amount}}</code>, <code>{{amtText}}</code>, <code>{{partnerType}}</code><br>
+          <strong>New Month / Milestone:</strong> <code>{{name}}</code><br>
+          <strong>Anniversary:</strong> <code>{{name}}</code>, <code>{{ordinal}}</code>, <code>{{years}}</code><br>
+          <strong>Pre-Meeting:</strong> <code>{{name}}</code>, <code>{{meetingTitle}}</code>, <code>{{meetingDate}}</code>, <code>{{meetingTime}}</code>, <code>{{venue}}</code><br>
+          <strong>Deadline:</strong> <code>{{name}}</code>, <code>{{task}}</code>, <code>{{dueDate}}</code></p>
         <div class="k-form-group">
           <label class="k-label">👋 Welcome SMS (new partner)</label>
           <textarea id="ks-sms-welcome" class="k-input k-textarea" rows="3" placeholder="Default: Welcome to RCCG Kingdom Parish, {{name}}!…">${esc(smsWelcomeText)}</textarea>
