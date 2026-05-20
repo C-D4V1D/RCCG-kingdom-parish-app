@@ -101,13 +101,13 @@
 <script>
   if ('serviceWorker' in navigator) {
     let refreshing = false;
-    const reloadForFreshWorker = () => {
+    const reloadOnServiceWorkerUpdate = () => {
       if (refreshing) return;
       refreshing = true;
       window.location.reload();
     };
 
-    navigator.serviceWorker.addEventListener('controllerchange', reloadForFreshWorker);
+    navigator.serviceWorker.addEventListener('controllerchange', reloadOnServiceWorkerUpdate);
     navigator.serviceWorker.register('/kpsc/sw.js', {
       scope: '/kpsc/',
       updateViaCache: 'none'

@@ -45,6 +45,7 @@ test('KPSC service worker prefers network for app shell updates', async () => {
   const html = await readFile(new URL('../kpsc/index.html', import.meta.url), 'utf8');
 
   assert.match(sw, /const CACHE = 'kpsc-v3';/);
+  assert.match(sw, /const SHELL = \[\s*'\/kpsc\/index\.html',\s*'\/kpsc\/manifest\.json',\s*'\/src\/css\/kpsc\.css',\s*'\/src\/js\/kpsc\.js',\s*\];/s);
   assert.match(sw, /networkFirst\(request, '\/kpsc\/index\.html'\)/);
   assert.match(sw, /if \(isAppShellAsset\(url\.pathname\)\)/);
   assert.match(html, /updateViaCache: 'none'/);

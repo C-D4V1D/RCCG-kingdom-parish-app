@@ -23,7 +23,7 @@ async function networkFirst(request, cacheKey = request) {
   } catch {
     const cached = await cache.match(cacheKey);
     if (cached) return cached;
-    throw new Error('offline');
+    throw new Error('Offline');
   }
 }
 
