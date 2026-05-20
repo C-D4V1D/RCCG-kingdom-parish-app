@@ -679,8 +679,109 @@ async function calcRemittances(income){
   return res;
 }
 
-function showModal(html){ const o=document.createElement('div'); o.className='modal-overlay'; o.id='modalOverlay'; o.innerHTML=`<div class="modal">${html}</div>`; document.body.appendChild(o) }
-function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
+let modalLastFocused = null;
+let modalTrapCleanup = null;
+
+function getFocusableEls(root){
+  if(!root) return [];
+  return Array.from(root.querySelectorAll(
+    'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )).filter(el => !el.hasAttribute('disabled') && el.getAttribute('aria-hidden') !== 'true');
+}
+
+function enableModalFocusTrap(overlay){
+  const modal = overlay?.querySelector('.modal');
+  if(!modal) return ()=>{};
+  const onKeydown = (e)=>{
+    if(e.key === 'Escape'){
+      e.preventDefault();
+      closeModal();
+      return;
+    }
+    if(e.key !== 'Tab') return;
+    const focusables = getFocusableEls(modal);
+    if(!focusables.length){
+      e.preventDefault();
+      modal.focus();
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if(e.shiftKey && document.activeElement === first){
+      e.preventDefault();
+      last.focus();
+    } else if(!e.shiftKey && document.activeElement === last){
+      e.preventDefault();
+      first.focus();
+    }
+  };
+  const onBackdropClick = (e)=>{
+    if(e.target === overlay) closeModal();
+  };
+  overlay.addEventListener('keydown', onKeydown);
+  overlay.addEventListener('click', onBackdropClick);
+  return ()=>{
+    overlay.removeEventListener('keydown', onKeydown);
+    overlay.removeEventListener('click', onBackdropClick);
+  };
+}
+
+function ensureTableAccessibility(root){
+  const host = root || document;
+  const title = document.getElementById('topBarTitle')?.textContent?.trim() || 'Data';
+  const tables = host.querySelectorAll ? host.querySelectorAll('table') : [];
+  tables.forEach((table, idx)=>{
+    if(!table.querySelector('caption')){
+      const cap = document.createElement('caption');
+      cap.className = 'sr-only';
+      cap.textContent = `${title} table ${idx + 1}`;
+      table.prepend(cap);
+    }
+    const headTh = table.querySelectorAll('thead th');
+    if(headTh.length){
+      headTh.forEach(th=>{ if(!th.getAttribute('scope')) th.setAttribute('scope','col'); });
+    } else {
+      const firstRowTh = table.querySelectorAll('tr:first-child th');
+      firstRowTh.forEach(th=>{ if(!th.getAttribute('scope')) th.setAttribute('scope','col'); });
+    }
+    const rowHeads = table.querySelectorAll('tbody tr th:first-child, tr th:first-child');
+    rowHeads.forEach(th=>{
+      if(!th.getAttribute('scope') && th.parentElement && th.parentElement.rowIndex > 0){
+        th.setAttribute('scope','row');
+      }
+    });
+  });
+}
+
+function showModal(html){
+  const old = document.getElementById('modalOverlay');
+  if(old) old.remove();
+  const o = document.createElement('div');
+  o.className = 'modal-overlay';
+  o.id = 'modalOverlay';
+  o.setAttribute('aria-hidden', 'false');
+  o.innerHTML = `<div class="modal" role="dialog" aria-modal="true" tabindex="-1">${html}</div>`;
+  document.body.appendChild(o);
+  ensureTableAccessibility(o);
+  modalLastFocused = document.activeElement;
+  modalTrapCleanup = enableModalFocusTrap(o);
+  const modal = o.querySelector('.modal');
+  const firstFocusable = getFocusableEls(modal)[0];
+  (firstFocusable || modal).focus();
+}
+
+function closeModal(){
+  const o = document.getElementById('modalOverlay');
+  if(modalTrapCleanup){
+    modalTrapCleanup();
+    modalTrapCleanup = null;
+  }
+  if(o) o.remove();
+  if(modalLastFocused && typeof modalLastFocused.focus === 'function'){
+    modalLastFocused.focus();
+  }
+  modalLastFocused = null;
+}
 function showAlert(msg,type='success'){
   const a=document.createElement('div'); a.className=`alert alert-${type}`;
   const icon=document.createElement('span'); icon.className='alert-icon'; icon.textContent=type==='success'?'✓':type==='danger'?'✕':'⚠';
@@ -825,6 +926,35 @@ async function submitChangePin(btn=null){
 // 6. NAVIGATION & ROUTER
 // ──────────────────────────────────────────
 const VALID_PAGES = ['dashboard','transactions','income','remittances','expenses','bank','petty_cash','reports','audit','admin'];
+const HASH_TAB_CONFIG = {
+  admin:  { stateKey:'adminTab',  tabs:['users','settings','quotas','rates','perms','backup'] },
+  income: { stateKey:'incomeTab', tabs:['list','other','summary','all'] },
+  bank:   { stateKey:'bankTab',   tabs:['overview','withdrawals','deposits','charges','reconciliation'] },
+};
+
+function tabFromHash(page){
+  const conf = HASH_TAB_CONFIG[page];
+  if(!conf) return null;
+  const raw = (window.location.hash || '').replace(/^#/, '').trim();
+  const prefix = `${page}-`;
+  if(!raw.startsWith(prefix)) return null;
+  const tab = raw.slice(prefix.length);
+  return conf.tabs.includes(tab) ? tab : null;
+}
+
+function syncPageTabFromHash(page){
+  const conf = HASH_TAB_CONFIG[page];
+  if(!conf) return;
+  const tab = tabFromHash(page);
+  if(tab) state[conf.stateKey] = tab;
+}
+
+function replaceHashForPageTab(page, tab){
+  const conf = HASH_TAB_CONFIG[page];
+  if(!conf || !conf.tabs.includes(tab)) return;
+  const url = `${window.location.pathname}${window.location.search}#${page}-${tab}`;
+  history.replaceState(history.state || null, '', url);
+}
 
 function pageFromPath(){
   const seg = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
@@ -846,14 +976,15 @@ window.addEventListener('popstate', ()=>{
   navigate(pageFromPath(), true);
 });
 
-// Handle hash changes for admin tab deep-linking
+// Handle hash changes for tab deep-linking (admin/income/bank)
 window.addEventListener('hashchange', ()=>{
-  if(!state.user || state.page !== 'admin') return;
-  const hashTab = (window.location.hash||'').replace(/^#admin-/,'').trim();
-  if(hashTab && ['users','settings','quotas','rates','perms','backup'].includes(hashTab)){
-    state.adminTab = hashTab;
-    renderAdmin();
-  }
+  if(!state.user || !HASH_TAB_CONFIG[state.page]) return;
+  const tab = tabFromHash(state.page);
+  if(!tab) return;
+  state[HASH_TAB_CONFIG[state.page].stateKey] = tab;
+  if(state.page === 'admin') renderAdmin();
+  else if(state.page === 'income') renderIncome();
+  else if(state.page === 'bank') renderBank();
 });
 
 function buildMonthSelector(){
@@ -938,6 +1069,9 @@ async function navigate(page, fromHistory){
   if(!fromHistory && window.location.pathname !== newPath){
     history.pushState({page}, '', newPath);
   }
+  if(!HASH_TAB_CONFIG[page] && window.location.hash){
+    history.replaceState(history.state || null, '', `${window.location.pathname}${window.location.search}`);
+  }
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   const titles={dashboard:'Dashboard',transactions:'Transactions',income:'Record Income',remittances:'Remittances',
@@ -988,6 +1122,7 @@ async function renderPage(page){
   try{
     if(pages[page]) await pages[page]();
     else document.getElementById('pageContent').innerHTML='<div class="card"><p>Page not found.</p></div>';
+    ensureTableAccessibility(document.getElementById('pageContent'));
   }catch(e){
     document.getElementById('pageContent').innerHTML=`<div class="card"><div class="alert alert-danger"><span class="alert-icon">✕</span><span>Error loading page: ${esc(e.message)}</span></div></div>`;
     console.error('renderPage error:',e);
@@ -1850,9 +1985,11 @@ async function calcChurchBalance(asOfDate){
     // numbers in the "Cash with Accountant" card while still allowing the total
     // balance to go negative when combined outflows exceed inflows.
     cashWithAccountant: Math.max(0, cashWithAccountantRaw),
+    cashPosition: Math.max(0, cashWithAccountantRaw),
     // cashDeficit > 0 means cash outflows (approved + pending) exceed recorded cash inflows —
     // accountant has disbursed more cash than received; pending expenses awaiting approval contribute here
     cashDeficit: Math.max(0, -cashWithAccountantRaw),
+    cashPositionDeficit: Math.max(0, -cashWithAccountantRaw),
     bankBalance,
     pettyFloat,
     total: cashWithAccountantRaw + bankBalance + pettyFloat
@@ -2683,9 +2820,10 @@ async function calcRemittancesFromRecords(records){
 
 // ── INCOME ────────────────────────────────
 async function renderIncome(){
+  syncPageTabFromHash('income');
   const [allIncomeRecs, _cashTx, remRatesData, balance] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance()]);
   const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
-  const cashWithAccountant = balance.cashWithAccountant;
+  const cashWithAccountant = balance.cashPosition ?? balance.cashWithAccountant;
   const records = filterByMonth(allIncomeRecs);
   const sundayRecs = records.filter(r=>!r.source||r.source==='sunday_collection');
   const otherRecs  = records.filter(r=>r.source && r.source!=='sunday_collection');
@@ -2730,7 +2868,7 @@ async function renderIncome(){
     ${await (tab==='list'?renderIncomeList(sundayRecs, _cashTx, remRates):tab==='other'?renderOtherIncomeList(otherRecs):tab==='summary'?renderIncomeSummary(records):renderAllIncomeList(allIncomeRecs, _cashTx, remRates))}`;
 }
 
-function setIncomeTab(t){ state.incomeTab=t; renderIncome() }
+function setIncomeTab(t){ state.incomeTab=t; replaceHashForPageTab('income', t); renderIncome() }
 
 async function renderIncomeList(records, cashTxOverride, remRatesOverride){
   if(!records.length) return '<div class="card"><div class="empty-table">No Sunday collection records found for this month. Click "📥 Sunday Collections" above to add one.</div></div>';
@@ -3230,7 +3368,7 @@ async function confirmDeposit(id){
   const cashHeld = getSundayCashWithAccountant(r, remRates);
   const alreadyDeposited = allCashCD.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
   const remaining = Math.max(0, cashHeld - alreadyDeposited);
-  const totalCashWithAccountant = balance.cashWithAccountant;
+  const totalCashWithAccountant = balance.cashPosition ?? balance.cashWithAccountant;
   const otherCash = Math.max(0, totalCashWithAccountant - remaining);
   const today = new Date().toISOString().split('T')[0];
   state._depositRemaining = remaining;
@@ -3325,7 +3463,7 @@ async function confirmBulkDeposit(){
     DB.getIncome(), DB.getCashTransactions(), getRemRates(), DB.getExpenses(), DB.getPetty(), calcChurchBalance()
   ]);
   const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
-  const cashWithAccountant = balance.cashWithAccountant;
+  const cashWithAccountant = balance.cashPosition ?? balance.cashWithAccountant;
 
   if(cashWithAccountant < 0.5){ showAlert('No cash currently held with accountant to deposit.','warn'); return; }
 
@@ -5661,9 +5799,10 @@ async function submitBankWithdrawal(btn=null){
 }
 
 // ── BANK ────────────────────────────────
-function setBankTab(t){ state.bankTab=t; renderBank() }
+function setBankTab(t){ state.bankTab=t; replaceHashForPageTab('bank', t); renderBank() }
 
 async function renderBank(){
+  syncPageTabFromHash('bank');
   const [allCashTx, allExpenses, allIncome, allRemittances] = await Promise.all([
     DB.getCashTransactions(), DB.getExpenses(), DB.getIncome(), DB.getRemittances()
   ]);
@@ -5700,7 +5839,7 @@ async function renderBank(){
   },0);
   const pettyCashTopupsRB = pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.cashAmount||0):(h.amount||0)),0);
-  const cashWithAccountant = Math.max(0, cashFromCollectionsRB - cashDepositedToBank + bankToAccountantRB - cashExpensesRB - pettyCashTopupsRB);
+  const cashPosition = Math.max(0, cashFromCollectionsRB - cashDepositedToBank + bankToAccountantRB - cashExpensesRB - pettyCashTopupsRB);
 
   // Monthly bank charges
   const monthlyBankCharges = filterByMonth(allExpenses).filter(e=>e.category==='bank').reduce((s,e)=>s+(e.amount||0),0);
@@ -5757,12 +5896,12 @@ async function renderBank(){
     <div class="page-header">
       <div><div class="page-title">Bank Account</div><div class="page-sub">Balance: ${fmt(bankBalance)}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${canAction('income_deposit')&&cashWithAccountant>0?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${fmt(cashWithAccountant)})</button>`:''}
+        ${canAction('income_deposit')&&cashPosition>0?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${fmt(cashPosition)})</button>`:''}
         ${canAction('bank_withdrawal')?`<button class="btn btn-primary" onclick="App.showBankWithdrawal()">🏦 Record Withdrawal</button>`:''}
         ${canAction('bank_charge')?`<button class="btn" onclick="App.showBankChargeForm()">💳 Bank Charge</button>`:''}
       </div>
     </div>
-    ${cashWithAccountant>0&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong> not yet deposited to the bank account.${pendingDepCount>0?` (${pendingDepCount} income record(s) pending)`:''} <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
+    ${cashPosition>0&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashPosition)}</strong> not yet deposited to the bank account.${pendingDepCount>0?` (${pendingDepCount} income record(s) pending)`:''} <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
 
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
       <div class="kpi">
@@ -7886,11 +8025,7 @@ async function renderAdmin(){
   if(state.user?.role!=='it_admin'){ document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--danger)">Access denied. IT Administrators only.</p></div>'; return }
   // Show loading skeleton immediately
   document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--text3)">Loading admin panel…</p></div>';
-  // Sync tab state from URL hash (e.g. #admin-settings → 'settings')
-  const hashTab = (window.location.hash||'').replace(/^#admin-/,'').trim();
-  if(hashTab && ['users','settings','quotas','rates','perms','backup'].includes(hashTab)){
-    state.adminTab = hashTab;
-  }
+  syncPageTabFromHash('admin');
   const [users, settings, auditLog, pettyConfig] = await Promise.all([
     DB.getUsers(),
     DB.getSettings(),
@@ -7921,7 +8056,7 @@ async function renderAdmin(){
 
 function setAdminTab(t){
   state.adminTab=t;
-  history.replaceState(null, '', '#admin-'+t);
+  replaceHashForPageTab('admin', t);
   renderAdmin();
 }
 
@@ -8803,7 +8938,7 @@ return {
 })();
 
 // Global helpers
-function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
+function closeModal(){ App.closeModal(); }
 function toggleTopupCard(el){ const card=el.closest('.topup-card'); if(card){ card.classList.toggle('expanded'); el.setAttribute('aria-expanded', card.classList.contains('expanded')?'true':'false') } }
 
 // Ensure App is accessible from inline onclick handlers in all browsers
