@@ -66,6 +66,9 @@ const ok  = (data)       => new Response(JSON.stringify(data),        { status: 
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
+
+// Emoji number labels for WhatsApp agenda lists (items beyond 10 fall back to plain numerals).
+const EMOJI_NUMS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
 // Absolute naira tolerance when matching statement lines to recorded entries.
 const RECONCILIATION_AMOUNT_TOLERANCE_ABSOLUTE = 0.5;
 
@@ -588,6 +591,105 @@ export async function onRequest(context) {
       }
     }
 
+    // ── Agenda Builder: /api/kpsc-agenda-notes ─────────────────
+    if (route === 'kpsc-agenda-notes') {
+      if (method === 'GET' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getAgendaNotes(DB);
+      }
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createAgendaNote(DB, body, auth);
+      }
+      if (method === 'PUT' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateAgendaNote(DB, param, body);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteAgendaNote(DB, param);
+      }
+    }
+
+    // ── Agenda Builder: /api/kpsc-agenda-suggest ───────────────
+    if (route === 'kpsc-agenda-suggest' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await suggestAgendaItems(DB, env, body);
+    }
+
+    // ── Agenda Builder: /api/kpsc-whatsapp-draft ───────────────
+    if (route === 'kpsc-whatsapp-draft') {
+      if (method === 'GET' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getWhatsappDrafts(DB);
+      }
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createWhatsappDraft(DB, body, auth);
+      }
+      if (method === 'PUT' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateWhatsappDraft(DB, param, body);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteWhatsappDraft(DB, param);
+      }
+      if (method === 'POST' && parts[2] === 'build') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await buildWhatsappMessage(DB, env, param, body);
+      }
+      if (method === 'POST' && parts[2] === 'refine') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await refineWhatsappMessage(DB, env, param, body);
+      }
+      if (method === 'POST' && parts[2] === 'finalize') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await finalizeWhatsappDraft(DB, param, body, auth);
+      }
+      if (method === 'POST' && parts[2] === 'outcomes') {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await saveAgendaOutcomes(DB, param, body);
+      }
+    }
+
+    // ── Agenda Builder: /api/kpsc-agenda-templates ─────────────
+    if (route === 'kpsc-agenda-templates') {
+      if (method === 'GET' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getAgendaTemplates(DB);
+      }
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createAgendaTemplate(DB, body, auth);
+      }
+      if (method === 'PUT' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateAgendaTemplate(DB, param, body);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteAgendaTemplate(DB, param);
+      }
+    }
+
     // ── B5+B6: internal cron endpoints (Bearer CRON_SECRET) ────
     if (route === 'internal') {
       if (method === 'POST' && param === 'run-followups')  return await runFollowups(DB, env, request);
@@ -915,6 +1017,42 @@ async function handleInit(DB) {
       created_at  TEXT DEFAULT (datetime('now')),
       updated_at  TEXT DEFAULT (datetime('now'))
     )`,
+    // ── Agenda Builder ──────────────────────────────────────────────
+    `CREATE TABLE IF NOT EXISTS kpsc_agenda_notes (
+      id          TEXT PRIMARY KEY,
+      text        TEXT NOT NULL DEFAULT '',
+      source      TEXT DEFAULT 'typed',
+      tag         TEXT DEFAULT 'general',
+      is_used     INTEGER DEFAULT 0,
+      created_by  TEXT DEFAULT '',
+      created_at  TEXT DEFAULT (datetime('now')),
+      updated_at  TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_whatsapp_drafts (
+      id                  TEXT PRIMARY KEY,
+      agenda_items_json   TEXT DEFAULT '[]',
+      meeting_title       TEXT DEFAULT '',
+      meeting_date        TEXT DEFAULT '',
+      meeting_time        TEXT DEFAULT '',
+      venue               TEXT DEFAULT '',
+      urgency             TEXT DEFAULT 'normal',
+      tag_all             INTEGER DEFAULT 0,
+      message_text        TEXT DEFAULT '',
+      status              TEXT DEFAULT 'draft',
+      linked_meeting_id   TEXT DEFAULT '',
+      created_by          TEXT DEFAULT '',
+      created_at          TEXT DEFAULT (datetime('now')),
+      updated_at          TEXT DEFAULT (datetime('now'))
+    )`,
+    // Agenda Templates: reusable agenda structures for recurring meetings
+    `CREATE TABLE IF NOT EXISTS kpsc_agenda_templates (
+      id          TEXT PRIMARY KEY,
+      title       TEXT NOT NULL DEFAULT '',
+      items_json  TEXT DEFAULT '[]',
+      created_by  TEXT DEFAULT '',
+      created_at  TEXT DEFAULT (datetime('now')),
+      updated_at  TEXT DEFAULT (datetime('now'))
+    )`,
   ];
 
   // Run all CREATE TABLE statements first
@@ -984,6 +1122,15 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_partner_payments ADD COLUMN deleted_by TEXT DEFAULT ''`,
     `ALTER TABLE kpsc_projects ADD COLUMN deleted_at TEXT DEFAULT ''`,
     `ALTER TABLE kpsc_projects ADD COLUMN deleted_by TEXT DEFAULT ''`,
+    // Agenda Builder: structured agenda attached to a meeting
+    `ALTER TABLE ai_secretary_meetings ADD COLUMN agenda_text TEXT DEFAULT ''`,
+    // Agenda Templates (additional features): prep checklist state on drafts
+    `ALTER TABLE kpsc_whatsapp_drafts ADD COLUMN prep_checklist_json TEXT DEFAULT '[]'`,
+    // Recurring agenda items: track which notes are pinned recurring items + how often each is used
+    `ALTER TABLE kpsc_agenda_notes ADD COLUMN is_recurring INTEGER DEFAULT 0`,
+    `ALTER TABLE kpsc_agenda_notes ADD COLUMN usage_count INTEGER DEFAULT 0`,
+    // Post-meeting closure: outcome statuses for each agenda item (discussed/carry_forward/not_discussed)
+    `ALTER TABLE kpsc_whatsapp_drafts ADD COLUMN agenda_outcomes_json TEXT DEFAULT '[]'`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -2620,6 +2767,42 @@ async function getKpscDashboard(DB, url) {
     WHERE year=? AND month=?
   `).bind(year, month).first();
 
+  // Load the next upcoming meeting from whatsapp drafts (saved/finalized with a future date).
+  // This powers the "Upcoming Meeting" card shown to all committee members on the dashboard.
+  const today = new Date().toISOString().slice(0, 10);
+  const upcomingDraft = await DB.prepare(`
+    SELECT id, meeting_title, meeting_date, meeting_time, venue, agenda_items_json, linked_meeting_id
+    FROM kpsc_whatsapp_drafts
+    WHERE status IN ('saved','finalized') AND meeting_date >= ?
+    ORDER BY meeting_date ASC
+    LIMIT 1
+  `).bind(today).first();
+
+  const upcomingMeeting = upcomingDraft ? {
+    id: upcomingDraft.id,
+    meetingTitle: upcomingDraft.meeting_title || '',
+    meetingDate: upcomingDraft.meeting_date || '',
+    meetingTime: upcomingDraft.meeting_time || '',
+    venue: upcomingDraft.venue || '',
+    agendaItems: safeJsonParse(upcomingDraft.agenda_items_json, []),
+    linkedMeetingId: upcomingDraft.linked_meeting_id || '',
+  } : null;
+
+  // Meeting frequency alert: find the last processed/active KPSC meeting date to compute days since.
+  const lastMeetingRow = await DB.prepare(`
+    SELECT meeting_date FROM ai_secretary_meetings
+    WHERE COALESCE(deleted_at,'') = '' AND status IN ('processed','active','draft')
+    ORDER BY meeting_date DESC LIMIT 1
+  `).first();
+  let daysSinceLastMeeting = null;
+  if (lastMeetingRow?.meeting_date) {
+    const lastMs = new Date(lastMeetingRow.meeting_date + 'T12:00:00').getTime();
+    const nowMs = new Date(today + 'T12:00:00').getTime();
+    if (!isNaN(lastMs) && !isNaN(nowMs)) {
+      daysSinceLastMeeting = Math.floor((nowMs - lastMs) / (1000 * 60 * 60 * 24));
+    }
+  }
+
   return ok({
     month,
     year,
@@ -2633,6 +2816,8 @@ async function getKpscDashboard(DB, url) {
       unpaidPartners: Number(unpaidPartnersRow?.unpaid_count || 0),
       remindersSent: Number(remindersRow?.sent_count || 0),
     },
+    upcomingMeeting,
+    daysSinceLastMeeting,
   });
 }
 
@@ -3317,6 +3502,7 @@ function aiSecretaryMeetingFromRow(row) {
     status: row.status,
     participants: safeJsonParse(row.participants_json, []),
     transcriptText: row.transcript_text || '',
+    agendaText: row.agenda_text || '',
     summaryShort: row.summary_short || '',
     summaryLong: row.summary_long || '',
     minutesMarkdown: row.minutes_markdown || '',
@@ -3663,6 +3849,33 @@ function parseAiSecretaryJson(text) {
   const end = raw.lastIndexOf('}');
   if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1));
   throw new Error('AI response did not contain valid JSON');
+}
+
+/**
+ * Normalise a DeepSeek model name, migrating legacy names that are being
+ * discontinued (deepseek-chat → deepseek-v4-flash, etc.).
+ */
+function normalizeDeepseekModel(raw) {
+  const m = String(raw || 'deepseek-v4-flash').trim() || 'deepseek-v4-flash';
+  if (m === 'deepseek-chat')     return 'deepseek-v4-flash';
+  if (m === 'deepseek-reasoner') return 'deepseek-v4-pro';
+  return m;
+}
+
+/**
+ * Load DeepSeek key + model from settings DB, returning { key, model }.
+ * Returns an object with empty key on error (callers should fall back gracefully).
+ */
+async function loadDeepseekSettings(DB) {
+  try {
+    const { results } = await DB.prepare(
+      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
+    ).all();
+    const s = Object.fromEntries((results || []).map(r => [r.key, String(r.value || '')]));
+    return { key: s.ai_deepseek_key?.trim() || '', model: normalizeDeepseekModel(s.ai_deepseek_model) };
+  } catch {
+    return { key: '', model: 'deepseek-v4-flash' };
+  }
 }
 
 function buildAiSecretaryOutput(meeting, options = {}) {
@@ -4037,7 +4250,7 @@ async function updateAiSecretaryMeeting(DB, id, data, auth) {
     UPDATE ai_secretary_meetings SET
       title=?, meeting_type=?, meeting_date=?, status=?, participants_json=?, transcript_text=?, ended_at=?,
       summary_short=?, summary_long=?, minutes_markdown=?, resolutions_json=?, action_items_json=?, policy_flags_json=?,
-      suggested_projects_json=?, scheduled_for=?, reviewed_at=?, reviewed_by=?, created_by_account_id=?
+      suggested_projects_json=?, scheduled_for=?, reviewed_at=?, reviewed_by=?, created_by_account_id=?, agenda_text=?
     WHERE id=?
   `).bind(
     data.title !== undefined ? String(data.title).trim() : existing.title,
@@ -4058,6 +4271,7 @@ async function updateAiSecretaryMeeting(DB, id, data, auth) {
     reviewedAt,
     reviewedBy,
     existing.created_by_account_id || (auth?.name && auth.name === (existing.created_by || '') ? auth.id : ''),
+    data.agendaText !== undefined ? String(data.agendaText || '').trim() : (existing.agenda_text || ''),
     id,
   ).run();
   return await getAiSecretaryMeeting(DB, id);
@@ -4194,7 +4408,7 @@ Title: ${meeting.title}
 Date: ${meeting.meetingDate}
 Type: ${meeting.meetingType}
 Attendance: ${participantList}
-
+${meeting.agendaText ? `\nMeeting Agenda (pre-set by the Chairman):\n${meeting.agendaText}\n\nIMPORTANT: Use the agenda above to structure "## 4. Agenda and Matters Discussed". Each agenda item should appear as a sub-heading even if discussion is brief. Items not in the agenda but raised during the meeting should appear at the end of that section.\n` : ''}
 Transcript:
 ${meeting.transcriptText || '(no transcript provided — produce a skeleton minutes document with placeholders for the secretary to complete)'}
 
@@ -5161,6 +5375,634 @@ Keep the total brief under 400 words. Cite specifics (names, dates, amounts) —
   }
 
   return ok({ ok: true, generated });
+}
+
+// ── AGENDA BUILDER HANDLERS ───────────────────────────────────────────────
+
+async function getAgendaNotes(DB) {
+  const { results } = await DB.prepare(
+    // Recurring items first so UI can highlight them; then by most recently created
+    `SELECT * FROM kpsc_agenda_notes ORDER BY is_recurring DESC, created_at DESC`
+  ).all();
+  return ok(results || []);
+}
+
+async function createAgendaNote(DB, data, auth) {
+  const id = newId('AGN-');
+  const now = new Date().toISOString();
+  const text = String(data.text || '').trim();
+  if (!text) return err('text is required', 400);
+  await DB.prepare(
+    `INSERT INTO kpsc_agenda_notes (id,text,source,tag,created_by,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?)`
+  ).bind(id, text, data.source || 'typed', data.tag || 'general', auth?.name || '', now, now).run();
+  const row = await DB.prepare(`SELECT * FROM kpsc_agenda_notes WHERE id=?`).bind(id).first();
+  return ok(row);
+}
+
+async function updateAgendaNote(DB, id, data) {
+  const existing = await DB.prepare(`SELECT id FROM kpsc_agenda_notes WHERE id=?`).bind(id).first();
+  if (!existing) return err('Agenda note not found', 404);
+  const now = new Date().toISOString();
+  // Support incrementing usage_count (for tracking how often a note is used in agendas)
+  const usageCountClause = data.incrementUsage
+    ? 'usage_count = usage_count + 1,'
+    : '';
+  await DB.prepare(
+    `UPDATE kpsc_agenda_notes SET ${usageCountClause} text=COALESCE(?,text), tag=COALESCE(?,tag), is_used=COALESCE(?,is_used), is_recurring=COALESCE(?,is_recurring), updated_at=? WHERE id=?`
+  ).bind(
+    data.text !== undefined ? String(data.text).trim() : null,
+    data.tag !== undefined ? data.tag : null,
+    data.isUsed !== undefined ? (data.isUsed ? 1 : 0) : null,
+    data.isRecurring !== undefined ? (data.isRecurring ? 1 : 0) : null,
+    now, id,
+  ).run();
+  const row = await DB.prepare(`SELECT * FROM kpsc_agenda_notes WHERE id=?`).bind(id).first();
+  return ok(row);
+}
+
+async function deleteAgendaNote(DB, id) {
+  const existing = await DB.prepare(`SELECT id FROM kpsc_agenda_notes WHERE id=?`).bind(id).first();
+  if (!existing) return err('Agenda note not found', 404);
+  await DB.prepare(`DELETE FROM kpsc_agenda_notes WHERE id=?`).bind(id).run();
+  return ok({ id, deleted: true });
+}
+
+async function suggestAgendaItems(DB, env, body) {
+  // Load recent processed meetings (last 5)
+  const { results: recentMeetings } = await DB.prepare(
+    `SELECT id,title,meeting_date,summary_short,action_items_json,resolutions_json,minutes_markdown
+     FROM ai_secretary_meetings
+     WHERE status='processed' AND COALESCE(deleted_at,'')=''
+     ORDER BY meeting_date DESC, processed_at DESC LIMIT 5`
+  ).all();
+
+  // Load personal agenda notes not yet used
+  const { results: agendaNotes } = await DB.prepare(
+    `SELECT id,text,tag,is_recurring,usage_count FROM kpsc_agenda_notes WHERE is_used=0 ORDER BY is_recurring DESC, created_at DESC`
+  ).all();
+
+  // Get DeepSeek key and model
+  const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
+
+  // Build deterministic fallback suggestions from action items and past meetings
+  const fallbackSuggestions = buildFallbackAgendaSuggestions(recentMeetings, agendaNotes);
+
+  if (!deepseekKey) {
+    return ok({ suggestions: fallbackSuggestions, source: 'deterministic' });
+  }
+
+  // Build AI context
+  const meetingContext = (recentMeetings || []).map(m => {
+    const openItems = safeJsonParse(m.action_items_json, [])
+      .filter(a => a.status !== 'done' && a.status !== 'cancelled')
+      .map(a => `  - ${a.task} (${a.assignee || 'Unassigned'}, due: ${a.dueDate || 'unset'})`).join('\n');
+    const resolutions = safeJsonParse(m.resolutions_json, [])
+      .slice(0, 5).map(r => `  - ${r.text}`).join('\n');
+    return `Meeting: ${m.title} (${m.meeting_date})\nSummary: ${m.summary_short || ''}\nOpen actions:\n${openItems || '  (none)'}\nKey decisions:\n${resolutions || '  (none)'}`;
+  }).join('\n\n---\n\n');
+
+  const notesContext = (agendaNotes || []).map(n =>
+    `[${(n.tag || 'general').toUpperCase()}] ${n.text}`
+  ).join('\n') || '(none)';
+
+  const prompt = `You are an intelligent meeting agenda planner for the KPSC (Kingdom Parish Stewardship Committee), a Nigerian church leadership committee.
+
+Analyse the context below from past meetings and personal notes, then suggest a prioritised list of agenda items for the next committee meeting.
+
+For each suggestion, provide:
+- topic: concise agenda item title (max 8 words)
+- reason: one sentence explaining why this should be on the agenda
+- priority: "high" | "medium" | "low"
+- source: "action_item" | "past_discussion" | "personal_note" | "recurring"
+- carryForward: true if this was deferred or unresolved from a previous meeting
+
+Rules:
+- Always include "Matters Arising from Previous Minutes" as the first item
+- Always include "Any Other Business / Open Floor" as the last item
+- Identify unresolved or deferred matters and flag them as carry_forward
+- Identify action items that need a progress update
+- Suggest relevant new topics based on patterns (finance, welfare, projects, partnerships)
+- Return 8–15 items maximum
+- Return only valid JSON: { "suggestions": [ {...}, ... ] }
+
+## Past Meeting Context
+${meetingContext || '(no past meetings found)'}
+
+## Chairman/Secretary Personal Notes
+${notesContext}
+
+Return only the JSON object, no markdown fences.`;
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 2000, temperature: 0.3 }),
+    });
+    if (!resp.ok) throw new Error(`DeepSeek error ${resp.status}`);
+    const data = await resp.json();
+    const text = data.choices?.[0]?.message?.content || '';
+    const parsed = parseAiSecretaryJson(text);
+    const suggestions = Array.isArray(parsed.suggestions) ? parsed.suggestions : fallbackSuggestions;
+    // Merge personal notes into suggestions, deduplicating
+    const merged = mergeNotesIntoSuggestions(suggestions, agendaNotes);
+    return ok({ suggestions: merged, source: 'ai' });
+  } catch (_) {
+    return ok({ suggestions: fallbackSuggestions, source: 'deterministic' });
+  }
+}
+
+function buildFallbackAgendaSuggestions(recentMeetings, agendaNotes) {
+  const suggestions = [
+    { topic: 'Matters Arising from Previous Minutes', reason: 'Standard opening item to review and follow up on previous decisions.', priority: 'high', source: 'recurring', carryForward: false, isPreTicked: true },
+  ];
+
+  // Open action items from last meeting
+  const lastMeeting = (recentMeetings || [])[0];
+  if (lastMeeting) {
+    const openItems = safeJsonParse(lastMeeting.action_items_json, [])
+      .filter(a => a.status !== 'done' && a.status !== 'cancelled');
+    if (openItems.length) {
+      suggestions.push({
+        topic: 'Action Item Progress Updates',
+        reason: `${openItems.length} action item(s) from the last meeting are still open.`,
+        priority: 'high',
+        source: 'action_item',
+        carryForward: true,
+        isPreTicked: true,
+      });
+    }
+  }
+
+  // Recurring personal notes — always include and pre-tick them
+  const recurringNotes = (agendaNotes || []).filter(n => n.is_recurring);
+  for (const note of recurringNotes) {
+    suggestions.push({
+      topic: note.text.length > 60 ? note.text.slice(0, 57) + '…' : note.text,
+      reason: 'This is a recurring agenda item — always discussed at KPSC meetings.',
+      priority: 'high',
+      source: 'recurring',
+      carryForward: false,
+      isPreTicked: true,
+      noteId: note.id,
+    });
+  }
+
+  // Personal notes (non-recurring)
+  for (const note of (agendaNotes || []).filter(n => !n.is_recurring).slice(0, 5)) {
+    suggestions.push({
+      topic: note.text.length > 60 ? note.text.slice(0, 57) + '…' : note.text,
+      reason: 'Added from your personal notes.',
+      priority: note.tag === 'urgent' ? 'high' : note.tag === 'important' ? 'medium' : 'low',
+      source: 'personal_note',
+      carryForward: false,
+      noteId: note.id,
+    });
+  }
+
+  suggestions.push({ topic: 'Any Other Business / Open Floor', reason: 'Standard closing item for members to raise miscellaneous matters.', priority: 'low', source: 'recurring', carryForward: false });
+  return suggestions;
+}
+
+function mergeNotesIntoSuggestions(aiSuggestions, agendaNotes) {
+  const merged = Array.isArray(aiSuggestions) ? [...aiSuggestions] : [];
+  const usedTexts = new Set(merged.map(s => String(s.topic || '').toLowerCase().trim()));
+  // First inject recurring notes (if AI didn't already include them)
+  for (const note of (agendaNotes || []).filter(n => n.is_recurring)) {
+    const key = note.text.toLowerCase().trim();
+    if (!usedTexts.has(key)) {
+      // Insert after "Matters Arising" (index 1) if that exists, else prepend
+      const insertIdx = merged.length > 0 ? 1 : 0;
+      merged.splice(insertIdx, 0, {
+        topic: note.text.length > 60 ? note.text.slice(0, 57) + '…' : note.text,
+        reason: 'This is a recurring agenda item — always discussed at KPSC meetings.',
+        priority: 'high',
+        source: 'recurring',
+        carryForward: false,
+        isPreTicked: true,
+        noteId: note.id,
+      });
+      usedTexts.add(key);
+    }
+  }
+  // Then inject non-recurring notes
+  for (const note of (agendaNotes || []).filter(n => !n.is_recurring)) {
+    const key = note.text.toLowerCase().trim();
+    if (!usedTexts.has(key)) {
+      // Insert before the last item if there are at least 2 items; otherwise append.
+      const insertIdx = merged.length > 1 ? merged.length - 1 : merged.length;
+      merged.splice(insertIdx, 0, {
+        topic: note.text.length > 60 ? note.text.slice(0, 57) + '…' : note.text,
+        reason: 'Added from your personal notes.',
+        priority: note.tag === 'urgent' ? 'high' : note.tag === 'important' ? 'medium' : 'low',
+        source: 'personal_note',
+        carryForward: false,
+        noteId: note.id,
+      });
+      usedTexts.add(key);
+    }
+  }
+  return merged;
+}
+
+// ── WHATSAPP DRAFT HANDLERS ───────────────────────────────────────────────
+
+function whatsappDraftFromRow(row) {
+  return {
+    id: row.id,
+    agendaItems: safeJsonParse(row.agenda_items_json, []),
+    meetingTitle: row.meeting_title || '',
+    meetingDate: row.meeting_date || '',
+    meetingTime: row.meeting_time || '',
+    venue: row.venue || '',
+    urgency: row.urgency || 'normal',
+    tagAll: !!row.tag_all,
+    messageText: row.message_text || '',
+    status: row.status || 'draft',
+    linkedMeetingId: row.linked_meeting_id || '',
+    prepChecklist: safeJsonParse(row.prep_checklist_json, []),
+    agendaOutcomes: safeJsonParse(row.agenda_outcomes_json, []),
+    createdBy: row.created_by || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || '',
+  };
+}
+
+async function getWhatsappDrafts(DB) {
+  // Return all drafts (no limit) so the full Notification Log can show the complete history.
+  const { results } = await DB.prepare(
+    `SELECT * FROM kpsc_whatsapp_drafts ORDER BY created_at DESC`
+  ).all();
+  return ok((results || []).map(whatsappDraftFromRow));
+}
+
+// Default prep checklist items every secretary should verify before a meeting.
+const DEFAULT_PREP_CHECKLIST = [
+  { id: 'venue',       label: 'Venue confirmed and arranged',         done: false },
+  { id: 'attendance',  label: 'Attendance sheet prepared',            done: false },
+  { id: 'minutes',     label: 'Previous minutes distributed',         done: false },
+  { id: 'agenda_copy', label: 'Printed agenda copies ready',          done: false },
+  { id: 'sound',       label: 'Sound system / microphone checked',    done: false },
+  { id: 'projector',   label: 'Projector / whiteboard available',     done: false },
+  { id: 'refresh',     label: 'Refreshments arranged',                done: false },
+];
+
+async function createWhatsappDraft(DB, data, auth) {
+  const id = newId('WAD-');
+  const now = new Date().toISOString();
+  const prepChecklist = data.prepChecklist?.length ? data.prepChecklist : DEFAULT_PREP_CHECKLIST;
+  await DB.prepare(
+    `INSERT INTO kpsc_whatsapp_drafts (id,agenda_items_json,meeting_title,meeting_date,meeting_time,venue,urgency,tag_all,message_text,status,prep_checklist_json,created_by,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    id,
+    JSON.stringify(data.agendaItems || []),
+    String(data.meetingTitle || ''),
+    String(data.meetingDate || ''),
+    String(data.meetingTime || ''),
+    String(data.venue || 'Church Premises'),
+    data.urgency || 'normal',
+    data.tagAll ? 1 : 0,
+    String(data.messageText || ''),
+    'draft',
+    JSON.stringify(prepChecklist),
+    auth?.name || '',
+    now, now,
+  ).run();
+  const row = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).first();
+  return ok(whatsappDraftFromRow(row));
+}
+
+async function updateWhatsappDraft(DB, id, data) {
+  const existing = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).first();
+  if (!existing) return err('WhatsApp draft not found', 404);
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE kpsc_whatsapp_drafts SET agenda_items_json=?, meeting_title=?, meeting_date=?, meeting_time=?, venue=?, urgency=?, tag_all=?, message_text=?, status=?, prep_checklist_json=?, agenda_outcomes_json=?, updated_at=? WHERE id=?`
+  ).bind(
+    JSON.stringify(data.agendaItems !== undefined ? data.agendaItems : safeJsonParse(existing.agenda_items_json, [])),
+    data.meetingTitle !== undefined ? String(data.meetingTitle) : (existing.meeting_title || ''),
+    data.meetingDate !== undefined ? String(data.meetingDate) : existing.meeting_date,
+    data.meetingTime !== undefined ? String(data.meetingTime) : existing.meeting_time,
+    data.venue !== undefined ? String(data.venue) : existing.venue,
+    data.urgency !== undefined ? data.urgency : existing.urgency,
+    data.tagAll !== undefined ? (data.tagAll ? 1 : 0) : existing.tag_all,
+    data.messageText !== undefined ? String(data.messageText) : existing.message_text,
+    data.status !== undefined ? data.status : existing.status,
+    JSON.stringify(data.prepChecklist !== undefined ? data.prepChecklist : safeJsonParse(existing.prep_checklist_json, DEFAULT_PREP_CHECKLIST)),
+    JSON.stringify(data.agendaOutcomes !== undefined ? data.agendaOutcomes : safeJsonParse(existing.agenda_outcomes_json, [])),
+    now, id,
+  ).run();
+  const row = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).first();
+  return ok(whatsappDraftFromRow(row));
+}
+
+async function deleteWhatsappDraft(DB, id) {
+  const existing = await DB.prepare(`SELECT id FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).first();
+  if (!existing) return err('WhatsApp draft not found', 404);
+  await DB.prepare(`DELETE FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).run();
+  return ok({ id, deleted: true });
+}
+
+// ── Agenda Templates CRUD ─────────────────────────────────────────
+
+function agendaTemplateFromRow(row) {
+  return {
+    id: row.id,
+    title: row.title || '',
+    items: safeJsonParse(row.items_json, []),
+    createdBy: row.created_by || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || '',
+  };
+}
+
+async function getAgendaTemplates(DB) {
+  const { results } = await DB.prepare(
+    `SELECT * FROM kpsc_agenda_templates ORDER BY title ASC`
+  ).all();
+  return ok((results || []).map(agendaTemplateFromRow));
+}
+
+async function createAgendaTemplate(DB, data, auth) {
+  const title = String(data.title || '').trim();
+  if (!title) return err('Template title is required.', 400);
+  const items = Array.isArray(data.items) ? data.items : [];
+  if (!items.length) return err('Template must have at least one agenda item.', 400);
+  const id = newId('TPL-');
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `INSERT INTO kpsc_agenda_templates (id,title,items_json,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?)`
+  ).bind(id, title, JSON.stringify(items), auth?.name || '', now, now).run();
+  const row = await DB.prepare(`SELECT * FROM kpsc_agenda_templates WHERE id=?`).bind(id).first();
+  return ok(agendaTemplateFromRow(row));
+}
+
+async function updateAgendaTemplate(DB, id, data) {
+  const existing = await DB.prepare(`SELECT * FROM kpsc_agenda_templates WHERE id=?`).bind(id).first();
+  if (!existing) return err('Template not found', 404);
+  const title = data.title !== undefined ? String(data.title).trim() : existing.title;
+  const items = data.items !== undefined ? data.items : safeJsonParse(existing.items_json, []);
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE kpsc_agenda_templates SET title=?, items_json=?, updated_at=? WHERE id=?`
+  ).bind(title, JSON.stringify(items), now, id).run();
+  const row = await DB.prepare(`SELECT * FROM kpsc_agenda_templates WHERE id=?`).bind(id).first();
+  return ok(agendaTemplateFromRow(row));
+}
+
+async function deleteAgendaTemplate(DB, id) {
+  const existing = await DB.prepare(`SELECT id FROM kpsc_agenda_templates WHERE id=?`).bind(id).first();
+  if (!existing) return err('Template not found', 404);
+  await DB.prepare(`DELETE FROM kpsc_agenda_templates WHERE id=?`).bind(id).run();
+  return ok({ id, deleted: true });
+}
+
+async function buildWhatsappMessage(DB, env, id, body) {
+  const existing = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).first();
+  if (!existing) return err('WhatsApp draft not found', 404);
+
+  const agendaItems = safeJsonParse(existing.agenda_items_json, []);
+  const meetingDate = existing.meeting_date || '';
+  const meetingTime = existing.meeting_time || 'Immediately after service';
+  const venue = existing.venue || 'Church Premises';
+  const urgency = existing.urgency || 'normal';
+  const tagAll = !!existing.tag_all;
+
+  // Format date for display
+  let dateDisplay = meetingDate;
+  if (meetingDate) {
+    try {
+      // Use noon (T12:00:00) to avoid DST boundary issues when parsing YYYY-MM-DD strings.
+      const d = new Date(meetingDate + 'T12:00:00');
+      const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+      const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      const dayName = days[d.getDay()];
+      dateDisplay = `${dayName}, ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+    } catch { /* use raw */ }
+  }
+
+  // Get DeepSeek key
+  const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
+
+  // Load last meeting's context for stylistic reference
+  let lastMeetingContext = '';
+  try {
+    const lastRow = await DB.prepare(
+      `SELECT summary_short FROM ai_secretary_meetings WHERE status='processed' AND COALESCE(deleted_at,'')='' ORDER BY meeting_date DESC LIMIT 1`
+    ).first();
+    if (lastRow?.summary_short) lastMeetingContext = lastRow.summary_short;
+  } catch { /* ignore */ }
+
+  const agendaList = agendaItems.map((item, i) => {
+    const label = typeof item === 'string' ? item : (item.topic || String(item));
+    return `${i + 1}. ${label}`;
+  }).join('\n');
+
+  const urgencyNote = urgency === 'urgent' ? ' (URGENT)' : urgency === 'extraordinary' ? ' (EXTRAORDINARY)' : '';
+  const tagLine = tagAll ? '@all ' : '';
+
+  // Build deterministic fallback message
+  const fallbackMessage = buildFallbackWhatsappMessage({ agendaItems, dateDisplay, meetingTime, venue, urgency, tagAll, agendaList, urgencyNote, tagLine });
+
+  if (!deepseekKey) {
+    await DB.prepare(`UPDATE kpsc_whatsapp_drafts SET message_text=?, updated_at=? WHERE id=?`)
+      .bind(fallbackMessage, new Date().toISOString(), id).run();
+    return ok({ messageText: fallbackMessage, source: 'template' });
+  }
+
+  const prompt = `You are helping the Chairman of the KPSC (Kingdom Parish Stewardship Committee) of RCCG Kingdom Parish write a WhatsApp meeting notification for committee members.
+
+Write a warm, professional WhatsApp message using *bold* and _italic_ WhatsApp formatting (not HTML). Use numbered emoji items (1️⃣ 2️⃣ 3️⃣ etc.) for the agenda. The tone should be respectful, authoritative, and warm — as a Nigerian church leader would write.
+
+## Meeting Details
+- Date: ${dateDisplay || 'To be confirmed'}
+- Time: ${meetingTime}
+- Venue: ${venue}
+- Urgency: ${urgency}${urgencyNote}
+- Tag all members: ${tagAll ? 'Yes — start the message with @all' : 'No'}
+
+## Agenda Items
+${agendaList || '(agenda to be confirmed)'}
+
+${lastMeetingContext ? `## Context from Last Meeting\n${lastMeetingContext}` : ''}
+
+## Rules
+- Use WhatsApp formatting only: *bold*, _italic_, no HTML
+- Use numbered emoji for agenda (1️⃣ 2️⃣ 3️⃣ …) — one item per line
+- Begin with a warm greeting to all KPSC members
+- Include date, time, venue clearly
+- End with a motivational/devotional closing line and "— KPSC Secretariat"
+- If urgency is "urgent" or "extraordinary", open with an urgent notice at the top
+- Keep it concise but complete — no unnecessary repetition
+- Return only the message text, nothing else`;
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 1200, temperature: 0.6 }),
+    });
+    if (!resp.ok) throw new Error(`DeepSeek error ${resp.status}`);
+    const data = await resp.json();
+    const messageText = (data.choices?.[0]?.message?.content || '').trim() || fallbackMessage;
+    await DB.prepare(`UPDATE kpsc_whatsapp_drafts SET message_text=?, updated_at=? WHERE id=?`)
+      .bind(messageText, new Date().toISOString(), id).run();
+    return ok({ messageText, source: 'ai' });
+  } catch (_) {
+    await DB.prepare(`UPDATE kpsc_whatsapp_drafts SET message_text=?, updated_at=? WHERE id=?`)
+      .bind(fallbackMessage, new Date().toISOString(), id).run();
+    return ok({ messageText: fallbackMessage, source: 'template' });
+  }
+}
+
+function buildFallbackWhatsappMessage({ agendaItems, dateDisplay, meetingTime, venue, urgency, tagAll, agendaList, urgencyNote, tagLine }) {
+  const agendaLines = agendaItems.map((item, i) => {
+    const label = typeof item === 'string' ? item : (item.topic || String(item));
+    return `${EMOJI_NUMS[i] || `${i+1}.`} ${label}`;
+  }).join('\n');
+
+  const urgencyHeader = urgency === 'urgent'
+    ? '🚨 *URGENT NOTICE* 🚨\n\n'
+    : urgency === 'extraordinary'
+    ? '📢 *EXTRAORDINARY MEETING NOTICE* 📢\n\n'
+    : '';
+
+  return `${urgencyHeader}${tagAll ? '@all\n\n' : ''}*KPSC Meeting Notice*\n\nDear Committee Members,\n\nYou are cordially invited to our next committee meeting.\n\n📅 *Date:* ${dateDisplay || 'To be confirmed'}\n🕐 *Time:* ${meetingTime}\n📍 *Venue:* ${venue}\n\n*Agenda:*\n${agendaLines || '(Agenda to be confirmed)'}\n\n_Please make every effort to attend. Kindly notify the secretary if you are unable to attend._\n\n_"As iron sharpens iron, so one person sharpens another." — Prov 27:17_\n\n— KPSC Secretariat`;
+}
+
+async function refineWhatsappMessage(DB, env, id, body) {
+  const existing = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).first();
+  if (!existing) return err('WhatsApp draft not found', 404);
+
+  const currentMessage = body.messageText || existing.message_text || '';
+  const action = String(body.action || 'proofread').toLowerCase();
+
+  const validActions = ['proofread', 'tone_formal', 'tone_warm', 'tone_urgent', 'tone_casual', 'shorten', 'expand', 'simplify'];
+  if (!validActions.includes(action)) return err(`Invalid action. Must be one of: ${validActions.join(', ')}`, 400);
+
+  const instructions = {
+    proofread:    'Carefully proofread the WhatsApp message below. Fix any grammatical errors, spelling mistakes, awkward phrasing, or unclear sentences. Preserve the original structure and intent. Return only the corrected message.',
+    tone_formal:  'Rewrite the WhatsApp message below in a more formal, authoritative tone suitable for a senior church committee. Maintain the content and structure but elevate the language. Return only the rewritten message.',
+    tone_warm:    'Rewrite the WhatsApp message below in a warmer, more personal, encouraging tone. Make members feel welcomed and valued. Maintain all key information. Return only the rewritten message.',
+    tone_urgent:  'Rewrite the WhatsApp message below to convey urgency and importance. Members should feel this meeting is critical to attend. Add an urgent opening if not already present. Return only the rewritten message.',
+    tone_casual:  'Rewrite the WhatsApp message below in a friendlier, more casual tone. Keep it professional but conversational. Maintain all key information. Return only the rewritten message.',
+    shorten:      'Shorten the WhatsApp message below without losing any critical information (date, time, venue, agenda items). Remove redundant phrases, trim lengthy sentences. Return only the shortened message.',
+    expand:       'Expand the WhatsApp message below to be more comprehensive. Add warmth, a devotional line if not present, and elaborate on the importance of attending. Keep WhatsApp formatting. Return only the expanded message.',
+    simplify:     'Simplify the language in the WhatsApp message below so it is clear and easy to understand for all members, including those less comfortable with formal English. Maintain WhatsApp formatting. Return only the simplified message.',
+  };
+
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-v4-flash';
+  { const ds = await loadDeepseekSettings(DB); deepseekKey = ds.key; deepseekModel = ds.model; }
+
+  if (!deepseekKey) return err('AI key not configured. Please add your DeepSeek API key in Settings.', 503);
+
+  const prompt = `${instructions[action]}\n\nMessage:\n${currentMessage}`;
+
+  const resp = await fetch('https://api.deepseek.com/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+    body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 1200, temperature: 0.4 }),
+  });
+  if (!resp.ok) return err(`AI service error: ${resp.status}`, 502);
+  const data = await resp.json();
+  const refined = (data.choices?.[0]?.message?.content || '').trim();
+  if (!refined) return err('AI returned an empty response. Please try again.', 502);
+  return ok({ messageText: refined });
+}
+
+async function finalizeWhatsappDraft(DB, id, body, auth) {
+  const existing = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).first();
+  if (!existing) return err('WhatsApp draft not found', 404);
+
+  const messageText = body.messageText || existing.message_text || '';
+  if (!messageText.trim()) return err('Message text is empty', 400);
+
+  const now = new Date().toISOString();
+
+  // Mark draft as saved
+  await DB.prepare(
+    `UPDATE kpsc_whatsapp_drafts SET message_text=?, status='saved', updated_at=? WHERE id=?`
+  ).bind(messageText, now, id).run();
+
+  // Mark used agenda notes as used
+  const agendaItems = safeJsonParse(existing.agenda_items_json, []);
+  const noteIds = agendaItems.filter(i => i && typeof i === 'object' && i.noteId).map(i => i.noteId);
+  for (const noteId of noteIds) {
+    try {
+      await DB.prepare(`UPDATE kpsc_agenda_notes SET is_used=1, updated_at=? WHERE id=?`).bind(now, noteId).run();
+    } catch { /* ignore */ }
+  }
+
+  // Auto-create a meeting draft if not already linked
+  let linkedMeetingId = existing.linked_meeting_id || '';
+  if (!linkedMeetingId) {
+    const meetingId = newId('AIM-');
+    // Build a clean plain-text agenda from the selected agenda items (not the WhatsApp message).
+    // The meeting's agenda_text field should hold the structured agenda, while message_text
+    // holds the WhatsApp notification (which includes greetings, emojis, and formatting).
+    const agendaForMeeting = agendaItems.map((item, i) => {
+      const label = typeof item === 'string' ? item : (item.topic || String(item));
+      return `${i + 1}. ${label}`;
+    }).join('\n');
+    const meetingTitle = body.meetingTitle || String(existing.meeting_title || '').trim()
+      || ('KPSC Meeting – ' + (existing.meeting_date || now.slice(0, 10)));
+    await DB.prepare(`
+      INSERT OR IGNORE INTO ai_secretary_meetings
+        (id,title,meeting_type,meeting_date,status,participants_json,transcript_text,agenda_text,created_by,created_by_account_id,started_at,created_at,scheduled_for)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      meetingId,
+      meetingTitle,
+      'routine',
+      existing.meeting_date || now.slice(0, 10),
+      'draft',
+      JSON.stringify([]),
+      '',
+      agendaForMeeting,
+      auth?.name || '',
+      auth?.id || '',
+      '',
+      now,
+      existing.meeting_date ? (existing.meeting_date + 'T' + (existing.meeting_time || '09:00') + ':00') : null,
+    ).run();
+    linkedMeetingId = meetingId;
+    await DB.prepare(`UPDATE kpsc_whatsapp_drafts SET linked_meeting_id=?, updated_at=? WHERE id=?`)
+      .bind(linkedMeetingId, now, id).run();
+  }
+
+  const row = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(id).first();
+  return ok({ ...whatsappDraftFromRow(row), linkedMeetingId });
+}
+
+// ── Post-Meeting Agenda Outcomes ─────────────────────────────────────
+
+async function saveAgendaOutcomes(DB, draftId, body) {
+  // Accepts { outcomes: [{ topic, status: 'resolved'|'carry_forward'|'not_discussed' }] }
+  const existing = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(draftId).first();
+  if (!existing) return err('Draft not found', 404);
+  const outcomes = Array.isArray(body.outcomes) ? body.outcomes : [];
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE kpsc_whatsapp_drafts SET agenda_outcomes_json=?, status='finalized', updated_at=? WHERE id=?`
+  ).bind(JSON.stringify(outcomes), now, draftId).run();
+
+  // Increment usage_count on referenced agenda notes so recurring items build their frequency score
+  const agendaItems = safeJsonParse(existing.agenda_items_json, []);
+  for (const item of agendaItems) {
+    if (item && typeof item === 'object' && item.noteId) {
+      try {
+        await DB.prepare(
+          `UPDATE kpsc_agenda_notes SET usage_count = usage_count + 1, updated_at=? WHERE id=?`
+        ).bind(now, item.noteId).run();
+      } catch { /* safe */ }
+    }
+  }
+
+  const row = await DB.prepare(`SELECT * FROM kpsc_whatsapp_drafts WHERE id=?`).bind(draftId).first();
+  return ok({ ...whatsappDraftFromRow(row), carryForwardItems: outcomes.filter(o => o.status === 'carry_forward' || o.status === 'not_discussed') });
 }
 
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
