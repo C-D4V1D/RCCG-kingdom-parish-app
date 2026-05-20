@@ -49,6 +49,11 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .kl-submit:hover{background:var(--navy-dark);}
 .kl-submit:active{transform:scale(.98);}
 .kl-submit:disabled{opacity:.7;cursor:not-allowed;}
+.kl-install-btn{display:flex;align-items:center;justify-content:center;width:100%;padding:11px 13px;margin-top:10px;
+  background:var(--navy-light);color:var(--navy);border:1px solid #c9d7eb;border-radius:10px;
+  font-size:13px;font-weight:600;text-decoration:none;transition:background .15s,transform .1s,border-color .15s;}
+.kl-install-btn:hover{background:#dde8f7;border-color:#b8cae4;}
+.kl-install-btn:active{transform:scale(.98);}
 .kl-error{background:#FCEBEB;color:#A32D2D;font-size:12px;padding:9px 12px;border-radius:8px;margin-bottom:12px;}
 .kl-hint{font-size:11px;color:var(--text3);text-align:center;margin-top:14px;line-height:1.6;}
 
