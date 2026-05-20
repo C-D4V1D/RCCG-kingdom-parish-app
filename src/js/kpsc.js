@@ -2568,6 +2568,7 @@ function buildDashboardContext() {
     pendingFollowups,
     upcomingBriefMeeting,
     upcomingMeeting: S._upcomingMeeting || null,
+    daysSinceLastMeeting: S._daysSinceLastMeeting ?? null,
   };
 }
 
@@ -2744,6 +2745,39 @@ function dashCardUpcomingMeeting(ctx) {
         <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('agenda_builder')">📋 Edit Agenda</button>
         ${um.linkedMeetingId ? `<button class="kbtn kbtn-sm kbtn-primary" style="margin-left:8px" onclick="Kpsc.openMeeting('${esc(um.linkedMeetingId)}')">▶ Open Meeting Draft</button>` : ''}
       </div>` : ''}
+    </div>`;
+}
+
+// ── Meeting Frequency Alert card ──────────────────────────────────
+// Shown to chairman and general_secretary on the dashboard when no meeting
+// has been scheduled for more than 14 days (2 weeks). Gives a gentle nudge.
+
+function dashCardMeetingFrequencyAlert(ctx) {
+  const days = ctx.daysSinceLastMeeting;
+  // Only show alert if more than 14 days since last meeting and no upcoming meeting is already planned
+  if (days === null || days < 14) return '';
+  if (ctx.upcomingMeeting?.meetingDate) return ''; // already have something planned
+
+  let weeksText;
+  if (days < 21) weeksText = '2 weeks';
+  else if (days < 28) weeksText = '3 weeks';
+  else if (days < 35) weeksText = '4 weeks';
+  else weeksText = `${Math.floor(days / 7)} weeks`;
+
+  return `
+    <div class="k-meeting-card" style="border-left:4px solid #d97706;margin-bottom:16px;background:var(--card)">
+      <div class="k-mc-top">
+        <div style="flex:1">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#d97706;margin-bottom:4px">⏰ Meeting Frequency Alert</div>
+          <div style="font-size:14px;font-weight:600;color:var(--text1);line-height:1.4">
+            It's been ${esc(weeksText)} since your last KPSC meeting.
+          </div>
+          <div style="font-size:12px;color:var(--text2);margin-top:4px">Would you like to plan the next one?</div>
+        </div>
+      </div>
+      <div style="margin-top:10px">
+        <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.navigate('agenda_builder')">📋 Plan Next Meeting</button>
+      </div>
     </div>`;
 }
 
@@ -2959,6 +2993,7 @@ async function renderDashboard(main) {
   S.members         = Array.isArray(settingsRes?.kpsc_members) ? settingsRes.kpsc_members : [];
   S.dashboard       = dashboardRes?.totals || null;
   S._upcomingMeeting = dashboardRes?.upcomingMeeting || null;
+  S._daysSinceLastMeeting = dashboardRes?.daysSinceLastMeeting ?? null;
   S.projects        = Array.isArray(projectsRes)            ? projectsRes            : [];
   S.financeEntries  = Array.isArray(financeRes)             ? financeRes             : [];
   S.partners        = Array.isArray(partnersRes)            ? partnersRes            : [];
@@ -3255,6 +3290,7 @@ async function renderMeetingRoom(main) {
       </div>
 
       ${isProcessed && m ? renderMinutesPanel(m) : ''}
+      ${isProcessed && m ? renderPostMeetingOutcomes(m) : ''}
     </div>`;
 
   setMeetingTab(S._meetingTab || 'record');
@@ -4099,6 +4135,86 @@ function minutesActionsHtml(m) {
     ${m.publicShareToken ? `<button class="kbtn kbtn-sm" onclick="Kpsc.revokeMinutesPublicLink('${m.id}')">🔒 Revoke Public Link</button>` : ''}
     <button class="kbtn kbtn-sm" id="btn-plain-english-${m.id}" onclick="Kpsc.togglePlainEnglish('${m.id}')" data-plain-english="false">📖 Read in plain English</button>
   `;
+}
+
+// ── Post-Meeting Closure: Agenda Outcomes Panel ──────────────────────────
+// After a meeting is processed, let the secretary mark each agenda item's outcome.
+// Outcomes are saved to the linked WhatsApp draft via the outcomes API.
+
+function renderPostMeetingOutcomes(m) {
+  if (!m?.agendaText) return '';
+
+  // Parse agenda items from the stored agendaText. Each line that looks like
+  // a numbered item or bullet is an agenda item. Skip blanks and obvious headers.
+  const rawLines = m.agendaText.split('\n').map(l => l.trim()).filter(Boolean);
+  const items = rawLines
+    .map(l => l.replace(/^[\d]+[.)]\s*/, '').replace(/^[-•*]\s*/, '').trim())
+    .filter(l => l.length > 1);
+
+  if (!items.length) return '';
+
+  // S._meetingAgendaOutcomes holds in-memory state for the current session.
+  // It is keyed by meeting id so it survives tab switches within the same session.
+  if (!S._meetingAgendaOutcomes) S._meetingAgendaOutcomes = {};
+  if (!S._meetingAgendaOutcomes[m.id]) {
+    // Pre-populate from any previously saved outcomes if the linked draft is loaded.
+    const draft = (S.agendaBuilderDraftsHistory || []).find(d => d.linkedMeetingId === m.id);
+    const savedOutcomes = Array.isArray(draft?.agendaOutcomes) ? draft.agendaOutcomes : [];
+    S._meetingAgendaOutcomes[m.id] = {};
+    for (const o of savedOutcomes) {
+      if (o.topic) S._meetingAgendaOutcomes[m.id][o.topic] = o.status;
+    }
+  }
+  const outcomes = S._meetingAgendaOutcomes[m.id];
+
+  const STATUS_OPTIONS = [
+    { value: 'resolved',      label: '✅ Discussed & Resolved',           color: '#16a34a' },
+    { value: 'carry_forward', label: '🔁 Discussed — Carry Forward',      color: '#d97706' },
+    { value: 'not_discussed', label: '⏭️ Not Discussed — Carry Forward', color: '#6b7280' },
+  ];
+
+  const rowsHtml = items.map((item, i) => {
+    const cur = outcomes[item] || '';
+    return `
+      <div class="k-meeting-card" id="km-outcome-row-${i}" style="padding:10px 12px;margin-bottom:8px">
+        <div style="display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <span style="flex:1;font-size:13px;font-weight:600;color:var(--text1);min-width:140px;line-height:1.4">${esc(item)}</span>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0">
+            ${STATUS_OPTIONS.map(o => `
+              <button class="kbtn kbtn-sm ${cur === o.value ? 'kbtn-primary' : 'kbtn-ghost'}"
+                style="font-size:11px;${cur === o.value ? `background:${o.color};border-color:${o.color}` : ''}"
+                onclick="Kpsc.abSetOutcome(${esc(JSON.stringify(m.id))},${esc(JSON.stringify(item))},${esc(JSON.stringify(o.value))},${i})"
+              >${esc(o.label)}</button>
+            `).join('')}
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  const doneCount = items.filter(t => outcomes[t]).length;
+  const allDone = doneCount === items.length;
+
+  return `
+    <details class="k-collapsible" ${!allDone ? 'open' : ''} style="margin-top:16px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+      <summary class="k-collapsible-hdr" style="padding:12px 14px;background:var(--card);cursor:pointer">
+        <span class="k-collapsible-title" style="font-size:14px;font-weight:600">
+          🏁 Post-Meeting Closure — Agenda Outcomes
+          <span class="kbadge ${allDone ? 'badge-green' : 'badge-amber'}" style="margin-left:8px">${doneCount}/${items.length} marked</span>
+        </span>
+      </summary>
+      <div style="padding:12px 14px 16px;background:var(--surface,#f8fafc)">
+        <p class="k-hint" style="margin:0 0 12px;font-size:12px">Mark each agenda item's outcome. Carry-forward items will appear at the top of the next meeting's Agenda Builder.</p>
+        <div id="km-outcomes-list">
+          ${rowsHtml}
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="kbtn kbtn-primary" onclick="Kpsc.abSaveOutcomes(${esc(JSON.stringify(m.id))},this)" id="km-save-outcomes-btn">
+            💾 Save Outcomes
+          </button>
+          ${allDone ? '<span class="k-hint" style="font-size:12px;color:var(--success,#16a34a)">✅ All outcomes saved — carry-forward items will appear in the next meeting\'s agenda.</span>' : ''}
+        </div>
+      </div>
+    </details>`;
 }
 
 function renderMinutesPanel(m) {
@@ -11463,6 +11579,95 @@ async function abReuseAsDraft(draftId) {
   showToast('Past draft loaded as a starting point. Adjust the agenda and proceed to Step 3 to set the new meeting date.', 'info');
 }
 
+// ── Post-Meeting Outcome Helpers ──────────────────────────────────
+
+// Called when the secretary taps a status button for an agenda item in the outcomes panel.
+function abSetOutcome(meetingId, topic, status, rowIdx) {
+  if (!S._meetingAgendaOutcomes) S._meetingAgendaOutcomes = {};
+  if (!S._meetingAgendaOutcomes[meetingId]) S._meetingAgendaOutcomes[meetingId] = {};
+
+  const current = S._meetingAgendaOutcomes[meetingId][topic];
+  // Toggle off if same status clicked again
+  if (current === status) {
+    delete S._meetingAgendaOutcomes[meetingId][topic];
+  } else {
+    S._meetingAgendaOutcomes[meetingId][topic] = status;
+  }
+
+  // Re-render the row's buttons to reflect the new selection
+  const rowEl = document.getElementById(`km-outcome-row-${rowIdx}`);
+  if (rowEl) {
+    const selectedStatus = S._meetingAgendaOutcomes[meetingId][topic] || '';
+    const STATUS_OPTIONS = [
+      { value: 'resolved',      label: '✅ Discussed & Resolved',           color: '#16a34a' },
+      { value: 'carry_forward', label: '🔁 Discussed — Carry Forward',      color: '#d97706' },
+      { value: 'not_discussed', label: '⏭️ Not Discussed — Carry Forward', color: '#6b7280' },
+    ];
+    const btnGroup = rowEl.querySelector('div[style*="flex"]');
+    if (btnGroup) {
+      btnGroup.innerHTML = STATUS_OPTIONS.map(o => `
+        <button class="kbtn kbtn-sm ${selectedStatus === o.value ? 'kbtn-primary' : 'kbtn-ghost'}"
+          style="font-size:11px;${selectedStatus === o.value ? `background:${o.color};border-color:${o.color}` : ''}"
+          onclick="Kpsc.abSetOutcome(${esc(JSON.stringify(meetingId))},${esc(JSON.stringify(topic))},${esc(JSON.stringify(o.value))},${rowIdx})"
+        >${esc(o.label)}</button>
+      `).join('');
+    }
+  }
+}
+
+// Called when "Save Outcomes" is clicked in the Post-Meeting Closure panel.
+async function abSaveOutcomes(meetingId, btn) {
+  const outcomes = S._meetingAgendaOutcomes?.[meetingId] || {};
+  const outcomeArray = Object.entries(outcomes).map(([topic, status]) => ({ topic, status }));
+
+  // Find the linked WhatsApp draft for this meeting
+  const draft = (S.agendaBuilderDraftsHistory || []).find(d => d.linkedMeetingId === meetingId);
+  if (!draft) {
+    // Try to load all drafts to find one linked to this meeting
+    const allDrafts = await apiGet('kpsc-whatsapp-draft');
+    if (!Array.isArray(allDrafts)) { showToast('Could not load notification drafts.', 'error'); return; }
+    S.agendaBuilderDraftsHistory = allDrafts;
+    const foundDraft = allDrafts.find(d => d.linkedMeetingId === meetingId);
+    if (!foundDraft) {
+      showToast('No linked meeting notification found. Please use the Agenda Builder to create and link a notification for this meeting first.', 'warn');
+      return;
+    }
+    return abSaveOutcomesToDraft(foundDraft.id, outcomeArray, btn);
+  }
+  return abSaveOutcomesToDraft(draft.id, outcomeArray, btn);
+}
+
+async function abSaveOutcomesToDraft(draftId, outcomes, btn) {
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    const res = await apiPost(`kpsc-whatsapp-draft/${draftId}/outcomes`, { outcomes });
+    if (res?.error) { showToast(res.error, 'error'); return; }
+    // Update history entry with new outcomes
+    if (Array.isArray(S.agendaBuilderDraftsHistory)) {
+      const idx = S.agendaBuilderDraftsHistory.findIndex(d => d.id === draftId);
+      if (idx >= 0) S.agendaBuilderDraftsHistory[idx] = { ...S.agendaBuilderDraftsHistory[idx], ...res };
+    }
+    const cfCount = Array.isArray(res.carryForwardItems) ? res.carryForwardItems.length : 0;
+    const msg = cfCount > 0
+      ? `Outcomes saved. ${cfCount} item${cfCount > 1 ? 's' : ''} will be carried forward to the next meeting.`
+      : 'Outcomes saved successfully.';
+    showToast(msg, 'success');
+    // Re-render the outcomes panel to show the "all done" confirmation
+    const outcomePanel = document.querySelector('[id^="km-save-outcomes-btn"]')?.closest('details');
+    if (outcomePanel) {
+      const summary = outcomePanel.querySelector('summary .kbadge');
+      if (summary) summary.textContent = `${outcomes.length}/${outcomes.length} marked`;
+      if (summary) summary.className = 'kbadge badge-green';
+      outcomePanel.open = false;
+    }
+  } catch {
+    showToast('Could not save outcomes. Check your connection.', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
+}
+
 // ── Agenda Builder Voice Note ───────────────────────────────────
 
 async function abToggleVoice() {
@@ -11730,6 +11935,12 @@ window.Kpsc = {
   abResetChecklist,
   abPrintAgenda,
   abCopyHistoryMessage,
+  // New additional features
+  abToggleRecurring,
+  abReuseAsDraft,
+  abPrintFromDraft,
+  abSetOutcome,
+  abSaveOutcomes,
 };
 
 document.addEventListener('DOMContentLoaded', init);
