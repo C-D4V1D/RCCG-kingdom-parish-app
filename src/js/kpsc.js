@@ -8767,7 +8767,7 @@ async function renderSettings(main) {
             </div>
           </div>
           <div id="ks-ssms-save-msg" class="k-settings-msg" style="display:none"></div>
-          <button class="kbtn kbtn-primary" onclick="Kpsc.scheduleSmsBast()">Schedule Blast</button>
+          <button class="kbtn kbtn-primary" onclick="Kpsc.scheduleSmsBlast()">Schedule Blast</button>
         </div>
       </div>
 
@@ -9106,7 +9106,7 @@ async function renderScheduledSmsList() {
     </div>`).join('')}</div>`;
 }
 
-async function scheduleSmsBast() {
+async function scheduleSmsBlast() {
   const message = document.getElementById('ks-ssms-message')?.value.trim()  || '';
   const sendAt  = document.getElementById('ks-ssms-sendAt')?.value.trim()   || '';
   const msg     = document.getElementById('ks-ssms-save-msg');
@@ -12547,7 +12547,7 @@ window.Kpsc = {
   saveSmsTemplate,
   deleteSmsTemplate,
   renderSmsTemplatesList,
-  scheduleSmsBast,
+  scheduleSmsBlast,
   deleteScheduledSms,
   renderScheduledSmsList,
   testDeepseekKey,
