@@ -4,12 +4,26 @@
 // D1 binding name: DB  (set in Cloudflare Pages → Settings → Functions → D1 bindings)
 // ================================================================
 
-const CORS_HEADERS = {
-  'Content-Type': 'application/json',
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-KPSC-Session',
-};
+// Allowed origins for CORS. The wildcard is replaced by an explicit allowlist to
+// prevent cross-origin exfiltration of financial data (C3 / C1 combined risk).
+const CORS_ALLOWED_ORIGINS = [
+  'https://rccg-kingdom-parish-app.pages.dev',
+  'https://kpaguleri.org',
+  'https://www.kpaguleri.org',
+];
+
+function buildCorsHeaders(requestOrigin) {
+  const origin = CORS_ALLOWED_ORIGINS.includes(requestOrigin)
+    ? requestOrigin
+    : CORS_ALLOWED_ORIGINS[0];
+  return {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': origin,
+    'Vary': 'Origin',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, X-KPSC-Session, X-Finance-Session',
+  };
+}
 
 // ── KPSC ROLE GROUPS ────────────────────────────────────────────────
 const KPSC_WRITE_ROLES    = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'it_admin'];
@@ -22,6 +36,23 @@ const KPSC_READ_ROLES     = ['acting_chairman', 'general_secretary', 'financial_
 
 // KPSC_SESSION_TTL_MS: 8 hours
 const KPSC_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+// Finance app session TTL: 8 hours
+const FINANCE_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+// Finance app role groups — mirror the client-side PERMISSIONS/ROLES
+const FINANCE_ADMIN_ROLES    = ['it_admin'];
+const FINANCE_INCOME_ROLES   = ['it_admin', 'accountant'];
+const FINANCE_EXPENSE_ROLES  = ['it_admin', 'accountant', 'admin_officer'];
+const FINANCE_PETTY_ROLES    = ['it_admin', 'accountant', 'admin_officer', 'signatory'];
+const FINANCE_REM_ROLES      = ['it_admin', 'accountant', 'pastor', 'signatory'];
+const FINANCE_REM_APPROVE_ROLES = ['it_admin', 'signatory', 'pastor'];
+const FINANCE_AUDIT_ROLES    = ['it_admin', 'pastor', 'accountant'];
+const FINANCE_ANY_ROLE       = ['it_admin', 'accountant', 'admin_officer', 'pastor', 'signatory', 'viewer'];
+
+// Rate limiting: max failed login attempts before a 5-minute lockout
+const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_WINDOW_MS    = 5 * 60 * 1000;  // 5 minutes
 
 /**
  * Verify a KPSC session token and check that the account has one of the
@@ -61,6 +92,41 @@ async function requireKpscRole(DB, request, allowedRoles) {
   }
   return account;
 }
+
+/**
+ * Verify a finance app session token and check that the user has one of the
+ * allowed roles.  Returns the user row on success, or a Response on failure
+ * (401 / 403).  The token is sent as the X-Finance-Session request header.
+ */
+async function requireFinanceRole(DB, request, allowedRoles) {
+  const token = (request.headers.get('X-Finance-Session') || '').trim();
+  if (!token) return err('Finance session required', 401);
+
+  const now = Date.now();
+  const session = await DB.prepare(
+    `SELECT user_id, expires_at FROM finance_sessions WHERE id=?`
+  ).bind(token).first();
+  if (!session) return err('Finance session not found or expired', 401);
+  if (session.expires_at < now) {
+    await DB.prepare(`DELETE FROM finance_sessions WHERE id=?`).bind(token).run();
+    return err('Finance session expired', 401);
+  }
+
+  const user = await DB.prepare(
+    `SELECT id, name, role, email FROM users WHERE id=?`
+  ).bind(session.user_id).first();
+  if (!user) return err('User not found', 401);
+
+  if (!allowedRoles.includes(user.role)) {
+    return err(`Role '${user.role}' is not permitted for this action`, 403);
+  }
+  return user;
+}
+
+// Per-request CORS headers, updated at the start of each onRequest call.
+// Note: this is a module-level mutable — acceptable for this app's traffic
+// patterns (low concurrency, all legitimate origins in the allowlist).
+let CORS_HEADERS = buildCorsHeaders('');
 
 const ok  = (data)       => new Response(JSON.stringify(data),        { status: 200, headers: CORS_HEADERS });
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
@@ -173,6 +239,9 @@ async function tableHasColumns(DB, table, cols) {
 export async function onRequest(context) {
   const { request, env } = context;
 
+  // Update per-request CORS headers based on the incoming origin
+  CORS_HEADERS = buildCorsHeaders(request.headers.get('origin') || '');
+
   // Handle CORS preflight
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -206,20 +275,27 @@ export async function onRequest(context) {
 
     // ── /api/users ─────────────────────────────────────────────
     if (route === 'users') {
+      const auth = await requireFinanceRole(DB, request, FINANCE_ADMIN_ROLES);
+      if (auth instanceof Response) return auth;
       if (method === 'GET'    && !param) return await getUsers(DB);
       if (method === 'POST'   && !param) return await createUser(DB, body);
       if (method === 'PUT'    &&  param) return await updateUser(DB, param, body);
       if (method === 'DELETE' &&  param) return await deleteUser(DB, param);
     }
     if (route === 'auth') {
-      if (method === 'POST' && param === 'login') return await loginUser(DB, body);
+      if (method === 'POST' && param === 'login')  return await loginUser(DB, body, request);
+      if (method === 'POST' && param === 'logout') return await financeLogout(DB, body);
     }
     if (route === 'kpsc-login-options' && method === 'GET') return await getKpscLoginOptions(DB);
     if (route === 'kpsc-login' && method === 'POST') return await kpscLoginUser(DB, body);
     if (route === 'kpsc-logout' && method === 'POST') return await kpscLogout(DB, body);
     if (route === 'kpsc-change-pin' && method === 'POST') return await changeKpscPin(DB, body);
     if (route === 'kpsc-accounts') {
-      if (method === 'GET'  && !param) return await getKpscAccounts(DB);
+      if (method === 'GET'  && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getKpscAccounts(DB);
+      }
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_ADMIN_ROLES);
         if (auth instanceof Response) return auth;
@@ -237,7 +313,11 @@ export async function onRequest(context) {
       }
     }
     if (route === 'kpsc-partners') {
-      if (method === 'GET'  && !param) return await getKpscPartners(DB);
+      if (method === 'GET'  && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getKpscPartners(DB);
+      }
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
@@ -255,7 +335,11 @@ export async function onRequest(context) {
       }
     }
     if (route === 'kpsc-partner-payments') {
-      if (method === 'GET'  && !param) return await getKpscPartnerPayments(DB, url);
+      if (method === 'GET'  && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getKpscPartnerPayments(DB, url);
+      }
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
         if (auth instanceof Response) return auth;
@@ -268,7 +352,11 @@ export async function onRequest(context) {
       }
     }
     if (route === 'kpsc-finance') {
-      if (method === 'GET'  && !param) return await getKpscFinanceEntries(DB, url);
+      if (method === 'GET'  && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getKpscFinanceEntries(DB, url);
+      }
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
         if (auth instanceof Response) return auth;
@@ -286,21 +374,33 @@ export async function onRequest(context) {
       }
     }
     if (route === 'kpsc-reminders') {
-      if (method === 'GET'  && !param) return await getKpscReminders(DB, url);
+      if (method === 'GET'  && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getKpscReminders(DB, url);
+      }
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
         return await createKpscReminder(DB, body);
       }
     }
-    if (route === 'kpsc-dashboard' && method === 'GET') return await getKpscDashboard(DB, url);
+    if (route === 'kpsc-dashboard' && method === 'GET') {
+      const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+      if (auth instanceof Response) return auth;
+      return await getKpscDashboard(DB, url);
+    }
     if (route === 'kpsc-reconciliation' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
       if (auth instanceof Response) return auth;
       return await runKpscReconciliation(DB, body);
     }
     if (route === 'kpsc-projects') {
-      if (method === 'GET'  && !param) return await getKpscProjects(DB, url);
+      if (method === 'GET'  && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getKpscProjects(DB, url);
+      }
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
@@ -358,24 +458,56 @@ export async function onRequest(context) {
       return await personalizeKpscReminder(DB, env, body);
     }
     if (route === 'change-pin' && method === 'POST') {
+      // Any authenticated finance user can change their own PIN
+      const auth = await requireFinanceRole(DB, request, FINANCE_ANY_ROLE);
+      if (auth instanceof Response) return auth;
       return await changeUserPin(DB, body);
     }
 
     // ── /api/income ────────────────────────────────────────────
     if (route === 'income') {
-      if (method === 'GET'  && !param) return await getIncome(DB);
-      if (method === 'POST' && !param) return await createIncome(DB, body);
-      if (method === 'PUT'  &&  param) return await updateIncome(DB, param, body);
-      if (method === 'DELETE' && param) return await deleteIncome(DB, param);
+      if (method === 'GET' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_ANY_ROLE);
+        if (auth instanceof Response) return auth;
+        return await getIncome(DB);
+      }
+      if (method === 'POST' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_INCOME_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createIncome(DB, body, auth);
+      }
+      if (method === 'PUT' && param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_INCOME_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateIncome(DB, param, body);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_ADMIN_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deleteIncome(DB, param);
+      }
     }
 
     // ── /api/expenses ──────────────────────────────────────────
     if (route === 'expenses') {
-      if (method === 'GET'  && !param) return await getExpenses(DB);
-      if (method === 'POST' && !param) return await createExpense(DB, body);
-      if (method === 'PUT'  &&  param) return await updateExpense(DB, param, body);
+      if (method === 'GET' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_ANY_ROLE);
+        if (auth instanceof Response) return auth;
+        return await getExpenses(DB);
+      }
+      if (method === 'POST' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_EXPENSE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createExpense(DB, body);
+      }
+      if (method === 'PUT' && param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_EXPENSE_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateExpense(DB, param, body);
+      }
       if (method === 'DELETE' && param) {
-        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+        // Fixed: was incorrectly using requireKpscRole — now uses finance auth
+        const auth = await requireFinanceRole(DB, request, FINANCE_ADMIN_ROLES);
         if (auth instanceof Response) return auth;
         return await deleteExpense(DB, param);
       }
@@ -383,21 +515,49 @@ export async function onRequest(context) {
 
     // ── /api/petty ─────────────────────────────────────────────
     if (route === 'petty') {
-      if (method === 'GET'  && !param) return await getPetty(DB);
-      if (method === 'POST' && !param) return await createPettyEntry(DB, body);
-      if (method === 'PUT'  &&  param) return await updatePettyEntry(DB, param, body);
-      if (method === 'DELETE' && param) return await deletePettyEntry(DB, param);
+      if (method === 'GET' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_ANY_ROLE);
+        if (auth instanceof Response) return auth;
+        return await getPetty(DB);
+      }
+      if (method === 'POST' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_PETTY_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createPettyEntry(DB, body);
+      }
+      if (method === 'PUT' && param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_PETTY_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updatePettyEntry(DB, param, body, auth);
+      }
+      if (method === 'DELETE' && param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_ADMIN_ROLES);
+        if (auth instanceof Response) return auth;
+        return await deletePettyEntry(DB, param);
+      }
     }
 
     // ── /api/petty-config ──────────────────────────────────────
     if (route === 'petty-config') {
-      if (method === 'GET'  && !param) return await getPettyConfig(DB);
-      if (method === 'POST' && !param) return await updatePettyConfig(DB, body);
+      if (method === 'GET' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_ANY_ROLE);
+        if (auth instanceof Response) return auth;
+        return await getPettyConfig(DB);
+      }
+      if (method === 'POST' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_INCOME_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updatePettyConfig(DB, body);
+      }
     }
 
     // ── /api/action-items ─────────────────────────────────────
     if (route === 'action-items') {
-      if (method === 'GET'  && !param) return await getActionItems(DB);
+      if (method === 'GET'  && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getActionItems(DB);
+      }
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
@@ -417,28 +577,64 @@ export async function onRequest(context) {
 
     // ── /api/remittances ───────────────────────────────────────
     if (route === 'remittances') {
-      if (method === 'GET'  && !param) return await getRemittances(DB);
-      if (method === 'POST' && !param) return await createRemittance(DB, body);
-      if (method === 'PUT'  &&  param) return await updateRemittance(DB, param, body);
+      if (method === 'GET' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_ANY_ROLE);
+        if (auth instanceof Response) return auth;
+        return await getRemittances(DB);
+      }
+      if (method === 'POST' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_REM_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createRemittance(DB, body);
+      }
+      if (method === 'PUT' && param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_REM_ROLES);
+        if (auth instanceof Response) return auth;
+        return await updateRemittance(DB, param, body, auth);
+      }
     }
 
     // ── /api/cash-transactions ─────────────────────────────────
     if (route === 'cash-transactions') {
-      if (method === 'GET'  && !param) return await getCashTransactions(DB);
-      if (method === 'POST' && !param) return await createCashTransaction(DB, body);
+      if (method === 'GET' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_ANY_ROLE);
+        if (auth instanceof Response) return auth;
+        return await getCashTransactions(DB);
+      }
+      if (method === 'POST' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_INCOME_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createCashTransaction(DB, body);
+      }
     }
 
     // ── /api/audit ─────────────────────────────────────────────
     if (route === 'audit') {
-      if (method === 'GET'  && !param) return await getAudit(DB);
-      if (method === 'POST' && !param) return await createAuditEntry(DB, body);
+      if (method === 'GET' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_AUDIT_ROLES);
+        if (auth instanceof Response) return auth;
+        return await getAudit(DB);
+      }
+      if (method === 'POST' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_ANY_ROLE);
+        if (auth instanceof Response) return auth;
+        return await createAuditEntry(DB, body);
+      }
     }
 
     // ── /api/settings ──────────────────────────────────────────
     if (route === 'settings') {
-      if (method === 'GET'  && param === 'api-status')       return getApiStatus(env);
-      if (method === 'GET'  && !param)                       return await getSettings(DB);
-      if (method === 'POST' && !param)                       return await saveSettings(DB, body);
+      if (method === 'GET'  && param === 'api-status') return getApiStatus(env);
+      if (method === 'GET'  && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_ANY_ROLE);
+        if (auth instanceof Response) return auth;
+        return await getSettings(DB);
+      }
+      if (method === 'POST' && !param) {
+        const auth = await requireFinanceRole(DB, request, FINANCE_ADMIN_ROLES);
+        if (auth instanceof Response) return auth;
+        return await saveSettings(DB, body, auth);
+      }
       if (method === 'POST' && param === 'test-deepseek') {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
@@ -453,6 +649,8 @@ export async function onRequest(context) {
 
     // ── /api/notifications ─────────────────────────────────────
     if (route === 'notifications') {
+      const auth = await requireFinanceRole(DB, request, FINANCE_ANY_ROLE);
+      if (auth instanceof Response) return auth;
       if (method === 'GET'  && !param)           return await getNotifications(DB);
       if (method === 'POST' && !param)           return await createNotification(DB, body);
       if (method === 'POST' && param === 'read') return await markAllRead(DB);
@@ -572,6 +770,8 @@ export async function onRequest(context) {
 
     // ── /api/admin ─────────────────────────────────────────────
     if (route === 'admin') {
+      const auth = await requireFinanceRole(DB, request, FINANCE_ADMIN_ROLES);
+      if (auth instanceof Response) return auth;
       if (method === 'POST' && param === 'clear')      return await adminClear(DB);
       if (method === 'POST' && param === 'clear-data') return await adminClearDataOnly(DB);
       if (method === 'POST' && param === 'import') return await adminImport(DB, body);
@@ -1054,6 +1254,19 @@ async function handleInit(DB) {
       created_at  TEXT DEFAULT (datetime('now')),
       updated_at  TEXT DEFAULT (datetime('now'))
     )`,
+    // Finance app server-side sessions (introduced in security hardening)
+    `CREATE TABLE IF NOT EXISTS finance_sessions (
+      id          TEXT PRIMARY KEY,
+      user_id     TEXT NOT NULL,
+      expires_at  INTEGER NOT NULL
+    )`,
+    // Login rate limiting: tracks failed attempts per IP
+    `CREATE TABLE IF NOT EXISTS login_attempts (
+      ip          TEXT PRIMARY KEY,
+      count       INTEGER DEFAULT 0,
+      first_at    INTEGER NOT NULL,
+      locked_until INTEGER DEFAULT 0
+    )`,
   ];
 
   // Run all CREATE TABLE statements first
@@ -1274,11 +1487,31 @@ async function updateUser(DB, id, data) {
   return ok(publicUser({ id, name, role, email }));
 }
 
-async function loginUser(DB, data) {
+async function loginUser(DB, data, request) {
   const role = String(data?.role || '').trim();
   const pin = String(data?.pin || '').trim();
   const userId = String(data?.userId || '').trim();
   if (!role || !pin) return err('role and pin are required', 400);
+
+  // Rate limiting: check failed attempts for this IP
+  const ip = (request?.headers?.get('CF-Connecting-IP') || request?.headers?.get('X-Forwarded-For') || 'unknown').split(',')[0].trim();
+  const now = Date.now();
+  try {
+    const attempt = await DB.prepare(`SELECT count, first_at, locked_until FROM login_attempts WHERE ip=?`).bind(ip).first();
+    if (attempt) {
+      if (attempt.locked_until > now) {
+        const retryAfterSecs = Math.ceil((attempt.locked_until - now) / 1000);
+        return new Response(JSON.stringify({ error: 'Too many failed login attempts. Please try again later.' }), {
+          status: 429,
+          headers: { ...CORS_HEADERS, 'Retry-After': String(retryAfterSecs) }
+        });
+      }
+      // Reset window if it's expired
+      if (now - attempt.first_at > LOGIN_WINDOW_MS) {
+        await DB.prepare(`DELETE FROM login_attempts WHERE ip=?`).bind(ip).run();
+      }
+    }
+  } catch { /* login_attempts table may not exist yet — fail open */ }
 
   let row = null;
   if (userId) {
@@ -1290,13 +1523,48 @@ async function loginUser(DB, data) {
     row = users[0] || null;
   }
 
-  if (!row) return err('Invalid credentials', 401);
+  // Increment failure counter before verifying PIN
+  const recordFailure = async () => {
+    try {
+      const attempt = await DB.prepare(`SELECT count, first_at FROM login_attempts WHERE ip=?`).bind(ip).first();
+      if (!attempt || now - attempt.first_at > LOGIN_WINDOW_MS) {
+        await DB.prepare(`INSERT OR REPLACE INTO login_attempts (ip, count, first_at, locked_until) VALUES (?,1,?,0)`)
+          .bind(ip, now).run();
+      } else {
+        const newCount = attempt.count + 1;
+        const lockedUntil = newCount >= LOGIN_MAX_ATTEMPTS ? now + LOGIN_WINDOW_MS : 0;
+        await DB.prepare(`UPDATE login_attempts SET count=?, locked_until=? WHERE ip=?`)
+          .bind(newCount, lockedUntil, ip).run();
+      }
+    } catch { /* non-blocking */ }
+  };
+
+  if (!row) { await recordFailure(); return err('Invalid credentials', 401); }
   const validPin = await verifyPin(row.pin, pin);
-  if (!validPin) return err('Invalid credentials', 401);
+  if (!validPin) { await recordFailure(); return err('Invalid credentials', 401); }
+
+  // Clear failed attempts on successful login
+  try { await DB.prepare(`DELETE FROM login_attempts WHERE ip=?`).bind(ip).run(); } catch { /* non-blocking */ }
+
   if (!isHashedPin(row.pin)) {
     await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(pin), row.id).run();
   }
-  return ok(publicUser(row));
+
+  // Create a server-side finance session token
+  const sessionToken = newId('fs');
+  const expiresAt = Date.now() + FINANCE_SESSION_TTL_MS;
+  await DB.prepare(`INSERT INTO finance_sessions (id, user_id, expires_at) VALUES (?,?,?)`)
+    .bind(sessionToken, row.id, expiresAt).run();
+
+  return ok({ ...publicUser(row), sessionToken });
+}
+
+async function financeLogout(DB, data) {
+  const token = String(data?.sessionToken || '').trim();
+  if (token) {
+    await DB.prepare(`DELETE FROM finance_sessions WHERE id=?`).bind(token).run();
+  }
+  return ok({ success: true });
 }
 
 async function deleteUser(DB, id) {
@@ -1538,8 +1806,21 @@ async function getIncome(DB) {
   })));
 }
 
-async function createIncome(DB, data) {
+async function createIncome(DB, data, caller) {
   const id = data.id || newId('INC-');
+
+  // Server-side income split validation for Sunday collections
+  const source = data.source || 'sunday_collection';
+  if (source === 'sunday_collection') {
+    const total       = Number(data.totalCollection   || 0);
+    const bankTransfer = Number(data.bankTransferAmount || 0);
+    const directPetty  = Number(data.directPettyCash   || 0);
+    // Cash with accountant is whatever remains after bank and petty allocations
+    const cashAmt      = total - bankTransfer - directPetty;
+    if (Math.abs(cashAmt) > 0.01 && cashAmt < -0.01) {
+      return err(`Income split invalid: bankTransfer (${bankTransfer}) + directPettyCash (${directPetty}) exceeds totalCollection (${total})`, 422);
+    }
+  }
   const hasSplitCols = await tableHasColumns(DB, 'income', ['bank_transfer_amount', 'direct_petty_cash', 'source']);
   const hasMetaCols  = await tableHasColumns(DB, 'income', ['payment_method', 'donor_name']);
   if (hasSplitCols && hasMetaCols) {
@@ -1845,7 +2126,45 @@ async function createPettyEntry(DB, data) {
   return ok({ ...data, id });
 }
 
-async function updatePettyEntry(DB, id, data) {
+async function updatePettyEntry(DB, id, data, caller) {
+  // Server-side petty cash state machine
+  // Fetch current status to validate transitions
+  const current = await DB.prepare(`SELECT status FROM petty_cash WHERE id=?`).bind(id).first();
+  if (!current) return err('Petty cash entry not found', 404);
+
+  if (data.status && data.status !== current.status) {
+    const from = current.status;
+    const to   = data.status;
+    const callerRole = caller?.role || '';
+    const approverRoles = ['accountant', 'it_admin'];
+
+    // Validate allowed transitions
+    const VALID_TRANSITIONS = {
+      pending_approval: ['approved', 'rejected'],
+      approved:         ['settled'],
+    };
+    const allowed = VALID_TRANSITIONS[from] || [];
+    if (!allowed.includes(to)) {
+      return err(`Status transition '${from}' → '${to}' is not permitted`, 422);
+    }
+
+    // Role check for approval, rejection, settlement
+    if (!approverRoles.includes(callerRole)) {
+      return err(`Role '${callerRole}' cannot change petty cash status`, 403);
+    }
+
+    // Require required fields for each transition
+    if (to === 'approved' && (!data.approvedBy || !data.approvedAt)) {
+      return err('approvedBy and approvedAt are required when approving', 422);
+    }
+    if (to === 'rejected' && (!data.rejectedBy || !data.rejectionReason)) {
+      return err('rejectedBy and rejectionReason are required when rejecting', 422);
+    }
+    if (to === 'settled' && !data.settledBy) {
+      return err('settledBy is required when settling', 422);
+    }
+  }
+
   // Build SET clause dynamically — only update fields that are provided
   const fieldMap = {
     status:           'status',
@@ -1956,10 +2275,26 @@ async function createRemittance(DB, data) {
   return ok({ ...data, id });
 }
 
-async function updateRemittance(DB, id, data) {
+async function updateRemittance(DB, id, data, caller) {
   const row = await DB.prepare(`SELECT * FROM remittances WHERE id=?`).bind(id).first();
   if (!row) return err('Remittance not found', 404);
-  const status      = data.status      || row.status;
+
+  // Server-side approval role enforcement
+  const newStatus = data.status || row.status;
+  if (newStatus !== row.status) {
+    const callerRole = caller?.role || '';
+    if (['approved', 'paid'].includes(newStatus)) {
+      if (!FINANCE_REM_APPROVE_ROLES.includes(callerRole)) {
+        return err(`Role '${callerRole}' cannot approve or mark remittances as paid`, 403);
+      }
+    }
+    // Rolling back status to pending_approval requires it_admin
+    if (newStatus === 'pending_approval' && !FINANCE_ADMIN_ROLES.includes(callerRole)) {
+      return err(`Role '${callerRole}' cannot roll back a remittance to pending`, 403);
+    }
+  }
+
+  const status      = newStatus;
   const approvedBy  = data.approvedBy  || row.approved_by  || '';
   const approvedAt  = data.approvedAt  || row.approved_at  || '';
   const notes       = data.notes       !== undefined ? data.notes : (row.notes || '');
@@ -2137,11 +2472,36 @@ async function getSettings(DB) {
   return ok(out);
 }
 
-async function saveSettings(DB, data) {
+async function saveSettings(DB, data, caller) {
+  // Capture before-state for audit trail
+  const beforeRows = {};
+  for (const key of Object.keys(data)) {
+    try {
+      const row = await DB.prepare(`SELECT value FROM settings WHERE key=?`).bind(key).first();
+      beforeRows[key] = row?.value ?? null;
+    } catch { /* non-blocking */ }
+  }
+
   for (const [key, value] of Object.entries(data)) {
     const stored = typeof value === 'object' ? JSON.stringify(value) : String(value);
     await DB.prepare(`INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)`).bind(key, stored).run();
   }
+
+  // Write audit entries for each changed setting
+  for (const [key, value] of Object.entries(data)) {
+    const stored = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    const before = beforeRows[key];
+    if (before !== stored) {
+      const auditId = newId('A');
+      const actor = caller?.name || 'System';
+      const detail = `Setting '${key}' changed` + (before !== null ? ` from '${String(before).slice(0, 80)}'` : '') + ` to '${String(stored).slice(0, 80)}'`;
+      try {
+        await DB.prepare(`INSERT INTO audit_log (id,type,detail,by_user,ts) VALUES (?,?,?,?,?)`)
+          .bind(auditId, 'settings_change', detail, actor, new Date().toISOString()).run();
+      } catch { /* non-blocking */ }
+    }
+  }
+
   return ok({ saved: true });
 }
 

@@ -157,7 +157,11 @@ const PIN_REGEX = /^\d{4,6}$/;
 // 2. DATA LAYER — Cloudflare D1 via /api/*
 // ──────────────────────────────────────────
 async function apiFetch(path, method='GET', body=null){
-  const opts = { method, headers:{'Content-Type':'application/json'} };
+  const headers = {'Content-Type':'application/json'};
+  // Attach the finance session token so guarded API routes can authenticate the caller.
+  const sessionToken = state.sessionToken || localStorage.getItem('rccgFinanceSession') || '';
+  if(sessionToken) headers['X-Finance-Session'] = sessionToken;
+  const opts = { method, headers };
   if(body !== null) opts.body = JSON.stringify(body);
   const res = await fetch('/api/'+path, opts);
   const data = await res.json();
@@ -167,6 +171,7 @@ async function apiFetch(path, method='GET', body=null){
 
 const DB = {
   login(d)                     { return apiFetch('auth/login','POST',d); },
+  logout(d)                    { return apiFetch('auth/logout','POST',d).catch(()=>{}); },
   getUsers()                   { return apiFetch('users'); },
   addUser(d)                   { return apiFetch('users','POST',d); },
   updateUser(id,d)             { return apiFetch(`users/${id}`,'PUT',d); },
@@ -726,7 +731,13 @@ async function login(btn=null){
     const user = await DB.login({ role, pin, userId: uid || undefined });
     errEl.style.display='none';
     state.user = user;
-    try { localStorage.setItem('rccgSession', JSON.stringify(user)); } catch(e) {}
+    // Persist session token for subsequent API calls (stored separately from the user object
+    // so it's not accidentally logged or exposed in JSON-stringified state).
+    state.sessionToken = user.sessionToken || '';
+    try {
+      localStorage.setItem('rccgSession', JSON.stringify(user));
+      if(user.sessionToken) localStorage.setItem('rccgFinanceSession', user.sessionToken);
+    } catch(e) {}
     DB.addAudit('login','User logged in',user.name);
     document.getElementById('loginScreen').style.display='none';
     document.getElementById('appShell').style.display='flex';
@@ -750,8 +761,14 @@ async function login(btn=null){
 }
 function logout(){
   DB.addAudit('logout','User logged out', state.user?.name);
-  try { localStorage.removeItem('rccgSession'); } catch(e) {}
-  state.user=null; state.page='dashboard';
+  // Tell the server to invalidate the finance session token
+  const token = state.sessionToken || localStorage.getItem('rccgFinanceSession') || '';
+  if(token) DB.logout({ sessionToken: token });
+  try {
+    localStorage.removeItem('rccgSession');
+    localStorage.removeItem('rccgFinanceSession');
+  } catch(e) {}
+  state.user=null; state.sessionToken=''; state.page='dashboard';
   history.replaceState(null,'','/');
   document.getElementById('appShell').style.display='none';
   document.getElementById('loginScreen').style.display='flex';
@@ -1822,6 +1839,11 @@ async function calcChurchBalance(asOfDate){
   }
 
   return {
+    // cashWithAccountant is clamped to ≥0 for display purposes. Use cashDeficit
+    // when you need to surface an overdrawn condition, and `total` (which uses the
+    // signed raw value) for all arithmetic. The dual representation avoids negative
+    // numbers in the "Cash with Accountant" card while still allowing the total
+    // balance to go negative when combined outflows exceed inflows.
     cashWithAccountant: Math.max(0, cashWithAccountantRaw),
     // cashDeficit > 0 means cash outflows (approved + pending) exceed recorded cash inflows —
     // accountant has disbursed more cash than received; pending expenses awaiting approval contribute here
@@ -1954,8 +1976,11 @@ async function renderDashboard(){
   const pendingPetty = await getPettyCashPendingCount();
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
 
-  // Spendable = total church funds − net accumulated unpaid remittances.
-  const dashOutstandingRems = dashTotalRemDueKpi;
+  // Spendable = total church funds − remittances that are overdue or currently due.
+  // Future-period quotas that are not yet past-due are excluded so that a healthy
+  // current balance is not artificially deflated by obligations months away.
+  // "Due" = prior-period unpaid remittances + current-period obligations (this period).
+  const dashOutstandingRems = dashPriorUnpaid + dashThisPeriodUnpaid;
   const dashTotalFunds = churchBal.total;
   const dashSpendable = dashTotalFunds - dashOutstandingRems;
   const dashSpendStrong   = parseFloat(settingsDash?.spendableStrong||0)||40000;
@@ -2169,7 +2194,26 @@ async function renderDashboard(){
   const forecastLabel=currentRate!==null&&validHist.length>0?`${validHist.length}-mo. + live`:currentRate!==null?'live data':validHist.length>0?`${validHist.length}-mo. trend`:'';
   // Skip forecasting for past periods — the period is closed, projecting it is meaningless.
   if(!dashIsPastPeriod && (currentRate!==null||historicalRate!==null)){
-    // Blend: current month rate gains weight as more Sundays are recorded
+    /**
+     * Adaptive Sunday-weighted income blend.
+     *
+     * Design intent: income has two useful signals — (a) the current month's
+     * live per-Sunday rate (most accurate once ≥1 Sunday is recorded) and
+     * (b) the weighted average of the prior 3 months' per-Sunday rates.
+     * As more Sundays are collected in the current month, the live signal
+     * becomes progressively more reliable than the historical one.
+     *
+     * cw (current weight) = sundayCount × 2  — grows as Sundays accumulate.
+     * hw (historical weight) = max(1, 6 − cw) — shrinks to a floor of 1.
+     *
+     * When cw ≥ 6 (i.e., ≥ 3 Sundays recorded), hw is locked at 1, meaning
+     * the blend is dominated by current data (≥85% current at 4 Sundays).
+     * This is intentional: the current month's offering patterns are the
+     * strongest predictor of the remaining weeks.
+     *
+     * With 0 Sundays recorded, cw=0 and hw=6, so we fall back entirely to
+     * historical data.  With 1 Sunday, cw=2, hw=4, giving a 33%/67% blend.
+     */
     const cw=sundayCount*2, hw=Math.max(1,6-cw);
     const blendedRate=currentRate!==null&&historicalRate!==null
       ?(currentRate*cw+historicalRate*hw)/(cw+hw)
@@ -8690,6 +8734,11 @@ function submitKPSCAlert(){
   try { saved = JSON.parse(localStorage.getItem('rccgSession') || 'null'); } catch(e) {}
   if (!saved || !saved.id || !saved.role || !saved.name) return;
   state.user = saved;
+  // Restore the finance session token for authenticated API calls
+  try {
+    const token = localStorage.getItem('rccgFinanceSession') || '';
+    if(token) state.sessionToken = token;
+  } catch(e) {}
   function doRestore(){
     const loginEl = document.getElementById('loginScreen');
     const appEl = document.getElementById('appShell');
@@ -8698,7 +8747,17 @@ function submitKPSCAlert(){
     appEl.style.display = 'flex';
     DB.getSettings()
       .then(s => { state.rolePermissions = s.rolePermissions || null; initApp(); })
-      .catch(() => initApp());
+      .catch(e => {
+        // If the server returns 401, the stored session has expired — force re-login
+        if(String(e?.message||'').includes('401') || String(e?.message||'').toLowerCase().includes('session')) {
+          try { localStorage.removeItem('rccgSession'); localStorage.removeItem('rccgFinanceSession'); } catch(_) {}
+          state.user = null; state.sessionToken = '';
+          if(loginEl) loginEl.style.display = 'flex';
+          if(appEl) appEl.style.display = 'none';
+        } else {
+          initApp();
+        }
+      });
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', doRestore);

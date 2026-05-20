@@ -15,6 +15,42 @@ function createRequest(url, method = 'GET', body) {
   return new Request(url, init);
 }
 
+// Create a request with a pre-authorised finance session header for tests that
+// hit finance endpoints now protected by requireFinanceRole.
+const TEST_FINANCE_SESSION_TOKEN = 'fs-test-token';
+function createFinanceRequest(url, method = 'GET', body) {
+  const init = {
+    method,
+    headers: { 'Content-Type': 'application/json', 'X-Finance-Session': TEST_FINANCE_SESSION_TOKEN },
+  };
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+  }
+  return new Request(url, init);
+}
+
+// Wrap a DB mock factory so that finance session-checking queries are answered first.
+// The caller provides a function that handles their own SQL; this wrapper adds
+// session and user lookups so requireFinanceRole passes.
+function withFinanceSessionMock(innerOnPrepare, { role = 'it_admin' } = {}) {
+  return function onPrepare(sql) {
+    if (/SELECT user_id, expires_at FROM finance_sessions/.test(sql)) {
+      const st = {
+        _bound: [], bind(...a) { st._bound = a; return st; },
+        async first() { return { user_id: 'u-test', expires_at: Date.now() + 3600_000 }; }
+      };
+      return st;
+    }
+    if (/SELECT id, name, role, email FROM users WHERE id=\?/.test(sql)) {
+      const st = {
+        _bound: [], bind(...a) { st._bound = a; return st; },
+        async first() { return { id: 'u-test', name: 'Test User', role, email: '' }; }
+      };
+      return st;
+    }
+    return innerOnPrepare(sql);
+  };
+}
 // Create a request with a pre-authorised KPSC session header for tests that
 // hit mutating endpoints now protected by requireKpscRole.
 const TEST_KPSC_SESSION_HEADER = JSON.stringify({ accountId: 'ka-test', token: 'ks-test-token' });
@@ -67,7 +103,9 @@ test('onRequest handles CORS preflight requests', async () => {
   });
 
   assert.equal(response.status, 204);
-  assert.equal(response.headers.get('Access-Control-Allow-Origin'), '*');
+  // CORS is now origin-restricted; unknown origins fall back to the primary allowlisted domain
+  const allowOrigin = response.headers.get('Access-Control-Allow-Origin');
+  assert.ok(allowOrigin && allowOrigin !== '*', 'wildcard CORS should no longer be used');
 });
 
 test('onRequest returns 503 when DB binding is missing', async () => {
@@ -93,13 +131,16 @@ test('unknown routes return 404', async () => {
 });
 
 test('create user rejects invalid PIN format', async () => {
+  const DB = createDBMock({
+    onPrepare: withFinanceSessionMock(() => ({}))
+  });
   const response = await onRequest({
-    request: createRequest('https://example.com/api/users', 'POST', {
+    request: createFinanceRequest('https://example.com/api/users', 'POST', {
       name: 'Test User',
       role: 'viewer',
       pin: '12'
     }),
-    env: { DB: createDBMock({ onPrepare: () => ({}) }) }
+    env: { DB }
   });
   const body = await readJson(response);
 
@@ -110,7 +151,7 @@ test('create user rejects invalid PIN format', async () => {
 test('create user stores hashed PIN and returns public user fields', async () => {
   const statements = [];
   const DB = createDBMock({
-    onPrepare(sql) {
+    onPrepare: withFinanceSessionMock(function(sql) {
       const statement = {
         sql,
         binds: [],
@@ -124,11 +165,11 @@ test('create user stores hashed PIN and returns public user fields', async () =>
         }
       };
       return statement;
-    }
+    })
   });
 
   const response = await onRequest({
-    request: createRequest('https://example.com/api/users', 'POST', {
+    request: createFinanceRequest('https://example.com/api/users', 'POST', {
       name: 'Jane Doe',
       role: 'accountant',
       pin: '1234',
@@ -145,11 +186,12 @@ test('create user stores hashed PIN and returns public user fields', async () =>
   assert.equal(body.email, 'jane@example.com');
   assert.equal(body.pin, undefined);
 
-  assert.equal(statements.length, 1);
-  assert.match(statements[0].sql, /INSERT INTO users/);
-  assert.equal(statements[0].binds[1], 'Jane Doe');
-  assert.equal(statements[0].binds[2], 'accountant');
-  assert.match(statements[0].binds[3], /^sha256\$/);
+  // 1 INSERT for the new user (session auth queries don't use run())
+  const insertStmts = statements.filter(s => /INSERT INTO users/.test(s.sql));
+  assert.equal(insertStmts.length, 1);
+  assert.equal(insertStmts[0].binds[1], 'Jane Doe');
+  assert.equal(insertStmts[0].binds[2], 'accountant');
+  assert.match(insertStmts[0].binds[3], /^sha256\$/);
 });
 
 test('login requires explicit user selection when multiple users share role', async () => {
@@ -202,7 +244,11 @@ test('login upgrades plaintext PIN to hashed PIN after successful auth', async (
           if (/SELECT id,name,role,email,pin FROM users WHERE id=\? AND role=\?/.test(sql)) {
             return { id: 'u7', name: 'Visitor', role: 'viewer', email: '', pin: '9999' };
           }
-          throw new Error(`Unexpected SQL in first(): ${sql}`);
+          // login_attempts check returns null (no prior attempts)
+          if (/SELECT count, first_at, locked_until FROM login_attempts/.test(sql)) {
+            return null;
+          }
+          return null;
         },
         async run() {
           runs.push({ sql, bound: statement._bound });
@@ -226,10 +272,14 @@ test('login upgrades plaintext PIN to hashed PIN after successful auth', async (
   assert.equal(response.status, 200);
   assert.equal(body.id, 'u7');
   assert.equal(body.role, 'viewer');
-  assert.equal(runs.length, 1);
-  assert.match(runs[0].sql, /UPDATE users SET pin=\? WHERE id=\?/);
-  assert.equal(runs[0].bound[1], 'u7');
-  assert.match(runs[0].bound[0], /^sha256\$/);
+  assert.ok(body.sessionToken, 'login should return a sessionToken');
+  // Expect: DELETE login_attempts + UPDATE users SET pin + INSERT finance_sessions
+  const pinUpdate = runs.find(r => /UPDATE users SET pin=\? WHERE id=\?/.test(r.sql));
+  assert.ok(pinUpdate, 'should run PIN upgrade UPDATE');
+  assert.equal(pinUpdate.bound[1], 'u7');
+  assert.match(pinUpdate.bound[0], /^sha256\$/);
+  const sessionInsert = runs.find(r => /INSERT INTO finance_sessions/.test(r.sql));
+  assert.ok(sessionInsert, 'should INSERT a finance session');
 });
 
 test('login with hashed PIN does not run upgrade update', async () => {
@@ -250,7 +300,11 @@ test('login with hashed PIN does not run upgrade update', async () => {
           if (/SELECT id,name,role,email,pin FROM users WHERE id=\? AND role=\?/.test(sql)) {
             return { id: 'u5', name: 'Signer', role: 'signatory', email: '', pin: storedHashedPin };
           }
-          throw new Error(`Unexpected SQL in first(): ${sql}`);
+          // login_attempts check returns null (no prior attempts)
+          if (/SELECT count, first_at, locked_until FROM login_attempts/.test(sql)) {
+            return null;
+          }
+          return null;
         },
         async run() {
           runs.push({ sql, bound: statement._bound });
@@ -273,7 +327,13 @@ test('login with hashed PIN does not run upgrade update', async () => {
 
   assert.equal(response.status, 200);
   assert.equal(body.id, 'u5');
-  assert.equal(runs.length, 0);
+  assert.ok(body.sessionToken, 'login should return a sessionToken');
+  // No PIN upgrade UPDATE should run
+  const pinUpdate = runs.find(r => /UPDATE users SET pin=\? WHERE id=\?/.test(r.sql));
+  assert.equal(pinUpdate, undefined, 'should NOT run PIN upgrade when PIN is already hashed');
+  // But a session INSERT should still happen
+  const sessionInsert = runs.find(r => /INSERT INTO finance_sessions/.test(r.sql));
+  assert.ok(sessionInsert, 'should INSERT a finance session');
 });
 
 test('kpsc login authenticates against dedicated kpsc_accounts table', async () => {
