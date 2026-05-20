@@ -112,6 +112,10 @@
     deferredInstallPrompt = null;
   });
 
+  if (installLink && (window.matchMedia('(display-mode: standalone)').matches || navigator.standalone)) {
+    installLink.style.display = 'none';
+  }
+
   if (installLink) {
     installLink.addEventListener('click', async event => {
       if (!deferredInstallPrompt) return;
