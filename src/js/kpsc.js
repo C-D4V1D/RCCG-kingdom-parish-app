@@ -11583,8 +11583,10 @@ function abUpdateSmsCharCount() {
   if (!smsEl || !countEl) return;
   const text = smsEl.value;
   const len = text.length;
-  // Detect unicode (non-GSM7) characters
-  const isUnicode = /[^\u0000-\u007f\u00a0-\u00ff\u0100-\u01ff]/.test(text);
+  // Heuristic: detect likely non-GSM-7 characters (emoji, Arabic, Cyrillic, CJK etc.).
+  // This covers the most common cases; extended GSM-7 chars (€, [, {, |, ~, ^, \) are
+  // rare in church messages and don't affect the page count estimate significantly.
+  const isUnicode = /[^\u0020-\u007e\u00a0-\u00ff]/.test(text);
   const pageSize = isUnicode ? 70 : 160;
   const pages = len === 0 ? 0 : Math.ceil(len / pageSize);
   const type = isUnicode ? 'Unicode' : 'GSM';

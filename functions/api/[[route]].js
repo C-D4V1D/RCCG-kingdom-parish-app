@@ -113,7 +113,7 @@ async function getTermiiSettings(DB) {
   for (const row of (results || [])) map[row.key] = row.value;
   return {
     apiKey:      String(map.kpsc_termii_api_key  || '').trim(),
-    senderId:    String(map.kpsc_termii_sender_id || 'N-Alert').trim(),
+    senderId:    String(map.kpsc_termii_sender_id || 'RCCG-KP').trim(),
     welcomeSms:  map.kpsc_termii_welcome_sms  !== '0',
     paymentSms:  map.kpsc_termii_payment_sms  !== '0',
     newMonthSms: map.kpsc_termii_newmonth_sms !== '0',
@@ -5611,13 +5611,18 @@ async function runReminderSms(DB, env, request) {
 
   // Decide whether today is a send day based on frequency
   let isSendDay = false;
+  // Last valid day of the current month (accounts for variable month lengths)
+  const lastDayOfMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
   if (freq === 'monthly') {
-    isSendDay = (dayOfMonth === reminderDay);
+    isSendDay = (dayOfMonth === Math.min(reminderDay, lastDayOfMonth));
   } else if (freq === 'biweekly') {
-    isSendDay = (dayOfMonth === reminderDay) || (dayOfMonth === Math.min(reminderDay + 14, 28));
+    const firstSendDay  = Math.min(reminderDay, lastDayOfMonth);
+    const secondSendDay = Math.min(reminderDay + 14, lastDayOfMonth);
+    isSendDay = (dayOfMonth === firstSendDay) || (dayOfMonth === secondSendDay);
   } else if (freq === 'weekly') {
-    // Every 7 days starting from reminderDay
-    const diff = dayOfMonth - reminderDay;
+    // Every 7 days starting from reminderDay (clamped to month end)
+    const firstSendDay = Math.min(reminderDay, lastDayOfMonth);
+    const diff = dayOfMonth - firstSendDay;
     isSendDay = diff >= 0 && diff % 7 === 0;
   }
 
