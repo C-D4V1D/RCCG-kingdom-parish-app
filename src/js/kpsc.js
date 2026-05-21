@@ -3676,11 +3676,10 @@ function renderIrSavedResCard(r, cat, idx, canEdit) {
 
 function renderIrSavedActionCard(a, idx, canEdit) {
   const accentCls = a.status === 'done' ? 'k-mc-accent-green' : a.status === 'cancelled' ? 'k-mc-accent-gray' : 'k-mc-accent-blue';
-  const actionBtns = canEdit ? `
-    <div class="k-ic-footer" style="margin-top:8px">
-      <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.irEditInsightItem('actions',null,${idx})">✏️ Edit</button>
-      <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.irRemoveInsightItem('actions',null,${idx})">✕ Remove</button>
-    </div>` : '';
+  // "View in minutes" link — navigates to the meeting minutes section
+  const viewLink = `<div class="k-ic-footer" style="margin-top:8px">
+      <span class="k-insight-view-link" onclick="document.getElementById('kr-panel')?.scrollIntoView({behavior:'smooth',block:'start'})">View in minutes ↑</span>
+    </div>`;
   return `
     <div class="k-meeting-card k-insight-card ${accentCls}" style="cursor:default">
       ${insightTruncText(a.task || '', 130)}
@@ -3690,7 +3689,7 @@ function renderIrSavedActionCard(a, idx, canEdit) {
         ${insightsDueDateLabel(a.dueDate, a.status)}
         ${insightsStatusBadge(a.status)}
       </div>
-      ${actionBtns}
+      ${viewLink}
     </div>`;
 }
 
@@ -4228,14 +4227,32 @@ function outcomeConfidenceBadge(suggestion, currentStatus) {
 }
 
 function renderPostMeetingOutcomes(m) {
-  if (!m?.agendaText) return '';
+  // Determine the agenda items to display. Priority:
+  // 1. AI-extracted agendaItems from meeting processing (most accurate)
+  // 2. Selected items from the linked Agenda Builder draft
+  // 3. Parsed lines from raw agendaText (fallback)
+  let items = [];
 
-  // Parse agenda items from the stored agendaText. Each line that looks like
-  // a numbered item or bullet is an agenda item. Skip blanks and obvious headers.
-  const rawLines = m.agendaText.split('\n').map(l => l.trim()).filter(Boolean);
-  const items = rawLines
-    .map(l => l.replace(/^[\d]+[.)]\s*/, '').replace(/^[-•*]\s*/, '').trim())
-    .filter(l => l.length > 1);
+  if (Array.isArray(m.agendaItems) && m.agendaItems.length) {
+    // AI has already analysed and extracted the structured agenda items
+    items = m.agendaItems.filter(i => String(i).trim().length > 1);
+  }
+
+  if (!items.length) {
+    // Try to get the selected items from the linked Agenda Builder draft
+    const draft = (S.agendaBuilderDraftsHistory || []).find(d => d.linkedMeetingId === m.id);
+    if (draft && Array.isArray(draft.agendaItems) && draft.agendaItems.length) {
+      items = draft.agendaItems.filter(i => String(i).trim().length > 1);
+    }
+  }
+
+  if (!items.length && m.agendaText) {
+    // Last resort: parse raw agendaText line by line
+    const rawLines = m.agendaText.split('\n').map(l => l.trim()).filter(Boolean);
+    items = rawLines
+      .map(l => l.replace(/^[\d]+[.)]\s*/, '').replace(/^[-•*]\s*/, '').trim())
+      .filter(l => l.length > 1);
+  }
 
   if (!items.length) return '';
 
@@ -4418,6 +4435,13 @@ async function saveMinutesReview(btn) {
     const hasInsights = (res.resolutions?.length || res.actionItems?.length || res.policyFlags?.length);
     if (approvedMinutes && hasInsights) {
       reconcileInsightsAfterApproval(S.activeMeeting.id, approvedMinutes);
+    }
+
+    // Auto-analyze agenda outcomes from approved minutes (best-effort)
+    const hasAgendaItems = (Array.isArray(res.agendaItems) && res.agendaItems.length) || res.agendaText;
+    if (approvedMinutes && hasAgendaItems) {
+      const outcomesBtn = document.getElementById('km-ai-outcomes-btn');
+      if (outcomesBtn) abAiAnalyseOutcomes(S.activeMeeting.id, outcomesBtn);
     }
   } catch {
     showToast('Review save failed. Check your connection.', 'error');
@@ -6205,7 +6229,7 @@ async function renderReminders(main) {
   const unpaid = S.partners.filter(p => p.status === 'active' && !partnerMonthlyPaid(p.id, month, year));
   const remindersRes = await apiGet(`kpsc-reminders?year=${year}&month=${month}`);
   if (remindersRes?.error) throw new Error(remindersRes.error);
-  const defaultTemplate = String(settingsRes?.kpsc_reminder_template || '').trim()
+  const defaultTemplate = String(settingsRes?.kpsc_sms_text_reminder || '').trim()
     || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge.';
   S.reminders = Array.isArray(remindersRes) ? remindersRes : [];
   main.innerHTML = `
@@ -6440,7 +6464,7 @@ function debouncedSaveReminderTemplate(textarea) {
   clearTimeout(_reminderTemplateSaveTimer);
   _reminderTemplateSaveTimer = setTimeout(async () => {
     const template = textarea.value.trim();
-    const res = await apiPost('settings', { kpsc_reminder_template: template });
+    const res = await apiPost('settings', { kpsc_sms_text_reminder: template });
     if (res?.error) {
       showToast('Could not save template: ' + res.error, 'error');
     } else {
@@ -8564,7 +8588,6 @@ async function renderSettings(main) {
   const transcriptionModel = res?.ai_transcription_model || 'gpt-4o-mini-transcribe';
   const ocrModel           = res?.ai_ocr_model           || 'gpt-5-mini';
   const deepseekModel      = res?.ai_deepseek_model      || 'deepseek-v4-flash';
-  const reminderTemplate = res?.kpsc_reminder_template || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge. God bless you.';
   const incomeCategories = Array.isArray(res?.kpsc_income_categories) ? res.kpsc_income_categories.join('\n') : '';
   const expenseCategories = Array.isArray(res?.kpsc_expense_categories) ? res.kpsc_expense_categories.join('\n') : '';
   const meetingCadence = res?.kpsc_meeting_cadence || 'none';
@@ -8598,6 +8621,7 @@ async function renderSettings(main) {
   const smsMilestone12Text= res?.kpsc_sms_text_milestone12|| '';
   const smsPremeetingText = res?.kpsc_sms_text_premeeting || '';
   const smsDeadlineText   = res?.kpsc_sms_text_deadline   || '';
+  const smsReminderText   = res?.kpsc_sms_text_reminder   || '';
   const cadenceOptions = [
     { value: 'none',              label: 'No fixed cadence' },
     { value: 'weekly:sun',        label: 'Weekly on Sunday' },
@@ -8885,42 +8909,52 @@ async function renderSettings(main) {
         <h2 class="k-card-title">✏️ System SMS Message Templates</h2>
         <p class="k-card-sub">Edit the text for each automated SMS the portal sends. Leave blank to use the built-in default text. Available variables by template:<br>
           <strong>Welcome:</strong> <code>{{name}}</code><br>
-          <strong>Payment:</strong> <code>{{name}}</code>, <code>{{month}}</code>, <code>{{amount}}</code>, <code>{{amtText}}</code>, <code>{{partnerType}}</code><br>
+          <strong>Payment Thank-you:</strong> <code>{{name}}</code>, <code>{{month}}</code>, <code>{{amount}}</code>, <code>{{amtText}}</code>, <code>{{partnerType}}</code><br>
           <strong>New Month / Milestone:</strong> <code>{{name}}</code><br>
           <strong>Anniversary:</strong> <code>{{name}}</code>, <code>{{ordinal}}</code>, <code>{{years}}</code><br>
           <strong>Pre-Meeting:</strong> <code>{{name}}</code>, <code>{{meetingTitle}}</code>, <code>{{meetingDate}}</code>, <code>{{meetingTime}}</code>, <code>{{venue}}</code><br>
-          <strong>Deadline:</strong> <code>{{name}}</code>, <code>{{task}}</code>, <code>{{dueDate}}</code></p>
+          <strong>Deadline:</strong> <code>{{name}}</code>, <code>{{task}}</code>, <code>{{dueDate}}</code><br>
+          <strong>Payment Reminder:</strong> <code>{{name}}</code>, <code>{{month}}</code>, <code>{{unpaidMonths}}</code> <em>(comma-separated list of outstanding months)</em></p>
         <div class="k-form-group">
           <label class="k-label">👋 Welcome SMS (new partner)</label>
-          <textarea id="ks-sms-welcome" class="k-input k-textarea" rows="3" placeholder="Default: Welcome to RCCG Kingdom Parish, {{name}}!…">${esc(smsWelcomeText)}</textarea>
+          <textarea id="ks-sms-welcome" class="k-input k-textarea" rows="4" placeholder="Dear {{name}}, welcome to the RCCG Kingdom Parish family! 🎉 We are so glad to have you as a partner in this beautiful journey of faith. Your support means the world to us, and we pray that God will bless you richly — spiritually and in all your endeavours. You are loved! — RCCG Kingdom Parish">${esc(smsWelcomeText)}</textarea>
         </div>
         <div class="k-form-group">
           <label class="k-label">🙏 Thank-you SMS (partner payment)</label>
-          <textarea id="ks-sms-payment" class="k-input k-textarea" rows="3" placeholder="Default: Dear {{name}}, thank you for your {{month}} partnership payment{{amtText}}…">${esc(smsPaymentText)}</textarea>
+          <textarea id="ks-sms-payment" class="k-input k-textarea" rows="4" placeholder="Dear {{name}}, we have received your {{month}} partnership pledge{{amtText}} and we are so grateful! 🙏 Your faithfulness to God's work here at RCCG Kingdom Parish is a blessing to us all. May the Lord be your reward — pressed down, shaken together, and running over. Your seed is sown in good ground. God bless you! — RCCG Kingdom Parish">${esc(smsPaymentText)}</textarea>
         </div>
         <div class="k-form-group">
           <label class="k-label">🎉 Happy New Month SMS (1st of month)</label>
-          <textarea id="ks-sms-newmonth" class="k-input k-textarea" rows="3" placeholder="Default: Happy New Month, {{name}}!…">${esc(smsNewmonthText)}</textarea>
+          <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;margin-bottom:6px">
+            <textarea id="ks-sms-newmonth" class="k-input k-textarea" rows="4" style="flex:1;min-width:200px" placeholder="Happy New Month! 🎊 Dear {{name}}, as we step into this brand new month, we lift our hearts in prayer for you: May the Lord open new doors of opportunity before you. May His favour surround you like a shield. May your home be filled with peace and your hands be blessed in all you do. We are grateful for your partnership! — RCCG Kingdom Parish 💙🙏">${esc(smsNewmonthText)}</textarea>
+            <button class="kbtn kbtn-sm kbtn-ai" style="white-space:nowrap;margin-top:2px" onclick="Kpsc.aiGenerateNewMonthSms(this)" title="Use AI to draft a fresh blessing SMS for this month with a Bible verse">🤖 AI Draft</button>
+          </div>
+          <p class="k-hint">Sent automatically on the 1st of each month. Click <strong>AI Draft</strong> to let AI write a unique blessing message with a Bible verse for this month.</p>
         </div>
         <div class="k-form-group">
           <label class="k-label">🎂 Anniversary SMS (yearly on start date)</label>
-          <textarea id="ks-sms-anniversary" class="k-input k-textarea" rows="3" placeholder="Default: Dear {{name}}, today marks your {{ordinal}} year…">${esc(smsAnnivText)}</textarea>
+          <textarea id="ks-sms-anniversary" class="k-input k-textarea" rows="4" placeholder="🎂 Celebrating You Today, {{name}}! It is a joyful day as we mark your {{ordinal}} partnership anniversary with RCCG Kingdom Parish. Your faithfulness speaks volumes. May this anniversary mark the beginning of an even greater season of blessing and breakthrough in your life. You are deeply appreciated! God bless you! 🎉 — RCCG Kingdom Parish">${esc(smsAnnivText)}</textarea>
         </div>
         <div class="k-form-group">
           <label class="k-label">🏅 6-Month Milestone SMS</label>
-          <textarea id="ks-sms-milestone6" class="k-input k-textarea" rows="3" placeholder="Default: Congratulations {{name}}! You've faithfully partnered for 6 months…">${esc(smsMilestone6Text)}</textarea>
+          <textarea id="ks-sms-milestone6" class="k-input k-textarea" rows="4" placeholder="🏅 Six months of faithful partnership — praise the Lord! 🙌 Dear {{name}}, you have been such a blessing to our community! Galatians 6:9 says: 'Let us not become weary in doing good, for at the proper time we will reap a harvest if we do not give up.' Your harvest season is drawing near! We celebrate you and pray God's special blessing upon you. — RCCG Kingdom Parish">${esc(smsMilestone6Text)}</textarea>
         </div>
         <div class="k-form-group">
           <label class="k-label">🏆 12-Month Milestone SMS (1 year)</label>
-          <textarea id="ks-sms-milestone12" class="k-input k-textarea" rows="3" placeholder="Default: Praise God! Dear {{name}}, you have completed a FULL YEAR…">${esc(smsMilestone12Text)}</textarea>
+          <textarea id="ks-sms-milestone12" class="k-input k-textarea" rows="4" placeholder="🏆 A FULL YEAR of faithful partnership — Glory to God! 🎉 Dear {{name}}, what an incredible milestone! Psalm 1:3 declares you shall be like a tree planted by rivers of water, bringing forth fruit in season. We declare over you a harvest of extraordinary blessings, divine health, and open heavens this year and beyond. You are a champion! — RCCG Kingdom Parish 💙">${esc(smsMilestone12Text)}</textarea>
         </div>
         <div class="k-form-group">
           <label class="k-label">📅 Pre-Meeting Reminder SMS (to members, 24h before)</label>
-          <textarea id="ks-sms-premeeting" class="k-input k-textarea" rows="3" placeholder="Default: Reminder: KPSC Meeting &quot;{{meetingTitle}}&quot; is tomorrow ({{meetingDate}}{{meetingTime}})…">${esc(smsPremeetingText)}</textarea>
+          <textarea id="ks-sms-premeeting" class="k-input k-textarea" rows="4" placeholder="Hello {{name}} 👋 This is a warm reminder that our KPSC meeting, '{{meetingTitle}}', is coming up tomorrow, {{meetingDate}}{{meetingTime}}{{venue}}. Your presence is very important to us — your voice and wisdom help shape our church family. Please come prepared and prayed up! God bless you. — RCCG Kingdom Parish Stewardship Committee">${esc(smsPremeetingText)}</textarea>
         </div>
         <div class="k-form-group">
           <label class="k-label">⏰ Action Item Deadline Reminder (3 days before)</label>
-          <textarea id="ks-sms-deadline" class="k-input k-textarea" rows="3" placeholder="Default: Reminder: Your action item &quot;{{task}}&quot; is due in 3 days ({{dueDate}})…">${esc(smsDeadlineText)}</textarea>
+          <textarea id="ks-sms-deadline" class="k-input k-textarea" rows="4" placeholder="Hello {{name}} 🔔 A quick and loving reminder: your action item '{{task}}' is due in 3 days ({{dueDate}}). We trust you are making great progress! If you need any support, please let us know. Together we are building something wonderful for God. Thank you for your dedication! — RCCG Kingdom Parish Stewardship Committee">${esc(smsDeadlineText)}</textarea>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">💰 Payment Reminder SMS</label>
+          <textarea id="ks-sms-reminder" class="k-input k-textarea" rows="5" placeholder="Dear {{name}} 🙏 We hope this message finds you well and in God's peace. This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God's work and your own blessing. '...he who sows generously will also reap generously.' (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family">${esc(smsReminderText)}</textarea>
+          <p class="k-hint">Use <code>{{unpaidMonths}}</code> to list which specific months are outstanding (e.g. "January, February"). Leave it out for a simpler message.</p>
         </div>
         <div id="ks-sms-texts-save-msg" class="k-settings-msg" style="display:none"></div>
         <button class="kbtn kbtn-primary" onclick="Kpsc.saveSystemSmsTemplates()">Save SMS Message Templates</button>
@@ -8953,11 +8987,6 @@ async function renderSettings(main) {
             ${cadenceOptions.map(o => `<option value="${o.value}" ${meetingCadence === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
           </select>
           <p class="k-hint">Used to pre-fill the date and title when you start a new meeting. Set to "No fixed cadence" if your committee meets ad-hoc.</p>
-        </div>
-        <div class="k-form-group">
-          <label class="k-label">SMS/WhatsApp Reminder Template</label>
-          <textarea id="ks-reminder-template" class="k-input k-textarea" style="min-height:80px">${esc(reminderTemplate)}</textarea>
-          <p class="k-hint">Use <code>{{name}}</code> for partner name and <code>{{month}}</code> for month name.</p>
         </div>
         <div class="k-form-group">
           <label class="k-label">Income Categories (one per line)</label>
@@ -9256,6 +9285,27 @@ async function deleteSmsTemplate(id) {
   await renderSmsTemplatesList();
 }
 
+async function aiGenerateNewMonthSms(btn) {
+  const textarea = document.getElementById('ks-sms-newmonth');
+  if (!textarea) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Generating…';
+  try {
+    const res = await apiPost('kpsc-ai-newmonth-sms', {});
+    if (res?.error) { showToast(res.error, 'error'); return; }
+    if (res?.message) {
+      textarea.value = res.message;
+      showToast('New month SMS drafted by AI! Review and save when ready.', 'success');
+    }
+  } catch {
+    showToast('AI generation failed. Check your connection.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
 async function saveSystemSmsTemplates() {
   const msg = document.getElementById('ks-sms-texts-save-msg');
   const data = {
@@ -9267,6 +9317,7 @@ async function saveSystemSmsTemplates() {
     kpsc_sms_text_milestone12: document.getElementById('ks-sms-milestone12')?.value.trim() || '',
     kpsc_sms_text_premeeting:  document.getElementById('ks-sms-premeeting')?.value.trim()  || '',
     kpsc_sms_text_deadline:    document.getElementById('ks-sms-deadline')?.value.trim()    || '',
+    kpsc_sms_text_reminder:    document.getElementById('ks-sms-reminder')?.value.trim()    || '',
   };
   const res = await apiPost('settings', data);
   if (msg) {
@@ -9378,14 +9429,12 @@ async function testOpenaiKey(btn) {
 
 async function saveKpscOpsSettings() {
   const msg = document.getElementById('ks-ops-save-msg');
-  const template = document.getElementById('ks-reminder-template')?.value.trim() || '';
   const incomeText = document.getElementById('ks-income-cats')?.value || '';
   const expenseText = document.getElementById('ks-expense-cats')?.value || '';
   const cadence = document.getElementById('ks-meeting-cadence')?.value || 'none';
   const incomeCategories = incomeText.split(/[\n,]/).map(s=>s.trim().toLowerCase().replace(/\s+/g,'_')).filter(Boolean);
   const expenseCategories = expenseText.split(/[\n,]/).map(s=>s.trim().toLowerCase().replace(/\s+/g,'_')).filter(Boolean);
   const res = await apiPost('settings', {
-    kpsc_reminder_template: template,
     kpsc_income_categories: incomeCategories,
     kpsc_expense_categories: expenseCategories,
     kpsc_meeting_cadence: cadence,
@@ -9663,12 +9712,12 @@ function renderProjectsList(projects, canManage) {
           </div>
         </div>
         ${canManage ? `
-          <div class="k-room-actions" style="flex-wrap:wrap">
-            <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.openProjectModal('${p.id}')">Edit</button>
+          <div class="k-proj-card-actions">
+            <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.openProjectModal('${p.id}')">✏️ Edit</button>
             <select class="k-input k-input-sm" style="width:auto;padding:4px 8px" onchange="Kpsc.changeProjectStatus('${p.id}', this.value)">
               ${PROJECT_STATUSES.map(s => `<option value="${s.value}" ${p.status === s.value ? 'selected' : ''}>${s.label}</option>`).join('')}
             </select>
-            <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.deleteProject('${p.id}')">Delete</button>
+            <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.deleteProject('${p.id}')">🗑 Delete</button>
           </div>` : ''}
       </div>`;
   }).join('')}</div>`;
@@ -11531,27 +11580,7 @@ function renderAbSettingsStep(latestDraft) {
         </label>
       </div>
 
-      <!-- Pre-Meeting Prep Checklist -->
-      <details class="k-collapsible" ${doneCount < checklist.length ? 'open' : ''} style="margin-top:20px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
-        <summary class="k-collapsible-hdr" style="padding:12px 14px;background:var(--card);cursor:pointer">
-          <span class="k-collapsible-title" style="font-size:14px;font-weight:600">
-            ✅ Pre-Meeting Prep Checklist
-            <span class="kbadge ${doneCount === checklist.length ? 'badge-green' : 'badge-amber'}" style="margin-left:8px">${doneCount}/${checklist.length} done</span>
-          </span>
-        </summary>
-        <div style="padding:12px 14px 16px;background:var(--surface,#f8fafc)">
-          <p class="k-hint" style="margin:0 0 10px">Tick each item as you complete your meeting preparations.</p>
-          <div id="ab-checklist-items">
-            ${checklist.map((item, i) => `
-              <label class="k-att-member" style="gap:10px;cursor:pointer;margin-bottom:10px;display:flex;align-items:center">
-                <input type="checkbox" id="ab-chk-${i}" ${item.done ? 'checked' : ''} onchange="Kpsc.abToggleChecklist(${i})"
-                  style="width:16px;height:16px;flex-shrink:0" />
-                <span style="font-size:13px;${item.done ? 'text-decoration:line-through;color:var(--text2)' : ''}">${esc(item.label)}</span>
-              </label>`).join('')}
-          </div>
-          <button class="kbtn kbtn-sm kbtn-ghost" style="margin-top:4px" onclick="Kpsc.abResetChecklist()">Reset all</button>
-        </div>
-      </details>
+      <!-- Pre-Meeting Prep Checklist removed -->
 
       <div style="margin-top:20px;display:flex;gap:8px">
         <button class="kbtn" onclick="Kpsc.abSetStep('select')">← Agenda</button>
@@ -12670,13 +12699,25 @@ async function abAiAnalyseOutcomes(meetingId, btn) {
     showToast(msg, 'success');
     if (statusEl) statusEl.textContent = needsReview > 0 ? `⚠️ ${needsReview} item(s) need your input` : '✓ All suggestions applied';
 
-    // Re-render the outcomes list
+    // Re-render the outcomes list (use same item resolution priority as renderPostMeetingOutcomes)
     const meeting = S.activeMeeting;
     if (meeting) {
       const listEl = document.getElementById('km-outcomes-list');
       if (listEl) {
-        const rawLines = meeting.agendaText.split('\n').map(l => l.trim()).filter(Boolean);
-        const items2 = rawLines.map(l => l.replace(/^[\d]+[.)]\s*/, '').replace(/^[-•*]\s*/, '').trim()).filter(l => l.length > 1);
+        let items2 = [];
+        if (Array.isArray(meeting.agendaItems) && meeting.agendaItems.length) {
+          items2 = meeting.agendaItems.filter(i => String(i).trim().length > 1).map(i => typeof i === 'object' ? (i.topic || String(i)) : String(i));
+        }
+        if (!items2.length) {
+          const draft = (S.agendaBuilderDraftsHistory || []).find(d => d.linkedMeetingId === meeting.id);
+          if (draft && Array.isArray(draft.agendaItems) && draft.agendaItems.length) {
+            items2 = draft.agendaItems.filter(i => String(i).trim().length > 1).map(i => typeof i === 'object' ? (i.topic || String(i)) : String(i));
+          }
+        }
+        if (!items2.length && meeting.agendaText) {
+          const rawLines = meeting.agendaText.split('\n').map(l => l.trim()).filter(Boolean);
+          items2 = rawLines.map(l => l.replace(/^[\d]+[.)]\s*/, '').replace(/^[-•*]\s*/, '').trim()).filter(l => l.length > 1);
+        }
         const outcomes2 = S._meetingAgendaOutcomes[meetingId] || {};
         const STATUS_OPTIONS2 = [
           { value: 'resolved',      label: '✅ Resolved',      color: '#16a34a' },
@@ -12873,6 +12914,7 @@ window.Kpsc = {
   checkTermiiBalance,
   saveSmsTemplate,
   deleteSmsTemplate,
+  aiGenerateNewMonthSms,
   saveSystemSmsTemplates,
   renderSmsTemplatesList,
   scheduleSmsBlast,
