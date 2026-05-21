@@ -5722,7 +5722,7 @@ function openRecordPaymentModal(partnerId) {
   const chips = MONTHS.map((mn, i) => {
     const mo = i + 1;
     const isPaid = paidSet.has(mo);
-    return `<div class="k-month-chip${isPaid ? ' already-paid' : mo === currentMo ? ' selected' : ''}" data-month="${mo}" data-paid="${isPaid ? '1' : '0'}" onclick="Kpsc._togglePaymentChip(this)">${mn}</div>`;
+    return `<div class="k-month-chip${isPaid ? ' already-paid' : mo === currentMo ? ' selected' : ''}" data-month="${mo}" data-paid="${isPaid ? '1' : '0'}" onclick="Kpsc._togglePaymentChip(this);Kpsc._updatePaymentTotal()">${mn}</div>`;
   }).join('');
 
   document.getElementById('k-rec-payment-modal')?.remove();
@@ -5753,9 +5753,11 @@ function openRecordPaymentModal(partnerId) {
           <label class="k-label">Amount per Month</label>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <input id="k-pay-amount" class="k-input" type="number" min="0" step="100"
-              value="${Number(partner.monthlyPledge || 0)}" style="flex:1;min-width:140px" placeholder="Amount (₦)" />
-            <button class="kbtn kbtn-sm" onclick="document.getElementById('k-pay-amount').value='${Number(partner.monthlyPledge || 0)}'">Use pledge (₦${Number(partner.monthlyPledge || 0).toLocaleString('en-NG')})</button>
+              value="${Number(partner.monthlyPledge || 0)}" style="flex:1;min-width:140px" placeholder="Amount (₦)"
+              oninput="Kpsc._updatePaymentTotal()" />
+            <button class="kbtn kbtn-sm" onclick="document.getElementById('k-pay-amount').value='${Number(partner.monthlyPledge || 0)}';Kpsc._updatePaymentTotal()">Use pledge (₦${Number(partner.monthlyPledge || 0).toLocaleString('en-NG')})</button>
           </div>
+          <div id="k-pay-total" style="margin-top:8px;padding:8px 12px;background:var(--bg);border-radius:8px;font-size:14px;font-weight:600;color:var(--navy);display:none"></div>
           <p class="k-hint" style="margin-top:4px">Each selected month gets this amount recorded. Enter a higher amount if they paid more than the pledge.</p>
         </div>
 
@@ -5782,11 +5784,44 @@ function openRecordPaymentModal(partnerId) {
       </div>
     </div>`;
   document.body.appendChild(modal);
+  // Show total immediately if current month is pre-selected
+  _updatePaymentTotal();
 }
 
 function _togglePaymentChip(chip) {
   if (chip.dataset.paid === '1') return;
   chip.classList.toggle('selected');
+}
+
+function _updatePaymentTotal() {
+  const chips = document.querySelectorAll('#k-pay-month-chips .k-month-chip.selected');
+  const count = chips.length;
+  const amount = Number(document.getElementById('k-pay-amount')?.value || 0);
+  const totalEl = document.getElementById('k-pay-total');
+  if (!totalEl) return;
+  if (count === 0 || amount <= 0) { totalEl.style.display = 'none'; return; }
+  const total = count * amount;
+  const monthNames = [...chips].map(c => {
+    const mn = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return mn[Number(c.dataset.month) - 1] || '';
+  }).join(', ');
+  totalEl.style.display = 'block';
+  totalEl.innerHTML = `${count} month${count > 1 ? 's' : ''} × ₦${amount.toLocaleString('en-NG')} = <span style="color:var(--green,#059669)">₦${total.toLocaleString('en-NG')} total</span><br><span style="font-size:11px;font-weight:400;color:var(--text2)">${monthNames}</span>`;
+}
+
+async function deletePartnerPayment(paymentId, partnerId) {
+  if (!confirm('Delete this payment record? This will also remove the linked finance entry.')) return;
+  const res = await apiDelete(`kpsc-partner-payments/${paymentId}`);
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  showToast('Payment record deleted.', 'success');
+  const year = S._partnerDetailYear || S.partnersYear;
+  await loadPartnerData(year);
+  const main = document.getElementById('kpsc-main');
+  if (S.page === 'partnerDetail') renderPartnerDetail(main);
+  else {
+    const list = document.getElementById('kpsc-partners-list');
+    if (list) list.innerHTML = renderPartnersList(canManagePartners());
+  }
 }
 
 async function saveRecordedPayments(partnerId, btn) {
@@ -5915,13 +5950,18 @@ function renderPartnersList(canManage) {
         <div class="k-mc-top">
           <div style="flex:1;padding-right:${canManage ? '32px' : '0'}">
             <div class="k-mc-title">${nameHtml}</div>
-            <div class="k-mc-meta" style="margin-top:4px">
-              <span class="kbadge badge-type">${esc(partnerTypeLabel(partner.partnershipType))}</span>
-              <span class="kbadge ${partner.status === 'active' ? 'badge-green' : 'badge-gray'}">${partner.status === 'active' ? 'Active' : 'Inactive'}</span>
-              <span class="kbadge ${currentPaid ? 'badge-green' : 'badge-amber'}">${currentPaid ? '✓ Paid this month' : 'Unpaid this month'}</span>
-              ${canManageFinance() ? `<span class="kbadge badge-gray">₦${Number(partner.monthlyPledge||0).toLocaleString('en-NG')}/mo</span>` : ''}
-              ${partner.dndFlagged ? `<span class="kbadge badge-red" title="DND — SMS delivery failed for this partner">🚫 DND</span>` : ''}
-              ${partner.optedOut   ? `<span class="kbadge badge-gray" title="Partner has opted out of SMS">Opted-out</span>` : ''}
+            <div style="font-size:12px;color:var(--text2);margin-top:3px;line-height:1.4">
+              ${esc(partnerTypeLabel(partner.partnershipType))}
+              &nbsp;·&nbsp;
+              <span style="color:${partner.status === 'active' ? '#065f46' : 'var(--text3)'}">
+                ${partner.status === 'active' ? 'Active' : 'Inactive'}
+              </span>
+              ${canManageFinance() ? `&nbsp;·&nbsp; ₦${Number(partner.monthlyPledge||0).toLocaleString('en-NG')}/mo` : ''}
+              ${partner.dndFlagged ? `&nbsp;·&nbsp; <span title="DND — SMS delivery failed">🚫 DND</span>` : ''}
+              ${partner.optedOut ? `&nbsp;·&nbsp; <span title="Opted out of SMS">📵 Opted-out</span>` : ''}
+            </div>
+            <div style="margin-top:5px">
+              <span class="kbadge ${currentPaid ? 'badge-green' : 'badge-amber'}" style="white-space:nowrap">${currentPaid ? '✓ Paid this month' : '✗ Unpaid this month'}</span>
             </div>
             <div class="k-progress-row">
               <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
@@ -6159,14 +6199,16 @@ function renderPartnerDetail(main) {
       ? `<span class="pl-method pl-cash">💵 Cash</span>`
       : method ? `<span class="pl-method pl-cash">${esc(method)}</span>` : '—';
     const dateStr = p.paidAt ? new Date(p.paidAt).toLocaleDateString('en-NG', { day:'numeric', month:'short' }) : '—';
+    const canDel = canManageFinance();
     return `<tr>
       <td><strong>${monthName(Number(p.month))}</strong></td>
       <td class="pl-amount">₦${Number(p.amount||0).toLocaleString('en-NG')}</td>
       <td>${methodBadge}</td>
       <td style="color:var(--text2)">${esc(p.recordedBy || '—')}</td>
       <td style="color:var(--text3)">${dateStr}</td>
+      <td>${canDel ? `<button class="kbtn kbtn-sm kbtn-danger" style="padding:3px 8px;font-size:11px" onclick="Kpsc.deletePartnerPayment('${p.id}','${partner.id}')">🗑</button>` : ''}</td>
     </tr>`;
-  }).join('') : `<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:16px">No payments recorded for ${year}.</td></tr>`;
+  }).join('') : `<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:16px">No payments recorded for ${year}.</td></tr>`;
 
   main.innerHTML = `
     <div class="k-page">
@@ -6199,7 +6241,7 @@ function renderPartnerDetail(main) {
         <h3 class="k-sec-title">${year} Payment Log</h3>
         <div style="overflow-x:auto">
           <table class="k-payment-log">
-            <thead><tr><th>Month</th><th>Amount</th><th>Method</th><th>Recorded by</th><th>Date</th></tr></thead>
+            <thead><tr><th>Month</th><th>Amount</th><th>Method</th><th>Recorded by</th><th>Date</th><th></th></tr></thead>
             <tbody>${paymentLogRows}</tbody>
           </table>
         </div>
@@ -13206,7 +13248,9 @@ window.Kpsc = {
   setPartnerDetailYear,
   openRecordPaymentModal,
   _togglePaymentChip,
+  _updatePaymentTotal,
   saveRecordedPayments,
+  deletePartnerPayment,
   requirePin,
   _submitPinConfirm,
   updateSmsCounter,
