@@ -3097,7 +3097,7 @@ function canDeleteMeeting(m) {
 function meetingCard(m) {
   const showDelete = canDeleteMeeting(m);
   // Show a reminder if the meeting has been processed but insights/minutes haven't been reviewed
-  const needsReview = m.minutesMarkdown && !m.reviewedAt;
+  const hasUnreviewedMinutes = m.minutesMarkdown && !m.reviewedAt;
   return `
     <div class="k-meeting-card" onclick="Kpsc.openMeeting('${m.id}')">
       <div class="k-mc-top">
@@ -3112,7 +3112,7 @@ function meetingCard(m) {
         ${m.resolutions?.length ? `<span>${m.resolutions.length} resolution${m.resolutions.length !== 1 ? 's' : ''}</span>` : ''}
         ${m.actionItems?.length ? `<span>${m.actionItems.length} action item${m.actionItems.length !== 1 ? 's' : ''}</span>` : ''}
       </div>
-      ${needsReview ? `<div class="k-mc-reminder">⚠️ Review pending — open to review minutes &amp; save insights</div>` : ''}
+      ${hasUnreviewedMinutes ? `<div class="k-mc-reminder">⚠️ Review pending — open to review minutes &amp; save insights</div>` : ''}
     </div>`;
 }
 
@@ -4209,6 +4209,24 @@ function minutesActionsHtml(m) {
 // After a meeting is processed, let the secretary mark each agenda item's outcome.
 // Outcomes are saved to the linked WhatsApp draft via the outcomes API.
 
+/**
+ * Renders an inline AI-suggestion badge for an agenda outcome item.
+ * Shows the AI's suggested status and confidence level when no manual selection
+ * has been made yet. Confidence maps to badge colour: high=blue, medium=amber, low=gray.
+ *
+ * @param {object|undefined} suggestion  AI suggestion object from S._meetingOutcomeSuggestions
+ * @param {string}           currentStatus  Currently selected status for this item (empty string = none)
+ * @returns {string} HTML badge string (empty if no suggestion or already selected)
+ */
+function outcomeConfidenceBadge(suggestion, currentStatus) {
+  if (!suggestion || currentStatus) return '';
+  const cls = suggestion.confidence === 'high' ? 'badge-blue'
+    : suggestion.confidence === 'medium' ? 'badge-amber' : 'badge-gray';
+  const prefix = suggestion.confidence === 'high' ? '🤖 AI: '
+    : suggestion.confidence === 'medium' ? '🤖 AI (unsure): ' : '🤖 AI (needs review): ';
+  return `<span class="kbadge ${cls}" style="font-size:10px;margin-left:4px" title="${esc(suggestion.rationale || '')}">${prefix}${esc(suggestion.label || '')}</span>`;
+}
+
 function renderPostMeetingOutcomes(m) {
   if (!m?.agendaText) return '';
 
@@ -4247,10 +4265,9 @@ function renderPostMeetingOutcomes(m) {
   const rowsHtml = items.map((item, i) => {
     const cur = outcomes[item] || '';
     const sug = suggestions[item];
-    const confidenceBadge = sug && !cur ? `<span class="kbadge ${sug.confidence === 'high' ? 'badge-blue' : sug.confidence === 'medium' ? 'badge-amber' : 'badge-gray'}" style="font-size:10px;margin-left:4px" title="${esc(sug.rationale || '')}">${sug.confidence === 'high' ? '🤖 AI: ' : sug.confidence === 'medium' ? '🤖 AI (unsure): ' : '🤖 AI (needs review): '}${esc(sug.label || '')}</span>` : '';
     return `
       <div class="k-outcome-row" id="km-outcome-row-${i}">
-        <div class="k-outcome-topic">${esc(item)}${confidenceBadge}</div>
+        <div class="k-outcome-topic">${esc(item)}${outcomeConfidenceBadge(sug, cur)}</div>
         <div class="k-outcome-btns">
           ${STATUS_OPTIONS.map(o => `
             <button class="kbtn kbtn-sm ${cur === o.value ? 'kbtn-primary' : 'kbtn-ghost'}"
@@ -4495,6 +4512,15 @@ async function aiProofreadMinutes(btn) {
   }
 }
 
+/**
+ * AI grammar and punctuation check for the current meeting minutes.
+ * Sends the minutes to the AI proofread endpoint with `grammarOnly: true` so the
+ * AI corrects ONLY language errors (spelling, grammar, punctuation) without
+ * changing any factual content, names, amounts, or structure.
+ * Summaries are updated only if they contain grammar errors.
+ *
+ * @param {HTMLButtonElement} btn  The clicked button (disabled during the request)
+ */
 async function aiGrammarCheck(btn) {
   if (!S.activeMeeting) return;
   const minutesMarkdown = document.getElementById('kr-minutes')?.value || '';
@@ -12595,7 +12621,15 @@ async function abSaveOutcomesToDraft(draftId, outcomes, btn) {
   }
 }
 
-// AI-powered analysis of agenda outcomes based on transcript/minutes
+/**
+ * Uses AI to analyse the current meeting's transcript/minutes and suggest an
+ * outcome (resolved / carry_forward / not_discussed) for each agenda item.
+ * High-confidence suggestions are auto-applied; medium and low confidence items
+ * are flagged for human review with a badge showing the AI's rationale.
+ *
+ * @param {string} meetingId  The active meeting's ID
+ * @param {HTMLButtonElement} btn  The clicked button (disabled during the request)
+ */
 async function abAiAnalyseOutcomes(meetingId, btn) {
   const statusEl = document.getElementById('km-ai-outcomes-status');
   const origText = btn?.textContent;
@@ -12652,9 +12686,8 @@ async function abAiAnalyseOutcomes(meetingId, btn) {
         listEl.innerHTML = items2.map((item, i) => {
           const cur = outcomes2[item] || '';
           const sug2 = sugMap[item];
-          const confidenceBadge2 = sug2 && !cur ? `<span class="kbadge ${sug2.confidence === 'high' ? 'badge-blue' : sug2.confidence === 'medium' ? 'badge-amber' : 'badge-gray'}" style="font-size:10px;margin-left:4px" title="${esc(sug2.rationale || '')}">${sug2.confidence === 'high' ? '🤖 AI: ' : sug2.confidence === 'medium' ? '🤖 AI (unsure): ' : '🤖 AI (needs review): '}${esc(sug2.label || '')}</span>` : '';
           return `<div class="k-outcome-row" id="km-outcome-row-${i}">
-            <div class="k-outcome-topic">${esc(item)}${confidenceBadge2}</div>
+            <div class="k-outcome-topic">${esc(item)}${outcomeConfidenceBadge(sug2, cur)}</div>
             <div class="k-outcome-btns">
               ${STATUS_OPTIONS2.map(o => `<button class="kbtn kbtn-sm ${cur === o.value ? 'kbtn-primary' : 'kbtn-ghost'}" style="${cur === o.value ? `background:${o.color};border-color:${o.color}` : ''}" onclick="Kpsc.abSetOutcome(${esc(JSON.stringify(meetingId))},${esc(JSON.stringify(item))},${esc(JSON.stringify(o.value))},${i})">${esc(o.label)}</button>`).join('')}
             </div>

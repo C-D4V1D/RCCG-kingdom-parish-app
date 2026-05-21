@@ -326,6 +326,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-mem-group{margin-bottom:20px;}
 .k-mem-group-hdr{font-size:12px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;
   color:var(--navy);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border);}
+/* col: name(110px) | role | email | phone(120px) | type(40px) | del(34px) */
 .k-mem-row{display:grid;grid-template-columns:110px 1fr 1fr 120px 40px 34px;gap:8px;align-items:center;margin-bottom:8px;}
 .k-members-actions{margin-top:20px;padding-top:16px;border-top:1px solid var(--border);}
 
@@ -722,6 +723,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
   font-family:'DM Sans',sans-serif;letter-spacing:0;
   min-width:52px;height:52px;border-radius:26px;
   padding:0 14px;font-size:13px;font-weight:700;white-space:nowrap;
+  /* 32px = 16px right margin × 2; prevents FAB overflowing left edge on narrow screens */
   max-width:calc(100vw - 32px);overflow:hidden;text-overflow:ellipsis;}
 #ka-fab:hover{background:var(--navy-dark);box-shadow:0 6px 20px rgba(30,58,95,.45);}
 #ka-fab:active{transform:scale(.95);}
