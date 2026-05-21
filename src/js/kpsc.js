@@ -3676,10 +3676,11 @@ function renderIrSavedResCard(r, cat, idx, canEdit) {
 
 function renderIrSavedActionCard(a, idx, canEdit) {
   const accentCls = a.status === 'done' ? 'k-mc-accent-green' : a.status === 'cancelled' ? 'k-mc-accent-gray' : 'k-mc-accent-blue';
-  // "View in minutes" link — navigates to the meeting minutes section
-  const viewLink = `<div class="k-ic-footer" style="margin-top:8px">
-      <span class="k-insight-view-link" onclick="document.getElementById('kr-panel')?.scrollIntoView({behavior:'smooth',block:'start'})">View in minutes ↑</span>
-    </div>`;
+  const actionBtns = canEdit ? `
+    <div class="k-ic-footer" style="margin-top:8px">
+      <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.irEditInsightItem('actions',null,${idx})">✏️ Edit</button>
+      <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.irRemoveInsightItem('actions',null,${idx})">✕ Remove</button>
+    </div>` : '';
   return `
     <div class="k-meeting-card k-insight-card ${accentCls}" style="cursor:default">
       ${insightTruncText(a.task || '', 130)}
@@ -3689,7 +3690,7 @@ function renderIrSavedActionCard(a, idx, canEdit) {
         ${insightsDueDateLabel(a.dueDate, a.status)}
         ${insightsStatusBadge(a.status)}
       </div>
-      ${viewLink}
+      ${actionBtns}
     </div>`;
 }
 
@@ -4145,9 +4146,10 @@ async function saveInsightsReview(btn) {
       S.meetings = S.meetings.map(m => m.id === S.activeMeeting.id ? S.activeMeeting : m);
     }
     showToast('Insights saved.', 'success');
-    // Switch to the card display view
-    const irSection = document.getElementById('k-insights-review');
-    if (irSection) irSection.outerHTML = renderInsightsReviewSavedView(S.activeMeeting);
+    const projsToPromote = (updated?.suggestedProjects || []).filter(p => p.title);
+    if (projsToPromote.length) {
+      autoPromoteProjects(S.activeMeeting.id, projsToPromote);
+    }
   } catch {
     showToast('Could not save insights. Check your connection.', 'error');
   } finally {
@@ -4189,6 +4191,31 @@ async function promoteInsightProject(btn, meetingId, title, description, estimat
     btn.disabled = false;
     btn.textContent = orig;
   }
+}
+
+async function autoPromoteProjects(meetingId, projects) {
+  try {
+    const res = await apiPost('kpsc-approve-meeting-projects', {
+      meetingId,
+      projects: projects.map(p => ({
+        title: p.title,
+        description: p.description || '',
+        estimatedCost: p.estimatedCost || 0,
+        priority: p.priority || 'medium',
+        targetDate: p.targetDate || '',
+      })),
+      createdBy: S.user?.name || '',
+    });
+    if (res?.error || !res?.saved) return;
+    S.activeMeeting = { ...S.activeMeeting, suggestedProjects: [] };
+    if (S.meetings?.length) {
+      S.meetings = S.meetings.map(m => m.id === meetingId ? S.activeMeeting : m);
+    }
+    if (Array.isArray(res.projects) && Array.isArray(S.projects)) {
+      S.projects = [...S.projects, ...res.projects];
+    }
+    showToast(`${res.saved} project suggestion${res.saved !== 1 ? 's' : ''} added to Projects automatically.`, 'success');
+  } catch { /* silent */ }
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -4421,14 +4448,7 @@ async function saveMinutesReview(btn) {
     if (actionsEl) actionsEl.innerHTML = minutesActionsHtml(S.activeMeeting);
     const hintEl = document.getElementById('k-minutes-review-hint');
     if (hintEl) hintEl.style.display = 'none';
-    // Show the saved card view for insights
-    const irSection = document.getElementById('k-insights-review');
-    if (irSection) irSection.outerHTML = renderInsightsReviewSavedView(S.activeMeeting);
     showToast('Review approved and saved', 'success');
-
-    // Show action item WhatsApp notification links if any action items exist.
-    const actions = S.activeMeeting.actionItems || [];
-    if (actions.length) renderActionNotifications(actions, S.activeMeeting);
 
     // Trigger AI reconciliation of insights against the approved minutes in the background
     const approvedMinutes = res.minutesMarkdown || document.getElementById('kr-minutes')?.value || '';
@@ -7199,6 +7219,18 @@ function aiAccentClass(entry) {
   return 'k-mc-accent-amber';
 }
 
+// ── Three-dot context menu helper ──────────────────────────────────
+function cardCtxMenu(id, ...items) {
+  const menuId = `k-ctx-${CSS.escape ? CSS.escape(id) : String(id).replace(/[^a-zA-Z0-9-_]/g, '-')}`;
+  const btnItems = items.map(it =>
+    `<button class="${it.danger ? 'k-ctx-danger' : ''}" onclick="event.stopPropagation();document.getElementById('${menuId}').style.display='none';${it.onclick}">${it.label}</button>`
+  ).join('');
+  return `<div class="k-card-ctx-wrap" onclick="event.stopPropagation()">
+    <button class="k-card-ctx-btn" onclick="event.stopPropagation();const m=document.getElementById('${menuId}');document.querySelectorAll('.k-card-ctx-menu').forEach(x=>x!==m&&(x.style.display='none'));m.style.display=m.style.display==='block'?'none':'block'" title="Options">⋮</button>
+    <div class="k-card-ctx-menu" id="${menuId}" style="display:none">${btnItems}</div>
+  </div>`;
+}
+
 // ── Card renderer ──────────────────────────────────────────────────
 
 function renderActionItemCard(entry) {
@@ -7237,15 +7269,17 @@ function renderActionItemCard(entry) {
 
   const doneBtn = canEdit && entry.status !== 'done' && entry.status !== 'cancelled'
     ? `<button class="kbtn kbtn-sm kbtn-success k-insight-edit-btn" onclick="Kpsc.toggleActionItemDone('${eid}','${esrc}','${emid}')">✓ Done</button>` : '';
-  const editBtn = canEdit
-    ? `<button class="kbtn kbtn-sm k-insight-edit-btn" onclick="Kpsc.openActionItemEdit('${eid}','${esrc}','${emid}')">Edit</button>` : '';
-  const deleteBtn = canEdit
-    ? `<button class="kbtn kbtn-sm kbtn-danger k-insight-edit-btn" onclick="Kpsc.deleteActionItemById('${eid}','${esrc}','${emid}')">Delete</button>` : '';
-  const viewInsightsLink = entry.meetingId
-    ? `<span class="k-insight-view-link" onclick="Kpsc.navigate('reports');setTimeout(()=>Kpsc.setReportsFilter('action_items'),300)">View in Insights →</span>` : '';
+  const ctxMenu = canEdit ? cardCtxMenu(
+    entry.id,
+    { label: '✏️ Edit',   onclick: `Kpsc.openActionItemEdit('${eid}','${esrc}','${emid}')` },
+    { label: '🗑 Delete', onclick: `Kpsc.deleteActionItemById('${eid}','${esrc}','${emid}')`, danger: true },
+  ) : '';
+  const viewMinutesLink = entry.meetingId
+    ? `<span class="k-insight-view-link" onclick="Kpsc.navigate('archive');setTimeout(()=>Kpsc.openMeeting('${encodeURIComponent(entry.meetingId)}'),300)">View in Minutes →</span>` : '';
 
   return `
-    <div class="k-meeting-card k-insight-card ${accent}" id="k-ai-card-${CSS.escape ? CSS.escape(entry.id) : entry.id.replace(/[^a-zA-Z0-9]/g,'-')}">
+    <div class="k-meeting-card k-insight-card ${accent}" id="k-ai-card-${CSS.escape ? CSS.escape(entry.id) : entry.id.replace(/[^a-zA-Z0-9]/g,'-')}" style="position:relative">
+      ${ctxMenu}
       <div class="k-ai-card-hdr">
         ${checkboxEl}
         <div class="k-ic-badges">
@@ -7264,9 +7298,7 @@ function renderActionItemCard(entry) {
       ${notesBit}
       <div class="k-ic-footer">
         ${doneBtn}
-        ${editBtn}
-        ${deleteBtn}
-        ${viewInsightsLink}
+        ${viewMinutesLink}
       </div>
     </div>`;
 }
@@ -8612,16 +8644,27 @@ async function renderSettings(main) {
   const termiiDeadline     = res?.kpsc_termii_deadline_sms    !== '0';
   const smsFreqCap         = res?.kpsc_sms_freq_cap      || '3';
   const smsCooloffDays     = res?.kpsc_sms_cooloff_days  || '7';
-  // System SMS message text templates
-  const smsWelcomeText    = res?.kpsc_sms_text_welcome    || '';
-  const smsPaymentText    = res?.kpsc_sms_text_payment    || '';
-  const smsNewmonthText   = res?.kpsc_sms_text_newmonth   || '';
-  const smsAnnivText      = res?.kpsc_sms_text_anniversary|| '';
-  const smsMilestone6Text = res?.kpsc_sms_text_milestone6 || '';
-  const smsMilestone12Text= res?.kpsc_sms_text_milestone12|| '';
-  const smsPremeetingText = res?.kpsc_sms_text_premeeting || '';
-  const smsDeadlineText   = res?.kpsc_sms_text_deadline   || '';
-  const smsReminderText   = res?.kpsc_sms_text_reminder   || '';
+  // System SMS message text templates — fall back to built-in defaults so textareas are always pre-filled
+  const SMS_DEFAULTS = {
+    welcome:    `Dear {{name}}, welcome to the RCCG Kingdom Parish family! 🎉 We are so glad to have you as a partner in this beautiful journey of faith. Your support means the world to us, and we pray that God will bless you richly — spiritually and in all your endeavours. You are loved! — RCCG Kingdom Parish`,
+    payment:    `Dear {{name}}, we have received your {{month}} partnership pledge{{amtText}} and we are so grateful! 🙏 Your faithfulness to God's work here at RCCG Kingdom Parish is a blessing to us all. May the Lord be your reward — pressed down, shaken together, and running over. Your seed is sown in good ground. God bless you! — RCCG Kingdom Parish`,
+    newmonth:   `Happy New Month! 🎊 Dear {{name}}, as we step into this brand new month, we lift our hearts in prayer for you: May the Lord open new doors of opportunity before you. May His favour surround you like a shield. May your home be filled with peace and your hands be blessed in all you do. We are grateful for your partnership! — RCCG Kingdom Parish 💙🙏`,
+    anniversary:`🎂 Celebrating You Today, {{name}}! It is a joyful day as we mark your {{ordinal}} partnership anniversary with RCCG Kingdom Parish. Your faithfulness speaks volumes. May this anniversary mark the beginning of an even greater season of blessing and breakthrough in your life. You are deeply appreciated! God bless you! 🎉 — RCCG Kingdom Parish`,
+    milestone6: `🏅 Six months of faithful partnership — praise the Lord! 🙌 Dear {{name}}, you have been such a blessing to our community! Galatians 6:9 says: 'Let us not become weary in doing good, for at the proper time we will reap a harvest if we do not give up.' Your harvest season is drawing near! We celebrate you and pray God's special blessing upon you. — RCCG Kingdom Parish`,
+    milestone12:`🏆 A FULL YEAR of faithful partnership — Glory to God! 🎉 Dear {{name}}, what an incredible milestone! Psalm 1:3 declares you shall be like a tree planted by rivers of water, bringing forth fruit in season. We declare over you a harvest of extraordinary blessings, divine health, and open heavens this year and beyond. You are a champion! — RCCG Kingdom Parish 💙`,
+    premeeting: `Hello {{name}} 👋 This is a warm reminder that our KPSC meeting, '{{meetingTitle}}', is coming up tomorrow, {{meetingDate}}{{meetingTime}}{{venue}}. Your presence is very important to us — your voice and wisdom help shape our church family. Please come prepared and prayed up! God bless you. — RCCG Kingdom Parish Stewardship Committee`,
+    deadline:   `Hello {{name}} 🔔 A quick and loving reminder: your action item '{{task}}' is due in 3 days ({{dueDate}}). We trust you are making great progress! If you need any support, please let us know. Together we are building something wonderful for God. Thank you for your dedication! — RCCG Kingdom Parish Stewardship Committee`,
+    reminder:   `Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God's work and your own blessing. "...he who sows generously will also reap generously." (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family`,
+  };
+  const smsWelcomeText    = res?.kpsc_sms_text_welcome     || SMS_DEFAULTS.welcome;
+  const smsPaymentText    = res?.kpsc_sms_text_payment     || SMS_DEFAULTS.payment;
+  const smsNewmonthText   = res?.kpsc_sms_text_newmonth    || SMS_DEFAULTS.newmonth;
+  const smsAnnivText      = res?.kpsc_sms_text_anniversary || SMS_DEFAULTS.anniversary;
+  const smsMilestone6Text = res?.kpsc_sms_text_milestone6  || SMS_DEFAULTS.milestone6;
+  const smsMilestone12Text= res?.kpsc_sms_text_milestone12 || SMS_DEFAULTS.milestone12;
+  const smsPremeetingText = res?.kpsc_sms_text_premeeting  || SMS_DEFAULTS.premeeting;
+  const smsDeadlineText   = res?.kpsc_sms_text_deadline    || SMS_DEFAULTS.deadline;
+  const smsReminderText   = res?.kpsc_sms_text_reminder    || SMS_DEFAULTS.reminder;
   const cadenceOptions = [
     { value: 'none',              label: 'No fixed cadence' },
     { value: 'weekly:sun',        label: 'Weekly on Sunday' },
@@ -9689,10 +9732,14 @@ function renderProjectsList(projects, canManage) {
     const progress = p.estimatedCost > 0 && p.actualCost > 0
       ? Math.min(100, Math.round((p.actualCost / p.estimatedCost) * 100)) : null;
     return `
-      <div class="k-meeting-card">
+      <div class="k-meeting-card" style="position:relative">
+        ${canManage ? cardCtxMenu('proj-' + p.id,
+          { label: '✏️ Edit',   onclick: `Kpsc.openProjectModal('${p.id}')` },
+          { label: '🗑 Delete', onclick: `Kpsc.deleteProject('${p.id}')`, danger: true },
+        ) : ''}
         <div class="k-mc-top">
           <div style="flex:1">
-            <div class="k-mc-title">${esc(p.title)}</div>
+            <div class="k-mc-title" style="padding-right:${canManage ? '28px' : '0'}">${esc(p.title)}</div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
               <span class="kbadge ${sc.cls}">${sc.label}</span>
               <span class="kbadge ${pc.cls}">⚡ ${pc.label} Priority</span>
@@ -9713,11 +9760,9 @@ function renderProjectsList(projects, canManage) {
         </div>
         ${canManage ? `
           <div class="k-proj-card-actions">
-            <button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.openProjectModal('${p.id}')">✏️ Edit</button>
             <select class="k-input k-input-sm" style="width:auto;padding:4px 8px" onchange="Kpsc.changeProjectStatus('${p.id}', this.value)">
               ${PROJECT_STATUSES.map(s => `<option value="${s.value}" ${p.status === s.value ? 'selected' : ''}>${s.label}</option>`).join('')}
             </select>
-            <button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.deleteProject('${p.id}')">🗑 Delete</button>
           </div>` : ''}
       </div>`;
   }).join('')}</div>`;
