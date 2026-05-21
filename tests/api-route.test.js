@@ -120,7 +120,7 @@ test('create user stores hashed PIN and returns public user fields', async () =>
         },
         async run() {
           statements.push(statement);
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -206,7 +206,7 @@ test('login upgrades plaintext PIN to hashed PIN after successful auth', async (
         },
         async run() {
           runs.push({ sql, bound: statement._bound });
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -254,7 +254,7 @@ test('login with hashed PIN does not run upgrade update', async () => {
         },
         async run() {
           runs.push({ sql, bound: statement._bound });
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -306,7 +306,7 @@ test('kpsc login authenticates against dedicated kpsc_accounts table', async () 
         },
         async run() {
           runs.push({ sql, bound: statement._bound });
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -354,7 +354,7 @@ test('kpsc change pin enforces current pin and clears must_change_pin', async ()
         },
         async run() {
           runs.push({ sql, bound: statement._bound });
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -435,7 +435,7 @@ test('AI secretary processing returns draft minutes and policy flags', async () 
               action_items_json: statement._bound[4] || '[]', policy_flags_json: statement._bound[5] || '[]' };
           }
           runs.push({ sql, bound: statement._bound });
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -455,8 +455,10 @@ test('AI secretary processing returns draft minutes and policy flags', async () 
   assert.ok(body.actionItems.some(a => /treasurer to follow up/i.test(a.task)));
   assert.ok(body.policyFlags.some(f => f.type === 'quorum_missing'));
   assert.ok(body.policyFlags.some(f => f.type === 'welfare_privacy'));
-  assert.equal(runs.length, 1);
+  // Two UPDATE runs: atomic status claim ('ended'→'processing') + final write
+  assert.equal(runs.length, 2);
   assert.match(runs[0].sql, /UPDATE ai_secretary_meetings SET/);
+  assert.match(runs[1].sql, /UPDATE ai_secretary_meetings SET/);
 });
 
 test('AI secretary keeps deterministic governance flags when provider omits them', async () => {
@@ -477,7 +479,7 @@ test('AI secretary keeps deterministic governance flags when provider omits them
     title: 'KPSC Project Meeting',
     meeting_type: 'routine',
     meeting_date: '2026-05-08',
-    status: 'recording',
+    status: 'ended',
     participants_json: JSON.stringify([
       { group: 'men', label: 'Men', present: true, name: 'Bro A' },
       { group: 'women', label: 'Women', present: false, name: '' },
@@ -527,7 +529,7 @@ test('AI secretary keeps deterministic governance flags when provider omits them
               processed_at: statement._bound[6] || ''
             };
           }
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -610,7 +612,7 @@ test('AI secretary quorum is based on required group coverage instead of every r
               processed_at: statement._bound[6] || ''
             };
           }
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -684,7 +686,7 @@ test('AI secretary classifies resolutions and extracts action owners/deadlines',
               processed_at: statement._bound[6] || ''
             };
           }
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -756,7 +758,7 @@ test('AI secretary meeting update persists reviewed minutes corrections', async 
               reviewed_by: statement._bound[16]
             };
           }
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -932,7 +934,7 @@ test('AI secretary meeting create derives author from authenticated session', as
           if (/INSERT OR IGNORE INTO ai_secretary_meetings/.test(sql)) {
             insertBinds = [...statement._bound];
           }
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -1013,7 +1015,7 @@ function createKpscSessionDB({ accountId, token, accountRole, sessionExpiry }) {
           }
           return null;
         },
-        async run() { return { success: true }; },
+        async run() { return { success: true, meta: { changes: 1 } }; },
         async all() { return { results: [] }; }
       };
       return statement;
@@ -1075,7 +1077,7 @@ test('kpsc mutating endpoint with allowed role returns success', async () => {
           }
           return null;
         },
-        async run() { return { success: true }; },
+        async run() { return { success: true, meta: { changes: 1 } }; },
         async all() { return { results: [] }; }
       };
       return statement;
@@ -1113,7 +1115,7 @@ test('kpsc mutating endpoint with it_admin role returns success', async () => {
           }
           return null;
         },
-        async run() { return { success: true }; },
+        async run() { return { success: true, meta: { changes: 1 } }; },
         async all() { return { results: [] }; }
       };
       return statement;
@@ -1167,7 +1169,7 @@ test('public link endpoint returns public URL only when review is approved', asy
           }
           return null;
         },
-        async run() { return { success: true }; }
+        async run() { return { success: true, meta: { changes: 1 } }; }
       };
       return statement;
     })
@@ -1234,7 +1236,7 @@ test('public link revoke endpoint clears an active token', async () => {
           if (/UPDATE ai_secretary_meetings SET public_share_token=''/i.test(sql)) {
             revokedMeetingId = statement._bound[0];
           }
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -1273,7 +1275,7 @@ test('meeting delete authorisation follows account id even after display name ch
           if (/UPDATE ai_secretary_meetings SET deleted_at=\?, deleted_by=\? WHERE id=\?/.test(sql)) {
             deletedId = statement._bound[2];
           }
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -1315,7 +1317,7 @@ function createDeleteAccountDB({ callerAccountId, callerRole, targetId, targetRo
           }
           return { results: [] };
         },
-        async run() { return { success: true }; }
+        async run() { return { success: true, meta: { changes: 1 } }; }
       };
       return statement;
     }
@@ -1470,7 +1472,7 @@ test('AI secretary deepseek model migration: empty ai_deepseek_model defaults to
         },
         async run() {
           if (/UPDATE ai_secretary_meetings SET/.test(sql)) dbState = { ...dbState, status: 'processed' };
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -1546,7 +1548,7 @@ test('AI secretary deepseek model migration: deepseek-chat migrates to deepseek-
         },
         async run() {
           if (/UPDATE ai_secretary_meetings SET/.test(sql)) dbState = { ...dbState, status: 'processed' };
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -1622,7 +1624,7 @@ test('AI secretary deepseek model migration: deepseek-reasoner migrates to deeps
         },
         async run() {
           if (/UPDATE ai_secretary_meetings SET/.test(sql)) dbState = { ...dbState, status: 'processed' };
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -1698,7 +1700,7 @@ test('AI secretary deepseek model migration: deepseek-v4-pro remains unchanged',
         },
         async run() {
           if (/UPDATE ai_secretary_meetings SET/.test(sql)) dbState = { ...dbState, status: 'processed' };
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         }
       };
       return statement;
@@ -1839,7 +1841,7 @@ test('voice-enroll: happy path stores embedding and returns enrolledAt + sampleC
             storedEmbedding = st._bound[0];
           }
           runs.push({ sql, bound: st._bound });
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         },
       };
       return st;
@@ -1907,7 +1909,7 @@ test('voice-enroll: member not found returns 404', async () => {
           if (/SELECT id, name, voice_sample_count FROM kpsc_members/.test(sql)) return null;
           throw new Error(`Unexpected first(): ${sql}`);
         },
-        async run() { return { success: true }; },
+        async run() { return { success: true, meta: { changes: 1 } }; },
       };
       return st;
     }),
@@ -1950,7 +1952,7 @@ test('voice-enroll: upstream Cloud Run 400 (e.g. audio too short) is passed thro
           }
           throw new Error(`Unexpected first(): ${sql}`);
         },
-        async run() { return { success: true }; },
+        async run() { return { success: true, meta: { changes: 1 } }; },
       };
       return st;
     }),
@@ -1984,7 +1986,7 @@ test('voice-enroll: VOICE_FP_URL not configured returns 503', async () => {
           }
           throw new Error(`Unexpected first(): ${sql}`);
         },
-        async run() { return { success: true }; },
+        async run() { return { success: true, meta: { changes: 1 } }; },
       };
       return st;
     }),
@@ -2031,7 +2033,7 @@ test('voice-identify: one enrolled member with identical embedding returns match
           throw new Error(`Unexpected all(): ${sql}`);
         },
         async first() { throw new Error(`Unexpected first(): ${sql}`); },
-        async run() { return { success: true }; },
+        async run() { return { success: true, meta: { changes: 1 } }; },
       };
       return st;
     }, { role: 'committee_viewer' }),
@@ -2089,7 +2091,7 @@ test('voice-identify: D1 BLOB returned as Uint8Array is decoded correctly (score
           throw new Error(`Unexpected all(): ${sql}`);
         },
         async first() { throw new Error(`Unexpected first(): ${sql}`); },
-        async run() { return { success: true }; },
+        async run() { return { success: true, meta: { changes: 1 } }; },
       };
       return st;
     }, { role: 'committee_viewer' }),
@@ -2147,7 +2149,7 @@ test('voice-identify: orthogonal embedding returns match:false (below threshold)
           throw new Error(`Unexpected all(): ${sql}`);
         },
         async first() { throw new Error(`Unexpected first(): ${sql}`); },
-        async run() { return { success: true }; },
+        async run() { return { success: true, meta: { changes: 1 } }; },
       };
       return st;
     }, { role: 'committee_viewer' }),
@@ -2198,7 +2200,7 @@ test('voice-identify: no enrolled members returns match:false with no_enrolled_m
           throw new Error(`Unexpected all(): ${sql}`);
         },
         async first() { throw new Error(`Unexpected first(): ${sql}`); },
-        async run() { return { success: true }; },
+        async run() { return { success: true, meta: { changes: 1 } }; },
       };
       return st;
     }, { role: 'committee_viewer' }),
@@ -2241,7 +2243,7 @@ test('voice-enrollment DELETE: clears voice data and returns ok:true', async () 
         },
         async run() {
           runs.push({ sql, bound: st._bound });
-          return { success: true };
+          return { success: true, meta: { changes: 1 } };
         },
       };
       return st;
@@ -2277,7 +2279,7 @@ test('voice-member-sync: inserts new member into D1', async () => {
       const statement = {
         _bound: [],
         bind(...args) { statement._bound = args; return statement; },
-        async run() { runs.push({ sql, bound: statement._bound }); return { success: true }; },
+        async run() { runs.push({ sql, bound: statement._bound }); return { success: true, meta: { changes: 1 } }; },
         async first() { return null; }
       };
       return statement;
@@ -2310,7 +2312,7 @@ test('voice-member-sync: update-existing updates name via ON CONFLICT', async ()
       const statement = {
         _bound: [],
         bind(...args) { statement._bound = args; return statement; },
-        async run() { runs.push({ sql, bound: statement._bound }); return { success: true }; },
+        async run() { runs.push({ sql, bound: statement._bound }); return { success: true, meta: { changes: 1 } }; },
         async first() { return null; }
       };
       return statement;
@@ -2750,7 +2752,7 @@ test('run-followups: happy path — inserts a kpsc_followups row for overdue ite
       const st = {
         _bound: [],
         bind(...args) { st._bound = args; return st; },
-        async run() { insertedRows.push({ sql, bound: st._bound }); return { success: true }; },
+        async run() { insertedRows.push({ sql, bound: st._bound }); return { success: true, meta: { changes: 1 } }; },
         async first() {
           if (/SELECT value FROM settings/.test(sql)) return { value: '' }; // no deepseek key
           if (/SELECT id FROM kpsc_followups WHERE meeting_id/.test(sql)) return null; // not existing
@@ -2800,7 +2802,7 @@ test('run-followups: does not double-insert when follow-up already exists', asyn
       const st = {
         _bound: [],
         bind(...args) { st._bound = args; return st; },
-        async run() { insertedRows.push({ sql, bound: st._bound }); return { success: true }; },
+        async run() { insertedRows.push({ sql, bound: st._bound }); return { success: true, meta: { changes: 1 } }; },
         async first() {
           if (/SELECT value FROM settings/.test(sql)) return { value: '' };
           if (/SELECT id FROM kpsc_followups WHERE meeting_id/.test(sql)) return { id: 'FU-existing' };
@@ -2860,7 +2862,7 @@ test('run-prebriefs: generates brief when meeting is scheduled within 24h', asyn
       const st = {
         _bound: [],
         bind(...args) { st._bound = args; return st; },
-        async run() { updatedRows.push({ sql, bound: st._bound }); return { success: true }; },
+        async run() { updatedRows.push({ sql, bound: st._bound }); return { success: true, meta: { changes: 1 } }; },
         async first() {
           if (/SELECT value FROM settings/.test(sql)) return { value: '' }; // no deepseek key
           if (/SELECT title, meeting_date, minutes_markdown, action_items_json/.test(sql)) {
@@ -2909,7 +2911,7 @@ test('run-prebriefs: skips meeting when pre_brief_markdown already set (handled 
       const st = {
         _bound: [],
         bind(...args) { st._bound = args; return st; },
-        async run() { return { success: true }; },
+        async run() { return { success: true, meta: { changes: 1 } }; },
         async first() { return null; },
         async all() {
           // Simulate SQL returning empty because pre_brief_markdown IS NOT NULL
@@ -2952,7 +2954,7 @@ test('GET /api/kpsc-followups: returns pending follow-ups for authenticated user
           return { results: [] };
         },
         async first() { return null; },
-        async run() { return { success: true }; },
+        async run() { return { success: true, meta: { changes: 1 } }; },
       };
       return st;
     })
