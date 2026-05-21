@@ -342,6 +342,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .kpsc-toast-success{background:var(--green);color:#fff;}
 .kpsc-toast-error  {background:var(--red);color:#fff;}
 .kpsc-toast-info   {background:var(--navy);color:#fff;}
+.kpsc-toast-warn   {background:#f59e0b;color:#fff;}
 
 /* ── RESPONSIVE ────────────────────────────────────────────────── */
 @media(max-width:560px){
