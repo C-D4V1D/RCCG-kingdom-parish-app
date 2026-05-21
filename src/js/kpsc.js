@@ -176,6 +176,7 @@ const Rec = {
   reconnectTimer: null,
   manualStop: false,
   transcriptEntries: [],
+  lastRenderedCount: 0,
   liveDeltas: new Map(),
   uploadQueue: [],
   uploadBusy: false,
@@ -356,6 +357,19 @@ function speakerDisplayName(idx) {
   return Rec.speakerMap.get(idx) || `Speaker ${idx + 1}`;
 }
 
+function recEntryHtml(entry) {
+  const hasSpeaker = entry.speaker !== null && entry.speaker !== undefined;
+  const displayName = hasSpeaker ? speakerDisplayName(entry.speaker) : '';
+  const speakerHtml = hasSpeaker
+    ? `<span class="lt-speaker lt-spk-${entry.speaker % 6}">${esc(displayName)}</span>`
+    : '';
+  return `<div class="lt-entry${entry.partial ? ' lt-entry-partial' : ''}${hasSpeaker ? ' lt-entry-diarized' : ''}">` +
+    `<span class="lt-time">${esc(entry.timestamp)}</span>` +
+    speakerHtml +
+    `<span class="lt-text">${esc(entry.text)}</span>` +
+    `</div>`;
+}
+
 function recRenderTranscript() {
   const list = document.getElementById('kpsc-live-transcript-list');
   if (!list) return;
@@ -366,20 +380,56 @@ function recRenderTranscript() {
     partial: true,
     speaker: null,
   }));
-  const rows = [...Rec.transcriptEntries, ...partials];
-  list.innerHTML = rows.length ? rows.map(entry => {
-    const hasSpeaker = entry.speaker !== null && entry.speaker !== undefined;
-    const displayName = hasSpeaker ? speakerDisplayName(entry.speaker) : '';
-    const speakerHtml = hasSpeaker
-      ? `<span class="lt-speaker lt-spk-${entry.speaker % 6}">${esc(displayName)}</span>`
-      : '';
-    return `
-    <div class="lt-entry${entry.partial ? ' lt-entry-partial' : ''}${hasSpeaker ? ' lt-entry-diarized' : ''}">
-      <span class="lt-time">${esc(entry.timestamp)}</span>
-      ${speakerHtml}
-      <span class="lt-text">${esc(entry.text)}</span>
-    </div>`;
-  }).join('') : '<div class="lt-empty">Live transcript will appear here as people speak.</div>';
+
+  const stableCount = Rec.transcriptEntries.length;
+  const lastRendered = Rec.lastRenderedCount ?? -1;
+
+  // Full re-render when the list is empty/replaced or entries were removed/reordered.
+  if (lastRendered > stableCount || list.children.length === 0 && (stableCount + partials.length) === 0) {
+    list.innerHTML = (stableCount + partials.length) === 0
+      ? '<div class="lt-empty">Live transcript will appear here as people speak.</div>'
+      : [...Rec.transcriptEntries, ...partials].map(recEntryHtml).join('');
+    Rec.lastRenderedCount = stableCount;
+    list.scrollTop = list.scrollHeight;
+    return;
+  }
+
+  // Remove the placeholder if the list was previously empty.
+  if (list.querySelector('.lt-empty')) {
+    list.innerHTML = '';
+    Rec.lastRenderedCount = 0;
+  }
+
+  // Append any newly finalised stable entries that weren't in the DOM yet.
+  if (stableCount > (Rec.lastRenderedCount ?? 0)) {
+    const frag = document.createDocumentFragment();
+    const tmp = document.createElement('div');
+    for (let i = Rec.lastRenderedCount ?? 0; i < stableCount; i++) {
+      tmp.innerHTML = recEntryHtml(Rec.transcriptEntries[i]);
+      frag.appendChild(tmp.firstChild);
+    }
+    list.appendChild(frag);
+    Rec.lastRenderedCount = stableCount;
+  }
+
+  // Remove all existing partial (liveDeltas) nodes, then re-append current ones.
+  // Partials are always at the end of the list.
+  let child = list.lastChild;
+  while (child && child.classList?.contains('lt-entry-partial')) {
+    const prev = child.previousSibling;
+    list.removeChild(child);
+    child = prev;
+  }
+  if (partials.length) {
+    const frag = document.createDocumentFragment();
+    const tmp = document.createElement('div');
+    for (const entry of partials) {
+      tmp.innerHTML = recEntryHtml(entry);
+      frag.appendChild(tmp.firstChild);
+    }
+    list.appendChild(frag);
+  }
+
   list.scrollTop = list.scrollHeight;
 }
 
@@ -499,6 +549,8 @@ function assignSpeaker(idx, name) {
     Rec.speakerMap.delete(idx);
   }
   rebuildTranscriptTextarea();
+  // Force a full re-render because existing entries' speaker names have changed.
+  Rec.lastRenderedCount = 0;
   recRenderTranscript();
   recRenderSpeakerMap();
 }
@@ -636,6 +688,7 @@ async function recStart(btn) {
     Rec.failedChunks = 0;
     Rec.uploadQueue = [];
     Rec.transcriptEntries = [];
+    Rec.lastRenderedCount = 0;
     Rec.liveDeltas = new Map();
     Rec.speakerMap = new Map();
     Rec.seenSpeakers = new Set();
@@ -688,6 +741,14 @@ async function recStart(btn) {
     if (statusInput && statusInput.value === 'draft') {
       statusInput.value = 'recording';
       updateStepperUI('recording');
+    }
+
+    // Immediately tell the server the meeting is now recording so that
+    // a page refresh or server-side poll reflects the correct status.
+    if (S.activeMeeting) {
+      apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, { status: 'recording' })
+        .then(res => { if (res && !res.error) S.activeMeeting = res; })
+        .catch(() => { /* non-fatal — autosave will sync status on the next cycle */ });
     }
   } catch (e) {
     if (stream && stream !== Rec.stream) stream.getTracks().forEach(t => t.stop());
@@ -863,6 +924,7 @@ function recReset() {
   Rec.elapsed = 0;
   Rec.status = 'idle';
   Rec.transcriptEntries = [];
+  Rec.lastRenderedCount = 0;
   Rec.liveDeltas = new Map();
   Rec.uploadQueue = [];
   Rec.uploadedChunks = 0;
@@ -878,6 +940,7 @@ function recReset() {
   Rec.voiceIdLastAttempt     = new Map();
   Rec.voiceIdInFlight        = new Set();
   Diarizer.status = 'offline';
+  Diarizer.manualStop = false;
   Diarizer.reconnectAttempts = 0;
   Diarizer.speakerRanges   = new Map();
   recRenderUI();
@@ -910,12 +973,15 @@ function recQueueChunk(blob, mimeType) {
     createdAt: new Date().toISOString(),
   };
   Rec.uploadQueue.push(chunk);
-  recFlushUploads(false);
+  if (!Rec.uploadRetryScheduled) recFlushUploads(false);
 }
 
 async function recFlushUploads(useKeepalive) {
+  // Acquire the busy lock BEFORE clearing uploadRetryScheduled so that any
+  // recQueueChunk call racing in between cannot start a second concurrent loop.
   if (Rec.uploadBusy) return;
   Rec.uploadBusy = true;
+  Rec.uploadRetryScheduled = false;
   try {
     while (Rec.uploadQueue.length) {
       const chunk = Rec.uploadQueue[0];
@@ -927,7 +993,10 @@ async function recFlushUploads(useKeepalive) {
         recRenderUI();
       } catch (_) {
         Rec.failedChunks = Rec.uploadQueue.length;
-        setTimeout(() => recFlushUploads(false), 2500);
+        if (!Rec.uploadRetryScheduled) {
+          Rec.uploadRetryScheduled = true;
+          setTimeout(() => recFlushUploads(false), 2500);
+        }
         break;
       }
     }
@@ -2235,6 +2304,9 @@ function navigate(page, opts) {
     // survives the navigation, then kick off the server PUT/POST.
     saveTranscriptBuffer();
     try { autoSaveNow(); } catch (_) { /* noop */ }
+  }
+  if (Rec.status === 'recording' || Rec.status === 'paused') {
+    if (!confirm('You are currently recording. Leaving will stop the recording. Continue?')) return;
   }
   recStop();
   Rec.status = 'idle';
@@ -4399,8 +4471,8 @@ async function saveMinutesReview(btn) {
       summaryShort: document.getElementById('kr-summary-short')?.value || '',
       summaryLong: document.getElementById('kr-summary-long')?.value || '',
       minutesMarkdown: document.getElementById('kr-minutes')?.value || '',
-      resolutions: S.activeMeeting.resolutions || [],
-      actionItems: S.activeMeeting.actionItems || [],
+      resolutions: readReviewResolutions(),
+      actionItems: readReviewActions(),
       policyFlags: S.activeMeeting.policyFlags || [],
       reviewedAt,
       reviewedBy: S.user?.name || '',
@@ -5112,11 +5184,21 @@ async function endMeeting(btn) {
   try {
     const trans = document.getElementById('km-transcript')?.value || S.activeMeeting.transcriptText || '';
     const participants = readAttendance();
+    const title = document.getElementById('km-title')?.value.trim() || S.activeMeeting.title || 'KPSC Meeting';
+    const meetingDate = document.getElementById('km-date')?.value || S.activeMeeting.meetingDate || today();
+    const meetingType = document.getElementById('km-type')?.value || S.activeMeeting.meetingType || 'routine';
+    const venue = document.getElementById('km-venue')?.value.trim() ?? S.activeMeeting.venue ?? '';
+    const agendaText = document.getElementById('km-agenda')?.value?.trim() ?? S.activeMeeting.agendaText ?? undefined;
     const res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
       status: 'ended',
       endedAt: new Date().toISOString(),
       transcriptText: trans,
       participants,
+      title,
+      meetingDate,
+      meetingType,
+      venue,
+      ...(agendaText !== undefined ? { agendaText } : {}),
     });
     if (res.error) { showToast(res.error, 'error'); return; }
     S.activeMeeting = res;
@@ -5531,10 +5613,25 @@ async function submitVoiceFpEnrollment() {
     if (enrollData.error) throw new Error(enrollData.error);
 
     // Step 3: persist enrollment metadata back on the JSON member.
+    // Read-before-write: fetch the latest settings so concurrent enrollment
+    // sessions don't overwrite each other's data.
+    const latestSettings = await apiGet('settings');
+    const latestMembers = latestSettings.kpsc_members || S.members;
+    // Find the matching member by voice_member_id or by name+group to merge.
+    const latestIdx = latestMembers.findIndex(
+      m => (m.voice_member_id && m.voice_member_id === vid) ||
+           (m.name === member.name && m.group === member.group)
+    );
+    if (latestIdx >= 0) {
+      latestMembers[latestIdx].voice_enrolled_at  = enrollData.enrolledAt;
+      latestMembers[latestIdx].voice_sample_count = enrollData.sampleCount;
+      latestMembers[latestIdx].voice_member_id    = vid;
+    }
+    // Also update local S.members so the UI reflects the change.
     S.members[idx].voice_enrolled_at  = enrollData.enrolledAt;
     S.members[idx].voice_sample_count = enrollData.sampleCount;
     S.members[idx].voice_member_id    = vid;
-    await apiPost('settings', { kpsc_members: S.members });
+    await apiPost('settings', { kpsc_members: latestMembers });
 
     showToast(`Voice enrolled for ${member.name}`, 'success');
     closeVoiceFpModal();
@@ -10441,6 +10538,11 @@ async function shareMinutesWhatsApp(meetingId) {
 }
 
 async function revokeMinutesPublicLink(meetingId) {
+  const role = String(S.user?.role || '').toLowerCase();
+  if (role !== 'acting_chairman' && role !== 'general_secretary') {
+    showToast('Only the Acting Chairman or General Secretary can revoke the public minutes link.', 'error');
+    return;
+  }
   const meeting = S.activeMeeting;
   if (!meeting?.publicShareToken) { showToast('No public minutes link is active for this meeting.', 'info'); return; }
   if (!confirm('Revoke the public minutes link? Anyone with the old link will lose access immediately.')) return;

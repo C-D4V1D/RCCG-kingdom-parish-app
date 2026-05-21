@@ -589,12 +589,20 @@ export async function onRequest(context) {
 
     // ── /api/realtime-transcription-token ───────────────────────
     if (route === 'realtime-transcription-token') {
-      if (method === 'POST' && !param) return await createRealtimeTranscriptionToken(env);
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createRealtimeTranscriptionToken(env);
+      }
     }
 
     // ── /api/deepgram-transcription-token ───────────────────────
     if (route === 'deepgram-transcription-token') {
-      if (method === 'POST' && !param) return await createDeepgramTranscriptionToken(env);
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+        if (auth instanceof Response) return auth;
+        return await createDeepgramTranscriptionToken(env);
+      }
     }
 
     // ── /api/voice-enroll/:memberId ─────────────────────────────
@@ -652,7 +660,7 @@ export async function onRequest(context) {
       if (method === 'GET'  &&  param) {
         const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
         if (auth instanceof Response) return auth;
-        return await getAiSecretaryMeeting(DB, param);
+        return await getAiSecretaryMeeting(DB, param, auth);
       }
       if (method === 'PUT'  &&  param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -682,6 +690,8 @@ export async function onRequest(context) {
 
       if (method === 'POST' && parts[2] === 'suggest-outcomes') {
         if (!param) return err('Missing meeting ID', 400);
+        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+        if (auth instanceof Response) return auth;
         return await suggestMeetingOutcomes(DB, env, param);
       }
       if (method === 'POST' && parts[2] === 'reconcile-insights') {
@@ -706,6 +716,8 @@ export async function onRequest(context) {
 
     // ── /api/admin ─────────────────────────────────────────────
     if (route === 'admin') {
+      const auth = await requireKpscRole(DB, request, ['it_admin']);
+      if (auth instanceof Response) return auth;
       if (method === 'POST' && param === 'clear')      return await adminClear(DB);
       if (method === 'POST' && param === 'clear-data') return await adminClearDataOnly(DB);
       if (method === 'POST' && param === 'import') return await adminImport(DB, body);
@@ -3552,6 +3564,11 @@ async function transcribeAudioWithDiarization(env, request) {
   const mimeType = String(form.get('mimeType') || audio.type || 'audio/webm');
   const audioBuffer = await audio.arrayBuffer();
 
+  const MAX_AUDIO_BYTES = 104857600; // 100 MB
+  if (audioBuffer.byteLength > MAX_AUDIO_BYTES) {
+    return err('Audio file too large (max 100 MB)', 413);
+  }
+
   const dgUrl = 'https://api.deepgram.com/v1/listen?diarize=true&utterances=true&model=nova-2&smart_format=true&punctuate=true';
   let dgResp;
   try {
@@ -3684,8 +3701,14 @@ async function transcribeAudioWithWhisper(env, request, DB) {
   const ext = mimeType.split('/')[1]?.split(';')[0] || 'webm';
   const filename = `recording.${ext}`;
 
+  const audioBuffer = await audio.arrayBuffer();
+  const MAX_AUDIO_BYTES = 104857600; // 100 MB
+  if (audioBuffer.byteLength > MAX_AUDIO_BYTES) {
+    return err('Audio file too large (max 100 MB)', 413);
+  }
+
   const whisperForm = new FormData();
-  whisperForm.append('file', audio, filename);
+  whisperForm.append('file', new File([audioBuffer], filename, { type: mimeType }), filename);
   whisperForm.append('model', transcriptionModel);
 
   const methodLabel = transcriptionModel === 'whisper-1'
@@ -4444,10 +4467,15 @@ async function deleteAiSecretaryMeeting(DB, id, auth) {
   return ok({ id, deletedAt: now });
 }
 
-async function getAiSecretaryMeeting(DB, id) {
+async function getAiSecretaryMeeting(DB, id, auth) {
   const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
   if (!row || row.deleted_at) return err('AI secretary meeting not found', 404);
-  return ok(aiSecretaryMeetingFromRow(row));
+  const meeting = aiSecretaryMeetingFromRow(row);
+  const TOKEN_ROLES = ['acting_chairman', 'general_secretary'];
+  if (!auth || !TOKEN_ROLES.includes(auth.role)) {
+    delete meeting.publicShareToken;
+  }
+  return ok(meeting);
 }
 
 async function createAiSecretaryMeetingPublicLink(DB, request, id) {
@@ -4458,7 +4486,7 @@ async function createAiSecretaryMeetingPublicLink(DB, request, id) {
   if (!row || row.deleted_at) return err('Meeting not found', 404);
   if (!String(row.minutes_markdown || '').trim()) return err('Minutes are not available for sharing yet.', 400);
   if (!String(row.reviewed_at || '').trim()) return err('Minutes review must be approved before sharing.', 412);
-  const token = String(row.public_share_token || '').trim() || newId('kpub_');
+  const token = String(row.public_share_token || '').trim() || ('kpub_' + crypto.randomUUID().replace(/-/g, ''));
   if (!row.public_share_token) {
     await DB.prepare(`UPDATE ai_secretary_meetings SET public_share_token=? WHERE id=?`).bind(token, id).run();
   }
@@ -4533,7 +4561,7 @@ async function createAiSecretaryMeeting(DB, data, auth) {
     String(data.title || 'KPSC Meeting').trim(),
     data.meetingType || 'routine',
     data.meetingDate || now.slice(0, 10),
-    data.status || 'draft',
+    ['draft', 'recording', 'ended'].includes(data.status) ? data.status : 'draft',
     JSON.stringify(participants),
     data.transcriptText || '',
     String(data.venue || '').trim(),
@@ -4597,10 +4625,12 @@ async function updateAiSecretaryMeeting(DB, id, data, auth) {
   const scheduledFor = data.scheduledFor !== undefined
     ? (data.scheduledFor ? String(data.scheduledFor).trim() : null)
     : (existing.scheduled_for || null);
-  const reviewedAt = data.reviewedAt !== undefined
+  const REVIEW_ROLES = ['acting_chairman', 'general_secretary'];
+  const canSetReviewedAt = REVIEW_ROLES.includes(auth?.role);
+  const reviewedAt = (data.reviewedAt !== undefined && canSetReviewedAt)
     ? String(data.reviewedAt || '').trim()
     : (existing.reviewed_at || '');
-  const reviewedBy = data.reviewedBy !== undefined
+  const reviewedBy = (data.reviewedBy !== undefined && canSetReviewedAt)
     ? String(data.reviewedBy || '').trim()
     : (existing.reviewed_by || '');
   const venue = data.venue !== undefined
@@ -4616,7 +4646,7 @@ async function updateAiSecretaryMeeting(DB, id, data, auth) {
     data.title !== undefined ? String(data.title).trim() : existing.title,
     data.meetingType !== undefined ? data.meetingType : existing.meeting_type,
     data.meetingDate !== undefined ? data.meetingDate : existing.meeting_date,
-    data.status !== undefined ? data.status : existing.status,
+    (data.status !== undefined && ['draft', 'recording', 'ended', 'processed'].includes(data.status)) ? data.status : existing.status,
     JSON.stringify(participants),
     data.transcriptText !== undefined ? data.transcriptText : existing.transcript_text,
     data.endedAt !== undefined ? data.endedAt : existing.ended_at,
@@ -4837,6 +4867,19 @@ Return only valid JSON. No markdown fences. No text before or after the JSON obj
 async function processAiSecretaryMeeting(DB, id) {
   const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
   if (!row || row.deleted_at) return err('AI secretary meeting not found', 404);
+  if (row.status === 'processed' || row.status === 'recording') {
+    return err(`Cannot process a meeting with status '${row.status}'`, 409);
+  }
+  if (row.status !== 'ended') {
+    return err(`Meeting must be in 'ended' status to process (current: '${row.status}')`, 409);
+  }
+  // Atomically claim the row to prevent concurrent re-processing
+  const claim = await DB.prepare(
+    `UPDATE ai_secretary_meetings SET status='processing' WHERE id=? AND status='ended'`
+  ).bind(id).run();
+  if ((claim.meta?.changes ?? claim.changes ?? 0) === 0) {
+    return err('Meeting is already being processed or was already processed', 409);
+  }
   const meeting = aiSecretaryMeetingFromRow(row);
   let deepseekKey = '';
   try {
@@ -4948,14 +4991,17 @@ ${minutesMarkdown}`;
     await DB.prepare(
       `UPDATE ai_secretary_meetings SET plain_english_minutes_md=? WHERE id=?`
     ).bind(plainEnglish, id).run();
-  } catch (_) {
-    // Safe to ignore if update fails; we still return the translation
+  } catch (e) {
+    return err(`Failed to save translation to database: ${e.message}`, 500);
   }
 
   return ok({ plainEnglish, fromCache: false });
 }
 
 async function proofreadAiSecretaryMinutes(DB, env, id, body) {
+  const meetingRow = await DB.prepare(`SELECT id, deleted_at FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
+  if (!meetingRow || meetingRow.deleted_at) return err('Meeting not found', 404);
+
   const minutesMarkdown = String(body?.minutesMarkdown || '').trim();
   const secretaryNotes  = String(body?.secretaryNotes  || '').trim();
   const summaryShort    = String(body?.summaryShort    || '').trim();
@@ -5058,12 +5104,14 @@ ${summaryLong || '(none)'}`;
   const improvedShort    = String(parsed.summaryShort    || summaryShort).trim();
   const improvedLong     = String(parsed.summaryLong     || summaryLong).trim();
 
-  // Persist improved content and clear stale plain-English cache
-  try {
-    await DB.prepare(
-      `UPDATE ai_secretary_meetings SET minutes_markdown=?, summary_short=?, summary_long=?, plain_english_minutes_md='' WHERE id=?`
-    ).bind(improvedMarkdown, improvedShort, improvedLong, id).run();
-  } catch (_) {}
+  // Persist improved content, clear stale plain-English cache, and clear approval
+  // signature so that a re-proofread meeting must be re-reviewed (FLOW-2).
+  const writeResult = await DB.prepare(
+    `UPDATE ai_secretary_meetings SET minutes_markdown=?, summary_short=?, summary_long=?, plain_english_minutes_md='', reviewed_at='', reviewed_by='' WHERE id=?`
+  ).bind(improvedMarkdown, improvedShort, improvedLong, id).run();
+  if ((writeResult.meta?.changes ?? writeResult.changes ?? 0) === 0) {
+    return err('Failed to save proofread minutes to database', 500);
+  }
 
   return ok({ minutesMarkdown: improvedMarkdown, summaryShort: improvedShort, summaryLong: improvedLong });
 }
@@ -5274,7 +5322,9 @@ ${JSON.stringify(suggestedProjects, null, 2)}`;
       JSON.stringify(updProjects),
       id,
     ).run();
-  } catch (_) {}
+  } catch (e) {
+    return err(`Failed to save reconciled insights to database: ${e.message}`, 500);
+  }
 
   return ok({ resolutions: updResolutions, actionItems: updActions, policyFlags: updFlags, suggestedProjects: updProjects, changes });
 }
