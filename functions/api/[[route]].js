@@ -1373,6 +1373,8 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_partners ADD COLUMN dnd_flagged INTEGER DEFAULT 0`,
     `ALTER TABLE kpsc_partners ADD COLUMN opted_out INTEGER DEFAULT 0`,
     `ALTER TABLE kpsc_partners ADD COLUMN last_sms_sent_at TEXT DEFAULT ''`,
+    // Link finance entries to their source partner payment for two-way sync
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN partner_payment_id TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -2666,6 +2668,38 @@ async function upsertKpscPartnerPayment(DB, data) {
     } catch { /* swallow — SMS failure must not break payment recording */ }
   }
 
+  // ── Sync to finance entries (create or update linked income record) ──
+  if (paid) {
+    try {
+      const MONTH_NAMES_FIN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      const monthLabel = MONTH_NAMES_FIN[(month - 1)] || '';
+      const partnerRow = await DB.prepare(`SELECT full_name FROM kpsc_partners WHERE id=?`).bind(partnerId).first();
+      const partnerName = partnerRow?.full_name || '';
+      const narration = `${monthLabel} ${year} partnership pledge${partnerName ? ' — ' + partnerName : ''}`;
+      const paymentMethod = String(data?.reference || '').trim() === 'transfer' ? 'bank_transfer' : (String(data?.reference || '').trim() || 'cash');
+      const existingFin = await DB.prepare(
+        `SELECT id FROM kpsc_finance_entries WHERE partner_payment_id=? AND COALESCE(deleted_at,'')=''`
+      ).bind(id).first();
+      if (existingFin) {
+        await DB.prepare(`
+          UPDATE kpsc_finance_entries SET amount=?,payment_method=?,narration=?,recorded_by=?,updated_at=datetime('now') WHERE id=?
+        `).bind(Number(data?.amount || 0), paymentMethod, narration, String(data?.recordedBy || '').trim(), existingFin.id).run();
+      } else {
+        const finId = newId('kfe');
+        const dateStr = paidAt ? paidAt.slice(0, 10) : new Date().toISOString().slice(0, 10);
+        await DB.prepare(`
+          INSERT INTO kpsc_finance_entries
+          (id,date,entry_type,category,sub_category,amount,payment_method,reference,narration,partner_id,recorded_by,approved_by,approval_status,attachment_name,partner_payment_id)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        `).bind(
+          finId, dateStr, 'income', 'partnership_pledge', paymentType === 'monthly_pledge' ? 'monthly_pledge' : paymentType,
+          Number(data?.amount || 0), paymentMethod, '', narration, partnerId,
+          String(data?.recordedBy || '').trim(), '', 'recorded', '', id
+        ).run();
+      }
+    } catch { /* finance sync failure must not break payment recording */ }
+  }
+
   const row = await DB.prepare(`SELECT * FROM kpsc_partner_payments WHERE id=?`).bind(id).first();
   return ok({
     id: row.id,
@@ -2691,6 +2725,10 @@ async function deleteKpscPartnerPayment(DB, id, auth) {
   const now = new Date().toISOString();
   await DB.prepare(
     `UPDATE kpsc_partner_payments SET deleted_at=?, deleted_by=? WHERE id=?`
+  ).bind(now, auth.name, id).run();
+  // Cascade soft-delete to the linked finance entry if present
+  await DB.prepare(
+    `UPDATE kpsc_finance_entries SET deleted_at=?, deleted_by=? WHERE partner_payment_id=? AND COALESCE(deleted_at,'')=''`
   ).bind(now, auth.name, id).run();
   return ok({ deleted: id });
 }
@@ -2783,8 +2821,8 @@ async function createKpscFinanceEntry(DB, data, auth) {
   const id = newId('kfe');
   await DB.prepare(`
     INSERT INTO kpsc_finance_entries
-    (id,date,entry_type,category,sub_category,amount,payment_method,reference,narration,partner_id,recorded_by,approved_by,approval_status,attachment_name)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    (id,date,entry_type,category,sub_category,amount,payment_method,reference,narration,partner_id,recorded_by,approved_by,approval_status,attachment_name,partner_payment_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     date,
@@ -2800,6 +2838,7 @@ async function createKpscFinanceEntry(DB, data, auth) {
     String(data?.approvedBy || '').trim(),
     String(data?.approvalStatus || 'recorded').trim() || 'recorded',
     String(data?.attachmentName || '').trim(),
+    String(data?.partnerPaymentId || '').trim(),
   ).run();
   return await getKpscFinanceEntryById(DB, id);
 }

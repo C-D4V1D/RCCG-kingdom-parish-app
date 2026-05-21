@@ -825,3 +825,47 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-remind-variant-card:hover{border-color:var(--navy);}
 .k-remind-variant-text{flex:1;font-size:13px;line-height:1.5;color:var(--text1);}
 .k-remind-variant-fallback{background:#f3f4f6;border-style:dashed;}
+
+/* ── SMS character/page counter ──────────────────────────────────── */
+.k-sms-counter{font-size:11px;color:var(--text3);text-align:right;margin-top:3px;min-height:16px;transition:color .2s;}
+.k-sms-counter.warn{color:#d97706;}
+.k-sms-counter.danger{color:#dc2626;font-weight:600;}
+.k-sms-counter.unicode{color:#7c3aed;}
+
+/* ── Payment month chips (Record Payment modal) ───────────────────── */
+.k-month-chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+.k-month-chip{padding:6px 10px;border-radius:8px;border:1.5px solid var(--border);font-size:12px;font-weight:600;
+  cursor:pointer;background:#f9fafb;color:var(--text2);transition:all .15s;user-select:none;}
+.k-month-chip:hover{border-color:var(--navy);color:var(--navy);}
+.k-month-chip.selected{background:var(--navy);color:#fff;border-color:var(--navy);}
+.k-month-chip.already-paid{background:#d1fae5;color:#065f46;border-color:#6ee7b7;cursor:default;opacity:.7;}
+.k-month-chip.already-paid::after{content:' ✓';}
+
+/* ── Partner page search input ───────────────────────────────────── */
+.k-partners-search{width:100%;margin-bottom:10px;}
+
+/* ── Payment amount inside calendar cell ────────────────────────── */
+.k-pgrid-amount{font-size:10px;font-weight:700;color:#065f46;line-height:1;margin-top:1px;}
+.k-pgrid-recorder{font-size:9px;color:#047857;opacity:.8;line-height:1;}
+
+/* ── Payment log table ───────────────────────────────────────────── */
+.k-payment-log{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;}
+.k-payment-log th{text-align:left;padding:6px 8px;border-bottom:2px solid var(--border);font-weight:700;color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:.5px;}
+.k-payment-log td{padding:8px 8px;border-bottom:1px solid var(--border);color:var(--text1);}
+.k-payment-log tr:last-child td{border-bottom:none;}
+.k-payment-log tr:hover td{background:#f9fafb;}
+.k-payment-log .pl-amount{font-weight:700;color:var(--navy);}
+.k-payment-log .pl-method{display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border-radius:999px;font-size:10px;font-weight:600;}
+.k-payment-log .pl-cash{background:#fef3c7;color:#92400e;}
+.k-payment-log .pl-transfer{background:#dbeafe;color:#1e40af;}
+
+/* ── PIN confirmation mini-modal ─────────────────────────────────── */
+.k-pin-confirm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:2000;display:flex;align-items:center;justify-content:center;padding:16px;}
+.k-pin-confirm-box{background:#fff;border-radius:16px;padding:24px 20px;width:100%;max-width:320px;box-shadow:0 20px 60px rgba(0,0,0,.25);}
+.k-pin-confirm-title{font-size:16px;font-weight:700;color:var(--navy);margin-bottom:6px;}
+.k-pin-confirm-sub{font-size:13px;color:var(--text2);margin-bottom:16px;line-height:1.5;}
+.k-pin-confirm-input{width:100%;text-align:center;font-size:24px;letter-spacing:6px;padding:10px;border-radius:10px;border:2px solid var(--border);outline:none;font-family:monospace;}
+.k-pin-confirm-input:focus{border-color:var(--navy);}
+.k-pin-confirm-err{font-size:12px;color:#dc2626;min-height:18px;margin:6px 0 10px;text-align:center;}
+.k-pin-confirm-btns{display:flex;gap:8px;margin-top:4px;}
+.k-pin-confirm-btns .kbtn{flex:1;}

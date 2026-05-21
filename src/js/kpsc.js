@@ -110,6 +110,7 @@ const S = {
   archiveQuickFilter: 'all',
   partnersYear: new Date().getUTCFullYear(),
   partnersFilter: 'active',
+  partnersSearch: '',
   financeYear: new Date().getUTCFullYear(),
   financeMonth: new Date().getUTCMonth() + 1,
   reportsYear: new Date().getUTCFullYear(),
@@ -5712,6 +5713,259 @@ function monthName(month) {
   return new Date(Date.UTC(currentYear(), Math.max(0, month - 1), 1)).toLocaleString('en-NG', { month: 'long', timeZone: 'UTC' });
 }
 
+// ── SMS character / page counter ─────────────────────────────────
+const GSM7_CHARS = new Set(
+  '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?' +
+  '¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà'
+);
+const GSM7_EXT = new Set('{}[]~^\\|€');
+
+function smsCharInfo(text) {
+  let charCount = 0;
+  let isGsm7 = true;
+  for (const ch of text) {
+    if (GSM7_CHARS.has(ch)) { charCount++; }
+    else if (GSM7_EXT.has(ch)) { charCount += 2; }
+    else { isGsm7 = false; break; }
+  }
+  if (!isGsm7) {
+    const len = [...text].length;
+    const pageSize = len <= 70 ? 70 : 67;
+    const pages = len === 0 ? 0 : Math.ceil(len / pageSize);
+    return { chars: len, pages, encoding: 'Unicode' };
+  }
+  const pageSize = charCount <= 160 ? 160 : 153;
+  const pages = charCount === 0 ? 0 : Math.ceil(charCount / pageSize);
+  return { chars: charCount, pages, encoding: 'GSM-7' };
+}
+
+function updateSmsCounter(textarea) {
+  const id = textarea?.id;
+  if (!id) return;
+  const counterId = 'sms-ctr-' + id;
+  const el = document.getElementById(counterId);
+  if (!el) return;
+  const info = smsCharInfo(textarea.value || '');
+  el.textContent = info.chars === 0
+    ? ''
+    : `${info.chars} char${info.chars !== 1 ? 's' : ''} · ${info.pages} SMS page${info.pages !== 1 ? 's' : ''} (${info.encoding})`;
+  el.className = 'k-sms-counter';
+  if (info.encoding === 'Unicode') el.classList.add('unicode');
+  else if (info.pages >= 3) el.classList.add('danger');
+  else if (info.pages === 2) el.classList.add('warn');
+}
+
+function initSmsCounters() {
+  ['ks-sms-welcome','ks-sms-payment','ks-sms-newmonth','ks-sms-anniversary',
+   'ks-sms-milestone6','ks-sms-milestone12','ks-sms-premeeting','ks-sms-deadline','ks-sms-reminder']
+    .forEach(id => { const el = document.getElementById(id); if (el) updateSmsCounter(el); });
+}
+
+// ── PIN confirmation gate ─────────────────────────────────────────
+function requirePin(title, subtitle, onConfirmed) {
+  document.getElementById('k-pin-confirm-modal')?.remove();
+  const overlay = document.createElement('div');
+  overlay.className = 'k-pin-confirm-overlay';
+  overlay.id = 'k-pin-confirm-modal';
+  overlay.innerHTML = `
+    <div class="k-pin-confirm-box">
+      <div class="k-pin-confirm-title">${esc(title)}</div>
+      <div class="k-pin-confirm-sub">${esc(subtitle)}</div>
+      <input id="k-pin-confirm-input" class="k-pin-confirm-input" type="password" inputmode="numeric" maxlength="6" placeholder="••••••" autofocus />
+      <div class="k-pin-confirm-err" id="k-pin-confirm-err"></div>
+      <div class="k-pin-confirm-btns">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-pin-confirm-modal')?.remove()">Cancel</button>
+        <button class="kbtn kbtn-primary" id="k-pin-confirm-btn" onclick="Kpsc._submitPinConfirm()">Confirm</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('keydown', e => { if (e.key === 'Enter') Kpsc._submitPinConfirm(); });
+  document.getElementById('k-pin-confirm-input')?.focus();
+  window._pinConfirmCallback = onConfirmed;
+}
+
+async function _submitPinConfirm() {
+  const pin = document.getElementById('k-pin-confirm-input')?.value.trim() || '';
+  const errEl = document.getElementById('k-pin-confirm-err');
+  const btn = document.getElementById('k-pin-confirm-btn');
+  if (!pin) { if (errEl) errEl.textContent = 'Please enter your PIN.'; return; }
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  const res = await apiPost('kpsc-login', { accountId: S.user?.id, pin, role: S.user?.role }).catch(() => ({ error: 'Network error' }));
+  if (btn) { btn.disabled = false; btn.textContent = orig; }
+  if (res?.error) {
+    if (errEl) errEl.textContent = 'Incorrect PIN. Please try again.';
+    const input = document.getElementById('k-pin-confirm-input');
+    if (input) { input.value = ''; input.focus(); }
+    return;
+  }
+  document.getElementById('k-pin-confirm-modal')?.remove();
+  if (typeof window._pinConfirmCallback === 'function') {
+    window._pinConfirmCallback();
+    window._pinConfirmCallback = null;
+  }
+}
+
+// ── Record Payment modal ──────────────────────────────────────────
+function openRecordPaymentModal(partnerId) {
+  const partner = S.partners.find(p => p.id === partnerId);
+  if (!partner) return;
+  const year = (S._partnerDetailId === partnerId && S._partnerDetailYear) ? S._partnerDetailYear : S.partnersYear;
+  const now = new Date();
+  const currentMo = now.getUTCMonth() + 1;
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const paidSet = new Set(
+    S.partnerPayments
+      .filter(p => p.partnerId === partnerId && p.year === year && p.paid && p.paymentType === 'monthly_pledge')
+      .map(p => p.month)
+  );
+  const chips = MONTHS.map((mn, i) => {
+    const mo = i + 1;
+    const isPaid = paidSet.has(mo);
+    return `<div class="k-month-chip${isPaid ? ' already-paid' : mo === currentMo ? ' selected' : ''}" data-month="${mo}" data-paid="${isPaid ? '1' : '0'}" onclick="Kpsc._togglePaymentChip(this);Kpsc._updatePaymentTotal()">${mn}</div>`;
+  }).join('');
+
+  document.getElementById('k-rec-payment-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.className = 'k-modal-overlay';
+  modal.id = 'k-rec-payment-modal';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:520px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">💳 Record Payment</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-rec-payment-modal')?.remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <div style="background:var(--bg);border-radius:10px;padding:10px 12px;margin-bottom:14px;">
+          <div style="font-weight:700;font-size:15px;color:var(--navy)">${esc(partner.fullName)}</div>
+          <div style="font-size:13px;color:var(--text2);margin-top:2px">
+            Monthly pledge: <strong>₦${Number(partner.monthlyPledge || 0).toLocaleString('en-NG')}</strong> &nbsp;·&nbsp; Year: ${year}
+          </div>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Select Month(s) to Record</label>
+          <p class="k-hint" style="margin-bottom:6px">Tap to select. Green months already have a payment. You can select multiple months for catch-up or upfront payment.</p>
+          <div class="k-month-chips" id="k-pay-month-chips">${chips}</div>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Amount per Month</label>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input id="k-pay-amount" class="k-input" type="number" min="0" step="100"
+              value="${Number(partner.monthlyPledge || 0)}" style="flex:1;min-width:140px" placeholder="Amount (₦)"
+              oninput="Kpsc._updatePaymentTotal()" />
+            <button class="kbtn kbtn-sm" onclick="document.getElementById('k-pay-amount').value='${Number(partner.monthlyPledge || 0)}';Kpsc._updatePaymentTotal()">Use pledge (₦${Number(partner.monthlyPledge || 0).toLocaleString('en-NG')})</button>
+          </div>
+          <div id="k-pay-total" style="margin-top:8px;padding:8px 12px;background:var(--bg);border-radius:8px;font-size:14px;font-weight:600;color:var(--navy);display:none"></div>
+          <p class="k-hint" style="margin-top:4px">Each selected month gets this amount recorded. Enter a higher amount if they paid more than the pledge.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Payment Method</label>
+          <div style="display:flex;gap:12px;margin-top:4px">
+            <label style="display:flex;align-items:center;gap:6px;font-size:14px;cursor:pointer">
+              <input type="radio" name="k-pay-method" value="cash" checked /> Cash
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:14px;cursor:pointer">
+              <input type="radio" name="k-pay-method" value="transfer" /> Transfer
+            </label>
+          </div>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Notes <span style="font-weight:400;color:var(--text3)">(optional)</span></label>
+          <textarea id="k-pay-notes" class="k-input k-textarea" rows="2" placeholder="e.g. Paid via bank app, reference 12345"></textarea>
+        </div>
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-rec-payment-modal')?.remove()">Cancel</button>
+        <button class="kbtn kbtn-primary" id="k-rec-payment-save-btn" onclick="Kpsc.saveRecordedPayments('${partnerId}', this)">Save Payment</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  // Show total immediately if current month is pre-selected
+  _updatePaymentTotal();
+}
+
+function _togglePaymentChip(chip) {
+  if (chip.dataset.paid === '1') return;
+  chip.classList.toggle('selected');
+}
+
+function _updatePaymentTotal() {
+  const chips = document.querySelectorAll('#k-pay-month-chips .k-month-chip.selected');
+  const count = chips.length;
+  const amount = Number(document.getElementById('k-pay-amount')?.value || 0);
+  const totalEl = document.getElementById('k-pay-total');
+  if (!totalEl) return;
+  if (count === 0 || amount <= 0) { totalEl.style.display = 'none'; return; }
+  const total = count * amount;
+  const monthNames = [...chips].map(c => {
+    const mn = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return mn[Number(c.dataset.month) - 1] || '';
+  }).join(', ');
+  totalEl.style.display = 'block';
+  totalEl.innerHTML = `${count} month${count > 1 ? 's' : ''} × ₦${amount.toLocaleString('en-NG')} = <span style="color:var(--green,#059669)">₦${total.toLocaleString('en-NG')} total</span><br><span style="font-size:11px;font-weight:400;color:var(--text2)">${monthNames}</span>`;
+}
+
+async function deletePartnerPayment(paymentId, partnerId) {
+  if (!confirm('Delete this payment record? This will also remove the linked finance entry.')) return;
+  const res = await apiDelete(`kpsc-partner-payments/${paymentId}`);
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  showToast('Payment record deleted.', 'success');
+  const year = S._partnerDetailYear || S.partnersYear;
+  await loadPartnerData(year);
+  const main = document.getElementById('kpsc-main');
+  if (S.page === 'partnerDetail') renderPartnerDetail(main);
+  else {
+    const list = document.getElementById('kpsc-partners-list');
+    if (list) list.innerHTML = renderPartnersList(canManagePartners());
+  }
+}
+
+async function saveRecordedPayments(partnerId, btn) {
+  const year = S._partnerDetailId === partnerId ? (S._partnerDetailYear || S.partnersYear) : S.partnersYear;
+  const chips = document.querySelectorAll('#k-pay-month-chips .k-month-chip.selected');
+  const selectedMonths = [...chips].map(c => Number(c.dataset.month)).filter(m => m > 0);
+  if (!selectedMonths.length) { showToast('Please select at least one month.', 'warn'); return; }
+  const amount = Number(document.getElementById('k-pay-amount')?.value || 0);
+  if (amount < 0) { showToast('Amount cannot be negative.', 'warn'); return; }
+  const method = document.querySelector('input[name="k-pay-method"]:checked')?.value || 'cash';
+  const notes = document.getElementById('k-pay-notes')?.value.trim() || '';
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = `Saving ${selectedMonths.length} payment${selectedMonths.length > 1 ? 's' : ''}…`;
+  const now = new Date().toISOString();
+  let errorCount = 0;
+  for (const month of selectedMonths) {
+    const res = await apiPost('kpsc-partner-payments', {
+      partnerId, year, month, amount,
+      paymentType: 'monthly_pledge',
+      source: 'partnership',
+      paid: true,
+      paidAt: now,
+      reference: method,
+      recordedBy: S.user?.name || '',
+      notes,
+    });
+    if (res?.error) errorCount++;
+  }
+  btn.disabled = false;
+  btn.textContent = orig;
+  document.getElementById('k-rec-payment-modal')?.remove();
+  if (errorCount) showToast(`${errorCount} payment(s) failed to save. Check and retry.`, 'error');
+  else showToast(`Payment recorded for ${selectedMonths.length} month${selectedMonths.length > 1 ? 's' : ''}.`, 'success');
+  await loadPartnerData(year);
+  const main = document.getElementById('kpsc-main');
+  if (S.page === 'partnerDetail' && S._partnerDetailId === partnerId) {
+    renderPartnerDetail(main);
+  } else {
+    const list = document.getElementById('kpsc-partners-list');
+    if (list) list.innerHTML = renderPartnersList(canManagePartners());
+  }
+}
+
 function catLabel(c) {
   return String(c || '').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
 }
@@ -5747,6 +6001,8 @@ async function renderPartners(main) {
         ${canManage ? `<button class="kbtn kbtn-primary" onclick="Kpsc.addPartner()">+ Add Partner</button>` : ''}
       </div>
       <p class="k-page-hint">Track God's Kingdom Partners and Covenant Partners, monthly pledges, and payment progress.</p>
+      <input class="k-input k-partners-search" type="search" placeholder="🔍 Search by name…"
+        value="${esc(S.partnersSearch)}" oninput="Kpsc.setPartnersSearch(this.value)" />
       <div class="k-partners-controls">
         <div class="k-tabs">
           <button class="k-tab ${S.partnersFilter === 'active' ? 'active' : ''}" onclick="Kpsc.setPartnersFilter('active')">Active</button>
@@ -5761,27 +6017,51 @@ async function renderPartners(main) {
     </div>`;
 }
 
+function setPartnersSearch(val) {
+  S.partnersSearch = String(val || '').trim();
+  const list = document.getElementById('kpsc-partners-list');
+  if (list) list.innerHTML = renderPartnersList(canManagePartners());
+}
+
 function renderPartnersList(canManage) {
   const year = S.partnersYear;
   let partners = S.partners;
   if (S.partnersFilter === 'active') partners = partners.filter(p => p.status === 'active');
   else if (S.partnersFilter === 'inactive') partners = partners.filter(p => p.status === 'inactive');
-  if (!partners.length) return `<div class="k-empty">No ${S.partnersFilter === 'all' ? '' : S.partnersFilter + ' '}partners found.</div>`;
+  const q = S.partnersSearch.toLowerCase();
+  if (q) partners = partners.filter(p => p.fullName.toLowerCase().includes(q));
+  if (!partners.length) {
+    return `<div class="k-empty">${q ? `No partners matching "${esc(S.partnersSearch)}".` : `No ${S.partnersFilter === 'all' ? '' : S.partnersFilter + ' '}partners found.`}</div>`;
+  }
+  const canFinance = canManageFinance();
   return `<div class="k-meeting-list">${partners.map(partner => {
     const paidMonths = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
     const currentPaid = partnerMonthlyPaid(partner.id, currentMonth(), year);
     const pct = Math.round((paidMonths / 12) * 100);
+    const nameHtml = q
+      ? esc(partner.fullName).replace(new RegExp(esc(S.partnersSearch).replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'gi'), m => `<mark>${m}</mark>`)
+      : esc(partner.fullName);
     return `
-      <div class="k-meeting-card">
+      <div class="k-meeting-card" style="position:relative">
+        ${canManage ? cardCtxMenu('partner-' + partner.id,
+          { label: '✏️ Edit', onclick: `Kpsc.editPartner('${partner.id}')` },
+          { label: '🗑 Delete', onclick: `Kpsc.deletePartner('${partner.id}')`, danger: true },
+        ) : ''}
         <div class="k-mc-top">
-          <div style="flex:1">
-            <div class="k-mc-title">${esc(partner.fullName)}</div>
-            <div class="k-mc-meta" style="margin-top:4px">
-              <span class="kbadge badge-type">${esc(partnerTypeLabel(partner.partnershipType))}</span>
-              <span class="kbadge ${partner.status === 'active' ? 'badge-green' : 'badge-gray'}">${partner.status === 'active' ? 'Active' : 'Inactive'}</span>
-              <span class="kbadge ${currentPaid ? 'badge-green' : 'badge-amber'}">${currentPaid ? '✓ Paid this month' : 'Unpaid this month'}</span>
-              ${partner.dndFlagged ? `<span class="kbadge badge-red" title="DND — SMS delivery failed for this partner">🚫 DND</span>` : ''}
-              ${partner.optedOut   ? `<span class="kbadge badge-gray" title="Partner has opted out of SMS">Opted-out</span>` : ''}
+          <div style="flex:1;padding-right:${canManage ? '32px' : '0'}">
+            <div class="k-mc-title">${nameHtml}</div>
+            <div style="font-size:12px;color:var(--text2);margin-top:3px;line-height:1.4">
+              ${esc(partnerTypeLabel(partner.partnershipType))}
+              &nbsp;·&nbsp;
+              <span style="color:${partner.status === 'active' ? '#065f46' : 'var(--text3)'}">
+                ${partner.status === 'active' ? 'Active' : 'Inactive'}
+              </span>
+              ${canManageFinance() ? `&nbsp;·&nbsp; ₦${Number(partner.monthlyPledge||0).toLocaleString('en-NG')}/mo` : ''}
+              ${partner.dndFlagged ? `&nbsp;·&nbsp; <span title="DND — SMS delivery failed">🚫 DND</span>` : ''}
+              ${partner.optedOut ? `&nbsp;·&nbsp; <span title="Opted out of SMS">📵 Opted-out</span>` : ''}
+            </div>
+            <div style="margin-top:5px">
+              <span class="kbadge ${currentPaid ? 'badge-green' : 'badge-amber'}" style="white-space:nowrap">${currentPaid ? '✓ Paid this month' : '✗ Unpaid this month'}</span>
             </div>
             <div class="k-progress-row">
               <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
@@ -5791,8 +6071,7 @@ function renderPartnersList(canManage) {
         </div>
         <div class="k-room-actions" style="flex-wrap:wrap">
           <button class="kbtn kbtn-sm" onclick="Kpsc.openPartnerDetail('${partner.id}')">📅 View History</button>
-          ${canManage ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.editPartner('${partner.id}')">Edit</button>` : ''}
-          ${canManage ? `<button class="kbtn kbtn-sm kbtn-danger" onclick="Kpsc.deletePartner('${partner.id}')">Delete</button>` : ''}
+          ${canFinance ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.openRecordPaymentModal('${partner.id}')">💳 Record Payment</button>` : ''}
         </div>
       </div>`;
   }).join('')}</div>`;
@@ -5882,7 +6161,17 @@ async function savePartner(id, btn) {
   showToast('Partner saved', 'success');
 }
 
-async function togglePartnerMonth(partnerId, month, year, paid) {
+function togglePartnerMonth(partnerId, month, year, paid) {
+  const action = paid ? 'mark as paid' : 'mark as unpaid';
+  const mName = monthName(month);
+  requirePin(
+    `Confirm: ${mName} ${year}`,
+    `Enter your PIN to ${action} for this partner. This helps prevent accidental changes.`,
+    () => _doTogglePartnerMonth(partnerId, month, year, paid)
+  );
+}
+
+async function _doTogglePartnerMonth(partnerId, month, year, paid) {
   if (!paid) {
     const payment = S.partnerPayments.find(p => p.partnerId === partnerId && p.month === month && p.year === year && p.paymentType === 'monthly_pledge');
     if (payment) {
@@ -5975,19 +6264,51 @@ function renderPartnerDetail(main) {
   const nowMonth = now.getUTCMonth() + 1;
 
   const gridCells = months.map(m => {
-    const isPaid = partnerMonthlyPaid(partner.id, m, year);
+    const payment = S.partnerPayments.find(p => p.partnerId === partner.id && Number(p.month) === m && Number(p.year) === year && p.paid && p.paymentType === 'monthly_pledge');
+    const isPaid = !!payment;
     const isFuture = year > nowYear || (year === nowYear && m > nowMonth);
     const cls = isFuture ? 'k-pgrid-cell k-pgrid-future' : isPaid ? 'k-pgrid-cell k-pgrid-paid' : 'k-pgrid-cell k-pgrid-unpaid';
     const icon = isFuture ? '·' : isPaid ? '✓' : '✗';
     const clickable = canManage && !isFuture;
-    return `<div class="${cls}${clickable ? ' k-pgrid-clickable' : ''}" title="${monthName(m)}" ${clickable ? `onclick="Kpsc.togglePartnerMonth('${partner.id}', ${m}, ${year}, ${!isPaid})"` : ''}>
+    const amtHtml = isPaid && payment.amount > 0 ? `<span class="k-pgrid-amount">₦${Number(payment.amount).toLocaleString('en-NG')}</span>` : '';
+    const recHtml = isPaid && payment.recordedBy ? `<span class="k-pgrid-recorder">${esc(payment.recordedBy.split(' ')[0])}</span>` : '';
+    const titleTip = isPaid
+      ? `${monthName(m)} · ₦${Number(payment.amount||0).toLocaleString('en-NG')}${payment.recordedBy ? ' · by ' + payment.recordedBy : ''}${payment.reference ? ' · ' + payment.reference : ''}`
+      : monthName(m);
+    return `<div class="${cls}${clickable ? ' k-pgrid-clickable' : ''}" title="${esc(titleTip)}" ${clickable ? `onclick="Kpsc.togglePartnerMonth('${partner.id}', ${m}, ${year}, ${!isPaid})"` : ''}>
       <span class="k-pgrid-month">${monthName(m).slice(0,3)}</span>
       <span class="k-pgrid-icon">${icon}</span>
+      ${amtHtml}${recHtml}
     </div>`;
   }).join('');
 
   const paidCount = months.filter(m => partnerMonthlyPaid(partner.id, m, year)).length;
   const yearOptions = [nowYear, nowYear-1, nowYear-2].map(y => `<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
+
+  const yearPayments = S.partnerPayments
+    .filter(p => p.partnerId === partner.id && Number(p.year) === year && p.paid && p.paymentType === 'monthly_pledge')
+    .sort((a, b) => Number(a.month) - Number(b.month));
+
+  const totalPaid = yearPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+
+  const paymentLogRows = yearPayments.length ? yearPayments.map(p => {
+    const method = String(p.reference || '').toLowerCase();
+    const methodBadge = method === 'transfer'
+      ? `<span class="pl-method pl-transfer">🏦 Transfer</span>`
+      : method === 'cash'
+      ? `<span class="pl-method pl-cash">💵 Cash</span>`
+      : method ? `<span class="pl-method pl-cash">${esc(method)}</span>` : '—';
+    const dateStr = p.paidAt ? new Date(p.paidAt).toLocaleDateString('en-NG', { day:'numeric', month:'short' }) : '—';
+    const canDel = canManageFinance();
+    return `<tr>
+      <td><strong>${monthName(Number(p.month))}</strong></td>
+      <td class="pl-amount">₦${Number(p.amount||0).toLocaleString('en-NG')}</td>
+      <td>${methodBadge}</td>
+      <td style="color:var(--text2)">${esc(p.recordedBy || '—')}</td>
+      <td style="color:var(--text3)">${dateStr}</td>
+      <td>${canDel ? `<button class="kbtn kbtn-sm kbtn-danger" style="padding:3px 8px;font-size:11px" onclick="Kpsc.deletePartnerPayment('${p.id}','${partner.id}')">🗑</button>` : ''}</td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:16px">No payments recorded for ${year}.</td></tr>`;
 
   main.innerHTML = `
     <div class="k-page">
@@ -6005,12 +6326,25 @@ function renderPartnerDetail(main) {
         <div class="k-about-row"><span class="k-about-label">Year</span><span>${year}</span></div>
         <div class="k-about-row"><span class="k-about-label">Months Paid</span><span>${paidCount} / 12</span></div>
         <div class="k-about-row"><span class="k-about-label">Progress</span><span>${Math.round((paidCount/12)*100)}%</span></div>
-        ${canManageFinance() ? `<div class="k-about-row"><span class="k-about-label">Monthly Pledge</span><span>₦${Number(partner.monthlyPledge||0).toLocaleString('en-NG')}</span></div>` : ''}
+        ${canManageFinance() ? `<div class="k-about-row"><span class="k-about-label">Monthly Pledge</span><span>₦${Number(partner.monthlyPledge||0).toLocaleString('en-NG')}/mo</span></div>` : ''}
+        ${canManageFinance() && totalPaid > 0 ? `<div class="k-about-row"><span class="k-about-label">Total Paid (${year})</span><span style="font-weight:700;color:var(--navy)">₦${totalPaid.toLocaleString('en-NG')}</span></div>` : ''}
       </div>
       <div class="k-section">
-        <h3 class="k-sec-title">${year} Payment Calendar</h3>
-        ${canManage ? `<p class="k-hint" style="margin-bottom:12px">Tap a month to toggle paid/unpaid. Future months are read-only.</p>` : ''}
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px">
+          <h3 class="k-sec-title" style="margin:0">${year} Payment Calendar</h3>
+          ${canManageFinance() ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.openRecordPaymentModal('${partner.id}')">💳 Record Payment</button>` : ''}
+        </div>
+        ${canManage ? `<p class="k-hint" style="margin-bottom:12px">Tap a month to toggle paid/unpaid (PIN required). Green cells show the amount paid. Hover for details.</p>` : ''}
         <div class="k-payment-grid">${gridCells}</div>
+      </div>
+      <div class="k-section">
+        <h3 class="k-sec-title">${year} Payment Log</h3>
+        <div style="overflow-x:auto">
+          <table class="k-payment-log">
+            <thead><tr><th>Month</th><th>Amount</th><th>Method</th><th>Recorded by</th><th>Date</th><th></th></tr></thead>
+            <tbody>${paymentLogRows}</tbody>
+          </table>
+        </div>
       </div>
       ${partner.notes ? `<div class="k-section"><h3 class="k-sec-title">Notes (private)</h3><p style="font-size:14px;color:var(--text2);line-height:1.65">${esc(partner.notes)}</p></div>` : ''}
       <div style="margin-top:12px">
@@ -9060,43 +9394,52 @@ async function renderSettings(main) {
           <strong>Payment Reminder:</strong> <code>{{name}}</code>, <code>{{month}}</code>, <code>{{unpaidMonths}}</code> <em>(comma-separated list of outstanding months)</em></p>
         <div class="k-form-group">
           <label class="k-label">👋 Welcome SMS (new partner)</label>
-          <textarea id="ks-sms-welcome" class="k-input k-textarea" rows="4" placeholder="Dear {{name}}, welcome to the RCCG Kingdom Parish family! 🎉 We are so glad to have you as a partner in this beautiful journey of faith. Your support means the world to us, and we pray that God will bless you richly — spiritually and in all your endeavours. You are loved! — RCCG Kingdom Parish">${esc(smsWelcomeText)}</textarea>
+          <textarea id="ks-sms-welcome" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="Dear {{name}}, welcome to the RCCG Kingdom Parish family! 🎉 We are so glad to have you as a partner in this beautiful journey of faith. Your support means the world to us, and we pray that God will bless you richly — spiritually and in all your endeavours. You are loved! — RCCG Kingdom Parish">${esc(smsWelcomeText)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-welcome"></div>
         </div>
         <div class="k-form-group">
           <label class="k-label">🙏 Thank-you SMS (partner payment)</label>
-          <textarea id="ks-sms-payment" class="k-input k-textarea" rows="4" placeholder="Dear {{name}}, we have received your {{month}} partnership pledge{{amtText}} and we are so grateful! 🙏 Your faithfulness to God's work here at RCCG Kingdom Parish is a blessing to us all. May the Lord be your reward — pressed down, shaken together, and running over. Your seed is sown in good ground. God bless you! — RCCG Kingdom Parish">${esc(smsPaymentText)}</textarea>
+          <textarea id="ks-sms-payment" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="Dear {{name}}, we have received your {{month}} partnership pledge{{amtText}} and we are so grateful! 🙏 Your faithfulness to God's work here at RCCG Kingdom Parish is a blessing to us all. May the Lord be your reward — pressed down, shaken together, and running over. Your seed is sown in good ground. God bless you! — RCCG Kingdom Parish">${esc(smsPaymentText)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-payment"></div>
         </div>
         <div class="k-form-group">
           <label class="k-label">🎉 Happy New Month SMS (1st of month)</label>
           <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;margin-bottom:6px">
-            <textarea id="ks-sms-newmonth" class="k-input k-textarea" rows="4" style="flex:1;min-width:200px" placeholder="Happy New Month! 🎊 Dear {{name}}, as we step into this brand new month, we lift our hearts in prayer for you: May the Lord open new doors of opportunity before you. May His favour surround you like a shield. May your home be filled with peace and your hands be blessed in all you do. We are grateful for your partnership! — RCCG Kingdom Parish 💙🙏">${esc(smsNewmonthText)}</textarea>
+            <textarea id="ks-sms-newmonth" class="k-input k-textarea" rows="4" style="flex:1;min-width:200px" oninput="Kpsc.updateSmsCounter(this)" placeholder="Happy New Month! 🎊 Dear {{name}}, as we step into this brand new month, we lift our hearts in prayer for you: May the Lord open new doors of opportunity before you. May His favour surround you like a shield. May your home be filled with peace and your hands be blessed in all you do. We are grateful for your partnership! — RCCG Kingdom Parish 💙🙏">${esc(smsNewmonthText)}</textarea>
             <button class="kbtn kbtn-sm kbtn-ai" style="white-space:nowrap;margin-top:2px" onclick="Kpsc.aiGenerateNewMonthSms(this)" title="Use AI to draft a fresh blessing SMS for this month with a Bible verse">🤖 AI Draft</button>
           </div>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-newmonth"></div>
           <p class="k-hint">Sent automatically on the 1st of each month. Click <strong>AI Draft</strong> to let AI write a unique blessing message with a Bible verse for this month.</p>
         </div>
         <div class="k-form-group">
           <label class="k-label">🎂 Anniversary SMS (yearly on start date)</label>
-          <textarea id="ks-sms-anniversary" class="k-input k-textarea" rows="4" placeholder="🎂 Celebrating You Today, {{name}}! It is a joyful day as we mark your {{ordinal}} partnership anniversary with RCCG Kingdom Parish. Your faithfulness speaks volumes. May this anniversary mark the beginning of an even greater season of blessing and breakthrough in your life. You are deeply appreciated! God bless you! 🎉 — RCCG Kingdom Parish">${esc(smsAnnivText)}</textarea>
+          <textarea id="ks-sms-anniversary" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="🎂 Celebrating You Today, {{name}}! It is a joyful day as we mark your {{ordinal}} partnership anniversary with RCCG Kingdom Parish. Your faithfulness speaks volumes. May this anniversary mark the beginning of an even greater season of blessing and breakthrough in your life. You are deeply appreciated! God bless you! 🎉 — RCCG Kingdom Parish">${esc(smsAnnivText)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-anniversary"></div>
         </div>
         <div class="k-form-group">
           <label class="k-label">🏅 6-Month Milestone SMS</label>
-          <textarea id="ks-sms-milestone6" class="k-input k-textarea" rows="4" placeholder="🏅 Six months of faithful partnership — praise the Lord! 🙌 Dear {{name}}, you have been such a blessing to our community! Galatians 6:9 says: 'Let us not become weary in doing good, for at the proper time we will reap a harvest if we do not give up.' Your harvest season is drawing near! We celebrate you and pray God's special blessing upon you. — RCCG Kingdom Parish">${esc(smsMilestone6Text)}</textarea>
+          <textarea id="ks-sms-milestone6" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="🏅 Six months of faithful partnership — praise the Lord! 🙌 Dear {{name}}, you have been such a blessing to our community! Galatians 6:9 says: 'Let us not become weary in doing good, for at the proper time we will reap a harvest if we do not give up.' Your harvest season is drawing near! We celebrate you and pray God's special blessing upon you. — RCCG Kingdom Parish">${esc(smsMilestone6Text)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-milestone6"></div>
         </div>
         <div class="k-form-group">
           <label class="k-label">🏆 12-Month Milestone SMS (1 year)</label>
-          <textarea id="ks-sms-milestone12" class="k-input k-textarea" rows="4" placeholder="🏆 A FULL YEAR of faithful partnership — Glory to God! 🎉 Dear {{name}}, what an incredible milestone! Psalm 1:3 declares you shall be like a tree planted by rivers of water, bringing forth fruit in season. We declare over you a harvest of extraordinary blessings, divine health, and open heavens this year and beyond. You are a champion! — RCCG Kingdom Parish 💙">${esc(smsMilestone12Text)}</textarea>
+          <textarea id="ks-sms-milestone12" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="🏆 A FULL YEAR of faithful partnership — Glory to God! 🎉 Dear {{name}}, what an incredible milestone! Psalm 1:3 declares you shall be like a tree planted by rivers of water, bringing forth fruit in season. We declare over you a harvest of extraordinary blessings, divine health, and open heavens this year and beyond. You are a champion! — RCCG Kingdom Parish 💙">${esc(smsMilestone12Text)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-milestone12"></div>
         </div>
         <div class="k-form-group">
           <label class="k-label">📅 Pre-Meeting Reminder SMS (to members, 24h before)</label>
-          <textarea id="ks-sms-premeeting" class="k-input k-textarea" rows="4" placeholder="Hello {{name}} 👋 This is a warm reminder that our KPSC meeting, '{{meetingTitle}}', is coming up tomorrow, {{meetingDate}}{{meetingTime}}{{venue}}. Your presence is very important to us — your voice and wisdom help shape our church family. Please come prepared and prayed up! God bless you. — RCCG Kingdom Parish Stewardship Committee">${esc(smsPremeetingText)}</textarea>
+          <textarea id="ks-sms-premeeting" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="Hello {{name}} 👋 This is a warm reminder that our KPSC meeting, '{{meetingTitle}}', is coming up tomorrow, {{meetingDate}}{{meetingTime}}{{venue}}. Your presence is very important to us — your voice and wisdom help shape our church family. Please come prepared and prayed up! God bless you. — RCCG Kingdom Parish Stewardship Committee">${esc(smsPremeetingText)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-premeeting"></div>
         </div>
         <div class="k-form-group">
           <label class="k-label">⏰ Action Item Deadline Reminder (3 days before)</label>
-          <textarea id="ks-sms-deadline" class="k-input k-textarea" rows="4" placeholder="Hello {{name}} 🔔 A quick and loving reminder: your action item '{{task}}' is due in 3 days ({{dueDate}}). We trust you are making great progress! If you need any support, please let us know. Together we are building something wonderful for God. Thank you for your dedication! — RCCG Kingdom Parish Stewardship Committee">${esc(smsDeadlineText)}</textarea>
+          <textarea id="ks-sms-deadline" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="Hello {{name}} 🔔 A quick and loving reminder: your action item '{{task}}' is due in 3 days ({{dueDate}}). We trust you are making great progress! If you need any support, please let us know. Together we are building something wonderful for God. Thank you for your dedication! — RCCG Kingdom Parish Stewardship Committee">${esc(smsDeadlineText)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-deadline"></div>
         </div>
         <div class="k-form-group">
           <label class="k-label">💰 Payment Reminder SMS</label>
-          <textarea id="ks-sms-reminder" class="k-input k-textarea" rows="5" placeholder="Dear {{name}} 🙏 We hope this message finds you well and in God's peace. This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God's work and your own blessing. '...he who sows generously will also reap generously.' (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family">${esc(smsReminderText)}</textarea>
+          <textarea id="ks-sms-reminder" class="k-input k-textarea" rows="5" oninput="Kpsc.updateSmsCounter(this)" placeholder="Dear {{name}} 🙏 We hope this message finds you well and in God's peace. This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God's work and your own blessing. '...he who sows generously will also reap generously.' (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family">${esc(smsReminderText)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-reminder"></div>
           <p class="k-hint">Use <code>{{unpaidMonths}}</code> to list which specific months are outstanding (e.g. "January, February"). Leave it out for a simpler message.</p>
         </div>
         <div id="ks-sms-texts-save-msg" class="k-settings-msg" style="display:none"></div>
@@ -9190,6 +9533,8 @@ async function renderSettings(main) {
   // Async-load SMS templates and scheduled blasts after innerHTML is set
   renderSmsTemplatesList().catch(() => {});
   renderScheduledSmsList().catch(() => {});
+  // Initialize SMS character counters for all template textareas
+  initSmsCounters();
 }
 
 async function saveAiModels() {
@@ -9439,6 +9784,7 @@ async function aiGenerateNewMonthSms(btn) {
     if (res?.error) { showToast(res.error, 'error'); return; }
     if (res?.message) {
       textarea.value = res.message;
+      updateSmsCounter(textarea);
       showToast('New month SMS drafted by AI! Review and save when ready.', 'success');
     }
   } catch {
@@ -13001,9 +13347,18 @@ window.Kpsc = {
   togglePartnerMonth,
   setPartnersFilter,
   setPartnersYear,
+  setPartnersSearch,
   deletePartner,
   openPartnerDetail,
   setPartnerDetailYear,
+  openRecordPaymentModal,
+  _togglePaymentChip,
+  _updatePaymentTotal,
+  saveRecordedPayments,
+  deletePartnerPayment,
+  requirePin,
+  _submitPinConfirm,
+  updateSmsCounter,
   openFinanceModal,
   closeFinanceModal,
   saveFinanceEntry,
