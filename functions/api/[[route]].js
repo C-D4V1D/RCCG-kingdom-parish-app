@@ -117,6 +117,7 @@ async function getTermiiSettings(DB) {
     'kpsc_sms_text_newmonth', 'kpsc_sms_text_anniversary',
     'kpsc_sms_text_milestone6', 'kpsc_sms_text_milestone12',
     'kpsc_sms_text_premeeting', 'kpsc_sms_text_deadline',
+    'kpsc_sms_text_reminder',
   ];
   const placeholders = keys.map(() => '?').join(',');
   const { results } = await DB.prepare(
@@ -151,6 +152,7 @@ async function getTermiiSettings(DB) {
     milestone12Text: String(map.kpsc_sms_text_milestone12 || '').trim() || '🏆 Praise God! Dear {{name}}, you have completed a FULL YEAR of faithful partnership with RCCG Kingdom Parish! Your commitment has been a tremendous blessing. May God reward you a hundredfold! 🙏 — RCCG Kingdom Parish',
     premeetingText:  String(map.kpsc_sms_text_premeeting  || '').trim() || '📅 Reminder: KPSC Committee Meeting "{{meetingTitle}}" is scheduled for tomorrow ({{meetingDate}}{{meetingTime}}). {{venue}}Please come prepared. — RCCG Kingdom Parish Secretary',
     deadlineText:    String(map.kpsc_sms_text_deadline     || '').trim() || '⏰ Reminder: Your action item "{{task}}" is due in 3 days ({{dueDate}}). Please ensure timely completion. — RCCG Kingdom Parish KPSC',
+    reminderText:    String(map.kpsc_sms_text_reminder    || '').trim() || 'Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God\'s work and your own blessing. "...he who sows generously will also reap generously." (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family',
   };
 }
 
@@ -752,6 +754,13 @@ export async function onRequest(context) {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
       return await suggestAgendaItems(DB, env, body);
+    }
+
+    // ── AI: Generate new-month blessing SMS ────────────────────
+    if (route === 'kpsc-ai-newmonth-sms' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await aiGenerateNewMonthSms(DB, env);
     }
 
     // ── Agenda Builder: /api/kpsc-whatsapp-draft ───────────────
@@ -1447,6 +1456,7 @@ async function handleInit(DB) {
     kpsc_sms_text_milestone12:'',
     kpsc_sms_text_premeeting: '',
     kpsc_sms_text_deadline:   '',
+    kpsc_sms_text_reminder:   '',
   };
   for (const [key, value] of Object.entries(defaultSettings)) {
     await DB.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).bind(key, value).run();
@@ -5920,7 +5930,9 @@ async function runMonthlySms(DB, env, request) {
   let sent = 0;
   let failed = 0;
   for (const p of (partners || [])) {
-    const msg = `Happy New Month! 🎉 Dear ${p.full_name}, we celebrate with you as we step into ${monthName} ${year}. May this month bring you joy, peace, and abundant blessings. Thank you for your faithful partnership! — RCCG Kingdom Parish`;
+    const msg = t.newmonthText
+      .replace(/\{\{name\}\}/g, p.full_name)
+      .replace(/\{\{month\}\}/g, `${monthName} ${year}`);
     const result = await sendTermiiSms(t.apiKey, t.senderId, p.phone, msg);
     if (result.ok) sent++; else failed++;
   }
@@ -5978,12 +5990,14 @@ async function runReminderSms(DB, env, request) {
 
   if (!isSendDay) return ok({ ok: true, skipped: true, reason: `Not a reminder send day (day=${dayOfMonth}, freq=${freq}, reminderDay=${reminderDay})` });
 
-  // Get template
-  const templateRow = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_reminder_template'`).first();
-  const template = String(templateRow?.value || 'Dear {{name}}, this is a reminder to pay your {{month}} partnership pledge. God bless you.').trim();
+  const template = t.reminderText;
 
   const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   const monthName = MONTH_NAMES[month - 1];
+
+  // Look back up to 12 months to find all unpaid months per partner
+  let lookbackYear = year; let lookbackMonth = month - 11;
+  if (lookbackMonth < 1) { lookbackMonth += 12; lookbackYear--; }
 
   // Find active partners who haven't paid this month, not opted-out or DND
   const { results: unpaid } = await DB.prepare(`
@@ -6007,9 +6021,37 @@ async function runReminderSms(DB, env, request) {
     const eligible = await isWithinFreqCap(DB, p.id, t.freqCap, t.cooloffDays);
     if (!eligible) { failed++; continue; }
 
+    // Build list of all unpaid months (last 12) for this partner
+    const { results: paidRows } = await DB.prepare(`
+      SELECT year, month FROM kpsc_partner_payments
+      WHERE partner_id=? AND paid=1 AND payment_type='monthly_pledge'
+        AND ((year > ?) OR (year = ? AND month >= ?))
+        AND COALESCE(deleted_at,'')=''
+    `).bind(p.id, lookbackYear, lookbackYear, lookbackMonth).all();
+    const paidSet = new Set((paidRows || []).map(r => `${r.year}-${r.month}`));
+    const partnerStart = p.start_date ? new Date(p.start_date + 'T00:00:00Z') : null;
+    const unpaidMonthsList = [];
+    for (let y = lookbackYear, m2 = lookbackMonth; (y < year) || (y === year && m2 <= month); ) {
+      const key = `${y}-${m2}`;
+      if (!paidSet.has(key)) {
+        // Only include months since the partner joined
+        const periodDate = new Date(Date.UTC(y, m2 - 1, 1));
+        if (!partnerStart || periodDate >= partnerStart) {
+          unpaidMonthsList.push(MONTH_NAMES[m2 - 1]);
+        }
+      }
+      m2++;
+      if (m2 > 12) { m2 = 1; y++; }
+    }
+
+    const unpaidMonthsStr = unpaidMonthsList.length > 1
+      ? ` (outstanding months: ${unpaidMonthsList.join(', ')})`
+      : '';
+
     let msg = template
       .replace(/\{\{name\}\}/g, p.full_name)
-      .replace(/\{\{month\}\}/g, monthName);
+      .replace(/\{\{month\}\}/g, monthName)
+      .replace(/\{\{unpaidMonths\}\}/g, unpaidMonthsStr);
 
     // Feature 6: tone-based lapsed re-engagement messaging
     if (t.lapsedSms) {
@@ -6143,14 +6185,70 @@ async function deleteAgendaNote(DB, id) {
   return ok({ id, deleted: true });
 }
 
+async function aiGenerateNewMonthSms(DB, env) {
+  const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
+  const now = new Date();
+  const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const monthName = MONTH_NAMES[now.getUTCMonth()];
+  const year = now.getUTCFullYear();
+
+  if (!deepseekKey) {
+    return ok({
+      message: `Happy New Month! 🎉 Dear {{name}}, as we step into ${monthName} ${year}, we pray that God opens doors of blessing and favour for you this month. May His grace surround you and your household. Thank you for your faithful partnership with RCCG Kingdom Parish. We love and appreciate you! — RCCG Kingdom Parish Family 💙`,
+      source: 'default',
+    });
+  }
+
+  const prompt = `You are a warm, loving communications writer for RCCG Kingdom Parish — a vibrant Nigerian church family. Write a Happy New Month SMS message to be sent to church partners on the 1st of ${monthName} ${year}.
+
+Requirements:
+- Begin with a warm greeting acknowledging the new month
+- Include an encouraging Bible verse relevant to the season (quote it fully)
+- Add a short, heartfelt prayer or blessing for the month
+- Express gratitude for the partner's faithful giving/partnership
+- Close warmly in the name of RCCG Kingdom Parish
+- Tone: warm, loving, family-like — like a message from a caring church family
+- Length: no more than 2 SMS pages (max ~320 characters per page, so aim for 500–600 characters total)
+- Use simple, clear English that is easy to read and engaging
+- The message should use {{name}} as a placeholder for the partner's first name
+- Do NOT include any markdown, asterisks, or formatting symbols
+- Return only the plain SMS text, nothing else`;
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 400, temperature: 0.7 }),
+    });
+    if (!resp.ok) throw new Error(`DeepSeek ${resp.status}`);
+    const data = await resp.json();
+    const message = (data.choices?.[0]?.message?.content || '').trim();
+    if (!message) throw new Error('Empty response');
+    return ok({ message, source: 'ai' });
+  } catch (e) {
+    return err(`AI generation failed: ${e.message}`, 500);
+  }
+}
+
 async function suggestAgendaItems(DB, env, body) {
-  // Load recent processed meetings (last 5)
-  const { results: recentMeetings } = await DB.prepare(
-    `SELECT id,title,meeting_date,summary_short,action_items_json,resolutions_json,minutes_markdown
+  // Load last 3 processed meetings with full minutes for deep analysis
+  const { results: recentMeetings3 } = await DB.prepare(
+    `SELECT id,title,meeting_date,summary_short,action_items_json,resolutions_json,minutes_markdown,agenda_text
      FROM ai_secretary_meetings
      WHERE status='processed' AND COALESCE(deleted_at,'')=''
-     ORDER BY meeting_date DESC, processed_at DESC LIMIT 5`
+     ORDER BY meeting_date DESC, processed_at DESC LIMIT 3`
   ).all();
+
+  // Load up to 12 recent meetings for broader insights context
+  const { results: recentMeetings12 } = await DB.prepare(
+    `SELECT id,title,meeting_date,summary_short,action_items_json,resolutions_json,agenda_text
+     FROM ai_secretary_meetings
+     WHERE status='processed' AND COALESCE(deleted_at,'')=''
+     ORDER BY meeting_date DESC, processed_at DESC LIMIT 12`
+  ).all();
+
+  // Use 3-meeting list as the primary for fallback; 12-meeting list for AI context
+  const recentMeetings = recentMeetings3 || [];
 
   // Load personal agenda notes not yet used
   const { results: agendaNotes } = await DB.prepare(
@@ -6167,15 +6265,30 @@ async function suggestAgendaItems(DB, env, body) {
     return ok({ suggestions: fallbackSuggestions, source: 'deterministic' });
   }
 
-  // Build AI context
-  const meetingContext = (recentMeetings || []).map(m => {
+  // Build rich AI context — last 3 meetings with full minutes
+  const deepMeetingContext = (recentMeetings3 || []).map((m, idx) => {
     const openItems = safeJsonParse(m.action_items_json, [])
       .filter(a => a.status !== 'done' && a.status !== 'cancelled')
       .map(a => `  - ${a.task} (${a.assignee || 'Unassigned'}, due: ${a.dueDate || 'unset'})`).join('\n');
     const resolutions = safeJsonParse(m.resolutions_json, [])
-      .slice(0, 5).map(r => `  - ${r.text}`).join('\n');
-    return `Meeting: ${m.title} (${m.meeting_date})\nSummary: ${m.summary_short || ''}\nOpen actions:\n${openItems || '  (none)'}\nKey decisions:\n${resolutions || '  (none)'}`;
-  }).join('\n\n---\n\n');
+      .slice(0, 8).map(r => `  - ${r.text}`).join('\n');
+    // Parse agenda items from agenda_text (raw text field on ai_secretary_meetings)
+    const agendaLines = (m.agenda_text || '').split('\n').map(l => l.trim()).filter(Boolean)
+      .map(l => `  - ${l.replace(/^[\d]+[.)]\s*/, '').replace(/^[-•*]\s*/, '').trim()}`).join('\n');
+    const minutesSnippet = (m.minutes_markdown || '').slice(0, 800);
+    return `--- Meeting ${idx + 1}: ${m.title} (${m.meeting_date}) ---\nSummary: ${m.summary_short || '(none)'}\nAgenda covered:\n${agendaLines || '  (none)'}\nOpen action items:\n${openItems || '  (none)'}\nKey decisions/resolutions:\n${resolutions || '  (none)'}\nMinutes excerpt:\n${minutesSnippet || '  (none)'}`;
+  }).join('\n\n');
+
+  // Build historical insights context — last 12 meetings (summary only)
+  const historicalContext = (recentMeetings12 || []).slice(3).map(m => {
+    const openItems = safeJsonParse(m.action_items_json, [])
+      .filter(a => a.status !== 'done' && a.status !== 'cancelled')
+      .map(a => `  - ${a.task}`).join('\n');
+    const resolutions = safeJsonParse(m.resolutions_json, [])
+      .slice(0, 3).map(r => `  - ${r.text}`).join('\n');
+    const agendaSnippet = (m.agenda_text || '').split('\n').filter(Boolean).slice(0, 5).join('; ');
+    return `${m.title} (${m.meeting_date}): ${m.summary_short || '(none)'}${agendaSnippet ? `\n  Agenda: ${agendaSnippet}` : ''}${openItems ? `\n  Open items:\n${openItems}` : ''}${resolutions ? `\n  Decisions:\n${resolutions}` : ''}`;
+  }).join('\n');
 
   const notesContext = (agendaNotes || []).map(n =>
     `[${(n.tag || 'general').toUpperCase()}] ${n.text}`
@@ -6183,26 +6296,30 @@ async function suggestAgendaItems(DB, env, body) {
 
   const prompt = `You are an intelligent meeting agenda planner for the KPSC (Kingdom Parish Stewardship Committee), a Nigerian church leadership committee.
 
-Analyse the context below from past meetings and personal notes, then suggest a prioritised list of agenda items for the next committee meeting.
+Analyse the context below from past meetings and personal notes, then suggest a prioritised list of agenda items for the NEXT committee meeting. Your suggestions should be intelligent, specific, and directly informed by patterns, unresolved matters, and action item statuses from the meeting history.
 
 For each suggestion, provide:
 - topic: concise agenda item title (max 8 words)
-- reason: one sentence explaining why this should be on the agenda
+- reason: one sentence explaining exactly why this should be on the agenda, citing specifics from the history
 - priority: "high" | "medium" | "low"
 - source: "action_item" | "past_discussion" | "personal_note" | "recurring"
 - carryForward: true if this was deferred or unresolved from a previous meeting
+- isPreTicked: true if this is a recurring standard item (Matters Arising, Action Item Updates, AOB)
 
 Rules:
-- Always include "Matters Arising from Previous Minutes" as the first item
+- Always include "Matters Arising from Previous Minutes" as the first item (isPreTicked: true)
+- Always include "Action Items Progress Update" if any action items are open (isPreTicked: true)
 - Always include "Any Other Business / Open Floor" as the last item
-- Identify unresolved or deferred matters and flag them as carry_forward
-- Identify action items that need a progress update
-- Suggest relevant new topics based on patterns (finance, welfare, projects, partnerships)
-- Return 8–15 items maximum
+- Identify unresolved or deferred matters and flag them as carryForward: true
+- Look for patterns: topics discussed multiple times, recurring financial reviews, welfare updates, project updates
+- Suggest 8–15 items maximum
 - Return only valid JSON: { "suggestions": [ {...}, ... ] }
 
-## Past Meeting Context
-${meetingContext || '(no past meetings found)'}
+## Last 3 Meetings — Full Context
+${deepMeetingContext || '(no recent meetings found)'}
+
+## Historical Insights — Last 12 Meetings (older)
+${historicalContext || '(no older meetings)'}
 
 ## Chairman/Secretary Personal Notes
 ${notesContext}

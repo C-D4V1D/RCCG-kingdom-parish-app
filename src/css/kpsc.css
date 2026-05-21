@@ -353,8 +353,9 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
   .k-stepper{padding:12px 10px;}
   .k-step-label{font-size:9px;}
   .k-step-dot{width:24px;height:24px;font-size:11px;}
-  .k-room-actions{flex-direction:column;align-items:stretch;}
-  .k-room-actions .kbtn{justify-content:center;}
+  .k-room-actions{flex-direction:row;flex-wrap:wrap;gap:6px;}
+  .k-room-actions .kbtn{flex:0 0 auto;width:auto;}
+  .k-room-actions select.k-input{flex:1;min-width:120px;}
 }
 
 /* ── SETTINGS ──────────────────────────────────────────────────── */

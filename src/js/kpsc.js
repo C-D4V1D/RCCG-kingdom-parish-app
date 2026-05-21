@@ -4436,6 +4436,13 @@ async function saveMinutesReview(btn) {
     if (approvedMinutes && hasInsights) {
       reconcileInsightsAfterApproval(S.activeMeeting.id, approvedMinutes);
     }
+
+    // Auto-analyze agenda outcomes from approved minutes (best-effort)
+    const hasAgendaItems = (Array.isArray(res.agendaItems) && res.agendaItems.length) || res.agendaText;
+    if (approvedMinutes && hasAgendaItems) {
+      const outcomesBtn = document.getElementById('km-ai-outcomes-btn');
+      if (outcomesBtn) abAiAnalyseOutcomes(S.activeMeeting.id, outcomesBtn);
+    }
   } catch {
     showToast('Review save failed. Check your connection.', 'error');
   } finally {
@@ -6222,7 +6229,7 @@ async function renderReminders(main) {
   const unpaid = S.partners.filter(p => p.status === 'active' && !partnerMonthlyPaid(p.id, month, year));
   const remindersRes = await apiGet(`kpsc-reminders?year=${year}&month=${month}`);
   if (remindersRes?.error) throw new Error(remindersRes.error);
-  const defaultTemplate = String(settingsRes?.kpsc_reminder_template || '').trim()
+  const defaultTemplate = String(settingsRes?.kpsc_sms_text_reminder || '').trim()
     || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge.';
   S.reminders = Array.isArray(remindersRes) ? remindersRes : [];
   main.innerHTML = `
@@ -6457,7 +6464,7 @@ function debouncedSaveReminderTemplate(textarea) {
   clearTimeout(_reminderTemplateSaveTimer);
   _reminderTemplateSaveTimer = setTimeout(async () => {
     const template = textarea.value.trim();
-    const res = await apiPost('settings', { kpsc_reminder_template: template });
+    const res = await apiPost('settings', { kpsc_sms_text_reminder: template });
     if (res?.error) {
       showToast('Could not save template: ' + res.error, 'error');
     } else {
@@ -8581,7 +8588,6 @@ async function renderSettings(main) {
   const transcriptionModel = res?.ai_transcription_model || 'gpt-4o-mini-transcribe';
   const ocrModel           = res?.ai_ocr_model           || 'gpt-5-mini';
   const deepseekModel      = res?.ai_deepseek_model      || 'deepseek-v4-flash';
-  const reminderTemplate = res?.kpsc_reminder_template || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge. God bless you.';
   const incomeCategories = Array.isArray(res?.kpsc_income_categories) ? res.kpsc_income_categories.join('\n') : '';
   const expenseCategories = Array.isArray(res?.kpsc_expense_categories) ? res.kpsc_expense_categories.join('\n') : '';
   const meetingCadence = res?.kpsc_meeting_cadence || 'none';
@@ -12693,13 +12699,25 @@ async function abAiAnalyseOutcomes(meetingId, btn) {
     showToast(msg, 'success');
     if (statusEl) statusEl.textContent = needsReview > 0 ? `⚠️ ${needsReview} item(s) need your input` : '✓ All suggestions applied';
 
-    // Re-render the outcomes list
+    // Re-render the outcomes list (use same item resolution priority as renderPostMeetingOutcomes)
     const meeting = S.activeMeeting;
     if (meeting) {
       const listEl = document.getElementById('km-outcomes-list');
       if (listEl) {
-        const rawLines = meeting.agendaText.split('\n').map(l => l.trim()).filter(Boolean);
-        const items2 = rawLines.map(l => l.replace(/^[\d]+[.)]\s*/, '').replace(/^[-•*]\s*/, '').trim()).filter(l => l.length > 1);
+        let items2 = [];
+        if (Array.isArray(meeting.agendaItems) && meeting.agendaItems.length) {
+          items2 = meeting.agendaItems.filter(i => String(i).trim().length > 1).map(i => typeof i === 'object' ? (i.topic || String(i)) : String(i));
+        }
+        if (!items2.length) {
+          const draft = (S.agendaBuilderDraftsHistory || []).find(d => d.linkedMeetingId === meeting.id);
+          if (draft && Array.isArray(draft.agendaItems) && draft.agendaItems.length) {
+            items2 = draft.agendaItems.filter(i => String(i).trim().length > 1).map(i => typeof i === 'object' ? (i.topic || String(i)) : String(i));
+          }
+        }
+        if (!items2.length && meeting.agendaText) {
+          const rawLines = meeting.agendaText.split('\n').map(l => l.trim()).filter(Boolean);
+          items2 = rawLines.map(l => l.replace(/^[\d]+[.)]\s*/, '').replace(/^[-•*]\s*/, '').trim()).filter(l => l.length > 1);
+        }
         const outcomes2 = S._meetingAgendaOutcomes[meetingId] || {};
         const STATUS_OPTIONS2 = [
           { value: 'resolved',      label: '✅ Resolved',      color: '#16a34a' },
