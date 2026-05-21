@@ -3456,6 +3456,10 @@ async function approveMeetingProjects(DB, data) {
   for (const proj of projects) {
     const title = String(proj?.title || '').trim();
     if (!title) continue;
+    const existing = await DB.prepare(
+      `SELECT id FROM kpsc_projects WHERE source_meeting_id=? AND title=? AND COALESCE(deleted_at,'')=''`
+    ).bind(meetingId, title).first();
+    if (existing) continue;
     const id = newId('kprj');
     await DB.prepare(`
       INSERT INTO kpsc_projects (id,title,description,estimated_cost,status,priority,target_date,source_meeting_id,source,created_by,updated_at)
