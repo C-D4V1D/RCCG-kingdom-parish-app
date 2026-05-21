@@ -35,6 +35,26 @@ const KPSC_PERMISSIONS = {
   // IT admin: full read access + account/settings management; no operational write actions.
   it_admin:           ['dashboard', 'archive', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'reports', 'agenda_builder', 'settings'],
 };
+// Default write (modify/edit) permissions per role per page
+const KPSC_WRITE_PERMISSIONS = {
+  acting_chairman:     ['dashboard','projects','action_items','partners','partner-progress','finance','reminders','members','archive','reports','agenda_builder','settings'],
+  general_secretary:   ['dashboard','projects','action_items','partners','partner-progress','reminders','members','archive','reports','agenda_builder','settings'],
+  financial_secretary: ['finance','partners','partner-progress','archive','reports'],
+  treasurer:           ['finance','partners','partner-progress','archive','reports'],
+  committee_viewer:    [],
+  it_admin:            ['members','settings'],
+};
+
+// Default delete permissions per role per page
+const KPSC_DELETE_PERMISSIONS = {
+  acting_chairman:     ['projects','action_items','partners','finance','archive','agenda_builder'],
+  general_secretary:   ['projects','action_items','partners','archive','agenda_builder'],
+  financial_secretary: ['finance'],
+  treasurer:           ['finance'],
+  committee_viewer:    [],
+  it_admin:            [],
+};
+
 const PIN_REGEX = /^\d{4,6}$/;
 
 // ── NAV GROUP / SUB-TAB MAPPING ────────────────────────────────────
@@ -1654,6 +1674,20 @@ function canAccess(page) {
   return true;
 }
 
+function canWrite(page) {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const savedWrite = S.writePermissions?.[role];
+  const allowed = Array.isArray(savedWrite) ? savedWrite : (KPSC_WRITE_PERMISSIONS[role] || []);
+  return allowed.includes(page);
+}
+
+function canDelete(page) {
+  const role = String(S.user?.role || 'committee_viewer').toLowerCase();
+  const savedDelete = S.deletePermissions?.[role];
+  const allowed = Array.isArray(savedDelete) ? savedDelete : (KPSC_DELETE_PERMISSIONS[role] || []);
+  return allowed.includes(page);
+}
+
 function canManagePartners() {
   return ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'it_admin'].includes(String(S.user?.role || '').toLowerCase());
 }
@@ -3062,6 +3096,8 @@ function canDeleteMeeting(m) {
 
 function meetingCard(m) {
   const showDelete = canDeleteMeeting(m);
+  // Show a reminder if the meeting has been processed but insights/minutes haven't been reviewed
+  const hasUnreviewedMinutes = m.minutesMarkdown && !m.reviewedAt;
   return `
     <div class="k-meeting-card" onclick="Kpsc.openMeeting('${m.id}')">
       <div class="k-mc-top">
@@ -3076,6 +3112,7 @@ function meetingCard(m) {
         ${m.resolutions?.length ? `<span>${m.resolutions.length} resolution${m.resolutions.length !== 1 ? 's' : ''}</span>` : ''}
         ${m.actionItems?.length ? `<span>${m.actionItems.length} action item${m.actionItems.length !== 1 ? 's' : ''}</span>` : ''}
       </div>
+      ${hasUnreviewedMinutes ? `<div class="k-mc-reminder">⚠️ Review pending — open to review minutes &amp; save insights</div>` : ''}
     </div>`;
 }
 
@@ -3469,6 +3506,9 @@ function renderReviewPanel(m) {
           <div class="k-minutes-body k-review-preview" id="kr-minutes-preview">${minutesHtml(m.minutesMarkdown || '')}</div>
         </div>
       </div>
+      <div style="display:flex;justify-content:flex-end;margin:-6px 0 10px">
+        <button class="kbtn kbtn-sm kbtn-ai" onclick="Kpsc.aiGrammarCheck(this)" title="Let AI silently fix grammar, spelling, and punctuation errors only — no content changes">🤖 AI Grammar &amp; Punctuation Check</button>
+      </div>
 
       <div class="k-review-step-label">Step 3 — AI Corrections (optional)</div>
       <div class="k-form-group">
@@ -3483,10 +3523,10 @@ function renderReviewPanel(m) {
         </div>
         <div id="kr-notes-upload-status"></div>
         <textarea class="k-input k-review-textarea k-sn-textarea" id="kr-secretary-notes" placeholder="Describe corrections in plain English — or upload/record above and AI will fill this in. e.g. &quot;Bro. Emmanuel proposed the motion, not the Chairman. Change the welfare amount to ₦25,000. Remove the paragraph about building plans.&quot;"></textarea>
-        <p class="k-review-hint" style="margin-top:4px">AI will integrate these notes into the minutes when you click <strong>AI Proofread</strong> below. Notes are not saved — used once and cleared.</p>
+        <p class="k-review-hint" style="margin-top:4px">AI will integrate these notes into the minutes when you click <strong>Apply Correction Notes to Minutes</strong> below. Notes are not saved — used once and cleared.</p>
       </div>
       <div style="margin-bottom:14px">
-        <button class="kbtn kbtn-ai" onclick="Kpsc.aiProofreadMinutes(this)">🤖 AI Proofread &amp; Apply Notes</button>
+        <button class="kbtn kbtn-ai" onclick="Kpsc.aiProofreadMinutes(this)">Apply Correction Notes to Minutes</button>
       </div>
 
       ${policyFlags.length ? `
@@ -4169,6 +4209,24 @@ function minutesActionsHtml(m) {
 // After a meeting is processed, let the secretary mark each agenda item's outcome.
 // Outcomes are saved to the linked WhatsApp draft via the outcomes API.
 
+/**
+ * Renders an inline AI-suggestion badge for an agenda outcome item.
+ * Shows the AI's suggested status and confidence level when no manual selection
+ * has been made yet. Confidence maps to badge colour: high=blue, medium=amber, low=gray.
+ *
+ * @param {object|undefined} suggestion  AI suggestion object from S._meetingOutcomeSuggestions
+ * @param {string}           currentStatus  Currently selected status for this item (empty string = none)
+ * @returns {string} HTML badge string (empty if no suggestion or already selected)
+ */
+function outcomeConfidenceBadge(suggestion, currentStatus) {
+  if (!suggestion || currentStatus) return '';
+  const cls = suggestion.confidence === 'high' ? 'badge-blue'
+    : suggestion.confidence === 'medium' ? 'badge-amber' : 'badge-gray';
+  const prefix = suggestion.confidence === 'high' ? '🤖 AI: '
+    : suggestion.confidence === 'medium' ? '🤖 AI (unsure): ' : '🤖 AI (needs review): ';
+  return `<span class="kbadge ${cls}" style="font-size:10px;margin-left:4px" title="${esc(suggestion.rationale || '')}">${prefix}${esc(suggestion.label || '')}</span>`;
+}
+
 function renderPostMeetingOutcomes(m) {
   if (!m?.agendaText) return '';
 
@@ -4193,34 +4251,37 @@ function renderPostMeetingOutcomes(m) {
       if (o.topic) S._meetingAgendaOutcomes[m.id][o.topic] = o.status;
     }
   }
+  // S._meetingOutcomeSuggestions holds AI-suggested outcomes per meeting (topic → {status, confidence, rationale})
+  if (!S._meetingOutcomeSuggestions) S._meetingOutcomeSuggestions = {};
   const outcomes = S._meetingAgendaOutcomes[m.id];
+  const suggestions = S._meetingOutcomeSuggestions[m.id] || {};
 
   const STATUS_OPTIONS = [
-    { value: 'resolved',      label: '✅ Discussed & Resolved',           color: '#16a34a' },
-    { value: 'carry_forward', label: '🔁 Discussed — Carry Forward',      color: '#d97706' },
-    { value: 'not_discussed', label: '⏭️ Not Discussed — Carry Forward', color: '#6b7280' },
+    { value: 'resolved',      label: '✅ Resolved',      color: '#16a34a' },
+    { value: 'carry_forward', label: '🔁 Carry Forward', color: '#d97706' },
+    { value: 'not_discussed', label: '⏭️ Not Discussed', color: '#6b7280' },
   ];
 
   const rowsHtml = items.map((item, i) => {
     const cur = outcomes[item] || '';
+    const sug = suggestions[item];
     return `
-      <div class="k-meeting-card" id="km-outcome-row-${i}" style="padding:10px 12px;margin-bottom:8px">
-        <div style="display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap">
-          <span style="flex:1;font-size:13px;font-weight:600;color:var(--text1);min-width:140px;line-height:1.4">${esc(item)}</span>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0">
-            ${STATUS_OPTIONS.map(o => `
-              <button class="kbtn kbtn-sm ${cur === o.value ? 'kbtn-primary' : 'kbtn-ghost'}"
-                style="font-size:11px;${cur === o.value ? `background:${o.color};border-color:${o.color}` : ''}"
-                onclick="Kpsc.abSetOutcome(${esc(JSON.stringify(m.id))},${esc(JSON.stringify(item))},${esc(JSON.stringify(o.value))},${i})"
-              >${esc(o.label)}</button>
-            `).join('')}
-          </div>
+      <div class="k-outcome-row" id="km-outcome-row-${i}">
+        <div class="k-outcome-topic">${esc(item)}${outcomeConfidenceBadge(sug, cur)}</div>
+        <div class="k-outcome-btns">
+          ${STATUS_OPTIONS.map(o => `
+            <button class="kbtn kbtn-sm ${cur === o.value ? 'kbtn-primary' : 'kbtn-ghost'}"
+              style="${cur === o.value ? `background:${o.color};border-color:${o.color}` : ''}"
+              onclick="Kpsc.abSetOutcome(${esc(JSON.stringify(m.id))},${esc(JSON.stringify(item))},${esc(JSON.stringify(o.value))},${i})"
+            >${esc(o.label)}</button>
+          `).join('')}
         </div>
       </div>`;
   }).join('');
 
   const doneCount = items.filter(t => outcomes[t]).length;
   const allDone = doneCount === items.length;
+  const hasTranscriptOrMinutes = !!(m.transcriptText || m.minutesMarkdown);
 
   return `
     <details class="k-collapsible" ${!allDone ? 'open' : ''} style="margin-top:16px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
@@ -4231,11 +4292,18 @@ function renderPostMeetingOutcomes(m) {
         </span>
       </summary>
       <div style="padding:12px 14px 16px;background:var(--surface,#f8fafc)">
-        <p class="k-hint" style="margin:0 0 12px;font-size:12px">Mark each agenda item's outcome. Carry-forward items will appear at the top of the next meeting's Agenda Builder.</p>
+        <p class="k-hint" style="margin:0 0 10px;font-size:12px">Mark each agenda item's outcome. Carry-forward items will appear at the top of the next meeting's Agenda Builder.</p>
+        ${hasTranscriptOrMinutes ? `
+        <div style="margin-bottom:12px">
+          <button class="kbtn kbtn-sm kbtn-ai" id="km-ai-outcomes-btn" onclick="Kpsc.abAiAnalyseOutcomes(${esc(JSON.stringify(m.id))},this)">
+            🤖 AI Analyse Outcomes from Minutes
+          </button>
+          <span id="km-ai-outcomes-status" style="font-size:12px;color:var(--text3);margin-left:8px"></span>
+        </div>` : ''}
         <div id="km-outcomes-list">
           ${rowsHtml}
         </div>
-        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <button class="kbtn kbtn-primary" onclick="Kpsc.abSaveOutcomes(${esc(JSON.stringify(m.id))},this)" id="km-save-outcomes-btn">
             💾 Save Outcomes
           </button>
@@ -4254,7 +4322,7 @@ function renderMinutesPanel(m) {
     <section class="k-section k-minutes-section">
       <h3 class="k-sec-title">Meeting Minutes</h3>
       ${m.summaryShort ? `<div class="k-summary">${esc(m.summaryShort)}</div>` : ''}
-      ${m.summaryLong ? `<details class="k-summary-detail"><summary>Detailed summary</summary><pre>${esc(m.summaryLong)}</pre></details>` : ''}
+      ${m.summaryLong ? `<details class="k-summary-detail"><summary>Detailed summary — click to expand</summary><pre>${esc(m.summaryLong)}</pre></details>` : ''}
 
       ${renderReviewPanel(m)}
 
@@ -4264,10 +4332,10 @@ function renderMinutesPanel(m) {
       <p id="k-minutes-review-hint" class="k-hint" style="margin-top:4px;margin-bottom:12px;${reviewed ? 'display:none' : ''}">Approve and save the review first before printing or sharing minutes.</p>
       ${m.publicShareToken ? `<div class="k-hint" style="margin-top:-4px;margin-bottom:12px">Public minutes link is active: <a href="${esc(publicUrl)}" target="_blank" rel="noopener noreferrer">${esc(publicUrl)}</a></div>` : ''}
 
-      <details class="k-collapsible" open>
+      <details class="k-collapsible">
         <summary class="k-collapsible-hdr">
           <span class="k-collapsible-title">📄 Minutes Preview</span>
-          <span class="k-collapsible-summary">${reviewed ? '✓ Approved' : 'Draft'}</span>
+          <span class="k-collapsible-summary">${reviewed ? '✓ Approved — click to expand' : 'Draft — click to expand'}</span>
         </summary>
         <div class="k-minutes-body" id="minutes-body-${m.id}">${minutesHtml(m.minutesMarkdown)}</div>
         <div class="k-plain-english-indicator" id="pe-indicator-${m.id}" style="display:none;font-size:0.9em;color:#666;margin-top:8px;padding:8px;background:#f5f5f5;border-radius:4px;">📖 Showing plain English version</div>
@@ -4438,6 +4506,53 @@ async function aiProofreadMinutes(btn) {
     showToast(msg, 'success');
   } catch {
     showToast('AI proofread failed. Check your connection.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+/**
+ * AI grammar and punctuation check for the current meeting minutes.
+ * Sends the minutes to the AI proofread endpoint with `grammarOnly: true` so the
+ * AI corrects ONLY language errors (spelling, grammar, punctuation) without
+ * changing any factual content, names, amounts, or structure.
+ * Summaries are updated only if they contain grammar errors.
+ *
+ * @param {HTMLButtonElement} btn  The clicked button (disabled during the request)
+ */
+async function aiGrammarCheck(btn) {
+  if (!S.activeMeeting) return;
+  const minutesMarkdown = document.getElementById('kr-minutes')?.value || '';
+  const summaryShort    = document.getElementById('kr-summary-short')?.value || '';
+  const summaryLong     = document.getElementById('kr-summary-long')?.value  || '';
+  if (!minutesMarkdown.trim()) { showToast('No minutes draft to check.', 'error'); return; }
+
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Checking grammar…';
+  try {
+    const res = await apiPost(`ai-secretary-meetings/${S.activeMeeting.id}/ai-proofread`, {
+      minutesMarkdown, secretaryNotes: '', summaryShort, summaryLong, grammarOnly: true,
+    });
+    if (res.error) { showToast(res.error, 'error'); return; }
+    document.getElementById('kr-minutes').value = res.minutesMarkdown;
+    updateMinutesPreview();
+    let summariesChanged = false;
+    if (res.summaryShort && res.summaryShort !== summaryShort) {
+      document.getElementById('kr-summary-short').value = res.summaryShort;
+      if (S.activeMeeting) S.activeMeeting.summaryShort = res.summaryShort;
+      summariesChanged = true;
+    }
+    if (res.summaryLong && res.summaryLong !== summaryLong) {
+      document.getElementById('kr-summary-long').value = res.summaryLong;
+      if (S.activeMeeting) S.activeMeeting.summaryLong = res.summaryLong;
+      summariesChanged = true;
+    }
+    const msg = summariesChanged ? 'Grammar corrected — minutes and summaries updated ✓' : 'Grammar and punctuation corrected ✓';
+    showToast(msg, 'success');
+  } catch {
+    showToast('Grammar check failed. Check your connection.', 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
@@ -8436,6 +8551,10 @@ async function renderSettings(main) {
   if (savedPerms && typeof savedPerms === 'object' && !Array.isArray(savedPerms)) {
     S.rolePermissions = savedPerms;
   }
+  const savedWritePerms = res?.kpsc_write_permissions;
+  if (savedWritePerms && typeof savedWritePerms === 'object') S.writePermissions = savedWritePerms;
+  const savedDeletePerms = res?.kpsc_delete_permissions;
+  if (savedDeletePerms && typeof savedDeletePerms === 'object') S.deletePermissions = savedDeletePerms;
   const deepseekKey = res?.ai_deepseek_key || '';
   const openaiKey   = res?.ai_openai_key   || '';
   const policyUrl   = res?.kpsc_policy_url  || '';
@@ -8470,6 +8589,15 @@ async function renderSettings(main) {
   const termiiDeadline     = res?.kpsc_termii_deadline_sms    !== '0';
   const smsFreqCap         = res?.kpsc_sms_freq_cap      || '3';
   const smsCooloffDays     = res?.kpsc_sms_cooloff_days  || '7';
+  // System SMS message text templates
+  const smsWelcomeText    = res?.kpsc_sms_text_welcome    || '';
+  const smsPaymentText    = res?.kpsc_sms_text_payment    || '';
+  const smsNewmonthText   = res?.kpsc_sms_text_newmonth   || '';
+  const smsAnnivText      = res?.kpsc_sms_text_anniversary|| '';
+  const smsMilestone6Text = res?.kpsc_sms_text_milestone6 || '';
+  const smsMilestone12Text= res?.kpsc_sms_text_milestone12|| '';
+  const smsPremeetingText = res?.kpsc_sms_text_premeeting || '';
+  const smsDeadlineText   = res?.kpsc_sms_text_deadline   || '';
   const cadenceOptions = [
     { value: 'none',              label: 'No fixed cadence' },
     { value: 'weekly:sun',        label: 'Weekly on Sunday' },
@@ -8751,6 +8879,51 @@ async function renderSettings(main) {
           <div id="ks-smst-save-msg" class="k-settings-msg" style="display:none"></div>
           <button class="kbtn kbtn-primary" onclick="Kpsc.saveSmsTemplate()">Save Template</button>
         </div>
+      </div>
+
+      <div class="k-card" style="margin-bottom:16px">
+        <h2 class="k-card-title">✏️ System SMS Message Templates</h2>
+        <p class="k-card-sub">Edit the text for each automated SMS the portal sends. Leave blank to use the built-in default text. Available variables by template:<br>
+          <strong>Welcome:</strong> <code>{{name}}</code><br>
+          <strong>Payment:</strong> <code>{{name}}</code>, <code>{{month}}</code>, <code>{{amount}}</code>, <code>{{amtText}}</code>, <code>{{partnerType}}</code><br>
+          <strong>New Month / Milestone:</strong> <code>{{name}}</code><br>
+          <strong>Anniversary:</strong> <code>{{name}}</code>, <code>{{ordinal}}</code>, <code>{{years}}</code><br>
+          <strong>Pre-Meeting:</strong> <code>{{name}}</code>, <code>{{meetingTitle}}</code>, <code>{{meetingDate}}</code>, <code>{{meetingTime}}</code>, <code>{{venue}}</code><br>
+          <strong>Deadline:</strong> <code>{{name}}</code>, <code>{{task}}</code>, <code>{{dueDate}}</code></p>
+        <div class="k-form-group">
+          <label class="k-label">👋 Welcome SMS (new partner)</label>
+          <textarea id="ks-sms-welcome" class="k-input k-textarea" rows="3" placeholder="Default: Welcome to RCCG Kingdom Parish, {{name}}!…">${esc(smsWelcomeText)}</textarea>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">🙏 Thank-you SMS (partner payment)</label>
+          <textarea id="ks-sms-payment" class="k-input k-textarea" rows="3" placeholder="Default: Dear {{name}}, thank you for your {{month}} partnership payment{{amtText}}…">${esc(smsPaymentText)}</textarea>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">🎉 Happy New Month SMS (1st of month)</label>
+          <textarea id="ks-sms-newmonth" class="k-input k-textarea" rows="3" placeholder="Default: Happy New Month, {{name}}!…">${esc(smsNewmonthText)}</textarea>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">🎂 Anniversary SMS (yearly on start date)</label>
+          <textarea id="ks-sms-anniversary" class="k-input k-textarea" rows="3" placeholder="Default: Dear {{name}}, today marks your {{ordinal}} year…">${esc(smsAnnivText)}</textarea>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">🏅 6-Month Milestone SMS</label>
+          <textarea id="ks-sms-milestone6" class="k-input k-textarea" rows="3" placeholder="Default: Congratulations {{name}}! You've faithfully partnered for 6 months…">${esc(smsMilestone6Text)}</textarea>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">🏆 12-Month Milestone SMS (1 year)</label>
+          <textarea id="ks-sms-milestone12" class="k-input k-textarea" rows="3" placeholder="Default: Praise God! Dear {{name}}, you have completed a FULL YEAR…">${esc(smsMilestone12Text)}</textarea>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">📅 Pre-Meeting Reminder SMS (to members, 24h before)</label>
+          <textarea id="ks-sms-premeeting" class="k-input k-textarea" rows="3" placeholder="Default: Reminder: KPSC Meeting &quot;{{meetingTitle}}&quot; is tomorrow ({{meetingDate}}{{meetingTime}})…">${esc(smsPremeetingText)}</textarea>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">⏰ Action Item Deadline Reminder (3 days before)</label>
+          <textarea id="ks-sms-deadline" class="k-input k-textarea" rows="3" placeholder="Default: Reminder: Your action item &quot;{{task}}&quot; is due in 3 days ({{dueDate}})…">${esc(smsDeadlineText)}</textarea>
+        </div>
+        <div id="ks-sms-texts-save-msg" class="k-settings-msg" style="display:none"></div>
+        <button class="kbtn kbtn-primary" onclick="Kpsc.saveSystemSmsTemplates()">Save SMS Message Templates</button>
       </div>
 
       <div class="k-card" style="margin-bottom:16px">
@@ -9083,6 +9256,27 @@ async function deleteSmsTemplate(id) {
   await renderSmsTemplatesList();
 }
 
+async function saveSystemSmsTemplates() {
+  const msg = document.getElementById('ks-sms-texts-save-msg');
+  const data = {
+    kpsc_sms_text_welcome:     document.getElementById('ks-sms-welcome')?.value.trim()     || '',
+    kpsc_sms_text_payment:     document.getElementById('ks-sms-payment')?.value.trim()     || '',
+    kpsc_sms_text_newmonth:    document.getElementById('ks-sms-newmonth')?.value.trim()    || '',
+    kpsc_sms_text_anniversary: document.getElementById('ks-sms-anniversary')?.value.trim() || '',
+    kpsc_sms_text_milestone6:  document.getElementById('ks-sms-milestone6')?.value.trim()  || '',
+    kpsc_sms_text_milestone12: document.getElementById('ks-sms-milestone12')?.value.trim() || '',
+    kpsc_sms_text_premeeting:  document.getElementById('ks-sms-premeeting')?.value.trim()  || '',
+    kpsc_sms_text_deadline:    document.getElementById('ks-sms-deadline')?.value.trim()    || '',
+  };
+  const res = await apiPost('settings', data);
+  if (msg) {
+    msg.className = res?.error ? 'k-settings-msg k-msg-error' : 'k-settings-msg k-msg-ok';
+    msg.textContent = res?.error ? res.error : 'SMS message templates saved.';
+    msg.style.display = 'block';
+    setTimeout(() => { if (msg) msg.style.display = 'none'; }, 3000);
+  }
+}
+
 // Feature 10: Scheduled SMS Blasts
 async function renderScheduledSmsList() {
   const container = document.getElementById('ks-scheduled-sms-list');
@@ -9242,37 +9436,61 @@ function isPermForced(roleKey, pageKey) {
 
 function renderRolePermissionsCard() {
   const perms = effectiveRolePermissions();
+  const writePerms = S.writePermissions || KPSC_WRITE_PERMISSIONS;
+  const deletePerms = S.deletePermissions || KPSC_DELETE_PERMISSIONS;
+
+  const roleCards = PERM_ROLES.map(role => {
+    const allowed      = Array.isArray(perms[role.key]) ? perms[role.key] : (KPSC_PERMISSIONS[role.key] || []);
+    const allowedWrite = Array.isArray(writePerms[role.key]) ? writePerms[role.key] : (KPSC_WRITE_PERMISSIONS[role.key] || []);
+    const allowedDel   = Array.isArray(deletePerms[role.key]) ? deletePerms[role.key] : (KPSC_DELETE_PERMISSIONS[role.key] || []);
+
+    const rows = PERM_PAGES.map(page => {
+      const forcedRead  = isPermForced(role.key, page.key);
+      const checkedRead  = forcedRead || allowed.includes(page.key);
+      const checkedWrite = allowedWrite.includes(page.key);
+      const checkedDel   = allowedDel.includes(page.key);
+      // Write/delete only makes sense if read is granted
+      const disableWD = !checkedRead && !forcedRead;
+      return `
+        <div class="k-perm-row">
+          <span class="k-perm-page-name">${page.label}</span>
+          <div class="k-perm-checks">
+            <label class="k-perm-check-lbl" title="View / access this section">
+              <input type="checkbox" id="kp-${role.key}-${page.key}-read"
+                ${checkedRead ? 'checked' : ''}
+                ${forcedRead  ? 'disabled title="Always enabled"' : ''}
+                onchange="Kpsc.onPermReadChange('${role.key}','${page.key}',this.checked)"
+              /><span>View</span>
+            </label>
+            <label class="k-perm-check-lbl" title="Edit / modify records in this section">
+              <input type="checkbox" id="kp-${role.key}-${page.key}-write"
+                ${checkedWrite ? 'checked' : ''}
+                ${disableWD ? 'disabled' : ''}
+              /><span>Edit</span>
+            </label>
+            <label class="k-perm-check-lbl" title="Delete records in this section">
+              <input type="checkbox" id="kp-${role.key}-${page.key}-delete"
+                ${checkedDel ? 'checked' : ''}
+                ${disableWD ? 'disabled' : ''}
+              /><span>Delete</span>
+            </label>
+          </div>
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="k-perm-role-card">
+        <div class="k-perm-role-hdr">${role.label}</div>
+        ${rows}
+      </div>`;
+  }).join('');
+
   return `
     <div class="k-card" style="margin-bottom:16px">
       <h2 class="k-card-title">Role Permissions</h2>
-      <p class="k-card-sub">Control which sections each role can access. Greyed checkboxes are always enforced and cannot be changed.</p>
-      <div style="overflow-x:auto">
-        <table class="k-perm-table">
-          <thead>
-            <tr>
-              <th class="k-perm-role-col">Role</th>
-              ${PERM_PAGES.map(p => `<th class="k-perm-page-col">${p.label}</th>`).join('')}
-            </tr>
-          </thead>
-          <tbody>
-            ${PERM_ROLES.map(role => {
-              const allowed = Array.isArray(perms[role.key]) ? perms[role.key] : (KPSC_PERMISSIONS[role.key] || []);
-              return `<tr>
-                <td class="k-perm-role-name">${role.label}</td>
-                ${PERM_PAGES.map(page => {
-                  const forced  = isPermForced(role.key, page.key);
-                  const checked = forced || allowed.includes(page.key);
-                  return `<td class="k-perm-check-cell">
-                    <input type="checkbox" id="kp-${role.key}-${page.key}"
-                      ${checked ? 'checked' : ''}
-                      ${forced  ? 'disabled title="Always enabled"' : ''}
-                    />
-                  </td>`;
-                }).join('')}
-              </tr>`;
-            }).join('')}
-          </tbody>
-        </table>
+      <p class="k-card-sub">Control what each role can <strong>view</strong>, <strong>edit</strong>, and <strong>delete</strong> in each section. Greyed items are always enforced.</p>
+      <div id="k-perm-roles-grid" class="k-perm-roles-grid">
+        ${roleCards}
       </div>
       <div id="ks-perms-save-msg" class="k-settings-msg" style="display:none"></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
@@ -9282,20 +9500,45 @@ function renderRolePermissionsCard() {
     </div>`;
 }
 
+function onPermReadChange(roleKey, pageKey, isChecked) {
+  // When read is unchecked, also uncheck write and delete for that page
+  if (!isChecked) {
+    const writeEl  = document.getElementById(`kp-${roleKey}-${pageKey}-write`);
+    const deleteEl = document.getElementById(`kp-${roleKey}-${pageKey}-delete`);
+    if (writeEl)  { writeEl.checked  = false; writeEl.disabled  = true; }
+    if (deleteEl) { deleteEl.checked = false; deleteEl.disabled = true; }
+  } else {
+    const writeEl  = document.getElementById(`kp-${roleKey}-${pageKey}-write`);
+    const deleteEl = document.getElementById(`kp-${roleKey}-${pageKey}-delete`);
+    if (writeEl)  writeEl.disabled  = false;
+    if (deleteEl) deleteEl.disabled = false;
+  }
+}
+
 async function saveRolePermissions() {
   const perms = {};
+  const writePerms = {};
+  const deletePerms = {};
   for (const role of PERM_ROLES) {
     perms[role.key] = PERM_PAGES
-      .filter(page => isPermForced(role.key, page.key) || document.getElementById(`kp-${role.key}-${page.key}`)?.checked)
+      .filter(page => isPermForced(role.key, page.key) || document.getElementById(`kp-${role.key}-${page.key}-read`)?.checked)
+      .map(page => page.key);
+    writePerms[role.key] = PERM_PAGES
+      .filter(page => document.getElementById(`kp-${role.key}-${page.key}-write`)?.checked)
+      .map(page => page.key);
+    deletePerms[role.key] = PERM_PAGES
+      .filter(page => document.getElementById(`kp-${role.key}-${page.key}-delete`)?.checked)
       .map(page => page.key);
   }
   const msg = document.getElementById('ks-perms-save-msg');
-  const res = await apiPost('settings', { kpsc_role_permissions: perms });
+  const res = await apiPost('settings', { kpsc_role_permissions: perms, kpsc_write_permissions: writePerms, kpsc_delete_permissions: deletePerms });
   if (res?.error) {
     msg.className = 'k-settings-msg k-msg-error';
     msg.textContent = res.error;
   } else {
     S.rolePermissions = perms;
+    S.writePermissions = writePerms;
+    S.deletePermissions = deletePerms;
     msg.className = 'k-settings-msg k-msg-ok';
     msg.textContent = 'Role permissions saved.';
   }
@@ -9306,14 +9549,16 @@ async function saveRolePermissions() {
 async function resetRolePermissions() {
   if (!confirm('Reset all role permissions to defaults? This will undo any customisations.')) return;
   const msg = document.getElementById('ks-perms-save-msg');
-  const res = await apiPost('settings', { kpsc_role_permissions: KPSC_PERMISSIONS });
+  const res = await apiPost('settings', { kpsc_role_permissions: KPSC_PERMISSIONS, kpsc_write_permissions: KPSC_WRITE_PERMISSIONS, kpsc_delete_permissions: KPSC_DELETE_PERMISSIONS });
   if (res?.error) {
     msg.className = 'k-settings-msg k-msg-error';
     msg.textContent = res.error;
     msg.style.display = 'block';
     setTimeout(() => { if (msg) msg.style.display = 'none'; }, 3000);
   } else {
-    S.rolePermissions = null; // null triggers fallback to KPSC_PERMISSIONS in effectiveRolePermissions()
+    S.rolePermissions = null;
+    S.writePermissions = null;
+    S.deletePermissions = null;
     await renderSettings(document.getElementById('kpsc-main'));
   }
 }
@@ -12376,6 +12621,88 @@ async function abSaveOutcomesToDraft(draftId, outcomes, btn) {
   }
 }
 
+/**
+ * Uses AI to analyse the current meeting's transcript/minutes and suggest an
+ * outcome (resolved / carry_forward / not_discussed) for each agenda item.
+ * High-confidence suggestions are auto-applied; medium and low confidence items
+ * are flagged for human review with a badge showing the AI's rationale.
+ *
+ * @param {string} meetingId  The active meeting's ID
+ * @param {HTMLButtonElement} btn  The clicked button (disabled during the request)
+ */
+async function abAiAnalyseOutcomes(meetingId, btn) {
+  const statusEl = document.getElementById('km-ai-outcomes-status');
+  const origText = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '🤖 Analysing…'; }
+  if (statusEl) statusEl.textContent = 'AI is reading the minutes…';
+
+  try {
+    const res = await apiPost(`ai-secretary-meetings/${meetingId}/suggest-outcomes`, {});
+    if (res?.error) {
+      showToast(res.error, 'error');
+      if (statusEl) statusEl.textContent = '';
+      return;
+    }
+    // Store suggestions
+    if (!S._meetingOutcomeSuggestions) S._meetingOutcomeSuggestions = {};
+    const sugMap = {};
+    const STATUS_OPTIONS = [
+      { value: 'resolved',      label: '✅ Resolved' },
+      { value: 'carry_forward', label: '🔁 Carry Forward' },
+      { value: 'not_discussed', label: '⏭️ Not Discussed' },
+    ];
+    for (const s of (res.suggestions || [])) {
+      const opt = STATUS_OPTIONS.find(o => o.value === s.status);
+      sugMap[s.topic] = { status: s.status, confidence: s.confidence, rationale: s.rationale, label: opt?.label || s.status, needsHumanInput: s.needsHumanInput };
+      // Auto-apply high-confidence suggestions only if not already set
+      if (s.confidence === 'high' && !S._meetingAgendaOutcomes?.[meetingId]?.[s.topic]) {
+        if (!S._meetingAgendaOutcomes) S._meetingAgendaOutcomes = {};
+        if (!S._meetingAgendaOutcomes[meetingId]) S._meetingAgendaOutcomes[meetingId] = {};
+        S._meetingAgendaOutcomes[meetingId][s.topic] = s.status;
+      }
+    }
+    S._meetingOutcomeSuggestions[meetingId] = sugMap;
+
+    const highCount = (res.suggestions || []).filter(s => s.confidence === 'high').length;
+    const needsReview = (res.suggestions || []).filter(s => s.needsHumanInput).length;
+    let msg = `AI analysed ${(res.suggestions || []).length} items. ${highCount} auto-applied.`;
+    if (needsReview > 0) msg += ` ${needsReview} need your review.`;
+    showToast(msg, 'success');
+    if (statusEl) statusEl.textContent = needsReview > 0 ? `⚠️ ${needsReview} item(s) need your input` : '✓ All suggestions applied';
+
+    // Re-render the outcomes list
+    const meeting = S.activeMeeting;
+    if (meeting) {
+      const listEl = document.getElementById('km-outcomes-list');
+      if (listEl) {
+        const rawLines = meeting.agendaText.split('\n').map(l => l.trim()).filter(Boolean);
+        const items2 = rawLines.map(l => l.replace(/^[\d]+[.)]\s*/, '').replace(/^[-•*]\s*/, '').trim()).filter(l => l.length > 1);
+        const outcomes2 = S._meetingAgendaOutcomes[meetingId] || {};
+        const STATUS_OPTIONS2 = [
+          { value: 'resolved',      label: '✅ Resolved',      color: '#16a34a' },
+          { value: 'carry_forward', label: '🔁 Carry Forward', color: '#d97706' },
+          { value: 'not_discussed', label: '⏭️ Not Discussed', color: '#6b7280' },
+        ];
+        listEl.innerHTML = items2.map((item, i) => {
+          const cur = outcomes2[item] || '';
+          const sug2 = sugMap[item];
+          return `<div class="k-outcome-row" id="km-outcome-row-${i}">
+            <div class="k-outcome-topic">${esc(item)}${outcomeConfidenceBadge(sug2, cur)}</div>
+            <div class="k-outcome-btns">
+              ${STATUS_OPTIONS2.map(o => `<button class="kbtn kbtn-sm ${cur === o.value ? 'kbtn-primary' : 'kbtn-ghost'}" style="${cur === o.value ? `background:${o.color};border-color:${o.color}` : ''}" onclick="Kpsc.abSetOutcome(${esc(JSON.stringify(meetingId))},${esc(JSON.stringify(item))},${esc(JSON.stringify(o.value))},${i})">${esc(o.label)}</button>`).join('')}
+            </div>
+          </div>`;
+        }).join('');
+      }
+    }
+  } catch {
+    showToast('AI analysis failed. Check your connection.', 'error');
+    if (statusEl) statusEl.textContent = '';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
+  }
+}
+
 // ── Agenda Builder Voice Note ───────────────────────────────────
 
 async function abToggleVoice() {
@@ -12546,6 +12873,7 @@ window.Kpsc = {
   checkTermiiBalance,
   saveSmsTemplate,
   deleteSmsTemplate,
+  saveSystemSmsTemplates,
   renderSmsTemplatesList,
   scheduleSmsBlast,
   deleteScheduledSms,
@@ -12666,6 +12994,11 @@ window.Kpsc = {
   abPrintFromDraft,
   abSetOutcome,
   abSaveOutcomes,
+  abAiAnalyseOutcomes,
+  aiGrammarCheck,
+  onPermReadChange,
+  canWrite,
+  canDelete,
 };
 
 document.addEventListener('DOMContentLoaded', init);
