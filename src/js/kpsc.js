@@ -384,8 +384,11 @@ function recRenderTranscript() {
   const stableCount = Rec.transcriptEntries.length;
   const lastRendered = Rec.lastRenderedCount ?? -1;
 
-  // Full re-render when the list is empty/replaced or entries were removed/reordered.
-  if (lastRendered > stableCount || list.children.length === 0 && (stableCount + partials.length) === 0) {
+  // Full re-render when entries were removed/reordered (rare), or when
+  // nothing has ever been rendered (lastRendered === -1 / 0 with empty list).
+  const needsFullRender = lastRendered > stableCount ||
+    (list.children.length === 0 && !list.querySelector('.lt-empty') && lastRendered < 0);
+  if (needsFullRender) {
     list.innerHTML = (stableCount + partials.length) === 0
       ? '<div class="lt-empty">Live transcript will appear here as people speak.</div>'
       : [...Rec.transcriptEntries, ...partials].map(recEntryHtml).join('');
