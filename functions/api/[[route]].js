@@ -1498,6 +1498,11 @@ async function handleInit(DB) {
     partnership_logo_url:      '',   // URL to logo image (optional)
     kpsc_welfare_cases_ytd:    '0',  // manually updated by KPSC each year
     partnership_whatsapp_number: '4740944059',
+    partnership_illu_hero:     '',   // Hero section illustration URL
+    partnership_illu_vision:   '',   // Vision section illustration URL
+    partnership_illu_step1:    '',   // How It Works Step 1 illustration URL
+    partnership_illu_step2:    '',   // How It Works Step 2 illustration URL
+    partnership_illu_step3:    '',   // How It Works Step 3 illustration URL
   };
   for (const [key, value] of Object.entries(defaultSettings)) {
     await DB.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).bind(key, value).run();
@@ -4684,7 +4689,7 @@ async function getPartnershipPublic(DB) {
 
   // Load partnership settings (annual goal, logo, welfare count)
   const settingsRows = await DB.prepare(
-    `SELECT key, value FROM settings WHERE key IN ('partnership_annual_goal','partnership_logo_url','kpsc_welfare_cases_ytd','partnership_whatsapp_number')`
+    `SELECT key, value FROM settings WHERE key IN ('partnership_annual_goal','partnership_logo_url','kpsc_welfare_cases_ytd','partnership_whatsapp_number','partnership_illu_hero','partnership_illu_vision','partnership_illu_step1','partnership_illu_step2','partnership_illu_step3')`
   ).all();
   const smap = {};
   (settingsRows.results || []).forEach(r => { smap[r.key] = r.value; });
@@ -4692,6 +4697,13 @@ async function getPartnershipPublic(DB) {
   const annualGoal   = smap.partnership_annual_goal ? parseFloat(smap.partnership_annual_goal) || null : null;
   const logoUrl      = smap.partnership_logo_url    ? String(smap.partnership_logo_url).trim()  : '';
   const welfareCases = smap.kpsc_welfare_cases_ytd  ? parseInt(smap.kpsc_welfare_cases_ytd, 10) || 0 : 0;
+  const illustrations = {
+    hero:  String(smap.partnership_illu_hero   || '').trim(),
+    vision:String(smap.partnership_illu_vision || '').trim(),
+    step1: String(smap.partnership_illu_step1  || '').trim(),
+    step2: String(smap.partnership_illu_step2  || '').trim(),
+    step3: String(smap.partnership_illu_step3  || '').trim(),
+  };
 
   // Active partner count
   const activeRow = await DB.prepare(
@@ -4747,6 +4759,7 @@ async function getPartnershipPublic(DB) {
     welfareCasesSupported: welfareCases,
     annualGoal,
     logoUrl,
+    illustrations,
     anonymousPartnersCount,
     partners,
     projects,

@@ -7671,7 +7671,7 @@ function rerenderInsightsList() {
 
 async function renderReports(main) {
   const res = await apiGet('ai-secretary-meetings');
-  S.meetings = res.meetings || res || [];
+  S.meetings = res?.items || res?.meetings || [];
   const allEntries = buildMeetingInsights(S.meetings);
   // Counts: respect current year + month + search, but ignore category filter for chip counts.
   const baseFiltered = filterMeetingInsights(allEntries, 'all');
@@ -9898,6 +9898,37 @@ async function renderSettings(main) {
           placeholder="https://example.com/rccg-logo.png"
           value="${esc(res?.partnership_logo_url || '')}" />
         <p class="k-hint">To upload a logo: host the image file anywhere publicly accessible (Google Drive, Cloudinary, etc.) and paste the direct image URL above. The logo will appear top-left on the landing page and in the footer.</p>
+
+        <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:14px">
+          <p class="k-label" style="font-size:13px;font-weight:700;margin-bottom:4px">Illustration Images</p>
+          <p class="k-hint" style="margin-bottom:12px">Paste public image URLs for each slot on the landing page. Leave empty to show the default placeholder. Host images on Cloudinary, Google Drive (direct link), or any public CDN.</p>
+
+          <label class="k-label">Slot 1 — Hero (cross + laurel wreath) · recommended ~400×400 px square</label>
+          <input id="ks-illu-hero" class="k-input" type="url"
+            placeholder="https://example.com/hero-cross.png"
+            value="${esc(res?.partnership_illu_hero || '')}" />
+
+          <label class="k-label" style="margin-top:10px">Slot 2 — Vision (hands holding a church) · recommended ~600×360 px landscape</label>
+          <input id="ks-illu-vision" class="k-input" type="url"
+            placeholder="https://example.com/vision-church.png"
+            value="${esc(res?.partnership_illu_vision || '')}" />
+
+          <label class="k-label" style="margin-top:10px">Slot 3 — Step 1: Decide (person deciding) · recommended ~400×240 px</label>
+          <input id="ks-illu-step1" class="k-input" type="url"
+            placeholder="https://example.com/step1-decide.png"
+            value="${esc(res?.partnership_illu_step1 || '')}" />
+
+          <label class="k-label" style="margin-top:10px">Slot 4 — Step 2: Pay (bank transfer / cash) · recommended ~400×240 px</label>
+          <input id="ks-illu-step2" class="k-input" type="url"
+            placeholder="https://example.com/step2-pay.png"
+            value="${esc(res?.partnership_illu_step2 || '')}" />
+
+          <label class="k-label" style="margin-top:10px">Slot 5 — Step 3: Get Card Signed · recommended ~400×240 px</label>
+          <input id="ks-illu-step3" class="k-input" type="url"
+            placeholder="https://example.com/step3-card.png"
+            value="${esc(res?.partnership_illu_step3 || '')}" />
+        </div>
+
         <div id="ks-partnership-save-msg" class="k-settings-msg" style="display:none"></div>
         <button class="kbtn kbtn-primary" style="margin-top:12px" onclick="Kpsc.savePartnershipSettings()">Save Partnership Settings</button>
         <a href="/partnership/" target="_blank" class="kbtn kbtn-ghost" style="margin-top:8px;display:inline-block;text-decoration:none">Preview Landing Page ↗</a>
@@ -10326,15 +10357,25 @@ async function saveKpscOpsSettings() {
 
 async function savePartnershipSettings() {
   const msg = document.getElementById('ks-partnership-save-msg');
-  const goal    = document.getElementById('ks-partnership-goal')?.value.trim() || '';
-  const welfare = document.getElementById('ks-welfare-cases')?.value.trim() || '0';
-  const waNum   = document.getElementById('ks-wa-number')?.value.trim() || '';
-  const logoUrl = document.getElementById('ks-logo-url')?.value.trim() || '';
+  const goal      = document.getElementById('ks-partnership-goal')?.value.trim() || '';
+  const welfare   = document.getElementById('ks-welfare-cases')?.value.trim() || '0';
+  const waNum     = document.getElementById('ks-wa-number')?.value.trim() || '';
+  const logoUrl   = document.getElementById('ks-logo-url')?.value.trim() || '';
+  const illuHero  = document.getElementById('ks-illu-hero')?.value.trim() || '';
+  const illuVision= document.getElementById('ks-illu-vision')?.value.trim() || '';
+  const illuStep1 = document.getElementById('ks-illu-step1')?.value.trim() || '';
+  const illuStep2 = document.getElementById('ks-illu-step2')?.value.trim() || '';
+  const illuStep3 = document.getElementById('ks-illu-step3')?.value.trim() || '';
   const res = await apiPost('settings', {
-    partnership_annual_goal:   goal,
-    kpsc_welfare_cases_ytd:    welfare,
+    partnership_annual_goal:     goal,
+    kpsc_welfare_cases_ytd:      welfare,
     partnership_whatsapp_number: waNum,
-    partnership_logo_url:      logoUrl,
+    partnership_logo_url:        logoUrl,
+    partnership_illu_hero:       illuHero,
+    partnership_illu_vision:     illuVision,
+    partnership_illu_step1:      illuStep1,
+    partnership_illu_step2:      illuStep2,
+    partnership_illu_step3:      illuStep3,
   });
   if (res?.error) {
     msg.className = 'k-settings-msg k-msg-error';
