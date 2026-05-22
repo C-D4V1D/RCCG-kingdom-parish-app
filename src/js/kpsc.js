@@ -7671,7 +7671,7 @@ function rerenderInsightsList() {
 
 async function renderReports(main) {
   const res = await apiGet('ai-secretary-meetings');
-  S.meetings = res.meetings || res || [];
+  S.meetings = Array.isArray(res) ? res : (Array.isArray(res?.meetings) ? res.meetings : []);
   const allEntries = buildMeetingInsights(S.meetings);
   // Counts: respect current year + month + search, but ignore category filter for chip counts.
   const baseFiltered = filterMeetingInsights(allEntries, 'all');
@@ -9893,13 +9893,31 @@ async function renderSettings(main) {
         <input id="ks-wa-number" class="k-input" type="tel" inputmode="numeric"
           placeholder="e.g. 2348012345678"
           value="${esc(res?.partnership_whatsapp_number || '4740944059')}" />
-        <label class="k-label" style="margin-top:12px">Church Logo Image URL — paste a public image URL, or leave empty to use the RCCG text badge</label>
-        <input id="ks-logo-url" class="k-input" type="url"
-          placeholder="https://example.com/rccg-logo.png"
-          value="${esc(res?.partnership_logo_url || '')}" />
-        <p class="k-hint">To upload a logo: host the image file anywhere publicly accessible (Google Drive, Cloudinary, etc.) and paste the direct image URL above. The logo will appear top-left on the landing page and in the footer.</p>
+        <label class="k-label" style="margin-top:12px">Church Logo — top-left badge on the landing page</label>
+        ${_illuField('ks-logo-url', res?.partnership_logo_url || '', 'RCCG circular logo')}
+
+        <div style="border-top:1px solid var(--border);margin-top:18px;padding-top:14px">
+          <div style="font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--text3);margin-bottom:4px">Illustration Slots</div>
+          <p class="k-hint" style="margin-top:0;margin-bottom:12px">Paste a public image URL <em>or</em> tap <strong>Upload</strong> to pick a file from your device. Uploaded images are stored directly — no external hosting needed. Keep files under 700KB for best performance.</p>
+
+          <label class="k-label">Slot 1 — Hero (cross + laurel wreath) · square ~400×400px</label>
+          ${_illuField('ks-illu-hero', res?.partnership_illu_hero || '', 'Hero illustration')}
+
+          <label class="k-label" style="margin-top:14px">Slot 2 — Vision (hands holding a church) · landscape ~600×360px</label>
+          ${_illuField('ks-illu-vision', res?.partnership_illu_vision || '', 'Vision illustration')}
+
+          <label class="k-label" style="margin-top:14px">Slot 3 — How It Works Step 1 (person deciding) · ~400×240px</label>
+          ${_illuField('ks-illu-step1', res?.partnership_illu_step1 || '', 'Step 1 icon')}
+
+          <label class="k-label" style="margin-top:14px">Slot 4 — How It Works Step 2 (bank transfer / cash) · ~400×240px</label>
+          ${_illuField('ks-illu-step2', res?.partnership_illu_step2 || '', 'Step 2 icon')}
+
+          <label class="k-label" style="margin-top:14px">Slot 5 — How It Works Step 3 (signing / card) · ~400×240px</label>
+          ${_illuField('ks-illu-step3', res?.partnership_illu_step3 || '', 'Step 3 icon')}
+        </div>
+
         <div id="ks-partnership-save-msg" class="k-settings-msg" style="display:none"></div>
-        <button class="kbtn kbtn-primary" style="margin-top:12px" onclick="Kpsc.savePartnershipSettings()">Save Partnership Settings</button>
+        <button class="kbtn kbtn-primary" style="margin-top:16px" onclick="Kpsc.savePartnershipSettings()">Save Partnership Settings</button>
         <a href="/partnership/" target="_blank" class="kbtn kbtn-ghost" style="margin-top:8px;display:inline-block;text-decoration:none">Preview Landing Page ↗</a>
       </div>
 
@@ -10324,17 +10342,64 @@ async function saveKpscOpsSettings() {
   setTimeout(() => { if(msg) msg.style.display = 'none'; }, 3000);
 }
 
+function _illuField(id, currentVal, altText) {
+  const preview = currentVal
+    ? `<img src="${esc(currentVal)}" alt="${esc(altText)}" style="display:block;max-height:72px;max-width:100%;border-radius:8px;border:1px solid var(--border);margin-top:8px;object-fit:contain" onerror="this.style.display='none'" />`
+    : '';
+  return `
+    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+      <input id="${id}" class="k-input" style="flex:1" placeholder="Paste URL  or  upload →"
+        value="${esc(currentVal)}"
+        oninput="document.getElementById('${id}-prev') && (document.getElementById('${id}-prev').src=this.value,document.getElementById('${id}-prev').style.display=this.value?'block':'none')" />
+      <label class="kbtn kbtn-ghost" style="cursor:pointer;white-space:nowrap;margin:0">
+        Upload
+        <input type="file" accept="image/*" style="display:none" onchange="Kpsc.loadIlluFile(this,'${id}')" />
+      </label>
+    </div>
+    <img id="${id}-prev" src="${esc(currentVal)}" alt="${esc(altText)}"
+      style="display:${currentVal ? 'block' : 'none'};max-height:72px;max-width:100%;border-radius:8px;border:1px solid var(--border);margin-top:8px;object-fit:contain"
+      onerror="this.style.display='none'" />`;
+}
+
+function loadIlluFile(input, targetId) {
+  const file = input.files?.[0];
+  if (!file) return;
+  if (file.size > 900 * 1024) {
+    showToast(`Image is ${Math.round(file.size/1024)}KB — please keep files under 900KB.`, 'error');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = e => {
+    const val = e.target.result;
+    const inp = document.getElementById(targetId);
+    const prev = document.getElementById(targetId + '-prev');
+    if (inp) inp.value = val;
+    if (prev) { prev.src = val; prev.style.display = 'block'; }
+  };
+  reader.readAsDataURL(file);
+}
+
 async function savePartnershipSettings() {
   const msg = document.getElementById('ks-partnership-save-msg');
   const goal    = document.getElementById('ks-partnership-goal')?.value.trim() || '';
   const welfare = document.getElementById('ks-welfare-cases')?.value.trim() || '0';
   const waNum   = document.getElementById('ks-wa-number')?.value.trim() || '';
   const logoUrl = document.getElementById('ks-logo-url')?.value.trim() || '';
+  const illuHero   = document.getElementById('ks-illu-hero')?.value.trim() || '';
+  const illuVision = document.getElementById('ks-illu-vision')?.value.trim() || '';
+  const illuStep1  = document.getElementById('ks-illu-step1')?.value.trim() || '';
+  const illuStep2  = document.getElementById('ks-illu-step2')?.value.trim() || '';
+  const illuStep3  = document.getElementById('ks-illu-step3')?.value.trim() || '';
   const res = await apiPost('settings', {
-    partnership_annual_goal:   goal,
-    kpsc_welfare_cases_ytd:    welfare,
+    partnership_annual_goal:     goal,
+    kpsc_welfare_cases_ytd:      welfare,
     partnership_whatsapp_number: waNum,
-    partnership_logo_url:      logoUrl,
+    partnership_logo_url:        logoUrl,
+    partnership_illu_hero:       illuHero,
+    partnership_illu_vision:     illuVision,
+    partnership_illu_step1:      illuStep1,
+    partnership_illu_step2:      illuStep2,
+    partnership_illu_step3:      illuStep3,
   });
   if (res?.error) {
     msg.className = 'k-settings-msg k-msg-error';
@@ -13888,6 +13953,7 @@ window.Kpsc = {
   promoteInsightProject,
   saveKpscOpsSettings,
   savePartnershipSettings,
+  loadIlluFile,
   saveRolePermissions,
   resetRolePermissions,
   partnerTypeLabel,

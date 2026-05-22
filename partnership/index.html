@@ -542,6 +542,10 @@ footer nav a { color: var(--cream); opacity: .85; text-decoration: none; font-we
 footer nav a:hover { opacity: 1; color: var(--gold-soft); }
 footer .meta { color: var(--gold-soft); font-style: italic; font-family: var(--font-serif); font-size: .93rem; }
 footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7); padding-top: 16px; border-top: 1px solid rgba(229,206,133,.18); text-align: center; }
+
+/* ── Filled illustration slot ── */
+.illu-slot.has-image { border: none; background: none; padding: 0; }
+.illu-slot.has-image img { width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius); display: block; }
 </style>
 </head>
 <body>
@@ -572,7 +576,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
     <h1>God's Kingdom <span class="accent">Partnership</span></h1>
     <p class="sub">RCCG Kingdom Parish, Aguleri</p>
 
-    <div class="hero-illu illu-slot" style="aspect-ratio:1/1;max-width:240px;" aria-hidden="true">
+    <div id="illu-hero" class="hero-illu illu-slot" style="aspect-ratio:1/1;max-width:240px;" aria-hidden="true">
       <div>
         <svg viewBox="0 0 200 200" width="160" height="160" aria-hidden="true" style="display:block;margin:0 auto 10px">
           <defs>
@@ -618,7 +622,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 <section class="vision" id="vision">
   <div class="container">
     <div class="vision-grid">
-      <div class="vision-illu illu-slot" aria-hidden="true">
+      <div id="illu-vision" class="vision-illu illu-slot" aria-hidden="true">
         <span class="tag">illustration · hands holding a church</span>
       </div>
       <div class="vision-text">
@@ -648,7 +652,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
     <div class="steps">
       <article class="step">
         <span class="step-num" aria-hidden="true">1</span>
-        <div class="step-illu illu-slot" aria-hidden="true"><span class="tag">icon · person deciding</span></div>
+        <div id="illu-step1" class="step-illu illu-slot" aria-hidden="true"><span class="tag">icon · person deciding</span></div>
         <h3>Determine Amount</h3>
         <p>Decide a monthly pledge you can give consistently — from your heart, not under pressure.</p>
       </article>
@@ -659,7 +663,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 
       <article class="step">
         <span class="step-num" aria-hidden="true">2</span>
-        <div class="step-illu illu-slot" aria-hidden="true"><span class="tag">icon · bank transfer / cash</span></div>
+        <div id="illu-step2" class="step-illu illu-slot" aria-hidden="true"><span class="tag">icon · bank transfer / cash</span></div>
         <h3>Make Payment</h3>
         <p>Direct transfer to the church bank account — or hand it to the KPSC Treasurer only.</p>
       </article>
@@ -670,7 +674,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 
       <article class="step">
         <span class="step-num" aria-hidden="true">3</span>
-        <div class="step-illu illu-slot" aria-hidden="true"><span class="tag">icon · signing / card</span></div>
+        <div id="illu-step3" class="step-illu illu-slot" aria-hidden="true"><span class="tag">icon · signing / card</span></div>
         <h3>Get Card Signed</h3>
         <p>Receive a signature from the KPSC Treasurer on your physical Partnership Card.</p>
       </article>
@@ -1005,6 +1009,30 @@ async function loadData() {
   renderGoal(data);
   renderProjects(data?.projects ?? null, 'active');
   renderPartners(data?.partners ?? null, data?.anonymousPartnersCount ?? null);
+  if (data) applyIllustrations(data);
+}
+
+// ═══ Apply illustration images from settings ═══
+function applyIllustrations(data) {
+  const slots = [
+    { id: 'illu-hero',   url: data.illuHero },
+    { id: 'illu-vision', url: data.illuVision },
+    { id: 'illu-step1',  url: data.illuStep1 },
+    { id: 'illu-step2',  url: data.illuStep2 },
+    { id: 'illu-step3',  url: data.illuStep3 },
+  ];
+  slots.forEach(({ id, url }) => {
+    if (!url) return;
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.add('has-image');
+    el.innerHTML = `<img src="${escHtml(url)}" alt="" loading="lazy" />`;
+  });
+  if (data.logoUrl) {
+    $$('#logo-mark, #footer-logo-mark').forEach(el => {
+      el.innerHTML = `<img src="${escHtml(data.logoUrl)}" alt="RCCG Kingdom Parish" />`;
+    });
+  }
 }
 
 // ═══ Stats ═══

@@ -407,12 +407,13 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;
   display:flex;align-items:center;justify-content:center;padding:20px;}
 .k-modal{background:#fff;border-radius:16px;width:100%;max-width:480px;
-  box-shadow:0 20px 60px rgba(0,0,0,.25);overflow:hidden;}
+  box-shadow:0 20px 60px rgba(0,0,0,.25);
+  max-height:90vh;display:flex;flex-direction:column;overflow:hidden;}
 .k-modal-hdr{display:flex;align-items:center;justify-content:space-between;
-  padding:14px 18px;border-bottom:1px solid var(--border);background:var(--navy-light);}
+  padding:14px 18px;border-bottom:1px solid var(--border);background:var(--navy-light);flex-shrink:0;}
 .k-modal-title{font-weight:700;color:var(--navy);font-size:15px;}
-.k-modal-body{padding:20px 18px;}
-.k-modal-footer{display:flex;gap:10px;padding:14px 18px;border-top:1px solid var(--border);background:#fafafa;}
+.k-modal-body{padding:20px 18px;overflow-y:auto;flex:1;min-height:0;}
+.k-modal-footer{display:flex;gap:10px;padding:14px 18px;border-top:1px solid var(--border);background:#fafafa;flex-shrink:0;}
 /* Enrol button in member row */
 .k-enroll-btn{font-size:14px;}
 .k-enroll-btn.k-enrolled{color:var(--green);border-color:transparent;background:transparent;}
@@ -670,7 +671,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 @media (max-width: 480px) {
   .k-dash-stats { grid-template-columns: repeat(2, 1fr); gap: 8px; }
   .k-stat-val { font-size: 22px; }
-  .k-modal { max-height: 92vh; overflow-y: auto; }
+  .k-modal { max-height: 96vh; }
   .k-rec-table { font-size: 11px; }
   .k-rec-table th, .k-rec-table td { padding: 6px 8px; }
   .k-page { padding: 16px 12px 24px; }
