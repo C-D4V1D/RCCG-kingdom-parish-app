@@ -3214,7 +3214,8 @@ function startNewMeeting() {
   document.querySelectorAll('.ka-nav-item').forEach(b => {
     b.classList.toggle('active', b.dataset.group === 'meetings');
   });
-  document.getElementById('kpsc-back-btn').style.display = '';
+  // Push a history entry so the device back button returns to the meetings list
+  history.pushState({ page: 'meeting', meetingId: null }, '', '#meeting');
   document.getElementById('kpsc-page-title').textContent = 'New Meeting';
   updateFab();
   renderPage('meeting');
@@ -3233,7 +3234,8 @@ async function openMeeting(id) {
   document.querySelectorAll('.ka-nav-item').forEach(b => {
     b.classList.toggle('active', b.dataset.group === 'meetings');
   });
-  document.getElementById('kpsc-back-btn').style.display = '';
+  // Push a history entry so the device back button returns to the meetings list
+  history.pushState({ page: 'meeting', meetingId: id }, '', '#meeting');
   document.getElementById('kpsc-page-title').textContent = 'Meeting Room';
   updateFab();
   renderPage('meeting');
@@ -5910,12 +5912,89 @@ function _updatePaymentTotal() {
 }
 
 async function deletePartnerPayment(paymentId, partnerId) {
-  if (!confirm('Delete this payment record? This will also remove the linked finance entry.')) return;
   const res = await apiDelete(`kpsc-partner-payments/${paymentId}`);
   if (res?.error) { showToast(res.error, 'error'); return; }
   showToast('Payment record deleted.', 'success');
   const year = S._partnerDetailYear || S.partnersYear;
   await loadPartnerData(year);
+  const main = document.getElementById('kpsc-main');
+  if (S.page === 'partnerDetail') renderPartnerDetail(main);
+  else {
+    const list = document.getElementById('kpsc-partners-list');
+    if (list) list.innerHTML = renderPartnersList(canManagePartners());
+  }
+}
+
+function deletePartnerPaymentWithPin(paymentId, partnerId) {
+  requirePin(
+    'Delete Payment Record',
+    'Enter your PIN to delete this payment. The linked finance entry will also be removed.',
+    () => deletePartnerPayment(paymentId, partnerId)
+  );
+}
+
+function editPartnerPaymentWithPin(paymentId, partnerId) {
+  const payment = S.partnerPayments.find(p => p.id === paymentId);
+  if (!payment) { showToast('Payment not found.', 'error'); return; }
+  requirePin(
+    'Edit Payment Record',
+    `Enter your PIN to edit the ${monthName(payment.month)} ${payment.year} payment.`,
+    () => openEditPartnerPaymentModal(payment, partnerId)
+  );
+}
+
+function openEditPartnerPaymentModal(payment, partnerId) {
+  document.getElementById('k-edit-payment-modal')?.remove();
+  const method = String(payment.reference || '').toLowerCase() || 'cash';
+  const modal = document.createElement('div');
+  modal.className = 'k-modal-overlay';
+  modal.id = 'k-edit-payment-modal';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:400px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">✏️ Edit Payment — ${esc(monthName(payment.month))} ${payment.year}</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-edit-payment-modal')?.remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <label class="k-label">Amount (₦)</label>
+        <input id="k-ep-amount" class="k-input" type="number" min="0" step="100" value="${Number(payment.amount || 0)}" />
+        <label class="k-label" style="margin-top:12px">Payment Method</label>
+        <div style="display:flex;gap:12px;margin-top:4px">
+          <label style="display:flex;align-items:center;gap:6px;font-size:14px;cursor:pointer">
+            <input type="radio" name="k-ep-method" value="cash" ${method !== 'transfer' ? 'checked' : ''} /> Cash
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:14px;cursor:pointer">
+            <input type="radio" name="k-ep-method" value="transfer" ${method === 'transfer' ? 'checked' : ''} /> Transfer
+          </label>
+        </div>
+        <label class="k-label" style="margin-top:12px">Notes <span style="font-weight:400;color:var(--text3)">(optional)</span></label>
+        <textarea id="k-ep-notes" class="k-input k-textarea" rows="2">${esc(payment.notes || '')}</textarea>
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-edit-payment-modal')?.remove()">Cancel</button>
+        <button class="kbtn kbtn-primary" id="k-ep-save-btn" onclick="Kpsc.saveEditedPartnerPayment('${payment.id}','${partnerId}','${payment.month}','${payment.year}','${payment.paymentType || 'monthly_pledge'}',this)">Save Changes</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function saveEditedPartnerPayment(paymentId, partnerId, month, year, paymentType, btn) {
+  const amount = Number(document.getElementById('k-ep-amount')?.value || 0);
+  const method = document.querySelector('input[name="k-ep-method"]:checked')?.value || 'cash';
+  const notes = document.getElementById('k-ep-notes')?.value.trim() || '';
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const res = await apiPost('kpsc-partner-payments', {
+    partnerId, year: Number(year), month: Number(month), amount,
+    paymentType, source: 'partnership', paid: true,
+    reference: method, recordedBy: S.user?.name || '', notes,
+  });
+  btn.disabled = false; btn.textContent = orig;
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  document.getElementById('k-edit-payment-modal')?.remove();
+  showToast('Payment updated.', 'success');
+  const yr = S._partnerDetailYear || S.partnersYear;
+  await loadPartnerData(yr);
   const main = document.getElementById('kpsc-main');
   if (S.page === 'partnerDetail') renderPartnerDetail(main);
   else {
@@ -5948,8 +6027,15 @@ async function saveRecordedPayments(partnerId, btn) {
       reference: method,
       recordedBy: S.user?.name || '',
       notes,
+      skipSms: true,  // batch SMS is sent once below instead of per-payment
     });
     if (res?.error) errorCount++;
+  }
+  // Send one combined thank-you SMS for all months instead of one per month
+  if (!errorCount) {
+    apiPost('kpsc-partner-batch-sms', {
+      partnerId, months: selectedMonths, year, amount,
+    }).catch(() => {});  // fire-and-forget; SMS failure must not block UI
   }
   btn.disabled = false;
   btn.textContent = orig;
@@ -6299,14 +6385,23 @@ function renderPartnerDetail(main) {
       ? `<span class="pl-method pl-cash">💵 Cash</span>`
       : method ? `<span class="pl-method pl-cash">${esc(method)}</span>` : '—';
     const dateStr = p.paidAt ? new Date(p.paidAt).toLocaleDateString('en-NG', { day:'numeric', month:'short' }) : '—';
-    const canDel = canManageFinance();
+    const canFin = canManageFinance();
+    const menuId = `pl-ctx-${p.id}`;
+    const ctxMenu = canFin ? `
+      <div style="position:relative;display:inline-block">
+        <button class="k-card-ctx-btn" style="font-size:16px;width:28px;height:28px" onclick="event.stopPropagation();const m=document.getElementById('${menuId}');m.style.display=m.style.display==='block'?'none':'block'">⋮</button>
+        <div id="${menuId}" class="k-card-ctx-menu" style="display:none;right:0;left:auto;min-width:120px" onclick="event.stopPropagation()">
+          <button onclick="document.getElementById('${menuId}').style.display='none';Kpsc.editPartnerPaymentWithPin('${p.id}','${partner.id}')">✏️ Edit</button>
+          <button class="k-ctx-danger" onclick="document.getElementById('${menuId}').style.display='none';Kpsc.deletePartnerPaymentWithPin('${p.id}','${partner.id}')">🗑 Delete</button>
+        </div>
+      </div>` : '';
     return `<tr>
       <td><strong>${monthName(Number(p.month))}</strong></td>
       <td class="pl-amount">₦${Number(p.amount||0).toLocaleString('en-NG')}</td>
       <td>${methodBadge}</td>
       <td style="color:var(--text2)">${esc(p.recordedBy || '—')}</td>
       <td style="color:var(--text3)">${dateStr}</td>
-      <td>${canDel ? `<button class="kbtn kbtn-sm kbtn-danger" style="padding:3px 8px;font-size:11px" onclick="Kpsc.deletePartnerPayment('${p.id}','${partner.id}')">🗑</button>` : ''}</td>
+      <td style="text-align:right">${ctxMenu}</td>
     </tr>`;
   }).join('') : `<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:16px">No payments recorded for ${year}.</td></tr>`;
 
@@ -6397,9 +6492,13 @@ async function renderFinance(main) {
       </div>
       <div class="k-meeting-list">
         ${S.financeEntries.length ? S.financeEntries.map(e => `
-          <div class="k-meeting-card">
+          <div class="k-meeting-card" style="position:relative">
+            ${(canManage || canDelete) ? cardCtxMenu('fin-' + e.id, ...[
+              ...(canManage ? [{ label: '✏️ Edit', onclick: `Kpsc.editFinanceEntryWithPin('${e.id}')` }] : []),
+              ...(canDelete ? [{ label: '🗑 Delete', onclick: `Kpsc.deleteFinanceEntryWithPin('${e.id}')`, danger: true }] : []),
+            ]) : ''}
             <div class="k-mc-top">
-              <div style="flex:1">
+              <div style="flex:1;padding-right:${(canManage || canDelete) ? '32px' : '0'}">
                 <div class="k-mc-title">${esc(catLabel(e.category))} — ₦${Number(e.amount || 0).toLocaleString('en-NG')}</div>
                 <div class="k-mc-meta" style="margin-top:4px">
                   <span>${esc(fmtDate(e.date))}</span>
@@ -6411,7 +6510,6 @@ async function renderFinance(main) {
                 ${e.partnerName ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Partner: ${esc(e.partnerName)}</div>` : ''}
                 ${e.recordedBy ? `<div style="font-size:11px;color:var(--text3)">Recorded by: ${esc(e.recordedBy)}</div>` : ''}
               </div>
-              ${canDelete ? `<button class="kbtn kbtn-sm kbtn-danger" style="flex-shrink:0;align-self:flex-start" onclick="Kpsc.deleteFinanceEntry('${e.id}')">🗑</button>` : ''}
             </div>
           </div>`).join('') : '<div class="k-empty">No entries for the selected period.</div>'}
       </div>
@@ -6450,53 +6548,61 @@ async function openFinanceModal(entryToEdit = null) {
   const incomeCategories = Array.isArray(settingsRes?.kpsc_income_categories) ? settingsRes.kpsc_income_categories : ['partnership_payment','one_time_donation','wealth_development_offering','other_income'];
   const expenseCategories = Array.isArray(settingsRes?.kpsc_expense_categories) ? settingsRes.kpsc_expense_categories : ['projects','welfare','rent','church_support','committee_operations'];
 
-  const incomeOpts = incomeCategories.map(c=>`<option value="${esc(c)}">${esc(catLabel(c))}</option>`).join('');
-  const expenseOpts = expenseCategories.map(c=>`<option value="${esc(c)}">${esc(catLabel(c))}</option>`).join('');
+  const e = entryToEdit;
+  const isEdit = !!e?.id;
+  const incomeOpts = incomeCategories.map(c=>`<option value="${esc(c)}" ${(e?.category||''===c)?'selected':''}>${esc(catLabel(c))}</option>`).join('');
+  const expenseOpts = expenseCategories.map(c=>`<option value="${esc(c)}" ${(e?.category||''===c)?'selected':''}>${esc(catLabel(c))}</option>`).join('');
+  const isExpense = (e?.entryType || '') === 'expense';
+  const catOpts = isExpense ? expenseOpts : incomeOpts;
 
   const modal = document.createElement('div');
   modal.id = 'kpsc-finance-modal';
   modal.className = 'k-modal-overlay';
   modal.innerHTML = `
     <div class="k-modal">
-      <div class="k-modal-hdr"><span class="k-modal-title">New Finance Entry</span><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeFinanceModal()">✕</button></div>
+      <div class="k-modal-hdr"><span class="k-modal-title">${isEdit ? 'Edit Finance Entry' : 'New Finance Entry'}</span><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeFinanceModal()">✕</button></div>
       <div class="k-modal-body">
-        <div class="kf-scan-block">
+        ${!isEdit ? `<div class="kf-scan-block">
           <input type="file" id="kf-receipt-file" accept="image/*" capture="environment" style="display:none" onchange="Kpsc.scanReceiptPhoto(this)" />
           <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('kf-receipt-file').click()">📷 Scan Receipt</button>
           <span id="kf-scan-status" class="k-hint" style="margin-left:8px"></span>
           <div id="kf-receipt-preview"></div>
-        </div>
+        </div>` : ''}
         <label class="k-label">Date</label>
-        <input id="kf-date" type="date" class="k-input" value="${today()}" />
+        <input id="kf-date" type="date" class="k-input" value="${esc(e?.date || today())}" />
         <label class="k-label">Entry Type</label>
         <select id="kf-type" class="k-input" onchange="Kpsc.updateFinanceCategoryOptions()">
-          <option value="income">Income</option>
-          <option value="expense">Expense</option>
+          <option value="income" ${!isExpense?'selected':''}>Income</option>
+          <option value="expense" ${isExpense?'selected':''}>Expense</option>
         </select>
         <label class="k-label">Category</label>
-        <select id="kf-category" class="k-input">
-          ${incomeOpts}
-        </select>
+        <select id="kf-category" class="k-input">${catOpts}</select>
         <label class="k-label">Amount (₦)</label>
-        <input id="kf-amount" type="number" min="0" class="k-input" placeholder="0" />
+        <input id="kf-amount" type="number" min="0" class="k-input" placeholder="0" value="${e?.amount != null ? Number(e.amount) : ''}" />
         <label class="k-label">Payment Method</label>
         <select id="kf-method" class="k-input">
-          <option value="cash">Cash</option>
-          <option value="bank_transfer">Bank Transfer</option>
-          <option value="pos">POS</option>
-          <option value="cheque">Cheque</option>
-          <option value="other">Other</option>
+          <option value="cash" ${(e?.paymentMethod||'')==='cash'?'selected':''}>Cash</option>
+          <option value="bank_transfer" ${(e?.paymentMethod||'')==='bank_transfer'?'selected':''}>Bank Transfer</option>
+          <option value="pos" ${(e?.paymentMethod||'')==='pos'?'selected':''}>POS</option>
+          <option value="cheque" ${(e?.paymentMethod||'')==='cheque'?'selected':''}>Cheque</option>
+          <option value="other" ${(e?.paymentMethod||'')==='other'?'selected':''}>Other</option>
         </select>
         <label class="k-label">Reference</label>
-        <input id="kf-ref" class="k-input" placeholder="e.g. receipt number, transaction ID" />
+        <input id="kf-ref" class="k-input" placeholder="e.g. receipt number, transaction ID" value="${esc(e?.reference||'')}" />
         <label class="k-label">Narration</label>
-        <textarea id="kf-note" class="k-input k-textarea" style="min-height:70px" placeholder="Brief description of this transaction…"></textarea>
+        <textarea id="kf-note" class="k-input k-textarea" style="min-height:70px" placeholder="Brief description of this transaction…">${esc(e?.narration||'')}</textarea>
       </div>
-      <div class="k-modal-footer"><button class="kbtn kbtn-primary" onclick="Kpsc.saveFinanceEntry(this)">Save Entry</button></div>
+      <div class="k-modal-footer"><button class="kbtn kbtn-primary" onclick="Kpsc.saveFinanceEntry(this)">${isEdit ? 'Save Changes' : 'Save Entry'}</button></div>
     </div>`;
   document.body.appendChild(modal);
   modal._incomeOpts = incomeOpts;
   modal._expenseOpts = expenseOpts;
+  modal._editId = e?.id || null;
+  // After inserting, set the category <select> to the right value
+  if (isEdit && e?.category) {
+    const catEl = document.getElementById('kf-category');
+    if (catEl) catEl.value = e.category;
+  }
 }
 
 // Pure helper — maps raw OCR receipt response → form-field values.
@@ -6605,7 +6711,9 @@ function updateFinanceCategoryOptions() {
 
 async function saveFinanceEntry(btn) {
   btn.disabled = true;
-  const res = await apiPost('kpsc-finance', {
+  const modal = document.getElementById('kpsc-finance-modal');
+  const editId = modal?._editId || null;
+  const payload = {
     date: document.getElementById('kf-date')?.value || '',
     entryType: document.getElementById('kf-type')?.value || '',
     category: document.getElementById('kf-category')?.value.trim() || '',
@@ -6614,7 +6722,10 @@ async function saveFinanceEntry(btn) {
     reference: document.getElementById('kf-ref')?.value.trim() || '',
     narration: document.getElementById('kf-note')?.value.trim() || '',
     recordedBy: S.user?.name || '',
-  });
+  };
+  const res = editId
+    ? await apiPut(`kpsc-finance/${editId}`, payload)
+    : await apiPost('kpsc-finance', payload);
   if (res?.error) {
     showToast(res.error, 'error');
     btn.disabled = false;
@@ -6622,7 +6733,7 @@ async function saveFinanceEntry(btn) {
   }
   closeFinanceModal();
   await renderFinance(document.getElementById('kpsc-main'));
-  showToast('Finance entry saved', 'success');
+  showToast(editId ? 'Finance entry updated.' : 'Finance entry saved.', 'success');
 }
 
 async function setFinanceYear(year) {
@@ -6635,12 +6746,34 @@ async function setFinanceMonth(month) {
   await renderFinance(document.getElementById('kpsc-main'));
 }
 
+function editFinanceEntryWithPin(id) {
+  const entry = S.financeEntries.find(e => e.id === id);
+  if (!entry) { showToast('Entry not found.', 'error'); return; }
+  requirePin('Edit Finance Entry', 'Enter your PIN to edit this finance entry.', () => openFinanceModal(entry));
+}
+
+function deleteFinanceEntryWithPin(id) {
+  if (!canDeleteFinanceEntries()) {
+    showToast('Only the Acting Chairman or IT Administrator may delete finance entries.', 'error');
+    return;
+  }
+  requirePin(
+    'Delete Finance Entry',
+    'Enter your PIN to permanently delete this entry. This action cannot be undone.',
+    async () => {
+      const res = await apiDelete(`kpsc-finance/${id}`);
+      if (res?.error) { showToast(res.error, 'error'); return; }
+      await renderFinance(document.getElementById('kpsc-main'));
+      showToast('Entry deleted.', 'success');
+    }
+  );
+}
+
 async function deleteFinanceEntry(id) {
   if (!canDeleteFinanceEntries()) {
     showToast('Only the Acting Chairman or IT Administrator may delete finance entries.', 'error');
     return;
   }
-  if (!confirm('Delete this finance entry? This is reserved for audited correction cases only.')) return;
   const res = await apiDelete(`kpsc-finance/${id}`);
   if (res?.error) { showToast(res.error, 'error'); return; }
   await renderFinance(document.getElementById('kpsc-main'));
@@ -9059,8 +9192,9 @@ async function renderSettings(main) {
   const meetingCadence = res?.kpsc_meeting_cadence || 'none';
   S.kpscMeetingCadence = meetingCadence;
   // Termii SMS settings
-  const termiiApiKey       = res?.kpsc_termii_api_key    || '';
-  const termiiSenderId     = res?.kpsc_termii_sender_id  || 'RCCG-KP';
+  const termiiApiKey         = res?.kpsc_termii_api_key             || '';
+  const termiiSenderId       = res?.kpsc_termii_sender_id           || 'RCCG-KP';
+  const termiiPartnerSenderId = res?.kpsc_termii_partner_sender_id  || '';
   const termiiWelcome      = res?.kpsc_termii_welcome_sms  !== '0';
   const termiiPayment      = res?.kpsc_termii_payment_sms  !== '0';
   const termiiNewMonth     = res?.kpsc_termii_newmonth_sms !== '0';
@@ -9233,10 +9367,17 @@ async function renderSettings(main) {
         </div>
 
         <div class="k-form-group">
-          <label class="k-label">Sender ID</label>
+          <label class="k-label">Sender ID (Members &amp; Staff)</label>
           <input type="text" id="ks-termii-sender" class="k-input" maxlength="11"
             placeholder="RCCG-KP" value="${esc(termiiSenderId)}" />
-          <p class="k-hint">Alphanumeric sender name shown to recipients (max 11 chars). Must be registered with Termii for your account.</p>
+          <p class="k-hint">Alphanumeric sender name for meeting, pre-meeting, action-item, and deadline SMS (max 11 chars). Must be registered with Termii.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Partner Sender ID <span style="font-weight:400;color:var(--text3)">(optional)</span></label>
+          <input type="text" id="ks-termii-partner-sender" class="k-input" maxlength="11"
+            placeholder="e.g. KPSC-PRTNR" value="${esc(termiiPartnerSenderId)}" />
+          <p class="k-hint">Separate sender ID for partner welcome, payment, reminder, and anniversary SMS. Falls back to the Sender ID above if left blank.</p>
         </div>
 
         <div class="k-form-group">
@@ -9401,6 +9542,8 @@ async function renderSettings(main) {
           <label class="k-label">🙏 Thank-you SMS (partner payment)</label>
           <textarea id="ks-sms-payment" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="Dear {{name}}, we have received your {{month}} partnership pledge{{amtText}} and we are so grateful! 🙏 Your faithfulness to God's work here at RCCG Kingdom Parish is a blessing to us all. May the Lord be your reward — pressed down, shaken together, and running over. Your seed is sown in good ground. God bless you! — RCCG Kingdom Parish">${esc(smsPaymentText)}</textarea>
           <div class="k-sms-counter" id="sms-ctr-ks-sms-payment"></div>
+          <p class="k-hint" style="margin-top:4px">Variables: <code>{{name}}</code> · <code>{{month}}</code> · <code>{{amtText}}</code><br>
+          When multiple months are paid at once, <code>{{month}}</code> automatically becomes a range e.g. <em>"January–April 2026 (4 months)"</em> and <code>{{amtText}}</code> shows the total e.g. <em>" totalling ₦20,000"</em> — one SMS is sent for the whole batch.</p>
         </div>
         <div class="k-form-group">
           <label class="k-label">🎉 Happy New Month SMS (1st of month)</label>
@@ -9600,21 +9743,23 @@ async function clearAiKeys() {
 
 async function saveSmsSettings() {
   const msg = document.getElementById('ks-termii-save-msg');
-  const apiKey   = document.getElementById('ks-termii-key')?.value.trim()    || '';
-  const senderId = document.getElementById('ks-termii-sender')?.value.trim() || 'RCCG-KP';
+  const apiKey         = document.getElementById('ks-termii-key')?.value.trim()            || '';
+  const senderId       = document.getElementById('ks-termii-sender')?.value.trim()         || 'RCCG-KP';
+  const partnerSenderId = document.getElementById('ks-termii-partner-sender')?.value.trim() || '';
   const welcome  = document.getElementById('ks-termii-welcome')?.checked  ? '1' : '0';
   const payment  = document.getElementById('ks-termii-payment')?.checked  ? '1' : '0';
   const newMonth = document.getElementById('ks-termii-newmonth')?.checked ? '1' : '0';
   const remDay   = String(parseInt(document.getElementById('ks-termii-rem-day')?.value  || '10', 10) || 10);
   const remFreq  = document.getElementById('ks-termii-rem-freq')?.value || 'monthly';
   const res = await apiPost('settings', {
-    kpsc_termii_api_key:      apiKey,
-    kpsc_termii_sender_id:    senderId,
-    kpsc_termii_welcome_sms:  welcome,
-    kpsc_termii_payment_sms:  payment,
-    kpsc_termii_newmonth_sms: newMonth,
-    kpsc_termii_reminder_day: remDay,
-    kpsc_termii_reminder_freq: remFreq,
+    kpsc_termii_api_key:              apiKey,
+    kpsc_termii_sender_id:            senderId,
+    kpsc_termii_partner_sender_id:    partnerSenderId,
+    kpsc_termii_welcome_sms:          welcome,
+    kpsc_termii_payment_sms:          payment,
+    kpsc_termii_newmonth_sms:         newMonth,
+    kpsc_termii_reminder_day:         remDay,
+    kpsc_termii_reminder_freq:        remFreq,
   });
   if (msg) {
     if (res?.error) {
@@ -10628,7 +10773,40 @@ async function previewAudioNotesPhoto(input) {
   const total = dataUrls.length;
   const thumbs = dataUrls.map((url, idx) => `<img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)" alt="Audio notes photo ${idx + 1} of ${total}" />`).join('');
   const cols = files.length > 1 ? 'grid-template-columns:repeat(auto-fit,minmax(140px,1fr));' : '';
-  preview.innerHTML = `<div style="display:grid;${cols}gap:10px">${thumbs}</div>`;
+  preview.innerHTML = `
+    <div style="display:grid;${cols}gap:10px;margin-bottom:10px">${thumbs}</div>
+    <div class="k-room-actions">
+      <button class="kbtn kbtn-primary kbtn-sm" onclick="Kpsc.ocrNotesAndAppend(this)">📝 Extract text with AI</button>
+    </div>
+    <div id="km-notes-ocr-status" style="margin-top:8px"></div>`;
+}
+
+async function ocrNotesAndAppend(btn) {
+  const notesInput = document.getElementById('km-audio-notes-photo');
+  const files = getSelectedImageFiles(notesInput);
+  if (!files.length) { showToast('No notes photos selected.', 'warn'); return; }
+  const statusEl = document.getElementById('km-notes-ocr-status');
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Extracting…';
+  if (statusEl) statusEl.innerHTML = `<div style="color:var(--text2);font-size:13px">🔍 Extracting text from ${files.length} photo${files.length > 1 ? 's' : ''}…</div>`;
+  try {
+    const ocrRes = await ocrNotesImages(files);
+    const ocrText = String(ocrRes?.transcript || '').trim();
+    if (!ocrText) {
+      if (statusEl) statusEl.innerHTML = `<div class="k-error-box">Could not extract text from the notes photo${files.length > 1 ? 's' : ''}. Make sure the handwriting is clear and well-lit.</div>`;
+    } else {
+      appendTranscriptText(`${NOTES_SEPARATOR}${ocrText}`);
+      const count = `${ocrRes?.successCount || files.length}/${files.length}`;
+      if (statusEl) statusEl.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:10px;font-size:13px;color:#065f46">✓ Notes text extracted (${count} photo${files.length > 1 ? 's' : ''}) and added to the transcript draft.</div>`;
+      showToast('Notes text extracted and added to draft.', 'success');
+    }
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = `<div class="k-error-box">OCR failed: ${esc(e?.message || String(e))}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
 }
 
 // ── MEETING LIVE RECORDING — also upload notes ────────────────────
@@ -13356,6 +13534,10 @@ window.Kpsc = {
   _updatePaymentTotal,
   saveRecordedPayments,
   deletePartnerPayment,
+  deletePartnerPaymentWithPin,
+  editPartnerPaymentWithPin,
+  openEditPartnerPaymentModal,
+  saveEditedPartnerPayment,
   requirePin,
   _submitPinConfirm,
   updateSmsCounter,
@@ -13368,6 +13550,8 @@ window.Kpsc = {
   setFinanceYear,
   setFinanceMonth,
   deleteFinanceEntry,
+  editFinanceEntryWithPin,
+  deleteFinanceEntryWithPin,
   runReconciliation,
   sendBulkReminders,
   copyReminderMessage,
@@ -13458,6 +13642,7 @@ window.Kpsc = {
   previewAudioFile,
   transcribeAudioFile,
   previewAudioNotesPhoto,
+  ocrNotesAndAppend,
   applyDiarizedTranscript,
   applyDiarizedTranscriptRaw,
   // Meeting - live recording notes upload
@@ -13552,13 +13737,25 @@ document.addEventListener('DOMContentLoaded', init);
 
 window.addEventListener('popstate', e => {
   const page = e.state?.page || window.location.hash.replace('#', '') || 'dashboard';
-  if (page && page !== S.page) {
-    const mapping = PAGE_TO_GROUP[page] || { group: 'home', subTab: null };
-    S.page   = page;
-    S.group  = mapping.group;
-    S.subTab = mapping.subTab;
-    document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.toggle('active', b.dataset.group === S.group));
-    updateFab();
-    renderPage(page);
+  if (!page || page === S.page) return;
+
+  // Meeting room: re-open the specific meeting if an ID is stored in history state
+  if (page === 'meeting') {
+    const meetingId = e.state?.meetingId;
+    if (meetingId) {
+      openMeeting(meetingId);
+    } else {
+      // Was a new-meeting session — just go back to the archive instead
+      navigate('archive', { replace: true });
+    }
+    return;
   }
+
+  const mapping = PAGE_TO_GROUP[page] || { group: 'home', subTab: null };
+  S.page   = page;
+  S.group  = mapping.group;
+  S.subTab = mapping.subTab;
+  document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.toggle('active', b.dataset.group === S.group));
+  updateFab();
+  renderPage(page);
 });
