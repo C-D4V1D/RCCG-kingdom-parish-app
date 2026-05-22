@@ -3214,6 +3214,8 @@ function startNewMeeting() {
   document.querySelectorAll('.ka-nav-item').forEach(b => {
     b.classList.toggle('active', b.dataset.group === 'meetings');
   });
+  // Push a history entry so the device back button returns to the meetings list
+  history.pushState({ page: 'meeting', meetingId: null }, '', '#meeting');
   document.getElementById('kpsc-page-title').textContent = 'New Meeting';
   updateFab();
   renderPage('meeting');
@@ -3232,6 +3234,8 @@ async function openMeeting(id) {
   document.querySelectorAll('.ka-nav-item').forEach(b => {
     b.classList.toggle('active', b.dataset.group === 'meetings');
   });
+  // Push a history entry so the device back button returns to the meetings list
+  history.pushState({ page: 'meeting', meetingId: id }, '', '#meeting');
   document.getElementById('kpsc-page-title').textContent = 'Meeting Room';
   updateFab();
   renderPage('meeting');
@@ -13733,13 +13737,25 @@ document.addEventListener('DOMContentLoaded', init);
 
 window.addEventListener('popstate', e => {
   const page = e.state?.page || window.location.hash.replace('#', '') || 'dashboard';
-  if (page && page !== S.page) {
-    const mapping = PAGE_TO_GROUP[page] || { group: 'home', subTab: null };
-    S.page   = page;
-    S.group  = mapping.group;
-    S.subTab = mapping.subTab;
-    document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.toggle('active', b.dataset.group === S.group));
-    updateFab();
-    renderPage(page);
+  if (!page || page === S.page) return;
+
+  // Meeting room: re-open the specific meeting if an ID is stored in history state
+  if (page === 'meeting') {
+    const meetingId = e.state?.meetingId;
+    if (meetingId) {
+      openMeeting(meetingId);
+    } else {
+      // Was a new-meeting session — just go back to the archive instead
+      navigate('archive', { replace: true });
+    }
+    return;
   }
+
+  const mapping = PAGE_TO_GROUP[page] || { group: 'home', subTab: null };
+  S.page   = page;
+  S.group  = mapping.group;
+  S.subTab = mapping.subTab;
+  document.querySelectorAll('.ka-nav-item').forEach(b => b.classList.toggle('active', b.dataset.group === S.group));
+  updateFab();
+  renderPage(page);
 });
