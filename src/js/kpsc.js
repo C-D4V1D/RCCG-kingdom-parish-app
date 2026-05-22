@@ -6033,6 +6033,29 @@ function _updatePaymentTotal() {
   totalEl.innerHTML = `${count} month${count > 1 ? 's' : ''} × ₦${amount.toLocaleString('en-NG')} = <span style="color:var(--green,#059669)">₦${total.toLocaleString('en-NG')} total</span><br><span style="font-size:11px;font-weight:400;color:var(--text2)">${monthNames}</span>`;
 }
 
+function _handleIllustrationUpload(targetInputId, fileInput, targetW, targetH) {
+  const file = fileInput.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = targetW;
+      canvas.height = targetH;
+      const ctx = canvas.getContext('2d');
+      // Cover-fit: scale to fill the canvas without distorting
+      const scale = Math.max(targetW / img.width, targetH / img.height);
+      const sw = img.width * scale, sh = img.height * scale;
+      ctx.drawImage(img, (targetW - sw) / 2, (targetH - sh) / 2, sw, sh);
+      document.getElementById(targetInputId).value = canvas.toDataURL('image/jpeg', 0.82);
+      fileInput.value = '';
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
 async function deletePartnerPayment(paymentId, partnerId) {
   const res = await apiDelete(`kpsc-partner-payments/${paymentId}`);
   if (res?.error) { showToast(res.error, 'error'); return; }
@@ -9903,30 +9926,11 @@ async function renderSettings(main) {
           <p class="k-label" style="font-size:13px;font-weight:700;margin-bottom:4px">Illustration Images</p>
           <p class="k-hint" style="margin-bottom:12px">Paste public image URLs for each slot on the landing page. Leave empty to show the default placeholder. Host images on Cloudinary, Google Drive (direct link), or any public CDN.</p>
 
-          <label class="k-label">Slot 1 — Hero (cross + laurel wreath) · recommended ~400×400 px square</label>
-          <input id="ks-illu-hero" class="k-input" type="url"
-            placeholder="https://example.com/hero-cross.png"
-            value="${esc(res?.partnership_illu_hero || '')}" />
-
-          <label class="k-label" style="margin-top:10px">Slot 2 — Vision (hands holding a church) · recommended ~600×360 px landscape</label>
-          <input id="ks-illu-vision" class="k-input" type="url"
-            placeholder="https://example.com/vision-church.png"
-            value="${esc(res?.partnership_illu_vision || '')}" />
-
-          <label class="k-label" style="margin-top:10px">Slot 3 — Step 1: Decide (person deciding) · recommended ~400×240 px</label>
-          <input id="ks-illu-step1" class="k-input" type="url"
-            placeholder="https://example.com/step1-decide.png"
-            value="${esc(res?.partnership_illu_step1 || '')}" />
-
-          <label class="k-label" style="margin-top:10px">Slot 4 — Step 2: Pay (bank transfer / cash) · recommended ~400×240 px</label>
-          <input id="ks-illu-step2" class="k-input" type="url"
-            placeholder="https://example.com/step2-pay.png"
-            value="${esc(res?.partnership_illu_step2 || '')}" />
-
-          <label class="k-label" style="margin-top:10px">Slot 5 — Step 3: Get Card Signed · recommended ~400×240 px</label>
-          <input id="ks-illu-step3" class="k-input" type="url"
-            placeholder="https://example.com/step3-card.png"
-            value="${esc(res?.partnership_illu_step3 || '')}" />
+          ${_illuField('ks-illu-hero',   res?.partnership_illu_hero,   'Slot 1 — Hero (cross + laurel wreath)',   400, 400, 'square')}
+          ${_illuField('ks-illu-vision', res?.partnership_illu_vision, 'Slot 2 — Vision (hands holding a church)', 600, 360, 'landscape')}
+          ${_illuField('ks-illu-step1',  res?.partnership_illu_step1,  'Slot 3 — Step 1: Decide',                  400, 240, '')}
+          ${_illuField('ks-illu-step2',  res?.partnership_illu_step2,  'Slot 4 — Step 2: Pay',                     400, 240, '')}
+          ${_illuField('ks-illu-step3',  res?.partnership_illu_step3,  'Slot 5 — Step 3: Get Card Signed',         400, 240, '')}
         </div>
 
         <div id="ks-partnership-save-msg" class="k-settings-msg" style="display:none"></div>
@@ -10353,6 +10357,29 @@ async function saveKpscOpsSettings() {
   }
   msg.style.display = 'block';
   setTimeout(() => { if(msg) msg.style.display = 'none'; }, 3000);
+}
+
+function _illuField(id, value, label, w, h, shape) {
+  const hasImage = String(value || '').trim().length > 0;
+  const sizeHint = shape ? `~${w}×${h} px ${shape}` : `~${w}×${h} px`;
+  const thumbHtml = hasImage
+    ? `<div style="margin-top:6px"><img src="${esc(value)}" alt="preview" style="max-height:64px;max-width:120px;border-radius:6px;border:1px solid var(--border);object-fit:cover;" /></div>`
+    : '';
+  return `
+    <div style="margin-top:10px">
+      <label class="k-label">${esc(label)} · ${esc(sizeHint)}</label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input id="${id}" class="k-input" type="text" style="flex:1;min-width:180px"
+          placeholder="https://example.com/image.jpg"
+          value="${esc(value || '')}" />
+        <label class="kbtn kbtn-sm" style="cursor:pointer;white-space:nowrap" title="Upload image from device">
+          📁 Upload
+          <input type="file" accept="image/*" style="display:none"
+            onchange="Kpsc._handleIllustrationUpload('${id}', this, ${w}, ${h})" />
+        </label>
+      </div>
+      ${thumbHtml}
+    </div>`;
 }
 
 async function savePartnershipSettings() {
@@ -13877,6 +13904,7 @@ window.Kpsc = {
   openRecordPaymentModal,
   _togglePaymentChip,
   _updatePaymentTotal,
+  _handleIllustrationUpload,
   saveRecordedPayments,
   deletePartnerPayment,
   deletePartnerPaymentWithPin,

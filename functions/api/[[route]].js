@@ -4705,32 +4705,37 @@ async function getPartnershipPublic(DB) {
     step3: String(smap.partnership_illu_step3  || '').trim(),
   };
 
-  // Active partner count
+  // Active God's Kingdom partner count only
   const activeRow = await DB.prepare(
-    `SELECT COUNT(*) AS cnt FROM kpsc_partners WHERE status='active' AND (deleted_at IS NULL OR deleted_at='')`
+    `SELECT COUNT(*) AS cnt FROM kpsc_partners WHERE status='active' AND partnership_type='gods_kingdom_partner' AND (deleted_at IS NULL OR deleted_at='')`
   ).first();
   const activePartners = activeRow?.cnt ?? 0;
 
-  // Total contributed YTD (sum of partner payments for current year)
+  // Total contributed YTD — God's Kingdom partners only
   const ytdRow = await DB.prepare(
-    `SELECT COALESCE(SUM(amount),0) AS total FROM kpsc_partner_payments WHERE year=? AND paid=1`
+    `SELECT COALESCE(SUM(p.amount),0) AS total
+     FROM kpsc_partner_payments p
+     JOIN kpsc_partners kp ON kp.id = p.partner_id
+     WHERE p.year=? AND p.paid=1
+       AND kp.partnership_type='gods_kingdom_partner'
+       AND (p.deleted_at IS NULL OR p.deleted_at='')`
   ).bind(year).first();
   const totalContributedYTD = ytdRow?.total ?? 0;
 
-  // Anonymous partner count (active, public_listing = 0 or column missing)
+  // Anonymous God's Kingdom partner count (active, public_listing = 0 or column missing)
   let anonymousPartnersCount = 0;
   try {
     const anonRow = await DB.prepare(
-      `SELECT COUNT(*) AS cnt FROM kpsc_partners WHERE status='active' AND (deleted_at IS NULL OR deleted_at='') AND (public_listing IS NULL OR public_listing=0)`
+      `SELECT COUNT(*) AS cnt FROM kpsc_partners WHERE status='active' AND partnership_type='gods_kingdom_partner' AND (deleted_at IS NULL OR deleted_at='') AND (public_listing IS NULL OR public_listing=0)`
     ).first();
     anonymousPartnersCount = anonRow?.cnt ?? 0;
   } catch { anonymousPartnersCount = activePartners; }
 
-  // Public partner names (only those who opted in)
+  // Public God's Kingdom partner names (only those who opted in)
   let partners = [];
   try {
     const { results: pRows } = await DB.prepare(
-      `SELECT full_name, location FROM kpsc_partners WHERE status='active' AND public_listing=1 AND (deleted_at IS NULL OR deleted_at='') ORDER BY full_name COLLATE NOCASE`
+      `SELECT full_name, location FROM kpsc_partners WHERE status='active' AND partnership_type='gods_kingdom_partner' AND public_listing=1 AND (deleted_at IS NULL OR deleted_at='') ORDER BY full_name COLLATE NOCASE`
     ).all();
     partners = (pRows || []).map(r => ({ name: r.full_name, location: r.location || '' }));
   } catch { partners = []; }
