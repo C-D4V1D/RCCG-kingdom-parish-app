@@ -926,6 +926,16 @@ export async function onRequest(context) {
     // ── B6: scheduled_for field on ai-secretary-meetings ───────
     // (handled inline in updateAiSecretaryMeeting via body.scheduledFor)
 
+    // ── /api/partnership-og-image  (public — serves stored OG image) ──
+    if (route === 'partnership-og-image' && method === 'GET') {
+      return await serveStoredImage(DB, 'partnership_og_image', '/icons/og-partnership.png');
+    }
+
+    // ── /api/partnership-favicon  (public — serves stored favicon) ────
+    if (route === 'partnership-favicon' && method === 'GET') {
+      return await serveStoredImage(DB, 'partnership_favicon', '/kpsc/icons/icon.svg');
+    }
+
     return err(`Route not found: ${method} /api/${path}`, 404);
 
   } catch (e) {
@@ -1503,6 +1513,10 @@ async function handleInit(DB) {
     partnership_illu_step1:    '',   // How It Works Step 1 illustration URL
     partnership_illu_step2:    '',   // How It Works Step 2 illustration URL
     partnership_illu_step3:    '',   // How It Works Step 3 illustration URL
+    partnership_og_title:      '',   // Custom OG/preview title
+    partnership_og_description:'',   // Custom OG/preview description
+    partnership_og_image:      '',   // Custom OG image (data URL or external URL)
+    partnership_favicon:       '',   // Custom favicon (data URL or external URL)
   };
   for (const [key, value] of Object.entries(defaultSettings)) {
     await DB.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).bind(key, value).run();
@@ -4684,12 +4698,34 @@ async function revokeAiSecretaryMeetingPublicLink(DB, id, auth) {
 }
 
 // ── Partnership public endpoint ─────────────────────────────────────
+async function serveStoredImage(DB, key, fallbackPath) {
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key=?`).bind(key).first();
+    const val = String(row?.value || '').trim();
+    if (!val) return Response.redirect(fallbackPath, 302);
+    if (val.startsWith('data:')) {
+      const match = val.match(/^data:([^;]+);base64,(.+)$/s);
+      if (!match) return Response.redirect(fallbackPath, 302);
+      const mime = match[1];
+      const binaryStr = atob(match[2]);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+      return new Response(bytes, {
+        headers: { 'Content-Type': mime, 'Cache-Control': 'public, max-age=3600' },
+      });
+    }
+    return Response.redirect(val, 302);
+  } catch {
+    return Response.redirect(fallbackPath, 302);
+  }
+}
+
 async function getPartnershipPublic(DB) {
   const year = new Date().getFullYear();
 
   // Load partnership settings (annual goal, logo, welfare count)
   const settingsRows = await DB.prepare(
-    `SELECT key, value FROM settings WHERE key IN ('partnership_annual_goal','partnership_logo_url','kpsc_welfare_cases_ytd','partnership_whatsapp_number','partnership_illu_hero','partnership_illu_vision','partnership_illu_step1','partnership_illu_step2','partnership_illu_step3')`
+    `SELECT key, value FROM settings WHERE key IN ('partnership_annual_goal','partnership_logo_url','kpsc_welfare_cases_ytd','partnership_whatsapp_number','partnership_illu_hero','partnership_illu_vision','partnership_illu_step1','partnership_illu_step2','partnership_illu_step3','partnership_favicon')`
   ).all();
   const smap = {};
   (settingsRows.results || []).forEach(r => { smap[r.key] = r.value; });
@@ -4704,6 +4740,11 @@ async function getPartnershipPublic(DB) {
     step2: String(smap.partnership_illu_step2  || '').trim(),
     step3: String(smap.partnership_illu_step3  || '').trim(),
   };
+  const rawFav   = String(smap.partnership_favicon || '').trim();
+  // For data URL favicons, point the JS to the serving endpoint
+  const faviconUrl = rawFav
+    ? (rawFav.startsWith('data:') ? '/api/partnership-favicon' : rawFav)
+    : '';
 
   // Active God's Kingdom partner count only
   const activeRow = await DB.prepare(
@@ -4764,6 +4805,7 @@ async function getPartnershipPublic(DB) {
     welfareCasesSupported: welfareCases,
     annualGoal,
     logoUrl,
+    faviconUrl,
     illustrations,
     anonymousPartnersCount,
     partners,

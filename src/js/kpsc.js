@@ -6033,7 +6033,7 @@ function _updatePaymentTotal() {
   totalEl.innerHTML = `${count} month${count > 1 ? 's' : ''} × ₦${amount.toLocaleString('en-NG')} = <span style="color:var(--green,#059669)">₦${total.toLocaleString('en-NG')} total</span><br><span style="font-size:11px;font-weight:400;color:var(--text2)">${monthNames}</span>`;
 }
 
-function _handleIllustrationUpload(targetInputId, fileInput, targetW, targetH) {
+function _handleIllustrationUpload(targetInputId, fileInput, targetW, targetH, quality = 0.82) {
   const file = fileInput.files[0];
   if (!file) return;
   const reader = new FileReader();
@@ -6048,7 +6048,7 @@ function _handleIllustrationUpload(targetInputId, fileInput, targetW, targetH) {
       const scale = Math.max(targetW / img.width, targetH / img.height);
       const sw = img.width * scale, sh = img.height * scale;
       ctx.drawImage(img, (targetW - sw) / 2, (targetH - sh) / 2, sw, sh);
-      document.getElementById(targetInputId).value = canvas.toDataURL('image/jpeg', 0.82);
+      document.getElementById(targetInputId).value = canvas.toDataURL('image/jpeg', quality);
       fileInput.value = '';
     };
     img.src = e.target.result;
@@ -9933,6 +9933,29 @@ async function renderSettings(main) {
           ${_illuField('ks-illu-step3',  res?.partnership_illu_step3,  'Slot 5 — Step 3: Get Card Signed',         400, 240, '')}
         </div>
 
+        <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:14px">
+          <p class="k-label" style="font-size:13px;font-weight:700;margin-bottom:4px">Link Preview Card (Open Graph)</p>
+          <p class="k-hint" style="margin-bottom:12px">Controls the card that appears when someone shares the <strong>/partnership/</strong> link on WhatsApp, Facebook, iMessage, etc. Injected server-side so bots see the right content.</p>
+
+          <label class="k-label">Preview Title</label>
+          <input id="ks-og-title" class="k-input" type="text"
+            placeholder="God's Kingdom Partnership — RCCG Kingdom Parish, Aguleri"
+            value="${esc(res?.partnership_og_title || '')}" />
+
+          <label class="k-label" style="margin-top:10px">Preview Description</label>
+          <textarea id="ks-og-desc" class="k-input" rows="2" style="resize:vertical"
+            placeholder="A monthly pledge to build our church and carry our members…">${esc(res?.partnership_og_description || '')}</textarea>
+
+          ${_illuField('ks-og-image', res?.partnership_og_image, 'Preview Image', 1200, 630, '1200×630 recommended')}
+          <p class="k-hint" style="margin-top:4px">💡 For large photos, paste an external URL instead of uploading — uploaded images are stored as base64 and served via the API.</p>
+        </div>
+
+        <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:14px">
+          <p class="k-label" style="font-size:13px;font-weight:700;margin-bottom:4px">Browser Tab Icon (Favicon)</p>
+          <p class="k-hint" style="margin-bottom:12px">Shown in the browser tab when someone opens the /partnership/ page. Square PNG recommended.</p>
+          ${_illuField('ks-favicon', res?.partnership_favicon, 'Favicon', 64, 64, '64×64 px square')}
+        </div>
+
         <div id="ks-partnership-save-msg" class="k-settings-msg" style="display:none"></div>
         <button class="kbtn kbtn-primary" style="margin-top:12px" onclick="Kpsc.savePartnershipSettings()">Save Partnership Settings</button>
         <a href="/partnership/" target="_blank" class="kbtn kbtn-ghost" style="margin-top:8px;display:inline-block;text-decoration:none">Preview Landing Page ↗</a>
@@ -10359,9 +10382,10 @@ async function saveKpscOpsSettings() {
   setTimeout(() => { if(msg) msg.style.display = 'none'; }, 3000);
 }
 
-function _illuField(id, value, label, w, h, shape) {
+function _illuField(id, value, label, w, h, shape, quality) {
   const hasImage = String(value || '').trim().length > 0;
   const sizeHint = shape ? `~${w}×${h} px ${shape}` : `~${w}×${h} px`;
+  const q = quality ?? (w * h > 200000 ? 0.72 : 0.82);
   const thumbHtml = hasImage
     ? `<div style="margin-top:6px"><img src="${esc(value)}" alt="preview" style="max-height:64px;max-width:120px;border-radius:6px;border:1px solid var(--border);object-fit:cover;" /></div>`
     : '';
@@ -10375,7 +10399,7 @@ function _illuField(id, value, label, w, h, shape) {
         <label class="kbtn kbtn-sm" style="cursor:pointer;white-space:nowrap" title="Upload image from device">
           📁 Upload
           <input type="file" accept="image/*" style="display:none"
-            onchange="Kpsc._handleIllustrationUpload('${id}', this, ${w}, ${h})" />
+            onchange="Kpsc._handleIllustrationUpload('${id}', this, ${w}, ${h}, ${q})" />
         </label>
       </div>
       ${thumbHtml}
@@ -10392,7 +10416,11 @@ async function savePartnershipSettings() {
   const illuVision= document.getElementById('ks-illu-vision')?.value.trim() || '';
   const illuStep1 = document.getElementById('ks-illu-step1')?.value.trim() || '';
   const illuStep2 = document.getElementById('ks-illu-step2')?.value.trim() || '';
-  const illuStep3 = document.getElementById('ks-illu-step3')?.value.trim() || '';
+  const illuStep3  = document.getElementById('ks-illu-step3')?.value.trim() || '';
+  const ogTitle    = document.getElementById('ks-og-title')?.value.trim() || '';
+  const ogDesc     = document.getElementById('ks-og-desc')?.value.trim() || '';
+  const ogImage    = document.getElementById('ks-og-image')?.value.trim() || '';
+  const favicon    = document.getElementById('ks-favicon')?.value.trim() || '';
   const res = await apiPost('settings', {
     partnership_annual_goal:     goal,
     kpsc_welfare_cases_ytd:      welfare,
@@ -10403,6 +10431,10 @@ async function savePartnershipSettings() {
     partnership_illu_step1:      illuStep1,
     partnership_illu_step2:      illuStep2,
     partnership_illu_step3:      illuStep3,
+    partnership_og_title:        ogTitle,
+    partnership_og_description:  ogDesc,
+    partnership_og_image:        ogImage,
+    partnership_favicon:         favicon,
   });
   if (res?.error) {
     msg.className = 'k-settings-msg k-msg-error';

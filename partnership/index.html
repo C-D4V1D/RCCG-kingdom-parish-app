@@ -20,6 +20,7 @@
 <meta name="twitter:title"       content="God's Kingdom Partnership — RCCG Kingdom Parish, Aguleri" />
 <meta name="twitter:description" content="A monthly pledge to build our church and carry our members — faithfully, transparently." />
 <meta name="twitter:image"       content="https://rccg-kingdom-parish-app.pages.dev/icons/og-partnership.png" />
+<link rel="icon" id="dyn-favicon" href="/api/partnership-favicon" type="image/png" />
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1129,6 +1130,12 @@ async function loadData() {
     $$('#logo-mark,#footer-logo-mark').forEach(el => {
       el.innerHTML = `<img src="${escHtml(data.logoUrl)}" alt="RCCG Kingdom Parish logo" />`;
     });
+  }
+
+  // Favicon — force browser to reload if a custom one is stored
+  if (data?.faviconUrl) {
+    const link = document.getElementById('dyn-favicon');
+    if (link) link.href = escHtml(data.faviconUrl) + '?v=' + Date.now();
   }
 
   // Illustrations
