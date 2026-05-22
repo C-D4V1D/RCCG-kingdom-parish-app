@@ -3139,7 +3139,6 @@ function startNewMeeting() {
   document.querySelectorAll('.ka-nav-item').forEach(b => {
     b.classList.toggle('active', b.dataset.group === 'meetings');
   });
-  document.getElementById('kpsc-back-btn').style.display = '';
   document.getElementById('kpsc-page-title').textContent = 'New Meeting';
   updateFab();
   renderPage('meeting');
@@ -3158,7 +3157,6 @@ async function openMeeting(id) {
   document.querySelectorAll('.ka-nav-item').forEach(b => {
     b.classList.toggle('active', b.dataset.group === 'meetings');
   });
-  document.getElementById('kpsc-back-btn').style.display = '';
   document.getElementById('kpsc-page-title').textContent = 'Meeting Room';
   updateFab();
   renderPage('meeting');
