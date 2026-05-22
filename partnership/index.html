@@ -178,7 +178,7 @@ section { padding-block: clamp(52px,9vw,108px); position: relative; }
 .btn-outline:hover { background: var(--terracotta); color: var(--surface); }
 
 /* ── Hero ── */
-.hero { padding-top: clamp(36px,6vw,68px); padding-bottom: clamp(44px,7vw,88px); text-align: center; }
+.hero { padding-top: clamp(36px,6vw,68px); padding-bottom: clamp(44px,7vw,88px); text-align: center; background: radial-gradient(ellipse 80% 55% at 50% -5%, rgba(201,168,76,.10) 0%, transparent 70%); }
 .hero h1 { margin-top: 14px; }
 .hero .sub {
   font-family: var(--font-serif); font-size: clamp(1rem,2vw,1.2rem);
@@ -200,29 +200,22 @@ section { padding-block: clamp(52px,9vw,108px); position: relative; }
   margin-top: clamp(18px,3vw,24px);
 }
 
-/* ── Illustration placeholder ── */
+/* ── Illustration slot ── */
 .illu-slot {
   border-radius: var(--radius);
-  background:
-    repeating-linear-gradient(135deg,
-      rgba(201,168,76,.10) 0 6px, transparent 6px 14px),
-    var(--surface);
-  border: 1.5px dashed var(--gold);
+  background: linear-gradient(160deg, rgba(248,233,192,.45) 0%, rgba(201,168,76,.06) 100%);
+  border: 1px solid rgba(201,168,76,.2);
   display: flex; align-items: center; justify-content: center;
-  text-align: center; padding: 24px;
-}
-.illu-slot .tag {
-  font-family: monospace; font-size: .72rem;
-  color: var(--espresso-2); background: rgba(255,250,245,.85);
-  padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border);
-  display: inline-flex; align-items: center; gap: 6px;
-}
-.illu-slot .tag::before {
-  content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--gold);
+  text-align: center; overflow: hidden; position: relative;
 }
 
+/* ── Scroll-reveal ── */
+.reveal { opacity: 0; transform: translateY(26px); transition: opacity .65s cubic-bezier(.4,0,.2,1), transform .65s cubic-bezier(.4,0,.2,1); }
+.reveal.in { opacity: 1; transform: none; }
+.rd1 { transition-delay: .10s; } .rd2 { transition-delay: .20s; } .rd3 { transition-delay: .30s; }
+
 /* ── Vision ── */
-.vision { background: var(--cream); }
+.vision { background: linear-gradient(180deg, var(--surface) 0%, var(--cream) 100%); }
 .vision-grid {
   display: grid; grid-template-columns: 1fr; gap: clamp(24px,5vw,52px);
   align-items: center; max-width: 960px; margin-inline: auto;
@@ -243,10 +236,12 @@ section { padding-block: clamp(52px,9vw,108px); position: relative; }
 }
 .steps { display: grid; grid-template-columns: 1fr; gap: 22px; }
 .step {
-  background: var(--cream); border: 1px solid var(--border);
+  background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 28px 22px 22px;
   position: relative; text-align: center;
+  transition: transform .22s ease, box-shadow .22s ease;
 }
+.step:hover { transform: translateY(-3px); box-shadow: var(--shadow-md); }
 .step-num {
   position: absolute; top: -15px; left: 50%; transform: translateX(-50%);
   width: 32px; height: 32px; border-radius: 50%;
@@ -274,7 +269,9 @@ section { padding-block: clamp(52px,9vw,108px); position: relative; }
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius-lg); padding: 26px 24px;
   box-shadow: var(--shadow-sm); position: relative; overflow: hidden;
+  transition: transform .22s ease, box-shadow .22s ease;
 }
+.stat-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-md); }
 .stat-card::before {
   content: ''; position: absolute; inset: 0 0 auto 0; height: 3px;
   background: linear-gradient(90deg,var(--gold),var(--terracotta));
@@ -568,35 +565,53 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 <!-- ═══ HERO ═══ -->
 <section class="hero" id="top">
   <div class="container">
-    <span class="eyebrow">A Kingdom Invitation</span>
-    <h1>God's Kingdom <span class="accent">Partnership</span></h1>
-    <p class="sub">RCCG Kingdom Parish, Aguleri</p>
+    <span class="eyebrow reveal" style="display:inline-block">A Kingdom Invitation</span>
+    <h1 class="reveal rd1">God's Kingdom <span class="accent">Partnership</span></h1>
+    <p class="sub reveal rd2">RCCG Kingdom Parish, Aguleri</p>
 
-    <div id="illu-hero" class="hero-illu illu-slot" style="aspect-ratio:1/1;max-width:240px;" aria-hidden="true">
-      <div>
-        <svg viewBox="0 0 200 200" width="160" height="160" aria-hidden="true" style="display:block;margin:0 auto 10px">
-          <defs>
-            <radialGradient id="gG" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stop-color="#F8E9C0"/>
-              <stop offset="60%" stop-color="#C9A84C"/>
-              <stop offset="100%" stop-color="#8E7222"/>
-            </radialGradient>
-          </defs>
-          <circle cx="100" cy="100" r="78" fill="none" stroke="url(#gG)" stroke-width="2" stroke-dasharray="2 6"/>
-          <circle cx="100" cy="100" r="65" fill="none" stroke="#C9A84C" stroke-width="1" opacity=".5"/>
-          <rect x="93" y="54" width="14" height="92" rx="2" fill="url(#gG)"/>
-          <rect x="68" y="82" width="64" height="14" rx="2" fill="url(#gG)"/>
-        </svg>
-        <span class="tag">illustration · cross + laurel wreath</span>
-      </div>
+    <div id="illu-hero" class="hero-illu illu-slot reveal" style="aspect-ratio:1/1;max-width:260px;" aria-hidden="true">
+      <svg viewBox="0 0 240 240" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:200px;height:200px;display:block;margin:0 auto">
+        <defs>
+          <radialGradient id="h-glow" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#F8E9C0" stop-opacity=".5"/>
+            <stop offset="100%" stop-color="#C9A84C" stop-opacity="0"/>
+          </radialGradient>
+          <linearGradient id="h-cross" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#F8E9C0"/>
+            <stop offset="45%" stop-color="#C9A84C"/>
+            <stop offset="100%" stop-color="#8E7222"/>
+          </linearGradient>
+        </defs>
+        <circle cx="120" cy="120" r="108" fill="url(#h-glow)"/>
+        <circle cx="120" cy="120" r="104" stroke="#C9A84C" stroke-width="1" stroke-dasharray="4 10" opacity=".35"/>
+        <circle cx="120" cy="120" r="86" stroke="#C9A84C" stroke-width=".8" opacity=".18"/>
+        <g fill="#A08830" opacity=".78">
+          <ellipse cx="40" cy="92" rx="14" ry="5.5" transform="rotate(-62 40 92)"/>
+          <ellipse cx="28" cy="113" rx="14" ry="5.5" transform="rotate(-78 28 113)"/>
+          <ellipse cx="26" cy="135" rx="14" ry="5.5" transform="rotate(83 26 135)"/>
+          <ellipse cx="34" cy="155" rx="14" ry="5.5" transform="rotate(68 34 155)"/>
+          <ellipse cx="50" cy="170" rx="14" ry="5.5" transform="rotate(52 50 170)"/>
+        </g>
+        <g fill="#A08830" opacity=".78">
+          <ellipse cx="200" cy="92" rx="14" ry="5.5" transform="rotate(62 200 92)"/>
+          <ellipse cx="212" cy="113" rx="14" ry="5.5" transform="rotate(78 212 113)"/>
+          <ellipse cx="214" cy="135" rx="14" ry="5.5" transform="rotate(-83 214 135)"/>
+          <ellipse cx="206" cy="155" rx="14" ry="5.5" transform="rotate(-68 206 155)"/>
+          <ellipse cx="190" cy="170" rx="14" ry="5.5" transform="rotate(-52 190 170)"/>
+        </g>
+        <rect x="112" y="50" width="16" height="136" rx="5" fill="url(#h-cross)"/>
+        <rect x="76" y="90" width="88" height="16" rx="5" fill="url(#h-cross)"/>
+        <circle cx="120" cy="98" r="6" fill="#FFFBF0" opacity=".7"/>
+        <circle cx="120" cy="98" r="3" fill="#F8E9C0"/>
+      </svg>
     </div>
 
-    <div class="scripture-block">
+    <div class="scripture-block reveal rd2">
       <span class="ref">2 Corinthians 9:7</span>
       <p class="scripture">"Each of you should give what you have decided in your heart to give. Don't give because you feel forced or sad about it. God loves a person who gives with a happy heart!"</p>
     </div>
 
-    <div class="cta-row">
+    <div class="cta-row reveal rd3">
       <a href="#pledge" class="btn btn-primary">
         Become a Partner
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
@@ -618,10 +633,40 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 <section class="vision" id="vision">
   <div class="container">
     <div class="vision-grid">
-      <div id="illu-vision" class="vision-illu illu-slot" aria-hidden="true">
-        <span class="tag">illustration · hands holding a church</span>
+      <div id="illu-vision" class="vision-illu illu-slot reveal" aria-hidden="true">
+        <svg viewBox="0 0 300 180" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%">
+          <defs>
+            <radialGradient id="v-glow" cx="50%" cy="40%" r="55%">
+              <stop offset="0%" stop-color="#F8E9C0" stop-opacity=".6"/>
+              <stop offset="100%" stop-color="#F5EDE0" stop-opacity="0"/>
+            </radialGradient>
+            <linearGradient id="v-roof" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#C9A84C"/>
+              <stop offset="100%" stop-color="#8E7222"/>
+            </linearGradient>
+            <linearGradient id="v-hands" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#D4724A"/>
+              <stop offset="100%" stop-color="#A35232"/>
+            </linearGradient>
+          </defs>
+          <ellipse cx="150" cy="80" rx="140" ry="80" fill="url(#v-glow)"/>
+          <rect x="105" y="76" width="90" height="74" rx="3" fill="#F5EDE0" stroke="#D8CCB2" stroke-width="1.5"/>
+          <path d="M139 150 L139 112 A11 11 0 0 1 161 112 L161 150 Z" fill="url(#v-roof)" opacity=".4"/>
+          <path d="M113 96 L113 82 A9 9 0 0 1 131 82 L131 96 Z" fill="url(#v-roof)" opacity=".3"/>
+          <path d="M169 96 L169 82 A9 9 0 0 1 187 82 L187 96 Z" fill="url(#v-roof)" opacity=".3"/>
+          <rect x="148" y="84" width="4" height="16" rx="1" fill="url(#v-roof)" opacity=".45"/>
+          <rect x="143" y="89" width="14" height="4" rx="1" fill="url(#v-roof)" opacity=".45"/>
+          <polygon points="95,76 150,30 205,76" fill="url(#v-roof)" opacity=".8"/>
+          <rect x="142" y="14" width="16" height="20" rx="2" fill="url(#v-roof)"/>
+          <rect x="149" y="4" width="3" height="16" rx="1" fill="#5B3A20"/>
+          <rect x="144" y="8" width="13" height="3" rx="1" fill="#5B3A20"/>
+          <path d="M18 172 Q20 144 55 133 Q92 122 122 138 L142 150" stroke="url(#v-hands)" stroke-width="18" stroke-linecap="round" fill="none" opacity=".75"/>
+          <path d="M22 170 Q14 154 20 138" stroke="url(#v-hands)" stroke-width="12" stroke-linecap="round" fill="none" opacity=".6"/>
+          <path d="M282 172 Q280 144 245 133 Q208 122 178 138 L158 150" stroke="url(#v-hands)" stroke-width="18" stroke-linecap="round" fill="none" opacity=".75"/>
+          <path d="M278 170 Q286 154 280 138" stroke="url(#v-hands)" stroke-width="12" stroke-linecap="round" fill="none" opacity=".6"/>
+        </svg>
       </div>
-      <div class="vision-text">
+      <div class="vision-text reveal rd1">
         <span class="eyebrow">Our Vision</span>
         <h2 style="margin-top:10px;">A church that <span class="accent">builds steadily</span>, and members carried with care.</h2>
         <p>To ensure the steady development of our local church and provide consistent welfare support to our members — reducing the need for frequent emergency contributions.</p>
@@ -648,7 +693,24 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
     <div class="steps">
       <article class="step">
         <span class="step-num" aria-hidden="true">1</span>
-        <div id="illu-step1" class="step-illu illu-slot" aria-hidden="true"><span class="tag">icon · person deciding</span></div>
+        <div id="illu-step1" class="step-illu illu-slot" aria-hidden="true">
+          <svg viewBox="0 0 200 120" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;max-height:100%">
+            <defs>
+              <radialGradient id="s1-bg" cx="50%" cy="50%" r="55%">
+                <stop offset="0%" stop-color="#FCE8E0"/>
+                <stop offset="100%" stop-color="#F5EDE0" stop-opacity="0"/>
+              </radialGradient>
+            </defs>
+            <ellipse cx="100" cy="60" rx="56" ry="52" fill="url(#s1-bg)"/>
+            <path d="M100 86 Q67 68 67 50 A17 17 0 0 1 100 42 A17 17 0 0 1 133 50 Q133 68 100 86Z" fill="#D4724A" opacity=".88"/>
+            <ellipse cx="87" cy="52" rx="7" ry="5.5" fill="white" opacity=".2" transform="rotate(-20 87 52)"/>
+            <line x1="100" y1="14" x2="100" y2="24" stroke="#C9A84C" stroke-width="2.5" stroke-linecap="round" opacity=".65"/>
+            <line x1="133" y1="23" x2="127" y2="31" stroke="#C9A84C" stroke-width="2.5" stroke-linecap="round" opacity=".5"/>
+            <line x1="67" y1="23" x2="73" y2="31" stroke="#C9A84C" stroke-width="2.5" stroke-linecap="round" opacity=".5"/>
+            <line x1="145" y1="46" x2="136" y2="50" stroke="#C9A84C" stroke-width="2" stroke-linecap="round" opacity=".4"/>
+            <line x1="55" y1="46" x2="64" y2="50" stroke="#C9A84C" stroke-width="2" stroke-linecap="round" opacity=".4"/>
+          </svg>
+        </div>
         <h3>Determine Amount</h3>
         <p>Decide a monthly pledge you can give consistently — from your heart, not under pressure.</p>
       </article>
@@ -659,7 +721,31 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 
       <article class="step">
         <span class="step-num" aria-hidden="true">2</span>
-        <div id="illu-step2" class="step-illu illu-slot" aria-hidden="true"><span class="tag">icon · bank transfer / cash</span></div>
+        <div id="illu-step2" class="step-illu illu-slot" aria-hidden="true">
+          <svg viewBox="0 0 200 120" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;max-height:100%">
+            <defs>
+              <radialGradient id="s2-bg" cx="50%" cy="50%" r="55%">
+                <stop offset="0%" stop-color="#F8E9C0"/>
+                <stop offset="100%" stop-color="#F5EDE0" stop-opacity="0"/>
+              </radialGradient>
+              <linearGradient id="s2-coin" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#F8E9C0"/>
+                <stop offset="100%" stop-color="#C9A84C"/>
+              </linearGradient>
+            </defs>
+            <ellipse cx="100" cy="60" rx="56" ry="52" fill="url(#s2-bg)"/>
+            <circle cx="100" cy="62" r="34" fill="url(#s2-coin)" stroke="#C9A84C" stroke-width="1.5"/>
+            <circle cx="100" cy="62" r="28" fill="none" stroke="#8E7222" stroke-width=".8" opacity=".4"/>
+            <text x="100" y="72" text-anchor="middle" fill="#5B3A20" font-size="28" font-family="Georgia,serif" font-weight="700" opacity=".88">₦</text>
+            <path d="M150 72 L150 50" stroke="#D4724A" stroke-width="2.5" stroke-linecap="round"/>
+            <path d="M142 58 L150 50 L158 58" stroke="#D4724A" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <rect x="36" y="54" width="22" height="24" rx="3" fill="#C9A84C" opacity=".3"/>
+            <polygon points="29,54 47,38 65,54" fill="#C9A84C" opacity=".4"/>
+            <rect x="44" y="30" width="7" height="12" rx="1" fill="#8E7222" opacity=".45"/>
+            <rect x="50" y="25" width="2.5" height="10" rx="1" fill="#5B3A20" opacity=".5"/>
+            <rect x="46" y="28" width="10" height="2.5" rx="1" fill="#5B3A20" opacity=".5"/>
+          </svg>
+        </div>
         <h3>Make Payment</h3>
         <p>Direct transfer to the church bank account — or hand it to the KPSC Treasurer only.</p>
       </article>
