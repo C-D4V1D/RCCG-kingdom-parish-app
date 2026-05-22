@@ -102,7 +102,7 @@ async function sendTermiiSms(apiKey, senderId, to, sms) {
 /** Load all Termii-related settings from the DB in one query. */
 async function getTermiiSettings(DB) {
   const keys = [
-    'kpsc_termii_api_key', 'kpsc_termii_sender_id',
+    'kpsc_termii_api_key', 'kpsc_termii_sender_id', 'kpsc_termii_partner_sender_id',
     'kpsc_termii_welcome_sms', 'kpsc_termii_payment_sms',
     'kpsc_termii_newmonth_sms', 'kpsc_termii_reminder_day',
     'kpsc_termii_reminder_freq',
@@ -128,6 +128,7 @@ async function getTermiiSettings(DB) {
   return {
     apiKey:          String(map.kpsc_termii_api_key  || '').trim(),
     senderId:        String(map.kpsc_termii_sender_id || 'RCCG-KP').trim(),
+    partnerSenderId: String(map.kpsc_termii_partner_sender_id || '').trim(),
     welcomeSms:      map.kpsc_termii_welcome_sms   !== '0',
     paymentSms:      map.kpsc_termii_payment_sms   !== '0',
     newMonthSms:     map.kpsc_termii_newmonth_sms  !== '0',
@@ -395,6 +396,11 @@ export async function onRequest(context) {
         if (auth instanceof Response) return auth;
         return await deleteKpscPartnerPayment(DB, param, auth);
       }
+    }
+    if (route === 'kpsc-partner-batch-sms' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await sendPartnerBatchPaymentSms(DB, body);
     }
     if (route === 'kpsc-finance') {
       if (method === 'GET'  && !param) return await getKpscFinanceEntries(DB, url);
@@ -1431,8 +1437,9 @@ async function handleInit(DB) {
     ]),
     kpsc_reminder_template: 'Dear {{name}}, this is a reminder to pay your {{month}} partnership pledge. God bless you.',
     // ── Termii SMS settings ──────────────────────────────────────────
-    kpsc_termii_api_key:      '',          // set in KPSC Settings → SMS
-    kpsc_termii_sender_id:    'RCCG-KP',  // max 11 chars, alphanumeric
+    kpsc_termii_api_key:             '',         // set in KPSC Settings → SMS
+    kpsc_termii_sender_id:           'RCCG-KP', // max 11 chars, for member/staff SMS
+    kpsc_termii_partner_sender_id:   '',         // optional separate sender ID for partner SMS
     kpsc_termii_welcome_sms:  '1',         // send welcome SMS on partner add
     kpsc_termii_payment_sms:  '1',         // send thank-you SMS on payment record
     kpsc_termii_newmonth_sms: '1',         // send Happy New Month SMS on 1st
@@ -2463,7 +2470,8 @@ async function createKpscPartner(DB, data) {
         const welcomeMsg = t.welcomeText
           .replace(/\{\{name\}\}/g, fullName)
           .replace(/\{\{partnerType\}\}/g, typeLabel);
-        await sendTermiiSms(t.apiKey, t.senderId, phone, welcomeMsg);
+        const wsid = t.partnerSenderId || t.senderId;
+        await sendTermiiSms(t.apiKey, wsid, phone, welcomeMsg);
       }
     } catch { /* swallow — SMS failure must not break partner creation */ }
   }
@@ -2606,7 +2614,8 @@ async function upsertKpscPartnerPayment(DB, data) {
   ).run();
 
   // ── Thank-you SMS when payment is marked paid (fire-and-forget) ──
-  if (paid) {
+  // skipSms=true means the caller will send a batch SMS (e.g. multi-month recording)
+  if (paid && !data?.skipSms) {
     try {
       const t = await getTermiiSettings(DB);
       if (t.apiKey && t.paymentSms) {
@@ -2620,7 +2629,8 @@ async function upsertKpscPartnerPayment(DB, data) {
             .replace(/\{\{name\}\}/g, partner.full_name)
             .replace(/\{\{month\}\}/g, monthName)
             .replace(/\{\{amtText\}\}/g, amtText);
-          await sendTermiiSms(t.apiKey, t.senderId, partner.phone, msg);
+          const sid = t.partnerSenderId || t.senderId;
+          await sendTermiiSms(t.apiKey, sid, partner.phone, msg);
         }
       }
 
@@ -2649,7 +2659,8 @@ async function upsertKpscPartnerPayment(DB, data) {
             milestoneMsg = t.milestone12Text.replace(/\{\{name\}\}/g, partner.full_name);
           }
           if (milestoneMsg) {
-            await sendTermiiSms(t.apiKey, t.senderId, partner.phone, milestoneMsg);
+            const sid = t.partnerSenderId || t.senderId;
+            await sendTermiiSms(t.apiKey, sid, partner.phone, milestoneMsg);
           }
         }
       }
@@ -2719,6 +2730,54 @@ async function deleteKpscPartnerPayment(DB, id, auth) {
     `UPDATE kpsc_finance_entries SET deleted_at=?, deleted_by=? WHERE partner_payment_id=? AND COALESCE(deleted_at,'')=''`
   ).bind(now, auth.name, id).run();
   return ok({ deleted: id });
+}
+
+async function sendPartnerBatchPaymentSms(DB, data) {
+  const partnerId = String(data?.partnerId || '').trim();
+  const months    = Array.isArray(data?.months) ? data.months.map(Number).filter(m => m >= 1 && m <= 12) : [];
+  const year      = Number(data?.year || new Date().getUTCFullYear());
+  const amount    = Number(data?.amount || 0);
+  if (!partnerId || !months.length) return err('partnerId and months are required', 400);
+
+  try {
+    const t = await getTermiiSettings(DB);
+    if (!t.apiKey || !t.paymentSms) return ok({ sent: false, reason: 'SMS disabled or no API key' });
+
+    const partner = await DB.prepare(
+      `SELECT full_name, phone, COALESCE(opted_out,0) AS opted_out, COALESCE(dnd_flagged,0) AS dnd_flagged FROM kpsc_partners WHERE id=?`
+    ).bind(partnerId).first();
+    if (!partner?.phone || Number(partner.opted_out) || Number(partner.dnd_flagged)) {
+      return ok({ sent: false, reason: 'Partner opted out, DND flagged, or no phone' });
+    }
+
+    const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const sortedMonths = [...months].sort((a, b) => a - b);
+    const n = sortedMonths.length;
+
+    let monthLabel, amtText;
+    if (n === 1) {
+      monthLabel = `${MONTH_NAMES[sortedMonths[0] - 1]} ${year}`;
+      amtText = amount > 0 ? ` of ₦${amount.toLocaleString('en-NG')}` : '';
+    } else {
+      const first = MONTH_NAMES[sortedMonths[0] - 1];
+      const last  = MONTH_NAMES[sortedMonths[n - 1] - 1];
+      // List months compactly: "January–March 2026 (3 months)"
+      monthLabel = `${first}–${last} ${year} (${n} months)`;
+      const total = amount * n;
+      amtText = amount > 0 ? ` totalling ₦${total.toLocaleString('en-NG')}` : '';
+    }
+
+    const msg = t.paymentText
+      .replace(/\{\{name\}\}/g, partner.full_name)
+      .replace(/\{\{month\}\}/g, monthLabel)
+      .replace(/\{\{amtText\}\}/g, amtText);
+
+    const sid = t.partnerSenderId || t.senderId;
+    await sendTermiiSms(t.apiKey, sid, partner.phone, msg);
+    return ok({ sent: true });
+  } catch (e) {
+    return ok({ sent: false, reason: String(e?.message || e) });
+  }
 }
 
 async function deleteKpscPartner(DB, id, auth) {
@@ -2836,7 +2895,7 @@ async function updateKpscFinanceEntry(DB, id, data, auth) {
   if (!row) return err('KPSC finance entry not found', 404);
   await DB.prepare(`
     UPDATE kpsc_finance_entries
-    SET date=?, entry_type=?, category=?, sub_category=?, amount=?, payment_method=?, reference=?, narration=?, partner_id=?, recorded_by=?, approved_by=?, approval_status=?, attachment_name=?
+    SET date=?, entry_type=?, category=?, sub_category=?, amount=?, payment_method=?, reference=?, narration=?, partner_id=?, recorded_by=?, approved_by=?, approval_status=?, attachment_name=?, partner_payment_id=COALESCE(partner_payment_id,'')
     WHERE id=?
   `).bind(
     data?.date !== undefined ? String(data.date || '').trim() : row.date,
@@ -5976,7 +6035,8 @@ async function runMonthlySms(DB, env, request) {
     const msg = t.newmonthText
       .replace(/\{\{name\}\}/g, p.full_name)
       .replace(/\{\{month\}\}/g, `${monthName} ${year}`);
-    const result = await sendTermiiSms(t.apiKey, t.senderId, p.phone, msg);
+    const nmsid = t.partnerSenderId || t.senderId;
+    const result = await sendTermiiSms(t.apiKey, nmsid, p.phone, msg);
     if (result.ok) sent++; else failed++;
   }
   return ok({ ok: true, sent, failed, total: (partners || []).length });
@@ -6118,7 +6178,8 @@ async function runReminderSms(DB, env, request) {
       } catch { /* fall back to template */ }
     }
 
-    const result = await sendTermiiSms(t.apiKey, t.senderId, p.phone, msg);
+    const rsid = t.partnerSenderId || t.senderId;
+    const result = await sendTermiiSms(t.apiKey, rsid, p.phone, msg);
     if (result.ok) {
       // Log to kpsc_reminders with message_id for delivery tracking
       const remId = newId('krm');
@@ -7160,7 +7221,8 @@ async function runAnniversarySms(DB, env, request) {
       .replace(/\{\{name\}\}/g, p.full_name)
       .replace(/\{\{ordinal\}\}/g, ordinal)
       .replace(/\{\{years\}\}/g, String(yearsOfPartnership));
-    const result = await sendTermiiSms(t.apiKey, t.senderId, p.phone, msg);
+    const asid = t.partnerSenderId || t.senderId;
+    const result = await sendTermiiSms(t.apiKey, asid, p.phone, msg);
     if (result.ok) { sent++; } else { failed++; }
   }
   return ok({ ok: true, sent, failed, total: sent + failed });
