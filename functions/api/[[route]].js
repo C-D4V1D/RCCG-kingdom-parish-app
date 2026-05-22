@@ -2769,13 +2769,13 @@ async function sendPartnerBatchPaymentSms(DB, data) {
     let monthLabel, amtText;
     if (n === 1) {
       monthLabel = `${MONTH_SHORT[sortedMonths[0] - 1]} ${year}`;
-      amtText = amount > 0 ? ` of ₦${amount.toLocaleString('en-NG')}` : '';
+      amtText = amount > 0 ? ` of N${amount.toLocaleString('en-NG')}` : '';
     } else {
       const first = MONTH_SHORT[sortedMonths[0] - 1];
       const last  = MONTH_SHORT[sortedMonths[n - 1] - 1];
       monthLabel = `${first} - ${last} ${year} (${n} months)`;
       const total = amount * n;
-      amtText = amount > 0 ? ` totalling ₦${total.toLocaleString('en-NG')}` : '';
+      amtText = amount > 0 ? ` totalling N${total.toLocaleString('en-NG')}` : '';
     }
 
     const msg = t.paymentText
