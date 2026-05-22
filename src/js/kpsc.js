@@ -6295,6 +6295,21 @@ function editPartner(id) {
   showPartnerModal(partner);
 }
 
+function _partnerPhoneParts(stored) {
+  const p = String(stored || '').replace(/\D/g, '');
+  if (!p) return { cc: '234', local: '' };
+  // If number starts with a known country code prefix (default 234), split it
+  if (p.startsWith('234') && p.length > 3) return { cc: '234', local: p.slice(3) };
+  // Legacy local number stored without country code (starts with 0 or just digits)
+  return { cc: '234', local: p.replace(/^0+/, '') };
+}
+
+function _normalizePartnerPhone(cc, local) {
+  const c = String(cc || '234').replace(/\D/g, '') || '234';
+  const l = String(local || '').replace(/\D/g, '').replace(/^0+/, '');
+  return l ? c + l : '';
+}
+
 function showPartnerModal(partner = null) {
   document.getElementById('kpsc-partner-modal')?.remove();
   const modal = document.createElement('div');
@@ -6310,7 +6325,28 @@ function showPartnerModal(partner = null) {
         <label class="k-label">Full Name</label>
         <input id="kp-full-name" class="k-input" value="${esc(partner?.fullName || '')}" />
         <label class="k-label">Phone</label>
-        <input id="kp-phone" class="k-input" value="${esc(partner?.phone || '')}" />
+        <div style="display:flex;gap:8px;align-items:flex-start">
+          <div style="flex:0 0 auto">
+            <div style="font-size:11px;color:var(--text3);margin-bottom:4px">Country code</div>
+            <input id="kp-phone-cc" class="k-input" type="tel" inputmode="numeric"
+              style="width:76px;text-align:center" maxlength="5"
+              value="${esc(_partnerPhoneParts(partner?.phone).cc)}" placeholder="234" />
+          </div>
+          <div style="flex:1">
+            <div style="font-size:11px;color:var(--text3);margin-bottom:4px">Number (with or without leading 0)</div>
+            <input id="kp-phone-local" class="k-input" type="tel" inputmode="numeric"
+              value="${esc(_partnerPhoneParts(partner?.phone).local)}"
+              placeholder="09157870471 or 9157870471" />
+          </div>
+        </div>
+        <p class="k-hint" style="margin-top:4px">Saved as <code id="kp-phone-preview">${esc(_normalizePartnerPhone(_partnerPhoneParts(partner?.phone).cc, _partnerPhoneParts(partner?.phone).local) || '—')}</code>
+          <script>
+            (function(){
+              function upd(){var cc=document.getElementById('kp-phone-cc'),loc=document.getElementById('kp-phone-local'),pre=document.getElementById('kp-phone-preview');if(!cc||!loc||!pre)return;var c=cc.value.replace(/\\D/g,''),l=loc.value.replace(/\\D/g,'').replace(/^0+/,'');pre.textContent=c&&l?c+l:'—';}
+              ['kp-phone-cc','kp-phone-local'].forEach(function(id){var el=document.getElementById(id);if(el)el.addEventListener('input',upd);});
+            })();
+          </script>
+        </p>
         <label class="k-label">Partnership Type</label>
         <select id="kp-type" class="k-input">
           <option value="gods_kingdom_partner" ${(partner?.partnershipType || '') === 'gods_kingdom_partner' ? 'selected' : ''}>God's Kingdom Partner</option>
@@ -6348,7 +6384,10 @@ function closePartnerModal() {
 async function savePartner(id, btn) {
   const payload = {
     fullName: document.getElementById('kp-full-name')?.value.trim() || '',
-    phone: document.getElementById('kp-phone')?.value.trim() || '',
+    phone: _normalizePartnerPhone(
+      document.getElementById('kp-phone-cc')?.value,
+      document.getElementById('kp-phone-local')?.value
+    ),
     partnershipType: document.getElementById('kp-type')?.value || 'gods_kingdom_partner',
     monthlyPledge: Number(document.getElementById('kp-pledge')?.value || 0),
     status: document.getElementById('kp-status')?.value || 'active',
