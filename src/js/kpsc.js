@@ -692,6 +692,11 @@ async function recStart(btn) {
     Rec.failedChunks = 0;
     Rec.uploadQueue = [];
     Rec.transcriptEntries = [];
+    // Seed transcript with prior content when resuming so the live panel isn't blank.
+    const existingText = document.getElementById('km-transcript')?.value?.trim();
+    if (existingText && Rec.transcriptEntries.length === 0) {
+      Rec.transcriptEntries = [{ speaker: '', text: '[Prior transcript loaded]', isFinal: true, ts: 0 }];
+    }
     Rec.lastRenderedCount = 0;
     Rec.liveDeltas = new Map();
     Rec.speakerMap = new Map();
@@ -943,6 +948,8 @@ function recReset() {
   Rec._voiceIdConsecutive503 = 0;
   Rec.voiceIdLastAttempt     = new Map();
   Rec.voiceIdInFlight        = new Set();
+  if (Rec.voiceIdHistory) Rec.voiceIdHistory.clear();
+  if (Diarizer._cleanupInterval) { clearInterval(Diarizer._cleanupInterval); Diarizer._cleanupInterval = null; }
   Diarizer.status = 'offline';
   Diarizer.manualStop = false;
   Diarizer.reconnectAttempts = 0;
@@ -1191,6 +1198,17 @@ async function diarizerConnect() {
       source.connect(workletNode);
       // Worklet must be connected to something in the audio graph to keep processing.
       workletNode.connect(audioCtx.createMediaStreamDestination());
+      // PERF-02: Run PCM ring-buffer cleanup once per second instead of on every message.
+      if (!Diarizer._cleanupInterval) {
+        Diarizer._cleanupInterval = setInterval(() => {
+          if (!Diarizer.pcmChunks?.length || !Diarizer.pcmSampleRate) return;
+          const minOffset = Diarizer.pcmSampleOffset - (PCM_BUFFER_DURATION_SEC * Diarizer.pcmSampleRate);
+          while (Diarizer.pcmChunks.length &&
+                 Diarizer.pcmChunks[0].offset + Diarizer.pcmChunks[0].data.length <= minOffset) {
+            Diarizer.pcmChunks.shift();
+          }
+        }, 1000);
+      }
     };
 
     ws.onmessage = (e) => diarizerHandleMessage(e.data);
@@ -1341,15 +1359,11 @@ function diarizerClose(markManual) {
 
 // ── PCM RING BUFFER ────────────────────────────────────────────────
 // Add incoming worklet samples to the ring buffer, keeping the last 60 s.
+// Cleanup is done on a 1-second interval (started in diarizerConnect) to avoid
+// O(n) work on every ~2.67 ms AudioWorklet message (PERF-02).
 function diarizerBufferPcm(samples) {
   Diarizer.pcmChunks.push({ offset: Diarizer.pcmSampleOffset, data: samples.slice() });
   Diarizer.pcmSampleOffset += samples.length;
-  // Remove chunks older than 60 seconds.
-  const minOffset = Diarizer.pcmSampleOffset - (PCM_BUFFER_DURATION_SEC * (Diarizer.pcmSampleRate || DEFAULT_PCM_SAMPLE_RATE));
-  while (Diarizer.pcmChunks.length &&
-         Diarizer.pcmChunks[0].offset + Diarizer.pcmChunks[0].data.length <= minOffset) {
-    Diarizer.pcmChunks.shift();
-  }
 }
 
 // Extract a Float32 slice from the ring buffer for an absolute sample range.
@@ -1959,27 +1973,53 @@ function minutesHtml(md) {
   const lines = md.split('\n');
   const out = [];
   let inUl = false;
+  let inOl = false;
+
+  function applyInline(escaped) {
+    // Links: [text](https://...) only — block javascript: URIs
+    escaped = escaped.replace(/\[([^\]]+)\]\((https:\/\/[^)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    // Inline code: `code`
+    escaped = escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Bold: **text**
+    escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // Italic: _text_ or *text*
+    escaped = escaped.replace(/(?<!\*)\*(?!\*)([^*]+)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+    escaped = escaped.replace(/(?<!_)_(?!_)([^_]+)(?<!_)_(?!_)/g, '<em>$1</em>');
+    return escaped;
+  }
+
   for (const raw of lines) {
     const line = raw.trimEnd();
     if (/^#{1,6}\s/.test(line)) {
       if (inUl) { out.push('</ul>'); inUl = false; }
+      if (inOl) { out.push('</ol>'); inOl = false; }
       const level = line.match(/^(#+)/)[1].length;
-      out.push(`<h${level}>${esc(line.replace(/^#+\s*/, ''))}</h${level}>`);
+      out.push(`<h${level}>${applyInline(esc(line.replace(/^#+\s*/, '')))}</h${level}>`);
     } else if (/^[-*]\s/.test(line)) {
+      if (inOl) { out.push('</ol>'); inOl = false; }
       if (!inUl) { out.push('<ul>'); inUl = true; }
-      out.push(`<li>${esc(line.replace(/^[-*]\s*/, ''))}</li>`);
+      out.push(`<li>${applyInline(esc(line.replace(/^[-*]\s*/, '')))}</li>`);
     } else if (/^\d+\.\s/.test(line)) {
       if (inUl) { out.push('</ul>'); inUl = false; }
-      out.push(`<p>${esc(line)}</p>`);
+      if (!inOl) { out.push('<ol>'); inOl = true; }
+      out.push(`<li>${applyInline(esc(line.replace(/^\d+\.\s*/, '')))}</li>`);
+    } else if (/^>\s/.test(line)) {
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      if (inOl) { out.push('</ol>'); inOl = false; }
+      out.push(`<blockquote>${applyInline(esc(line.replace(/^>\s*/, '')))}</blockquote>`);
     } else if (line === '') {
       if (inUl) { out.push('</ul>'); inUl = false; }
+      if (inOl) { out.push('</ol>'); inOl = false; }
       out.push('');
     } else {
       if (inUl) { out.push('</ul>'); inUl = false; }
-      out.push(`<p>${esc(line)}</p>`);
+      if (inOl) { out.push('</ol>'); inOl = false; }
+      out.push(`<p>${applyInline(esc(line))}</p>`);
     }
   }
   if (inUl) out.push('</ul>');
+  if (inOl) out.push('</ol>');
   return out.join('\n');
 }
 
@@ -3104,7 +3144,32 @@ async function renderDashboard(main) {
   const role = String(S.user?.role || 'committee_viewer').toLowerCase();
   const isChairOrSecretary = role === 'acting_chairman' || role === 'general_secretary';
 
-  // Load all data needed for any role in parallel
+  // Stale-while-revalidate: render from cache immediately, then refresh in background
+  if (_dashCache.data && Date.now() - _dashCache.ts < 30000) {
+    _applyDashboardData(_dashCache.data, role);
+    main.innerHTML = `<div class="k-page">${dashboardCardsForRole(role, buildDashboardContext())}</div>`;
+    // Refresh in background without blocking
+    _fetchDashboardData(year, month, isChairOrSecretary).then(freshData => {
+      _dashCache.data = freshData;
+      _dashCache.ts = Date.now();
+      _applyDashboardData(freshData, role);
+      main.innerHTML = `<div class="k-page">${dashboardCardsForRole(role, buildDashboardContext())}</div>`;
+    }).catch(() => { /* background refresh failed — cached view is still shown */ });
+    return;
+  }
+
+  const freshData = await _fetchDashboardData(year, month, isChairOrSecretary);
+  _dashCache.data = freshData;
+  _dashCache.ts = Date.now();
+  _applyDashboardData(freshData, role);
+
+  main.innerHTML = `
+    <div class="k-page">
+      ${dashboardCardsForRole(role, buildDashboardContext())}
+    </div>`;
+}
+
+async function _fetchDashboardData(year, month, isChairOrSecretary) {
   const loadPromises = [
     apiGet('ai-secretary-meetings'),
     apiGet('settings'),
@@ -3117,10 +3182,11 @@ async function renderDashboard(main) {
   ];
   // B5: only load followups for chairman/secretary
   if (isChairOrSecretary) loadPromises.push(apiGet('kpsc-followups?status=pending'));
+  const results = await Promise.all(loadPromises);
+  return results;
+}
 
-  const [meetingsRes, settingsRes, dashboardRes, projectsRes, financeRes, partnersRes, paymentsRes, smsAnalyticsRes, followupsRes] =
-    await Promise.all(loadPromises);
-
+function _applyDashboardData([meetingsRes, settingsRes, dashboardRes, projectsRes, financeRes, partnersRes, paymentsRes, smsAnalyticsRes, followupsRes]) {
   if (meetingsRes?.error) throw new Error(meetingsRes.error);
   S.meetings        = Array.isArray(meetingsRes)            ? meetingsRes            : [];
   S.members         = Array.isArray(settingsRes?.kpsc_members) ? settingsRes.kpsc_members : [];
@@ -3139,13 +3205,6 @@ async function renderDashboard(main) {
     ? settingsRes.kpsc_distributed_meeting_ids
     : (Array.isArray(S._distributedMeetingIds) ? S._distributedMeetingIds : []);
   S._distributedMeetingIds = rawDistributed;
-
-  const ctx  = buildDashboardContext();
-
-  main.innerHTML = `
-    <div class="k-page">
-      ${dashboardCardsForRole(role, ctx)}
-    </div>`;
 }
 
 function isMeetingAuthor(m) {
@@ -3426,10 +3485,12 @@ async function renderMeetingRoom(main) {
 
       <div class="k-room-actions">
         ${isEditable ? `<span id="km-autosave-status" class="k-autosave-status" aria-live="polite"></span>` : ''}
-        ${(status === 'draft' || status === 'recording') && (m ? canDeleteMeeting(m) : S._isNewMeeting) ? `<button class="kbtn kbtn-ghost kbtn-sm" style="color:var(--danger,#dc2626)" onclick="Kpsc.discardMeetingFromRoom()">🗑 Discard</button>` : ''}
-        ${(status === 'recording' || (status === 'draft' && m)) ? `<button id="km-end-meeting-btn" class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
-        ${status === 'ended' ? `<button class="kbtn kbtn-primary" onclick="Kpsc.processMeeting(this)">✨ Generate Minutes</button>` : ''}
-        ${isProcessed ? `<div class="k-processed-note">✅ Minutes have been generated and finalised.</div>` : ''}
+        ${(status === 'draft' || status === 'recording') && (m ? canDeleteMeeting(m) : S._isNewMeeting) ? `<button class="kbtn kbtn-ghost kbtn-sm" style="color:var(--danger,#dc2626);margin-right:auto" onclick="Kpsc.discardMeetingFromRoom()">🗑 Discard Draft</button>` : ''}
+        <span class="k-room-actions-primary">
+          ${(status === 'recording' || (status === 'draft' && m)) ? `<button id="km-end-meeting-btn" class="kbtn kbtn-amber" onclick="Kpsc.endMeeting(this)">🔒 End Meeting</button>` : ''}
+          ${status === 'ended' ? `<button class="kbtn kbtn-primary" onclick="Kpsc.processMeeting(this)">✨ Generate Minutes</button>` : ''}
+          ${isProcessed ? `<div class="k-processed-note">✅ Minutes have been generated and finalised.</div>` : ''}
+        </span>
       </div>
 
       ${isProcessed && m ? renderMinutesPanel(m) : ''}
@@ -4301,12 +4362,35 @@ async function autoPromoteProjects(meetingId, projects) {
 function minutesActionsHtml(m) {
   const reviewed = !!m.reviewedAt;
   const rg = reviewed ? '' : 'disabled title="Approve and save the review before this action is available."';
+  const _role = String(S.user?.role || '').toLowerCase();
+  const isChairOrSecretary = _role === 'acting_chairman' || _role === 'general_secretary';
   return `
     <button class="kbtn kbtn-sm" onclick="Kpsc.printMinutes('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${rg}>🖨 Print / Save PDF</button>
     <button class="kbtn kbtn-sm" onclick="Kpsc.shareMinutesWhatsApp('${m.id}')" aria-disabled="${reviewed ? 'false' : 'true'}" ${rg}>📲 Share via WhatsApp</button>
-    ${m.publicShareToken ? `<button class="kbtn kbtn-sm" onclick="Kpsc.revokeMinutesPublicLink('${m.id}')">🔒 Revoke Public Link</button>` : ''}
+    ${m.publicShareToken && isChairOrSecretary ? `<button class="kbtn kbtn-sm" onclick="Kpsc.revokeMinutesPublicLink('${m.id}')">🔒 Revoke Public Link</button>` : ''}
     <button class="kbtn kbtn-sm" id="btn-plain-english-${m.id}" onclick="Kpsc.togglePlainEnglish('${m.id}')" data-plain-english="false">📖 Read in plain English</button>
+    ${isChairOrSecretary ? `<button class="kbtn kbtn-sm kbtn-ghost" style="margin-left:8px" onclick="Kpsc.reGenerateMinutes('${m.id}', this)">🔄 Re-generate Minutes</button>` : ''}
   `;
+}
+
+async function reGenerateMinutes(meetingId, btn) {
+  if (!confirm('Re-generate AI minutes? This will clear the current approved minutes and restart the AI processing pipeline.')) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Resetting…';
+  try {
+    const res = await apiPost(`ai-secretary-meetings/${meetingId}/reset-for-reprocess`, {});
+    if (res.error) { showToast(res.error, 'error'); return; }
+    S.activeMeeting = res;
+    _dashCache.ts = 0; // invalidate dashboard cache
+    renderPage('meeting');
+    showToast('Meeting reset — you can now generate new minutes.', 'success');
+  } catch {
+    showToast('Failed to reset meeting. Check your connection.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
 }
 
 // ── Post-Meeting Closure: Agenda Outcomes Panel ──────────────────────────
@@ -4499,6 +4583,11 @@ async function saveMinutesReview(btn) {
   btn.disabled = true;
   btn.textContent = 'Saving…';
   try {
+    // MISSING-05: auto-save insights if the insights edit form is currently open
+    const insightsEditForm = document.querySelector('#k-insights-review .kbtn[onclick*="saveInsightsReview"]');
+    if (insightsEditForm) {
+      try { await saveInsightsReview(insightsEditForm); } catch (_) { /* non-blocking — proceed with approval */ }
+    }
     const reviewedAt = new Date().toISOString();
     const res = await apiPut(`ai-secretary-meetings/${S.activeMeeting.id}`, {
       summaryShort: document.getElementById('kr-summary-short')?.value || '',
@@ -4532,14 +4621,22 @@ async function saveMinutesReview(btn) {
     const approvedMinutes = res.minutesMarkdown || document.getElementById('kr-minutes')?.value || '';
     const hasInsights = (res.resolutions?.length || res.actionItems?.length || res.policyFlags?.length);
     if (approvedMinutes && hasInsights) {
-      reconcileInsightsAfterApproval(S.activeMeeting.id, approvedMinutes);
+      showToast('Reconciling insights with approved minutes…', 'info');
+      reconcileInsightsAfterApproval(S.activeMeeting.id, approvedMinutes).catch(() => {
+        showToast('Background AI analysis failed — you can continue, but insights may not reflect the latest minutes.', 'warn');
+      });
     }
 
     // Auto-analyze agenda outcomes from approved minutes (best-effort)
     const hasAgendaItems = (Array.isArray(res.agendaItems) && res.agendaItems.length) || res.agendaText;
     if (approvedMinutes && hasAgendaItems) {
       const outcomesBtn = document.getElementById('km-ai-outcomes-btn');
-      if (outcomesBtn) abAiAnalyseOutcomes(S.activeMeeting.id, outcomesBtn);
+      if (outcomesBtn) {
+        showToast('Analysing agenda outcomes…', 'info');
+        abAiAnalyseOutcomes(S.activeMeeting.id, outcomesBtn).catch(() => {
+          showToast('Background AI analysis failed — you can continue, but insights may not reflect the latest minutes.', 'warn');
+        });
+      }
     }
   } catch {
     showToast('Review save failed. Check your connection.', 'error');
@@ -4571,8 +4668,8 @@ async function reconcileInsightsAfterApproval(meetingId, minutesMarkdown) {
     // Re-render insights card view with the updated data
     const irSection = document.getElementById('k-insights-review');
     if (irSection) irSection.outerHTML = renderInsightsReviewSavedView(S.activeMeeting);
-    showToast(`AI updated insights: ${changes}`, 'info');
-  } catch { /* silent — reconciliation is best-effort */ }
+    showToast('AI updated resolutions and action items based on approved minutes. Review in the Insights tab.', 'success');
+  } catch (err) { throw err; /* propagate so caller can show error toast */ }
 }
 
 function openReviewEditor() {
@@ -5115,6 +5212,7 @@ async function deleteMeeting(id, event) {
   clearMeetingUiState(id);
   clearTranscriptBuffer(id);
   S.meetings = S.meetings.filter(x => x.id !== id);
+  _dashCache.ts = 0; // invalidate dashboard cache
   const main = document.getElementById('kpsc-main');
   if (main) await renderDashboard(main);
   showToast('Meeting deleted.', 'success');
@@ -5228,6 +5326,7 @@ async function endMeeting(btn) {
     });
     if (res.error) { showToast(res.error, 'error'); return; }
     S.activeMeeting = res;
+    _dashCache.ts = 0; // invalidate dashboard cache
     renderPage('meeting');
   } catch {
     showToast('Failed to end meeting. Check your connection.', 'error');
@@ -5239,9 +5338,21 @@ async function endMeeting(btn) {
 
 async function processMeeting(btn) {
   if (!S.activeMeeting) return;
+  if (!confirm('Generate AI minutes for this meeting? This may take 1–2 minutes and cannot be undone.')) return;
   const orig = btn.textContent;
   btn.disabled = true;
-  btn.textContent = 'Generating minutes…';
+  btn.textContent = '⏳ Generating minutes…';
+
+  // Show a progress status message below the button
+  let statusEl = document.getElementById('km-process-status');
+  if (!statusEl) {
+    statusEl = document.createElement('div');
+    statusEl.id = 'km-process-status';
+    statusEl.style.cssText = 'font-size:13px;color:#6b7280;margin-top:8px;';
+    btn.insertAdjacentElement('afterend', statusEl);
+  }
+  statusEl.textContent = 'This usually takes 1–2 minutes. Please keep this page open.';
+  statusEl.style.display = '';
 
   try {
     const res = await apiPost(`ai-secretary-meetings/${S.activeMeeting.id}/process`, {});
@@ -5257,6 +5368,7 @@ async function processMeeting(btn) {
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
+    if (statusEl) statusEl.style.display = 'none';
   }
 }
 
@@ -5446,15 +5558,24 @@ function showVoiceFpEnrollModal(idx) {
   const modal = document.createElement('div');
   modal.id        = 'k-vfp-modal';
   modal.className = 'k-modal-overlay';
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.setAttribute('aria-labelledby', 'km-voice-enroll-title');
   modal.innerHTML = `
     <div class="k-modal">
       <div class="k-modal-hdr">
-        <span class="k-modal-title">🎙 Voice Enrollment — ${esc(member.name)}</span>
+        <span class="k-modal-title" id="km-voice-enroll-title">🎙 Voice Enrollment — ${esc(member.name)}</span>
         <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeVoiceFpModal()">✕</button>
       </div>
       <div class="k-modal-body">
-        <p class="k-enroll-instruction">Voice enrollment stores a mathematical representation of <strong>${esc(member.name)}</strong>'s voice (192 numbers) that lets KPSC identify them in meetings. The raw recording is not kept. You can delete this data at any time. By proceeding you confirm <strong>${esc(member.name)}</strong> has consented to this enrollment.</p>
+        <p class="k-enroll-instruction">Voice enrollment stores a mathematical representation of <strong>${esc(member.name)}</strong>'s voice (192 numbers) that lets KPSC identify them in meetings. The raw recording is not kept. You can delete this data at any time.</p>
         ${alreadyEnrolled ? `<div class="k-enroll-warn">⚠ Already enrolled (${esc(new Date(member.voice_enrolled_at).toLocaleDateString())}${member.voice_sample_count ? ` · ${member.voice_sample_count} sample(s)` : ''}). Recording again will replace the existing data.</div>` : ''}
+        <div style="margin:12px 0;padding:10px;background:var(--bg-warn,#fffbeb);border:1px solid var(--border-warn,#f59e0b);border-radius:6px">
+          <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px">
+            <input type="checkbox" id="km-voice-consent-cb" style="margin-top:2px;flex-shrink:0" onchange="(function(cb){ var btn=document.getElementById('k-vfp-record-btn'); if(btn) btn.disabled=!cb.checked; })(this)">
+            <span>I confirm that <strong>${esc(member.name)}</strong> has given explicit consent to record and store a voice fingerprint for identification purposes.</span>
+          </label>
+        </div>
         <div id="k-vfp-status"></div>
         <div id="k-vfp-recording-ui" style="display:none">
           <div class="k-vfp-rec-indicator">
@@ -5467,13 +5588,14 @@ function showVoiceFpEnrollModal(idx) {
         </div>
       </div>
       <div class="k-modal-footer" id="k-vfp-footer">
-        <button class="kbtn kbtn-record" id="k-vfp-record-btn" onclick="Kpsc.startVoiceFpRecording()">🔴 Record 5 seconds</button>
+        <button class="kbtn kbtn-record" id="k-vfp-record-btn" onclick="Kpsc.startVoiceFpRecording()" disabled>🔴 Record 5 seconds</button>
         <button class="kbtn kbtn-primary" id="k-vfp-submit-btn" onclick="Kpsc.submitVoiceFpEnrollment()" disabled>Submit</button>
         ${alreadyEnrolled ? `<button class="kbtn kbtn-danger-outline" onclick="Kpsc.removeVoiceFpEnrollment(${idx})">🗑 Remove voice data</button>` : ''}
         <button class="kbtn kbtn-ghost" onclick="Kpsc.closeVoiceFpModal()">Cancel</button>
       </div>
     </div>`;
   document.body.appendChild(modal);
+  setTimeout(() => modal.querySelector('button, input')?.focus(), 50);
 }
 
 function closeVoiceFpModal() {
@@ -6882,6 +7004,13 @@ async function renderReminders(main) {
 
 // Per-partner personalized message overrides: Map<partnerId, resolvedMessageString>
 const _personalizedMessages = new Map();
+
+// ── MEETING ARCHIVE PAGINATION ────────────────────────────────────────────────
+let meetingListOffset = 0;
+const MEETING_PAGE_SIZE = 20;
+
+// ── DASHBOARD CACHE ──────────────────────────────────────────────────────────
+const _dashCache = { data: null, ts: 0 };
 
 function copyReminderMessage(partnerId) {
   const partner = S.partners.find(p => p.id === partnerId);
@@ -8926,8 +9055,13 @@ function setArchiveQuickFilter(filter) {
 }
 
 async function renderArchive(main) {
-  const res = await apiGet('ai-secretary-meetings');
-  S.meetings = res.meetings || res || [];
+  meetingListOffset = 0;
+  const res = await apiGet(`ai-secretary-meetings?limit=${MEETING_PAGE_SIZE}&offset=0`);
+  // Guard: backend may return flat array (before pagination support) or { items, total, limit, offset }
+  const items = Array.isArray(res) ? res : (res.items || res.meetings || res || []);
+  const total = typeof res?.total === 'number' ? res.total : items.length;
+  S.meetings = items;
+  S._archiveTotal = total;
   main.innerHTML = `
     <div class="k-page">
       <div class="k-search-bar">
@@ -8938,7 +9072,34 @@ async function renderArchive(main) {
         ${archiveQuickFilters().map(f => `<button class="k-filter ${S.archiveQuickFilter === f.key ? 'active' : ''}" onclick="Kpsc.setArchiveQuickFilter('${f.key}')">${f.label}</button>`).join('')}
       </div>
       <div id="k-archive-list">${archiveList(S.meetings, S.archiveSearch)}</div>
+      ${meetingListOffset + items.length < total ? `<div id="k-archive-loadmore" style="text-align:center;margin-top:16px"><button class="kbtn kbtn-ghost" onclick="Kpsc.loadMoreMeetings()">Load more</button></div>` : ''}
     </div>`;
+}
+
+async function loadMoreMeetings() {
+  meetingListOffset += MEETING_PAGE_SIZE;
+  const btn = document.querySelector('#k-archive-loadmore button');
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+  try {
+    const res = await apiGet(`ai-secretary-meetings?limit=${MEETING_PAGE_SIZE}&offset=${meetingListOffset}`);
+    const items = Array.isArray(res) ? res : (res.items || res.meetings || res || []);
+    const total = typeof res?.total === 'number' ? res.total : (S._archiveTotal || 0);
+    S.meetings = [...S.meetings, ...items];
+    S._archiveTotal = total;
+    const listEl = document.getElementById('k-archive-list');
+    if (listEl) listEl.innerHTML = archiveList(S.meetings, S.archiveSearch);
+    const loadMoreEl = document.getElementById('k-archive-loadmore');
+    if (loadMoreEl) {
+      if (meetingListOffset + items.length < total) {
+        loadMoreEl.innerHTML = `<button class="kbtn kbtn-ghost" onclick="Kpsc.loadMoreMeetings()">Load more</button>`;
+      } else {
+        loadMoreEl.remove();
+      }
+    }
+  } catch {
+    if (btn) { btn.disabled = false; btn.textContent = 'Load more'; }
+    showToast('Failed to load more meetings. Check your connection.', 'error');
+  }
 }
 
 function filterArchive(q) {
@@ -11011,22 +11172,64 @@ function printMinutes(meetingId) {
   if (!meeting?.reviewedAt) { showToast('Approve and save the review before printing.', 'warn'); return; }
 
   function mdToHtml(md) {
-    // Escape HTML entities first to prevent XSS before applying markdown transforms
-    const escaped = md
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-    return escaped
-      .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-      .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-      .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/^- (.+)$/gm, '<li>$1</li>')
-      .replace(/(<li>.*<\/li>[\n]?)+/g, '<ul>$&</ul>')
-      .replace(/\n\n/g, '<br><br>')
-      .replace(/\n/g, '<br>');
+    if (!md) return '';
+    const lines = md.split('\n');
+    const out = [];
+    let inUl = false;
+    let inOl = false;
+
+    function escPrint(s) {
+      return String(s || '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function applyInlinePrint(escaped) {
+      // Links: only allow https:// URLs
+      escaped = escaped.replace(/\[([^\]]+)\]\((https:\/\/[^)]+)\)/g,
+        '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+      // Inline code
+      escaped = escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // Bold
+      escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      // Italic
+      escaped = escaped.replace(/(?<!\*)\*(?!\*)([^*]+)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+      escaped = escaped.replace(/(?<!_)_(?!_)([^_]+)(?<!_)_(?!_)/g, '<em>$1</em>');
+      return escaped;
+    }
+
+    for (const raw of lines) {
+      const line = raw.trimEnd();
+      if (/^#{1,6}\s/.test(line)) {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        const level = line.match(/^(#+)/)[1].length;
+        out.push(`<h${level}>${applyInlinePrint(escPrint(line.replace(/^#+\s*/, '')))}</h${level}>`);
+      } else if (/^[-*]\s/.test(line)) {
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        if (!inUl) { out.push('<ul>'); inUl = true; }
+        out.push(`<li>${applyInlinePrint(escPrint(line.replace(/^[-*]\s*/, '')))}</li>`);
+      } else if (/^\d+\.\s/.test(line)) {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (!inOl) { out.push('<ol>'); inOl = true; }
+        out.push(`<li>${applyInlinePrint(escPrint(line.replace(/^\d+\.\s*/, '')))}</li>`);
+      } else if (/^>\s/.test(line)) {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        out.push(`<blockquote>${applyInlinePrint(escPrint(line.replace(/^>\s*/, '')))}</blockquote>`);
+      } else if (line === '') {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        out.push('');
+      } else {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        out.push(`<p>${applyInlinePrint(escPrint(line))}</p>`);
+      }
+    }
+    if (inUl) out.push('</ul>');
+    if (inOl) out.push('</ol>');
+    return out.join('\n');
   }
 
   const html = `<!DOCTYPE html>
@@ -13731,6 +13934,10 @@ window.Kpsc = {
   onPermReadChange,
   canWrite,
   canDelete,
+  // Archive pagination
+  loadMoreMeetings,
+  // Minutes management
+  reGenerateMinutes,
 };
 
 document.addEventListener('DOMContentLoaded', init);

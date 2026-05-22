@@ -455,12 +455,12 @@ export async function onRequest(context) {
     if (route === 'kpsc-extract-projects' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
-      return await extractProjectsFromMeeting(DB, env, body);
+      return await extractProjectsFromMeeting(DB, env, body, auth);
     }
     if (route === 'kpsc-approve-meeting-projects' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
-      return await approveMeetingProjects(DB, body);
+      return await approveMeetingProjects(DB, body, auth);
     }
     if (route === 'kpsc-ocr-notes' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -651,12 +651,12 @@ export async function onRequest(context) {
       if (method === 'POST' && param === 'audio-chunk') {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
-        return await uploadAiSecretaryAudioChunk(env, request);
+        return await uploadAiSecretaryAudioChunk(DB, env, request);
       }
       if (method === 'GET'  && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
         if (auth instanceof Response) return auth;
-        return await getAiSecretaryMeetings(DB);
+        return await getAiSecretaryMeetings(DB, auth, url);
       }
       if (method === 'POST' && !param) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -677,6 +677,11 @@ export async function onRequest(context) {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
         if (auth instanceof Response) return auth;
         return await deleteAiSecretaryMeeting(DB, param, auth);
+      }
+      if (method === 'POST' && parts[2] === 'reset-for-reprocess') {
+        const auth = await requireKpscRole(DB, request, ['acting_chairman', 'general_secretary']);
+        if (auth instanceof Response) return auth;
+        return await resetAiSecretaryMeetingForReprocess(DB, param);
       }
       if (method === 'POST' && parts[2] === 'process') {
         const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -870,7 +875,7 @@ export async function onRequest(context) {
 
     // ── Termii delivery status webhook (Feature 1) ──────────────────
     if (route === 'termii-webhook' && method === 'POST') {
-      return await handleTermiiWebhook(DB, body);
+      return await handleTermiiWebhook(DB, body, request, env);
     }
 
     // ── Termii balance check (Feature 13) ──────────────────────────
@@ -1744,7 +1749,8 @@ async function kpscLoginUser(DB, data) {
   const now = new Date().toISOString();
   await DB.prepare(`UPDATE kpsc_accounts SET last_login_at=?, updated_at=? WHERE id=?`).bind(now, now, row.id).run();
   // Create a server-side session token so subsequent requests can be authenticated.
-  const sessionToken = newId('ks');
+  // Use crypto.randomUUID() for cryptographically secure session token generation.
+  const sessionToken = crypto.randomUUID();
   const expiresAt = Date.now() + KPSC_SESSION_TTL_MS;
   await DB.prepare(`INSERT INTO kpsc_sessions (id, account_id, expires_at) VALUES (?,?,?)`).bind(sessionToken, row.id, expiresAt).run();
   return ok({ ...publicKpscAccount({ ...row, last_login_at: now }), sessionType: 'kpsc', sessionToken });
@@ -3459,9 +3465,10 @@ async function deleteKpscProject(DB, id, auth) {
   return ok({ deleted: id });
 }
 
-async function extractProjectsFromMeeting(DB, env, data) {
+async function extractProjectsFromMeeting(DB, env, data, auth) {
   const meetingId = String(data?.meetingId || '').trim();
-  const createdBy = String(data?.createdBy || '').trim();
+  // Use verified auth identity — never trust client-supplied createdBy
+  const createdBy = String(auth?.name || '').trim();
   if (!meetingId) return err('meetingId is required', 400);
   const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(meetingId).first();
   if (!row) return err('Meeting not found', 404);
@@ -3552,13 +3559,14 @@ async function extractProjectsFromMeeting(DB, env, data) {
 // ── APPROVE MEETING SUGGESTED PROJECTS ───────────────────────────────────────
 // Called when the secretary approves suggested projects in the review panel.
 // Writes each approved project to kpsc_projects and clears the suggested list.
-async function approveMeetingProjects(DB, data) {
+async function approveMeetingProjects(DB, data, auth) {
   const meetingId = String(data?.meetingId || '').trim();
-  const createdBy = String(data?.createdBy || '').trim();
+  // Use verified auth identity — never trust client-supplied createdBy
+  const createdBy = String(auth?.name || '').trim();
   const projects = Array.isArray(data?.projects) ? data.projects : [];
   if (!meetingId) return err('meetingId is required', 400);
 
-  const row = await DB.prepare(`SELECT id FROM ai_secretary_meetings WHERE id=?`).bind(meetingId).first();
+  const row = await DB.prepare(`SELECT id FROM ai_secretary_meetings WHERE id=? AND (deleted_at IS NULL OR deleted_at = '')`).bind(meetingId).first();
   if (!row) return err('Meeting not found', 404);
 
   const inserted = [];
@@ -3958,8 +3966,8 @@ function normalizeAiParticipants(participants) {
   }));
 }
 
-function aiSecretaryMeetingFromRow(row) {
-  return {
+function aiSecretaryMeetingFromRow(row, role) {
+  const meeting = {
     id: row.id,
     title: row.title,
     meetingType: row.meeting_type,
@@ -3991,6 +3999,14 @@ function aiSecretaryMeetingFromRow(row) {
     preBriefGeneratedAt: row.pre_brief_generated_at || null,
     venue: row.venue || '',
   };
+  // Strip sensitive fields for committee_viewer role
+  if (role === 'committee_viewer') {
+    delete meeting.transcriptText;
+    delete meeting.deletedAt;
+    delete meeting.deletedBy;
+    delete meeting.policyFlags;
+  }
+  return meeting;
 }
 
 function transcriptSentences(transcript) {
@@ -4514,13 +4530,29 @@ function buildAiSecretaryOutput(meeting, options = {}) {
   return options.skipSanitize ? output : sanitizeAiSecretaryOutput(output, meeting, output);
 }
 
-async function getAiSecretaryMeetings(DB) {
+async function getAiSecretaryMeetings(DB, auth, url) {
+  const limit  = Math.min(parseInt(url?.searchParams?.get('limit')  || '20'), 100);
+  const offset = Math.max(parseInt(url?.searchParams?.get('offset') || '0'),  0);
+
+  const WHERE = `WHERE COALESCE(deleted_at,'') = ''`;
+  const countRow = await DB.prepare(
+    `SELECT COUNT(*) as total FROM ai_secretary_meetings ${WHERE}`
+  ).first();
+  const total = countRow?.total ?? 0;
+
   const { results } = await DB.prepare(
     `SELECT * FROM ai_secretary_meetings
-     WHERE COALESCE(deleted_at,'') = ''
-     ORDER BY meeting_date DESC, created_at DESC LIMIT 200`
-  ).all();
-  return ok((results || []).map(aiSecretaryMeetingFromRow));
+     ${WHERE}
+     ORDER BY meeting_date DESC, created_at DESC
+     LIMIT ? OFFSET ?`
+  ).bind(limit, offset).all();
+
+  return ok({
+    items: (results || []).map(r => aiSecretaryMeetingFromRow(r, auth?.role)),
+    total,
+    limit,
+    offset,
+  });
 }
 
 async function deleteAiSecretaryMeeting(DB, id, auth) {
@@ -4571,7 +4603,7 @@ async function deleteAiSecretaryMeeting(DB, id, auth) {
 async function getAiSecretaryMeeting(DB, id, auth) {
   const row = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
   if (!row || row.deleted_at) return err('AI secretary meeting not found', 404);
-  const meeting = aiSecretaryMeetingFromRow(row);
+  const meeting = aiSecretaryMeetingFromRow(row, auth?.role);
   const TOKEN_ROLES = ['acting_chairman', 'general_secretary'];
   if (!auth || !TOKEN_ROLES.includes(auth.role)) {
     delete meeting.publicShareToken;
@@ -4643,6 +4675,13 @@ async function getAiSecretaryMeetingPublicView(DB, token) {
 }
 
 async function createAiSecretaryMeeting(DB, data, auth) {
+  const VALID_MEETING_TYPES = ['routine', 'extraordinary', 'emergency', 'agm', 'special'];
+  if (data.meetingType != null && !VALID_MEETING_TYPES.includes(data.meetingType)) {
+    return err('Invalid meeting type', 400);
+  }
+  if (data.meetingDate != null && isNaN(Date.parse(data.meetingDate))) {
+    return err('Invalid meeting date', 400);
+  }
   const id = data.id || newId('AIM-');
   const participants = normalizeAiParticipants(data.participants);
   const now = new Date().toISOString();
@@ -4676,6 +4715,13 @@ async function createAiSecretaryMeeting(DB, data, auth) {
 }
 
 async function updateAiSecretaryMeeting(DB, id, data, auth) {
+  const VALID_MEETING_TYPES = ['routine', 'extraordinary', 'emergency', 'agm', 'special'];
+  if (data.meetingType != null && !VALID_MEETING_TYPES.includes(data.meetingType)) {
+    return err('Invalid meeting type', 400);
+  }
+  if (data.meetingDate != null && isNaN(Date.parse(data.meetingDate))) {
+    return err('Invalid meeting date', 400);
+  }
   const existing = await DB.prepare(`SELECT * FROM ai_secretary_meetings WHERE id=?`).bind(id).first();
   if (!existing || existing.deleted_at) return err('AI secretary meeting not found', 404);
   const participants = data.participants !== undefined ? normalizeAiParticipants(data.participants) : safeJsonParse(existing.participants_json, []);
@@ -4803,7 +4849,9 @@ async function callDeepSeekForMeeting(apiKey, meeting) {
   }
   const timingInfo = timingParts.join(' | ');
 
-  const policyContext = aiSecretaryText(meeting.policyContext);
+  // Cap policyContext to prevent prompt injection via saved settings.
+  let policyContext = aiSecretaryText(meeting.policyContext);
+  if (policyContext && policyContext.length > 3000) policyContext = policyContext.slice(0, 3000);
   const prompt = `You are an expert meeting minutes writer for the Kingdom Parish Stewardship Committee (KPSC), a Nigerian church committee. Correct transcription errors intelligently based on context. Your job is to produce a clean, professional set of structured minutes from the meeting rough transcript below.
 
 Return a single valid JSON object — no markdown fences, no commentary outside the JSON — with these exact keys:
@@ -4946,10 +4994,14 @@ ${participantList}
 ${meeting.agendaText ? `\nMeeting Agenda (pre-set by the Chairman):\n${meeting.agendaText}\n\nIMPORTANT: Use the agenda above to structure "## 4. Agenda and Matters Discussed". Each agenda item should appear as a sub-heading even if discussion is brief. Items not in the agenda but raised during the meeting should appear at the end of that section.\n` : ''}
 
 ${meeting.transcriptText
-  ? `Transcript note: The following is a rough, error-heavy phonetic transcript produced by an AI transcriber. Many words are misspelled or misheard (e.g. Nigerian names mangled, naira amounts garbled, church/committee terms misrecognised). Use the surrounding conversational context to deduce the true meaning of unclear passages. Correct all technical jargon, proper nouns, and grammar errors as you draft the minutes — do not reproduce the transcript errors verbatim.
-
-Transcript:
-${meeting.transcriptText}`
+  ? (() => {
+      const rawTranscript = meeting.transcriptText || '';
+      const cappedTranscript = rawTranscript.slice(0, 80000); // ~20k tokens cap
+      if (rawTranscript.length > 80000) {
+        console.warn(`Transcript truncated from ${rawTranscript.length} to 80000 chars for DeepSeek prompt`);
+      }
+      return `Transcript note: The following is a rough, error-heavy phonetic transcript produced by an AI transcriber. Many words are misspelled or misheard (e.g. Nigerian names mangled, naira amounts garbled, church/committee terms misrecognised). Use the surrounding conversational context to deduce the true meaning of unclear passages. Correct all technical jargon, proper nouns, and grammar errors as you draft the minutes — do not reproduce the transcript errors verbatim.\n\nTranscript:\n${cappedTranscript}`;
+    })()
   : `Transcript:\n(no transcript provided — produce a skeleton minutes document with placeholders for the secretary to complete)`}
 
 Return only valid JSON. No markdown fences. No text before or after the JSON object.`;
@@ -4963,6 +5015,21 @@ Return only valid JSON. No markdown fences. No text before or after the JSON obj
   const data = await resp.json();
   const text = data.choices?.[0]?.message?.content || '';
   return parseAiSecretaryJson(text);
+}
+
+async function resetAiSecretaryMeetingForReprocess(DB, id) {
+  const row = await DB.prepare(
+    `SELECT id, status FROM ai_secretary_meetings WHERE id=? AND (deleted_at IS NULL OR deleted_at = '')`
+  ).bind(id).first();
+  if (!row) return err('Meeting not found', 404);
+  if (row.status !== 'processed') return err('Meeting is not in processed status', 409);
+  await DB.prepare(`
+    UPDATE ai_secretary_meetings
+    SET status='ended', processed_at='', reviewed_at='', reviewed_by='',
+        minutes_markdown='', summary_short='', summary_long=''
+    WHERE id=?
+  `).bind(id).run();
+  return ok({ success: true, message: 'Meeting reset for reprocessing' });
 }
 
 async function processAiSecretaryMeeting(DB, id) {
@@ -5104,7 +5171,10 @@ async function proofreadAiSecretaryMinutes(DB, env, id, body) {
   if (!meetingRow || meetingRow.deleted_at) return err('Meeting not found', 404);
 
   const minutesMarkdown = String(body?.minutesMarkdown || '').trim();
-  const secretaryNotes  = String(body?.secretaryNotes  || '').trim();
+  let secretaryNotes    = String(body?.secretaryNotes  || '').trim();
+  // Sanitise secretaryNotes: strip control characters and cap length to prevent prompt injection.
+  secretaryNotes = secretaryNotes.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+  if (secretaryNotes.length > 2000) secretaryNotes = secretaryNotes.slice(0, 2000);
   const summaryShort    = String(body?.summaryShort    || '').trim();
   const summaryLong     = String(body?.summaryLong     || '').trim();
   const grammarOnly     = !!body?.grammarOnly;
@@ -5649,7 +5719,7 @@ async function voiceDeleteEnrollment(DB, memberId) {
 }
 
 
-async function uploadAiSecretaryAudioChunk(env, request) {
+async function uploadAiSecretaryAudioChunk(DB, env, request) {
   const form = await request.formData();
   const audio = form.get('audio');
   const uploadSessionId = String(form.get('uploadSessionId') || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
@@ -5660,6 +5730,15 @@ async function uploadAiSecretaryAudioChunk(env, request) {
 
   if (!audio || typeof audio.arrayBuffer !== 'function') return err('Missing audio chunk.', 400);
   if (!uploadSessionId) return err('Missing upload session id.', 400);
+
+  // Validate that the meeting exists and is in recording status (unless unsaved)
+  if (meetingId !== 'unsaved') {
+    const meetingRow = await DB.prepare(
+      `SELECT id, status FROM ai_secretary_meetings WHERE id=? AND (deleted_at IS NULL OR deleted_at = '')`
+    ).bind(meetingId).first();
+    if (!meetingRow) return err('Meeting not found', 404);
+    if (meetingRow.status !== 'recording') return err('Meeting is not in recording status', 409);
+  }
 
   const key = `kpsc-audio/${meetingId}/${uploadSessionId}/${sequence}.webm`;
   const bucket = env.KPSC_AUDIO_BUCKET || env.AUDIO_BUCKET;
@@ -5861,9 +5940,9 @@ async function runFollowups(DB, env, request) {
 
   const todayStr = new Date().toISOString().slice(0, 10);
 
-  // Load all processed meetings
+  // Load all processed meetings (excluding soft-deleted)
   const { results: meetingRows } = await DB.prepare(
-    `SELECT id, title, meeting_date, status, action_items_json FROM ai_secretary_meetings WHERE status='processed'`
+    `SELECT id, title, meeting_date, status, action_items_json FROM ai_secretary_meetings WHERE status='processed' AND (deleted_at IS NULL OR deleted_at = '')`
   ).all();
 
   // Load existing followup keys to avoid double-nudging
@@ -5977,11 +6056,12 @@ async function runPrebriefs(DB, env, request) {
   const authErr = requireCronSecret(env, request);
   if (authErr) return authErr;
 
-  // Find meetings scheduled within the next 24 hours that don't have a brief yet
+  // Find meetings scheduled within the next 24 hours that don't have a brief yet (excluding soft-deleted)
   const { results: upcoming } = await DB.prepare(
     `SELECT id, title, scheduled_for FROM ai_secretary_meetings
      WHERE scheduled_for IS NOT NULL
        AND pre_brief_markdown IS NULL
+       AND (deleted_at IS NULL OR deleted_at = '')
        AND datetime(replace(scheduled_for, 'T', ' ')) BETWEEN datetime('now') AND datetime('now', '+24 hours')`
   ).all();
 
@@ -7026,7 +7106,36 @@ async function saveAgendaOutcomes(DB, draftId, body) {
  * Expected payload: { message_id, status, ... }
  * status values: 'DND' | 'delivered' | 'sent' | 'failed'
  */
-async function handleTermiiWebhook(DB, body) {
+async function handleTermiiWebhook(DB, body, request, env) {
+  // HMAC-SHA512 signature verification
+  const webhookSecret = String(env?.TERMII_WEBHOOK_SECRET || '').trim();
+  if (webhookSecret) {
+    const signature = String(request?.headers?.get('x-termii-signature') || '').trim();
+    // Get raw body text for HMAC computation (body was already parsed, so re-read via clone)
+    let rawBodyText = '';
+    try {
+      rawBodyText = await request.clone().text();
+    } catch (_) {
+      rawBodyText = JSON.stringify(body || {});
+    }
+    const encoder = new TextEncoder();
+    const keyData = encoder.encode(webhookSecret);
+    const msgData = encoder.encode(rawBodyText);
+    const cryptoKey = await crypto.subtle.importKey('raw', keyData, { name: 'HMAC', hash: 'SHA-512' }, false, ['sign']);
+    const sigBuffer = await crypto.subtle.sign('HMAC', cryptoKey, msgData);
+    const computedHex = Array.from(new Uint8Array(sigBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+    // Constant-time comparison to prevent timing attacks
+    const sigBytes = encoder.encode(signature);
+    const computedBytes = encoder.encode(computedHex);
+    let match = sigBytes.length === computedBytes.length;
+    for (let i = 0; i < computedBytes.length; i++) {
+      if ((sigBytes[i] ?? 0) !== computedBytes[i]) match = false;
+    }
+    if (!match) return err('Invalid signature', 401);
+  } else {
+    console.warn('TERMII_WEBHOOK_SECRET is not configured — skipping webhook signature verification');
+  }
+
   const messageId    = String(body?.message_id || body?.messageId || '').trim();
   const rawStatus    = String(body?.status      || '').toLowerCase().trim();
   if (!messageId) return ok({ ok: true, ignored: true, reason: 'no message_id' });
