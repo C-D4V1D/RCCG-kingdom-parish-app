@@ -236,6 +236,24 @@ section { padding-block: clamp(52px,9vw,108px); position: relative; }
   .vision-text { text-align: left; }
 }
 
+/* ── Vision carousel ── */
+.vision-carousel { overflow: hidden; position: relative; }
+.vc-track {
+  display: flex; width: 100%; height: 100%;
+  transition: transform .55s cubic-bezier(.4,0,.2,1);
+}
+.vc-slide { min-width: 100%; height: 100%; flex: none; }
+.vc-slide img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: inherit; }
+.vc-dots {
+  position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 7px; z-index: 2;
+}
+.vc-dot {
+  width: 8px; height: 8px; border-radius: 50%; border: 0; padding: 0; cursor: pointer;
+  background: rgba(255,255,255,.45); transition: background .2s, transform .2s;
+}
+.vc-dot.active { background: #fff; transform: scale(1.25); }
+
 /* ── How it works ── */
 .howitworks {
   background: var(--surface);
@@ -329,8 +347,13 @@ section { padding-block: clamp(52px,9vw,108px); position: relative; }
   display: inline-flex; padding: 5px; gap: 3px;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 999px; box-shadow: var(--shadow-sm);
+  white-space: nowrap;
 }
-.tabs-wrap { text-align: center; margin-bottom: 26px; }
+.tabs-wrap {
+  text-align: center; margin-bottom: 26px;
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
+  padding-bottom: 6px;
+}
 .tab {
   appearance: none; border: 0; background: transparent;
   font-family: var(--font-sans); font-weight: 600; font-size: .88rem;
@@ -641,7 +664,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 <section class="vision" id="vision">
   <div class="container">
     <div class="vision-grid">
-      <div id="illu-vision" class="vision-illu illu-slot reveal" aria-hidden="true">
+      <div id="illu-vision" class="vision-illu illu-slot vision-carousel reveal" aria-hidden="true">
         <svg viewBox="0 0 300 180" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%">
           <defs>
             <radialGradient id="v-glow" cx="50%" cy="40%" r="55%">
@@ -854,11 +877,11 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 
     <div class="tabs-wrap">
       <div class="tabs" role="tablist" aria-label="Project status">
-        <button class="tab" role="tab" data-tab="completed" aria-selected="false">
+        <button class="tab" role="tab" data-tab="completed" aria-selected="true">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
           Completed <span class="count" id="count-completed">0</span>
         </button>
-        <button class="tab" role="tab" data-tab="active" aria-selected="true">
+        <button class="tab" role="tab" data-tab="active" aria-selected="false">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M8 10h8"/><path d="M8 14h5"/></svg>
           Active <span class="count" id="count-active">0</span>
         </button>
@@ -1075,7 +1098,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
       <a href="/">Home</a>
       <a href="/kpsc/">KPSC Portal</a>
       <a href="#bank">Bank Details</a>
-      <a href="/">Member Login</a>
+      <a href="/partnership/progress/">Progress Report</a>
     </nav>
     <div class="meta">"…God loves a cheerful giver." 2 Cor. 9:7</div>
     <div class="legal">Managed by the Kingdom Parish Stewardship Committee (KPSC) · © 2026</div>
@@ -1117,6 +1140,52 @@ function applyIllustration(id, url) {
   el.style.padding = '0';
 }
 
+// ═══ Vision carousel ═══
+function initVisionCarousel(slides, duration) {
+  const container = document.getElementById('illu-vision');
+  if (!container) return;
+  const valid = (slides || []).filter(Boolean);
+  if (!valid.length) return;
+
+  if (valid.length === 1) { applyIllustration('illu-vision', valid[0]); return; }
+
+  const ms = Math.max(2000, Math.min(30000, (parseFloat(duration) || 5) * 1000));
+  container.innerHTML = '';
+  container.style.cssText += ';background:none;border:none;padding:0;';
+
+  const track = document.createElement('div');
+  track.className = 'vc-track';
+  valid.forEach(src => {
+    const slide = document.createElement('div');
+    slide.className = 'vc-slide';
+    slide.innerHTML = `<img src="${escHtml(src)}" alt="" loading="lazy" />`;
+    track.appendChild(slide);
+  });
+  container.appendChild(track);
+
+  const dotsEl = document.createElement('div');
+  dotsEl.className = 'vc-dots';
+  const dotBtns = valid.map((_, i) => {
+    const d = document.createElement('button');
+    d.className = 'vc-dot' + (i === 0 ? ' active' : '');
+    d.setAttribute('aria-label', `Slide ${i + 1}`);
+    dotsEl.appendChild(d);
+    return d;
+  });
+  container.appendChild(dotsEl);
+
+  let cur = 0; let paused = false;
+  function goTo(idx) {
+    cur = ((idx % valid.length) + valid.length) % valid.length;
+    track.style.transform = `translateX(-${cur * 100}%)`;
+    dotBtns.forEach((d, i) => d.classList.toggle('active', i === cur));
+  }
+  dotBtns.forEach((d, i) => d.addEventListener('click', () => { goTo(i); paused = true; setTimeout(() => { paused = false; }, ms + 1000); }));
+  container.addEventListener('mouseenter', () => { paused = true; });
+  container.addEventListener('mouseleave', () => { paused = false; });
+  setInterval(() => { if (!paused) goTo(cur + 1); }, ms);
+}
+
 // ═══ Load all public data ═══
 async function loadData() {
   let data = null;
@@ -1140,15 +1209,21 @@ async function loadData() {
 
   // Illustrations
   const illu = data?.illustrations || {};
-  applyIllustration('illu-hero',   illu.hero);
-  applyIllustration('illu-vision', illu.vision);
-  applyIllustration('illu-step1',  illu.step1);
-  applyIllustration('illu-step2',  illu.step2);
-  applyIllustration('illu-step3',  illu.step3);
+  applyIllustration('illu-hero',  illu.hero);
+  applyIllustration('illu-step1', illu.step1);
+  applyIllustration('illu-step2', illu.step2);
+  applyIllustration('illu-step3', illu.step3);
+
+  // Vision: carousel if slides set, else fall back to static illu or SVG placeholder
+  if (data?.visionSlides?.length) {
+    initVisionCarousel(data.visionSlides, data.visionDuration);
+  } else if (illu.vision) {
+    applyIllustration('illu-vision', illu.vision);
+  }
 
   renderStats(data);
   renderGoal(data);
-  renderProjects(data?.projects ?? null, 'active');
+  renderProjects(data?.projects ?? null, 'completed');
   renderPartners(data?.partners ?? null, data?.anonymousPartnersCount ?? null);
 }
 
@@ -1348,6 +1423,13 @@ function bindPledge() {
 
     const url = `https://wa.me/${KPSC_WA_NUMBER}?text=${encodeURIComponent(msg)}`;
     window.open(url, '_blank', 'noopener,noreferrer');
+
+    // Quietly notify KPSC pledge inbox (fire-and-forget)
+    fetch(`${API_BASE}/partnership-pledge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, phone, location: loc || '', amount: amtNum, public_listing: pub ? 1 : 0 }),
+    }).catch(() => {});
   });
 }
 
