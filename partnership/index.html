@@ -684,14 +684,14 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 <!-- ═══ HOW IT WORKS ═══ -->
 <section class="howitworks" id="how">
   <div class="container">
-    <div class="section-head">
+    <div class="section-head reveal">
       <span class="eyebrow">How It Works</span>
       <h2>Three simple <span class="accent">faithful</span> steps</h2>
       <p>The same flow as your physical partnership card — designed to keep every pledge consistent and accountable.</p>
     </div>
 
     <div class="steps">
-      <article class="step">
+      <article class="step reveal rd1">
         <span class="step-num" aria-hidden="true">1</span>
         <div id="illu-step1" class="step-illu illu-slot" aria-hidden="true">
           <svg viewBox="0 0 200 120" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;max-height:100%">
@@ -719,7 +719,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
         <svg width="38" height="22" viewBox="0 0 40 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h34"/><path d="m30 6 6 6-6 6"/></svg>
       </div>
 
-      <article class="step">
+      <article class="step reveal rd2">
         <span class="step-num" aria-hidden="true">2</span>
         <div id="illu-step2" class="step-illu illu-slot" aria-hidden="true">
           <svg viewBox="0 0 200 120" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;max-height:100%">
@@ -754,9 +754,33 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
         <svg width="38" height="22" viewBox="0 0 40 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h34"/><path d="m30 6 6 6-6 6"/></svg>
       </div>
 
-      <article class="step">
+      <article class="step reveal rd3">
         <span class="step-num" aria-hidden="true">3</span>
-        <div id="illu-step3" class="step-illu illu-slot" aria-hidden="true"><span class="tag">icon · signing / card</span></div>
+        <div id="illu-step3" class="step-illu illu-slot" aria-hidden="true">
+          <svg viewBox="0 0 200 120" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;max-height:100%">
+            <defs>
+              <radialGradient id="s3-bg" cx="50%" cy="50%" r="55%">
+                <stop offset="0%" stop-color="#F8E9C0"/>
+                <stop offset="100%" stop-color="#F5EDE0" stop-opacity="0"/>
+              </radialGradient>
+              <linearGradient id="s3-hdr" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stop-color="#C9A84C"/>
+                <stop offset="100%" stop-color="#D4724A"/>
+              </linearGradient>
+            </defs>
+            <ellipse cx="100" cy="62" rx="62" ry="50" fill="url(#s3-bg)"/>
+            <rect x="34" y="26" width="132" height="82" rx="9" fill="#FFFBF0" stroke="#C9A84C" stroke-width="1.5"/>
+            <rect x="34" y="26" width="132" height="22" rx="9" fill="url(#s3-hdr)" opacity=".22"/>
+            <rect x="34" y="37" width="132" height="11" fill="url(#s3-hdr)" opacity=".22"/>
+            <rect x="48" y="60" width="66" height="4" rx="2" fill="#C9A84C" opacity=".5"/>
+            <rect x="48" y="71" width="48" height="4" rx="2" fill="#D4724A" opacity=".38"/>
+            <line x1="48" y1="96" x2="114" y2="96" stroke="#8E7222" stroke-width="1.2" opacity=".4"/>
+            <path d="M50 93 Q57 88 64 93 Q71 98 78 93 Q85 88 92 93" stroke="#5B3A20" stroke-width="1.8" stroke-linecap="round" fill="none" opacity=".72"/>
+            <circle cx="152" cy="88" r="20" fill="#C9A84C" opacity=".10" stroke="#C9A84C" stroke-width="1.5"/>
+            <circle cx="152" cy="88" r="14" fill="none" stroke="#C9A84C" stroke-width=".8" opacity=".4"/>
+            <path d="M142 88 L149 95 L162 80" stroke="#8E7222" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity=".85"/>
+          </svg>
+        </div>
         <h3>Get Card Signed</h3>
         <p>Receive a signature from the KPSC Treasurer on your physical Partnership Card.</p>
       </article>
@@ -767,14 +791,14 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 <!-- ═══ IMPACT ═══ -->
 <section class="impact" id="impact">
   <div class="container">
-    <div class="section-head">
+    <div class="section-head reveal">
       <span class="eyebrow">Impact Snapshot</span>
       <h2>What your partnership <span class="accent">is building</span></h2>
       <p>Live figures from the KPSC ledger — refreshed as partnerships and projects move forward.</p>
     </div>
 
     <div class="stat-grid">
-      <div class="stat-card">
+      <div class="stat-card reveal rd1">
         <div class="stat-icon" aria-hidden="true">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/><path d="M16 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/><path d="M2 21v-1a6 6 0 0 1 6-6h0a6 6 0 0 1 6 6v1"/><path d="M16 13a6 6 0 0 1 6 6v1"/></svg>
         </div>
@@ -782,7 +806,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
         <div class="stat-value skeleton" data-stat="activePartners">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</div>
         <div class="stat-meta">at home &amp; in diaspora</div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card reveal rd2">
         <div class="stat-icon" aria-hidden="true">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="2"/><circle cx="12" cy="12.5" r="2.5"/><path d="M6 6V4h12v2"/></svg>
         </div>
@@ -790,7 +814,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
         <div class="stat-value skeleton" data-stat="totalContributedYTD">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</div>
         <div class="stat-meta" id="stat-year">faithfully sown · 2026</div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card reveal rd3">
         <div class="stat-icon" aria-hidden="true">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78Z"/></svg>
         </div>
@@ -814,7 +838,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 <!-- ═══ PROJECTS ═══ -->
 <section class="projects" id="projects">
   <div class="container">
-    <div class="section-head">
+    <div class="section-head reveal">
       <span class="eyebrow">Our Projects</span>
       <h2>Full <span class="accent">transparency</span> — every Naira accounted for.</h2>
       <p>Every project below is reviewed by the 12-member KPSC committee before funds move.</p>
@@ -854,7 +878,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 <!-- ═══ PARTNERS WALL ═══ -->
 <section class="partners" id="partners">
   <div class="container">
-    <div class="section-head">
+    <div class="section-head reveal">
       <span class="eyebrow">Our Kingdom Partners</span>
       <h2>The men and women <span class="accent">standing with us</span></h2>
       <p>At home and abroad — names only, by their permission. Pledge amounts are never displayed publicly.</p>
@@ -968,7 +992,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
 <!-- ═══ PLEDGE FORM ═══ -->
 <section class="pledge" id="pledge">
   <div class="container">
-    <div class="section-head">
+    <div class="section-head reveal">
       <span class="eyebrow">Become a Partner</span>
       <h2>Become a <span class="accent">Kingdom Partner</span> today</h2>
       <p>Choose a monthly pledge you can sustain consistently. Every amount counts.</p>
@@ -1062,19 +1086,14 @@ const $$ = (s, p = document) => Array.from(p.querySelectorAll(s));
 const fmtN  = n => new Intl.NumberFormat('en-NG').format(n);
 const fmtNG = n => '₦' + fmtN(n);
 
-// ═══ Load logo from settings ═══
-async function loadLogo() {
-  try {
-    const res = await fetch(`${API_BASE}/partnership-public`);
-    if (!res.ok) return;
-    const data = await res.json();
-    if (data.logoUrl) {
-      $$('#logo-mark,#footer-logo-mark').forEach(el => {
-        el.innerHTML = `<img src="${escHtml(data.logoUrl)}" alt="RCCG Kingdom Parish logo" />`;
-      });
-    }
-    return data;
-  } catch { return null; }
+// ═══ Scroll reveal ═══
+function initReveal() {
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) { e.target.classList.add('in'); obs.unobserve(e.target); }
+    });
+  }, { threshold: 0.07, rootMargin: '0px 0px -30px 0px' });
+  document.querySelectorAll('.reveal').forEach(el => obs.observe(el));
 }
 
 const escHtml = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -1321,6 +1340,7 @@ function bindPledge() {
 // ═══ Init ═══
 document.addEventListener('DOMContentLoaded', () => {
   $('#stat-year') && ($('#stat-year').textContent = `faithfully sown · ${CURRENT_YEAR}`);
+  initReveal();
   bindProjectTabs();
   bindCopy();
   bindPledge();
