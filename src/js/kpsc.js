@@ -5810,12 +5810,89 @@ function _updatePaymentTotal() {
 }
 
 async function deletePartnerPayment(paymentId, partnerId) {
-  if (!confirm('Delete this payment record? This will also remove the linked finance entry.')) return;
   const res = await apiDelete(`kpsc-partner-payments/${paymentId}`);
   if (res?.error) { showToast(res.error, 'error'); return; }
   showToast('Payment record deleted.', 'success');
   const year = S._partnerDetailYear || S.partnersYear;
   await loadPartnerData(year);
+  const main = document.getElementById('kpsc-main');
+  if (S.page === 'partnerDetail') renderPartnerDetail(main);
+  else {
+    const list = document.getElementById('kpsc-partners-list');
+    if (list) list.innerHTML = renderPartnersList(canManagePartners());
+  }
+}
+
+function deletePartnerPaymentWithPin(paymentId, partnerId) {
+  requirePin(
+    'Delete Payment Record',
+    'Enter your PIN to delete this payment. The linked finance entry will also be removed.',
+    () => deletePartnerPayment(paymentId, partnerId)
+  );
+}
+
+function editPartnerPaymentWithPin(paymentId, partnerId) {
+  const payment = S.partnerPayments.find(p => p.id === paymentId);
+  if (!payment) { showToast('Payment not found.', 'error'); return; }
+  requirePin(
+    'Edit Payment Record',
+    `Enter your PIN to edit the ${monthName(payment.month)} ${payment.year} payment.`,
+    () => openEditPartnerPaymentModal(payment, partnerId)
+  );
+}
+
+function openEditPartnerPaymentModal(payment, partnerId) {
+  document.getElementById('k-edit-payment-modal')?.remove();
+  const method = String(payment.reference || '').toLowerCase() || 'cash';
+  const modal = document.createElement('div');
+  modal.className = 'k-modal-overlay';
+  modal.id = 'k-edit-payment-modal';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:400px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">✏️ Edit Payment — ${esc(monthName(payment.month))} ${payment.year}</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-edit-payment-modal')?.remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <label class="k-label">Amount (₦)</label>
+        <input id="k-ep-amount" class="k-input" type="number" min="0" step="100" value="${Number(payment.amount || 0)}" />
+        <label class="k-label" style="margin-top:12px">Payment Method</label>
+        <div style="display:flex;gap:12px;margin-top:4px">
+          <label style="display:flex;align-items:center;gap:6px;font-size:14px;cursor:pointer">
+            <input type="radio" name="k-ep-method" value="cash" ${method !== 'transfer' ? 'checked' : ''} /> Cash
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:14px;cursor:pointer">
+            <input type="radio" name="k-ep-method" value="transfer" ${method === 'transfer' ? 'checked' : ''} /> Transfer
+          </label>
+        </div>
+        <label class="k-label" style="margin-top:12px">Notes <span style="font-weight:400;color:var(--text3)">(optional)</span></label>
+        <textarea id="k-ep-notes" class="k-input k-textarea" rows="2">${esc(payment.notes || '')}</textarea>
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-edit-payment-modal')?.remove()">Cancel</button>
+        <button class="kbtn kbtn-primary" id="k-ep-save-btn" onclick="Kpsc.saveEditedPartnerPayment('${payment.id}','${partnerId}','${payment.month}','${payment.year}','${payment.paymentType || 'monthly_pledge'}',this)">Save Changes</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function saveEditedPartnerPayment(paymentId, partnerId, month, year, paymentType, btn) {
+  const amount = Number(document.getElementById('k-ep-amount')?.value || 0);
+  const method = document.querySelector('input[name="k-ep-method"]:checked')?.value || 'cash';
+  const notes = document.getElementById('k-ep-notes')?.value.trim() || '';
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const res = await apiPost('kpsc-partner-payments', {
+    partnerId, year: Number(year), month: Number(month), amount,
+    paymentType, source: 'partnership', paid: true,
+    reference: method, recordedBy: S.user?.name || '', notes,
+  });
+  btn.disabled = false; btn.textContent = orig;
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  document.getElementById('k-edit-payment-modal')?.remove();
+  showToast('Payment updated.', 'success');
+  const yr = S._partnerDetailYear || S.partnersYear;
+  await loadPartnerData(yr);
   const main = document.getElementById('kpsc-main');
   if (S.page === 'partnerDetail') renderPartnerDetail(main);
   else {
@@ -6199,14 +6276,23 @@ function renderPartnerDetail(main) {
       ? `<span class="pl-method pl-cash">💵 Cash</span>`
       : method ? `<span class="pl-method pl-cash">${esc(method)}</span>` : '—';
     const dateStr = p.paidAt ? new Date(p.paidAt).toLocaleDateString('en-NG', { day:'numeric', month:'short' }) : '—';
-    const canDel = canManageFinance();
+    const canFin = canManageFinance();
+    const menuId = `pl-ctx-${p.id}`;
+    const ctxMenu = canFin ? `
+      <div style="position:relative;display:inline-block">
+        <button class="k-card-ctx-btn" style="font-size:16px;width:28px;height:28px" onclick="event.stopPropagation();const m=document.getElementById('${menuId}');m.style.display=m.style.display==='block'?'none':'block'">⋮</button>
+        <div id="${menuId}" class="k-card-ctx-menu" style="display:none;right:0;left:auto;min-width:120px" onclick="event.stopPropagation()">
+          <button onclick="document.getElementById('${menuId}').style.display='none';Kpsc.editPartnerPaymentWithPin('${p.id}','${partner.id}')">✏️ Edit</button>
+          <button class="k-ctx-danger" onclick="document.getElementById('${menuId}').style.display='none';Kpsc.deletePartnerPaymentWithPin('${p.id}','${partner.id}')">🗑 Delete</button>
+        </div>
+      </div>` : '';
     return `<tr>
       <td><strong>${monthName(Number(p.month))}</strong></td>
       <td class="pl-amount">₦${Number(p.amount||0).toLocaleString('en-NG')}</td>
       <td>${methodBadge}</td>
       <td style="color:var(--text2)">${esc(p.recordedBy || '—')}</td>
       <td style="color:var(--text3)">${dateStr}</td>
-      <td>${canDel ? `<button class="kbtn kbtn-sm kbtn-danger" style="padding:3px 8px;font-size:11px" onclick="Kpsc.deletePartnerPayment('${p.id}','${partner.id}')">🗑</button>` : ''}</td>
+      <td style="text-align:right">${ctxMenu}</td>
     </tr>`;
   }).join('') : `<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:16px">No payments recorded for ${year}.</td></tr>`;
 
@@ -6297,9 +6383,13 @@ async function renderFinance(main) {
       </div>
       <div class="k-meeting-list">
         ${S.financeEntries.length ? S.financeEntries.map(e => `
-          <div class="k-meeting-card">
+          <div class="k-meeting-card" style="position:relative">
+            ${(canManage || canDelete) ? cardCtxMenu('fin-' + e.id, ...[
+              ...(canManage ? [{ label: '✏️ Edit', onclick: `Kpsc.editFinanceEntryWithPin('${e.id}')` }] : []),
+              ...(canDelete ? [{ label: '🗑 Delete', onclick: `Kpsc.deleteFinanceEntryWithPin('${e.id}')`, danger: true }] : []),
+            ]) : ''}
             <div class="k-mc-top">
-              <div style="flex:1">
+              <div style="flex:1;padding-right:${(canManage || canDelete) ? '32px' : '0'}">
                 <div class="k-mc-title">${esc(catLabel(e.category))} — ₦${Number(e.amount || 0).toLocaleString('en-NG')}</div>
                 <div class="k-mc-meta" style="margin-top:4px">
                   <span>${esc(fmtDate(e.date))}</span>
@@ -6311,7 +6401,6 @@ async function renderFinance(main) {
                 ${e.partnerName ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Partner: ${esc(e.partnerName)}</div>` : ''}
                 ${e.recordedBy ? `<div style="font-size:11px;color:var(--text3)">Recorded by: ${esc(e.recordedBy)}</div>` : ''}
               </div>
-              ${canDelete ? `<button class="kbtn kbtn-sm kbtn-danger" style="flex-shrink:0;align-self:flex-start" onclick="Kpsc.deleteFinanceEntry('${e.id}')">🗑</button>` : ''}
             </div>
           </div>`).join('') : '<div class="k-empty">No entries for the selected period.</div>'}
       </div>
@@ -6350,53 +6439,61 @@ async function openFinanceModal(entryToEdit = null) {
   const incomeCategories = Array.isArray(settingsRes?.kpsc_income_categories) ? settingsRes.kpsc_income_categories : ['partnership_payment','one_time_donation','wealth_development_offering','other_income'];
   const expenseCategories = Array.isArray(settingsRes?.kpsc_expense_categories) ? settingsRes.kpsc_expense_categories : ['projects','welfare','rent','church_support','committee_operations'];
 
-  const incomeOpts = incomeCategories.map(c=>`<option value="${esc(c)}">${esc(catLabel(c))}</option>`).join('');
-  const expenseOpts = expenseCategories.map(c=>`<option value="${esc(c)}">${esc(catLabel(c))}</option>`).join('');
+  const e = entryToEdit;
+  const isEdit = !!e?.id;
+  const incomeOpts = incomeCategories.map(c=>`<option value="${esc(c)}" ${(e?.category||''===c)?'selected':''}>${esc(catLabel(c))}</option>`).join('');
+  const expenseOpts = expenseCategories.map(c=>`<option value="${esc(c)}" ${(e?.category||''===c)?'selected':''}>${esc(catLabel(c))}</option>`).join('');
+  const isExpense = (e?.entryType || '') === 'expense';
+  const catOpts = isExpense ? expenseOpts : incomeOpts;
 
   const modal = document.createElement('div');
   modal.id = 'kpsc-finance-modal';
   modal.className = 'k-modal-overlay';
   modal.innerHTML = `
     <div class="k-modal">
-      <div class="k-modal-hdr"><span class="k-modal-title">New Finance Entry</span><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeFinanceModal()">✕</button></div>
+      <div class="k-modal-hdr"><span class="k-modal-title">${isEdit ? 'Edit Finance Entry' : 'New Finance Entry'}</span><button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.closeFinanceModal()">✕</button></div>
       <div class="k-modal-body">
-        <div class="kf-scan-block">
+        ${!isEdit ? `<div class="kf-scan-block">
           <input type="file" id="kf-receipt-file" accept="image/*" capture="environment" style="display:none" onchange="Kpsc.scanReceiptPhoto(this)" />
           <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('kf-receipt-file').click()">📷 Scan Receipt</button>
           <span id="kf-scan-status" class="k-hint" style="margin-left:8px"></span>
           <div id="kf-receipt-preview"></div>
-        </div>
+        </div>` : ''}
         <label class="k-label">Date</label>
-        <input id="kf-date" type="date" class="k-input" value="${today()}" />
+        <input id="kf-date" type="date" class="k-input" value="${esc(e?.date || today())}" />
         <label class="k-label">Entry Type</label>
         <select id="kf-type" class="k-input" onchange="Kpsc.updateFinanceCategoryOptions()">
-          <option value="income">Income</option>
-          <option value="expense">Expense</option>
+          <option value="income" ${!isExpense?'selected':''}>Income</option>
+          <option value="expense" ${isExpense?'selected':''}>Expense</option>
         </select>
         <label class="k-label">Category</label>
-        <select id="kf-category" class="k-input">
-          ${incomeOpts}
-        </select>
+        <select id="kf-category" class="k-input">${catOpts}</select>
         <label class="k-label">Amount (₦)</label>
-        <input id="kf-amount" type="number" min="0" class="k-input" placeholder="0" />
+        <input id="kf-amount" type="number" min="0" class="k-input" placeholder="0" value="${e?.amount != null ? Number(e.amount) : ''}" />
         <label class="k-label">Payment Method</label>
         <select id="kf-method" class="k-input">
-          <option value="cash">Cash</option>
-          <option value="bank_transfer">Bank Transfer</option>
-          <option value="pos">POS</option>
-          <option value="cheque">Cheque</option>
-          <option value="other">Other</option>
+          <option value="cash" ${(e?.paymentMethod||'')==='cash'?'selected':''}>Cash</option>
+          <option value="bank_transfer" ${(e?.paymentMethod||'')==='bank_transfer'?'selected':''}>Bank Transfer</option>
+          <option value="pos" ${(e?.paymentMethod||'')==='pos'?'selected':''}>POS</option>
+          <option value="cheque" ${(e?.paymentMethod||'')==='cheque'?'selected':''}>Cheque</option>
+          <option value="other" ${(e?.paymentMethod||'')==='other'?'selected':''}>Other</option>
         </select>
         <label class="k-label">Reference</label>
-        <input id="kf-ref" class="k-input" placeholder="e.g. receipt number, transaction ID" />
+        <input id="kf-ref" class="k-input" placeholder="e.g. receipt number, transaction ID" value="${esc(e?.reference||'')}" />
         <label class="k-label">Narration</label>
-        <textarea id="kf-note" class="k-input k-textarea" style="min-height:70px" placeholder="Brief description of this transaction…"></textarea>
+        <textarea id="kf-note" class="k-input k-textarea" style="min-height:70px" placeholder="Brief description of this transaction…">${esc(e?.narration||'')}</textarea>
       </div>
-      <div class="k-modal-footer"><button class="kbtn kbtn-primary" onclick="Kpsc.saveFinanceEntry(this)">Save Entry</button></div>
+      <div class="k-modal-footer"><button class="kbtn kbtn-primary" onclick="Kpsc.saveFinanceEntry(this)">${isEdit ? 'Save Changes' : 'Save Entry'}</button></div>
     </div>`;
   document.body.appendChild(modal);
   modal._incomeOpts = incomeOpts;
   modal._expenseOpts = expenseOpts;
+  modal._editId = e?.id || null;
+  // After inserting, set the category <select> to the right value
+  if (isEdit && e?.category) {
+    const catEl = document.getElementById('kf-category');
+    if (catEl) catEl.value = e.category;
+  }
 }
 
 // Pure helper — maps raw OCR receipt response → form-field values.
@@ -6505,7 +6602,9 @@ function updateFinanceCategoryOptions() {
 
 async function saveFinanceEntry(btn) {
   btn.disabled = true;
-  const res = await apiPost('kpsc-finance', {
+  const modal = document.getElementById('kpsc-finance-modal');
+  const editId = modal?._editId || null;
+  const payload = {
     date: document.getElementById('kf-date')?.value || '',
     entryType: document.getElementById('kf-type')?.value || '',
     category: document.getElementById('kf-category')?.value.trim() || '',
@@ -6514,7 +6613,10 @@ async function saveFinanceEntry(btn) {
     reference: document.getElementById('kf-ref')?.value.trim() || '',
     narration: document.getElementById('kf-note')?.value.trim() || '',
     recordedBy: S.user?.name || '',
-  });
+  };
+  const res = editId
+    ? await apiPut(`kpsc-finance/${editId}`, payload)
+    : await apiPost('kpsc-finance', payload);
   if (res?.error) {
     showToast(res.error, 'error');
     btn.disabled = false;
@@ -6522,7 +6624,7 @@ async function saveFinanceEntry(btn) {
   }
   closeFinanceModal();
   await renderFinance(document.getElementById('kpsc-main'));
-  showToast('Finance entry saved', 'success');
+  showToast(editId ? 'Finance entry updated.' : 'Finance entry saved.', 'success');
 }
 
 async function setFinanceYear(year) {
@@ -6535,12 +6637,34 @@ async function setFinanceMonth(month) {
   await renderFinance(document.getElementById('kpsc-main'));
 }
 
+function editFinanceEntryWithPin(id) {
+  const entry = S.financeEntries.find(e => e.id === id);
+  if (!entry) { showToast('Entry not found.', 'error'); return; }
+  requirePin('Edit Finance Entry', 'Enter your PIN to edit this finance entry.', () => openFinanceModal(entry));
+}
+
+function deleteFinanceEntryWithPin(id) {
+  if (!canDeleteFinanceEntries()) {
+    showToast('Only the Acting Chairman or IT Administrator may delete finance entries.', 'error');
+    return;
+  }
+  requirePin(
+    'Delete Finance Entry',
+    'Enter your PIN to permanently delete this entry. This action cannot be undone.',
+    async () => {
+      const res = await apiDelete(`kpsc-finance/${id}`);
+      if (res?.error) { showToast(res.error, 'error'); return; }
+      await renderFinance(document.getElementById('kpsc-main'));
+      showToast('Entry deleted.', 'success');
+    }
+  );
+}
+
 async function deleteFinanceEntry(id) {
   if (!canDeleteFinanceEntries()) {
     showToast('Only the Acting Chairman or IT Administrator may delete finance entries.', 'error');
     return;
   }
-  if (!confirm('Delete this finance entry? This is reserved for audited correction cases only.')) return;
   const res = await apiDelete(`kpsc-finance/${id}`);
   if (res?.error) { showToast(res.error, 'error'); return; }
   await renderFinance(document.getElementById('kpsc-main'));
@@ -13251,6 +13375,10 @@ window.Kpsc = {
   _updatePaymentTotal,
   saveRecordedPayments,
   deletePartnerPayment,
+  deletePartnerPaymentWithPin,
+  editPartnerPaymentWithPin,
+  openEditPartnerPaymentModal,
+  saveEditedPartnerPayment,
   requirePin,
   _submitPinConfirm,
   updateSmsCounter,
@@ -13263,6 +13391,8 @@ window.Kpsc = {
   setFinanceYear,
   setFinanceMonth,
   deleteFinanceEntry,
+  editFinanceEntryWithPin,
+  deleteFinanceEntryWithPin,
   runReconciliation,
   sendBulkReminders,
   copyReminderMessage,
