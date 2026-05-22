@@ -9440,6 +9440,8 @@ async function renderSettings(main) {
           <label class="k-label">🙏 Thank-you SMS (partner payment)</label>
           <textarea id="ks-sms-payment" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="Dear {{name}}, we have received your {{month}} partnership pledge{{amtText}} and we are so grateful! 🙏 Your faithfulness to God's work here at RCCG Kingdom Parish is a blessing to us all. May the Lord be your reward — pressed down, shaken together, and running over. Your seed is sown in good ground. God bless you! — RCCG Kingdom Parish">${esc(smsPaymentText)}</textarea>
           <div class="k-sms-counter" id="sms-ctr-ks-sms-payment"></div>
+          <p class="k-hint" style="margin-top:4px">Variables: <code>{{name}}</code> · <code>{{month}}</code> · <code>{{amtText}}</code><br>
+          When multiple months are paid at once, <code>{{month}}</code> automatically becomes a range e.g. <em>"January–April 2026 (4 months)"</em> and <code>{{amtText}}</code> shows the total e.g. <em>" totalling ₦20,000"</em> — one SMS is sent for the whole batch.</p>
         </div>
         <div class="k-form-group">
           <label class="k-label">🎉 Happy New Month SMS (1st of month)</label>
