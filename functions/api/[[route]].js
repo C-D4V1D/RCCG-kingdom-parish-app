@@ -725,6 +725,11 @@ export async function onRequest(context) {
       return await getAiSecretaryMeetingPublicView(DB, param);
     }
 
+    // ── /api/partnership-public (no auth — safe public data only) ─
+    if (route === 'partnership-public' && method === 'GET') {
+      return await getPartnershipPublic(DB);
+    }
+
     // ── /api/admin ─────────────────────────────────────────────
     if (route === 'admin') {
       const auth = await requireKpscRole(DB, request, ['it_admin']);
@@ -1386,6 +1391,11 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_partners ADD COLUMN last_sms_sent_at TEXT DEFAULT ''`,
     // Link finance entries to their source partner payment for two-way sync
     `ALTER TABLE kpsc_finance_entries ADD COLUMN partner_payment_id TEXT DEFAULT ''`,
+    // Partnership public landing page: partner opt-in for public wall + location display
+    `ALTER TABLE kpsc_partners ADD COLUMN public_listing INTEGER DEFAULT 0`,
+    `ALTER TABLE kpsc_partners ADD COLUMN location TEXT DEFAULT ''`,
+    // Projects: track funds raised toward active projects
+    `ALTER TABLE kpsc_projects ADD COLUMN raised_amount REAL DEFAULT 0`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -1483,6 +1493,11 @@ async function handleInit(DB) {
     kpsc_sms_text_premeeting: '',
     kpsc_sms_text_deadline:   '',
     kpsc_sms_text_reminder:   '',
+    // Partnership public landing page settings
+    partnership_annual_goal:   '',   // ₦ number — empty means hide goal bar
+    partnership_logo_url:      '',   // URL to logo image (optional)
+    kpsc_welfare_cases_ytd:    '0',  // manually updated by KPSC each year
+    partnership_whatsapp_number: '4740944059',
   };
   for (const [key, value] of Object.entries(defaultSettings)) {
     await DB.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).bind(key, value).run();
@@ -2449,6 +2464,8 @@ async function getKpscPartners(DB) {
     dndFlagged: Number(row.dnd_flagged || 0) === 1,
     optedOut: Number(row.opted_out || 0) === 1,
     lastSmsSentAt: row.last_sms_sent_at || '',
+    location: row.location || '',
+    publicListing: Number(row.public_listing || 0) === 1,
     createdBy: row.created_by || '',
     createdAt: row.created_at || '',
     updatedAt: row.updated_at || '',
@@ -2462,8 +2479,8 @@ async function createKpscPartner(DB, data) {
   const phone = String(data?.phone || '').trim();
   await DB.prepare(`
     INSERT INTO kpsc_partners (
-      id,full_name,phone,partnership_type,start_date,monthly_pledge,status,reminder_preference,notes,created_by,updated_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      id,full_name,phone,partnership_type,start_date,monthly_pledge,status,reminder_preference,notes,location,public_listing,created_by,updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     fullName,
@@ -2474,6 +2491,8 @@ async function createKpscPartner(DB, data) {
     normalizeKpscAccountStatus(data?.status),
     String(data?.reminderPreference || 'sms').trim() || 'sms',
     String(data?.notes || '').trim(),
+    String(data?.location || '').trim(),
+    data?.publicListing ? 1 : 0,
     String(data?.createdBy || '').trim(),
     new Date().toISOString(),
   ).run();
@@ -2508,6 +2527,8 @@ async function createKpscPartner(DB, data) {
     dndFlagged: Number(row.dnd_flagged || 0) === 1,
     optedOut: Number(row.opted_out || 0) === 1,
     lastSmsSentAt: row.last_sms_sent_at || '',
+    location: row.location || '',
+    publicListing: Number(row.public_listing || 0) === 1,
     createdBy: row.created_by || '',
     createdAt: row.created_at || '',
     updatedAt: row.updated_at || '',
@@ -2521,7 +2542,7 @@ async function updateKpscPartner(DB, id, data) {
   if (!fullName) return err('fullName is required', 400);
   await DB.prepare(`
     UPDATE kpsc_partners
-    SET full_name=?, phone=?, partnership_type=?, start_date=?, monthly_pledge=?, status=?, reminder_preference=?, notes=?, updated_at=?
+    SET full_name=?, phone=?, partnership_type=?, start_date=?, monthly_pledge=?, status=?, reminder_preference=?, notes=?, location=?, public_listing=?, updated_at=?
     WHERE id=?
   `).bind(
     fullName,
@@ -2532,6 +2553,8 @@ async function updateKpscPartner(DB, id, data) {
     data?.status !== undefined ? normalizeKpscAccountStatus(data.status) : row.status,
     data?.reminderPreference !== undefined ? String(data.reminderPreference || 'sms').trim() : row.reminder_preference,
     data?.notes !== undefined ? String(data.notes || '').trim() : row.notes,
+    data?.location !== undefined ? String(data.location || '').trim() : (row.location || ''),
+    data?.publicListing !== undefined ? (data.publicListing ? 1 : 0) : Number(row.public_listing || 0),
     new Date().toISOString(),
     id,
   ).run();
@@ -2554,6 +2577,8 @@ async function createKpscPartnerResponse(DB, id) {
     dndFlagged: Number(row.dnd_flagged || 0) === 1,
     optedOut: Number(row.opted_out || 0) === 1,
     lastSmsSentAt: row.last_sms_sent_at || '',
+    location: row.location || '',
+    publicListing: Number(row.public_listing || 0) === 1,
     createdBy: row.created_by || '',
     createdAt: row.created_at || '',
     updatedAt: row.updated_at || '',
@@ -4651,6 +4676,81 @@ async function revokeAiSecretaryMeetingPublicLink(DB, id, auth) {
     now,
   ).run();
   return ok({ meetingId: id, revoked: true });
+}
+
+// ── Partnership public endpoint ─────────────────────────────────────
+async function getPartnershipPublic(DB) {
+  const year = new Date().getFullYear();
+
+  // Load partnership settings (annual goal, logo, welfare count)
+  const settingsRows = await DB.prepare(
+    `SELECT key, value FROM settings WHERE key IN ('partnership_annual_goal','partnership_logo_url','kpsc_welfare_cases_ytd','partnership_whatsapp_number')`
+  ).all();
+  const smap = {};
+  (settingsRows.results || []).forEach(r => { smap[r.key] = r.value; });
+
+  const annualGoal   = smap.partnership_annual_goal ? parseFloat(smap.partnership_annual_goal) || null : null;
+  const logoUrl      = smap.partnership_logo_url    ? String(smap.partnership_logo_url).trim()  : '';
+  const welfareCases = smap.kpsc_welfare_cases_ytd  ? parseInt(smap.kpsc_welfare_cases_ytd, 10) || 0 : 0;
+
+  // Active partner count
+  const activeRow = await DB.prepare(
+    `SELECT COUNT(*) AS cnt FROM kpsc_partners WHERE status='active' AND (deleted_at IS NULL OR deleted_at='')`
+  ).first();
+  const activePartners = activeRow?.cnt ?? 0;
+
+  // Total contributed YTD (sum of partner payments for current year)
+  const ytdRow = await DB.prepare(
+    `SELECT COALESCE(SUM(amount),0) AS total FROM kpsc_partner_payments WHERE year=? AND paid=1`
+  ).bind(year).first();
+  const totalContributedYTD = ytdRow?.total ?? 0;
+
+  // Anonymous partner count (active, public_listing = 0 or column missing)
+  let anonymousPartnersCount = 0;
+  try {
+    const anonRow = await DB.prepare(
+      `SELECT COUNT(*) AS cnt FROM kpsc_partners WHERE status='active' AND (deleted_at IS NULL OR deleted_at='') AND (public_listing IS NULL OR public_listing=0)`
+    ).first();
+    anonymousPartnersCount = anonRow?.cnt ?? 0;
+  } catch { anonymousPartnersCount = activePartners; }
+
+  // Public partner names (only those who opted in)
+  let partners = [];
+  try {
+    const { results: pRows } = await DB.prepare(
+      `SELECT full_name, location FROM kpsc_partners WHERE status='active' AND public_listing=1 AND (deleted_at IS NULL OR deleted_at='') ORDER BY full_name COLLATE NOCASE`
+    ).all();
+    partners = (pRows || []).map(r => ({ name: r.full_name, location: r.location || '' }));
+  } catch { partners = []; }
+
+  // Projects (all statuses — client filters)
+  let projects = [];
+  try {
+    const { results: pjRows } = await DB.prepare(
+      `SELECT id, title, description, estimated_cost, actual_cost, raised_amount, status, target_date FROM kpsc_projects WHERE (deleted_at IS NULL OR deleted_at='') ORDER BY created_at DESC`
+    ).all();
+    projects = (pjRows || []).map(r => ({
+      id:             r.id,
+      title:          r.title,
+      description:    r.description,
+      estimated_cost: r.estimated_cost,
+      actual_cost:    r.actual_cost,
+      raised_amount:  r.raised_amount || 0,
+      status:         r.status,
+      target_date:    r.target_date,
+    }));
+  } catch { projects = []; }
+
+  return ok({
+    activePartners,
+    totalContributedYTD,
+    welfareCasesSupported: welfareCases,
+    annualGoal,
+    logoUrl,
+    anonymousPartnersCount,
+    partners,
+    projects,
+  });
 }
 
 async function getAiSecretaryMeetingPublicView(DB, token) {

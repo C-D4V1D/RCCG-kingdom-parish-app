@@ -6369,6 +6369,18 @@ function showPartnerModal(partner = null) {
         </select>
         <label class="k-label">Notes (private)</label>
         <textarea id="kp-notes" class="k-input k-textarea" style="min-height:60px">${esc(partner?.notes || '')}</textarea>
+        <div style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px">
+          <div style="font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--text3);margin-bottom:10px">Public Partnership Page</div>
+          <label class="k-label">Location / City (shown publicly if listed)</label>
+          <input id="kp-location" class="k-input" placeholder="e.g. Aguleri · Lagos · London, UK" value="${esc(partner?.location || '')}" />
+          <label style="display:flex;align-items:flex-start;gap:10px;margin-top:10px;cursor:pointer;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;background:var(--bg)">
+            <input type="checkbox" id="kp-public-listing" style="margin-top:2px;accent-color:var(--green)" ${partner?.publicListing ? 'checked' : ''} />
+            <span>
+              <span style="display:block;font-size:13px;font-weight:600;color:var(--text)">List name on public Partners Wall</span>
+              <span style="display:block;font-size:12px;color:var(--text2);margin-top:2px">Shows name and location only — pledge amount is never shown publicly</span>
+            </span>
+          </label>
+        </div>
       </div>
       <div class="k-modal-footer">
         <button class="kbtn kbtn-primary" onclick="Kpsc.savePartner('${partner?.id || ''}', this)">Save</button>
@@ -6394,6 +6406,8 @@ async function savePartner(id, btn) {
     startDate: document.getElementById('kp-start-date')?.value || '',
     reminderPreference: document.getElementById('kp-reminder-pref')?.value || 'sms',
     notes: document.getElementById('kp-notes')?.value.trim() || '',
+    location: document.getElementById('kp-location')?.value.trim() || '',
+    publicListing: document.getElementById('kp-public-listing')?.checked ? 1 : 0,
     createdBy: S.user?.name || '',
   };
   btn.disabled = true;
@@ -9865,6 +9879,31 @@ async function renderSettings(main) {
       </div>
 
       <div class="k-card" style="margin-top:16px">
+        <h2 class="k-card-title">Partnership Landing Page</h2>
+        <p class="k-card-sub">Settings for the public-facing <strong>/partnership/</strong> page — visible to everyone, including WhatsApp visitors.</p>
+        <label class="k-label">Annual Partnership Goal (₦) — leave empty to hide the goal bar</label>
+        <input id="ks-partnership-goal" class="k-input" type="number" min="0" step="1000"
+          placeholder="e.g. 24000000"
+          value="${esc(res?.partnership_annual_goal || '')}" />
+        <label class="k-label" style="margin-top:12px">Welfare Cases Supported This Year — update manually each year</label>
+        <input id="ks-welfare-cases" class="k-input" type="number" min="0" step="1"
+          placeholder="e.g. 12"
+          value="${esc(res?.kpsc_welfare_cases_ytd || '0')}" />
+        <label class="k-label" style="margin-top:12px">WhatsApp Number (for pledge form) — international format, no spaces or +</label>
+        <input id="ks-wa-number" class="k-input" type="tel" inputmode="numeric"
+          placeholder="e.g. 2348012345678"
+          value="${esc(res?.partnership_whatsapp_number || '4740944059')}" />
+        <label class="k-label" style="margin-top:12px">Church Logo Image URL — paste a public image URL, or leave empty to use the RCCG text badge</label>
+        <input id="ks-logo-url" class="k-input" type="url"
+          placeholder="https://example.com/rccg-logo.png"
+          value="${esc(res?.partnership_logo_url || '')}" />
+        <p class="k-hint">To upload a logo: host the image file anywhere publicly accessible (Google Drive, Cloudinary, etc.) and paste the direct image URL above. The logo will appear top-left on the landing page and in the footer.</p>
+        <div id="ks-partnership-save-msg" class="k-settings-msg" style="display:none"></div>
+        <button class="kbtn kbtn-primary" style="margin-top:12px" onclick="Kpsc.savePartnershipSettings()">Save Partnership Settings</button>
+        <a href="/partnership/" target="_blank" class="kbtn kbtn-ghost" style="margin-top:8px;display:inline-block;text-decoration:none">Preview Landing Page ↗</a>
+      </div>
+
+      <div class="k-card" style="margin-top:16px">
         <h2 class="k-card-title">About KPSC Portal</h2>
         <p class="k-card-sub">Kingdom Parish Stewardship Committee Meeting Portal</p>
         <div class="k-about-row"><span class="k-about-label">Church</span><span>Redeemed Christian Church of God</span></div>
@@ -10280,6 +10319,29 @@ async function saveKpscOpsSettings() {
   } else {
     msg.className = 'k-settings-msg k-msg-ok';
     msg.textContent = 'Operations settings saved.';
+  }
+  msg.style.display = 'block';
+  setTimeout(() => { if(msg) msg.style.display = 'none'; }, 3000);
+}
+
+async function savePartnershipSettings() {
+  const msg = document.getElementById('ks-partnership-save-msg');
+  const goal    = document.getElementById('ks-partnership-goal')?.value.trim() || '';
+  const welfare = document.getElementById('ks-welfare-cases')?.value.trim() || '0';
+  const waNum   = document.getElementById('ks-wa-number')?.value.trim() || '';
+  const logoUrl = document.getElementById('ks-logo-url')?.value.trim() || '';
+  const res = await apiPost('settings', {
+    partnership_annual_goal:   goal,
+    kpsc_welfare_cases_ytd:    welfare,
+    partnership_whatsapp_number: waNum,
+    partnership_logo_url:      logoUrl,
+  });
+  if (res?.error) {
+    msg.className = 'k-settings-msg k-msg-error';
+    msg.textContent = res.error;
+  } else {
+    msg.className = 'k-settings-msg k-msg-ok';
+    msg.textContent = 'Partnership page settings saved.';
   }
   msg.style.display = 'block';
   setTimeout(() => { if(msg) msg.style.display = 'none'; }, 3000);
@@ -13825,6 +13887,7 @@ window.Kpsc = {
   irRemoveInsightItem,
   promoteInsightProject,
   saveKpscOpsSettings,
+  savePartnershipSettings,
   saveRolePermissions,
   resetRolePermissions,
   partnerTypeLabel,

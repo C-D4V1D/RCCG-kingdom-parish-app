@@ -1,0 +1,1219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>God's Kingdom Partnership · RCCG Kingdom Parish, Aguleri</title>
+<meta name="description" content="Join the God's Kingdom Partnership — a monthly pledge to build our church and carry our members. RCCG Kingdom Parish, Aguleri." />
+
+<!-- Open Graph / WhatsApp sharing -->
+<meta property="og:type"        content="website" />
+<meta property="og:title"       content="God's Kingdom Partnership — RCCG Kingdom Parish, Aguleri" />
+<meta property="og:description" content="A Kingdom invitation rooted in transparency, accountability, and faith. Join our monthly partnership today." />
+<meta property="og:url"         content="/partnership/" />
+<meta property="og:image"       content="/icons/og-partnership.png" />
+<meta name="twitter:card"       content="summary_large_image" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;0,6..72,700;0,6..72,800;1,6..72,400&family=Nunito:wght@300;400;500;600;700&display=swap">
+
+<style>
+/* ── Design tokens ── */
+:root {
+  --cream:        #F5EDE0;
+  --cream-deep:   #ECE0CC;
+  --espresso:     #3B1F0A;
+  --espresso-2:   #5B3A20;
+  --terracotta:   #D4724A;
+  --terracotta-d: #B85A33;
+  --gold:         #C9A84C;
+  --gold-soft:    #E5CE85;
+  --surface:      #FFFAF5;
+  --success:      #2F7D4A;
+  --border:       #E6DCC8;
+  --border-2:     #D8CCB2;
+
+  --shadow-sm: 0 1px 2px rgba(59,31,10,.06), 0 1px 1px rgba(59,31,10,.04);
+  --shadow-md: 0 6px 18px -8px rgba(59,31,10,.18), 0 2px 6px rgba(59,31,10,.06);
+  --shadow-lg: 0 24px 60px -28px rgba(59,31,10,.30), 0 8px 24px -12px rgba(59,31,10,.10);
+
+  --radius-sm: 8px;
+  --radius:    14px;
+  --radius-lg: 22px;
+
+  --font-serif: 'Newsreader','Iowan Old Style','Palatino',Georgia,serif;
+  --font-sans:  'Nunito',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+
+  --container: 1180px;
+}
+
+*,*::before,*::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--cream);
+  color: var(--espresso);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+::selection { background: var(--gold-soft); color: var(--espresso); }
+
+/* ── Typography ── */
+h1,h2,h3 {
+  font-family: var(--font-serif);
+  color: var(--espresso);
+  letter-spacing: -.01em;
+  line-height: 1.08;
+  margin: 0;
+  font-weight: 700;
+  text-wrap: balance;
+}
+h1 { font-size: clamp(2.2rem,6.5vw,4.2rem); font-weight: 800; letter-spacing: -.02em; }
+h2 { font-size: clamp(1.7rem,4vw,2.7rem); }
+h3 { font-size: clamp(1.1rem,2vw,1.3rem); }
+
+.eyebrow {
+  font-family: var(--font-sans);
+  font-size: .78rem;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--terracotta-d);
+}
+.scripture {
+  font-family: var(--font-serif);
+  font-style: italic;
+  color: var(--espresso-2);
+  line-height: 1.5;
+}
+.accent { font-style: italic; color: var(--terracotta-d); }
+a { color: inherit; }
+p { text-wrap: pretty; }
+
+/* ── Layout ── */
+.container {
+  width: 100%;
+  max-width: var(--container);
+  margin-inline: auto;
+  padding-inline: clamp(18px,5vw,56px);
+}
+section { padding-block: clamp(52px,9vw,108px); position: relative; }
+.section-head { text-align: center; max-width: 720px; margin-inline: auto; margin-bottom: clamp(28px,5vw,52px); }
+.section-head .eyebrow { display: inline-block; margin-bottom: 12px; }
+.section-head p { color: var(--espresso-2); font-size: 1.02rem; margin-top: 12px; }
+
+/* ── Ornamental divider ── */
+.divider {
+  display: flex; align-items: center; justify-content: center;
+  gap: 14px; margin: clamp(24px,4vw,40px) auto;
+  max-width: 380px; color: var(--gold);
+}
+.divider .line { flex: 1; height: 1px;
+  background: linear-gradient(90deg,transparent,var(--gold) 50%,transparent); }
+
+/* ── Topbar ── */
+.topbar {
+  position: sticky; top: 0; z-index: 50;
+  background: rgba(245,237,224,.9);
+  backdrop-filter: saturate(140%) blur(14px);
+  -webkit-backdrop-filter: saturate(140%) blur(14px);
+  border-bottom: 1px solid rgba(216,204,178,.6);
+}
+.topbar-inner {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 60px;
+}
+.brand {
+  display: flex; align-items: center; gap: 10px;
+  font-family: var(--font-serif); font-weight: 700; font-size: 1rem;
+  color: var(--espresso); text-decoration: none;
+}
+.brand small {
+  display: block; font-family: var(--font-sans); font-weight: 500;
+  font-size: .7rem; color: var(--espresso-2); letter-spacing: .02em;
+}
+.topbar nav { display: none; gap: 24px; font-size: .9rem; font-weight: 500; color: var(--espresso-2); }
+.topbar nav a { text-decoration: none; }
+.topbar nav a:hover { color: var(--terracotta-d); }
+.topbar .cta-mini {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 16px; border-radius: 999px;
+  background: var(--terracotta); color: var(--surface);
+  font-size: .85rem; font-weight: 600; text-decoration: none;
+  box-shadow: var(--shadow-sm);
+  transition: background .18s;
+  white-space: nowrap;
+}
+.topbar .cta-mini:hover { background: var(--terracotta-d); }
+@media (min-width: 820px) { .topbar nav { display: flex; } }
+
+/* ── Logo mark ── */
+.logo-mark {
+  width: 36px; height: 36px; border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%,#F8E9C0,var(--gold) 55%,#8E7222);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--espresso); font-family: var(--font-serif); font-weight: 800;
+  font-size: .72rem; letter-spacing: .06em; flex: none;
+  box-shadow: inset 0 0 0 2px rgba(255,255,255,.35), 0 1px 2px rgba(0,0,0,.12);
+  overflow: hidden;
+}
+.logo-mark img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+.logo-mark .logo-text { transform: translateY(-1px); }
+
+/* ── Buttons ── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 10px; padding: 14px 26px; border-radius: 999px;
+  font-family: var(--font-sans); font-weight: 700; font-size: .96rem;
+  text-decoration: none; cursor: pointer; border: 2px solid transparent;
+  transition: all .18s; line-height: 1;
+}
+.btn:focus-visible { outline: 3px solid var(--gold); outline-offset: 3px; }
+.btn-primary { background: var(--terracotta); color: var(--surface); box-shadow: var(--shadow-md); }
+.btn-primary:hover { background: var(--terracotta-d); transform: translateY(-1px); }
+.btn-outline { background: transparent; color: var(--terracotta-d); border-color: var(--terracotta); }
+.btn-outline:hover { background: var(--terracotta); color: var(--surface); }
+
+/* ── Hero ── */
+.hero { padding-top: clamp(36px,6vw,68px); padding-bottom: clamp(44px,7vw,88px); text-align: center; }
+.hero h1 { margin-top: 14px; }
+.hero .sub {
+  font-family: var(--font-serif); font-size: clamp(1rem,2vw,1.2rem);
+  color: var(--espresso-2); margin-top: 10px; font-style: italic;
+}
+.hero-illu { margin: clamp(22px,4vw,38px) auto; max-width: 260px; }
+.scripture-block {
+  max-width: 620px; margin: clamp(20px,4vw,32px) auto;
+  padding: 20px 22px;
+}
+.scripture-block .ref {
+  display: block; font-family: var(--font-sans); font-weight: 600;
+  font-size: .76rem; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--terracotta-d); margin-bottom: 8px;
+}
+.scripture-block p { font-size: clamp(1rem,2vw,1.15rem); margin: 0; }
+.cta-row {
+  display: flex; flex-wrap: wrap; gap: 12px; justify-content: center;
+  margin-top: clamp(18px,3vw,24px);
+}
+
+/* ── Illustration placeholder ── */
+.illu-slot {
+  border-radius: var(--radius);
+  background:
+    repeating-linear-gradient(135deg,
+      rgba(201,168,76,.10) 0 6px, transparent 6px 14px),
+    var(--surface);
+  border: 1.5px dashed var(--gold);
+  display: flex; align-items: center; justify-content: center;
+  text-align: center; padding: 24px;
+}
+.illu-slot .tag {
+  font-family: monospace; font-size: .72rem;
+  color: var(--espresso-2); background: rgba(255,250,245,.85);
+  padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.illu-slot .tag::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--gold);
+}
+
+/* ── Vision ── */
+.vision { background: var(--cream); }
+.vision-grid {
+  display: grid; grid-template-columns: 1fr; gap: clamp(24px,5vw,52px);
+  align-items: center; max-width: 960px; margin-inline: auto;
+}
+.vision-text { text-align: center; }
+.vision-text p { font-size: clamp(1rem,1.8vw,1.15rem); color: var(--espresso-2); margin-top: 12px; }
+.vision-illu { aspect-ratio: 5/3; }
+@media (min-width: 820px) {
+  .vision-grid { grid-template-columns: 1fr 1fr; }
+  .vision-text { text-align: left; }
+}
+
+/* ── How it works ── */
+.howitworks {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.steps { display: grid; grid-template-columns: 1fr; gap: 22px; }
+.step {
+  background: var(--cream); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 28px 22px 22px;
+  position: relative; text-align: center;
+}
+.step-num {
+  position: absolute; top: -15px; left: 50%; transform: translateX(-50%);
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--gold); color: var(--espresso);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-serif); font-weight: 800; font-size: .95rem;
+  box-shadow: var(--shadow-sm);
+}
+.step-illu { aspect-ratio: 5/3; margin-bottom: 16px; }
+.step h3 { margin-bottom: 6px; }
+.step p { margin: 0; color: var(--espresso-2); font-size: .95rem; }
+.step-arrow { display: none; color: var(--gold); }
+@media (min-width: 880px) {
+  .steps { grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch; gap: 16px; }
+  .step-arrow { display: flex; align-items: center; }
+}
+
+/* ── Impact stats ── */
+.impact .stat-grid {
+  display: grid; grid-template-columns: 1fr; gap: 16px;
+  max-width: 1000px; margin-inline: auto;
+}
+@media (min-width: 720px) { .impact .stat-grid { grid-template-columns: repeat(3,1fr); } }
+.stat-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 26px 24px;
+  box-shadow: var(--shadow-sm); position: relative; overflow: hidden;
+}
+.stat-card::before {
+  content: ''; position: absolute; inset: 0 0 auto 0; height: 3px;
+  background: linear-gradient(90deg,var(--gold),var(--terracotta));
+  opacity: .85;
+}
+.stat-icon {
+  width: 42px; height: 42px; border-radius: 12px;
+  background: var(--cream); display: flex; align-items: center; justify-content: center;
+  color: var(--terracotta-d); margin-bottom: 14px; border: 1px solid var(--border);
+}
+.stat-label { font-size: .8rem; letter-spacing: .14em; text-transform: uppercase; color: var(--espresso-2); font-weight: 600; }
+.stat-value {
+  font-family: var(--font-serif); font-weight: 800;
+  font-size: clamp(1.8rem,4vw,2.4rem); color: var(--espresso);
+  margin-top: 4px; line-height: 1; letter-spacing: -.02em;
+}
+.stat-meta { font-size: .86rem; color: var(--espresso-2); margin-top: 6px; }
+
+.goal-block {
+  max-width: 760px; margin: clamp(24px,4vw,36px) auto 0;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px 20px;
+}
+.goal-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.goal-head .label { font-weight: 600; color: var(--espresso); }
+.goal-head .pct { font-family: var(--font-serif); font-weight: 700; color: var(--terracotta-d); }
+.progress {
+  height: 10px; border-radius: 999px; background: var(--cream-deep);
+  margin-top: 10px; overflow: hidden;
+}
+.progress > span {
+  display: block; height: 100%;
+  background: linear-gradient(90deg,var(--gold) 0%,var(--terracotta) 100%);
+  border-radius: 999px; transition: width 1s ease;
+}
+.skeleton {
+  background: linear-gradient(90deg,var(--cream-deep) 0%,var(--border) 50%,var(--cream-deep) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+  border-radius: 6px; color: transparent; user-select: none;
+}
+@keyframes shimmer { from{background-position:200% 0} to{background-position:-200% 0} }
+
+/* ── Projects ── */
+.projects { background: var(--cream); }
+.tabs {
+  display: inline-flex; padding: 5px; gap: 3px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 999px; box-shadow: var(--shadow-sm);
+}
+.tabs-wrap { text-align: center; margin-bottom: 26px; }
+.tab {
+  appearance: none; border: 0; background: transparent;
+  font-family: var(--font-sans); font-weight: 600; font-size: .88rem;
+  color: var(--espresso-2); padding: 9px 16px; border-radius: 999px;
+  cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  transition: all .18s;
+}
+.tab[aria-selected="true"] { background: var(--espresso); color: var(--cream); }
+.tab:hover:not([aria-selected="true"]) { background: var(--cream-deep); color: var(--espresso); }
+.tab .count { font-size: .72rem; opacity: .7; padding: 1px 6px; border-radius: 999px; background: rgba(255,255,255,.18); }
+.tab[aria-selected="false"] .count { background: var(--cream-deep); }
+
+.project-grid {
+  display: grid; grid-template-columns: 1fr; gap: 16px;
+  max-width: 1100px; margin-inline: auto;
+}
+@media (min-width: 720px) { .project-grid { grid-template-columns: repeat(2,1fr); } }
+@media (min-width: 1000px) { .project-grid { grid-template-columns: repeat(3,1fr); } }
+
+.project-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 20px;
+  display: flex; flex-direction: column; gap: 12px;
+  box-shadow: var(--shadow-sm);
+}
+.project-card h3 { font-size: 1.1rem; }
+.project-card .desc { color: var(--espresso-2); font-size: .93rem; flex: 1; }
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 9px; border-radius: 999px;
+  font-size: .72rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+}
+.badge.completed { background: rgba(47,125,74,.12); color: var(--success); }
+.badge.active    { background: rgba(201,168,76,.18); color: #8B7322; }
+.badge.proposed  { background: rgba(212,114,74,.14); color: var(--terracotta-d); }
+.badge .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.project-meta { display: flex; flex-wrap: wrap; gap: 12px 22px; font-size: .86rem; color: var(--espresso-2); }
+.project-meta b { color: var(--espresso); font-weight: 700; }
+.project-foot { font-size: .8rem; color: var(--espresso-2); display: flex; justify-content: space-between; }
+.verify-note {
+  text-align: center; margin-top: 24px; font-size: .86rem; color: var(--espresso-2);
+  display: inline-flex; align-items: center; gap: 7px; width: 100%; justify-content: center;
+}
+
+/* ── Partners wall ── */
+.partners .partner-grid {
+  display: grid; grid-template-columns: repeat(auto-fill,minmax(200px,1fr));
+  gap: 10px; max-width: 1100px; margin-inline: auto;
+}
+.partner-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 12px 14px;
+  display: flex; align-items: center; gap: 10px;
+}
+.partner-icon {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--cream-deep); color: var(--terracotta-d);
+  display: flex; align-items: center; justify-content: center; flex: none;
+}
+.partner-card .name { font-weight: 600; font-size: .93rem; color: var(--espresso); line-height: 1.2; }
+.partner-card .loc { font-size: .8rem; color: var(--espresso-2); }
+.silent {
+  text-align: center; margin-top: 20px; font-style: italic; color: var(--espresso-2);
+  font-family: var(--font-serif); font-size: 1rem;
+}
+.silent b { color: var(--terracotta-d); font-style: normal; font-weight: 800; }
+.partners-cta-note { text-align: center; margin-top: 12px; font-size: .9rem; color: var(--espresso-2); }
+
+/* ── Empty state ── */
+.empty-state {
+  text-align: center; padding: 40px 20px; color: var(--espresso-2);
+  font-style: italic; font-family: var(--font-serif);
+  grid-column: 1 / -1;
+}
+
+/* ── Governance ── */
+.governance { background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.gov-card {
+  max-width: 880px; margin-inline: auto;
+  background: var(--cream); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: clamp(24px,5vw,44px);
+  text-align: center;
+}
+.shield {
+  width: 60px; height: 60px; border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%,#F8E9C0,var(--gold) 55%,#8E7222);
+  display: flex; align-items: center; justify-content: center;
+  margin: 0 auto 16px; color: var(--espresso);
+  box-shadow: inset 0 0 0 2px rgba(255,255,255,.35);
+}
+.gov-card p { color: var(--espresso-2); max-width: 620px; margin-inline: auto; margin-top: 10px; }
+.pills { display: flex; flex-wrap: wrap; gap: 9px; justify-content: center; margin: 20px auto; }
+.pill {
+  background: var(--surface); border: 1px solid var(--border-2);
+  padding: 9px 16px; border-radius: 999px;
+  font-weight: 600; font-size: .9rem; color: var(--espresso);
+  display: inline-flex; align-items: center; gap: 7px;
+}
+.pill .n { font-family: var(--font-serif); font-weight: 800; color: var(--terracotta-d); font-size: 1rem; }
+.accountability {
+  font-style: italic; font-family: var(--font-serif);
+  color: var(--espresso); font-size: 1rem; margin-top: 16px;
+}
+
+/* ── Bank details ── */
+.bank { background: var(--cream); }
+.bank-card {
+  max-width: 620px; margin-inline: auto;
+  background: var(--surface); border: 2px solid var(--gold);
+  border-radius: var(--radius-lg); padding: clamp(20px,4vw,36px);
+  box-shadow: var(--shadow-md); position: relative;
+}
+.bank-card::before,.bank-card::after {
+  content: ''; position: absolute; width: 22px; height: 22px;
+  border: 2px solid var(--gold); border-radius: 4px; opacity: .6;
+}
+.bank-card::before { top: 10px; left: 10px; border-right: 0; border-bottom: 0; }
+.bank-card::after  { bottom: 10px; right: 10px; border-left: 0; border-top: 0; }
+.bank-row {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 0; border-bottom: 1px dashed var(--border);
+}
+.bank-row:last-child { border-bottom: 0; }
+.bank-row .icon {
+  width: 36px; height: 36px; border-radius: 10px; flex: none;
+  background: var(--cream); color: var(--terracotta-d);
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border);
+}
+.bank-row .label { font-size: .76rem; letter-spacing: .12em; text-transform: uppercase; color: var(--espresso-2); font-weight: 600; }
+.bank-row .value { font-family: var(--font-serif); font-weight: 700; color: var(--espresso); font-size: 1.1rem; }
+.bank-row.copyable { cursor: copy; }
+.bank-row.copyable:hover { background: rgba(201,168,76,.06); border-radius: var(--radius-sm); }
+.bank-warning { margin-top: 20px; text-align: center; font-weight: 700; font-size: .9rem; color: var(--terracotta-d); }
+
+/* ── Re-activation ── */
+.reactivate {
+  background: var(--cream-deep);
+  border-top: 1px solid var(--border-2);
+  border-bottom: 1px solid var(--border-2);
+}
+.reactivate .container { max-width: 740px; text-align: center; }
+.reactivate .scripture-block { background: rgba(255,250,245,.5); border-radius: var(--radius); padding: 20px; }
+
+/* ── Pledge form ── */
+.pledge { background: var(--cream); }
+.pledge-card {
+  max-width: 700px; margin-inline: auto;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: clamp(22px,4vw,38px);
+  box-shadow: var(--shadow-md);
+}
+.tier-grid {
+  display: grid; grid-template-columns: repeat(2,1fr); gap: 10px;
+  margin-top: 18px;
+}
+@media (min-width: 560px) { .tier-grid { grid-template-columns: repeat(4,1fr); } }
+.tier {
+  appearance: none; border: 2px solid var(--border-2); background: var(--cream);
+  padding: 16px 12px; border-radius: var(--radius);
+  font-family: var(--font-serif); font-weight: 700; font-size: 1rem;
+  color: var(--espresso); cursor: pointer;
+  transition: all .18s;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+}
+.tier small { font-family: var(--font-sans); font-weight: 600; font-size: .7rem; color: var(--espresso-2); letter-spacing: .08em; text-transform: uppercase; }
+.tier:hover { border-color: var(--gold); background: var(--surface); }
+.tier[aria-pressed="true"] { border-color: var(--terracotta); background: var(--surface); box-shadow: 0 0 0 4px rgba(212,114,74,.12); }
+.tier[aria-pressed="true"] small { color: var(--terracotta-d); }
+
+.form-grid { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 22px; }
+@media (min-width: 560px) { .form-grid.two { grid-template-columns: 1fr 1fr; } }
+.field label {
+  display: block; font-size: .76rem; letter-spacing: .12em; text-transform: uppercase;
+  font-weight: 600; color: var(--espresso-2); margin-bottom: 5px;
+}
+.field input {
+  width: 100%; padding: 13px 14px; border-radius: 12px;
+  border: 1.5px solid var(--border-2); background: var(--cream);
+  font-family: var(--font-sans); font-size: .97rem; color: var(--espresso);
+  transition: border-color .18s, box-shadow .18s;
+}
+.field input:focus { outline: none; border-color: var(--terracotta); box-shadow: 0 0 0 4px rgba(212,114,74,.15); }
+.check {
+  display: flex; gap: 11px; align-items: flex-start;
+  padding: 13px 14px; background: var(--cream); border-radius: 12px;
+  border: 1.5px solid var(--border-2); cursor: pointer;
+  transition: border-color .18s; margin-top: 16px;
+}
+.check:hover { border-color: var(--gold); }
+.check input[type="checkbox"] { margin-top: 3px; accent-color: var(--terracotta); width: 17px; height: 17px; }
+.check .ck-label { font-weight: 600; color: var(--espresso); }
+.check .ck-sub { font-size: .84rem; color: var(--espresso-2); margin-top: 2px; }
+.pledge-submit {
+  width: 100%; margin-top: 20px;
+  background: var(--terracotta); color: var(--surface);
+  padding: 17px 20px; border-radius: 14px; border: 0;
+  font-family: var(--font-sans); font-weight: 700; font-size: 1rem;
+  cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+  box-shadow: var(--shadow-md); transition: background .18s, transform .18s;
+}
+.pledge-submit:hover { background: var(--terracotta-d); transform: translateY(-1px); }
+.pledge-submit:focus-visible { outline: 3px solid var(--gold); outline-offset: 3px; }
+.pledge-note { text-align: center; font-size: .86rem; color: var(--espresso-2); margin-top: 12px; }
+
+/* ── Footer ── */
+footer { background: var(--espresso); color: var(--cream); padding-block: 52px; }
+footer .container { display: grid; grid-template-columns: 1fr; gap: 26px; text-align: center; }
+@media (min-width: 720px) { footer .container { grid-template-columns: auto 1fr auto; text-align: left; align-items: center; } }
+footer .brand { color: var(--cream); }
+footer .brand small { color: var(--gold-soft); }
+footer nav { display: flex; flex-wrap: wrap; gap: 16px 24px; justify-content: center; }
+footer nav a { color: var(--cream); opacity: .85; text-decoration: none; font-weight: 500; font-size: .93rem; }
+footer nav a:hover { opacity: 1; color: var(--gold-soft); }
+footer .meta { color: var(--gold-soft); font-style: italic; font-family: var(--font-serif); font-size: .93rem; }
+footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7); padding-top: 16px; border-top: 1px solid rgba(229,206,133,.18); text-align: center; }
+</style>
+</head>
+<body>
+
+<!-- ═══ TOP BAR ═══ -->
+<header class="topbar">
+  <div class="container topbar-inner">
+    <a class="brand" href="/partnership/">
+      <span class="logo-mark" id="logo-mark">
+        <span class="logo-text">RCCG</span>
+      </span>
+      <span>Kingdom Parish<small>Aguleri</small></span>
+    </a>
+    <nav aria-label="Page sections">
+      <a href="#vision">Vision</a>
+      <a href="#projects">Projects</a>
+      <a href="#partners">Partners</a>
+      <a href="#governance">Governance</a>
+    </nav>
+    <a class="cta-mini" href="#pledge">Become a Partner</a>
+  </div>
+</header>
+
+<!-- ═══ HERO ═══ -->
+<section class="hero" id="top">
+  <div class="container">
+    <span class="eyebrow">A Kingdom Invitation</span>
+    <h1>God's Kingdom <span class="accent">Partnership</span></h1>
+    <p class="sub">RCCG Kingdom Parish, Aguleri</p>
+
+    <div class="hero-illu illu-slot" style="aspect-ratio:1/1;max-width:240px;" aria-hidden="true">
+      <div>
+        <svg viewBox="0 0 200 200" width="160" height="160" aria-hidden="true" style="display:block;margin:0 auto 10px">
+          <defs>
+            <radialGradient id="gG" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#F8E9C0"/>
+              <stop offset="60%" stop-color="#C9A84C"/>
+              <stop offset="100%" stop-color="#8E7222"/>
+            </radialGradient>
+          </defs>
+          <circle cx="100" cy="100" r="78" fill="none" stroke="url(#gG)" stroke-width="2" stroke-dasharray="2 6"/>
+          <circle cx="100" cy="100" r="65" fill="none" stroke="#C9A84C" stroke-width="1" opacity=".5"/>
+          <rect x="93" y="54" width="14" height="92" rx="2" fill="url(#gG)"/>
+          <rect x="68" y="82" width="64" height="14" rx="2" fill="url(#gG)"/>
+        </svg>
+        <span class="tag">illustration · cross + laurel wreath</span>
+      </div>
+    </div>
+
+    <div class="scripture-block">
+      <span class="ref">2 Corinthians 9:7</span>
+      <p class="scripture">"Each of you should give what you have decided in your heart to give. Don't give because you feel forced or sad about it. God loves a person who gives with a happy heart!"</p>
+    </div>
+
+    <div class="cta-row">
+      <a href="#pledge" class="btn btn-primary">
+        Become a Partner
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+      </a>
+      <a href="#projects" class="btn btn-outline">See Our Projects</a>
+    </div>
+  </div>
+</section>
+
+<div class="container">
+  <div class="divider" aria-hidden="true">
+    <span class="line"></span>
+    <svg width="20" height="20" viewBox="0 0 22 22"><path d="M11 1 L13 9 L21 11 L13 13 L11 21 L9 13 L1 11 L9 9 Z" fill="currentColor"/></svg>
+    <span class="line"></span>
+  </div>
+</div>
+
+<!-- ═══ VISION ═══ -->
+<section class="vision" id="vision">
+  <div class="container">
+    <div class="vision-grid">
+      <div class="vision-illu illu-slot" aria-hidden="true">
+        <span class="tag">illustration · hands holding a church</span>
+      </div>
+      <div class="vision-text">
+        <span class="eyebrow">Our Vision</span>
+        <h2 style="margin-top:10px;">A church that <span class="accent">builds steadily</span>, and members carried with care.</h2>
+        <p>To ensure the steady development of our local church and provide consistent welfare support to our members — reducing the need for frequent emergency contributions.</p>
+      </div>
+    </div>
+
+    <div class="divider" aria-hidden="true">
+      <span class="line"></span>
+      <svg width="20" height="20" viewBox="0 0 22 22"><path d="M11 1 L13 9 L21 11 L13 13 L11 21 L9 13 L1 11 L9 9 Z" fill="currentColor"/></svg>
+      <span class="line"></span>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ HOW IT WORKS ═══ -->
+<section class="howitworks" id="how">
+  <div class="container">
+    <div class="section-head">
+      <span class="eyebrow">How It Works</span>
+      <h2>Three simple <span class="accent">faithful</span> steps</h2>
+      <p>The same flow as your physical partnership card — designed to keep every pledge consistent and accountable.</p>
+    </div>
+
+    <div class="steps">
+      <article class="step">
+        <span class="step-num" aria-hidden="true">1</span>
+        <div class="step-illu illu-slot" aria-hidden="true"><span class="tag">icon · person deciding</span></div>
+        <h3>Determine Amount</h3>
+        <p>Decide a monthly pledge you can give consistently — from your heart, not under pressure.</p>
+      </article>
+
+      <div class="step-arrow" aria-hidden="true">
+        <svg width="38" height="22" viewBox="0 0 40 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h34"/><path d="m30 6 6 6-6 6"/></svg>
+      </div>
+
+      <article class="step">
+        <span class="step-num" aria-hidden="true">2</span>
+        <div class="step-illu illu-slot" aria-hidden="true"><span class="tag">icon · bank transfer / cash</span></div>
+        <h3>Make Payment</h3>
+        <p>Direct transfer to the church bank account — or hand it to the KPSC Treasurer only.</p>
+      </article>
+
+      <div class="step-arrow" aria-hidden="true">
+        <svg width="38" height="22" viewBox="0 0 40 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h34"/><path d="m30 6 6 6-6 6"/></svg>
+      </div>
+
+      <article class="step">
+        <span class="step-num" aria-hidden="true">3</span>
+        <div class="step-illu illu-slot" aria-hidden="true"><span class="tag">icon · signing / card</span></div>
+        <h3>Get Card Signed</h3>
+        <p>Receive a signature from the KPSC Treasurer on your physical Partnership Card.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ IMPACT ═══ -->
+<section class="impact" id="impact">
+  <div class="container">
+    <div class="section-head">
+      <span class="eyebrow">Impact Snapshot</span>
+      <h2>What your partnership <span class="accent">is building</span></h2>
+      <p>Live figures from the KPSC ledger — refreshed as partnerships and projects move forward.</p>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/><path d="M16 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/><path d="M2 21v-1a6 6 0 0 1 6-6h0a6 6 0 0 1 6 6v1"/><path d="M16 13a6 6 0 0 1 6 6v1"/></svg>
+        </div>
+        <div class="stat-label">Active Partners</div>
+        <div class="stat-value skeleton" data-stat="activePartners">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</div>
+        <div class="stat-meta">at home &amp; in diaspora</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="2"/><circle cx="12" cy="12.5" r="2.5"/><path d="M6 6V4h12v2"/></svg>
+        </div>
+        <div class="stat-label">Contributed YTD</div>
+        <div class="stat-value skeleton" data-stat="totalContributedYTD">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</div>
+        <div class="stat-meta" id="stat-year">faithfully sown · 2026</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78Z"/></svg>
+        </div>
+        <div class="stat-label">Welfare Cases Supported</div>
+        <div class="stat-value skeleton" data-stat="welfareCasesSupported">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</div>
+        <div class="stat-meta">members carried this year</div>
+      </div>
+    </div>
+
+    <!-- Goal bar — shown only when a goal is set in KPSC settings -->
+    <div class="goal-block" id="goal-block" style="display:none">
+      <div class="goal-head">
+        <span class="label" id="goal-label">Annual Goal · 2026</span>
+        <span class="pct" id="goal-pct"></span>
+      </div>
+      <div class="progress"><span id="goal-bar" style="width:0%"></span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ PROJECTS ═══ -->
+<section class="projects" id="projects">
+  <div class="container">
+    <div class="section-head">
+      <span class="eyebrow">Our Projects</span>
+      <h2>Full <span class="accent">transparency</span> — every Naira accounted for.</h2>
+      <p>Every project below is reviewed by the 12-member KPSC committee before funds move.</p>
+    </div>
+
+    <div class="tabs-wrap">
+      <div class="tabs" role="tablist" aria-label="Project status">
+        <button class="tab" role="tab" data-tab="completed" aria-selected="false">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+          Completed <span class="count" id="count-completed">0</span>
+        </button>
+        <button class="tab" role="tab" data-tab="active" aria-selected="true">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M8 10h8"/><path d="M8 14h5"/></svg>
+          Active <span class="count" id="count-active">0</span>
+        </button>
+        <button class="tab" role="tab" data-tab="proposed" aria-selected="false">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+          Proposed <span class="count" id="count-proposed">0</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="project-grid" id="project-grid">
+      <!-- skeleton loaders -->
+      <div class="project-card"><div class="skeleton" style="height:18px;width:60%;border-radius:4px"></div><div class="skeleton" style="height:40px;margin-top:10px;border-radius:4px"></div></div>
+      <div class="project-card"><div class="skeleton" style="height:18px;width:60%;border-radius:4px"></div><div class="skeleton" style="height:40px;margin-top:10px;border-radius:4px"></div></div>
+      <div class="project-card"><div class="skeleton" style="height:18px;width:60%;border-radius:4px"></div><div class="skeleton" style="height:40px;margin-top:10px;border-radius:4px"></div></div>
+    </div>
+
+    <p class="verify-note">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+      All project records are reviewed and verified by the 12-member KPSC committee.
+    </p>
+  </div>
+</section>
+
+<!-- ═══ PARTNERS WALL ═══ -->
+<section class="partners" id="partners">
+  <div class="container">
+    <div class="section-head">
+      <span class="eyebrow">Our Kingdom Partners</span>
+      <h2>The men and women <span class="accent">standing with us</span></h2>
+      <p>At home and abroad — names only, by their permission. Pledge amounts are never displayed publicly.</p>
+    </div>
+
+    <div class="partner-grid" id="partner-grid">
+      <!-- skeleton -->
+      <div class="partner-card"><div class="skeleton" style="height:14px;width:80%;border-radius:4px"></div></div>
+      <div class="partner-card"><div class="skeleton" style="height:14px;width:70%;border-radius:4px"></div></div>
+      <div class="partner-card"><div class="skeleton" style="height:14px;width:75%;border-radius:4px"></div></div>
+    </div>
+
+    <p class="silent">…and <b id="anon-count">—</b> anonymous partners standing with us in silence.</p>
+    <p class="partners-cta-note">Want your name here? Become a partner and choose to be listed when you sign up.</p>
+  </div>
+</section>
+
+<!-- ═══ GOVERNANCE ═══ -->
+<section class="governance" id="governance">
+  <div class="container">
+    <div class="gov-card">
+      <div class="shield" aria-hidden="true">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+      </div>
+      <span class="eyebrow">Commitment to Transparency</span>
+      <h2 style="margin-top:9px;">Governed by <span class="accent">twelve faithful stewards</span></h2>
+      <p>This fund is managed transparently by the Kingdom Parish Stewardship Committee (KPSC), composed of twelve members representing all major groups in the church:</p>
+
+      <div class="pills">
+        <span class="pill"><span class="n">3</span> Men</span>
+        <span class="pill"><span class="n">3</span> Women</span>
+        <span class="pill"><span class="n">3</span> Youths</span>
+        <span class="pill"><span class="n">2</span> Ministers</span>
+        <span class="pill"><span class="n">1</span> Parish Pastor</span>
+      </div>
+
+      <p class="accountability">"Financial summaries are presented to the entire church twice yearly to ensure full accountability."</p>
+    </div>
+
+    <div class="divider" aria-hidden="true" style="margin-top:44px">
+      <span class="line"></span>
+      <svg width="20" height="20" viewBox="0 0 22 22"><path d="M11 1 L13 9 L21 11 L13 13 L11 21 L9 13 L1 11 L9 9 Z" fill="currentColor"/></svg>
+      <span class="line"></span>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ BANK DETAILS ═══ -->
+<section class="bank" id="bank">
+  <div class="container">
+    <div class="section-head">
+      <span class="eyebrow">Account Details</span>
+      <h2>For your <span class="accent">monthly remittance</span></h2>
+    </div>
+
+    <div class="bank-card">
+      <div class="bank-row">
+        <div class="icon" aria-hidden="true">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0 1 16 0v1"/></svg>
+        </div>
+        <div>
+          <div class="label">Account Name</div>
+          <div class="value">RCCG Kingdom Parish Development &amp; Welfare Fund</div>
+        </div>
+      </div>
+
+      <div class="bank-row copyable" data-copy="2048356358" title="Tap to copy account number">
+        <div class="icon" aria-hidden="true">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>
+        </div>
+        <div>
+          <div class="label">Account Number <span style="font-weight:400;text-transform:none;letter-spacing:0;opacity:.7;">— tap to copy</span></div>
+          <div class="value" id="acc-num-display" style="letter-spacing:.1em;">2048 356 358</div>
+        </div>
+      </div>
+
+      <div class="bank-row">
+        <div class="icon" aria-hidden="true">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-6 9 6"/><path d="M4 9v11h16V9"/><path d="M8 20V12"/><path d="M12 20V12"/><path d="M16 20V12"/></svg>
+        </div>
+        <div>
+          <div class="label">Bank</div>
+          <div class="value">First Bank Plc</div>
+        </div>
+      </div>
+
+      <p class="bank-warning">⚠ All funds must be paid only into this dedicated church bank account.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ RE-ACTIVATION ═══ -->
+<section class="reactivate" id="reactivate">
+  <div class="container">
+    <span class="eyebrow">A gentle word</span>
+    <h2 style="margin-top:9px;">Still <span class="accent">with us?</span></h2>
+    <p style="font-size:1.06rem;color:var(--espresso-2);margin-top:12px;">Life gets busy. If you pledged and stepped back — we understand. But your church is still building, still serving, still standing. Come back to your commitment.</p>
+
+    <div class="scripture-block" style="margin-top:20px">
+      <span class="ref">Ecclesiastes 5:4</span>
+      <p class="scripture">"When you make a vow to God, do not delay to fulfil it."</p>
+    </div>
+
+    <a href="#pledge" class="btn btn-primary" style="margin-top:14px">
+      Resume My Pledge
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+    </a>
+  </div>
+</section>
+
+<!-- ═══ PLEDGE FORM ═══ -->
+<section class="pledge" id="pledge">
+  <div class="container">
+    <div class="section-head">
+      <span class="eyebrow">Become a Partner</span>
+      <h2>Become a <span class="accent">Kingdom Partner</span> today</h2>
+      <p>Choose a monthly pledge you can sustain consistently. Every amount counts.</p>
+    </div>
+
+    <form class="pledge-card" id="pledge-form" novalidate>
+      <fieldset style="border:0;padding:0;margin:0">
+        <legend class="eyebrow" style="display:block;margin-bottom:5px">Monthly Pledge Tier</legend>
+        <div class="tier-grid" role="radiogroup" aria-label="Monthly pledge amount">
+          <button type="button" class="tier" data-amount="1000" aria-pressed="false"><span>₦1,000</span><small>/ month</small></button>
+          <button type="button" class="tier" data-amount="2500" aria-pressed="true"><span>₦2,500</span><small>/ month</small></button>
+          <button type="button" class="tier" data-amount="5000" aria-pressed="false"><span>₦5,000</span><small>/ month</small></button>
+          <button type="button" class="tier" data-amount="custom" aria-pressed="false"><span>Custom</span><small>your amount</small></button>
+        </div>
+      </fieldset>
+
+      <div class="form-grid" id="custom-wrap" style="display:none">
+        <div class="field">
+          <label for="custom-amount">Custom Amount (₦)</label>
+          <input type="number" id="custom-amount" min="100" step="100" placeholder="e.g. 10000" inputmode="numeric" />
+        </div>
+      </div>
+
+      <div class="form-grid two">
+        <div class="field">
+          <label for="p-name">Full Name</label>
+          <input type="text" id="p-name" required placeholder="Bro David Okafor" autocomplete="name" />
+        </div>
+        <div class="field">
+          <label for="p-phone">Phone Number</label>
+          <input type="tel" id="p-phone" required placeholder="+234 …" autocomplete="tel" inputmode="tel" />
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <div class="field">
+          <label for="p-location">
+            Location / City
+            <span style="text-transform:none;letter-spacing:0;color:var(--espresso-2);font-weight:500"> — optional</span>
+          </label>
+          <input type="text" id="p-location" placeholder="Aguleri · Lagos · London, UK" autocomplete="address-level2" />
+        </div>
+      </div>
+
+      <label class="check">
+        <input type="checkbox" id="p-public" />
+        <span>
+          <span class="ck-label">Display my name on the Partners Wall</span>
+          <span class="ck-sub" style="display:block">Only your name and location — never the pledge amount. Unchecked by default; fully your choice.</span>
+        </span>
+      </label>
+
+      <button type="submit" class="pledge-submit">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.52 3.48A11.93 11.93 0 0 0 12.04 0C5.46 0 .1 5.36.1 11.94c0 2.1.55 4.15 1.6 5.95L0 24l6.27-1.64a11.9 11.9 0 0 0 5.76 1.47h.01c6.58 0 11.94-5.36 11.94-11.94 0-3.19-1.24-6.18-3.46-8.41Zm-8.48 18.36h-.01a9.88 9.88 0 0 1-5.04-1.38l-.36-.21-3.72.97 1-3.63-.23-.37a9.92 9.92 0 0 1-1.52-5.28c0-5.48 4.46-9.94 9.94-9.94a9.88 9.88 0 0 1 7.03 2.91 9.88 9.88 0 0 1 2.91 7.03c0 5.48-4.46 9.93-9.93 9.93Z"/></svg>
+        Send My Pledge via WhatsApp
+      </button>
+      <p class="pledge-note">You will receive a physical Partnership Card signed by the KPSC Treasurer.</p>
+    </form>
+  </div>
+</section>
+
+<!-- ═══ FOOTER ═══ -->
+<footer>
+  <div class="container">
+    <a class="brand" href="/partnership/" style="display:flex;align-items:center;gap:10px;text-decoration:none">
+      <span class="logo-mark" id="footer-logo-mark">
+        <span class="logo-text">RCCG</span>
+      </span>
+      <span>RCCG Kingdom Parish<small>Aguleri · Anambra</small></span>
+    </a>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/kpsc/">KPSC Portal</a>
+      <a href="#bank">Bank Details</a>
+      <a href="/">Member Login</a>
+    </nav>
+    <div class="meta">"…God loves a cheerful giver." 2 Cor. 9:7</div>
+    <div class="legal">Managed by the Kingdom Parish Stewardship Committee (KPSC) · © 2026</div>
+  </div>
+</footer>
+
+<script>
+// ═══ CONFIG ═══
+const KPSC_WA_NUMBER = '4740944059';
+const API_BASE = '/api';
+const CURRENT_YEAR = new Date().getFullYear();
+
+// ═══ Helpers ═══
+const $ = (s, p = document) => p.querySelector(s);
+const $$ = (s, p = document) => Array.from(p.querySelectorAll(s));
+const fmtN  = n => new Intl.NumberFormat('en-NG').format(n);
+const fmtNG = n => '₦' + fmtN(n);
+
+// ═══ Load logo from settings ═══
+async function loadLogo() {
+  try {
+    const res = await fetch(`${API_BASE}/partnership-public`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.logoUrl) {
+      $$('#logo-mark,#footer-logo-mark').forEach(el => {
+        el.innerHTML = `<img src="${escHtml(data.logoUrl)}" alt="RCCG Kingdom Parish logo" />`;
+      });
+    }
+    return data;
+  } catch { return null; }
+}
+
+const escHtml = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+// ═══ Load all public data ═══
+async function loadData() {
+  let data = null;
+  try {
+    const res = await fetch(`${API_BASE}/partnership-public`);
+    if (res.ok) data = await res.json();
+  } catch { /* network error — keep skeletons */ }
+
+  renderStats(data);
+  renderGoal(data);
+  renderProjects(data?.projects ?? null, 'active');
+  renderPartners(data?.partners ?? null, data?.anonymousPartnersCount ?? null);
+}
+
+// ═══ Stats ═══
+function renderStats(data) {
+  const statEls = $$('[data-stat]');
+  statEls.forEach(el => el.classList.remove('skeleton'));
+
+  if (!data) {
+    statEls.forEach(el => { el.textContent = '—'; });
+    return;
+  }
+
+  const set = (key, val) => {
+    const el = $(`[data-stat="${key}"]`);
+    if (el) { el.classList.remove('skeleton'); el.textContent = val; }
+  };
+  set('activePartners',        fmtN(data.activePartners || 0));
+  set('totalContributedYTD',   fmtNG(data.totalContributedYTD || 0));
+  set('welfareCasesSupported', fmtN(data.welfareCasesSupported || 0));
+
+  const yearEl = $('#stat-year');
+  if (yearEl) yearEl.textContent = `faithfully sown · ${CURRENT_YEAR}`;
+}
+
+// ═══ Goal bar ═══
+function renderGoal(data) {
+  const block = $('#goal-block');
+  if (!block || !data?.annualGoal) return;
+
+  block.style.display = '';
+  const goal = data.annualGoal;
+  const raised = data.totalContributedYTD || 0;
+  const pct = Math.min(100, Math.round((raised / goal) * 100));
+
+  $('#goal-label').textContent = `Annual Goal · ${CURRENT_YEAR} · ${fmtNG(goal)}`;
+  $('#goal-pct').textContent = `${pct}% funded`;
+  setTimeout(() => { $('#goal-bar').style.width = pct + '%'; }, 100);
+}
+
+// ═══ Projects ═══
+let allProjects = [];
+function renderProjects(projects, filter) {
+  const grid = $('#project-grid');
+  if (!grid) return;
+
+  if (projects === null) {
+    grid.innerHTML = `<div class="empty-state">Projects will appear here once data loads.</div>`;
+    return;
+  }
+
+  allProjects = projects;
+  const counts = { completed: 0, active: 0, proposed: 0 };
+  projects.forEach(p => { if (counts[p.status] !== undefined) counts[p.status]++; });
+  $('#count-completed').textContent = counts.completed;
+  $('#count-active').textContent    = counts.active;
+  $('#count-proposed').textContent  = counts.proposed;
+
+  $$('.tab').forEach(t => t.setAttribute('aria-selected', t.dataset.tab === filter ? 'true' : 'false'));
+
+  const items = projects.filter(p => p.status === filter);
+  if (!items.length) {
+    grid.innerHTML = `<div class="empty-state">No ${filter} projects to display yet.</div>`;
+    return;
+  }
+  grid.innerHTML = items.map(projectCard).join('');
+}
+
+function statusBadge(s) {
+  const label = { completed: 'Completed', active: 'In Progress', proposed: 'Proposed' }[s] || s;
+  return `<span class="badge ${escHtml(s)}"><span class="dot"></span>${escHtml(label)}</span>`;
+}
+
+function projectCard(p) {
+  let financials = '';
+  let progressHtml = '';
+  const budget    = p.estimated_cost || p.budget || 0;
+  const finalCost = p.actual_cost    || p.finalCost || 0;
+  const raised    = p.raised_amount  || p.raised || 0;
+  const needed    = p.needed || budget;
+
+  if (p.status === 'completed') {
+    financials = `<div class="project-meta"><div><b>Budget</b><br>${fmtNG(budget)}</div><div><b>Final Cost</b><br>${fmtNG(finalCost)}</div></div>`;
+  } else if (p.status === 'active') {
+    const pct = budget > 0 ? Math.min(100, Math.round((raised / budget) * 100)) : 0;
+    financials = `<div class="project-meta"><div><b>Budget</b><br>${fmtNG(budget)}</div><div><b>Raised</b><br>${fmtNG(raised)} <span style="color:var(--terracotta-d)">· ${pct}%</span></div></div>`;
+    progressHtml = `<div class="progress"><span style="width:${pct}%"></span></div>`;
+  } else {
+    financials = `<div class="project-meta"><div><b>Est. Budget</b><br>${fmtNG(budget)}</div><div><b>Funding Needed</b><br>${fmtNG(needed)}</div></div>`;
+  }
+
+  const date = p.target_date || p.date || '';
+  return `
+    <article class="project-card" data-status="${escHtml(p.status)}">
+      ${statusBadge(p.status)}
+      <h3>${escHtml(p.title || p.name || '')}</h3>
+      <p class="desc">${escHtml(p.description || '')}</p>
+      ${financials}
+      ${progressHtml}
+      <div class="project-foot">
+        <span>${escHtml(date)}</span>
+        <span>KPSC-verified</span>
+      </div>
+    </article>`;
+}
+
+function bindProjectTabs() {
+  $$('.tab').forEach(t => {
+    t.addEventListener('click', () => renderProjects(allProjects, t.dataset.tab));
+  });
+}
+
+// ═══ Partners wall ═══
+function renderPartners(partners, anonCount) {
+  const grid = $('#partner-grid');
+  if (!grid) return;
+
+  if (partners === null) {
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">Partner names will appear here as members opt in.</div>`;
+  } else if (!partners.length) {
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">Be the first to have your name listed here.</div>`;
+  } else {
+    const heart = `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78Z"/></svg>`;
+    grid.innerHTML = partners.map(p => `
+      <div class="partner-card">
+        <span class="partner-icon" aria-hidden="true">${heart}</span>
+        <div>
+          <div class="name">${escHtml(p.name || p.full_name || '')}</div>
+          <div class="loc">${escHtml(p.location || '')}</div>
+        </div>
+      </div>`).join('');
+  }
+
+  const anonEl = $('#anon-count');
+  if (anonEl) anonEl.textContent = anonCount !== null ? fmtN(anonCount) : '—';
+}
+
+// ═══ Bank copy ═══
+function bindCopy() {
+  $$('.bank-row.copyable').forEach(row => {
+    row.addEventListener('click', () => {
+      const val = row.dataset.copy;
+      const display = row.querySelector('.value,[id]') || row.querySelector('.value');
+      const target = $('#acc-num-display') || display;
+      navigator.clipboard?.writeText(val).then(() => {
+        if (!target) return;
+        const prev = target.textContent;
+        target.textContent = 'Copied ✓';
+        setTimeout(() => { target.textContent = prev; }, 1400);
+      }).catch(() => {});
+    });
+  });
+}
+
+// ═══ Pledge form ═══
+function bindPledge() {
+  const tiers = $$('.tier');
+  const customWrap = $('#custom-wrap');
+  let selected = '2500';
+
+  tiers.forEach(t => {
+    t.addEventListener('click', () => {
+      tiers.forEach(o => o.setAttribute('aria-pressed', 'false'));
+      t.setAttribute('aria-pressed', 'true');
+      selected = t.dataset.amount;
+      if (customWrap) customWrap.style.display = selected === 'custom' ? 'block' : 'none';
+    });
+  });
+
+  const form = $('#pledge-form');
+  if (!form) return;
+
+  form.addEventListener('submit', e => {
+    e.preventDefault();
+    const name  = $('#p-name')?.value.trim();
+    const phone = $('#p-phone')?.value.trim();
+    const loc   = $('#p-location')?.value.trim();
+    const pub   = $('#p-public')?.checked;
+
+    if (!name || !phone) {
+      alert('Please enter your name and phone number so we can send your signed Partnership Card.');
+      return;
+    }
+
+    let amtNum = 0;
+    if (selected === 'custom') {
+      amtNum = parseInt($('#custom-amount')?.value || '0', 10) || 0;
+      if (!amtNum) { alert('Please enter a custom pledge amount.'); return; }
+    } else {
+      amtNum = parseInt(selected, 10);
+    }
+
+    let msg = `Hello KPSC, my name is ${name}, phone ${phone}`;
+    if (loc) msg += `, location ${loc}`;
+    msg += `. I would like to pledge ₦${fmtN(amtNum)} monthly as a Kingdom Partner.`;
+    if (pub) msg += ` I consent to having my name listed on the public Partners Wall.`;
+
+    const url = `https://wa.me/${KPSC_WA_NUMBER}?text=${encodeURIComponent(msg)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  });
+}
+
+// ═══ Init ═══
+document.addEventListener('DOMContentLoaded', () => {
+  $('#stat-year') && ($('#stat-year').textContent = `faithfully sown · ${CURRENT_YEAR}`);
+  bindProjectTabs();
+  bindCopy();
+  bindPledge();
+  loadData();
+});
+</script>
+</body>
+</html>
