@@ -2762,19 +2762,18 @@ async function sendPartnerBatchPaymentSms(DB, data) {
       return ok({ sent: false, reason: 'Partner opted out, DND flagged, or no phone' });
     }
 
-    const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const sortedMonths = [...months].sort((a, b) => a - b);
     const n = sortedMonths.length;
 
     let monthLabel, amtText;
     if (n === 1) {
-      monthLabel = `${MONTH_NAMES[sortedMonths[0] - 1]} ${year}`;
+      monthLabel = `${MONTH_SHORT[sortedMonths[0] - 1]} ${year}`;
       amtText = amount > 0 ? ` of ₦${amount.toLocaleString('en-NG')}` : '';
     } else {
-      const first = MONTH_NAMES[sortedMonths[0] - 1];
-      const last  = MONTH_NAMES[sortedMonths[n - 1] - 1];
-      // List months compactly: "January–March 2026 (3 months)"
-      monthLabel = `${first}–${last} ${year} (${n} months)`;
+      const first = MONTH_SHORT[sortedMonths[0] - 1];
+      const last  = MONTH_SHORT[sortedMonths[n - 1] - 1];
+      monthLabel = `${first} - ${last} ${year} (${n} months)`;
       const total = amount * n;
       amtText = amount > 0 ? ` totalling ₦${total.toLocaleString('en-NG')}` : '';
     }
