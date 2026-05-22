@@ -6025,8 +6025,15 @@ async function saveRecordedPayments(partnerId, btn) {
       reference: method,
       recordedBy: S.user?.name || '',
       notes,
+      skipSms: true,  // batch SMS is sent once below instead of per-payment
     });
     if (res?.error) errorCount++;
+  }
+  // Send one combined thank-you SMS for all months instead of one per month
+  if (!errorCount) {
+    apiPost('kpsc-partner-batch-sms', {
+      partnerId, months: selectedMonths, year, amount,
+    }).catch(() => {});  // fire-and-forget; SMS failure must not block UI
   }
   btn.disabled = false;
   btn.textContent = orig;
@@ -9183,8 +9190,9 @@ async function renderSettings(main) {
   const meetingCadence = res?.kpsc_meeting_cadence || 'none';
   S.kpscMeetingCadence = meetingCadence;
   // Termii SMS settings
-  const termiiApiKey       = res?.kpsc_termii_api_key    || '';
-  const termiiSenderId     = res?.kpsc_termii_sender_id  || 'RCCG-KP';
+  const termiiApiKey         = res?.kpsc_termii_api_key             || '';
+  const termiiSenderId       = res?.kpsc_termii_sender_id           || 'RCCG-KP';
+  const termiiPartnerSenderId = res?.kpsc_termii_partner_sender_id  || '';
   const termiiWelcome      = res?.kpsc_termii_welcome_sms  !== '0';
   const termiiPayment      = res?.kpsc_termii_payment_sms  !== '0';
   const termiiNewMonth     = res?.kpsc_termii_newmonth_sms !== '0';
@@ -9357,10 +9365,17 @@ async function renderSettings(main) {
         </div>
 
         <div class="k-form-group">
-          <label class="k-label">Sender ID</label>
+          <label class="k-label">Sender ID (Members &amp; Staff)</label>
           <input type="text" id="ks-termii-sender" class="k-input" maxlength="11"
             placeholder="RCCG-KP" value="${esc(termiiSenderId)}" />
-          <p class="k-hint">Alphanumeric sender name shown to recipients (max 11 chars). Must be registered with Termii for your account.</p>
+          <p class="k-hint">Alphanumeric sender name for meeting, pre-meeting, action-item, and deadline SMS (max 11 chars). Must be registered with Termii.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Partner Sender ID <span style="font-weight:400;color:var(--text3)">(optional)</span></label>
+          <input type="text" id="ks-termii-partner-sender" class="k-input" maxlength="11"
+            placeholder="e.g. KPSC-PRTNR" value="${esc(termiiPartnerSenderId)}" />
+          <p class="k-hint">Separate sender ID for partner welcome, payment, reminder, and anniversary SMS. Falls back to the Sender ID above if left blank.</p>
         </div>
 
         <div class="k-form-group">
@@ -9724,21 +9739,23 @@ async function clearAiKeys() {
 
 async function saveSmsSettings() {
   const msg = document.getElementById('ks-termii-save-msg');
-  const apiKey   = document.getElementById('ks-termii-key')?.value.trim()    || '';
-  const senderId = document.getElementById('ks-termii-sender')?.value.trim() || 'RCCG-KP';
+  const apiKey         = document.getElementById('ks-termii-key')?.value.trim()            || '';
+  const senderId       = document.getElementById('ks-termii-sender')?.value.trim()         || 'RCCG-KP';
+  const partnerSenderId = document.getElementById('ks-termii-partner-sender')?.value.trim() || '';
   const welcome  = document.getElementById('ks-termii-welcome')?.checked  ? '1' : '0';
   const payment  = document.getElementById('ks-termii-payment')?.checked  ? '1' : '0';
   const newMonth = document.getElementById('ks-termii-newmonth')?.checked ? '1' : '0';
   const remDay   = String(parseInt(document.getElementById('ks-termii-rem-day')?.value  || '10', 10) || 10);
   const remFreq  = document.getElementById('ks-termii-rem-freq')?.value || 'monthly';
   const res = await apiPost('settings', {
-    kpsc_termii_api_key:      apiKey,
-    kpsc_termii_sender_id:    senderId,
-    kpsc_termii_welcome_sms:  welcome,
-    kpsc_termii_payment_sms:  payment,
-    kpsc_termii_newmonth_sms: newMonth,
-    kpsc_termii_reminder_day: remDay,
-    kpsc_termii_reminder_freq: remFreq,
+    kpsc_termii_api_key:              apiKey,
+    kpsc_termii_sender_id:            senderId,
+    kpsc_termii_partner_sender_id:    partnerSenderId,
+    kpsc_termii_welcome_sms:          welcome,
+    kpsc_termii_payment_sms:          payment,
+    kpsc_termii_newmonth_sms:         newMonth,
+    kpsc_termii_reminder_day:         remDay,
+    kpsc_termii_reminder_freq:        remFreq,
   });
   if (msg) {
     if (res?.error) {
@@ -10752,7 +10769,40 @@ async function previewAudioNotesPhoto(input) {
   const total = dataUrls.length;
   const thumbs = dataUrls.map((url, idx) => `<img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)" alt="Audio notes photo ${idx + 1} of ${total}" />`).join('');
   const cols = files.length > 1 ? 'grid-template-columns:repeat(auto-fit,minmax(140px,1fr));' : '';
-  preview.innerHTML = `<div style="display:grid;${cols}gap:10px">${thumbs}</div>`;
+  preview.innerHTML = `
+    <div style="display:grid;${cols}gap:10px;margin-bottom:10px">${thumbs}</div>
+    <div class="k-room-actions">
+      <button class="kbtn kbtn-primary kbtn-sm" onclick="Kpsc.ocrNotesAndAppend(this)">📝 Extract text with AI</button>
+    </div>
+    <div id="km-notes-ocr-status" style="margin-top:8px"></div>`;
+}
+
+async function ocrNotesAndAppend(btn) {
+  const notesInput = document.getElementById('km-audio-notes-photo');
+  const files = getSelectedImageFiles(notesInput);
+  if (!files.length) { showToast('No notes photos selected.', 'warn'); return; }
+  const statusEl = document.getElementById('km-notes-ocr-status');
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Extracting…';
+  if (statusEl) statusEl.innerHTML = `<div style="color:var(--text2);font-size:13px">🔍 Extracting text from ${files.length} photo${files.length > 1 ? 's' : ''}…</div>`;
+  try {
+    const ocrRes = await ocrNotesImages(files);
+    const ocrText = String(ocrRes?.transcript || '').trim();
+    if (!ocrText) {
+      if (statusEl) statusEl.innerHTML = `<div class="k-error-box">Could not extract text from the notes photo${files.length > 1 ? 's' : ''}. Make sure the handwriting is clear and well-lit.</div>`;
+    } else {
+      appendTranscriptText(`${NOTES_SEPARATOR}${ocrText}`);
+      const count = `${ocrRes?.successCount || files.length}/${files.length}`;
+      if (statusEl) statusEl.innerHTML = `<div style="background:#d1fae5;border-radius:8px;padding:10px;font-size:13px;color:#065f46">✓ Notes text extracted (${count} photo${files.length > 1 ? 's' : ''}) and added to the transcript draft.</div>`;
+      showToast('Notes text extracted and added to draft.', 'success');
+    }
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = `<div class="k-error-box">OCR failed: ${esc(e?.message || String(e))}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
 }
 
 // ── MEETING LIVE RECORDING — also upload notes ────────────────────
@@ -13588,6 +13638,7 @@ window.Kpsc = {
   previewAudioFile,
   transcribeAudioFile,
   previewAudioNotesPhoto,
+  ocrNotesAndAppend,
   applyDiarizedTranscript,
   applyDiarizedTranscriptRaw,
   // Meeting - live recording notes upload
