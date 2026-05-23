@@ -57,6 +57,13 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .kl-install-btn:active{transform:scale(.98);}
 .kl-error{background:#FCEBEB;color:#A32D2D;font-size:12px;padding:9px 12px;border-radius:8px;margin-bottom:12px;}
 .kl-hint{font-size:11px;color:var(--text3);text-align:center;margin-top:14px;line-height:1.6;}
+.kl-partnership-links{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;}
+.kl-partner-link,.kl-wa-share-btn{flex:1;min-width:0;display:flex;align-items:center;justify-content:center;gap:6px;
+  padding:9px 12px;border-radius:10px;font-size:12px;font-weight:600;cursor:pointer;text-decoration:none;transition:all .15s;}
+.kl-partner-link{background:#eef3fb;color:var(--navy);border:1.5px solid #c8d9ef;}
+.kl-partner-link:hover{background:#dde8f7;border-color:#b8cae4;}
+.kl-wa-share-btn{background:#25d366;color:#fff;border:none;}
+.kl-wa-share-btn:hover{background:#1ebe5d;}
 
 /* ── APP SHELL ─────────────────────────────────────────────────── */
 #kpsc-app{display:flex;flex-direction:column;min-height:100vh;}

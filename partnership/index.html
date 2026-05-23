@@ -347,19 +347,21 @@ section { padding-block: clamp(52px,9vw,108px); position: relative; }
   display: inline-flex; padding: 5px; gap: 3px;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 999px; box-shadow: var(--shadow-sm);
-  white-space: nowrap;
+  max-width: 100%;
 }
 .tabs-wrap {
   text-align: center; margin-bottom: 26px;
-  overflow-x: auto; -webkit-overflow-scrolling: touch;
-  padding-bottom: 6px;
 }
 .tab {
   appearance: none; border: 0; background: transparent;
   font-family: var(--font-sans); font-weight: 600; font-size: .88rem;
   color: var(--espresso-2); padding: 9px 16px; border-radius: 999px;
   cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
-  transition: all .18s;
+  transition: all .18s; white-space: nowrap; flex: 1 1 0; justify-content: center;
+}
+@media (max-width: 400px) {
+  .tab { font-size: .75rem; padding: 7px 10px; gap: 3px; }
+  .tab .count { font-size: .65rem; padding: 0 4px; }
 }
 .tab[aria-selected="true"] { background: var(--espresso); color: var(--cream); }
 .tab:hover:not([aria-selected="true"]) { background: var(--cream-deep); color: var(--espresso); }
@@ -559,6 +561,49 @@ section { padding-block: clamp(52px,9vw,108px); position: relative; }
 .pledge-submit:focus-visible { outline: 3px solid var(--gold); outline-offset: 3px; }
 .pledge-note { text-align: center; font-size: .86rem; color: var(--espresso-2); margin-top: 12px; }
 
+/* ── Prayer card ── */
+.prayer-section { background: var(--navy, #1e3a5f); padding-block: 56px; }
+.prayer-card {
+  max-width: 760px; margin: 0 auto; text-align: center; color: #e8f0fb;
+  padding: 40px 32px; border-radius: 18px;
+  background: linear-gradient(135deg, rgba(255,255,255,.07) 0%, rgba(255,255,255,.03) 100%);
+  border: 1px solid rgba(255,255,255,.12);
+}
+.prayer-card .prayer-icon { font-size: 2.4rem; margin-bottom: 14px; display: block; }
+.prayer-card h2 { font-family: var(--font-serif); font-size: 1.55rem; color: #fff; margin-bottom: 10px; }
+.prayer-card p { font-size: 1.04rem; line-height: 1.75; color: rgba(255,255,255,.82); max-width: 600px; margin: 0 auto 18px; }
+.prayer-card .prayer-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: rgba(229,206,133,.18); border: 1px solid rgba(229,206,133,.35);
+  color: #e5ce85; border-radius: 999px; padding: 7px 18px; font-size: .9rem; font-weight: 600;
+}
+
+/* ── Feedback FAB ── */
+.feedback-fab {
+  position: fixed; bottom: 24px; right: 24px; z-index: 900;
+  background: var(--espresso, #3b1f0a); color: #fff;
+  border: none; border-radius: 999px; padding: 12px 18px;
+  font-size: .9rem; font-weight: 600; cursor: pointer;
+  box-shadow: 0 4px 20px rgba(0,0,0,.25); display: flex; align-items: center; gap: 8px;
+  transition: transform .15s, box-shadow .15s;
+}
+.feedback-fab:hover { transform: translateY(-2px); box-shadow: 0 6px 26px rgba(0,0,0,.3); }
+.feedback-modal-overlay {
+  position: fixed; inset: 0; z-index: 1000; background: rgba(0,0,0,.5);
+  display: flex; align-items: flex-end; justify-content: center;
+}
+@media (min-width: 600px) { .feedback-modal-overlay { align-items: center; } }
+.feedback-modal {
+  background: #fff; border-radius: 18px 18px 0 0; padding: 28px 24px; width: 100%; max-width: 520px;
+  box-shadow: 0 -4px 40px rgba(0,0,0,.15);
+}
+@media (min-width: 600px) { .feedback-modal { border-radius: 18px; } }
+.feedback-modal h3 { font-family: var(--font-serif); font-size: 1.2rem; color: var(--espresso); margin-bottom: 6px; }
+.feedback-modal p { font-size: .9rem; color: var(--text2, #7a6a58); margin-bottom: 16px; }
+.feedback-modal textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--border, #e0d5ca); border-radius: 10px; padding: 12px; font-size: .95rem; min-height: 110px; resize: vertical; font-family: var(--font-sans); }
+.feedback-modal textarea:focus { outline: 2px solid var(--espresso); }
+.feedback-modal-actions { display: flex; gap: 10px; margin-top: 14px; justify-content: flex-end; }
+
 /* ── Footer ── */
 footer { background: var(--espresso); color: var(--cream); padding-block: 52px; }
 footer .container { display: grid; grid-template-columns: 1fr; gap: 26px; text-align: center; }
@@ -700,7 +745,7 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
       <div class="vision-text reveal rd1">
         <span class="eyebrow">Our Vision</span>
         <h2 style="margin-top:10px;">A church that <span class="accent">builds steadily</span>, and members carried with care.</h2>
-        <p>To ensure the steady development of our local church and provide consistent welfare support to our members — reducing the need for frequent emergency contributions.</p>
+        <p>To ensure the steady development of our local church and provide consistent welfare support to the church family and community — reducing the need for frequent emergency contributions.</p>
       </div>
     </div>
 
@@ -1034,8 +1079,8 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
         <legend class="eyebrow" style="display:block;margin-bottom:5px">Monthly Pledge Tier</legend>
         <div class="tier-grid" role="radiogroup" aria-label="Monthly pledge amount">
           <button type="button" class="tier" data-amount="1000" aria-pressed="false"><span>₦1,000</span><small>/ month</small></button>
-          <button type="button" class="tier" data-amount="2500" aria-pressed="true"><span>₦2,500</span><small>/ month</small></button>
-          <button type="button" class="tier" data-amount="5000" aria-pressed="false"><span>₦5,000</span><small>/ month</small></button>
+          <button type="button" class="tier" data-amount="5000" aria-pressed="true"><span>₦5,000</span><small>/ month</small></button>
+          <button type="button" class="tier" data-amount="20000" aria-pressed="false"><span>₦20,000</span><small>/ month</small></button>
           <button type="button" class="tier" data-amount="custom" aria-pressed="false"><span>Custom</span><small>your amount</small></button>
         </div>
       </fieldset>
@@ -1084,6 +1129,27 @@ footer .legal { grid-column: 1/-1; font-size: .8rem; color: rgba(229,206,133,.7)
     </form>
   </div>
 </section>
+
+<!-- ═══ PRAYER CARD ═══ -->
+<section class="prayer-section">
+  <div class="container">
+    <div class="prayer-card reveal">
+      <span class="prayer-icon">🙏</span>
+      <h2>Prayed for. Every Wednesday.</h2>
+      <p>Every Wednesday, our prayer warriors intentionally pray for all Kingdom Partners — sowing spiritual seeds for divine provision, favour, and financial blessings over every partner.</p>
+      <span class="prayer-badge">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        You are covered in prayer
+      </span>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ FEEDBACK ═══ -->
+<button class="feedback-fab" onclick="openFeedback()" aria-label="Send feedback">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+  Feedback
+</button>
 
 <!-- ═══ FOOTER ═══ -->
 <footer>
@@ -1382,7 +1448,7 @@ function bindCopy() {
 function bindPledge() {
   const tiers = $$('.tier');
   const customWrap = $('#custom-wrap');
-  let selected = '2500';
+  let selected = '5000';
 
   tiers.forEach(t => {
     t.addEventListener('click', () => {
@@ -1442,6 +1508,65 @@ document.addEventListener('DOMContentLoaded', () => {
   bindPledge();
   loadData();
 });
+
+// ═══ Feedback ═══
+function openFeedback() {
+  if (document.getElementById('feedback-modal-overlay')) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'feedback-modal-overlay';
+  overlay.className = 'feedback-modal-overlay';
+  overlay.innerHTML = `
+    <div class="feedback-modal" role="dialog" aria-modal="true" aria-label="Send feedback">
+      <h3>💬 Send a Message or Suggestion</h3>
+      <p>Have a question, suggestion, or something to share with the KPSC? We'd love to hear from you.</p>
+      <textarea id="feedback-text" placeholder="Type your message here…" maxlength="1000"></textarea>
+      <div id="feedback-name-row" style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
+        <input id="feedback-name" class="k-input" type="text" placeholder="Your name (optional)" style="flex:1;min-width:0;border:1px solid #e0d5ca;border-radius:10px;padding:10px;font-size:.95rem;font-family:inherit" />
+        <input id="feedback-contact" class="k-input" type="text" placeholder="Phone / WhatsApp (optional)" style="flex:1;min-width:0;border:1px solid #e0d5ca;border-radius:10px;padding:10px;font-size:.95rem;font-family:inherit" />
+      </div>
+      <div class="feedback-modal-actions">
+        <button class="btn" onclick="closeFeedback()" style="background:transparent;border:1px solid #ccc;padding:10px 20px;border-radius:999px;cursor:pointer;font-size:.9rem">Cancel</button>
+        <button class="btn btn-primary" onclick="submitFeedback(this)" style="padding:10px 22px;border-radius:999px;border:none;background:var(--espresso,#3b1f0a);color:#fff;font-size:.9rem;font-weight:600;cursor:pointer">Send Message</button>
+      </div>
+      <p id="feedback-status" style="font-size:.85rem;margin-top:10px;text-align:center;min-height:18px"></p>
+    </div>`;
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeFeedback(); });
+  document.body.appendChild(overlay);
+  setTimeout(() => document.getElementById('feedback-text')?.focus(), 50);
+}
+
+function closeFeedback() {
+  document.getElementById('feedback-modal-overlay')?.remove();
+}
+
+async function submitFeedback(btn) {
+  const text = document.getElementById('feedback-text')?.value.trim();
+  if (!text) { document.getElementById('feedback-status').textContent = 'Please write your message first.'; return; }
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  const status = document.getElementById('feedback-status');
+  try {
+    const res = await fetch(`${API_BASE}/partnership-feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: text,
+        name: document.getElementById('feedback-name')?.value.trim() || '',
+        contact: document.getElementById('feedback-contact')?.value.trim() || '',
+      }),
+    });
+    if (!res.ok) throw new Error('Server error');
+    status.style.color = '#065f46';
+    status.textContent = '✓ Message sent! We will get back to you shortly. God bless you.';
+    btn.textContent = 'Sent ✓';
+    setTimeout(closeFeedback, 2400);
+  } catch {
+    status.style.color = '#b91c1c';
+    status.textContent = 'Could not send — please try again or contact us via WhatsApp.';
+    btn.disabled = false;
+    btn.textContent = 'Send Message';
+  }
+}
 </script>
 </body>
 </html>

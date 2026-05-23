@@ -21,7 +21,7 @@
   <div class="kl-hero">
     <div class="kl-cross">✝</div>
     <p class="kl-denom">Redeemed Christian Church of God</p>
-    <h1 class="kl-name">Kingdom Parish, Aguleri</h1>
+    <h1 class="kl-name">Kingdom Parish, Aguleri &mdash; Anambra</h1>
     <p class="kl-portal">KPSC Meeting Portal</p>
     <div class="kl-divider"></div>
     <p class="kl-tagline">Kingdom Parish Stewardship Committee — secure workspace for recording, processing, and archiving committee meetings.</p>
@@ -44,6 +44,16 @@
         <button class="kl-submit" onclick="Kpsc.login(this)">Sign In</button>
         <a class="kl-install-btn" id="kpsc-install-link" href="/kpsc/install/">Install App on this Device</a>
         <p class="kl-hint">Contact the IT Administrator if you have forgotten your PIN.</p>
+        <div class="kl-partnership-links">
+          <a class="kl-partner-link" href="/partnership/" target="_blank" rel="noopener">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+            View Partnership Page
+          </a>
+          <button class="kl-wa-share-btn" onclick="sharePartnershipOnWhatsApp()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.52 3.48A11.93 11.93 0 0 0 12.04 0C5.46 0 .1 5.36.1 11.94c0 2.1.55 4.15 1.6 5.95L0 24l6.27-1.64a11.9 11.9 0 0 0 5.76 1.47h.01c6.58 0 11.94-5.36 11.94-11.94 0-3.19-1.24-6.18-3.46-8.41Z"/></svg>
+            Share on WhatsApp
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -142,6 +152,12 @@
     }).then(registration => {
       registration.update().catch(() => {});
     }).catch(() => {});
+  }
+
+  function sharePartnershipOnWhatsApp() {
+    const url = encodeURIComponent(window.location.origin + '/partnership/');
+    const text = encodeURIComponent("Join us as a Kingdom Partner at RCCG Kingdom Parish, Aguleri! Your monthly pledge helps build our church and support our community. Click the link to learn more and register your pledge:");
+    window.open(`https://wa.me/?text=${text}%20${url}`, '_blank', 'noopener');
   }
 </script>
 </body>

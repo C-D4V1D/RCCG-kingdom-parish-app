@@ -27,13 +27,13 @@ const STATUS_CONFIG = {
 };
 
 const KPSC_PERMISSIONS = {
-  acting_chairman:    ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'archive', 'reports', 'agenda_builder', 'settings'],
-  general_secretary:  ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'reminders', 'members', 'archive', 'reports', 'agenda_builder', 'settings'],
-  financial_secretary:['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
-  treasurer:          ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports'],
-  committee_viewer:   ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'reports', 'archive'],
+  acting_chairman:    ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'archive', 'reports', 'agenda_builder', 'settings', 'inbox'],
+  general_secretary:  ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'reminders', 'members', 'archive', 'reports', 'agenda_builder', 'settings', 'inbox'],
+  financial_secretary:['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports', 'inbox'],
+  treasurer:          ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports', 'inbox'],
+  committee_viewer:   ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'reports', 'archive', 'inbox'],
   // IT admin: full read access + account/settings management; no operational write actions.
-  it_admin:           ['dashboard', 'archive', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'reports', 'agenda_builder', 'settings'],
+  it_admin:           ['dashboard', 'archive', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'reports', 'agenda_builder', 'settings', 'inbox'],
 };
 // Default write (modify/edit) permissions per role per page
 const KPSC_WRITE_PERMISSIONS = {
@@ -111,6 +111,7 @@ const S = {
   partnersYear: new Date().getUTCFullYear(),
   partnersFilter: 'active',
   partnersSearch: '',
+  partnersTypeFilter: '',
   financeYear: new Date().getUTCFullYear(),
   financeMonth: new Date().getUTCMonth() + 1,
   reportsYear: new Date().getUTCFullYear(),
@@ -2559,7 +2560,7 @@ function moreSubTabStrip() {
   const tabs = [];
   if (role !== 'committee_viewer') tabs.push({ key: 'members',  label: 'Members'  });
   if (role !== 'committee_viewer') tabs.push({ key: 'settings', label: 'Settings' });
-  tabs.push({ key: 'inbox', label: 'Pledge Inbox' });
+  tabs.push({ key: 'inbox', label: 'Inbox' });
   if (!tabs.length) return '';
   return `<div class="ka-subtabs">${tabs.map(t =>
     `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
@@ -2586,7 +2587,7 @@ function renderMoreMenu(main) {
         </button>` : ''}
         <button class="ka-more-item" onclick="Kpsc.navigate('inbox')">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/></svg>
-          <span>Pledge Inbox</span>
+          <span>Inbox</span>
           <svg class="ka-more-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
         </button>
         <button class="ka-more-item ka-more-item-danger" onclick="Kpsc.logout()">
@@ -2599,30 +2600,83 @@ function renderMoreMenu(main) {
 
 async function renderInbox(main) {
   main.innerHTML = '<div class="k-loading">Loading…</div>';
-  const res = await apiGet('partnership-pledges');
-  const pledges = res?.pledges || [];
+  const [pledgesRes, feedbackRes] = await Promise.all([
+    apiGet('partnership-pledges'),
+    apiGet('partnership-feedback'),
+  ]);
+  const pledges  = pledgesRes?.pledges   || [];
+  const feedback = feedbackRes?.feedback || [];
   const fmtN = n => new Intl.NumberFormat('en-NG').format(n);
+  S._inboxTab = S._inboxTab || 'pledges';
+
+  const renderPledges = () => pledges.length === 0
+    ? `<div class="k-empty" style="padding:32px 0;text-align:center;font-style:italic">No pledge intents yet. They appear when visitors submit via the partnership page.</div>`
+    : pledges.map(p => `
+        <div class="k-meeting-card" style="margin-bottom:8px;cursor:default">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px">
+            <div>
+              <div class="k-mc-title">${esc(p.full_name || 'Anonymous')}</div>
+              <div style="font-size:13px;color:var(--text3);margin-top:2px">${esc(p.phone || '')}${p.location ? ' · ' + esc(p.location) : ''}</div>
+            </div>
+            <div style="text-align:right">
+              <div style="font-weight:700;color:var(--navy);font-size:15px">₦${fmtN(p.amount || 0)}<span style="font-weight:400;font-size:12px;color:var(--text3)">/mo</span></div>
+              ${p.public_listing ? `<span style="font-size:11px;color:var(--green);font-weight:600">Public ✓</span>` : '<span style="font-size:11px;color:var(--text3)">Anonymous</span>'}
+            </div>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-top:6px">${esc(p.created_at || '')}</div>
+        </div>`).join('');
+
+  const renderFeedback = () => feedback.length === 0
+    ? `<div class="k-empty" style="padding:32px 0;text-align:center;font-style:italic">No messages yet. They appear when visitors use the Feedback button on the partnership page.</div>`
+    : feedback.map(f => `
+        <div class="k-meeting-card" style="margin-bottom:8px;cursor:default">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
+            <div style="font-weight:600;color:var(--navy)">${esc(f.name || 'Anonymous')}</div>
+            ${f.contact ? `<span style="font-size:12px;color:var(--text3)">${esc(f.contact)}</span>` : ''}
+          </div>
+          <div style="margin-top:8px;font-size:14px;line-height:1.6;color:var(--text)">${esc(f.message || '')}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:8px">${esc(f.created_at || '')}</div>
+        </div>`).join('');
+
+  const switchTab = tab => {
+    S._inboxTab = tab;
+    document.getElementById('inbox-pledges-tab')?.classList.toggle('active', tab === 'pledges');
+    document.getElementById('inbox-feedback-tab')?.classList.toggle('active', tab === 'feedback');
+    const body = document.getElementById('inbox-tab-body');
+    if (body) body.innerHTML = tab === 'pledges' ? renderPledges() : renderFeedback();
+  };
+
+  // Cache rendered content for tab switching
+  main._inboxRenderPledges  = renderPledges;
+  main._inboxRenderFeedback = renderFeedback;
+
   main.innerHTML = `
     <div class="k-page">
-      <h2 style="font-family:'Lora',serif;font-size:20px;color:var(--navy);margin-bottom:4px">Pledge Inbox</h2>
-      <p style="font-size:13px;color:var(--text-2);margin-bottom:16px">WhatsApp pledges submitted via the /partnership/ landing page. Each entry means someone opened WhatsApp — follow up to record the formal pledge.</p>
-      ${pledges.length === 0
-        ? `<div class="k-empty-state" style="padding:32px;text-align:center;color:var(--text-2);font-style:italic">No pledges received yet. They will appear here when visitors submit via the partnership page.</div>`
-        : pledges.map(p => `
-          <div class="k-meeting-card" style="margin-bottom:8px;padding:14px 16px">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px">
-              <div>
-                <div style="font-weight:600;font-size:15px;color:var(--navy)">${esc(p.full_name || '')}</div>
-                <div style="font-size:13px;color:var(--text-2);margin-top:2px">${esc(p.phone || '')}${p.location ? ' · ' + esc(p.location) : ''}</div>
-              </div>
-              <div style="text-align:right">
-                <div style="font-weight:700;color:var(--navy);font-size:15px">₦${fmtN(p.amount || 0)}<span style="font-weight:400;font-size:12px;color:var(--text-2)">/month</span></div>
-                ${p.public_listing ? `<span style="font-size:11px;color:var(--green);font-weight:600">Public listing ✓</span>` : '<span style="font-size:11px;color:var(--text-3)">Anonymous</span>'}
-              </div>
-            </div>
-            <div style="font-size:11px;color:var(--text-3);margin-top:6px">${esc(p.created_at || '')}</div>
-          </div>`).join('')}
+      <h2 style="font-family:'Lora',serif;font-size:20px;color:var(--navy);margin-bottom:4px">Inbox</h2>
+      <p style="font-size:13px;color:var(--text3);margin-bottom:16px">Messages and pledge intents received from the public partnership page.</p>
+      <div class="k-tabs" style="margin-bottom:16px">
+        <button id="inbox-pledges-tab" class="k-tab ${S._inboxTab === 'pledges' ? 'active' : ''}" onclick="Kpsc.setInboxTab('pledges')">
+          Pledge Intents <span class="kbadge" style="margin-left:4px;background:var(--navy-light);color:var(--navy)">${pledges.length}</span>
+        </button>
+        <button id="inbox-feedback-tab" class="k-tab ${S._inboxTab === 'feedback' ? 'active' : ''}" onclick="Kpsc.setInboxTab('feedback')">
+          Feedback &amp; Messages <span class="kbadge" style="margin-left:4px;background:var(--navy-light);color:var(--navy)">${feedback.length}</span>
+        </button>
+      </div>
+      <div id="inbox-tab-body">${S._inboxTab === 'pledges' ? renderPledges() : renderFeedback()}</div>
     </div>`;
+}
+
+function setInboxTab(tab) {
+  S._inboxTab = tab;
+  document.getElementById('inbox-pledges-tab')?.classList.toggle('active', tab === 'pledges');
+  document.getElementById('inbox-feedback-tab')?.classList.toggle('active', tab === 'feedback');
+  const main = document.getElementById('kpsc-main');
+  const body = document.getElementById('inbox-tab-body');
+  if (body && main) {
+    body.innerHTML = tab === 'pledges'
+      ? (main._inboxRenderPledges?.() || '')
+      : (main._inboxRenderFeedback?.() || '');
+  }
 }
 
 function goBack() {
@@ -6277,9 +6331,16 @@ async function renderPartners(main) {
           <button class="k-tab ${S.partnersFilter === 'all' ? 'active' : ''}" onclick="Kpsc.setPartnersFilter('all')">All</button>
           <button class="k-tab ${S.partnersFilter === 'inactive' ? 'active' : ''}" onclick="Kpsc.setPartnersFilter('inactive')">Inactive</button>
         </div>
-        <select class="k-input k-input-sm k-year-select" onchange="Kpsc.setPartnersYear(this.value)">
-          ${[currentYear(), currentYear()-1, currentYear()-2].map(y => `<option value="${y}" ${S.partnersYear === y ? 'selected' : ''}>${y}</option>`).join('')}
-        </select>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <select class="k-input k-input-sm" style="min-width:160px" onchange="Kpsc.setPartnersTypeFilter(this.value)">
+            <option value="" ${S.partnersTypeFilter === '' ? 'selected' : ''}>All Types</option>
+            <option value="gods_kingdom_partner" ${S.partnersTypeFilter === 'gods_kingdom_partner' ? 'selected' : ''}>God's Kingdom Partner</option>
+            <option value="covenant_partner" ${S.partnersTypeFilter === 'covenant_partner' ? 'selected' : ''}>Covenant Partner</option>
+          </select>
+          <select class="k-input k-input-sm k-year-select" onchange="Kpsc.setPartnersYear(this.value)">
+            ${[currentYear(), currentYear()-1, currentYear()-2].map(y => `<option value="${y}" ${S.partnersYear === y ? 'selected' : ''}>${y}</option>`).join('')}
+          </select>
+        </div>
       </div>
       <div id="kpsc-partners-list">${renderPartnersList(canManage)}</div>
     </div>`;
@@ -6296,6 +6357,7 @@ function renderPartnersList(canManage) {
   let partners = S.partners;
   if (S.partnersFilter === 'active') partners = partners.filter(p => p.status === 'active');
   else if (S.partnersFilter === 'inactive') partners = partners.filter(p => p.status === 'inactive');
+  if (S.partnersTypeFilter) partners = partners.filter(p => p.partnershipType === S.partnersTypeFilter);
   const q = S.partnersSearch.toLowerCase();
   if (q) partners = partners.filter(p => p.fullName.toLowerCase().includes(q));
   if (!partners.length) {
@@ -6539,6 +6601,12 @@ function setPartnersFilter(filter) {
   document.querySelectorAll('.k-tab').forEach(b => {
     if (b.textContent.toLowerCase().startsWith(filter === 'all' ? 'all' : filter === 'active' ? 'active' : 'inactive')) b.classList.add('active');
   });
+}
+
+function setPartnersTypeFilter(type) {
+  S.partnersTypeFilter = type || '';
+  const list = document.getElementById('kpsc-partners-list');
+  if (list) list.innerHTML = renderPartnersList(canManagePartners());
 }
 
 async function setPartnersYear(year) {
@@ -6811,7 +6879,13 @@ async function openFinanceModal(entryToEdit = null) {
           <option value="expense" ${isExpense?'selected':''}>Expense</option>
         </select>
         <label class="k-label">Category</label>
-        <select id="kf-category" class="k-input">${catOpts}</select>
+        <select id="kf-category" class="k-input" onchange="Kpsc.onFinanceCategoryChange()">${catOpts}</select>
+        <div id="kf-welfare-wrap" style="display:${isExpense && (e?.category || '') === 'welfare' ? 'block' : 'none'}">
+          <label class="k-label">Number of People Given Welfare Support</label>
+          <select id="kf-welfare-count" class="k-input">
+            ${[1,2,3,4,5,6,7,8,9,10,15,20,25,30].map(n => `<option value="${n}">${n}</option>`).join('')}
+          </select>
+        </div>
         <label class="k-label">Amount (₦)</label>
         <input id="kf-amount" type="number" min="0" class="k-input" placeholder="0" value="${e?.amount != null ? Number(e.amount) : ''}" />
         <label class="k-label">Payment Method</label>
@@ -6942,21 +7016,37 @@ function updateFinanceCategoryOptions() {
   const cat = document.getElementById('kf-category');
   if (!cat) return;
   cat.innerHTML = type === 'expense' ? modal._expenseOpts : modal._incomeOpts;
+  const welfareWrap = document.getElementById('kf-welfare-wrap');
+  if (welfareWrap) welfareWrap.style.display = (type === 'expense' && cat.value === 'welfare') ? 'block' : 'none';
 }
+
+function onFinanceCategoryChange() {
+  const type = document.getElementById('kf-type')?.value;
+  const cat = document.getElementById('kf-category')?.value;
+  const welfareWrap = document.getElementById('kf-welfare-wrap');
+  if (welfareWrap) welfareWrap.style.display = (type === 'expense' && cat === 'welfare') ? 'block' : 'none';
+}
+
 
 async function saveFinanceEntry(btn) {
   btn.disabled = true;
   const modal = document.getElementById('kpsc-finance-modal');
   const editId = modal?._editId || null;
+  const category = document.getElementById('kf-category')?.value.trim() || '';
+  const entryType = document.getElementById('kf-type')?.value || '';
+  const welfareCount = (entryType === 'expense' && category === 'welfare')
+    ? Number(document.getElementById('kf-welfare-count')?.value || 0)
+    : 0;
   const payload = {
     date: document.getElementById('kf-date')?.value || '',
-    entryType: document.getElementById('kf-type')?.value || '',
-    category: document.getElementById('kf-category')?.value.trim() || '',
+    entryType,
+    category,
     amount: Number(document.getElementById('kf-amount')?.value || 0),
     paymentMethod: document.getElementById('kf-method')?.value.trim() || '',
     reference: document.getElementById('kf-ref')?.value.trim() || '',
     narration: document.getElementById('kf-note')?.value.trim() || '',
     recordedBy: S.user?.name || '',
+    welfareCount,
   };
   const res = editId
     ? await apiPut(`kpsc-finance/${editId}`, payload)
@@ -8774,9 +8864,34 @@ async function renderPartnerProgress(main) {
   const yearOpts = [nowYear, nowYear-1, nowYear-2].map(y=>`<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
 
   const activePartners = S.partners.filter(p => p.status === 'active');
-  const allPaidThisMonth = activePartners.filter(p => partnerMonthlyPaid(p.id, month, year)).length;
+  const paidThisMonthPartners = activePartners.filter(p => partnerMonthlyPaid(p.id, month, year));
+  const allPaidThisMonth = paidThisMonthPartners.length;
   const allUnpaidThisMonth = activePartners.length - allPaidThisMonth;
   const expectedMonthlyIncome = activePartners.reduce((sum, p) => sum + Number(p.monthlyPledge || 0), 0);
+
+  // Paid amount this month (sum of actual payments recorded for monthly_pledge in current month)
+  const allPayments = S.partnerPayments || [];
+  const paidAmountThisMonth = allPayments
+    .filter(pmt => pmt.paymentType === 'monthly_pledge' && pmt.month === month && pmt.year === year)
+    .reduce((sum, pmt) => sum + Number(pmt.amount || 0), 0);
+
+  // Income breakdown by partnership type
+  const typeBreakdown = {};
+  activePartners.forEach(p => {
+    const t = p.partnershipType || 'other';
+    if (!typeBreakdown[t]) typeBreakdown[t] = { count: 0, expected: 0 };
+    typeBreakdown[t].count++;
+    typeBreakdown[t].expected += Number(p.monthlyPledge || 0);
+  });
+  const typeBreakdownHtml = Object.entries(typeBreakdown).map(([type, info]) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+      <div>
+        <span class="kbadge badge-type" style="font-size:11px">${esc(partnerTypeLabel(type))}</span>
+        <span style="font-size:12px;color:var(--text3);margin-left:6px">${info.count} partner${info.count !== 1 ? 's' : ''}</span>
+      </div>
+      <span style="font-weight:700;color:var(--navy)">₦${info.expected.toLocaleString('en-NG')}<span style="font-size:11px;font-weight:400;color:var(--text3)">/mo</span></span>
+    </div>`).join('') || '<div class="k-empty" style="padding:12px 0">No active partners.</div>';
+
   const months = [1,2,3,4,5,6,7,8,9,10,11,12];
 
   const progressRows = activePartners.map(partner => {
@@ -8815,9 +8930,21 @@ async function renderPartnerProgress(main) {
       <p class="k-page-hint">Progress view — pledge amounts are private and not shown here.</p>
       <div class="k-dash-stats">
         <div class="k-stat"><div class="k-stat-val">${activePartners.length}</div><div class="k-stat-lbl">Active Partners</div></div>
-        <div class="k-stat"><div class="k-stat-val">${allPaidThisMonth}</div><div class="k-stat-lbl">Paid This Month</div></div>
+        <div class="k-stat">
+          <div class="k-stat-val">${allPaidThisMonth}</div>
+          <div class="k-stat-lbl">Paid This Month</div>
+          ${paidAmountThisMonth > 0 ? `<div style="font-size:12px;font-weight:600;color:var(--green);margin-top:3px">₦${paidAmountThisMonth.toLocaleString('en-NG')} received</div>` : ''}
+        </div>
         <div class="k-stat k-stat-highlight"><div class="k-stat-val">${allUnpaidThisMonth}</div><div class="k-stat-lbl">Unpaid This Month</div></div>
         <div class="k-stat"><div class="k-stat-val">₦${expectedMonthlyIncome.toLocaleString('en-NG')}</div><div class="k-stat-lbl">Expected Monthly Income</div></div>
+      </div>
+      <div class="k-section" style="margin-top:16px">
+        <h3 class="k-sec-title" style="margin-bottom:10px">📊 Expected Monthly Income by Partnership Type</h3>
+        ${typeBreakdownHtml}
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;margin-top:4px;font-weight:700">
+          <span>Total</span>
+          <span style="color:var(--navy)">₦${expectedMonthlyIncome.toLocaleString('en-NG')}/mo</span>
+        </div>
       </div>
       <div class="k-dot-legend">
         <span><span class="k-dot-cell k-dot-paid"></span> Paid</span>
@@ -9474,6 +9601,7 @@ async function renderSettings(main) {
   const termiiNewMonth     = res?.kpsc_termii_newmonth_sms !== '0';
   const termiiRemDay       = res?.kpsc_termii_reminder_day  || '10';
   const termiiRemFreq      = res?.kpsc_termii_reminder_freq || 'monthly';
+  const termiiRemMode      = res?.kpsc_termii_reminder_mode || 'day_of_month';
   const hasTermii          = !!termiiApiKey;
   // Advanced SMS settings
   const smsSendWindowStart = res?.kpsc_sms_send_window_start || '08:00';
@@ -9672,7 +9800,14 @@ async function renderSettings(main) {
 
         <div class="k-form-group">
           <label class="k-label">Payment Reminder Schedule</label>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <div style="margin-bottom:8px">
+            <label class="k-label" style="font-size:12px">Schedule Mode</label>
+            <select id="ks-termii-rem-mode" class="k-input k-input-sm" onchange="Kpsc.toggleReminderDayField(this.value)">
+              <option value="day_of_month" ${termiiRemMode === 'day_of_month' ? 'selected' : ''}>Fixed day of month</option>
+              <option value="sat_before_last_sun" ${termiiRemMode === 'sat_before_last_sun' ? 'selected' : ''}>Saturday before last Sunday of month</option>
+            </select>
+          </div>
+          <div id="ks-rem-day-wrap" style="${termiiRemMode === 'sat_before_last_sun' ? 'display:none' : 'display:flex'};gap:8px;flex-wrap:wrap;align-items:center">
             <div>
               <label class="k-label" style="font-size:12px">Day of month</label>
               <input type="number" id="ks-termii-rem-day" class="k-input k-input-sm" min="1" max="28" value="${esc(termiiRemDay)}" style="width:70px" />
@@ -10094,6 +10229,7 @@ async function saveSmsSettings() {
   const welcome  = document.getElementById('ks-termii-welcome')?.checked  ? '1' : '0';
   const payment  = document.getElementById('ks-termii-payment')?.checked  ? '1' : '0';
   const newMonth = document.getElementById('ks-termii-newmonth')?.checked ? '1' : '0';
+  const remMode  = document.getElementById('ks-termii-rem-mode')?.value || 'day_of_month';
   const remDay   = String(parseInt(document.getElementById('ks-termii-rem-day')?.value  || '10', 10) || 10);
   const remFreq  = document.getElementById('ks-termii-rem-freq')?.value || 'monthly';
   const res = await apiPost('settings', {
@@ -10103,6 +10239,7 @@ async function saveSmsSettings() {
     kpsc_termii_welcome_sms:          welcome,
     kpsc_termii_payment_sms:          payment,
     kpsc_termii_newmonth_sms:         newMonth,
+    kpsc_termii_reminder_mode:        remMode,
     kpsc_termii_reminder_day:         remDay,
     kpsc_termii_reminder_freq:        remFreq,
   });
@@ -10118,6 +10255,11 @@ async function saveSmsSettings() {
     msg.style.display = 'block';
     setTimeout(() => { if (msg) msg.style.display = 'none'; }, 3500);
   }
+}
+
+function toggleReminderDayField(mode) {
+  const wrap = document.getElementById('ks-rem-day-wrap');
+  if (wrap) wrap.style.display = mode === 'sat_before_last_sun' ? 'none' : 'flex';
 }
 
 async function clearSmsKey() {
@@ -13984,6 +14126,8 @@ window.Kpsc = {
   savePartner,
   togglePartnerMonth,
   setPartnersFilter,
+  setPartnersTypeFilter,
+  setInboxTab,
   setPartnersYear,
   setPartnersSearch,
   deletePartner,
@@ -14006,6 +14150,7 @@ window.Kpsc = {
   closeFinanceModal,
   saveFinanceEntry,
   updateFinanceCategoryOptions,
+  onFinanceCategoryChange,
   scanReceiptPhoto,
   mapReceiptOcrToFormFields,
   setFinanceYear,
@@ -14059,6 +14204,7 @@ window.Kpsc = {
   saveAiModels,
   clearAiKeys,
   saveSmsSettings,
+  toggleReminderDayField,
   clearSmsKey,
   saveAdvSmsSettings,
   sendTestSms,
