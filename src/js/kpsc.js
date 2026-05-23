@@ -2600,30 +2600,83 @@ function renderMoreMenu(main) {
 
 async function renderInbox(main) {
   main.innerHTML = '<div class="k-loading">Loading…</div>';
-  const res = await apiGet('partnership-pledges');
-  const pledges = res?.pledges || [];
+  const [pledgesRes, feedbackRes] = await Promise.all([
+    apiGet('partnership-pledges'),
+    apiGet('partnership-feedback'),
+  ]);
+  const pledges  = pledgesRes?.pledges   || [];
+  const feedback = feedbackRes?.feedback || [];
   const fmtN = n => new Intl.NumberFormat('en-NG').format(n);
+  S._inboxTab = S._inboxTab || 'pledges';
+
+  const renderPledges = () => pledges.length === 0
+    ? `<div class="k-empty" style="padding:32px 0;text-align:center;font-style:italic">No pledge intents yet. They appear when visitors submit via the partnership page.</div>`
+    : pledges.map(p => `
+        <div class="k-meeting-card" style="margin-bottom:8px;cursor:default">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px">
+            <div>
+              <div class="k-mc-title">${esc(p.full_name || 'Anonymous')}</div>
+              <div style="font-size:13px;color:var(--text3);margin-top:2px">${esc(p.phone || '')}${p.location ? ' · ' + esc(p.location) : ''}</div>
+            </div>
+            <div style="text-align:right">
+              <div style="font-weight:700;color:var(--navy);font-size:15px">₦${fmtN(p.amount || 0)}<span style="font-weight:400;font-size:12px;color:var(--text3)">/mo</span></div>
+              ${p.public_listing ? `<span style="font-size:11px;color:var(--green);font-weight:600">Public ✓</span>` : '<span style="font-size:11px;color:var(--text3)">Anonymous</span>'}
+            </div>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-top:6px">${esc(p.created_at || '')}</div>
+        </div>`).join('');
+
+  const renderFeedback = () => feedback.length === 0
+    ? `<div class="k-empty" style="padding:32px 0;text-align:center;font-style:italic">No messages yet. They appear when visitors use the Feedback button on the partnership page.</div>`
+    : feedback.map(f => `
+        <div class="k-meeting-card" style="margin-bottom:8px;cursor:default">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
+            <div style="font-weight:600;color:var(--navy)">${esc(f.name || 'Anonymous')}</div>
+            ${f.contact ? `<span style="font-size:12px;color:var(--text3)">${esc(f.contact)}</span>` : ''}
+          </div>
+          <div style="margin-top:8px;font-size:14px;line-height:1.6;color:var(--text)">${esc(f.message || '')}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:8px">${esc(f.created_at || '')}</div>
+        </div>`).join('');
+
+  const switchTab = tab => {
+    S._inboxTab = tab;
+    document.getElementById('inbox-pledges-tab')?.classList.toggle('active', tab === 'pledges');
+    document.getElementById('inbox-feedback-tab')?.classList.toggle('active', tab === 'feedback');
+    const body = document.getElementById('inbox-tab-body');
+    if (body) body.innerHTML = tab === 'pledges' ? renderPledges() : renderFeedback();
+  };
+
+  // Cache rendered content for tab switching
+  main._inboxRenderPledges  = renderPledges;
+  main._inboxRenderFeedback = renderFeedback;
+
   main.innerHTML = `
     <div class="k-page">
       <h2 style="font-family:'Lora',serif;font-size:20px;color:var(--navy);margin-bottom:4px">Inbox</h2>
-      <p style="font-size:13px;color:var(--text-2);margin-bottom:16px">WhatsApp pledges submitted via the /partnership/ landing page. Each entry means someone opened WhatsApp — follow up to record the formal pledge.</p>
-      ${pledges.length === 0
-        ? `<div class="k-empty-state" style="padding:32px;text-align:center;color:var(--text-2);font-style:italic">No pledges received yet. They will appear here when visitors submit via the partnership page.</div>`
-        : pledges.map(p => `
-          <div class="k-meeting-card" style="margin-bottom:8px;padding:14px 16px">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px">
-              <div>
-                <div style="font-weight:600;font-size:15px;color:var(--navy)">${esc(p.full_name || '')}</div>
-                <div style="font-size:13px;color:var(--text-2);margin-top:2px">${esc(p.phone || '')}${p.location ? ' · ' + esc(p.location) : ''}</div>
-              </div>
-              <div style="text-align:right">
-                <div style="font-weight:700;color:var(--navy);font-size:15px">₦${fmtN(p.amount || 0)}<span style="font-weight:400;font-size:12px;color:var(--text-2)">/month</span></div>
-                ${p.public_listing ? `<span style="font-size:11px;color:var(--green);font-weight:600">Public listing ✓</span>` : '<span style="font-size:11px;color:var(--text-3)">Anonymous</span>'}
-              </div>
-            </div>
-            <div style="font-size:11px;color:var(--text-3);margin-top:6px">${esc(p.created_at || '')}</div>
-          </div>`).join('')}
+      <p style="font-size:13px;color:var(--text3);margin-bottom:16px">Messages and pledge intents received from the public partnership page.</p>
+      <div class="k-tabs" style="margin-bottom:16px">
+        <button id="inbox-pledges-tab" class="k-tab ${S._inboxTab === 'pledges' ? 'active' : ''}" onclick="Kpsc.setInboxTab('pledges')">
+          Pledge Intents <span class="kbadge" style="margin-left:4px;background:var(--navy-light);color:var(--navy)">${pledges.length}</span>
+        </button>
+        <button id="inbox-feedback-tab" class="k-tab ${S._inboxTab === 'feedback' ? 'active' : ''}" onclick="Kpsc.setInboxTab('feedback')">
+          Feedback &amp; Messages <span class="kbadge" style="margin-left:4px;background:var(--navy-light);color:var(--navy)">${feedback.length}</span>
+        </button>
+      </div>
+      <div id="inbox-tab-body">${S._inboxTab === 'pledges' ? renderPledges() : renderFeedback()}</div>
     </div>`;
+}
+
+function setInboxTab(tab) {
+  S._inboxTab = tab;
+  document.getElementById('inbox-pledges-tab')?.classList.toggle('active', tab === 'pledges');
+  document.getElementById('inbox-feedback-tab')?.classList.toggle('active', tab === 'feedback');
+  const main = document.getElementById('kpsc-main');
+  const body = document.getElementById('inbox-tab-body');
+  if (body && main) {
+    body.innerHTML = tab === 'pledges'
+      ? (main._inboxRenderPledges?.() || '')
+      : (main._inboxRenderFeedback?.() || '');
+  }
 }
 
 function goBack() {
@@ -14074,6 +14127,7 @@ window.Kpsc = {
   togglePartnerMonth,
   setPartnersFilter,
   setPartnersTypeFilter,
+  setInboxTab,
   setPartnersYear,
   setPartnersSearch,
   deletePartner,

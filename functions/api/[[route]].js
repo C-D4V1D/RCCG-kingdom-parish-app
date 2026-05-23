@@ -972,6 +972,16 @@ export async function onRequest(context) {
       return ok({ ok: true });
     }
 
+    // ── /api/partnership-feedback  (KPSC auth GET — read feedback inbox) ──
+    if (route === 'partnership-feedback' && method === 'GET') {
+      const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+      if (auth instanceof Response) return auth;
+      const { results } = await DB.prepare(
+        `SELECT id, message, name, contact, created_at FROM kpsc_partnership_feedback ORDER BY created_at DESC LIMIT 200`
+      ).all();
+      return ok({ feedback: results || [] });
+    }
+
     return err(`Route not found: ${method} /api/${path}`, 404);
 
   } catch (e) {
