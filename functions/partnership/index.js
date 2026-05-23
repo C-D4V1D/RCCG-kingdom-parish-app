@@ -38,7 +38,7 @@ export async function onRequestGet(context) {
     ? (rawImg.startsWith('data:') ? `${host}/api/partnership-og-image` : rawImg)
     : FALLBACK_IMAGE;
 
-  return new HTMLRewriter()
+  const transformed = new HTMLRewriter()
     .on('meta[property="og:title"]',        { element: el => el.setAttribute('content', title) })
     .on('meta[property="og:description"]',  { element: el => el.setAttribute('content', desc)  })
     .on('meta[property="og:image"]',        { element: el => el.setAttribute('content', image) })
@@ -47,4 +47,8 @@ export async function onRequestGet(context) {
     .on('meta[name="twitter:description"]', { element: el => el.setAttribute('content', desc)  })
     .on('meta[name="twitter:image"]',       { element: el => el.setAttribute('content', image) })
     .transform(response);
+  // Prevent edge caching so saved OG settings are always reflected
+  const headers = new Headers(transformed.headers);
+  headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  return new Response(transformed.body, { status: transformed.status, headers });
 }

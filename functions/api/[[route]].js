@@ -105,7 +105,7 @@ async function getTermiiSettings(DB) {
     'kpsc_termii_api_key', 'kpsc_termii_sender_id', 'kpsc_termii_partner_sender_id',
     'kpsc_termii_welcome_sms', 'kpsc_termii_payment_sms',
     'kpsc_termii_newmonth_sms', 'kpsc_termii_reminder_day',
-    'kpsc_termii_reminder_freq',
+    'kpsc_termii_reminder_freq', 'kpsc_termii_reminder_mode',
     // Advanced SMS features
     'kpsc_sms_send_window_start', 'kpsc_sms_send_window_end',
     'kpsc_termii_anniversary_sms', 'kpsc_termii_milestone_sms',
@@ -134,6 +134,7 @@ async function getTermiiSettings(DB) {
     newMonthSms:     map.kpsc_termii_newmonth_sms  !== '0',
     reminderDay:     parseInt(map.kpsc_termii_reminder_day || '10', 10) || 10,
     reminderFreq:    String(map.kpsc_termii_reminder_freq || 'monthly').trim(),
+    reminderMode:    String(map.kpsc_termii_reminder_mode || 'day_of_month').trim(),
     sendWindowStart: String(map.kpsc_sms_send_window_start || '08:00').trim(),
     sendWindowEnd:   String(map.kpsc_sms_send_window_end   || '18:00').trim(),
     anniversarySms:  map.kpsc_termii_anniversary_sms  !== '0',
@@ -960,6 +961,17 @@ export async function onRequest(context) {
       return ok({ pledges: results || [] });
     }
 
+    // ── /api/partnership-feedback  (public POST — feedback/suggestions) ──
+    if (route === 'partnership-feedback' && method === 'POST') {
+      const { message, name, contact } = body || {};
+      if (!message || !String(message).trim()) return err('message is required', 400);
+      const fbId = newId('fb');
+      await DB.prepare(
+        `INSERT INTO kpsc_partnership_feedback (id, message, name, contact, created_at) VALUES (?, ?, ?, ?, datetime('now'))`
+      ).bind(fbId, String(message).trim().slice(0, 1000), String(name || '').trim().slice(0, 200), String(contact || '').trim().slice(0, 100)).run();
+      return ok({ ok: true });
+    }
+
     return err(`Route not found: ${method} /api/${path}`, 404);
 
   } catch (e) {
@@ -1345,6 +1357,13 @@ async function handleInit(DB) {
       public_listing INTEGER DEFAULT 0,
       created_at     TEXT DEFAULT (datetime('now'))
     )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_partnership_feedback (
+      id         TEXT PRIMARY KEY,
+      message    TEXT NOT NULL DEFAULT '',
+      name       TEXT DEFAULT '',
+      contact    TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    )`,
   ];
 
   // Run all CREATE TABLE statements first
@@ -1513,8 +1532,9 @@ async function handleInit(DB) {
     kpsc_termii_welcome_sms:  '1',         // send welcome SMS on partner add
     kpsc_termii_payment_sms:  '1',         // send thank-you SMS on payment record
     kpsc_termii_newmonth_sms: '1',         // send Happy New Month SMS on 1st
-    kpsc_termii_reminder_day: '10',        // day of month to send payment reminders
-    kpsc_termii_reminder_freq: 'monthly',  // monthly | biweekly | weekly
+    kpsc_termii_reminder_day: '10',          // day of month to send payment reminders
+    kpsc_termii_reminder_freq: 'monthly',   // monthly | biweekly | weekly
+    kpsc_termii_reminder_mode: 'day_of_month', // day_of_month | sat_before_last_sun
     // Advanced SMS feature settings (features 3,4,5,6,7,8,9,17)
     kpsc_sms_send_window_start:   '08:00', // WAT hour to start sending (quiet hours - feature 3)
     kpsc_sms_send_window_end:     '18:00', // WAT hour to stop sending (quiet hours - feature 3)
@@ -2981,6 +3001,18 @@ async function createKpscFinanceEntry(DB, data, auth) {
     String(data?.attachmentName || '').trim(),
     String(data?.partnerPaymentId || '').trim(),
   ).run();
+
+  // Auto-increment welfare cases count when a welfare expense is recorded
+  if (entryType === 'expense' && category === 'welfare') {
+    const welfareCount = parseInt(data?.welfareCount || 0, 10);
+    if (welfareCount > 0) {
+      const existing = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_welfare_cases_ytd'`).first();
+      const currentVal = parseInt(existing?.value || '0', 10) || 0;
+      await DB.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES ('kpsc_welfare_cases_ytd', ?)`)
+        .bind(String(currentVal + welfareCount)).run();
+    }
+  }
+
   return await getKpscFinanceEntryById(DB, id);
 }
 
@@ -6404,12 +6436,23 @@ async function runReminderSms(DB, env, request) {
   const year = now.getUTCFullYear();
   const reminderDay = t.reminderDay;
   const freq = t.reminderFreq;
+  const reminderMode = t.reminderMode || 'day_of_month';
 
   // Decide whether today is a send day based on frequency
   let isSendDay = false;
   // Last valid day of the current month (accounts for variable month lengths)
   const lastDayOfMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-  if (freq === 'monthly') {
+
+  if (reminderMode === 'sat_before_last_sun') {
+    // Find the last Sunday of the month, then back up one day to Saturday
+    let lastSunDay = 0;
+    for (let d = lastDayOfMonth; d >= 1; d--) {
+      const dow = new Date(Date.UTC(year, month - 1, d)).getUTCDay(); // 0=Sun
+      if (dow === 0) { lastSunDay = d; break; }
+    }
+    const satBeforeLastSun = lastSunDay > 1 ? lastSunDay - 1 : lastSunDay;
+    isSendDay = (dayOfMonth === satBeforeLastSun);
+  } else if (freq === 'monthly') {
     isSendDay = (dayOfMonth === Math.min(reminderDay, lastDayOfMonth));
   } else if (freq === 'biweekly') {
     const firstSendDay  = Math.min(reminderDay, lastDayOfMonth);
@@ -6422,7 +6465,7 @@ async function runReminderSms(DB, env, request) {
     isSendDay = diff >= 0 && diff % 7 === 0;
   }
 
-  if (!isSendDay) return ok({ ok: true, skipped: true, reason: `Not a reminder send day (day=${dayOfMonth}, freq=${freq}, reminderDay=${reminderDay})` });
+  if (!isSendDay) return ok({ ok: true, skipped: true, reason: `Not a reminder send day (day=${dayOfMonth}, mode=${reminderMode}, freq=${freq}, reminderDay=${reminderDay})` });
 
   const template = t.reminderText;
 
