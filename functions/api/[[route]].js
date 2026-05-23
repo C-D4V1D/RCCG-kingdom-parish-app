@@ -936,6 +936,30 @@ export async function onRequest(context) {
       return await serveStoredImage(DB, 'partnership_favicon', '/kpsc/icons/icon.svg');
     }
 
+    // ── /api/partnership-pledge  (public POST — log WhatsApp pledge intent) ──
+    if (route === 'partnership-pledge' && method === 'POST') {
+      const { name, phone, location, amount, public_listing } = body || {};
+      if (!name || !phone) return err('name and phone are required', 400);
+      const pledgeId = newId('pl');
+      await DB.prepare(
+        `INSERT INTO kpsc_partnership_pledges (id, full_name, phone, location, amount, public_listing, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`
+      ).bind(pledgeId, String(name).trim(), String(phone).trim(), String(location || '').trim(),
+             parseFloat(amount) || 0, public_listing ? 1 : 0).run();
+      return ok({ ok: true });
+    }
+
+    // ── /api/partnership-pledges  (KPSC auth GET — read pledge inbox) ────
+    if (route === 'partnership-pledges' && method === 'GET') {
+      const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+      if (auth instanceof Response) return auth;
+      const { results } = await DB.prepare(
+        `SELECT id, full_name, phone, location, amount, public_listing, created_at
+         FROM kpsc_partnership_pledges ORDER BY created_at DESC LIMIT 200`
+      ).all();
+      return ok({ pledges: results || [] });
+    }
+
     return err(`Route not found: ${method} /api/${path}`, 404);
 
   } catch (e) {
@@ -1311,6 +1335,15 @@ async function handleInit(DB) {
       failed_count  INTEGER DEFAULT 0,
       created_by    TEXT DEFAULT '',
       created_at    TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_partnership_pledges (
+      id             TEXT PRIMARY KEY,
+      full_name      TEXT NOT NULL DEFAULT '',
+      phone          TEXT NOT NULL DEFAULT '',
+      location       TEXT DEFAULT '',
+      amount         REAL DEFAULT 0,
+      public_listing INTEGER DEFAULT 0,
+      created_at     TEXT DEFAULT (datetime('now'))
     )`,
   ];
 
@@ -4725,7 +4758,7 @@ async function getPartnershipPublic(DB) {
 
   // Load partnership settings (annual goal, logo, welfare count)
   const settingsRows = await DB.prepare(
-    `SELECT key, value FROM settings WHERE key IN ('partnership_annual_goal','partnership_logo_url','kpsc_welfare_cases_ytd','partnership_whatsapp_number','partnership_illu_hero','partnership_illu_vision','partnership_illu_step1','partnership_illu_step2','partnership_illu_step3','partnership_favicon')`
+    `SELECT key, value FROM settings WHERE key IN ('partnership_annual_goal','partnership_logo_url','kpsc_welfare_cases_ytd','partnership_whatsapp_number','partnership_illu_hero','partnership_illu_vision','partnership_illu_step1','partnership_illu_step2','partnership_illu_step3','partnership_favicon','partnership_vision_slide_1','partnership_vision_slide_2','partnership_vision_slide_3','partnership_vision_slide_4','partnership_vision_duration')`
   ).all();
   const smap = {};
   (settingsRows.results || []).forEach(r => { smap[r.key] = r.value; });
@@ -4740,6 +4773,13 @@ async function getPartnershipPublic(DB) {
     step2: String(smap.partnership_illu_step2  || '').trim(),
     step3: String(smap.partnership_illu_step3  || '').trim(),
   };
+  const visionSlides = [
+    String(smap.partnership_vision_slide_1 || '').trim(),
+    String(smap.partnership_vision_slide_2 || '').trim(),
+    String(smap.partnership_vision_slide_3 || '').trim(),
+    String(smap.partnership_vision_slide_4 || '').trim(),
+  ].filter(Boolean);
+  const visionDuration = parseFloat(smap.partnership_vision_duration || '') || 5;
   const rawFav   = String(smap.partnership_favicon || '').trim();
   // For data URL favicons, point the JS to the serving endpoint
   const faviconUrl = rawFav
@@ -4807,6 +4847,8 @@ async function getPartnershipPublic(DB) {
     logoUrl,
     faviconUrl,
     illustrations,
+    visionSlides,
+    visionDuration,
     anonymousPartnersCount,
     partners,
     projects,

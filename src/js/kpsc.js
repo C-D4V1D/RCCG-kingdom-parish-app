@@ -2539,6 +2539,9 @@ async function renderPage(page) {
     } else if (page === 'settings') {
       await renderSettings(main);
       prependSubTabs(main, moreSubTabStrip());
+    } else if (page === 'inbox') {
+      await renderInbox(main);
+      prependSubTabs(main, moreSubTabStrip());
     } else if (page === 'more') {
       renderMoreMenu(main);
     }
@@ -2556,6 +2559,7 @@ function moreSubTabStrip() {
   const tabs = [];
   if (role !== 'committee_viewer') tabs.push({ key: 'members',  label: 'Members'  });
   if (role !== 'committee_viewer') tabs.push({ key: 'settings', label: 'Settings' });
+  tabs.push({ key: 'inbox', label: 'Pledge Inbox' });
   if (!tabs.length) return '';
   return `<div class="ka-subtabs">${tabs.map(t =>
     `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
@@ -2580,11 +2584,44 @@ function renderMoreMenu(main) {
           <span>Settings</span>
           <svg class="ka-more-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
         </button>` : ''}
+        <button class="ka-more-item" onclick="Kpsc.navigate('inbox')">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/></svg>
+          <span>Pledge Inbox</span>
+          <svg class="ka-more-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
         <button class="ka-more-item ka-more-item-danger" onclick="Kpsc.logout()">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
           <span>Sign Out</span>
         </button>
       </div>
+    </div>`;
+}
+
+async function renderInbox(main) {
+  main.innerHTML = '<div class="k-loading">Loading…</div>';
+  const res = await apiGet('partnership-pledges');
+  const pledges = res?.pledges || [];
+  const fmtN = n => new Intl.NumberFormat('en-NG').format(n);
+  main.innerHTML = `
+    <div class="k-page">
+      <h2 style="font-family:'Lora',serif;font-size:20px;color:var(--navy);margin-bottom:4px">Pledge Inbox</h2>
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:16px">WhatsApp pledges submitted via the /partnership/ landing page. Each entry means someone opened WhatsApp — follow up to record the formal pledge.</p>
+      ${pledges.length === 0
+        ? `<div class="k-empty-state" style="padding:32px;text-align:center;color:var(--text-2);font-style:italic">No pledges received yet. They will appear here when visitors submit via the partnership page.</div>`
+        : pledges.map(p => `
+          <div class="k-meeting-card" style="margin-bottom:8px;padding:14px 16px">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px">
+              <div>
+                <div style="font-weight:600;font-size:15px;color:var(--navy)">${esc(p.full_name || '')}</div>
+                <div style="font-size:13px;color:var(--text-2);margin-top:2px">${esc(p.phone || '')}${p.location ? ' · ' + esc(p.location) : ''}</div>
+              </div>
+              <div style="text-align:right">
+                <div style="font-weight:700;color:var(--navy);font-size:15px">₦${fmtN(p.amount || 0)}<span style="font-weight:400;font-size:12px;color:var(--text-2)">/month</span></div>
+                ${p.public_listing ? `<span style="font-size:11px;color:var(--green);font-weight:600">Public listing ✓</span>` : '<span style="font-size:11px;color:var(--text-3)">Anonymous</span>'}
+              </div>
+            </div>
+            <div style="font-size:11px;color:var(--text-3);margin-top:6px">${esc(p.created_at || '')}</div>
+          </div>`).join('')}
     </div>`;
 }
 
@@ -9926,11 +9963,22 @@ async function renderSettings(main) {
           <p class="k-label" style="font-size:13px;font-weight:700;margin-bottom:4px">Illustration Images</p>
           <p class="k-hint" style="margin-bottom:12px">Paste public image URLs for each slot on the landing page. Leave empty to show the default placeholder. Host images on Cloudinary, Google Drive (direct link), or any public CDN.</p>
 
-          ${_illuField('ks-illu-hero',   res?.partnership_illu_hero,   'Slot 1 — Hero (cross + laurel wreath)',   400, 400, 'square')}
-          ${_illuField('ks-illu-vision', res?.partnership_illu_vision, 'Slot 2 — Vision (hands holding a church)', 600, 360, 'landscape')}
-          ${_illuField('ks-illu-step1',  res?.partnership_illu_step1,  'Slot 3 — Step 1: Decide',                  400, 240, '')}
-          ${_illuField('ks-illu-step2',  res?.partnership_illu_step2,  'Slot 4 — Step 2: Pay',                     400, 240, '')}
-          ${_illuField('ks-illu-step3',  res?.partnership_illu_step3,  'Slot 5 — Step 3: Get Card Signed',         400, 240, '')}
+          ${_illuField('ks-illu-hero',  res?.partnership_illu_hero,  'Slot 1 — Hero (cross + laurel wreath)',    400, 400, 'square')}
+          <div style="margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-soft)">
+            <p class="k-label" style="font-size:12px;font-weight:700;margin-bottom:4px">Slot 2 — Vision Carousel (600×360 landscape) — up to 4 slides</p>
+            <p class="k-hint" style="margin-bottom:10px">The Vision section auto-slides through these images. Add 1–4 photos. Leave empty slots to skip. Set slide duration below.</p>
+            ${_illuField('ks-vision-slide-1', res?.partnership_vision_slide_1, 'Slide 1', 600, 360, 'landscape')}
+            ${_illuField('ks-vision-slide-2', res?.partnership_vision_slide_2, 'Slide 2', 600, 360, 'landscape')}
+            ${_illuField('ks-vision-slide-3', res?.partnership_vision_slide_3, 'Slide 3 (optional)', 600, 360, 'landscape')}
+            ${_illuField('ks-vision-slide-4', res?.partnership_vision_slide_4, 'Slide 4 (optional)', 600, 360, 'landscape')}
+            <label class="k-label" style="margin-top:12px">Slide Duration (seconds)</label>
+            <input id="ks-vision-duration" class="k-input" type="number" min="2" max="30" step="1"
+              placeholder="5" style="max-width:140px"
+              value="${esc(res?.partnership_vision_duration || '5')}" />
+          </div>
+          ${_illuField('ks-illu-step1', res?.partnership_illu_step1,  'Slot 3 — Step 1: Decide',               400, 240, '')}
+          ${_illuField('ks-illu-step2', res?.partnership_illu_step2,  'Slot 4 — Step 2: Pay',                  400, 240, '')}
+          ${_illuField('ks-illu-step3', res?.partnership_illu_step3,  'Slot 5 — Step 3: Get Card Signed',      400, 240, '')}
         </div>
 
         <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:14px">
@@ -10412,29 +10460,37 @@ async function savePartnershipSettings() {
   const welfare   = document.getElementById('ks-welfare-cases')?.value.trim() || '0';
   const waNum     = document.getElementById('ks-wa-number')?.value.trim() || '';
   const logoUrl   = document.getElementById('ks-logo-url')?.value.trim() || '';
-  const illuHero  = document.getElementById('ks-illu-hero')?.value.trim() || '';
-  const illuVision= document.getElementById('ks-illu-vision')?.value.trim() || '';
-  const illuStep1 = document.getElementById('ks-illu-step1')?.value.trim() || '';
-  const illuStep2 = document.getElementById('ks-illu-step2')?.value.trim() || '';
-  const illuStep3  = document.getElementById('ks-illu-step3')?.value.trim() || '';
-  const ogTitle    = document.getElementById('ks-og-title')?.value.trim() || '';
-  const ogDesc     = document.getElementById('ks-og-desc')?.value.trim() || '';
-  const ogImage    = document.getElementById('ks-og-image')?.value.trim() || '';
-  const favicon    = document.getElementById('ks-favicon')?.value.trim() || '';
+  const illuHero      = document.getElementById('ks-illu-hero')?.value.trim() || '';
+  const illuStep1     = document.getElementById('ks-illu-step1')?.value.trim() || '';
+  const illuStep2     = document.getElementById('ks-illu-step2')?.value.trim() || '';
+  const illuStep3     = document.getElementById('ks-illu-step3')?.value.trim() || '';
+  const visionSlide1  = document.getElementById('ks-vision-slide-1')?.value.trim() || '';
+  const visionSlide2  = document.getElementById('ks-vision-slide-2')?.value.trim() || '';
+  const visionSlide3  = document.getElementById('ks-vision-slide-3')?.value.trim() || '';
+  const visionSlide4  = document.getElementById('ks-vision-slide-4')?.value.trim() || '';
+  const visionDuration= document.getElementById('ks-vision-duration')?.value.trim() || '5';
+  const ogTitle       = document.getElementById('ks-og-title')?.value.trim() || '';
+  const ogDesc        = document.getElementById('ks-og-desc')?.value.trim() || '';
+  const ogImage       = document.getElementById('ks-og-image')?.value.trim() || '';
+  const favicon       = document.getElementById('ks-favicon')?.value.trim() || '';
   const res = await apiPost('settings', {
-    partnership_annual_goal:     goal,
-    kpsc_welfare_cases_ytd:      welfare,
-    partnership_whatsapp_number: waNum,
-    partnership_logo_url:        logoUrl,
-    partnership_illu_hero:       illuHero,
-    partnership_illu_vision:     illuVision,
-    partnership_illu_step1:      illuStep1,
-    partnership_illu_step2:      illuStep2,
-    partnership_illu_step3:      illuStep3,
-    partnership_og_title:        ogTitle,
-    partnership_og_description:  ogDesc,
-    partnership_og_image:        ogImage,
-    partnership_favicon:         favicon,
+    partnership_annual_goal:      goal,
+    kpsc_welfare_cases_ytd:       welfare,
+    partnership_whatsapp_number:  waNum,
+    partnership_logo_url:         logoUrl,
+    partnership_illu_hero:        illuHero,
+    partnership_illu_step1:       illuStep1,
+    partnership_illu_step2:       illuStep2,
+    partnership_illu_step3:       illuStep3,
+    partnership_vision_slide_1:   visionSlide1,
+    partnership_vision_slide_2:   visionSlide2,
+    partnership_vision_slide_3:   visionSlide3,
+    partnership_vision_slide_4:   visionSlide4,
+    partnership_vision_duration:  visionDuration,
+    partnership_og_title:         ogTitle,
+    partnership_og_description:   ogDesc,
+    partnership_og_image:         ogImage,
+    partnership_favicon:          favicon,
   });
   if (res?.error) {
     msg.className = 'k-settings-msg k-msg-error';
