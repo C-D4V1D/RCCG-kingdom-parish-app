@@ -591,6 +591,18 @@ function getQuotaLinesForPeriod(quotas, fromDate, toDate){
 }
 
 
+
+function isQuotaFullyAccrued(q){
+  const full=Number(q?.monthlyAmount||0);
+  const amt=Number(q?.amount||0);
+  return full>0 && amt >= (full - 0.005);
+}
+
+function quotaTypeTextForReport(q){
+  if(isQuotaFullyAccrued(q)) return 'Fixed';
+  return q?.isProrated ? `Fixed • ${q.basis}` : 'Fixed';
+}
+
 function sumQuotaLines(lines){
   return (lines||[]).reduce((s,l)=>s+(l.amount||0),0);
 }
@@ -4476,7 +4488,7 @@ async function printRemittanceReport(fromOverride, toOverride){
       type:`${Math.round(rr.provinceRebate*100)}% Based`, amount:rem.provinceRebate
     }]:[]),
     // Fixed RCCG quotas (excluding pastoral Zonal Mummy Stipend)
-    ...rccgQuotas.map(q=>({ desc:q.label, type:q.isProrated?`Fixed • ${q.basis}`:'Fixed', amount:q.amount||0 })).filter(r=>r.amount>0)
+    ...rccgQuotas.map(q=>({ desc:q.label, type:quotaTypeTextForReport(q), amount:q.amount||0 })).filter(r=>r.amount>0)
   ];
   const subTotalA=partARows.reduce((s,r)=>s+r.amount,0);
 
@@ -4486,7 +4498,7 @@ async function printRemittanceReport(fromOverride, toOverride){
     { desc:`Thanksgiving → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,          type:`${Math.round(rr.tgPastor*100)}% Based`, amount:rem.totalPastor||0 },
     { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,     type:`${Math.round(rr.tgMinisters*100)}% Based`, amount:rem.totalMinisters||0 },
     { desc:`Thanksgiving → Seed — Pastor's Children (${Math.round(rr.tgSeed*100)}%)`,  type:`${Math.round(rr.tgSeed*100)}% Based`, amount:rem.totalSeed||0 },
-    ...mummyQuotas.map(q=>({ desc:q.label, type:q.isProrated?`Fixed • ${q.basis}`:'Fixed', amount:q.amount||0 }))
+    ...mummyQuotas.map(q=>({ desc:q.label, type:quotaTypeTextForReport(q), amount:q.amount||0 }))
   ].filter(r=>r.amount>0);
   const subTotalB=partBRows.reduce((s,r)=>s+r.amount,0);
 
@@ -7544,7 +7556,7 @@ async function generateMonthlyReport(){
       ${rem.totalPastor>0?`<tr><td style="padding-left:16px">Thanksgiving → Parish Pastor's Share</td><td class="td-c">${Math.round(remRatesData.tgPastor*100)}% of TG</td><td class="td-r">${fmt(rem.totalPastor)}</td></tr>`:''}
       ${rem.totalMinisters>0?`<tr><td style="padding-left:16px">Thanksgiving → Ministers' Share</td><td class="td-c">${Math.round(remRatesData.tgMinisters*100)}% of TG</td><td class="td-r">${fmt(rem.totalMinisters)}</td></tr>`:''}
       ${(rem.totalSeed||0)>0?`<tr><td style="padding-left:16px">Thanksgiving → Seed (Pastor's Children)</td><td class="td-c">${Math.round((remRatesData.tgSeed||0)*100)}% of TG</td><td class="td-r">${fmt(rem.totalSeed)}</td></tr>`:''}
-      ${quotaLines.map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">${esc(q.isProrated?`Fixed • ${q.basis}`:'Fixed Quota')}</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
+      ${quotaLines.map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">${esc(isQuotaFullyAccrued(q)?'Fixed':(q.isProrated?`Fixed • ${q.basis}`:'Fixed Quota'))}</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${fmt(totalRemDue)}</td></tr>
       ${totalRemPaid>0?`<tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Period</td><td class="td-r td-green">${fmt(totalRemPaid)}</td></tr>`:''}
       ${totalRemPaid<totalRemDue?`<tr><td colspan="2" style="padding-left:20px;color:var(--danger)">Outstanding Balance</td><td class="td-r td-red">− ${fmt(totalRemDue-totalRemPaid)}</td></tr>`:''}
