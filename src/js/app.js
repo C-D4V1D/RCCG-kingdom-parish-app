@@ -3092,18 +3092,64 @@ async function viewIncome(id){
   const r=allIncVI.find(x=>x.id===id);
   if(!r) return;
   const isSunday = !r.source||r.source==='sunday_collection';
-  const rem = isSunday ? await calcRemittances(r) : null;
-  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
+  const [rem, remRates, allCashVI, settings] = await Promise.all([
+    isSunday ? calcRemittances(r) : Promise.resolve(null),
+    getRemRates(),
+    DB.getCashTransactions(),
+    isSunday ? DB.getSettings() : Promise.resolve(null),
+  ]);
+  const rates = remRates.rates || DEFAULT_REMITTANCE_RATES;
   const btAmt = r.bankTransferAmount||0;
   const dpAmt = r.directPettyCash||0;
-  const childrenTeacherHeld = isSunday ? getChildrenTeacherHeldCash(r, remRates) : 0;
+  const childrenTeacherHeld = isSunday ? getChildrenTeacherHeldCash(r, rates) : 0;
   const cashHeld = isSunday
-    ? getSundayCashWithAccountant(r, remRates)
+    ? getSundayCashWithAccountant(r, rates)
     : Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
-  const allCashVI = await DB.getCashTransactions();
   const deposits = allCashVI.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id);
   const depositedTotal = deposits.reduce((s,t)=>s+(t.amount||0),0);
   const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Sunday Collection'};
+
+  // Per-Sunday fixed quota share: periodAmount ÷ total Sundays in the remittance period
+  let perSundayQuotaLines = [];
+  if(isSunday && r.date && settings){
+    const quotas = getQuotaList(settings).filter(q=>(q.amount||0)>0);
+    if(quotas.length){
+      const d = parseYmdDate(r.date);
+      const yr = d.getFullYear(), mo = d.getMonth();
+      const cutoffCfg = getRemCutoffDates(settings, yr);
+      const cutoffDay = (cutoffCfg && Number(cutoffCfg.year)===yr && Number.isInteger(cutoffCfg.dates[mo]))
+        ? cutoffCfg.dates[mo] : null;
+      let periodFrom, periodTo;
+      if(cutoffDay){
+        periodTo = new Date(yr, mo, cutoffDay);
+        const prevMo = mo===0 ? 11 : mo-1;
+        const prevYr = mo===0 ? yr-1 : yr;
+        const prevCC = getRemCutoffDates(settings, prevYr);
+        const prevCutDay = (prevCC && Number(prevCC.year)===prevYr && Number.isInteger(prevCC.dates[prevMo]))
+          ? prevCC.dates[prevMo] : null;
+        if(prevCutDay){
+          const from = new Date(prevYr, prevMo, prevCutDay);
+          from.setDate(from.getDate()+1);
+          periodFrom = from;
+        } else { periodFrom = new Date(yr, mo, 1); }
+      } else {
+        periodFrom = new Date(yr, mo, 1);
+        periodTo = new Date(yr, mo+1, 0);
+      }
+      const periodSundays = countSundaysInRange(periodFrom, periodTo);
+      if(periodSundays > 0){
+        perSundayQuotaLines = quotas.map(q=>({
+          label: q.label,
+          amount: (q.amount||0) / periodSundays,
+          periodAmount: q.amount||0,
+          periodSundays,
+        }));
+      }
+    }
+  }
+  const quotaThisSunday = perSundayQuotaLines.reduce((s,q)=>s+q.amount, 0);
+  const trueNetLocal = isSunday ? (rem.netLocal - quotaThisSunday) : 0;
+
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">Income Details — ${fmtDate(r.date)}</div>
@@ -3126,7 +3172,20 @@ async function viewIncome(id){
     <p class="card-title">Remittances Due</p>
     ${rem.lines.map(l=>`<div class="status-row"><div class="status-row-label">${l.label} → HQ</div><div class="status-row-amt td-red">${fmt(l.national||0)}</div></div>`).join('')}
     <div class="status-row"><div class="status-row-label">Province Rebate (20%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div></div>
-    <div class="status-row" style="border-top:2px solid var(--border)"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt td-green" style="font-size:15px">${fmt(rem.netLocal)}</div></div>`:''}
+    ${perSundayQuotaLines.length?`
+    <div style="margin-top:10px;margin-bottom:4px;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px">Fixed Quotas — This Sunday's Share</div>
+    ${perSundayQuotaLines.map(q=>`
+    <div class="status-row">
+      <div>
+        <div class="status-row-label">${esc(q.label)}</div>
+        <div class="status-row-sub">${fmt(q.periodAmount)} ÷ ${q.periodSundays} Sunday${q.periodSundays!==1?'s':''} this period</div>
+      </div>
+      <div class="status-row-amt" style="color:var(--info)">${fmt(q.amount)}</div>
+    </div>`).join('')}`:''}
+    <div class="status-row" style="border-top:2px solid var(--border);margin-top:6px">
+      <div class="status-row-label fw-bold">Net Local Retained${perSundayQuotaLines.length?' (after quotas)':''}</div>
+      <div class="status-row-amt td-green" style="font-size:15px">${fmt(perSundayQuotaLines.length?trueNetLocal:rem.netLocal)}</div>
+    </div>`:''}
     <hr class="divider">
     <div class="fs-12 text-muted">Recorded by: ${r.recordedBy||'—'} · ${isSunday?'Counted with: '+r.usher:'Donor: '+(r.donorName||'—')}</div>
     ${deposits.length?`<div class="fs-12 text-muted">Deposit records: ${deposits.map(d=>`${fmt(d.amount)} via ${d.depositMethod?.replace('_',' ')||'—'} on ${fmtDate(d.date)} (Ref: ${d.reference||'—'})`).join('; ')}</div>`:''}
