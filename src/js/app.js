@@ -3947,10 +3947,6 @@ async function renderRemittances(){
     <!-- Period Selector -->
     <div class="card" style="margin-bottom:12px;padding:14px 16px">
       <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px">📅 Remittance Period</div>
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-        <button class="chip ${mode==='remittance'?'active':''}" onclick="App.setReportPeriodMode('remittance')">Remittance Period</button>
-        <button class="chip ${mode==='calendar'?'active':''}" onclick="App.setReportPeriodMode('calendar')">Calendar Month</button>
-      </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="display:flex;align-items:center;gap:6px">
           <label style="font-size:12px;color:var(--text2);white-space:nowrap">From</label>
@@ -7416,10 +7412,6 @@ async function renderReports(){
     <div class="page-header"><div class="page-title">📊 Reports Centre</div><div class="page-sub">Generate comprehensive financial reports</div></div>
     <div class="card" style="margin-bottom:12px;padding:14px 16px">
       <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px">📅 Report Period</div>
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-        <button class="chip ${mode==='remittance'?'active':''}" onclick="App.setReportPeriodMode('remittance')">Remittance Period</button>
-        <button class="chip ${mode==='calendar'?'active':''}" onclick="App.setReportPeriodMode('calendar')">Calendar Month</button>
-      </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="display:flex;align-items:center;gap:6px">
           <label style="font-size:12px;color:var(--text2);white-space:nowrap">From</label>
