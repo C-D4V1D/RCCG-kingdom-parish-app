@@ -8067,6 +8067,7 @@ async function runMonthlySmsInternal(DB, now) {
       `SELECT id, full_name, phone FROM kpsc_partners WHERE COALESCE(deleted_at,'')='' AND status='active' AND phone != '' AND COALESCE(opted_out,0)=0 AND COALESCE(dnd_flagged,0)=0`
     ).all();
 
+    let sentCount = 0;
     for (const p of (partners || [])) {
       const msg = newmonthText
         .replace(/\{\{name\}\}/g, p.full_name)
@@ -8074,13 +8075,14 @@ async function runMonthlySmsInternal(DB, now) {
       const nmsid = t.partnerSenderId || t.senderId;
       const result = await sendTermiiSms(t.apiKey, nmsid, p.phone, msg);
       if (result.ok) {
+        sentCount++;
         await DB.prepare(
           `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
         ).bind(newId('krm'), p.id, 'sms', msg, 'sent', 'pending', result.messageId || '', 'new_month', year, nmMonth, 'cron', now.toISOString()).run().catch(() => {});
       }
     }
-    // Clear draft after send
-    if (draftRow?.value) {
+    // Only clear the draft if at least one SMS was delivered — preserves it for retry on total failure
+    if (draftRow?.value && sentCount > 0) {
       await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
         .bind('kpsc_newmonth_sms_pending_draft', '').run();
     }
@@ -8289,11 +8291,14 @@ async function amendmentApply(DB, env, data, auth) {
   const { oldText, newText, insightText, meetingId, byelawVersionId, aiConfidence } = data || {};
   if (!newText || !insightText) return err('newText and insightText are required', 400);
 
-  // Load current byelaw content
-  const byelaw = await DB.prepare(
-    `SELECT id, content_md, version_num FROM kpsc_policy_versions WHERE policy_type='byelaw' AND is_current=1 ORDER BY version_num DESC LIMIT 1`
-  ).first().catch(() => null);
+  // Load the exact byelaw version that was previewed — reject if it's no longer current
+  const byelaw = byelawVersionId
+    ? await DB.prepare(`SELECT id, content_md, version_num FROM kpsc_policy_versions WHERE id=? AND policy_type='byelaw'`).bind(byelawVersionId).first().catch(() => null)
+    : await DB.prepare(`SELECT id, content_md, version_num FROM kpsc_policy_versions WHERE policy_type='byelaw' AND is_current=1 ORDER BY version_num DESC LIMIT 1`).first().catch(() => null);
   if (!byelaw) return err('No published byelaw found', 404);
+  // Verify the previewed version is still the current one — if another version was published in between, reject
+  const current = await DB.prepare(`SELECT id FROM kpsc_policy_versions WHERE policy_type='byelaw' AND is_current=1 LIMIT 1`).first().catch(() => null);
+  if (current && byelaw.id !== current.id) return err('The byelaw was updated after your preview. Please generate a new diff against the current version before applying.', 409);
 
   // Apply change: replace old text with new text in the full document
   let newContent = byelaw.content_md;
