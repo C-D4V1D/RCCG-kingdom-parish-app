@@ -5222,11 +5222,13 @@ async function submitExpense(btn=null){
   const file = fileEl?.files?.[0];
   const restore = setBtnLoading(btn, 'Saving…');
 
+  const expenseId = 'EXP-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
   async function saveExpenseRecord(receiptDataUrl, receiptFileName){
     _expenseSubmitting = true;
     try {
       const expenseStatus = defaultExpenseStatusForCurrentUser();
-      await DB.addExpense({ date, category, subCategory, description: description || subCategory, amount,
+      await DB.addExpense({ id: expenseId, date, category, subCategory, description: description || subCategory, amount,
         receiptNo: document.getElementById('exp_receipt')?.value,
         receiptImage: receiptDataUrl||null, receiptFileName: receiptFileName||null,
         paymentMethod: isSplit ? 'split' : method,
@@ -5235,12 +5237,6 @@ async function submitExpense(btn=null){
         pettyAmount: pettyAmount,
         notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:expenseStatus });
 
-      // Deduct from petty cash float for petty_cash or the petty portion of split
-      const pettyDeduction = pettyAmount;
-      if(pettyDeduction>0){
-        const pettyCfg = await DB.getPettyConfig();
-        await DB.savePettyConfig({ float: pettyCfg.float - pettyDeduction, max: pettyCfg.max });
-      }
       closeModal();
       const splitLabel = isSplit
         ? ` (${pettyAmount>0?`Petty: ${fmt(pettyAmount)} · `:''}${cashAmount>0?`Cash: ${fmt(cashAmount)} · `:''}Bank: ${fmt(bankAmount)})`
@@ -5400,12 +5396,10 @@ async function deleteExpense(id, btn=null){
   _expenseDeleting.add(id);
   const restore = setBtnLoading(btn, 'Deleting…');
   try {
-    if((exp.pettyAmount||0)>0){
-      const pettyCfg = await DB.getPettyConfig();
-      await DB.savePettyConfig({ float: pettyCfg.float + (exp.pettyAmount||0), max: pettyCfg.max });
-      DB.addAudit('petty_adjustment',`Petty float restored by ${fmt(exp.pettyAmount||0)} from deleted pending expense (${exp.id})`,state.user?.name);
-    }
     await DB.deleteExpense(id);
+    if((exp.pettyAmount||0)>0){
+      DB.addAudit('petty_adjustment',`Petty float restored by ${fmt(exp.pettyAmount||0)} from deleted expense (${exp.id})`,state.user?.name);
+    }
     DB.addAudit('expense_deleted',`Expense deleted: ${exp.id} (${fmt(exp.amount)})`,state.user?.name);
     showAlert('Expense deleted.','warn');
     renderExpenses();

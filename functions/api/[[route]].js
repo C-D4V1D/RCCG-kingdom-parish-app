@@ -2206,7 +2206,7 @@ async function getExpenses(DB) {
 
 async function createExpense(DB, data) {
   const id = data.id || newId('EXP-');
-  await DB.prepare(`
+  const insertStmt = DB.prepare(`
     INSERT INTO expenses
       (id,date,category,subcategory,description,amount,receipt_no,receipt_image,receipt_file_name,
        payment_method,notes,recorded_by,petty_ref,status,bank_amount,cash_amount,petty_amount,no_receipt)
@@ -2230,8 +2230,18 @@ async function createExpense(DB, data) {
     data.cashAmount      || 0,
     data.pettyAmount     || 0,
     data.noReceipt       ? 1 : 0,
-  ).run();
-  return ok({ ...data, id });
+  );
+
+  const pettyDeduction = Number(data.pettyAmount) || 0;
+  if (pettyDeduction > 0) {
+    const deductStmt = DB.prepare(
+      `UPDATE petty_config SET float_amount = float_amount - ? WHERE id='main'`
+    ).bind(pettyDeduction);
+    await DB.batch([insertStmt, deductStmt]);
+  } else {
+    await insertStmt.run();
+  }
+  return ok({ ...data, id, pettyDeducted: pettyDeduction > 0 });
 }
 
 async function updateExpense(DB, id, data) {
@@ -2269,8 +2279,19 @@ async function updateExpense(DB, id, data) {
 }
 
 async function deleteExpense(DB, id) {
-  await DB.prepare(`DELETE FROM expenses WHERE id=?`).bind(id).run();
-  return ok({ id, deleted: true });
+  const row = await DB.prepare(`SELECT petty_amount FROM expenses WHERE id=?`).bind(id).first();
+  const pettyAmount = Number(row?.petty_amount) || 0;
+
+  const deleteStmt = DB.prepare(`DELETE FROM expenses WHERE id=?`).bind(id);
+  if (pettyAmount > 0) {
+    const restoreStmt = DB.prepare(
+      `UPDATE petty_config SET float_amount = float_amount + ? WHERE id='main'`
+    ).bind(pettyAmount);
+    await DB.batch([deleteStmt, restoreStmt]);
+  } else {
+    await deleteStmt.run();
+  }
+  return ok({ id, deleted: true, pettyRestored: pettyAmount });
 }
 
 // ── PETTY CASH ────────────────────────────────────────────────────
