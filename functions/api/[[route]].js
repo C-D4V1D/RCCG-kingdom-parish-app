@@ -520,11 +520,7 @@ export async function onRequest(context) {
       if (method === 'GET'  && !param) return await getExpenses(DB);
       if (method === 'POST' && !param) return await createExpense(DB, body);
       if (method === 'PUT'  &&  param) return await updateExpense(DB, param, body);
-      if (method === 'DELETE' && param) {
-        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
-        if (auth instanceof Response) return auth;
-        return await deleteExpense(DB, param);
-      }
+      if (method === 'DELETE' && param) return await deleteExpense(DB, param);
     }
 
     // ── /api/petty ─────────────────────────────────────────────

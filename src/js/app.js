@@ -5160,7 +5160,9 @@ function onExpSplitChange(){
   else { statusEl.textContent=''; }
 }
 
+let _expenseSubmitting = false;
 async function submitExpense(btn=null){
+  if(_expenseSubmitting) return;
   if(!canAction('expense_log')){ showAlert('You do not have permission to log expenses.','danger'); return; }
   const date=document.getElementById('exp_date')?.value;
   const category=document.getElementById('exp_cat')?.value;
@@ -5221,6 +5223,7 @@ async function submitExpense(btn=null){
   const restore = setBtnLoading(btn, 'Saving…');
 
   async function saveExpenseRecord(receiptDataUrl, receiptFileName){
+    _expenseSubmitting = true;
     try {
       const expenseStatus = defaultExpenseStatusForCurrentUser();
       await DB.addExpense({ date, category, subCategory, description: description || subCategory, amount,
@@ -5247,6 +5250,8 @@ async function submitExpense(btn=null){
     } catch(err) {
       restore();
       showAlert(`Failed to save expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
+    } finally {
+      _expenseSubmitting = false;
     }
   }
 
@@ -5380,7 +5385,9 @@ async function submitEditExpense(id, btn=null){
   renderExpenses();
 }
 
+const _expenseDeleting = new Set();
 async function deleteExpense(id, btn=null){
+  if(_expenseDeleting.has(id)) return;
   const all = await DB.getExpenses();
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
@@ -5390,6 +5397,7 @@ async function deleteExpense(id, btn=null){
     if(!canAction('expense_delete_pending')){ alert('You are not allowed to delete this expense.'); return }
   }
   if(!confirm(`Delete this expense (${fmt(exp.amount)})?`)) return;
+  _expenseDeleting.add(id);
   const restore = setBtnLoading(btn, 'Deleting…');
   try {
     if((exp.pettyAmount||0)>0){
@@ -5404,6 +5412,8 @@ async function deleteExpense(id, btn=null){
   } catch(err) {
     restore();
     showAlert(`Failed to delete expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  } finally {
+    _expenseDeleting.delete(id);
   }
 }
 
