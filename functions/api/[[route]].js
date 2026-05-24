@@ -978,14 +978,14 @@ export async function onRequest(context) {
       }
       // Admin: GET version history
       if (method === 'GET' && param === 'versions') {
-        const auth = await requireKpscRole(DB, request, ['it_admin', 'general_secretary']);
+        const auth = await requireKpscRole(DB, request, ['acting_chairman', 'it_admin', 'general_secretary']);
         if (auth instanceof Response) return auth;
         const type = url.searchParams.get('type') || '';
         return await getPolicyVersionHistory(DB, type);
       }
       // Admin: Publish new version
       if (method === 'POST' && !param) {
-        const auth = await requireKpscRole(DB, request, ['it_admin', 'general_secretary']);
+        const auth = await requireKpscRole(DB, request, ['acting_chairman', 'it_admin', 'general_secretary']);
         if (auth instanceof Response) return auth;
         return await publishPolicyVersion(DB, body, auth);
       }
@@ -997,7 +997,7 @@ export async function onRequest(context) {
       }
       // Admin: AI format raw text into structured markdown
       if (method === 'POST' && param === 'ai-format') {
-        const auth = await requireKpscRole(DB, request, ['it_admin', 'general_secretary']);
+        const auth = await requireKpscRole(DB, request, ['acting_chairman', 'it_admin', 'general_secretary']);
         if (auth instanceof Response) return auth;
         return await aiFormatPolicyText(DB, env, body);
       }

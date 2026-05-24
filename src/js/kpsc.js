@@ -10066,7 +10066,7 @@ async function renderSettings(main) {
         </div>
       </div>
 
-      ${(S.user?.role === 'it_admin' || S.user?.role === 'general_secretary') ? `
+      ${(S.user?.role === 'it_admin' || S.user?.role === 'general_secretary' || S.user?.role === 'acting_chairman') ? `
       <div class="k-card" style="margin-bottom:16px" id="ks-policies-card">
         <h2 class="k-card-title">📜 Policies & Byelaw</h2>
         <p class="k-card-sub">Manage the Welfare Support Policy and KPSC Byelaw. Published versions are publicly accessible at <code>/kpsc/welfare-policy/</code> and <code>/kpsc/byelaw/</code>.</p>
@@ -10215,7 +10215,7 @@ async function renderSettings(main) {
   renderScheduledSmsList().catch(() => {});
   // Initialize SMS character counters for all template textareas
   initSmsCounters();
-  if (S.user?.role === 'it_admin' || S.user?.role === 'general_secretary') {
+  if (S.user?.role === 'it_admin' || S.user?.role === 'general_secretary' || S.user?.role === 'acting_chairman') {
     loadKpscPoliciesCard();
   }
 }
