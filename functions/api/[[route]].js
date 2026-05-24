@@ -2312,8 +2312,7 @@ async function updatePettyConfig(DB, data) {
 }
 
 async function recalcPettyFloat(DB) {
-  const cfg = await DB.prepare(`SELECT max_float FROM petty_config WHERE id='main'`).first();
-  const maxFloat = cfg?.max_float ?? 50000;
+  const cfg = await DB.prepare(`SELECT float_amount, max_float FROM petty_config WHERE id='main'`).first();
 
   // Sum petty deductions from all expense records
   const expRow = await DB.prepare(`
@@ -2322,7 +2321,7 @@ async function recalcPettyFloat(DB) {
   `).first();
   const totalExpenseDeductions = expRow?.total || 0;
 
-  // Sum all petty cash history float movements
+  // Sum all petty cash history float movements (refills, advances, settlements)
   const { results: pettyRows } = await DB.prepare(`SELECT * FROM petty_cash`).all();
   let historyDelta = 0;
   for (const h of (pettyRows || [])) {
@@ -2341,9 +2340,11 @@ async function recalcPettyFloat(DB) {
     }
   }
 
-  const correctFloat = maxFloat - totalExpenseDeductions + historyDelta;
-  const currentFloat = cfg ? (await DB.prepare(`SELECT float_amount FROM petty_config WHERE id='main'`).first())?.float_amount : maxFloat;
-  const drift = correctFloat - (currentFloat || 0);
+  // Start from 0 — refills add cash, expenses/advances remove it.
+  // max_float is only the approved spending limit, not a starting balance.
+  const correctFloat = historyDelta - totalExpenseDeductions;
+  const currentFloat = cfg?.float_amount ?? 0;
+  const drift = correctFloat - currentFloat;
 
   await DB.prepare(`UPDATE petty_config SET float_amount=? WHERE id='main'`).bind(correctFloat).run();
 
@@ -2351,7 +2352,7 @@ async function recalcPettyFloat(DB) {
     previousFloat: currentFloat,
     correctedFloat: correctFloat,
     drift,
-    breakdown: { maxFloat, totalExpenseDeductions, historyDelta }
+    breakdown: { totalExpenseDeductions, historyDelta }
   });
 }
 
