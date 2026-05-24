@@ -3914,11 +3914,15 @@ function renderIrSavedResCard(r, cat, idx, canEdit) {
       ${r.secondedBy ? `<span>Seconded: ${esc(r.secondedBy)}</span>` : ''}
       ${r.voteSummary ? `<span>${esc(r.voteSummary)}</span>` : ''}
     </div>` : '';
+  const amendmentBtn = (cat === 'amendments' && canApplyAmendment() && !r.appliedAmendmentId)
+    ? `<button class="kbtn kbtn-sm kbtn-ghost" style="margin-top:6px" data-amendment-key="${esc(String(r._meetingId||''))}" onclick="Kpsc.showAmendmentWorkflowModal('${esc(String(r.text||'')).replace(/'/g,"\\'")}','${esc(String(r._meetingId||''))}','${cat}-${idx}')">📜 Apply Amendment</button>`
+    : (cat === 'amendments' && r.appliedAmendmentId ? `<span class="kbadge badge-green" style="margin-top:6px;cursor:pointer" title="Click to view version history" onclick="Kpsc.navigate('settings')">✓ Applied in v${r.appliedAmendmentVersion||'?'}</span>` : '');
   const actionBtns = canEdit ? `
     <div class="k-ic-footer" style="margin-top:8px">
       <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.irEditInsightItem('res','${cat}',${idx})">✏️ Edit</button>
       <button class="kbtn kbtn-sm kbtn-danger-outline" onclick="Kpsc.irRemoveInsightItem('res','${cat}',${idx})">✕ Remove</button>
-    </div>` : '';
+      ${amendmentBtn}
+    </div>` : (amendmentBtn ? `<div class="k-ic-footer" style="margin-top:8px">${amendmentBtn}</div>` : '');
   return `
     <div class="k-meeting-card k-insight-card ${accentCls}" style="cursor:default">
       ${insightTruncText(r.text || '', 130)}
@@ -10062,6 +10066,13 @@ async function renderSettings(main) {
         </div>
       </div>
 
+      ${(S.user?.role === 'it_admin' || S.user?.role === 'general_secretary' || S.user?.role === 'acting_chairman') ? `
+      <div class="k-card" style="margin-bottom:16px" id="ks-policies-card">
+        <h2 class="k-card-title">📜 Policies & Byelaw</h2>
+        <p class="k-card-sub">Manage the Welfare Support Policy and KPSC Byelaw. Published versions are publicly accessible at <code>/kpsc/welfare-policy/</code> and <code>/kpsc/byelaw/</code>.</p>
+        <div id="ks-policies-content"><em style="font-size:13px;color:#888">Loading…</em></div>
+      </div>` : ''}
+
       <div class="k-card" style="margin-bottom:16px">
         <h2 class="k-card-title">KPSC Operations Settings</h2>
         <p class="k-card-sub">Configure partnership categories, finance categories, and reminder templates for the KPSC portal.</p>
@@ -10204,6 +10215,9 @@ async function renderSettings(main) {
   renderScheduledSmsList().catch(() => {});
   // Initialize SMS character counters for all template textareas
   initSmsCounters();
+  if (S.user?.role === 'it_admin' || S.user?.role === 'general_secretary' || S.user?.role === 'acting_chairman') {
+    loadKpscPoliciesCard();
+  }
 }
 
 async function saveAiModels() {
@@ -14210,6 +14224,623 @@ function dismissNewMonthDraft() {
   document.getElementById('nm-draft-banner')?.remove();
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// KPSC POLICY MANAGEMENT
+// ══════════════════════════════════════════════════════════════════════
+
+async function loadKpscPoliciesCard() {
+  const container = document.getElementById('ks-policies-content');
+  if (!container) return;
+  container.innerHTML = '<em style="font-size:13px;color:#888">Loading…</em>';
+  try {
+    const [welfareRes, byelawRes, welfareHist, byelawHist, summaries] = await Promise.all([
+      apiGet('kpsc-policy?type=welfare').catch(() => null),
+      apiGet('kpsc-policy?type=byelaw').catch(() => null),
+      apiGet('kpsc-policy/versions?type=welfare').catch(() => null),
+      apiGet('kpsc-policy/versions?type=byelaw').catch(() => null),
+      apiGet('kpsc-policy/summary').catch(() => null),
+    ]);
+    container.innerHTML = renderPoliciesCardContent({
+      welfare: welfareRes,
+      byelaw: byelawRes,
+      welfareVersions: welfareHist?.versions || [],
+      byelawVersions: byelawHist?.versions || [],
+      welfareSummary: summaries?.welfareSummary || '',
+      byelawSummary: summaries?.byelawSummary || '',
+    });
+  } catch (e) {
+    container.innerHTML = `<p class="k-hint" style="color:var(--danger)">Failed to load policy data.</p>`;
+  }
+}
+
+function renderPoliciesCardContent({ welfare, byelaw, welfareVersions, byelawVersions, welfareSummary, byelawSummary }) {
+  return `
+    ${renderPolicySection('welfare', 'Welfare Support Policy', welfare, welfareVersions, welfareSummary)}
+    <div style="height:1px;background:var(--border);margin:24px 0"></div>
+    ${renderPolicySection('byelaw', 'KPSC Byelaw & Governance', byelaw, byelawVersions, byelawSummary)}
+  `;
+}
+
+function renderPolicySection(type, title, current, versions, summaryText) {
+  const hasContent = current?.content;
+  const recentVersions = (versions || []).slice(0, 5);
+  const hasMore = (versions || []).length > 5;
+
+  return `
+    <div class="k-policy-section" id="kps-${type}">
+      <h3 style="font-size:14px;font-weight:600;margin-bottom:8px;color:var(--navy)">${title}</h3>
+      ${hasContent ? `<p class="k-hint" style="margin-bottom:12px">Current: <strong>v${current.version}</strong> · Effective ${esc(current.effectiveDate || '')} · Approved by ${esc(current.approvedBy || 'Unknown')}</p>` : `<p class="k-hint" style="margin-bottom:12px;color:var(--danger)">No version published yet.</p>`}
+
+      <div class="k-form-group">
+        <label class="k-label">Login Page Summary (2–3 sentences)</label>
+        <textarea id="kps-${type}-summary" class="k-input k-textarea" rows="2" placeholder="Brief summary shown to visitors on the KPSC login page.">${esc(summaryText)}</textarea>
+      </div>
+
+      <div class="k-form-group" style="margin-top:12px">
+        <label class="k-label">Import from Document or URL</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
+          <label class="kbtn kbtn-sm kbtn-ghost" style="cursor:pointer;margin:0" title="Upload PDF, Word (.docx), or plain text file">
+            📎 Upload File
+            <input type="file" id="kps-${type}-file-input" accept=".pdf,.docx,.doc,.txt" style="display:none"
+              onchange="Kpsc.importPolicyFile('${type}',this)">
+          </label>
+          <div style="display:flex;gap:6px;flex:1;min-width:220px">
+            <input type="url" id="kps-${type}-url-input" class="k-input" style="font-size:13px;padding:6px 10px"
+              placeholder="https://… paste policy URL" />
+            <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.importPolicyUrl('${type}')" id="kps-${type}-url-btn">🔗 Import</button>
+          </div>
+        </div>
+        <p class="k-hint" style="margin-bottom:8px">Supports PDF, Word (.docx), plain text, or any public web URL. After import the text is automatically AI-formatted into structured Markdown.</p>
+      </div>
+
+      <div class="k-form-group" style="margin-top:4px">
+        <label class="k-label">Policy Text (Markdown)</label>
+        <div style="margin-bottom:6px;display:flex;gap:6px;flex-wrap:wrap">
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.policyToolbar('${type}','bold')" title="Bold"><strong>B</strong></button>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.policyToolbar('${type}','italic')" title="Italic"><em>I</em></button>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.policyToolbar('${type}','h2')" title="Section heading">H2</button>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.policyToolbar('${type}','h3')" title="Subsection">H3</button>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.policyToolbar('${type}','ul')" title="Bullet list">• List</button>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.policyToolbar('${type}','ol')" title="Numbered list">1. List</button>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.policyToolbar('${type}','hr')" title="Divider">—</button>
+          <button class="kbtn kbtn-sm kbtn-primary" id="kps-${type}-ai-btn" onclick="Kpsc.aiFormatPolicy('${type}')">✨ AI Format</button>
+        </div>
+        <div style="display:flex;gap:10px;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <textarea id="kps-${type}-edit" class="k-input k-textarea k-policy-textarea" rows="14"
+              oninput="Kpsc.updatePolicyPreview('${type}')"
+              style="font-family:monospace;font-size:12px;resize:vertical">${esc(hasContent ? current.content : '')}</textarea>
+          </div>
+          <div style="flex:1;min-width:0;max-height:340px;overflow-y:auto;border:1.5px solid var(--border);border-radius:8px;padding:12px;background:#fafafa;font-size:14px;line-height:1.7" id="kps-${type}-preview">
+            ${hasContent ? minutesHtml(current.content) : '<em style="color:#aaa">Live preview…</em>'}
+          </div>
+        </div>
+      </div>
+
+      <div class="k-form-group" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div style="flex:1;min-width:180px">
+          <label class="k-label">Change Summary</label>
+          <input type="text" id="kps-${type}-change-summary" class="k-input" placeholder="e.g. Updated eligibility criteria" />
+        </div>
+        <div style="width:150px">
+          <label class="k-label">Effective Date</label>
+          <input type="date" id="kps-${type}-effective-date" class="k-input" value="${new Date().toISOString().slice(0,10)}" />
+        </div>
+      </div>
+      <div id="kps-${type}-msg" class="k-settings-msg" style="display:none;margin-top:8px"></div>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.publishPolicyVersion('${type}',this)">Publish New Version</button>
+        <a class="kbtn kbtn-ghost" href="/kpsc/${type === 'welfare' ? 'welfare-policy' : 'byelaw'}/" target="_blank" rel="noopener">View Public Page ↗</a>
+      </div>
+
+      ${recentVersions.length ? `
+      <div style="margin-top:16px">
+        <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">Version History</div>
+        <div id="kps-${type}-history">
+          <table style="width:100%;font-size:12px;border-collapse:collapse">
+            <thead><tr style="color:var(--text3)"><th style="text-align:left;padding:4px 8px 4px 0">Ver</th><th style="text-align:left;padding:4px 8px">Date</th><th style="text-align:left;padding:4px 8px">Approved by</th><th style="text-align:left;padding:4px 8px">Summary</th><th></th></tr></thead>
+            <tbody>
+              ${recentVersions.map(v => `
+                <tr style="border-top:1px solid var(--border)">
+                  <td style="padding:6px 8px 6px 0;color:${v.is_current?'var(--green)':'var(--text2)'};font-weight:${v.is_current?'600':'400'}">v${v.version_num}${v.is_current?' ✓':''}</td>
+                  <td style="padding:6px 8px;color:var(--text2)">${esc(v.effective_date||v.created_at?.slice(0,10)||'')}</td>
+                  <td style="padding:6px 8px;color:var(--text2)">${esc(v.approved_by||'')}</td>
+                  <td style="padding:6px 8px;color:var(--text2);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(v.change_summary||'')}</td>
+                  <td style="padding:6px 8px">${v.is_current?'':'<button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.confirmRollbackPolicy(\''+type+'\',\''+v.id+'\','+v.version_num+')">Rollback</button>'}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+          ${hasMore ? `<button class="kbtn kbtn-sm kbtn-ghost" style="margin-top:6px" onclick="Kpsc.showAllPolicyVersions('${type}')">Show all ${versions.length} versions</button>` : ''}
+        </div>
+      </div>` : ''}
+    </div>
+  `;
+}
+
+function updatePolicyPreview(type) {
+  const md = document.getElementById(`kps-${type}-edit`)?.value || '';
+  const preview = document.getElementById(`kps-${type}-preview`);
+  if (preview) preview.innerHTML = md ? minutesHtml(md) : '<em style="color:#aaa">Live preview…</em>';
+}
+
+function policyToolbar(type, action) {
+  const ta = document.getElementById(`kps-${type}-edit`);
+  if (!ta) return;
+  const start = ta.selectionStart, end = ta.selectionEnd;
+  const sel = ta.value.slice(start, end);
+  const before = ta.value.slice(0, start), after = ta.value.slice(end);
+  let insert = '';
+  if (action === 'bold')   insert = `**${sel || 'bold text'}**`;
+  if (action === 'italic') insert = `_${sel || 'italic text'}_`;
+  if (action === 'h2')     insert = `\n## ${sel || 'Section Heading'}\n`;
+  if (action === 'h3')     insert = `\n### ${sel || 'Subsection'}\n`;
+  if (action === 'ul')     insert = `\n- ${sel || 'item'}\n`;
+  if (action === 'ol')     insert = `\n1. ${sel || 'item'}\n`;
+  if (action === 'hr')     insert = `\n\n---\n\n`;
+  ta.value = before + insert + after;
+  ta.selectionStart = ta.selectionEnd = start + insert.length;
+  ta.focus();
+  updatePolicyPreview(type);
+}
+
+async function aiFormatPolicy(type) {
+  const btn = document.getElementById(`kps-${type}-ai-btn`);
+  const ta = document.getElementById(`kps-${type}-edit`);
+  if (!ta || !btn) return;
+  const rawText = ta.value.trim();
+  if (!rawText) { showToast('Paste policy text first, then click AI Format.', 'info'); return; }
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Formatting…';
+  try {
+    const res = await apiPost('kpsc-policy/ai-format', { text: rawText, docType: type });
+    if (res?.formatted) {
+      ta.value = res.formatted;
+      updatePolicyPreview(type);
+      showToast('Formatted — review the structure before publishing.', 'success');
+    } else {
+      showToast('AI formatting failed — you can still publish the text as-is.', 'error');
+    }
+  } catch (e) {
+    showToast('AI formatting failed — you can still publish the text as-is.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+async function publishPolicyVersion(type, btn) {
+  const content = document.getElementById(`kps-${type}-edit`)?.value?.trim() || '';
+  const summary = document.getElementById(`kps-${type}-summary`)?.value?.trim() || '';
+  const changeSummary = document.getElementById(`kps-${type}-change-summary`)?.value?.trim() || '';
+  const effectiveDate = document.getElementById(`kps-${type}-effective-date`)?.value || '';
+  const msgEl = document.getElementById(`kps-${type}-msg`);
+  if (!content) { if (msgEl) { msgEl.style.display='block'; msgEl.className='k-settings-msg k-settings-msg-err'; msgEl.textContent='Policy text cannot be empty.'; } return; }
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Publishing…';
+  try {
+    const res = await apiPost('kpsc-policy', { policyType: type, contentMd: content, summary, changeSummary, effectiveDate });
+    if (res?.versionNum) {
+      if (msgEl) { msgEl.style.display='block'; msgEl.className='k-settings-msg k-settings-msg-ok'; msgEl.textContent=`Published as v${res.versionNum}.`; }
+      showToast(`${type === 'welfare' ? 'Welfare Policy' : 'Byelaw'} published as v${res.versionNum}.`, 'success');
+      setTimeout(() => loadKpscPoliciesCard(), 800);
+    } else {
+      if (msgEl) { msgEl.style.display='block'; msgEl.className='k-settings-msg k-settings-msg-err'; msgEl.textContent=res?.error||'Failed to publish.'; }
+    }
+  } catch (e) {
+    if (msgEl) { msgEl.style.display='block'; msgEl.className='k-settings-msg k-settings-msg-err'; msgEl.textContent='Failed to publish: '+e.message; }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+function confirmRollbackPolicy(type, targetVersionId, targetVersionNum) {
+  document.getElementById('kps-rollback-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'kps-rollback-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:420px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">Rollback to v${targetVersionNum}?</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('kps-rollback-modal').remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p style="font-size:14px;line-height:1.6">A new version will be created with the content from <strong>v${targetVersionNum}</strong>. The public page will update immediately. All previous versions remain visible in the history.</p>
+      </div>
+      <div class="k-modal-footer" style="display:flex;gap:8px">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('kps-rollback-modal').remove()">Cancel</button>
+        <button class="kbtn kbtn-danger" onclick="Kpsc.doRollbackPolicy('${type}','${targetVersionId}',this)">Rollback to v${targetVersionNum}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function doRollbackPolicy(type, targetVersionId, btn) {
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Rolling back…';
+  try {
+    const res = await apiPost('kpsc-policy/rollback', { targetVersionId });
+    if (res?.versionNum) {
+      document.getElementById('kps-rollback-modal')?.remove();
+      showToast(`Rolled back. Now at v${res.versionNum}.`, 'success');
+      setTimeout(() => loadKpscPoliciesCard(), 600);
+    } else {
+      showToast(res?.error || 'Rollback failed.', 'error');
+    }
+  } catch (e) {
+    showToast('Rollback failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+async function showAllPolicyVersions(type) {
+  try {
+    const res = await apiGet(`kpsc-policy/versions?type=${type}`);
+    const versions = res?.versions || [];
+    const container = document.getElementById(`kps-${type}-history`);
+    if (!container) return;
+    container.innerHTML = `
+      <table style="width:100%;font-size:12px;border-collapse:collapse">
+        <thead><tr style="color:var(--text3)"><th style="text-align:left;padding:4px 8px 4px 0">Ver</th><th style="text-align:left;padding:4px 8px">Date</th><th style="text-align:left;padding:4px 8px">Approved by</th><th style="text-align:left;padding:4px 8px">Summary</th><th></th></tr></thead>
+        <tbody>
+          ${versions.map(v => `
+            <tr style="border-top:1px solid var(--border)">
+              <td style="padding:6px 8px 6px 0;color:${v.is_current?'var(--green)':'var(--text2)'};font-weight:${v.is_current?'600':'400'}">v${v.version_num}${v.is_current?' ✓':''}</td>
+              <td style="padding:6px 8px;color:var(--text2)">${esc(v.effective_date||v.created_at?.slice(0,10)||'')}</td>
+              <td style="padding:6px 8px;color:var(--text2)">${esc(v.approved_by||'')}</td>
+              <td style="padding:6px 8px;color:var(--text2);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(v.change_summary||'')}</td>
+              <td style="padding:6px 8px">${v.is_current?'':'<button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.confirmRollbackPolicy(\''+type+'\',\''+v.id+'\','+v.version_num+')">Rollback</button>'}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch (e) {
+    showToast('Failed to load version history.', 'error');
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// KPSC AMENDMENT WORKFLOW
+// ══════════════════════════════════════════════════════════════════════
+
+function canApplyAmendment() {
+  const role = String(S.user?.role || '').toLowerCase();
+  return role === 'acting_chairman' || role === 'general_secretary' || role === 'it_admin';
+}
+
+function showAmendmentWorkflowModal(insightText, meetingId, itemKey) {
+  document.getElementById('k-amendment-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'k-amendment-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:620px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">📜 Apply Byelaw Amendment</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-amendment-modal').remove()">✕</button>
+      </div>
+      <div class="k-modal-body" id="k-amendment-body">
+        <div class="k-amendment-steps" style="display:flex;gap:0;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:12px">
+          <span class="k-amend-step k-amend-step-active" id="k-amend-s1">① Review</span>
+          <span class="k-amend-step" id="k-amend-s2">② Check Diff</span>
+          <span class="k-amend-step" id="k-amend-s3">③ Apply</span>
+        </div>
+        <div id="k-amend-panel-1">
+          <p style="font-size:12px;color:var(--text2);margin-bottom:6px">Amendment from meeting:</p>
+          <blockquote class="k-amendment-quote">${esc(insightText)}</blockquote>
+          <p class="k-hint" style="margin-top:10px">AI will read the current byelaw and identify exactly which text changes. Review the diff before applying.</p>
+        </div>
+        <div id="k-amend-panel-2" style="display:none"></div>
+      </div>
+      <div class="k-modal-footer" id="k-amendment-footer" style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-amendment-modal').remove()">Cancel</button>
+        <button class="kbtn kbtn-primary" id="k-amend-gen-btn" onclick="Kpsc.generateAmendmentDiff('${esc(insightText).replace(/'/g,"\\'")}','${meetingId}')">Generate Diff →</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function generateAmendmentDiff(insightText, meetingId) {
+  const btn = document.getElementById('k-amend-gen-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Analysing byelaw…'; }
+  try {
+    const res = await apiPost('kpsc-amendment-preview', { insightText, meetingId });
+    const panel2 = document.getElementById('k-amend-panel-2');
+    const panel1 = document.getElementById('k-amend-panel-1');
+    const footer = document.getElementById('k-amendment-footer');
+    const s2 = document.getElementById('k-amend-s2'), s3 = document.getElementById('k-amend-s3');
+    if (!panel2) return;
+    panel1.style.display = 'none';
+    panel2.style.display = 'block';
+    if (s2) s2.className = 'k-amend-step k-amend-step-active';
+
+    if (!res?.found) {
+      // Manual entry mode
+      panel2.innerHTML = `
+        <div class="k-amendment-warn" style="background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:13px">
+          ⚠️ ${esc(res?.reason || 'AI could not identify the specific text to change.')} Please enter it manually.
+        </div>
+        <label class="k-label">Current byelaw text to replace</label>
+        <textarea id="k-amend-old-text" class="k-input k-textarea" rows="4" placeholder="Paste the exact text from the byelaw that should be changed…"></textarea>
+        <label class="k-label" style="margin-top:10px">Replacement text</label>
+        <textarea id="k-amend-new-text" class="k-input k-textarea" rows="4" placeholder="Type the new text that will replace it…"
+          oninput="document.getElementById('k-amend-proofread-area')&&(document.getElementById('k-amend-proofread-area').style.display='block')"></textarea>
+        <div id="k-amend-proofread-area" style="display:none;margin-top:8px">
+          <button class="kbtn kbtn-sm kbtn-ghost" id="k-amend-proof-btn" onclick="Kpsc.aiProofreadAmendment()">✨ AI Proofread</button>
+        </div>`;
+      if (footer) footer.innerHTML = `
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-amendment-modal').remove()">Cancel</button>
+        <button class="kbtn kbtn-primary" onclick="Kpsc.showAmendmentApplyConfirm('${esc(insightText).replace(/'/g,"\\'")}','${meetingId}','manual',null)">Review & Apply →</button>`;
+    } else {
+      // Found — show diff
+      panel2.innerHTML = `
+        <p style="font-size:12px;color:var(--text2);margin-bottom:8px">AI identified the following change (confidence: <strong>${res.confidence || 'high'}</strong>):</p>
+        ${res.reason ? `<p class="k-hint" style="margin-bottom:10px">${esc(res.reason)}</p>` : ''}
+        <div style="display:flex;gap:10px" class="k-diff-wrap">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:4px;text-transform:uppercase">Before</div>
+            <div class="k-diff-old" style="background:#fff5f5;border:1px solid #ffcdd2;border-radius:8px;padding:10px 12px;font-size:13px;line-height:1.6;max-height:260px;overflow-y:auto;white-space:pre-wrap">${esc(res.oldText || '')}</div>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:4px;text-transform:uppercase">After</div>
+            <div class="k-diff-new" id="k-amend-new-display" style="background:#f1f8f1;border:1px solid #c8e6c9;border-radius:8px;padding:10px 12px;font-size:13px;line-height:1.6;max-height:260px;overflow-y:auto;white-space:pre-wrap">${esc(res.newText || '')}</div>
+          </div>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="kbtn kbtn-sm kbtn-ghost" id="k-amend-proof-btn" onclick="Kpsc.aiProofreadAmendment()">✨ AI Proofread new text</button>
+          <span id="k-amend-proof-toggle" style="display:none;font-size:12px;color:var(--text2)"></span>
+        </div>
+        <input type="hidden" id="k-amend-old-stored" value="${esc(res.oldText || '')}">
+        <input type="hidden" id="k-amend-new-stored" value="${esc(res.newText || '')}">`;
+      if (footer) footer.innerHTML = `
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-amendment-modal').remove()">Reject</button>
+        <button class="kbtn kbtn-primary" onclick="Kpsc.showAmendmentApplyConfirm('${esc(insightText).replace(/'/g,"\\'")}','${meetingId}','${res.confidence||'high'}','${esc(res.byelawVersionId||'')}')">Approve & Apply →</button>`;
+      if (s3) s3.className = 'k-amend-step';
+    }
+  } catch (e) {
+    showToast('Failed to generate diff: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Retry'; }
+  }
+}
+
+async function aiProofreadAmendment() {
+  const btn = document.getElementById('k-amend-proof-btn');
+  const newDisplay = document.getElementById('k-amend-new-display');
+  const newTextarea = document.getElementById('k-amend-new-text');
+  const source = newDisplay || newTextarea;
+  if (!source || !btn) return;
+  const text = newDisplay ? (document.getElementById('k-amend-new-stored')?.value || newDisplay.textContent || '') : newTextarea.value;
+  if (!text.trim()) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Proofreading…';
+  try {
+    const res = await apiPost('kpsc-amendment-proofread', { text });
+    if (res?.improved) {
+      if (newDisplay) {
+        // Store original, show proofread
+        const origStored = document.getElementById('k-amend-new-stored');
+        const toggle = document.getElementById('k-amend-proof-toggle');
+        if (origStored && !origStored.dataset.original) origStored.dataset.original = origStored.value;
+        origStored.value = res.improved;
+        newDisplay.textContent = res.improved;
+        if (toggle) {
+          toggle.style.display = 'inline';
+          toggle.innerHTML = `<button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.toggleProofreadView()">Show AI draft</button>`;
+          toggle.dataset.showing = 'proofread';
+          toggle.dataset.original = origStored.dataset.original || '';
+          toggle.dataset.proofread = res.improved;
+        }
+      } else if (newTextarea) {
+        newTextarea.value = res.improved;
+      }
+      showToast('Proofread complete.', 'success');
+    } else {
+      showToast('Proofread failed.', 'error');
+    }
+  } catch (e) {
+    showToast('Proofread failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+function toggleProofreadView() {
+  const toggle = document.getElementById('k-amend-proof-toggle');
+  const newDisplay = document.getElementById('k-amend-new-display');
+  const stored = document.getElementById('k-amend-new-stored');
+  if (!toggle || !newDisplay || !stored) return;
+  const showing = toggle.dataset.showing || 'proofread';
+  if (showing === 'proofread') {
+    newDisplay.textContent = toggle.dataset.original || '';
+    stored.value = toggle.dataset.original || '';
+    toggle.innerHTML = `<button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.toggleProofreadView()">Show proofread</button>`;
+    toggle.dataset.showing = 'original';
+  } else {
+    newDisplay.textContent = toggle.dataset.proofread || '';
+    stored.value = toggle.dataset.proofread || '';
+    toggle.innerHTML = `<button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.toggleProofreadView()">Show AI draft</button>`;
+    toggle.dataset.showing = 'proofread';
+  }
+}
+
+function showAmendmentApplyConfirm(insightText, meetingId, aiConfidence, byelawVersionId) {
+  const oldText = document.getElementById('k-amend-old-stored')?.value || document.getElementById('k-amend-old-text')?.value || '';
+  const newText = document.getElementById('k-amend-new-stored')?.value || document.getElementById('k-amend-new-text')?.value || '';
+  if (!newText.trim()) { showToast('Replacement text cannot be empty.', 'error'); return; }
+
+  document.getElementById('k-amend-confirm-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'k-amend-confirm-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:420px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">Confirm Amendment</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-amend-confirm-modal').remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p style="font-size:14px;line-height:1.6">This will update the <strong>KPSC Byelaw</strong> and create a new version. Members will see the updated text immediately on the public page.</p>
+        <p style="font-size:13px;color:var(--text2);margin-top:8px">This action is logged in the amendment audit trail and can be rolled back via Settings → Policies.</p>
+      </div>
+      <div class="k-modal-footer" style="display:flex;gap:8px">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-amend-confirm-modal').remove()">Go Back</button>
+        <button class="kbtn kbtn-primary" id="k-amend-final-btn" onclick="Kpsc.applyAmendmentFinal('${esc(insightText).replace(/'/g,"\\'")}','${meetingId}','${aiConfidence}','${byelawVersionId||''}',this)">Apply Amendment</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function applyAmendmentFinal(insightText, meetingId, aiConfidence, byelawVersionId, btn) {
+  const oldText = document.getElementById('k-amend-old-stored')?.value || document.getElementById('k-amend-old-text')?.value || '';
+  const newText = document.getElementById('k-amend-new-stored')?.value || document.getElementById('k-amend-new-text')?.value || '';
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Applying…';
+  try {
+    const res = await apiPost('kpsc-amendment-apply', { oldText, newText, insightText, meetingId, byelawVersionId, aiConfidence });
+    if (res?.versionNum) {
+      document.getElementById('k-amend-confirm-modal')?.remove();
+      document.getElementById('k-amendment-modal')?.remove();
+      showToast(`Byelaw updated to v${res.versionNum}.`, 'success');
+      // Mark the amendment as applied in the insights view
+      const amendBtns = document.querySelectorAll(`[data-amendment-key="${meetingId}"]`);
+      amendBtns.forEach(el => {
+        el.outerHTML = `<span class="kbadge badge-green" style="cursor:pointer" title="Click to view version history" onclick="Kpsc.navigate('settings')">✓ Applied in v${res.versionNum}</span>`;
+      });
+    } else {
+      showToast(res?.error || 'Failed to apply amendment.', 'error');
+    }
+  } catch (e) {
+    showToast('Failed to apply amendment: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// POLICY DOCUMENT IMPORT (file upload + URL)
+// ══════════════════════════════════════════════════════════════════════
+
+async function importPolicyFile(type, input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  input.value = ''; // reset so same file can be re-selected
+  const ext = file.name.split('.').pop().toLowerCase();
+
+  showToast(`Reading ${file.name}…`, 'info');
+
+  try {
+    let rawText = '';
+
+    if (ext === 'txt') {
+      rawText = await file.text();
+
+    } else if (ext === 'docx' || ext === 'doc') {
+      rawText = await extractDocxText(file);
+
+    } else if (ext === 'pdf') {
+      rawText = await extractPdfText(file);
+
+    } else {
+      showToast('Unsupported file type. Use PDF, Word (.docx), or plain text (.txt).', 'error');
+      return;
+    }
+
+    if (!rawText.trim()) {
+      showToast('No text could be extracted from the file.', 'error');
+      return;
+    }
+
+    const ta = document.getElementById(`kps-${type}-edit`);
+    if (ta) {
+      ta.value = rawText;
+      updatePolicyPreview(type);
+    }
+    showToast('File imported — formatting with AI…', 'info');
+    await aiFormatPolicy(type);
+
+  } catch (e) {
+    showToast('Failed to read file: ' + e.message, 'error');
+  }
+}
+
+async function importPolicyUrl(type) {
+  const input = document.getElementById(`kps-${type}-url-input`);
+  const btn = document.getElementById(`kps-${type}-url-btn`);
+  const url = input?.value?.trim();
+  if (!url) { showToast('Paste a URL first.', 'info'); return; }
+
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Fetching…';
+
+  try {
+    const res = await apiPost('kpsc-policy/fetch-url', { url });
+    if (!res?.text?.trim()) {
+      showToast(res?.error || 'No readable text found at that URL.', 'error');
+      return;
+    }
+    const ta = document.getElementById(`kps-${type}-edit`);
+    if (ta) {
+      ta.value = res.text;
+      updatePolicyPreview(type);
+    }
+    if (input) input.value = '';
+    showToast('URL content imported — formatting with AI…', 'info');
+    await aiFormatPolicy(type);
+  } catch (e) {
+    showToast('Import failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
+async function extractDocxText(file) {
+  if (!window.mammoth) {
+    await loadScript('https://unpkg.com/mammoth@1.8.0/mammoth.browser.min.js');
+  }
+  const arrayBuffer = await file.arrayBuffer();
+  const result = await window.mammoth.extractRawText({ arrayBuffer });
+  return result.value || '';
+}
+
+async function extractPdfText(file) {
+  if (!window.pdfjsLib) {
+    await loadScript('https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js');
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+  }
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const parts = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    parts.push(content.items.map(item => item.str).join(' '));
+  }
+  return parts.join('\n');
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
 window.Kpsc = {
   login,
   logout,
@@ -14290,6 +14921,22 @@ window.Kpsc = {
   setReportsAssignee,
   setReportsApproval,
   setInsightsViewMode,
+  loadKpscPoliciesCard,
+  importPolicyFile,
+  importPolicyUrl,
+  updatePolicyPreview,
+  policyToolbar,
+  aiFormatPolicy,
+  publishPolicyVersion,
+  confirmRollbackPolicy,
+  doRollbackPolicy,
+  showAllPolicyVersions,
+  showAmendmentWorkflowModal,
+  generateAmendmentDiff,
+  aiProofreadAmendment,
+  toggleProofreadView,
+  showAmendmentApplyConfirm,
+  applyAmendmentFinal,
   toggleInsightsDigest,
   toggleInsightEdit,
   saveInsightActionEdit,

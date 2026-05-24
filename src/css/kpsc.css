@@ -65,6 +65,13 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .kl-wa-share-btn{background:#25d366;color:#fff;border:none;}
 .kl-wa-share-btn:hover{background:#1ebe5d;}
 
+/* ── LOGIN POLICY CARDS ─────────────────────────────────────────── */
+.kl-policy-card { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:14px 16px; }
+.kl-policy-card-hdr { display:flex; align-items:center; gap:8px; font-size:14px; color:#1a2340; margin-bottom:6px; }
+.kl-policy-card-text { font-size:13px; color:#5a6478; line-height:1.55; margin:0 0 8px; }
+.kl-policy-card-link { font-size:13px; color:#2563eb; text-decoration:none; font-weight:500; }
+.kl-policy-card-link:hover { text-decoration:underline; }
+
 /* ── APP SHELL ─────────────────────────────────────────────────── */
 #kpsc-app{display:flex;flex-direction:column;min-height:100vh;}
 

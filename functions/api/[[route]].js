@@ -964,6 +964,68 @@ export async function onRequest(context) {
       if (method === 'DELETE' && param) return await deleteScheduledSms(DB, param);
     }
 
+    // ── KPSC Policy: public read + admin write ──────────────────
+    if (route === 'kpsc-policy') {
+      // Public GET current version — no auth needed
+      if (method === 'GET' && !param) {
+        const type = url.searchParams.get('type') || '';
+        if (type !== 'welfare' && type !== 'byelaw') return err('type must be welfare or byelaw', 400);
+        return await getPolicyCurrentVersion(DB, type);
+      }
+      // Public GET summary strings for login page cards — no auth
+      if (method === 'GET' && param === 'summary') {
+        return await getPolicySummaries(DB);
+      }
+      // Admin: GET version history
+      if (method === 'GET' && param === 'versions') {
+        const auth = await requireKpscRole(DB, request, ['acting_chairman', 'it_admin', 'general_secretary']);
+        if (auth instanceof Response) return auth;
+        const type = url.searchParams.get('type') || '';
+        return await getPolicyVersionHistory(DB, type);
+      }
+      // Admin: Publish new version
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, ['acting_chairman', 'it_admin', 'general_secretary']);
+        if (auth instanceof Response) return auth;
+        return await publishPolicyVersion(DB, body, auth);
+      }
+      // Admin: Rollback to a previous version (creates new version)
+      if (method === 'POST' && param === 'rollback') {
+        const auth = await requireKpscRole(DB, request, ['acting_chairman', 'it_admin', 'general_secretary']);
+        if (auth instanceof Response) return auth;
+        return await rollbackPolicyVersion(DB, body, auth);
+      }
+      // Admin: AI format raw text into structured markdown
+      if (method === 'POST' && param === 'ai-format') {
+        const auth = await requireKpscRole(DB, request, ['acting_chairman', 'it_admin', 'general_secretary']);
+        if (auth instanceof Response) return auth;
+        return await aiFormatPolicyText(DB, env, body);
+      }
+      // Fetch a public URL and extract readable text for import
+      if (method === 'POST' && param === 'fetch-url') {
+        const auth = await requireKpscRole(DB, request, ['acting_chairman', 'it_admin', 'general_secretary']);
+        if (auth instanceof Response) return auth;
+        return await fetchPolicyUrl(body);
+      }
+    }
+
+    // ── KPSC Amendment workflow ─────────────────────────────────
+    if (route === 'kpsc-amendment-preview' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_ADMIN_ROLES);
+      if (auth instanceof Response) return auth;
+      return await amendmentPreview(DB, env, body);
+    }
+    if (route === 'kpsc-amendment-apply' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_ADMIN_ROLES);
+      if (auth instanceof Response) return auth;
+      return await amendmentApply(DB, env, body, auth);
+    }
+    if (route === 'kpsc-amendment-proofread' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_ADMIN_ROLES);
+      if (auth instanceof Response) return auth;
+      return await amendmentProofread(DB, env, body);
+    }
+
     // ── B6: scheduled_for field on ai-secretary-meetings ───────
     // (handled inline in updateAiSecretaryMeeting via body.scheduledFor)
 
@@ -1413,6 +1475,30 @@ async function handleInit(DB) {
       name       TEXT DEFAULT '',
       contact    TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_policy_versions (
+      id             TEXT PRIMARY KEY,
+      policy_type    TEXT NOT NULL,
+      version_num    INTEGER NOT NULL,
+      content_md     TEXT NOT NULL DEFAULT '',
+      change_summary TEXT DEFAULT '',
+      approved_by    TEXT DEFAULT '',
+      approved_by_id TEXT DEFAULT '',
+      effective_date TEXT DEFAULT '',
+      is_current     INTEGER DEFAULT 0,
+      created_at     TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_byelaw_amendment_log (
+      id                TEXT PRIMARY KEY,
+      meeting_id        TEXT DEFAULT '',
+      insight_text      TEXT DEFAULT '',
+      old_text          TEXT DEFAULT '',
+      new_text          TEXT DEFAULT '',
+      approved_by       TEXT DEFAULT '',
+      approved_by_id    TEXT DEFAULT '',
+      policy_version_id TEXT DEFAULT '',
+      ai_confidence     TEXT DEFAULT 'manual',
+      created_at        TEXT NOT NULL
     )`,
   ];
 
@@ -7987,6 +8073,7 @@ async function runMonthlySmsInternal(DB, now) {
       `SELECT id, full_name, phone FROM kpsc_partners WHERE COALESCE(deleted_at,'')='' AND status='active' AND phone != '' AND COALESCE(opted_out,0)=0 AND COALESCE(dnd_flagged,0)=0`
     ).all();
 
+    let sentCount = 0;
     for (const p of (partners || [])) {
       const msg = newmonthText
         .replace(/\{\{name\}\}/g, p.full_name)
@@ -7994,17 +8081,339 @@ async function runMonthlySmsInternal(DB, now) {
       const nmsid = t.partnerSenderId || t.senderId;
       const result = await sendTermiiSms(t.apiKey, nmsid, p.phone, msg);
       if (result.ok) {
+        sentCount++;
         await DB.prepare(
           `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
         ).bind(newId('krm'), p.id, 'sms', msg, 'sent', 'pending', result.messageId || '', 'new_month', year, nmMonth, 'cron', now.toISOString()).run().catch(() => {});
       }
     }
-    // Clear draft after send
-    if (draftRow?.value) {
+    // Only clear the draft if at least one SMS was delivered — preserves it for retry on total failure
+    if (draftRow?.value && sentCount > 0) {
       await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
         .bind('kpsc_newmonth_sms_pending_draft', '').run();
     }
   } catch { /* swallow */ }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// KPSC POLICY MANAGEMENT
+// ══════════════════════════════════════════════════════════════════════
+
+async function getPolicyCurrentVersion(DB, type) {
+  const row = await DB.prepare(
+    `SELECT id, policy_type, version_num, content_md, change_summary, approved_by, effective_date, created_at
+     FROM kpsc_policy_versions WHERE policy_type=? AND is_current=1 ORDER BY version_num DESC LIMIT 1`
+  ).bind(type).first().catch(() => null);
+  if (!row) return ok({ version: null, content: null });
+  return ok({ version: row.version_num, versionId: row.id, content: row.content_md, changeSummary: row.change_summary, approvedBy: row.approved_by, effectiveDate: row.effective_date, createdAt: row.created_at });
+}
+
+async function getPolicySummaries(DB) {
+  const keys = ['kpsc_welfare_policy_summary', 'kpsc_byelaw_summary'];
+  const { results } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN (?,?)`).bind(...keys).all();
+  const m = {};
+  for (const r of (results || [])) m[r.key] = r.value;
+  return ok({ welfareSummary: String(m.kpsc_welfare_policy_summary || ''), byelawSummary: String(m.kpsc_byelaw_summary || '') });
+}
+
+async function getPolicyVersionHistory(DB, type) {
+  if (type !== 'welfare' && type !== 'byelaw') return err('type must be welfare or byelaw', 400);
+  const { results } = await DB.prepare(
+    `SELECT id, policy_type, version_num, change_summary, approved_by, effective_date, is_current, created_at
+     FROM kpsc_policy_versions WHERE policy_type=? ORDER BY version_num DESC`
+  ).bind(type).all();
+  return ok({ versions: results || [] });
+}
+
+async function publishPolicyVersion(DB, data, auth) {
+  const type = String(data?.policyType || '').trim();
+  if (type !== 'welfare' && type !== 'byelaw') return err('policyType must be welfare or byelaw', 400);
+  const content = String(data?.contentMd || '').trim();
+  if (!content) return err('contentMd is required', 400);
+
+  // Save summary to settings if provided
+  if (data?.summary !== undefined) {
+    const summaryKey = type === 'welfare' ? 'kpsc_welfare_policy_summary' : 'kpsc_byelaw_summary';
+    await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
+      .bind(summaryKey, String(data.summary || '')).run();
+  }
+
+  // Get next version number
+  const maxRow = await DB.prepare(`SELECT MAX(version_num) as mx FROM kpsc_policy_versions WHERE policy_type=?`).bind(type).first().catch(() => null);
+  const nextVer = (Number(maxRow?.mx || 0)) + 1;
+
+  // Deactivate current version
+  await DB.prepare(`UPDATE kpsc_policy_versions SET is_current=0 WHERE policy_type=? AND is_current=1`).bind(type).run();
+
+  // Insert new version
+  const id = newId('kpv');
+  const now = new Date().toISOString();
+  const effectiveDate = String(data?.effectiveDate || now.slice(0, 10)).trim();
+  const changeSummary = String(data?.changeSummary || '').trim();
+  await DB.prepare(
+    `INSERT INTO kpsc_policy_versions (id,policy_type,version_num,content_md,change_summary,approved_by,approved_by_id,effective_date,is_current,created_at)
+     VALUES (?,?,?,?,?,?,?,?,1,?)`
+  ).bind(id, type, nextVer, content, changeSummary, auth.name || '', auth.id || '', effectiveDate, now).run();
+
+  return ok({ versionId: id, versionNum: nextVer });
+}
+
+async function rollbackPolicyVersion(DB, data, auth) {
+  const targetId = String(data?.targetVersionId || '').trim();
+  if (!targetId) return err('targetVersionId is required', 400);
+
+  const targetRow = await DB.prepare(`SELECT * FROM kpsc_policy_versions WHERE id=?`).bind(targetId).first().catch(() => null);
+  if (!targetRow) return err('Version not found', 404);
+
+  const type = targetRow.policy_type;
+
+  // Get next version number
+  const maxRow = await DB.prepare(`SELECT MAX(version_num) as mx FROM kpsc_policy_versions WHERE policy_type=?`).bind(type).first().catch(() => null);
+  const nextVer = (Number(maxRow?.mx || 0)) + 1;
+
+  // Deactivate current
+  await DB.prepare(`UPDATE kpsc_policy_versions SET is_current=0 WHERE policy_type=? AND is_current=1`).bind(type).run();
+
+  // Insert rollback version
+  const id = newId('kpv');
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `INSERT INTO kpsc_policy_versions (id,policy_type,version_num,content_md,change_summary,approved_by,approved_by_id,effective_date,is_current,created_at)
+     VALUES (?,?,?,?,?,?,?,?,1,?)`
+  ).bind(id, type, nextVer, targetRow.content_md, `Rolled back to v${targetRow.version_num}`, auth.name || '', auth.id || '', now.slice(0, 10), now).run();
+
+  return ok({ versionId: id, versionNum: nextVer, rolledBackTo: targetRow.version_num });
+}
+
+async function fetchPolicyUrl(data) {
+  const rawUrl = String(data?.url || '').trim();
+  if (!rawUrl) return err('url is required', 400);
+  let parsedUrl;
+  try { parsedUrl = new URL(rawUrl); } catch { return err('Invalid URL', 400); }
+  if (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') return err('Only http/https URLs are supported', 400);
+
+  try {
+    const resp = await fetch(rawUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; RCCGKPSCPortal/1.0)', 'Accept': 'text/html,text/plain' },
+      redirect: 'follow',
+    });
+    if (!resp.ok) return err(`URL returned HTTP ${resp.status}`, 400);
+    const contentType = resp.headers.get('content-type') || '';
+    const rawBody = await resp.text();
+
+    let text = '';
+    if (contentType.includes('text/plain')) {
+      text = rawBody;
+    } else {
+      // Strip HTML: remove scripts, styles, then all tags
+      text = rawBody
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/\s{3,}/g, '\n\n')
+        .trim();
+    }
+
+    if (!text || text.length < 50) return err('No readable text found at that URL.', 422);
+    // Cap at ~50k chars to stay within AI context
+    return ok({ text: text.slice(0, 50000) });
+  } catch (e) {
+    return err('Failed to fetch URL: ' + e.message, 502);
+  }
+}
+
+async function aiFormatPolicyText(DB, env, data) {
+  const rawText = String(data?.text || '').trim();
+  const docType = String(data?.docType || 'policy').trim(); // 'welfare' | 'byelaw'
+  if (!rawText) return err('text is required', 400);
+
+  const { results: settingsRows } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
+  const settings = {};
+  for (const r of (settingsRows || [])) settings[r.key] = r.value;
+  const deepseekKey = String(settings.ai_deepseek_key || '').trim();
+  const deepseekModel = String(settings.ai_deepseek_model || 'deepseek-chat').trim();
+
+  if (!deepseekKey) return err('AI key not configured', 503);
+
+  const docLabel = docType === 'byelaw' ? 'governance byelaw/constitution document' : 'welfare support policy document';
+  const prompt = `You are a document formatter. Convert the following raw ${docLabel} text into clean, well-structured Markdown.
+
+RULES — YOU MUST FOLLOW ALL OF THESE:
+1. Preserve ALL original content exactly — do not add, remove, or change any words
+2. Use ## for major sections, ### for subsections
+3. Use - bullet lists for eligibility criteria, requirements, and lists
+4. Use numbered lists (1. 2. 3.) for sequential steps or numbered clauses
+5. Use --- for major section dividers
+6. Return ONLY the formatted Markdown, no explanations, no preamble
+
+Raw text to format:
+${rawText}`;
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 4096, temperature: 0.1 }),
+    });
+    if (!resp.ok) return err('AI service error', 502);
+    const aiData = await resp.json();
+    const formatted = (aiData.choices?.[0]?.message?.content || '').trim();
+    if (!formatted) return err('AI returned empty response', 502);
+    return ok({ formatted });
+  } catch (e) {
+    return err('AI request failed: ' + e.message, 502);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// KPSC AMENDMENT WORKFLOW
+// ══════════════════════════════════════════════════════════════════════
+
+async function amendmentPreview(DB, env, data) {
+  const insightText = String(data?.insightText || '').trim();
+  if (!insightText) return err('insightText is required', 400);
+
+  // Load current byelaw
+  const byelaw = await DB.prepare(
+    `SELECT id, content_md, version_num FROM kpsc_policy_versions WHERE policy_type='byelaw' AND is_current=1 ORDER BY version_num DESC LIMIT 1`
+  ).first().catch(() => null);
+  if (!byelaw) return ok({ found: false, reason: 'No published byelaw found. Publish the byelaw in Settings → Policies first.' });
+
+  const { results: settingsRows } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
+  const settings = {};
+  for (const r of (settingsRows || [])) settings[r.key] = r.value;
+  const deepseekKey = String(settings.ai_deepseek_key || '').trim();
+  const deepseekModel = String(settings.ai_deepseek_model || 'deepseek-chat').trim();
+
+  if (!deepseekKey) return err('AI key not configured', 503);
+
+  const prompt = `You are a byelaw amendment assistant. A committee has voted on the following amendment:
+
+AMENDMENT DESCRIPTION:
+${insightText}
+
+CURRENT BYELAW TEXT:
+${byelaw.content_md}
+
+Your task: Identify the exact text in the byelaw that needs to change, and provide the replacement text.
+
+Respond with ONLY a valid JSON object in this exact format (no markdown code fences, no explanation):
+{
+  "found": true,
+  "oldText": "the exact text from the byelaw to be replaced (verbatim, including surrounding context — at least one full sentence or clause)",
+  "newText": "the replacement text reflecting the voted amendment",
+  "confidence": "high",
+  "reason": "brief explanation of what is changing and why"
+}
+
+If you cannot identify specific text to change (amendment is too vague, or references text not found in the byelaw), respond with:
+{
+  "found": false,
+  "confidence": "low",
+  "reason": "explanation of why the text cannot be identified"
+}`;
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 1200, temperature: 0.2 }),
+    });
+    if (!resp.ok) return err('AI service error', 502);
+    const aiData = await resp.json();
+    const raw = (aiData.choices?.[0]?.message?.content || '').trim();
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch { return ok({ found: false, confidence: 'low', reason: 'AI response could not be parsed. Please enter the changes manually.' }); }
+    return ok({ ...parsed, byelawVersionId: byelaw.id, byelawVersionNum: byelaw.version_num });
+  } catch (e) {
+    return err('AI request failed: ' + e.message, 502);
+  }
+}
+
+async function amendmentApply(DB, env, data, auth) {
+  const { oldText, newText, insightText, meetingId, byelawVersionId, aiConfidence } = data || {};
+  if (!newText || !insightText) return err('newText and insightText are required', 400);
+
+  // Load the exact byelaw version that was previewed — reject if it's no longer current
+  const byelaw = byelawVersionId
+    ? await DB.prepare(`SELECT id, content_md, version_num FROM kpsc_policy_versions WHERE id=? AND policy_type='byelaw'`).bind(byelawVersionId).first().catch(() => null)
+    : await DB.prepare(`SELECT id, content_md, version_num FROM kpsc_policy_versions WHERE policy_type='byelaw' AND is_current=1 ORDER BY version_num DESC LIMIT 1`).first().catch(() => null);
+  if (!byelaw) return err('No published byelaw found', 404);
+  // Verify the previewed version is still the current one — if another version was published in between, reject
+  const current = await DB.prepare(`SELECT id FROM kpsc_policy_versions WHERE policy_type='byelaw' AND is_current=1 LIMIT 1`).first().catch(() => null);
+  if (current && byelaw.id !== current.id) return err('The byelaw was updated after your preview. Please generate a new diff against the current version before applying.', 409);
+
+  // Apply change: replace old text with new text in the full document
+  let newContent = byelaw.content_md;
+  if (oldText && newContent.includes(oldText)) {
+    newContent = newContent.replace(oldText, newText);
+  } else {
+    // Manual mode: user provided new text as full replacement or the oldText wasn't found — append as addendum note
+    newContent = byelaw.content_md + '\n\n---\n\n## Amendment (Applied)\n\n' + newText;
+  }
+
+  // Get next version number
+  const maxRow = await DB.prepare(`SELECT MAX(version_num) as mx FROM kpsc_policy_versions WHERE policy_type='byelaw'`).first().catch(() => null);
+  const nextVer = (Number(maxRow?.mx || 0)) + 1;
+
+  // Deactivate current version
+  await DB.prepare(`UPDATE kpsc_policy_versions SET is_current=0 WHERE policy_type='byelaw' AND is_current=1`).run();
+
+  // Insert new version
+  const versionId = newId('kpv');
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `INSERT INTO kpsc_policy_versions (id,policy_type,version_num,content_md,change_summary,approved_by,approved_by_id,effective_date,is_current,created_at)
+     VALUES (?,?,?,?,?,?,?,?,1,?)`
+  ).bind(versionId, 'byelaw', nextVer, newContent, `Amendment applied: ${String(insightText).slice(0, 100)}`, auth.name || '', auth.id || '', now.slice(0, 10), now).run();
+
+  // Write amendment log
+  const logId = newId('kal');
+  await DB.prepare(
+    `INSERT INTO kpsc_byelaw_amendment_log (id,meeting_id,insight_text,old_text,new_text,approved_by,approved_by_id,policy_version_id,ai_confidence,created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`
+  ).bind(logId, String(meetingId || ''), String(insightText || ''), String(oldText || ''), String(newText || ''), auth.name || '', auth.id || '', versionId, String(aiConfidence || 'manual'), now).run();
+
+  return ok({ versionId, versionNum: nextVer, amendmentLogId: logId });
+}
+
+async function amendmentProofread(DB, env, data) {
+  const text = String(data?.text || '').trim();
+  if (!text) return err('text is required', 400);
+
+  const { results: settingsRows } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
+  const settings = {};
+  for (const r of (settingsRows || [])) settings[r.key] = r.value;
+  const deepseekKey = String(settings.ai_deepseek_key || '').trim();
+  const deepseekModel = String(settings.ai_deepseek_model || 'deepseek-chat').trim();
+
+  if (!deepseekKey) return err('AI key not configured', 503);
+
+  const prompt = `Proofread and improve the following governance/byelaw text for grammar, clarity, and formal tone. Preserve the exact meaning and legal intent. Return only the improved text, no explanations.
+
+Text to proofread:
+${text}`;
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 800, temperature: 0.2 }),
+    });
+    if (!resp.ok) return err('AI service error', 502);
+    const aiData = await resp.json();
+    const improved = (aiData.choices?.[0]?.message?.content || '').trim();
+    if (!improved) return err('AI returned empty response', 502);
+    return ok({ improved });
+  } catch (e) {
+    return err('AI request failed: ' + e.message, 502);
+  }
 }
 
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────

@@ -56,6 +56,7 @@
         </div>
       </div>
     </div>
+    <div id="kl-policy-cards" style="display:none;margin-top:16px;flex-direction:column;gap:12px;width:100%;max-width:400px;margin-left:auto;margin-right:auto;padding:0 16px 24px"></div>
   </div>
 </div>
 
@@ -159,6 +160,23 @@
     const text = encodeURIComponent("Join us as a Kingdom Partner at RCCG Kingdom Parish, Aguleri! Your monthly pledge helps build our church and support our community. Click the link to learn more and register your pledge:");
     window.open(`https://wa.me/?text=${text}%20${url}`, '_blank', 'noopener');
   }
+
+  // Load policy summary cards on login page
+  fetch('/api/kpsc-policy/summary').then(r => r.json()).then(data => {
+    const container = document.getElementById('kl-policy-cards');
+    if (!container) return;
+    const cards = [];
+    if (data.welfareSummary) cards.push({ type: 'welfare', icon: '🤝', title: 'Welfare Support', summary: data.welfareSummary, link: '/kpsc/welfare-policy/', linkText: 'Read full policy →' });
+    if (data.byelawSummary) cards.push({ type: 'byelaw', icon: '📋', title: 'KPSC Byelaw & Governance', summary: data.byelawSummary, link: '/kpsc/byelaw/', linkText: 'Read full byelaw →' });
+    if (!cards.length) return;
+    container.style.display = 'flex';
+    container.innerHTML = cards.map(c => `
+      <div class="kl-policy-card">
+        <div class="kl-policy-card-hdr"><span>${c.icon}</span> <strong>${c.title}</strong></div>
+        <p class="kl-policy-card-text">${c.summary.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</p>
+        <a class="kl-policy-card-link" href="${c.link}" target="_blank" rel="noopener">${c.linkText}</a>
+      </div>`).join('');
+  }).catch(() => {});
 </script>
 </body>
 </html>

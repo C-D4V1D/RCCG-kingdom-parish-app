@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KPSC Byelaw & Governance — RCCG Kingdom Parish</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --navy: #1a2340;
+      --accent: #2563eb;
+      --text: #1f2937;
+      --text2: #6b7280;
+      --text3: #9ca3af;
+      --border: #e5e7eb;
+      --bg: #f9fafb;
+      --sidebar-w: 220px;
+    }
+    html { font-size: 16px; scroll-behavior: smooth; }
+    body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; font-size: 16px; line-height: 1.75; color: var(--text); background: var(--bg); }
+
+    /* ── Page layout ── */
+    .page-wrap { display: flex; min-height: 100vh; }
+    .sidebar {
+      width: var(--sidebar-w);
+      flex-shrink: 0;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      background: #fff;
+      border-right: 1px solid var(--border);
+      padding: 24px 16px;
+    }
+    .sidebar-logo { font-size: 11px; font-weight: 700; color: var(--navy); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 20px; line-height: 1.4; }
+    .sidebar-title { font-size: 12px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 10px; }
+    .sidebar-nav { list-style: none; }
+    .sidebar-nav li { margin-bottom: 2px; }
+    .sidebar-nav a {
+      display: block;
+      font-size: 13px;
+      color: var(--text2);
+      text-decoration: none;
+      padding: 5px 8px;
+      border-radius: 6px;
+      transition: background .12s, color .12s;
+      line-height: 1.4;
+    }
+    .sidebar-nav a:hover { background: #f1f5fd; color: var(--accent); }
+    .sidebar-nav a.active { background: #eff6ff; color: var(--accent); font-weight: 600; }
+    .sidebar-util { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+    .sidebar-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--text2); text-decoration: none;
+      padding: 6px 8px; border-radius: 6px; background: none; border: 1px solid var(--border);
+      cursor: pointer; transition: background .12s;
+    }
+    .sidebar-btn:hover { background: #f3f4f6; }
+
+    /* ── Content ── */
+    .content { flex: 1; min-width: 0; max-width: 720px; padding: 40px 48px 80px; }
+    .page-header { margin-bottom: 32px; padding-bottom: 24px; border-bottom: 2px solid var(--border); }
+    .page-header-church { font-size: 12px; font-weight: 700; color: var(--navy); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
+    .page-header-title { font-size: 28px; font-weight: 700; color: var(--navy); line-height: 1.2; margin-bottom: 10px; }
+    .page-header-desc { font-size: 14px; color: var(--text2); margin-bottom: 12px; line-height: 1.5; }
+    .page-header-meta { font-size: 13px; color: var(--text2); display: flex; flex-wrap: wrap; gap: 16px; }
+    .page-header-meta span { display: flex; align-items: center; gap: 4px; }
+
+    /* ── Markdown rendered content ── */
+    .doc-body { line-height: 1.75; }
+    .doc-body h1 { font-size: 22px; font-weight: 700; color: var(--navy); margin: 36px 0 12px; }
+    .doc-body h2 { font-size: 18px; font-weight: 700; color: var(--navy); margin: 32px 0 10px; padding-bottom: 6px; border-bottom: 1.5px solid var(--border); }
+    .doc-body h3 { font-size: 15px; font-weight: 600; color: var(--navy); margin: 24px 0 8px; }
+    .doc-body h4 { font-size: 14px; font-weight: 600; color: var(--text); margin: 16px 0 6px; }
+    .doc-body p { margin: 0 0 14px; }
+    .doc-body ul, .doc-body ol { margin: 0 0 14px 24px; }
+    .doc-body li { margin-bottom: 5px; }
+    .doc-body blockquote { border-left: 3px solid var(--accent); padding: 8px 14px; margin: 16px 0; color: var(--text2); font-style: italic; background: #f8faff; border-radius: 0 6px 6px 0; }
+    .doc-body code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 14px; font-family: 'Courier New', monospace; }
+    .doc-body hr { border: none; border-top: 1.5px solid var(--border); margin: 28px 0; }
+    .doc-body strong { font-weight: 600; }
+    .doc-body a { color: var(--accent); }
+
+    /* ── Mobile ── */
+    .mobile-topbar {
+      display: none;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: #fff;
+      border-bottom: 1px solid var(--border);
+      padding: 10px 16px;
+      align-items: center;
+      gap: 10px;
+    }
+    .mobile-topbar-section { flex: 1; font-size: 13px; font-weight: 600; color: var(--navy); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mobile-menu-btn { font-size: 20px; background: none; border: none; cursor: pointer; color: var(--text2); padding: 4px 6px; flex-shrink: 0; }
+    .mobile-drawer {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      z-index: 100;
+    }
+    .mobile-drawer-overlay { position: absolute; inset: 0; background: rgba(0,0,0,.4); }
+    .mobile-drawer-panel {
+      position: absolute;
+      top: 0; left: 0; bottom: 0;
+      width: 260px;
+      background: #fff;
+      padding: 24px 16px;
+      overflow-y: auto;
+      box-shadow: 4px 0 16px rgba(0,0,0,.12);
+    }
+    .mobile-drawer.open { display: block; }
+
+    /* ── Empty state ── */
+    .empty-state { text-align: center; padding: 64px 24px; color: var(--text2); }
+    .empty-state-icon { font-size: 48px; margin-bottom: 16px; }
+    .empty-state h2 { font-size: 18px; font-weight: 600; color: var(--navy); margin-bottom: 8px; }
+    .empty-state p { font-size: 14px; line-height: 1.6; max-width: 380px; margin: 0 auto; }
+
+    /* ── Utility bar ── */
+    .util-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+    .util-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 13px; color: var(--text2); text-decoration: none;
+      padding: 6px 12px; border-radius: 8px; background: #fff; border: 1px solid var(--border);
+      cursor: pointer; transition: background .12s; white-space: nowrap;
+    }
+    .util-btn:hover { background: #f3f4f6; }
+
+    @media (max-width: 720px) {
+      .sidebar { display: none; }
+      .mobile-topbar { display: flex; }
+      .content { padding: 20px 16px 60px; }
+      .page-header-title { font-size: 22px; }
+    }
+
+    @media print {
+      .sidebar, .mobile-topbar, .mobile-drawer, .util-bar { display: none !important; }
+      .page-wrap { display: block; }
+      .content { max-width: 100%; padding: 0; }
+      .doc-body h2 { page-break-before: auto; break-before: auto; }
+      body { font-size: 12px; line-height: 1.5; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Mobile top bar -->
+<div class="mobile-topbar" id="mobile-topbar">
+  <button class="mobile-menu-btn" onclick="openDrawer()" aria-label="Open navigation">☰</button>
+  <span class="mobile-topbar-section" id="mobile-current-section">KPSC Byelaw & Governance</span>
+</div>
+
+<!-- Mobile drawer -->
+<div class="mobile-drawer" id="mobile-drawer">
+  <div class="mobile-drawer-overlay" onclick="closeDrawer()"></div>
+  <div class="mobile-drawer-panel">
+    <div style="font-size:12px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.06em;margin-bottom:16px">Navigation</div>
+    <ul class="sidebar-nav" id="drawer-nav"></ul>
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px">
+      <button class="sidebar-btn" onclick="window.print();closeDrawer()">🖨 Print / Save PDF</button>
+      <a class="sidebar-btn" href="/kpsc/" rel="noopener">← Back to Portal</a>
+    </div>
+  </div>
+</div>
+
+<div class="page-wrap">
+  <!-- Desktop sidebar -->
+  <aside class="sidebar" id="desktop-sidebar">
+    <div class="sidebar-logo">RCCG Kingdom Parish<br>Aguleri, Anambra</div>
+    <div class="sidebar-title">In this document</div>
+    <ul class="sidebar-nav" id="sidebar-nav"></ul>
+    <div class="sidebar-util">
+      <button class="sidebar-btn" onclick="window.print()">🖨 Print / Save PDF</button>
+      <a class="sidebar-btn" href="/kpsc/" rel="noopener">← Back to Portal</a>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="content" id="main-content">
+    <div id="page-header-wrap"></div>
+    <div id="doc-content"><div class="empty-state"><div class="empty-state-icon">📋</div><p>Loading…</p></div></div>
+  </main>
+</div>
+
+<script>
+  function esc(s) {
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function minutesHtml(md) {
+    if (!md) return '';
+    const lines = md.split('\n');
+    const out = [];
+    let inUl = false;
+    let inOl = false;
+
+    function applyInline(escaped) {
+      escaped = escaped.replace(/\[([^\]]+)\]\((https:\/\/[^)]+)\)/g,
+        '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+      escaped = escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
+      escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      escaped = escaped.replace(/(?<!\*)\*(?!\*)([^*]+)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+      escaped = escaped.replace(/(?<!_)_(?!_)([^_]+)(?<!_)_(?!_)/g, '<em>$1</em>');
+      return escaped;
+    }
+
+    for (const raw of lines) {
+      const line = raw.trimEnd();
+      if (line === '---' || line === '***' || line === '___') {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        out.push('<hr>');
+      } else if (/^#{1,6}\s/.test(line)) {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        const level = line.match(/^(#+)/)[1].length;
+        const text = line.replace(/^#+\s*/, '');
+        const slug = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        out.push(`<h${level} id="${slug}">${applyInline(esc(text))}</h${level}>`);
+      } else if (/^[-*]\s/.test(line)) {
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        if (!inUl) { out.push('<ul>'); inUl = true; }
+        out.push(`<li>${applyInline(esc(line.replace(/^[-*]\s*/, '')))}</li>`);
+      } else if (/^\d+\.\s/.test(line)) {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (!inOl) { out.push('<ol>'); inOl = true; }
+        out.push(`<li>${applyInline(esc(line.replace(/^\d+\.\s*/, '')))}</li>`);
+      } else if (/^>\s/.test(line)) {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        out.push(`<blockquote>${applyInline(esc(line.replace(/^>\s*/, '')))}</blockquote>`);
+      } else if (line === '') {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        out.push('');
+      } else {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        out.push(`<p>${applyInline(esc(line))}</p>`);
+      }
+    }
+    if (inUl) out.push('</ul>');
+    if (inOl) out.push('</ol>');
+    return out.join('\n');
+  }
+
+  function slugify(text) {
+    return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  }
+
+  function buildNav(container) {
+    const headings = document.querySelectorAll('.doc-body h2');
+    const items = [];
+    headings.forEach(h => {
+      const text = h.textContent;
+      const id = h.id || slugify(text);
+      if (!h.id) h.id = id;
+      items.push({ text, id });
+    });
+    if (!items.length) { container.innerHTML = '<li style="font-size:12px;color:var(--text3);padding:4px 8px">No sections found</li>'; return; }
+    container.innerHTML = items.map(i =>
+      `<li><a href="#${i.id}" onclick="closeDrawer()">${esc(i.text)}</a></li>`
+    ).join('');
+  }
+
+  function setupScrollSpy() {
+    const headings = Array.from(document.querySelectorAll('.doc-body h2'));
+    if (!headings.length) return;
+    const navLinks = document.querySelectorAll('#sidebar-nav a, #drawer-nav a');
+    const topbar = document.getElementById('mobile-current-section');
+    let ticking = false;
+
+    function update() {
+      const scrollY = window.scrollY + 100;
+      let current = headings[0];
+      for (const h of headings) {
+        if (h.offsetTop <= scrollY) current = h;
+      }
+      navLinks.forEach(a => {
+        a.classList.toggle('active', a.getAttribute('href') === '#' + current.id);
+      });
+      if (topbar) topbar.textContent = current.textContent;
+      ticking = false;
+    }
+
+    window.addEventListener('scroll', () => {
+      if (!ticking) { requestAnimationFrame(update); ticking = true; }
+    }, { passive: true });
+    update();
+  }
+
+  function openDrawer() { document.getElementById('mobile-drawer').classList.add('open'); }
+  function closeDrawer() { document.getElementById('mobile-drawer').classList.remove('open'); }
+
+  async function loadContent() {
+    try {
+      const res = await fetch('/api/kpsc-policy?type=byelaw');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+
+      const headerWrap = document.getElementById('page-header-wrap');
+      const docContent = document.getElementById('doc-content');
+
+      if (!data.content) {
+        headerWrap.innerHTML = '';
+        docContent.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">📋</div>
+            <h2>Byelaw Not Yet Published</h2>
+            <p>The KPSC Byelaw & Governance document has not been published yet. Please check back later, or contact the IT Administrator.</p>
+          </div>`;
+        document.getElementById('sidebar-nav').innerHTML = '<li style="font-size:12px;color:var(--text3);padding:4px 8px">No content yet</li>';
+        document.getElementById('drawer-nav').innerHTML = '<li style="font-size:12px;color:var(--text3);padding:4px 8px">No content yet</li>';
+        return;
+      }
+
+      document.title = 'KPSC Byelaw & Governance — RCCG Kingdom Parish';
+
+      headerWrap.innerHTML = `
+        <div class="util-bar">
+          <button class="util-btn" onclick="window.print()">🖨 Print / Save PDF</button>
+          <a class="util-btn" href="/kpsc/" rel="noopener">← Back to Portal</a>
+        </div>
+        <div class="page-header">
+          <div class="page-header-church">RCCG Kingdom Parish, Aguleri — Anambra</div>
+          <h1 class="page-header-title">KPSC Byelaw & Governance</h1>
+          <p class="page-header-desc">Governance rules and procedures for the Kingdom Parish Stewardship Committee</p>
+          <div class="page-header-meta">
+            ${data.version ? `<span>📋 Version ${data.version}</span>` : ''}
+            ${data.effectiveDate ? `<span>📅 Effective ${esc(data.effectiveDate)}</span>` : ''}
+            ${data.approvedBy ? `<span>✅ Approved by ${esc(data.approvedBy)}</span>` : ''}
+          </div>
+        </div>`;
+
+      docContent.innerHTML = `<div class="doc-body">${minutesHtml(data.content)}</div>`;
+
+      // Build nav after content is rendered
+      buildNav(document.getElementById('sidebar-nav'));
+      buildNav(document.getElementById('drawer-nav'));
+      setupScrollSpy();
+    } catch (e) {
+      document.getElementById('doc-content').innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state-icon">⚠️</div>
+          <h2>Could Not Load Byelaw</h2>
+          <p>There was a problem loading the KPSC Byelaw. Please try refreshing the page.</p>
+        </div>`;
+    }
+  }
+
+  loadContent();
+</script>
+</body>
+</html>
