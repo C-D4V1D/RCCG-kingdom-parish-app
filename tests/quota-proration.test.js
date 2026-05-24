@@ -99,3 +99,26 @@ test('multi-month basis text uses Sundays in remittance period', () => {
 
   assert.equal(lines[0].basis, 'Proportion of 3 of 3 Sundays in the rem. period.');
 });
+
+
+test('fixed quotas accrue week-by-week when cut-off end is in the future', () => {
+  const RealDate = Date;
+  class MockDate extends RealDate {
+    constructor(...args){
+      if(args.length===0) return new RealDate('2026-05-11T12:00:00Z');
+      return new RealDate(...args);
+    }
+    static now(){ return new RealDate('2026-05-11T12:00:00Z').getTime(); }
+  }
+  globalThis.Date = MockDate;
+  try {
+    const lines = App._getQuotaLinesForPeriod([
+      { label: 'Zonal Mummy Stipend', amount: 7500 }
+    ], '2026-04-20', '2026-05-24');
+
+    assert.equal(lines[0].basis, 'Proportion of 3 of 5 Sundays in the rem. period.');
+    assertClose(lines[0].amount, 4500);
+  } finally {
+    globalThis.Date = RealDate;
+  }
+});

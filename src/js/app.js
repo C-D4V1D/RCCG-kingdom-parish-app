@@ -543,7 +543,9 @@ function getQuotaLinesForPeriod(quotas, fromDate, toDate){
   const to=(toRaw && toRaw>todayDate) ? todayDate : toRaw;
   if(from && to && from>to) return [];
   const canProrate=!!from && !!to && from<=to;
-  const periodSundays=canProrate ? countSundaysInRange(from, to) : 0;
+  const fullPeriodEnd=(toRaw && from && toRaw>=from) ? toRaw : to;
+  const coveredSundays=canProrate ? countSundaysInRange(from, to) : 0;
+  const periodSundays=canProrate ? countSundaysInRange(from, fullPeriodEnd) : 0;
 
   return list.map(q=>{
     const label=q?.label||'';
@@ -553,7 +555,6 @@ function getQuotaLinesForPeriod(quotas, fromDate, toDate){
       return { label, amount:periodAmount, section:'quota', monthlyAmount:periodAmount, isProrated:false, basis:'Fixed remittance-period amount' };
     }
     if(periodSundays<=0) return null;
-    const coveredSundays=countSundaysInRange(from, to);
     const amount = periodAmount * (coveredSundays / periodSundays);
     const basis = `Proportion of ${coveredSundays} of ${periodSundays} Sundays in the rem. period.`;
     return { label, amount, section:'quota', monthlyAmount:periodAmount, isProrated:true, basis };
