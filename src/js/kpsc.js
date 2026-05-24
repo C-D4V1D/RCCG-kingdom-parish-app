@@ -114,6 +114,12 @@ const S = {
   partnersTypeFilter: '',
   financeYear: new Date().getUTCFullYear(),
   financeMonth: new Date().getUTCMonth() + 1,
+  financeSearch: '',
+  financeTypeFilter: 'all',
+  financeCatFilter: '',
+  financeMethodFilter: '',
+  financeSortCol: 'date',
+  financeSortAsc: false,
   reportsYear: new Date().getUTCFullYear(),
   reportsMonth: 0,
   reportsFilter: 'all',
@@ -6798,58 +6804,111 @@ async function renderFinance(main) {
   if (partnersRes?.error) throw new Error(partnersRes.error);
   S.financeEntries = Array.isArray(financeRes) ? financeRes : [];
   S.partners = Array.isArray(partnersRes) ? partnersRes : [];
+
+  // Reset filter/sort state on every full page load
+  S.financeSearch = '';
+  S.financeTypeFilter = 'all';
+  S.financeCatFilter = '';
+  S.financeMethodFilter = '';
+  S.financeSortCol = 'date';
+  S.financeSortAsc = false;
+
   const canManage = canManageFinance();
   const canDelete = canDeleteFinanceEntries();
-  const incomeTotal = S.financeEntries.filter(e => e.entryType === 'income').reduce((sum, e) => sum + Number(e.amount || 0), 0);
-  const expenseTotal = S.financeEntries.filter(e => e.entryType === 'expense').reduce((sum, e) => sum + Number(e.amount || 0), 0);
+
+  const incomeEntries  = S.financeEntries.filter(e => e.entryType === 'income');
+  const expenseEntries = S.financeEntries.filter(e => e.entryType === 'expense');
+  const incomeTotal  = incomeEntries.reduce((s, e) => s + Number(e.amount || 0), 0);
+  const expenseTotal = expenseEntries.reduce((s, e) => s + Number(e.amount || 0), 0);
   const net = incomeTotal - expenseTotal;
+  const partnerIncome = incomeEntries.filter(e => e.category === 'partnership_payment').reduce((s, e) => s + Number(e.amount || 0), 0);
+  const unlinkedCount = incomeEntries.filter(e => e.category === 'partnership_payment' && !e.partnerId).length;
+
   const nowYear = currentYear();
-  const yearOpts = [nowYear, nowYear-1, nowYear-2].map(y=>`<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
-  const monthOpts = [0,1,2,3,4,5,6,7,8,9,10,11,12].map(m=>
+  const yearOpts = [nowYear, nowYear-1, nowYear-2].map(y => `<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
+  const monthOpts = [0,1,2,3,4,5,6,7,8,9,10,11,12].map(m =>
     `<option value="${m}" ${month===m?'selected':''}>${m===0?'All Months':monthName(m)}</option>`
   ).join('');
+
+  const allCategories = [...new Set(S.financeEntries.map(e => e.category).filter(Boolean))].sort();
+  const catFilterOpts = `<option value="">All Categories</option>` +
+    allCategories.map(c => `<option value="${esc(c)}">${esc(catLabel(c))}</option>`).join('');
+  const methodFilterOpts = `<option value="">All Methods</option>` +
+    ['cash','bank_transfer','pos','cheque','other'].map(m =>
+      `<option value="${m}">${m.replace(/_/g,' ').replace(/\b\w/g, l => l.toUpperCase())}</option>`
+    ).join('');
+  const periodLabel = month ? `${monthName(month)} ${year}` : `Year ${year}`;
+
   main.innerHTML = `
     <div class="k-page">
-      <div class="k-dash-stats">
-        <div class="k-stat"><div class="k-stat-val">₦${incomeTotal.toLocaleString('en-NG')}</div><div class="k-stat-lbl">Income</div></div>
-        <div class="k-stat"><div class="k-stat-val">₦${expenseTotal.toLocaleString('en-NG')}</div><div class="k-stat-lbl">Expense</div></div>
-        <div class="k-stat ${net >= 0 ? '' : 'k-stat-highlight'}"><div class="k-stat-val" style="color:${net>=0?'var(--green)':'var(--red)'}">₦${Math.abs(net).toLocaleString('en-NG')}</div><div class="k-stat-lbl">${net >= 0 ? 'Net Surplus' : 'Net Deficit'}</div></div>
+
+      <div class="k-dash-stats kf-stat-5">
+        <div class="k-stat">
+          <div class="k-stat-val" style="color:var(--green)">₦${Math.round(incomeTotal).toLocaleString('en-NG')}</div>
+          <div class="k-stat-sub">${incomeEntries.length} entr${incomeEntries.length===1?'y':'ies'}</div>
+          <div class="k-stat-lbl">Income</div>
+        </div>
+        <div class="k-stat">
+          <div class="k-stat-val" style="color:var(--red)">₦${Math.round(expenseTotal).toLocaleString('en-NG')}</div>
+          <div class="k-stat-sub">${expenseEntries.length} entr${expenseEntries.length===1?'y':'ies'}</div>
+          <div class="k-stat-lbl">Expenses</div>
+        </div>
+        <div class="k-stat ${net >= 0 ? '' : 'k-stat-highlight'}">
+          <div class="k-stat-val" style="color:${net>=0?'var(--green)':'var(--red)'}">₦${Math.round(Math.abs(net)).toLocaleString('en-NG')}</div>
+          <div class="k-stat-lbl">${net >= 0 ? 'Net Surplus' : 'Net Deficit'}</div>
+        </div>
+        <div class="k-stat">
+          <div class="k-stat-val" style="color:var(--navy)">₦${Math.round(partnerIncome).toLocaleString('en-NG')}</div>
+          <div class="k-stat-lbl">Partner Income</div>
+        </div>
+        <div class="k-stat ${unlinkedCount > 0 ? 'k-stat-highlight' : ''}">
+          <div class="k-stat-val" style="color:${unlinkedCount>0?'var(--amber)':'var(--navy)'}">${unlinkedCount}</div>
+          <div class="k-stat-lbl">Unlinked Entries</div>
+        </div>
       </div>
+
       <div class="k-section-hdr">
         <h2>Finance Entries</h2>
-        <div style="display:flex;gap:8px;align-items:center">
+        <div class="kf-controls-right">
           <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setFinanceYear(this.value)">${yearOpts}</select>
           <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setFinanceMonth(this.value)">${monthOpts}</select>
           ${canManage ? `<button class="kbtn kbtn-primary kbtn-sm" onclick="Kpsc.openFinanceModal()">+ New Entry</button>` : ''}
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.exportFinanceCsv()" title="Download as CSV">⬇ CSV</button>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.printFinanceReport()" title="Print / PDF report">🖨 Report</button>
         </div>
       </div>
-      <div class="k-meeting-list">
-        ${S.financeEntries.length ? S.financeEntries.map(e => `
-          <div class="k-meeting-card" style="position:relative">
-            ${(canManage || canDelete) ? cardCtxMenu('fin-' + e.id, ...[
-              ...(canManage ? [{ label: '✏️ Edit', onclick: `Kpsc.editFinanceEntryWithPin('${e.id}')` }] : []),
-              ...(canDelete ? [{ label: '🗑 Delete', onclick: `Kpsc.deleteFinanceEntryWithPin('${e.id}')`, danger: true }] : []),
-            ]) : ''}
-            <div class="k-mc-top">
-              <div style="flex:1;padding-right:${(canManage || canDelete) ? '32px' : '0'}">
-                <div class="k-mc-title">${esc(catLabel(e.category))} — ₦${Number(e.amount || 0).toLocaleString('en-NG')}</div>
-                <div class="k-mc-meta" style="margin-top:4px">
-                  <span>${esc(fmtDate(e.date))}</span>
-                  <span class="kbadge ${e.entryType==='income'?'badge-green':'badge-red'}">${esc(e.entryType)}</span>
-                  ${e.paymentMethod ? `<span class="kbadge badge-gray">${esc(e.paymentMethod.replace(/_/g,' '))}</span>` : ''}
-                </div>
-                ${e.narration ? `<div class="k-page-hint" style="margin-top:6px">${esc(e.narration)}</div>` : ''}
-                ${e.reference ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Ref: ${esc(e.reference)}</div>` : ''}
-                ${e.partnerName ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Partner: ${esc(e.partnerName)}</div>` : ''}
-                ${e.recordedBy ? `<div style="font-size:11px;color:var(--text3)">Recorded by: ${esc(e.recordedBy)}</div>` : ''}
-              </div>
-            </div>
-          </div>`).join('') : '<div class="k-empty">No entries for the selected period.</div>'}
+
+      <div class="kf-filter-bar">
+        <input type="search" id="kf-search" class="k-input kf-search-input" placeholder="Search narration, reference, partner…" oninput="Kpsc.setFinanceSearch(this.value)" />
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button class="kbtn kbtn-sm kf-type-chip active" data-type="all" onclick="Kpsc.setFinanceTypeFilter('all')">All</button>
+          <button class="kbtn kbtn-sm kf-type-chip" data-type="income" onclick="Kpsc.setFinanceTypeFilter('income')">Income</button>
+          <button class="kbtn kbtn-sm kf-type-chip" data-type="expense" onclick="Kpsc.setFinanceTypeFilter('expense')">Expense</button>
+        </div>
+        ${allCategories.length > 1 ? `<select class="k-input k-input-sm" style="width:auto;flex-shrink:0" onchange="Kpsc.setFinanceCatFilter(this.value)">${catFilterOpts}</select>` : ''}
+        <select class="k-input k-input-sm" style="width:auto;flex-shrink:0" onchange="Kpsc.setFinanceMethodFilter(this.value)">${methodFilterOpts}</select>
       </div>
+
+      ${S.financeEntries.length > 0 ? `
+      <details class="k-collapsible" id="kf-breakdown">
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">Category Breakdown</span>
+          <span class="k-collapsible-summary">${esc(periodLabel)} — ${S.financeEntries.length} entries</span>
+        </summary>
+        ${renderFinanceCategoryBreakdown(incomeEntries, expenseEntries, incomeTotal, expenseTotal)}
+      </details>` : ''}
+
+      <div id="kf-entry-list">
+        ${renderFinanceEntryList(canManage, canDelete)}
+      </div>
+
       ${canManage ? `
-      <div class="k-section" style="margin-top:16px">
-        <h3 class="k-sec-title">Bank Reconciliation</h3>
-        <p class="k-hint">Upload your bank statement PDF for AI-assisted reconciliation, or paste the data manually as JSON.</p>
+      <details class="k-collapsible" id="kf-reconciliation" style="margin-top:16px">
+        <summary class="k-collapsible-hdr">
+          <span class="k-collapsible-title">Bank Reconciliation</span>
+          <span class="k-collapsible-summary">Upload statement to cross-check ledger</span>
+        </summary>
+        <p class="k-hint" style="margin-bottom:12px">Upload your bank statement PDF for AI-assisted reconciliation, or paste the data manually as JSON.</p>
         <div class="k-tabs" style="margin-bottom:16px">
           <button class="k-tab active" id="krec-tab-pdf" onclick="Kpsc.setReconciliationTab('pdf')">📄 Upload PDF</button>
           <button class="k-tab" id="krec-tab-json" onclick="Kpsc.setReconciliationTab('json')">{ } Paste JSON</button>
@@ -6871,7 +6930,8 @@ async function renderFinance(main) {
           </div>
         </div>
         <div id="krec-result"></div>
-      </div>` : ''}
+      </details>` : ''}
+
     </div>`;
 }
 
@@ -6887,6 +6947,14 @@ async function openFinanceModal(entryToEdit = null) {
   const expenseOpts = expenseCategories.map(c=>`<option value="${esc(c)}" ${(e?.category||''===c)?'selected':''}>${esc(catLabel(c))}</option>`).join('');
   const isExpense = (e?.entryType || '') === 'expense';
   const catOpts = isExpense ? expenseOpts : incomeOpts;
+
+  // Partner select for income + partnership_payment entries
+  const partnerOpts = (S.partners || [])
+    .filter(p => p.status === 'active')
+    .slice().sort((a, b) => String(a.fullName || '').localeCompare(String(b.fullName || '')))
+    .map(p => `<option value="${esc(p.id)}" ${(e?.partnerId || '') === p.id ? 'selected' : ''}>${esc(p.fullName || p.name || p.id)}</option>`)
+    .join('');
+  const showPartner = !isExpense && (e?.category || 'partnership_payment') === 'partnership_payment';
 
   const modal = document.createElement('div');
   modal.id = 'kpsc-finance-modal';
@@ -6915,6 +6983,14 @@ async function openFinanceModal(entryToEdit = null) {
           <select id="kf-welfare-count" class="k-input">
             ${[1,2,3,4,5,6,7,8,9,10,15,20,25,30].map(n => `<option value="${n}">${n}</option>`).join('')}
           </select>
+        </div>
+        <div id="kf-partner-wrap" style="display:${showPartner ? 'block' : 'none'}">
+          <label class="k-label">Partner (optional)</label>
+          <select id="kf-partner" class="k-input">
+            <option value="">— Not linked to a partner —</option>
+            ${partnerOpts}
+          </select>
+          <p class="k-hint">Select to link this income to a specific partner's record.</p>
         </div>
         <label class="k-label">Amount (₦)</label>
         <input id="kf-amount" type="number" min="0" class="k-input" placeholder="0" value="${e?.amount != null ? Number(e.amount) : ''}" />
@@ -7046,8 +7122,7 @@ function updateFinanceCategoryOptions() {
   const cat = document.getElementById('kf-category');
   if (!cat) return;
   cat.innerHTML = type === 'expense' ? modal._expenseOpts : modal._incomeOpts;
-  const welfareWrap = document.getElementById('kf-welfare-wrap');
-  if (welfareWrap) welfareWrap.style.display = (type === 'expense' && cat.value === 'welfare') ? 'block' : 'none';
+  onFinanceCategoryChange();
 }
 
 function onFinanceCategoryChange() {
@@ -7055,6 +7130,8 @@ function onFinanceCategoryChange() {
   const cat = document.getElementById('kf-category')?.value;
   const welfareWrap = document.getElementById('kf-welfare-wrap');
   if (welfareWrap) welfareWrap.style.display = (type === 'expense' && cat === 'welfare') ? 'block' : 'none';
+  const partnerWrap = document.getElementById('kf-partner-wrap');
+  if (partnerWrap) partnerWrap.style.display = (type === 'income' && cat === 'partnership_payment') ? 'block' : 'none';
 }
 
 
@@ -7067,6 +7144,9 @@ async function saveFinanceEntry(btn) {
   const welfareCount = (entryType === 'expense' && category === 'welfare')
     ? Number(document.getElementById('kf-welfare-count')?.value || 0)
     : 0;
+  const partnerId = (entryType === 'income' && category === 'partnership_payment')
+    ? (document.getElementById('kf-partner')?.value?.trim() || null)
+    : null;
   const payload = {
     date: document.getElementById('kf-date')?.value || '',
     entryType,
@@ -7077,6 +7157,7 @@ async function saveFinanceEntry(btn) {
     narration: document.getElementById('kf-note')?.value.trim() || '',
     recordedBy: S.user?.name || '',
     welfareCount,
+    partnerId,
   };
   const res = editId
     ? await apiPut(`kpsc-finance/${editId}`, payload)
@@ -7133,6 +7214,349 @@ async function deleteFinanceEntry(id) {
   if (res?.error) { showToast(res.error, 'error'); return; }
   await renderFinance(document.getElementById('kpsc-main'));
   showToast('Entry deleted.', 'success');
+}
+
+// ── FINANCE FILTER / SORT / EXPORT HELPERS ──────────────────────────────────
+
+function getFilteredFinanceEntries() {
+  let entries = S.financeEntries.slice();
+  if (S.financeTypeFilter !== 'all') {
+    entries = entries.filter(e => e.entryType === S.financeTypeFilter);
+  }
+  if (S.financeCatFilter) {
+    entries = entries.filter(e => e.category === S.financeCatFilter);
+  }
+  if (S.financeMethodFilter) {
+    entries = entries.filter(e => e.paymentMethod === S.financeMethodFilter);
+  }
+  const q = (S.financeSearch || '').trim().toLowerCase();
+  if (q) {
+    entries = entries.filter(e =>
+      String(e.narration || '').toLowerCase().includes(q) ||
+      String(e.reference || '').toLowerCase().includes(q) ||
+      String(e.partnerName || '').toLowerCase().includes(q) ||
+      catLabel(e.category).toLowerCase().includes(q)
+    );
+  }
+  const col = S.financeSortCol || 'date';
+  entries.sort((a, b) => {
+    let av, bv;
+    if (col === 'amount') {
+      av = Number(a.amount || 0); bv = Number(b.amount || 0);
+    } else if (col === 'date') {
+      av = a.date || ''; bv = b.date || '';
+    } else {
+      av = String(a[col] || '').toLowerCase();
+      bv = String(b[col] || '').toLowerCase();
+    }
+    if (av < bv) return S.financeSortAsc ? -1 : 1;
+    if (av > bv) return S.financeSortAsc ? 1 : -1;
+    return 0;
+  });
+  return entries;
+}
+
+function renderFinanceEntryList(canManage, canDelete) {
+  const entries = getFilteredFinanceEntries();
+  if (!entries.length) {
+    return '<div class="k-empty">No entries match the current filters.</div>';
+  }
+  const thCls = col => {
+    if (S.financeSortCol !== col) return 'kf-sortable';
+    return S.financeSortAsc ? 'kf-sortable kf-sort-active kf-sort-asc' : 'kf-sortable kf-sort-active';
+  };
+  const tableRows = entries.map(e => {
+    const amtColor = e.entryType === 'income' ? 'var(--green)' : 'var(--red)';
+    const actionCells = (canManage || canDelete) ? `<td class="kf-td-actions">
+        ${canManage ? `<button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.editFinanceEntryWithPin('${e.id}')" title="Edit">✏️</button>` : ''}
+        ${canDelete ? `<button class="kbtn kbtn-sm kbtn-ghost" style="color:var(--red)" onclick="Kpsc.deleteFinanceEntryWithPin('${e.id}')" title="Delete">🗑</button>` : ''}
+      </td>` : '';
+    return `<tr>
+        <td>${esc(fmtDate(e.date))}</td>
+        <td><span class="kbadge ${e.entryType==='income'?'badge-green':'badge-red'}">${esc(e.entryType)}</span></td>
+        <td>${esc(catLabel(e.category))}</td>
+        <td style="color:var(--text3)">${esc(e.partnerName || '—')}</td>
+        <td class="kf-td-amount" style="color:${amtColor}">₦${Number(e.amount||0).toLocaleString('en-NG')}</td>
+        <td>${esc((e.paymentMethod||'—').replace(/_/g,' '))}</td>
+        <td style="color:var(--text3);font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.reference||'—')}</td>
+        ${actionCells}
+      </tr>`;
+  }).join('');
+  const actionHead = (canManage || canDelete) ? '<th></th>' : '';
+  const table = `
+    <div class="kf-table-wrap">
+      <table class="kf-table">
+        <thead><tr>
+          <th class="${thCls('date')}" onclick="Kpsc.sortFinanceBy('date')">Date</th>
+          <th>Type</th>
+          <th class="${thCls('category')}" onclick="Kpsc.sortFinanceBy('category')">Category</th>
+          <th>Partner</th>
+          <th class="${thCls('amount')}" onclick="Kpsc.sortFinanceBy('amount')">Amount</th>
+          <th class="${thCls('paymentMethod')}" onclick="Kpsc.sortFinanceBy('paymentMethod')">Method</th>
+          <th class="${thCls('reference')}" onclick="Kpsc.sortFinanceBy('reference')">Reference</th>
+          ${actionHead}
+        </tr></thead>
+        <tbody>${tableRows}</tbody>
+      </table>
+    </div>`;
+  const cards = entries.map(e => `
+    <div class="k-meeting-card" style="position:relative">
+      ${(canManage || canDelete) ? cardCtxMenu('fin-' + e.id, ...[
+        ...(canManage ? [{ label: '✏️ Edit', onclick: `Kpsc.editFinanceEntryWithPin('${e.id}')` }] : []),
+        ...(canDelete ? [{ label: '🗑 Delete', onclick: `Kpsc.deleteFinanceEntryWithPin('${e.id}')`, danger: true }] : []),
+      ]) : ''}
+      <div class="k-mc-top">
+        <div style="flex:1;padding-right:${(canManage || canDelete) ? '32px' : '0'}">
+          <div class="k-mc-title">${esc(catLabel(e.category))} — ₦${Number(e.amount || 0).toLocaleString('en-NG')}</div>
+          <div class="k-mc-meta" style="margin-top:4px">
+            <span>${esc(fmtDate(e.date))}</span>
+            <span class="kbadge ${e.entryType==='income'?'badge-green':'badge-red'}">${esc(e.entryType)}</span>
+            ${e.paymentMethod ? `<span class="kbadge badge-gray">${esc(e.paymentMethod.replace(/_/g,' '))}</span>` : ''}
+          </div>
+          ${e.narration ? `<div class="k-page-hint" style="margin-top:6px">${esc(e.narration)}</div>` : ''}
+          ${e.reference ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Ref: ${esc(e.reference)}</div>` : ''}
+          ${e.partnerName ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Partner: ${esc(e.partnerName)}</div>` : ''}
+          ${e.recordedBy ? `<div style="font-size:11px;color:var(--text3)">Recorded by: ${esc(e.recordedBy)}</div>` : ''}
+        </div>
+      </div>
+    </div>`).join('');
+  return `${table}<div class="kf-cards--mobile k-meeting-list" style="margin-top:0">${cards}</div>`;
+}
+
+function rerenderFinanceEntryList() {
+  const el = document.getElementById('kf-entry-list');
+  if (!el) return;
+  el.innerHTML = renderFinanceEntryList(canManageFinance(), canDeleteFinanceEntries());
+}
+
+function renderFinanceCategoryBreakdown(incomeEntries, expenseEntries, incomeTotal, expenseTotal) {
+  function buildRows(list, total, barClass) {
+    const cats = {};
+    list.forEach(e => { const c = e.category || 'other'; cats[c] = (cats[c] || 0) + Number(e.amount || 0); });
+    const sorted = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+    if (!sorted.length) return '<div class="k-hint" style="padding:6px 0">No entries</div>';
+    return sorted.map(([cat, amt]) => {
+      const pct = total > 0 ? Math.round((amt / total) * 100) : 0;
+      return `<div class="kf-cat-row">
+        <div class="kf-cat-label">${esc(catLabel(cat))}</div>
+        <div class="kf-cat-bar-wrap"><div class="kf-cat-bar ${barClass}" style="width:${pct}%"></div></div>
+        <div class="kf-cat-amount">₦${Math.round(amt).toLocaleString('en-NG')}</div>
+        <div class="kf-cat-pct">${pct}%</div>
+      </div>`;
+    }).join('');
+  }
+  return `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;padding:4px 0 8px">
+      <div>
+        <div class="kf-breakdown-title" style="color:var(--green)">Income</div>
+        ${buildRows(incomeEntries, incomeTotal, 'kf-cat-bar--income')}
+      </div>
+      <div>
+        <div class="kf-breakdown-title" style="color:var(--red)">Expenses</div>
+        ${buildRows(expenseEntries, expenseTotal, 'kf-cat-bar--expense')}
+      </div>
+    </div>`;
+}
+
+function setFinanceSearch(val) {
+  S.financeSearch = String(val || '');
+  rerenderFinanceEntryList();
+}
+
+function setFinanceTypeFilter(type) {
+  S.financeTypeFilter = type || 'all';
+  document.querySelectorAll('.kf-type-chip').forEach(el =>
+    el.classList.toggle('active', el.dataset.type === S.financeTypeFilter)
+  );
+  rerenderFinanceEntryList();
+}
+
+function setFinanceCatFilter(val) {
+  S.financeCatFilter = val || '';
+  rerenderFinanceEntryList();
+}
+
+function setFinanceMethodFilter(val) {
+  S.financeMethodFilter = val || '';
+  rerenderFinanceEntryList();
+}
+
+function sortFinanceBy(col) {
+  if (S.financeSortCol === col) {
+    S.financeSortAsc = !S.financeSortAsc;
+  } else {
+    S.financeSortCol = col;
+    S.financeSortAsc = col !== 'date';
+  }
+  rerenderFinanceEntryList();
+}
+
+function exportFinanceCsv() {
+  const entries = getFilteredFinanceEntries();
+  const periodLabel = S.financeMonth
+    ? `${monthName(S.financeMonth)}-${S.financeYear}`
+    : String(S.financeYear);
+  const headers = ['Date','Type','Category','Partner','Amount (NGN)','Payment Method','Reference','Narration','Recorded By'];
+  const rows = entries.map(e => [
+    e.date || '',
+    e.entryType || '',
+    catLabel(e.category),
+    e.partnerName || '',
+    Number(e.amount || 0).toFixed(2),
+    (e.paymentMethod || '').replace(/_/g, ' '),
+    e.reference || '',
+    e.narration || '',
+    e.recordedBy || '',
+  ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
+  const csv = '﻿' + [headers.join(','), ...rows].join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `kpsc-finance-${periodLabel}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function printFinanceReport() {
+  function escPrint(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  const year  = S.financeYear;
+  const month = S.financeMonth;
+  const entries = S.financeEntries;
+  const periodLabel = month ? `${monthName(month)} ${year}` : `Full Year ${year}`;
+  const generatedDate = new Date().toLocaleDateString('en-NG', { year: 'numeric', month: 'long', day: 'numeric' });
+  const preparedBy = S.user?.name || '';
+  const incomeEntries  = entries.filter(e => e.entryType === 'income').slice().sort((a, b) => (a.date || '') > (b.date || '') ? 1 : -1);
+  const expenseEntries = entries.filter(e => e.entryType === 'expense').slice().sort((a, b) => (a.date || '') > (b.date || '') ? 1 : -1);
+  const incomeTotal  = incomeEntries.reduce((s, e) => s + Number(e.amount || 0), 0);
+  const expenseTotal = expenseEntries.reduce((s, e) => s + Number(e.amount || 0), 0);
+  const net = incomeTotal - expenseTotal;
+  const netColor = net >= 0 ? '#1a5e3a' : '#8b1a1a';
+  const netLabel = net >= 0 ? 'Surplus' : 'Deficit';
+
+  function catSummaryRows(list, total) {
+    const cats = {};
+    list.forEach(e => { const c = e.category || 'other'; cats[c] = (cats[c] || 0) + Number(e.amount || 0); });
+    return Object.entries(cats).sort((a, b) => b[1] - a[1]).map(([cat, amt]) => {
+      const pct = total > 0 ? Math.round((amt / total) * 100) : 0;
+      return `<tr><td>${escPrint(catLabel(cat))}</td><td style="text-align:right;font-weight:600">₦${Math.round(amt).toLocaleString('en-NG')}</td><td style="text-align:right;color:#666">${pct}%</td></tr>`;
+    }).join('');
+  }
+
+  function entryRows(list, showPartner) {
+    if (!list.length) return `<tr><td colspan="${showPartner ? 8 : 7}" style="text-align:center;color:#888;padding:12px">No entries recorded</td></tr>`;
+    return list.map(e => `<tr>
+      <td style="white-space:nowrap">${escPrint(e.date || '')}</td>
+      <td>${escPrint(catLabel(e.category))}</td>
+      ${showPartner ? `<td>${escPrint(e.partnerName || '—')}</td>` : ''}
+      <td>${escPrint((e.paymentMethod || '—').replace(/_/g, ' '))}</td>
+      <td style="font-size:11px">${escPrint(e.reference || '—')}</td>
+      <td style="font-size:11px;color:#555">${escPrint(e.narration || '—')}</td>
+      <td style="text-align:right;font-weight:600;white-space:nowrap">₦${Number(e.amount || 0).toLocaleString('en-NG')}</td>
+      <td style="color:#777;font-size:11px">${escPrint(e.recordedBy || '—')}</td>
+    </tr>`).join('');
+  }
+
+  let prose;
+  if (!entries.length) {
+    prose = `No financial transactions were recorded for <strong>${escPrint(periodLabel)}</strong>.`;
+  } else if (net >= 0) {
+    prose = `During <strong>${escPrint(periodLabel)}</strong>, the committee received a total of <strong style="color:#1a5e3a">₦${Math.round(incomeTotal).toLocaleString('en-NG')}</strong> in income across ${incomeEntries.length} entr${incomeEntries.length === 1 ? 'y' : 'ies'}, and spent <strong style="color:#8b1a1a">₦${Math.round(expenseTotal).toLocaleString('en-NG')}</strong> across ${expenseEntries.length} entr${expenseEntries.length === 1 ? 'y' : 'ies'}. This leaves a <strong style="color:#1a5e3a">surplus of ₦${Math.round(net).toLocaleString('en-NG')}</strong>.`;
+  } else {
+    prose = `During <strong>${escPrint(periodLabel)}</strong>, the committee received a total of <strong style="color:#1a5e3a">₦${Math.round(incomeTotal).toLocaleString('en-NG')}</strong> in income across ${incomeEntries.length} entr${incomeEntries.length === 1 ? 'y' : 'ies'}, and spent <strong style="color:#8b1a1a">₦${Math.round(expenseTotal).toLocaleString('en-NG')}</strong> across ${expenseEntries.length} entr${expenseEntries.length === 1 ? 'y' : 'ies'}. Expenses exceeded income, resulting in a <strong style="color:#8b1a1a">deficit of ₦${Math.round(Math.abs(net)).toLocaleString('en-NG')}</strong>.`;
+  }
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Finance Report — ${escPrint(periodLabel)}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'DM Sans',Arial,sans-serif;font-size:13px;color:#1a1a1a;background:#fff;padding:0 24px 40px}
+  @media print{@page{margin:18mm 15mm;size:A4}body{-webkit-print-color-adjust:exact;print-color-adjust:exact;padding:0}.no-print{display:none}}
+  .report-header{text-align:center;padding:28px 0 18px;border-bottom:2px solid #1e3a5f;margin-bottom:24px}
+  .org-name{font-size:20px;font-weight:700;color:#1e3a5f;letter-spacing:.5px}
+  .report-title{font-size:15px;font-weight:600;color:#333;margin-top:6px}
+  .report-meta{font-size:11px;color:#666;margin-top:6px}
+  .section{margin-bottom:28px}
+  .section-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#1e3a5f;border-bottom:1px solid #ddd;padding-bottom:7px;margin-bottom:14px}
+  .overview-box{background:#f4f6f9;border-radius:8px;padding:14px 18px;margin-bottom:20px;line-height:1.8;font-size:13px}
+  .summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:8px}
+  .tile{border:1px solid #ddd;border-radius:8px;padding:16px;text-align:center}
+  .tile-val{font-size:22px;font-weight:700}
+  .tile-lbl{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{background:#1e3a5f;color:#fff;padding:9px 10px;text-align:left;font-size:11px;font-weight:600;letter-spacing:.4px}
+  td{padding:8px 10px;border-bottom:1px solid #eee;vertical-align:top}
+  tr:nth-child(even) td{background:#f9fafb}
+  tr:last-child td{border-bottom:none}
+  .sig-section{margin-top:36px;page-break-inside:avoid}
+  .sig-grid{display:grid;grid-template-columns:1fr 1fr;gap:36px;margin-top:12px}
+  .sig-line{border-top:1px solid #aaa;margin-top:40px;padding-top:7px;font-size:11px;color:#555}
+  .print-btn{display:block;margin:20px auto 0;background:#1e3a5f;color:#fff;border:none;padding:12px 24px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
+  .print-btn:hover{background:#13284a}
+</style>
+</head>
+<body>
+<button class="print-btn no-print" onclick="window.print()">🖨 Print / Save as PDF</button>
+<div class="report-header">
+  <div class="org-name">Kingdom Parish Stewardship Committee</div>
+  <div class="report-title">Finance Report — ${escPrint(periodLabel)}</div>
+  <div class="report-meta">Generated on ${escPrint(generatedDate)}${preparedBy ? ` &nbsp;·&nbsp; Prepared by: ${escPrint(preparedBy)}` : ''}</div>
+</div>
+
+<div class="section">
+  <div class="section-title">Overview</div>
+  <div class="overview-box">${prose}</div>
+  <div class="summary-grid">
+    <div class="tile"><div class="tile-val" style="color:#1a5e3a">₦${Math.round(incomeTotal).toLocaleString('en-NG')}</div><div class="tile-lbl">Total Received</div></div>
+    <div class="tile"><div class="tile-val" style="color:#8b1a1a">₦${Math.round(expenseTotal).toLocaleString('en-NG')}</div><div class="tile-lbl">Total Spent</div></div>
+    <div class="tile" style="border-color:${netColor}"><div class="tile-val" style="color:${netColor}">₦${Math.round(Math.abs(net)).toLocaleString('en-NG')}</div><div class="tile-lbl">Net ${netLabel}</div></div>
+  </div>
+</div>
+
+${incomeEntries.length ? `
+<div class="section">
+  <div class="section-title">Income Breakdown by Category</div>
+  <table><thead><tr><th>Category</th><th style="text-align:right">Amount</th><th style="text-align:right">% of Income</th></tr></thead>
+  <tbody>${catSummaryRows(incomeEntries, incomeTotal)}<tr style="font-weight:700"><td>Total</td><td style="text-align:right">₦${Math.round(incomeTotal).toLocaleString('en-NG')}</td><td style="text-align:right">100%</td></tr></tbody></table>
+</div>
+<div class="section">
+  <div class="section-title">Money Received — All Entries (${incomeEntries.length})</div>
+  <table><thead><tr><th>Date</th><th>Category</th><th>Partner</th><th>Method</th><th>Reference</th><th>Description</th><th style="text-align:right">Amount</th><th>Recorded By</th></tr></thead>
+  <tbody>${entryRows(incomeEntries, true)}</tbody></table>
+</div>` : ''}
+
+${expenseEntries.length ? `
+<div class="section">
+  <div class="section-title">Expense Breakdown by Category</div>
+  <table><thead><tr><th>Category</th><th style="text-align:right">Amount</th><th style="text-align:right">% of Expenses</th></tr></thead>
+  <tbody>${catSummaryRows(expenseEntries, expenseTotal)}<tr style="font-weight:700"><td>Total</td><td style="text-align:right">₦${Math.round(expenseTotal).toLocaleString('en-NG')}</td><td style="text-align:right">100%</td></tr></tbody></table>
+</div>
+<div class="section">
+  <div class="section-title">Money Spent — All Entries (${expenseEntries.length})</div>
+  <table><thead><tr><th>Date</th><th>Category</th><th>Method</th><th>Reference</th><th>Description</th><th style="text-align:right">Amount</th><th>Recorded By</th></tr></thead>
+  <tbody>${entryRows(expenseEntries, false)}</tbody></table>
+</div>` : ''}
+
+<div class="sig-section">
+  <div class="section-title">Approval &amp; Signatures</div>
+  <div class="sig-grid">
+    <div><div class="sig-line">Financial Secretary</div></div>
+    <div><div class="sig-line">Treasurer</div></div>
+    <div><div class="sig-line">Acting Chairman</div></div>
+    <div><div class="sig-line">Date</div></div>
+  </div>
+</div>
+</body></html>`;
+
+  const win = window.open('', '_blank');
+  if (!win) { showToast('Please allow pop-ups to generate the report.', 'warn'); return; }
+  win.document.write(html);
+  win.document.close();
 }
 
 async function runReconciliation(btn) {
@@ -14813,23 +15237,6 @@ async function extractDocxText(file) {
   return result.value || '';
 }
 
-async function extractPdfText(file) {
-  if (!window.pdfjsLib) {
-    await loadScript('https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js');
-    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-      'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
-  }
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-  const parts = [];
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    parts.push(content.items.map(item => item.str).join(' '));
-  }
-  return parts.join('\n');
-}
-
 function loadScript(src) {
   return new Promise((resolve, reject) => {
     if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
@@ -14904,6 +15311,14 @@ window.Kpsc = {
   mapReceiptOcrToFormFields,
   setFinanceYear,
   setFinanceMonth,
+  setFinanceSearch,
+  setFinanceTypeFilter,
+  setFinanceCatFilter,
+  setFinanceMethodFilter,
+  sortFinanceBy,
+  exportFinanceCsv,
+  printFinanceReport,
+  rerenderFinanceEntryList,
   deleteFinanceEntry,
   editFinanceEntryWithPin,
   deleteFinanceEntryWithPin,

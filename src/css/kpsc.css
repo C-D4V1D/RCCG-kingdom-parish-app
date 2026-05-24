@@ -886,3 +886,62 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-pin-confirm-err{font-size:12px;color:#dc2626;min-height:18px;margin:6px 0 10px;text-align:center;}
 .k-pin-confirm-btns{display:flex;gap:8px;margin-top:4px;}
 .k-pin-confirm-btns .kbtn{flex:1;}
+
+/* ── FINANCE PAGE ENHANCEMENTS ────────────────────────────────────────────── */
+
+/* 5-column stat bar */
+.kf-stat-5{grid-template-columns:repeat(5,1fr);}
+.k-stat-sub{font-size:11px;color:var(--text3);margin-top:2px;}
+@media(max-width:700px){
+  .kf-stat-5{grid-template-columns:repeat(2,1fr);}
+  .kf-stat-5 .k-stat:nth-child(5){grid-column:1/-1;}
+}
+
+/* Controls row */
+.kf-controls-right{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+
+/* Filter bar */
+.kf-filter-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:16px;padding:12px 14px;background:var(--white);border:1px solid var(--border);border-radius:10px;}
+.kf-search-input{flex:1;min-width:160px;margin-bottom:0;}
+@media(max-width:480px){.kf-filter-bar{flex-direction:column;align-items:stretch;}}
+
+/* Type filter chips */
+.kf-type-chip{border:1px solid var(--border);background:var(--surface);color:var(--navy);}
+.kf-type-chip.active{background:var(--navy);color:#fff;border-color:var(--navy);}
+.kf-type-chip:hover:not(.active){background:var(--navy-light);}
+
+/* Desktop table */
+.kf-table-wrap{overflow-x:auto;border-radius:10px;border:1px solid var(--border);margin-bottom:0;}
+.kf-table{width:100%;border-collapse:collapse;font-size:13px;}
+.kf-table th{background:var(--navy-light);color:var(--navy);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;}
+.kf-table th.kf-sortable{cursor:pointer;user-select:none;}
+.kf-table th.kf-sortable:hover{background:#d4e1f2;}
+.kf-table td{padding:10px 12px;border-bottom:1px solid #f1f5f9;color:var(--text2);vertical-align:middle;}
+.kf-table tr:last-child td{border-bottom:none;}
+.kf-table tr:hover td{background:#f8fafc;}
+.kf-td-amount{font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap;}
+.kf-td-actions{white-space:nowrap;}
+.kf-sort-active::after{content:' ▼';font-size:9px;opacity:.7;}
+.kf-sort-active.kf-sort-asc::after{content:' ▲';}
+
+/* Mobile/desktop visibility toggle */
+.kf-cards--mobile{display:none;}
+@media(max-width:599px){
+  .kf-table-wrap{display:none;}
+  .kf-cards--mobile{display:flex;flex-direction:column;gap:10px;}
+}
+
+/* Category breakdown bars */
+.kf-breakdown-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--navy);margin:0 0 10px;padding-bottom:6px;border-bottom:1px solid var(--border);}
+.kf-cat-row{display:grid;grid-template-columns:160px 1fr 110px 40px;align-items:center;gap:8px;padding:5px 0;}
+.kf-cat-label{font-size:13px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.kf-cat-bar-wrap{height:8px;background:#e8eef7;border-radius:4px;overflow:hidden;}
+.kf-cat-bar{height:8px;border-radius:4px;}
+.kf-cat-bar--income{background:var(--green);}
+.kf-cat-bar--expense{background:var(--red);}
+.kf-cat-amount{font-size:12px;font-weight:600;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+.kf-cat-pct{font-size:11px;color:var(--text3);text-align:right;}
+@media(max-width:480px){
+  .kf-cat-row{grid-template-columns:1fr 80px;}
+  .kf-cat-bar-wrap,.kf-cat-pct{display:none;}
+}
