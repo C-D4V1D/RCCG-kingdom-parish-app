@@ -118,6 +118,9 @@ async function getTermiiSettings(DB) {
     'kpsc_sms_text_milestone6', 'kpsc_sms_text_milestone12',
     'kpsc_sms_text_premeeting', 'kpsc_sms_text_deadline',
     'kpsc_sms_text_reminder',
+    // Rotating template variants (A/B/C)
+    'kpsc_sms_text_payment_a', 'kpsc_sms_text_payment_b', 'kpsc_sms_text_payment_c',
+    'kpsc_sms_text_reminder_a', 'kpsc_sms_text_reminder_b', 'kpsc_sms_text_reminder_c',
   ];
   const placeholders = keys.map(() => '?').join(',');
   const { results } = await DB.prepare(
@@ -155,6 +158,13 @@ async function getTermiiSettings(DB) {
     premeetingText:  String(map.kpsc_sms_text_premeeting  || '').trim() || '📅 Reminder: KPSC Committee Meeting "{{meetingTitle}}" is scheduled for tomorrow ({{meetingDate}}{{meetingTime}}). {{venue}}Please come prepared. — RCCG Kingdom Parish Secretary',
     deadlineText:    String(map.kpsc_sms_text_deadline     || '').trim() || '⏰ Reminder: Your action item "{{task}}" is due in 3 days ({{dueDate}}). Please ensure timely completion. — RCCG Kingdom Parish KPSC',
     reminderText:    String(map.kpsc_sms_text_reminder    || '').trim() || 'Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God\'s work and your own blessing. "...he who sows generously will also reap generously." (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family',
+    // Rotating template variants — fall back to base template if not set
+    paymentTextA:    String(map.kpsc_sms_text_payment_a   || '').trim() || String(map.kpsc_sms_text_payment || '').trim() || 'Dear {{name}}, thank you for your {{month}} partnership payment{{amtText}}. Your seed is a blessing to the Kingdom. God will reward you abundantly! — RCCG Kingdom Parish',
+    paymentTextB:    String(map.kpsc_sms_text_payment_b   || '').trim() || String(map.kpsc_sms_text_payment || '').trim() || 'Dear {{name}}, we received your {{month}} partnership payment{{amtText}}. What a faithful heart you have! The Lord sees every seed you sow for His Kingdom. God bless you richly! — RCCG Kingdom Parish',
+    paymentTextC:    String(map.kpsc_sms_text_payment_c   || '').trim() || String(map.kpsc_sms_text_payment || '').trim() || 'Praise God, {{name}}! Your {{month}} partnership gift{{amtText}} has been received. "Bring the whole tithe into the storehouse..." (Mal 3:10). We are grateful for your faithfulness. — RCCG Kingdom Parish',
+    reminderTextA:   String(map.kpsc_sms_text_reminder_a  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. When you are able, please do honour your pledge. God bless you! — RCCG Kingdom Parish',
+    reminderTextB:   String(map.kpsc_sms_text_reminder_b  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Dear {{name}}, we want to gently remind you that your {{month}} partnership pledge{{unpaidMonths}} is still outstanding. Your consistent support is what keeps God\'s work moving forward. We appreciate you! — RCCG Kingdom Parish',
+    reminderTextC:   String(map.kpsc_sms_text_reminder_c  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Hello {{name}} 🙏 A warm reminder that your {{month}} partnership pledge{{unpaidMonths}} remains outstanding. "He who is faithful in a little is also faithful in much." (Luke 16:10). We trust in your faithfulness. God bless! — RCCG Kingdom Parish',
   };
 }
 
@@ -790,6 +800,36 @@ export async function onRequest(context) {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
       return await aiGenerateNewMonthSms(DB, env);
+    }
+
+    // ── New Month SMS pending draft (auto-generated on 3rd of month) ──
+    if (route === 'kpsc-newmonth-draft') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      if (method === 'GET') {
+        const upsert = (key, val) =>
+          DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind(key, val).run();
+        const keys = ['kpsc_newmonth_sms_pending_draft','kpsc_newmonth_sms_draft_date','kpsc_newmonth_sms_draft_month','kpsc_newmonth_sms_draft_year'];
+        const { results: rows } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN (${keys.map(()=>'?').join(',')})`).bind(...keys).all();
+        const m = {};
+        for (const r of (rows||[])) m[r.key] = r.value;
+        return ok({
+          draft: String(m.kpsc_newmonth_sms_pending_draft || '').trim(),
+          draftDate: String(m.kpsc_newmonth_sms_draft_date || ''),
+          draftMonth: parseInt(m.kpsc_newmonth_sms_draft_month || '0', 10),
+          draftYear: parseInt(m.kpsc_newmonth_sms_draft_year || '0', 10),
+        });
+      }
+      if (method === 'POST') {
+        const text = String(body?.draft || '').trim();
+        if (!text) return err('draft text is required', 400);
+        await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind('kpsc_newmonth_sms_pending_draft', text).run();
+        return ok({ ok: true });
+      }
+      if (method === 'DELETE') {
+        await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind('kpsc_newmonth_sms_pending_draft', '').run();
+        return ok({ ok: true });
+      }
     }
 
     // ── Agenda Builder: /api/kpsc-whatsapp-draft ───────────────
@@ -2590,7 +2630,13 @@ async function createKpscPartner(DB, data) {
           .replace(/\{\{name\}\}/g, fullName)
           .replace(/\{\{partnerType\}\}/g, typeLabel);
         const wsid = t.partnerSenderId || t.senderId;
-        await sendTermiiSms(t.apiKey, wsid, phone, welcomeMsg);
+        const wsResult = await sendTermiiSms(t.apiKey, wsid, phone, welcomeMsg);
+        if (wsResult.ok) {
+          const wsNow = new Date();
+          await DB.prepare(
+            `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+          ).bind(newId('krm'), id, 'sms', welcomeMsg, 'sent', 'pending', wsResult.messageId || '', 'welcome', wsNow.getUTCFullYear(), wsNow.getUTCMonth() + 1, 'auto', wsNow.toISOString()).run().catch(() => {});
+        }
       }
     } catch { /* swallow — SMS failure must not break partner creation */ }
   }
@@ -2750,12 +2796,24 @@ async function upsertKpscPartnerPayment(DB, data) {
           const monthName = MONTH_NAMES[(month - 1)] || '';
           const amount = Number(data?.amount || 0);
           const amtText = amount > 0 ? ` of ₦${amount.toLocaleString('en-NG')}` : '';
-          const msg = t.paymentText
+          // Rotating template: pick A/B/C based on (paid payment count - 1) % 3
+          const payCount = await DB.prepare(
+            `SELECT COUNT(*) AS cnt FROM kpsc_partner_payments WHERE partner_id=? AND paid=1 AND COALESCE(deleted_at,'')=''`
+          ).bind(partnerId).first().catch(() => ({ cnt: 0 }));
+          const tidx = ((Number(payCount?.cnt || 0) - 1) % 3 + 3) % 3;
+          const ptTemplates = [t.paymentTextA, t.paymentTextB, t.paymentTextC];
+          const msg = (ptTemplates[tidx] || t.paymentText)
             .replace(/\{\{name\}\}/g, partner.full_name)
             .replace(/\{\{month\}\}/g, monthName)
             .replace(/\{\{amtText\}\}/g, amtText);
           const sid = t.partnerSenderId || t.senderId;
-          await sendTermiiSms(t.apiKey, sid, partner.phone, msg);
+          const ptResult = await sendTermiiSms(t.apiKey, sid, partner.phone, msg);
+          if (ptResult.ok) {
+            const ptNow = new Date();
+            await DB.prepare(
+              `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+            ).bind(newId('krm'), partnerId, 'sms', msg, 'sent', 'pending', ptResult.messageId || '', 'payment', year, month, 'auto', ptNow.toISOString()).run().catch(() => {});
+          }
         }
       }
 
@@ -2785,7 +2843,13 @@ async function upsertKpscPartnerPayment(DB, data) {
           }
           if (milestoneMsg) {
             const sid = t.partnerSenderId || t.senderId;
-            await sendTermiiSms(t.apiKey, sid, partner.phone, milestoneMsg);
+            const msResult = await sendTermiiSms(t.apiKey, sid, partner.phone, milestoneMsg);
+            if (msResult.ok) {
+              const msNow = new Date();
+              await DB.prepare(
+                `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+              ).bind(newId('krm'), partnerId, 'sms', milestoneMsg, 'sent', 'pending', msResult.messageId || '', 'milestone', year, month, 'auto', msNow.toISOString()).run().catch(() => {});
+            }
           }
         }
       }
@@ -2891,14 +2955,26 @@ async function sendPartnerBatchPaymentSms(DB, data) {
       amtText = amount > 0 ? ` totalling N${total.toLocaleString('en-NG')}` : '';
     }
 
-    const msg = t.paymentText
+    // Rotating template: pick A/B/C based on (paid payment count - 1) % 3
+    const bpPayCount = await DB.prepare(
+      `SELECT COUNT(*) AS cnt FROM kpsc_partner_payments WHERE partner_id=? AND paid=1 AND COALESCE(deleted_at,'')=''`
+    ).bind(partnerId).first().catch(() => ({ cnt: 0 }));
+    const bpTidx = ((Number(bpPayCount?.cnt || 0) - 1) % 3 + 3) % 3;
+    const bpTemplates = [t.paymentTextA, t.paymentTextB, t.paymentTextC];
+    const msg = (bpTemplates[bpTidx] || t.paymentText)
       .replace(/\{\{name\}\}/g, partner.full_name)
       .replace(/\{\{month\}\}/g, monthLabel)
       .replace(/\{\{amtText\}\}/g, amtText);
 
     const sid = t.partnerSenderId || t.senderId;
-    await sendTermiiSms(t.apiKey, sid, partner.phone, msg);
-    return ok({ sent: true });
+    const bpResult = await sendTermiiSms(t.apiKey, sid, partner.phone, msg);
+    if (bpResult.ok) {
+      const bpNow = new Date();
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), partnerId, 'sms', msg, 'sent', 'pending', bpResult.messageId || '', 'payment', year, sortedMonths[sortedMonths.length - 1], 'auto', bpNow.toISOString()).run().catch(() => {});
+    }
+    return ok({ sent: bpResult.ok });
   } catch (e) {
     return ok({ sent: false, reason: String(e?.message || e) });
   }
@@ -3116,9 +3192,9 @@ async function createKpscReminder(DB, data) {
   for (const partnerId of cleaned) {
     const id = newId('krm');
     await DB.prepare(`
-      INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,year,month,sent_by,sent_at)
-      VALUES (?,?,?,?,?,?,?,?,?)
-    `).bind(id, partnerId, channel, message, 'sent', year, month, sentBy, new Date().toISOString()).run();
+      INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(id, partnerId, channel, message, 'sent', '', '', 'reminder', year, month, sentBy, new Date().toISOString()).run();
     out.push({ id, partnerId, channel, status: 'sent', year, month });
   }
   return ok({ sent: out.length, reminders: out });
@@ -6399,18 +6475,35 @@ async function runMonthlySms(DB, env, request) {
   const year = now.getUTCFullYear();
 
   const { results: partners } = await DB.prepare(
-    `SELECT full_name, phone FROM kpsc_partners WHERE COALESCE(deleted_at,'')='' AND status='active' AND phone != '' AND COALESCE(opted_out,0)=0 AND COALESCE(dnd_flagged,0)=0`
+    `SELECT id, full_name, phone FROM kpsc_partners WHERE COALESCE(deleted_at,'')='' AND status='active' AND phone != '' AND COALESCE(opted_out,0)=0 AND COALESCE(dnd_flagged,0)=0`
   ).all();
 
+  // Use pending auto-draft if available, otherwise fall back to saved template
+  const draftRow = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_newmonth_sms_pending_draft'`).first();
+  const newmonthText = (draftRow?.value && draftRow.value.trim()) ? draftRow.value.trim() : t.newmonthText;
+
+  const nmMonth = now.getUTCMonth() + 1;
   let sent = 0;
   let failed = 0;
   for (const p of (partners || [])) {
-    const msg = t.newmonthText
+    const msg = newmonthText
       .replace(/\{\{name\}\}/g, p.full_name)
       .replace(/\{\{month\}\}/g, `${monthName} ${year}`);
     const nmsid = t.partnerSenderId || t.senderId;
     const result = await sendTermiiSms(t.apiKey, nmsid, p.phone, msg);
-    if (result.ok) sent++; else failed++;
+    if (result.ok) {
+      sent++;
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), p.id, 'sms', msg, 'sent', 'pending', result.messageId || '', 'new_month', year, nmMonth, 'cron', now.toISOString()).run().catch(() => {});
+    } else {
+      failed++;
+    }
+  }
+  // Clear draft after successful send
+  if (draftRow?.value) {
+    await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
+      .bind('kpsc_newmonth_sms_pending_draft', '').run().catch(() => {});
   }
   return ok({ ok: true, sent, failed, total: (partners || []).length });
 }
@@ -6535,7 +6628,15 @@ async function runReminderSms(DB, env, request) {
       ? ` (outstanding months: ${unpaidMonthsList.join(', ')})`
       : '';
 
-    let msg = template
+    // Rotating reminder template: pick A/B/C based on how many reminders sent to this partner
+    const remCount = await DB.prepare(
+      `SELECT COUNT(*) AS cnt FROM kpsc_reminders WHERE partner_id=? AND reminder_type='reminder'`
+    ).bind(p.id).first().catch(() => ({ cnt: 0 }));
+    const ridx = (Number(remCount?.cnt || 0)) % 3;
+    const rTemplates = [t.reminderTextA, t.reminderTextB, t.reminderTextC];
+    const rTemplate = rTemplates[ridx] || template;
+
+    let msg = rTemplate
       .replace(/\{\{name\}\}/g, p.full_name)
       .replace(/\{\{month\}\}/g, monthName)
       .replace(/\{\{unpaidMonths\}\}/g, unpaidMonthsStr);
@@ -7792,6 +7893,118 @@ async function runScheduledSms(DB, env, request) {
     processed++;
   }
   return ok({ ok: true, processed });
+}
+
+// ── AUTO-DRAFT: HAPPY NEW MONTH SMS (runs on 3rd of each month via cron) ──────
+async function autoGenerateNewMonthDraft(DB, env) {
+  try {
+    const now = new Date();
+    // Determine next month
+    const rawNext = now.getUTCMonth() + 2; // +1 for 0-index, +1 for next month
+    const nextYear = rawNext > 12 ? now.getUTCFullYear() + 1 : now.getUTCFullYear();
+    const nextMonth = rawNext > 12 ? 1 : rawNext;
+    const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const monthLabel = MONTH_NAMES[nextMonth - 1];
+
+    // Load DeepSeek key
+    const { results: dsRows } = await DB.prepare(
+      `SELECT key, value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
+    ).all();
+    const dsMap = {};
+    for (const r of (dsRows || [])) dsMap[r.key] = r.value;
+    const deepseekKey = String(dsMap.ai_deepseek_key || '').trim();
+    const deepseekModel = String(dsMap.ai_deepseek_model || 'deepseek-chat').trim();
+    if (!deepseekKey) return;
+
+    const prompt = `Write a warm, faith-filled Happy New Month SMS message for RCCG Kingdom Parish church partners for the month of ${monthLabel} ${nextYear}.
+Requirements:
+- Start with "Happy New Month!"
+- Address the partner by name using the placeholder {{name}}
+- Include a short encouraging Bible verse or faith statement
+- Warm, personal, blessing-focused tone
+- CRITICAL: Total message must be between 306 and 459 characters (2-3 GSM-7 SMS pages at 153 chars each)
+- Use ONLY standard GSM-7 characters: plain letters, numbers, common punctuation (., , ! ? - ' : ;). NO emojis, NO special Unicode.
+- End with a blessing or prayer
+- Output only the SMS text, no preamble or explanation`;
+
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({
+        model: deepseekModel,
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 220,
+        temperature: 0.8,
+      }),
+    });
+    if (!resp.ok) return;
+    const aiData = await resp.json();
+    const draftText = aiData?.choices?.[0]?.message?.content?.trim() || '';
+    if (!draftText) return;
+
+    const upsert = (key, val) =>
+      DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
+        .bind(key, val).run();
+    await upsert('kpsc_newmonth_sms_pending_draft', draftText);
+    await upsert('kpsc_newmonth_sms_draft_date', now.toISOString());
+    await upsert('kpsc_newmonth_sms_draft_month', String(nextMonth));
+    await upsert('kpsc_newmonth_sms_draft_year', String(nextYear));
+  } catch { /* swallow — draft failure must not surface */ }
+}
+
+// ── CLOUDFLARE SCHEDULED HANDLER (cron triggers) ──────────────────────────────
+export async function scheduled(event, env, ctx) {
+  const DB = env.DB;
+  if (!DB) return;
+  const now = new Date();
+  const day = now.getUTCDate();
+  if (day === 3) {
+    ctx.waitUntil(autoGenerateNewMonthDraft(DB, env));
+  }
+  if (day === 1) {
+    // Build a minimal fake request for runMonthlySms (it validates cron secret on HTTP calls only)
+    ctx.waitUntil(runMonthlySmsInternal(DB, now));
+  }
+}
+
+// Internal version of runMonthlySms that uses a pending draft if available
+async function runMonthlySmsInternal(DB, now) {
+  try {
+    const t = await getTermiiSettings(DB);
+    if (!t.apiKey || !t.newMonthSms) return;
+    if (!isWithinSendWindow(t)) return;
+
+    const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const monthName = MONTH_NAMES[now.getUTCMonth()];
+    const year = now.getUTCFullYear();
+    const nmMonth = now.getUTCMonth() + 1;
+
+    // Use pending auto-draft if available, otherwise fall back to saved template
+    const draftRow = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_newmonth_sms_pending_draft'`).first();
+    const newmonthText = (draftRow?.value && draftRow.value.trim()) ? draftRow.value.trim() : t.newmonthText;
+
+    const { results: partners } = await DB.prepare(
+      `SELECT id, full_name, phone FROM kpsc_partners WHERE COALESCE(deleted_at,'')='' AND status='active' AND phone != '' AND COALESCE(opted_out,0)=0 AND COALESCE(dnd_flagged,0)=0`
+    ).all();
+
+    for (const p of (partners || [])) {
+      const msg = newmonthText
+        .replace(/\{\{name\}\}/g, p.full_name)
+        .replace(/\{\{month\}\}/g, `${monthName} ${year}`);
+      const nmsid = t.partnerSenderId || t.senderId;
+      const result = await sendTermiiSms(t.apiKey, nmsid, p.phone, msg);
+      if (result.ok) {
+        await DB.prepare(
+          `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+        ).bind(newId('krm'), p.id, 'sms', msg, 'sent', 'pending', result.messageId || '', 'new_month', year, nmMonth, 'cron', now.toISOString()).run().catch(() => {});
+      }
+    }
+    // Clear draft after send
+    if (draftRow?.value) {
+      await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
+        .bind('kpsc_newmonth_sms_pending_draft', '').run();
+    }
+  } catch { /* swallow */ }
 }
 
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────

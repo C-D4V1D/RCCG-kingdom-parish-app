@@ -3022,6 +3022,25 @@ function dashCardMeetingFrequencyAlert(ctx) {
     </div>`;
 }
 
+function newMonthDraftBanner() {
+  const d = S.newmonthDraft;
+  if (!d?.draft) return '';
+  const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const monthLabel = d.draftMonth ? (MONTH_NAMES[d.draftMonth - 1] || '') : '';
+  const yearLabel  = d.draftYear || '';
+  return `
+    <div id="nm-draft-banner" class="k-meeting-card" style="background:linear-gradient(135deg,#e8f5e9,#f1f8e9);border-left:4px solid #4caf50;margin-bottom:12px">
+      <div class="k-mc-top">
+        <div style="flex:1">
+          <div class="k-mc-title" style="color:#2e7d32">📝 Happy New Month SMS Drafted — ${monthLabel} ${yearLabel}</div>
+          <div style="font-size:12px;color:#555;margin:4px 0">An AI draft has been prepared for the 1st. Review and edit before it auto-sends.</div>
+        </div>
+        <button class="kbtn kbtn-sm" style="margin-left:8px" onclick="Kpsc.showNewMonthDraftModal()" title="Review draft">Review</button>
+        <button class="kbtn kbtn-sm kbtn-ghost" style="margin-left:4px" onclick="Kpsc.dismissNewMonthDraft()" title="Dismiss">✕</button>
+      </div>
+    </div>`;
+}
+
 function dashboardCardsForRole(role, ctx) {
   const r = String(role || 'committee_viewer').toLowerCase();
 
@@ -3047,6 +3066,7 @@ function dashboardCardsForRole(role, ctx) {
 
   if (r === 'acting_chairman') {
     return `
+      ${newMonthDraftBanner()}
       ${dashCardPreBrief(ctx)}
       ${dashCardMeetingFrequencyAlert(ctx)}
       ${dashCardUpcomingMeeting(ctx)}
@@ -3143,6 +3163,7 @@ function dashboardCardsForRole(role, ctx) {
 
   if (r === 'financial_secretary' || r === 'treasurer') {
     return `
+      ${newMonthDraftBanner()}
       ${dashCardUpcomingMeeting(ctx)}
       <div class="k-section-hdr" style="margin-top:4px"><h2>Finance At a Glance</h2></div>
       <div class="k-meeting-list">
@@ -3197,8 +3218,9 @@ function dashboardCardsForRole(role, ctx) {
       </div>` : ''}`;
   }
 
-  // committee_viewer (default)
+  // committee_viewer / it_admin (default)
   return `
+    ${newMonthDraftBanner()}
     ${dashCardUpcomingMeeting(ctx)}
     <div class="k-section-hdr" style="margin-top:4px"><h2>Committee Overview</h2></div>
     <div class="k-meeting-list">
@@ -3270,6 +3292,7 @@ async function _fetchDashboardData(year, month, isChairOrSecretary) {
     apiGet('kpsc-partners'),
     apiGet(`kpsc-partner-payments?year=${year}`),
     apiGet(`kpsc-sms-analytics?year=${year}&month=${month}`).catch(() => null),
+    apiGet('kpsc-newmonth-draft').catch(() => null),
   ];
   // B5: only load followups for chairman/secretary
   if (isChairOrSecretary) loadPromises.push(apiGet('kpsc-followups?status=pending'));
@@ -3277,7 +3300,7 @@ async function _fetchDashboardData(year, month, isChairOrSecretary) {
   return results;
 }
 
-function _applyDashboardData([meetingsRes, settingsRes, dashboardRes, projectsRes, financeRes, partnersRes, paymentsRes, smsAnalyticsRes, followupsRes]) {
+function _applyDashboardData([meetingsRes, settingsRes, dashboardRes, projectsRes, financeRes, partnersRes, paymentsRes, smsAnalyticsRes, newmonthDraftRes, followupsRes]) {
   if (meetingsRes?.error) throw new Error(meetingsRes.error);
   S.meetings        = Array.isArray(meetingsRes)            ? meetingsRes            : [];
   S.members         = Array.isArray(settingsRes?.kpsc_members) ? settingsRes.kpsc_members : [];
@@ -3290,6 +3313,7 @@ function _applyDashboardData([meetingsRes, settingsRes, dashboardRes, projectsRe
   S.partnerPayments = Array.isArray(paymentsRes)            ? paymentsRes            : [];
   S.followups       = Array.isArray(followupsRes)           ? followupsRes           : [];
   S.smsAnalytics    = smsAnalyticsRes && !smsAnalyticsRes.error ? smsAnalyticsRes : null;
+  S.newmonthDraft   = newmonthDraftRes && !newmonthDraftRes.error ? newmonthDraftRes : null;
 
   // Load distributed-meeting-ids from settings (stored as JSON string)
   const rawDistributed = Array.isArray(settingsRes?.kpsc_distributed_meeting_ids)
@@ -5971,8 +5995,10 @@ function updateSmsCounter(textarea) {
 }
 
 function initSmsCounters() {
-  ['ks-sms-welcome','ks-sms-payment','ks-sms-newmonth','ks-sms-anniversary',
-   'ks-sms-milestone6','ks-sms-milestone12','ks-sms-premeeting','ks-sms-deadline','ks-sms-reminder']
+  ['ks-sms-welcome','ks-sms-newmonth','ks-sms-anniversary',
+   'ks-sms-milestone6','ks-sms-milestone12','ks-sms-premeeting','ks-sms-deadline',
+   'ks-sms-payment-a','ks-sms-payment-b','ks-sms-payment-c',
+   'ks-sms-reminder-a','ks-sms-reminder-b','ks-sms-reminder-c']
     .forEach(id => { const el = document.getElementById(id); if (el) updateSmsCounter(el); });
 }
 
@@ -9628,6 +9654,9 @@ async function renderSettings(main) {
   };
   const smsWelcomeText    = res?.kpsc_sms_text_welcome     || SMS_DEFAULTS.welcome;
   const smsPaymentText    = res?.kpsc_sms_text_payment     || SMS_DEFAULTS.payment;
+  const smsPaymentTextA   = res?.kpsc_sms_text_payment_a   || smsPaymentText;
+  const smsPaymentTextB   = res?.kpsc_sms_text_payment_b   || smsPaymentText;
+  const smsPaymentTextC   = res?.kpsc_sms_text_payment_c   || smsPaymentText;
   const smsNewmonthText   = res?.kpsc_sms_text_newmonth    || SMS_DEFAULTS.newmonth;
   const smsAnnivText      = res?.kpsc_sms_text_anniversary || SMS_DEFAULTS.anniversary;
   const smsMilestone6Text = res?.kpsc_sms_text_milestone6  || SMS_DEFAULTS.milestone6;
@@ -9635,6 +9664,9 @@ async function renderSettings(main) {
   const smsPremeetingText = res?.kpsc_sms_text_premeeting  || SMS_DEFAULTS.premeeting;
   const smsDeadlineText   = res?.kpsc_sms_text_deadline    || SMS_DEFAULTS.deadline;
   const smsReminderText   = res?.kpsc_sms_text_reminder    || SMS_DEFAULTS.reminder;
+  const smsReminderTextA  = res?.kpsc_sms_text_reminder_a  || smsReminderText;
+  const smsReminderTextB  = res?.kpsc_sms_text_reminder_b  || smsReminderText;
+  const smsReminderTextC  = res?.kpsc_sms_text_reminder_c  || smsReminderText;
   const cadenceOptions = [
     { value: 'none',              label: 'No fixed cadence' },
     { value: 'weekly:sun',        label: 'Weekly on Sunday' },
@@ -9948,11 +9980,18 @@ async function renderSettings(main) {
           <div class="k-sms-counter" id="sms-ctr-ks-sms-welcome"></div>
         </div>
         <div class="k-form-group">
-          <label class="k-label">🙏 Thank-you SMS (partner payment)</label>
-          <textarea id="ks-sms-payment" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="Dear {{name}}, we have received your {{month}} partnership pledge{{amtText}} and we are so grateful! 🙏 Your faithfulness to God's work here at RCCG Kingdom Parish is a blessing to us all. May the Lord be your reward — pressed down, shaken together, and running over. Your seed is sown in good ground. God bless you! — RCCG Kingdom Parish">${esc(smsPaymentText)}</textarea>
-          <div class="k-sms-counter" id="sms-ctr-ks-sms-payment"></div>
-          <p class="k-hint" style="margin-top:4px">Variables: <code>{{name}}</code> · <code>{{month}}</code> · <code>{{amtText}}</code><br>
-          When multiple months are paid at once, <code>{{month}}</code> automatically becomes a range e.g. <em>"January–April 2026 (4 months)"</em> and <code>{{amtText}}</code> shows the total e.g. <em>" totalling ₦20,000"</em> — one SMS is sent for the whole batch.</p>
+          <label class="k-label">🙏 Thank-you SMS (partner payment) — 3 Rotating Templates</label>
+          <p class="k-hint" style="margin-bottom:8px">These 3 templates rotate per partner: Template A on their 1st payment, B on 2nd, C on 3rd, then back to A on 4th, and so on. Variables: <code>{{name}}</code> · <code>{{month}}</code> · <code>{{amtText}}</code></p>
+          <label class="k-label" style="font-size:12px;color:var(--text3)">Template A (1st, 4th, 7th… payment)</label>
+          <textarea id="ks-sms-payment-a" class="k-input k-textarea" rows="3" oninput="Kpsc.updateSmsCounter(this)">${esc(smsPaymentTextA)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-payment-a"></div>
+          <label class="k-label" style="font-size:12px;color:var(--text3);margin-top:8px">Template B (2nd, 5th, 8th… payment)</label>
+          <textarea id="ks-sms-payment-b" class="k-input k-textarea" rows="3" oninput="Kpsc.updateSmsCounter(this)">${esc(smsPaymentTextB)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-payment-b"></div>
+          <label class="k-label" style="font-size:12px;color:var(--text3);margin-top:8px">Template C (3rd, 6th, 9th… payment)</label>
+          <textarea id="ks-sms-payment-c" class="k-input k-textarea" rows="3" oninput="Kpsc.updateSmsCounter(this)">${esc(smsPaymentTextC)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-payment-c"></div>
+          <p class="k-hint" style="margin-top:4px">When multiple months are paid at once, <code>{{month}}</code> becomes a range e.g. <em>"Jan–Apr 2026 (4 months)"</em> and <code>{{amtText}}</code> shows the total.</p>
         </div>
         <div class="k-form-group">
           <label class="k-label">🎉 Happy New Month SMS (1st of month)</label>
@@ -9989,10 +10028,17 @@ async function renderSettings(main) {
           <div class="k-sms-counter" id="sms-ctr-ks-sms-deadline"></div>
         </div>
         <div class="k-form-group">
-          <label class="k-label">💰 Payment Reminder SMS</label>
-          <textarea id="ks-sms-reminder" class="k-input k-textarea" rows="5" oninput="Kpsc.updateSmsCounter(this)" placeholder="Dear {{name}} 🙏 We hope this message finds you well and in God's peace. This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God's work and your own blessing. '...he who sows generously will also reap generously.' (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family">${esc(smsReminderText)}</textarea>
-          <div class="k-sms-counter" id="sms-ctr-ks-sms-reminder"></div>
-          <p class="k-hint">Use <code>{{unpaidMonths}}</code> to list which specific months are outstanding (e.g. "January, February"). Leave it out for a simpler message.</p>
+          <label class="k-label">💰 Payment Reminder SMS — 3 Rotating Templates</label>
+          <p class="k-hint" style="margin-bottom:8px">These 3 templates rotate per partner based on how many reminders they have previously received. Variables: <code>{{name}}</code> · <code>{{month}}</code> · <code>{{unpaidMonths}}</code> (list of outstanding months)</p>
+          <label class="k-label" style="font-size:12px;color:var(--text3)">Template A (1st, 4th, 7th… reminder)</label>
+          <textarea id="ks-sms-reminder-a" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)">${esc(smsReminderTextA)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-reminder-a"></div>
+          <label class="k-label" style="font-size:12px;color:var(--text3);margin-top:8px">Template B (2nd, 5th, 8th… reminder)</label>
+          <textarea id="ks-sms-reminder-b" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)">${esc(smsReminderTextB)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-reminder-b"></div>
+          <label class="k-label" style="font-size:12px;color:var(--text3);margin-top:8px">Template C (3rd, 6th, 9th… reminder)</label>
+          <textarea id="ks-sms-reminder-c" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)">${esc(smsReminderTextC)}</textarea>
+          <div class="k-sms-counter" id="sms-ctr-ks-sms-reminder-c"></div>
         </div>
         <div id="ks-sms-texts-save-msg" class="k-settings-msg" style="display:none"></div>
         <button class="kbtn kbtn-primary" onclick="Kpsc.saveSystemSmsTemplates()">Save SMS Message Templates</button>
@@ -10431,14 +10477,20 @@ async function saveSystemSmsTemplates() {
   const msg = document.getElementById('ks-sms-texts-save-msg');
   const data = {
     kpsc_sms_text_welcome:     document.getElementById('ks-sms-welcome')?.value.trim()     || '',
-    kpsc_sms_text_payment:     document.getElementById('ks-sms-payment')?.value.trim()     || '',
     kpsc_sms_text_newmonth:    document.getElementById('ks-sms-newmonth')?.value.trim()    || '',
     kpsc_sms_text_anniversary: document.getElementById('ks-sms-anniversary')?.value.trim() || '',
     kpsc_sms_text_milestone6:  document.getElementById('ks-sms-milestone6')?.value.trim()  || '',
     kpsc_sms_text_milestone12: document.getElementById('ks-sms-milestone12')?.value.trim() || '',
     kpsc_sms_text_premeeting:  document.getElementById('ks-sms-premeeting')?.value.trim()  || '',
     kpsc_sms_text_deadline:    document.getElementById('ks-sms-deadline')?.value.trim()    || '',
-    kpsc_sms_text_reminder:    document.getElementById('ks-sms-reminder')?.value.trim()    || '',
+    // Rotating payment thank-you templates (A/B/C)
+    kpsc_sms_text_payment_a:   document.getElementById('ks-sms-payment-a')?.value.trim()   || '',
+    kpsc_sms_text_payment_b:   document.getElementById('ks-sms-payment-b')?.value.trim()   || '',
+    kpsc_sms_text_payment_c:   document.getElementById('ks-sms-payment-c')?.value.trim()   || '',
+    // Rotating reminder templates (A/B/C)
+    kpsc_sms_text_reminder_a:  document.getElementById('ks-sms-reminder-a')?.value.trim()  || '',
+    kpsc_sms_text_reminder_b:  document.getElementById('ks-sms-reminder-b')?.value.trim()  || '',
+    kpsc_sms_text_reminder_c:  document.getElementById('ks-sms-reminder-c')?.value.trim()  || '',
   };
   const res = await apiPost('settings', data);
   if (msg) {
@@ -10667,6 +10719,7 @@ const PERM_PAGES = [
   { key: 'reports',          label: 'Reports' },
   { key: 'members',          label: 'Members' },
   { key: 'settings',         label: 'Settings' },
+  { key: 'inbox',            label: 'Inbox' },
 ];
 
 function isPermForced(roleKey, pageKey) {
@@ -14092,6 +14145,71 @@ async function getOpenAiKey() {
   } catch { return ''; }
 }
 
+function showNewMonthDraftModal() {
+  const d = S.newmonthDraft;
+  if (!d) return;
+  document.getElementById('nm-draft-modal')?.remove();
+  const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const monthLabel = d.draftMonth ? (MONTH_NAMES[d.draftMonth - 1] || '') : '';
+  const yearLabel  = d.draftYear || '';
+  const charCount = (d.draft || '').length;
+  const pages = charCount <= 160 ? 1 : Math.ceil(charCount / 153);
+
+  const modal = document.createElement('div');
+  modal.id = 'nm-draft-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:520px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">Happy New Month SMS — ${monthLabel} ${yearLabel}</span>
+        <button class="kbtn kbtn-ghost kbtn-sm" onclick="Kpsc.dismissNewMonthDraft()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p class="k-hint" style="margin-bottom:12px">AI-drafted on the 3rd. This will auto-send on the 1st of ${monthLabel}. Edit if needed, then save.</p>
+        <textarea id="nm-draft-text" class="k-textarea" style="width:100%;min-height:120px;font-size:14px;padding:10px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;resize:vertical">${esc(d.draft || '')}</textarea>
+        <div id="nm-draft-charcount" style="font-size:12px;color:var(--text3);margin:4px 0 0">
+          ${charCount} chars — ${pages} SMS page${pages !== 1 ? 's' : ''} (GSM-7)
+        </div>
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-primary" onclick="Kpsc.saveNewMonthDraft()">Save Changes</button>
+        <button class="kbtn kbtn-ghost" onclick="Kpsc.dismissNewMonthDraft()">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  const ta = document.getElementById('nm-draft-text');
+  const ccDiv = document.getElementById('nm-draft-charcount');
+  if (ta && ccDiv) {
+    ta.addEventListener('input', () => {
+      const n = ta.value.length;
+      const pg = n <= 160 ? 1 : Math.ceil(n / 153);
+      ccDiv.textContent = `${n} chars — ${pg} SMS page${pg !== 1 ? 's' : ''} (GSM-7)`;
+    });
+  }
+}
+
+async function saveNewMonthDraft() {
+  const ta = document.getElementById('nm-draft-text');
+  if (!ta) return;
+  const text = ta.value.trim();
+  if (!text) { showToast('Draft cannot be empty', 'warn'); return; }
+  try {
+    await apiPost('kpsc-newmonth-draft', { draft: text });
+    if (S.newmonthDraft) S.newmonthDraft.draft = text;
+    document.getElementById('nm-draft-modal')?.remove();
+    showToast('Draft saved!', 'success');
+  } catch {
+    showToast('Failed to save draft', 'error');
+  }
+}
+
+function dismissNewMonthDraft() {
+  document.getElementById('nm-draft-modal')?.remove();
+  if (S.newmonthDraft) S.newmonthDraft.draft = '';
+  document.getElementById('nm-draft-banner')?.remove();
+}
+
 window.Kpsc = {
   login,
   logout,
@@ -14343,6 +14461,10 @@ window.Kpsc = {
   loadMoreMeetings,
   // Minutes management
   reGenerateMinutes,
+  // New month draft banner
+  showNewMonthDraftModal,
+  saveNewMonthDraft,
+  dismissNewMonthDraft,
 };
 
 document.addEventListener('DOMContentLoaded', init);
