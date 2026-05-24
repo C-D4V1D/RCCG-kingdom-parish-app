@@ -2,11 +2,6 @@ name = "rccg-kingdom-parish-app"
 compatibility_date = "2024-01-01"
 pages_build_output_dir = "."
 
-[triggers]
-# 3rd of each month at 06:00 UTC — auto-draft Happy New Month SMS for next month
-# 1st of each month at 07:00 UTC — auto-send the drafted message (within WAT window)
-crons = ["0 6 3 * *", "0 7 1 * *"]
-
 # Production (main branch) — live church database
 [[d1_databases]]
 binding = "DB"
