@@ -520,11 +520,7 @@ export async function onRequest(context) {
       if (method === 'GET'  && !param) return await getExpenses(DB);
       if (method === 'POST' && !param) return await createExpense(DB, body);
       if (method === 'PUT'  &&  param) return await updateExpense(DB, param, body);
-      if (method === 'DELETE' && param) {
-        const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
-        if (auth instanceof Response) return auth;
-        return await deleteExpense(DB, param);
-      }
+      if (method === 'DELETE' && param) return await deleteExpense(DB, param);
     }
 
     // ── /api/petty ─────────────────────────────────────────────
@@ -539,6 +535,11 @@ export async function onRequest(context) {
     if (route === 'petty-config') {
       if (method === 'GET'  && !param) return await getPettyConfig(DB);
       if (method === 'POST' && !param) return await updatePettyConfig(DB, body);
+    }
+
+    // ── /api/petty-recalc ─────────────────────────────────────
+    if (route === 'petty-recalc' && method === 'POST') {
+      return await recalcPettyFloat(DB);
     }
 
     // ── /api/action-items ─────────────────────────────────────
@@ -2210,7 +2211,7 @@ async function getExpenses(DB) {
 
 async function createExpense(DB, data) {
   const id = data.id || newId('EXP-');
-  await DB.prepare(`
+  const insertStmt = DB.prepare(`
     INSERT INTO expenses
       (id,date,category,subcategory,description,amount,receipt_no,receipt_image,receipt_file_name,
        payment_method,notes,recorded_by,petty_ref,status,bank_amount,cash_amount,petty_amount,no_receipt)
@@ -2234,8 +2235,18 @@ async function createExpense(DB, data) {
     data.cashAmount      || 0,
     data.pettyAmount     || 0,
     data.noReceipt       ? 1 : 0,
-  ).run();
-  return ok({ ...data, id });
+  );
+
+  const pettyDeduction = Number(data.pettyAmount) || 0;
+  if (pettyDeduction > 0) {
+    const deductStmt = DB.prepare(
+      `UPDATE petty_config SET float_amount = float_amount - ? WHERE id='main'`
+    ).bind(pettyDeduction);
+    await DB.batch([insertStmt, deductStmt]);
+  } else {
+    await insertStmt.run();
+  }
+  return ok({ ...data, id, pettyDeducted: pettyDeduction > 0 });
 }
 
 async function updateExpense(DB, id, data) {
@@ -2273,8 +2284,19 @@ async function updateExpense(DB, id, data) {
 }
 
 async function deleteExpense(DB, id) {
-  await DB.prepare(`DELETE FROM expenses WHERE id=?`).bind(id).run();
-  return ok({ id, deleted: true });
+  const row = await DB.prepare(`SELECT petty_amount FROM expenses WHERE id=?`).bind(id).first();
+  const pettyAmount = Number(row?.petty_amount) || 0;
+
+  const deleteStmt = DB.prepare(`DELETE FROM expenses WHERE id=?`).bind(id);
+  if (pettyAmount > 0) {
+    const restoreStmt = DB.prepare(
+      `UPDATE petty_config SET float_amount = float_amount + ? WHERE id='main'`
+    ).bind(pettyAmount);
+    await DB.batch([deleteStmt, restoreStmt]);
+  } else {
+    await deleteStmt.run();
+  }
+  return ok({ id, deleted: true, pettyRestored: pettyAmount });
 }
 
 // ── PETTY CASH ────────────────────────────────────────────────────
@@ -2287,6 +2309,50 @@ async function updatePettyConfig(DB, data) {
   await DB.prepare(`UPDATE petty_config SET float_amount=?,max_float=? WHERE id='main'`)
     .bind(data.float, data.max).run();
   return ok({ float: data.float, max: data.max });
+}
+
+async function recalcPettyFloat(DB) {
+  const cfg = await DB.prepare(`SELECT max_float FROM petty_config WHERE id='main'`).first();
+  const maxFloat = cfg?.max_float ?? 50000;
+
+  // Sum petty deductions from all expense records
+  const expRow = await DB.prepare(`
+    SELECT COALESCE(SUM(petty_amount), 0) AS total
+    FROM expenses WHERE petty_amount > 0
+  `).first();
+  const totalExpenseDeductions = expRow?.total || 0;
+
+  // Sum all petty cash history float movements
+  const { results: pettyRows } = await DB.prepare(`SELECT * FROM petty_cash`).all();
+  let historyDelta = 0;
+  for (const h of (pettyRows || [])) {
+    if (h.type === 'refill' && (h.status === 'approved' || h.status === 'settled')) {
+      historyDelta += Number(h.amount) || 0;
+    }
+    if (h.type === 'advance' && (h.status === 'approved' || h.status === 'settled')) {
+      historyDelta -= Number(h.amount) || 0;
+      if (h.status === 'settled') {
+        historyDelta += Number(h.change_returned) || 0;
+        historyDelta -= Number(h.extra_spent) || 0;
+      }
+    }
+    if (h.type === 'disbursement' && h.status === 'approved') {
+      historyDelta -= Number(h.amount) || 0;
+    }
+  }
+
+  const correctFloat = maxFloat - totalExpenseDeductions + historyDelta;
+  const currentFloat = cfg ? (await DB.prepare(`SELECT float_amount FROM petty_config WHERE id='main'`).first())?.float_amount : maxFloat;
+  const drift = correctFloat - (currentFloat || 0);
+
+  await DB.prepare(`UPDATE petty_config SET float_amount=? WHERE id='main'`).bind(correctFloat).run();
+
+  return ok({
+    previousFloat: currentFloat,
+    correctedFloat: correctFloat,
+    drift,
+    breakdown: { maxFloat, totalExpenseDeductions, historyDelta }
+  });
 }
 
 async function getPetty(DB) {

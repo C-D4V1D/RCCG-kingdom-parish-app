@@ -186,6 +186,7 @@ const DB = {
   getPetty()                   { return apiFetch('petty'); },
   getPettyConfig()             { return apiFetch('petty-config'); },
   savePettyConfig(d)           { return apiFetch('petty-config','POST',d); },
+  recalcPettyFloat()           { return apiFetch('petty-recalc','POST'); },
   addPettyEntry(d)             { return apiFetch('petty','POST',d); },
   updatePettyEntry(id,d)       { return apiFetch(`petty/${id}`,'PUT',d); },
   deletePettyEntry(id)         { return apiFetch(`petty/${id}`,'DELETE'); },
@@ -5003,6 +5004,25 @@ function setPettyStatusFilter(v){ state.pettyStatusFilter=v||null; renderPettyCa
 function setPettySort(v){ state.pettySort=v||'date_desc'; renderPettyCash(); }
 function clearPettyFilters(){ state.pettySearch=''; state.pettyTypeFilter=null; state.pettyStatusFilter=null; renderPettyCash(); }
 
+async function recalcPettyFloat(btn=null){
+  if(!confirm('Recalculate petty cash balance from all expense and petty cash records? This will correct any drift caused by failed operations.')) return;
+  const restore = setBtnLoading(btn, 'Recalculating…');
+  try {
+    const result = await DB.recalcPettyFloat();
+    const drift = result.drift||0;
+    if(Math.abs(drift) < 0.01){
+      showAlert('Petty cash balance is already correct — no adjustment needed.','success');
+    } else {
+      DB.addAudit('petty_recalc',`Petty float recalculated: ${fmt(result.previousFloat)} → ${fmt(result.correctedFloat)} (drift: ${drift>0?'+':''}${fmt(drift)})`,state.user?.name);
+      showAlert(`Petty cash balance corrected by ${fmt(Math.abs(drift))} (was ${fmt(result.previousFloat)}, now ${fmt(result.correctedFloat)}).`,'success');
+    }
+    renderPettyCash();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to recalculate: ${err.message||'Unknown error'}`,'danger');
+  }
+}
+
 function updateExpenseSubcats(){
   const cat = document.getElementById('exp_cat')?.value;
   const subcats = cat ? (EXPENSE_SUBCATS[cat]||['Others...']) : [];
@@ -5160,7 +5180,9 @@ function onExpSplitChange(){
   else { statusEl.textContent=''; }
 }
 
+let _expenseSubmitting = false;
 async function submitExpense(btn=null){
+  if(_expenseSubmitting) return;
   if(!canAction('expense_log')){ showAlert('You do not have permission to log expenses.','danger'); return; }
   const date=document.getElementById('exp_date')?.value;
   const category=document.getElementById('exp_cat')?.value;
@@ -5220,10 +5242,13 @@ async function submitExpense(btn=null){
   const file = fileEl?.files?.[0];
   const restore = setBtnLoading(btn, 'Saving…');
 
+  const expenseId = 'EXP-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
   async function saveExpenseRecord(receiptDataUrl, receiptFileName){
+    _expenseSubmitting = true;
     try {
       const expenseStatus = defaultExpenseStatusForCurrentUser();
-      await DB.addExpense({ date, category, subCategory, description: description || subCategory, amount,
+      await DB.addExpense({ id: expenseId, date, category, subCategory, description: description || subCategory, amount,
         receiptNo: document.getElementById('exp_receipt')?.value,
         receiptImage: receiptDataUrl||null, receiptFileName: receiptFileName||null,
         paymentMethod: isSplit ? 'split' : method,
@@ -5232,12 +5257,6 @@ async function submitExpense(btn=null){
         pettyAmount: pettyAmount,
         notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:expenseStatus });
 
-      // Deduct from petty cash float for petty_cash or the petty portion of split
-      const pettyDeduction = pettyAmount;
-      if(pettyDeduction>0){
-        const pettyCfg = await DB.getPettyConfig();
-        await DB.savePettyConfig({ float: pettyCfg.float - pettyDeduction, max: pettyCfg.max });
-      }
       closeModal();
       const splitLabel = isSplit
         ? ` (${pettyAmount>0?`Petty: ${fmt(pettyAmount)} · `:''}${cashAmount>0?`Cash: ${fmt(cashAmount)} · `:''}Bank: ${fmt(bankAmount)})`
@@ -5247,6 +5266,8 @@ async function submitExpense(btn=null){
     } catch(err) {
       restore();
       showAlert(`Failed to save expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
+    } finally {
+      _expenseSubmitting = false;
     }
   }
 
@@ -5380,7 +5401,9 @@ async function submitEditExpense(id, btn=null){
   renderExpenses();
 }
 
+const _expenseDeleting = new Set();
 async function deleteExpense(id, btn=null){
+  if(_expenseDeleting.has(id)) return;
   const all = await DB.getExpenses();
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
@@ -5390,20 +5413,21 @@ async function deleteExpense(id, btn=null){
     if(!canAction('expense_delete_pending')){ alert('You are not allowed to delete this expense.'); return }
   }
   if(!confirm(`Delete this expense (${fmt(exp.amount)})?`)) return;
+  _expenseDeleting.add(id);
   const restore = setBtnLoading(btn, 'Deleting…');
   try {
-    if((exp.pettyAmount||0)>0){
-      const pettyCfg = await DB.getPettyConfig();
-      await DB.savePettyConfig({ float: pettyCfg.float + (exp.pettyAmount||0), max: pettyCfg.max });
-      DB.addAudit('petty_adjustment',`Petty float restored by ${fmt(exp.pettyAmount||0)} from deleted pending expense (${exp.id})`,state.user?.name);
-    }
     await DB.deleteExpense(id);
+    if((exp.pettyAmount||0)>0){
+      DB.addAudit('petty_adjustment',`Petty float restored by ${fmt(exp.pettyAmount||0)} from deleted expense (${exp.id})`,state.user?.name);
+    }
     DB.addAudit('expense_deleted',`Expense deleted: ${exp.id} (${fmt(exp.amount)})`,state.user?.name);
     showAlert('Expense deleted.','warn');
     renderExpenses();
   } catch(err) {
     restore();
     showAlert(`Failed to delete expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  } finally {
+    _expenseDeleting.delete(id);
   }
 }
 
@@ -6088,6 +6112,7 @@ async function renderPettyCash(){
           <button class="btn" onclick="App.showAdvanceRequest()">+ Request Advance</button>
         `:''}
         ${canAction('petty_topup_payment')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">📋 Record Top-Up Payment</button>`:''}
+        ${can('petty_view')?`<button class="btn btn-sm" onclick="App.recalcPettyFloat(this)" title="Recalculate petty cash balance from all expense and petty cash records">⚖ Recalculate Balance</button>`:''}
       </div>
     </div>
 
@@ -8776,7 +8801,7 @@ return {
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
-  renderPettyCash, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
+  renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
