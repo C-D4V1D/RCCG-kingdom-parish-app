@@ -67,7 +67,7 @@ test('countSundaysInRange counts calendar Sundays inclusively', () => {
   assert.equal(App._countSundaysInRange('2026-02-22', '2026-03-08'), 3);
 });
 
-test('all fixed quotas are prorated by Sundays for the selected period', () => {
+test('fixed quotas use remittance-period amount when selected period Sundays are fully covered', () => {
   const lines = App._getQuotaLinesForPeriod([
     { label: 'RMF (Camp Clearing)', amount: 4000 },
     { label: 'Regional Contribution', amount: 2000 },
@@ -75,19 +75,19 @@ test('all fixed quotas are prorated by Sundays for the selected period', () => {
     { label: 'Future Fixed Quota', amount: 12000 }
   ], '2026-02-01', '2026-02-01');
 
-  assertClose(lines.find(l => l.label === 'RMF (Camp Clearing)').amount, 1000);
-  assertClose(lines.find(l => l.label === 'Regional Contribution').amount, 500);
-  assertClose(lines.find(l => l.label === 'Zonal Mummy Stipend').amount, 2000);
-  assertClose(lines.find(l => l.label === 'Future Fixed Quota').amount, 3000);
+  assertClose(lines.find(l => l.label === 'RMF (Camp Clearing)').amount, 4000);
+  assertClose(lines.find(l => l.label === 'Regional Contribution').amount, 2000);
+  assertClose(lines.find(l => l.label === 'Zonal Mummy Stipend').amount, 8000);
+  assertClose(lines.find(l => l.label === 'Future Fixed Quota').amount, 12000);
   assert.ok(lines.every(l => l.isProrated));
 });
 
-test('authority quota proration sums correctly across month boundaries', () => {
+test('authority quota amount is unchanged across month boundaries for same remittance period', () => {
   const lines = App._getQuotaLinesForPeriod([
     { label: 'RMF (Camp Clearing)', amount: 4000 }
   ], '2026-02-22', '2026-03-08');
 
-  assertClose(lines[0].amount, 4000 * ((1 / 4) + (2 / 5)));
+  assertClose(lines[0].amount, 4000);
   assert.equal(lines[0].isProrated, true);
 });
 

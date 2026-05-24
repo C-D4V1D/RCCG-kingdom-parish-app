@@ -538,49 +538,28 @@ function getQuotaLinesForPeriod(quotas, fromDate, toDate){
   const list=Array.isArray(quotas)?quotas:[];
   const from=parseYmdDate(fromDate);
   const toRaw=parseYmdDate(toDate);
-  // Each Sunday's prorated share accrues on that Sunday. Future Sundays haven't
-  // elapsed and aren't owed yet, so cap the upper bound at today across the app —
-  // dashboard KPIs, the remittance form, the printed slip, and reports all see
-  // the same "due as of now" number for any in-progress period.
   const now=new Date();
   const todayDate=new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const to=(toRaw && toRaw>todayDate) ? todayDate : toRaw;
-  // Entire range in the future → nothing has accrued yet.
   if(from && to && from>to) return [];
   const canProrate=!!from && !!to && from<=to;
+  const periodSundays=canProrate ? countSundaysInRange(from, to) : 0;
+
   return list.map(q=>{
     const label=q?.label||'';
-    const monthlyAmount=Number(q?.amount||0);
-    if(!(monthlyAmount>0)) return null;
+    const periodAmount=Number(q?.amount||0);
+    if(!(periodAmount>0)) return null;
     if(!canProrate){
-      return { label, amount:monthlyAmount, section:'quota', monthlyAmount, isProrated:false, basis:'Fixed monthly amount' };
+      return { label, amount:periodAmount, section:'quota', monthlyAmount:periodAmount, isProrated:false, basis:'Fixed remittance-period amount' };
     }
-    let amount=0;
-    const segments=[];
-    let y=from.getFullYear(), m=from.getMonth();
-    // Walk each month touched by the selected period so each month's quota uses that month's Sunday count.
-    while(y<to.getFullYear() || (y===to.getFullYear() && m<=to.getMonth())){
-      const segFrom=(y===from.getFullYear() && m===from.getMonth()) ? from : new Date(y,m,1);
-      const segTo=(y===to.getFullYear() && m===to.getMonth()) ? to : new Date(y,m+1,0);
-      const sundaysInMonth=countSundaysInMonth(y,m);
-      const sundaysCovered=countSundaysInRange(segFrom, segTo);
-      if(sundaysCovered>0 && sundaysInMonth>0){
-        amount += monthlyAmount * (sundaysCovered / sundaysInMonth);
-        segments.push({ year:y, month:m, sundaysCovered, sundaysInMonth });
-      }
-      m++;
-      if(m>11){ m=0; y++; }
-    }
-    if(!(amount>0)) return null;
-    const totalSundaysCovered=segments.reduce((s,seg)=>s+seg.sundaysCovered,0);
-    const totalSundaysInMonths=segments.reduce((s,seg)=>s+seg.sundaysInMonth,0);
-    const periodSundays=countSundaysInRange(from, to);
-    const basis = segments.length===1
-      ? `Proportion of ${segments[0].sundaysCovered} of ${segments[0].sundaysInMonth} Sundays in ${MONTHS[segments[0].month]} ${segments[0].year}`
-      : `Proportion of ${totalSundaysCovered} of ${periodSundays} Sundays in the rem. period.`;
-    return { label, amount, section:'quota', monthlyAmount, isProrated:true, basis };
+    if(periodSundays<=0) return null;
+    const coveredSundays=countSundaysInRange(from, to);
+    const amount = periodAmount * (coveredSundays / periodSundays);
+    const basis = `Proportion of ${coveredSundays} of ${periodSundays} Sundays in the rem. period.`;
+    return { label, amount, section:'quota', monthlyAmount:periodAmount, isProrated:true, basis };
   }).filter(Boolean);
 }
+
 
 function sumQuotaLines(lines){
   return (lines||[]).reduce((s,l)=>s+(l.amount||0),0);
