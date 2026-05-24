@@ -235,6 +235,7 @@ const state = {
   loginBusy: false,
   aiSecretaryActiveId: null,
   dashPeriodMode: 'remittance', // 'remittance' | 'calendar'
+  reportPeriodMode: 'remittance', // 'remittance' | 'calendar'
 };
 
 // ──────────────────────────────────────────
@@ -526,6 +527,35 @@ function countSundaysInRange(fromValue, toValue){
   return count;
 }
 
+
+function getWATNowParts(now=new Date()){
+  const wat = new Date(now.getTime() + (60 * 60 * 1000)); // WAT = UTC+1
+  return {
+    year: wat.getUTCFullYear(),
+    month: wat.getUTCMonth()+1,
+    day: wat.getUTCDate(),
+    hour: wat.getUTCHours(),
+    minute: wat.getUTCMinutes()
+  };
+}
+
+function countAccruedSundaysInRange(fromValue, toValue, now=new Date()){
+  const from=parseYmdDate(fromValue);
+  const to=parseYmdDate(toValue);
+  if(!from || !to || from>to) return 0;
+  const watNow=getWATNowParts(now);
+  const watTodayYmd=`${watNow.year}-${String(watNow.month).padStart(2,'0')}-${String(watNow.day).padStart(2,'0')}`;
+  const isAfterSundayAccrualCutoff = (watNow.hour>11) || (watNow.hour===11 && watNow.minute>=30);
+  let count=0;
+  for(let d=new Date(from.getFullYear(), from.getMonth(), from.getDate()); d<=to; d.setDate(d.getDate()+1)){
+    if(d.getDay()!==0) continue;
+    const dYmd=ymdLocal(d);
+    if(dYmd < watTodayYmd){ count++; continue; }
+    if(dYmd===watTodayYmd && isAfterSundayAccrualCutoff){ count++; }
+  }
+  return count;
+}
+
 function countSundaysInMonth(year, month){
   return countSundaysInRange(
     new Date(year, month, 1),
@@ -537,48 +567,29 @@ function getQuotaLinesForPeriod(quotas, fromDate, toDate){
   const list=Array.isArray(quotas)?quotas:[];
   const from=parseYmdDate(fromDate);
   const toRaw=parseYmdDate(toDate);
-  // Each Sunday's prorated share accrues on that Sunday. Future Sundays haven't
-  // elapsed and aren't owed yet, so cap the upper bound at today across the app —
-  // dashboard KPIs, the remittance form, the printed slip, and reports all see
-  // the same "due as of now" number for any in-progress period.
   const now=new Date();
   const todayDate=new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const to=(toRaw && toRaw>todayDate) ? todayDate : toRaw;
-  // Entire range in the future → nothing has accrued yet.
   if(from && to && from>to) return [];
   const canProrate=!!from && !!to && from<=to;
+  const fullPeriodEnd=(toRaw && from && toRaw>=from) ? toRaw : to;
+  const coveredSundays=canProrate ? countAccruedSundaysInRange(from, to, now) : 0;
+  const periodSundays=canProrate ? countSundaysInRange(from, fullPeriodEnd) : 0;
+
   return list.map(q=>{
     const label=q?.label||'';
-    const monthlyAmount=Number(q?.amount||0);
-    if(!(monthlyAmount>0)) return null;
+    const periodAmount=Number(q?.amount||0);
+    if(!(periodAmount>0)) return null;
     if(!canProrate){
-      return { label, amount:monthlyAmount, section:'quota', monthlyAmount, isProrated:false, basis:'Fixed monthly amount' };
+      return { label, amount:periodAmount, section:'quota', monthlyAmount:periodAmount, isProrated:false, basis:'Fixed remittance-period amount' };
     }
-    let amount=0;
-    const segments=[];
-    let y=from.getFullYear(), m=from.getMonth();
-    // Walk each month touched by the selected period so each month's quota uses that month's Sunday count.
-    while(y<to.getFullYear() || (y===to.getFullYear() && m<=to.getMonth())){
-      const segFrom=(y===from.getFullYear() && m===from.getMonth()) ? from : new Date(y,m,1);
-      const segTo=(y===to.getFullYear() && m===to.getMonth()) ? to : new Date(y,m+1,0);
-      const sundaysInMonth=countSundaysInMonth(y,m);
-      const sundaysCovered=countSundaysInRange(segFrom, segTo);
-      if(sundaysCovered>0 && sundaysInMonth>0){
-        amount += monthlyAmount * (sundaysCovered / sundaysInMonth);
-        segments.push({ year:y, month:m, sundaysCovered, sundaysInMonth });
-      }
-      m++;
-      if(m>11){ m=0; y++; }
-    }
-    if(!(amount>0)) return null;
-    const totalSundaysCovered=segments.reduce((s,seg)=>s+seg.sundaysCovered,0);
-    const totalSundaysInMonths=segments.reduce((s,seg)=>s+seg.sundaysInMonth,0);
-    const basis = segments.length===1
-      ? `Proportion of ${segments[0].sundaysCovered} of ${segments[0].sundaysInMonth} Sundays in ${MONTHS[segments[0].month]} ${segments[0].year}`
-      : `Proportion of ${totalSundaysCovered} of ${totalSundaysInMonths} Sundays across ${segments.length} months`;
-    return { label, amount, section:'quota', monthlyAmount, isProrated:true, basis };
+    if(periodSundays<=0) return null;
+    const amount = periodAmount * (coveredSundays / periodSundays);
+    const basis = `Proportion of ${coveredSundays} of ${periodSundays} Sundays in the rem. period.`;
+    return { label, amount, section:'quota', monthlyAmount:periodAmount, isProrated:true, basis };
   }).filter(Boolean);
 }
+
 
 function sumQuotaLines(lines){
   return (lines||[]).reduce((s,l)=>s+(l.amount||0),0);
@@ -7362,9 +7373,14 @@ function reportSignatureHTML(pastorName='', reviewerLabel='Reviewed &amp; Approv
   <div class="footer-note">This is a computer-generated report from the RCCG Kingdom Parish Finance Portal. For enquiries, contact the Church Accountant or Admin Officer.</div>`;
 }
 
-async function renderReports(){
-  const settings = await DB.getSettings();
-  // Initialise report date range using same cut-off logic as remittances page
+
+function applyReportPeriodDefaults(settings){
+  const mode = state.reportPeriodMode || 'remittance';
+  if(mode==='calendar'){
+    state.reportFromDate = ymdLocal(new Date(state.year, state.month, 1));
+    state.reportToDate = ymdLocal(new Date(state.year, state.month+1, 0));
+    return { cutoffDay:null, mode };
+  }
   const cutoffConfig = getRemCutoffDates(settings, state.year);
   const cutoffYear = cutoffConfig ? Number(cutoffConfig.year) : null;
   const cutoffDay = (cutoffConfig && cutoffYear===state.year && Number.isInteger(cutoffConfig.dates[state.month]))
@@ -7377,14 +7393,28 @@ async function renderReports(){
     const prevCutoffDay = (prevCC && Number.isInteger(prevCC.dates[prevMonth]) && Number(prevCC.year)===prevYear)
       ? prevCC.dates[prevMonth] : null;
     if(prevCutoffDay){
-      state.reportFromDate=ymdLocal(new Date(prevYear,prevMonth,prevCutoffDay));
+      const from = new Date(prevYear, prevMonth, prevCutoffDay);
+      from.setDate(from.getDate()+1);
+      state.reportFromDate=ymdLocal(from);
     } else {
       state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
     }
   } else {
-    if(!state.reportFromDate) state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
-    if(!state.reportToDate)   state.reportToDate=ymdLocal(new Date());
+    state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
+    state.reportToDate=ymdLocal(new Date());
   }
+  return { cutoffDay, mode };
+}
+
+function setReportPeriodMode(mode){
+  state.reportPeriodMode = mode==='calendar' ? 'calendar' : 'remittance';
+  renderReports();
+}
+
+async function renderReports(){
+  const settings = await DB.getSettings();
+  // Initialize report date range from selected mode (remittance cut-off or calendar month)
+  const { cutoffDay, mode } = applyReportPeriodDefaults(settings);
   const fromDate=state.reportFromDate;
   const toDate=state.reportToDate;
   document.getElementById('pageContent').innerHTML=`
@@ -7404,10 +7434,10 @@ async function renderReports(){
             style="width:auto;padding:6px 10px;font-size:13px"
             onchange="App.onReportDatesChange()" />
         </div>
-        ${cutoffDay?'<span class="badge badge-info" style="font-size:11px">📅 Default from cut-off date</span>':''}
+        ${mode==='remittance'&&cutoffDay?'<span class="badge badge-info" style="font-size:11px">📅 Default from cut-off date</span>':''}${mode==='calendar'?'<span class="badge badge-info" style="font-size:11px">🗓️ Calendar month period</span>':''}
       </div>
       <div style="font-size:11px;color:var(--text3);margin-top:6px">
-        ℹ️ All reports below will cover this period. ${cutoffDay?'Defaulted from HQ cut-off date — you can still edit. ':''}Adjust the dates before generating any report.
+        ℹ️ All reports below will cover this period. ${mode==='remittance'?(cutoffDay?'Defaulted from HQ cut-off date. ':'Using remittance cycle for this month. '):'Using full calendar month period. '}Adjust the dates before generating any report.
         Period: <strong>${fmtDate(fromDate)}</strong> – <strong>${fmtDate(toDate)}</strong>
       </div>
     </div>
@@ -8728,7 +8758,7 @@ return {
   renderPettyCash, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
-  generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange,
+  generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
   setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
     updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
     setDashPeriodMode,
