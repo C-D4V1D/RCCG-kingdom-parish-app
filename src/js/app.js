@@ -544,14 +544,14 @@ function countAccruedSundaysInRange(fromValue, toValue, now=new Date()){
   const to=parseYmdDate(toValue);
   if(!from || !to || from>to) return 0;
   const watNow=getWATNowParts(now);
-  const watTodayYmd=`${watNow.year}-${String(watNow.month).padStart(2,'0')}-${String(watNow.day).padStart(2,'0')}`;
+  // Build a plain local-midnight Date from WAT parts so comparisons stay in the same coordinate space as the loop iterator
+  const watTodayLocal=new Date(watNow.year, watNow.month-1, watNow.day);
   const isAfterSundayAccrualCutoff = (watNow.hour>11) || (watNow.hour===11 && watNow.minute>=30);
   let count=0;
   for(let d=new Date(from.getFullYear(), from.getMonth(), from.getDate()); d<=to; d.setDate(d.getDate()+1)){
     if(d.getDay()!==0) continue;
-    const dYmd=ymdLocal(d);
-    if(dYmd < watTodayYmd){ count++; continue; }
-    if(dYmd===watTodayYmd && isAfterSundayAccrualCutoff){ count++; }
+    if(d < watTodayLocal){ count++; continue; }
+    if(d.getTime()===watTodayLocal.getTime() && isAfterSundayAccrualCutoff){ count++; }
   }
   return count;
 }
@@ -595,7 +595,7 @@ function getQuotaLinesForPeriod(quotas, fromDate, toDate){
 function isQuotaFullyAccrued(q){
   const full=Number(q?.monthlyAmount||0);
   const amt=Number(q?.amount||0);
-  return full>0 && amt >= (full - 0.005);
+  return full>0 && amt >= (full - 0.01);
 }
 
 function quotaTypeTextForReport(q){
@@ -7389,8 +7389,8 @@ function reportSignatureHTML(pastorName='', reviewerLabel='Reviewed &amp; Approv
 function applyReportPeriodDefaults(settings){
   const mode = state.reportPeriodMode || 'remittance';
   if(mode==='calendar'){
-    state.reportFromDate = ymdLocal(new Date(state.year, state.month, 1));
-    state.reportToDate = ymdLocal(new Date(state.year, state.month+1, 0));
+    if(!state.reportFromDate) state.reportFromDate = ymdLocal(new Date(state.year, state.month, 1));
+    if(!state.reportToDate)   state.reportToDate   = ymdLocal(new Date(state.year, state.month+1, 0));
     return { cutoffDay:null, mode };
   }
   const cutoffConfig = getRemCutoffDates(settings, state.year);
@@ -7398,28 +7398,33 @@ function applyReportPeriodDefaults(settings){
   const cutoffDay = (cutoffConfig && cutoffYear===state.year && Number.isInteger(cutoffConfig.dates[state.month]))
     ? cutoffConfig.dates[state.month] : null;
   if(cutoffDay){
-    state.reportToDate = ymdLocal(new Date(state.year, state.month, cutoffDay));
-    const prevMonth = state.month===0 ? 11 : state.month-1;
-    const prevYear  = state.month===0 ? state.year-1 : state.year;
-    const prevCC = getRemCutoffDates(settings, prevYear);
-    const prevCutoffDay = (prevCC && Number.isInteger(prevCC.dates[prevMonth]) && Number(prevCC.year)===prevYear)
-      ? prevCC.dates[prevMonth] : null;
-    if(prevCutoffDay){
-      const from = new Date(prevYear, prevMonth, prevCutoffDay);
-      from.setDate(from.getDate()+1);
-      state.reportFromDate=ymdLocal(from);
-    } else {
-      state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
+    if(!state.reportToDate) state.reportToDate = ymdLocal(new Date(state.year, state.month, cutoffDay));
+    if(!state.reportFromDate){
+      const prevMonth = state.month===0 ? 11 : state.month-1;
+      const prevYear  = state.month===0 ? state.year-1 : state.year;
+      const prevCC = getRemCutoffDates(settings, prevYear);
+      const prevCutoffDay = (prevCC && Number.isInteger(prevCC.dates[prevMonth]) && Number(prevCC.year)===prevYear)
+        ? prevCC.dates[prevMonth] : null;
+      if(prevCutoffDay){
+        const from = new Date(prevYear, prevMonth, prevCutoffDay);
+        from.setDate(from.getDate()+1);
+        state.reportFromDate=ymdLocal(from);
+      } else {
+        state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
+      }
     }
   } else {
-    state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
-    state.reportToDate=ymdLocal(new Date());
+    if(!state.reportFromDate) state.reportFromDate=ymdLocal(new Date(state.year,state.month,1));
+    if(!state.reportToDate)   state.reportToDate  =ymdLocal(new Date());
   }
   return { cutoffDay, mode };
 }
 
 function setReportPeriodMode(mode){
   state.reportPeriodMode = mode==='calendar' ? 'calendar' : 'remittance';
+  // Clear cached dates so applyReportPeriodDefaults recalculates for the new mode
+  state.reportFromDate = null;
+  state.reportToDate = null;
   renderReports();
 }
 
@@ -7433,6 +7438,10 @@ async function renderReports(){
     <div class="page-header"><div class="page-title">📊 Reports Centre</div><div class="page-sub">Generate comprehensive financial reports</div></div>
     <div class="card" style="margin-bottom:12px;padding:14px 16px">
       <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px">📅 Report Period</div>
+      <div style="display:flex;gap:6px;margin-bottom:12px">
+        <button onclick="App.setReportPeriodMode('remittance')" style="padding:5px 14px;border-radius:20px;border:1.5px solid ${mode==='remittance'?'var(--primary)':'var(--border)'};background:${mode==='remittance'?'var(--primary)':'transparent'};color:${mode==='remittance'?'#fff':'var(--text2)'};font-size:12px;font-weight:600;cursor:pointer;transition:all .15s">Remittance Period</button>
+        <button onclick="App.setReportPeriodMode('calendar')" style="padding:5px 14px;border-radius:20px;border:1.5px solid ${mode==='calendar'?'var(--primary)':'var(--border)'};background:${mode==='calendar'?'var(--primary)':'transparent'};color:${mode==='calendar'?'#fff':'var(--text2)'};font-size:12px;font-weight:600;cursor:pointer;transition:all .15s">Calendar Month</button>
+      </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="display:flex;align-items:center;gap:6px">
           <label style="font-size:12px;color:var(--text2);white-space:nowrap">From</label>
