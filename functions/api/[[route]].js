@@ -1001,6 +1001,12 @@ export async function onRequest(context) {
         if (auth instanceof Response) return auth;
         return await aiFormatPolicyText(DB, env, body);
       }
+      // Fetch a public URL and extract readable text for import
+      if (method === 'POST' && param === 'fetch-url') {
+        const auth = await requireKpscRole(DB, request, ['acting_chairman', 'it_admin', 'general_secretary']);
+        if (auth instanceof Response) return auth;
+        return await fetchPolicyUrl(body);
+      }
     }
 
     // ── KPSC Amendment workflow ─────────────────────────────────
@@ -8177,6 +8183,49 @@ async function rollbackPolicyVersion(DB, data, auth) {
   ).bind(id, type, nextVer, targetRow.content_md, `Rolled back to v${targetRow.version_num}`, auth.name || '', auth.id || '', now.slice(0, 10), now).run();
 
   return ok({ versionId: id, versionNum: nextVer, rolledBackTo: targetRow.version_num });
+}
+
+async function fetchPolicyUrl(data) {
+  const rawUrl = String(data?.url || '').trim();
+  if (!rawUrl) return err('url is required', 400);
+  let parsedUrl;
+  try { parsedUrl = new URL(rawUrl); } catch { return err('Invalid URL', 400); }
+  if (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') return err('Only http/https URLs are supported', 400);
+
+  try {
+    const resp = await fetch(rawUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; RCCGKPSCPortal/1.0)', 'Accept': 'text/html,text/plain' },
+      redirect: 'follow',
+    });
+    if (!resp.ok) return err(`URL returned HTTP ${resp.status}`, 400);
+    const contentType = resp.headers.get('content-type') || '';
+    const rawBody = await resp.text();
+
+    let text = '';
+    if (contentType.includes('text/plain')) {
+      text = rawBody;
+    } else {
+      // Strip HTML: remove scripts, styles, then all tags
+      text = rawBody
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/\s{3,}/g, '\n\n')
+        .trim();
+    }
+
+    if (!text || text.length < 50) return err('No readable text found at that URL.', 422);
+    // Cap at ~50k chars to stay within AI context
+    return ok({ text: text.slice(0, 50000) });
+  } catch (e) {
+    return err('Failed to fetch URL: ' + e.message, 502);
+  }
 }
 
 async function aiFormatPolicyText(DB, env, data) {

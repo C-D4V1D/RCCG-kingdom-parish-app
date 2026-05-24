@@ -14277,6 +14277,23 @@ function renderPolicySection(type, title, current, versions, summaryText) {
       </div>
 
       <div class="k-form-group" style="margin-top:12px">
+        <label class="k-label">Import from Document or URL</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
+          <label class="kbtn kbtn-sm kbtn-ghost" style="cursor:pointer;margin:0" title="Upload PDF, Word (.docx), or plain text file">
+            📎 Upload File
+            <input type="file" id="kps-${type}-file-input" accept=".pdf,.docx,.doc,.txt" style="display:none"
+              onchange="Kpsc.importPolicyFile('${type}',this)">
+          </label>
+          <div style="display:flex;gap:6px;flex:1;min-width:220px">
+            <input type="url" id="kps-${type}-url-input" class="k-input" style="font-size:13px;padding:6px 10px"
+              placeholder="https://… paste policy URL" />
+            <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.importPolicyUrl('${type}')" id="kps-${type}-url-btn">🔗 Import</button>
+          </div>
+        </div>
+        <p class="k-hint" style="margin-bottom:8px">Supports PDF, Word (.docx), plain text, or any public web URL. After import the text is automatically AI-formatted into structured Markdown.</p>
+      </div>
+
+      <div class="k-form-group" style="margin-top:4px">
         <label class="k-label">Policy Text (Markdown)</label>
         <div style="margin-bottom:6px;display:flex;gap:6px;flex-wrap:wrap">
           <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.policyToolbar('${type}','bold')" title="Bold"><strong>B</strong></button>
@@ -14708,6 +14725,122 @@ async function applyAmendmentFinal(insightText, meetingId, aiConfidence, byelawV
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// POLICY DOCUMENT IMPORT (file upload + URL)
+// ══════════════════════════════════════════════════════════════════════
+
+async function importPolicyFile(type, input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  input.value = ''; // reset so same file can be re-selected
+  const ext = file.name.split('.').pop().toLowerCase();
+
+  showToast(`Reading ${file.name}…`, 'info');
+
+  try {
+    let rawText = '';
+
+    if (ext === 'txt') {
+      rawText = await file.text();
+
+    } else if (ext === 'docx' || ext === 'doc') {
+      rawText = await extractDocxText(file);
+
+    } else if (ext === 'pdf') {
+      rawText = await extractPdfText(file);
+
+    } else {
+      showToast('Unsupported file type. Use PDF, Word (.docx), or plain text (.txt).', 'error');
+      return;
+    }
+
+    if (!rawText.trim()) {
+      showToast('No text could be extracted from the file.', 'error');
+      return;
+    }
+
+    const ta = document.getElementById(`kps-${type}-edit`);
+    if (ta) {
+      ta.value = rawText;
+      updatePolicyPreview(type);
+    }
+    showToast('File imported — formatting with AI…', 'info');
+    await aiFormatPolicy(type);
+
+  } catch (e) {
+    showToast('Failed to read file: ' + e.message, 'error');
+  }
+}
+
+async function importPolicyUrl(type) {
+  const input = document.getElementById(`kps-${type}-url-input`);
+  const btn = document.getElementById(`kps-${type}-url-btn`);
+  const url = input?.value?.trim();
+  if (!url) { showToast('Paste a URL first.', 'info'); return; }
+
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Fetching…';
+
+  try {
+    const res = await apiPost('kpsc-policy/fetch-url', { url });
+    if (!res?.text?.trim()) {
+      showToast(res?.error || 'No readable text found at that URL.', 'error');
+      return;
+    }
+    const ta = document.getElementById(`kps-${type}-edit`);
+    if (ta) {
+      ta.value = res.text;
+      updatePolicyPreview(type);
+    }
+    if (input) input.value = '';
+    showToast('URL content imported — formatting with AI…', 'info');
+    await aiFormatPolicy(type);
+  } catch (e) {
+    showToast('Import failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
+async function extractDocxText(file) {
+  if (!window.mammoth) {
+    await loadScript('https://unpkg.com/mammoth@1.8.0/mammoth.browser.min.js');
+  }
+  const arrayBuffer = await file.arrayBuffer();
+  const result = await window.mammoth.extractRawText({ arrayBuffer });
+  return result.value || '';
+}
+
+async function extractPdfText(file) {
+  if (!window.pdfjsLib) {
+    await loadScript('https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js');
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+  }
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const parts = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    parts.push(content.items.map(item => item.str).join(' '));
+  }
+  return parts.join('\n');
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
 window.Kpsc = {
   login,
   logout,
@@ -14789,6 +14922,8 @@ window.Kpsc = {
   setReportsApproval,
   setInsightsViewMode,
   loadKpscPoliciesCard,
+  importPolicyFile,
+  importPolicyUrl,
   updatePolicyPreview,
   policyToolbar,
   aiFormatPolicy,
