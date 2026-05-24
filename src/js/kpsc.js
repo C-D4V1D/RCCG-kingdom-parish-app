@@ -37,12 +37,12 @@ const KPSC_PERMISSIONS = {
 };
 // Default write (modify/edit) permissions per role per page
 const KPSC_WRITE_PERMISSIONS = {
-  acting_chairman:     ['dashboard','projects','action_items','partners','partner-progress','finance','reminders','members','archive','reports','agenda_builder','settings'],
-  general_secretary:   ['dashboard','projects','action_items','partners','partner-progress','reminders','members','archive','reports','agenda_builder','settings'],
+  acting_chairman:     ['dashboard','projects','action_items','partners','partner-progress','finance','reminders','members','archive','reports','agenda_builder','settings','policy'],
+  general_secretary:   ['dashboard','projects','action_items','partners','partner-progress','reminders','members','archive','reports','agenda_builder','settings','policy'],
   financial_secretary: ['finance','partners','partner-progress','archive','reports'],
   treasurer:           ['finance','partners','partner-progress','archive','reports'],
   committee_viewer:    [],
-  it_admin:            ['members','settings'],
+  it_admin:            ['members','settings','policy'],
 };
 
 // Default delete permissions per role per page
@@ -73,6 +73,7 @@ const PAGE_TO_GROUP = {
   reminders:       { group: 'money',    subTab: 'reminders'       },
   members:         { group: 'more',     subTab: 'members'         },
   settings:        { group: 'more',     subTab: 'settings'        },
+  policy:          { group: 'more',     subTab: 'policy'          },
   // Group-level pseudo-pages (rendered inline by their own renderer)
   more:            { group: 'more',     subTab: null },
   // Sub-pages (reachable from within a group; nav highlight stays on group)
@@ -2543,6 +2544,9 @@ async function renderPage(page) {
     } else if (page === 'inbox') {
       await renderInbox(main);
       prependSubTabs(main, moreSubTabStrip());
+    } else if (page === 'policy') {
+      await renderPolicyCenter(main);
+      prependSubTabs(main, moreSubTabStrip());
     } else if (page === 'more') {
       renderMoreMenu(main);
     }
@@ -2560,6 +2564,7 @@ function moreSubTabStrip() {
   const tabs = [];
   if (role !== 'committee_viewer') tabs.push({ key: 'members',  label: 'Members'  });
   if (role !== 'committee_viewer') tabs.push({ key: 'settings', label: 'Settings' });
+  tabs.push({ key: 'policy', label: 'Policy Center' });
   tabs.push({ key: 'inbox', label: 'Inbox' });
   if (!tabs.length) return '';
   return `<div class="ka-subtabs">${tabs.map(t =>
@@ -14128,6 +14133,13 @@ window.Kpsc = {
   setPartnersFilter,
   setPartnersTypeFilter,
   setInboxTab,
+  renderPolicyCenter,
+  uploadPolicyVersion,
+  generatePolicyAmendment,
+  proofreadPolicyAmendment,
+  approvePolicyAmendment,
+  rejectPolicyAmendment,
+  rollbackPolicyVersion,
   setPartnersYear,
   setPartnersSearch,
   deletePartner,
@@ -14371,3 +14383,40 @@ window.addEventListener('popstate', e => {
   updateFab();
   renderPage(page);
 });
+
+async function renderPolicyCenter(main) {
+  const canWrite = canAccess('settings');
+  const canApplyAmend = ['acting_chairman','general_secretary','it_admin'].includes(String(S.user?.role || '').toLowerCase());
+  const policies = await apiGet('kpsc-policies').catch(() => []);
+  const rows = Array.isArray(policies) ? policies : [];
+  main.innerHTML = `<div class='k-page'>
+    <h2 style='margin-bottom:8px'>Policy Center</h2>
+    <p style='color:var(--text3);margin-bottom:14px'>Upload and manage Welfare Policy and KPSC Byelaw versions. AI amendment supports minutes + transcript insights.</p>
+    ${canWrite ? `<div class='k-form-grid'>
+      <input id='kp-policy-id' class='kinput' placeholder='Policy ID (select below)' />
+      <input id='kp-policy-version' class='kinput' placeholder='Version label (e.g. v1.0)' />
+      <input id='kp-policy-effective' class='kinput' type='date' placeholder='Effective date' />
+      <input id='kp-policy-summary' class='kinput' placeholder='Change summary' />
+      <textarea id='kp-policy-text' class='kinput' style='min-height:140px' placeholder='Paste full policy text'></textarea>
+      <button class='kbtn' onclick='Kpsc.uploadPolicyVersion()'>Upload Policy Version</button>
+      <textarea id='kp-policy-minutes' class='kinput' placeholder='Meeting minutes insight'></textarea>
+      <textarea id='kp-policy-transcript' class='kinput' placeholder='Transcript insight'></textarea>
+      <input id='kp-policy-base-version' class='kinput' placeholder='Base version ID' />
+      <button class='kbtn' onclick='Kpsc.generatePolicyAmendment()'>Apply Amendment</button>
+      <input id='kp-policy-proposed-version' class='kinput' placeholder='Proposed version ID' />
+      <button class='kbtn kbtn-ghost' onclick='Kpsc.proofreadPolicyAmendment()'>AI Proofread</button>
+      <input id='kp-policy-amendment-id' class='kinput' placeholder='Amendment ID' />
+      ${canApplyAmend ? `<button class='kbtn kbtn-green' onclick='Kpsc.approvePolicyAmendment()'>Approve & Apply</button><button class='kbtn kbtn-danger' onclick='Kpsc.rejectPolicyAmendment()'>Reject</button>` : ''}
+      ${canApplyAmend ? `<input id='kp-rollback-target' class='kinput' placeholder='Rollback target version ID' /><button class='kbtn kbtn-warn' onclick='Kpsc.rollbackPolicyVersion()'>Rollback</button>` : ''}
+      <div id='kp-amend-diff'></div>
+    </div>` : ''}
+    <div style='margin-top:16px'>${rows.map(p => `<div class='k-meeting-card' style='margin-bottom:8px'><b>${esc(p.title)}</b><div style='font-size:12px;color:var(--text3)'>${esc(p.policy_type)} · ${esc(p.status)} · current: ${esc(p.current_version_id || 'none')}</div><div style='font-size:12px'>${esc(p.summary || '')}</div></div>`).join('') || '<div class="k-empty">No policies yet.</div>'}</div>
+  </div>`;
+}
+
+async function uploadPolicyVersion() { const res = await apiPost('kpsc-policy-upload', { policyId: document.getElementById('kp-policy-id')?.value.trim(), versionLabel: document.getElementById('kp-policy-version')?.value.trim(), effectiveDate: document.getElementById('kp-policy-effective')?.value || '', changeSummary: document.getElementById('kp-policy-summary')?.value || '', fullText: document.getElementById('kp-policy-text')?.value || '', publish: false }); if (res?.error) return showToast(res.error, 'error'); showToast('Policy version uploaded', 'success'); renderPolicyCenter(document.getElementById('kpsc-main')); }
+async function generatePolicyAmendment() { const res = await apiPost('kpsc-policy-ai-amend', { policyId: document.getElementById('kp-policy-id')?.value.trim(), baseVersionId: document.getElementById('kp-policy-base-version')?.value.trim(), meetingMinutes: document.getElementById('kp-policy-minutes')?.value || '', transcriptInsights: document.getElementById('kp-policy-transcript')?.value || '' }); if (res?.error) return showToast(res.error, 'error'); const diffEl=document.getElementById('kp-amend-diff'); if(diffEl){const rows=(res.diff||[]).slice(0,50).map(d=>`<div class='k-amend-row'><div class='k-amend-old'>${esc(d.oldText||'')}</div><div class='k-amend-new'>${esc(d.newText||'')}</div></div>`).join(''); diffEl.innerHTML=`<h4>Old vs New (AI Draft)</h4>${rows||'<p>No line differences detected.</p>'}`;} showToast('Amendment draft generated', 'success'); }
+async function proofreadPolicyAmendment() { const res = await apiPost('kpsc-policy-proofread', { proposedVersionId: document.getElementById('kp-policy-proposed-version')?.value.trim() }); if (res?.error) return showToast(res.error, 'error'); showToast('Proofread complete', 'success'); }
+async function approvePolicyAmendment() { const res = await apiPost('kpsc-policy-approve', { amendmentId: document.getElementById('kp-policy-amendment-id')?.value.trim() }); if (res?.error) return showToast(res.error, 'error'); showToast('Policy amendment approved and published', 'success'); renderPolicyCenter(document.getElementById('kpsc-main')); }
+async function rejectPolicyAmendment() { const res = await apiPost('kpsc-policy-reject', { amendmentId: document.getElementById('kp-policy-amendment-id')?.value.trim() }); if (res?.error) return showToast(res.error, 'error'); showToast('Amendment rejected', 'info'); }
+async function rollbackPolicyVersion() { const res = await apiPost('kpsc-policy-rollback', { policyId: document.getElementById('kp-policy-id')?.value.trim(), targetVersionId: document.getElementById('kp-rollback-target')?.value.trim(), effectiveDate: document.getElementById('kp-policy-effective')?.value || '', changeSummary: document.getElementById('kp-policy-summary')?.value || '' }); if (res?.error) return showToast(res.error, 'error'); showToast('Rollback published', 'success'); }

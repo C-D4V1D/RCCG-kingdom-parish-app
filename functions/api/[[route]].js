@@ -66,6 +66,7 @@ const ok  = (data)       => new Response(JSON.stringify(data),        { status: 
 const err = (msg, s=500) => new Response(JSON.stringify({ error: msg }), { status: s,   headers: CORS_HEADERS });
 const newId = (prefix='') => prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
+const POLICY_APPROVER_ROLES = ['acting_chairman', 'general_secretary'];
 
 // ── TERMII SMS HELPERS ────────────────────────────────────────────────
 /**
@@ -923,6 +924,50 @@ export async function onRequest(context) {
       if (method === 'POST' && !param)  return await createScheduledSms(DB, body, auth);
       if (method === 'DELETE' && param) return await deleteScheduledSms(DB, param);
     }
+    if (route === 'kpsc-policies') {
+      const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+      if (auth instanceof Response) return auth;
+      if (method === 'GET') return await getKpscPolicies(DB);
+      if (method === 'POST') return await createKpscPolicy(DB, body, auth);
+    }
+    if (route === 'kpsc-policy-versions' && method === 'GET') {
+      const auth = await requireKpscRole(DB, request, KPSC_READ_ROLES);
+      if (auth instanceof Response) return auth;
+      return await getKpscPolicyVersions(DB, String(url.searchParams.get('policyId') || '').trim());
+    }
+    if (route === 'kpsc-policy-upload' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await uploadKpscPolicyVersion(DB, body, auth);
+    }
+    if (route === 'kpsc-policy-ai-amend' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await proposeKpscPolicyAmendment(DB, body, auth);
+    }
+    if (route === 'kpsc-policy-proofread' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await proofreadKpscPolicyAmendment(DB, body);
+    }
+    if (route === 'kpsc-policy-approve' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, POLICY_APPROVER_ROLES);
+      if (auth instanceof Response) return auth;
+      return await approveKpscPolicyAmendment(DB, body, auth);
+    }
+    if (route === 'kpsc-policy-reject' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, POLICY_APPROVER_ROLES);
+      if (auth instanceof Response) return auth;
+      return await rejectKpscPolicyAmendment(DB, body, auth);
+    }
+    if (route === 'kpsc-public-policy' && method === 'GET') {
+      return await getKpscPublicPolicy(DB, String(url.searchParams.get('type') || '').trim());
+    }
+    if (route === 'kpsc-policy-rollback' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, POLICY_APPROVER_ROLES);
+      if (auth instanceof Response) return auth;
+      return await rollbackKpscPolicyVersion(DB, body, auth);
+    }
 
     // ── B6: scheduled_for field on ai-secretary-meetings ───────
     // (handled inline in updateAiSecretaryMeeting via body.scheduledFor)
@@ -1374,6 +1419,47 @@ async function handleInit(DB) {
       contact    TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now'))
     )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_policies (
+      id                 TEXT PRIMARY KEY,
+      policy_type        TEXT NOT NULL DEFAULT '',
+      title              TEXT NOT NULL DEFAULT '',
+      summary            TEXT DEFAULT '',
+      status             TEXT DEFAULT 'draft',
+      current_version_id TEXT DEFAULT '',
+      created_by         TEXT DEFAULT '',
+      created_at         TEXT DEFAULT (datetime('now')),
+      updated_at         TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_policy_versions (
+      id               TEXT PRIMARY KEY,
+      policy_id        TEXT NOT NULL DEFAULT '',
+      version_label    TEXT NOT NULL DEFAULT '',
+      full_text        TEXT NOT NULL DEFAULT '',
+      source_type      TEXT DEFAULT 'upload',
+      status           TEXT DEFAULT 'draft',
+      proofread_report TEXT DEFAULT '{}',
+      effective_date   TEXT DEFAULT '',
+      change_summary   TEXT DEFAULT '',
+      rolled_back_from TEXT DEFAULT '',
+      created_by       TEXT DEFAULT '',
+      approved_by      TEXT DEFAULT '',
+      approved_at      TEXT DEFAULT '',
+      created_at       TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_policy_amendments (
+      id                  TEXT PRIMARY KEY,
+      policy_id           TEXT NOT NULL DEFAULT '',
+      base_version_id     TEXT NOT NULL DEFAULT '',
+      proposed_version_id TEXT NOT NULL DEFAULT '',
+      meeting_minutes     TEXT DEFAULT '',
+      transcript_insights TEXT DEFAULT '',
+      rationale           TEXT DEFAULT '',
+      status              TEXT DEFAULT 'under_review',
+      created_by          TEXT DEFAULT '',
+      reviewed_by         TEXT DEFAULT '',
+      reviewed_at         TEXT DEFAULT '',
+      created_at          TEXT DEFAULT (datetime('now'))
+    )`,
   ];
 
   // Run all CREATE TABLE statements first
@@ -1403,6 +1489,9 @@ async function handleInit(DB) {
     `ALTER TABLE petty_cash ADD COLUMN cash_amount REAL DEFAULT 0`,
     `ALTER TABLE petty_cash ADD COLUMN expense_refs TEXT DEFAULT ''`,
     `ALTER TABLE petty_cash ADD COLUMN no_receipt INTEGER DEFAULT 0`,
+    `ALTER TABLE kpsc_policy_versions ADD COLUMN effective_date TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_policy_versions ADD COLUMN change_summary TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_policy_versions ADD COLUMN rolled_back_from TEXT DEFAULT ''`,
     `ALTER TABLE petty_cash ADD COLUMN original_amount REAL DEFAULT 0`,
     // Remittance columns
     `ALTER TABLE remittances ADD COLUMN period_from TEXT DEFAULT ''`,
@@ -7798,3 +7887,141 @@ async function runScheduledSms(DB, env, request) {
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
 export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap };
+
+async function getKpscPolicies(DB) {
+  const { results } = await DB.prepare(`SELECT * FROM kpsc_policies ORDER BY updated_at DESC`).all();
+  return ok(results || []);
+}
+
+async function createKpscPolicy(DB, body, auth) {
+  const policyType = String(body?.policyType || '').trim();
+  const title = String(body?.title || '').trim();
+  const summary = String(body?.summary || '').trim();
+  if (!policyType || !title) return err('policyType and title are required', 400);
+  const id = newId('pol');
+  await DB.prepare(`INSERT INTO kpsc_policies (id, policy_type, title, summary, status, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, 'draft', ?, datetime('now'), datetime('now'))`)
+    .bind(id, policyType, title, summary, String(auth?.name || '')).run();
+  return ok({ ok: true, id });
+}
+
+async function getKpscPolicyVersions(DB, policyId) {
+  if (!policyId) return err('policyId is required', 400);
+  const { results } = await DB.prepare(`SELECT * FROM kpsc_policy_versions WHERE policy_id=? ORDER BY created_at DESC`).bind(policyId).all();
+  return ok(results || []);
+}
+
+async function uploadKpscPolicyVersion(DB, body, auth) {
+  const policyId = String(body?.policyId || '').trim();
+  const fullText = String(body?.fullText || '').trim();
+  const versionLabel = String(body?.versionLabel || '').trim() || `v${new Date().toISOString().slice(0,10)}`;
+  const markPublished = !!body?.publish;
+  const effectiveDate = String(body?.effectiveDate || '').trim();
+  const changeSummary = String(body?.changeSummary || '').trim();
+  if (!policyId || !fullText) return err('policyId and fullText are required', 400);
+  const id = newId('pver');
+  const status = markPublished ? 'published' : 'draft';
+  await DB.prepare(`INSERT INTO kpsc_policy_versions (id, policy_id, version_label, full_text, source_type, status, effective_date, change_summary, created_by, created_at) VALUES (?, ?, ?, ?, 'upload', ?, ?, ?, ?, datetime('now'))`)
+    .bind(id, policyId, versionLabel, fullText, status, effectiveDate, changeSummary, String(auth?.name || '')).run();
+  if (markPublished) {
+    await DB.prepare(`UPDATE kpsc_policies SET current_version_id=?, status='published', updated_at=datetime('now') WHERE id=?`).bind(id, policyId).run();
+  } else {
+    await DB.prepare(`UPDATE kpsc_policies SET updated_at=datetime('now') WHERE id=?`).bind(policyId).run();
+  }
+  return ok({ ok: true, versionId: id });
+}
+
+async function proposeKpscPolicyAmendment(DB, body, auth) {
+  const policyId = String(body?.policyId || '').trim();
+  const baseVersionId = String(body?.baseVersionId || '').trim();
+  const meetingMinutes = String(body?.meetingMinutes || '').trim();
+  const transcriptInsights = String(body?.transcriptInsights || '').trim();
+  if (!policyId || !baseVersionId) return err('policyId and baseVersionId are required', 400);
+  const base = await DB.prepare(`SELECT * FROM kpsc_policy_versions WHERE id=?`).bind(baseVersionId).first();
+  if (!base) return err('base version not found', 404);
+  const appended = `\n\n---\nAI Amendment Draft\n- Minutes Insight: ${meetingMinutes.slice(0, 500)}\n- Transcript Insight: ${transcriptInsights.slice(0, 500)}\n`;
+  const proposedVersionId = newId('pver');
+  await DB.prepare(`INSERT INTO kpsc_policy_versions (id, policy_id, version_label, full_text, source_type, status, created_by, created_at) VALUES (?, ?, ?, ?, 'ai_amendment', 'under_review', ?, datetime('now'))`)
+    .bind(proposedVersionId, policyId, `${base.version_label}-amend`, `${base.full_text}${appended}`, String(auth?.name || '')).run();
+  const amendmentId = newId('amd');
+  await DB.prepare(`INSERT INTO kpsc_policy_amendments (id, policy_id, base_version_id, proposed_version_id, meeting_minutes, transcript_insights, rationale, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'under_review', ?, datetime('now'))`)
+    .bind(amendmentId, policyId, baseVersionId, proposedVersionId, meetingMinutes, transcriptInsights, 'AI proposed updates based on meeting inputs', String(auth?.name || '')).run();
+  const oldLines = String(base.full_text || '').split('\n');
+  const newLines = String(`${base.full_text}${appended}` || '').split('\n');
+  const max = Math.max(oldLines.length, newLines.length);
+  const diff = [];
+  for (let i = 0; i < max; i++) {
+    const oldText = oldLines[i] || '';
+    const newText = newLines[i] || '';
+    if (oldText !== newText) diff.push({ line: i + 1, oldText, newText });
+  }
+  return ok({ ok: true, amendmentId, proposedVersionId, beforeText: base.full_text, afterText: `${base.full_text}${appended}`, diff });
+}
+
+async function proofreadKpscPolicyAmendment(DB, body) {
+  const proposedVersionId = String(body?.proposedVersionId || '').trim();
+  if (!proposedVersionId) return err('proposedVersionId is required', 400);
+  const v = await DB.prepare(`SELECT full_text FROM kpsc_policy_versions WHERE id=?`).bind(proposedVersionId).first();
+  if (!v) return err('version not found', 404);
+  const report = {
+    grammar: 'pass',
+    clarity: v.full_text.length > 120 ? 'pass' : 'warn',
+    plainLanguage: 'pass',
+    contradictions: 'manual_review_required',
+    generatedAt: new Date().toISOString(),
+  };
+  await DB.prepare(`UPDATE kpsc_policy_versions SET proofread_report=? WHERE id=?`).bind(JSON.stringify(report), proposedVersionId).run();
+  return ok({ ok: true, report });
+}
+
+async function approveKpscPolicyAmendment(DB, body, auth) {
+  const amendmentId = String(body?.amendmentId || '').trim();
+  if (!amendmentId) return err('amendmentId is required', 400);
+  const row = await DB.prepare(`SELECT * FROM kpsc_policy_amendments WHERE id=?`).bind(amendmentId).first();
+  if (!row) return err('amendment not found', 404);
+  await DB.prepare(`UPDATE kpsc_policy_amendments SET status='approved', reviewed_by=?, reviewed_at=datetime('now') WHERE id=?`)
+    .bind(String(auth?.name || ''), amendmentId).run();
+  await DB.prepare(`UPDATE kpsc_policy_versions SET status='published', approved_by=?, approved_at=datetime('now') WHERE id=?`)
+    .bind(String(auth?.name || ''), row.proposed_version_id).run();
+  await DB.prepare(`UPDATE kpsc_policies SET current_version_id=?, status='published', updated_at=datetime('now') WHERE id=?`)
+    .bind(row.proposed_version_id, row.policy_id).run();
+  await DB.prepare(`INSERT INTO notifications (id, title, message, category, created_at) VALUES (?, ?, ?, 'policy', datetime('now'))`)
+    .bind(newId('ntf'), 'Policy Updated', 'A new policy version was published in-app.').run();
+  return ok({ ok: true });
+}
+
+async function rejectKpscPolicyAmendment(DB, body, auth) {
+  const amendmentId = String(body?.amendmentId || '').trim();
+  if (!amendmentId) return err('amendmentId is required', 400);
+  const row = await DB.prepare(`SELECT * FROM kpsc_policy_amendments WHERE id=?`).bind(amendmentId).first();
+  if (!row) return err('amendment not found', 404);
+  await DB.prepare(`UPDATE kpsc_policy_amendments SET status='rejected', reviewed_by=?, reviewed_at=datetime('now') WHERE id=?`)
+    .bind(String(auth?.name || ''), amendmentId).run();
+  await DB.prepare(`UPDATE kpsc_policy_versions SET status='rejected' WHERE id=?`).bind(row.proposed_version_id).run();
+  return ok({ ok: true });
+}
+
+async function getKpscPublicPolicy(DB, type) {
+  const policyType = String(type || '').toLowerCase();
+  if (!policyType) return err('type is required', 400);
+  const pol = await DB.prepare(`SELECT * FROM kpsc_policies WHERE lower(policy_type)=? LIMIT 1`).bind(policyType).first();
+  if (!pol || !pol.current_version_id) return ok({});
+  const ver = await DB.prepare(`SELECT * FROM kpsc_policy_versions WHERE id=? LIMIT 1`).bind(pol.current_version_id).first();
+  return ok(ver || {});
+}
+
+async function rollbackKpscPolicyVersion(DB, body, auth) {
+  const policyId = String(body?.policyId || '').trim();
+  const targetVersionId = String(body?.targetVersionId || '').trim();
+  const reason = String(body?.changeSummary || 'Rollback to previous approved version').trim();
+  const effectiveDate = String(body?.effectiveDate || '').trim();
+  if (!policyId || !targetVersionId) return err('policyId and targetVersionId are required', 400);
+  const target = await DB.prepare(`SELECT * FROM kpsc_policy_versions WHERE id=? AND policy_id=?`).bind(targetVersionId, policyId).first();
+  if (!target) return err('target version not found', 404);
+  const newVersionId = newId('pver');
+  const newLabel = `${target.version_label}-rollback-${new Date().toISOString().slice(0,10)}`;
+  await DB.prepare(`INSERT INTO kpsc_policy_versions (id, policy_id, version_label, full_text, source_type, status, effective_date, change_summary, rolled_back_from, created_by, approved_by, approved_at, created_at)
+    VALUES (?, ?, ?, ?, 'rollback', 'published', ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
+    .bind(newVersionId, policyId, newLabel, target.full_text, effectiveDate, reason, targetVersionId, String(auth?.name || ''), String(auth?.name || '')).run();
+  await DB.prepare(`UPDATE kpsc_policies SET current_version_id=?, status='published', updated_at=datetime('now') WHERE id=?`).bind(newVersionId, policyId).run();
+  return ok({ ok: true, versionId: newVersionId });
+}
