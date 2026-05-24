@@ -964,6 +964,62 @@ export async function onRequest(context) {
       if (method === 'DELETE' && param) return await deleteScheduledSms(DB, param);
     }
 
+    // ── KPSC Policy: public read + admin write ──────────────────
+    if (route === 'kpsc-policy') {
+      // Public GET current version — no auth needed
+      if (method === 'GET' && !param) {
+        const type = url.searchParams.get('type') || '';
+        if (type !== 'welfare' && type !== 'byelaw') return err('type must be welfare or byelaw', 400);
+        return await getPolicyCurrentVersion(DB, type);
+      }
+      // Public GET summary strings for login page cards — no auth
+      if (method === 'GET' && param === 'summary') {
+        return await getPolicySummaries(DB);
+      }
+      // Admin: GET version history
+      if (method === 'GET' && param === 'versions') {
+        const auth = await requireKpscRole(DB, request, ['it_admin', 'general_secretary']);
+        if (auth instanceof Response) return auth;
+        const type = url.searchParams.get('type') || '';
+        return await getPolicyVersionHistory(DB, type);
+      }
+      // Admin: Publish new version
+      if (method === 'POST' && !param) {
+        const auth = await requireKpscRole(DB, request, ['it_admin', 'general_secretary']);
+        if (auth instanceof Response) return auth;
+        return await publishPolicyVersion(DB, body, auth);
+      }
+      // Admin: Rollback to a previous version (creates new version)
+      if (method === 'POST' && param === 'rollback') {
+        const auth = await requireKpscRole(DB, request, ['acting_chairman', 'it_admin', 'general_secretary']);
+        if (auth instanceof Response) return auth;
+        return await rollbackPolicyVersion(DB, body, auth);
+      }
+      // Admin: AI format raw text into structured markdown
+      if (method === 'POST' && param === 'ai-format') {
+        const auth = await requireKpscRole(DB, request, ['it_admin', 'general_secretary']);
+        if (auth instanceof Response) return auth;
+        return await aiFormatPolicyText(DB, env, body);
+      }
+    }
+
+    // ── KPSC Amendment workflow ─────────────────────────────────
+    if (route === 'kpsc-amendment-preview' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_ADMIN_ROLES);
+      if (auth instanceof Response) return auth;
+      return await amendmentPreview(DB, env, body);
+    }
+    if (route === 'kpsc-amendment-apply' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_ADMIN_ROLES);
+      if (auth instanceof Response) return auth;
+      return await amendmentApply(DB, env, body, auth);
+    }
+    if (route === 'kpsc-amendment-proofread' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_ADMIN_ROLES);
+      if (auth instanceof Response) return auth;
+      return await amendmentProofread(DB, env, body);
+    }
+
     // ── B6: scheduled_for field on ai-secretary-meetings ───────
     // (handled inline in updateAiSecretaryMeeting via body.scheduledFor)
 
@@ -1413,6 +1469,30 @@ async function handleInit(DB) {
       name       TEXT DEFAULT '',
       contact    TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_policy_versions (
+      id             TEXT PRIMARY KEY,
+      policy_type    TEXT NOT NULL,
+      version_num    INTEGER NOT NULL,
+      content_md     TEXT NOT NULL DEFAULT '',
+      change_summary TEXT DEFAULT '',
+      approved_by    TEXT DEFAULT '',
+      approved_by_id TEXT DEFAULT '',
+      effective_date TEXT DEFAULT '',
+      is_current     INTEGER DEFAULT 0,
+      created_at     TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_byelaw_amendment_log (
+      id                TEXT PRIMARY KEY,
+      meeting_id        TEXT DEFAULT '',
+      insight_text      TEXT DEFAULT '',
+      old_text          TEXT DEFAULT '',
+      new_text          TEXT DEFAULT '',
+      approved_by       TEXT DEFAULT '',
+      approved_by_id    TEXT DEFAULT '',
+      policy_version_id TEXT DEFAULT '',
+      ai_confidence     TEXT DEFAULT 'manual',
+      created_at        TEXT NOT NULL
     )`,
   ];
 
