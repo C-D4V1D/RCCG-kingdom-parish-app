@@ -90,3 +90,12 @@ test('authority quota proration sums correctly across month boundaries', () => {
   assertClose(lines[0].amount, 4000 * ((1 / 4) + (2 / 5)));
   assert.equal(lines[0].isProrated, true);
 });
+
+
+test('multi-month basis text uses Sundays in remittance period', () => {
+  const lines = App._getQuotaLinesForPeriod([
+    { label: 'RMF (Camp Clearing)', amount: 4000 }
+  ], '2026-02-22', '2026-03-08');
+
+  assert.equal(lines[0].basis, 'Proportion of 3 of 3 Sundays in the rem. period.');
+});
