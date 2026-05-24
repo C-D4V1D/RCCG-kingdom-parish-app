@@ -186,6 +186,7 @@ const DB = {
   getPetty()                   { return apiFetch('petty'); },
   getPettyConfig()             { return apiFetch('petty-config'); },
   savePettyConfig(d)           { return apiFetch('petty-config','POST',d); },
+  recalcPettyFloat()           { return apiFetch('petty-recalc','POST'); },
   addPettyEntry(d)             { return apiFetch('petty','POST',d); },
   updatePettyEntry(id,d)       { return apiFetch(`petty/${id}`,'PUT',d); },
   deletePettyEntry(id)         { return apiFetch(`petty/${id}`,'DELETE'); },
@@ -5003,6 +5004,25 @@ function setPettyStatusFilter(v){ state.pettyStatusFilter=v||null; renderPettyCa
 function setPettySort(v){ state.pettySort=v||'date_desc'; renderPettyCash(); }
 function clearPettyFilters(){ state.pettySearch=''; state.pettyTypeFilter=null; state.pettyStatusFilter=null; renderPettyCash(); }
 
+async function recalcPettyFloat(btn=null){
+  if(!confirm('Recalculate petty cash balance from all expense and petty cash records? This will correct any drift caused by failed operations.')) return;
+  const restore = setBtnLoading(btn, 'Recalculating…');
+  try {
+    const result = await DB.recalcPettyFloat();
+    const drift = result.drift||0;
+    if(Math.abs(drift) < 0.01){
+      showAlert('Petty cash balance is already correct — no adjustment needed.','success');
+    } else {
+      DB.addAudit('petty_recalc',`Petty float recalculated: ${fmt(result.previousFloat)} → ${fmt(result.correctedFloat)} (drift: ${drift>0?'+':''}${fmt(drift)})`,state.user?.name);
+      showAlert(`Petty cash balance corrected by ${fmt(Math.abs(drift))} (was ${fmt(result.previousFloat)}, now ${fmt(result.correctedFloat)}).`,'success');
+    }
+    renderPettyCash();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to recalculate: ${err.message||'Unknown error'}`,'danger');
+  }
+}
+
 function updateExpenseSubcats(){
   const cat = document.getElementById('exp_cat')?.value;
   const subcats = cat ? (EXPENSE_SUBCATS[cat]||['Others...']) : [];
@@ -6092,6 +6112,7 @@ async function renderPettyCash(){
           <button class="btn" onclick="App.showAdvanceRequest()">+ Request Advance</button>
         `:''}
         ${canAction('petty_topup_payment')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">📋 Record Top-Up Payment</button>`:''}
+        ${can('petty_view')?`<button class="btn btn-sm" onclick="App.recalcPettyFloat(this)" title="Recalculate petty cash balance from all expense and petty cash records">⚖ Recalculate Balance</button>`:''}
       </div>
     </div>
 
@@ -8780,7 +8801,7 @@ return {
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
-  renderPettyCash, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
+  renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,

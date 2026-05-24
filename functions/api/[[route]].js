@@ -537,6 +537,11 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) return await updatePettyConfig(DB, body);
     }
 
+    // ── /api/petty-recalc ─────────────────────────────────────
+    if (route === 'petty-recalc' && method === 'POST') {
+      return await recalcPettyFloat(DB);
+    }
+
     // ── /api/action-items ─────────────────────────────────────
     if (route === 'action-items') {
       if (method === 'GET'  && !param) return await getActionItems(DB);
@@ -2304,6 +2309,50 @@ async function updatePettyConfig(DB, data) {
   await DB.prepare(`UPDATE petty_config SET float_amount=?,max_float=? WHERE id='main'`)
     .bind(data.float, data.max).run();
   return ok({ float: data.float, max: data.max });
+}
+
+async function recalcPettyFloat(DB) {
+  const cfg = await DB.prepare(`SELECT max_float FROM petty_config WHERE id='main'`).first();
+  const maxFloat = cfg?.max_float ?? 50000;
+
+  // Sum petty deductions from all expense records
+  const expRow = await DB.prepare(`
+    SELECT COALESCE(SUM(petty_amount), 0) AS total
+    FROM expenses WHERE petty_amount > 0
+  `).first();
+  const totalExpenseDeductions = expRow?.total || 0;
+
+  // Sum all petty cash history float movements
+  const { results: pettyRows } = await DB.prepare(`SELECT * FROM petty_cash`).all();
+  let historyDelta = 0;
+  for (const h of (pettyRows || [])) {
+    if (h.type === 'refill' && (h.status === 'approved' || h.status === 'settled')) {
+      historyDelta += Number(h.amount) || 0;
+    }
+    if (h.type === 'advance' && (h.status === 'approved' || h.status === 'settled')) {
+      historyDelta -= Number(h.amount) || 0;
+      if (h.status === 'settled') {
+        historyDelta += Number(h.change_returned) || 0;
+        historyDelta -= Number(h.extra_spent) || 0;
+      }
+    }
+    if (h.type === 'disbursement' && h.status === 'approved') {
+      historyDelta -= Number(h.amount) || 0;
+    }
+  }
+
+  const correctFloat = maxFloat - totalExpenseDeductions + historyDelta;
+  const currentFloat = cfg ? (await DB.prepare(`SELECT float_amount FROM petty_config WHERE id='main'`).first())?.float_amount : maxFloat;
+  const drift = correctFloat - (currentFloat || 0);
+
+  await DB.prepare(`UPDATE petty_config SET float_amount=? WHERE id='main'`).bind(correctFloat).run();
+
+  return ok({
+    previousFloat: currentFloat,
+    correctedFloat: correctFloat,
+    drift,
+    breakdown: { maxFloat, totalExpenseDeductions, historyDelta }
+  });
 }
 
 async function getPetty(DB) {
