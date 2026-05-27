@@ -6063,8 +6063,21 @@ async function renderPettyCash(){
 
   // Approved top-up requests awaiting payment recording
   // Approved top-up requests awaiting payment — only show those with remaining balance
-  const approvedTopups = history.filter(h=>h.status==='approved'&&h.type==='topup_request'&&
-    Math.max(0,(h.originalAmount||h.amount||0)-(h.actualAmount||0))>0.5);
+  // Recalculate effective amount from expenseRefs against current expenses to handle
+  // cases where an expense was deleted after the request was created/approved.
+  const expenseMap = new Map(allExpenses.map(e => [e.id, e]));
+  const approvedTopups = history.filter(h=>h.status==='approved'&&h.type==='topup_request')
+    .map(h => {
+      const refs = Array.isArray(h.expenseRefs) ? h.expenseRefs : [];
+      const liveTotal = refs.reduce((s, id) => {
+        const e = expenseMap.get(id);
+        if (!e) return s;
+        return s + (e.paymentMethod === 'split' ? (e.pettyAmount || 0) : (e.amount || 0));
+      }, 0);
+      const effectiveAmount = refs.length > 0 ? liveTotal : (h.amount || 0);
+      return { ...h, _effectiveAmount: effectiveAmount };
+    })
+    .filter(h => Math.max(0, (h._effectiveAmount) - (h.actualAmount || 0)) > 0.5);
 
   // Advances awaiting proof
   const advancesAwaitingProof = history.filter(h=>h.status==='approved'&&h.type==='advance'&&!h.receiptNo);
@@ -6202,32 +6215,32 @@ async function renderPettyCash(){
     <div class="card" style="margin-bottom:1rem">
       <div class="card-header">
         <span class="card-title">✅ Approved Top-Ups — Awaiting Payment (${approvedTopups.length})</span>
-        <span style="font-size:11px;color:var(--text3)">Total: ${fmt(approvedTopups.reduce((s,r)=>s+(r.amount||0),0))}</span>
+        <span style="font-size:11px;color:var(--text3)">Total: ${fmt(approvedTopups.reduce((s,r)=>s+(r._effectiveAmount||0),0))}</span>
       </div>
       <div class="topup-desktop-table">
         <div class="table-wrap"><table>
           <tr><th>Date Approved</th><th>Request</th><th>Requested By</th><th>Approved By</th><th class="td-right">Amount</th><th>Action</th></tr>
-          ${approvedTopups.map(r=>`<tr>
+          ${approvedTopups.map(r=>{ const _due=Math.max(0,(r._effectiveAmount)-(r.actualAmount||0)); return `<tr>
             <td style="white-space:nowrap">${fmtDate(r.approvedAt||r.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(r.approvedAt||r.createdAt)}</div></td>
             <td>
               <div style="font-size:13px;font-weight:500">${r.purpose||'Wallet top-up'}</div>
               ${r.expenseRefs?.length?`<div style="font-size:11px;color:var(--text3)">${r.expenseRefs.length} expense(s) included</div>`:''}
-              ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--text3)">Paid so far: ${fmt(r.actualAmount||0)} · Remaining: ${fmt(Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0)))}</div>`:''}
+              ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--text3)">Paid so far: ${fmt(r.actualAmount||0)} · Remaining: ${fmt(_due)}</div>`:''}
             </td>
             <td class="td-muted">${r.requestedBy||'—'}</td>
             <td class="td-muted">${r.approvedBy||'—'}</td>
             <td class="td-right td-bold" style="color:var(--primary)">
-              <div>${fmt(r.originalAmount||r.amount)}</div>
+              <div>${fmt(r._effectiveAmount)}</div>
               ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--success)">Paid: ${fmt(r.actualAmount)}</div>`:''}
-              ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--amber)">Due: ${fmt(Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0)))}</div>`:''}
+              ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--amber)">Due: ${fmt(_due)}</div>`:''}
             </td>
-            <td><button class="btn btn-sm btn-primary" onclick="App.showPettyRefill(${Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0))}, '${r.id}')">📋 Record Payment</button></td>
-          </tr>`).join('')}
+            <td><button class="btn btn-sm btn-primary" onclick="App.showPettyRefill(${_due}, '${r.id}')">📋 Record Payment</button></td>
+          </tr>`; }).join('')}
         </table></div>
       </div>
       <div class="topup-mobile-list">
         ${approvedTopups.map(r=>{
-          const due=Math.max(0,(r.originalAmount||r.amount||0)-(r.actualAmount||0));
+          const due=Math.max(0,(r._effectiveAmount)-(r.actualAmount||0));
           return`<div class="topup-card">
             <div class="topup-card-header" onclick="toggleTopupCard(this)" role="button" tabindex="0" aria-expanded="false" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleTopupCard(this)}">
               <div class="topup-card-left">
@@ -6236,7 +6249,7 @@ async function renderPettyCash(){
                 ${r.expenseRefs?.length?`<div class="topup-card-sub">${r.expenseRefs.length} expense(s) included</div>`:''}
               </div>
               <div class="topup-card-right">
-                <div class="topup-card-amount">${fmt(r.originalAmount||r.amount)}</div>
+                <div class="topup-card-amount">${fmt(r._effectiveAmount)}</div>
                 ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--amber)">Due: ${fmt(due)}</div>`:''}
               </div>
               <span class="topup-card-chevron">▼</span>
