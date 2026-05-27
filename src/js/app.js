@@ -4698,7 +4698,7 @@ async function renderExpenses(){
   const topSubcats = Object.values(subcatFreq)
     .filter(s => s.subCategory !== 'Others...')
     .sort((a, b) => b.count - a.count)
-    .slice(0, 5);
+    .slice(0, 6);
   state._quickLogItems = topSubcats;
 
   // Active category filter (stored on state)
@@ -4797,21 +4797,24 @@ async function renderExpenses(){
         <div style="font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:var(--text3)">Quick Log</div>
         <div style="font-size:10px;color:var(--text3)">Based on recent expenses</div>
       </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
         ${topSubcats.map((s, qi) => {
           const cat = EXPENSE_CATS.find(c => c.key === s.category);
           const icon = cat?.icon || '💸';
-          const label = s.subCategory.length > 24 ? s.subCategory.slice(0, 22) + '…' : s.subCategory;
+          const isWide = qi < 2;
+          const maxLen = isWide ? 50 : 22;
+          const label = s.subCategory.length > maxLen ? s.subCategory.slice(0, maxLen - 2) + '…' : s.subCategory;
           return `<button onclick="App.quickLogExpense(${qi})" style="
-            all:unset;display:inline-flex;align-items:center;gap:5px;
+            all:unset;display:flex;align-items:center;gap:5px;
             background:var(--card);border:1px solid var(--border);
             border-radius:20px;padding:5px 10px 5px 7px;cursor:pointer;
-            transition:border-color 0.15s;font-size:0;line-height:1
+            transition:border-color 0.15s;line-height:1;
+            ${isWide ? 'grid-column:1/-1' : ''}
           " onmouseover="this.style.borderColor='var(--primary)'"
              onmouseout="this.style.borderColor='var(--border)'">
-            <span style="font-size:13px;line-height:1">${icon}</span>
-            <span style="font-size:11px;font-weight:600;color:var(--text)">${esc(label)}</span>
-            <span style="font-size:9px;color:var(--text3);font-weight:500">${s.count}x</span>
+            <span style="font-size:13px;line-height:1;flex-shrink:0">${icon}</span>
+            <span style="font-size:11px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(label)}</span>
+            <span style="font-size:9px;color:var(--text3);font-weight:500;flex-shrink:0">${s.count}x</span>
           </button>`;
         }).join('')}
       </div>
