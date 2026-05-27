@@ -4685,6 +4685,22 @@ async function renderExpenses(){
   const catTotals = {};
   EXPENSE_CATS.forEach(c=>{ catTotals[c.key]=expenses.filter(e=>e.category===c.key).reduce((s,e)=>s+(e.amount||0),0); });
 
+  // Quick-log: top 5 most frequent subcategories from the last 3 months
+  const _3moAgo = new Date(); _3moAgo.setMonth(_3moAgo.getMonth() - 3);
+  const _3moStr = _3moAgo.toISOString().split('T')[0];
+  const recentExp = allExp.filter(e => (e.date || e.createdAt || '') >= _3moStr && e.subCategory);
+  const subcatFreq = {};
+  recentExp.forEach(e => {
+    const k = `${e.category}||${e.subCategory}`;
+    if (!subcatFreq[k]) subcatFreq[k] = { category: e.category, subCategory: e.subCategory, count: 0 };
+    subcatFreq[k].count++;
+  });
+  const topSubcats = Object.values(subcatFreq)
+    .filter(s => s.subCategory !== 'Others...')
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+  state._quickLogItems = topSubcats;
+
   // Active category filter (stored on state)
   const activeFilter   = state.expCatFilter    || null;
   const searchTerm     = state.expSearch       || '';
@@ -4774,6 +4790,34 @@ async function renderExpenses(){
         <div style="height:4px;background:${spendColor};width:${Math.min(100,Math.max(0,spendable/Math.max(totalChurch,1)*100)).toFixed(1)}%;border-radius:2px;transition:width 0.4s"></div>
       </div>
     </div>
+
+    ${canAction('expense_log') && topSubcats.length ? `
+    <div style="margin-bottom:1rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding:0 2px">
+        <div style="font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:var(--text3)">Quick Log</div>
+        <div style="font-size:10px;color:var(--text3)">Based on recent expenses</div>
+      </div>
+      <div class="no-scrollbar" style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch">
+        ${topSubcats.map((s, qi) => {
+          const cat = EXPENSE_CATS.find(c => c.key === s.category);
+          const icon = cat?.icon || '💸';
+          const label = s.subCategory.length > 28 ? s.subCategory.slice(0, 26) + '…' : s.subCategory;
+          return `<button onclick="App.quickLogExpense(${qi})" style="
+            all:unset;flex:0 0 auto;display:flex;align-items:center;gap:8px;
+            background:var(--card);border:1.5px solid var(--border);
+            border-radius:40px;padding:8px 14px 8px 10px;cursor:pointer;
+            transition:all 0.15s;white-space:nowrap;
+            box-shadow:0 1px 3px rgba(0,0,0,0.04)
+          " onmouseover="this.style.borderColor='var(--primary)';this.style.boxShadow='0 2px 8px rgba(0,0,0,0.08)'"
+             onmouseout="this.style.borderColor='var(--border)';this.style.boxShadow='0 1px 3px rgba(0,0,0,0.04)'">
+            <span style="font-size:16px;line-height:1">${icon}</span>
+            <span style="font-size:12px;font-weight:600;color:var(--text)">${esc(label)}</span>
+            <span style="font-size:10px;color:var(--text3);font-weight:500">${s.count}x</span>
+          </button>`;
+        }).join('')}
+      </div>
+    </div>` : ''}
+
     <div class="card" style="margin-bottom:1rem">
       <div class="card-header">
         <span class="card-title">Category Breakdown</span>
@@ -5073,7 +5117,12 @@ function getExpenseMethodOptionsForRole(role){
   return options;
 }
 
-function showExpenseForm(preselectedCat){
+function quickLogExpense(idx){
+  const item = state._quickLogItems?.[idx];
+  if(item) showExpenseForm(item.category, item.subCategory);
+}
+
+function showExpenseForm(preselectedCat, preselectedSubcat){
   if(!canAction('expense_log')){ showAlert('You do not have permission to log expenses.','danger'); return; }
   const today=new Date().toISOString().split('T')[0];
   const methodOptions = getExpenseMethodOptionsForRole(state.user?.role);
@@ -5144,8 +5193,15 @@ function showExpenseForm(preselectedCat){
     </div>
     <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="exp_notes" class="form-textarea" placeholder="Additional details..."></textarea></div>
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitExpense(this)">Save Expense</button></div>`);
-  // If a category was pre-selected, populate subcategories immediately
-  if(preselectedCat){ setTimeout(()=>App.updateExpenseSubcats(), 30); }
+  if(preselectedCat){
+    setTimeout(()=>{
+      App.updateExpenseSubcats();
+      if(preselectedSubcat){
+        const sel = document.getElementById('exp_subcat');
+        if(sel){ sel.value = preselectedSubcat; App.updateExpenseDescRequired(); }
+      }
+    }, 30);
+  }
 }
 
 function onExpMethodChange(){
@@ -8810,7 +8866,7 @@ return {
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
-  showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, submitEditExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
+  quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, submitEditExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
