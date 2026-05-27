@@ -4841,8 +4841,11 @@ async function renderExpenses(){
               <span style="font-size:22px;line-height:1">${c.icon}</span>
               ${pct>0?`<span style="font-size:11px;font-weight:700;padding:2px 6px;border-radius:10px;background:var(--primary-light);color:var(--primary)">${pct<1?'<1':Math.round(pct)}%</span>`:''}
             </div>
-            <div style="font-size:12px;font-weight:600;color:var(--text);line-height:1.3;margin-top:2px">${c.label}</div>
-            ${pct>0?`<div style="height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:2px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:2px">
+              <span style="font-size:12px;font-weight:600;color:var(--text);line-height:1.3">${c.label}</span>
+              <span style="font-size:11px;font-weight:700;color:${hasAmt?'var(--danger)':'var(--text3)'};white-space:nowrap;margin-left:6px">${hasAmt?fmt(amt):'—'}</span>
+            </div>
+            ${pct>0?`<div style="height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:4px">
               <div style="height:3px;width:${Math.min(100,pct)}%;background:var(--primary);border-radius:2px"></div>
             </div>`:''}
           </button>`;
