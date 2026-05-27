@@ -4822,32 +4822,29 @@ async function renderExpenses(){
         <span class="card-title">Category Breakdown</span>
         ${activeFilter?`<button class="btn btn-sm" onclick="App.setExpCatFilter(null)">✕ Clear filter</button>`:canAction('expense_log')?'<span style="font-size:11px;color:var(--text3)">Tap a category to log an expense</span>':''}
       </div>
-      <div class="exp-cat-grid">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">
         ${EXPENSE_CATS.map(c=>{
           const amt  = catTotals[c.key]||0;
           const pct  = total>0 ? (amt/total*100) : 0;
           const hasAmt = amt>0;
           return `
-          <button class="exp-cat-card${hasAmt?' exp-cat-active':''}" onclick="${canAction('expense_log')?`App.showExpenseForm('${c.key}')`:``}">
-            <div class="exp-cat-desktop">
-              <div style="display:flex;justify-content:space-between;align-items:flex-start">
-                <span style="font-size:22px;line-height:1">${c.icon}</span>
-                ${pct>0?`<span style="font-size:11px;font-weight:700;padding:2px 6px;border-radius:10px;background:var(--primary-light);color:var(--primary)">${pct<1?'<1':Math.round(pct)}%</span>`:''}
-              </div>
-              <div style="font-size:12px;font-weight:600;color:var(--text);line-height:1.3;margin-top:6px">${c.label}</div>
-              <div style="font-size:13px;font-weight:700;color:${hasAmt?'var(--danger)':'var(--text3)'}">
-                ${hasAmt?fmt(amt):'—'}
-              </div>
-              ${pct>0?`<div style="height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:4px">
-                <div style="height:3px;width:${Math.min(100,pct)}%;background:var(--primary);border-radius:2px"></div>
-              </div>`:''}
+          <button onclick="${canAction('expense_log')?`App.showExpenseForm('${c.key}')`:``}" style="
+            all:unset;display:flex;flex-direction:column;gap:4px;
+            background:var(--surface);
+            border:1.5px solid ${hasAmt?'var(--border2)':'var(--border)'};
+            border-radius:var(--rl);padding:10px 12px;cursor:pointer;
+            transition:all 0.15s;opacity:${hasAmt?1:0.45};
+            box-shadow:none;
+            text-align:left;width:100%;box-sizing:border-box
+          " >
+            <div style="display:flex;justify-content:space-between;align-items:flex-start">
+              <span style="font-size:22px;line-height:1">${c.icon}</span>
+              ${pct>0?`<span style="font-size:11px;font-weight:700;padding:2px 6px;border-radius:10px;background:var(--primary-light);color:var(--primary)">${pct<1?'<1':Math.round(pct)}%</span>`:''}
             </div>
-            <div class="exp-cat-mobile">
-              <span style="font-size:18px;line-height:1">${c.icon}</span>
-              <span style="flex:1;font-size:12px;font-weight:600;color:var(--text)">${c.label}</span>
-              <span style="font-size:12px;font-weight:700;color:${hasAmt?'var(--danger)':'var(--text3)'};white-space:nowrap">${hasAmt?fmt(amt):'—'}</span>
-              ${pct>0?`<span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:8px;background:var(--primary-light);color:var(--primary);white-space:nowrap">${pct<1?'<1':Math.round(pct)}%</span>`:''}
-            </div>
+            <div style="font-size:12px;font-weight:600;color:var(--text);line-height:1.3;margin-top:2px">${c.label}</div>
+            ${pct>0?`<div style="height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:2px">
+              <div style="height:3px;width:${Math.min(100,pct)}%;background:var(--primary);border-radius:2px"></div>
+            </div>`:''}
           </button>`;
         }).join('')}
       </div>
