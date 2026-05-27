@@ -4793,26 +4793,25 @@ async function renderExpenses(){
 
     ${canAction('expense_log') && topSubcats.length ? `
     <div style="margin-bottom:1rem">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding:0 2px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding:0 2px">
         <div style="font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:var(--text3)">Quick Log</div>
         <div style="font-size:10px;color:var(--text3)">Based on recent expenses</div>
       </div>
-      <div class="no-scrollbar" style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch">
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
         ${topSubcats.map((s, qi) => {
           const cat = EXPENSE_CATS.find(c => c.key === s.category);
           const icon = cat?.icon || '💸';
-          const label = s.subCategory.length > 28 ? s.subCategory.slice(0, 26) + '…' : s.subCategory;
+          const label = s.subCategory.length > 24 ? s.subCategory.slice(0, 22) + '…' : s.subCategory;
           return `<button onclick="App.quickLogExpense(${qi})" style="
-            all:unset;flex:0 0 auto;display:flex;align-items:center;gap:8px;
-            background:var(--card);border:1.5px solid var(--border);
-            border-radius:40px;padding:8px 14px 8px 10px;cursor:pointer;
-            transition:all 0.15s;white-space:nowrap;
-            box-shadow:0 1px 3px rgba(0,0,0,0.04)
-          " onmouseover="this.style.borderColor='var(--primary)';this.style.boxShadow='0 2px 8px rgba(0,0,0,0.08)'"
-             onmouseout="this.style.borderColor='var(--border)';this.style.boxShadow='0 1px 3px rgba(0,0,0,0.04)'">
-            <span style="font-size:16px;line-height:1">${icon}</span>
-            <span style="font-size:12px;font-weight:600;color:var(--text)">${esc(label)}</span>
-            <span style="font-size:10px;color:var(--text3);font-weight:500">${s.count}x</span>
+            all:unset;display:inline-flex;align-items:center;gap:5px;
+            background:var(--card);border:1px solid var(--border);
+            border-radius:20px;padding:5px 10px 5px 7px;cursor:pointer;
+            transition:border-color 0.15s;font-size:0;line-height:1
+          " onmouseover="this.style.borderColor='var(--primary)'"
+             onmouseout="this.style.borderColor='var(--border)'">
+            <span style="font-size:13px;line-height:1">${icon}</span>
+            <span style="font-size:11px;font-weight:600;color:var(--text)">${esc(label)}</span>
+            <span style="font-size:9px;color:var(--text3);font-weight:500">${s.count}x</span>
           </button>`;
         }).join('')}
       </div>
@@ -4823,32 +4822,32 @@ async function renderExpenses(){
         <span class="card-title">Category Breakdown</span>
         ${activeFilter?`<button class="btn btn-sm" onclick="App.setExpCatFilter(null)">✕ Clear filter</button>`:canAction('expense_log')?'<span style="font-size:11px;color:var(--text3)">Tap a category to log an expense</span>':''}
       </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">
+      <div class="exp-cat-grid">
         ${EXPENSE_CATS.map(c=>{
           const amt  = catTotals[c.key]||0;
           const pct  = total>0 ? (amt/total*100) : 0;
           const hasAmt = amt>0;
           return `
-          <button onclick="${canAction('expense_log')?`App.showExpenseForm('${c.key}')`:``}" style="
-            all:unset;display:flex;flex-direction:column;gap:6px;
-            background:var(--surface);
-            border:1.5px solid ${hasAmt?'var(--border2)':'var(--border)'};
-            border-radius:var(--rl);padding:12px 14px;cursor:pointer;
-            transition:all 0.15s;opacity:${hasAmt?1:0.45};
-            box-shadow:none;
-            text-align:left;width:100%;box-sizing:border-box
-          " >
-            <div style="display:flex;justify-content:space-between;align-items:flex-start">
-              <span style="font-size:22px;line-height:1">${c.icon}</span>
-              ${pct>0?`<span style="font-size:11px;font-weight:700;padding:2px 6px;border-radius:10px;background:var(--primary-light);color:var(--primary)">${pct<1?'<1':Math.round(pct)}%</span>`:''}
+          <button class="exp-cat-card${hasAmt?' exp-cat-active':''}" onclick="${canAction('expense_log')?`App.showExpenseForm('${c.key}')`:``}">
+            <div class="exp-cat-desktop">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <span style="font-size:22px;line-height:1">${c.icon}</span>
+                ${pct>0?`<span style="font-size:11px;font-weight:700;padding:2px 6px;border-radius:10px;background:var(--primary-light);color:var(--primary)">${pct<1?'<1':Math.round(pct)}%</span>`:''}
+              </div>
+              <div style="font-size:12px;font-weight:600;color:var(--text);line-height:1.3;margin-top:6px">${c.label}</div>
+              <div style="font-size:13px;font-weight:700;color:${hasAmt?'var(--danger)':'var(--text3)'}">
+                ${hasAmt?fmt(amt):'—'}
+              </div>
+              ${pct>0?`<div style="height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:4px">
+                <div style="height:3px;width:${Math.min(100,pct)}%;background:var(--primary);border-radius:2px"></div>
+              </div>`:''}
             </div>
-            <div style="font-size:12px;font-weight:600;color:var(--text);line-height:1.3;margin-top:2px">${c.label}</div>
-            <div style="font-size:13px;font-weight:700;color:${hasAmt?'var(--danger)':'var(--text3)'}">
-              ${hasAmt?fmt(amt):'—'}
+            <div class="exp-cat-mobile">
+              <span style="font-size:18px;line-height:1">${c.icon}</span>
+              <span style="flex:1;font-size:12px;font-weight:600;color:var(--text)">${c.label}</span>
+              <span style="font-size:12px;font-weight:700;color:${hasAmt?'var(--danger)':'var(--text3)'};white-space:nowrap">${hasAmt?fmt(amt):'—'}</span>
+              ${pct>0?`<span style="font-size:10px;font-weight:700;padding:1px 5px;border-radius:8px;background:var(--primary-light);color:var(--primary);white-space:nowrap">${pct<1?'<1':Math.round(pct)}%</span>`:''}
             </div>
-            ${pct>0?`<div style="height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:2px">
-              <div style="height:3px;width:${Math.min(100,pct)}%;background:var(--primary);border-radius:2px"></div>
-            </div>`:''}
           </button>`;
         }).join('')}
       </div>
