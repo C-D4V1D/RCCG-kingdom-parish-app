@@ -507,6 +507,9 @@ export async function onRequest(context) {
       return await changeUserPin(DB, body);
     }
 
+    // ── /api/dashboard — batched first-load payload ────────────
+    if (route === 'dashboard' && method === 'GET' && !param) return await getDashboardBatch(DB);
+
     // ── /api/income ────────────────────────────────────────────
     if (route === 'income') {
       if (method === 'GET'  && !param) return await getIncome(DB);
@@ -2561,6 +2564,23 @@ async function getCashTransactions(DB) {
     photoData:     row.photo_data,
     createdAt:     row.created_at,
   })));
+}
+
+// Aggregated first-load payload for the Dashboard. The client otherwise fires
+// seven full-table GETs in parallel; on a weak parish link those saturate the
+// connection and a single dropped one blanks the page. Serving them in one
+// response (server-side parallel D1 queries) collapses seven round-trips into
+// one while keeping the EXACT per-endpoint shapes — we reuse the same getters
+// and reparse their JSON, so the batch can never drift from the individual
+// endpoints. getRemRates is derived from settings on the client, so it needs
+// no entry here.
+async function getDashboardBatch(DB) {
+  const [income, expenses, petty, settings, remittances, pettyConfig, cashTransactions] =
+    await Promise.all([
+      getIncome(DB), getExpenses(DB), getPetty(DB), getSettings(DB),
+      getRemittances(DB), getPettyConfig(DB), getCashTransactions(DB),
+    ].map(p => p.then(r => r.json())));
+  return ok({ income, expenses, petty, settings, remittances, pettyConfig, cashTransactions });
 }
 
 async function createCashTransaction(DB, data) {

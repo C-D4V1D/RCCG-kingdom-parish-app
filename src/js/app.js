@@ -299,7 +299,87 @@ const DB = {
   addAiSecretaryMeeting(d)       { return apiFetch('ai-secretary-meetings','POST',d); },
   updateAiSecretaryMeeting(id,d) { return apiFetch(`ai-secretary-meetings/${id}`,'PUT',d); },
   processAiSecretaryMeeting(id)  { return apiFetch(`ai-secretary-meetings/${id}/process`,'POST'); },
+
+  // One round-trip for the seven tables the Dashboard needs. See loadDashboardData.
+  getDashboardData()           { return apiFetch('dashboard'); },
 };
+
+// ── Dashboard batch loader ──────────────────────────────────────────────────
+// The Dashboard needs seven full tables. Fetching them as seven parallel GETs
+// saturates a weak parish link, and a single dropped connection blanks the page.
+// `/api/dashboard` returns all seven in ONE response. We seed the per-endpoint
+// cache from the batch so navigating Dashboard → Transactions/Income/Bank next
+// reuses the data with no extra fetch. Falls back to the individual endpoints if
+// the batch route is unavailable (e.g. mid-deploy) or returns an unexpected
+// shape, preserving the granular per-source error reporting.
+const _DASH_CACHE_KEYS = ['income','expenses','petty','settings','remittances','petty-config','cash-transactions'];
+
+function _assembleDashFromCache(){
+  const fresh = key => { const c = _apiCache.get(key); return (c && Date.now() - c.ts < _CACHE_TTL[key]) ? c : null; };
+  if(!_DASH_CACHE_KEYS.every(fresh)) return null;
+  return {
+    income:           fresh('income').data,
+    expenses:         fresh('expenses').data,
+    petty:            fresh('petty').data,
+    settings:         fresh('settings').data,
+    remittances:      fresh('remittances').data,
+    pettyConfig:      fresh('petty-config').data,
+    cashTransactions: fresh('cash-transactions').data,
+  };
+}
+
+function _seedDashCache(batch){
+  const now = Date.now();
+  _apiCache.set('income',            { data: batch.income,            ts: now });
+  _apiCache.set('expenses',          { data: batch.expenses,          ts: now });
+  _apiCache.set('petty',             { data: batch.petty,             ts: now });
+  _apiCache.set('settings',          { data: batch.settings,          ts: now });
+  _apiCache.set('remittances',       { data: batch.remittances,       ts: now });
+  _apiCache.set('petty-config',      { data: batch.pettyConfig,       ts: now });
+  _apiCache.set('cash-transactions', { data: batch.cashTransactions,  ts: now });
+}
+
+async function _loadDashboardDataIndividually(){
+  const sources = [
+    ['Income records',     () => DB.getIncome()],
+    ['Expense records',    () => DB.getExpenses()],
+    ['Petty cash history', () => DB.getPetty()],
+    ['Settings',           () => DB.getSettings()],
+    ['Remittance history', () => DB.getRemittances()],
+    ['Petty cash config',  () => DB.getPettyConfig()],
+    ['Cash transactions',  () => DB.getCashTransactions()],
+  ];
+  const settled = await Promise.allSettled(sources.map(([, fn]) => fn()));
+  const failed = settled
+    .map((r, i) => r.status === 'rejected' ? { label: sources[i][0], err: r.reason } : null)
+    .filter(Boolean);
+  if(failed.length){
+    const e = new Error('Failed to load: ' + failed.map(f => f.label).join(', '));
+    e.failed = failed;
+    throw e;
+  }
+  const [income, expenses, petty, settings, remittances, pettyConfig, cashTransactions] = settled.map(r => r.value);
+  return { income, expenses, petty, settings, remittances, pettyConfig, cashTransactions };
+}
+
+async function loadDashboardData(){
+  // Fast path: arriving at the Dashboard right after another page — everything
+  // is already cached and fresh, so skip the network entirely.
+  const cached = _assembleDashFromCache();
+  if(cached) return cached;
+  try {
+    const batch = await DB.getDashboardData();
+    // Guard against an old backend answering this route with a different shape.
+    if(!batch || typeof batch !== 'object' || !Array.isArray(batch.income) || !Array.isArray(batch.expenses)){
+      return await _loadDashboardDataIndividually();
+    }
+    _seedDashCache(batch);
+    return batch;
+  } catch(e){
+    if(e && e.failed) throw e;   // individual fallback already ran and reported failures
+    return await _loadDashboardDataIndividually();
+  }
+}
 
 // ──────────────────────────────────────────
 // 3. STATE
@@ -2137,29 +2217,28 @@ async function renderDashboard(){
   // Phase 1 — paint the shell synchronously so the user sees structure now.
   renderDashboardSkeleton();
 
-  // Phase 2 — fetch the 8 dashboard endpoints. apiFetch retries transient
-  // failures (network drops, 5xx) under the hood; allSettled so a single
-  // permanent failure surfaces a clear error UI instead of blanking the
-  // dashboard.
-  const _dashSources = [
-    ['Income records',     () => DB.getIncome()],
-    ['Expense records',    () => DB.getExpenses()],
-    ['Petty cash history', () => DB.getPetty()],
-    ['Settings',           () => DB.getSettings()],
-    ['Remittance history', () => DB.getRemittances()],
-    ['Petty cash config',  () => DB.getPettyConfig()],
-    ['Remittance rates',   () => getRemRates()],
-    ['Cash transactions',  () => DB.getCashTransactions()],
-  ];
-  const _dashSettled = await Promise.allSettled(_dashSources.map(([, fn]) => fn()));
-  const _dashFailed = _dashSettled
-    .map((r, i) => r.status === 'rejected' ? { label: _dashSources[i][0], err: r.reason } : null)
-    .filter(Boolean);
-  if(_dashFailed.length > 0){
-    renderDashboardErrorState(_dashFailed);
+  // Phase 2 — one batched request for all seven dashboard tables (falls back to
+  // the individual endpoints if the batch route is unavailable). apiFetch retries
+  // transient failures (network drops, timeouts, 5xx) under the hood; a permanent
+  // failure surfaces a clear error UI instead of blanking the dashboard. The batch
+  // seeds the per-endpoint cache, so moving to Transactions/Income/Bank next
+  // reuses this data with no extra fetch.
+  let _dash;
+  try {
+    _dash = await loadDashboardData();
+  } catch(e){
+    renderDashboardErrorState(e.failed || [{ label: 'Dashboard data', err: e }]);
     return;
   }
-  const [allIncomeDash,allExpensesDash,pettyHistDash,settingsDash,allRemsDash,pettyConfigDash,remRatesDash,cashTxDash] = _dashSettled.map(r => r.value);
+  const allIncomeDash   = _dash.income;
+  const allExpensesDash = _dash.expenses;
+  const pettyHistDash   = _dash.petty;
+  const settingsDash    = _dash.settings;
+  const allRemsDash     = _dash.remittances;
+  const pettyConfigDash = _dash.pettyConfig;
+  const cashTxDash      = _dash.cashTransactions;
+  // Derived from settings, which loadDashboardData has already cached — no fetch.
+  const remRatesDash    = await getRemRates();
   const settings = settingsDash;
   const { from: dashPeriodFrom, to: dashPeriodTo } =
     computeRemPeriodDates(settings, allRemsDash, state.year, state.month);
