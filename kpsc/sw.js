@@ -37,9 +37,14 @@ self.addEventListener('install', e => {
 });
 
 self.addEventListener('activate', e => {
+  // Only delete our own old cache versions. CacheStorage is per-origin, so the
+  // root admin service worker's cache (kpadmin-v*) lives alongside ours — wiping
+  // anything that isn't ours would silently break the other portal's offline shell.
   e.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(keys => Promise.all(
+        keys.filter(k => k.startsWith('kpsc-') && k !== CACHE).map(k => caches.delete(k))
+      ))
       .then(() => self.clients.claim())
   );
 });

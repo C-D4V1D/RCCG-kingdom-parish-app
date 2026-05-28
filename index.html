@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
   <meta name="theme-color" content="#0F6E56" />
   <title>RCCG Kingdom Parish — Finance Portal</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+  <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+  <link rel="apple-touch-icon" href="/icons/icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Kingdom Parish" />
   <link rel="stylesheet" href="src/css/styles.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
@@ -40,6 +47,9 @@
     .hp-signin-btn{width:100%;padding:13px;background:var(--green);color:white;border:none;border-radius:10px;font-size:15px;font-weight:600;font-family:'DM Sans',sans-serif;cursor:pointer;transition:background .15s,transform .1s;margin-top:4px;}
     .hp-signin-btn:hover{background:var(--green-dark);}
     .hp-signin-btn:active{transform:scale(.98);}
+    .hp-install-btn{display:none;width:100%;margin-top:10px;padding:12px;background:transparent;color:var(--green);border:1.5px solid var(--green);border-radius:10px;font-size:14px;font-weight:600;font-family:'DM Sans',sans-serif;cursor:pointer;text-decoration:none;text-align:center;transition:background .15s,color .15s,transform .1s;}
+    .hp-install-btn:hover{background:var(--green-light);}
+    .hp-install-btn:active{transform:scale(.98);}
     .hp-login-hint{font-size:11px;color:var(--text3);text-align:center;margin-top:14px;line-height:1.6;}
     .hp-login-error{background:#FCEBEB;color:#A32D2D;font-size:12px;padding:9px 12px;border-radius:8px;margin-bottom:10px;}
 
@@ -144,6 +154,7 @@
         <label class="form-label">PIN</label>
         <input type="password" id="pinInput" maxlength="6" placeholder="••••••" inputmode="numeric" onkeydown="if(event.key==='Enter')App.login(document.querySelector('#loginScreen .hp-signin-btn'))" />
         <button class="hp-signin-btn" onclick="App.login(this)">Sign In</button>
+        <a class="hp-install-btn" id="installAppBtn" href="/install/">⬇  Install App on this Device</a>
         <p class="hp-login-hint">Contact the IT Administrator if you have forgotten your PIN.</p>
       </div>
     </div>
@@ -267,6 +278,61 @@
     const isOpen = item.classList.contains('open');
     document.querySelectorAll('.hp-faq-item.open').forEach(el => el.classList.remove('open'));
     if (!isOpen) item.classList.add('open');
+  }
+</script>
+<script>
+  // ── PWA: service worker + Install button ──────────────────────────
+  // Register the service worker so the page becomes installable. Network-first
+  // for HTML/JS/CSS means new deployments still show up on reload.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js', {
+        scope: '/',
+        updateViaCache: 'none'
+      }).then(reg => { reg.update().catch(() => {}); }).catch(() => {});
+    });
+  }
+
+  let deferredInstallPrompt = null;
+  const installAppBtn = document.getElementById('installAppBtn');
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches || !!navigator.standalone;
+
+  // Hide the install button when already running as an installed PWA
+  if (installAppBtn && isStandalone) {
+    installAppBtn.style.display = 'none';
+  }
+
+  // Show the install button as soon as the browser tells us we're installable.
+  // iOS Safari never fires this — those users fall through to the /install/ link.
+  window.addEventListener('beforeinstallprompt', event => {
+    event.preventDefault();
+    deferredInstallPrompt = event;
+    if (installAppBtn && !isStandalone) installAppBtn.style.display = 'block';
+  });
+
+  window.addEventListener('appinstalled', () => {
+    deferredInstallPrompt = null;
+    if (installAppBtn) installAppBtn.style.display = 'none';
+  });
+
+  if (installAppBtn) {
+    // Always show on iOS — they can't be auto-prompted but the /install/ page guides them.
+    const ua = navigator.userAgent || '';
+    const isIOS = /iphone|ipad|ipod/i.test(ua);
+    if (isIOS && !isStandalone) installAppBtn.style.display = 'block';
+
+    installAppBtn.addEventListener('click', async event => {
+      if (!deferredInstallPrompt) return; // let the link navigate to /install/
+      event.preventDefault();
+      try {
+        deferredInstallPrompt.prompt();
+        await deferredInstallPrompt.userChoice;
+        deferredInstallPrompt = null;
+      } catch (e) {
+        console.warn('PWA install prompt failed', e);
+        window.location.href = '/install/';
+      }
+    });
   }
 </script>
 <script src="src/js/app.js"></script>
