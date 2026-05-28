@@ -156,43 +156,89 @@ const PIN_REGEX = /^\d{4,6}$/;
 // ──────────────────────────────────────────
 // 2. DATA LAYER — Cloudflare D1 via /api/*
 // ──────────────────────────────────────────
-const _apiCache = new Map();
-const _CACHE_TTL = { settings: 300000, 'petty-config': 300000, users: 300000 };
+const _apiCache = new Map();   // endpoint -> { data, ts }  — short-lived read cache
+const _inflight = new Map();   // path -> Promise            — de-dupes concurrent GETs
+// Read-cache TTLs (ms). Settings/petty-config/users rarely change, so they live long.
+// The heavy list endpoints (income, expenses, petty, remittances, cash-transactions)
+// are re-fetched by nearly every page — Dashboard, Transactions, Income, Expenses, Bank
+// and Remittances all pull the SAME full tables. A short TTL lets navigation between
+// pages reuse data already downloaded instead of re-pulling whole tables over a slow
+// parish mobile link, which is the main cause of long "Loading…" waits and the
+// "Failed to fetch" blank screen (8 parallel downloads saturating the connection).
+// Any write clears the WHOLE cache (see below), so these can never go stale behind
+// your own edits.
+const _CACHE_TTL = {
+  settings: 300000, 'petty-config': 300000, users: 300000,
+  income: 60000, expenses: 60000, petty: 60000, remittances: 60000, 'cash-transactions': 60000,
+};
+// Abort a request that stalls this long so it can be retried, rather than leaving the
+// page stuck on "Loading…" forever when a mobile connection dies mid-flight. Generous
+// enough that a legitimately slow download on a weak link still completes.
+const _REQUEST_TIMEOUT_MS = 45000;
 
-async function apiFetch(path, method='GET', body=null, _retryCount=0){
+// One network attempt, wrapped in a timeout so a dead connection fails fast.
+async function _apiFetchOnce(path, opts){
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), _REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch('/api/'+path, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function apiFetch(path, method='GET', body=null){
   const endpoint = path.split('/')[0];
   if(method !== 'GET'){
-    _apiCache.delete(endpoint);
+    // Finance tables are interrelated — an expense touches petty cash and the bank,
+    // a remittance touches cash, etc. Clear the whole cache on any write so the next
+    // read of ANY page reflects the change immediately.
+    _apiCache.clear();
   } else if(_CACHE_TTL[endpoint]){
     const cached = _apiCache.get(endpoint);
     if(cached && Date.now() - cached.ts < _CACHE_TTL[endpoint]) return cached.data;
+    const pending = _inflight.get(path);
+    if(pending) return pending;   // a concurrent caller is already loading this — reuse it
   }
   const opts = { method, headers:{'Content-Type':'application/json'} };
   if(body !== null) opts.body = JSON.stringify(body);
 
   // Retry GETs on transient failures. Mobile networks at the parish often drop
-  // one of several parallel TCP connections, surfacing here as a TypeError
-  // ("Failed to fetch") or a 5xx from the edge. Two retries with 1s, 3s
-  // backoff recover most of these without bothering the user. Mutations
-  // (POST/PUT/DELETE) are NEVER retried — a successful write whose response
-  // was lost in transit would duplicate the record.
-  try {
-    const res = await fetch('/api/'+path, opts);
-    if(!res.ok && method === 'GET' && res.status >= 500 && _retryCount < 2){
-      await new Promise(r => setTimeout(r, 1000 * (2 * _retryCount + 1)));
-      return apiFetch(path, method, body, _retryCount + 1);
+  // one of several parallel connections, surfacing here as a TypeError ("Failed
+  // to fetch"), an aborted request (our timeout above), or a 5xx from the edge.
+  // Two retries with 1s, 3s backoff recover most of these without bothering the
+  // user. Mutations (POST/PUT/DELETE) are NEVER retried — a successful write whose
+  // response was lost in transit would duplicate the record. The retry loop lives
+  // inside the in-flight promise so de-duped callers share the whole sequence.
+  const run = (async () => {
+    for(let attempt = 0; ; attempt++){
+      try {
+        const res = await _apiFetchOnce(path, opts);
+        if(!res.ok && method === 'GET' && res.status >= 500 && attempt < 2){
+          await new Promise(r => setTimeout(r, 1000 * (2 * attempt + 1)));
+          continue;
+        }
+        const data = await res.json();
+        if(!res.ok) throw new Error(data.error || `API error ${res.status}`);
+        if(method === 'GET' && _CACHE_TTL[endpoint]) _apiCache.set(endpoint, { data, ts: Date.now() });
+        return data;
+      } catch(err){
+        const retryable = (err instanceof TypeError) || (err && err.name === 'AbortError');
+        if(retryable && method === 'GET' && attempt < 2){
+          await new Promise(r => setTimeout(r, 1000 * (2 * attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
     }
-    const data = await res.json();
-    if(!res.ok) throw new Error(data.error || `API error ${res.status}`);
-    if(method === 'GET' && _CACHE_TTL[endpoint]) _apiCache.set(endpoint, { data, ts: Date.now() });
-    return data;
-  } catch(err){
-    if(err instanceof TypeError && method === 'GET' && _retryCount < 2){
-      await new Promise(r => setTimeout(r, 1000 * (2 * _retryCount + 1)));
-      return apiFetch(path, method, body, _retryCount + 1);
-    }
-    throw err;
+  })();
+
+  if(method === 'GET' && _CACHE_TTL[endpoint]){
+    _inflight.set(path, run);
+    const cleanup = () => { if(_inflight.get(path) === run) _inflight.delete(path); };
+    run.then(cleanup, cleanup);
   }
+  return run;
 }
 
 const DB = {
@@ -253,7 +299,87 @@ const DB = {
   addAiSecretaryMeeting(d)       { return apiFetch('ai-secretary-meetings','POST',d); },
   updateAiSecretaryMeeting(id,d) { return apiFetch(`ai-secretary-meetings/${id}`,'PUT',d); },
   processAiSecretaryMeeting(id)  { return apiFetch(`ai-secretary-meetings/${id}/process`,'POST'); },
+
+  // One round-trip for the seven tables the Dashboard needs. See loadDashboardData.
+  getDashboardData()           { return apiFetch('dashboard'); },
 };
+
+// ── Dashboard batch loader ──────────────────────────────────────────────────
+// The Dashboard needs seven full tables. Fetching them as seven parallel GETs
+// saturates a weak parish link, and a single dropped connection blanks the page.
+// `/api/dashboard` returns all seven in ONE response. We seed the per-endpoint
+// cache from the batch so navigating Dashboard → Transactions/Income/Bank next
+// reuses the data with no extra fetch. Falls back to the individual endpoints if
+// the batch route is unavailable (e.g. mid-deploy) or returns an unexpected
+// shape, preserving the granular per-source error reporting.
+const _DASH_CACHE_KEYS = ['income','expenses','petty','settings','remittances','petty-config','cash-transactions'];
+
+function _assembleDashFromCache(){
+  const fresh = key => { const c = _apiCache.get(key); return (c && Date.now() - c.ts < _CACHE_TTL[key]) ? c : null; };
+  if(!_DASH_CACHE_KEYS.every(fresh)) return null;
+  return {
+    income:           fresh('income').data,
+    expenses:         fresh('expenses').data,
+    petty:            fresh('petty').data,
+    settings:         fresh('settings').data,
+    remittances:      fresh('remittances').data,
+    pettyConfig:      fresh('petty-config').data,
+    cashTransactions: fresh('cash-transactions').data,
+  };
+}
+
+function _seedDashCache(batch){
+  const now = Date.now();
+  _apiCache.set('income',            { data: batch.income,            ts: now });
+  _apiCache.set('expenses',          { data: batch.expenses,          ts: now });
+  _apiCache.set('petty',             { data: batch.petty,             ts: now });
+  _apiCache.set('settings',          { data: batch.settings,          ts: now });
+  _apiCache.set('remittances',       { data: batch.remittances,       ts: now });
+  _apiCache.set('petty-config',      { data: batch.pettyConfig,       ts: now });
+  _apiCache.set('cash-transactions', { data: batch.cashTransactions,  ts: now });
+}
+
+async function _loadDashboardDataIndividually(){
+  const sources = [
+    ['Income records',     () => DB.getIncome()],
+    ['Expense records',    () => DB.getExpenses()],
+    ['Petty cash history', () => DB.getPetty()],
+    ['Settings',           () => DB.getSettings()],
+    ['Remittance history', () => DB.getRemittances()],
+    ['Petty cash config',  () => DB.getPettyConfig()],
+    ['Cash transactions',  () => DB.getCashTransactions()],
+  ];
+  const settled = await Promise.allSettled(sources.map(([, fn]) => fn()));
+  const failed = settled
+    .map((r, i) => r.status === 'rejected' ? { label: sources[i][0], err: r.reason } : null)
+    .filter(Boolean);
+  if(failed.length){
+    const e = new Error('Failed to load: ' + failed.map(f => f.label).join(', '));
+    e.failed = failed;
+    throw e;
+  }
+  const [income, expenses, petty, settings, remittances, pettyConfig, cashTransactions] = settled.map(r => r.value);
+  return { income, expenses, petty, settings, remittances, pettyConfig, cashTransactions };
+}
+
+async function loadDashboardData(){
+  // Fast path: arriving at the Dashboard right after another page — everything
+  // is already cached and fresh, so skip the network entirely.
+  const cached = _assembleDashFromCache();
+  if(cached) return cached;
+  try {
+    const batch = await DB.getDashboardData();
+    // Guard against an old backend answering this route with a different shape.
+    if(!batch || typeof batch !== 'object' || !Array.isArray(batch.income) || !Array.isArray(batch.expenses)){
+      return await _loadDashboardDataIndividually();
+    }
+    _seedDashCache(batch);
+    return batch;
+  } catch(e){
+    if(e && e.failed) throw e;   // individual fallback already ran and reported failures
+    return await _loadDashboardDataIndividually();
+  }
+}
 
 // ──────────────────────────────────────────
 // 3. STATE
@@ -2091,29 +2217,28 @@ async function renderDashboard(){
   // Phase 1 — paint the shell synchronously so the user sees structure now.
   renderDashboardSkeleton();
 
-  // Phase 2 — fetch the 8 dashboard endpoints. apiFetch retries transient
-  // failures (network drops, 5xx) under the hood; allSettled so a single
-  // permanent failure surfaces a clear error UI instead of blanking the
-  // dashboard.
-  const _dashSources = [
-    ['Income records',     () => DB.getIncome()],
-    ['Expense records',    () => DB.getExpenses()],
-    ['Petty cash history', () => DB.getPetty()],
-    ['Settings',           () => DB.getSettings()],
-    ['Remittance history', () => DB.getRemittances()],
-    ['Petty cash config',  () => DB.getPettyConfig()],
-    ['Remittance rates',   () => getRemRates()],
-    ['Cash transactions',  () => DB.getCashTransactions()],
-  ];
-  const _dashSettled = await Promise.allSettled(_dashSources.map(([, fn]) => fn()));
-  const _dashFailed = _dashSettled
-    .map((r, i) => r.status === 'rejected' ? { label: _dashSources[i][0], err: r.reason } : null)
-    .filter(Boolean);
-  if(_dashFailed.length > 0){
-    renderDashboardErrorState(_dashFailed);
+  // Phase 2 — one batched request for all seven dashboard tables (falls back to
+  // the individual endpoints if the batch route is unavailable). apiFetch retries
+  // transient failures (network drops, timeouts, 5xx) under the hood; a permanent
+  // failure surfaces a clear error UI instead of blanking the dashboard. The batch
+  // seeds the per-endpoint cache, so moving to Transactions/Income/Bank next
+  // reuses this data with no extra fetch.
+  let _dash;
+  try {
+    _dash = await loadDashboardData();
+  } catch(e){
+    renderDashboardErrorState(e.failed || [{ label: 'Dashboard data', err: e }]);
     return;
   }
-  const [allIncomeDash,allExpensesDash,pettyHistDash,settingsDash,allRemsDash,pettyConfigDash,remRatesDash,cashTxDash] = _dashSettled.map(r => r.value);
+  const allIncomeDash   = _dash.income;
+  const allExpensesDash = _dash.expenses;
+  const pettyHistDash   = _dash.petty;
+  const settingsDash    = _dash.settings;
+  const allRemsDash     = _dash.remittances;
+  const pettyConfigDash = _dash.pettyConfig;
+  const cashTxDash      = _dash.cashTransactions;
+  // Derived from settings, which loadDashboardData has already cached — no fetch.
+  const remRatesDash    = await getRemRates();
   const settings = settingsDash;
   const { from: dashPeriodFrom, to: dashPeriodTo } =
     computeRemPeriodDates(settings, allRemsDash, state.year, state.month);

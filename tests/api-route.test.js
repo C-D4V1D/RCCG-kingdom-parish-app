@@ -3106,3 +3106,52 @@ test('POST /api/internal/run-reminder-sms: skips on wrong day', async () => {
   assert.equal(res.status, 200);
   assert.equal(body.skipped, true);
 });
+
+test('GET /api/dashboard batches all seven tables in one response', async () => {
+  const incomeRow = {
+    id: 'INC-1', date: '2026-05-03', members_tithe: 100, total_collection: 500,
+    source: 'sunday_collection', created_at: '2026-05-03T10:00:00Z',
+  };
+  const onPrepare = (sql) => {
+    const stmt = {
+      bind() { return stmt; },
+      async all() {
+        if (/FROM income/.test(sql))            return { results: [incomeRow] };
+        if (/FROM expenses/.test(sql))          return { results: [] };
+        if (/FROM petty_cash/.test(sql))        return { results: [] };
+        if (/FROM settings/.test(sql))          return { results: [{ key: 'parishName', value: '"Test Parish"' }] };
+        if (/FROM remittances/.test(sql))       return { results: [] };
+        if (/FROM cash_transactions/.test(sql)) return { results: [] };
+        return { results: [] };
+      },
+      async first() {
+        if (/FROM petty_config/.test(sql)) return { float_amount: 40000, max_float: 50000 };
+        return null;
+      },
+    };
+    return stmt;
+  };
+
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/dashboard', 'GET'),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  // All seven datasets present with the expected container types.
+  assert.ok(Array.isArray(body.income));
+  assert.ok(Array.isArray(body.expenses));
+  assert.ok(Array.isArray(body.petty));
+  assert.ok(Array.isArray(body.remittances));
+  assert.ok(Array.isArray(body.cashTransactions));
+  assert.equal(typeof body.settings, 'object');
+  assert.equal(typeof body.pettyConfig, 'object');
+  // Shapes match the individual endpoints exactly (row mapping is reused).
+  assert.equal(body.income[0].id, 'INC-1');
+  assert.equal(body.income[0].membersTithe, 100);
+  assert.equal(body.income[0].totalCollection, 500);
+  assert.equal(body.settings.parishName, 'Test Parish');
+  assert.equal(body.pettyConfig.float, 40000);
+  assert.equal(body.pettyConfig.max, 50000);
+});
