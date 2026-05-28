@@ -1901,8 +1901,10 @@ async function calcChurchBalance(asOfDate, prefetched){
   }, 0);
   const paidRems = paidRemsList.reduce((s,r) => s+(r.amount||0), 0);
   const bankWithdrawals = cashTxF.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
-  // Petty top-ups via bank transfer leave the bank account
-  const pettyBankTopups = pettyF.filter(h=>h.type==='refill'&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
+  // Petty top-ups via bank transfer leave the bank account. Only approved/settled
+  // refills have actually moved money — pending_approval requests must not be
+  // deducted from the bank balance (mirrors the pettyCashTopups filter below).
+  const pettyBankTopups = pettyF.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)),0);
   const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals - pettyBankTopups;
 
@@ -5871,9 +5873,10 @@ async function renderBank(){
   }, 0);
   const paidRems = allRemittances.filter(r=>r.status==='paid').reduce((s,r) => s+(r.amount||0), 0);
   const bankWithdrawals = allCashTx.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
-  // Petty top-ups paid via bank transfer must be deducted (same as calcChurchBalance)
+  // Petty top-ups paid via bank transfer must be deducted (same as calcChurchBalance).
+  // Status filter mirrors pettyCashTopupsRB — pending_approval requests haven't paid yet.
   const pettyHistory = await DB.getPetty();
-  const pettyBankTopups = pettyHistory.filter(h=>h.type==='refill'&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
+  const pettyBankTopups = pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)),0);
   const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals - pettyBankTopups;
 
