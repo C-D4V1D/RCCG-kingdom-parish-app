@@ -156,12 +156,23 @@ const PIN_REGEX = /^\d{4,6}$/;
 // ──────────────────────────────────────────
 // 2. DATA LAYER — Cloudflare D1 via /api/*
 // ──────────────────────────────────────────
+const _apiCache = new Map();
+const _CACHE_TTL = { settings: 300000, 'petty-config': 300000, users: 300000 };
+
 async function apiFetch(path, method='GET', body=null){
+  const endpoint = path.split('/')[0];
+  if(method !== 'GET'){
+    _apiCache.delete(endpoint);
+  } else if(_CACHE_TTL[endpoint]){
+    const cached = _apiCache.get(endpoint);
+    if(cached && Date.now() - cached.ts < _CACHE_TTL[endpoint]) return cached.data;
+  }
   const opts = { method, headers:{'Content-Type':'application/json'} };
   if(body !== null) opts.body = JSON.stringify(body);
   const res = await fetch('/api/'+path, opts);
   const data = await res.json();
   if(!res.ok) throw new Error(data.error || `API error ${res.status}`);
+  if(method === 'GET' && _CACHE_TTL[endpoint]) _apiCache.set(endpoint, { data, ts: Date.now() });
   return data;
 }
 
@@ -662,8 +673,8 @@ function getSundayCashWithAccountant(record, remRates = DEFAULT_REMITTANCE_RATES
   return Math.max(0, total - bankTransfer - directPetty - childrenTeacherHeld);
 }
 
-async function calcRemittances(income){
-  const rr = await getRemRates();
+async function calcRemittances(income, preRates){
+  const rr = preRates || await getRemRates();
   const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, totalSeed:0,
                 localBefore:0, localTithe:0, provinceRebate:0, netLocal:0 };
   INCOME_TYPES.forEach(t=>{
@@ -1126,10 +1137,10 @@ function getTxSavedViews(){
 }
 
 async function buildTransactionsLedger(){
-  const [income, expenses, remittances, cashTx, petty] = await Promise.all([
-    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getCashTransactions(), DB.getPetty()
+  const [income, expenses, remittances, cashTx, petty, remRatesRaw] = await Promise.all([
+    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getCashTransactions(), DB.getPetty(), getRemRates()
   ]);
-  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
+  const remRates = remRatesRaw.rates || DEFAULT_REMITTANCE_RATES;
 
   const tx = [];
 
@@ -1779,9 +1790,13 @@ function pettyFloatEvents(h){
  *  every input record is filtered by date ≤ asOfDate and the petty float is
  *  unwound from the current stored value by reversing post-asOfDate events.
  *  Pass nothing (or null) for the live "as of now" balance. */
-async function calcChurchBalance(asOfDate){
-  const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory,pettyConfig] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getRemittances(),DB.getCashTransactions(),DB.getPetty(),DB.getPettyConfig()]);
-  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
+async function calcChurchBalance(asOfDate, prefetched){
+  const pf = prefetched || {};
+  const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory,pettyConfig] = await Promise.all([
+    pf.income || DB.getIncome(), pf.expenses || DB.getExpenses(), pf.remittances || DB.getRemittances(),
+    pf.cashTx || DB.getCashTransactions(), pf.pettyHistory || DB.getPetty(), pf.pettyConfig || DB.getPettyConfig()
+  ]);
+  const remRates = pf.remRates || (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
 
   const recDate = r => String(r?.date || r?.dateNeeded || r?.createdAt || '').slice(0,10);
   const onOrBefore = r => !asOfDate || (function(){ const d=recDate(r); return !d || d <= asOfDate; })();
@@ -1857,7 +1872,7 @@ async function calcChurchBalance(asOfDate){
 }
 
 async function renderDashboard(){
-  const [allIncomeDash,allExpensesDash,pettyHistDash,settingsDash,allRemsDash,pettyConfigDash,remRatesDash] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getPetty(),DB.getSettings(),DB.getRemittances(),DB.getPettyConfig(),getRemRates()]);
+  const [allIncomeDash,allExpensesDash,pettyHistDash,settingsDash,allRemsDash,pettyConfigDash,remRatesDash,cashTxDash] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getPetty(),DB.getSettings(),DB.getRemittances(),DB.getPettyConfig(),getRemRates(),DB.getCashTransactions()]);
   const settings = settingsDash;
   const { from: dashPeriodFrom, to: dashPeriodTo } =
     computeRemPeriodDates(settings, allRemsDash, state.year, state.month);
@@ -1890,7 +1905,7 @@ async function renderDashboard(){
 
   const totalIncome = income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
-  const remittances = await calcRemittancesFromRecords(income);
+  const remittances = await calcRemittancesFromRecords(income, remRatesDash);
   const dashQuotas = getQuotaList(settings);
   const now=new Date();
   const dashTodayStr=ymdLocal(now);
@@ -1937,7 +1952,7 @@ async function renderDashboard(){
   const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
   // Accumulated unpaid: remittances owed on ALL income through the as-of date, minus everything already paid by then.
-  const dashAllTimeRemittances = await calcRemittancesFromRecords(allIncome);
+  const dashAllTimeRemittances = await calcRemittancesFromRecords(allIncome, remRatesDash);
   const dashAllTimeIncomeRemDue = (dashAllTimeRemittances.totalNatl||0)+(dashAllTimeRemittances.totalArea||0)
     +(dashAllTimeRemittances.totalPastor||0)+(dashAllTimeRemittances.totalMinisters||0)
     +(dashAllTimeRemittances.totalSeed||0)+(dashAllTimeRemittances.provinceRebate||0);
@@ -1974,8 +1989,12 @@ async function renderDashboard(){
     return !d||!dashPaidPeriods.some(p=>d>=p.from&&d<=p.to);
   }).reduce((s,r)=>s+(r.totalCollection||0),0);
   // Historical snapshot when a past period is selected; live balance otherwise.
-  const churchBal = await calcChurchBalance(dashIsPastPeriod ? dashAsOfDate : null);
-  const pendingPetty = await getPettyCashPendingCount();
+  const churchBal = await calcChurchBalance(dashIsPastPeriod ? dashAsOfDate : null, {
+    income: allIncomeDash, expenses: allExpensesDash, remittances: allRemsDash,
+    cashTx: cashTxDash, pettyHistory: pettyHistDash, pettyConfig: pettyConfigDash,
+    remRates: (remRatesDash.rates || DEFAULT_REMITTANCE_RATES)
+  });
+  const pendingPetty = (pettyHistDash||[]).filter(h=>h.status==='pending_approval').length;
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
 
   // Spendable = total church funds − net accumulated unpaid remittances.
@@ -2649,11 +2668,11 @@ async function renderDashboard(){
     </div>`;
 }
 
-async function calcRemittancesFromRecords(records){
+async function calcRemittancesFromRecords(records, preRates){
   const combined = {};
   INCOME_TYPES.forEach(t=>{ combined[t.key]=0 });
   records.forEach(r=>{ INCOME_TYPES.forEach(t=>{ combined[t.key]+=(r[t.key]||0) }) });
-  return await calcRemittances(combined);
+  return await calcRemittances(combined, preRates);
 }
 
 // ── INCOME ────────────────────────────────
@@ -3820,11 +3839,10 @@ async function saveRemCutoffDates(btn=null){
 }
 
 async function renderRemittances(){
-  const [allIncome, allRems, settings, allUsers] = await Promise.all([
-    DB.getIncome(), DB.getRemittances(), DB.getSettings(), DB.getUsers()
+  const [allIncome, allRems, settings, allUsers, rr] = await Promise.all([
+    DB.getIncome(), DB.getRemittances(), DB.getSettings(), DB.getUsers(), getRemRates()
   ]);
   const quotas = getQuotaList(settings);
-  const rr = await getRemRates();
 
   // --- Cut-off date for selected month (governs To date when configured) ---
   const cutoffConfig = getRemCutoffDates(settings, state.year);
