@@ -38,6 +38,21 @@
 /kpsc/sw.js
   Cache-Control: no-cache, no-store, must-revalidate
 
+/manifest.json
+  Cache-Control: no-cache, no-store, must-revalidate
+
+/sw.js
+  Cache-Control: no-cache, no-store, must-revalidate
+
+/install
+  Cache-Control: no-cache, no-store, must-revalidate
+
+/install/
+  Cache-Control: no-cache, no-store, must-revalidate
+
+/install/index.html
+  Cache-Control: no-cache, no-store, must-revalidate
+
 # Always revalidate JS and CSS so browsers never serve stale assets after a deployment.
 # Cloudflare will respond with 304 Not Modified (fast) if the file hasn't changed,
 # or send the new file if it has — no manual cache-clearing needed by users.
