@@ -1,16 +1,16 @@
-const CACHE = 'kpsc-v3';
+const CACHE = 'kpsc-v4';
 const SHELL = [
   '/kpsc/index.html',
   '/kpsc/manifest.json',
-  '/src/css/kpsc.css',
-  '/src/js/kpsc.js',
+  '/dist/css/kpsc.css',
+  '/dist/js/kpsc.js',
 ];
 
 function isAppShellAsset(pathname) {
   return pathname === '/kpsc/index.html'
     || pathname === '/kpsc/'
-    || pathname === '/src/css/kpsc.css'
-    || pathname === '/src/js/kpsc.js'
+    || pathname === '/dist/css/kpsc.css'
+    || pathname === '/dist/js/kpsc.js'
     || pathname === '/kpsc/manifest.json';
 }
 

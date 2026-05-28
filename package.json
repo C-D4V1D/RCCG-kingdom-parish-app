@@ -3,10 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "node scripts/build.mjs",
     "test": "node --test",
     "test:coverage": "node --test --experimental-test-coverage"
   },
   "devDependencies": {
-    "sharp": "^0.34.5"
+    "csso": "5.0.5",
+    "sharp": "^0.34.5",
+    "terser": "5.36.0"
   }
 }
