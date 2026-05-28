@@ -246,8 +246,17 @@ const state = {
   year: new Date().getFullYear(),
   loginBusy: false,
   aiSecretaryActiveId: null,
-  dashPeriodMode: 'remittance', // 'remittance' | 'calendar'
-  reportPeriodMode: 'remittance', // 'remittance' | 'calendar'
+  // App-wide period mode shared by Dashboard, Bank, Income, Expenses.
+  // 'remittance' anchors at the RCCG cut-off period; 'calendar' uses the natural month.
+  periodMode: 'remittance',
+  // True once the user manually picks a month from the dropdown — disables the
+  // smart-default that re-snaps state.month/year when the period mode changes.
+  userPickedMonth: false,
+  // Cached {year, month} for the END of the currently active remittance period.
+  // Lets buildMonthSelector include the upcoming month as an option even before
+  // the user toggles into remittance mode.
+  upcomingPeriodAnchor: null,
+  reportPeriodMode: 'remittance', // 'remittance' | 'calendar' — Reports page only
 };
 
 // ──────────────────────────────────────────
@@ -504,6 +513,59 @@ function computeRemPeriodDates(settings, allRems, year, month){
     if(!isNaN(d.getTime())){ d.setDate(d.getDate()+1); return { from: ymdLocal(d), to: ymdLocal(new Date()) }; }
   }
   return { from: ymdLocal(new Date(year, month, 1)), to: ymdLocal(new Date(year, month+1, 0)) };
+}
+
+/** Returns the calendar {year, month} that contains the END of the currently active
+ *  remittance period (the one that's open for collections right now).
+ *  E.g. May 28 with May cut-off=24 → {year:2026, month:5} (June, since the active
+ *  period runs May 25 – June 24). May 20 with the same cut-off → {2026, 4} (May). */
+function getCurrentRemPeriodAnchor(settings, allRems){
+  const today = new Date();
+  const tYear = today.getFullYear();
+  const tMonth = today.getMonth();
+  const tStr = ymdLocal(today);
+  const { to: thisTo } = computeRemPeriodDates(settings, allRems, tYear, tMonth);
+  if(thisTo >= tStr) return { year: tYear, month: tMonth };
+  const nextMonth = tMonth === 11 ? 0 : tMonth + 1;
+  const nextYear  = tMonth === 11 ? tYear + 1 : tYear;
+  return { year: nextYear, month: nextMonth };
+}
+
+/** Smart default {year, month} for the given mode based on today's date. */
+function getDefaultMonthForMode(mode, settings, allRems){
+  if(mode === 'remittance') return getCurrentRemPeriodAnchor(settings, allRems);
+  const today = new Date();
+  return { year: today.getFullYear(), month: today.getMonth() };
+}
+
+/** Refresh state.upcomingPeriodAnchor and, unless the user has manually picked a
+ *  month, snap state.month/year to the smart default for the current period mode. */
+async function applySmartDefaultMonth(){
+  const [settings, allRems] = await Promise.all([DB.getSettings(), DB.getRemittances()]);
+  state.upcomingPeriodAnchor = getCurrentRemPeriodAnchor(settings, allRems);
+  if(state.userPickedMonth) return;
+  const { year, month } = getDefaultMonthForMode(state.periodMode, settings, allRems);
+  state.year = year;
+  state.month = month;
+}
+
+/** Returns the {from, to} date range for the current selection, based on
+ *  state.periodMode + state.year/month. Used by Bank, Income, Expenses. */
+async function getCurrentPeriodRange(){
+  if(state.periodMode === 'remittance'){
+    const [settings, allRems] = await Promise.all([DB.getSettings(), DB.getRemittances()]);
+    return computeRemPeriodDates(settings, allRems, state.year, state.month);
+  }
+  return {
+    from: ymdLocal(new Date(state.year, state.month, 1)),
+    to: ymdLocal(new Date(state.year, state.month+1, 0))
+  };
+}
+
+/** Filter records by the current period (calendar month or remittance period). */
+function filterByCurrentPeriod(arr, from, to){
+  if(state.periodMode === 'remittance') return filterByDateRange(arr, from, to);
+  return filterByMonth(arr);
 }
 
 /** Return the quota list as an array of {label, amount} objects.
@@ -871,14 +933,28 @@ window.addEventListener('hashchange', ()=>{
 
 function buildMonthSelector(){
   const sel = document.getElementById('globalMonth');
+  if(!sel) return;
   sel.innerHTML = '';
-  for(let y=state.year;y>=state.year-2;y--){
-    for(let m=11;m>=0;m--){
-      if(y===state.year && m>new Date().getMonth()) continue;
+  const today = new Date();
+  // Upper bound for selectable months = the latest of:
+  //   - today's calendar month,
+  //   - the upcoming remittance period anchor (= next calendar month after a cut-off has passed),
+  //   - the currently-selected month (in case the user navigated forward).
+  let maxY = today.getFullYear(), maxM = today.getMonth();
+  const anchor = state.upcomingPeriodAnchor;
+  if(anchor && (anchor.year > maxY || (anchor.year === maxY && anchor.month > maxM))){
+    maxY = anchor.year; maxM = anchor.month;
+  }
+  if(state.year > maxY || (state.year === maxY && state.month > maxM)){
+    maxY = state.year; maxM = state.month;
+  }
+  for(let y=maxY; y>=maxY-2; y--){
+    for(let m=11; m>=0; m--){
+      if(y === maxY && m > maxM) continue;
       const opt = document.createElement('option');
-      opt.value=`${y}-${m}`;
-      opt.textContent=`${MONTHS[m]} ${y}`;
-      if(y===state.year && m===state.month) opt.selected=true;
+      opt.value = `${y}-${m}`;
+      opt.textContent = `${MONTHS[m]} ${y}`;
+      if(y === state.year && m === state.month) opt.selected = true;
       sel.appendChild(opt);
     }
   }
@@ -887,6 +963,9 @@ function buildMonthSelector(){
 function onMonthChange(){
   const [y,m] = document.getElementById('globalMonth').value.split('-').map(Number);
   state.year=y; state.month=m;
+  // User has explicitly picked a month — disable the smart-default snap so the
+  // selection sticks across page navigation and period-mode toggles.
+  state.userPickedMonth = true;
   // Reset remittance period so it recalculates defaults for the new month
   state.remFromDate=null; state.remToDate=null;
   navigate(state.page);
@@ -963,7 +1042,8 @@ async function navigate(page, fromHistory){
   document.getElementById('sidebarOverlay').classList.remove('visible');
   // Close notifications
   document.getElementById('notifPanel').style.display='none';
-  await Promise.all([buildSidebar(), updateNotifBadge()]);
+  await Promise.all([buildSidebar(), updateNotifBadge(), applySmartDefaultMonth()]);
+  buildMonthSelector();
   setTimeout(()=>{ renderPage(page).catch(e=>console.error(e)); },50);
 }
 
@@ -1876,7 +1956,7 @@ async function renderDashboard(){
   const settings = settingsDash;
   const { from: dashPeriodFrom, to: dashPeriodTo } =
     computeRemPeriodDates(settings, allRemsDash, state.year, state.month);
-  const useRemPeriod = state.dashPeriodMode === 'remittance';
+  const useRemPeriod = state.periodMode === 'remittance';
   // As-of date: every "current state" KPI on the dashboard is anchored here, so selecting
   // a past period gives a true historical snapshot. For the current period the period end
   // is in the future, so we cap at today (no future records exist).
@@ -2260,6 +2340,19 @@ async function renderDashboard(){
     }
   }
 
+  // Each period button shows its own anchor month. When the user hasn't picked a
+  // month explicitly, the Remittance button shows the upcoming-anchor month
+  // (June after May 24 cut-off) and the Calendar button shows today's calendar
+  // month — so users see what they'll get if they click. After an explicit pick,
+  // both buttons follow state.month.
+  const _todayDash = new Date();
+  const remBtnY = state.userPickedMonth ? state.year : (state.upcomingPeriodAnchor?.year ?? state.year);
+  const remBtnM = state.userPickedMonth ? state.month : (state.upcomingPeriodAnchor?.month ?? state.month);
+  const calBtnY = state.userPickedMonth ? state.year : _todayDash.getFullYear();
+  const calBtnM = state.userPickedMonth ? state.month : _todayDash.getMonth();
+  const remBtnRange = computeRemPeriodDates(settings, allRemsDash, remBtnY, remBtnM);
+  const calBtnLastDay = new Date(calBtnY, calBtnM + 1, 0).getDate();
+
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
       <div>
@@ -2272,15 +2365,15 @@ async function renderDashboard(){
     <section style="margin:0 0 18px">
       <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px;text-align:center">Select Period Type</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-        <button onclick="App.setDashPeriodMode('remittance')" style="min-width:0;padding:12px 14px;border-radius:12px;border:1.5px solid ${useRemPeriod?'var(--primary)':'var(--border)'};background:${useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
-          <div style="font-size:13px;font-weight:700;color:${useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${MONTHS[state.month]} Remittance Period</div>
+        <button onclick="App.setPeriodMode('remittance')" style="min-width:0;padding:12px 14px;border-radius:12px;border:1.5px solid ${useRemPeriod?'var(--primary)':'var(--border)'};background:${useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
+          <div style="font-size:13px;font-weight:700;color:${useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${MONTHS[remBtnM]} Remittance Period</div>
           <div style="font-size:11px;color:var(--text3);margin-top:2px">the custom RCCG period</div>
-          <div style="margin-top:8px"><span style="display:inline-block;padding:4px 10px;border-radius:12px;background:${useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${useRemPeriod?'#fff':'var(--text2)'};font-size:11px;font-weight:700;letter-spacing:0.2px">${fmtDateShort(dashPeriodFrom)} – ${fmtDateShort(dashPeriodTo)}</span></div>
+          <div style="margin-top:8px"><span style="display:inline-block;padding:4px 10px;border-radius:12px;background:${useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${useRemPeriod?'#fff':'var(--text2)'};font-size:11px;font-weight:700;letter-spacing:0.2px">${fmtDateShort(remBtnRange.from)} – ${fmtDateShort(remBtnRange.to)}</span></div>
         </button>
-        <button onclick="App.setDashPeriodMode('calendar')" style="min-width:0;padding:12px 14px;border-radius:12px;border:1.5px solid ${!useRemPeriod?'var(--primary)':'var(--border)'};background:${!useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${!useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
-          <div style="font-size:13px;font-weight:700;color:${!useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${MONTHS[state.month]} Calendar Period</div>
+        <button onclick="App.setPeriodMode('calendar')" style="min-width:0;padding:12px 14px;border-radius:12px;border:1.5px solid ${!useRemPeriod?'var(--primary)':'var(--border)'};background:${!useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${!useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
+          <div style="font-size:13px;font-weight:700;color:${!useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${MONTHS[calBtnM]} Calendar Period</div>
           <div style="font-size:11px;color:var(--text3);margin-top:2px">the normal month period</div>
-          <div style="margin-top:8px"><span style="display:inline-block;padding:4px 10px;border-radius:12px;background:${!useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${!useRemPeriod?'#fff':'var(--text2)'};font-size:11px;font-weight:700;letter-spacing:0.2px">1 ${MONTHS[state.month].slice(0,3)} – ${new Date(state.year,state.month+1,0).getDate()} ${MONTHS[state.month].slice(0,3)}</span></div>
+          <div style="margin-top:8px"><span style="display:inline-block;padding:4px 10px;border-radius:12px;background:${!useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${!useRemPeriod?'#fff':'var(--text2)'};font-size:11px;font-weight:700;letter-spacing:0.2px">1 ${MONTHS[calBtnM].slice(0,3)} – ${calBtnLastDay} ${MONTHS[calBtnM].slice(0,3)}</span></div>
         </button>
       </div>
     </section>
@@ -2677,10 +2770,10 @@ async function calcRemittancesFromRecords(records, preRates){
 
 // ── INCOME ────────────────────────────────
 async function renderIncome(){
-  const [allIncomeRecs, _cashTx, remRatesData, balance] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance()]);
+  const [allIncomeRecs, _cashTx, remRatesData, balance, periodRange] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance(), getCurrentPeriodRange()]);
   const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
   const cashWithAccountant = balance.cashWithAccountant;
-  const records = filterByMonth(allIncomeRecs);
+  const records = filterByCurrentPeriod(allIncomeRecs, periodRange.from, periodRange.to);
   const sundayRecs = records.filter(r=>!r.source||r.source==='sunday_collection');
   const otherRecs  = records.filter(r=>r.source && r.source!=='sunday_collection');
   const tab = state.incomeTab||'list';
@@ -2695,14 +2788,14 @@ async function renderIncome(){
   }).filter(p=>p.cashHeld>0 && p.dep<p.cashHeld);
   const pendingCount = pendingItems.length;
   const totalCollected = records.reduce((s,r)=>s+(r.totalCollection||0),0);
-  // Only count deposits linked to this month's income records (scoped correctly to the month view)
-  const currentMonthRecordIds = new Set(records.map(r=>r.id));
-  const totalDeposited = _cashTx.filter(t=>t.type==='cash_deposit'&&currentMonthRecordIds.has(t.incomeRef)).reduce((s,t)=>s+(t.amount||0),0)
+  // Only count deposits linked to this period's income records (scoped to the active view)
+  const currentPeriodRecordIds = new Set(records.map(r=>r.id));
+  const totalDeposited = _cashTx.filter(t=>t.type==='cash_deposit'&&currentPeriodRecordIds.has(t.incomeRef)).reduce((s,t)=>s+(t.amount||0),0)
     + records.reduce((s,r)=>s+(r.bankTransferAmount||0),0);
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
-      <div><div class="page-title">Income Recording</div><div class="page-sub">${monthLabel()}</div></div>
+      <div><div class="page-title">Income Recording</div><div class="page-sub">${monthLabel()}${state.periodMode === 'remittance' ? ` · Remittance Period (${fmtDateShort(periodRange.from)} – ${fmtDateShort(periodRange.to)})` : ''}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${canAction('income_record')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">📥 Sunday Collections</button>`:''}
         ${canAction('income_record')?`<button class="btn btn-amber" onclick="App.showOtherIncomeForm()">➕ Other Income</button>`:''}
@@ -4658,9 +4751,9 @@ async function printRemittanceReport(fromOverride, toOverride){
 
 // ── EXPENSES ──────────────────────────────
 async function renderExpenses(){
-  const allExp = await DB.getExpenses();
+  const [allExp, periodRange] = await Promise.all([DB.getExpenses(), getCurrentPeriodRange()]);
   state._expAll = allExp;
-  const expenses = filterByMonth(allExp);
+  const expenses = filterByCurrentPeriod(allExp, periodRange.from, periodRange.to);
   const total = expenses.reduce((s,r)=>s+(r.amount||0),0);
 
   // Fetch balance data for the financial position bar
@@ -4769,7 +4862,7 @@ async function renderExpenses(){
     <div class="page-header">
       <div>
         <div class="page-title">Expenses</div>
-        <div class="page-sub">${monthLabel()} — <strong>${fmt(total)}</strong> total${activeFilter?` · Filtered: ${activeCat?.label||activeFilter}`:''}${searchTerm?` · Search: "${searchTerm}"`:''}
+        <div class="page-sub">${monthLabel()}${state.periodMode === 'remittance' ? ` · Remittance Period (${fmtDateShort(periodRange.from)} – ${fmtDateShort(periodRange.to)})` : ''} — <strong>${fmt(total)}</strong> total${activeFilter?` · Filtered: ${activeCat?.label||activeFilter}`:''}${searchTerm?` · Search: "${searchTerm}"`:''}
         </div>
       </div>
       ${canAction('expense_log')?`<button class="btn btn-primary" onclick="App.showExpenseForm()">+ Log Expense</button>`:''}
@@ -5738,11 +5831,12 @@ async function submitBankWithdrawal(btn=null){
 function setBankTab(t){ state.bankTab=t; renderBank() }
 
 async function renderBank(){
-  const [allCashTx, allExpenses, allIncome, allRemittances] = await Promise.all([
-    DB.getCashTransactions(), DB.getExpenses(), DB.getIncome(), DB.getRemittances()
+  const [allCashTx, allExpenses, allIncome, allRemittances, periodRange] = await Promise.all([
+    DB.getCashTransactions(), DB.getExpenses(), DB.getIncome(), DB.getRemittances(), getCurrentPeriodRange()
   ]);
   const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
   const tab = state.bankTab||'overview';
+  const { from: bankPeriodFrom, to: bankPeriodTo } = periodRange;
 
   // Calculate bank balance components
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
@@ -5776,12 +5870,12 @@ async function renderBank(){
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.cashAmount||0):(h.amount||0)),0);
   const cashWithAccountant = Math.max(0, cashFromCollectionsRB - cashDepositedToBank + bankToAccountantRB - cashExpensesRB - pettyCashTopupsRB);
 
-  // Monthly bank charges
-  const monthlyBankCharges = filterByMonth(allExpenses).filter(e=>e.category==='bank').reduce((s,e)=>s+(e.amount||0),0);
-
-  // Monthly withdrawals / deposits
-  const monthlyWithdrawals = filterByMonth(allCashTx).filter(t=>t.type==='withdrawal');
-  const monthlyDeposits = filterByMonth(allCashTx).filter(t=>t.type==='cash_deposit');
+  // Period bank charges (calendar month or remittance period — follows state.periodMode)
+  const periodExpenses = filterByCurrentPeriod(allExpenses, bankPeriodFrom, bankPeriodTo);
+  const periodCashTx = filterByCurrentPeriod(allCashTx, bankPeriodFrom, bankPeriodTo);
+  const monthlyBankCharges = periodExpenses.filter(e=>e.category==='bank').reduce((s,e)=>s+(e.amount||0),0);
+  const monthlyWithdrawals = periodCashTx.filter(t=>t.type==='withdrawal');
+  const monthlyDeposits = periodCashTx.filter(t=>t.type==='cash_deposit');
 
   // Pending cash deposits (income records with undeposited cash — all time)
   const pendingDepItems = allIncome.filter(r=>{
@@ -5823,13 +5917,19 @@ async function renderBank(){
   ].sort((a,b)=>new Date(b.date||b.createdAt||0)-new Date(a.date||a.createdAt||0));
 
   const monthBankTx = bankTxAll.filter(t=>{
+    if(state.periodMode === 'remittance'){
+      const raw = new Date(t.date || t.createdAt || '');
+      if(isNaN(raw.getTime())) return false;
+      const d = ymdLocal(raw);
+      return d >= bankPeriodFrom && d <= bankPeriodTo;
+    }
     const d=new Date(t.date||t.createdAt||0);
     return d.getMonth()===state.month && d.getFullYear()===state.year;
   });
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
-      <div><div class="page-title">Bank Account</div><div class="page-sub">Balance: ${fmt(bankBalance)}</div></div>
+      <div><div class="page-title">Bank Account</div><div class="page-sub">Balance: ${fmt(bankBalance)} · ${monthLabel()}${state.periodMode === 'remittance' ? ` Remittance Period (${fmtDateShort(bankPeriodFrom)} – ${fmtDateShort(bankPeriodTo)})` : ''}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${canAction('income_deposit')&&cashWithAccountant>0?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${fmt(cashWithAccountant)})</button>`:''}
         ${canAction('bank_withdrawal')?`<button class="btn btn-primary" onclick="App.showBankWithdrawal()">🏦 Record Withdrawal</button>`:''}
@@ -5872,7 +5972,7 @@ async function renderBank(){
     ${tab==='overview'?renderBankOverview(monthBankTx,bankBalance):
       tab==='withdrawals'?renderBankWithdrawals(monthlyWithdrawals):
       tab==='deposits'?renderBankDeposits(monthlyDeposits):
-      tab==='charges'?renderBankCharges(filterByMonth(allExpenses).filter(e=>e.category==='bank')):
+      tab==='charges'?renderBankCharges(periodExpenses.filter(e=>e.category==='bank')):
       renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups)}`;
 }
 
@@ -8872,9 +8972,16 @@ function submitKPSCAlert(){
   }
 })();
 
-function setDashPeriodMode(mode){
-  state.dashPeriodMode = mode;
-  navigate('dashboard');
+async function setPeriodMode(mode){
+  if(state.periodMode === mode) return;
+  state.periodMode = mode;
+  // Each mode picks its own "today's period" anchor — June for remittance after
+  // a cut-off, May for calendar. Reset the user-pick flag so the smart default
+  // kicks in for the new mode (per spec: "modes should consider today's date
+  // and show the period modes they fall under").
+  state.userPickedMonth = false;
+  await applySmartDefaultMonth();
+  navigate(state.page);
 }
 
 // ──────────────────────────────────────────
@@ -8896,7 +9003,7 @@ return {
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
   setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
     updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
-    setDashPeriodMode,
+    setPeriodMode,
     showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
     _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod
   };
