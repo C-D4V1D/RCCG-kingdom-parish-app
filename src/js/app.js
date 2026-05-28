@@ -159,7 +159,7 @@ const PIN_REGEX = /^\d{4,6}$/;
 const _apiCache = new Map();
 const _CACHE_TTL = { settings: 300000, 'petty-config': 300000, users: 300000 };
 
-async function apiFetch(path, method='GET', body=null){
+async function apiFetch(path, method='GET', body=null, _retryCount=0){
   const endpoint = path.split('/')[0];
   if(method !== 'GET'){
     _apiCache.delete(endpoint);
@@ -169,11 +169,30 @@ async function apiFetch(path, method='GET', body=null){
   }
   const opts = { method, headers:{'Content-Type':'application/json'} };
   if(body !== null) opts.body = JSON.stringify(body);
-  const res = await fetch('/api/'+path, opts);
-  const data = await res.json();
-  if(!res.ok) throw new Error(data.error || `API error ${res.status}`);
-  if(method === 'GET' && _CACHE_TTL[endpoint]) _apiCache.set(endpoint, { data, ts: Date.now() });
-  return data;
+
+  // Retry GETs on transient failures. Mobile networks at the parish often drop
+  // one of several parallel TCP connections, surfacing here as a TypeError
+  // ("Failed to fetch") or a 5xx from the edge. Two retries with 1s, 3s
+  // backoff recover most of these without bothering the user. Mutations
+  // (POST/PUT/DELETE) are NEVER retried — a successful write whose response
+  // was lost in transit would duplicate the record.
+  try {
+    const res = await fetch('/api/'+path, opts);
+    if(!res.ok && method === 'GET' && res.status >= 500 && _retryCount < 2){
+      await new Promise(r => setTimeout(r, 1000 * (2 * _retryCount + 1)));
+      return apiFetch(path, method, body, _retryCount + 1);
+    }
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || `API error ${res.status}`);
+    if(method === 'GET' && _CACHE_TTL[endpoint]) _apiCache.set(endpoint, { data, ts: Date.now() });
+    return data;
+  } catch(err){
+    if(err instanceof TypeError && method === 'GET' && _retryCount < 2){
+      await new Promise(r => setTimeout(r, 1000 * (2 * _retryCount + 1)));
+      return apiFetch(path, method, body, _retryCount + 1);
+    }
+    throw err;
+  }
 }
 
 const DB = {
@@ -1082,7 +1101,10 @@ async function renderPage(page){
     if(pages[page]) await pages[page]();
     else document.getElementById('pageContent').innerHTML='<div class="card"><p>Page not found.</p></div>';
   }catch(e){
-    document.getElementById('pageContent').innerHTML=`<div class="card"><div class="alert alert-danger"><span class="alert-icon">✕</span><span>Error loading page: ${esc(e.message)}</span></div></div>`;
+    document.getElementById('pageContent').innerHTML=`<div class="card">
+      <div class="alert alert-danger" style="margin-bottom:14px"><span class="alert-icon">✕</span><span>Error loading page: ${esc(e.message)}</span></div>
+      <button class="btn btn-primary" onclick="App.navigate('${page}')">Retry</button>
+    </div>`;
     console.error('renderPage error:',e);
   }
 }
@@ -1953,8 +1975,112 @@ async function calcChurchBalance(asOfDate, prefetched){
   };
 }
 
+// Skeleton-first paint. Renders the page header + period selector + skeleton
+// cards using only synchronous state (user name, month, period mode) — no API
+// needed — so the user sees dashboard structure within ~50ms instead of
+// staring at a blank screen for 30+ seconds on slow networks. The full
+// content swaps in below once all 8 fetches resolve.
+function renderDashboardSkeleton(){
+  const userName = (state.user?.name?.split(/\s+/).slice(0,2).join(' ')) || 'User';
+  const monthName = MONTHS[state.month];
+  const useRemPeriod = state.periodMode === 'remittance';
+  const chip = `<div style="margin-top:8px;display:inline-block;height:22px;width:130px;background:rgba(0,0,0,0.06);border-radius:12px"></div>`;
+  const skelLine = (w) => `<div style="height:18px;width:${w};background:rgba(0,0,0,0.06);border-radius:5px;margin:6px 0"></div>`;
+  const skelCard = (showSub) => `<div class="card" style="margin-bottom:12px">
+    ${skelLine('45%')}
+    <div style="height:32px;width:55%;background:rgba(0,0,0,0.06);border-radius:6px;margin:8px 0"></div>
+    ${showSub ? skelLine('70%') : ''}
+  </div>`;
+  document.getElementById('pageContent').innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Welcome, ${userName} 👋</div>
+        <div class="page-sub">${monthLabel()} Financial Overview</div>
+      </div>
+    </div>
+
+    <section style="margin:0 0 18px">
+      <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px;text-align:center">Select Period Type</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div style="padding:12px 14px;border-radius:12px;border:1.5px solid ${useRemPeriod?'var(--primary)':'var(--border)'};background:${useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};text-align:left">
+          <div style="font-size:13px;font-weight:700;color:${useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${monthName} Remittance Period</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">the custom RCCG period</div>
+          ${chip}
+        </div>
+        <div style="padding:12px 14px;border-radius:12px;border:1.5px solid ${!useRemPeriod?'var(--primary)':'var(--border)'};background:${!useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};text-align:left">
+          <div style="font-size:13px;font-weight:700;color:${!useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${monthName} Calendar Period</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">the normal month period</div>
+          ${chip}
+        </div>
+      </div>
+    </section>
+
+    <div style="background:rgba(99,102,241,0.05);border:1px solid rgba(99,102,241,0.2);border-radius:10px;padding:12px 18px;margin-bottom:14px;height:48px"></div>
+    ${skelCard(true)}
+    ${skelCard(true)}
+    ${skelCard(true)}
+    <div style="text-align:center;padding:14px 16px;color:var(--text3);font-size:12px">Loading dashboard… this can take a few seconds on slow networks.</div>
+  `;
+}
+
+// Shown when one or more endpoints fail to load after retries. Lists exactly
+// what failed (in plain language, not endpoint names) and gives the user a
+// single, prominent Retry button — much better than the previous "Error
+// loading page: Failed to fetch" blank screen.
+function renderDashboardErrorState(failed){
+  const userName = (state.user?.name?.split(/\s+/).slice(0,2).join(' ')) || 'User';
+  const labels = failed.map(f => f.label);
+  failed.forEach(f => console.error(`Dashboard fetch failed (${f.label}):`, f.err));
+  document.getElementById('pageContent').innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Welcome, ${userName} 👋</div>
+        <div class="page-sub">${monthLabel()} Financial Overview</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="alert alert-danger" style="margin-bottom:14px">
+        <span class="alert-icon">⚠</span>
+        <div>
+          <div style="font-weight:600;margin-bottom:4px">Couldn't load ${labels.length === 1 ? 'one part of' : 'parts of'} the dashboard</div>
+          <div style="font-size:13px">${labels.length === 1 ? 'This part' : 'These parts'} didn't load: <strong>${labels.join(', ')}</strong>. Your network may be slow or unstable.</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="App.navigate('dashboard')">Retry</button>
+        <button class="btn" onclick="App.navigate('transactions')">View Transactions instead</button>
+      </div>
+    </div>
+  `;
+}
+
 async function renderDashboard(){
-  const [allIncomeDash,allExpensesDash,pettyHistDash,settingsDash,allRemsDash,pettyConfigDash,remRatesDash,cashTxDash] = await Promise.all([DB.getIncome(),DB.getExpenses(),DB.getPetty(),DB.getSettings(),DB.getRemittances(),DB.getPettyConfig(),getRemRates(),DB.getCashTransactions()]);
+  // Phase 1 — paint the shell synchronously so the user sees structure now.
+  renderDashboardSkeleton();
+
+  // Phase 2 — fetch the 8 dashboard endpoints. apiFetch retries transient
+  // failures (network drops, 5xx) under the hood; allSettled so a single
+  // permanent failure surfaces a clear error UI instead of blanking the
+  // dashboard.
+  const _dashSources = [
+    ['Income records',     () => DB.getIncome()],
+    ['Expense records',    () => DB.getExpenses()],
+    ['Petty cash history', () => DB.getPetty()],
+    ['Settings',           () => DB.getSettings()],
+    ['Remittance history', () => DB.getRemittances()],
+    ['Petty cash config',  () => DB.getPettyConfig()],
+    ['Remittance rates',   () => getRemRates()],
+    ['Cash transactions',  () => DB.getCashTransactions()],
+  ];
+  const _dashSettled = await Promise.allSettled(_dashSources.map(([, fn]) => fn()));
+  const _dashFailed = _dashSettled
+    .map((r, i) => r.status === 'rejected' ? { label: _dashSources[i][0], err: r.reason } : null)
+    .filter(Boolean);
+  if(_dashFailed.length > 0){
+    renderDashboardErrorState(_dashFailed);
+    return;
+  }
+  const [allIncomeDash,allExpensesDash,pettyHistDash,settingsDash,allRemsDash,pettyConfigDash,remRatesDash,cashTxDash] = _dashSettled.map(r => r.value);
   const settings = settingsDash;
   const { from: dashPeriodFrom, to: dashPeriodTo } =
     computeRemPeriodDates(settings, allRemsDash, state.year, state.month);
