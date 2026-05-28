@@ -156,43 +156,89 @@ const PIN_REGEX = /^\d{4,6}$/;
 // ──────────────────────────────────────────
 // 2. DATA LAYER — Cloudflare D1 via /api/*
 // ──────────────────────────────────────────
-const _apiCache = new Map();
-const _CACHE_TTL = { settings: 300000, 'petty-config': 300000, users: 300000 };
+const _apiCache = new Map();   // endpoint -> { data, ts }  — short-lived read cache
+const _inflight = new Map();   // path -> Promise            — de-dupes concurrent GETs
+// Read-cache TTLs (ms). Settings/petty-config/users rarely change, so they live long.
+// The heavy list endpoints (income, expenses, petty, remittances, cash-transactions)
+// are re-fetched by nearly every page — Dashboard, Transactions, Income, Expenses, Bank
+// and Remittances all pull the SAME full tables. A short TTL lets navigation between
+// pages reuse data already downloaded instead of re-pulling whole tables over a slow
+// parish mobile link, which is the main cause of long "Loading…" waits and the
+// "Failed to fetch" blank screen (8 parallel downloads saturating the connection).
+// Any write clears the WHOLE cache (see below), so these can never go stale behind
+// your own edits.
+const _CACHE_TTL = {
+  settings: 300000, 'petty-config': 300000, users: 300000,
+  income: 60000, expenses: 60000, petty: 60000, remittances: 60000, 'cash-transactions': 60000,
+};
+// Abort a request that stalls this long so it can be retried, rather than leaving the
+// page stuck on "Loading…" forever when a mobile connection dies mid-flight. Generous
+// enough that a legitimately slow download on a weak link still completes.
+const _REQUEST_TIMEOUT_MS = 45000;
 
-async function apiFetch(path, method='GET', body=null, _retryCount=0){
+// One network attempt, wrapped in a timeout so a dead connection fails fast.
+async function _apiFetchOnce(path, opts){
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), _REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch('/api/'+path, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function apiFetch(path, method='GET', body=null){
   const endpoint = path.split('/')[0];
   if(method !== 'GET'){
-    _apiCache.delete(endpoint);
+    // Finance tables are interrelated — an expense touches petty cash and the bank,
+    // a remittance touches cash, etc. Clear the whole cache on any write so the next
+    // read of ANY page reflects the change immediately.
+    _apiCache.clear();
   } else if(_CACHE_TTL[endpoint]){
     const cached = _apiCache.get(endpoint);
     if(cached && Date.now() - cached.ts < _CACHE_TTL[endpoint]) return cached.data;
+    const pending = _inflight.get(path);
+    if(pending) return pending;   // a concurrent caller is already loading this — reuse it
   }
   const opts = { method, headers:{'Content-Type':'application/json'} };
   if(body !== null) opts.body = JSON.stringify(body);
 
   // Retry GETs on transient failures. Mobile networks at the parish often drop
-  // one of several parallel TCP connections, surfacing here as a TypeError
-  // ("Failed to fetch") or a 5xx from the edge. Two retries with 1s, 3s
-  // backoff recover most of these without bothering the user. Mutations
-  // (POST/PUT/DELETE) are NEVER retried — a successful write whose response
-  // was lost in transit would duplicate the record.
-  try {
-    const res = await fetch('/api/'+path, opts);
-    if(!res.ok && method === 'GET' && res.status >= 500 && _retryCount < 2){
-      await new Promise(r => setTimeout(r, 1000 * (2 * _retryCount + 1)));
-      return apiFetch(path, method, body, _retryCount + 1);
+  // one of several parallel connections, surfacing here as a TypeError ("Failed
+  // to fetch"), an aborted request (our timeout above), or a 5xx from the edge.
+  // Two retries with 1s, 3s backoff recover most of these without bothering the
+  // user. Mutations (POST/PUT/DELETE) are NEVER retried — a successful write whose
+  // response was lost in transit would duplicate the record. The retry loop lives
+  // inside the in-flight promise so de-duped callers share the whole sequence.
+  const run = (async () => {
+    for(let attempt = 0; ; attempt++){
+      try {
+        const res = await _apiFetchOnce(path, opts);
+        if(!res.ok && method === 'GET' && res.status >= 500 && attempt < 2){
+          await new Promise(r => setTimeout(r, 1000 * (2 * attempt + 1)));
+          continue;
+        }
+        const data = await res.json();
+        if(!res.ok) throw new Error(data.error || `API error ${res.status}`);
+        if(method === 'GET' && _CACHE_TTL[endpoint]) _apiCache.set(endpoint, { data, ts: Date.now() });
+        return data;
+      } catch(err){
+        const retryable = (err instanceof TypeError) || (err && err.name === 'AbortError');
+        if(retryable && method === 'GET' && attempt < 2){
+          await new Promise(r => setTimeout(r, 1000 * (2 * attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
     }
-    const data = await res.json();
-    if(!res.ok) throw new Error(data.error || `API error ${res.status}`);
-    if(method === 'GET' && _CACHE_TTL[endpoint]) _apiCache.set(endpoint, { data, ts: Date.now() });
-    return data;
-  } catch(err){
-    if(err instanceof TypeError && method === 'GET' && _retryCount < 2){
-      await new Promise(r => setTimeout(r, 1000 * (2 * _retryCount + 1)));
-      return apiFetch(path, method, body, _retryCount + 1);
-    }
-    throw err;
+  })();
+
+  if(method === 'GET' && _CACHE_TTL[endpoint]){
+    _inflight.set(path, run);
+    const cleanup = () => { if(_inflight.get(path) === run) _inflight.delete(path); };
+    run.then(cleanup, cleanup);
   }
+  return run;
 }
 
 const DB = {
