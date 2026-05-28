@@ -2019,6 +2019,15 @@ async function renderDashboard(){
   const dashRemRates = remRatesDash?.rates || DEFAULT_REMITTANCE_RATES;
   const dashSundayRecs = income.filter(r => !r.source || r.source === 'sunday_collection');
   const dashChildrenTeacherTotal = dashSundayRecs.reduce((s, r) => s + getChildrenTeacherHeldCash(r, dashRemRates), 0);
+  // All-time unsettled Children Teacher's cash. getSundayCashWithAccountant subtracts
+  // this from churchBal.total silently (treating it as "not with the accountant"), which
+  // skews the algebraic opening-balance derivation. We surface it as an explicit
+  // deduction line in the Actual Balance breakdown so the opening balance can reflect
+  // the TRUE prior-period closing balance instead of being adjusted to make the math
+  // appear to work.
+  const dashAllUnsettledChildrenTeacherCash = allIncome
+    .filter(r => !r.source || r.source === 'sunday_collection')
+    .reduce((s, r) => s + getChildrenTeacherHeldCash(r, dashRemRates), 0);
   // Check if the current month's remittance has already been paid or partially paid.
   // A remittance is considered "for this month" when its periodTo falls within the viewed year/month.
   const dashMonthPrefix = `${state.year}-${String(state.month+1).padStart(2,'0')}`;
@@ -2127,9 +2136,13 @@ async function renderDashboard(){
     .filter(h => h.status === 'approved' && !h.receiptNo).length;
 
   const totalPeriodAllExpenses = totalPeriodLoggedExpenses + totalPeriodPettyAdvanceSpend;
-  // Carried forward = churchBal − (income − all-expenses for period). Algebraically exact
-  // once "all-expenses" reflects EVERY real outflow, including unsettled advances.
-  const dashCarriedForward = churchBal.total - totalIncome + totalPeriodAllExpenses;
+  // Carried forward = (real cash on hand) − period income + period all-expenses.
+  // churchBal.total silently nets out unsettled Children Teacher's cash via
+  // getSundayCashWithAccountant, so add it back here to recover the actual physical
+  // cash position. That keeps the opening balance equal to the TRUE prior-period
+  // closing — the CT cash shows up as its own deduction line further down so the
+  // breakdown still reconciles to the same Total Church Balance.
+  const dashCarriedForward = churchBal.total + dashAllUnsettledChildrenTeacherCash - totalIncome + totalPeriodAllExpenses;
   // True opening = cash on hand minus the still-owed remittances from prior periods.
   const dashActualOpening = dashCarriedForward - dashPriorUnpaid;
   const dashPrevMonthName = MONTHS[state.month === 0 ? 11 : state.month - 1];
@@ -2575,10 +2588,15 @@ async function renderDashboard(){
                 <span style="color:var(--text3)">+ Total Income</span>
                 <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(totalIncome)}</span>
               </div>
-              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+              <div style="display:flex;justify-content:space-between;align-items:center${dashAllUnsettledChildrenTeacherCash>0?'':';border-bottom:1.5px dashed var(--border);padding-bottom:6px'}">
                 <span style="color:var(--text3)">− Total Expenses ${totalPeriodPendingExpenses>0?'(incl. pending)':''}</span>
                 <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodAllExpenses)}</span>
               </div>
+              ${dashAllUnsettledChildrenTeacherCash>0?`
+              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+                <span style="color:var(--text3)">− Children Teacher's cash held</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashAllUnsettledChildrenTeacherCash)}</span>
+              </div>`:''}
               <div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:13px;padding-top:2px">
                 <span>= Total Church Balance</span>
                 <span style="font-family:ui-monospace,monospace;color:#185FA5">${fmt(churchBal.total)}</span>
@@ -2623,10 +2641,15 @@ async function renderDashboard(){
                 <span style="color:var(--text3)">+ Other unremitted income</span>
                 <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(otherUnremittedIncome)}</span>
               </div>`:''}
-              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+              <div style="display:flex;justify-content:space-between;align-items:center${dashAllUnsettledChildrenTeacherCash>0?'':';border-bottom:1.5px dashed var(--border);padding-bottom:6px'}">
                 <span style="color:var(--text3)">− Total Expenses ${totalPeriodPendingExpenses>0?'(incl. pending)':''}</span>
                 <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodAllExpenses)}</span>
               </div>
+              ${dashAllUnsettledChildrenTeacherCash>0?`
+              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+                <span style="color:var(--text3)">− Children Teacher's cash held</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashAllUnsettledChildrenTeacherCash)}</span>
+              </div>`:''}
               <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
                 <span>= Actual Balance</span>
                 <span style="font-family:ui-monospace,monospace;color:${dashSpendColor}">${fmt(dashSpendable)}</span>
