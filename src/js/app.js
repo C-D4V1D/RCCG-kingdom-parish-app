@@ -2023,35 +2023,68 @@ function renderDashboardSkeleton(){
   `;
 }
 
+// Generic skeleton for pages that follow the standard "header + KPI grid +
+// tabs/content" layout (Income, Expenses, Bank). Paints synchronously from
+// state alone so the user sees structure within ~50ms even on slow networks.
+function renderPageSkeleton({ pageTitle, pageSub, kpiCount = 3, hasTabs = true, hint = 'Loading…' }){
+  const skelLine = (w, h = 14) => `<div style="height:${h}px;width:${w};background:rgba(0,0,0,0.06);border-radius:5px;margin:6px 0"></div>`;
+  const skelKpi = `<div class="kpi">
+    <div class="kpi-icon" style="background:rgba(0,0,0,0.04)"></div>
+    ${skelLine('70%', 14)}
+    ${skelLine('55%', 26)}
+    ${skelLine('80%', 12)}
+  </div>`;
+  document.getElementById('pageContent').innerHTML = `
+    <div class="page-header">
+      <div><div class="page-title">${pageTitle}</div><div class="page-sub">${pageSub}</div></div>
+    </div>
+    <div class="kpi-grid" style="margin-bottom:16px">${Array(kpiCount).fill(skelKpi).join('')}</div>
+    ${hasTabs ? '<div class="card" style="margin-bottom:12px"><div style="height:32px;background:rgba(0,0,0,0.04);border-radius:8px"></div></div>' : ''}
+    <div style="text-align:center;padding:14px 16px;color:var(--text3);font-size:12px">${hint} this can take a few seconds on slow networks.</div>
+  `;
+}
+
+// Shared graceful-error UI for pages whose fetches are wrapped in
+// Promise.allSettled. Lists failed sources in plain English and gives the
+// user a single prominent Retry button. extraButtons accepts raw HTML for
+// pages that want to offer a secondary escape (e.g. dashboard offers
+// "View Transactions").
+function renderPageErrorState({ pageId, pageTitle, pageSub, failed, extraButtons = '' }){
+  const labels = failed.map(f => f.label);
+  failed.forEach(f => console.error(`${pageId} fetch failed (${f.label}):`, f.err));
+  document.getElementById('pageContent').innerHTML = `
+    <div class="page-header">
+      <div><div class="page-title">${pageTitle}</div><div class="page-sub">${pageSub}</div></div>
+    </div>
+    <div class="card">
+      <div class="alert alert-danger" style="margin-bottom:14px">
+        <span class="alert-icon">⚠</span>
+        <div>
+          <div style="font-weight:600;margin-bottom:4px">Couldn't load ${labels.length === 1 ? 'one part of' : 'parts of'} this page</div>
+          <div style="font-size:13px">${labels.length === 1 ? 'This part' : 'These parts'} didn't load: <strong>${labels.join(', ')}</strong>. Your network may be slow or unstable.</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="App.navigate('${pageId}')">Retry</button>
+        ${extraButtons}
+      </div>
+    </div>
+  `;
+}
+
 // Shown when one or more endpoints fail to load after retries. Lists exactly
 // what failed (in plain language, not endpoint names) and gives the user a
 // single, prominent Retry button — much better than the previous "Error
 // loading page: Failed to fetch" blank screen.
 function renderDashboardErrorState(failed){
   const userName = (state.user?.name?.split(/\s+/).slice(0,2).join(' ')) || 'User';
-  const labels = failed.map(f => f.label);
-  failed.forEach(f => console.error(`Dashboard fetch failed (${f.label}):`, f.err));
-  document.getElementById('pageContent').innerHTML = `
-    <div class="page-header">
-      <div>
-        <div class="page-title">Welcome, ${userName} 👋</div>
-        <div class="page-sub">${monthLabel()} Financial Overview</div>
-      </div>
-    </div>
-    <div class="card">
-      <div class="alert alert-danger" style="margin-bottom:14px">
-        <span class="alert-icon">⚠</span>
-        <div>
-          <div style="font-weight:600;margin-bottom:4px">Couldn't load ${labels.length === 1 ? 'one part of' : 'parts of'} the dashboard</div>
-          <div style="font-size:13px">${labels.length === 1 ? 'This part' : 'These parts'} didn't load: <strong>${labels.join(', ')}</strong>. Your network may be slow or unstable.</div>
-        </div>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-primary" onclick="App.navigate('dashboard')">Retry</button>
-        <button class="btn" onclick="App.navigate('transactions')">View Transactions instead</button>
-      </div>
-    </div>
-  `;
+  renderPageErrorState({
+    pageId: 'dashboard',
+    pageTitle: `Welcome, ${userName} 👋`,
+    pageSub: `${monthLabel()} Financial Overview`,
+    failed,
+    extraButtons: `<button class="btn" onclick="App.navigate('transactions')">View Transactions instead</button>`,
+  });
 }
 
 async function renderDashboard(){
@@ -2921,7 +2954,21 @@ async function calcRemittancesFromRecords(records, preRates){
 
 // ── INCOME ────────────────────────────────
 async function renderIncome(){
-  const [allIncomeRecs, _cashTx, remRatesData, balance, periodRange] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance(), getCurrentPeriodRange()]);
+  renderPageSkeleton({ pageTitle: 'Income Recording', pageSub: monthLabel(), kpiCount: 3, hint: 'Loading income…' });
+  const _incSources = [
+    ['Income records',     () => DB.getIncome()],
+    ['Cash transactions',  () => DB.getCashTransactions()],
+    ['Remittance rates',   () => getRemRates()],
+    ['Church balance',     () => calcChurchBalance()],
+    ['Period range',       () => getCurrentPeriodRange()],
+  ];
+  const _incSettled = await Promise.allSettled(_incSources.map(([, fn]) => fn()));
+  const _incFailed = _incSettled.map((r, i) => r.status === 'rejected' ? { label: _incSources[i][0], err: r.reason } : null).filter(Boolean);
+  if(_incFailed.length > 0){
+    renderPageErrorState({ pageId: 'income', pageTitle: 'Income Recording', pageSub: monthLabel(), failed: _incFailed });
+    return;
+  }
+  const [allIncomeRecs, _cashTx, remRatesData, balance, periodRange] = _incSettled.map(r => r.value);
   const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
   const cashWithAccountant = balance.cashWithAccountant;
   const records = filterByCurrentPeriod(allIncomeRecs, periodRange.from, periodRange.to);
@@ -4902,18 +4949,28 @@ async function printRemittanceReport(fromOverride, toOverride){
 
 // ── EXPENSES ──────────────────────────────
 async function renderExpenses(){
-  const [allExp, periodRange] = await Promise.all([DB.getExpenses(), getCurrentPeriodRange()]);
+  renderPageSkeleton({ pageTitle: 'Expenses', pageSub: monthLabel(), kpiCount: 3, hint: 'Loading expenses…' });
+  // Consolidated from two back-to-back Promise.all blocks — all 6 sources are
+  // independent so they fan out together. Saves one round-trip-worth of
+  // sequential waiting on slow networks.
+  const _expSources = [
+    ['Expense records',    () => DB.getExpenses()],
+    ['Period range',       () => getCurrentPeriodRange()],
+    ['Church balance',     () => calcChurchBalance()],
+    ['Income records',     () => DB.getIncome()],
+    ['Remittance history', () => DB.getRemittances()],
+    ['Settings',           () => DB.getSettings()],
+  ];
+  const _expSettled = await Promise.allSettled(_expSources.map(([, fn]) => fn()));
+  const _expFailed = _expSettled.map((r, i) => r.status === 'rejected' ? { label: _expSources[i][0], err: r.reason } : null).filter(Boolean);
+  if(_expFailed.length > 0){
+    renderPageErrorState({ pageId: 'expenses', pageTitle: 'Expenses', pageSub: monthLabel(), failed: _expFailed });
+    return;
+  }
+  const [allExp, periodRange, churchBal, allIncome, allRems, settings] = _expSettled.map(r => r.value);
   state._expAll = allExp;
   const expenses = filterByCurrentPeriod(allExp, periodRange.from, periodRange.to);
   const total = expenses.reduce((s,r)=>s+(r.amount||0),0);
-
-  // Fetch balance data for the financial position bar
-  const [churchBal, allIncome, allRems, settings] = await Promise.all([
-    calcChurchBalance(),
-    DB.getIncome(),
-    DB.getRemittances(),
-    DB.getSettings()
-  ]);
   // Outstanding remittances = accumulated all-time due minus all-time paid (same as dashboard KPI logic)
   const allTimeRemittances = await calcRemittancesFromRecords(allIncome);
   const allTimeIncomeRemDue = (allTimeRemittances.totalNatl||0)+(allTimeRemittances.totalArea||0)
@@ -5982,10 +6039,24 @@ async function submitBankWithdrawal(btn=null){
 function setBankTab(t){ state.bankTab=t; renderBank() }
 
 async function renderBank(){
-  const [allCashTx, allExpenses, allIncome, allRemittances, periodRange] = await Promise.all([
-    DB.getCashTransactions(), DB.getExpenses(), DB.getIncome(), DB.getRemittances(), getCurrentPeriodRange()
-  ]);
-  const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
+  renderPageSkeleton({ pageTitle: 'Bank Account', pageSub: monthLabel(), kpiCount: 4, hint: 'Loading bank activity…' });
+  // Pulled getRemRates into the parallel batch (was awaited sequentially after).
+  const _bankSources = [
+    ['Cash transactions',  () => DB.getCashTransactions()],
+    ['Expense records',    () => DB.getExpenses()],
+    ['Income records',     () => DB.getIncome()],
+    ['Remittance history', () => DB.getRemittances()],
+    ['Period range',       () => getCurrentPeriodRange()],
+    ['Remittance rates',   () => getRemRates()],
+  ];
+  const _bankSettled = await Promise.allSettled(_bankSources.map(([, fn]) => fn()));
+  const _bankFailed = _bankSettled.map((r, i) => r.status === 'rejected' ? { label: _bankSources[i][0], err: r.reason } : null).filter(Boolean);
+  if(_bankFailed.length > 0){
+    renderPageErrorState({ pageId: 'bank', pageTitle: 'Bank Account', pageSub: monthLabel(), failed: _bankFailed });
+    return;
+  }
+  const [allCashTx, allExpenses, allIncome, allRemittances, periodRange, _bankRatesData] = _bankSettled.map(r => r.value);
+  const remRates = _bankRatesData.rates || DEFAULT_REMITTANCE_RATES;
   const tab = state.bankTab||'overview';
   const { from: bankPeriodFrom, to: bankPeriodTo } = periodRange;
 
