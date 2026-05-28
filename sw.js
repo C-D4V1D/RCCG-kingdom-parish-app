@@ -38,9 +38,14 @@ self.addEventListener('install', e => {
 });
 
 self.addEventListener('activate', e => {
+  // Only delete our own old cache versions. CacheStorage is per-origin, so the
+  // KPSC service worker's cache (kpsc-v*) lives alongside ours — wiping anything
+  // that isn't ours would silently break the other portal's offline shell.
   e.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(keys => Promise.all(
+        keys.filter(k => k.startsWith('kpadmin-') && k !== CACHE).map(k => caches.delete(k))
+      ))
       .then(() => self.clients.claim())
   );
 });
@@ -61,11 +66,16 @@ self.addEventListener('fetch', e => {
   if (request.method !== 'GET') return;
 
   // Navigation requests: always try network first so new deployments show on reload;
-  // fall back to cached shell when offline.
+  // fall back to cached shell when offline. Cache key MUST be the actual URL for
+  // non-root navigations — otherwise visiting /install/ would overwrite the cached
+  // /index.html with the install page, and the next offline launch of "/" would
+  // serve the install instructions instead of the login screen.
   if (request.mode === 'navigate') {
+    const isRootNav = url.pathname === '/' || url.pathname === '/index.html';
+    const cacheKey = isRootNav ? '/index.html' : request;
     e.respondWith(
-      networkFirst(request, '/index.html')
-        .catch(() => caches.match('/index.html'))
+      networkFirst(request, cacheKey)
+        .catch(() => caches.match(cacheKey).then(r => r || caches.match('/index.html')))
     );
     return;
   }
