@@ -12,16 +12,16 @@ test('homepage KPSC portal button links to real directory route', async () => {
 test('KPSC portal directory page uses root-relative assets', async () => {
   const html = await readFile(new URL('../kpsc/index.html', import.meta.url), 'utf8');
 
-  assert.match(html, /<link rel="stylesheet" href="\/src\/css\/kpsc\.css(\?v=\d+)?" \/>/);
-  assert.match(html, /<script src="\/src\/js\/kpsc\.js(\?v=\d+)?"><\/script>/);
+  assert.match(html, /<link rel="stylesheet" href="\/dist\/css\/kpsc\.css(\?v=\d+)?" \/>/);
+  assert.match(html, /<script src="\/dist\/js\/kpsc\.js(\?v=\d+)?"><\/script>/);
   assert.match(html, /id="kpsc-account-select"/);
 });
 
 test('KPSC public minutes page uses root-relative assets', async () => {
   const html = await readFile(new URL('../kpsc/minutes/index.html', import.meta.url), 'utf8');
 
-  assert.match(html, /<link rel="stylesheet" href="\/src\/css\/kpsc\.css" \/>/);
-  assert.match(html, /<script src="\/src\/js\/kpsc-public-minutes\.js"><\/script>/);
+  assert.match(html, /<link rel="stylesheet" href="\/dist\/css\/kpsc\.css" \/>/);
+  assert.match(html, /<script src="\/dist\/js\/kpsc-public-minutes\.js"><\/script>/);
 });
 
 test('Cloudflare redirects do not rewrite KPSC back to an .html file', async () => {
@@ -44,12 +44,12 @@ test('KPSC service worker prefers network for app shell updates', async () => {
   const sw = await readFile(new URL('../kpsc/sw.js', import.meta.url), 'utf8');
   const html = await readFile(new URL('../kpsc/index.html', import.meta.url), 'utf8');
 
-  assert.match(sw, /const CACHE = 'kpsc-v3';/);
+  assert.match(sw, /const CACHE = 'kpsc-v\d+';/);
   assert.match(sw, /const SHELL = \[/);
   assert.match(sw, /'\/kpsc\/index\.html'/);
   assert.match(sw, /'\/kpsc\/manifest\.json'/);
-  assert.match(sw, /'\/src\/css\/kpsc\.css'/);
-  assert.match(sw, /'\/src\/js\/kpsc\.js'/);
+  assert.match(sw, /'\/dist\/css\/kpsc\.css'/);
+  assert.match(sw, /'\/dist\/js\/kpsc\.js'/);
   assert.match(sw, /networkFirst\(request, '\/kpsc\/index\.html'\)/);
   assert.match(sw, /if \(isAppShellAsset\(url\.pathname\)\)/);
   assert.match(html, /updateViaCache: 'none'/);

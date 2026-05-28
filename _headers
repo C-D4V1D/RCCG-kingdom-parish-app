@@ -64,3 +64,9 @@
 
 /src/css/*
   Cache-Control: no-cache, must-revalidate
+
+/dist/js/*
+  Cache-Control: no-cache, must-revalidate
+
+/dist/css/*
+  Cache-Control: no-cache, must-revalidate

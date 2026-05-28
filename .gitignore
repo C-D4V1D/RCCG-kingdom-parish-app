@@ -17,8 +17,9 @@ Thumbs.db
 *.swp
 *.swo
 
-# Build output
-dist/
+# Build output — note: dist/ IS committed because Cloudflare Pages serves it
+# directly from the repo root. tests/build-output.test.js keeps it in sync
+# with src/. Other build outputs stay ignored.
 build/
 
 # Wrangler local development state (dev-only SQLite caches)
