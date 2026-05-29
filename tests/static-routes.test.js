@@ -40,6 +40,30 @@ test('cache headers force fresh HTML, manifest, and service worker after deploys
   assert.match(headers, /^\/kpsc\/sw\.js\s*\n\s*Cache-Control: no-cache, no-store, must-revalidate$/m);
 });
 
+test('admin service worker serves the real built bundles network-first', async () => {
+  const sw = await readFile(new URL('../sw.js', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+
+  // A cache version must be present — bumping it purges stale shells on activate.
+  assert.match(sw, /const CACHE = 'kpadmin-v\d+';/);
+
+  // The SW app shell must list the ACTUAL built assets the page loads so they are
+  // served network-first and new deploys appear on reload. The bug this guards
+  // against: the shell pointed at the unbundled /src/ paths (which the page never
+  // requests), silently leaving the real /dist/ bundle on the cache-first path —
+  // stale forever, so deployments never reached users.
+  assert.match(sw, /'\/dist\/css\/styles\.css'/);
+  assert.match(sw, /'\/dist\/js\/app\.js'/);
+  assert.doesNotMatch(sw, /'\/src\/js\/app\.js'/);
+  assert.doesNotMatch(sw, /'\/src\/css\/styles\.css'/);
+  assert.match(sw, /if \(isAppShellAsset\(url\.pathname\)\)/);
+
+  // Root-cause guard: the JS/CSS index.html actually loads must be exactly what the
+  // SW treats as a network-first shell asset, or it falls through to cache-first.
+  assert.match(html, /<script src="dist\/js\/app\.js"><\/script>/);
+  assert.match(html, /<link rel="stylesheet" href="dist\/css\/styles\.css" \/>/);
+});
+
 test('KPSC service worker prefers network for app shell updates', async () => {
   const sw = await readFile(new URL('../kpsc/sw.js', import.meta.url), 'utf8');
   const html = await readFile(new URL('../kpsc/index.html', import.meta.url), 'utf8');
