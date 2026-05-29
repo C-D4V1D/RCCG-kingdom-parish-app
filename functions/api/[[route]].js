@@ -2440,6 +2440,7 @@ async function updatePettyEntry(DB, id, data) {
     settledAt:        'settled_at',
     settledBy:        'settled_by',
     actualAmount:     'actual_amount',
+    originalAmount:   'original_amount',
     reference:        'reference',
     changeReturned:   'change_returned',
     vendor:           'vendor',
