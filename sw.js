@@ -1,18 +1,18 @@
-const CACHE = 'kpadmin-v1';
+const CACHE = 'kpadmin-v2';
 const SHELL = [
   '/',
   '/index.html',
   '/manifest.json',
-  '/src/css/styles.css',
-  '/src/js/app.js',
+  '/dist/css/styles.css',
+  '/dist/js/app.js',
 ];
 
 function isAppShellAsset(pathname) {
   return pathname === '/'
     || pathname === '/index.html'
     || pathname === '/manifest.json'
-    || pathname === '/src/css/styles.css'
-    || pathname === '/src/js/app.js';
+    || pathname === '/dist/css/styles.css'
+    || pathname === '/dist/js/app.js';
 }
 
 async function networkFirst(request, cacheKey = request) {
