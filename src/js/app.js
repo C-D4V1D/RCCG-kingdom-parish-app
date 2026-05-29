@@ -7654,13 +7654,39 @@ async function confirmPettyReceipt(id, btn=null){
 
 async function showPettyRefill(prefillAmount, topupRequestId=''){
   if(!canAction('petty_topup_payment')){ showAlert('You do not have permission to record petty cash top-up payments.','danger'); return; }
-  const [pettyHistory, pettyConfig, allUsers] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getUsers()]);
+  const [pettyHistory, pettyConfig, allUsers, allExpenses] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getUsers(), DB.getExpenses()]);
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
+
+  // Approved top-up requests still awaiting payment. Effective amount is recomputed
+  // from live expenseRefs (mirrors renderPettyCash) so deleted expenses don't strand
+  // a request. The recorded payment can be attributed to one of these so its status
+  // advances to "settled" instead of lingering in "Awaiting Payment".
+  const _expenseMap = new Map(allExpenses.map(e => [e.id, e]));
+  const outstandingTopups = pettyHistory
+    .filter(h => h.type === 'topup_request' && h.status === 'approved')
+    .map(h => {
+      const refs = Array.isArray(h.expenseRefs) ? h.expenseRefs : [];
+      const liveTotal = refs.reduce((s, id) => {
+        const e = _expenseMap.get(id);
+        if (!e) return s;
+        return s + (e.paymentMethod === 'split' ? (e.pettyAmount || 0) : (e.amount || 0));
+      }, 0);
+      const effectiveAmount = refs.length > 0 ? liveTotal : (h.amount || 0);
+      const remaining = Math.max(0, effectiveAmount - (h.actualAmount || 0));
+      return { id: h.id, purpose: h.purpose || 'Wallet top-up', approvedAt: h.approvedAt || h.createdAt, remaining };
+    })
+    .filter(h => h.remaining > 0.5);
   const settled = pettyMonthHistory(petty.history).filter(h=>h.status==='settled'&&h.type!=='refill');
   const settledTotal = settled.reduce((s,h)=>s+(h.actualAmount||h.amount||0),0);
   const spaceInFloat = petty.max - petty.float;
+  // When no specific request was passed but exactly one is outstanding, default to it
+  // so the common case settles without the user having to remember to attribute it.
+  const fixedTopupId = topupRequestId || '';
+  const defaultTopupId = fixedTopupId || (outstandingTopups.length === 1 ? outstandingTopups[0].id : '');
+  const selectedOutstanding = outstandingTopups.find(o => o.id === defaultTopupId);
   const suggested = prefillAmount != null
     ? prefillAmount   // use the pre-filled amount from an approved request
+    : selectedOutstanding ? selectedOutstanding.remaining   // settle the single outstanding request
     : petty.float < 0 ? Math.min(Math.abs(petty.float)+settledTotal, petty.max) : Math.min(settledTotal, spaceInFloat);
 
   // Build signatory checklist from app users
@@ -7682,9 +7708,19 @@ async function showPettyRefill(prefillAmount, topupRequestId=''){
       ${petty.float<0?`<div style="margin-top:8px;font-size:12px;color:var(--danger);font-weight:600">⚠ The Admin Officer is owed ${fmt(Math.abs(petty.float))} of personal funds. Top this up to clear the debt.</div>`:''}
     </div>
 
+    ${fixedTopupId || outstandingTopups.length === 0 ? `
+      <input type="hidden" id="ref_topup_id" value="${esc(fixedTopupId)}" />
+    ` : `
+    <div class="form-group"><label class="form-label">Settle which approved request?</label>
+      <select id="ref_topup_id" class="form-select" onchange="App.onRefillTopupChange()">
+        <option value="">None — general top-up (not linked to a request)</option>
+        ${outstandingTopups.map(o=>`<option value="${esc(o.id)}" data-remaining="${o.remaining}" ${o.id===defaultTopupId?'selected':''}>${esc(o.purpose)} — ${fmt(o.remaining)} due (approved ${fmtDate(o.approvedAt)})</option>`).join('')}
+      </select>
+      <div class="form-hint">Linking this payment to an approved request marks it as settled once fully paid. Leave as "None" for an ad-hoc top-up.</div>
+    </div>`}
+
     <div class="form-group"><label class="form-label">Top-Up Amount (₦) <span style="color:var(--danger)">*</span></label>
       <input type="number" id="ref_amt" class="form-input" placeholder="0" value="${suggested||''}" />
-      <input type="hidden" id="ref_topup_id" value="${esc(topupRequestId||'')}" />
       <div class="form-hint">Max top-up: ${fmt(Math.max(0,spaceInFloat))} (total cannot exceed the approved max of ${fmt(petty.max)})</div>
     </div>
 
@@ -7725,6 +7761,17 @@ async function showPettyRefill(prefillAmount, topupRequestId=''){
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="App.submitRefill(this)">Confirm Top-Up</button>
     </div>`);
+}
+
+function onRefillTopupChange(){
+  const sel = document.getElementById('ref_topup_id');
+  const opt = sel?.selectedOptions?.[0];
+  const remaining = opt ? parseFloat(opt.getAttribute('data-remaining')) : NaN;
+  const amtInput = document.getElementById('ref_amt');
+  // Prefill the amount with the selected request's outstanding balance so the
+  // common "pay it off" action settles it. Clearing the selection leaves the
+  // amount untouched (it may be an ad-hoc top-up).
+  if(amtInput && Number.isFinite(remaining) && remaining > 0){ amtInput.value = remaining; }
 }
 
 function onRefillMethodChange(){
@@ -7793,14 +7840,24 @@ async function submitRefill(btn=null){
   const methodLabel = method==='split' ? `Split — Bank: ${fmt(bankAmt)} + Cash: ${fmt(cashAmt)}` : method==='cash_accountant' ? 'Cash with Accountant' : 'Bank Transfer';
 
   let linkedTopup = null;
+  let linkedEffectiveAmount = 0;
   if(topupRequestId){
-    const pettyHistory = await DB.getPetty();
+    const [pettyHistory, allExpenses] = await Promise.all([DB.getPetty(), DB.getExpenses()]);
     linkedTopup = pettyHistory.find(h=>h.id===topupRequestId && h.type==='topup_request');
     if(!linkedTopup){ alert('Linked top-up request was not found. Please refresh and try again.'); return }
     if(linkedTopup.status!=='approved'){ alert('Only approved top-up requests can be settled from this screen.'); return }
-    const remaining = linkedTopup.amount||0;
-    if(actualAdded > remaining + 0.5){
-      alert(`Recorded payment (${fmt(actualAdded)}) cannot exceed the remaining approved balance (${fmt(remaining)}).`);
+    // Effective amount mirrors renderPettyCash: recompute from live expenseRefs so a
+    // deleted expense doesn't leave the request impossible to settle.
+    const refs = Array.isArray(linkedTopup.expenseRefs) ? linkedTopup.expenseRefs : [];
+    if(refs.length > 0){
+      const expMap = new Map(allExpenses.map(e=>[e.id, e]));
+      linkedEffectiveAmount = refs.reduce((s,id)=>{ const e=expMap.get(id); if(!e) return s; return s + (e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)); }, 0);
+    } else {
+      linkedEffectiveAmount = linkedTopup.amount || 0;
+    }
+    const remainingDue = Math.max(0, linkedEffectiveAmount - (linkedTopup.actualAmount||0));
+    if(actualAdded > remainingDue + 0.5){
+      alert(`Recorded payment (${fmt(actualAdded)}) cannot exceed the remaining balance on the approved request (${fmt(remainingDue)}).`);
       return;
     }
   }
@@ -7814,11 +7871,13 @@ async function submitRefill(btn=null){
       reference:ref, authorizedBy:auth, paymentMethod:method, bankAmount:bankAmt, cashAmount:cashAmt
     });
     if(linkedTopup){
-      // Preserve original amount — do NOT mutate it. Track paid via actualAmount.
-      const originalAmt = linkedTopup.originalAmount || linkedTopup.amount || 0;
+      // Settle against the live effective amount (what the UI shows as due), tracking
+      // cumulative payment via actualAmount. originalAmount locks the effective total
+      // on first payment so the record keeps an audit trail of what was owed.
+      const originalAmt = linkedTopup.originalAmount || linkedEffectiveAmount || linkedTopup.amount || 0;
       const paidSoFar = linkedTopup.actualAmount || 0;
       const totalPaid = paidSoFar + actualAdded;
-      const remaining = Math.max(0, originalAmt - totalPaid);
+      const remaining = Math.max(0, linkedEffectiveAmount - totalPaid);
       const settledNow = remaining <= 0.5;
       const paymentLine = `${new Date().toISOString().split('T')[0]}: ${fmt(actualAdded)} via ${methodLabel}${ref?` (ref: ${ref})`:''}`;
       const mergedNotes = [linkedTopup.notes||'', `Payment log → ${paymentLine}`].filter(Boolean).join('\n');
@@ -7840,9 +7899,8 @@ async function submitRefill(btn=null){
     DB.addAudit('petty_refilled',`Cash topped up: ${fmt(actualAdded)} via ${methodLabel} (authorized by ${auth}${ref?', ref: '+ref:''})`,state.user?.name);
     DB.addNotification('Petty Cash Topped Up',`${fmt(actualAdded)} added to petty cash. New balance: ${fmt(newFloat)}. Authorized by: ${auth}.`,'success');
     closeModal();
-    const _origAmt = linkedTopup ? (linkedTopup.originalAmount || linkedTopup.amount || 0) : 0;
     const _paidSoFar = linkedTopup ? (linkedTopup.actualAmount || 0) : 0;
-    const _remaining = linkedTopup ? Math.max(0, _origAmt - (_paidSoFar + actualAdded)) : 0;
+    const _remaining = linkedTopup ? Math.max(0, linkedEffectiveAmount - (_paidSoFar + actualAdded)) : 0;
     const remainingMsg = linkedTopup ? (_remaining > 0.5 ? ` Remaining on approved request: ${fmt(_remaining)}.` : ' Top-up request fully settled.') : '';
     showAlert(`Petty cash topped up by ${fmt(actualAdded)}. New balance: ${fmt(newFloat)}.${actualAdded<amt?` (Max reached — only ${fmt(actualAdded)} added.)`:''}${remainingMsg}`,'success');
     renderPettyCash();
@@ -9346,7 +9404,7 @@ return {
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
-  approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange,
+  approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange, onRefillTopupChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
   setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
