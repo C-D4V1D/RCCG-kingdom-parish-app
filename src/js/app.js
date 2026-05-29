@@ -380,7 +380,8 @@ const DB = {
   updateIncome(id,d)           { return apiFetch(`income/${id}`,'PUT',d); },
   deleteIncome(id)             { return apiFetch(`income/${id}`,'DELETE'); },
 
-  getExpenses()                { return apiFetch('expenses'); },
+  getExpenses(full=false)      { return apiFetch('expenses'+(full?'?full=1':'')); },
+  getExpenseReceipt(id)        { return apiFetch(`expense-receipt/${id}`); },
   addExpense(d)                { return apiFetch('expenses','POST',d); },
   updateExpense(id,d)          { return apiFetch(`expenses/${id}`,'PUT',d); },
   deleteExpense(id)            { return apiFetch(`expenses/${id}`,'DELETE'); },
@@ -397,7 +398,8 @@ const DB = {
   addRemittance(d)             { return apiFetch('remittances','POST',d); },
   updateRemittance(id,d)       { return apiFetch(`remittances/${id}`,'PUT',d); },
 
-  getCashTransactions()        { return apiFetch('cash-transactions'); },
+  getCashTransactions(full=false){ return apiFetch('cash-transactions'+(full?'?full=1':'')); },
+  getCashPhoto(id)             { return apiFetch(`cash-photo/${id}`); },
   addCashTransaction(d)        { return apiFetch('cash-transactions','POST',d); },
 
   getAudit()                   { return apiFetch('audit'); },
@@ -5525,7 +5527,7 @@ async function renderExpenses(){
             <td class="td-muted" style="font-size:12px">${e.recordedBy||'—'}</td>
             <td>
               <div style="display:flex;gap:6px;flex-wrap:wrap">
-                ${e.receiptImage?`<button class="btn btn-sm" onclick="App.viewExpenseReceipt('${e.id}')">🧾 View</button>`:e.receiptNo?`<span class="badge badge-gray">#${e.receiptNo}</span>`:'<span style="color:var(--text3);font-size:12px">—</span>'}
+                ${(e.hasReceiptImage||e.receiptImage)?`<button class="btn btn-sm" onclick="App.viewExpenseReceipt('${e.id}')">🧾 View</button>`:e.receiptNo?`<span class="badge badge-gray">#${e.receiptNo}</span>`:'<span style="color:var(--text3);font-size:12px">—</span>'}
                 ${canEditPending?`<button class="btn btn-sm" onclick="App.editExpense('${e.id}')">✏️ Edit</button><button class="btn btn-sm btn-danger" onclick="App.deleteExpense('${e.id}', this)">🗑 Delete</button>`:''}
               </div>
             </td>
@@ -5614,7 +5616,7 @@ function showExpenseDetail(id){
     ['Status',          statusBadge],
     ['Payment Method',  `${methodLabel}${splitParts.length?`<div style="font-size:11px;color:var(--text3);margin-top:3px">${splitParts.join(' · ')}</div>`:''}`],
     ['Recorded By',     esc(e.recordedBy||'—')],
-    ['Receipt / Ref',   e.receiptNo?`#${esc(e.receiptNo)}`:(e.receiptImage?'📎 Image attached':'—')],
+    ['Receipt / Ref',   e.receiptNo?`#${esc(e.receiptNo)}`:((e.hasReceiptImage||e.receiptImage)?'📎 Image attached':'—')],
   ];
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -5628,7 +5630,7 @@ function showExpenseDetail(id){
     </table>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Close</button>
-      ${e.receiptImage?`<button class="btn btn-sm" onclick="closeModal();App.viewExpenseReceipt('${e.id}')">🧾 View Receipt</button>`:''}
+      ${(e.hasReceiptImage||e.receiptImage)?`<button class="btn btn-sm" onclick="closeModal();App.viewExpenseReceipt('${e.id}')">🧾 View Receipt</button>`:''}
       ${canEditPending?`<button class="btn btn-sm" onclick="closeModal();App.editExpense('${e.id}')">✏️ Edit</button>`:''}
       ${(canEditPending||canDeleteApproved)?`<button class="btn btn-sm btn-danger" onclick="closeModal();App.deleteExpense('${e.id}')">🗑 Delete</button>`:''}
       ${canApprovePending?`<button class="btn btn-primary" onclick="closeModal();App.approveExpense('${e.id}')">✓ Approve</button>`:''}
@@ -5934,14 +5936,37 @@ async function submitExpense(btn=null){
 async function viewExpenseReceipt(id){
   const allExpVE = await DB.getExpenses();
   const exp = allExpVE.find(e=>e.id===id);
-  if(!exp||!exp.receiptImage) return;
-  const isImg = exp.receiptImage.startsWith('data:image');
+  if(!exp || !(exp.hasReceiptImage || exp.receiptImage)) return;
+  // The image is no longer shipped in the list payload — fetch it on demand.
+  let receiptImage = exp.receiptImage;
+  if(!receiptImage){
+    try { const r = await DB.getExpenseReceipt(id); receiptImage = r?.receiptImage || ''; }
+    catch(e){ showAlert('Could not load the receipt image. Please try again.','danger'); return; }
+  }
+  if(!receiptImage){ showAlert('No receipt image found for this expense.','info'); return; }
+  const isImg = receiptImage.startsWith('data:image');
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">🧾 Receipt — ${exp.description||exp.subCategory||'Expense'}</div>
     <p style="font-size:12px;color:var(--text3);margin-bottom:8px">${exp.receiptFileName||''} · ${fmtDate(exp.date||exp.createdAt)}</p>
-    ${isImg?`<img src="${exp.receiptImage}" style="width:100%;border-radius:var(--r);max-height:70vh;object-fit:contain" alt="Receipt" />`:
-      `<a href="${exp.receiptImage}" target="_blank" class="btn btn-primary" download="${exp.receiptFileName||'receipt'}">Download Receipt PDF</a>`}
+    ${isImg?`<img src="${receiptImage}" style="width:100%;border-radius:var(--r);max-height:70vh;object-fit:contain" alt="Receipt" />`:
+      `<a href="${receiptImage}" target="_blank" class="btn btn-primary" download="${exp.receiptFileName||'receipt'}">Download Receipt PDF</a>`}
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
+}
+
+// Lazy-load and show a cash transaction's deposit-slip photo (no longer shipped
+// inline in the transactions list).
+async function viewCashPhoto(id){
+  let photoData = '';
+  try { const r = await DB.getCashPhoto(id); photoData = r?.photoData || ''; }
+  catch(e){ showAlert('Could not load the deposit slip. Please try again.','danger'); return; }
+  if(!photoData){ showAlert('No deposit slip photo found for this transaction.','info'); return; }
+  const isImg = photoData.startsWith('data:image');
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">📷 Deposit Slip</div>
+    ${isImg?`<img src="${photoData}" style="width:100%;border-radius:var(--r);max-height:70vh;object-fit:contain" alt="Deposit slip" />`:
+      `<a href="${photoData}" target="_blank" class="btn btn-primary" download="deposit-slip">Open Deposit Slip</a>`}
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
 }
 
@@ -6503,7 +6528,7 @@ function renderBankOverview(monthBankTx,bankBalance){
           <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
             <div>Balance after this transaction: <strong style="color:${balColor}">${fmt(t.balAfter)}</strong></div>
             ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
-            ${t.photoData?`<div><a href="${t.photoData}" target="_blank" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
+            ${(t.hasPhoto||t.photoData)?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${t.id}')" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
             <div>Time: ${fmtTime(t.createdAt||t.date)}</div>
           </div>
         </div>`;
@@ -6547,7 +6572,7 @@ function renderBankDeposits(deposits){
         <div style="display:flex;align-items:center;gap:10px">
           <div style="flex:1;min-width:0">
             <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.description||'Cash Deposit'}</div>
-            <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(t.date||t.createdAt)}${t.depositMethod?` &nbsp;·&nbsp; ${(t.depositMethod||'').replace(/_/g,' ')}`:''}${t.photoData?` &nbsp;·&nbsp; <span class="badge badge-info" style="font-size:10px">📷 Photo</span>`:''}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(t.date||t.createdAt)}${t.depositMethod?` &nbsp;·&nbsp; ${(t.depositMethod||'').replace(/_/g,' ')}`:''}${(t.hasPhoto||t.photoData)?` &nbsp;·&nbsp; <span class="badge badge-info" style="font-size:10px">📷 Photo</span>`:''}</div>
           </div>
           <div style="text-align:right;flex-shrink:0;margin-left:4px">
             <div style="font-size:14px;font-weight:700;color:var(--success,#2e7d32)">+${fmt(t.amount)}</div>
@@ -6557,7 +6582,7 @@ function renderBankDeposits(deposits){
         <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
           ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
           ${t.recordedBy?`<div>Recorded By: <strong>${t.recordedBy}</strong></div>`:''}
-          ${t.photoData?`<div><a href="${t.photoData}" target="_blank" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
+          ${(t.hasPhoto||t.photoData)?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${t.id}')" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
           <div>Time: ${fmtTime(t.createdAt||t.date)}</div>
         </div>
       </div>`).join('')}
@@ -9263,7 +9288,9 @@ async function exportData(btn=null){
   if(!requireAdmin()) return;
   const restore = setBtnLoading(btn, 'Exporting…');
   try {
-    const [usersRaw,income,remittances,expenses,petty,auditLog,settings,cashTransactions] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(),DB.getPetty(),DB.getAudit(),DB.getSettings(),DB.getCashTransactions()]);
+    // Pass full=true so the backup includes receipt/deposit-slip images, which the
+    // normal list endpoints now omit for speed.
+    const [usersRaw,income,remittances,expenses,petty,auditLog,settings,cashTransactions] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(true),DB.getPetty(),DB.getAudit(),DB.getSettings(),DB.getCashTransactions(true)]);
     // Strip sensitive auth data (PIN hashes) — they must never leave the database in any export
     const users = usersRaw.map(({pin:_pin, pinHash:_hash, ...u})=>u);
     const data={ users,income,remittances,expenses,petty,audit:auditLog,settings,cashTransactions, exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
@@ -9547,7 +9574,7 @@ return {
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
-  quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, editExpense, submitEditExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
+  quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
