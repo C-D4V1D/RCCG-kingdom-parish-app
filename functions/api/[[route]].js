@@ -520,11 +520,17 @@ export async function onRequest(context) {
 
     // ── /api/expenses ──────────────────────────────────────────
     if (route === 'expenses') {
-      if (method === 'GET'  && !param) return await getExpenses(DB);
+      if (method === 'GET'  && !param) return await getExpenses(DB, url.searchParams.get('full') === '1');
       if (method === 'POST' && !param) return await createExpense(DB, body);
       if (method === 'PUT'  &&  param) return await updateExpense(DB, param, body);
       if (method === 'DELETE' && param) return await deleteExpense(DB, param);
     }
+
+    // ── /api/expense-receipt/:id — single receipt image, fetched on demand ──
+    if (route === 'expense-receipt' && method === 'GET' && param) return await getExpenseReceipt(DB, param);
+
+    // ── /api/cash-photo/:id — single deposit-slip photo, fetched on demand ──
+    if (route === 'cash-photo' && method === 'GET' && param) return await getCashPhoto(DB, param);
 
     // ── /api/petty ─────────────────────────────────────────────
     if (route === 'petty') {
@@ -574,7 +580,7 @@ export async function onRequest(context) {
 
     // ── /api/cash-transactions ─────────────────────────────────
     if (route === 'cash-transactions') {
-      if (method === 'GET'  && !param) return await getCashTransactions(DB);
+      if (method === 'GET'  && !param) return await getCashTransactions(DB, url.searchParams.get('full') === '1');
       if (method === 'POST' && !param) return await createCashTransaction(DB, body);
     }
 
@@ -2187,8 +2193,20 @@ async function deleteIncome(DB, id) {
 }
 
 // ── EXPENSES ──────────────────────────────────────────────────────
-async function getExpenses(DB) {
-  const { results } = await DB.prepare(`SELECT * FROM expenses ORDER BY date DESC, created_at DESC`).all();
+// By default the base64 receipt image is NOT returned — it can be hundreds of KB
+// per row and made the all-rows list (and the Dashboard batch) balloon to multiple
+// MB, which stalled first load on slow links. The client gets a lightweight
+// `hasReceiptImage` flag and fetches the actual image on demand via
+// /api/expense-receipt/:id. Pass includeImages=true (?full=1) for full backups.
+async function getExpenses(DB, includeImages = false) {
+  const sql = includeImages
+    ? `SELECT * FROM expenses ORDER BY date DESC, created_at DESC`
+    : `SELECT id,date,category,subcategory,description,amount,receipt_no,receipt_file_name,
+              payment_method,notes,recorded_by,petty_ref,status,bank_amount,cash_amount,
+              petty_amount,no_receipt,created_at,
+              (receipt_image IS NOT NULL AND receipt_image != '') AS has_receipt_image
+         FROM expenses ORDER BY date DESC, created_at DESC`;
+  const { results } = await DB.prepare(sql).all();
   return ok((results || []).map(row => ({
     id:              row.id,
     date:            row.date,
@@ -2197,7 +2215,8 @@ async function getExpenses(DB) {
     description:     row.description,
     amount:          row.amount,
     receiptNo:       row.receipt_no,
-    receiptImage:    row.receipt_image,
+    receiptImage:    includeImages ? row.receipt_image : undefined,
+    hasReceiptImage: includeImages ? !!row.receipt_image : row.has_receipt_image === 1,
     receiptFileName: row.receipt_file_name,
     paymentMethod:   row.payment_method,
     notes:           row.notes,
@@ -2210,6 +2229,13 @@ async function getExpenses(DB) {
     noReceipt:       row.no_receipt === 1,
     createdAt:       row.created_at,
   })));
+}
+
+// Lazy fetch of a single expense's receipt image (kept out of the list payloads).
+async function getExpenseReceipt(DB, id) {
+  const row = await DB.prepare(`SELECT receipt_image, receipt_file_name FROM expenses WHERE id=?`).bind(id).first();
+  if (!row) return err('Expense not found', 404);
+  return ok({ receiptImage: row.receipt_image || '', receiptFileName: row.receipt_file_name || '' });
 }
 
 async function createExpense(DB, data) {
@@ -2548,8 +2574,17 @@ async function updateRemittance(DB, id, data) {
 }
 
 // ── CASH TRANSACTIONS ─────────────────────────────────────────────
-async function getCashTransactions(DB) {
-  const { results } = await DB.prepare(`SELECT * FROM cash_transactions ORDER BY date DESC, created_at DESC`).all();
+// The base64 deposit-slip photo (photo_data) is excluded by default for the same
+// reason as expense receipts — see getExpenses. Client gets a `hasPhoto` flag and
+// fetches the image on demand via /api/cash-photo/:id. ?full=1 includes it.
+async function getCashTransactions(DB, includeImages = false) {
+  const sql = includeImages
+    ? `SELECT * FROM cash_transactions ORDER BY date DESC, created_at DESC`
+    : `SELECT id,type,date,amount,description,reference,authorized_by,recorded_by,
+              deposit_method,income_ref,destination,created_at,
+              (photo_data IS NOT NULL AND photo_data != '') AS has_photo
+         FROM cash_transactions ORDER BY date DESC, created_at DESC`;
+  const { results } = await DB.prepare(sql).all();
   return ok((results || []).map(row => ({
     id:            row.id,
     type:          row.type,
@@ -2562,9 +2597,17 @@ async function getCashTransactions(DB) {
     depositMethod: row.deposit_method,
     incomeRef:     row.income_ref,
     destination:   row.destination,
-    photoData:     row.photo_data,
+    photoData:     includeImages ? row.photo_data : undefined,
+    hasPhoto:      includeImages ? !!row.photo_data : row.has_photo === 1,
     createdAt:     row.created_at,
   })));
+}
+
+// Lazy fetch of a single cash transaction's deposit-slip photo.
+async function getCashPhoto(DB, id) {
+  const row = await DB.prepare(`SELECT photo_data FROM cash_transactions WHERE id=?`).bind(id).first();
+  if (!row) return err('Transaction not found', 404);
+  return ok({ photoData: row.photo_data || '' });
 }
 
 // Aggregated first-load payload for the Dashboard. The client otherwise fires

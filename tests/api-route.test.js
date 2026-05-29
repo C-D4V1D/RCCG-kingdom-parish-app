@@ -3155,3 +3155,62 @@ test('GET /api/dashboard batches all seven tables in one response', async () => 
   assert.equal(body.pettyConfig.float, 40000);
   assert.equal(body.pettyConfig.max, 50000);
 });
+
+// The base64 receipt/photo images dominated the first-load payload (multi-MB on a
+// real DB) and stalled slow links. They must be omitted from list payloads and
+// fetched lazily; backups (?full=1) still include them.
+test('GET /api/expenses omits the receipt image and exposes a hasReceiptImage flag', async () => {
+  const row = {
+    id: 'EXP-1', date: '2026-05-03', amount: 100, receipt_no: '',
+    receipt_image: 'data:image/png;base64,AAAA', receipt_file_name: 'r.png',
+    has_receipt_image: 1, created_at: '2026-05-03T10:00:00Z',
+  };
+  const onPrepare = (sql) => ({ bind() { return this; }, async all() { return /FROM expenses/.test(sql) ? { results: [row] } : { results: [] }; } });
+
+  const slim = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/expenses', 'GET'),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+  assert.equal(slim[0].receiptImage, undefined, 'receipt image must not ship in the list');
+  assert.equal(slim[0].hasReceiptImage, true, 'flag tells the UI an image exists');
+
+  const full = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/expenses?full=1', 'GET'),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+  assert.equal(full[0].receiptImage, 'data:image/png;base64,AAAA', 'backup includes the image');
+});
+
+test('GET /api/expense-receipt/:id returns the single receipt image on demand', async () => {
+  const onPrepare = () => ({ bind() { return this; }, async first() { return { receipt_image: 'data:image/png;base64,BBBB', receipt_file_name: 'r.png' }; } });
+  const body = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/expense-receipt/EXP-1', 'GET'),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+  assert.equal(body.receiptImage, 'data:image/png;base64,BBBB');
+  assert.equal(body.receiptFileName, 'r.png');
+});
+
+test('GET /api/cash-transactions omits photoData and exposes a hasPhoto flag', async () => {
+  const row = {
+    id: 'CTX-1', type: 'cash_deposit', date: '2026-05-03', amount: 100,
+    photo_data: 'data:image/png;base64,CCCC', has_photo: 1, created_at: '2026-05-03T10:00:00Z',
+  };
+  const onPrepare = (sql) => ({ bind() { return this; }, async all() { return /FROM cash_transactions/.test(sql) ? { results: [row] } : { results: [] }; } });
+
+  const slim = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/cash-transactions', 'GET'),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+  assert.equal(slim[0].photoData, undefined);
+  assert.equal(slim[0].hasPhoto, true);
+});
+
+test('GET /api/cash-photo/:id returns the single deposit-slip photo on demand', async () => {
+  const onPrepare = () => ({ bind() { return this; }, async first() { return { photo_data: 'data:image/png;base64,DDDD' }; } });
+  const body = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/cash-photo/CTX-1', 'GET'),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+  assert.equal(body.photoData, 'data:image/png;base64,DDDD');
+});
