@@ -28,6 +28,26 @@ async function networkFirst(request, cacheKey = request) {
   }
 }
 
+// Serve from cache immediately for speed, then refresh the cache in the
+// background so the next load picks up a new deployment. This keeps the big
+// bundles (app.js / styles.css) instant on slow links. networkFirst here was a
+// mistake: it blocked every page load on re-downloading the full ~430 KB app.js
+// over the network, which stalled slow parish connections — even though a good
+// cached copy was already on the device.
+async function staleWhileRevalidate(request, cacheKey = request) {
+  const cache = await caches.open(CACHE);
+  const cached = await cache.match(cacheKey);
+  // Kick off a background refresh regardless of a cache hit, so the cache is
+  // up to date for the next load. Never blocks the response when we have a hit.
+  const networked = fetch(request)
+    .then(res => { if (res.ok) cache.put(cacheKey, res.clone()); return res; })
+    .catch(() => null);
+  if (cached) return cached;
+  const res = await networked;
+  if (res) return res;
+  throw new Error('Offline');
+}
+
 self.addEventListener('install', e => {
   // allSettled so one slow/failed asset doesn't abort install
   e.waitUntil(
@@ -80,10 +100,11 @@ self.addEventListener('fetch', e => {
     return;
   }
 
-  // App shell assets — prefer network so CSS/JS updates appear immediately
+  // App shell bundles (CSS/JS/manifest) — serve instantly from cache and refresh
+  // in the background. Fast on slow links; a new deploy appears on the next load.
   if (isAppShellAsset(url.pathname)) {
     e.respondWith(
-      networkFirst(request, url.pathname).catch(() => caches.match(url.pathname))
+      staleWhileRevalidate(request, url.pathname).catch(() => caches.match(url.pathname))
     );
     return;
   }

@@ -58,6 +58,12 @@ test('admin service worker serves the real built bundles network-first', async (
   assert.doesNotMatch(sw, /'\/src\/css\/styles\.css'/);
   assert.match(sw, /if \(isAppShellAsset\(url\.pathname\)\)/);
 
+  // The shell bundles must be served stale-while-revalidate: instant from cache,
+  // refreshed in the background. network-first here re-downloaded the full app.js
+  // bundle on every load, which stalled slow connections.
+  assert.match(sw, /async function staleWhileRevalidate/);
+  assert.match(sw, /staleWhileRevalidate\(request, url\.pathname\)/);
+
   // Root-cause guard: the JS/CSS index.html actually loads must be exactly what the
   // SW treats as a network-first shell asset, or it falls through to cache-first.
   assert.match(html, /<script src="dist\/js\/app\.js"><\/script>/);
