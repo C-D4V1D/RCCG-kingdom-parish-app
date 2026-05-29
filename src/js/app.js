@@ -187,6 +187,132 @@ async function _apiFetchOnce(path, opts){
   }
 }
 
+// ── Download progress + live speed ──────────────────────────────────────────
+// Tracks bytes flowing through the streamed GET reader (see _readJson) so the
+// loading skeletons can show a real percentage, the amount downloaded and the
+// measured throughput. On slow parish links this turns the old opaque "Loading…"
+// into visible progress. When the server sends no usable Content-Length (chunked
+// / compressed responses), the percentage eases toward 95% by elapsed time and
+// snaps to 100% on completion, while the byte counter and speed stay exact.
+const NetLoad = {
+  active: new Map(),                    // reqId -> { received, total }
+  startTs: 0, lastTs: 0, lastBytes: 0, speed: 0 /* bytes/s */, ticker: 0,
+  begin(id, total){
+    const fresh = this.active.size === 0;
+    this.active.set(id, { received: 0, total: total || 0 });
+    if(fresh){
+      this.startTs = performance.now();
+      this.lastTs = this.startTs; this.lastBytes = 0;
+      if(!this.ticker) this.ticker = setInterval(() => this._render(), 150);
+    }
+    this._render();
+  },
+  update(id, received){
+    const e = this.active.get(id); if(!e) return;
+    e.received = received;
+    const now = performance.now();
+    const dt = now - this.lastTs;
+    if(dt >= 200){
+      const bytes = this._received();
+      const inst = (bytes - this.lastBytes) / (dt / 1000);
+      this.speed = this.speed ? this.speed * 0.65 + inst * 0.35 : inst;
+      this.lastTs = now; this.lastBytes = bytes;
+    }
+  },
+  finish(id){
+    this.active.delete(id);
+    if(this.active.size === 0){
+      if(this.ticker){ clearInterval(this.ticker); this.ticker = 0; }
+      this._render(true);
+      this.speed = 0;
+    }
+  },
+  _received(){ let s = 0; for(const e of this.active.values()) s += e.received; return s; },
+  _pct(done){
+    if(done) return 100;
+    if(this.active.size === 0) return 0;
+    let recv = 0, tot = 0;
+    for(const e of this.active.values()){ if(e.total > 0){ recv += e.received; tot += e.total; } }
+    if(tot > 0 && recv <= tot * 1.05) return Math.min(99, Math.round(recv / tot * 100));
+    // No reliable Content-Length (chunked/compressed) — ease toward 95% by time.
+    const elapsed = performance.now() - this.startTs;
+    return Math.min(95, Math.round((1 - Math.exp(-elapsed / this._expectedMs())) * 100));
+  },
+  _expectedMs(){
+    const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    const dl = c && typeof c.downlink === 'number' && c.downlink > 0 ? c.downlink : 1.5; // Mbps
+    const ms = (300 * 1024 * 8) / (dl * 1e6) * 1000;   // ~300 KB payload over the link
+    return Math.max(2500, Math.min(20000, ms));
+  },
+  _speedLabel(){
+    if(this.speed > 0){
+      const kbps = this.speed / 1024;
+      return kbps >= 1024 ? (kbps / 1024).toFixed(2) + ' MB/s' : Math.max(1, Math.round(kbps)) + ' KB/s';
+    }
+    const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if(c && typeof c.downlink === 'number') return '~' + c.downlink + ' Mbps' + (c.effectiveType ? ' ' + c.effectiveType : '');
+    return 'measuring…';
+  },
+  _render(done){
+    const fill = document.getElementById('loadProgressFill');
+    const pctEl = document.getElementById('loadProgressPct');
+    const speedEl = document.getElementById('loadProgressSpeed');
+    const bytesEl = document.getElementById('loadProgressBytes');
+    if(!fill && !pctEl && !speedEl && !bytesEl) return;
+    const p = this._pct(done);
+    if(fill) fill.style.width = p + '%';
+    if(pctEl) pctEl.textContent = (p === 0 && !done) ? 'Loading…' : p + '%';
+    if(speedEl) speedEl.textContent = this._speedLabel();
+    if(bytesEl){ const b = this._received(); bytesEl.textContent = b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : b > 0 ? Math.round(b / 1024) + ' KB' : ''; }
+  },
+  // Populate idle labels into a freshly painted skeleton footer.
+  sync(){ this._render(); },
+};
+
+// HTML for the loading footer shown inside skeletons: progress bar + live
+// percentage, amount downloaded and measured network speed. NetLoad targets the
+// ids below as bytes stream in.
+function loadingFooter(hint = 'Loading…'){
+  return `<div class="load-progress" id="loadProgress" role="status" aria-live="polite">
+    <div class="load-progress-track"><div class="load-progress-fill" id="loadProgressFill" style="width:0%"></div></div>
+    <div class="load-progress-meta">
+      <span class="load-progress-pct" id="loadProgressPct">Loading…</span>
+      <span class="load-progress-detail"><span id="loadProgressBytes"></span><span class="load-progress-speed" id="loadProgressSpeed"></span></span>
+    </div>
+    <div class="load-progress-hint">${hint} this can take a few seconds on slow networks.</div>
+  </div>`;
+}
+
+let _netReqSeq = 0;
+// Read a Response body as JSON while reporting download progress to NetLoad.
+// Falls back to res.json() when streaming is unavailable or the body is still
+// intact after an error.
+async function _readJson(res){
+  try {
+    if(!res.body || typeof res.body.getReader !== 'function') return await res.json();
+    const total = Number(res.headers.get('content-length')) || 0;
+    const id = ++_netReqSeq;
+    const reader = res.body.getReader();
+    const chunks = []; let received = 0;
+    NetLoad.begin(id, total);
+    try {
+      for(;;){
+        const { done, value } = await reader.read();
+        if(done) break;
+        chunks.push(value); received += value.length;
+        NetLoad.update(id, received);
+      }
+    } finally { NetLoad.finish(id); }
+    const buf = new Uint8Array(received); let off = 0;
+    for(const c of chunks){ buf.set(c, off); off += c.length; }
+    const text = new TextDecoder('utf-8').decode(buf);
+    return text ? JSON.parse(text) : null;
+  } catch(e){
+    if(res.bodyUsed) throw e;   // stream already consumed — can't retry res.json()
+    return await res.json();
+  }
+}
+
 async function apiFetch(path, method='GET', body=null){
   const endpoint = path.split('/')[0];
   if(method !== 'GET'){
@@ -218,7 +344,7 @@ async function apiFetch(path, method='GET', body=null){
           await new Promise(r => setTimeout(r, 1000 * (2 * attempt + 1)));
           continue;
         }
-        const data = await res.json();
+        const data = await _readJson(res);
         if(!res.ok) throw new Error(data.error || `API error ${res.status}`);
         if(method === 'GET' && _CACHE_TTL[endpoint]) _apiCache.set(endpoint, { data, ts: Date.now() });
         return data;
@@ -1180,16 +1306,36 @@ async function navigate(page, fromHistory){
   const titles={dashboard:'Dashboard',transactions:'Transactions',income:'Record Income',remittances:'Remittances',
     expenses:'Expenses',bank:'Bank',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel'};
   document.getElementById('topBarTitle').textContent=titles[page]||page;
-  const pc=document.getElementById('pageContent');
-  pc.innerHTML='<div style="padding:40px;text-align:center;color:var(--text3)">Loading...</div>';
+  // Paint the page skeleton immediately from synchronous state — no network — so a
+  // slow connection sees the page's structure (and the loading progress bar) within
+  // ~50ms instead of a bare "Loading…" string. Previously this was blocked behind the
+  // chrome fetches below, so on a weak link the skeleton never showed until they
+  // resolved.
+  paintSkeleton(page, titles[page]||page);
   // Close sidebar on mobile
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('sidebarOverlay').classList.remove('visible');
   // Close notifications
   document.getElementById('notifPanel').style.display='none';
-  await Promise.all([buildSidebar(), updateNotifBadge(), applySmartDefaultMonth()]);
+  // Sidebar + notification badge are page chrome, not content — loading them must
+  // never block the skeleton or the content fetch, so they run in the background.
+  buildSidebar(); updateNotifBadge();
+  // The smart default month decides which period the content is fetched for, so it
+  // must settle before we render the real content (the skeleton is already visible).
+  await applySmartDefaultMonth();
   buildMonthSelector();
   setTimeout(()=>{ renderPage(page).catch(e=>console.error(e)); },50);
+}
+
+// Paint the most specific skeleton available for a page, synchronously, so the
+// user sees structure immediately. Pages with a bespoke loader fall back to the
+// generic header + KPI skeleton.
+function paintSkeleton(page, title){
+  if(page === 'dashboard') return renderDashboardSkeleton();
+  if(page === 'income')    return renderPageSkeleton({ pageTitle: 'Income Recording', pageSub: monthLabel(), kpiCount: 3, hint: 'Loading income…' });
+  if(page === 'expenses')  return renderPageSkeleton({ pageTitle: 'Expenses', pageSub: monthLabel(), kpiCount: 3, hint: 'Loading expenses…' });
+  if(page === 'bank')      return renderPageSkeleton({ pageTitle: 'Bank Account', pageSub: monthLabel(), kpiCount: 4, hint: 'Loading bank activity…' });
+  return renderPageSkeleton({ pageTitle: title || 'Loading', pageSub: monthLabel(), kpiCount: 3, hasTabs: true, hint: 'Loading…' });
 }
 
 function toggleSidebar(){
@@ -2145,8 +2291,9 @@ function renderDashboardSkeleton(){
     ${skelCard(true)}
     ${skelCard(true)}
     ${skelCard(true)}
-    <div style="text-align:center;padding:14px 16px;color:var(--text3);font-size:12px">Loading dashboard… this can take a few seconds on slow networks.</div>
+    ${loadingFooter('Loading dashboard…')}
   `;
+  NetLoad.sync();
 }
 
 // Generic skeleton for pages that follow the standard "header + KPI grid +
@@ -2166,8 +2313,9 @@ function renderPageSkeleton({ pageTitle, pageSub, kpiCount = 3, hasTabs = true, 
     </div>
     <div class="kpi-grid" style="margin-bottom:16px">${Array(kpiCount).fill(skelKpi).join('')}</div>
     ${hasTabs ? '<div class="card" style="margin-bottom:12px"><div style="height:32px;background:rgba(0,0,0,0.04);border-radius:8px"></div></div>' : ''}
-    <div style="text-align:center;padding:14px 16px;color:var(--text3);font-size:12px">${hint} this can take a few seconds on slow networks.</div>
+    ${loadingFooter(hint)}
   `;
+  NetLoad.sync();
 }
 
 // Shared graceful-error UI for pages whose fetches are wrapped in
