@@ -15,6 +15,11 @@ name: Cron — Follow-ups & Pre-briefs
 # Then add the SAME CRON_SECRET value to Cloudflare Pages:
 #   Pages dashboard → Settings → Environment Variables → CRON_SECRET
 
+# Each step uses `continue-on-error: true` so that one failing endpoint (e.g. a
+# transient error in run-monthly-sms) never prevents the later steps — most
+# importantly the payment-reminder send — from running. Failures still surface
+# as ::error:: annotations on the run.
+
 on:
   schedule:
     - cron: "*/30 * * * *"
@@ -28,6 +33,7 @@ jobs:
 
     steps:
       - name: Run follow-up nudge generation (B5)
+        continue-on-error: true
         run: |
           echo "Hitting /api/internal/run-followups …"
           RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
@@ -45,6 +51,7 @@ jobs:
           fi
 
       - name: Run pre-meeting brief generation (B6)
+        continue-on-error: true
         run: |
           echo "Hitting /api/internal/run-prebriefs …"
           RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
@@ -62,6 +69,7 @@ jobs:
           fi
 
       - name: Run Happy New Month SMS (1st of each month)
+        continue-on-error: true
         run: |
           echo "Hitting /api/internal/run-monthly-sms …"
           RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
@@ -79,6 +87,7 @@ jobs:
           fi
 
       - name: Run partner payment reminder SMS
+        continue-on-error: true
         run: |
           echo "Hitting /api/internal/run-reminder-sms …"
           RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
@@ -96,6 +105,7 @@ jobs:
           fi
 
       - name: Run partner anniversary SMS (Feature 4)
+        continue-on-error: true
         run: |
           echo "Hitting /api/internal/run-anniversary-sms …"
           RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
@@ -113,6 +123,7 @@ jobs:
           fi
 
       - name: Run pre-meeting member SMS (Feature 7)
+        continue-on-error: true
         run: |
           echo "Hitting /api/internal/run-premeeting-sms …"
           RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
@@ -130,6 +141,7 @@ jobs:
           fi
 
       - name: Run action item deadline SMS (Feature 9)
+        continue-on-error: true
         run: |
           echo "Hitting /api/internal/run-actionitem-sms …"
           RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
@@ -147,6 +159,7 @@ jobs:
           fi
 
       - name: Run scheduled SMS blast (Feature 10)
+        continue-on-error: true
         run: |
           echo "Hitting /api/internal/run-scheduled-sms …"
           RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \

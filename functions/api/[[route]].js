@@ -197,15 +197,101 @@ async function isWithinFreqCap(DB, partnerId, freqCap, cooloffDays) {
   const cooloffCutoff = new Date(now.getTime() - cooloffDays * 24 * 60 * 60 * 1000).toISOString();
   const weekCutoff    = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
   // Check cooloff: any reminder in last N days?
+  // Only successfully-sent messages count toward the cooloff/cap — skipped and
+  // failed attempts are logged too, but must never block a future genuine send.
   const recent = await DB.prepare(
-    `SELECT COUNT(*) AS cnt FROM kpsc_reminders WHERE partner_id=? AND sent_at >= ? AND channel='sms'`
+    `SELECT COUNT(*) AS cnt FROM kpsc_reminders WHERE partner_id=? AND sent_at >= ? AND channel='sms' AND status='sent'`
   ).bind(partnerId, cooloffCutoff).first();
   if (Number(recent?.cnt || 0) > 0) return false; // within cooloff — do not send
   // Check weekly frequency cap
   const weekly = await DB.prepare(
-    `SELECT COUNT(*) AS cnt FROM kpsc_reminders WHERE partner_id=? AND sent_at >= ? AND channel='sms'`
+    `SELECT COUNT(*) AS cnt FROM kpsc_reminders WHERE partner_id=? AND sent_at >= ? AND channel='sms' AND status='sent'`
   ).bind(partnerId, weekCutoff).first();
   return Number(weekly?.cnt || 0) < freqCap;
+}
+
+// Full month names, 1-indexed via [m-1]. Shared by reminder + analytics code.
+const MONTH_NAMES_FULL = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+/**
+ * Decide whether `dayOfMonth` of (year, month) is a payment-reminder send day,
+ * and report the single calendar day in the month that IS the send day.
+ * Pure function — exported for unit tests.
+ *
+ * @param {number} year
+ * @param {number} month       1-12
+ * @param {number} dayOfMonth  1-31 (the day being tested)
+ * @param {string} mode        'day_of_month' | 'sat_before_last_sun'
+ * @param {string} freq        'monthly' | 'biweekly' | 'weekly' (only used in day_of_month mode)
+ * @param {number} reminderDay configured day-of-month trigger (day_of_month mode)
+ * @returns {{ isSendDay: boolean, sendDays: number[], label: string }}
+ */
+function reminderSendDayInfo(year, month, dayOfMonth, mode, freq, reminderDay) {
+  const lastDayOfMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (mode === 'sat_before_last_sun') {
+    let lastSunDay = 0;
+    for (let d = lastDayOfMonth; d >= 1; d--) {
+      if (new Date(Date.UTC(year, month - 1, d)).getUTCDay() === 0) { lastSunDay = d; break; }
+    }
+    const sat = lastSunDay > 1 ? lastSunDay - 1 : lastSunDay;
+    return { isSendDay: dayOfMonth === sat, sendDays: [sat], label: 'Saturday before the last Sunday of the month' };
+  }
+  if (freq === 'biweekly') {
+    const a = Math.min(reminderDay, lastDayOfMonth);
+    const b = Math.min(reminderDay + 14, lastDayOfMonth);
+    return { isSendDay: dayOfMonth === a || dayOfMonth === b, sendDays: [a, b], label: `Twice a month (day ${a} & ${b})` };
+  }
+  if (freq === 'weekly') {
+    const first = Math.min(reminderDay, lastDayOfMonth);
+    const days = [];
+    for (let d = first; d <= lastDayOfMonth; d += 7) days.push(d);
+    const diff = dayOfMonth - first;
+    return { isSendDay: diff >= 0 && diff % 7 === 0, sendDays: days, label: `Weekly from day ${first}` };
+  }
+  // monthly (default)
+  const d = Math.min(reminderDay, lastDayOfMonth);
+  return { isSendDay: dayOfMonth === d, sendDays: [d], label: `Day ${d} of each month` };
+}
+
+/**
+ * Build the list of unpaid month names for a partner, looking back up to 12
+ * months and EXCLUDING any month before the partner joined the portal.
+ *
+ * The pre-registration filter is month-granular: a partner who joined on
+ * 2026-05-15 still owes May 2026 (we compare year*12+month, not exact dates),
+ * but owes nothing for Jan–Apr 2026.
+ *
+ * Pure function — exported for unit tests.
+ *
+ * @param {Set<string>} paidSet   set of `${year}-${month}` strings already paid
+ * @param {object} opts
+ * @param {number} opts.year        current year
+ * @param {number} opts.month       current month (1-12)
+ * @param {string|null} opts.startDate  partner start_date ('YYYY-MM-DD') or null
+ * @returns {string[]} month names (e.g. ['May'])
+ */
+function computeUnpaidMonths(paidSet, { year, month, startDate }) {
+  let lookbackYear = year, lookbackMonth = month - 11;
+  if (lookbackMonth < 1) { lookbackMonth += 12; lookbackYear--; }
+
+  // Partner join cutoff as a year*12+month ordinal (month-granular).
+  let startOrdinal = -Infinity;
+  if (startDate) {
+    const m = /^(\d{4})-(\d{2})/.exec(String(startDate));
+    if (m) startOrdinal = Number(m[1]) * 12 + Number(m[2]);
+  }
+
+  const out = [];
+  for (let y = lookbackYear, m2 = lookbackMonth; (y < year) || (y === year && m2 <= month); ) {
+    const key = `${y}-${m2}`;
+    const ordinal = y * 12 + m2;
+    if (!paidSet.has(key) && ordinal >= startOrdinal) {
+      out.push(MONTH_NAMES_FULL[m2 - 1]);
+    }
+    m2++;
+    if (m2 > 12) { m2 = 1; y++; }
+  }
+  return out;
 }
 
 // Emoji number labels for WhatsApp agenda lists (items beyond 10 fall back to plain numerals).
@@ -956,6 +1042,29 @@ export async function onRequest(context) {
       return await getSmsAnalytics(DB, url);
     }
 
+    // ── SMS Logs / Outbox: per-message log + scheduler health ───────
+    if (route === 'kpsc-sms-logs' && method === 'GET') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await getSmsLogs(DB, url);
+    }
+    // Manual "Run payment reminders now" trigger (bypasses send-day/window).
+    if (route === 'kpsc-run-reminders-now' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      const summary = await executeReminderRun(DB, {
+        trigger: 'manual', force: true, ignoreWindow: true,
+        sentBy: auth?.name || 'manual',
+      });
+      return ok(summary);
+    }
+    // Retry a single failed SMS log row (or all failed for a month).
+    if (route === 'kpsc-sms-retry' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await retrySmsLog(DB, body, auth);
+    }
+
     // ── SMS Templates (Feature 11) ──────────────────────────────────
     if (route === 'kpsc-sms-templates') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -1459,6 +1568,23 @@ async function handleInit(DB) {
       created_at  TEXT DEFAULT (datetime('now')),
       updated_at  TEXT DEFAULT (datetime('now'))
     )`,
+    // Cron run log: one row per automated SMS job invocation, so the portal can
+    // show whether the scheduler actually fired, whether today was a send day,
+    // and what the outcome was (sent/failed/skipped + reason).
+    `CREATE TABLE IF NOT EXISTS kpsc_cron_runs (
+      id            TEXT PRIMARY KEY,
+      job           TEXT NOT NULL DEFAULT '',
+      ran_at        TEXT NOT NULL DEFAULT '',
+      is_send_day   INTEGER DEFAULT 0,
+      window_ok     INTEGER DEFAULT 1,
+      sent          INTEGER DEFAULT 0,
+      failed        INTEGER DEFAULT 0,
+      skipped       INTEGER DEFAULT 0,
+      total         INTEGER DEFAULT 0,
+      trigger       TEXT DEFAULT 'cron',
+      reason        TEXT DEFAULT '',
+      created_at    TEXT DEFAULT (datetime('now'))
+    )`,
     // Scheduled SMS blasts: a composer queue that the cron fires at the right time
     `CREATE TABLE IF NOT EXISTS kpsc_scheduled_sms (
       id            TEXT PRIMARY KEY,
@@ -1594,6 +1720,10 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_reminders ADD COLUMN delivery_status TEXT DEFAULT ''`,
     `ALTER TABLE kpsc_reminders ADD COLUMN message_id TEXT DEFAULT ''`,
     `ALTER TABLE kpsc_reminders ADD COLUMN reminder_type TEXT DEFAULT 'reminder'`,
+    // SMS outbox visibility: record failed/skipped attempts with the reason and
+    // the destination number, so the SMS Logs page can show + retry them.
+    `ALTER TABLE kpsc_reminders ADD COLUMN error_text TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_reminders ADD COLUMN phone TEXT DEFAULT ''`,
     // Partner DND / opt-out flags
     `ALTER TABLE kpsc_partners ADD COLUMN dnd_flagged INTEGER DEFAULT 0`,
     `ALTER TABLE kpsc_partners ADD COLUMN opted_out INTEGER DEFAULT 0`,
@@ -6760,56 +6890,89 @@ async function runMonthlySms(DB, env, request) {
 async function runReminderSms(DB, env, request) {
   const authErr = requireCronSecret(env, request);
   if (authErr) return authErr;
+  const result = await executeReminderRun(DB, { trigger: 'cron' });
+  return ok(result);
+}
+
+/**
+ * Record a lightweight "the scheduler is alive" heartbeat in settings on every
+ * invocation, plus a detailed kpsc_cron_runs row whenever something meaningful
+ * happened (a real send attempt, a manual run, or an outright skip with a
+ * reason). Non-send-day cron ticks only update the heartbeat so the run log
+ * stays readable.
+ */
+async function recordCronHeartbeat(DB, job, reason) {
+  try {
+    await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
+      .bind(`kpsc_cron_heartbeat_${job}`, JSON.stringify({ at: new Date().toISOString(), reason: reason || '' })).run();
+  } catch { /* heartbeat is best-effort */ }
+}
+
+async function logCronRun(DB, job, f) {
+  try {
+    await DB.prepare(
+      `INSERT INTO kpsc_cron_runs (id,job,ran_at,is_send_day,window_ok,sent,failed,skipped,total,trigger,reason) VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(
+      newId('cron'), job, new Date().toISOString(),
+      f.isSendDay ? 1 : 0, f.windowOk ? 1 : 0,
+      f.sent || 0, f.failed || 0, f.skipped || 0, f.total || 0,
+      f.trigger || 'cron', f.reason || ''
+    ).run();
+  } catch { /* run log is best-effort */ }
+}
+
+/**
+ * Core payment-reminder engine, shared by the cron endpoint and the manual
+ * "Run reminders now" button.
+ *
+ * opts:
+ *   trigger       'cron' | 'manual'
+ *   sentBy        display name recorded against sent rows (default 'cron')
+ *   force         bypass the "is today a send day?" check (manual sends)
+ *   ignoreWindow  bypass the 08:00–18:00 WAT send-window check (manual sends)
+ *   ignoreFreqCap bypass per-partner cooloff/frequency cap (rarely wanted)
+ *
+ * Returns a plain summary object (the HTTP wrappers add `ok`).
+ */
+async function executeReminderRun(DB, opts = {}) {
+  const trigger      = opts.trigger || 'cron';
+  const sentBy       = opts.sentBy || (trigger === 'manual' ? 'manual' : 'cron');
+  const force        = !!opts.force;
+  const ignoreWindow = !!opts.ignoreWindow;
+  const ignoreFreqCap = !!opts.ignoreFreqCap;
 
   const t = await getTermiiSettings(DB);
-  if (!t.apiKey) return ok({ ok: true, skipped: true, reason: 'No Termii API key configured' });
-
-  // Feature 3: send window check
-  if (!isWithinSendWindow(t)) {
-    return ok({ ok: true, skipped: true, reason: `Outside send window (${t.sendWindowStart}–${t.sendWindowEnd} WAT)` });
-  }
 
   const now = new Date();
   const dayOfMonth = now.getUTCDate();
   const month = now.getUTCMonth() + 1;
   const year = now.getUTCFullYear();
-  const reminderDay = t.reminderDay;
-  const freq = t.reminderFreq;
-  const reminderMode = t.reminderMode || 'day_of_month';
+  const dayInfo = reminderSendDayInfo(year, month, dayOfMonth, t.reminderMode || 'day_of_month', t.reminderFreq, t.reminderDay);
 
-  // Decide whether today is a send day based on frequency
-  let isSendDay = false;
-  // Last valid day of the current month (accounts for variable month lengths)
-  const lastDayOfMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  await recordCronHeartbeat(DB, 'reminder', dayInfo.isSendDay ? 'send day' : 'not a send day');
 
-  if (reminderMode === 'sat_before_last_sun') {
-    // Find the last Sunday of the month, then back up one day to Saturday
-    let lastSunDay = 0;
-    for (let d = lastDayOfMonth; d >= 1; d--) {
-      const dow = new Date(Date.UTC(year, month - 1, d)).getUTCDay(); // 0=Sun
-      if (dow === 0) { lastSunDay = d; break; }
-    }
-    const satBeforeLastSun = lastSunDay > 1 ? lastSunDay - 1 : lastSunDay;
-    isSendDay = (dayOfMonth === satBeforeLastSun);
-  } else if (freq === 'monthly') {
-    isSendDay = (dayOfMonth === Math.min(reminderDay, lastDayOfMonth));
-  } else if (freq === 'biweekly') {
-    const firstSendDay  = Math.min(reminderDay, lastDayOfMonth);
-    const secondSendDay = Math.min(reminderDay + 14, lastDayOfMonth);
-    isSendDay = (dayOfMonth === firstSendDay) || (dayOfMonth === secondSendDay);
-  } else if (freq === 'weekly') {
-    // Every 7 days starting from reminderDay (clamped to month end)
-    const firstSendDay = Math.min(reminderDay, lastDayOfMonth);
-    const diff = dayOfMonth - firstSendDay;
-    isSendDay = diff >= 0 && diff % 7 === 0;
+  if (!t.apiKey) {
+    const reason = 'No Termii API key configured';
+    await logCronRun(DB, 'reminder-sms', { isSendDay: dayInfo.isSendDay, windowOk: true, trigger, reason });
+    return { ok: true, skipped: true, reason, sent: 0, failed: 0, skippedCount: 0, total: 0 };
   }
 
-  if (!isSendDay) return ok({ ok: true, skipped: true, reason: `Not a reminder send day (day=${dayOfMonth}, mode=${reminderMode}, freq=${freq}, reminderDay=${reminderDay})` });
+  // Send-window check (Feature 3) — bypassed for explicit manual sends.
+  const windowOk = isWithinSendWindow(t);
+  if (!windowOk && !ignoreWindow) {
+    const reason = `Outside send window (${t.sendWindowStart}–${t.sendWindowEnd} WAT)`;
+    // Only worth a run-log entry on a day we would otherwise have sent.
+    if (dayInfo.isSendDay) await logCronRun(DB, 'reminder-sms', { isSendDay: true, windowOk: false, trigger, reason });
+    return { ok: true, skipped: true, reason, sent: 0, failed: 0, skippedCount: 0, total: 0 };
+  }
+
+  if (!dayInfo.isSendDay && !force) {
+    const reason = `Not a reminder send day (today=${dayOfMonth}; schedule: ${dayInfo.label})`;
+    return { ok: true, skipped: true, reason, sent: 0, failed: 0, skippedCount: 0, total: 0, isSendDay: false };
+  }
 
   const template = t.reminderText;
-
-  const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const monthName = MONTH_NAMES[month - 1];
+  const monthName = MONTH_NAMES_FULL[month - 1];
 
   // Look back up to 12 months to find all unpaid months per partner
   let lookbackYear = year; let lookbackMonth = month - 11;
@@ -6832,12 +6995,18 @@ async function runReminderSms(DB, env, request) {
 
   let sent = 0;
   let failed = 0;
+  let skippedCount = 0;
   for (const p of (unpaid || [])) {
-    // Feature 17: frequency cap
-    const eligible = await isWithinFreqCap(DB, p.id, t.freqCap, t.cooloffDays);
-    if (!eligible) { failed++; continue; }
+    // Feature 17: frequency cap / cooloff. A cooloff skip is the normal dedup
+    // path (the cron fires every 30 min on a send day) — count it but do NOT
+    // persist a per-recipient row, or the log would fill with noise.
+    if (!ignoreFreqCap) {
+      const eligible = await isWithinFreqCap(DB, p.id, t.freqCap, t.cooloffDays);
+      if (!eligible) { skippedCount++; continue; }
+    }
 
-    // Build list of all unpaid months (last 12) for this partner
+    // Build list of all unpaid months (last 12) for this partner, excluding any
+    // month before they joined the portal (month-granular — see computeUnpaidMonths).
     const { results: paidRows } = await DB.prepare(`
       SELECT year, month FROM kpsc_partner_payments
       WHERE partner_id=? AND paid=1 AND payment_type='monthly_pledge'
@@ -6845,28 +7014,16 @@ async function runReminderSms(DB, env, request) {
         AND COALESCE(deleted_at,'')=''
     `).bind(p.id, lookbackYear, lookbackYear, lookbackMonth).all();
     const paidSet = new Set((paidRows || []).map(r => `${r.year}-${r.month}`));
-    const partnerStart = p.start_date ? new Date(p.start_date + 'T00:00:00Z') : null;
-    const unpaidMonthsList = [];
-    for (let y = lookbackYear, m2 = lookbackMonth; (y < year) || (y === year && m2 <= month); ) {
-      const key = `${y}-${m2}`;
-      if (!paidSet.has(key)) {
-        // Only include months since the partner joined
-        const periodDate = new Date(Date.UTC(y, m2 - 1, 1));
-        if (!partnerStart || periodDate >= partnerStart) {
-          unpaidMonthsList.push(MONTH_NAMES[m2 - 1]);
-        }
-      }
-      m2++;
-      if (m2 > 12) { m2 = 1; y++; }
-    }
+    const unpaidMonthsList = computeUnpaidMonths(paidSet, { year, month, startDate: p.start_date || null });
 
     const unpaidMonthsStr = unpaidMonthsList.length > 1
       ? ` (outstanding months: ${unpaidMonthsList.join(', ')})`
       : '';
 
-    // Rotating reminder template: pick A/B/C based on how many reminders sent to this partner
+    // Rotating reminder template: pick A/B/C based on how many reminders this
+    // partner has actually received (failed/skipped rows must not rotate it).
     const remCount = await DB.prepare(
-      `SELECT COUNT(*) AS cnt FROM kpsc_reminders WHERE partner_id=? AND reminder_type='reminder'`
+      `SELECT COUNT(*) AS cnt FROM kpsc_reminders WHERE partner_id=? AND reminder_type='reminder' AND status='sent'`
     ).bind(p.id).first().catch(() => ({ cnt: 0 }));
     const ridx = (Number(remCount?.cnt || 0)) % 3;
     const rTemplates = [t.reminderTextA, t.reminderTextB, t.reminderTextC];
@@ -6902,19 +7059,27 @@ async function runReminderSms(DB, env, request) {
     const rsid = t.partnerSenderId || t.senderId;
     const result = await sendTermiiSms(t.apiKey, rsid, p.phone, msg);
     if (result.ok) {
-      // Log to kpsc_reminders with message_id for delivery tracking
-      const remId = newId('krm');
       await DB.prepare(
-        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
-      ).bind(remId, p.id, 'sms', msg, 'sent', 'pending', result.messageId || '', 'reminder', year, month, 'cron', now.toISOString()).run();
-      // Update last_sms_sent_at on partner
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), p.id, 'sms', msg, 'sent', 'pending', result.messageId || '', 'reminder', year, month, sentBy, now.toISOString(), p.phone || '', '').run();
       await DB.prepare(`UPDATE kpsc_partners SET last_sms_sent_at=? WHERE id=?`).bind(now.toISOString(), p.id).run();
       sent++;
     } else {
+      // Persist the failure so it shows on the SMS Logs page and can be retried.
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), p.id, 'sms', msg, 'failed', '', '', 'reminder', year, month, sentBy, now.toISOString(), p.phone || '', String(result.error || 'Termii send failed')).run();
       failed++;
     }
   }
-  return ok({ ok: true, sent, failed, total: (unpaid || []).length });
+
+  await logCronRun(DB, 'reminder-sms', {
+    isSendDay: dayInfo.isSendDay, windowOk: true, trigger,
+    sent, failed, skipped: skippedCount, total: (unpaid || []).length,
+    reason: force && !dayInfo.isSendDay ? 'Manual run (forced, not a scheduled send day)' : '',
+  });
+
+  return { ok: true, sent, failed, skippedCount, total: (unpaid || []).length, isSendDay: dayInfo.isSendDay, trigger };
 }
 
 // ── BULK MEMBER SMS (meeting notification) ────────────────────────────────
@@ -7852,6 +8017,172 @@ async function getSmsAnalytics(DB, url) {
   });
 }
 
+// ── SMS LOGS / OUTBOX ─────────────────────────────────────────────────────
+/**
+ * GET /api/kpsc-sms-logs?year=&month=&status=&type=
+ * Returns every outgoing SMS attempt for the month (sent / failed / delivered /
+ * dnd / pending), the payment-reminder scheduler health (so the user can see
+ * whether the cron actually fired and whether today is a send day), and the
+ * recent automated-run history with per-run outcomes.
+ */
+async function getSmsLogs(DB, url) {
+  const now = new Date();
+  const year  = parseInt(url.searchParams.get('year')  || String(now.getUTCFullYear()), 10);
+  const month = parseInt(url.searchParams.get('month') || String(now.getUTCMonth() + 1), 10);
+  const statusFilter = String(url.searchParams.get('status') || '').trim().toLowerCase();
+  const typeFilter   = String(url.searchParams.get('type')   || '').trim().toLowerCase();
+
+  const clauses = ['r.year=?', 'r.month=?'];
+  const binds = [year, month];
+  if (typeFilter) { clauses.push('r.reminder_type=?'); binds.push(typeFilter); }
+  if (statusFilter === 'failed')    clauses.push("r.status='failed'");
+  else if (statusFilter === 'skipped') clauses.push("r.status='skipped'");
+  else if (statusFilter === 'sent')    clauses.push("r.status='sent'");
+  else if (statusFilter === 'delivered') clauses.push("r.delivery_status='delivered'");
+  else if (statusFilter === 'dnd')     clauses.push("r.delivery_status='dnd'");
+  else if (statusFilter === 'pending') clauses.push("r.status='sent' AND (r.delivery_status='' OR r.delivery_status='pending')");
+
+  const { results } = await DB.prepare(`
+    SELECT r.*, p.full_name AS partner_name, p.phone AS partner_phone
+    FROM kpsc_reminders r
+    LEFT JOIN kpsc_partners p ON p.id = r.partner_id
+    WHERE ${clauses.join(' AND ')}
+    ORDER BY r.created_at DESC, r.sent_at DESC
+    LIMIT 500
+  `).bind(...binds).all();
+
+  const logs = (results || []).map(row => ({
+    id: row.id,
+    partnerId: row.partner_id,
+    partnerName: row.partner_name || '',
+    phone: row.phone || row.partner_phone || '',
+    channel: row.channel || 'sms',
+    message: row.message || '',
+    status: row.status || 'sent',
+    deliveryStatus: row.delivery_status || '',
+    errorText: row.error_text || '',
+    reminderType: row.reminder_type || 'reminder',
+    sentBy: row.sent_by || '',
+    sentAt: row.sent_at || '',
+    createdAt: row.created_at || '',
+    retryable: (row.status === 'failed' || row.status === 'skipped'),
+  }));
+
+  // Month-wide status counts (independent of the active filter).
+  const counts = await DB.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN status='sent'   THEN 1 ELSE 0 END) AS sent,
+      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN status='skipped' THEN 1 ELSE 0 END) AS skipped,
+      SUM(CASE WHEN delivery_status='delivered' THEN 1 ELSE 0 END) AS delivered,
+      SUM(CASE WHEN delivery_status='dnd' THEN 1 ELSE 0 END) AS dnd,
+      SUM(CASE WHEN status='sent' AND (delivery_status='' OR delivery_status='pending') THEN 1 ELSE 0 END) AS pending
+    FROM kpsc_reminders WHERE year=? AND month=?
+  `).bind(year, month).first();
+
+  // Scheduler health for the payment-reminder cron.
+  const t = await getTermiiSettings(DB);
+  const dayInfo = reminderSendDayInfo(now.getUTCFullYear(), now.getUTCMonth() + 1, now.getUTCDate(), t.reminderMode || 'day_of_month', t.reminderFreq, t.reminderDay);
+  // Next send day (this month if still ahead, else first send day next month).
+  const todayDom = now.getUTCDate();
+  let nextSendDay = (dayInfo.sendDays || []).filter(d => d >= todayDom).sort((a, b) => a - b)[0];
+  let nextSendLabel;
+  if (nextSendDay) {
+    nextSendLabel = `${MONTH_NAMES_FULL[now.getUTCMonth()]} ${nextSendDay}, ${now.getUTCFullYear()}`;
+  } else {
+    let ny = now.getUTCFullYear(), nm = now.getUTCMonth() + 2;
+    if (nm > 12) { nm = 1; ny++; }
+    const nextInfo = reminderSendDayInfo(ny, nm, 1, t.reminderMode || 'day_of_month', t.reminderFreq, t.reminderDay);
+    const nd = (nextInfo.sendDays || [])[0];
+    nextSendLabel = nd ? `${MONTH_NAMES_FULL[nm - 1]} ${nd}, ${ny}` : '—';
+  }
+
+  let heartbeat = null;
+  try {
+    const hb = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_cron_heartbeat_reminder'`).first();
+    if (hb?.value) heartbeat = JSON.parse(hb.value);
+  } catch { /* ignore */ }
+
+  const { results: runRows } = await DB.prepare(`
+    SELECT * FROM kpsc_cron_runs WHERE job='reminder-sms' ORDER BY ran_at DESC LIMIT 15
+  `).all();
+  const runs = (runRows || []).map(r => ({
+    id: r.id, ranAt: r.ran_at, isSendDay: !!r.is_send_day, windowOk: !!r.window_ok,
+    sent: Number(r.sent || 0), failed: Number(r.failed || 0), skipped: Number(r.skipped || 0),
+    total: Number(r.total || 0), trigger: r.trigger || 'cron', reason: r.reason || '',
+  }));
+
+  return ok({
+    year, month,
+    logs,
+    counts: {
+      total:     Number(counts?.total     || 0),
+      sent:      Number(counts?.sent      || 0),
+      failed:    Number(counts?.failed    || 0),
+      skipped:   Number(counts?.skipped   || 0),
+      delivered: Number(counts?.delivered || 0),
+      dnd:       Number(counts?.dnd       || 0),
+      pending:   Number(counts?.pending   || 0),
+    },
+    scheduler: {
+      apiKeyConfigured: !!t.apiKey,
+      mode: t.reminderMode || 'day_of_month',
+      freq: t.reminderFreq,
+      reminderDay: t.reminderDay,
+      scheduleLabel: dayInfo.label,
+      isSendDayToday: dayInfo.isSendDay,
+      nextSendLabel,
+      sendWindow: `${t.sendWindowStart}–${t.sendWindowEnd} WAT`,
+      withinWindowNow: isWithinSendWindow(t),
+      heartbeat,
+    },
+    runs,
+  });
+}
+
+/**
+ * POST /api/kpsc-sms-retry  { id }
+ * Re-sends a single failed/skipped reminder row through Termii. On success the
+ * row is flipped to 'sent' (so it leaves the retry queue); on failure the error
+ * text is refreshed.
+ */
+async function retrySmsLog(DB, body, auth) {
+  const id = String(body?.id || '').trim();
+  if (!id) return err('id is required', 400);
+  const row = await DB.prepare(`SELECT * FROM kpsc_reminders WHERE id=?`).bind(id).first();
+  if (!row) return err('SMS log entry not found', 404);
+  if (row.status === 'sent') return ok({ ok: true, alreadySent: true });
+
+  const t = await getTermiiSettings(DB);
+  if (!t.apiKey) return err('Termii API key not configured', 400);
+
+  // Resolve the destination number (logged number first, else current partner phone).
+  let phone = String(row.phone || '').trim();
+  if (!phone && row.partner_id) {
+    const p = await DB.prepare(`SELECT phone FROM kpsc_partners WHERE id=?`).bind(row.partner_id).first();
+    phone = String(p?.phone || '').trim();
+  }
+  if (!phone) return err('No destination phone number on this entry', 400);
+
+  const rsid = t.partnerSenderId || t.senderId;
+  const result = await sendTermiiSms(t.apiKey, rsid, phone, row.message || '');
+  const now = new Date().toISOString();
+  if (result.ok) {
+    await DB.prepare(
+      `UPDATE kpsc_reminders SET status='sent', delivery_status='pending', message_id=?, error_text='', sent_by=?, sent_at=?, phone=? WHERE id=?`
+    ).bind(result.messageId || '', auth?.name || 'manual-retry', now, phone, id).run();
+    if (row.partner_id) {
+      await DB.prepare(`UPDATE kpsc_partners SET last_sms_sent_at=? WHERE id=?`).bind(now, row.partner_id).run();
+    }
+    return ok({ ok: true, retried: true, status: 'sent' });
+  }
+  await DB.prepare(
+    `UPDATE kpsc_reminders SET status='failed', error_text=?, sent_at=?, phone=? WHERE id=?`
+  ).bind(String(result.error || 'Termii send failed'), now, phone, id).run();
+  return ok({ ok: false, retried: true, status: 'failed', error: result.error || 'Termii send failed' });
+}
+
 // ── FEATURE 11: SMS TEMPLATES LIBRARY ────────────────────────────────────
 async function getSmsTemplates(DB) {
   const { results } = await DB.prepare(
@@ -8569,4 +8900,4 @@ ${text}`;
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap };
+export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths };
