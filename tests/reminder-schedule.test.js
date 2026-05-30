@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reminderSendDayInfo, computeUnpaidMonths } from '../functions/api/[[route]].js';
+import { reminderSendDayInfo, computeUnpaidMonths, smsPagesInfo } from '../functions/api/[[route]].js';
 
 // ── reminderSendDayInfo: "Saturday before last Sunday" ──────────────────────
 test('sat_before_last_sun: May 2026 send day is the 30th (Sat before Sun 31)', () => {
@@ -61,4 +61,28 @@ test('computeUnpaidMonths: no start date falls back to the full 12-month lookbac
   assert.equal(months.length, 12);
   assert.equal(months[months.length - 1], 'May');
   assert.equal(months[0], 'June');
+});
+
+// ── smsPagesInfo: segment / page counting ───────────────────────────────────
+test('smsPagesInfo: short GSM-7 message is 1 page', () => {
+  const r = smsPagesInfo('Dear John, your May pledge is outstanding.');
+  assert.equal(r.encoding, 'GSM-7');
+  assert.equal(r.pages, 1);
+});
+
+test('smsPagesInfo: 161 GSM-7 chars spills to 2 pages', () => {
+  const r = smsPagesInfo('a'.repeat(161));
+  assert.equal(r.encoding, 'GSM-7');
+  assert.equal(r.pages, 2);
+});
+
+test('smsPagesInfo: an emoji forces Unicode and 70-char pages', () => {
+  // A single 🙏 makes the whole message Unicode (70 chars/page).
+  const r = smsPagesInfo('Thank you 🙏 ' + 'a'.repeat(65));
+  assert.equal(r.encoding, 'Unicode');
+  assert.equal(r.pages, 2); // 76 chars > 70 → 2 pages
+});
+
+test('smsPagesInfo: empty message costs 0 pages', () => {
+  assert.equal(smsPagesInfo('').pages, 0);
 });

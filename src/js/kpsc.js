@@ -7702,6 +7702,29 @@ async function renderSmsLogs(main) {
   const apiWarn = sch.apiKeyConfigured ? '' :
     `<div class="k-error-box" style="margin-top:10px"><strong>No Termii API key configured.</strong> Reminders cannot be sent until a key is added in Settings → SMS.</div>`;
 
+  // Wallet / credits
+  const w = res.wallet || {};
+  const cost = res.cost || {};
+  const rate = w.nairaPerPage || cost.nairaPerPage || 5;
+  const fmtN = (n) => '₦' + Number(n || 0).toLocaleString('en-NG');
+  const balanceText = (w.balance != null)
+    ? `${fmtN(w.balance)}${w.pagesRemaining != null ? ` · ≈ ${w.pagesRemaining.toLocaleString('en-NG')} SMS page(s) left` : ''}`
+    : (w.error ? esc(w.error) : 'Unavailable');
+
+  // Delivery-report webhook diagnostics
+  const wh = res.webhook || {};
+  const whSeen = wh.lastSeen ? `Last delivery report received ${fmtDateTime(wh.lastSeen)}` : 'No delivery reports received yet';
+  const whWarn = !wh.lastSeen
+    ? `<div class="k-error-box" style="margin-top:10px">
+         <strong>Delivery status isn't updating because Termii's Delivery Report (DLR) webhook isn't set up yet.</strong>
+         In your Termii dashboard, set the webhook / notification URL below (POST, application/json), then new messages will move from “Sent” to “Delivered / Failed / DND” automatically.
+         <div style="margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+           <code style="background:#fff;padding:4px 8px;border-radius:6px;border:1px solid var(--border);word-break:break-all">${esc(wh.url || '')}</code>
+           <button class="kbtn kbtn-sm" onclick="Kpsc.copyText('${esc(wh.url || '')}', this)">📋 Copy</button>
+         </div>
+       </div>`
+    : '';
+
   main.innerHTML = `
     <div class="k-page">
       <div class="k-section">
@@ -7724,8 +7747,13 @@ async function renderSmsLogs(main) {
             <span class="k-label" style="margin:0">Scheduler heartbeat</span>
             <span class="k-hint">${esc(hbText)}</span>
           </div>
+          <div class="k-sms-sched-row">
+            <span class="k-label" style="margin:0">Delivery reports</span>
+            <span>${wh.lastSeen ? '<span class="kbadge badge-green">connected</span>' : '<span class="kbadge badge-amber">not set up</span>'} <span class="k-hint" style="margin-left:6px">${esc(whSeen)}</span></span>
+          </div>
         </div>
         ${apiWarn}
+        ${whWarn}
 
         <div class="k-room-actions" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="kbtn kbtn-primary" id="ksms-runnow" onclick="Kpsc.runRemindersNow(this)">📤 Run payment reminders now</button>
@@ -7733,6 +7761,24 @@ async function renderSmsLogs(main) {
           <button class="kbtn kbtn-ghost" onclick="Kpsc.navigate('reminders')">Reminder workflow →</button>
         </div>
         <p class="k-hint" style="margin-top:8px">“Run now” sends this month's reminder to every active, unpaid partner immediately (ignoring the schedule and send-window), while still skipping opted-out / DND partners and anyone already reminded within the cool-off period.</p>
+      </div>
+
+      <div class="k-section">
+        <div class="k-sms-sched">
+          <div class="k-sms-sched-row">
+            <span class="k-label" style="margin:0">Termii wallet balance</span>
+            <span>${esc(balanceText)}</span>
+          </div>
+          <div class="k-sms-sched-row">
+            <span class="k-label" style="margin:0">Spent this month</span>
+            <span>${fmtN(cost.monthCost)} <span class="k-hint" style="margin-left:6px">${(cost.monthPages || 0).toLocaleString('en-NG')} page(s) sent</span></span>
+          </div>
+          <div class="k-sms-sched-row">
+            <span class="k-label" style="margin:0">Rate</span>
+            <span class="k-hint">${fmtN(rate)} per SMS page</span>
+          </div>
+        </div>
+        <p class="k-hint" style="margin-top:8px">An SMS page is 160 characters (GSM-7). Messages containing emoji or special characters switch to Unicode (70 chars/page), so they cost more pages. Cost below is an estimate at ${fmtN(rate)}/page.</p>
       </div>
 
       <div class="k-section">
@@ -7753,6 +7799,7 @@ async function renderSmsLogs(main) {
                     <span class="kbadge badge-type">${esc(SMS_TYPE_LABELS[log.reminderType] || log.reminderType || 'sms')}</span>
                     <span>${esc(fmtDateTime(log.createdAt || log.sentAt))}</span>
                     ${log.sentBy ? `<span>by ${esc(log.sentBy)}</span>` : ''}
+                    <span title="${log.pages || 0} SMS page(s), ${esc(log.encoding || 'GSM-7')}">📄 ${log.pages || 0} pg${log.cost ? ` · ${fmtN(log.cost)}` : ''}</span>
                   </div>
                 </div>
                 <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
@@ -7788,6 +7835,16 @@ async function renderSmsLogs(main) {
         </div>
       </div>
     </div>`;
+}
+
+async function copyText(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+    if (btn) { const o = btn.textContent; btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = o; }, 1500); }
+    else showToast('Copied to clipboard.', 'success');
+  } catch {
+    showToast('Could not copy — please copy it manually.', 'error');
+  }
 }
 
 async function setSmsLogsFilter(key) {
@@ -15524,6 +15581,7 @@ window.Kpsc = {
   retrySms,
   retryAllFailedSms,
   setSmsLogsFilter,
+  copyText,
   useReminderVariant,
   closePersonalizeModal,
   debouncedSaveReminderTemplate,
