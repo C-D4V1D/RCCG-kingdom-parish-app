@@ -294,6 +294,38 @@ function computeUnpaidMonths(paidSet, { year, month, startDate }) {
   return out;
 }
 
+// GSM-7 charset used to decide SMS segment encoding (mirrors the frontend
+// smsCharInfo so per-message cost is computed identically on both sides).
+const GSM7_CHARS = new Set(
+  '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?' +
+  '¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà'
+);
+const GSM7_EXT = new Set('{}[]~^\\|€');
+
+/**
+ * Number of SMS pages (segments) a message will cost, and its encoding.
+ * GSM-7: 160 chars for a single page, 153 per page when concatenated.
+ * Unicode (any emoji / non-GSM char): 70 single, 67 per concatenated page.
+ * Pure function — exported for unit tests.
+ */
+function smsPagesInfo(text) {
+  const s = String(text || '');
+  let charCount = 0;
+  let isGsm7 = true;
+  for (const ch of s) {
+    if (GSM7_CHARS.has(ch)) charCount++;
+    else if (GSM7_EXT.has(ch)) charCount += 2;
+    else { isGsm7 = false; break; }
+  }
+  if (!isGsm7) {
+    const len = [...s].length;
+    const pageSize = len <= 70 ? 70 : 67;
+    return { pages: len === 0 ? 0 : Math.ceil(len / pageSize), encoding: 'Unicode' };
+  }
+  const pageSize = charCount <= 160 ? 160 : 153;
+  return { pages: charCount === 0 ? 0 : Math.ceil(charCount / pageSize), encoding: 'GSM-7' };
+}
+
 // Emoji number labels for WhatsApp agenda lists (items beyond 10 fall back to plain numerals).
 const EMOJI_NUMS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
 // Absolute naira tolerance when matching statement lines to recorded entries.
@@ -7893,6 +7925,12 @@ async function handleTermiiWebhook(DB, body, request, env) {
     console.warn('TERMII_WEBHOOK_SECRET is not configured — skipping webhook signature verification');
   }
 
+  // Heartbeat: record that Termii reached our webhook (proves DLRs are wired up).
+  try {
+    await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
+      .bind('kpsc_termii_webhook_last_seen', new Date().toISOString()).run();
+  } catch { /* best-effort */ }
+
   const messageId    = String(body?.message_id || body?.messageId || '').trim();
   const rawStatus    = String(body?.status      || '').toLowerCase().trim();
   if (!messageId) return ok({ ok: true, ignored: true, reason: 'no message_id' });
@@ -8051,22 +8089,35 @@ async function getSmsLogs(DB, url) {
     LIMIT 500
   `).bind(...binds).all();
 
-  const logs = (results || []).map(row => ({
-    id: row.id,
-    partnerId: row.partner_id,
-    partnerName: row.partner_name || '',
-    phone: row.phone || row.partner_phone || '',
-    channel: row.channel || 'sms',
-    message: row.message || '',
-    status: row.status || 'sent',
-    deliveryStatus: row.delivery_status || '',
-    errorText: row.error_text || '',
-    reminderType: row.reminder_type || 'reminder',
-    sentBy: row.sent_by || '',
-    sentAt: row.sent_at || '',
-    createdAt: row.created_at || '',
-    retryable: (row.status === 'failed' || row.status === 'skipped'),
-  }));
+  // Naira charged per SMS page (configurable; Termii default route ≈ ₦5/page).
+  const rateRow = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_sms_naira_per_page'`).first().catch(() => null);
+  const nairaPerPage = Number(rateRow?.value) > 0 ? Number(rateRow.value) : 5;
+
+  const logs = (results || []).map(row => {
+    const status = row.status || 'sent';
+    const seg = smsPagesInfo(row.message || '');
+    // Only successfully-submitted messages are billed by Termii.
+    const charged = status === 'sent';
+    return {
+      id: row.id,
+      partnerId: row.partner_id,
+      partnerName: row.partner_name || '',
+      phone: row.phone || row.partner_phone || '',
+      channel: row.channel || 'sms',
+      message: row.message || '',
+      status,
+      deliveryStatus: row.delivery_status || '',
+      errorText: row.error_text || '',
+      reminderType: row.reminder_type || 'reminder',
+      sentBy: row.sent_by || '',
+      sentAt: row.sent_at || '',
+      createdAt: row.created_at || '',
+      retryable: (status === 'failed' || status === 'skipped'),
+      pages: seg.pages,
+      encoding: seg.encoding,
+      cost: charged ? seg.pages * nairaPerPage : 0,
+    };
+  });
 
   // Month-wide status counts (independent of the active filter).
   const counts = await DB.prepare(`
@@ -8080,6 +8131,40 @@ async function getSmsLogs(DB, url) {
       SUM(CASE WHEN status='sent' AND (delivery_status='' OR delivery_status='pending') THEN 1 ELSE 0 END) AS pending
     FROM kpsc_reminders WHERE year=? AND month=?
   `).bind(year, month).first();
+
+  // Month spend: sum SMS pages across every billed (status='sent') message.
+  // Computed in JS so the GSM-7/Unicode segment logic matches the per-row cost.
+  let monthPages = 0;
+  try {
+    const { results: sentMsgs } = await DB.prepare(
+      `SELECT message FROM kpsc_reminders WHERE year=? AND month=? AND status='sent'`
+    ).bind(year, month).all();
+    for (const r of (sentMsgs || [])) monthPages += smsPagesInfo(r.message || '').pages;
+  } catch { /* best-effort */ }
+  const monthCost = monthPages * nairaPerPage;
+
+  // Termii wallet balance (best-effort — network call may fail).
+  let wallet = { balance: null, currency: 'NGN', error: null };
+  try {
+    const t0 = await getTermiiSettings(DB);
+    if (t0.apiKey) {
+      const resp = await fetch(`https://api.ng.termii.com/api/get-balance?api_key=${encodeURIComponent(t0.apiKey)}`);
+      const data = await resp.json().catch(() => ({}));
+      wallet.balance = data?.data?.balance ?? data?.balance ?? null;
+      wallet.currency = data?.data?.currency ?? data?.currency ?? 'NGN';
+    }
+  } catch (e) { wallet.error = 'Could not reach Termii to fetch balance'; }
+  const pagesRemaining = (wallet.balance != null && nairaPerPage > 0) ? Math.floor(Number(wallet.balance) / nairaPerPage) : null;
+
+  // Delivery-report webhook diagnostics: the exact URL to register in Termii,
+  // plus when (if ever) Termii last delivered a report to us. A "never" here is
+  // the usual reason statuses stay stuck on "Sent / awaiting delivery".
+  const webhookUrl = `${url.origin}/api/termii-webhook`;
+  let webhookLastSeen = null;
+  try {
+    const wh = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_termii_webhook_last_seen'`).first();
+    if (wh?.value) webhookLastSeen = wh.value;
+  } catch { /* ignore */ }
 
   // Scheduler health for the payment-reminder cron.
   const t = await getTermiiSettings(DB);
@@ -8125,6 +8210,15 @@ async function getSmsLogs(DB, url) {
       dnd:       Number(counts?.dnd       || 0),
       pending:   Number(counts?.pending   || 0),
     },
+    wallet: {
+      balance: wallet.balance,
+      currency: wallet.currency,
+      pagesRemaining,
+      nairaPerPage,
+      error: wallet.error,
+    },
+    cost: { monthPages, monthCost, nairaPerPage },
+    webhook: { url: webhookUrl, lastSeen: webhookLastSeen },
     scheduler: {
       apiKeyConfigured: !!t.apiKey,
       mode: t.reminderMode || 'day_of_month',
@@ -8900,4 +8994,4 @@ ${text}`;
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths };
+export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths, smsPagesInfo };
