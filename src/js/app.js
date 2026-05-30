@@ -397,6 +397,7 @@ const DB = {
   getRemittances()             { return apiFetch('remittances'); },
   addRemittance(d)             { return apiFetch('remittances','POST',d); },
   updateRemittance(id,d)       { return apiFetch(`remittances/${id}`,'PUT',d); },
+  deleteRemittance(id)         { return apiFetch(`remittances/${id}`,'DELETE'); },
 
   getCashTransactions(full=false){ return apiFetch('cash-transactions'+(full?'?full=1':'')); },
   getCashPhoto(id)             { return apiFetch(`cash-photo/${id}`); },
@@ -668,6 +669,7 @@ const ACCESS_RULES = {
     income_record: ['income'],
     income_deposit: ['income'],
     remittance_record_payment: ['remittances'],
+    remittance_delete_pending: ['remittances'],
     expense_log: ['expenses'],
     bank_withdrawal: ['income'],
     bank_charge: ['expenses'],
@@ -4620,7 +4622,7 @@ async function renderRemittances(){
 
       <!-- RIGHT: History + Local Share -->
       <div>
-        ${pendingApprovals.length&&can('signoff')?`
+        ${pendingApprovals.length&&(can('signoff')||canAction('remittance_delete_pending'))?`
         <div class="card" style="border-left:3px solid var(--amber);margin-bottom:12px">
           <div class="card-header"><span class="card-title">⏳ Pending Approval (${pendingApprovals.length})</span></div>
           <p style="font-size:11px;color:var(--text3);margin:0 0 8px 0">These payments have been submitted and are awaiting approval by the Pastor or a Bank Signatory.</p>
@@ -4635,6 +4637,7 @@ async function renderRemittances(){
               <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
                 <span class="td-bold td-red">${fmt(r.amount)}</span>
                 ${can('signoff')?`<button class="btn btn-sm btn-primary" onclick="App.approveRemittance('${r.id}', this)">✅ Approve</button>`:''}
+                ${canAction('remittance_delete_pending')?`<button class="btn btn-sm btn-danger" onclick="App.deleteRemittance('${r.id}', this)">🗑 Delete</button>`:''}
               </div>
             </div>`).join('')}
         </div>`:''}
@@ -4988,6 +4991,28 @@ async function approveRemittance(id, btn=null){
   } catch(err) {
     restore();
     showAlert(`Failed to approve remittance: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+async function deleteRemittance(id, btn=null){
+  if(!canAction('remittance_delete_pending')){ showAlert('You do not have permission to delete pending remittances.','danger'); return; }
+  const allRems = await DB.getRemittances();
+  const rem = allRems.find(r=>r.id===id);
+  if(!rem) return;
+  if(rem.status !== 'pending_approval'){ showAlert('Only pending remittances can be deleted.','danger'); return; }
+  const periodLabel = rem.periodFrom && rem.periodTo ? ` for period ${fmtDate(rem.periodFrom)} – ${fmtDate(rem.periodTo)}` : '';
+  if(!confirm(`Delete this pending remittance (${fmt(rem.amount)})${periodLabel}?\n\nThis will cancel the submission and reverse the pending approval notification. This action cannot be undone.`)) return;
+  const restore = setBtnLoading(btn, 'Deleting…');
+  try {
+    await DB.deleteRemittance(id);
+    DB.addAudit('remittance_deleted',
+      `Pending remittance deleted/reversed: ${id} (${fmt(rem.amount)})${periodLabel} — Submitted by: ${rem.submittedBy||'—'}`,
+      state.user?.name);
+    showAlert('Pending remittance deleted and reversed successfully.','warn');
+    renderRemittances();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to delete remittance: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
 }
 
@@ -9572,7 +9597,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance,
+  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance, deleteRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,

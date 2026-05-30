@@ -573,9 +573,10 @@ export async function onRequest(context) {
 
     // ── /api/remittances ───────────────────────────────────────
     if (route === 'remittances') {
-      if (method === 'GET'  && !param) return await getRemittances(DB);
-      if (method === 'POST' && !param) return await createRemittance(DB, body);
-      if (method === 'PUT'  &&  param) return await updateRemittance(DB, param, body);
+      if (method === 'GET'    && !param) return await getRemittances(DB);
+      if (method === 'POST'   && !param) return await createRemittance(DB, body);
+      if (method === 'PUT'    &&  param) return await updateRemittance(DB, param, body);
+      if (method === 'DELETE' &&  param) return await deleteRemittance(DB, param);
     }
 
     // ── /api/cash-transactions ─────────────────────────────────
@@ -2571,6 +2572,24 @@ async function updateRemittance(DB, id, data) {
     `UPDATE remittances SET status=?, approved_by=?, approved_at=?, notes=? WHERE id=?`
   ).bind(status, approvedBy, approvedAt, notes, id).run();
   return ok({ id, status, approvedBy, approvedAt });
+}
+
+async function deleteRemittance(DB, id) {
+  const row = await DB.prepare(`SELECT * FROM remittances WHERE id=?`).bind(id).first();
+  if (!row) return err('Remittance not found', 404);
+  if (row.status !== 'pending_approval') return err('Only pending remittances can be deleted', 403);
+
+  const stmts = [DB.prepare(`DELETE FROM remittances WHERE id=?`).bind(id)];
+  // Clear the matching unread pending-approval notification so it doesn't linger
+  if (row.submitted_by) {
+    stmts.push(
+      DB.prepare(
+        `DELETE FROM notifications WHERE title='Remittance Pending Approval' AND body LIKE ? AND is_read=0`
+      ).bind(`%${row.submitted_by}%`)
+    );
+  }
+  await DB.batch(stmts);
+  return ok({ id, deleted: true, label: row.label, amount: row.amount, submittedBy: row.submitted_by });
 }
 
 // ── CASH TRANSACTIONS ─────────────────────────────────────────────
