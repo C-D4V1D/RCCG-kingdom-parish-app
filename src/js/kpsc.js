@@ -71,6 +71,7 @@ const PAGE_TO_GROUP = {
   finance:         { group: 'money',    subTab: 'finance'         },
   partners:        { group: 'money',    subTab: 'partners'        },
   reminders:       { group: 'money',    subTab: 'reminders'       },
+  sms_logs:        { group: 'money',    subTab: 'sms_logs'        },
   members:         { group: 'more',     subTab: 'members'         },
   settings:        { group: 'more',     subTab: 'settings'        },
   // Group-level pseudo-pages (rendered inline by their own renderer)
@@ -102,6 +103,8 @@ const S = {
   partnerPayments: [],
   financeEntries: [],
   reminders: [],
+  smsLogsFilter: 'all',
+  smsLogsData: null,
   dashboard: null,
   projects: [],
   projectsFilter: 'all',
@@ -1750,6 +1753,8 @@ function canAccess(page) {
   if (['home', 'meetings', 'money', 'more'].includes(page)) return true;
   // notification_log is accessible to anyone who can access agenda_builder
   if (page === 'notification_log') return canAccess('agenda_builder');
+  // sms_logs is accessible to anyone who can access the reminders workflow
+  if (page === 'sms_logs') return canAccess('reminders');
   const role = String(S.user?.role || 'committee_viewer').toLowerCase();
   const perms = effectiveRolePermissions();
   // Use saved permissions for this role if available; fall back to hardcoded defaults.
@@ -2488,6 +2493,7 @@ function moneySubTabStrip() {
   tabs.push({ key: 'partners',  label: 'Partners'  });
   if (canAccess('partner-progress')) tabs.push({ key: 'partner-progress', label: 'Progress' });
   if (canAccess('reminders')) tabs.push({ key: 'reminders', label: 'Reminders' });
+  if (canAccess('sms_logs'))  tabs.push({ key: 'sms_logs',  label: 'SMS Logs' });
   return `<div class="ka-subtabs">${tabs.map(t =>
     `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
   ).join('')}</div>`;
@@ -2537,6 +2543,9 @@ async function renderPage(page) {
       prependSubTabs(main, moneySubTabStrip());
     } else if (page === 'reminders') {
       await renderReminders(main);
+      prependSubTabs(main, moneySubTabStrip());
+    } else if (page === 'sms_logs') {
+      await renderSmsLogs(main);
       prependSubTabs(main, moneySubTabStrip());
     } else if (page === 'meeting') {
       await renderMeetingRoom(main);
@@ -7606,9 +7615,11 @@ async function renderReminders(main) {
         <label class="k-label">Reminder Message Template</label>
         <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message" oninput="Kpsc.debouncedSaveReminderTemplate(this)">${esc(defaultTemplate)}</textarea>
         <p class="k-hint">Use <code>{{name}}</code> for partner name and <code>{{month}}</code> for month name.</p>
-        <div class="k-room-actions" style="margin-top:10px">
+        <div class="k-room-actions" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="kbtn kbtn-primary" onclick="Kpsc.sendBulkReminders(this)">Send Bulk Reminders (${unpaid.length})</button>
+          <button class="kbtn kbtn-ghost" onclick="Kpsc.navigate('sms_logs')">📋 SMS Logs &amp; Delivery</button>
         </div>
+        <p class="k-hint" style="margin-top:8px">The automated payment-reminder schedule and its delivery results (sent, failed, retries) now live on the <a href="#sms_logs" onclick="Kpsc.navigate('sms_logs');return false;">SMS Logs</a> page.</p>
       </div>
 
       ${unpaid.length ? `
@@ -7637,26 +7648,209 @@ async function renderReminders(main) {
         </div>
       </div>` : `<div class="k-section"><div class="k-empty">🎉 All active partners have paid for ${monthName(month)} ${year}!</div></div>`}
 
-      <div class="k-section-hdr"><h2>Reminder History</h2></div>
-      <div class="k-meeting-list">
-        ${S.reminders.length ? S.reminders.map(r => {
-          const dlvBadge = r.deliveryStatus === 'delivered' ? `<span class="kbadge badge-green" title="Delivered">✅ Delivered</span>`
-            : r.deliveryStatus === 'failed' ? `<span class="kbadge badge-red" title="Failed">❌ Failed</span>`
-            : r.deliveryStatus === 'dnd'   ? `<span class="kbadge badge-red" title="Do Not Disturb">🚫 DND</span>`
-            : r.deliveryStatus === 'pending' ? `<span class="kbadge badge-amber" title="Pending delivery confirmation">⏳ Pending</span>`
-            : '';
-          return `
-          <div class="k-meeting-card" style="cursor:default">
-            <div class="k-mc-top">
-              <div class="k-mc-title">${esc(r.partnerName || 'Partner')}</div>
-              <span class="kbadge badge-blue">${esc(r.channel || 'sms')}</span>
-            </div>
-            <div class="k-mc-meta"><span>${esc(fmtDateTime(r.createdAt))}</span><span class="kbadge badge-green">${esc(r.status || 'sent')}</span>${dlvBadge}${r.sentBy ? `<span>by ${esc(r.sentBy)}</span>` : ''}</div>
-            <div class="k-page-hint" style="margin-top:6px;font-size:13px">${esc(r.message)}</div>
-          </div>`;
-        }).join('') : '<div class="k-empty">No reminders sent this month.</div>'}
+      <div class="k-section">
+        <div class="k-section-hdr"><h2>Reminder History &amp; Delivery</h2></div>
+        <p class="k-hint">${S.reminders.length} reminder message(s) logged for ${monthName(month)} ${year}. The full outbox — including failed sends, retry buttons and the automated-schedule health — is on the SMS Logs page.</p>
+        <div class="k-room-actions" style="margin-top:10px">
+          <button class="kbtn kbtn-primary" onclick="Kpsc.navigate('sms_logs')">Open SMS Logs &amp; Delivery →</button>
+        </div>
       </div>
     </div>`;
+}
+
+// ── SMS LOGS / OUTBOX PAGE ────────────────────────────────────────────────
+function smsLogStatusBadge(log) {
+  if (log.status === 'failed') return `<span class="kbadge badge-red" title="${esc(log.errorText || 'Send failed')}">❌ Failed</span>`;
+  if (log.status === 'skipped') return `<span class="kbadge badge-gray" title="${esc(log.errorText || 'Skipped')}">⏭️ Skipped</span>`;
+  // status === 'sent' → show delivery sub-status
+  if (log.deliveryStatus === 'delivered') return `<span class="kbadge badge-green">✅ Delivered</span>`;
+  if (log.deliveryStatus === 'dnd')       return `<span class="kbadge badge-red">🚫 DND</span>`;
+  if (log.deliveryStatus === 'failed')    return `<span class="kbadge badge-red">❌ Not delivered</span>`;
+  return `<span class="kbadge badge-amber" title="Sent to Termii; awaiting delivery confirmation">⏳ Sent</span>`;
+}
+
+const SMS_TYPE_LABELS = {
+  reminder: 'Payment reminder', welcome: 'Welcome', payment: 'Payment thank-you',
+  new_month: 'Happy New Month', anniversary: 'Anniversary', milestone: 'Milestone',
+  premeeting: 'Pre-meeting', actionitem: 'Action item', deadline: 'Deadline', bulk: 'Bulk',
+};
+
+async function renderSmsLogs(main) {
+  const year = currentYear();
+  const month = currentMonth();
+  const filter = S.smsLogsFilter || 'all';
+  const qs = `year=${year}&month=${month}` + (filter !== 'all' ? `&status=${encodeURIComponent(filter)}` : '');
+  const res = await apiGet(`kpsc-sms-logs?${qs}`);
+  if (res?.error) throw new Error(res.error);
+  S.smsLogsData = res;
+  const c = res.counts || {};
+  const sch = res.scheduler || {};
+  const logs = Array.isArray(res.logs) ? res.logs : [];
+  const runs = Array.isArray(res.runs) ? res.runs : [];
+
+  const filters = [
+    { key: 'all',     label: `All (${c.total || 0})` },
+    { key: 'failed',  label: `Failed (${c.failed || 0})` },
+    { key: 'pending', label: `Awaiting delivery (${c.pending || 0})` },
+    { key: 'delivered', label: `Delivered (${c.delivered || 0})` },
+    { key: 'dnd',     label: `DND (${c.dnd || 0})` },
+  ];
+
+  // Scheduler health banner colour: green when today is a send day, neutral otherwise.
+  const hb = sch.heartbeat;
+  const hbText = hb?.at ? `Scheduler last ran ${fmtDateTime(hb.at)}${hb.reason ? ` — ${esc(hb.reason)}` : ''}` : 'Scheduler has not reported in yet.';
+  const apiWarn = sch.apiKeyConfigured ? '' :
+    `<div class="k-error-box" style="margin-top:10px"><strong>No Termii API key configured.</strong> Reminders cannot be sent until a key is added in Settings → SMS.</div>`;
+
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-section">
+        <h3 class="k-sec-title">SMS Logs &amp; Outbox — ${monthName(month)} ${year}</h3>
+
+        <div class="k-sms-sched">
+          <div class="k-sms-sched-row">
+            <span class="k-label" style="margin:0">Payment reminder schedule</span>
+            <span>${esc(sch.scheduleLabel || '—')}</span>
+          </div>
+          <div class="k-sms-sched-row">
+            <span class="k-label" style="margin:0">Today a send day?</span>
+            <span>${sch.isSendDayToday ? '<span class="kbadge badge-green">Yes — today</span>' : '<span class="kbadge badge-gray">No</span>'} <span class="k-hint" style="margin-left:6px">Next: ${esc(sch.nextSendLabel || '—')}</span></span>
+          </div>
+          <div class="k-sms-sched-row">
+            <span class="k-label" style="margin:0">Send window</span>
+            <span>${esc(sch.sendWindow || '—')} ${sch.withinWindowNow ? '<span class="kbadge badge-green">open now</span>' : '<span class="kbadge badge-amber">closed now</span>'}</span>
+          </div>
+          <div class="k-sms-sched-row">
+            <span class="k-label" style="margin:0">Scheduler heartbeat</span>
+            <span class="k-hint">${esc(hbText)}</span>
+          </div>
+        </div>
+        ${apiWarn}
+
+        <div class="k-room-actions" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="kbtn kbtn-primary" id="ksms-runnow" onclick="Kpsc.runRemindersNow(this)">📤 Run payment reminders now</button>
+          ${c.failed ? `<button class="kbtn" onclick="Kpsc.retryAllFailedSms(this)">🔁 Retry all failed (${c.failed})</button>` : ''}
+          <button class="kbtn kbtn-ghost" onclick="Kpsc.navigate('reminders')">Reminder workflow →</button>
+        </div>
+        <p class="k-hint" style="margin-top:8px">“Run now” sends this month's reminder to every active, unpaid partner immediately (ignoring the schedule and send-window), while still skipping opted-out / DND partners and anyone already reminded within the cool-off period.</p>
+      </div>
+
+      <div class="k-section">
+        <div class="k-sms-stats">
+          ${[['Sent', c.sent || 0, 'badge-blue'], ['Delivered', c.delivered || 0, 'badge-green'], ['Failed', c.failed || 0, 'badge-red'], ['Awaiting', c.pending || 0, 'badge-amber'], ['DND', c.dnd || 0, 'badge-gray']]
+            .map(([lbl, n, cls]) => `<div class="k-sms-stat"><div class="k-sms-stat-n">${n}</div><div class="k-sms-stat-l"><span class="kbadge ${cls}">${lbl}</span></div></div>`).join('')}
+        </div>
+        <div class="ka-subtabs" style="margin-top:12px">
+          ${filters.map(f => `<button class="ka-subtab${filter === f.key ? ' active' : ''}" onclick="Kpsc.setSmsLogsFilter('${f.key}')">${esc(f.label)}</button>`).join('')}
+        </div>
+        <div class="k-meeting-list" style="margin-top:12px">
+          ${logs.length ? logs.map(log => `
+            <div class="k-meeting-card" style="cursor:default">
+              <div class="k-mc-top">
+                <div style="flex:1">
+                  <div class="k-mc-title">${esc(log.partnerName || 'Partner')}${log.phone ? ` <span class="k-hint">· ${esc(log.phone)}</span>` : ''}</div>
+                  <div class="k-mc-meta">
+                    <span class="kbadge badge-type">${esc(SMS_TYPE_LABELS[log.reminderType] || log.reminderType || 'sms')}</span>
+                    <span>${esc(fmtDateTime(log.createdAt || log.sentAt))}</span>
+                    ${log.sentBy ? `<span>by ${esc(log.sentBy)}</span>` : ''}
+                  </div>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+                  ${smsLogStatusBadge(log)}
+                  ${log.retryable ? `<button class="kbtn kbtn-sm" onclick="Kpsc.retrySms('${esc(log.id)}', this)">🔁 Retry</button>` : ''}
+                </div>
+              </div>
+              ${log.errorText ? `<div class="k-page-hint" style="margin-top:6px;color:var(--red)">⚠️ ${esc(log.errorText)}</div>` : ''}
+              <div class="k-page-hint" style="margin-top:6px;font-size:13px">${esc(log.message)}</div>
+            </div>`).join('') : `<div class="k-empty">No SMS ${filter !== 'all' ? `(${esc(filter)}) ` : ''}logged for ${monthName(month)} ${year}.</div>`}
+        </div>
+      </div>
+
+      <div class="k-section">
+        <div class="k-section-hdr"><h2>Automated Run History</h2></div>
+        <p class="k-hint">Each time the reminder scheduler fires (every 30 min) it records a line here so you can confirm it ran and see the outcome.</p>
+        <div class="k-meeting-list" style="margin-top:10px">
+          ${runs.length ? runs.map(r => `
+            <div class="k-meeting-card" style="cursor:default">
+              <div class="k-mc-top">
+                <div class="k-mc-title">${esc(fmtDateTime(r.ranAt))}</div>
+                <span class="kbadge ${r.trigger === 'manual' ? 'badge-type' : 'badge-blue'}">${r.trigger === 'manual' ? 'manual' : 'cron'}</span>
+              </div>
+              <div class="k-mc-meta">
+                ${r.isSendDay ? '<span class="kbadge badge-green">send day</span>' : '<span class="kbadge badge-gray">not a send day</span>'}
+                <span>✅ ${r.sent} sent</span>
+                ${r.failed ? `<span style="color:var(--red)">❌ ${r.failed} failed</span>` : ''}
+                ${r.skipped ? `<span>⏭️ ${r.skipped} skipped (cool-off)</span>` : ''}
+                <span class="k-hint">of ${r.total}</span>
+              </div>
+              ${r.reason ? `<div class="k-page-hint" style="margin-top:4px">${esc(r.reason)}</div>` : ''}
+            </div>`).join('') : '<div class="k-empty">No automated runs recorded yet. If this stays empty on a send day, the scheduler (GitHub Actions cron) is not reaching the app.</div>'}
+        </div>
+      </div>
+    </div>`;
+}
+
+async function setSmsLogsFilter(key) {
+  S.smsLogsFilter = key;
+  const main = document.getElementById('kpsc-main');
+  if (main) { await renderSmsLogs(main); prependSubTabs(main, moneySubTabStrip()); }
+}
+
+async function runRemindersNow(btn) {
+  if (!confirm('Send this month\'s payment reminder now to every active, unpaid partner?\n\nOpted-out / DND partners and anyone already reminded within the cool-off period are still skipped.')) return;
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    const res = await apiPost('kpsc-run-reminders-now', {});
+    if (res?.error) { showToast(res.error, 'error'); }
+    else if (res.skipped) { showToast(`No reminders sent: ${res.reason || 'nothing to send'}`, 'info'); }
+    else {
+      const parts = [`${res.sent || 0} sent`];
+      if (res.failed) parts.push(`${res.failed} failed`);
+      if (res.skippedCount) parts.push(`${res.skippedCount} skipped (cool-off)`);
+      showToast(`Reminders: ${parts.join(', ')}.`, (res.failed ? 'error' : 'success'));
+    }
+  } catch (e) {
+    showToast('Could not run reminders: ' + (e.message || e), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+    const main = document.getElementById('kpsc-main');
+    if (main) { await renderSmsLogs(main); prependSubTabs(main, moneySubTabStrip()); }
+  }
+}
+
+async function retrySms(id, btn) {
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const res = await apiPost('kpsc-sms-retry', { id });
+    if (res?.ok && res.status === 'sent') showToast('Resent successfully.', 'success');
+    else showToast('Retry failed: ' + (res?.error || 'Termii rejected the message'), 'error');
+  } catch (e) {
+    showToast('Retry error: ' + (e.message || e), 'error');
+  } finally {
+    const main = document.getElementById('kpsc-main');
+    if (main) { await renderSmsLogs(main); prependSubTabs(main, moneySubTabStrip()); }
+  }
+}
+
+async function retryAllFailedSms(btn) {
+  const data = S.smsLogsData;
+  const failedIds = (data?.logs || []).filter(l => l.status === 'failed').map(l => l.id);
+  if (!failedIds.length) { showToast('No failed messages to retry.', 'info'); return; }
+  if (!confirm(`Retry ${failedIds.length} failed message(s)?`)) return;
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Retrying…'; }
+  let okCount = 0, failCount = 0;
+  for (const id of failedIds) {
+    try {
+      const res = await apiPost('kpsc-sms-retry', { id });
+      if (res?.ok && res.status === 'sent') okCount++; else failCount++;
+    } catch { failCount++; }
+  }
+  showToast(`Retry complete: ${okCount} sent${failCount ? `, ${failCount} still failing` : ''}.`, failCount ? 'error' : 'success');
+  const main = document.getElementById('kpsc-main');
+  if (main) { await renderSmsLogs(main); prependSubTabs(main, moneySubTabStrip()); }
 }
 
 // Per-partner personalized message overrides: Map<partnerId, resolvedMessageString>
@@ -15326,6 +15520,10 @@ window.Kpsc = {
   sendBulkReminders,
   copyReminderMessage,
   personalizeReminder,
+  runRemindersNow,
+  retrySms,
+  retryAllFailedSms,
+  setSmsLogsFilter,
   useReminderVariant,
   closePersonalizeModal,
   debouncedSaveReminderTemplate,
