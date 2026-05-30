@@ -10319,6 +10319,7 @@ async function renderSettings(main) {
   const termiiDeadline     = res?.kpsc_termii_deadline_sms    !== '0';
   const smsFreqCap         = res?.kpsc_sms_freq_cap      || '3';
   const smsCooloffDays     = res?.kpsc_sms_cooloff_days  || '7';
+  const smsNairaPerPage    = res?.kpsc_sms_naira_per_page || '5';
   // System SMS message text templates — fall back to built-in defaults so textareas are always pre-filled
   const SMS_DEFAULTS = {
     welcome:    `Dear {{name}}, welcome to the RCCG Kingdom Parish family! 🎉 We are so glad to have you as a partner in this beautiful journey of faith. Your support means the world to us, and we pray that God will bless you richly — spiritually and in all your endeavours. You are loved! — RCCG Kingdom Parish`,
@@ -10533,6 +10534,12 @@ async function renderSettings(main) {
             </div>
           </div>
           <p class="k-hint" style="margin-top:6px">Sends payment reminder SMS to active unpaid partners. Uses the <em>SMS/WhatsApp Reminder Template</em> below. The cron job runs every 30 minutes — only sends on matching days.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Cost per SMS page (₦)</label>
+          <input type="number" id="ks-sms-naira-per-page" class="k-input k-input-sm" min="0" step="0.5" value="${esc(smsNairaPerPage)}" style="width:110px" />
+          <p class="k-hint" style="margin-top:4px">Used only to estimate credits/cost on the SMS Logs page (1 page = 160 chars GSM-7, or 70 chars if the message contains emoji/special characters). Termii's default route is ≈ ₦5/page.</p>
         </div>
 
         <div id="ks-termii-save-msg" class="k-settings-msg" style="display:none"></div>
@@ -10967,6 +10974,8 @@ async function saveSmsSettings() {
   const remMode  = document.getElementById('ks-termii-rem-mode')?.value || 'day_of_month';
   const remDay   = String(parseInt(document.getElementById('ks-termii-rem-day')?.value  || '10', 10) || 10);
   const remFreq  = document.getElementById('ks-termii-rem-freq')?.value || 'monthly';
+  const nairaPerPageRaw = parseFloat(document.getElementById('ks-sms-naira-per-page')?.value);
+  const nairaPerPage = String(nairaPerPageRaw > 0 ? nairaPerPageRaw : 5);
   const res = await apiPost('settings', {
     kpsc_termii_api_key:              apiKey,
     kpsc_termii_sender_id:            senderId,
@@ -10977,6 +10986,7 @@ async function saveSmsSettings() {
     kpsc_termii_reminder_mode:        remMode,
     kpsc_termii_reminder_day:         remDay,
     kpsc_termii_reminder_freq:        remFreq,
+    kpsc_sms_naira_per_page:          nairaPerPage,
   });
   if (msg) {
     if (res?.error) {
