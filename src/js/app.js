@@ -3629,7 +3629,7 @@ async function submitIncome(btn=null){
   const rec={date,usher,source:'sunday_collection',recordedBy:state.user?.name,depositConfirmed:false};
   let total=0;
   INCOME_TYPES.forEach(t=>{ const v=parseFloat(document.getElementById('inc_'+t.key)?.value||0)||0; rec[t.key]=v; total+=v });
-  total=Math.round(total);
+  total=Math.round(total * 100) / 100;
   if(!total){ alert('Please enter at least one income amount.'); return }
   rec.totalCollection=total;
 
@@ -4137,7 +4137,7 @@ async function submitOtherIncome(btn=null){
   const source     = document.getElementById('oi_source')?.value;
   const donorName  = document.getElementById('oi_donor')?.value?.trim();
   const category   = document.getElementById('oi_category')?.value;
-  const amount     = Math.round(parseFloat(document.getElementById('oi_amount')?.value)||0);
+  const amount     = Math.round((parseFloat(document.getElementById('oi_amount')?.value)||0) * 100) / 100;
   const method     = document.getElementById('oi_method')?.value;
   const notes      = document.getElementById('oi_notes')?.value||'';
   if(!date||!source){ alert('Please select a date and source type.'); return }
