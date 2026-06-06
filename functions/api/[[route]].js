@@ -3417,10 +3417,16 @@ async function deleteKpscFinanceEntry(DB, id, auth) {
 
 async function getKpscFinanceEntries(DB, url) {
   const month = normalizeOptionalMonth(url.searchParams.get('month'));
-  const year = normalizeYear(url.searchParams.get('year'));
+  const yearParam = String(url.searchParams.get('year') || '').trim();
+  const allTime = yearParam === 'all';
+  const year = allTime ? null : normalizeYear(yearParam);
   const entryType = String(url.searchParams.get('entryType') || '').trim().toLowerCase();
-  const where = ['strftime(\'%Y\', date)=?',];
-  const binds = [String(year)];
+  const where = [];
+  const binds = [];
+  if (!allTime) {
+    where.push('strftime(\'%Y\', date)=?');
+    binds.push(String(year));
+  }
   if (month) {
     where.push(`strftime('%m', date)=?`);
     binds.push(String(month).padStart(2, '0'));
@@ -3429,11 +3435,14 @@ async function getKpscFinanceEntries(DB, url) {
     where.push('entry_type=?');
     binds.push(entryType);
   }
+  const whereClause = where.length
+    ? `WHERE ${where.join(' AND ')} AND COALESCE(f.deleted_at,'') = ''`
+    : `WHERE COALESCE(f.deleted_at,'') = ''`;
   const { results } = await DB.prepare(`
     SELECT f.*, p.full_name AS partner_name
     FROM kpsc_finance_entries f
     LEFT JOIN kpsc_partners p ON p.id = f.partner_id
-    WHERE ${where.join(' AND ')} AND COALESCE(f.deleted_at,'') = ''
+    ${whereClause}
     ORDER BY date DESC, created_at DESC
   `).bind(...binds).all();
   return ok((results || []).map(row => ({

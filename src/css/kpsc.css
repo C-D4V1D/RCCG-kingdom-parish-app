@@ -111,8 +111,11 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-dash-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:28px;}
 .k-stat{background:var(--white);border-radius:12px;padding:16px 14px;text-align:center;border:1px solid var(--border);}
 .k-stat-highlight{border-color:var(--gold);background:var(--gold-light);}
+.k-stat-balance{background:var(--navy-light);border:2px solid var(--navy);}
+.k-stat-balance-deficit{background:#fef2f2;border-color:var(--red);}
 .k-stat-val{font-size:28px;font-weight:700;color:var(--navy);line-height:1.1;margin-bottom:4px;}
 .k-stat-highlight .k-stat-val{color:var(--amber);}
+.k-stat-balance .k-stat-lbl{color:var(--navy);font-weight:700;}
 .k-stat-lbl{font-size:11px;color:var(--text3);font-weight:500;text-transform:uppercase;letter-spacing:.5px;}
 
 /* ── SECTION HEADER ────────────────────────────────────────────── */

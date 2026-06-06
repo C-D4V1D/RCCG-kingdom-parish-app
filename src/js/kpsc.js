@@ -6805,14 +6805,16 @@ async function setPartnerDetailYear(year) {
 async function renderFinance(main) {
   const year = S.financeYear;
   const month = S.financeMonth;
-  const [financeRes, partnersRes] = await Promise.all([
+  const [financeRes, partnersRes, allTimeRes] = await Promise.all([
     apiGet(`kpsc-finance?year=${year}${month ? `&month=${month}` : ''}`),
     apiGet('kpsc-partners'),
+    apiGet('kpsc-finance?year=all'),
   ]);
   if (financeRes?.error) throw new Error(financeRes.error);
   if (partnersRes?.error) throw new Error(partnersRes.error);
   S.financeEntries = Array.isArray(financeRes) ? financeRes : [];
   S.partners = Array.isArray(partnersRes) ? partnersRes : [];
+  S.allFinanceEntries = Array.isArray(allTimeRes) ? allTimeRes : [];
 
   // Reset filter/sort state on every full page load
   S.financeSearch = '';
@@ -6829,11 +6831,30 @@ async function renderFinance(main) {
   const expenseEntries = S.financeEntries.filter(e => e.entryType === 'expense');
   const incomeTotal  = incomeEntries.reduce((s, e) => s + Number(e.amount || 0), 0);
   const expenseTotal = expenseEntries.reduce((s, e) => s + Number(e.amount || 0), 0);
-  const net = incomeTotal - expenseTotal;
   const partnerIncome = incomeEntries.filter(e => e.category === 'partnership_payment').reduce((s, e) => s + Number(e.amount || 0), 0);
   const unlinkedCount = incomeEntries.filter(e => e.category === 'partnership_payment' && !e.partnerId).length;
 
   const nowYear = currentYear();
+  const nowMonth = new Date().getUTCMonth() + 1;
+  const isCurrentPeriod = year === nowYear && (!month || month === nowMonth);
+
+  // Compute cumulative balance as of end of selected period
+  let balanceCutoff;
+  if (month) {
+    balanceCutoff = new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
+  } else {
+    balanceCutoff = year === nowYear
+      ? new Date().toISOString().slice(0, 10)
+      : `${year}-12-31`;
+  }
+  const balanceEntries = isCurrentPeriod
+    ? S.allFinanceEntries
+    : S.allFinanceEntries.filter(e => (e.date || '') <= balanceCutoff);
+  const balanceIncome  = balanceEntries.filter(e => e.entryType === 'income').reduce((s, e) => s + Number(e.amount || 0), 0);
+  const balanceExpense = balanceEntries.filter(e => e.entryType === 'expense').reduce((s, e) => s + Number(e.amount || 0), 0);
+  const currentBalance = balanceIncome - balanceExpense;
+  S.financeBalance = currentBalance;
+  S.financeBalanceIsCurrentPeriod = isCurrentPeriod;
   const yearOpts = [nowYear, nowYear-1, nowYear-2].map(y => `<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
   const monthOpts = [0,1,2,3,4,5,6,7,8,9,10,11,12].map(m =>
     `<option value="${m}" ${month===m?'selected':''}>${m===0?'All Months':monthName(m)}</option>`
@@ -6862,9 +6883,10 @@ async function renderFinance(main) {
           <div class="k-stat-sub">${expenseEntries.length} entr${expenseEntries.length===1?'y':'ies'}</div>
           <div class="k-stat-lbl">Expenses</div>
         </div>
-        <div class="k-stat ${net >= 0 ? '' : 'k-stat-highlight'}">
-          <div class="k-stat-val" style="color:${net>=0?'var(--green)':'var(--red)'}">₦${Math.round(Math.abs(net)).toLocaleString('en-NG')}</div>
-          <div class="k-stat-lbl">${net >= 0 ? 'Net Surplus' : 'Net Deficit'}</div>
+        <div class="k-stat k-stat-balance ${currentBalance < 0 ? 'k-stat-balance-deficit' : ''}">
+          <div class="k-stat-val" style="color:${currentBalance>=0?'var(--navy)':'var(--red)'}">₦${Math.round(Math.abs(currentBalance)).toLocaleString('en-NG')}</div>
+          <div class="k-stat-sub" style="color:${currentBalance>=0?'var(--green)':'var(--red)'}">${currentBalance>=0?'Surplus':'Deficit'}</div>
+          <div class="k-stat-lbl">${isCurrentPeriod ? 'Current Balance' : `Balance · end of ${periodLabel}`}</div>
         </div>
         <div class="k-stat">
           <div class="k-stat-val" style="color:var(--navy)">₦${Math.round(partnerIncome).toLocaleString('en-NG')}</div>
@@ -7444,6 +7466,9 @@ function printFinanceReport() {
   const net = incomeTotal - expenseTotal;
   const netColor = net >= 0 ? '#1a5e3a' : '#8b1a1a';
   const netLabel = net >= 0 ? 'Surplus' : 'Deficit';
+  const reportBalance = typeof S.financeBalance === 'number' ? S.financeBalance : null;
+  const balanceColor = reportBalance !== null ? (reportBalance >= 0 ? '#1e3a5f' : '#8b1a1a') : '#555';
+  const balanceLabel = S.financeBalanceIsCurrentPeriod ? 'Current Balance' : `Balance (end of ${periodLabel})`;
 
   function catSummaryRows(list, total) {
     const cats = {};
@@ -7493,7 +7518,7 @@ function printFinanceReport() {
   .section{margin-bottom:28px}
   .section-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#1e3a5f;border-bottom:1px solid #ddd;padding-bottom:7px;margin-bottom:14px}
   .overview-box{background:#f4f6f9;border-radius:8px;padding:14px 18px;margin-bottom:20px;line-height:1.8;font-size:13px}
-  .summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:8px}
+  .summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:8px}
   .tile{border:1px solid #ddd;border-radius:8px;padding:16px;text-align:center}
   .tile-val{font-size:22px;font-weight:700}
   .tile-lbl{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
@@ -7523,7 +7548,8 @@ function printFinanceReport() {
   <div class="summary-grid">
     <div class="tile"><div class="tile-val" style="color:#1a5e3a">₦${Math.round(incomeTotal).toLocaleString('en-NG')}</div><div class="tile-lbl">Total Received</div></div>
     <div class="tile"><div class="tile-val" style="color:#8b1a1a">₦${Math.round(expenseTotal).toLocaleString('en-NG')}</div><div class="tile-lbl">Total Spent</div></div>
-    <div class="tile" style="border-color:${netColor}"><div class="tile-val" style="color:${netColor}">₦${Math.round(Math.abs(net)).toLocaleString('en-NG')}</div><div class="tile-lbl">Net ${netLabel}</div></div>
+    <div class="tile" style="border-color:${netColor}"><div class="tile-val" style="color:${netColor}">₦${Math.round(Math.abs(net)).toLocaleString('en-NG')}</div><div class="tile-lbl">Net ${netLabel} (Period)</div></div>
+    ${reportBalance !== null ? `<div class="tile" style="border:2px solid ${balanceColor};background:${reportBalance>=0?'#eef3fb':'#fef2f2'}"><div class="tile-val" style="color:${balanceColor}">₦${Math.round(Math.abs(reportBalance)).toLocaleString('en-NG')}</div><div class="tile-lbl" style="color:${balanceColor};font-weight:700">${escPrint(balanceLabel)}</div></div>` : ''}
   </div>
 </div>
 
