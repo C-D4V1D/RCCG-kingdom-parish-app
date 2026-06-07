@@ -113,7 +113,7 @@ function calculateRemittances(income) {
       pastorsSeed: amt * REMITTANCE_RATES.thanksgiving.pastorsSeed,
       local: 0
     };
-    result.totals.totalToNational += result.breakdown.thanksgiving.national + result.breakdown.thanksgiving.pastorsSeed;
+    result.totals.totalToNational += result.breakdown.thanksgiving.national;
     result.totals.totalToArea += result.breakdown.thanksgiving.area;
     result.totals.totalToPastor += result.breakdown.thanksgiving.pastor;
     result.totals.totalToMinisters += result.breakdown.thanksgiving.ministers;

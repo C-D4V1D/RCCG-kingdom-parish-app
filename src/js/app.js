@@ -1018,7 +1018,7 @@ async function calcRemittances(income, preRates){
     const amt = income[t.key]||0;
     if(!amt) return;
     if(t.special==='tg'){
-      const line = { label:t.label, isTg:true, total:amt, national: amt*(rr.tgNational+(rr.tgSeed||0)), area: amt*rr.tgArea,
+      const line = { label:t.label, isTg:true, total:amt, national: amt*rr.tgNational, area: amt*rr.tgArea,
         pastor: amt*rr.tgPastor, ministers: amt*rr.tgMinisters, seed: amt*(rr.tgSeed||0), local:0 };
       res.lines.push(line);
       res.totalNatl+=line.national; res.totalArea+=line.area;
@@ -2473,7 +2473,7 @@ async function renderDashboard(){
   const dashMonthPaidAmt = dashMonthPaidRems.reduce((s,r)=>s+(r.amount||0),0);
   // Current month due (used only for paid/partial status label).
   const dashCurrentMonthRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
-    +(remittances.totalMinisters||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
+    +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
   const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashCurrentMonthRemDue * PAYMENT_TOLERANCE_THRESHOLD;
   const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
   const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
@@ -2482,7 +2482,7 @@ async function renderDashboard(){
   const dashAllTimeRemittances = await calcRemittancesFromRecords(allIncome, remRatesDash);
   const dashAllTimeIncomeRemDue = (dashAllTimeRemittances.totalNatl||0)+(dashAllTimeRemittances.totalArea||0)
     +(dashAllTimeRemittances.totalPastor||0)+(dashAllTimeRemittances.totalMinisters||0)
-    +(dashAllTimeRemittances.provinceRebate||0);
+    +(dashAllTimeRemittances.totalSeed||0)+(dashAllTimeRemittances.provinceRebate||0);
   // Source array is `allIncome` (date-filtered to ≤ asOfDate for past-period views) so
   // a historical snapshot doesn't see income that didn't exist yet.
   const dashFirstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
@@ -4739,6 +4739,7 @@ async function showRemittancePaymentModal(){
     { label:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      amount:rem.totalArea },
     { label:`Thanksgiving → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor },
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters },
+    { label:`Thanksgiving → Seed → National HQ (${Math.round(rr.tgSeed*100)}%)`, amount:rem.totalSeed||0 },
     { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`, amount:rem.provinceRebate },
     ...quotaLines.map(q=>({ label:q.label, amount:q.amount||0 }))
   ].filter(l=>l.amount>0);
@@ -5085,6 +5086,11 @@ async function printRemittanceReport(fromOverride, toOverride){
         : `${l.total>0?Math.round((l.national/l.total)*100):'0'}% Based`,
       amount:l.national||0
     })).filter(r=>r.amount>0),
+    // TG Seed — separate line going to National HQ
+    ...((rem.totalSeed||0)>0?[{
+      desc:`Thanksgiving → Seed → National HQ (${Math.round(rr.tgSeed*100)}%)`,
+      type:`${Math.round(rr.tgSeed*100)}% Based`, amount:rem.totalSeed
+    }]:[]),
     // Province Rebate (% of local retained tithes)
     ...(rem.provinceRebate>0?[{
       desc:`Province Rebate — ${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes (Members' + Ministers' Tithe: ${fmt(rem.localTithe)})`,
@@ -5267,7 +5273,7 @@ async function renderExpenses(){
   const allTimeRemittances = await calcRemittancesFromRecords(allIncome);
   const allTimeIncomeRemDue = (allTimeRemittances.totalNatl||0)+(allTimeRemittances.totalArea||0)
     +(allTimeRemittances.totalPastor||0)+(allTimeRemittances.totalMinisters||0)
-    +(allTimeRemittances.provinceRebate||0);
+    +(allTimeRemittances.totalSeed||0)+(allTimeRemittances.provinceRebate||0);
   const quotaList = getQuotaList(settings);
 
   // Sunday-prorate accumulated quotas (same basis as dashboard KPI + Remittances page).
@@ -8323,7 +8329,7 @@ async function generateMonthlyReport(){
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
   const totalRemPaid=paidRems.reduce((s,r)=>s+(r.amount||0),0);
-  const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+rem.provinceRebate+totalFixedQuotas;
+  const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate+totalFixedQuotas;
   const trueNetLocal=rem.netLocal-totalFixedQuotas;
   const netPosition=totalIncome-totalExpenses-totalRemDue;
   const totalChildrenOffering=income.reduce((s,r)=>s+(r.childrenOffering||0),0);
@@ -8374,7 +8380,7 @@ async function generateMonthlyReport(){
     <table>
       <tr><th>Description</th><th class="td-c">Rate / Basis</th><th class="td-r">Amount (₦)</th></tr>
       ${rem.lines.filter(l=>!l.isTg&&l.national>0).map(l=>`<tr><td>${l.label} → National HQ</td><td class="td-c">${l.total>0?Math.round(l.national/l.total*100)+'% of '+fmt(l.total):'% Based'}</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
-      ${rem.lines.filter(l=>l.isTg&&l.national>0).map(l=>`<tr><td>Thanksgiving (TG) → National HQ (incl. ${Math.round((remRatesData.tgSeed||0)*100)}% Seed)</td><td class="td-c">${Math.round(remRatesData.tgNational*100)}% + ${Math.round((remRatesData.tgSeed||0)*100)}% Seed of ${fmt(l.total)}</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
+      ${rem.lines.filter(l=>l.isTg&&l.national>0).map(l=>`<tr><td>Thanksgiving (TG) → National HQ</td><td class="td-c">${Math.round(remRatesData.tgNational*100)}% of ${fmt(l.total)}</td><td class="td-r">${fmt(l.national)}</td></tr>${(l.seed||0)>0?`<tr><td style="padding-left:16px">Thanksgiving → Seed → National HQ</td><td class="td-c">${Math.round((remRatesData.tgSeed||0)*100)}% of ${fmt(l.total)}</td><td class="td-r">${fmt(l.seed)}</td></tr>`:''}`).join('')}
       ${rem.provinceRebate>0?`<tr><td>Province Rebate (on local tithes)</td><td class="td-c">${rem.localTithe>0?Math.round(rem.provinceRebate/rem.localTithe*100)+'% of '+fmt(rem.localTithe):'% Based'}</td><td class="td-r">${fmt(rem.provinceRebate)}</td></tr>`:''}
       ${rem.totalArea>0?`<tr><td style="padding-left:16px">Thanksgiving → Area/Zonal Pastor</td><td class="td-c">${Math.round(remRatesData.tgArea*100)}% of TG</td><td class="td-r">${fmt(rem.totalArea)}</td></tr>`:''}
       ${rem.totalPastor>0?`<tr><td style="padding-left:16px">Thanksgiving → Parish Pastor's Share</td><td class="td-c">${Math.round(remRatesData.tgPastor*100)}% of TG</td><td class="td-r">${fmt(rem.totalPastor)}</td></tr>`:''}
@@ -8510,7 +8516,7 @@ async function generateQuarterlyReport(){
     const total=recs.reduce((s,r)=>s+(r.totalCollection||0),0);
     const exp=exps.reduce((s,e)=>s+(e.amount||0),0);
     const rem=await calcRemittancesFromRecords(recs);
-    const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+rem.provinceRebate+quotasTotal;
+    const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate+quotasTotal;
     const trueNetLocal=rem.netLocal-quotasTotal;
     const netSurplus=total-totalRemDue-exp;
     quarterData.push({month:MONTHS[m],year:y,income:total,expenses:exp,remittances:totalRemDue,netLocal:trueNetLocal,surplus:netSurplus,sundays:recs.length});
