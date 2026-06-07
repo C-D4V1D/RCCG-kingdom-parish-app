@@ -4486,6 +4486,12 @@ async function renderRemittances(){
     pct: Math.round(rr.tgNational*100),
     amount:tgNatlAmt, section:'income'
   });
+  const tgSeedAmt=rem.totalSeed||0;
+  if(tgSeedAmt>0) incomeLines.push({
+    label:`Thanksgiving → Seed → National HQ`,
+    pct: Math.round((rr.tgSeed||0)*100),
+    amount:tgSeedAmt, section:'income'
+  });
 
   const tgLines=[
     { label:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`,      amount:rem.totalArea,     section:'tg' },
@@ -5036,7 +5042,7 @@ async function printRemittanceReport(fromOverride, toOverride){
   const tgLine=rem.lines.find(l=>l.isTg);
   const tgTotal=tgLine?.total||0;
   const tgNatlAmt=tgLine?.national||0;
-  const tgDistributed=tgTotal-tgNatlAmt; // area+pastor+ministers (seed now in national)
+  const tgDistributed=tgTotal-tgNatlAmt-(tgLine?.seed||0); // area+pastor+ministers only
   const totalToHQ=rem.lines.reduce((s,l)=>s+(l.national||0),0); // incl. TG national
   const totalParishLocal=rem.lines.filter(l=>!l.isTg).reduce((s,l)=>s+(l.local||0),0);
 
