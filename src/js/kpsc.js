@@ -105,6 +105,8 @@ const S = {
   reminders: [],
   smsLogsFilter: 'all',
   smsLogsData: null,
+  smsLogsYear: new Date().getUTCFullYear(),
+  smsLogsMonth: new Date().getUTCMonth() + 1,
   dashboard: null,
   projects: [],
   projectsFilter: 'all',
@@ -112,9 +114,11 @@ const S = {
   archiveSearch: '',
   archiveQuickFilter: 'all',
   partnersYear: new Date().getUTCFullYear(),
+  partnersMonth: new Date().getUTCMonth() + 1,
   partnersFilter: 'active',
   partnersSearch: '',
   partnersTypeFilter: '',
+  partnersPaymentFilter: 'all',
   financeYear: new Date().getUTCFullYear(),
   financeMonth: new Date().getUTCMonth() + 1,
   financeSearch: '',
@@ -125,6 +129,7 @@ const S = {
   financeSortAsc: false,
   reportsYear: new Date().getUTCFullYear(),
   reportsMonth: 0,
+  progressMonth: new Date().getUTCMonth() + 1,
   reportsFilter: 'all',
   reportsSearch: '',
   reportsAssignee: '',
@@ -6361,6 +6366,11 @@ function partnerMonthlyPaid(partnerId, month, year = currentYear()) {
 async function renderPartners(main) {
   await loadPartnerData(S.partnersYear);
   const canManage = canManagePartners();
+  const nowYear = currentYear();
+  const monthOpts = Array.from({length: 12}, (_, i) => {
+    const m = i + 1;
+    return `<option value="${m}" ${S.partnersMonth === m ? 'selected' : ''}>${monthName(m)}</option>`;
+  }).join('');
   main.innerHTML = `
     <div class="k-page">
       <div class="k-section-hdr">
@@ -6382,8 +6392,14 @@ async function renderPartners(main) {
             <option value="gods_kingdom_partner" ${S.partnersTypeFilter === 'gods_kingdom_partner' ? 'selected' : ''}>God's Kingdom Partner</option>
             <option value="covenant_partner" ${S.partnersTypeFilter === 'covenant_partner' ? 'selected' : ''}>Covenant Partner</option>
           </select>
+          <select class="k-input k-input-sm" onchange="Kpsc.setPartnersMonth(this.value)">${monthOpts}</select>
+          <select class="k-input k-input-sm" onchange="Kpsc.setPartnersPaymentFilter(this.value)">
+            <option value="all" ${S.partnersPaymentFilter === 'all' ? 'selected' : ''}>All</option>
+            <option value="paid" ${S.partnersPaymentFilter === 'paid' ? 'selected' : ''}>Paid this month</option>
+            <option value="unpaid" ${S.partnersPaymentFilter === 'unpaid' ? 'selected' : ''}>Unpaid this month</option>
+          </select>
           <select class="k-input k-input-sm k-year-select" onchange="Kpsc.setPartnersYear(this.value)">
-            ${[currentYear(), currentYear()-1, currentYear()-2].map(y => `<option value="${y}" ${S.partnersYear === y ? 'selected' : ''}>${y}</option>`).join('')}
+            ${[nowYear, nowYear-1, nowYear-2].map(y => `<option value="${y}" ${S.partnersYear === y ? 'selected' : ''}>${y}</option>`).join('')}
           </select>
         </div>
       </div>
@@ -6399,19 +6415,22 @@ function setPartnersSearch(val) {
 
 function renderPartnersList(canManage) {
   const year = S.partnersYear;
+  const month = S.partnersMonth;
   let partners = S.partners;
   if (S.partnersFilter === 'active') partners = partners.filter(p => p.status === 'active');
   else if (S.partnersFilter === 'inactive') partners = partners.filter(p => p.status === 'inactive');
   if (S.partnersTypeFilter) partners = partners.filter(p => p.partnershipType === S.partnersTypeFilter);
   const q = S.partnersSearch.toLowerCase();
   if (q) partners = partners.filter(p => p.fullName.toLowerCase().includes(q));
+  if (S.partnersPaymentFilter === 'paid') partners = partners.filter(p => partnerMonthlyPaid(p.id, month, year));
+  else if (S.partnersPaymentFilter === 'unpaid') partners = partners.filter(p => !partnerMonthlyPaid(p.id, month, year));
   if (!partners.length) {
     return `<div class="k-empty">${q ? `No partners matching "${esc(S.partnersSearch)}".` : `No ${S.partnersFilter === 'all' ? '' : S.partnersFilter + ' '}partners found.`}</div>`;
   }
   const canFinance = canManageFinance();
   return `<div class="k-meeting-list">${partners.map(partner => {
     const paidMonths = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
-    const currentPaid = partnerMonthlyPaid(partner.id, currentMonth(), year);
+    const currentPaid = partnerMonthlyPaid(partner.id, month, year);
     const pct = Math.round((paidMonths / 12) * 100);
     const nameHtml = q
       ? esc(partner.fullName).replace(new RegExp(esc(S.partnersSearch).replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'gi'), m => `<mark>${m}</mark>`)
@@ -6657,6 +6676,18 @@ function setPartnersTypeFilter(type) {
 async function setPartnersYear(year) {
   S.partnersYear = Number(year) || currentYear();
   await loadPartnerData(S.partnersYear);
+  const list = document.getElementById('kpsc-partners-list');
+  if (list) list.innerHTML = renderPartnersList(canManagePartners());
+}
+
+function setPartnersMonth(month) {
+  S.partnersMonth = Number(month) || currentMonth();
+  const list = document.getElementById('kpsc-partners-list');
+  if (list) list.innerHTML = renderPartnersList(canManagePartners());
+}
+
+function setPartnersPaymentFilter(filter) {
+  S.partnersPaymentFilter = String(filter || 'all');
   const list = document.getElementById('kpsc-partners-list');
   if (list) list.innerHTML = renderPartnersList(canManagePartners());
 }
@@ -7702,10 +7733,17 @@ const SMS_TYPE_LABELS = {
 };
 
 async function renderSmsLogs(main) {
-  const year = currentYear();
-  const month = currentMonth();
+  const nowYear = currentYear();
+  const nowMonth = currentMonth();
+  const year = S.smsLogsYear || nowYear;
+  const month = S.smsLogsMonth || nowMonth;
   const filter = S.smsLogsFilter || 'all';
   const qs = `year=${year}&month=${month}` + (filter !== 'all' ? `&status=${encodeURIComponent(filter)}` : '');
+  const yearOpts = [nowYear, nowYear-1, nowYear-2].map(y => `<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
+  const monthOpts = Array.from({length: 12}, (_, i) => {
+    const m = i + 1;
+    return `<option value="${m}" ${month===m?'selected':''}>${monthName(m)}</option>`;
+  }).join('');
   const res = await apiGet(`kpsc-sms-logs?${qs}`);
   if (res?.error) throw new Error(res.error);
   S.smsLogsData = res;
@@ -7754,7 +7792,13 @@ async function renderSmsLogs(main) {
   main.innerHTML = `
     <div class="k-page">
       <div class="k-section">
-        <h3 class="k-sec-title">SMS Logs &amp; Outbox — ${monthName(month)} ${year}</h3>
+        <div class="k-section-hdr" style="margin-bottom:8px">
+          <h3 class="k-sec-title" style="margin:0">SMS Logs &amp; Outbox</h3>
+          <div style="display:flex;gap:6px">
+            <select class="k-input k-input-sm" onchange="Kpsc.setSmsLogsMonth(this.value)">${monthOpts}</select>
+            <select class="k-input k-input-sm" onchange="Kpsc.setSmsLogsYear(this.value)">${yearOpts}</select>
+          </div>
+        </div>
 
         <div class="k-sms-sched">
           <div class="k-sms-sched-row">
@@ -7796,7 +7840,7 @@ async function renderSmsLogs(main) {
             <span>${esc(balanceText)}</span>
           </div>
           <div class="k-sms-sched-row">
-            <span class="k-label" style="margin:0">Spent this month</span>
+            <span class="k-label" style="margin:0">Spent in ${monthName(month)} ${year}</span>
             <span>${fmtN(cost.monthCost)} <span class="k-hint" style="margin-left:6px">${(cost.monthPages || 0).toLocaleString('en-NG')} page(s) sent</span></span>
           </div>
           <div class="k-sms-sched-row">
@@ -7875,6 +7919,18 @@ async function copyText(text, btn) {
 
 async function setSmsLogsFilter(key) {
   S.smsLogsFilter = key;
+  const main = document.getElementById('kpsc-main');
+  if (main) { await renderSmsLogs(main); prependSubTabs(main, moneySubTabStrip()); }
+}
+
+async function setSmsLogsYear(year) {
+  S.smsLogsYear = Number(year) || currentYear();
+  const main = document.getElementById('kpsc-main');
+  if (main) { await renderSmsLogs(main); prependSubTabs(main, moneySubTabStrip()); }
+}
+
+async function setSmsLogsMonth(month) {
+  S.smsLogsMonth = Number(month) || currentMonth();
   const main = document.getElementById('kpsc-main');
   if (main) { await renderSmsLogs(main); prependSubTabs(main, moneySubTabStrip()); }
 }
@@ -9590,9 +9646,14 @@ function rerenderActionItemsList() {
 async function renderPartnerProgress(main) {
   const year = S.reportsYear;
   await loadPartnerData(year);
-  const month = currentMonth();
   const nowYear = currentYear();
+  const nowMonth = currentMonth();
+  const month = S.progressMonth || nowMonth;
   const yearOpts = [nowYear, nowYear-1, nowYear-2].map(y=>`<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
+  const monthOpts = Array.from({length: 12}, (_, i) => {
+    const m = i + 1;
+    return `<option value="${m}" ${month===m?'selected':''}>${monthName(m)}</option>`;
+  }).join('');
 
   const activePartners = S.partners.filter(p => p.status === 'active');
   const paidThisMonthPartners = activePartners.filter(p => partnerMonthlyPaid(p.id, month, year));
@@ -9630,7 +9691,7 @@ async function renderPartnerProgress(main) {
     const pct = Math.round((monthsPaid / 12) * 100);
     const dotRow = months.map(m => {
       const isPaid = partnerMonthlyPaid(partner.id, m, year);
-      const isFuture = year > nowYear || (year === nowYear && m > month);
+      const isFuture = year > nowYear || (year === nowYear && m > nowMonth);
       return `<span class="k-dot-cell ${isPaid ? 'k-dot-paid' : isFuture ? 'k-dot-future' : 'k-dot-unpaid'}" title="${monthName(m)}: ${isPaid ? 'Paid' : isFuture ? 'Future' : 'Unpaid'}"></span>`;
     }).join('');
     return `
@@ -9656,7 +9717,10 @@ async function renderPartnerProgress(main) {
     <div class="k-page">
       <div class="k-section-hdr">
         <h2>Partner Progress Report</h2>
-        <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setReportsYear(this.value)">${yearOpts}</select>
+        <div style="display:flex;gap:6px">
+          <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setProgressMonth(this.value)">${monthOpts}</select>
+          <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setReportsYear(this.value)">${yearOpts}</select>
+        </div>
       </div>
       <p class="k-page-hint">Progress view — pledge amounts are private and not shown here.</p>
       <div class="k-dash-stats">
@@ -9695,6 +9759,11 @@ function setReportsYear(year) {
     return;
   }
   rerenderInsightsList();
+}
+
+function setProgressMonth(month) {
+  S.progressMonth = Number(month) || currentMonth();
+  renderPage('partner-progress');
 }
 
 function setReportsMonth(month) {
@@ -15572,6 +15641,8 @@ window.Kpsc = {
   setPartnersTypeFilter,
   setInboxTab,
   setPartnersYear,
+  setPartnersMonth,
+  setPartnersPaymentFilter,
   setPartnersSearch,
   deletePartner,
   openPartnerDetail,
@@ -15617,11 +15688,14 @@ window.Kpsc = {
   retrySms,
   retryAllFailedSms,
   setSmsLogsFilter,
+  setSmsLogsYear,
+  setSmsLogsMonth,
   copyText,
   useReminderVariant,
   closePersonalizeModal,
   debouncedSaveReminderTemplate,
   setReportsYear,
+  setProgressMonth,
   setReportsMonth,
   setReportsFilter,
   setReportsSearch,
