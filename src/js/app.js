@@ -8457,8 +8457,10 @@ async function generateWeeklyReport(){
   });
 
   const totalCollected=income.reduce((s,r)=>s+(r.totalCollection||0),0);
-  const weeklySundayCount=new Set(income.filter(r=>!r.source||r.source==='sunday_collection').map(r=>r.date)).size;
-  const avgPerSunday=weeklySundayCount?Math.round(totalCollected/weeklySundayCount):0;
+  const sundayRecs=income.filter(r=>!r.source||r.source==='sunday_collection');
+  const weeklySundayCount=new Set(sundayRecs.map(r=>r.date)).size;
+  const sundayCollected=sundayRecs.reduce((s,r)=>s+(r.totalCollection||0),0);
+  const avgPerSunday=weeklySundayCount?Math.round(sundayCollected/weeklySundayCount):0;
   const deposited=income.filter(r=>{const c=getSundayCashWithAccountant(r,remRates);return c===0||(depositMap[r.id]||0)>=c}).length;
   const pending=income.length-deposited;
 
