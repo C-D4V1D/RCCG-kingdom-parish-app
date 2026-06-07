@@ -8334,6 +8334,11 @@ async function generateMonthlyReport(){
   const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate+totalFixedQuotas;
   const trueNetLocal=rem.netLocal-totalFixedQuotas;
   const netPosition=totalIncome-totalExpenses-totalRemDue;
+  const totalChildrenOffering=income.reduce((s,r)=>s+(r.childrenOffering||0),0);
+  const childrenLocalShare=totalChildrenOffering*getChildrenOfferingLocalRate(remRates);
+  const netPositionExChildren=netPosition-childrenLocalShare;
+  // Count unique Sundays only (exclude other-income records and duplicate dates)
+  const sundayCount=new Set(income.filter(r=>!r.source||r.source==='sunday_collection').map(r=>r.date)).size;
 
   // Income by type summary
   const incomeByType={};
@@ -8355,8 +8360,8 @@ async function generateMonthlyReport(){
       <div class="summary-box"><div class="label">Total Expenses</div><div class="value red">${fmt(totalExpenses)}</div></div>
       <div class="summary-box"><div class="label">Total Remittances Due</div><div class="value red">${fmt(totalRemDue)}</div></div>
       <div class="summary-box"><div class="label">Net Local Retained</div><div class="value green">${fmt(trueNetLocal)}</div></div>
-      <div class="summary-box"><div class="label">Net Position</div><div class="value ${netPosition>=0?'green':'red'}">${fmt(netPosition)}</div></div>
-      <div class="summary-box"><div class="label">No. of Sundays</div><div class="value blue">${income.length}</div></div>
+      <div class="summary-box"><div class="label">Net Parish Balance</div><div class="value ${netPositionExChildren>=0?'green':'red'}">${fmt(netPositionExChildren)}</div>${totalChildrenOffering>0?`<div style="font-size:10px;color:var(--text3);margin-top:3px">Incl. Children's Dept: ${fmt(netPosition)}</div>`:''}</div>
+      <div class="summary-box"><div class="label">No. of Sundays</div><div class="value blue">${sundayCount}</div></div>
     </div>
 
     <div class="section-title">Section A: Income Summary by Type</div>
@@ -8410,9 +8415,10 @@ async function generateMonthlyReport(){
       <tr><td style="font-weight:600">Total Income for ${periodLabel}</td><td class="td-r td-green">${fmt(totalIncome)}</td></tr>
       <tr><td style="padding-left:20px;color:#555">Less: Remittances Due to RCCG</td><td class="td-r td-red">− ${fmt(totalRemDue)}</td></tr>
       <tr><td style="padding-left:20px;color:#555">Less: Local Expenses</td><td class="td-r td-red">− ${fmt(totalExpenses)}</td></tr>
-      <tr class="total-row"><td>NET PARISH BALANCE</td><td class="td-r ${netPosition>=0?'td-green':'td-red'}">${fmt(netPosition)}</td></tr>
+      <tr class="total-row"><td>NET PARISH BALANCE</td><td class="td-r ${netPositionExChildren>=0?'td-green':'td-red'}">${fmt(netPositionExChildren)}</td></tr>
+      ${totalChildrenOffering>0?`<tr><td style="padding-left:20px;font-size:12px;color:var(--text3)">Children's Dept. local share included (managed by dept., not admin)</td><td class="td-r" style="font-size:12px;color:var(--text3)">+ ${fmt(childrenLocalShare)} = ${fmt(netPosition)}</td></tr>`:''}
     </table>
-    ${netPosition<0?'<div class="note-box">⚠️ The parish is in a deficit position this month. Expenses and remittances exceed total income. Please review with the Parish Pastor.</div>':''}
+    ${netPositionExChildren<0?'<div class="note-box">⚠️ The parish is in a deficit position this month. Expenses and remittances exceed total income (excluding Children\'s Dept. funds). Please review with the Parish Pastor.</div>':''}
 
     ${reportSignatureHTML(pastorName)}`;
 
@@ -8451,7 +8457,8 @@ async function generateWeeklyReport(){
   });
 
   const totalCollected=income.reduce((s,r)=>s+(r.totalCollection||0),0);
-  const avgPerSunday=income.length?Math.round(totalCollected/income.length):0;
+  const weeklySundayCount=new Set(income.filter(r=>!r.source||r.source==='sunday_collection').map(r=>r.date)).size;
+  const avgPerSunday=weeklySundayCount?Math.round(totalCollected/weeklySundayCount):0;
   const deposited=income.filter(r=>{const c=getSundayCashWithAccountant(r,remRates);return c===0||(depositMap[r.id]||0)>=c}).length;
   const pending=income.length-deposited;
 
@@ -8464,7 +8471,7 @@ async function generateWeeklyReport(){
 
     <div class="summary-grid">
       <div class="summary-box"><div class="label">Total Collections</div><div class="value green">${fmt(totalCollected)}</div></div>
-      <div class="summary-box"><div class="label">No. of Sundays</div><div class="value blue">${income.length}</div></div>
+      <div class="summary-box"><div class="label">No. of Sundays</div><div class="value blue">${weeklySundayCount}</div></div>
       <div class="summary-box"><div class="label">Average per Sunday</div><div class="value">${fmt(avgPerSunday)}</div></div>
       <div class="summary-box"><div class="label">Deposited</div><div class="value green">${deposited}</div></div>
       <div class="summary-box"><div class="label">Pending Deposit</div><div class="value ${pending>0?'amber':'green'}">${pending}</div></div>
