@@ -8415,8 +8415,9 @@ async function generateMonthlyReport(){
       <tr><td style="font-weight:600">Total Income for ${periodLabel}</td><td class="td-r td-green">${fmt(totalIncome)}</td></tr>
       <tr><td style="padding-left:20px;color:#555">Less: Remittances Due to RCCG</td><td class="td-r td-red">− ${fmt(totalRemDue)}</td></tr>
       <tr><td style="padding-left:20px;color:#555">Less: Local Expenses</td><td class="td-r td-red">− ${fmt(totalExpenses)}</td></tr>
+      ${totalChildrenOffering>0?`<tr style="background:#f5f5f5"><td style="font-weight:600">Balance (incl. Children's Dept. share)</td><td class="td-r" style="font-weight:600">${fmt(netPosition)}</td></tr>
+      <tr><td style="padding-left:20px;color:#555">Less: Children's Dept. local share (not admin-managed)</td><td class="td-r td-red">− ${fmt(childrenLocalShare)}</td></tr>`:''}
       <tr class="total-row"><td>NET PARISH BALANCE</td><td class="td-r ${netPositionExChildren>=0?'td-green':'td-red'}">${fmt(netPositionExChildren)}</td></tr>
-      ${totalChildrenOffering>0?`<tr><td style="padding-left:20px;font-size:12px;color:var(--text3)">Children's Dept. local share included (managed by dept., not admin)</td><td class="td-r" style="font-size:12px;color:var(--text3)">+ ${fmt(childrenLocalShare)} = ${fmt(netPosition)}</td></tr>`:''}
     </table>
     ${netPositionExChildren<0?'<div class="note-box">⚠️ The parish is in a deficit position this month. Expenses and remittances exceed total income (excluding Children\'s Dept. funds). Please review with the Parish Pastor.</div>':''}
 
