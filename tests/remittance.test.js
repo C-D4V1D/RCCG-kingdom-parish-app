@@ -50,7 +50,7 @@ test('calculateRemittances computes all categories with correct totals', () => {
   assert.equal(result.breakdown.sundaySchool.national, 10000);
   assertClose(result.breakdown.childrenOffering.childrensDept, 2600);
 
-  assertClose(result.totals.totalToNational, 123800);
+  assertClose(result.totals.totalToNational, 124000); // includes seed (200) now remitted to HQ
   assertClose(result.totals.totalToArea, 1000);
   assertClose(result.totals.totalToPastor, 2000);
   assertClose(result.totals.totalToMinisters, 1800);

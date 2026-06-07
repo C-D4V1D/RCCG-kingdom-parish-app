@@ -19,7 +19,7 @@ const REMITTANCE_RATES = {
     area: 0.05,
     pastor: 0.10,
     ministers: 0.09,
-    pastorsSeed: 0.01,   // 1% for the Pastor's Children (Seed)
+    pastorsSeed: 0.01,   // 1% Seed — remitted to National HQ
     local: 0,
     label: "Thanksgiving (TG)"
   },
@@ -113,7 +113,7 @@ function calculateRemittances(income) {
       pastorsSeed: amt * REMITTANCE_RATES.thanksgiving.pastorsSeed,
       local: 0
     };
-    result.totals.totalToNational += result.breakdown.thanksgiving.national;
+    result.totals.totalToNational += result.breakdown.thanksgiving.national + result.breakdown.thanksgiving.pastorsSeed;
     result.totals.totalToArea += result.breakdown.thanksgiving.area;
     result.totals.totalToPastor += result.breakdown.thanksgiving.pastor;
     result.totals.totalToMinisters += result.breakdown.thanksgiving.ministers;
