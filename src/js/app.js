@@ -8334,7 +8334,7 @@ async function generateMonthlyReport(){
   const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate+totalFixedQuotas;
   const trueNetLocal=rem.netLocal-totalFixedQuotas;
   const netPosition=totalIncome-totalExpenses-totalRemDue;
-  const totalChildrenOffering=income.filter(r=>!r.source||r.source==='sunday_collection').reduce((s,r)=>s+(r.childrenOffering||0),0);
+  const totalChildrenOffering=income.reduce((s,r)=>s+(r.childrenOffering||0),0);
   const childrenLocalShare=totalChildrenOffering*getChildrenOfferingLocalRate(remRates);
   const netPositionExChildren=netPosition-childrenLocalShare;
   // Count unique Sundays only (exclude other-income records and duplicate dates)
