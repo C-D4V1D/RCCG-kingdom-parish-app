@@ -2574,15 +2574,28 @@ async function renderDashboard(){
     .filter(h => h.status === 'approved' && !h.receiptNo).length;
 
   const totalPeriodAllExpenses = totalPeriodLoggedExpenses + totalPeriodPettyAdvanceSpend;
-  // Carried forward = (real cash on hand) − period income + period all-expenses.
-  // churchBal.total silently nets out unsettled Children Teacher's cash via
-  // getSundayCashWithAccountant, so add it back here to recover the actual physical
-  // cash position. That keeps the opening balance equal to the TRUE prior-period
-  // closing — the CT cash shows up as its own deduction line further down so the
-  // breakdown still reconciles to the same Total Church Balance.
-  const dashCarriedForward = churchBal.total + dashAllUnsettledChildrenTeacherCash - totalIncome + totalPeriodAllExpenses;
-  // True opening = cash on hand minus the still-owed remittances from prior periods.
-  const dashActualOpening = dashCarriedForward - dashPriorUnpaid;
+
+  // --- Net Parish Balance (NPB) for the opening card ---
+  // All-time logged expenses (approved + pending, excluding auto-petty entries)
+  const _allExpNPB = dashIsPastPeriod ? allExpensesDash.filter(_onOrBefore) : allExpensesDash;
+  const _allTimeLoggedExp = _allExpNPB
+    .filter(e => (e.status === 'approved' || e.status === 'pending') && !e.pettyRef)
+    .reduce((s, e) => s + (e.amount || 0), 0);
+  // All-time petty-advance spend
+  const _allPettyNPB = dashIsPastPeriod
+    ? pettyHistDash.filter(h => { const d = pettyAdvanceImpactDate(h); return !d || d <= dashAsOfDate; })
+    : pettyHistDash;
+  const _allTimePettySpend = _allPettyNPB
+    .filter(isApprovedOrSettledAdvance)
+    .reduce((s, h) => s + pettyAdvanceImpactAmount(h), 0);
+  // Prior-period NPB components (all-time minus this period)
+  const _priorIncome   = allIncome.reduce((s, r) => s + (r.totalCollection || 0), 0) - totalIncome;
+  const _priorExpenses = (_allTimeLoggedExp + _allTimePettySpend) - totalPeriodAllExpenses;
+  const _priorRemDue   = Math.max(0, (dashAllTimeIncomeRemDue + dashAccumQuotas) - dashCurrentMonthRemDue);
+  const _priorCTShare  = dashAllUnsettledChildrenTeacherCash - dashChildrenTeacherTotal;
+  // Net Parish Balance: what the parish had after settling all prior obligations.
+  // Ignores petty-float initialisation and pre-app bank movements — only tracked records count.
+  const dashCarriedForward = _priorIncome - _priorExpenses - _priorRemDue - _priorCTShare;
   const dashPrevMonthName = MONTHS[state.month === 0 ? 11 : state.month - 1];
   // Label for the Carried Forward card — "after last remittance (19 Apr)" or "after last month (31 Mar)"
   const _pStart = new Date(dashPeriodFrom + 'T00:00:00');
@@ -2591,13 +2604,9 @@ async function renderDashboard(){
   const dashCarriedFwdDateStr = useRemPeriod
     ? `${_dayBefore.getDate()} ${MONTHS[_dayBefore.getMonth()].slice(0,3)}`
     : `${_lastDayPrevMo.getDate()} ${MONTHS[_lastDayPrevMo.getMonth()].slice(0,3)}`;
-  // "Total" prefix distinguishes this from the Actual Balance variant shown alongside.
   const dashCarriedFwdLabel = useRemPeriod
-    ? `Total Balance after last remittance (${dashCarriedFwdDateStr})`
-    : `Total Balance after last month (${dashCarriedFwdDateStr})`;
-  const dashActualOpeningLabel = useRemPeriod
-    ? `Actual Balance after last remittance (${dashCarriedFwdDateStr})`
-    : `Actual Balance after last month (${dashCarriedFwdDateStr})`;
+    ? `Net Parish Balance after last remittance (${dashCarriedFwdDateStr})`
+    : `Net Parish Balance after last month (${dashCarriedFwdDateStr})`;
 
   // Feed items — richer detail for Recent Transactions card
   const recentIncome = allIncome.slice(0,4);
@@ -2838,16 +2847,11 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:#6366F1;border-radius:3px 0 0 3px"></div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
           <div style="min-width:0;flex:1">
-            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:#6366F1;margin-bottom:1px">Total Balance after last period (${dashCarriedFwdDateStr})</div>
+            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:#6366F1;margin-bottom:1px">Net Parish Balance after last period (${dashCarriedFwdDateStr})</div>
             <div style="font-size:11px;color:var(--text3)">Opening balance at the start of this period</div>
           </div>
           <div style="font-size:18px;font-weight:800;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'};letter-spacing:-0.5px;white-space:nowrap;flex-shrink:0">${fmt(dashCarriedForward)}</div>
         </div>
-        ${dashCarriedForward!==0 && dashPriorUnpaid>0?`
-        <div style="margin-top:8px;padding-top:8px;border-top:1px dashed rgba(99,102,241,0.25);display:flex;align-items:center;justify-content:space-between;gap:12px">
-          <div style="font-size:10.5px;color:var(--text3)">Actual balance <span style="color:var(--text3)">— after −${fmt(dashPriorUnpaid)} owed from previous period(s)</span></div>
-          <div style="font-size:14px;font-weight:700;color:${dashActualOpening<0?'var(--danger)':'var(--text2)'};white-space:nowrap;flex-shrink:0">${fmt(dashActualOpening)}</div>
-        </div>`:''}
       </div>
 
       <!-- + connector -->
@@ -3014,90 +3018,75 @@ async function renderDashboard(){
       </summary>
       <div style="background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--rl) var(--rl);overflow:hidden">
         <div class="dash-explain-slider" style="display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;-webkit-overflow-scrolling:touch">
-          <!-- Slide 1: From Total Balance -->
+          <!-- Slide 1: How Available Fund is calculated (physical balance path) -->
           <div style="flex:0 0 100%;scroll-snap-align:start;padding:16px 18px;box-sizing:border-box">
-            <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px">From Total Balance</div>
+            <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px">How Available Fund is Calculated</div>
             <div style="font-size:12px;line-height:2.3;color:var(--text2)">
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">${dashCarriedFwdLabel}</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'}">${fmt(dashCarriedForward)}</span>
+                <span style="color:var(--text3)">🏦 Bank balance</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace">${fmt(churchBal.bankBalance)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">+ Total Income</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(totalIncome)}</span>
+                <span style="color:var(--text3)">💵 Cash with Accountant</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace">${fmt(churchBal.cashWithAccountant)}</span>
               </div>
-              <div style="display:flex;justify-content:space-between;align-items:center${dashAllUnsettledChildrenTeacherCash>0?'':';border-bottom:1.5px dashed var(--border);padding-bottom:6px'}">
-                <span style="color:var(--text3)">− Total Expenses ${totalPeriodPendingExpenses>0?'(incl. pending)':''}</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodAllExpenses)}</span>
-              </div>
-              ${dashAllUnsettledChildrenTeacherCash>0?`
               <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-                <span style="color:var(--text3)">− Children Teacher's cash held</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashAllUnsettledChildrenTeacherCash)}</span>
-              </div>`:''}
+                <span style="color:var(--text3)">🪙 Petty cash</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:${churchBal.pettyFloat<0?'var(--danger)':'inherit'}">${fmt(churchBal.pettyFloat)}</span>
+              </div>
               <div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:13px;padding-top:2px">
                 <span>= Total Church Balance</span>
                 <span style="font-family:ui-monospace,monospace;color:#185FA5">${fmt(churchBal.total)}</span>
               </div>
               ${dashPriorUnpaid>0?`
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">− Unpaid remittance from previous period(s)</span>
+                <span style="color:var(--text3)">− Unpaid from previous period(s)</span>
                 <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashPriorUnpaid)}</span>
               </div>
-              <div style="display:flex;justify-content:space-between;align-items:center">
+              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
                 <span style="color:var(--text3)">− RCCG remittance due (this period)</span>
                 <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashThisPeriodUnpaid)}</span>
-              </div>
-              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-                <span style="color:var(--text3)">= Total RCCG remittances</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
               </div>`:`
               <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-                <span style="color:var(--text3)">− RCCG remittance due</span>
+                <span style="color:var(--text3)">− RCCG outstanding remittances</span>
                 <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
               </div>`}
               <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
-                <span>= Actual Balance</span>
+                <span>= Available Fund</span>
                 <span style="font-family:ui-monospace,monospace;color:${dashSpendColor}">${fmt(dashSpendable)}</span>
               </div>
             </div>
           </div>
-          <!-- Slide 2: From Actual Balance — start net of prior remittances, add only what the parish keeps -->
+          <!-- Slide 2: How the opening Net Parish Balance was computed -->
           <div style="flex:0 0 100%;scroll-snap-align:start;padding:16px 18px;box-sizing:border-box">
-            <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px">From Actual Balance</div>
+            <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px">How the Opening Balance Was Computed</div>
             <div style="font-size:12px;line-height:2.3;color:var(--text2)">
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">${dashActualOpeningLabel}</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:${dashActualOpening<0?'var(--danger)':'var(--text2)'}">${fmt(dashActualOpening)}</span>
+                <span style="color:var(--text3)">Income (before this period)</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(_priorIncome)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">+ Parish retains (this period)</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(parishRetains)}</span>
+                <span style="color:var(--text3)">− Expenses (before this period)</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(_priorExpenses)}</span>
               </div>
-              ${otherUnremittedIncome>0?`
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">+ Other unremitted income</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(otherUnremittedIncome)}</span>
-              </div>`:''}
-              <div style="display:flex;justify-content:space-between;align-items:center${dashAllUnsettledChildrenTeacherCash>0?'':';border-bottom:1.5px dashed var(--border);padding-bottom:6px'}">
-                <span style="color:var(--text3)">− Total Expenses ${totalPeriodPendingExpenses>0?'(incl. pending)':''}</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodAllExpenses)}</span>
+                <span style="color:var(--text3)">− RCCG remittances due (prior periods)</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(_priorRemDue)}</span>
               </div>
-              ${dashAllUnsettledChildrenTeacherCash>0?`
               <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-                <span style="color:var(--text3)">− Children Teacher's cash held</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashAllUnsettledChildrenTeacherCash)}</span>
-              </div>`:''}
+                <span style="color:var(--text3)">− Children's dept allocation (prior)</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(_priorCTShare)}</span>
+              </div>
               <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
-                <span>= Actual Balance</span>
-                <span style="font-family:ui-monospace,monospace;color:${dashSpendColor}">${fmt(dashSpendable)}</span>
+                <span>= Net Parish Balance (opening)</span>
+                <span style="font-family:ui-monospace,monospace;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'}">${fmt(dashCarriedForward)}</span>
               </div>
             </div>
           </div>
         </div>
         <div style="padding:10px 18px 14px;font-size:11px;color:var(--text3);line-height:1.6;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;justify-content:center">
           <span style="font-size:13px">◀</span>
-          <span>Slide left or right to see the other way to calculate your Actual Balance.</span>
+          <span>Slide left or right — how Available Fund is calculated ◀▶ how the opening balance was computed.</span>
           <span style="font-size:13px">▶</span>
         </div>
       </div>
