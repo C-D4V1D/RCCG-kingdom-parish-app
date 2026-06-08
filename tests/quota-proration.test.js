@@ -177,6 +177,25 @@ test('actual balance helper paths stay mathematically aligned', () => {
   assert.equal(availableFromOpening, 100000);
 });
 
+test('remittance split keeps prior carryover inside the total outstanding figure', () => {
+  const noCarryoverTotalOutstanding = 74595.20;
+  const noCarryoverCurrentUnpaid = App._calcCurrentPeriodOutstandingRemittance(82937.70, 8342.50, noCarryoverTotalOutstanding);
+  assert.equal(noCarryoverCurrentUnpaid, 74595.20);
+  assert.equal(noCarryoverTotalOutstanding - noCarryoverCurrentUnpaid, 0);
+
+  const totalOutstanding = 90000;
+  const currentUnpaid = App._calcCurrentPeriodOutstandingRemittance(80000, 5000, totalOutstanding);
+  const priorCarryover = totalOutstanding - currentUnpaid;
+  assert.equal(currentUnpaid, 75000);
+  assert.equal(priorCarryover, 15000);
+  assert.equal(currentUnpaid + priorCarryover, totalOutstanding);
+
+  assert.equal(
+    App._calcCurrentPeriodOutstandingRemittance(18000, 20000, 5000),
+    0
+  );
+});
+
 test('total remittance due helper sums all remittance buckets and quotas', () => {
   const total = App._totalRemittanceDue({
     totalNatl: 10000,

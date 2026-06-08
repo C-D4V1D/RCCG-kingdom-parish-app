@@ -1025,6 +1025,13 @@ function calcOutstandingRemittancesFromFlow(openingOutstandingRems, currentPerio
   return Math.max(0, openingOutstandingRems + currentPeriodRemDue - periodRemittancesPaid);
 }
 
+function calcCurrentPeriodOutstandingRemittance(currentPeriodRemDue, periodRemittancesPaid, totalOutstandingRems = Number.POSITIVE_INFINITY){
+  return Math.min(
+    Math.max(0, currentPeriodRemDue - periodRemittancesPaid),
+    Number.isFinite(totalOutstandingRems) ? Math.max(0, totalOutstandingRems) : Number.POSITIVE_INFINITY
+  );
+}
+
 function calcAvailableFundFromOpening(openingBalance, openingOutstandingRems, totalIncome, childrenTeacherHold, totalExpenses, currentPeriodRemDue){
   return (openingBalance - openingOutstandingRems) + (totalIncome - childrenTeacherHold) - totalExpenses - currentPeriodRemDue;
 }
@@ -2522,8 +2529,9 @@ async function renderDashboard(){
   // Split the all-time outstanding into "this period" vs "prior periods" so the dashboard
   // can show the selected period in the headline and surface any carryover as a sub-line.
   // The sum of the two always equals dashTotalRemDueKpi, so the Available Fund math is unchanged.
-  const dashThisPeriodUnpaid = Math.min(
-    Math.max(0, dashCurrentMonthRemDue - dashMonthPaidAmt),
+  const dashThisPeriodUnpaid = calcCurrentPeriodOutstandingRemittance(
+    dashCurrentMonthRemDue,
+    dashMonthPaidAmt,
     dashTotalRemDueKpi
   );
   const dashPriorUnpaid = dashTotalRemDueKpi - dashThisPeriodUnpaid;
@@ -3019,17 +3027,18 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--amber)"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
-            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">RCCG Remittance Due${dashPriorUnpaid>0?' <span style="color:var(--text3);font-weight:600">(this period)</span>':''}</div>
-            <div style="font-size:26px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(dashCurrentMonthRemDue)}</div>
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">RCCG Remittance Due</div>
+            <div style="font-size:26px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(dashOutstandingRems)}</div>
             <div style="font-size:12px;color:var(--text3);margin-top:5px">📅 ${dashDueLabel}</div>
-            ${totalIncome>0?`<div style="margin-top:4px;font-size:11.5px;color:var(--amber)">${Math.round(dashCurrentMonthRemDue/totalIncome*100)}% of period income</div>`:''}
+            ${totalIncome>0?`<div style="margin-top:4px;font-size:11.5px;color:var(--amber)">${Math.round(dashOutstandingRems/totalIncome*100)}% of period income</div>`:''}
+            ${dashMonthPaidAmt>0 && dashOutstandingRems>0 ? `<div style="margin-top:4px;font-size:11px;color:var(--text3)">After ${fmt(dashMonthPaidAmt)} already paid this period</div>` : ''}
           </div>
           <div style="width:44px;height:44px;border-radius:12px;background:#FCEBEB;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">📤</div>
         </div>
         ${dashPriorUnpaid>0?`
         <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(184,134,11,0.25);display:flex;align-items:center;justify-content:space-between;gap:12px">
-          <div style="font-size:10.5px;color:var(--text3)">Unpaid from previous period(s)</div>
-          <div style="font-size:14px;font-weight:700;color:var(--danger);white-space:nowrap;flex-shrink:0">+${fmt(dashPriorUnpaid)}</div>
+          <div style="font-size:10.5px;color:var(--text3)">Includes unpaid from previous period(s)</div>
+          <div style="font-size:14px;font-weight:700;color:var(--danger);white-space:nowrap;flex-shrink:0">${fmt(dashPriorUnpaid)}</div>
         </div>`:''}
       </div>
 
@@ -3106,7 +3115,7 @@ async function renderDashboard(){
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
                 <span style="color:var(--text3)">− RCCG outstanding remittances</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashOutstandingRemsFromFlow)}</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashOutstandingRems)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
                 <span>= Actual Balance</span>
@@ -9663,6 +9672,7 @@ return {
       _totalRemittanceDue: totalRemittanceDue,
       _calcChurchBalanceFromOpening: calcChurchBalanceFromOpening,
       _calcOutstandingRemittancesFromFlow: calcOutstandingRemittancesFromFlow,
+      _calcCurrentPeriodOutstandingRemittance: calcCurrentPeriodOutstandingRemittance,
       _calcAvailableFundFromOpening: calcAvailableFundFromOpening
     };
 
