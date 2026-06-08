@@ -2850,8 +2850,12 @@ async function renderDashboard(){
     let hInc;
     if(useRemPeriod){const{from:pf,to:pt}=computeRemPeriodDates(settings,allRemsDash,y,m);hInc=filterByDateRange(allIncomeDash,pf,pt);}
     else{hInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});}
-    const hSundayRecs=hInc.filter(r=>!r.source||r.source==='sunday_collection');
-    const hSundays=hSundayRecs.length>0?hSundayRecs.length:fullMonthSundays(y,m);
+    // Count distinct Sunday DATES, not records — a single Sunday's collection is routinely
+    // split across multiple entries (e.g. cash + transfer), so counting records would inflate
+    // the Sunday count and deflate the per-Sunday rate. Mirrors the Sunday-count logic used in
+    // the Income Breakdown so the forecast agrees with the rest of the dashboard.
+    const hSundayDates=new Set(hInc.filter(r=>!r.source||r.source==='sunday_collection').map(r=>r.date));
+    const hSundays=hSundayDates.size>0?hSundayDates.size:fullMonthSundays(y,m);
     histMonths.push({income:trendData[3-i].income,expenses:trendData[3-i].expenses,sundays:hSundays});}
   const validHist=histMonths.filter(h=>h.income>0&&h.sundays>0);
   // Current month's per-Sunday rate (most accurate signal when available)
