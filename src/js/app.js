@@ -2871,17 +2871,24 @@ async function renderDashboard(){
     const blendedRate=currentRate!==null&&historicalRate!==null
       ?(currentRate*cw+historicalRate*hw)/(cw+hw)
       :(currentRate??historicalRate);
-    const proj=trendData[3].income+remainingSundays*blendedRate;
-    // Income spread: std dev of all known per-Sunday rates × full month Sunday count
+    const realizedIncome=trendData[3].income;
+    const proj=realizedIncome+remainingSundays*blendedRate;
+    // Income spread: the uncertainty lives only in the *unbanked* Sundays — money already
+    // collected is known, so the band must narrow as the month progresses and vanish once
+    // the last Sunday is in. Per-Sunday rates here are monthly averages (i.e. month-level
+    // variation), so the remaining same-month Sundays move together → scale linearly with
+    // the number of Sundays still to come, not the full month.
     const allRates=[...validHist.map(h=>h.income/h.sundays),...(currentRate!==null?[currentRate]:[])];
     let incomeSpread;
     if(allRates.length>=2){
       const meanR=allRates.reduce((s,r)=>s+r,0)/allRates.length;
-      incomeSpread=Math.sqrt(allRates.reduce((s,r)=>s+(r-meanR)**2,0)/allRates.length)*totalSundaysFullMonth;
+      const perSundayStd=Math.sqrt(allRates.reduce((s,r)=>s+(r-meanR)**2,0)/allRates.length);
+      incomeSpread=perSundayStd*remainingSundays;
     }else{
-      incomeSpread=proj*0.10; // 10% floor — single data point
+      incomeSpread=remainingSundays*blendedRate*0.15; // single data point: 15% band on the unbanked portion
     }
-    forecastIncome={min:Math.max(0,Math.round(proj-incomeSpread)),max:Math.round(proj+incomeSpread)};
+    // Floor the band at income already collected — the month-end total can never end up below it.
+    forecastIncome={min:Math.max(realizedIncome,Math.round(proj-incomeSpread)),max:Math.round(proj+incomeSpread)};
     // Retained income forecast: blend historical retention rates with current month
     // Correctly accounts for variable income mix (Thanksgiving = 0% local, tithes = ~40% local, etc.)
     const validHistRates=histMonthRetention.filter(h=>h.retentionRate!==null);
@@ -2898,19 +2905,25 @@ async function renderDashboard(){
       }
       forecastRetained={min:Math.max(0,Math.round(forecastIncome.min*blendedRetRate)),max:Math.max(0,Math.round(forecastIncome.max*blendedRetRate))};
     }
-    // Expense spread: std dev of actual monthly totals
+    // Expense forecast: anchored to what's already been spent this month. Expenses don't
+    // track Sundays, so we expect the month to land near the historical average — but it can
+    // never end up below what's already gone out, so both the point estimate and the band
+    // floor at the current month's actual spend (otherwise a month that has already overspent
+    // the average would show an already-breached band, which is useless for budgeting).
     const validExp=histMonths.filter(h=>h.expenses>0);
     if(validExp.length>0){
+      const curExp=trendData[3].expenses;
       const ewts=validExp.map((_,i)=>i+1);
       const avgExp=validExp.reduce((s,h,i)=>s+ewts[i]*h.expenses,0)/ewts.reduce((s,w)=>s+w,0);
+      const projExp=Math.max(curExp,avgExp);
       let expSpread;
       if(validExp.length>=2){
         const expMean=validExp.reduce((s,h)=>s+h.expenses,0)/validExp.length;
         expSpread=Math.sqrt(validExp.reduce((s,h)=>s+(h.expenses-expMean)**2,0)/validExp.length);
       }else{
-        expSpread=avgExp*0.20; // 20% floor — single data point
+        expSpread=avgExp*0.20; // 20% band — single data point
       }
-      forecastExpenses={min:Math.max(0,Math.round(avgExp-expSpread)),max:Math.round(avgExp+expSpread)};
+      forecastExpenses={min:Math.max(curExp,Math.round(projExp-expSpread)),max:Math.round(projExp+expSpread)};
     }
   }
 
