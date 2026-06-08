@@ -3089,7 +3089,7 @@ async function renderDashboard(){
                 <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">+${fmt(totalIncome)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:#BA7517">− Children Teacher hold (not managed by Admin Team)</span>
+                <span style="color:#BA7517">− Children Teacher hold (not managed by Admin team)</span>
                 <span style="font-weight:600;font-family:ui-monospace,monospace;color:#BA7517">−${fmt(dashChildrenTeacherTotal)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center">
