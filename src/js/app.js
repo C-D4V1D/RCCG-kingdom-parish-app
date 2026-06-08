@@ -2234,7 +2234,13 @@ async function calcChurchBalance(asOfDate, prefetched){
       .flatMap(pettyFloatEvents)
       .filter(e => e.date && e.date > asOfDate)
       .reduce((s,e) => s + e.delta, 0);
-    pettyFloat = pettyConfig.float - reverseDelta;
+    // Also reverse direct-petty expense deductions (pettyAmount > 0) whose date is after
+    // the snapshot date. The backend recalcPettyFloat subtracts these when rebuilding the
+    // stored float, so the historical unwind must add them back to avoid over-deducting.
+    const reverseExpenseDeductions = expenses
+      .filter(e => (e.pettyAmount||0) > 0 && recDate(e) > asOfDate)
+      .reduce((s,e) => s + (e.pettyAmount||0), 0);
+    pettyFloat = pettyConfig.float - reverseDelta + reverseExpenseDeductions;
   }
 
   return {
@@ -2572,38 +2578,28 @@ async function renderDashboard(){
 
   const totalPeriodAllExpenses = totalPeriodLoggedExpenses + totalPeriodPettyAdvanceSpend;
 
-  // --- Net Parish Balance (NPB) for the opening card ---
-  // All-time logged expenses (approved + pending, excluding auto-petty entries)
-  const _allExpNPB = dashIsPastPeriod ? allExpensesDash.filter(_onOrBefore) : allExpensesDash;
-  const _allTimeLoggedExp = _allExpNPB
-    .filter(e => (e.status === 'approved' || e.status === 'pending') && !e.pettyRef)
-    .reduce((s, e) => s + (e.amount || 0), 0);
-  // All-time petty-advance spend
-  const _allPettyNPB = dashIsPastPeriod
-    ? pettyHistDash.filter(h => { const d = pettyAdvanceImpactDate(h); return !d || d <= dashAsOfDate; })
-    : pettyHistDash;
-  const _allTimePettySpend = _allPettyNPB
-    .filter(isApprovedOrSettledAdvance)
-    .reduce((s, h) => s + pettyAdvanceImpactAmount(h), 0);
-  // Prior-period NPB components (all-time minus this period)
-  const _priorIncome   = allIncome.reduce((s, r) => s + (r.totalCollection || 0), 0) - totalIncome;
-  const _priorExpenses = (_allTimeLoggedExp + _allTimePettySpend) - totalPeriodAllExpenses;
-  const _priorRemDue   = Math.max(0, (dashAllTimeIncomeRemDue + dashAccumQuotas) - dashCurrentMonthRemDue);
-  const _priorCTShare  = dashAllUnsettledChildrenTeacherCash - dashChildrenTeacherTotal;
-  // Net Parish Balance: what the parish had after settling all prior obligations.
-  // Ignores petty-float initialisation and pre-app bank movements — only tracked records count.
-  const dashCarriedForward = _priorIncome - _priorExpenses - _priorRemDue - _priorCTShare;
-  const dashPrevMonthName = MONTHS[state.month === 0 ? 11 : state.month - 1];
-  // Label for the Carried Forward card — "after last remittance (19 Apr)" or "after last month (31 Mar)"
+  // --- Opening balance = prior period's closing Total Church Balance ---
+  // Date-helpers for the prior-close snapshot and card labels.
   const _pStart = new Date(dashPeriodFrom + 'T00:00:00');
   const _dayBefore = new Date(_pStart); _dayBefore.setDate(_dayBefore.getDate() - 1);
   const _lastDayPrevMo = new Date(state.year, state.month, 0);
+  const dashPriorCloseDate = useRemPeriod ? ymdLocal(_dayBefore) : ymdLocal(_lastDayPrevMo);
+  // Call calcChurchBalance for the day before this period began. The prefetched arrays
+  // already contain all historical records, so no extra API call is needed.
+  const dashOpeningBal = await calcChurchBalance(dashPriorCloseDate, {
+    income: allIncomeDash, expenses: allExpensesDash, remittances: allRemsDash,
+    cashTx: cashTxDash, pettyHistory: pettyHistDash, pettyConfig: pettyConfigDash,
+    remRates: (remRatesDash.rates || DEFAULT_REMITTANCE_RATES)
+  });
+  // dashCarriedForward is the opening amount shown on the card.
+  // By construction, May's closing TCB === June's opening — period continuity is exact.
+  const dashCarriedForward = dashOpeningBal.total;
   const dashCarriedFwdDateStr = useRemPeriod
     ? `${_dayBefore.getDate()} ${MONTHS[_dayBefore.getMonth()].slice(0,3)}`
     : `${_lastDayPrevMo.getDate()} ${MONTHS[_lastDayPrevMo.getMonth()].slice(0,3)}`;
   const dashCarriedFwdLabel = useRemPeriod
-    ? `Net Parish Balance after last remittance (${dashCarriedFwdDateStr})`
-    : `Net Parish Balance after last month (${dashCarriedFwdDateStr})`;
+    ? `Opening balance (as of ${dashCarriedFwdDateStr})`
+    : `Opening balance (as of ${dashCarriedFwdDateStr})`;
 
   // Feed items — richer detail for Recent Transactions card
   const recentIncome = allIncome.slice(0,4);
@@ -2844,8 +2840,8 @@ async function renderDashboard(){
         <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:#6366F1;border-radius:3px 0 0 3px"></div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
           <div style="min-width:0;flex:1">
-            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:#6366F1;margin-bottom:1px">Net Parish Balance after last period (${dashCarriedFwdDateStr})</div>
-            <div style="font-size:11px;color:var(--text3)">Opening balance at the start of this period</div>
+            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:#6366F1;margin-bottom:1px">${dashCarriedFwdLabel}</div>
+            <div style="font-size:11px;color:var(--text3)">Total church balance carried from the previous period</div>
           </div>
           <div style="font-size:18px;font-weight:800;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'};letter-spacing:-0.5px;white-space:nowrap;flex-shrink:0">${fmt(dashCarriedForward)}</div>
         </div>
@@ -3054,30 +3050,30 @@ async function renderDashboard(){
               </div>
             </div>
           </div>
-          <!-- Slide 2: How the opening Net Parish Balance was computed -->
+          <!-- Slide 2: What the church had at the start of this period -->
           <div style="flex:0 0 100%;scroll-snap-align:start;padding:16px 18px;box-sizing:border-box">
-            <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px">How the Opening Balance Was Computed</div>
+            <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px">Opening Balance — What the Church Had on ${dashCarriedFwdDateStr}</div>
             <div style="font-size:12px;line-height:2.3;color:var(--text2)">
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">Income (before this period)</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">${fmt(_priorIncome)}</span>
+                <span style="color:var(--text3)">🏦 Bank balance</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace">${fmt(dashOpeningBal.bankBalance)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">− Expenses (before this period)</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(_priorExpenses)}</span>
-              </div>
-              <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">− RCCG remittances due (prior periods)</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(_priorRemDue)}</span>
+                <span style="color:var(--text3)">💵 Cash with Accountant</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace">${fmt(dashOpeningBal.cashWithAccountant)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-                <span style="color:var(--text3)">− Children's dept allocation (prior)</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(_priorCTShare)}</span>
+                <span style="color:var(--text3);color:${dashOpeningBal.pettyFloat<0?'var(--danger)':'var(--text3)'}">🪙 Petty cash${dashOpeningBal.pettyFloat<0?' (church owes Admin Officer)':''}</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:${dashOpeningBal.pettyFloat<0?'var(--danger)':'inherit'}">${fmt(dashOpeningBal.pettyFloat)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
-                <span>= Net Parish Balance (opening)</span>
+                <span>= Opening Balance</span>
                 <span style="font-family:ui-monospace,monospace;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'}">${fmt(dashCarriedForward)}</span>
               </div>
+            </div>
+            <div style="margin-top:10px;font-size:11px;color:var(--text3);line-height:1.5;padding-top:8px;border-top:1px dashed var(--border)">
+              This is the exact physical balance the parish was holding when this period began.
+              It equals the previous period's closing Total Church Balance, so consecutive periods reconcile automatically.
             </div>
           </div>
         </div>
