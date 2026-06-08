@@ -445,15 +445,15 @@ const _DASH_CACHE_KEYS = ['income','expenses','petty','settings','remittances','
 
 function _assembleDashFromCache(){
   const fresh = key => { const c = _apiCache.get(key); return (c && Date.now() - c.ts < _CACHE_TTL[key]) ? c : null; };
-  if(!_DASH_CACHE_KEYS.every(fresh)) return null;
+  if(!_DASH_CACHE_KEYS.every(k => fresh(k))) return null;
   return {
-    income:           fresh('income').data,
-    expenses:         fresh('expenses').data,
-    petty:            fresh('petty').data,
-    settings:         fresh('settings').data,
-    remittances:      fresh('remittances').data,
-    pettyConfig:      fresh('petty-config').data,
-    cashTransactions: fresh('cash-transactions').data,
+    income:           fresh('income')?.data,
+    expenses:         fresh('expenses')?.data,
+    petty:            fresh('petty')?.data,
+    settings:         fresh('settings')?.data,
+    remittances:      fresh('remittances')?.data,
+    pettyConfig:      fresh('petty-config')?.data,
+    cashTransactions: fresh('cash-transactions')?.data,
   };
 }
 
@@ -1123,9 +1123,10 @@ function showAlert(msg,type='success'){
   const icon=document.createElement('span'); icon.className='alert-icon'; icon.textContent=type==='success'?'✓':type==='danger'?'✕':'⚠';
   const txt=document.createElement('span'); txt.textContent=msg;
   a.appendChild(icon); a.appendChild(txt);
-  const pc=document.getElementById('pageContent'); if(pc){ pc.insertBefore(a,pc.firstChild); setTimeout(()=>a.remove(),4000) }
+  const duration = type==='danger' ? 6000 : 4000;
+  const pc=document.getElementById('pageContent'); if(pc){ pc.insertBefore(a,pc.firstChild); setTimeout(()=>a.remove(),duration) }
 }
-async function updateNotifBadge(){ try{ const notifs=await DB.getNotifications(); const unread=notifs.filter(n=>!n.read).length; const el=document.getElementById('notifCount'); if(el){ el.textContent=unread; el.style.display=unread?'flex':'none' } }catch(e){} }
+async function updateNotifBadge(){ try{ const notifs=await DB.getNotifications(); const unread=notifs.filter(n=>!n.read).length; const el=document.getElementById('notifCount'); if(el){ el.textContent=unread; el.style.display=unread?'flex':'none' } }catch(e){ console.warn('Failed to update notification badge:', e) } }
 
 // ──────────────────────────────────────────
 // 5. AUTH
@@ -1364,7 +1365,10 @@ function updateSidebarUser(){
   const u = state.user;
   if(!u) return;
   const r = ROLES[u.role];
-  document.getElementById('sidebarUser').innerHTML=`
+  if(!r) return;
+  const el = document.getElementById('sidebarUser');
+  if(!el) return;
+  el.innerHTML=`
     <strong>${u.name}</strong>
     <span style="display:inline-block;margin-top:4px;font-size:11px;padding:2px 8px;border-radius:10px;background:${r.bg};color:${r.color};font-weight:600">${r.label}</span>`;
 }
@@ -3753,13 +3757,13 @@ async function submitIncome(btn=null){
   if(!canAction('income_record')){ showAlert('You do not have permission to record income.','danger'); return; }
   const date=document.getElementById('inc_date')?.value;
   const usher=document.getElementById('inc_usher')?.value?.trim();
-  if(!date){ alert('Please select a date.'); return }
-  if(!usher){ alert('Please enter the Head Usher name for counter-signing.'); return }
+  if(!date){ showAlert('Please select a date.','danger'); return }
+  if(!usher){ showAlert('Please enter the Head Usher name for counter-signing.','danger'); return }
   const rec={date,usher,source:'sunday_collection',recordedBy:state.user?.name,depositConfirmed:false};
   let total=0;
   INCOME_TYPES.forEach(t=>{ const v=parseFloat(document.getElementById('inc_'+t.key)?.value||0)||0; rec[t.key]=v; total+=v });
   total=Math.round(total * 100) / 100;
-  if(!total){ alert('Please enter at least one income amount.'); return }
+  if(!total){ showAlert('Please enter at least one income amount.','danger'); return }
   rec.totalCollection=total;
 
   const bankTransferAmount = Math.round((parseFloat(document.getElementById('inc_bank_transfer')?.value||0)||0)*100)/100;
@@ -3768,7 +3772,7 @@ async function submitIncome(btn=null){
   const childrenTeacherHeld = getChildrenTeacherHeldCash(rec, remRates);
   const maxAllocatable = Math.max(0, total - childrenTeacherHeld);
   if(bankTransferAmount + directPettyCash > maxAllocatable){
-    alert(`Bank transfer (${fmt(bankTransferAmount)}) + direct petty cash (${fmt(directPettyCash)}) cannot exceed the amount available after Children Teacher hold (${fmt(maxAllocatable)}).`);
+    showAlert(`Bank transfer (${fmt(bankTransferAmount)}) + direct petty cash (${fmt(directPettyCash)}) cannot exceed the amount available after Children Teacher hold (${fmt(maxAllocatable)}).`,"danger");
     return;
   }
   rec.bankTransferAmount = bankTransferAmount;
@@ -3980,8 +3984,8 @@ async function submitCashDeposit(incomeId, btn=null){
   const ref     = document.getElementById('dep_ref')?.value?.trim();
   const date    = document.getElementById('dep_date')?.value;
   const photoFile = document.getElementById('dep_photo')?.files?.[0];
-  if(!amount||!date){ alert('Please fill all required fields.'); return; }
-  if(!ref&&!photoFile){ alert('Please provide either a teller/reference number or upload a photo of the deposit slip. At least one is required.'); return; }
+  if(!amount||!date){ showAlert('Please fill all required fields.','danger'); return; }
+  if(!ref&&!photoFile){ showAlert('Please provide either a teller/reference number or upload a photo of the deposit slip. At least one is required.','danger'); return; }
   const maxDeposit = state._depositRemaining ?? Infinity;
   if(amount > maxDeposit + 0.5){
     showAlert(`Deposit amount (${fmt(amount)}) exceeds the cash available for this record (${fmt(maxDeposit)}). Please enter a correct amount.`,'danger');
@@ -4162,8 +4166,8 @@ async function submitBulkDeposit(btn=null){
   const ref       = document.getElementById('bulk_dep_ref')?.value?.trim();
   const date      = document.getElementById('bulk_dep_date')?.value;
   const photoFile = document.getElementById('bulk_dep_photo')?.files?.[0];
-  if(!date){ alert('Please enter the deposit date.'); return; }
-  if(!ref&&!photoFile){ alert('Please provide either a teller/reference number or upload a photo of the deposit slip. At least one is required.'); return; }
+  if(!date){ showAlert('Please enter the deposit date.','danger'); return; }
+  if(!ref&&!photoFile){ showAlert('Please provide either a teller/reference number or upload a photo of the deposit slip. At least one is required.','danger'); return; }
   let photoData = '';
   if(photoFile){
     photoData = await new Promise(resolve=>{
@@ -4269,9 +4273,9 @@ async function submitOtherIncome(btn=null){
   const amount     = Math.round((parseFloat(document.getElementById('oi_amount')?.value)||0) * 100) / 100;
   const method     = document.getElementById('oi_method')?.value;
   const notes      = document.getElementById('oi_notes')?.value||'';
-  if(!date||!source){ alert('Please select a date and source type.'); return }
-  if(!amount){ alert('Please enter an amount.'); return }
-  if(!method){ alert('Please select a payment method.'); return }
+  if(!date||!source){ showAlert('Please select a date and source type.','danger'); return }
+  if(!amount){ showAlert('Please enter an amount.','danger'); return }
+  if(!method){ showAlert('Please select a payment method.','danger'); return }
 
   // Build a record compatible with the income structure
   const rec = {
@@ -5986,10 +5990,10 @@ async function submitExpense(btn=null){
   const description=document.getElementById('exp_desc')?.value?.trim();
   const amount=parseFloat(document.getElementById('exp_amt')?.value)||0;
   const isOthers = subCategory==='Others...';
-  if(!date||!category){ alert('Please select a date and category.'); return }
-  if(!subCategory){ alert('Please select a sub-category.'); return }
-  if(isOthers && !description){ alert('Description is required when "Others..." is selected.'); return }
-  if(!amount){ alert('Please enter an amount.'); return }
+  if(!date||!category){ showAlert('Please select a date and category.','danger'); return }
+  if(!subCategory){ showAlert('Please select a sub-category.','danger'); return }
+  if(isOthers && !description){ showAlert('Description is required when "Others..." is selected.','danger'); return }
+  if(!amount){ showAlert('Please enter an amount.','danger'); return }
 
   const method = document.querySelector('input[name="exp_method"]:checked')?.value || 'bank_transfer';
   const isSplitPettyBank = method==='split_petty_bank';
@@ -6004,8 +6008,8 @@ async function submitExpense(btn=null){
     if(isSplitPettyBank) pettyAmount=secondaryAmount;
     if(isSplitCashBank) cashAmount=secondaryAmount;
     const splitTotal = secondaryAmount + bankAmount;
-    if(!secondaryAmount&&!bankAmount){ alert('Please enter at least one split amount.'); return }
-    if(Math.abs(splitTotal-amount)>0.5){ alert(`Split total (${fmt(splitTotal)}) must equal the expense amount (${fmt(amount)}). Please correct.`); return }
+    if(!secondaryAmount&&!bankAmount){ showAlert('Please enter at least one split amount.','danger'); return }
+    if(Math.abs(splitTotal-amount)>0.5){ showAlert(`Split total (${fmt(splitTotal)}) must equal the expense amount (${fmt(amount)}). Please correct.`,'danger'); return }
   } else if(method==='petty_cash'){
     pettyAmount=amount;
   } else if(method==='bank_transfer'){
@@ -6021,14 +6025,14 @@ async function submitExpense(btn=null){
     if(bankAmount > 0){
       const availBank = Math.max(0, _bal.bankBalance||0);
       if(bankAmount > availBank + 0.5){
-        alert(`Bank balance is insufficient for this expense.\nAvailable bank balance: ${fmt(availBank)}\nRequired: ${fmt(bankAmount)}`);
+        showAlert(`Bank balance is insufficient for this expense.\nAvailable bank balance: ${fmt(availBank)}. Required: ${fmt(bankAmount)}`,'danger');
         return;
       }
     }
     if(cashAmount > 0){
       const availCash = Math.max(0, _bal.cashWithAccountant||0);
       if(cashAmount > availCash + 0.5){
-        alert(`Cash with Accountant is insufficient for this expense.\nAvailable cash: ${fmt(availCash)}\nRequired: ${fmt(cashAmount)}`);
+        showAlert(`Cash with Accountant is insufficient for this expense.\nAvailable cash: ${fmt(availCash)}. Required: ${fmt(cashAmount)}`,'danger');
         return;
       }
     }
@@ -6118,8 +6122,8 @@ async function editExpense(id){
   const all = await DB.getExpenses();
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
-  if(exp.status==='approved'){ alert('Approved expenses cannot be edited.'); return }
-  if(!canAction('expense_edit_pending')){ alert('You are not allowed to edit this expense.'); return }
+  if(exp.status==='approved'){ showAlert('Approved expenses cannot be edited.','danger'); return }
+  if(!canAction('expense_edit_pending')){ showAlert('You are not allowed to edit this expense.','danger'); return }
 
   const methodLabel = exp.paymentMethod==='petty_cash'?'💳 Petty Cash'
     :exp.paymentMethod==='bank_transfer'?'🏦 Bank Transfer'
@@ -6189,15 +6193,15 @@ async function submitEditExpense(id, btn=null){
   const amount      = parseFloat(document.getElementById('exp_amt')?.value)||0;
   const notes       = document.getElementById('exp_notes')?.value?.trim();
 
-  if(!category){ alert('Please select a category.'); return }
-  if(!subCategory){ alert('Please select a sub-category.'); return }
-  if(subCategory==='Others...' && !description){ alert('Description is required when "Others..." is selected.'); return }
-  if(!amount || amount<=0){ alert('Please enter a valid amount.'); return }
+  if(!category){ showAlert('Please select a category.','danger'); return }
+  if(!subCategory){ showAlert('Please select a sub-category.','danger'); return }
+  if(subCategory==='Others...' && !description){ showAlert('Description is required when "Others..." is selected.','danger'); return }
+  if(!amount || amount<=0){ showAlert('Please enter a valid amount.','danger'); return }
 
   if(btn) btn.disabled=true;
   const all = await DB.getExpenses();
   const exp = all.find(e=>e.id===id);
-  if(!exp){ if(btn) btn.disabled=false; alert('Expense not found.'); return }
+  if(!exp){ if(btn) btn.disabled=false; showAlert('Expense not found.','danger'); return }
 
   let newPettyAmount = exp.pettyAmount||0;
   if(exp.paymentMethod==='petty_cash'){
@@ -6227,9 +6231,9 @@ async function deleteExpense(id, btn=null){
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
   if(exp.status==='approved'){
-    if(!canAction('expense_delete_approved')){ alert('You are not allowed to delete approved expenses.'); return }
+    if(!canAction('expense_delete_approved')){ showAlert('You are not allowed to delete approved expenses.','danger'); return }
   } else {
-    if(!canAction('expense_delete_pending')){ alert('You are not allowed to delete this expense.'); return }
+    if(!canAction('expense_delete_pending')){ showAlert('You are not allowed to delete this expense.','danger'); return }
   }
   if(!confirm(`Delete this expense (${fmt(exp.amount)})?`)) return;
   _expenseDeleting.add(id);
@@ -6386,11 +6390,11 @@ async function submitBankWithdrawal(btn=null){
   const receipt   = document.getElementById('wd_exp_receipt')?.value?.trim();
   const receiptPhotoFile = isDirect ? document.getElementById('wd_exp_receipt_photo')?.files?.[0] : null;
 
-  if(!date||!amount){ alert('Please fill in the date and amount.'); return; }
-  if(!isDirect && !description){ alert('Please fill in the purpose / description.'); return; }
-  if(!auth){ alert('Please select at least one authorizing signatory.'); return; }
-  if(isDirect && !expCat){ alert('Please select an expense category.'); return; }
-  if(isDirect && !expSubcat){ alert('Please select a sub-category.'); return; }
+  if(!date||!amount){ showAlert('Please fill in the date and amount.','danger'); return; }
+  if(!isDirect && !description){ showAlert('Please fill in the purpose / description.','danger'); return; }
+  if(!auth){ showAlert('Please select at least one authorizing signatory.','danger'); return; }
+  if(isDirect && !expCat){ showAlert('Please select an expense category.','danger'); return; }
+  if(isDirect && !expSubcat){ showAlert('Please select a sub-category.','danger'); return; }
 
   let receiptPhotoData = '';
   if(receiptPhotoFile){
@@ -6793,7 +6797,7 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
 
 function compareBankBalance(){
   const stmtBal = parseFloat(document.getElementById('bank_stmt_bal')?.value);
-  if(isNaN(stmtBal)){ alert('Please enter the bank statement balance.'); return }
+  if(isNaN(stmtBal)){ showAlert('Please enter the bank statement balance.','danger'); return }
   calcChurchBalance().then(bal=>{
     const diff = bal.bankBalance - stmtBal;
     const el = document.getElementById('bankCompareResult');
@@ -6833,7 +6837,7 @@ async function submitBankCharge(btn=null){
   const description = document.getElementById('bc_desc')?.value?.trim() || subCategory;
   const amount = parseFloat(document.getElementById('bc_amt')?.value)||0;
   const receiptNo = document.getElementById('bc_ref')?.value;
-  if(!date||!amount){ alert('Please fill date and amount.'); return }
+  if(!date||!amount){ showAlert('Please fill date and amount.','danger'); return }
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.addExpense({
@@ -6874,7 +6878,7 @@ function isReceiptOverdue(req){
 
 async function renderPettyCash(){
   // Silently correct any float drift before displaying so the balance is always accurate
-  try { await DB.recalcPettyFloat(); } catch(e) { /* continue with stored value on failure */ }
+  try { await DB.recalcPettyFloat(); } catch(e) { console.warn('recalcPettyFloat failed:', e); }
   const [pettyHistory, pettyConfig, allExpenses] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getExpenses()]);
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
   const history = petty.history||[];
@@ -7490,8 +7494,8 @@ async function submitTopUpRequest(btn=null){
   const override = !!document.getElementById('topup_override')?.checked;
   const overrideReason = document.getElementById('topup_override_reason')?.value?.trim()||'';
   const notes  = document.getElementById('topup_notes')?.value||'';
-  if(!amount){ alert('Please enter the top-up amount.'); return }
-  if(override && !overrideReason){ alert('Please provide a reason for overriding the calculated amount.'); return }
+  if(!amount){ showAlert('Please enter the top-up amount.','danger'); return }
+  if(override && !overrideReason){ showAlert('Please provide a reason for overriding the calculated amount.','danger'); return }
   const pettyConfig = await DB.getPettyConfig();
   const req = {
     id:'PC-'+Date.now(), type:'topup_request',
@@ -7540,9 +7544,9 @@ async function cancelTopUpRequest(id, btn=null){
   const pettyHistory = await DB.getPetty();
   const req = pettyHistory.find(h=>h.id===id);
   if(!req || req.type!=='topup_request') return;
-  if(req.status!=='pending_approval'){ alert('Only pending top-up requests can be cancelled.'); return }
+  if(req.status!=='pending_approval'){ showAlert('Only pending top-up requests can be cancelled.','danger'); return }
   const canCancel = canAction('topup_cancel', { request:req });
-  if(!canCancel){ alert('You are not allowed to cancel this request.'); return }
+  if(!canCancel){ showAlert('You are not allowed to cancel this request.','danger'); return }
   if(!confirm(`Cancel top-up request of ${fmt(req.amount)}?`)) return;
   const restore = setBtnLoading(btn, 'Cancelling…');
   try {
@@ -7601,7 +7605,7 @@ async function submitAdvanceRequest(btn=null){
   const category = document.getElementById('adv_cat')?.value;
   const dateNeeded = document.getElementById('adv_date')?.value;
   const notes    = document.getElementById('adv_notes')?.value||'';
-  if(!purpose||!amount||!category){ alert('Please fill in the purpose, amount, and category.'); return }
+  if(!purpose||!amount||!category){ showAlert('Please fill in the purpose, amount, and category.','danger'); return }
 
   const pettyConfig = await DB.getPettyConfig();
   if(amount > pettyConfig.float && pettyConfig.float > 0){
@@ -7752,7 +7756,7 @@ function printTopupReview(){
   if(!el) return;
   const content = el.innerHTML;
   const win = window.open('','_blank','width=800,height=700');
-  if(!win){ alert('Please allow pop-ups for this site to print.'); return; }
+  if(!win){ showAlert('Please allow pop-ups for this site to print.','danger'); return; }
   win.document.write(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7876,8 +7880,8 @@ async function confirmPettyReceipt(id, btn=null){
     ? ('NO-RECEIPT: ' + (document.getElementById('rc_reason')?.value?.trim() || 'No reason given'))
     : document.getElementById('rc_no')?.value?.trim();
 
-  if(!noReceiptChecked && !no){ alert('Please enter the receipt number, or tick "No physical receipt" and give a reason.'); return }
-  if(noReceiptChecked && !document.getElementById('rc_reason')?.value?.trim()){ alert('Please explain why there is no receipt.'); return }
+  if(!noReceiptChecked && !no){ showAlert('Please enter the receipt number, or tick "No physical receipt" and give a reason.','danger'); return }
+  if(noReceiptChecked && !document.getElementById('rc_reason')?.value?.trim()){ showAlert('Please explain why there is no receipt.','danger'); return }
 
   const [pettyHistory, pettyConfig] = await Promise.all([DB.getPetty(), DB.getPettyConfig()]);
   const req = pettyHistory.find(h=>h.id===id);
@@ -8100,14 +8104,14 @@ async function submitRefill(btn=null){
   const authText = document.getElementById('ref_auth_text')?.value?.trim();
   const auth = checkedSigs.length>0 ? checkedSigs.join(', ') : authText;
 
-  if(!amt){ alert('Please enter a top-up amount.'); return }
-  if(method!=='cash_accountant' && !ref){ alert('Please enter the bank transfer reference number.'); return }
-  if(!auth){ alert('Please select or enter who is authorizing this top-up.'); return }
+  if(!amt){ showAlert('Please enter a top-up amount.','danger'); return }
+  if(method!=='cash_accountant' && !ref){ showAlert('Please enter the bank transfer reference number.','danger'); return }
+  if(!auth){ showAlert('Please select or enter who is authorizing this top-up.','danger'); return }
 
   const pettyConfig = await DB.getPettyConfig();
   const spaceAvailable = pettyConfig.max - pettyConfig.float;
   if(spaceAvailable <= 0){
-    alert(`Petty cash is already at or above the approved max (${fmt(pettyConfig.max)}). Reduce current float before recording another top-up.`);
+    showAlert(`Petty cash is already at or above the approved max (${fmt(pettyConfig.max)}). Reduce current float before recording another top-up.`,'danger');
     return;
   }
   const actualAdded = Math.max(0, Math.min(amt, spaceAvailable));
@@ -8122,19 +8126,19 @@ async function submitRefill(btn=null){
   const bankBal = churchBal.bankBalance||0;
   const cashBal = Math.max(0, churchBal.cashWithAccountant||0);
   if(method==='bank_transfer' && bankAmt > bankBal + 0.5){
-    alert(`Bank balance is insufficient for this top-up.\nAvailable bank balance: ${fmt(bankBal)}\nRequested: ${fmt(bankAmt)}`);
+    showAlert(`Bank balance is insufficient for this top-up. Available: ${fmt(bankBal)}, Requested: ${fmt(bankAmt)}`,'danger');
     return;
   }
   if(method==='cash_accountant' && cashAmt > cashBal + 0.5){
-    alert(`Cash with Accountant is insufficient for this top-up.\nAvailable cash: ${fmt(cashBal)}\nRequested: ${fmt(cashAmt)}`);
+    showAlert(`Cash with Accountant is insufficient for this top-up. Available: ${fmt(cashBal)}, Requested: ${fmt(cashAmt)}`,'danger');
     return;
   }
   if(method==='split'){
     const splitTotal = bankAmt + cashAmt;
-    if(!bankAmt && !cashAmt){ alert('Enter split amounts for bank and cash.'); return }
-    if(Math.abs(splitTotal-actualAdded)>0.5){ alert(`Split total (${fmt(splitTotal)}) must match top-up amount (${fmt(actualAdded)}).`); return }
-    if(bankAmt > bankBal + 0.5){ alert(`Bank portion exceeds available bank balance (${fmt(bankBal)}).`); return }
-    if(cashAmt > cashBal + 0.5){ alert(`Cash portion exceeds available cash with Accountant (${fmt(cashBal)}).`); return }
+    if(!bankAmt && !cashAmt){ showAlert('Enter split amounts for bank and cash.','danger'); return }
+    if(Math.abs(splitTotal-actualAdded)>0.5){ showAlert(`Split total (${fmt(splitTotal)}) must match top-up amount (${fmt(actualAdded)}).`,'danger'); return }
+    if(bankAmt > bankBal + 0.5){ showAlert(`Bank portion exceeds available bank balance (${fmt(bankBal)}).`,'danger'); return }
+    if(cashAmt > cashBal + 0.5){ showAlert(`Cash portion exceeds available cash with Accountant (${fmt(cashBal)}).`,'danger'); return }
   }
   const methodLabel = method==='split' ? `Split — Bank: ${fmt(bankAmt)} + Cash: ${fmt(cashAmt)}` : method==='cash_accountant' ? 'Cash with Accountant' : 'Bank Transfer';
 
@@ -8143,8 +8147,8 @@ async function submitRefill(btn=null){
   if(topupRequestId){
     const [pettyHistory, allExpenses] = await Promise.all([DB.getPetty(), DB.getExpenses()]);
     linkedTopup = pettyHistory.find(h=>h.id===topupRequestId && h.type==='topup_request');
-    if(!linkedTopup){ alert('Linked top-up request was not found. Please refresh and try again.'); return }
-    if(linkedTopup.status!=='approved'){ alert('Only approved top-up requests can be settled from this screen.'); return }
+    if(!linkedTopup){ showAlert('Linked top-up request was not found. Please refresh and try again.','danger'); return }
+    if(linkedTopup.status!=='approved'){ showAlert('Only approved top-up requests can be settled from this screen.','danger'); return }
     // Effective amount mirrors renderPettyCash: recompute from live expenseRefs so a
     // deleted expense doesn't leave the request impossible to settle.
     const refs = Array.isArray(linkedTopup.expenseRefs) ? linkedTopup.expenseRefs : [];
@@ -9071,7 +9075,7 @@ async function saveRolePermissions(btn=null){
 async function resetRolePermissions(){
   if(!requireAdmin()) return;
   const word = prompt('Type RESET to restore all role permissions to factory defaults:');
-  if(word !== 'RESET'){ if(word !== null) alert('Cancelled — you must type RESET exactly.'); return; }
+  if(word !== 'RESET'){ if(word !== null) showAlert('Cancelled — you must type RESET exactly.','danger'); return; }
   const s = await DB.getSettings();
   delete s.rolePermissions;
   await DB.saveSettings(s);
@@ -9332,7 +9336,7 @@ async function addUser(btn=null){
   const role=document.getElementById('nu_role')?.value;
   const email=document.getElementById('nu_email')?.value;
   const pin=document.getElementById('nu_pin')?.value;
-  if(!name||!role||!pin||pin.length<4){ alert('Please fill name, role, and PIN (min 4 digits).'); return }
+  if(!name||!role||!pin||pin.length<4){ showAlert('Please fill name, role, and PIN (min 4 digits).','danger'); return }
   // Duplicate check
   const existingUsers = await DB.getUsers();
   const duplicate = existingUsers.find(u=>u.name.toLowerCase()===name.toLowerCase() && u.role===role);
@@ -9459,7 +9463,7 @@ function importData(){
         DB.addAudit('data_imported','Data restored from backup',state.user?.name);
         showAlert('Data restored successfully! Reloading…','success');
         setTimeout(()=>window.location.reload(), 600);
-      }catch(e){ alert('Invalid backup file. Please use a valid JSON backup.') }
+      }catch(e){ showAlert('Invalid backup file. Please use a valid JSON backup.','danger') }
     };
     reader.readAsText(file);
   };
@@ -9475,7 +9479,7 @@ async function clearDataOnly(){
     'Export a backup first if you need to keep the test data.\n\nProceed?'
   )) return;
   const word=prompt('Type CLEAR DATA to confirm deletion of all financial records:');
-  if(word!=='CLEAR DATA'){ if(word!==null) alert('Cancelled — you must type CLEAR DATA exactly.'); return; }
+  if(word!=='CLEAR DATA'){ if(word!==null) showAlert('Cancelled — you must type CLEAR DATA exactly.','danger'); return; }
   try {
     showAlert('Clearing data…', 'info');
     await DB.clearDataOnly();
@@ -9491,13 +9495,13 @@ async function clearAllData(){
   if(!requireAdmin()) return;
   if(!confirm('⚠ This will permanently delete ALL church financial records. Type CONFIRM to proceed.')) return;
   const word=prompt('Type CONFIRM to delete everything:');
-  if(word!=='CONFIRM'){ alert('Cancelled.'); return }
+  if(word!=='CONFIRM'){ showAlert('Cancelled.','danger'); return }
   try{
     await DB.clearAllData();
     showAlert('All data cleared. Reloading…','warn');
     setTimeout(()=>window.location.reload(), 600);
   }catch(e){
-    alert(`Failed to clear data: ${e.message||'Unknown error'}`);
+    showAlert(`Failed to clear data: ${e.message||'Unknown error'}`,'danger');
   }
 }
 
@@ -9645,7 +9649,7 @@ function submitKPSCAlert(){
   const type=document.getElementById('kpsc_type')?.value;
   const amt=parseFloat(document.getElementById('kpsc_amt')?.value)||0;
   const desc=document.getElementById('kpsc_desc')?.value;
-  if(!amt||!desc){ alert('Please fill all fields.'); return }
+  if(!amt||!desc){ showAlert('Please fill all fields.','danger'); return }
   DB.addAudit('kpsc_alert',`KPSC Alert sent: ${type} — ${fmt(amt)}`,state.user?.name);
   DB.addNotification('KPSC Alert Sent',`Emergency request: ${type} — ${fmt(amt)} needed`,'warn');
   closeModal();

@@ -67,6 +67,7 @@ function calculateRemittances(income) {
       totalToPastor: 0,
       totalToMinisters: 0,
       localRetainedBeforeRebate: 0,
+      localTithe: 0,
       provinceRebate: 0,
       netLocalRetained: 0
     }
@@ -83,7 +84,7 @@ function calculateRemittances(income) {
     };
     result.totals.totalToNational += result.breakdown.membersTithe.national;
     result.totals.localRetainedBeforeRebate += result.breakdown.membersTithe.local;
-    result.totals.localTithe = (result.totals.localTithe || 0) + result.breakdown.membersTithe.local;
+    result.totals.localTithe += result.breakdown.membersTithe.local;
   }
 
   // Ministers' Tithe — tracked separately for Province Rebate calculation
@@ -97,7 +98,7 @@ function calculateRemittances(income) {
     };
     result.totals.totalToNational += result.breakdown.ministersTithe.national;
     result.totals.localRetainedBeforeRebate += result.breakdown.ministersTithe.local;
-    result.totals.localTithe = (result.totals.localTithe || 0) + result.breakdown.ministersTithe.local;
+    result.totals.localTithe += result.breakdown.ministersTithe.local;
   }
 
   // Thanksgiving
@@ -185,7 +186,7 @@ function calculateRemittances(income) {
 
   // Province Rebate = 20% of local retained tithes ONLY (Members' Tithe + Ministers' Tithe)
   // This is NOT applied to SLO, CRM, Gospel Fund (Workers' Offering), Teen/Children's Offering etc.
-  result.totals.provinceRebate = (result.totals.localTithe || 0) * PROVINCE_REBATE_RATE;
+  result.totals.provinceRebate = result.totals.localTithe * PROVINCE_REBATE_RATE;
   result.totals.netLocalRetained = result.totals.localRetainedBeforeRebate - result.totals.provinceRebate;
 
   // Total income
@@ -198,6 +199,7 @@ function calculateRemittances(income) {
  * Format number as Nigerian Naira
  */
 function formatNaira(amount) {
+  if (typeof amount !== 'number' || !isFinite(amount)) return '₦0';
   return '₦' + Math.round(amount).toLocaleString('en-NG');
 }
 
