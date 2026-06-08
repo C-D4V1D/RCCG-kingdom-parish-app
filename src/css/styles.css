@@ -26,7 +26,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 /* FORMS */
 .form-label{display:block;font-size:12px;font-weight:600;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:0.4px}
 .form-select,.form-input,.form-textarea{width:100%;padding:10px 12px;border:1px solid var(--border2);border-radius:var(--r);font-size:14px;color:var(--text);background:#fff;outline:none;transition:border 0.15s;font-family:inherit}
-.form-select:focus,.form-input:focus,.form-textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(15,110,86,0.1)}
+.form-select:focus,.form-input:focus,.form-textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(15,110,86,0.15);outline:none}
 .form-textarea{resize:vertical;min-height:80px}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .form-row-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
@@ -54,6 +54,9 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .btn-logout-icon{display:flex;align-items:center;justify-content:center;padding:7px;background:none;border:1px solid var(--border2);border-radius:var(--r);color:var(--text3);cursor:pointer;flex-shrink:0;transition:all 0.15s}
 .btn-logout-icon:hover{background:var(--danger-light);color:var(--danger);border-color:var(--danger)}
 .btn:disabled{opacity:0.65;cursor:not-allowed;pointer-events:none}
+.btn:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.btn-primary:focus-visible{outline-color:#fff;box-shadow:0 0 0 4px var(--primary)}
+.btn-danger:focus-visible{outline-color:#fff;box-shadow:0 0 0 4px var(--danger)}
 .btn-spinner-sm{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,0.35);border-top-color:currentColor;border-radius:50%;animation:btn-spin .7s linear infinite;vertical-align:middle;flex-shrink:0}
 @keyframes btn-spin{to{transform:rotate(360deg)}}
 
@@ -67,11 +70,12 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .sidebar-title-wrap{flex:1;min-width:0}
 .sidebar-title{display:block;font-size:13px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sidebar-sub{display:block;font-size:11px;color:var(--text3)}
-.sidebar-close{background:none;border:none;cursor:pointer;font-size:18px;color:var(--text3);display:none;padding:4px}
+.sidebar-close{background:none;border:none;cursor:pointer;font-size:18px;color:var(--text2);display:none;padding:8px;min-width:44px;min-height:44px;align-items:center;justify-content:center}
 .sidebar-nav{flex:1;padding:0.75rem 0;overflow-y:auto}
 .nav-section{padding:6px 12px 4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3);margin-top:8px}
 .nav-item{display:flex;align-items:center;gap:10px;padding:9px 16px;font-size:13px;font-weight:500;color:var(--text2);cursor:pointer;border-left:3px solid transparent;transition:all 0.15s;text-decoration:none}
 .nav-item:hover{background:var(--surface);color:var(--primary)}
+.nav-item:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
 .nav-item.active{background:var(--primary-light);color:var(--primary);border-left-color:var(--primary)}
 .nav-item .nav-icon{width:18px;height:18px;flex-shrink:0;opacity:0.7}
 .nav-item.active .nav-icon{opacity:1}
@@ -87,12 +91,12 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 
 /* TOP BAR */
 .top-bar{background:var(--card);border-bottom:1px solid var(--border);padding:0 1rem;height:56px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:100}
-.hamburger{display:none;flex-direction:column;gap:5px;background:none;border:none;cursor:pointer;padding:4px}
+.hamburger{display:none;flex-direction:column;gap:5px;background:none;border:none;cursor:pointer;padding:8px;min-width:44px;min-height:44px;align-items:center;justify-content:center}
 .hamburger span{display:block;width:22px;height:2px;background:var(--text);border-radius:2px}
 .top-bar-title{flex:1;font-size:16px;font-weight:600;color:var(--text)}
 .top-bar-right{display:flex;align-items:center;gap:10px}
 .month-select{font-size:13px;padding:6px 10px;border:1px solid var(--border2);border-radius:var(--r);background:var(--surface);color:var(--text);cursor:pointer}
-.notif-bell{position:relative;cursor:pointer;width:36px;height:36px;display:flex;align-items:center;justify-content:center;border-radius:var(--r);color:var(--text2);transition:background 0.15s}
+.notif-bell{position:relative;cursor:pointer;width:44px;height:44px;display:flex;align-items:center;justify-content:center;border-radius:var(--r);color:var(--text2);transition:background 0.15s}
 .notif-bell:hover{background:var(--surface)}
 .notif-count{position:absolute;top:4px;right:4px;background:var(--danger);color:#fff;font-size:10px;font-weight:700;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;padding:0 3px}
 .notif-panel{position:absolute;top:56px;right:1rem;width:320px;background:var(--card);border:1px solid var(--border2);border-radius:var(--rl);box-shadow:0 8px 24px rgba(0,0,0,0.12);z-index:200;max-height:400px;overflow-y:auto}
@@ -270,6 +274,7 @@ tr:hover td{background:var(--surface)}
 .tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:1.25rem;overflow-x:auto}
 .tab{padding:10px 16px;font-size:13px;font-weight:500;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;transition:all 0.15s;background:none;border-top:none;border-left:none;border-right:none;font-family:inherit}
 .tab:hover{color:var(--primary)}
+.tab:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
 .tab.active{color:var(--primary);border-bottom-color:var(--primary)}
 
 /* ADMIN GRID */
@@ -326,7 +331,7 @@ tr:hover td{background:var(--surface)}
 }
 
 /* SLOW NETWORK BANNER */
-.slow-net-banner{display:flex;align-items:center;justify-content:center;gap:8px;background:#F5A623;color:#5C3D00;font-size:13px;font-weight:600;padding:8px 16px;position:sticky;top:56px;/* matches .top-bar height */z-index:99;width:100%}
+.slow-net-banner{display:flex;align-items:center;justify-content:center;gap:8px;background:#F5A623;color:#5C3D00;font-size:13px;font-weight:600;padding:8px 16px;position:sticky;top:56px;z-index:150;width:100%}
 .slow-net-icon{width:16px;height:16px;flex-shrink:0}
 
 /* LOADING PROGRESS (inside skeletons) */
