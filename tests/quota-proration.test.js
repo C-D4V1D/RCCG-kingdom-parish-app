@@ -123,6 +123,73 @@ test('fixed quotas accrue week-by-week when cut-off end is in the future', () =>
   }
 });
 
+test('petty float snapshots are rebuilt from ledger events for the selected as-of date', () => {
+  const pettyHistory = [
+    { type:'refill', status:'approved', amount:50000, createdAt:'2026-04-20T09:00:00Z' },
+    { type:'advance', status:'approved', amount:30000, approvedAt:'2026-05-10T09:00:00Z' },
+    { type:'refill', status:'approved', amount:10000, createdAt:'2026-05-15T09:00:00Z' },
+    { type:'advance', status:'settled', amount:10000, approvedAt:'2026-06-01T10:00:00Z', settledAt:'2026-06-03T10:00:00Z', changeReturned:2000 }
+  ];
+  const expenses = [
+    { date:'2026-05-18', pettyAmount:4000 },
+    { date:'2026-06-04', pettyAmount:6000 }
+  ];
+  const recDate = r => String(r?.date || r?.createdAt || '').slice(0,10);
+
+  assert.equal(App._calcPettyFloatFromLedger(pettyHistory, expenses, '2026-04-19', recDate), 0);
+  assert.equal(App._calcPettyFloatFromLedger(pettyHistory, expenses, '2026-05-24', recDate), 26000);
+  assert.equal(App._calcPettyFloatFromLedger(pettyHistory, expenses, null, recDate), 12000);
+});
+
+test('actual balance helper paths stay mathematically aligned', () => {
+  const openingBalance = 100000;
+  const openingOutstanding = 15000;
+  const totalIncome = 50000;
+  const childrenTeacherHold = 5000;
+  const totalExpenses = 12000;
+  const remittancesPaid = 8000;
+  const currentPeriodRemDue = 18000;
+
+  const churchBalance = App._calcChurchBalanceFromOpening(
+    openingBalance,
+    totalIncome,
+    childrenTeacherHold,
+    totalExpenses,
+    remittancesPaid
+  );
+  const outstanding = App._calcOutstandingRemittancesFromFlow(
+    openingOutstanding,
+    currentPeriodRemDue,
+    remittancesPaid
+  );
+  const availableFromOpening = App._calcAvailableFundFromOpening(
+    openingBalance,
+    openingOutstanding,
+    totalIncome,
+    childrenTeacherHold,
+    totalExpenses,
+    currentPeriodRemDue
+  );
+
+  assert.equal(churchBalance, 125000);
+  assert.equal(outstanding, 25000);
+  assert.equal(churchBalance - outstanding, 100000);
+  assert.equal(availableFromOpening, 100000);
+});
+
+test('total remittance due helper sums all remittance buckets and quotas', () => {
+  const total = App._totalRemittanceDue({
+    totalNatl: 10000,
+    totalArea: 2000,
+    totalPastor: 1500,
+    totalMinisters: 900,
+    totalSeed: 100,
+    provinceRebate: 500
+  }, 3000);
+
+  assert.equal(total, 18000);
+});
+
 
 test('fixed quota accrual starts at 11:30am WAT on each Sunday', () => {
   const RealDate = Date;

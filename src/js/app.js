@@ -1007,6 +1007,28 @@ function getSundayCashWithAccountant(record, remRates = DEFAULT_REMITTANCE_RATES
   return Math.max(0, total - bankTransfer - directPetty - childrenTeacherHeld);
 }
 
+function totalRemittanceDue(remCalc, quotas = 0){
+  return (remCalc?.totalNatl || 0)
+    + (remCalc?.totalArea || 0)
+    + (remCalc?.totalPastor || 0)
+    + (remCalc?.totalMinisters || 0)
+    + (remCalc?.totalSeed || 0)
+    + (remCalc?.provinceRebate || 0)
+    + (quotas || 0);
+}
+
+function calcChurchBalanceFromOpening(openingBalance, totalIncome, childrenTeacherHold, totalExpenses, remittancesPaid){
+  return openingBalance + (totalIncome - childrenTeacherHold) - totalExpenses - remittancesPaid;
+}
+
+function calcOutstandingRemittancesFromFlow(openingOutstandingRems, currentPeriodRemDue, periodRemittancesPaid){
+  return Math.max(0, openingOutstandingRems + currentPeriodRemDue - periodRemittancesPaid);
+}
+
+function calcAvailableFundFromOpening(openingBalance, openingOutstandingRems, totalIncome, childrenTeacherHold, totalExpenses, currentPeriodRemDue){
+  return (openingBalance - openingOutstandingRems) + (totalIncome - childrenTeacherHold) - totalExpenses - currentPeriodRemDue;
+}
+
 async function calcRemittances(income, preRates){
   const rr = preRates || await getRemRates();
   const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, totalSeed:0,
@@ -2161,15 +2183,27 @@ function pettyFloatEvents(h){
   return [];
 }
 
+function calcPettyFloatFromLedger(pettyHistory, expenses, asOfDate, recDate=()=> ''){
+  const historyDelta = (pettyHistory || [])
+    .flatMap(pettyFloatEvents)
+    .filter(e => !asOfDate || !e.date || e.date <= asOfDate)
+    .reduce((s,e) => s + (e.delta || 0), 0);
+  const expenseDeductions = (expenses || [])
+    .filter(e => (e.pettyAmount||0) > 0)
+    .filter(e => !asOfDate || !recDate(e) || recDate(e) <= asOfDate)
+    .reduce((s,e) => s + (e.pettyAmount||0), 0);
+  return historyDelta - expenseDeductions;
+}
+
 /** Cash position. Pass `asOfDate` (YYYY-MM-DD) to get a historical snapshot —
  *  every input record is filtered by date ≤ asOfDate and the petty float is
- *  unwound from the current stored value by reversing post-asOfDate events.
+ *  rebuilt from ledger events up to that date.
  *  Pass nothing (or null) for the live "as of now" balance. */
 async function calcChurchBalance(asOfDate, prefetched){
   const pf = prefetched || {};
-  const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory,pettyConfig] = await Promise.all([
+  const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory] = await Promise.all([
     pf.income || DB.getIncome(), pf.expenses || DB.getExpenses(), pf.remittances || DB.getRemittances(),
-    pf.cashTx || DB.getCashTransactions(), pf.pettyHistory || DB.getPetty(), pf.pettyConfig || DB.getPettyConfig()
+    pf.cashTx || DB.getCashTransactions(), pf.pettyHistory || DB.getPetty()
   ]);
   const remRates = pf.remRates || (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
 
@@ -2223,25 +2257,9 @@ async function calcChurchBalance(asOfDate, prefetched){
   const cashWithAccountantRaw = cashFromCollections - cashDepositedToBank + bankToAccountant - cashExpenses - pettyCashTopups;
 
   // --- PETTY CASH (with Admin Officer) ---
-  // pettyFloat can be negative — means Admin Officer spent personal money and church owes them.
-  // For historical view: unwind from current float by reversing every event whose IMPACT date
-  // falls after asOfDate. Each refill / advance approval / settlement adjustment / disbursement
-  // is its own event with its own date, so an advance approved in May can't accidentally
-  // contaminate a March snapshot via the requester's "dateNeeded" hint.
-  let pettyFloat = pettyConfig.float;
-  if(asOfDate){
-    const reverseDelta = pettyHistory
-      .flatMap(pettyFloatEvents)
-      .filter(e => e.date && e.date > asOfDate)
-      .reduce((s,e) => s + e.delta, 0);
-    // Also reverse direct-petty expense deductions (pettyAmount > 0) whose date is after
-    // the snapshot date. The backend recalcPettyFloat subtracts these when rebuilding the
-    // stored float, so the historical unwind must add them back to avoid over-deducting.
-    const reverseExpenseDeductions = expenses
-      .filter(e => (e.pettyAmount||0) > 0 && recDate(e) > asOfDate)
-      .reduce((s,e) => s + (e.pettyAmount||0), 0);
-    pettyFloat = pettyConfig.float - reverseDelta + reverseExpenseDeductions;
-  }
+  // Rebuild the float from raw ledger movements each time so historical snapshots stay
+  // accurate even if the stored petty_config.float has drifted.
+  const pettyFloat = calcPettyFloatFromLedger(pettyHistory, allExpenses, asOfDate, recDate);
 
   return {
     cashWithAccountant: Math.max(0, cashWithAccountantRaw),
@@ -2475,17 +2493,14 @@ async function renderDashboard(){
   const dashMonthPaidRems = allRemsForKpi.filter(r=>r.status==='paid' && (r.periodTo||'').startsWith(dashMonthPrefix));
   const dashMonthPaidAmt = dashMonthPaidRems.reduce((s,r)=>s+(r.amount||0),0);
   // Current month due (used only for paid/partial status label).
-  const dashCurrentMonthRemDue = (remittances.totalNatl||0)+(remittances.totalArea||0)+(remittances.totalPastor||0)
-    +(remittances.totalMinisters||0)+(remittances.totalSeed||0)+(remittances.provinceRebate||0)+dashAllQuotasAmt;
+  const dashCurrentMonthRemDue = totalRemittanceDue(remittances, dashAllQuotasAmt);
   const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashCurrentMonthRemDue * PAYMENT_TOLERANCE_THRESHOLD;
   const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
   const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
   // Accumulated unpaid: remittances owed on ALL income through the as-of date, minus everything already paid by then.
   const dashAllTimeRemittances = await calcRemittancesFromRecords(allIncome, remRatesDash);
-  const dashAllTimeIncomeRemDue = (dashAllTimeRemittances.totalNatl||0)+(dashAllTimeRemittances.totalArea||0)
-    +(dashAllTimeRemittances.totalPastor||0)+(dashAllTimeRemittances.totalMinisters||0)
-    +(dashAllTimeRemittances.totalSeed||0)+(dashAllTimeRemittances.provinceRebate||0);
+  const dashAllTimeIncomeRemDue = totalRemittanceDue(dashAllTimeRemittances);
   // Source array is `allIncome` (date-filtered to ≤ asOfDate for past-period views) so
   // a historical snapshot doesn't see income that didn't exist yet.
   const dashFirstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
@@ -2600,6 +2615,56 @@ async function renderDashboard(){
   const dashCarriedFwdLabel = useRemPeriod
     ? `Opening balance (as of ${dashCarriedFwdDateStr})`
     : `Opening balance (as of ${dashCarriedFwdDateStr})`;
+  const dashOpeningIncome = allIncomeDash.filter(r => {
+    const d = String(r?.date || r?.dateNeeded || r?.createdAt || '').slice(0,10);
+    return !d || d <= dashPriorCloseDate;
+  });
+  const dashOpeningAllTimeRemittances = await calcRemittancesFromRecords(dashOpeningIncome, remRatesDash);
+  const dashOpeningIncomeRemDue = totalRemittanceDue(dashOpeningAllTimeRemittances);
+  const dashOpeningFirstIncRec = dashOpeningIncome.length > 0 ? dashOpeningIncome[dashOpeningIncome.length-1] : null;
+  const dashOpeningFirstDateStr = (dashOpeningFirstIncRec ? (dashOpeningFirstIncRec.date||dashOpeningFirstIncRec.createdAt||'') : '').slice(0,10);
+  const dashOpeningAccumQuotas = dashOpeningFirstIncRec
+    ? sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, dashOpeningFirstDateStr, dashPriorCloseDate))
+    : 0;
+  const dashOpeningPaidRems = allRemsDash
+    .filter(r => r.status === 'paid')
+    .filter(r => {
+      const d = String(r?.paidDate || r?.createdAt || '').slice(0,10);
+      return !d || d <= dashPriorCloseDate;
+    })
+    .reduce((s,r)=>s+(r.amount||0),0);
+  const dashOpeningOutstandingRems = Math.max(0, dashOpeningIncomeRemDue + dashOpeningAccumQuotas - dashOpeningPaidRems);
+  const dashPeriodRemittancesPaid = allRemsDash
+    .filter(r => r.status === 'paid')
+    .filter(r => {
+      const d = String(r?.paidDate || r?.date || r?.createdAt || '').slice(0,10);
+      if(!d) return false;
+      if(useRemPeriod) return d >= dashPeriodFrom && d <= dashPeriodTo;
+      const dt = new Date(d);
+      return dt.getMonth() === state.month && dt.getFullYear() === state.year;
+    })
+    .reduce((s,r)=>s+(r.amount||0),0);
+  const dashAdminManagedIncome = totalIncome - dashChildrenTeacherTotal;
+  const dashChurchBalanceFromOpening = calcChurchBalanceFromOpening(
+    dashCarriedForward,
+    totalIncome,
+    dashChildrenTeacherTotal,
+    totalPeriodAllExpenses,
+    dashPeriodRemittancesPaid
+  );
+  const dashOutstandingRemsFromFlow = calcOutstandingRemittancesFromFlow(
+    dashOpeningOutstandingRems,
+    dashCurrentMonthRemDue,
+    dashPeriodRemittancesPaid
+  );
+  const dashAvailableFromOpening = calcAvailableFundFromOpening(
+    dashCarriedForward,
+    dashOpeningOutstandingRems,
+    totalIncome,
+    dashChildrenTeacherTotal,
+    totalPeriodAllExpenses,
+    dashCurrentMonthRemDue
+  );
 
   // Feed items — richer detail for Recent Transactions card
   const recentIncome = allIncome.slice(0,4);
@@ -3011,75 +3076,99 @@ async function renderDashboard(){
       </summary>
       <div style="background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--rl) var(--rl);overflow:hidden">
         <div class="dash-explain-slider" style="display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;-webkit-overflow-scrolling:touch">
-          <!-- Slide 1: How Available Fund is calculated (physical balance path) -->
+          <!-- Slide 1: Opening-balance path to total church balance -->
           <div style="flex:0 0 100%;scroll-snap-align:start;padding:16px 18px;box-sizing:border-box">
-            <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px">How Available Fund is Calculated</div>
+            <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px">How Actual Balance is Calculated</div>
             <div style="font-size:12px;line-height:2.3;color:var(--text2)">
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">🏦 Bank balance</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace">${fmt(churchBal.bankBalance)}</span>
+                <span style="color:var(--text3)">Opening balance</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace">${fmt(dashCarriedForward)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">💵 Cash with Accountant</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace">${fmt(churchBal.cashWithAccountant)}</span>
+                <span style="color:var(--text3)">+ Total income recorded this period</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">+${fmt(totalIncome)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:#BA7517">− Children Teacher hold (not managed by Admin team)</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:#BA7517">−${fmt(dashChildrenTeacherTotal)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">− Total expenses this period</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodAllExpenses)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">− Remittances paid this period</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashPeriodRemittancesPaid)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-                <span style="color:var(--text3)">🪙 Petty cash</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:${churchBal.pettyFloat<0?'var(--danger)':'inherit'}">${fmt(churchBal.pettyFloat)}</span>
-              </div>
-              <div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:13px;padding-top:2px">
                 <span>= Total Church Balance</span>
-                <span style="font-family:ui-monospace,monospace;color:#185FA5">${fmt(churchBal.total)}</span>
+                <span style="font-weight:700;font-family:ui-monospace,monospace;color:#185FA5">${fmt(dashChurchBalanceFromOpening)}</span>
               </div>
-              ${dashPriorUnpaid>0?`
-              <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">− Unpaid from previous period(s)</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashPriorUnpaid)}</span>
-              </div>
-              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-                <span style="color:var(--text3)">− RCCG remittance due (this period)</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashThisPeriodUnpaid)}</span>
-              </div>`:`
               <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
                 <span style="color:var(--text3)">− RCCG outstanding remittances</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashTotalRemDueKpi)}</span>
-              </div>`}
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashOutstandingRemsFromFlow)}</span>
+              </div>
               <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
-                <span>= Available Fund</span>
+                <span>= Actual Balance</span>
                 <span style="font-family:ui-monospace,monospace;color:${dashSpendColor}">${fmt(dashSpendable)}</span>
               </div>
             </div>
+            <div style="margin-top:10px;font-size:11px;color:var(--text3);line-height:1.5;padding-top:8px;border-top:1px dashed var(--border)">
+              This path starts from the opening balance, removes the Children Teacher share because it is not managed by the Admin team, and shows how the church arrived at the current physical church balance before deducting the HQ amount that is still owed.
+            </div>
           </div>
-          <!-- Slide 2: What the church had at the start of this period -->
+          <!-- Slide 2: Alternative path using opening obligations and current-period due -->
           <div style="flex:0 0 100%;scroll-snap-align:start;padding:16px 18px;box-sizing:border-box">
-            <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px">Opening Balance — What the Church Had on ${dashCarriedFwdDateStr}</div>
+            <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px">Second Check — Opening Balance to Available Funds</div>
             <div style="font-size:12px;line-height:2.3;color:var(--text2)">
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">🏦 Bank balance</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace">${fmt(dashOpeningBal.bankBalance)}</span>
+                <span style="color:var(--text3)">Opening balance</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace">${fmt(dashCarriedForward)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:var(--text3)">💵 Cash with Accountant</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace">${fmt(dashOpeningBal.cashWithAccountant)}</span>
+                <span style="color:var(--text3)">− Opening remittance carryover</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashOpeningOutstandingRems)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
-                <span style="color:var(--text3);color:${dashOpeningBal.pettyFloat<0?'var(--danger)':'var(--text3)'}">🪙 Petty cash${dashOpeningBal.pettyFloat<0?' (church owes Admin Officer)':''}</span>
-                <span style="font-weight:600;font-family:ui-monospace,monospace;color:${dashOpeningBal.pettyFloat<0?'var(--danger)':'inherit'}">${fmt(dashOpeningBal.pettyFloat)}</span>
+                <span>= Opening available balance</span>
+                <span style="font-weight:700;font-family:ui-monospace,monospace;color:#4F46E5">${fmt(dashCarriedForward - dashOpeningOutstandingRems)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">+ Admin-managed income this period</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">+${fmt(dashAdminManagedIncome)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">− Total expenses this period</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodAllExpenses)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+                <span style="color:var(--text3)">− RCCG remittance due for this period</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashCurrentMonthRemDue)}</span>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
-                <span>= Opening Balance</span>
-                <span style="font-family:ui-monospace,monospace;color:${dashCarriedForward<0?'var(--danger)':'#4F46E5'}">${fmt(dashCarriedForward)}</span>
+                <span>= Actual Balance</span>
+                <span style="font-family:ui-monospace,monospace;color:${dashSpendColor}">${fmt(dashAvailableFromOpening)}</span>
               </div>
             </div>
-            <div style="margin-top:10px;font-size:11px;color:var(--text3);line-height:1.5;padding-top:8px;border-top:1px dashed var(--border)">
-              This is the exact physical balance the parish was holding when this period began.
-              It equals the previous period's closing Total Church Balance, so consecutive periods reconcile automatically.
+            <div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border);font-size:11px;color:var(--text3);line-height:1.7">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span>Current remittance flow cross-check</span>
+                <span style="font-family:ui-monospace,monospace">${fmt(dashOutstandingRemsFromFlow)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">Opening carryover + current due</span>
+                <span style="font-family:ui-monospace,monospace">${fmt(dashOpeningOutstandingRems + dashCurrentMonthRemDue)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">− Remittances paid this period</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashPeriodRemittancesPaid)}</span>
+              </div>
             </div>
           </div>
         </div>
         <div style="padding:10px 18px 14px;font-size:11px;color:var(--text3);line-height:1.6;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;justify-content:center">
           <span style="font-size:13px">◀</span>
-          <span>Slide left or right — how Available Fund is calculated ◀▶ how the opening balance was computed.</span>
+          <span>Slide left or right — physical-balance path ◀▶ opening-liability path.</span>
           <span style="font-size:13px">▶</span>
         </div>
       </div>
@@ -9569,8 +9658,13 @@ return {
     updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
     setPeriodMode,
     showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
-    _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod
-  };
+    _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
+      _calcPettyFloatFromLedger: calcPettyFloatFromLedger,
+      _totalRemittanceDue: totalRemittanceDue,
+      _calcChurchBalanceFromOpening: calcChurchBalanceFromOpening,
+      _calcOutstandingRemittancesFromFlow: calcOutstandingRemittancesFromFlow,
+      _calcAvailableFundFromOpening: calcAvailableFundFromOpening
+    };
 
 })();
 
