@@ -3021,7 +3021,7 @@ async function renderDashboard(){
           <div style="flex:1;min-width:0">
             <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Expenses (This Period)</div>
             <div style="font-size:22px;font-weight:800;color:var(--danger);letter-spacing:-0.5px;line-height:1.15">${fmt(totalPeriodAllExpenses)}</div>
-            <div style="font-size:12px;color:var(--text3);margin-top:5px">${expenses.filter(e=>e.status==='approved'&&!e.pettyRef).length} approved${totalPeriodPendingExpenses>0?` · <span style="color:var(--amber);font-weight:600">${expenses.filter(e=>isPendingExpense(e)&&!e.pettyRef).length} pending approval (${fmt(totalPeriodPendingExpenses)})</span>`:''}</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:5px">${expenses.filter(e=>isLoggedExpense(e)&&!e.pettyRef).length} expense(s) logged this period</div>
             ${totalPeriodPettyAdvanceSpend>0?`<div style="margin-top:8px;padding:7px 10px;border-radius:8px;background:rgba(186,117,23,0.08);border:1px dashed rgba(186,117,23,0.3);font-size:11.5px;line-height:1.5;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
               <span style="color:#BA7517">💳 Includes ${fmt(totalPeriodPettyAdvanceSpend)} via petty cash${pendingPettyAdvanceCount>0?` <span style="color:var(--text3)">(${pendingPettyAdvanceCount} awaiting receipt)</span>`:''}</span>
             </div>`:''}
@@ -6057,7 +6057,7 @@ async function submitExpense(btn=null){
       const splitLabel = isSplit
         ? ` (${pettyAmount>0?`Petty: ${fmt(pettyAmount)} · `:''}${cashAmount>0?`Cash: ${fmt(cashAmount)} · `:''}Bank: ${fmt(bankAmount)})`
         : '';
-      showAlert(`Expense of ${fmt(amount)} logged${splitLabel}.${expenseStatus!=='approved'?' It is pending approval.':''}`,'success');
+      showAlert(`Expense of ${fmt(amount)} logged${splitLabel}.`,'success');
       await renderExpenses();
     } catch(err) {
       restore();
@@ -7424,7 +7424,6 @@ async function showTopUpRequest(){
       <td><span class="badge badge-gray" style="font-size:11px">${c.icon} ${c.label}</span></td>
       <td style="font-size:12px">
         ${detailBits.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}
-        ${e.status!=='approved'?`<div><span class="badge badge-warn" style="font-size:10px;margin-top:3px">Pending approval</span></div>`:''}
       </td>
       <td class="td-right td-bold" style="font-size:13px;color:var(--danger)">${fmt(amt)}</td>
     </tr>`;
