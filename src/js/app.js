@@ -6765,12 +6765,10 @@ async function renderPettyCash(){
   const monthTopups = monthHistory.filter(h=>h.type==='refill').reduce((s,h)=>s+(h.amount||0),0);
   const monthAdvancesDisbursed = monthHistory.filter(h=>h.type==='advance'&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.amount||0),0);
 
-  // Petty cash expenses since the last refill (for top-up request)
-  // history is already newest-first from the API — find() without reverse picks the most recent
-  const lastRefill = history.find(h=>h.type==='refill');
-  const lastRefillDate = lastRefill ? new Date(lastRefill.createdAt||0) : new Date(0);
-  // Exclude expenses already included in any pending or approved top-up request
-  // Exclude expenses already in any active OR settled top-up request
+  // All petty cash expenses not yet covered by any top-up request (pending, approved, or settled).
+  // We do NOT filter by last refill date — the goal is to recover every unclaimed expense
+  // regardless of when the last cash handover was, so the suggested top-up always restores
+  // the admin to the total cash level they have been given.
   const alreadyClaimedExpIds = new Set(
     history
       .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'||h.status==='settled'))
@@ -6779,12 +6777,7 @@ async function renderPettyCash(){
   const expensesSinceRefill = allExpenses.filter(e=>{
     if(e.status!=='approved' && e.status!=='pending_approval') return false;
     if(e.paymentMethod!=='petty_cash' && !(e.paymentMethod==='split' && (e.pettyAmount||0)>0)) return false;
-    if(alreadyClaimedExpIds.has(e.id)) return false;
-    // Use createdAt (record timestamp) for the refill cutoff — e.date is date-only
-    // and would parse to midnight UTC, wrongly excluding same-day expenses logged
-    // after a refill earlier in the day.
-    const expTime = new Date(e.createdAt || e.date || 0);
-    return expTime > lastRefillDate;
+    return !alreadyClaimedExpIds.has(e.id);
   });
   const expensesSinceRefillTotal = expensesSinceRefill.reduce((s,e)=>
     s+(e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)), 0);
@@ -6827,9 +6820,9 @@ async function renderPettyCash(){
         </div>
         <div style="border-left:1px solid var(--border);padding-left:16px">
           <div style="margin-bottom:10px">
-            <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Spent since last top-up</div>
+            <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Not yet refunded</div>
             <div style="font-size:16px;font-weight:700;color:var(--danger)">${fmt(expensesSinceRefillTotal)}</div>
-            <div style="font-size:11px;color:var(--text3)">${expensesSinceRefill.length} expense(s) not yet refunded</div>
+            <div style="font-size:11px;color:var(--text3)">${expensesSinceRefill.length} expense(s) not yet covered</div>
           </div>
           <div style="margin-bottom:10px">
             <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Topped up this month</div>
@@ -6844,7 +6837,7 @@ async function renderPettyCash(){
       ${expensesSinceRefillTotal>0&&canAction('petty_request')?`
       <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
         <div style="font-size:13px;color:var(--text2);margin-bottom:8px">
-          The wallet has been used for ${fmt(expensesSinceRefillTotal)} in expenses since the last top-up.
+          ${fmt(expensesSinceRefillTotal)} in expenses have not yet been covered by a top-up request.
           ${petty.float/petty.max < 0.4 ? ' The balance is getting low — consider requesting a top-up.' : ''}
         </div>
         <button class="btn btn-primary btn-sm" onclick="App.showTopUpRequest()">↺ Request Top-Up (${fmt(expensesSinceRefillTotal)})</button>
@@ -7258,11 +7251,8 @@ async function submitDeletePetty(id, btn=null){
 async function showTopUpRequest(){
   if(!canAction('petty_request')){ showAlert('You do not have permission to request petty cash top-up.','danger'); return; }
   const [pettyConfig, allExpenses, allPettyRaw] = await Promise.all([DB.getPettyConfig(), DB.getExpenses(), DB.getPetty()]);
-  // allPettyRaw is newest-first from API — find() without reverse picks the most recent refill
-  const lastRefill = allPettyRaw.find(h=>h.type==='refill');
-  const lastRefillDate = lastRefill ? new Date(lastRefill.createdAt||0) : new Date(0);
-
-  // Expenses paid from petty cash since last top-up — exclude those already in any request (including settled)
+  // All petty cash expenses not yet covered by any top-up request — no last-refill cutoff,
+  // so the request covers every unclaimed expense and restores the admin to their full float level.
   const alreadyInRequest = new Set(
     allPettyRaw
       .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'||h.status==='settled'))
@@ -7271,9 +7261,7 @@ async function showTopUpRequest(){
   const unrecovered = allExpenses.filter(e=>{
     if(e.status!=='approved' && e.status!=='pending_approval') return false;
     if(e.paymentMethod!=='petty_cash' && !(e.paymentMethod==='split' && (e.pettyAmount||0)>0)) return false;
-    if(alreadyInRequest.has(e.id)) return false;
-    const expTime = new Date(e.createdAt || e.date || 0);
-    return expTime > lastRefillDate;
+    return !alreadyInRequest.has(e.id);
   }).sort((a,b)=>new Date(a.createdAt||a.date||0)-new Date(b.createdAt||b.date||0));
 
   const totalAmt = unrecovered.reduce((s,e)=>s+(e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)),0);
@@ -7297,7 +7285,7 @@ async function showTopUpRequest(){
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">↺ Request Wallet Top-Up</div>
-    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>This lists all petty cash expenses logged since the last top-up. The Accountant will verify these, then a Signatory approves before the cash is sent to you.</span></div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>This lists all petty cash expenses not yet covered by a previous top-up request. The Accountant will verify these, then a Signatory approves before the cash is sent to you.</span></div>
     <div style="background:var(--surface);border-radius:var(--r);padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
       <span style="font-size:12px;color:var(--text2)">Current wallet balance</span>
       <span style="font-weight:700;color:${cashOnHand<0?'var(--danger)':cashOnHand<10000?'var(--amber)':'var(--primary)'}">${cashOnHand<0?'−'+fmt(Math.abs(cashOnHand)):fmt(cashOnHand)}</span>
