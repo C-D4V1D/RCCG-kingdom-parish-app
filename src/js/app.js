@@ -902,13 +902,6 @@ function countAccruedSundaysInRange(fromValue, toValue, now=new Date()){
   return count;
 }
 
-function countSundaysInMonth(year, month){
-  return countSundaysInRange(
-    new Date(year, month, 1),
-    new Date(year, month+1, 0)
-  );
-}
-
 function getQuotaLinesForPeriod(quotas, fromDate, toDate){
   const list=Array.isArray(quotas)?quotas:[];
   const from=parseYmdDate(fromDate);
