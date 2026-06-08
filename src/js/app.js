@@ -2785,7 +2785,12 @@ async function renderDashboard(){
     if(othersTotal>0) displayIncomeCats.push(['_others',othersTotal]);
   }
   const maxIncomeCat = displayIncomeCats[0]?.[1]||1;
-  const sundayCount = countSundaysInMonth(state.year, state.month);
+  // In remittance mode count distinct Sunday dates already recorded in the period (the period
+  // may include Sundays from the tail of the prior calendar month). In calendar mode use the
+  // date-aware helper that caps at today so only elapsed Sundays are counted.
+  const sundayCount = useRemPeriod
+    ? new Set(income.filter(r=>!r.source||r.source==='sunday_collection').map(r=>r.date)).size
+    : countSundaysInMonth(state.year, state.month);
 
   const expByCat = {};
   expenses.forEach(e=>{ expByCat[e.category]=(expByCat[e.category]||0)+(e.amount||0) });
@@ -2843,7 +2848,11 @@ async function renderDashboard(){
 
   // Forecast: adaptive Sunday-weighted income projection + expense range
   const fullMonthSundays=(y,m)=>{let c=0,d=new Date(y,m,1);while(d.getMonth()===m){if(d.getDay()===0)c++;d.setDate(d.getDate()+1);}return c;};
-  const totalSundaysFullMonth=fullMonthSundays(state.year,state.month);
+  // In remittance mode, count Sundays across the actual period (which may span two calendar
+  // months). In calendar mode, use the full calendar month.
+  const totalSundaysFullMonth = useRemPeriod
+    ? countSundaysInRange(dashPeriodFrom, dashPeriodTo)
+    : fullMonthSundays(state.year,state.month);
   const remainingSundays=Math.max(0,totalSundaysFullMonth-sundayCount);
   const histMonths=[];
   for(let i=3;i>=1;i--){let m=state.month-i,y=state.year;if(m<0){m+=12;y--;}
@@ -2930,6 +2939,18 @@ async function renderDashboard(){
       forecastExpenses={min:Math.max(curExp,Math.round(projExp-expSpread)),max:Math.round(projExp+expSpread)};
     }
   }
+  // "Balance after expenses" = retained share minus expenses — what the parish actually keeps.
+  // Falls back to income minus expenses when the retained forecast isn't available.
+  const _forecastBase = forecastRetained || forecastIncome;
+  const forecastBalance = _forecastBase && forecastExpenses
+    ? {min:_forecastBase.min-forecastExpenses.max, max:_forecastBase.max-forecastExpenses.min}
+    : null;
+  // Pre-compute midpoints and spreads for the ± display format.
+  const _incMid = forecastIncome ? Math.round((forecastIncome.min+forecastIncome.max)/2) : 0;
+  const _incSpread = forecastIncome ? Math.round((forecastIncome.max-forecastIncome.min)/2) : 0;
+  const _retMid = forecastRetained ? Math.round((forecastRetained.min+forecastRetained.max)/2) : 0;
+  const _retSpread = forecastRetained ? Math.round((forecastRetained.max-forecastRetained.min)/2) : 0;
+  const _balColor = forecastBalance && forecastBalance.min < 0 ? 'var(--danger)' : '#185FA5';
 
   // Each period button shows its own anchor month. When the user hasn't picked a
   // month explicitly, the Remittance button shows the upcoming-anchor month
@@ -3309,24 +3330,69 @@ async function renderDashboard(){
               </div>`;}).join('')}
           </div>
           ${forecastIncome?`
-          <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:8px">${MONTHS[state.month].toUpperCase()} FORECAST <span style="font-weight:400;text-transform:none;letter-spacing:0">(${forecastLabel} · ${remainingSundays} Sunday${remainingSundays!==1?'s':''} remaining)</span></div>
-            <div style="display:flex;gap:8px;margin-bottom:${forecastExpenses?'8px':'0'}">
-              <div style="flex:1;padding:8px 10px;background:rgba(29,158,117,0.06);border-radius:8px;border:1px solid rgba(29,158,117,0.18)">
-                <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Income</div>
-                <div style="font-size:13px;font-weight:700;color:var(--primary)">${fmtShort(forecastIncome.min)} – ${fmtShort(forecastIncome.max)}</div>
-              </div>
-              ${forecastRetained?`
-              <div style="flex:1;padding:8px 10px;background:rgba(186,117,23,0.06);border-radius:8px;border:1px solid rgba(186,117,23,0.18)">
-                <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Retained</div>
-                <div style="font-size:13px;font-weight:700;color:#BA7517">${fmtShort(forecastRetained.min)} – ${fmtShort(forecastRetained.max)}</div>
-              </div>`:''}
+          <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:10px">
+              ${MONTHS[state.month].toUpperCase()} FORECAST
+              <span style="font-weight:400;text-transform:none;letter-spacing:0"> (${forecastLabel} · ${remainingSundays} Sunday${remainingSundays!==1?'s':''} remaining)</span>
             </div>
-            ${forecastExpenses?`
-            <div style="padding:8px 10px;background:rgba(163,45,45,0.06);border-radius:8px;border:1px solid rgba(163,45,45,0.18)">
-              <div style="font-size:10px;color:var(--text3);margin-bottom:3px">Expected Expenses</div>
-              <div style="font-size:13px;font-weight:700;color:var(--danger)">${fmtShort(forecastExpenses.min)} – ${fmtShort(forecastExpenses.max)}</div>
-            </div>`:''}
+            <div style="border-radius:12px;border:1px solid var(--border);overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,0.06)">
+
+              <!-- Row 1: Expected Income -->
+              <div style="padding:13px 14px;background:rgba(29,158,117,0.04);display:flex;align-items:stretch;gap:11px">
+                <div style="width:3px;border-radius:2px;background:var(--primary);flex-shrink:0"></div>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Income for this period</div>
+                  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:7px">
+                    <span style="font-size:18px;font-weight:800;color:var(--primary);letter-spacing:-0.4px">${fmtShort(_incMid)}</span>
+                    <span style="font-size:11.5px;font-weight:700;color:var(--primary);opacity:0.75;background:rgba(29,158,117,0.12);border-radius:20px;padding:2px 9px;white-space:nowrap">± ${fmtShort(_incSpread)}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div style="height:1px;background:var(--border)"></div>
+
+              <!-- Row 2: Expected Retained Share -->
+              ${forecastRetained?`
+              <div style="padding:13px 14px;background:rgba(186,117,23,0.04);display:flex;align-items:stretch;gap:11px">
+                <div style="width:3px;border-radius:2px;background:#BA7517;flex-shrink:0"></div>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Retained Share</div>
+                  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:7px">
+                    <span style="font-size:18px;font-weight:800;color:#BA7517;letter-spacing:-0.4px">${fmtShort(_retMid)}</span>
+                    <span style="font-size:11.5px;font-weight:700;color:#BA7517;opacity:0.75;background:rgba(186,117,23,0.12);border-radius:20px;padding:2px 9px;white-space:nowrap">± ${fmtShort(_retSpread)}</span>
+                  </div>
+                </div>
+              </div>
+              <div style="height:1px;background:var(--border)"></div>
+              `:''}
+
+              <!-- Row 3: Expected Balance after Expenses (or Expenses alone if balance unavailable) -->
+              ${forecastBalance?`
+              <div style="padding:13px 14px;background:${forecastBalance.min<0?'rgba(163,45,45,0.04)':'rgba(24,95,165,0.04)'};display:flex;align-items:stretch;gap:11px">
+                <div style="width:3px;border-radius:2px;background:${_balColor};flex-shrink:0"></div>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Actual Balance after Expenses</div>
+                  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:6px">
+                    <span style="font-size:18px;font-weight:800;color:${_balColor};letter-spacing:-0.4px">${fmtShort(forecastBalance.min)}</span>
+                    <span style="font-size:14px;color:var(--text3);font-weight:500;line-height:1">–</span>
+                    <span style="font-size:18px;font-weight:800;color:${_balColor};letter-spacing:-0.4px">${fmtShort(forecastBalance.max)}</span>
+                  </div>
+                </div>
+              </div>
+              `:forecastExpenses?`
+              <div style="padding:13px 14px;background:rgba(163,45,45,0.04);display:flex;align-items:stretch;gap:11px">
+                <div style="width:3px;border-radius:2px;background:var(--danger);flex-shrink:0"></div>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Expenses</div>
+                  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:7px">
+                    <span style="font-size:18px;font-weight:800;color:var(--danger);letter-spacing:-0.4px">${fmtShort(Math.round((forecastExpenses.min+forecastExpenses.max)/2))}</span>
+                    <span style="font-size:11.5px;font-weight:700;color:var(--danger);opacity:0.75;background:rgba(163,45,45,0.12);border-radius:20px;padding:2px 9px;white-space:nowrap">± ${fmtShort(Math.round((forecastExpenses.max-forecastExpenses.min)/2))}</span>
+                  </div>
+                </div>
+              </div>
+              `:''}
+
+            </div>
           </div>`:''}
         </div>
       </div>
