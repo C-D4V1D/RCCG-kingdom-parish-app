@@ -141,6 +141,55 @@ test('petty float snapshots are rebuilt from ledger events for the selected as-o
   assert.equal(App._calcPettyFloatFromLedger(pettyHistory, expenses, null, recDate), 12000);
 });
 
+test('actual balance helper paths stay mathematically aligned', () => {
+  const openingBalance = 100000;
+  const openingOutstanding = 15000;
+  const totalIncome = 50000;
+  const childrenTeacherHold = 5000;
+  const totalExpenses = 12000;
+  const remittancesPaid = 8000;
+  const currentPeriodRemDue = 18000;
+
+  const churchBalance = App._calcChurchBalanceFromOpening(
+    openingBalance,
+    totalIncome,
+    childrenTeacherHold,
+    totalExpenses,
+    remittancesPaid
+  );
+  const outstanding = App._calcOutstandingRemittancesFromFlow(
+    openingOutstanding,
+    currentPeriodRemDue,
+    remittancesPaid
+  );
+  const availableFromOpening = App._calcAvailableFundFromOpening(
+    openingBalance,
+    openingOutstanding,
+    totalIncome,
+    childrenTeacherHold,
+    totalExpenses,
+    currentPeriodRemDue
+  );
+
+  assert.equal(churchBalance, 125000);
+  assert.equal(outstanding, 25000);
+  assert.equal(churchBalance - outstanding, 100000);
+  assert.equal(availableFromOpening, 100000);
+});
+
+test('total remittance due helper sums all remittance buckets and quotas', () => {
+  const total = App._totalRemittanceDue({
+    totalNatl: 10000,
+    totalArea: 2000,
+    totalPastor: 1500,
+    totalMinisters: 900,
+    totalSeed: 100,
+    provinceRebate: 500
+  }, 3000);
+
+  assert.equal(total, 18000);
+});
+
 
 test('fixed quota accrual starts at 11:30am WAT on each Sunday', () => {
   const RealDate = Date;
