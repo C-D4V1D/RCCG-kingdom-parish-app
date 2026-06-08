@@ -177,6 +177,17 @@ test('actual balance helper paths stay mathematically aligned', () => {
   assert.equal(availableFromOpening, 100000);
 });
 
+test('current-period outstanding remittance display reflects only unpaid current due', () => {
+  assert.equal(
+    App._calcCurrentPeriodOutstandingRemittance(82937.70, 8342.50, 74595.20),
+    74595.20
+  );
+  assert.equal(
+    App._calcCurrentPeriodOutstandingRemittance(18000, 20000, 5000),
+    0
+  );
+});
+
 test('total remittance due helper sums all remittance buckets and quotas', () => {
   const total = App._totalRemittanceDue({
     totalNatl: 10000,
