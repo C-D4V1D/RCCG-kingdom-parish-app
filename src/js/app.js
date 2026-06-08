@@ -953,6 +953,55 @@ function sumQuotaLines(lines){
   return (lines||[]).reduce((s,l)=>s+(l.amount||0),0);
 }
 
+/**
+ * Correctly accumulates fixed quotas across multiple remittance periods.
+ *
+ * getQuotaLinesForPeriod() treats quota.amount as the total for ONE period and
+ * prorates by the Sunday ratio within that period. Passing it a date range that
+ * spans N remittance periods yields only 1× quota.amount instead of the correct
+ * N× accumulated total. This function iterates each period individually and sums.
+ *
+ * @param {Array}  quotas         - quota list (from getQuotaList)
+ * @param {Object} settings       - app settings (needed by computeRemPeriodDates)
+ * @param {Array}  allRems        - all remittance records (needed by fallback period logic)
+ * @param {string} firstIncDateStr - date of the earliest income record (YYYY-MM-DD)
+ * @param {string} asOfDateStr    - upper bound date (YYYY-MM-DD); typically today or period end
+ */
+function accumQuotasAcrossPeriods(quotas, settings, allRems, firstIncDateStr, asOfDateStr){
+  if(!firstIncDateStr || !asOfDateStr) return 0;
+  const firstDate = parseYmdDate(firstIncDateStr);
+  if(!firstDate) return 0;
+
+  let total = 0;
+  let scanYear = firstDate.getFullYear();
+  let scanMonth = firstDate.getMonth();
+  const LIMIT = 72; // safety cap — 6 years of monthly periods
+  let prevPFrom = null;
+
+  for(let i = 0; i < LIMIT; i++){
+    const { from: pFrom, to: pTo } = computeRemPeriodDates(settings, allRems, scanYear, scanMonth);
+
+    // Guard: if no cut-off dates are configured the fallback may return the same
+    // period for every month, which would cause infinite accumulation.
+    if(pFrom === prevPFrom) break;
+    prevPFrom = pFrom;
+
+    // Stop once the period begins after the as-of date.
+    if(pFrom > asOfDateStr) break;
+
+    // Only include periods that overlap the range [firstIncDateStr, asOfDateStr].
+    // getQuotaLinesForPeriod handles "cap at today" for the current period internally.
+    if(pTo >= firstIncDateStr){
+      total += sumQuotaLines(getQuotaLinesForPeriod(quotas, pFrom, pTo));
+    }
+
+    if(scanMonth === 11){ scanYear++; scanMonth = 0; }
+    else{ scanMonth++; }
+  }
+
+  return total;
+}
+
 /** Escape special HTML characters to prevent XSS when inserting user data into innerHTML */
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') }
 
@@ -2521,7 +2570,7 @@ async function renderDashboard(){
   // change "what's owed to HQ right now". The per-period split (this period vs
   // prior) can still differ by view; only this total must match.
   const dashAccumQuotas = dashFirstIncRec
-    ? sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, dashFirstDateStr, dashAsOfDate))
+    ? accumQuotasAcrossPeriods(dashQuotas, settingsDash, allRemsForKpi, dashFirstDateStr, dashAsOfDate)
     : 0;
   const dashAllPaidRems = allRemsForKpi.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
@@ -2632,7 +2681,7 @@ async function renderDashboard(){
   const dashOpeningFirstIncRec = dashOpeningIncome.length > 0 ? dashOpeningIncome[dashOpeningIncome.length-1] : null;
   const dashOpeningFirstDateStr = (dashOpeningFirstIncRec ? (dashOpeningFirstIncRec.date||dashOpeningFirstIncRec.createdAt||'') : '').slice(0,10);
   const dashOpeningAccumQuotas = dashOpeningFirstIncRec
-    ? sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, dashOpeningFirstDateStr, dashPriorCloseDate))
+    ? accumQuotasAcrossPeriods(dashQuotas, settingsDash, allRemsDash, dashOpeningFirstDateStr, dashPriorCloseDate)
     : 0;
   const dashOpeningPaidRems = allRemsDash
     .filter(r => r.status === 'paid')
@@ -5362,13 +5411,14 @@ async function renderExpenses(){
     +(allTimeRemittances.totalSeed||0)+(allTimeRemittances.provinceRebate||0);
   const quotaList = getQuotaList(settings);
 
-  // Sunday-prorate accumulated quotas (same basis as dashboard KPI + Remittances page).
-  // Anchor at today so only elapsed Sundays accrue — future Sundays in the
-  // current remittance period aren't yet due.
+  // Accumulated quotas: iterate each remittance period from the first income record
+  // through today and sum the prorated quota for each. Using a single
+  // getQuotaLinesForPeriod call across the full date span only yields 1× quota.amount
+  // regardless of how many periods have elapsed.
   const firstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
   const firstDateStr = (firstIncRec ? (firstIncRec.date||firstIncRec.createdAt||'') : '').slice(0,10);
   const accumQuotas = firstIncRec
-    ? sumQuotaLines(getQuotaLinesForPeriod(quotaList, firstDateStr, ymdLocal(new Date())))
+    ? accumQuotasAcrossPeriods(quotaList, settings, allRems, firstDateStr, ymdLocal(new Date()))
     : 0;
   const paidRems = allRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
   const outstandingRems = Math.max(0, allTimeIncomeRemDue + accumQuotas - paidRems);
