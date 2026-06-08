@@ -8417,8 +8417,8 @@ async function generateMonthlyReport(){
   const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
   const income=filterByDateRange(allIncome,fromDate,toDate);
   const allMonthExpenses=filterByDateRange(allExpenses,fromDate,toDate);
-  const expenses=allMonthExpenses.filter(e=>e.status==='approved');
-  const pendingExpCount=allMonthExpenses.filter(e=>e.status==='pending_approval'||e.status==='pending').length;
+  const expenses=allMonthExpenses.filter(e=>isLoggedExpense(e));
+  const pendingExpCount=0;
   const paidRems=filterByDateRange(allRemittances,fromDate,toDate);
   const rem=await calcRemittancesFromRecords(income);
   const quotaList=getQuotaList(settings);
@@ -8490,13 +8490,12 @@ async function generateMonthlyReport(){
       <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">NET LOCAL RETAINED (after all remittances)</td><td class="td-r td-green">${fmt(trueNetLocal)}</td></tr>
     </table>
 
-    <div class="section-title">Section D: Approved Expenses <span>(${expenses.length} entries totalling ${fmt(totalExpenses)})${pendingExpCount>0?' — '+pendingExpCount+' pending approval not included':''}</span></div>
+    <div class="section-title">Section D: Expenses <span>(${expenses.length} entries totalling ${fmt(totalExpenses)})</span></div>
     ${expenses.length?`<table>
-      <tr><th>S/N</th><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th>Method</th><th>Status</th><th>Receipt No.</th><th class="td-r">Amount (₦)</th></tr>
-      ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const methodLabel=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';const desc=e.description&&e.description.trim()&&e.description.trim()!==e.subCategory?esc(e.description):'—';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${desc}</td><td>${methodLabel}</td><td><span class="badge badge-success">Approved</span></td><td>${e.receiptNo||'—'}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
-      <tr class="total-row"><td colspan="8">TOTAL APPROVED EXPENSES</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
-    </table>`:'<div class="no-data">No approved expenses recorded for this period.</div>'}
-    ${pendingExpCount>0?`<div class="note-box">ℹ️ ${pendingExpCount} expense(s) are pending approval and not included in the financial totals above.</div>`:''}
+      <tr><th>S/N</th><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th>Method</th><th>Receipt No.</th><th class="td-r">Amount (₦)</th></tr>
+      ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const methodLabel=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';const desc=e.description&&e.description.trim()&&e.description.trim()!==e.subCategory?esc(e.description):'—';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${desc}</td><td>${methodLabel}</td><td>${e.receiptNo||'—'}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
+      <tr class="total-row"><td colspan="7">TOTAL EXPENSES</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
+    </table>`:'<div class="no-data">No expenses recorded for this period.</div>'}
 
     ${expSorted.length?`<div class="section-title">Section E: Expense Summary by Category</div>
     <table>
@@ -8685,9 +8684,6 @@ async function generateExpenseReport(){
   expenses.forEach(e=>{if(byCat[e.category]){byCat[e.category].total+=e.amount||0;byCat[e.category].count++;byCat[e.category].items.push(e)}});
   const sorted=Object.values(byCat).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);
 
-  // Approval status
-  const approved=expenses.filter(e=>e.status==='approved').length;
-  const pending=expenses.filter(e=>e.status==='pending_approval').length;
   const withReceipt=expenses.filter(e=>e.receiptNo).length;
 
   const body=`
@@ -8698,8 +8694,6 @@ async function generateExpenseReport(){
       <div class="summary-box"><div class="label">No. of Entries</div><div class="value blue">${expenses.length}</div></div>
       <div class="summary-box"><div class="label">Categories Used</div><div class="value">${sorted.length}</div></div>
       <div class="summary-box"><div class="label">With Receipts</div><div class="value green">${withReceipt}/${expenses.length}</div></div>
-      <div class="summary-box"><div class="label">Approved</div><div class="value green">${approved}</div></div>
-      ${pending>0?`<div class="summary-box"><div class="label">Pending Approval</div><div class="value amber">${pending}</div></div>`:''}
     </div>
 
     <div class="section-title">Summary by Category</div>
@@ -8712,7 +8706,7 @@ async function generateExpenseReport(){
     <div class="section-title">Detailed Line Items (All Expenses)</div>
     ${expenses.length?`<table>
       <tr><th>S/N</th><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th>Method</th><th>Status</th><th>Receipt No.</th><th>Recorded By</th><th class="td-r">Amount (₦)</th></tr>
-      ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const mL=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';const sb=e.status==='approved'?'<span class="badge badge-success">Approved</span>':e.status==='rejected'?'<span class="badge badge-danger">Rejected</span>':'<span class="badge badge-warn">Pending</span>';const desc=e.description&&e.description.trim()&&e.description.trim()!==e.subCategory?esc(e.description):'—';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${desc}</td><td>${mL}</td><td>${sb}</td><td>${e.receiptNo||'—'}</td><td>${esc(e.recordedBy||e.createdByName||'—')}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
+      ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const mL=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';const sb=e.status==='rejected'?'<span class="badge badge-danger">Rejected</span>':'<span class="badge badge-success">Logged</span>';const desc=e.description&&e.description.trim()&&e.description.trim()!==e.subCategory?esc(e.description):'—';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${desc}</td><td>${mL}</td><td>${sb}</td><td>${e.receiptNo||'—'}</td><td>${esc(e.recordedBy||e.createdByName||'—')}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
       <tr class="total-row"><td colspan="9">TOTAL EXPENDITURE</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
     </table>`:'<div class="no-data">No expenses recorded for this period.</div>'}
 
