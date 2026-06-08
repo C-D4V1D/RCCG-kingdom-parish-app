@@ -681,7 +681,6 @@ const ACCESS_RULES = {
     expense_edit_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_approved: ['expense_delete_approved'],
-    expense_approve_pending: { roles:['accountant','it_admin'] },
     topup_cancel: ({ request }) => canCancelTopupRequest(request)
   }
 };
@@ -703,9 +702,7 @@ function canAccessPage(page){
 }
 function monthLabel(){ return MONTHS[state.month]+' '+state.year }
 function defaultExpenseStatusForCurrentUser(){
-  // Only the Admin Officer's expenses need Accountant verification
-  // All other roles (Accountant, Pastor, Signatory, IT Admin) log pre-approved expenses
-  return state.user?.role==='admin_officer' ? 'pending_approval' : 'approved';
+  return 'approved';
 }
 function filterByMonth(arr){
   return (arr||[]).filter(r=>{
@@ -5510,7 +5507,6 @@ async function renderExpenses(){
           <th>Category</th>
           <th>Sub-category / Description</th>
           <th ${thStyle('amount')} class="td-right">Amount ${sortIcon('amount')}</th>
-          <th>Status</th>
           <th>Method</th>
           <th>Recorded By</th>
           <th>Receipt</th>
@@ -5528,10 +5524,6 @@ async function renderExpenses(){
           const splitDetail = e.paymentMethod==='split'&&splitParts.length
             ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">${splitParts.join(' · ')}</div>` : '';
           const canEditPending = canAction('expense_edit_pending') && e.status!=='approved';
-          const canApprovePending = canAction('expense_approve_pending') && e.status!=='approved';
-          const statusBadge = e.status==='approved'
-            ? '<span class="badge badge-success">Approved</span>'
-            : '<span class="badge badge-warn">Pending Approval</span>';
           return `<tr>
             <td style="white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.createdAt||e.date)}</div></td>
             <td><span class="badge badge-gray">${c.icon} ${c.label}</span></td>
@@ -5540,7 +5532,6 @@ async function renderExpenses(){
               ${e.subCategory&&e.description&&e.description!==e.subCategory?`<div style="font-size:11px;color:var(--text3)">${e.description}</div>`:''}
             </td>
             <td class="td-right td-red td-bold">${fmt(e.amount)}</td>
-            <td>${statusBadge}</td>
             <td class="td-muted" style="font-size:12px">${methodLabel}${splitDetail}</td>
             <td class="td-muted" style="font-size:12px">${e.recordedBy||'—'}</td>
             <td>
@@ -5560,15 +5551,12 @@ async function renderExpenses(){
             :e.paymentMethod==='bank_transfer'?'🏦 Bank'
             :e.paymentMethod==='split'?'🔀 Split'
             :'💵 Cash';
-          const mobileStatus = e.status==='approved'
-            ? '<span class="badge badge-success">Approved</span>'
-            : '<span class="badge badge-warn">Pending</span>';
           return `<tr class="tx-mobile-row" onclick="App.showExpenseDetail('${e.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.showExpenseDetail('${e.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(e.subCategory||e.description||'Expense')} — ${fmt(e.amount)}">
             <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(e.date||e.createdAt)}</div><div class="td-muted" style="font-size:11px">${fmtTime(e.createdAt||e.date)}</div></td>
             <td style="max-width:0;width:55%">
               <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="badge badge-gray" style="font-size:11px">${c.icon} ${c.label}</span></div>
               <div class="td-muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">${esc(e.subCategory||e.description||'—')}</div>
-              <div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">${mobileStatus}<span class="td-muted" style="font-size:11px">${methodLabel}</span></div>
+              <div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap"><span class="td-muted" style="font-size:11px">${methodLabel}</span></div>
             </td>
             <td class="td-right td-red td-bold" style="white-space:nowrap">${fmt(e.amount)}</td>
           </tr>`;
@@ -5619,19 +5607,14 @@ function showExpenseDetail(id){
   if((e.bankAmount||0)>0) splitParts.push(`Bank: ${fmt(e.bankAmount)}`);
   if((e.pettyAmount||0)>0) splitParts.push(`Petty: ${fmt(e.pettyAmount)}`);
   if((e.cashAmount||0)>0) splitParts.push(`Cash: ${fmt(e.cashAmount)}`);
-  const statusBadge = e.status==='approved'
-    ? '<span class="badge badge-success">Approved</span>'
-    : '<span class="badge badge-warn">Pending Approval</span>';
   const canEditPending = canAction('expense_edit_pending') && e.status!=='approved';
   const canDeleteApproved = canAction('expense_delete_approved') && e.status==='approved';
-  const canApprovePending = canAction('expense_approve_pending') && e.status!=='approved';
   const rows = [
     ['Date',            fmtDate(e.date||e.createdAt)],
     ['Category',        `<span class="badge badge-gray">${c.icon} ${c.label}</span>`],
     ['Sub-category',    esc(e.subCategory||'—')],
     ...(e.description && e.description!==e.subCategory ? [['Description', esc(e.description)]] : []),
     ['Amount',          `<span class="td-red td-bold" style="font-size:16px">${fmt(e.amount)}</span>`],
-    ['Status',          statusBadge],
     ['Payment Method',  `${methodLabel}${splitParts.length?`<div style="font-size:11px;color:var(--text3);margin-top:3px">${splitParts.join(' · ')}</div>`:''}`],
     ['Recorded By',     esc(e.recordedBy||'—')],
     ['Receipt / Ref',   e.receiptNo?`#${esc(e.receiptNo)}`:((e.hasReceiptImage||e.receiptImage)?'📎 Image attached':'—')],
@@ -5651,7 +5634,6 @@ function showExpenseDetail(id){
       ${(e.hasReceiptImage||e.receiptImage)?`<button class="btn btn-sm" onclick="closeModal();App.viewExpenseReceipt('${e.id}')">🧾 View Receipt</button>`:''}
       ${canEditPending?`<button class="btn btn-sm" onclick="closeModal();App.editExpense('${e.id}')">✏️ Edit</button>`:''}
       ${(canEditPending||canDeleteApproved)?`<button class="btn btn-sm btn-danger" onclick="closeModal();App.deleteExpense('${e.id}')">🗑 Delete</button>`:''}
-      ${canApprovePending?`<button class="btn btn-primary" onclick="closeModal();App.approveExpense('${e.id}')">✓ Approve</button>`:''}
     </div>`);
 }
 
@@ -6124,23 +6106,6 @@ async function deleteExpense(id, btn=null){
   }
 }
 
-async function approveExpense(id, btn=null){
-  if(!canAction('expense_approve_pending')){ alert('You are not allowed to approve expenses.'); return }
-  const all = await DB.getExpenses();
-  const exp = all.find(e=>e.id===id);
-  if(!exp) return;
-  if(exp.status==='approved'){ alert('Expense is already approved.'); return }
-  const restore = setBtnLoading(btn, 'Approving…');
-  try {
-    await DB.updateExpense(id, { status:'approved' });
-    DB.addAudit('expense_approved',`Expense approved: ${exp.id} (${fmt(exp.amount)})`,state.user?.name);
-    showAlert('Expense approved.','success');
-    renderExpenses();
-  } catch(err) {
-    restore();
-    showAlert(`Failed to approve expense: ${err.message||'Unknown error'}. Please try again.`,'danger');
-  }
-}
 
 async function showBankWithdrawal(){
   if(!canAction('bank_withdrawal')){ showAlert('You do not have permission to record bank withdrawals.','danger'); return; }
@@ -6764,6 +6729,8 @@ function isReceiptOverdue(req){
 }
 
 async function renderPettyCash(){
+  // Silently correct any float drift before displaying so the balance is always accurate
+  try { await DB.recalcPettyFloat(); } catch(e) { /* continue with stored value on failure */ }
   const [pettyHistory, pettyConfig, allExpenses] = await Promise.all([DB.getPetty(), DB.getPettyConfig(), DB.getExpenses()]);
   const petty = { history: pettyHistory, float: pettyConfig.float, max: pettyConfig.max };
   const history = petty.history||[];
@@ -6840,7 +6807,6 @@ async function renderPettyCash(){
           <button class="btn" onclick="App.showAdvanceRequest()">+ Request Advance</button>
         `:''}
         ${canAction('petty_topup_payment')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">📋 Record Top-Up Payment</button>`:''}
-        ${can('petty_view')?`<button class="btn btn-sm" onclick="App.recalcPettyFloat(this)" title="Recalculate petty cash balance from all expense and petty cash records">⚖ Recalculate Balance</button>`:''}
       </div>
     </div>
 
@@ -6949,7 +6915,10 @@ async function renderPettyCash(){
               ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--success)">Paid: ${fmt(r.actualAmount)}</div>`:''}
               ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--amber)">Due: ${fmt(_due)}</div>`:''}
             </td>
-            <td><button class="btn btn-sm btn-primary" onclick="App.showPettyRefill(${_due}, '${r.id}')">📋 Record Payment</button></td>
+            <td style="display:flex;gap:6px;flex-wrap:wrap">
+              <button class="btn btn-sm btn-primary" onclick="App.showPettyRefill(${_due}, '${r.id}')">📋 Record Payment</button>
+              ${canAction('petty_topup_payment')?`<button class="btn btn-sm" onclick="App.markTopupSettled('${r.id}')">✓ Mark Settled</button>`:''}
+            </td>
           </tr>`; }).join('')}
         </table></div>
       </div>
@@ -6974,7 +6943,10 @@ async function renderPettyCash(){
               <div class="topup-card-detail-row"><span class="topup-card-detail-label">Approved By</span><span class="topup-card-detail-val">${r.approvedBy||'—'}</span></div>
               ${(r.actualAmount||0)>0?`<div class="topup-card-detail-row"><span class="topup-card-detail-label">Paid So Far</span><span class="topup-card-detail-val" style="color:var(--success)">${fmt(r.actualAmount)}</span></div>`:''}
               ${(r.actualAmount||0)>0?`<div class="topup-card-detail-row"><span class="topup-card-detail-label">Remaining</span><span class="topup-card-detail-val" style="color:var(--amber)">${fmt(due)}</span></div>`:''}
-              <div class="topup-card-action"><button class="btn btn-sm btn-primary btn-full" onclick="App.showPettyRefill(${due}, '${r.id}')">📋 Record Payment</button></div>
+              <div class="topup-card-action" style="display:flex;gap:8px">
+                <button class="btn btn-sm btn-primary btn-full" onclick="App.showPettyRefill(${due}, '${r.id}')">📋 Record Payment</button>
+                ${canAction('petty_topup_payment')?`<button class="btn btn-sm" onclick="App.markTopupSettled('${r.id}')">✓ Mark Settled</button>`:''}
+              </div>
             </div>
           </div>`;
         }).join('')}
@@ -7696,14 +7668,6 @@ async function confirmTopupApproval(id, btn=null){
   try {
     const approvedAt = new Date().toISOString();
     await DB.updatePettyEntry(id, { status:'approved', approvedBy:state.user?.name, approvedAt });
-    // Option B: approving a top-up request also marks linked expenses as approved
-    if(Array.isArray(req.expenseRefs) && req.expenseRefs.length){
-      const allExpenses = await DB.getExpenses();
-      const linked = allExpenses.filter(e=>req.expenseRefs.includes(e.id) && e.status!=='approved');
-      for(const exp of linked){
-        await DB.updateExpense(exp.id, { status:'approved' });
-      }
-    }
     DB.addAudit('topup_approved',`Top-up approved: ${fmt(req.amount)} (by ${state.user?.name})`,state.user?.name);
     DB.addNotification('Top-Up Approved',`Top-up of ${fmt(req.amount)} approved by ${state.user?.name}. Accountant should record the payment.`,'success');
     closeModal();
@@ -7954,6 +7918,19 @@ async function showPettyRefill(prefillAmount, topupRequestId=''){
     </div>`);
 }
 
+async function markTopupSettled(id){
+  if(!canAction('petty_topup_payment')){ showAlert('You do not have permission.','danger'); return; }
+  if(!confirm('Mark this top-up request as settled?\n\nOnly use this if the full amount owed has already been paid through a separate top-up entry. The cash balance will not be changed.')) return;
+  try {
+    await DB.updatePettyEntry(id, { status:'settled', settledAt:new Date().toISOString(), settledBy:state.user?.name });
+    DB.addAudit('petty_manual_settle',`Top-up request ${id} manually marked as settled by ${state.user?.name}`,state.user?.name);
+    showAlert('Request marked as settled.','success');
+    renderPettyCash();
+  } catch(err) {
+    showAlert(`Failed to settle request: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
 function onRefillTopupChange(){
   const sel = document.getElementById('ref_topup_id');
   const opt = sel?.selectedOptions?.[0];
@@ -8045,11 +8022,6 @@ async function submitRefill(btn=null){
       linkedEffectiveAmount = refs.reduce((s,id)=>{ const e=expMap.get(id); if(!e) return s; return s + (e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)); }, 0);
     } else {
       linkedEffectiveAmount = linkedTopup.amount || 0;
-    }
-    const remainingDue = Math.max(0, linkedEffectiveAmount - (linkedTopup.actualAmount||0));
-    if(actualAdded > remainingDue + 0.5){
-      alert(`Recorded payment (${fmt(actualAdded)}) cannot exceed the remaining balance on the approved request (${fmt(remainingDue)}).`);
-      return;
     }
   }
 
@@ -9601,12 +9573,12 @@ return {
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance, deleteRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
-  quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, approveExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
+  quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
-  approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, submitRefill, onRefillMethodChange, onRefillTopupChange,
+  approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
   setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
