@@ -2161,15 +2161,27 @@ function pettyFloatEvents(h){
   return [];
 }
 
+function calcPettyFloatFromLedger(pettyHistory, expenses, asOfDate, recDate=()=> ''){
+  const historyDelta = (pettyHistory || [])
+    .flatMap(pettyFloatEvents)
+    .filter(e => !asOfDate || !e.date || e.date <= asOfDate)
+    .reduce((s,e) => s + (e.delta || 0), 0);
+  const expenseDeductions = (expenses || [])
+    .filter(e => (e.pettyAmount||0) > 0)
+    .filter(e => !asOfDate || !recDate(e) || recDate(e) <= asOfDate)
+    .reduce((s,e) => s + (e.pettyAmount||0), 0);
+  return historyDelta - expenseDeductions;
+}
+
 /** Cash position. Pass `asOfDate` (YYYY-MM-DD) to get a historical snapshot —
  *  every input record is filtered by date ≤ asOfDate and the petty float is
- *  unwound from the current stored value by reversing post-asOfDate events.
+ *  rebuilt from ledger events up to that date.
  *  Pass nothing (or null) for the live "as of now" balance. */
 async function calcChurchBalance(asOfDate, prefetched){
   const pf = prefetched || {};
-  const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory,pettyConfig] = await Promise.all([
+  const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory] = await Promise.all([
     pf.income || DB.getIncome(), pf.expenses || DB.getExpenses(), pf.remittances || DB.getRemittances(),
-    pf.cashTx || DB.getCashTransactions(), pf.pettyHistory || DB.getPetty(), pf.pettyConfig || DB.getPettyConfig()
+    pf.cashTx || DB.getCashTransactions(), pf.pettyHistory || DB.getPetty()
   ]);
   const remRates = pf.remRates || (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
 
@@ -2223,25 +2235,9 @@ async function calcChurchBalance(asOfDate, prefetched){
   const cashWithAccountantRaw = cashFromCollections - cashDepositedToBank + bankToAccountant - cashExpenses - pettyCashTopups;
 
   // --- PETTY CASH (with Admin Officer) ---
-  // pettyFloat can be negative — means Admin Officer spent personal money and church owes them.
-  // For historical view: unwind from current float by reversing every event whose IMPACT date
-  // falls after asOfDate. Each refill / advance approval / settlement adjustment / disbursement
-  // is its own event with its own date, so an advance approved in May can't accidentally
-  // contaminate a March snapshot via the requester's "dateNeeded" hint.
-  let pettyFloat = pettyConfig.float;
-  if(asOfDate){
-    const reverseDelta = pettyHistory
-      .flatMap(pettyFloatEvents)
-      .filter(e => e.date && e.date > asOfDate)
-      .reduce((s,e) => s + e.delta, 0);
-    // Also reverse direct-petty expense deductions (pettyAmount > 0) whose date is after
-    // the snapshot date. The backend recalcPettyFloat subtracts these when rebuilding the
-    // stored float, so the historical unwind must add them back to avoid over-deducting.
-    const reverseExpenseDeductions = expenses
-      .filter(e => (e.pettyAmount||0) > 0 && recDate(e) > asOfDate)
-      .reduce((s,e) => s + (e.pettyAmount||0), 0);
-    pettyFloat = pettyConfig.float - reverseDelta + reverseExpenseDeductions;
-  }
+  // Rebuild the float from raw ledger movements each time so historical snapshots stay
+  // accurate even if the stored petty_config.float has drifted.
+  const pettyFloat = calcPettyFloatFromLedger(pettyHistory, allExpenses, asOfDate, recDate);
 
   return {
     cashWithAccountant: Math.max(0, cashWithAccountantRaw),
@@ -9569,7 +9565,8 @@ return {
     updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
     setPeriodMode,
     showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
-    _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod
+    _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
+    _calcPettyFloatFromLedger: calcPettyFloatFromLedger
   };
 
 })();
