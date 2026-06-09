@@ -43,6 +43,11 @@ const REMITTANCE_RATES = {
     local: 0.75,
     label: "Gospel Fund (Workers' Offering)"
   },
+  firstFruit: {
+    national: 1.00,
+    local: 0,
+    label: "First Fruit"
+  },
   childrenOffering: {
     national: 0.35,
     localChildrensDept: 0.65,

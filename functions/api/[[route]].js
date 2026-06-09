@@ -1266,6 +1266,7 @@ async function handleInit(DB) {
       slo                   REAL DEFAULT 0,
       crm                   REAL DEFAULT 0,
       workers_offering      REAL DEFAULT 0,
+      first_fruit           REAL DEFAULT 0,
       children_offering     REAL DEFAULT 0,
       total_collection      REAL DEFAULT 0,
       bank_transfer_amount  REAL DEFAULT 0,
@@ -1685,6 +1686,7 @@ async function handleInit(DB) {
     `ALTER TABLE income ADD COLUMN source TEXT DEFAULT 'sunday_collection'`,
     `ALTER TABLE income ADD COLUMN payment_method TEXT DEFAULT ''`,
     `ALTER TABLE income ADD COLUMN donor_name TEXT DEFAULT ''`,
+    `ALTER TABLE income ADD COLUMN first_fruit REAL DEFAULT 0`,
     // Expense columns
     `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
     `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
@@ -1798,7 +1800,7 @@ async function handleInit(DB) {
     bankName:         '',
     accountNo:        '',
     pettyMax:         '50000',
-    quotas:           JSON.stringify({ rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000 }),
+    quotas:           JSON.stringify({ volunteer:2000, csr:3000, camp:5000, rmf:5000, edu:2000, mummy:8000 }),
     remittanceRates:  JSON.stringify({
       membersTithe:    { natl:0.58, local:0.42 },
       ministersTithe:  { natl:0.62, local:0.38 },
@@ -1806,9 +1808,11 @@ async function handleInit(DB) {
       slo:             { natl:0.30, local:0.70 },
       crm:             { natl:0.60, local:0.40 },
       workersOffering: { natl:0.25, local:0.75 },
+      firstFruit:      { natl:1.00, local:0.00 },
       childrenOffering:{ natl:0.35, local:0.65 },
       tgNational:0.75, tgArea:0.05, tgPastor:0.10, tgMinisters:0.09, tgSeed:0.01,
-      provinceRebate:0.20
+      provinceRebate:0.20,
+      crmAddon:0.25, coastline:0.01, insuranceGenTithe:0.0125, insuranceMinTithe:0.0125
     }),
     kpsc_default_pin: '1234',
     // Default to the mini variant — ~half the cost of gpt-4o-transcribe
@@ -2200,6 +2204,7 @@ async function getIncome(DB) {
     slo:                 row.slo,
     crm:                 row.crm,
     workersOffering:     row.workers_offering,
+    firstFruit:          row.first_fruit,
     childrenOffering:    row.children_offering,
     totalCollection:     row.total_collection,
     bankTransferAmount:  row.bank_transfer_amount,
@@ -2220,9 +2225,40 @@ async function getIncome(DB) {
 
 async function createIncome(DB, data) {
   const id = data.id || newId('INC-');
-  const hasSplitCols = await tableHasColumns(DB, 'income', ['bank_transfer_amount', 'direct_petty_cash', 'source']);
-  const hasMetaCols  = await tableHasColumns(DB, 'income', ['payment_method', 'donor_name']);
-  if (hasSplitCols && hasMetaCols) {
+  const hasSplitCols  = await tableHasColumns(DB, 'income', ['bank_transfer_amount', 'direct_petty_cash', 'source']);
+  const hasMetaCols   = await tableHasColumns(DB, 'income', ['payment_method', 'donor_name']);
+  const hasFirstFruit = await tableHasColumns(DB, 'income', ['first_fruit']);
+  if (hasSplitCols && hasMetaCols && hasFirstFruit) {
+    await DB.prepare(`
+      INSERT INTO income
+        (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
+         slo,crm,workers_offering,first_fruit,children_offering,total_collection,
+         bank_transfer_amount,direct_petty_cash,source,payment_method,donor_name,
+         usher,recorded_by,notes)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id,
+      data.date                 || new Date().toISOString().split('T')[0],
+      data.membersTithe         || 0,
+      data.ministersTithe       || 0,
+      data.thanksgiving         || 0,
+      data.sundaySchool         || 0,
+      data.slo                  || 0,
+      data.crm                  || 0,
+      data.workersOffering      || 0,
+      data.firstFruit           || 0,
+      data.childrenOffering     || 0,
+      data.totalCollection      || 0,
+      data.bankTransferAmount   || 0,
+      data.directPettyCash      || 0,
+      data.source               || 'sunday_collection',
+      data.paymentMethod        || '',
+      data.donorName            || '',
+      data.usher                || '',
+      data.recordedBy           || '',
+      data.notes                || '',
+    ).run();
+  } else if (hasSplitCols && hasMetaCols) {
     await DB.prepare(`
       INSERT INTO income
         (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
