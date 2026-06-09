@@ -77,6 +77,7 @@ const INCOME_TYPES = [
   { key:'slo',             label:'Sunday Love Offering',   natl:0.30, local:0.70 },
   { key:'crm',             label:'CRM (Weekly Activities)',natl:0.60, local:0.40 },
   { key:'workersOffering', label:"Gospel Fund (Workers' Offering)", natl:0.25, local:0.75 },
+  { key:'firstFruit',      label:'First Fruit',            natl:1.00, local:0 },
   { key:'childrenOffering',label:"Teen/Children's Offering",        natl:0.35, local:0.65 }
 ];
 
@@ -114,15 +115,15 @@ const EXPENSE_SUBCATS = {
   security:    ['Monthly salary or allowance for the night security guard','Security supplies','Occasional tips or relations with local police or community vigilantes','Others...']
 };
 
-const DEFAULT_QUOTAS = { rmf:5000, csr:3000, edu:2000, camp:5000, mummy:8000, volunteer:2000, regional:0 };
+const DEFAULT_QUOTAS = { volunteer:2000, csr:3000, camp:5000, rmf:5000, edu:2000, mummy:8000, regional:0 };
 
 const QUOTA_LABELS = {
-  rmf:      'RMF (Camp Clearing)',
-  csr:      'CSR (Christian Social Responsibility)',
-  edu:      'Education Fund',
-  camp:     'Camp Meeting Fund',
+  volunteer:'Convention Volunteer',
+  csr:      'CSR Support (Zonal HQ)',
+  camp:     'RCCG Camp Clearing',
+  rmf:      'RMF',
+  edu:      'Run Edu Fund (Zonal HQ)',
   mummy:    'Zonal Mummy Stipend',
-  volunteer:'Volunteer Fund',
   regional: 'Regional Contribution'
 };
 
@@ -147,9 +148,11 @@ const DEFAULT_REMITTANCE_RATES = {
   slo:             { natl:0.30, local:0.70 },
   crm:             { natl:0.60, local:0.40 },
   workersOffering: { natl:0.25, local:0.75 },
+  firstFruit:      { natl:1.00, local:0.00 },
   childrenOffering:{ natl:0.35, local:0.65 },
   tgNational:0.75, tgArea:0.05, tgPastor:0.10, tgMinisters:0.09, tgSeed:0.01,
-  provinceRebate:0.20
+  provinceRebate:0.20,
+  crmAddon:0.25, coastline:0.01, insuranceGenTithe:0.0125, insuranceMinTithe:0.0125
 };
 const PIN_REGEX = /^\d{4,6}$/;
 
@@ -1018,12 +1021,16 @@ async function getRemRates(){
   const r = s.remittanceRates || DEFAULT_REMITTANCE_RATES;
   return {
     rates: r,
-    tgNational:  r.tgNational   ?? DEFAULT_REMITTANCE_RATES.tgNational,
-    tgArea:      r.tgArea       ?? DEFAULT_REMITTANCE_RATES.tgArea,
-    tgPastor:    r.tgPastor     ?? DEFAULT_REMITTANCE_RATES.tgPastor,
-    tgMinisters: r.tgMinisters  ?? DEFAULT_REMITTANCE_RATES.tgMinisters,
-    tgSeed:      r.tgSeed       ?? DEFAULT_REMITTANCE_RATES.tgSeed,
-    provinceRebate: r.provinceRebate ?? DEFAULT_REMITTANCE_RATES.provinceRebate
+    tgNational:       r.tgNational        ?? DEFAULT_REMITTANCE_RATES.tgNational,
+    tgArea:           r.tgArea            ?? DEFAULT_REMITTANCE_RATES.tgArea,
+    tgPastor:         r.tgPastor          ?? DEFAULT_REMITTANCE_RATES.tgPastor,
+    tgMinisters:      r.tgMinisters       ?? DEFAULT_REMITTANCE_RATES.tgMinisters,
+    tgSeed:           r.tgSeed            ?? DEFAULT_REMITTANCE_RATES.tgSeed,
+    provinceRebate:   r.provinceRebate    ?? DEFAULT_REMITTANCE_RATES.provinceRebate,
+    crmAddon:         r.crmAddon          ?? DEFAULT_REMITTANCE_RATES.crmAddon,
+    coastline:        r.coastline         ?? DEFAULT_REMITTANCE_RATES.coastline,
+    insuranceGenTithe:r.insuranceGenTithe ?? DEFAULT_REMITTANCE_RATES.insuranceGenTithe,
+    insuranceMinTithe:r.insuranceMinTithe ?? DEFAULT_REMITTANCE_RATES.insuranceMinTithe
   };
 }
 
@@ -1056,6 +1063,10 @@ function totalRemittanceDue(remCalc, quotas = 0){
     + (remCalc?.totalMinisters || 0)
     + (remCalc?.totalSeed || 0)
     + (remCalc?.provinceRebate || 0)
+    + (remCalc?.crmAddon || 0)
+    + (remCalc?.coastline || 0)
+    + (remCalc?.insuranceGen || 0)
+    + (remCalc?.insuranceMin || 0)
     + (quotas || 0);
 }
 
@@ -1081,12 +1092,14 @@ function calcAvailableFundFromOpening(openingBalance, openingOutstandingRems, to
 async function calcRemittances(income, preRates){
   const rr = preRates || await getRemRates();
   const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, totalSeed:0,
-                localBefore:0, localTithe:0, provinceRebate:0, netLocal:0 };
+                localBefore:0, localTithe:0, provinceRebate:0, netLocal:0,
+                crmAddon:0, coastline:0, insuranceGen:0, insuranceMin:0 };
+  let rawCrm=0, rawMembersTithe=0, rawMinisTithe=0;
   INCOME_TYPES.forEach(t=>{
     const amt = income[t.key]||0;
     if(!amt) return;
     if(t.special==='tg'){
-      const line = { label:t.label, isTg:true, total:amt, national: amt*rr.tgNational, area: amt*rr.tgArea,
+      const line = { key:t.key, label:t.label, isTg:true, total:amt, national: amt*rr.tgNational, area: amt*rr.tgArea,
         pastor: amt*rr.tgPastor, ministers: amt*rr.tgMinisters, seed: amt*(rr.tgSeed||0), local:0 };
       res.lines.push(line);
       res.totalNatl+=line.national; res.totalArea+=line.area;
@@ -1095,17 +1108,21 @@ async function calcRemittances(income, preRates){
       const rateEntry = (rr.rates[t.key]) || { natl: t.natl||0, local: t.local||0 };
       const local = amt*(rateEntry.local);
       const natl  = amt*(rateEntry.natl);
-      res.lines.push({ label:t.label, total:amt, national:natl, local });
+      res.lines.push({ key:t.key, label:t.label, total:amt, national:natl, local });
       res.totalNatl+=natl; res.localBefore+=local;
-      // Province Rebate applies only to local retained tithes (Members' + Ministers')
-      if(t.key==='membersTithe' || t.key==='ministersTithe'){
-        res.localTithe+=local;
-      }
+      if(t.key==='membersTithe'){ res.localTithe+=local; rawMembersTithe=amt; }
+      if(t.key==='ministersTithe'){ res.localTithe+=local; rawMinisTithe=amt; }
+      if(t.key==='crm') rawCrm=amt;
     }
   });
   // Province Rebate = 20% of local retained tithes (Members' Tithe + Ministers' Tithe)
   res.provinceRebate = res.localTithe * rr.provinceRebate;
-  res.netLocal = res.localBefore - res.provinceRebate;
+  // Additional RCCG levies computed from raw collection totals
+  res.crmAddon    = rawCrm          * (rr.crmAddon          || 0);
+  res.coastline   = rawMinisTithe   * (rr.coastline          || 0);
+  res.insuranceGen= rawMembersTithe * (rr.insuranceGenTithe  || 0);
+  res.insuranceMin= rawMinisTithe   * (rr.insuranceMinTithe  || 0);
+  res.netLocal = res.localBefore - res.provinceRebate - res.crmAddon - res.coastline - res.insuranceGen - res.insuranceMin;
   return res;
 }
 
@@ -3924,7 +3941,11 @@ async function viewIncome(id){
     <hr class="divider">
     <p class="card-title">Remittances Due</p>
     ${rem.lines.map(l=>`<div class="status-row"><div class="status-row-label">${l.label} → HQ</div><div class="status-row-amt td-red">${fmt(l.national||0)}</div></div>`).join('')}
-    <div class="status-row"><div class="status-row-label">Province Rebate (20%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div></div>
+    <div class="status-row"><div class="status-row-label">Province Rebate</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div></div>
+    ${(rem.crmAddon||0)>0?`<div class="status-row"><div class="status-row-label">CRM Add-on → National HQ</div><div class="status-row-amt td-amber">${fmt(rem.crmAddon)}</div></div>`:''}
+    ${(rem.coastline||0)>0?`<div class="status-row"><div class="status-row-label">Coastline Worship Centre</div><div class="status-row-amt td-amber">${fmt(rem.coastline)}</div></div>`:''}
+    ${(rem.insuranceGen||0)>0?`<div class="status-row"><div class="status-row-label">Insurance Fund (GEN TITHE)</div><div class="status-row-amt td-amber">${fmt(rem.insuranceGen)}</div></div>`:''}
+    ${(rem.insuranceMin||0)>0?`<div class="status-row"><div class="status-row-label">Insurance Fund (MIN TITHE)</div><div class="status-row-amt td-amber">${fmt(rem.insuranceMin)}</div></div>`:''}
     <div class="status-row" style="border-top:2px solid var(--border)"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt td-green" style="font-size:15px">${fmt(rem.netLocal)}</div></div>`:''}
     <hr class="divider">
     <div class="fs-12 text-muted">Recorded by: ${r.recordedBy||'—'} · ${isSunday?'Counted with: '+r.usher:'Donor: '+(r.donorName||'—')}</div>
@@ -5296,32 +5317,45 @@ async function printRemittanceReport(fromOverride, toOverride){
 
   const quotasTotal=sumQuotaLines(quotaLines);
   const trueNetLocal=rem.netLocal-quotasTotal;
+  const additionalLevies=(rem.crmAddon||0)+(rem.coastline||0)+(rem.insuranceGen||0)+(rem.insuranceMin||0);
 
-  // ─── PART A: RCCG AUTHORITY REMITTANCES ──────────────────────────
-  const partARows=[
-    // Income-based % remittances → National HQ (all types including TG)
-    ...rem.lines.map(l=>({
-      desc: l.isTg
-        ? `Thanksgiving Offering → National HQ (${Math.round(rr.tgNational*100)}%)`
-        : `${l.label} → National HQ`,
-      type: l.isTg
-        ? `${Math.round(rr.tgNational*100)}% Based`
-        : `${l.total>0?Math.round((l.national/l.total)*100):'0'}% Based`,
-      amount:l.national||0
-    })).filter(r=>r.amount>0),
-    // TG Seed — separate line going to National HQ
-    ...((rem.totalSeed||0)>0?[{
-      desc:`Thanksgiving → Seed → National HQ (${Math.round(rr.tgSeed*100)}%)`,
-      type:`${Math.round(rr.tgSeed*100)}% Based`, amount:rem.totalSeed
-    }]:[]),
-    // Province Rebate (% of local retained tithes)
-    ...(rem.provinceRebate>0?[{
-      desc:`Province Rebate — ${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes (Members' + Ministers' Tithe: ${fmt(rem.localTithe)})`,
-      type:`${Math.round(rr.provinceRebate*100)}% Based`, amount:rem.provinceRebate
-    }]:[]),
-    // Fixed RCCG quotas (excluding pastoral Zonal Mummy Stipend)
-    ...rccgQuotas.map(q=>({ desc:q.label, type:quotaTypeTextForReport(q), amount:q.amount||0 })).filter(r=>r.amount>0)
-  ];
+  // ─── PART A: RCCG AUTHORITY REMITTANCES (explicit canonical order) ────
+  const partARows=[];
+  const pushA=row=>{ if((row.amount||0)>0) partARows.push(row); };
+  const getLine=key=>rem.lines.find(l=>l.key===key);
+  const linePct=l=>l&&l.total>0?Math.round((l.national/l.total)*100):0;
+  // 1. Ministers' Tithe
+  { const l=getLine('ministersTithe'); if(l) pushA({ desc:`Ministers' Tithe → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+  // 2. Members' Tithe
+  { const l=getLine('membersTithe'); if(l) pushA({ desc:`Members' Tithe → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+  // 3. Thanksgiving → National HQ (75%)
+  { const l=getLine('thanksgiving'); if(l) pushA({ desc:`Thanksgiving Offering → National HQ (${Math.round(rr.tgNational*100)}%)`, type:`${Math.round(rr.tgNational*100)}% Based`, amount:l.national||0 }); }
+  // 4. Thanksgiving → Seed → National HQ (1%)
+  if((rem.totalSeed||0)>0) pushA({ desc:`Thanksgiving → Seed → National HQ (${Math.round(rr.tgSeed*100)}%)`, type:`${Math.round(rr.tgSeed*100)}% Based`, amount:rem.totalSeed });
+  // 5. Sunday Love Offering
+  { const l=getLine('slo'); if(l) pushA({ desc:`Sunday Love Offering → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+  // 6. Province Rebate
+  if(rem.provinceRebate>0) pushA({ desc:`Province Rebate — ${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes (Members' + Ministers' Tithe: ${fmt(rem.localTithe)})`, type:`${Math.round(rr.provinceRebate*100)}% Based`, amount:rem.provinceRebate });
+  // 7. CRM (Weekly Activities)
+  { const l=getLine('crm'); if(l) pushA({ desc:`CRM (Weekly Activities) → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+  // 8. Gospel Fund (Workers' Offering)
+  { const l=getLine('workersOffering'); if(l) pushA({ desc:`Gospel Fund (Workers' Offering) → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+  // 9. First Fruit
+  { const l=getLine('firstFruit'); if(l) pushA({ desc:`First Fruit → National HQ`, type:`100% Based`, amount:l.national||0 }); }
+  // 10. Teen/Children's Offering
+  { const l=getLine('childrenOffering'); if(l) pushA({ desc:`Teen/Children's Offering → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+  // 11. Sunday School
+  { const l=getLine('sundaySchool'); if(l) pushA({ desc:`Sunday School → National HQ`, type:`100% Based`, amount:l.national||0 }); }
+  // 12. CRM Add-on
+  if((rem.crmAddon||0)>0) pushA({ desc:`CRM Add-on → National HQ (${Math.round(rr.crmAddon*100)}% of CRM Total)`, type:`${Math.round(rr.crmAddon*100)}% Based`, amount:rem.crmAddon });
+  // 13. Coastline Worship Centre
+  if((rem.coastline||0)>0) pushA({ desc:`Coastline Worship Centre — ${Math.round(rr.coastline*100)}% of Ministers' Tithe`, type:`${Math.round(rr.coastline*100)}% Based`, amount:rem.coastline });
+  // 14. Insurance Fund (GEN TITHE)
+  if((rem.insuranceGen||0)>0) pushA({ desc:`Insurance Fund (GEN TITHE) — ${+(rr.insuranceGenTithe*100).toFixed(2)}% of Members' Tithe`, type:`${+(rr.insuranceGenTithe*100).toFixed(2)}% Based`, amount:rem.insuranceGen });
+  // 15. Insurance Fund (MIN TITHE)
+  if((rem.insuranceMin||0)>0) pushA({ desc:`Insurance Fund (MIN TITHE) — ${+(rr.insuranceMinTithe*100).toFixed(2)}% of Ministers' Tithe`, type:`${+(rr.insuranceMinTithe*100).toFixed(2)}% Based`, amount:rem.insuranceMin });
+  // Fixed RCCG quotas (excluding pastoral Zonal Mummy Stipend)
+  rccgQuotas.forEach(q=>{ if((q.amount||0)>0) partARows.push({ desc:q.label, type:quotaTypeTextForReport(q), amount:q.amount||0 }); });
   const subTotalA=partARows.reduce((s,r)=>s+r.amount,0);
 
   // ─── PART B: OTHER DISBURSEMENTS ─────────────────────────────────
@@ -5414,6 +5448,14 @@ async function printRemittanceReport(fromOverride, toOverride){
       <td></td>
       <td class="td-r danger">− ${fmt(rem.provinceRebate)}</td>
     </tr>`:''}
+    ${additionalLevies>0?`<tr class="deduct-row">
+      <td style="padding-left:22px;color:#555;font-style:italic">less: Additional RCCG Levies</td>
+      <td></td>
+      <td class="td-c" style="color:#555;font-size:11px">CRM Add-on, Coastline, Insurance — see Part A</td>
+      <td></td>
+      <td></td>
+      <td class="td-r danger">− ${fmt(additionalLevies)}</td>
+    </tr>`:''}
     ${quotasTotal>0?`<tr class="deduct-row">
       <td style="padding-left:22px;color:#555;font-style:italic">less: Total Fixed Quotas</td>
       <td></td>
@@ -5494,9 +5536,7 @@ async function renderExpenses(){
   const total = expenses.reduce((s,r)=>s+(r.amount||0),0);
   // Outstanding remittances = accumulated all-time due minus all-time paid (same as dashboard KPI logic)
   const allTimeRemittances = await calcRemittancesFromRecords(allIncome);
-  const allTimeIncomeRemDue = (allTimeRemittances.totalNatl||0)+(allTimeRemittances.totalArea||0)
-    +(allTimeRemittances.totalPastor||0)+(allTimeRemittances.totalMinisters||0)
-    +(allTimeRemittances.totalSeed||0)+(allTimeRemittances.provinceRebate||0);
+  const allTimeIncomeRemDue = totalRemittanceDue(allTimeRemittances);
   const quotaList = getQuotaList(settings);
 
   // Accumulated quotas: iterate each remittance period from the first income record
@@ -8516,7 +8556,7 @@ async function generateMonthlyReport(){
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
   const totalRemPaid=paidRems.reduce((s,r)=>s+(r.amount||0),0);
-  const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate+totalFixedQuotas;
+  const totalRemDue=totalRemittanceDue(rem, totalFixedQuotas);
   const trueNetLocal=rem.netLocal-totalFixedQuotas;
   const netPosition=totalIncome-totalExpenses-totalRemDue;
   const totalChildrenOffering=income.reduce((s,r)=>s+(r.childrenOffering||0),0);
@@ -8569,6 +8609,10 @@ async function generateMonthlyReport(){
       ${rem.lines.filter(l=>!l.isTg&&l.national>0).map(l=>`<tr><td>${l.label} → National HQ</td><td class="td-c">${l.total>0?Math.round(l.national/l.total*100)+'% of '+fmt(l.total):'% Based'}</td><td class="td-r">${fmt(l.national)}</td></tr>`).join('')}
       ${rem.lines.filter(l=>l.isTg&&l.national>0).map(l=>`<tr><td>Thanksgiving (TG) → National HQ</td><td class="td-c">${Math.round(remRatesData.tgNational*100)}% of ${fmt(l.total)}</td><td class="td-r">${fmt(l.national)}</td></tr>${(l.seed||0)>0?`<tr><td style="padding-left:16px">Thanksgiving → Seed → National HQ</td><td class="td-c">${Math.round((remRatesData.tgSeed||0)*100)}% of ${fmt(l.total)}</td><td class="td-r">${fmt(l.seed)}</td></tr>`:''}`).join('')}
       ${rem.provinceRebate>0?`<tr><td>Province Rebate (on local tithes)</td><td class="td-c">${rem.localTithe>0?Math.round(rem.provinceRebate/rem.localTithe*100)+'% of '+fmt(rem.localTithe):'% Based'}</td><td class="td-r">${fmt(rem.provinceRebate)}</td></tr>`:''}
+      ${(rem.crmAddon||0)>0?`<tr><td>CRM Add-on → National HQ</td><td class="td-c">${Math.round(remRatesData.crmAddon*100)}% of CRM Total</td><td class="td-r">${fmt(rem.crmAddon)}</td></tr>`:''}
+      ${(rem.coastline||0)>0?`<tr><td>Coastline Worship Centre</td><td class="td-c">${Math.round(remRatesData.coastline*100)}% of Min. Tithe</td><td class="td-r">${fmt(rem.coastline)}</td></tr>`:''}
+      ${(rem.insuranceGen||0)>0?`<tr><td>Insurance Fund (GEN TITHE)</td><td class="td-c">${+(remRatesData.insuranceGenTithe*100).toFixed(2)}% of Mem. Tithe</td><td class="td-r">${fmt(rem.insuranceGen)}</td></tr>`:''}
+      ${(rem.insuranceMin||0)>0?`<tr><td>Insurance Fund (MIN TITHE)</td><td class="td-c">${+(remRatesData.insuranceMinTithe*100).toFixed(2)}% of Min. Tithe</td><td class="td-r">${fmt(rem.insuranceMin)}</td></tr>`:''}
       ${rem.totalArea>0?`<tr><td style="padding-left:16px">Thanksgiving → Area/Zonal Pastor</td><td class="td-c">${Math.round(remRatesData.tgArea*100)}% of TG</td><td class="td-r">${fmt(rem.totalArea)}</td></tr>`:''}
       ${rem.totalPastor>0?`<tr><td style="padding-left:16px">Thanksgiving → Parish Pastor's Share</td><td class="td-c">${Math.round(remRatesData.tgPastor*100)}% of TG</td><td class="td-r">${fmt(rem.totalPastor)}</td></tr>`:''}
       ${rem.totalMinisters>0?`<tr><td style="padding-left:16px">Thanksgiving → Ministers' Share</td><td class="td-c">${Math.round(remRatesData.tgMinisters*100)}% of TG</td><td class="td-r">${fmt(rem.totalMinisters)}</td></tr>`:''}
@@ -8704,7 +8748,7 @@ async function generateQuarterlyReport(){
     const total=recs.reduce((s,r)=>s+(r.totalCollection||0),0);
     const exp=exps.reduce((s,e)=>s+(e.amount||0),0);
     const rem=await calcRemittancesFromRecords(recs);
-    const totalRemDue=rem.totalNatl+rem.totalArea+rem.totalPastor+rem.totalMinisters+(rem.totalSeed||0)+rem.provinceRebate+quotasTotal;
+    const totalRemDue=totalRemittanceDue(rem, quotasTotal);
     const trueNetLocal=rem.netLocal-quotasTotal;
     const netSurplus=total-totalRemDue-exp;
     quarterData.push({month:MONTHS[m],year:y,income:total,expenses:exp,remittances:totalRemDue,netLocal:trueNetLocal,surplus:netSurplus,sundays:recs.length});
@@ -9023,9 +9067,11 @@ function renderAdminRates(s){
   const ratesBadge = isCustom
     ? `<span class="badge" style="background:#E6F1FB;color:#185FA5;margin-left:8px">Custom Rates</span>`
     : `<span class="badge" style="background:#f0f0f0;color:#444;margin-left:8px">Default RCCG Rates</span>`;
-  const decToPct = v => Math.round((v??0)*1000)/10;
+  const decToPct = v => +(((v??0)*100).toFixed(4));
   const rateInput = (id, val) =>
     `<input type="number" id="${id}" class="form-input" value="${decToPct(val)}" min="0" max="100" step="0.1" style="width:80px;display:inline-block" /> %`;
+  const rateInputFine = (id, val) =>
+    `<input type="number" id="${id}" class="form-input" value="${decToPct(val)}" min="0" max="100" step="0.01" style="width:90px;display:inline-block" /> %`;
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Remittance Percentage Rates ${ratesBadge}</div>
     <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">Configure what percentage of each income type goes to National HQ and what stays local. National + Local should sum to 100%. Changes take effect immediately for all new calculations.</p>
@@ -9053,6 +9099,16 @@ function renderAdminRates(s){
       <label class="form-label" style="margin:0;flex:1">Province Rebate — % of Local Retained Tithes (Members' + Ministers' only):</label>
       ${rateInput('rate_provinceRebate', r.provinceRebate ?? DEFAULT_REMITTANCE_RATES.provinceRebate)}
     </div>
+    <hr class="divider">
+    <div class="modal-title" style="font-size:13px;margin-bottom:8px;color:var(--text2)">Additional RCCG Levies</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:10px">These are computed from the raw collection totals and appear as separate lines in Part A of the remittance report.</p>
+    <div class="table-wrap"><table>
+      <tr><th>Levy</th><th>Basis</th><th>Rate %</th></tr>
+      <tr><td>CRM Add-on → National HQ</td><td style="font-size:11px;color:var(--text3)">% of total CRM collection</td><td>${rateInput('rate_crmAddon', r.crmAddon ?? DEFAULT_REMITTANCE_RATES.crmAddon)}</td></tr>
+      <tr><td>Coastline Worship Centre</td><td style="font-size:11px;color:var(--text3)">% of Ministers' Tithe total</td><td>${rateInputFine('rate_coastline', r.coastline ?? DEFAULT_REMITTANCE_RATES.coastline)}</td></tr>
+      <tr><td>Insurance Fund (GEN TITHE)</td><td style="font-size:11px;color:var(--text3)">% of Members' Tithe total</td><td>${rateInputFine('rate_insuranceGenTithe', r.insuranceGenTithe ?? DEFAULT_REMITTANCE_RATES.insuranceGenTithe)}</td></tr>
+      <tr><td>Insurance Fund (MIN TITHE)</td><td style="font-size:11px;color:var(--text3)">% of Ministers' Tithe total</td><td>${rateInputFine('rate_insuranceMinTithe', r.insuranceMinTithe ?? DEFAULT_REMITTANCE_RATES.insuranceMinTithe)}</td></tr>
+    </table></div>
     <br>
     <button class="btn btn-primary" onclick="App.saveRates(this)">Save Remittance Rates</button>
   </div>`;
@@ -9079,7 +9135,7 @@ async function saveRates(btn=null){
     showAlert(`National + Local must equal 100% for: ${badRows.join(', ')}. Please correct before saving.`,'danger');
     return;
   }
-  ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed','provinceRebate'].forEach(k=>{
+  ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed','provinceRebate','crmAddon','coastline','insuranceGenTithe','insuranceMinTithe'].forEach(k=>{
     const v = pct2dec(`rate_${k}`);
     if(v!==null) r[k] = v;
   });
@@ -9711,14 +9767,15 @@ async function showKPSCAlert(){
   const rem=await calcRemittancesFromRecords(income);
   const expenses=filterByMonth(await DB.getExpenses());
   const totalExp=expenses.reduce((s,e)=>s+(e.amount||0),0);
-  const balance=totalIncome-rem.totalNatl-rem.totalArea-rem.provinceRebate-totalExp;
+  const remPending=totalRemittanceDue(rem);
+  const balance=totalIncome-remPending-totalExp;
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">🔔 Alert KPSC — Emergency Support</div>
     <div class="alert alert-warn"><span class="alert-icon">⚠</span><span>Use this when the main account cannot cover necessary daily expenses after RCCG remittances. This follows proper procedure — no public announcements from the Pastor.</span></div>
     <div class="grid-2" style="margin:12px 0">
       <div style="background:var(--surface);padding:10px;border-radius:var(--r);text-align:center"><div class="amount-label">Current Balance</div><div style="font-size:18px;font-weight:700;color:${balance<0?'var(--danger)':'var(--primary)'}">${fmt(balance)}</div></div>
-      <div style="background:var(--surface);padding:10px;border-radius:var(--r);text-align:center"><div class="amount-label">Remittances Pending</div><div style="font-size:18px;font-weight:700;color:var(--amber)">${fmt(rem.totalNatl+rem.totalArea+rem.provinceRebate)}</div></div>
+      <div style="background:var(--surface);padding:10px;border-radius:var(--r);text-align:center"><div class="amount-label">Remittances Pending</div><div style="font-size:18px;font-weight:700;color:var(--amber)">${fmt(remPending)}</div></div>
     </div>
     <div class="form-group"><label class="form-label">Nature of Emergency</label>
       <select id="kpsc_type" class="form-select">
