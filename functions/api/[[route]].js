@@ -135,7 +135,7 @@ async function getTermiiSettings(DB) {
     welcomeSms:      map.kpsc_termii_welcome_sms   !== '0',
     paymentSms:      map.kpsc_termii_payment_sms   !== '0',
     newMonthSms:     map.kpsc_termii_newmonth_sms  !== '0',
-    reminderDay:     parseInt(map.kpsc_termii_reminder_day || '10', 10) || 10,
+    reminderDay:     (() => { const raw = map.kpsc_termii_reminder_day; if (raw == null || raw === '') return 10; const v = parseInt(raw, 10); return isNaN(v) ? 10 : v; })(),
     reminderFreq:    String(map.kpsc_termii_reminder_freq || 'monthly').trim(),
     reminderMode:    String(map.kpsc_termii_reminder_mode || 'day_of_month').trim(),
     sendWindowStart: String(map.kpsc_sms_send_window_start || '08:00').trim(),
