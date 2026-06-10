@@ -4737,7 +4737,14 @@ async function renderRemittances(){
 
   const quotaLines=getQuotaLinesForPeriod(quotas, fromDate, toDate);
 
-  const allLines=[...incomeLines,...tgLines,...provinceLines,...quotaLines];
+  const levyLines=[
+    rem.crmAddon>0   ?{ label:`CRM Add-on → National HQ (${Math.round((rr.crmAddon||0)*100)}% of CRM)`,                     amount:rem.crmAddon,    section:'levy', pct:Math.round((rr.crmAddon||0)*100) }:null,
+    rem.coastline>0  ?{ label:`Coastline Worship Centre → National HQ (${+(((rr.coastline||0)*100).toFixed(2))}% of Min. Tithe)`, amount:rem.coastline,   section:'levy', pct:+(((rr.coastline||0)*100).toFixed(2)) }:null,
+    rem.insuranceGen>0?{ label:`Insurance Fund (GEN TITHE) → National HQ (${+(((rr.insuranceGenTithe||0)*100).toFixed(4))}% of Mbr Tithe)`, amount:rem.insuranceGen, section:'levy', pct:+(((rr.insuranceGenTithe||0)*100).toFixed(4)) }:null,
+    rem.insuranceMin>0?{ label:`Insurance Fund (MIN TITHE) → National HQ (${+(((rr.insuranceMinTithe||0)*100).toFixed(4))}% of Min. Tithe)`, amount:rem.insuranceMin, section:'levy', pct:+(((rr.insuranceMinTithe||0)*100).toFixed(4)) }:null,
+  ].filter(Boolean);
+
+  const allLines=[...incomeLines,...tgLines,...provinceLines,...levyLines,...quotaLines];
   const totalDue=allLines.reduce((s,l)=>s+l.amount,0);
   const quotasTotal=sumQuotaLines(quotaLines);
   const trueNetLocal=rem.netLocal-quotasTotal;
@@ -4840,6 +4847,7 @@ async function renderRemittances(){
           ${renderSection(incomeLines,'Income-Based Remittances → National HQ (% of collections)')}
           ${renderSection(tgLines,'Thanksgiving — Pastoral & Local Distribution')}
           ${renderSection(provinceLines,'Province Rebate (20% of Local Retained Tithes)')}
+          ${renderSection(levyLines,'Additional RCCG Levies → National HQ')}
           ${renderSection(quotaLines,'Fixed Quotas Due for This Period')}
           <tr style="border-top:2px solid var(--border)">
             <td colspan="2" class="td-bold" style="font-size:14px;padding:10px 12px">TOTAL REMITTANCES DUE</td>
@@ -5284,12 +5292,16 @@ async function printRemittanceReport(fromOverride, toOverride){
   const totalToHQ=rem.lines.reduce((s,l)=>s+(l.national||0),0); // incl. TG national
   const totalParishLocal=rem.lines.filter(l=>!l.isTg).reduce((s,l)=>s+(l.local||0),0);
 
-  const collectionRowsHTML=rem.lines.map(l=>{
-    if(!l.total) return '';
+  // Explicit canonical order for the collection summary rows (form field order is unchanged)
+  const SUMMARY_ORDER=['ministersTithe','membersTithe','thanksgiving','slo','crm','workersOffering','firstFruit','childrenOffering','sundaySchool'];
+  const getL=key=>rem.lines.find(l=>l.key===key);
+  const collectionRowsHTML=SUMMARY_ORDER.map(key=>{
+    const l=getL(key);
+    if(!l||!l.total) return '';
     if(l.isTg){
       const natlPct=Math.round(rr.tgNational*100);
       const distPct=100-natlPct;
-      return `<tr>
+      const tgRow=`<tr>
         <td>Thanksgiving (TG) <sup style="color:#c0392b">†</sup></td>
         <td class="td-r">${fmt(l.total)}</td>
         <td class="td-c">${natlPct}%</td>
@@ -5297,6 +5309,16 @@ async function printRemittanceReport(fromOverride, toOverride){
         <td class="td-c" style="color:#888">${distPct}%</td>
         <td class="td-r" style="color:#888;font-style:italic">0</td>
       </tr>`;
+      const seedAmt=l.seed||0;
+      const seedRow=seedAmt>0?`<tr style="background:#fff8e1">
+        <td style="padding-left:24px;color:#7a5200;font-style:italic;font-size:11px">↳ Thanksgiving (Seed) → National HQ (${Math.round((rr.tgSeed||0)*100)}%)</td>
+        <td class="td-r" style="color:#888;font-size:11px">—</td>
+        <td class="td-c" style="color:#7a5200;font-size:11px">${Math.round((rr.tgSeed||0)*100)}%</td>
+        <td class="td-r" style="color:#7a5200;font-size:11px">${fmt(seedAmt)}</td>
+        <td class="td-c" style="color:#888;font-size:11px">—</td>
+        <td class="td-r" style="color:#888;font-size:11px">—</td>
+      </tr>`:'';
+      return tgRow+seedRow;
     }
     const natlPct=Math.round((l.national/l.total)*100);
     const locPct=Math.round((l.local/l.total)*100);
