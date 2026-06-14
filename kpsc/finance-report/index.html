@@ -116,7 +116,7 @@
   }
 
   function renderReport(data) {
-    const { year, months, entries, createdBy, createdAt } = data;
+    const { year, months, entries, createdBy, createdAt, currentBalance } = data;
     const monthsSorted = [...months].sort((a, b) => a - b);
     const periodLabel = monthsSorted.length === 12
       ? `Full Year ${year}`
@@ -162,8 +162,8 @@
         <div class="summary-grid">
           <div class="tile"><div class="tile-val" style="color:#1a5e3a">${fmt(incomeTotal)}</div><div class="tile-lbl">Total Received</div></div>
           <div class="tile"><div class="tile-val" style="color:#8b1a1a">${fmt(expenseTotal)}</div><div class="tile-lbl">Total Spent</div></div>
-          <div class="tile" style="border-color:${netColor}"><div class="tile-val" style="color:${netColor}">${fmt(Math.abs(net))}</div><div class="tile-lbl">Net ${esc(netLabel)}</div></div>
-          <div class="tile"><div class="tile-val">${entries.length}</div><div class="tile-lbl">Total Entries</div></div>
+          <div class="tile" style="border-color:${netColor}"><div class="tile-val" style="color:${netColor}">${fmt(Math.abs(net))}</div><div class="tile-lbl">Net ${esc(netLabel)} (Period)</div></div>
+          ${typeof currentBalance === 'number' ? `<div class="tile" style="border:2px solid ${currentBalance>=0?'#1e3a5f':'#8b1a1a'};background:${currentBalance>=0?'#eef3fb':'#fef2f2'}"><div class="tile-val" style="color:${currentBalance>=0?'#1e3a5f':'#8b1a1a'}">${fmt(Math.abs(currentBalance))}</div><div class="tile-lbl" style="color:${currentBalance>=0?'#1e3a5f':'#8b1a1a'};font-weight:700">Current Balance</div></div>` : `<div class="tile"><div class="tile-val">${entries.length}</div><div class="tile-lbl">Total Entries</div></div>`}
         </div>
       </div>
 
