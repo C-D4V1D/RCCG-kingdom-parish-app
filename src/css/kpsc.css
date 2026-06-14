@@ -967,104 +967,53 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .kf-month-check input[type=checkbox]{accent-color:var(--navy);width:15px;height:15px;cursor:pointer;flex-shrink:0;}
 .kf-month-check input[type=checkbox]:checked + span{font-weight:600;color:var(--navy);}
 
-/* ── CASH COLLECTION TRACKER ──────────────────────────────────────────────── */
+/* ── CASH COLLECTION TRACKER v2 ───────────────────────────────────────────── */
 
-/* Floating widget — fixed bottom-left, above the bottom nav */
-.k-cash-widget{
-  position:fixed;bottom:80px;left:14px;display:flex;align-items:center;gap:10px;
-  background:var(--amber);color:#fff;border:none;border-radius:14px;
-  padding:10px 14px 10px 12px;cursor:pointer;z-index:190;
-  box-shadow:0 4px 18px rgba(180,83,9,.45),0 2px 6px rgba(0,0,0,.15);
-  font-family:inherit;transition:background .15s,box-shadow .15s;
-  text-align:left;max-width:230px;
+/* Embedded card — appears inline on Partners and Finance pages */
+.k-cash-card{
+  background:var(--gold-light);border:1.5px solid #e8c84a;border-radius:12px;
+  padding:14px 16px;margin-bottom:16px;
 }
-.k-cash-widget:hover{background:#92400e;box-shadow:0 6px 24px rgba(146,64,14,.5);}
-.k-cash-widget:active{transform:scale(.97);}
-.k-cw-icon{flex-shrink:0;opacity:.9;}
-.k-cw-body{flex:1;min-width:0;}
-.k-cw-label{font-size:10px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;opacity:.85;line-height:1;margin-bottom:3px;}
-.k-cw-amount{font-size:17px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;white-space:nowrap;}
-.k-cw-sub{font-size:11px;opacity:.8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;}
-.k-cw-arrow{font-size:18px;opacity:.7;flex-shrink:0;margin-left:2px;}
+.k-cash-card-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;}
+.k-cash-card-title{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--amber);}
+.k-cash-card-total{font-size:22px;font-weight:800;color:var(--text);font-variant-numeric:tabular-nums;}
+.k-cash-card-summary{font-size:12px;color:var(--text2);margin-bottom:10px;}
+.k-cash-holders{margin:10px 0;}
+.k-cash-holder-row{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid rgba(0,0,0,.06);}
+.k-cash-holder-row:last-child{border-bottom:none;}
+.k-cash-holder-name{font-size:13px;font-weight:600;color:var(--text);}
+.k-cash-holder-meta{font-size:11px;color:var(--text3);margin-top:2px;}
+.k-cash-holder-amount{font-size:14px;font-weight:700;color:var(--amber);font-variant-numeric:tabular-nums;flex-shrink:0;}
+.k-cash-card-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;}
 
-/* Pulse animation — briefly draws attention when a new cash payment is added */
-@keyframes k-cash-pulse{
-  0%{box-shadow:0 4px 18px rgba(180,83,9,.45),0 0 0 0 rgba(180,83,9,.5);}
-  60%{box-shadow:0 4px 18px rgba(180,83,9,.45),0 0 0 12px rgba(180,83,9,0);}
-  100%{box-shadow:0 4px 18px rgba(180,83,9,.45),0 0 0 0 rgba(180,83,9,0);}
-}
-.k-cw-pulse{animation:k-cash-pulse .55s ease-out;}
+/* Transfer modal — lot checklist */
+.k-transfer-lot-list{display:flex;flex-direction:column;gap:4px;max-height:240px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:6px;}
+.k-transfer-lot{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;cursor:pointer;transition:background .1s;}
+.k-transfer-lot:hover{background:var(--gold-light);}
+.k-transfer-lot input[type=checkbox]{flex-shrink:0;width:16px;height:16px;accent-color:var(--amber);}
+.k-transfer-lot-body{flex:1;min-width:0;}
+.k-transfer-lot-name{font-size:13px;font-weight:600;color:var(--text);white-space:normal;word-break:break-word;}
+.k-transfer-lot-meta{font-size:11px;color:var(--text3);}
+.k-transfer-lot-amount{font-size:13px;font-weight:700;color:var(--amber);font-variant-numeric:tabular-nums;flex-shrink:0;}
+.k-cash-spent-note{font-size:12px;color:var(--green);background:#f0faf5;border-radius:6px;padding:6px 10px;margin-bottom:10px;}
 
-/* Panel overlay */
-.k-cash-panel-overlay{
-  position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:500;
-  opacity:0;transition:opacity .25s;pointer-events:none;
-}
-.k-cash-panel-overlay--visible{opacity:1;pointer-events:auto;}
-
-/* Slide-in panel */
-.k-cash-panel{
-  position:fixed;top:0;right:0;bottom:0;width:min(380px,100vw);
-  background:#fff;z-index:510;display:flex;flex-direction:column;
-  box-shadow:-4px 0 32px rgba(0,0,0,.18);
-  transform:translateX(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);
-}
-.k-cash-panel--open{transform:translateX(0);}
-.k-cash-panel-hdr{
-  display:flex;align-items:center;justify-content:space-between;
-  padding:14px 16px;border-bottom:1px solid var(--border);
-  background:var(--gold-light);flex-shrink:0;
-}
-.k-cash-panel-title{display:flex;align-items:center;gap:8px;font-weight:700;color:var(--amber);font-size:15px;}
-.k-cash-panel-body{flex:1;overflow-y:auto;padding:16px;}
-.k-cash-panel-footer{padding:14px 16px;border-top:1px solid var(--border);background:#fafafa;flex-shrink:0;display:flex;}
-
-/* Section labels */
+/* Details modal — per-holder item rows */
 .k-cash-section-title{
   font-size:11px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;
-  color:var(--text3);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border);
+  color:var(--text3);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border);
   display:flex;align-items:center;justify-content:space-between;
 }
-.k-cash-older-hint{font-size:10px;font-weight:400;color:var(--red);letter-spacing:0;text-transform:none;}
+.k-cash-detail-row{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid rgba(0,0,0,.05);}
+.k-cash-detail-row:last-of-type{border-bottom:none;}
+.k-cash-detail-name{font-size:13px;font-weight:600;color:var(--text);word-break:break-word;}
+.k-cash-detail-meta{font-size:11px;color:var(--text3);margin-top:2px;}
+.k-cash-detail-amount{font-size:13px;font-weight:700;color:var(--amber);font-variant-numeric:tabular-nums;flex-shrink:0;}
+.k-cash-detail-expense .k-cash-detail-amount{color:var(--red);}
+.k-cash-holder-subtotal{display:flex;justify-content:space-between;font-size:12px;color:var(--text2);padding:8px 0 2px;border-top:1px solid var(--border);margin-top:4px;}
 
-/* Payment list items */
-.k-cash-item{
-  display:grid;grid-template-columns:1fr auto;gap:2px 10px;
-  padding:10px 12px;border-radius:8px;margin-bottom:6px;
-  background:var(--bg);border:1px solid var(--border);
-}
-.k-cash-item--today{background:var(--gold-light);border-color:#e8c84a;}
-.k-cash-item-name{font-size:13px;font-weight:600;color:var(--text);grid-column:1;grid-row:1;}
-.k-cash-item-meta{font-size:11px;color:var(--text3);grid-column:1;grid-row:2;}
-.k-cash-item-amount{font-size:14px;font-weight:700;color:var(--amber);font-variant-numeric:tabular-nums;grid-column:2;grid-row:1/3;align-self:center;}
-.k-cash-item-older-badge{display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;background:#fee2e2;color:#991b1b;margin-left:4px;}
-
-/* "Who Holds What" collector rows */
-.k-cash-collector-row{
-  display:flex;align-items:center;gap:8px;
-  padding:9px 12px;border-radius:8px;margin-bottom:4px;
-  background:#f0f4ff;border:1px solid #c7d7f5;
-}
-.k-cash-collector-name{flex:1;font-size:13px;font-weight:600;color:var(--navy);}
-.k-cash-collector-meta{font-size:11px;color:var(--text3);}
-.k-cash-collector-amount{font-size:14px;font-weight:700;color:var(--navy);font-variant-numeric:tabular-nums;}
-
-/* Total summary bar */
-.k-cash-total-bar{
-  display:flex;align-items:center;justify-content:space-between;
-  margin-top:14px;padding:12px 14px;
-  background:var(--navy);color:#fff;border-radius:10px;font-size:14px;font-weight:600;
-}
-.k-cash-total-bar-amount{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--gold);}
-
-/* Recent transfer history */
+/* Recent transfer history (reused in details modal) */
 .k-handover-item{padding:10px 12px;border-radius:8px;margin-bottom:6px;background:var(--bg);border:1px solid var(--border);}
 .k-handover-item-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:3px;}
 .k-handover-item-amount{font-size:14px;font-weight:700;color:var(--green);font-variant-numeric:tabular-nums;}
 .k-handover-item-count{font-size:12px;color:var(--text3);}
 .k-handover-item-meta{font-size:11px;color:var(--text3);line-height:1.4;}
-
-@media(max-width:360px){
-  .k-cw-label,.k-cw-sub{display:none;}
-  .k-cash-widget{padding:10px 12px;}
-}
