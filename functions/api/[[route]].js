@@ -549,6 +549,14 @@ export async function onRequest(context) {
         return await deleteKpscFinanceEntry(DB, param, auth);
       }
     }
+    if (route === 'kpsc-finance-share' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await createFinanceShareToken(DB, body, auth, url);
+    }
+    if (route === 'kpsc-finance-report' && method === 'GET' && param) {
+      return await getFinanceReportByToken(DB, param);
+    }
     if (route === 'kpsc-reminders') {
       if (method === 'GET'  && !param) return await getKpscReminders(DB, url);
       if (method === 'POST' && !param) {
@@ -1645,6 +1653,14 @@ async function handleInit(DB) {
       name       TEXT DEFAULT '',
       contact    TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_finance_report_tokens (
+      id         TEXT PRIMARY KEY,
+      year       INTEGER NOT NULL,
+      months     TEXT NOT NULL DEFAULT '[]',
+      created_by TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now')),
+      expires_at TEXT NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS kpsc_policy_versions (
       id             TEXT PRIMARY KEY,
@@ -3499,6 +3515,65 @@ async function getKpscFinanceEntries(DB, url) {
     attachmentName: row.attachment_name || '',
     createdAt: row.created_at || '',
   })));
+}
+
+async function createFinanceShareToken(DB, body, auth, url) {
+  const year = Number(body?.year);
+  const months = Array.isArray(body?.months) ? body.months.map(Number).filter(m => m >= 1 && m <= 12) : [];
+  if (!year || year < 2000 || year > 2100) return err('Valid year is required', 400);
+  if (!months.length) return err('At least one month is required', 400);
+  const id = newId('kfr');
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  await DB.prepare(
+    `INSERT INTO kpsc_finance_report_tokens (id, year, months, created_by, created_at, expires_at) VALUES (?,?,?,?,?,?)`
+  ).bind(id, year, JSON.stringify(months), auth?.name || '', now.toISOString(), expiresAt).run();
+  const origin = new URL(url).origin;
+  const reportUrl = `${origin}/kpsc/finance-report/?token=${id}`;
+  return ok({ token: id, url: reportUrl, expiresAt });
+}
+
+async function getFinanceReportByToken(DB, token) {
+  const tokenRow = await DB.prepare(
+    `SELECT id, year, months, created_by, created_at, expires_at FROM kpsc_finance_report_tokens WHERE id=?`
+  ).bind(token).first();
+  if (!tokenRow) return err('Report not found or link has expired', 404);
+  if (tokenRow.expires_at < new Date().toISOString()) return err('This report link has expired', 410);
+  const year = Number(tokenRow.year);
+  let months;
+  try { months = JSON.parse(tokenRow.months || '[]'); } catch { months = []; }
+  if (!months.length) return err('Invalid report token', 400);
+  const monthPad = months.map(m => String(m).padStart(2, '0'));
+  const placeholders = monthPad.map(() => '?').join(',');
+  const { results } = await DB.prepare(`
+    SELECT f.*, p.full_name AS partner_name
+    FROM kpsc_finance_entries f
+    LEFT JOIN kpsc_partners p ON p.id = f.partner_id
+    WHERE strftime('%Y', f.date)=?
+      AND strftime('%m', f.date) IN (${placeholders})
+      AND COALESCE(f.deleted_at,'') = ''
+    ORDER BY f.date ASC, f.created_at ASC
+  `).bind(String(year), ...monthPad).all();
+  const entries = (results || []).map(row => ({
+    id: row.id,
+    date: row.date,
+    entryType: row.entry_type,
+    category: row.category || '',
+    amount: Number(row.amount || 0),
+    paymentMethod: row.payment_method || '',
+    reference: row.reference || '',
+    narration: row.narration || '',
+    partnerName: row.partner_name || '',
+    recordedBy: row.recorded_by || '',
+  }));
+  return ok({
+    year,
+    months,
+    createdBy: tokenRow.created_by || '',
+    createdAt: tokenRow.created_at || '',
+    expiresAt: tokenRow.expires_at || '',
+    entries,
+  });
 }
 
 async function createKpscFinanceEntry(DB, data, auth) {

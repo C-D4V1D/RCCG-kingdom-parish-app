@@ -959,3 +959,10 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
   .kf-cat-row{grid-template-columns:1fr 80px;}
   .kf-cat-bar-wrap,.kf-cat-pct{display:none;}
 }
+
+/* Finance report month picker */
+.kf-month-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+.kf-month-check{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;cursor:pointer;font-size:13px;transition:background .15s,border-color .15s;}
+.kf-month-check:hover{background:var(--navy-light);border-color:var(--navy);}
+.kf-month-check input[type=checkbox]{accent-color:var(--navy);width:15px;height:15px;cursor:pointer;flex-shrink:0;}
+.kf-month-check input[type=checkbox]:checked + span{font-weight:600;color:var(--navy);}

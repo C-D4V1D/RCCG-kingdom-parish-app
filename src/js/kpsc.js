@@ -6862,8 +6862,8 @@ async function renderFinance(main) {
   const expenseEntries = S.financeEntries.filter(e => e.entryType === 'expense');
   const incomeTotal  = incomeEntries.reduce((s, e) => s + Number(e.amount || 0), 0);
   const expenseTotal = expenseEntries.reduce((s, e) => s + Number(e.amount || 0), 0);
-  const partnerIncome = incomeEntries.filter(e => e.category === 'partnership_payment').reduce((s, e) => s + Number(e.amount || 0), 0);
-  const unlinkedCount = incomeEntries.filter(e => e.category === 'partnership_payment' && !e.partnerId).length;
+  const partnerIncome = incomeEntries.filter(e => (e.category || '').startsWith('partnership')).reduce((s, e) => s + Number(e.amount || 0), 0);
+  const unlinkedCount = incomeEntries.filter(e => (e.category || '').startsWith('partnership') && !e.partnerId).length;
 
   const nowYear = currentYear();
   const nowMonth = new Date().getUTCMonth() + 1;
@@ -6936,7 +6936,7 @@ async function renderFinance(main) {
           <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setFinanceMonth(this.value)">${monthOpts}</select>
           ${canManage ? `<button class="kbtn kbtn-primary kbtn-sm" onclick="Kpsc.openFinanceModal()">+ New Entry</button>` : ''}
           <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.exportFinanceCsv()" title="Download as CSV">⬇ CSV</button>
-          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.printFinanceReport()" title="Print / PDF report">🖨 Report</button>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.openFinanceReportModal()" title="Generate Finance Report">📊 Report</button>
         </div>
       </div>
 
@@ -7480,14 +7480,123 @@ function exportFinanceCsv() {
   URL.revokeObjectURL(url);
 }
 
+function openFinanceReportModal() {
+  document.getElementById('kf-report-modal')?.remove();
+  const year = S.financeYear;
+  const curMonth = S.financeMonth;
+  const preSelected = curMonth ? [curMonth] : [1,2,3,4,5,6,7,8,9,10,11,12];
+  const monthCheckboxes = [1,2,3,4,5,6,7,8,9,10,11,12].map(m => {
+    const checked = preSelected.includes(m) ? 'checked' : '';
+    return `<label class="kf-month-check"><input type="checkbox" name="kf-month" value="${m}" ${checked} /><span>${monthName(m)}</span></label>`;
+  }).join('');
+  const modal = document.createElement('div');
+  modal.id = 'kf-report-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:440px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">Generate Finance Report</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('kf-report-modal')?.remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p class="k-hint" style="margin-bottom:12px">Select one or more months to include in the <strong>${year}</strong> report. You can combine months e.g. March &amp; April.</p>
+        <div class="kf-month-grid">${monthCheckboxes}</div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc._selectAllReportMonths(true)">Select All</button>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc._selectAllReportMonths(false)">Clear</button>
+        </div>
+      </div>
+      <div class="k-modal-footer" style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="kbtn kbtn-primary" style="flex:1" onclick="Kpsc._generateLocalReport()">📄 Generate Report</button>
+        <button class="kbtn kbtn-ghost" style="flex:1" onclick="Kpsc._generateShareableLink(this)">🔗 Shareable Link</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function _selectAllReportMonths(checked) {
+  document.querySelectorAll('input[name="kf-month"]').forEach(cb => { cb.checked = checked; });
+}
+
+function _getSelectedReportMonths() {
+  return [...document.querySelectorAll('input[name="kf-month"]:checked')].map(cb => Number(cb.value));
+}
+
+function _generateLocalReport() {
+  const months = _getSelectedReportMonths();
+  if (!months.length) { showToast('Please select at least one month.', 'warn'); return; }
+  document.getElementById('kf-report-modal')?.remove();
+  generateFinanceReport(months);
+}
+
+async function _generateShareableLink(btn) {
+  const months = _getSelectedReportMonths();
+  if (!months.length) { showToast('Please select at least one month.', 'warn'); return; }
+  const origText = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Creating…';
+  const res = await apiPost('kpsc-finance-share', { year: S.financeYear, months });
+  btn.disabled = false; btn.textContent = origText;
+  if (res?.error) { showToast(res.error, 'error'); return; }
+  document.getElementById('kf-report-modal')?.remove();
+  showShareLinkModal(res.url, res.expiresAt, months);
+}
+
+function showShareLinkModal(url, expiresAt, months) {
+  document.getElementById('kf-share-link-modal')?.remove();
+  const monthsLabel = months.length === 12 ? 'Full Year' : months.map(m => monthName(m)).join(', ');
+  const expiryDate = expiresAt ? new Date(expiresAt).toLocaleDateString('en-NG', { dateStyle: 'long' }) : '30 days';
+  const waMsg = encodeURIComponent(`KPSC Finance Report — ${monthsLabel} ${S.financeYear}\n${url}`);
+  const modal = document.createElement('div');
+  modal.id = 'kf-share-link-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:440px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">Shareable Report Link</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('kf-share-link-modal')?.remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p class="k-hint" style="margin-bottom:10px">Anyone with this link can view the finance report without logging in. Share it directly on WhatsApp.</p>
+        <div style="background:#f4f6f9;border-radius:8px;padding:12px;word-break:break-all;font-size:12px;margin-bottom:12px;border:1px solid #dde">${esc(url)}</div>
+        <p class="k-hint">Period: <strong>${esc(monthsLabel)} ${S.financeYear}</strong> &nbsp;·&nbsp; Expires: ${esc(expiryDate)}</p>
+      </div>
+      <div class="k-modal-footer" style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="kbtn kbtn-primary" style="flex:1" onclick="Kpsc.copyText(${JSON.stringify(url)}, this)">📋 Copy Link</button>
+        <a class="kbtn kbtn-ghost" href="https://wa.me/?text=${waMsg}" target="_blank" rel="noopener" style="flex:1;text-align:center;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:6px">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.52 3.48A11.93 11.93 0 0 0 12.04 0C5.46 0 .1 5.36.1 11.94c0 2.1.55 4.15 1.6 5.95L0 24l6.27-1.64a11.9 11.9 0 0 0 5.76 1.47h.01c6.58 0 11.94-5.36 11.94-11.94 0-3.19-1.24-6.18-3.46-8.41Z"/></svg>
+          WhatsApp
+        </a>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+// Kept as alias for any existing callers; delegates to generateFinanceReport for the current period.
 function printFinanceReport() {
+  const months = S.financeMonth ? [S.financeMonth] : [1,2,3,4,5,6,7,8,9,10,11,12];
+  generateFinanceReport(months);
+}
+
+function generateFinanceReport(months) {
   function escPrint(s) {
     return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
-  const year  = S.financeYear;
-  const month = S.financeMonth;
-  const entries = S.financeEntries;
-  const periodLabel = month ? `${monthName(month)} ${year}` : `Full Year ${year}`;
+  const year = S.financeYear;
+  // Filter all-time entries by year + selected months
+  const allEntries = Array.isArray(S.allFinanceEntries) ? S.allFinanceEntries : [];
+  const entries = allEntries.filter(e => {
+    const d = e.date || '';
+    if (!d) return false;
+    const eYear = Number(d.slice(0, 4));
+    const eMonth = Number(d.slice(5, 7));
+    return eYear === year && months.includes(eMonth);
+  });
+  const monthsSorted = [...months].sort((a, b) => a - b);
+  const periodLabel = monthsSorted.length === 12
+    ? `Full Year ${year}`
+    : monthsSorted.length === 1
+      ? `${monthName(monthsSorted[0])} ${year}`
+      : `${monthsSorted.map(m => monthName(m)).join(', ')} ${year}`;
   const generatedDate = new Date().toLocaleDateString('en-NG', { year: 'numeric', month: 'long', day: 'numeric' });
   const preparedBy = S.user?.name || '';
   const incomeEntries  = entries.filter(e => e.entryType === 'income').slice().sort((a, b) => (a.date || '') > (b.date || '') ? 1 : -1);
@@ -7500,6 +7609,7 @@ function printFinanceReport() {
   const reportBalance = typeof S.financeBalance === 'number' ? S.financeBalance : null;
   const balanceColor = reportBalance !== null ? (reportBalance >= 0 ? '#1e3a5f' : '#8b1a1a') : '#555';
   const balanceLabel = S.financeBalanceIsCurrentPeriod ? 'Current Balance' : `Balance (end of ${periodLabel})`;
+  const safeFilename = `KPSC-Finance-Report-${monthsSorted.map(m => monthName(m).slice(0,3)).join('-')}-${year}`.replace(/[^a-zA-Z0-9-]/g, '-');
 
   function catSummaryRows(list, total) {
     const cats = {};
@@ -7533,10 +7643,20 @@ function printFinanceReport() {
     prose = `During <strong>${escPrint(periodLabel)}</strong>, the committee received a total of <strong style="color:#1a5e3a">₦${Math.round(incomeTotal).toLocaleString('en-NG')}</strong> in income across ${incomeEntries.length} entr${incomeEntries.length === 1 ? 'y' : 'ies'}, and spent <strong style="color:#8b1a1a">₦${Math.round(expenseTotal).toLocaleString('en-NG')}</strong> across ${expenseEntries.length} entr${expenseEntries.length === 1 ? 'y' : 'ies'}. Expenses exceeded income, resulting in a <strong style="color:#8b1a1a">deficit of ₦${Math.round(Math.abs(net)).toLocaleString('en-NG')}</strong>.`;
   }
 
-  const html = `<!DOCTYPE html>
+  const html = buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, preparedBy, safeFilename, incomeEntries, expenseEntries, incomeTotal, expenseTotal, net, netColor, netLabel, reportBalance, balanceColor, balanceLabel, prose, catSummaryRows, entryRows });
+
+  const win = window.open('', '_blank');
+  if (!win) { showToast('Please allow pop-ups to generate the report.', 'warn'); return; }
+  win.document.write(html);
+  win.document.close();
+}
+
+function buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, preparedBy, safeFilename, incomeEntries, expenseEntries, incomeTotal, expenseTotal, net, netColor, netLabel, reportBalance, balanceColor, balanceLabel, prose, catSummaryRows, entryRows }) {
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Finance Report — ${escPrint(periodLabel)}</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
@@ -7561,12 +7681,19 @@ function printFinanceReport() {
   .sig-section{margin-top:36px;page-break-inside:avoid}
   .sig-grid{display:grid;grid-template-columns:1fr 1fr;gap:36px;margin-top:12px}
   .sig-line{border-top:1px solid #aaa;margin-top:40px;padding-top:7px;font-size:11px;color:#555}
-  .print-btn{display:block;margin:20px auto 0;background:#1e3a5f;color:#fff;border:none;padding:12px 24px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
-  .print-btn:hover{background:#13284a}
+  .action-bar{display:flex;gap:10px;justify-content:center;padding:16px 0;margin-bottom:4px;flex-wrap:wrap}
+  .action-btn{background:#1e3a5f;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
+  .action-btn:hover{background:#13284a}
+  .action-btn-outline{background:#fff;color:#1e3a5f;border:2px solid #1e3a5f;padding:10px 22px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
+  .action-btn-outline:hover{background:#f0f4fa}
 </style>
 </head>
 <body>
-<button class="print-btn no-print" onclick="window.print()">🖨 Print / Save as PDF</button>
+<div class="action-bar no-print">
+  <button class="action-btn" id="dl-btn" onclick="downloadPDF()">📥 Download PDF</button>
+  <button class="action-btn-outline" onclick="window.print()">🖨 Print</button>
+</div>
+<div id="report-content">
 <div class="report-header">
   <div class="org-name">Kingdom Parish Stewardship Committee</div>
   <div class="report-title">Finance Report — ${escPrint(periodLabel)}</div>
@@ -7617,13 +7744,26 @@ ${expenseEntries.length ? `
     <div><div class="sig-line">Date</div></div>
   </div>
 </div>
-</body></html>`;
-
-  const win = window.open('', '_blank');
-  if (!win) { showToast('Please allow pop-ups to generate the report.', 'warn'); return; }
-  win.document.write(html);
-  win.document.close();
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<script>
+function downloadPDF() {
+  var btn = document.getElementById('dl-btn');
+  var bar = document.querySelector('.action-bar');
+  if (bar) bar.style.display = 'none';
+  html2pdf().set({
+    margin:[12,10],
+    filename:${JSON.stringify(safeFilename + '.pdf')},
+    html2canvas:{scale:2,useCORS:true,letterRendering:true},
+    jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}
+  }).from(document.getElementById('report-content')).save().then(function(){
+    if (bar) bar.style.display = '';
+  });
 }
+</script>
+</body></html>`;
+}
+
 
 async function runReconciliation(btn) {
   let statementItems;
@@ -15676,6 +15816,13 @@ window.Kpsc = {
   sortFinanceBy,
   exportFinanceCsv,
   printFinanceReport,
+  openFinanceReportModal,
+  generateFinanceReport,
+  _selectAllReportMonths,
+  _getSelectedReportMonths,
+  _generateLocalReport,
+  _generateShareableLink,
+  showShareLinkModal,
   rerenderFinanceEntryList,
   deleteFinanceEntry,
   editFinanceEntryWithPin,
