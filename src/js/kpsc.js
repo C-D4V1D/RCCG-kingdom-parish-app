@@ -163,6 +163,10 @@ const S = {
   _meetingTab: 'record',
   _reviewEditMode: false, // true = show inline review editor; false = show reviewed summary
   _isNewMeeting: false,   // true when the room is hosting a fresh, never-saved draft
+  cashCollection: {
+    pendingTotal: 0, todayTotal: 0, olderTotal: 0, pendingCount: 0,
+    todayPayments: [], olderPayments: [], collectors: [], recentHandovers: [], loaded: false,
+  },
   kpscMeetingCadence: 'none',
   rolePermissions: null, // loaded from DB; null means use KPSC_PERMISSIONS defaults
 };
@@ -2311,6 +2315,7 @@ async function enterApp() {
     }
   } catch { /* fall back to hardcoded KPSC_PERMISSIONS */ }
   applyNavPermissions();
+  loadCashCollection(); // fire-and-forget — widget appears once data loads
   S._navStack = [];
   const hashPage = window.location.hash.replace('#', '');
   // hashPage might be an old page name (e.g. 'archive', 'partners') — canAccess handles those.
@@ -6328,6 +6333,7 @@ async function saveRecordedPayments(partnerId, btn) {
   document.getElementById('k-rec-payment-modal')?.remove();
   if (errorCount) showToast(`${errorCount} payment(s) failed to save. Check and retry.`, 'error');
   else showToast(`Payment recorded for ${selectedMonths.length} month${selectedMonths.length > 1 ? 's' : ''}.`, 'success');
+  if (!errorCount && method === 'cash') loadCashCollection(); // fire-and-forget — updates cash widget
   await loadPartnerData(year);
   const main = document.getElementById('kpsc-main');
   if (S.page === 'partnerDetail' && S._partnerDetailId === partnerId) {
@@ -6352,6 +6358,164 @@ async function loadPartnerData(year = currentYear()) {
   S.partners = Array.isArray(partnersRes) ? partnersRes : [];
   S.partnerPayments = Array.isArray(paymentsRes) ? paymentsRes : [];
 }
+
+// ── CASH COLLECTION TRACKER ──────────────────────────────────────────────────
+
+async function loadCashCollection() {
+  if (!canManageFinance()) return;
+  try {
+    const res = await apiGet('kpsc-cash-collection');
+    if (res?.error) return;
+    S.cashCollection = { ...res, loaded: true };
+  } catch { /* silent — widget stays hidden on network failure */ }
+  renderCashWidget();
+}
+
+function renderCashWidget() {
+  const w = document.getElementById('k-cash-widget');
+  if (!w) return;
+  const { pendingTotal, todayTotal, olderTotal, collectors, loaded } = S.cashCollection;
+  if (!loaded || pendingTotal <= 0 || !canManageFinance()) { w.style.display = 'none'; return; }
+  w.style.display = 'flex';
+  const amtEl = w.querySelector('.k-cw-amount');
+  const subEl = w.querySelector('.k-cw-sub');
+  if (amtEl) amtEl.textContent = '₦' + pendingTotal.toLocaleString('en-NG');
+  if (subEl) {
+    const parts = [];
+    if (todayTotal > 0) parts.push(`₦${todayTotal.toLocaleString('en-NG')} today`);
+    if (olderTotal > 0) parts.push(`₦${olderTotal.toLocaleString('en-NG')} older`);
+    if (collectors.length === 1) parts.push(`held by ${collectors[0].name}`);
+    else if (collectors.length > 1) parts.push(`${collectors.length} holders`);
+    subEl.textContent = parts.join(' · ');
+  }
+  w.classList.remove('k-cw-pulse');
+  void w.offsetWidth;
+  w.classList.add('k-cw-pulse');
+}
+
+function openCashPanel() {
+  const panel = document.getElementById('k-cash-panel');
+  const overlay = document.getElementById('k-cash-panel-overlay');
+  if (!panel || !overlay) return;
+  renderCashPanelBody();
+  overlay.style.display = 'block';
+  requestAnimationFrame(() => {
+    panel.classList.add('k-cash-panel--open');
+    overlay.classList.add('k-cash-panel-overlay--visible');
+  });
+}
+
+function closeCashPanel() {
+  const panel = document.getElementById('k-cash-panel');
+  const overlay = document.getElementById('k-cash-panel-overlay');
+  if (panel) panel.classList.remove('k-cash-panel--open');
+  if (overlay) overlay.classList.remove('k-cash-panel-overlay--visible');
+  setTimeout(() => { if (overlay) overlay.style.display = 'none'; }, 260);
+}
+
+function renderCashPanelBody() {
+  const body = document.getElementById('k-cash-panel-body');
+  if (!body) return;
+  const { pendingTotal, todayPayments, olderPayments, collectors, recentHandovers } = S.cashCollection;
+  const fmtN = n => '₦' + Number(n || 0).toLocaleString('en-NG');
+  const fmtD = s => {
+    if (!s) return '';
+    const d = new Date(s);
+    return d.toLocaleDateString('en-NG', { day: 'numeric', month: 'short' });
+  };
+
+  const paymentRow = (p, isToday) => `
+    <div class="k-cash-item${isToday ? ' k-cash-item--today' : ''}">
+      <div class="k-cash-item-name">${esc(p.partner_name || 'Unknown Partner')}</div>
+      <div class="k-cash-item-meta">${fmtD(p.date)}${!isToday ? ' <span class="k-cash-item-older-badge">older</span>' : ''}</div>
+      <div class="k-cash-item-amount">${fmtN(p.amount)}</div>
+    </div>`;
+
+  const collectorSection = collectors.length > 1 ? `
+    <div class="k-cash-section-title" style="margin-top:16px">Who Holds What</div>
+    ${collectors.map(c => `
+      <div class="k-cash-collector-row">
+        <span class="k-cash-collector-name">${esc(c.name)}</span>
+        <span class="k-cash-collector-meta">${c.count} payment${c.count !== 1 ? 's' : ''}</span>
+        <span class="k-cash-collector-amount">${fmtN(c.total)}</span>
+      </div>`).join('')}` : '';
+
+  const handoverRow = h => `
+    <div class="k-handover-item">
+      <div class="k-handover-item-top">
+        <span class="k-handover-item-amount">${fmtN(h.amount)}</span>
+        <span class="k-handover-item-count">${h.payment_count} payment${Number(h.payment_count) !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="k-handover-item-meta">${fmtD(h.transferred_at)} · ${esc(h.transferred_by || '')}${h.notes ? ' · ' + esc(h.notes) : ''}</div>
+    </div>`;
+
+  body.innerHTML = `
+    ${todayPayments.length ? `
+      <div class="k-cash-section-title">Today's Cash Payments</div>
+      ${todayPayments.map(p => paymentRow(p, true)).join('')}` : ''}
+    ${olderPayments.length ? `
+      <div class="k-cash-section-title" style="margin-top:${todayPayments.length ? 16 : 0}px">
+        Older Pending <span class="k-cash-older-hint">Not yet transferred</span>
+      </div>
+      ${olderPayments.map(p => paymentRow(p, false)).join('')}` : ''}
+    ${!todayPayments.length && !olderPayments.length
+      ? '<div class="k-empty">No pending cash payments.</div>' : ''}
+    ${collectorSection}
+    <div class="k-cash-total-bar">
+      <span>Total in Hand</span>
+      <span class="k-cash-total-bar-amount">${fmtN(pendingTotal)}</span>
+    </div>
+    ${recentHandovers.length ? `
+      <div class="k-cash-section-title" style="margin-top:20px">Recent Transfers to Bank</div>
+      ${recentHandovers.map(handoverRow).join('')}` : ''}
+  `;
+}
+
+function openHandoverModal() {
+  const overlay = document.getElementById('k-handover-modal-overlay');
+  if (!overlay) return;
+  const amtEl = document.getElementById('k-handover-amount');
+  const dateEl = document.getElementById('k-handover-date');
+  const notesEl = document.getElementById('k-handover-notes');
+  const errEl = document.getElementById('k-handover-err');
+  if (amtEl) amtEl.value = S.cashCollection.pendingTotal.toFixed(0);
+  if (dateEl) dateEl.value = new Date().toISOString().slice(0, 10);
+  if (notesEl) notesEl.value = '';
+  if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+  overlay.style.display = 'flex';
+}
+
+function closeHandoverModal() {
+  const overlay = document.getElementById('k-handover-modal-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+async function submitCashHandover(btn) {
+  const amount = Number(document.getElementById('k-handover-amount')?.value || 0);
+  const notes = (document.getElementById('k-handover-notes')?.value || '').trim();
+  const errEl = document.getElementById('k-handover-err');
+  if (amount <= 0) {
+    if (errEl) { errEl.textContent = 'Please enter a valid amount.'; errEl.style.display = 'block'; }
+    return;
+  }
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  const res = await apiPost('kpsc-cash-handovers', { amount, notes });
+  btn.disabled = false;
+  btn.textContent = orig;
+  if (res?.error) {
+    if (errEl) { errEl.textContent = res.error; errEl.style.display = 'block'; }
+    showToast('Transfer failed: ' + res.error, 'error');
+    return;
+  }
+  showToast(`₦${amount.toLocaleString('en-NG')} transfer recorded.`, 'success');
+  closeHandoverModal();
+  closeCashPanel();
+  await loadCashCollection();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function partnerPaymentsByPartner(partnerId, year = currentYear()) {
   return S.partnerPayments.filter(p => p.partnerId === partnerId && Number(p.year) === Number(year) && p.paid);
@@ -16040,6 +16204,12 @@ window.Kpsc = {
   showNewMonthDraftModal,
   saveNewMonthDraft,
   dismissNewMonthDraft,
+  // Cash Collection Tracker
+  openCashPanel,
+  closeCashPanel,
+  openHandoverModal,
+  closeHandoverModal,
+  submitCashHandover,
 };
 
 document.addEventListener('DOMContentLoaded', init);
