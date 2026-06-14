@@ -3545,16 +3545,29 @@ async function getFinanceReportByToken(DB, token) {
   if (!months.length) return err('Invalid report token', 400);
   const monthPad = months.map(m => String(m).padStart(2, '0'));
   const placeholders = monthPad.map(() => '?').join(',');
-  const { results } = await DB.prepare(`
-    SELECT f.*, p.full_name AS partner_name
-    FROM kpsc_finance_entries f
-    LEFT JOIN kpsc_partners p ON p.id = f.partner_id
-    WHERE strftime('%Y', f.date)=?
-      AND strftime('%m', f.date) IN (${placeholders})
-      AND COALESCE(f.deleted_at,'') = ''
-    ORDER BY f.date ASC, f.created_at ASC
-  `).bind(String(year), ...monthPad).all();
-  const entries = (results || []).map(row => ({
+
+  // Cutoff date = last day of the latest selected month in the selected year
+  const lastMonth = Math.max(...months);
+  const balanceCutoff = new Date(Date.UTC(year, lastMonth, 0)).toISOString().slice(0, 10);
+
+  // Fetch period entries and all-time-up-to-cutoff entries in parallel
+  const [periodRes, balanceRes] = await Promise.all([
+    DB.prepare(`
+      SELECT f.*, p.full_name AS partner_name
+      FROM kpsc_finance_entries f
+      LEFT JOIN kpsc_partners p ON p.id = f.partner_id
+      WHERE strftime('%Y', f.date)=?
+        AND strftime('%m', f.date) IN (${placeholders})
+        AND COALESCE(f.deleted_at,'') = ''
+      ORDER BY f.date ASC, f.created_at ASC
+    `).bind(String(year), ...monthPad).all(),
+    DB.prepare(`
+      SELECT entry_type, amount FROM kpsc_finance_entries
+      WHERE date <= ? AND COALESCE(deleted_at,'') = ''
+    `).bind(balanceCutoff).all(),
+  ]);
+
+  const entries = (periodRes.results || []).map(row => ({
     id: row.id,
     date: row.date,
     entryType: row.entry_type,
@@ -3566,6 +3579,12 @@ async function getFinanceReportByToken(DB, token) {
     partnerName: row.partner_name || '',
     recordedBy: row.recorded_by || '',
   }));
+
+  const balanceRows = balanceRes.results || [];
+  const balanceIncome  = balanceRows.filter(r => r.entry_type === 'income').reduce((s, r) => s + Number(r.amount || 0), 0);
+  const balanceExpense = balanceRows.filter(r => r.entry_type === 'expense').reduce((s, r) => s + Number(r.amount || 0), 0);
+  const currentBalance = balanceIncome - balanceExpense;
+
   return ok({
     year,
     months,
@@ -3573,6 +3592,8 @@ async function getFinanceReportByToken(DB, token) {
     createdAt: tokenRow.created_at || '',
     expiresAt: tokenRow.expires_at || '',
     entries,
+    currentBalance,
+    balanceCutoff,
   });
 }
 
