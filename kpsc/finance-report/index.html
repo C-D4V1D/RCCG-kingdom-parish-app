@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="theme-color" content="#1e3a5f" />
+<title>Finance Report — Kingdom Parish Stewardship Committee</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'DM Sans',Arial,sans-serif;font-size:13px;color:#1a1a1a;background:#f4f6fa;min-height:100vh}
+  @media print{
+    @page{margin:18mm 15mm;size:A4}
+    body{background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .no-print{display:none!important}
+    .page-wrap{box-shadow:none;border-radius:0;padding:0}
+  }
+  .top-bar{background:#1e3a5f;color:#fff;padding:12px 20px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:10}
+  .top-bar-logo{font-weight:700;font-size:15px;letter-spacing:.3px;flex:1}
+  .top-bar-sub{font-size:11px;opacity:.7;margin-top:1px}
+  .action-bar{display:flex;gap:10px;justify-content:center;padding:16px;flex-wrap:wrap}
+  .action-btn{background:#1e3a5f;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:6px}
+  .action-btn:hover{background:#13284a}
+  .action-btn-outline{background:#fff;color:#1e3a5f;border:2px solid #1e3a5f;padding:10px 22px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:6px}
+  .action-btn-outline:hover{background:#f0f4fa}
+  .page-wrap{max-width:900px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 2px 16px rgba(0,0,0,.08);padding:28px 28px 40px;margin-top:16px;margin-bottom:24px}
+  .report-header{text-align:center;padding-bottom:18px;border-bottom:2px solid #1e3a5f;margin-bottom:24px}
+  .org-name{font-size:20px;font-weight:700;color:#1e3a5f;letter-spacing:.5px}
+  .report-title{font-size:15px;font-weight:600;color:#333;margin-top:6px}
+  .report-meta{font-size:11px;color:#666;margin-top:6px}
+  .section{margin-bottom:28px}
+  .section-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#1e3a5f;border-bottom:1px solid #ddd;padding-bottom:7px;margin-bottom:14px}
+  .overview-box{background:#f4f6f9;border-radius:8px;padding:14px 18px;margin-bottom:20px;line-height:1.8;font-size:13px}
+  .summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:8px}
+  @media(max-width:600px){.summary-grid{grid-template-columns:repeat(2,1fr)}}
+  .tile{border:1px solid #ddd;border-radius:8px;padding:16px;text-align:center}
+  .tile-val{font-size:20px;font-weight:700}
+  .tile-lbl{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+  .table-wrap{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:12px;min-width:500px}
+  th{background:#1e3a5f;color:#fff;padding:9px 10px;text-align:left;font-size:11px;font-weight:600;letter-spacing:.4px}
+  td{padding:8px 10px;border-bottom:1px solid #eee;vertical-align:top}
+  tr:nth-child(even) td{background:#f9fafb}
+  tr:last-child td{border-bottom:none}
+  .sig-section{margin-top:36px;page-break-inside:avoid}
+  .sig-grid{display:grid;grid-template-columns:1fr 1fr;gap:36px;margin-top:12px}
+  .sig-line{border-top:1px solid #aaa;margin-top:40px;padding-top:7px;font-size:11px;color:#555}
+  #loading{text-align:center;padding:60px 20px;color:#555;font-size:15px}
+  #error-msg{text-align:center;padding:60px 20px;color:#c0392b;font-size:14px;background:#fff;border-radius:12px;margin:20px auto;max-width:500px}
+  .exp-badge{background:#fef2f2;color:#8b1a1a;border-radius:4px;font-size:10px;padding:2px 6px;font-weight:600;vertical-align:middle;margin-left:4px}
+  .inc-badge{background:#f0faf6;color:#1a5e3a;border-radius:4px;font-size:10px;padding:2px 6px;font-weight:600;vertical-align:middle;margin-left:4px}
+</style>
+</head>
+<body>
+
+<div class="top-bar no-print">
+  <div>
+    <div class="top-bar-logo">KPSC Finance Report</div>
+    <div class="top-bar-sub">Kingdom Parish Stewardship Committee · RCCG</div>
+  </div>
+</div>
+
+<div class="no-print action-bar" id="action-bar" style="display:none!important">
+  <button class="action-btn" id="dl-btn" onclick="downloadPDF()">📥 Download PDF</button>
+  <button class="action-btn-outline" onclick="window.print()">🖨 Print</button>
+</div>
+
+<div id="loading">Loading report…</div>
+<div id="error-msg" style="display:none"></div>
+
+<div class="page-wrap" id="report-wrap" style="display:none">
+  <div id="report-content"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<script>
+(function() {
+  function esc(s) {
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function catLabel(c) {
+    return String(c || '').replace(/_/g,' ').replace(/\b\w/g, l => l.toUpperCase());
+  }
+
+  function monthName(m) {
+    return new Date(Date.UTC(2000, m - 1, 1)).toLocaleString('en-NG', { month: 'long', timeZone: 'UTC' });
+  }
+
+  function fmt(n) {
+    return '₦' + Math.round(n).toLocaleString('en-NG');
+  }
+
+  function catSummaryRows(list, total) {
+    const cats = {};
+    list.forEach(e => { const c = e.category || 'other'; cats[c] = (cats[c] || 0) + Number(e.amount || 0); });
+    return Object.entries(cats).sort((a, b) => b[1] - a[1]).map(([cat, amt]) => {
+      const pct = total > 0 ? Math.round((amt / total) * 100) : 0;
+      return `<tr><td>${esc(catLabel(cat))}</td><td style="text-align:right;font-weight:600">${fmt(amt)}</td><td style="text-align:right;color:#666">${pct}%</td></tr>`;
+    }).join('');
+  }
+
+  function entryRows(list, showPartner) {
+    if (!list.length) return `<tr><td colspan="${showPartner ? 8 : 7}" style="text-align:center;color:#888;padding:12px">No entries recorded</td></tr>`;
+    return list.map(e => `<tr>
+      <td style="white-space:nowrap">${esc(e.date || '')}</td>
+      <td>${esc(catLabel(e.category))}</td>
+      ${showPartner ? `<td>${esc(e.partnerName || '—')}</td>` : ''}
+      <td>${esc((e.paymentMethod || '—').replace(/_/g,' '))}</td>
+      <td style="font-size:11px">${esc(e.reference || '—')}</td>
+      <td style="font-size:11px;color:#555">${esc(e.narration || '—')}</td>
+      <td style="text-align:right;font-weight:600;white-space:nowrap">${fmt(e.amount)}</td>
+      <td style="color:#777;font-size:11px">${esc(e.recordedBy || '—')}</td>
+    </tr>`).join('');
+  }
+
+  function renderReport(data) {
+    const { year, months, entries, createdBy, createdAt } = data;
+    const monthsSorted = [...months].sort((a, b) => a - b);
+    const periodLabel = monthsSorted.length === 12
+      ? `Full Year ${year}`
+      : monthsSorted.length === 1
+        ? `${monthName(monthsSorted[0])} ${year}`
+        : `${monthsSorted.map(m => monthName(m)).join(', ')} ${year}`;
+
+    const safeFilename = 'KPSC-Finance-Report-' + monthsSorted.map(m => monthName(m).slice(0,3)).join('-') + '-' + year;
+    window._reportFilename = safeFilename + '.pdf';
+    document.title = `Finance Report — ${periodLabel}`;
+
+    const generatedDate = createdAt
+      ? new Date(createdAt).toLocaleDateString('en-NG', { year: 'numeric', month: 'long', day: 'numeric' })
+      : new Date().toLocaleDateString('en-NG', { year: 'numeric', month: 'long', day: 'numeric' });
+
+    const incomeEntries = entries.filter(e => e.entryType === 'income').slice().sort((a, b) => (a.date || '') > (b.date || '') ? 1 : -1);
+    const expenseEntries = entries.filter(e => e.entryType === 'expense').slice().sort((a, b) => (a.date || '') > (b.date || '') ? 1 : -1);
+    const incomeTotal = incomeEntries.reduce((s, e) => s + Number(e.amount || 0), 0);
+    const expenseTotal = expenseEntries.reduce((s, e) => s + Number(e.amount || 0), 0);
+    const net = incomeTotal - expenseTotal;
+    const netColor = net >= 0 ? '#1a5e3a' : '#8b1a1a';
+    const netLabel = net >= 0 ? 'Surplus' : 'Deficit';
+
+    let prose;
+    if (!entries.length) {
+      prose = `No financial transactions were recorded for <strong>${esc(periodLabel)}</strong>.`;
+    } else if (net >= 0) {
+      prose = `During <strong>${esc(periodLabel)}</strong>, the committee received a total of <strong style="color:#1a5e3a">${fmt(incomeTotal)}</strong> in income across ${incomeEntries.length} entr${incomeEntries.length === 1 ? 'y' : 'ies'}, and spent <strong style="color:#8b1a1a">${fmt(expenseTotal)}</strong> across ${expenseEntries.length} entr${expenseEntries.length === 1 ? 'y' : 'ies'}. This leaves a <strong style="color:#1a5e3a">surplus of ${fmt(net)}</strong>.`;
+    } else {
+      prose = `During <strong>${esc(periodLabel)}</strong>, the committee received a total of <strong style="color:#1a5e3a">${fmt(incomeTotal)}</strong> in income across ${incomeEntries.length} entr${incomeEntries.length === 1 ? 'y' : 'ies'}, and spent <strong style="color:#8b1a1a">${fmt(expenseTotal)}</strong> across ${expenseEntries.length} entr${expenseEntries.length === 1 ? 'y' : 'ies'}. Expenses exceeded income, resulting in a <strong style="color:#8b1a1a">deficit of ${fmt(Math.abs(net))}</strong>.`;
+    }
+
+    document.getElementById('report-content').innerHTML = `
+      <div class="report-header">
+        <div class="org-name">Kingdom Parish Stewardship Committee</div>
+        <div class="report-title">Finance Report — ${esc(periodLabel)}</div>
+        <div class="report-meta">Generated on ${esc(generatedDate)}${createdBy ? ` &nbsp;·&nbsp; Prepared by: ${esc(createdBy)}` : ''}</div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Overview</div>
+        <div class="overview-box">${prose}</div>
+        <div class="summary-grid">
+          <div class="tile"><div class="tile-val" style="color:#1a5e3a">${fmt(incomeTotal)}</div><div class="tile-lbl">Total Received</div></div>
+          <div class="tile"><div class="tile-val" style="color:#8b1a1a">${fmt(expenseTotal)}</div><div class="tile-lbl">Total Spent</div></div>
+          <div class="tile" style="border-color:${netColor}"><div class="tile-val" style="color:${netColor}">${fmt(Math.abs(net))}</div><div class="tile-lbl">Net ${esc(netLabel)}</div></div>
+          <div class="tile"><div class="tile-val">${entries.length}</div><div class="tile-lbl">Total Entries</div></div>
+        </div>
+      </div>
+
+      ${incomeEntries.length ? `
+      <div class="section">
+        <div class="section-title">Income Breakdown by Category</div>
+        <div class="table-wrap"><table><thead><tr><th>Category</th><th style="text-align:right">Amount</th><th style="text-align:right">% of Income</th></tr></thead>
+        <tbody>${catSummaryRows(incomeEntries, incomeTotal)}<tr style="font-weight:700"><td>Total</td><td style="text-align:right">${fmt(incomeTotal)}</td><td style="text-align:right">100%</td></tr></tbody></table></div>
+      </div>
+      <div class="section">
+        <div class="section-title">Money Received — All Entries (${incomeEntries.length})</div>
+        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Partner</th><th>Method</th><th>Reference</th><th>Description</th><th style="text-align:right">Amount</th><th>Recorded By</th></tr></thead>
+        <tbody>${entryRows(incomeEntries, true)}</tbody></table></div>
+      </div>` : ''}
+
+      ${expenseEntries.length ? `
+      <div class="section">
+        <div class="section-title">Expense Breakdown by Category</div>
+        <div class="table-wrap"><table><thead><tr><th>Category</th><th style="text-align:right">Amount</th><th style="text-align:right">% of Expenses</th></tr></thead>
+        <tbody>${catSummaryRows(expenseEntries, expenseTotal)}<tr style="font-weight:700"><td>Total</td><td style="text-align:right">${fmt(expenseTotal)}</td><td style="text-align:right">100%</td></tr></tbody></table></div>
+      </div>
+      <div class="section">
+        <div class="section-title">Money Spent — All Entries (${expenseEntries.length})</div>
+        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Method</th><th>Reference</th><th>Description</th><th style="text-align:right">Amount</th><th>Recorded By</th></tr></thead>
+        <tbody>${entryRows(expenseEntries, false)}</tbody></table></div>
+      </div>` : ''}
+
+      <div class="sig-section">
+        <div class="section-title">Approval &amp; Signatures</div>
+        <div class="sig-grid">
+          <div><div class="sig-line">Financial Secretary</div></div>
+          <div><div class="sig-line">Treasurer</div></div>
+          <div><div class="sig-line">Acting Chairman</div></div>
+          <div><div class="sig-line">Date</div></div>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('report-wrap').style.display = '';
+    const bar = document.getElementById('action-bar');
+    bar.style.display = '';
+    bar.style.setProperty('display', 'flex', 'important');
+  }
+
+  function showError(msg) {
+    document.getElementById('loading').style.display = 'none';
+    const el = document.getElementById('error-msg');
+    el.textContent = msg;
+    el.style.display = '';
+  }
+
+  async function load() {
+    const token = new URLSearchParams(window.location.search).get('token');
+    if (!token) { showError('No report token provided. Please use a valid shareable link.'); return; }
+    try {
+      const res = await fetch(`/api/kpsc-finance-report/${encodeURIComponent(token)}`);
+      const data = await res.json();
+      if (data?.error) { showError(data.error); return; }
+      renderReport(data);
+    } catch (e) {
+      showError('Failed to load the report. Please check your connection and try again.');
+    }
+  }
+
+  load();
+
+  window.downloadPDF = function() {
+    const bar = document.getElementById('action-bar');
+    if (bar) bar.style.display = 'none';
+    html2pdf().set({
+      margin: [12, 10],
+      filename: window._reportFilename || 'KPSC-Finance-Report.pdf',
+      html2canvas: { scale: 2, useCORS: true, letterRendering: true },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+    }).from(document.getElementById('report-wrap')).save().then(function() {
+      if (bar) { bar.style.display = ''; bar.style.setProperty('display','flex','important'); }
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
