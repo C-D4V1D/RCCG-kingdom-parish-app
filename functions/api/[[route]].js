@@ -1203,6 +1203,13 @@ export async function onRequest(context) {
       return await createKpscCashHandover(DB, body, auth);
     }
 
+    // ── /api/kpsc-cash-reassign  (POST — reassign a lot to a different holder) ──
+    if (route === 'kpsc-cash-reassign' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await reassignCashHolder(DB, body, auth);
+    }
+
     // ── /api/partnership-og-image  (public — serves stored OG image) ──
     if (route === 'partnership-og-image' && method === 'GET') {
       return await serveStoredImage(DB, 'partnership_og_image', '/icons/og-partnership.png');
@@ -1811,6 +1818,12 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_projects ADD COLUMN raised_amount REAL DEFAULT 0`,
     // Cash handover: link settled finance entries to the handover record
     `ALTER TABLE kpsc_finance_entries ADD COLUMN handover_id TEXT DEFAULT ''`,
+    // Cash collection v2: per-holder custody and cash-box expenses
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN cash_holder TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN cash_box_expense INTEGER DEFAULT 0`,
+    `ALTER TABLE kpsc_cash_handovers ADD COLUMN holder TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_cash_handovers ADD COLUMN collected_total REAL DEFAULT 0`,
+    `ALTER TABLE kpsc_cash_handovers ADD COLUMN expense_total REAL DEFAULT 0`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -3351,14 +3364,15 @@ async function upsertKpscPartnerPayment(DB, data) {
       } else {
         const finId = newId('kfe');
         const dateStr = paidAt ? paidAt.slice(0, 10) : new Date().toISOString().slice(0, 10);
+        const cashHolder = paymentMethod === 'cash' ? String(data?.recordedBy || '').trim() : '';
         await DB.prepare(`
           INSERT INTO kpsc_finance_entries
-          (id,date,entry_type,category,sub_category,amount,payment_method,reference,narration,partner_id,recorded_by,approved_by,approval_status,attachment_name,partner_payment_id)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          (id,date,entry_type,category,sub_category,amount,payment_method,reference,narration,partner_id,recorded_by,approved_by,approval_status,attachment_name,partner_payment_id,cash_holder)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         `).bind(
           finId, dateStr, 'income', 'partnership_pledge', paymentType === 'monthly_pledge' ? 'monthly_pledge' : paymentType,
           Number(data?.amount || 0), paymentMethod, '', narration, partnerId,
-          String(data?.recordedBy || '').trim(), '', 'recorded', '', id
+          String(data?.recordedBy || '').trim(), '', 'recorded', '', id, cashHolder
         ).run();
       }
     } catch { /* finance sync failure must not break payment recording */ }
@@ -3495,8 +3509,12 @@ async function deleteKpscFinanceEntry(DB, id, auth) {
 
 async function getKpscCashCollection(DB) {
   const todayStr = new Date().toISOString().slice(0, 10);
-  const { results: pending } = await DB.prepare(`
-    SELECT f.id, f.date, f.amount, f.partner_id, f.recorded_by, p.full_name AS partner_name
+
+  // Unsettled partnership cash income lots
+  const { results: lots } = await DB.prepare(`
+    SELECT f.id, f.date, f.amount, f.partner_id, f.recorded_by,
+           COALESCE(f.cash_holder,'') AS cash_holder,
+           p.full_name AS partner_name
     FROM kpsc_finance_entries f
     LEFT JOIN kpsc_partners p ON p.id = f.partner_id
     WHERE f.payment_method = 'cash'
@@ -3506,71 +3524,112 @@ async function getKpscCashCollection(DB) {
       AND COALESCE(f.deleted_at, '') = ''
     ORDER BY f.date DESC, f.created_at DESC
   `).all();
-  const all = pending || [];
-  const todayPayments = all.filter(r => r.date === todayStr);
-  const olderPayments = all.filter(r => r.date !== todayStr);
-  const sum = arr => arr.reduce((s, r) => s + Number(r.amount || 0), 0);
 
-  // Group by collector so the UI can show who holds what cash
-  const collectorMap = {};
-  for (const p of all) {
-    const name = p.recorded_by || 'Unknown';
-    if (!collectorMap[name]) collectorMap[name] = { name, total: 0, count: 0 };
-    collectorMap[name].total += Number(p.amount || 0);
-    collectorMap[name].count++;
+  // Unreconciled cash-box expenses
+  const { results: boxExpenses } = await DB.prepare(`
+    SELECT f.id, f.date, f.amount, f.narration, f.category, f.recorded_by,
+           COALESCE(f.cash_holder,'') AS cash_holder
+    FROM kpsc_finance_entries f
+    WHERE f.cash_box_expense = 1
+      AND f.entry_type = 'expense'
+      AND COALESCE(f.handover_id, '') = ''
+      AND COALESCE(f.deleted_at, '') = ''
+    ORDER BY f.date DESC, f.created_at DESC
+  `).all();
+
+  const allLots = lots || [];
+  const allExpenses = boxExpenses || [];
+
+  // Build per-holder map
+  const holderMap = {};
+  const getHolder = name => {
+    if (!holderMap[name]) holderMap[name] = { name, collected: 0, spent: 0, inHand: 0, lots: [], expenses: [] };
+    return holderMap[name];
+  };
+  for (const lot of allLots) {
+    const h = getHolder(lot.cash_holder || lot.recorded_by || 'Unknown');
+    h.collected += Number(lot.amount || 0);
+    h.lots.push({ id: lot.id, date: lot.date, amount: Number(lot.amount || 0), partnerId: lot.partner_id, partnerName: lot.partner_name || 'Unknown', isToday: lot.date === todayStr });
   }
-  const collectors = Object.values(collectorMap).sort((a, b) => b.total - a.total);
+  for (const exp of allExpenses) {
+    const h = getHolder(exp.cash_holder || exp.recorded_by || 'Unknown');
+    h.spent += Number(exp.amount || 0);
+    h.expenses.push({ id: exp.id, date: exp.date, amount: Number(exp.amount || 0), narration: exp.narration || '', category: exp.category || '' });
+  }
+
+  const holders = Object.values(holderMap).map(h => ({ ...h, inHand: h.collected - h.spent })).sort((a, b) => b.inHand - a.inHand);
+  const collectedTotal = holders.reduce((s, h) => s + h.collected, 0);
+  const spentTotal = holders.reduce((s, h) => s + h.spent, 0);
+  const pendingTotal = holders.reduce((s, h) => s + h.inHand, 0);
 
   const { results: recentHandovers } = await DB.prepare(`
-    SELECT id, amount, payment_count, transferred_by, transferred_at, notes, created_by, created_at
+    SELECT id, amount, payment_count, transferred_by, holder, transferred_at, notes,
+           COALESCE(collected_total,0) AS collected_total, COALESCE(expense_total,0) AS expense_total, created_at
     FROM kpsc_cash_handovers ORDER BY created_at DESC LIMIT 10
   `).all();
-  return ok({
-    pendingTotal: sum(all),
-    todayTotal: sum(todayPayments),
-    olderTotal: sum(olderPayments),
-    pendingCount: all.length,
-    todayPayments,
-    olderPayments,
-    collectors,
-    recentHandovers: recentHandovers || [],
-  });
+
+  return ok({ pendingTotal, collectedTotal, spentTotal, holderCount: holders.length, holders, recentHandovers: recentHandovers || [] });
 }
 
 async function createKpscCashHandover(DB, data, auth) {
   const amount = Number(data?.amount || 0);
   const notes = String(data?.notes || '').trim().slice(0, 500);
+  const holder = String(data?.holder || auth.name || '').trim();
+  const paymentIds = Array.isArray(data?.paymentIds) ? data.paymentIds.filter(id => typeof id === 'string' && id.trim()) : [];
+  const transferredAt = String(data?.date || '').trim() || new Date().toISOString();
+
   if (amount <= 0) return err('amount must be greater than 0', 400);
-  const { results: pending } = await DB.prepare(`
-    SELECT id FROM kpsc_finance_entries
-    WHERE payment_method = 'cash' AND category = 'partnership_pledge'
-      AND entry_type = 'income'
-      AND COALESCE(handover_id, '') = ''
-      AND COALESCE(deleted_at, '') = ''
-  `).all();
-  const paymentCount = (pending || []).length;
+  if (!paymentIds.length) return err('Select at least one payment to transfer', 400);
+
+  // Validate that each paymentId is an unsettled income lot
+  const phLots = paymentIds.map(() => '?').join(',');
+  const { results: validLots } = await DB.prepare(
+    `SELECT id, amount FROM kpsc_finance_entries WHERE id IN (${phLots}) AND payment_method='cash' AND entry_type='income' AND COALESCE(handover_id,'')='' AND COALESCE(deleted_at,'')=''`
+  ).bind(...paymentIds).all();
+  const validIds = (validLots || []).map(r => r.id);
+  if (!validIds.length) return err('No valid pending payments found', 400);
+
+  const collectedTotal = (validLots || []).reduce((s, r) => s + Number(r.amount || 0), 0);
+
+  // Find this holder's unreconciled cash-box expenses to reconcile together
+  const { results: pendingExpenses } = await DB.prepare(
+    `SELECT id, amount FROM kpsc_finance_entries WHERE cash_box_expense=1 AND entry_type='expense' AND COALESCE(handover_id,'')='' AND COALESCE(deleted_at,'')='' AND (COALESCE(cash_holder,'')=? OR (COALESCE(cash_holder,'')='' AND recorded_by=?))`
+  ).bind(holder, holder).all();
+  const expenseTotal = (pendingExpenses || []).reduce((s, r) => s + Number(r.amount || 0), 0);
+
   const handoverId = newId('kch');
-  const transferredAt = new Date().toISOString();
-  await DB.prepare(`
-    INSERT INTO kpsc_cash_handovers (id,amount,payment_count,transferred_by,transferred_at,notes,created_by,created_at)
-    VALUES (?,?,?,?,?,?,?,datetime('now'))
-  `).bind(handoverId, amount, paymentCount, auth.name, transferredAt, notes, auth.name).run();
-  // Link pending entries in batches of 50 (D1 does not support array binding natively)
-  const ids = (pending || []).map(r => r.id);
-  for (let i = 0; i < ids.length; i += 50) {
-    const chunk = ids.slice(i, i + 50);
-    const ph = chunk.map(() => '?').join(',');
-    await DB.prepare(`UPDATE kpsc_finance_entries SET handover_id=? WHERE id IN (${ph})`).bind(handoverId, ...chunk).run();
+  await DB.prepare(
+    `INSERT INTO kpsc_cash_handovers (id,amount,payment_count,transferred_by,holder,transferred_at,notes,collected_total,expense_total,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
+  ).bind(handoverId, amount, validIds.length, auth.name, holder, transferredAt, notes, collectedTotal, expenseTotal, auth.name).run();
+
+  // Link selected income lots in batches of 50
+  for (let i = 0; i < validIds.length; i += 50) {
+    const chunk = validIds.slice(i, i + 50);
+    const p = chunk.map(() => '?').join(',');
+    await DB.prepare(`UPDATE kpsc_finance_entries SET handover_id=? WHERE id IN (${p})`).bind(handoverId, ...chunk).run();
   }
+  // Reconcile this holder's pending cash-box expenses
+  const expenseIds = (pendingExpenses || []).map(r => r.id);
+  for (let i = 0; i < expenseIds.length; i += 50) {
+    const chunk = expenseIds.slice(i, i + 50);
+    const p = chunk.map(() => '?').join(',');
+    await DB.prepare(`UPDATE kpsc_finance_entries SET handover_id=? WHERE id IN (${p})`).bind(handoverId, ...chunk).run();
+  }
+
   const row = await DB.prepare(`SELECT * FROM kpsc_cash_handovers WHERE id=?`).bind(handoverId).first();
-  return ok({
-    id: row.id,
-    amount: Number(row.amount),
-    paymentCount: Number(row.payment_count),
-    transferredBy: row.transferred_by,
-    transferredAt: row.transferred_at,
-    notes: row.notes,
-  });
+  return ok({ id: row.id, amount: Number(row.amount), paymentCount: Number(row.payment_count), transferredBy: row.transferred_by, holder: row.holder, transferredAt: row.transferred_at, notes: row.notes, collectedTotal: Number(row.collected_total || 0), expenseTotal: Number(row.expense_total || 0) });
+}
+
+async function reassignCashHolder(DB, data, auth) {
+  const paymentId = String(data?.paymentId || '').trim();
+  const newHolder = String(data?.holder || '').trim();
+  if (!paymentId || !newHolder) return err('paymentId and holder are required', 400);
+  const existing = await DB.prepare(
+    `SELECT id FROM kpsc_finance_entries WHERE id=? AND payment_method='cash' AND COALESCE(handover_id,'')='' AND COALESCE(deleted_at,'')=''`
+  ).bind(paymentId).first();
+  if (!existing) return err('Payment not found or already settled', 404);
+  await DB.prepare(`UPDATE kpsc_finance_entries SET cash_holder=? WHERE id=?`).bind(newHolder, paymentId).run();
+  return ok({ id: paymentId, holder: newHolder });
 }
 
 async function getKpscFinanceEntries(DB, url) {
@@ -3711,10 +3770,12 @@ async function createKpscFinanceEntry(DB, data, auth) {
     return err('date, category and valid entryType are required', 400);
   }
   const id = newId('kfe');
+  const cashBoxExpense = data?.cashBoxExpense ? 1 : 0;
+  const cashHolder = cashBoxExpense ? String(data?.cashHolder || auth?.name || '').trim() : '';
   await DB.prepare(`
     INSERT INTO kpsc_finance_entries
-    (id,date,entry_type,category,sub_category,amount,payment_method,reference,narration,partner_id,recorded_by,approved_by,approval_status,attachment_name,partner_payment_id)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    (id,date,entry_type,category,sub_category,amount,payment_method,reference,narration,partner_id,recorded_by,approved_by,approval_status,attachment_name,partner_payment_id,cash_box_expense,cash_holder)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     date,
@@ -3731,6 +3792,8 @@ async function createKpscFinanceEntry(DB, data, auth) {
     String(data?.approvalStatus || 'recorded').trim() || 'recorded',
     String(data?.attachmentName || '').trim(),
     String(data?.partnerPaymentId || '').trim(),
+    cashBoxExpense,
+    cashHolder,
   ).run();
 
   // Auto-increment welfare cases count when a welfare expense is recorded

@@ -164,8 +164,8 @@ const S = {
   _reviewEditMode: false, // true = show inline review editor; false = show reviewed summary
   _isNewMeeting: false,   // true when the room is hosting a fresh, never-saved draft
   cashCollection: {
-    pendingTotal: 0, todayTotal: 0, olderTotal: 0, pendingCount: 0,
-    todayPayments: [], olderPayments: [], collectors: [], recentHandovers: [], loaded: false,
+    loaded: false, pendingTotal: 0, collectedTotal: 0, spentTotal: 0,
+    holderCount: 0, holders: [], recentHandovers: [],
   },
   kpscMeetingCadence: 'none',
   rolePermissions: null, // loaded from DB; null means use KPSC_PERMISSIONS defaults
@@ -2315,7 +2315,6 @@ async function enterApp() {
     }
   } catch { /* fall back to hardcoded KPSC_PERMISSIONS */ }
   applyNavPermissions();
-  loadCashCollection(); // fire-and-forget — widget appears once data loads
   S._navStack = [];
   const hashPage = window.location.hash.replace('#', '');
   // hashPage might be an old page name (e.g. 'archive', 'partners') — canAccess handles those.
@@ -6359,7 +6358,7 @@ async function loadPartnerData(year = currentYear()) {
   S.partnerPayments = Array.isArray(paymentsRes) ? paymentsRes : [];
 }
 
-// ── CASH COLLECTION TRACKER ──────────────────────────────────────────────────
+// ── CASH COLLECTION TRACKER v2 ───────────────────────────────────────────────
 
 async function loadCashCollection() {
   if (!canManageFinance()) return;
@@ -6367,152 +6366,343 @@ async function loadCashCollection() {
     const res = await apiGet('kpsc-cash-collection');
     if (res?.error) return;
     S.cashCollection = { ...res, loaded: true };
-  } catch { /* silent — widget stays hidden on network failure */ }
-  renderCashWidget();
+  } catch { /* silent — cards stay hidden on network failure */ }
+  refreshCashCards();
 }
 
-function renderCashWidget() {
-  const w = document.getElementById('k-cash-widget');
-  if (!w) return;
-  const { pendingTotal, todayTotal, olderTotal, collectors, loaded } = S.cashCollection;
-  if (!loaded || pendingTotal <= 0 || !canManageFinance()) { w.style.display = 'none'; return; }
-  w.style.display = 'flex';
-  const amtEl = w.querySelector('.k-cw-amount');
-  const subEl = w.querySelector('.k-cw-sub');
-  if (amtEl) amtEl.textContent = '₦' + pendingTotal.toLocaleString('en-NG');
-  if (subEl) {
-    const parts = [];
-    if (todayTotal > 0) parts.push(`₦${todayTotal.toLocaleString('en-NG')} today`);
-    if (olderTotal > 0) parts.push(`₦${olderTotal.toLocaleString('en-NG')} older`);
-    if (collectors.length === 1) parts.push(`held by ${collectors[0].name}`);
-    else if (collectors.length > 1) parts.push(`${collectors.length} holders`);
-    subEl.textContent = parts.join(' · ');
-  }
-  w.classList.remove('k-cw-pulse');
-  void w.offsetWidth;
-  w.classList.add('k-cw-pulse');
-}
-
-function openCashPanel() {
-  const panel = document.getElementById('k-cash-panel');
-  const overlay = document.getElementById('k-cash-panel-overlay');
-  if (!panel || !overlay) return;
-  renderCashPanelBody();
-  overlay.style.display = 'block';
-  requestAnimationFrame(() => {
-    panel.classList.add('k-cash-panel--open');
-    overlay.classList.add('k-cash-panel-overlay--visible');
+function refreshCashCards() {
+  document.querySelectorAll('#k-cash-card-mount').forEach(mount => {
+    mount.innerHTML = renderCashCard();
   });
 }
 
-function closeCashPanel() {
-  const panel = document.getElementById('k-cash-panel');
-  const overlay = document.getElementById('k-cash-panel-overlay');
-  if (panel) panel.classList.remove('k-cash-panel--open');
-  if (overlay) overlay.classList.remove('k-cash-panel-overlay--visible');
-  setTimeout(() => { if (overlay) overlay.style.display = 'none'; }, 260);
-}
-
-function renderCashPanelBody() {
-  const body = document.getElementById('k-cash-panel-body');
-  if (!body) return;
-  const { pendingTotal, todayPayments, olderPayments, collectors, recentHandovers } = S.cashCollection;
+function renderCashCard() {
+  if (!canManageFinance()) return '';
+  const { loaded, pendingTotal, collectedTotal, spentTotal, holders } = S.cashCollection;
+  if (!loaded || pendingTotal <= 0) return '';
   const fmtN = n => '₦' + Number(n || 0).toLocaleString('en-NG');
-  const fmtD = s => {
-    if (!s) return '';
-    const d = new Date(s);
-    return d.toLocaleDateString('en-NG', { day: 'numeric', month: 'short' });
-  };
+  const showBreakdown = collectedTotal !== pendingTotal && spentTotal > 0;
 
-  const paymentRow = (p, isToday) => `
-    <div class="k-cash-item${isToday ? ' k-cash-item--today' : ''}">
-      <div class="k-cash-item-name">${esc(p.partner_name || 'Unknown Partner')}</div>
-      <div class="k-cash-item-meta">${fmtD(p.date)}${!isToday ? ' <span class="k-cash-item-older-badge">older</span>' : ''}</div>
-      <div class="k-cash-item-amount">${fmtN(p.amount)}</div>
-    </div>`;
-
-  const collectorSection = collectors.length > 1 ? `
-    <div class="k-cash-section-title" style="margin-top:16px">Who Holds What</div>
-    ${collectors.map(c => `
-      <div class="k-cash-collector-row">
-        <span class="k-cash-collector-name">${esc(c.name)}</span>
-        <span class="k-cash-collector-meta">${c.count} payment${c.count !== 1 ? 's' : ''}</span>
-        <span class="k-cash-collector-amount">${fmtN(c.total)}</span>
-      </div>`).join('')}` : '';
-
-  const handoverRow = h => `
-    <div class="k-handover-item">
-      <div class="k-handover-item-top">
-        <span class="k-handover-item-amount">${fmtN(h.amount)}</span>
-        <span class="k-handover-item-count">${h.payment_count} payment${Number(h.payment_count) !== 1 ? 's' : ''}</span>
+  const holderRows = holders.map(h => {
+    const spentLine = h.spent > 0 ? ` · spent ${fmtN(h.spent)}` : '';
+    const todayCount = h.lots.filter(l => l.isToday).length;
+    const todayLine = todayCount > 0 ? ` · ${todayCount} today` : '';
+    return `<div class="k-cash-holder-row">
+      <div>
+        <div class="k-cash-holder-name">${esc(h.name)}</div>
+        <div class="k-cash-holder-meta">Collected ${fmtN(h.collected)}${spentLine} · ${h.lots.length} payment${h.lots.length !== 1 ? 's' : ''}${todayLine}</div>
       </div>
-      <div class="k-handover-item-meta">${fmtD(h.transferred_at)} · ${esc(h.transferred_by || '')}${h.notes ? ' · ' + esc(h.notes) : ''}</div>
+      <div class="k-cash-holder-amount">${fmtN(h.inHand)}</div>
     </div>`;
+  }).join('');
 
-  body.innerHTML = `
-    ${todayPayments.length ? `
-      <div class="k-cash-section-title">Today's Cash Payments</div>
-      ${todayPayments.map(p => paymentRow(p, true)).join('')}` : ''}
-    ${olderPayments.length ? `
-      <div class="k-cash-section-title" style="margin-top:${todayPayments.length ? 16 : 0}px">
-        Older Pending <span class="k-cash-older-hint">Not yet transferred</span>
+  return `<div class="k-cash-card">
+    <div class="k-cash-card-hdr">
+      <div class="k-cash-card-title">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="flex-shrink:0"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-4 0v2"/><circle cx="12" cy="14" r="2"/></svg>
+        Cash in Hand
       </div>
-      ${olderPayments.map(p => paymentRow(p, false)).join('')}` : ''}
-    ${!todayPayments.length && !olderPayments.length
-      ? '<div class="k-empty">No pending cash payments.</div>' : ''}
-    ${collectorSection}
-    <div class="k-cash-total-bar">
-      <span>Total in Hand</span>
-      <span class="k-cash-total-bar-amount">${fmtN(pendingTotal)}</span>
+      <div class="k-cash-card-total">${fmtN(pendingTotal)}</div>
     </div>
-    ${recentHandovers.length ? `
-      <div class="k-cash-section-title" style="margin-top:20px">Recent Transfers to Bank</div>
-      ${recentHandovers.map(handoverRow).join('')}` : ''}
-  `;
+    ${showBreakdown ? `<div class="k-cash-card-summary">Collected ${fmtN(collectedTotal)} · Spent ${fmtN(spentTotal)} · In hand ${fmtN(pendingTotal)}</div>` : ''}
+    ${holders.length > 0 ? `<div class="k-cash-holders">${holderRows}</div>` : ''}
+    <div class="k-cash-card-actions">
+      <button class="kbtn kbtn-primary kbtn-sm" onclick="Kpsc.openTransferModal()">Transfer to Bank</button>
+      <button class="kbtn kbtn-sm" style="background:#f0faf5;color:var(--green);border:1px solid #b7dfc9" onclick="Kpsc.openSpendModal()">Spend from Cash</button>
+      <button class="kbtn kbtn-ghost kbtn-sm" onclick="Kpsc.openCashDetailsModal()">Details</button>
+    </div>
+  </div>`;
 }
 
-function openHandoverModal() {
-  const overlay = document.getElementById('k-handover-modal-overlay');
-  if (!overlay) return;
-  const amtEl = document.getElementById('k-handover-amount');
-  const dateEl = document.getElementById('k-handover-date');
-  const notesEl = document.getElementById('k-handover-notes');
-  const errEl = document.getElementById('k-handover-err');
-  if (amtEl) amtEl.value = S.cashCollection.pendingTotal.toFixed(0);
-  if (dateEl) dateEl.value = new Date().toISOString().slice(0, 10);
-  if (notesEl) notesEl.value = '';
-  if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
-  overlay.style.display = 'flex';
+function openTransferModal(holderName) {
+  document.getElementById('k-transfer-modal')?.remove();
+  const { holders } = S.cashCollection;
+  if (!holders.length) { showToast('No pending cash to transfer.', 'error'); return; }
+  const defaultHolder = holderName || holders[0].name;
+  const fmtN = n => '₦' + Number(n || 0).toLocaleString('en-NG');
+  const fmtD = s => s ? new Date(s).toLocaleDateString('en-NG', { day: 'numeric', month: 'short' }) : '';
+
+  const holderOptions = holders.map(h => `<option value="${esc(h.name)}" ${h.name === defaultHolder ? 'selected' : ''}>${esc(h.name)} — in hand ${fmtN(h.inHand)}</option>`).join('');
+
+  const buildLotRows = h => h ? h.lots.map(lot => `
+    <label class="k-transfer-lot">
+      <input type="checkbox" name="k-transfer-lot" value="${esc(lot.id)}" data-amount="${lot.amount}" checked onchange="Kpsc._updateTransferAmount()"/>
+      <div class="k-transfer-lot-body">
+        <div class="k-transfer-lot-name">${esc(lot.partnerName)}</div>
+        <div class="k-transfer-lot-meta">${fmtD(lot.date)}${lot.isToday ? ' · today' : ''}</div>
+      </div>
+      <div class="k-transfer-lot-amount">${fmtN(lot.amount)}</div>
+    </label>`).join('') : '';
+
+  const currentHolder = holders.find(h => h.name === defaultHolder);
+  const spentNote = currentHolder?.spent > 0 ? `<div class="k-cash-spent-note">Spent from this cash: ${fmtN(currentHolder.spent)} (will be reconciled)</div>` : '';
+
+  const modal = document.createElement('div');
+  modal.id = 'k-transfer-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">Transfer Cash to Bank</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-transfer-modal').remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        ${holders.length > 1 ? `<div class="k-form-group"><label class="k-label">Holder</label><select id="k-transfer-holder" class="k-input" onchange="Kpsc._rebuildTransferLots(this.value)">${holderOptions}</select></div>` : `<input type="hidden" id="k-transfer-holder" value="${esc(defaultHolder)}"/>`}
+        <div class="k-form-group">
+          <label class="k-label">Select Payments to Include</label>
+          <div id="k-transfer-lot-list" class="k-transfer-lot-list">${buildLotRows(currentHolder)}</div>
+        </div>
+        ${spentNote}
+        <div class="k-form-group">
+          <label class="k-label">Amount to Transfer (₦)</label>
+          <input id="k-transfer-amount" class="k-input" type="number" min="1" step="100" inputmode="decimal"/>
+          <p class="k-hint" style="margin-top:4px">Auto-filled from ticked payments. Edit if keeping some change.</p>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">Date</label>
+          <input id="k-transfer-date" class="k-input" type="date" value="${new Date().toISOString().slice(0,10)}"/>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">Notes <span style="font-weight:400;color:var(--text3)">(optional)</span></label>
+          <textarea id="k-transfer-notes" class="k-input k-textarea" rows="2" placeholder="e.g. GTB Onitsha branch, teller receipt #12345" style="min-height:60px"></textarea>
+        </div>
+        <div id="k-transfer-err" style="display:none;color:var(--red);font-size:13px;margin-top:4px"></div>
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-transfer-modal').remove()">Cancel</button>
+        <button id="k-transfer-submit" class="kbtn kbtn-primary" onclick="Kpsc.submitCashHandover(this)">Confirm Transfer</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  _updateTransferAmount();
 }
 
-function closeHandoverModal() {
-  const overlay = document.getElementById('k-handover-modal-overlay');
-  if (overlay) overlay.style.display = 'none';
+function _rebuildTransferLots(holderName) {
+  const holder = S.cashCollection.holders.find(h => h.name === holderName);
+  const fmtN = n => '₦' + Number(n || 0).toLocaleString('en-NG');
+  const fmtD = s => s ? new Date(s).toLocaleDateString('en-NG', { day: 'numeric', month: 'short' }) : '';
+  const list = document.getElementById('k-transfer-lot-list');
+  if (!list) return;
+  if (!holder) { list.innerHTML = ''; _updateTransferAmount(); return; }
+  list.innerHTML = holder.lots.map(lot => `
+    <label class="k-transfer-lot">
+      <input type="checkbox" name="k-transfer-lot" value="${esc(lot.id)}" data-amount="${lot.amount}" checked onchange="Kpsc._updateTransferAmount()"/>
+      <div class="k-transfer-lot-body">
+        <div class="k-transfer-lot-name">${esc(lot.partnerName)}</div>
+        <div class="k-transfer-lot-meta">${fmtD(lot.date)}${lot.isToday ? ' · today' : ''}</div>
+      </div>
+      <div class="k-transfer-lot-amount">${fmtN(lot.amount)}</div>
+    </label>`).join('');
+  const spentNote = document.querySelector('.k-cash-spent-note');
+  if (spentNote) spentNote.textContent = holder.spent > 0 ? `Spent from this cash: ${fmtN(holder.spent)} (will be reconciled)` : '';
+  _updateTransferAmount();
+}
+
+function _updateTransferAmount() {
+  const checks = [...document.querySelectorAll('input[name="k-transfer-lot"]:checked')];
+  const total = checks.reduce((s, c) => s + Number(c.dataset.amount || 0), 0);
+  const holderName = document.getElementById('k-transfer-holder')?.value || '';
+  const holder = S.cashCollection.holders.find(h => h.name === holderName);
+  const net = Math.max(0, total - (holder?.spent || 0));
+  const amtEl = document.getElementById('k-transfer-amount');
+  if (amtEl) amtEl.value = net.toFixed(0);
 }
 
 async function submitCashHandover(btn) {
-  const amount = Number(document.getElementById('k-handover-amount')?.value || 0);
-  const notes = (document.getElementById('k-handover-notes')?.value || '').trim();
-  const errEl = document.getElementById('k-handover-err');
+  const holder = document.getElementById('k-transfer-holder')?.value || '';
+  const paymentIds = [...document.querySelectorAll('input[name="k-transfer-lot"]:checked')].map(c => c.value);
+  const amount = Number(document.getElementById('k-transfer-amount')?.value || 0);
+  const notes = (document.getElementById('k-transfer-notes')?.value || '').trim();
+  const date = document.getElementById('k-transfer-date')?.value || '';
+  const errEl = document.getElementById('k-transfer-err');
+  if (!paymentIds.length) {
+    if (errEl) { errEl.textContent = 'Tick at least one payment.'; errEl.style.display = 'block'; }
+    return;
+  }
   if (amount <= 0) {
     if (errEl) { errEl.textContent = 'Please enter a valid amount.'; errEl.style.display = 'block'; }
     return;
   }
   const orig = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = 'Saving…';
-  const res = await apiPost('kpsc-cash-handovers', { amount, notes });
-  btn.disabled = false;
-  btn.textContent = orig;
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const res = await apiPost('kpsc-cash-handovers', { holder, paymentIds, amount, notes, date });
+  btn.disabled = false; btn.textContent = orig;
   if (res?.error) {
     if (errEl) { errEl.textContent = res.error; errEl.style.display = 'block'; }
     showToast('Transfer failed: ' + res.error, 'error');
     return;
   }
   showToast(`₦${amount.toLocaleString('en-NG')} transfer recorded.`, 'success');
-  closeHandoverModal();
-  closeCashPanel();
+  document.getElementById('k-transfer-modal')?.remove();
   await loadCashCollection();
+}
+
+function openSpendModal(holderName) {
+  document.getElementById('k-spend-modal')?.remove();
+  const { holders } = S.cashCollection;
+  const defaultHolder = holderName || S.user?.name || (holders[0]?.name || '');
+  const holderOptions = holders.map(h => `<option value="${esc(h.name)}" ${h.name === defaultHolder ? 'selected' : ''}>${esc(h.name)}</option>`).join('');
+  const expCats = (S.settings?.kpsc_expense_categories || ['projects','welfare','committee_operations','church_support']).map(c =>
+    `<option value="${esc(c)}">${esc(catLabel(c))}</option>`).join('');
+
+  const modal = document.createElement('div');
+  modal.id = 'k-spend-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">Spend from Cash</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-spend-modal').remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p class="k-hint" style="margin-bottom:14px">Record a cash expense paid from money physically in hand. This reduces the holder's cash balance and logs the expense in Finance.</p>
+        ${holders.length > 1 ? `<div class="k-form-group"><label class="k-label">Whose cash?</label><select id="k-spend-holder" class="k-input">${holderOptions}</select></div>` : `<input type="hidden" id="k-spend-holder" value="${esc(defaultHolder)}"/>`}
+        <div class="k-form-group">
+          <label class="k-label">Category</label>
+          <select id="k-spend-category" class="k-input">${expCats}</select>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">Amount (₦)</label>
+          <input id="k-spend-amount" class="k-input" type="number" min="1" step="100" inputmode="decimal" placeholder="e.g. 5000"/>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">Description</label>
+          <textarea id="k-spend-narration" class="k-input k-textarea" rows="2" placeholder="What was this cash spent on?" style="min-height:60px"></textarea>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">Date</label>
+          <input id="k-spend-date" class="k-input" type="date" value="${new Date().toISOString().slice(0,10)}"/>
+        </div>
+        <div id="k-spend-err" style="display:none;color:var(--red);font-size:13px;margin-top:4px"></div>
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-spend-modal').remove()">Cancel</button>
+        <button class="kbtn kbtn-primary" onclick="Kpsc.submitCashExpense(this)">Record Expense</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function submitCashExpense(btn) {
+  const cashHolder = document.getElementById('k-spend-holder')?.value || '';
+  const category = document.getElementById('k-spend-category')?.value || '';
+  const amount = Number(document.getElementById('k-spend-amount')?.value || 0);
+  const narration = (document.getElementById('k-spend-narration')?.value || '').trim();
+  const date = document.getElementById('k-spend-date')?.value || new Date().toISOString().slice(0, 10);
+  const errEl = document.getElementById('k-spend-err');
+
+  if (amount <= 0) {
+    if (errEl) { errEl.textContent = 'Please enter a valid amount.'; errEl.style.display = 'block'; }
+    return;
+  }
+  if (!category) {
+    if (errEl) { errEl.textContent = 'Please select a category.'; errEl.style.display = 'block'; }
+    return;
+  }
+
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const res = await apiPost('kpsc-finance', {
+    entryType: 'expense', category, amount,
+    paymentMethod: 'cash', narration, date,
+    recordedBy: S.user?.name || '',
+    cashBoxExpense: true, cashHolder,
+  });
+  btn.disabled = false; btn.textContent = orig;
+
+  if (res?.error) {
+    if (errEl) { errEl.textContent = res.error; errEl.style.display = 'block'; }
+    showToast('Failed to record expense: ' + res.error, 'error');
+    return;
+  }
+  showToast(`₦${amount.toLocaleString('en-NG')} expense recorded.`, 'success');
+  document.getElementById('k-spend-modal')?.remove();
+  await loadCashCollection();
+  // Refresh finance entry list if the finance page is currently showing
+  const finList = document.getElementById('kf-entry-list');
+  if (finList) {
+    const finRes = await apiGet(`kpsc-finance?year=${S.financeYear}${S.financeMonth ? `&month=${S.financeMonth}` : ''}`);
+    if (!finRes?.error) {
+      S.financeEntries = Array.isArray(finRes) ? finRes : [];
+      finList.innerHTML = renderFinanceEntryList(canManageFinance(), canDeleteFinanceEntries());
+    }
+  }
+}
+
+function openCashDetailsModal() {
+  document.getElementById('k-cash-details-modal')?.remove();
+  const { holders, recentHandovers } = S.cashCollection;
+  const fmtN = n => '₦' + Number(n || 0).toLocaleString('en-NG');
+  const fmtD = s => s ? new Date(s).toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: '2-digit' }) : '';
+
+  const holderSections = holders.map(h => {
+    const lotRows = h.lots.map(lot => `
+      <div class="k-cash-detail-row">
+        <div>
+          <div class="k-cash-detail-name">${esc(lot.partnerName)}</div>
+          <div class="k-cash-detail-meta">${fmtD(lot.date)}${lot.isToday ? ' · today' : ''}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="k-cash-detail-amount">${fmtN(lot.amount)}</span>
+          <button class="kbtn kbtn-sm kbtn-ghost" style="font-size:11px;padding:2px 8px" onclick="Kpsc._promptReassign('${esc(lot.id)}')">Reassign</button>
+        </div>
+      </div>`).join('');
+    const expRows = h.expenses.map(exp => `
+      <div class="k-cash-detail-row k-cash-detail-expense">
+        <div>
+          <div class="k-cash-detail-name">${esc(exp.narration || catLabel(exp.category))}</div>
+          <div class="k-cash-detail-meta">${fmtD(exp.date)} · ${esc(catLabel(exp.category))}</div>
+        </div>
+        <span class="k-cash-detail-amount" style="color:var(--red)">−${fmtN(exp.amount)}</span>
+      </div>`).join('');
+    return `
+      <div class="k-cash-section-title" style="margin-top:16px">${esc(h.name)} — in hand ${fmtN(h.inHand)}</div>
+      ${lotRows}
+      ${expRows || ''}
+      <div class="k-cash-holder-subtotal">
+        ${h.spent > 0 ? `<span>Collected ${fmtN(h.collected)} · Spent ${fmtN(h.spent)}</span>` : `<span>${h.lots.length} payment${h.lots.length !== 1 ? 's' : ''}</span>`}
+        <span style="font-weight:700">In hand: ${fmtN(h.inHand)}</span>
+      </div>`;
+  }).join('');
+
+  const handoverRows = recentHandovers.map(h => `
+    <div class="k-handover-item">
+      <div class="k-handover-item-top">
+        <span class="k-handover-item-amount">${fmtN(h.amount)}</span>
+        <span class="k-handover-item-count">${h.payment_count} payment${Number(h.payment_count) !== 1 ? 's' : ''}${h.holder ? ' · ' + esc(h.holder) : ''}</span>
+      </div>
+      <div class="k-handover-item-meta">${fmtD(h.transferred_at)} · by ${esc(h.transferred_by || '')}${h.notes ? ' · ' + esc(h.notes) : ''}${Number(h.expense_total) > 0 ? ` · spent ${fmtN(h.expense_total)}` : ''}</div>
+    </div>`).join('');
+
+  const modal = document.createElement('div');
+  modal.id = 'k-cash-details-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:520px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">Cash Collection Details</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-cash-details-modal').remove()">✕</button>
+      </div>
+      <div class="k-modal-body" style="max-height:70vh;overflow-y:auto">
+        ${holderSections || '<div class="k-empty">No pending cash.</div>'}
+        ${recentHandovers.length ? `<div class="k-cash-section-title" style="margin-top:20px">Recent Transfers</div>${handoverRows}` : ''}
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-cash-details-modal').remove()">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function _promptReassign(paymentId) {
+  const newHolder = prompt('Reassign to (enter exact name):');
+  if (!newHolder || !newHolder.trim()) return;
+  apiPost('kpsc-cash-reassign', { paymentId, holder: newHolder.trim() }).then(res => {
+    if (res?.error) { showToast('Reassign failed: ' + res.error, 'error'); return; }
+    showToast('Reassigned.', 'success');
+    document.getElementById('k-cash-details-modal')?.remove();
+    loadCashCollection();
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6542,6 +6732,7 @@ async function renderPartners(main) {
         ${canManage ? `<button class="kbtn kbtn-primary" onclick="Kpsc.addPartner()">+ Add Partner</button>` : ''}
       </div>
       <p class="k-page-hint">Track God's Kingdom Partners and Covenant Partners, monthly pledges, and payment progress.</p>
+      <div id="k-cash-card-mount"></div>
       <input class="k-input k-partners-search" type="search" placeholder="🔍 Search by name…"
         value="${esc(S.partnersSearch)}" oninput="Kpsc.setPartnersSearch(this.value)" />
       <div class="k-partners-controls">
@@ -6569,6 +6760,7 @@ async function renderPartners(main) {
       </div>
       <div id="kpsc-partners-list">${renderPartnersList(canManage)}</div>
     </div>`;
+  loadCashCollection(); // refresh embedded card after partners page loads
 }
 
 function setPartnersSearch(val) {
@@ -7093,6 +7285,8 @@ async function renderFinance(main) {
         </div>
       </div>
 
+      ${canManage ? '<div id="k-cash-card-mount"></div>' : ''}
+
       <div class="k-section-hdr">
         <h2>Finance Entries</h2>
         <div class="kf-controls-right">
@@ -7159,6 +7353,7 @@ async function renderFinance(main) {
       </details>` : ''}
 
     </div>`;
+  if (canManage) loadCashCollection(); // refresh embedded card after finance page loads
 }
 
 async function openFinanceModal(entryToEdit = null) {
@@ -16204,12 +16399,15 @@ window.Kpsc = {
   showNewMonthDraftModal,
   saveNewMonthDraft,
   dismissNewMonthDraft,
-  // Cash Collection Tracker
-  openCashPanel,
-  closeCashPanel,
-  openHandoverModal,
-  closeHandoverModal,
+  // Cash Collection Tracker v2
+  openTransferModal,
   submitCashHandover,
+  openSpendModal,
+  submitCashExpense,
+  openCashDetailsModal,
+  _rebuildTransferLots,
+  _updateTransferAmount,
+  _promptReassign,
 };
 
 document.addEventListener('DOMContentLoaded', init);
