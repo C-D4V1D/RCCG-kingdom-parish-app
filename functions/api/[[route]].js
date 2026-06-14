@@ -1189,6 +1189,20 @@ export async function onRequest(context) {
     // ── B6: scheduled_for field on ai-secretary-meetings ───────
     // (handled inline in updateAiSecretaryMeeting via body.scheduledFor)
 
+    // ── /api/kpsc-cash-collection  (GET — pending cash + recent handovers) ──
+    if (route === 'kpsc-cash-collection' && method === 'GET') {
+      const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await getKpscCashCollection(DB);
+    }
+
+    // ── /api/kpsc-cash-handovers  (POST — record a cash transfer to bank) ──
+    if (route === 'kpsc-cash-handovers' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await createKpscCashHandover(DB, body, auth);
+    }
+
     // ── /api/partnership-og-image  (public — serves stored OG image) ──
     if (route === 'partnership-og-image' && method === 'GET') {
       return await serveStoredImage(DB, 'partnership_og_image', '/icons/og-partnership.png');
@@ -1686,6 +1700,16 @@ async function handleInit(DB) {
       ai_confidence     TEXT DEFAULT 'manual',
       created_at        TEXT NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS kpsc_cash_handovers (
+      id              TEXT PRIMARY KEY,
+      amount          REAL    DEFAULT 0,
+      payment_count   INTEGER DEFAULT 0,
+      transferred_by  TEXT    DEFAULT '',
+      transferred_at  TEXT    DEFAULT '',
+      notes           TEXT    DEFAULT '',
+      created_by      TEXT    DEFAULT '',
+      created_at      TEXT    DEFAULT (datetime('now'))
+    )`,
   ];
 
   // Run all CREATE TABLE statements first
@@ -1785,6 +1809,8 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_partners ADD COLUMN location TEXT DEFAULT ''`,
     // Projects: track funds raised toward active projects
     `ALTER TABLE kpsc_projects ADD COLUMN raised_amount REAL DEFAULT 0`,
+    // Cash handover: link settled finance entries to the handover record
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN handover_id TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -3465,6 +3491,86 @@ async function deleteKpscFinanceEntry(DB, id, auth) {
     now,
   ).run();
   return ok({ deleted: id });
+}
+
+async function getKpscCashCollection(DB) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const { results: pending } = await DB.prepare(`
+    SELECT f.id, f.date, f.amount, f.partner_id, f.recorded_by, p.full_name AS partner_name
+    FROM kpsc_finance_entries f
+    LEFT JOIN kpsc_partners p ON p.id = f.partner_id
+    WHERE f.payment_method = 'cash'
+      AND f.category = 'partnership_pledge'
+      AND f.entry_type = 'income'
+      AND COALESCE(f.handover_id, '') = ''
+      AND COALESCE(f.deleted_at, '') = ''
+    ORDER BY f.date DESC, f.created_at DESC
+  `).all();
+  const all = pending || [];
+  const todayPayments = all.filter(r => r.date === todayStr);
+  const olderPayments = all.filter(r => r.date !== todayStr);
+  const sum = arr => arr.reduce((s, r) => s + Number(r.amount || 0), 0);
+
+  // Group by collector so the UI can show who holds what cash
+  const collectorMap = {};
+  for (const p of all) {
+    const name = p.recorded_by || 'Unknown';
+    if (!collectorMap[name]) collectorMap[name] = { name, total: 0, count: 0 };
+    collectorMap[name].total += Number(p.amount || 0);
+    collectorMap[name].count++;
+  }
+  const collectors = Object.values(collectorMap).sort((a, b) => b.total - a.total);
+
+  const { results: recentHandovers } = await DB.prepare(`
+    SELECT id, amount, payment_count, transferred_by, transferred_at, notes, created_by, created_at
+    FROM kpsc_cash_handovers ORDER BY created_at DESC LIMIT 10
+  `).all();
+  return ok({
+    pendingTotal: sum(all),
+    todayTotal: sum(todayPayments),
+    olderTotal: sum(olderPayments),
+    pendingCount: all.length,
+    todayPayments,
+    olderPayments,
+    collectors,
+    recentHandovers: recentHandovers || [],
+  });
+}
+
+async function createKpscCashHandover(DB, data, auth) {
+  const amount = Number(data?.amount || 0);
+  const notes = String(data?.notes || '').trim().slice(0, 500);
+  if (amount <= 0) return err('amount must be greater than 0', 400);
+  const { results: pending } = await DB.prepare(`
+    SELECT id FROM kpsc_finance_entries
+    WHERE payment_method = 'cash' AND category = 'partnership_pledge'
+      AND entry_type = 'income'
+      AND COALESCE(handover_id, '') = ''
+      AND COALESCE(deleted_at, '') = ''
+  `).all();
+  const paymentCount = (pending || []).length;
+  const handoverId = newId('kch');
+  const transferredAt = new Date().toISOString();
+  await DB.prepare(`
+    INSERT INTO kpsc_cash_handovers (id,amount,payment_count,transferred_by,transferred_at,notes,created_by,created_at)
+    VALUES (?,?,?,?,?,?,?,datetime('now'))
+  `).bind(handoverId, amount, paymentCount, auth.name, transferredAt, notes, auth.name).run();
+  // Link pending entries in batches of 50 (D1 does not support array binding natively)
+  const ids = (pending || []).map(r => r.id);
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    const ph = chunk.map(() => '?').join(',');
+    await DB.prepare(`UPDATE kpsc_finance_entries SET handover_id=? WHERE id IN (${ph})`).bind(handoverId, ...chunk).run();
+  }
+  const row = await DB.prepare(`SELECT * FROM kpsc_cash_handovers WHERE id=?`).bind(handoverId).first();
+  return ok({
+    id: row.id,
+    amount: Number(row.amount),
+    paymentCount: Number(row.payment_count),
+    transferredBy: row.transferred_by,
+    transferredAt: row.transferred_at,
+    notes: row.notes,
+  });
 }
 
 async function getKpscFinanceEntries(DB, url) {
