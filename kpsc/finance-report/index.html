@@ -32,13 +32,21 @@
   .section{margin-bottom:28px}
   .section-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#1e3a5f;border-bottom:1px solid #ddd;padding-bottom:7px;margin-bottom:14px}
   .overview-box{background:#f4f6f9;border-radius:8px;padding:14px 18px;margin-bottom:20px;line-height:1.8;font-size:13px}
-  .summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:8px}
+  .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:8px}
   @media(max-width:600px){.summary-grid{grid-template-columns:repeat(2,1fr)}}
   .tile{border:1px solid #ddd;border-radius:8px;padding:16px;text-align:center}
   .tile-val{font-size:20px;font-weight:700}
   .tile-lbl{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
   .table-wrap{overflow-x:auto}
   table{width:100%;border-collapse:collapse;font-size:12px;min-width:500px}
+  table.cat-table{min-width:0}
+  .section-title.collapsible{display:flex;justify-content:space-between;align-items:center;cursor:pointer;-webkit-tap-highlight-color:transparent;padding-bottom:9px}
+  .section-title.collapsible:hover{color:#2a4f7f}
+  .toggle-meta{display:flex;align-items:center;gap:5px;font-weight:500;text-transform:none;letter-spacing:0;font-size:11px;color:#888;flex-shrink:0;margin-left:8px}
+  .toggle-arrow{font-size:10px;color:#1e3a5f;font-weight:700;transition:transform .25s;display:inline-block}
+  .section-title.collapsible.open .toggle-arrow{transform:rotate(180deg)}
+  .collapsible-body{display:none}
+  .collapsible-body.open{display:block}
   th{background:#1e3a5f;color:#fff;padding:9px 10px;text-align:left;font-size:11px;font-weight:600;letter-spacing:.4px}
   td{padding:8px 10px;border-bottom:1px solid #eee;vertical-align:top}
   tr:nth-child(even) td{background:#f9fafb}
@@ -139,14 +147,23 @@
     const net = incomeTotal - expenseTotal;
     const netColor = net >= 0 ? '#1a5e3a' : '#8b1a1a';
     const netLabel = net >= 0 ? 'Surplus' : 'Deficit';
+    const openingBalance = typeof currentBalance === 'number' ? currentBalance - net : null;
+    const closingBalance = typeof currentBalance === 'number' ? currentBalance : null;
+    const openingBalanceColor = openingBalance !== null ? (openingBalance >= 0 ? '#1e3a5f' : '#8b1a1a') : '#1e3a5f';
+    const closingBalanceColor = closingBalance !== null ? (closingBalance >= 0 ? '#1e3a5f' : '#8b1a1a') : '#1e3a5f';
 
     let prose;
     if (!entries.length) {
       prose = `No financial transactions were recorded for <strong>${esc(periodLabel)}</strong>.`;
-    } else if (net >= 0) {
-      prose = `During <strong>${esc(periodLabel)}</strong>, the committee received a total of <strong style="color:#1a5e3a">${fmt(incomeTotal)}</strong> in income across ${incomeEntries.length} entr${incomeEntries.length === 1 ? 'y' : 'ies'}, and spent <strong style="color:#8b1a1a">${fmt(expenseTotal)}</strong> across ${expenseEntries.length} entr${expenseEntries.length === 1 ? 'y' : 'ies'}. This leaves a <strong style="color:#1a5e3a">surplus of ${fmt(net)}</strong>.`;
     } else {
-      prose = `During <strong>${esc(periodLabel)}</strong>, the committee received a total of <strong style="color:#1a5e3a">${fmt(incomeTotal)}</strong> in income across ${incomeEntries.length} entr${incomeEntries.length === 1 ? 'y' : 'ies'}, and spent <strong style="color:#8b1a1a">${fmt(expenseTotal)}</strong> across ${expenseEntries.length} entr${expenseEntries.length === 1 ? 'y' : 'ies'}. Expenses exceeded income, resulting in a <strong style="color:#8b1a1a">deficit of ${fmt(Math.abs(net))}</strong>.`;
+      const openingClause = openingBalance !== null
+        ? `Starting from an opening balance of <strong style="color:${openingBalanceColor}">${fmt(openingBalance)}</strong>, `
+        : `During <strong>${esc(periodLabel)}</strong>, `;
+      if (net >= 0) {
+        prose = `${openingClause}the committee received <strong style="color:#1a5e3a">${fmt(incomeTotal)}</strong> in income across ${incomeEntries.length} entr${incomeEntries.length === 1 ? 'y' : 'ies'} and spent <strong style="color:#8b1a1a">${fmt(expenseTotal)}</strong> across ${expenseEntries.length} entr${expenseEntries.length === 1 ? 'y' : 'ies'} during <strong>${esc(periodLabel)}</strong>. This yields a <strong style="color:#1a5e3a">period surplus of ${fmt(net)}</strong>${closingBalance !== null ? `, bringing the closing balance to <strong style="color:${closingBalanceColor}">${fmt(closingBalance)}</strong>` : ''}.`;
+      } else {
+        prose = `${openingClause}the committee received <strong style="color:#1a5e3a">${fmt(incomeTotal)}</strong> in income across ${incomeEntries.length} entr${incomeEntries.length === 1 ? 'y' : 'ies'} and spent <strong style="color:#8b1a1a">${fmt(expenseTotal)}</strong> across ${expenseEntries.length} entr${expenseEntries.length === 1 ? 'y' : 'ies'} during <strong>${esc(periodLabel)}</strong>. Expenses exceeded income, resulting in a <strong style="color:#8b1a1a">period deficit of ${fmt(Math.abs(net))}</strong>${closingBalance !== null ? `, bringing the closing balance to <strong style="color:${closingBalanceColor}">${fmt(closingBalance)}</strong>` : ''}.`;
+      }
     }
 
     document.getElementById('report-content').innerHTML = `
@@ -160,35 +177,46 @@
         <div class="section-title">Overview</div>
         <div class="overview-box">${prose}</div>
         <div class="summary-grid">
+          ${openingBalance !== null ? `<div class="tile" style="border:2px solid ${openingBalanceColor};background:${openingBalance>=0?'#f4f6f9':'#fef2f2'}"><div class="tile-val" style="color:${openingBalanceColor}">${fmt(openingBalance)}</div><div class="tile-lbl" style="color:${openingBalanceColor};font-weight:700">Opening Balance</div></div>` : ''}
           <div class="tile"><div class="tile-val" style="color:#1a5e3a">${fmt(incomeTotal)}</div><div class="tile-lbl">Total Received</div></div>
           <div class="tile"><div class="tile-val" style="color:#8b1a1a">${fmt(expenseTotal)}</div><div class="tile-lbl">Total Spent</div></div>
           <div class="tile" style="border-color:${netColor}"><div class="tile-val" style="color:${netColor}">${fmt(Math.abs(net))}</div><div class="tile-lbl">Net ${esc(netLabel)} (Period)</div></div>
-          ${typeof currentBalance === 'number' ? `<div class="tile" style="border:2px solid ${currentBalance>=0?'#1e3a5f':'#8b1a1a'};background:${currentBalance>=0?'#eef3fb':'#fef2f2'}"><div class="tile-val" style="color:${currentBalance>=0?'#1e3a5f':'#8b1a1a'}">${fmt(Math.abs(currentBalance))}</div><div class="tile-lbl" style="color:${currentBalance>=0?'#1e3a5f':'#8b1a1a'};font-weight:700">Current Balance</div></div>` : `<div class="tile"><div class="tile-val">${entries.length}</div><div class="tile-lbl">Total Entries</div></div>`}
+          ${closingBalance !== null ? `<div class="tile" style="border:2px solid ${closingBalanceColor};background:${closingBalance>=0?'#eef3fb':'#fef2f2'}"><div class="tile-val" style="color:${closingBalanceColor}">${fmt(closingBalance)}</div><div class="tile-lbl" style="color:${closingBalanceColor};font-weight:700">Closing Balance</div></div>` : `<div class="tile"><div class="tile-val">${entries.length}</div><div class="tile-lbl">Total Entries</div></div>`}
         </div>
       </div>
 
       ${incomeEntries.length ? `
       <div class="section">
         <div class="section-title">Income Breakdown by Category</div>
-        <div class="table-wrap"><table><thead><tr><th>Category</th><th style="text-align:right">Amount</th><th style="text-align:right">% of Income</th></tr></thead>
+        <div class="table-wrap"><table class="cat-table"><thead><tr><th>Category</th><th style="text-align:right">Amount</th><th style="text-align:right">% of Income</th></tr></thead>
         <tbody>${catSummaryRows(incomeEntries, incomeTotal)}<tr style="font-weight:700"><td>Total</td><td style="text-align:right">${fmt(incomeTotal)}</td><td style="text-align:right">100%</td></tr></tbody></table></div>
       </div>
       <div class="section">
-        <div class="section-title">Money Received — All Entries (${incomeEntries.length})</div>
-        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Partner</th><th>Method</th><th>Reference</th><th>Description</th><th style="text-align:right">Amount</th><th>Recorded By</th></tr></thead>
-        <tbody>${entryRows(incomeEntries, true)}</tbody></table></div>
+        <div class="section-title collapsible" onclick="toggleSection(this)">
+          <span>Money Received — All Entries (${incomeEntries.length})</span>
+          <span class="toggle-meta"><span class="toggle-hint">Tap to expand</span><span class="toggle-arrow">▼</span></span>
+        </div>
+        <div class="collapsible-body">
+          <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Partner</th><th>Method</th><th>Reference</th><th>Description</th><th style="text-align:right">Amount</th><th>Recorded By</th></tr></thead>
+          <tbody>${entryRows(incomeEntries, true)}</tbody></table></div>
+        </div>
       </div>` : ''}
 
       ${expenseEntries.length ? `
       <div class="section">
         <div class="section-title">Expense Breakdown by Category</div>
-        <div class="table-wrap"><table><thead><tr><th>Category</th><th style="text-align:right">Amount</th><th style="text-align:right">% of Expenses</th></tr></thead>
+        <div class="table-wrap"><table class="cat-table"><thead><tr><th>Category</th><th style="text-align:right">Amount</th><th style="text-align:right">% of Expenses</th></tr></thead>
         <tbody>${catSummaryRows(expenseEntries, expenseTotal)}<tr style="font-weight:700"><td>Total</td><td style="text-align:right">${fmt(expenseTotal)}</td><td style="text-align:right">100%</td></tr></tbody></table></div>
       </div>
       <div class="section">
-        <div class="section-title">Money Spent — All Entries (${expenseEntries.length})</div>
-        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Method</th><th>Reference</th><th>Description</th><th style="text-align:right">Amount</th><th>Recorded By</th></tr></thead>
-        <tbody>${entryRows(expenseEntries, false)}</tbody></table></div>
+        <div class="section-title collapsible" onclick="toggleSection(this)">
+          <span>Money Spent — All Entries (${expenseEntries.length})</span>
+          <span class="toggle-meta"><span class="toggle-hint">Tap to expand</span><span class="toggle-arrow">▼</span></span>
+        </div>
+        <div class="collapsible-body">
+          <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Method</th><th>Reference</th><th>Description</th><th style="text-align:right">Amount</th><th>Recorded By</th></tr></thead>
+          <tbody>${entryRows(expenseEntries, false)}</tbody></table></div>
+        </div>
       </div>` : ''}
 
       <div class="sig-section">
@@ -230,6 +258,14 @@
   }
 
   load();
+
+  window.toggleSection = function(el) {
+    const isOpen = el.classList.toggle('open');
+    const body = el.nextElementSibling;
+    if (body) body.classList.toggle('open', isOpen);
+    const hint = el.querySelector('.toggle-hint');
+    if (hint) hint.textContent = isOpen ? 'Tap to collapse' : 'Tap to expand';
+  };
 
   window.downloadPDF = function() {
     const bar = document.getElementById('action-bar');
