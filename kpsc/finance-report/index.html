@@ -40,13 +40,16 @@
   .table-wrap{overflow-x:auto}
   table{width:100%;border-collapse:collapse;font-size:12px;min-width:500px}
   table.cat-table{min-width:0}
-  .section-title.collapsible{display:flex;justify-content:space-between;align-items:center;cursor:pointer;-webkit-tap-highlight-color:transparent;padding-bottom:9px}
-  .section-title.collapsible:hover{color:#2a4f7f}
-  .toggle-meta{display:flex;align-items:center;gap:5px;font-weight:500;text-transform:none;letter-spacing:0;font-size:11px;color:#888;flex-shrink:0;margin-left:8px}
-  .toggle-arrow{font-size:10px;color:#1e3a5f;font-weight:700;transition:transform .25s;display:inline-block}
+  .section-title.collapsible{display:flex;justify-content:space-between;align-items:center;cursor:pointer;-webkit-tap-highlight-color:transparent;background:#e8eef7;border:1.5px solid #b8cce0;border-radius:8px;padding:11px 14px;margin-bottom:0;border-bottom:none;color:#1e3a5f}
+  .section-title.collapsible:active{background:#dce6f2}
+  .section-title.collapsible.open{border-radius:8px 8px 0 0;border-bottom:none;background:#1e3a5f;color:#fff}
+  .collapsible-title-text{flex:1;min-width:0}
+  .toggle-btn{display:inline-flex;align-items:center;gap:5px;background:#1e3a5f;color:#fff;border-radius:20px;padding:5px 11px;font-size:11px;font-weight:700;text-transform:none;letter-spacing:.3px;white-space:nowrap;flex-shrink:0;margin-left:10px;transition:background .15s}
+  .section-title.collapsible.open .toggle-btn{background:#fff;color:#1e3a5f}
+  .toggle-arrow{display:inline-block;transition:transform .25s}
   .section-title.collapsible.open .toggle-arrow{transform:rotate(180deg)}
   .collapsible-body{display:none}
-  .collapsible-body.open{display:block}
+  .collapsible-body.open{display:block;border:1.5px solid #b8cce0;border-top:none;border-radius:0 0 8px 8px;overflow:hidden}
   th{background:#1e3a5f;color:#fff;padding:9px 10px;text-align:left;font-size:11px;font-weight:600;letter-spacing:.4px}
   td{padding:8px 10px;border-bottom:1px solid #eee;vertical-align:top}
   tr:nth-child(even) td{background:#f9fafb}
@@ -193,8 +196,8 @@
       </div>
       <div class="section">
         <div class="section-title collapsible" onclick="toggleSection(this)">
-          <span>Money Received — All Entries (${incomeEntries.length})</span>
-          <span class="toggle-meta"><span class="toggle-hint">Tap to expand</span><span class="toggle-arrow">▼</span></span>
+          <span class="collapsible-title-text">Money Received — All Entries (${incomeEntries.length})</span>
+          <span class="toggle-btn"><span class="toggle-hint">Show all</span><span class="toggle-arrow">▼</span></span>
         </div>
         <div class="collapsible-body">
           <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Partner</th><th>Method</th><th>Reference</th><th>Description</th><th style="text-align:right">Amount</th><th>Recorded By</th></tr></thead>
@@ -210,8 +213,8 @@
       </div>
       <div class="section">
         <div class="section-title collapsible" onclick="toggleSection(this)">
-          <span>Money Spent — All Entries (${expenseEntries.length})</span>
-          <span class="toggle-meta"><span class="toggle-hint">Tap to expand</span><span class="toggle-arrow">▼</span></span>
+          <span class="collapsible-title-text">Money Spent — All Entries (${expenseEntries.length})</span>
+          <span class="toggle-btn"><span class="toggle-hint">Show all</span><span class="toggle-arrow">▼</span></span>
         </div>
         <div class="collapsible-body">
           <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Method</th><th>Reference</th><th>Description</th><th style="text-align:right">Amount</th><th>Recorded By</th></tr></thead>
@@ -264,7 +267,7 @@
     const body = el.nextElementSibling;
     if (body) body.classList.toggle('open', isOpen);
     const hint = el.querySelector('.toggle-hint');
-    if (hint) hint.textContent = isOpen ? 'Tap to collapse' : 'Tap to expand';
+    if (hint) hint.textContent = isOpen ? 'Collapse' : 'Show all';
   };
 
   window.downloadPDF = function() {
