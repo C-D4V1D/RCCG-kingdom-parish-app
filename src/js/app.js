@@ -66,6 +66,10 @@ const MONTHS = ['January','February','March','April','May','June','July','August
 const MAX_TRANSACTION_VIEW_NAME_LENGTH = 60;
 // Tolerance for considering a remittance "fully paid" (within 1% of due amount to allow for rounding)
 const PAYMENT_TOLERANCE_THRESHOLD = 0.99;
+// Softer tolerance used only for PAST periods to absorb rate-change artifacts:
+// if a period was paid at ≥ 95% of the *current* (retroactively-recalculated) due,
+// treat it as fully settled so rate changes don't manufacture phantom prior-period debt.
+const SETTLED_PERIOD_THRESHOLD = 0.95;
 // Tolerance for TG split validation — percentages must sum within ±0.1% to allow for floating-point rounding
 const TG_SUM_TOLERANCE = 0.001;
 
@@ -2566,7 +2570,7 @@ async function renderDashboard(){
   const dashMonthPaidAmt = dashMonthPaidRems.reduce((s,r)=>s+(r.amount||0),0);
   // Current month due (used only for paid/partial status label).
   const dashCurrentMonthRemDue = totalRemittanceDue(remittances, dashAllQuotasAmt);
-  const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashCurrentMonthRemDue * PAYMENT_TOLERANCE_THRESHOLD;
+  const dashKpiIsPaid = dashMonthPaidAmt > 0 && (dashMonthPaidAmt >= dashCurrentMonthRemDue * PAYMENT_TOLERANCE_THRESHOLD || (dashIsPastPeriod && dashMonthPaidAmt >= dashCurrentMonthRemDue * SETTLED_PERIOD_THRESHOLD));
   const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
   const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
@@ -2589,8 +2593,30 @@ async function renderDashboard(){
     ? accumQuotasAcrossPeriods(dashQuotas, settingsDash, allRemsForKpi, dashFirstDateStr, dashAsOfDate)
     : 0;
   const dashAllPaidRems = allRemsForKpi.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-  // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
-  const dashTotalRemDueKpi = Math.max(0, dashAllTimeIncomeRemDue + dashAccumQuotas - dashAllPaidRems);
+  // When remittance rates change, the all-time-income due is retroactively recalculated at
+  // the new rates even for periods that were already fully settled. This inflates the KPI
+  // and produces phantom "unpaid from previous period" debt. For each past period that was
+  // settled (paid ≥ SETTLED_PERIOD_THRESHOLD of recalculated due), subtract the excess
+  // (recalculated_due − actual_paid) so only genuinely unpaid amounts remain.
+  const _settledPeriodKeys = [...new Set(
+    allRemsForKpi
+      .filter(r => r.status === 'paid' && r.periodFrom && r.periodTo)
+      .map(r => `${r.periodFrom}|${r.periodTo}`)
+  )];
+  let dashPhantomDebt = 0;
+  await Promise.all(_settledPeriodKeys.map(async key => {
+    const [pFrom, pTo] = key.split('|');
+    const ppIncome = allIncome.filter(r => { const d = r.date||r.createdAt||''; return d >= pFrom && d <= pTo; });
+    const ppPaid = allRemsForKpi.filter(r => r.status === 'paid' && r.periodFrom === pFrom && r.periodTo === pTo).reduce((s, r) => s + (r.amount || 0), 0);
+    const ppRemCalc = await calcRemittancesFromRecords(ppIncome, remRatesDash);
+    const ppDue = totalRemittanceDue(ppRemCalc) + sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, pFrom, pTo));
+    if (ppPaid > 0 && ppDue > 0 && ppPaid >= ppDue * SETTLED_PERIOD_THRESHOLD) {
+      dashPhantomDebt += Math.max(0, ppDue - ppPaid);
+    }
+  }));
+  // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid,
+  // minus any phantom debt from rate-change recalculation on already-settled periods.
+  const dashTotalRemDueKpi = Math.max(0, dashAllTimeIncomeRemDue + dashAccumQuotas - dashAllPaidRems - dashPhantomDebt);
   // Split the all-time outstanding into "this period" vs "prior periods" so the dashboard
   // can show the selected period in the headline and surface any carryover as a sub-line.
   // The sum of the two always equals dashTotalRemDueKpi, so the Available Fund math is unchanged.
@@ -4756,7 +4782,10 @@ async function renderRemittances(){
   // --- Check for period payment ---
   const periodPayments=allRems.filter(r=>r.status==='paid'&&r.periodFrom===fromDate&&r.periodTo===toDate);
   const totalPaid=periodPayments.reduce((s,r)=>s+(r.amount||0),0);
-  const isPaid=totalPaid>0&&totalPaid>=totalDue*PAYMENT_TOLERANCE_THRESHOLD;
+  // For past periods, use the softer SETTLED_PERIOD_THRESHOLD (95%) to absorb small discrepancies
+  // caused by rate changes applied after the period was already paid — prevents a formerly-fully-paid
+  // period from being relabelled "Partially paid" purely because the rates changed afterwards.
+  const isPaid=totalPaid>0&&(totalPaid>=totalDue*PAYMENT_TOLERANCE_THRESHOLD||(toDate<todayStr&&totalPaid>=totalDue*SETTLED_PERIOD_THRESHOLD));
   const isPartial=totalPaid>0&&!isPaid;
   const remDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid, isPartial, paidAmount: totalPaid });
