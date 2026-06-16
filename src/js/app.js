@@ -5586,7 +5586,6 @@ async function printRemittanceReport(fromOverride, toOverride){
 }
 
 async function shareRemittanceReport(fromOverride, toOverride){
-  if(!canAction('remittances_view')){ showAlert('You do not have permission to share reports.','danger'); return; }
   const restore = setBtnLoading(document.activeElement, 'Creating link…');
   try {
     const [allIncome, settings, users] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getUsers()]);
