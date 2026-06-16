@@ -1758,6 +1758,7 @@ async function handleInit(DB) {
     `ALTER TABLE remittances ADD COLUMN approved_at TEXT DEFAULT ''`,
     `ALTER TABLE remittances ADD COLUMN bank_amount REAL DEFAULT 0`,
     `ALTER TABLE remittances ADD COLUMN cash_amount REAL DEFAULT 0`,
+    `ALTER TABLE remittances ADD COLUMN due_at_time_of_payment REAL DEFAULT 0`,
     `ALTER TABLE cash_transactions ADD COLUMN photo_data TEXT DEFAULT ''`,
     // Soft-delete for AI secretary meeting drafts.
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_at TEXT DEFAULT ''`,
@@ -2782,8 +2783,9 @@ async function getRemittances(DB) {
     submittedBy:   row.submitted_by || '',
     approvedBy:    row.approved_by  || '',
     approvedAt:    row.approved_at  || '',
-    bankAmount:    row.bank_amount   || 0,
-    cashAmount:    row.cash_amount   || 0,
+    bankAmount:           row.bank_amount            || 0,
+    cashAmount:           row.cash_amount            || 0,
+    dueAtTimeOfPayment:   row.due_at_time_of_payment || 0,
     createdAt:     row.created_at,
   })));
 }
@@ -2793,23 +2795,25 @@ async function createRemittance(DB, data) {
   await DB.prepare(`
     INSERT INTO remittances
       (id, label, amount, paid_date, reference, authorized_by, status,
-       period_from, period_to, payment_method, notes, submitted_by, bank_amount, cash_amount)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       period_from, period_to, payment_method, notes, submitted_by, bank_amount, cash_amount,
+       due_at_time_of_payment)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
-    data.label         || '',
-    data.amount        || 0,
-    data.paidDate      || '',
-    data.reference     || '',
-    data.authorizedBy  || '',
-    data.status        || 'pending_approval',
-    data.periodFrom    || '',
-    data.periodTo      || '',
-    data.paymentMethod || 'bank_transfer',
-    data.notes         || '',
-    data.submittedBy   || '',
-    data.bankAmount    || 0,
-    data.cashAmount    || 0,
+    data.label               || '',
+    data.amount              || 0,
+    data.paidDate            || '',
+    data.reference           || '',
+    data.authorizedBy        || '',
+    data.status              || 'pending_approval',
+    data.periodFrom          || '',
+    data.periodTo            || '',
+    data.paymentMethod       || 'bank_transfer',
+    data.notes               || '',
+    data.submittedBy         || '',
+    data.bankAmount          || 0,
+    data.cashAmount          || 0,
+    data.dueAtTimeOfPayment  || 0,
   ).run();
   return ok({ ...data, id });
 }

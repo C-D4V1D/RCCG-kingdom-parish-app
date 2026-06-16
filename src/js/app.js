@@ -2566,31 +2566,68 @@ async function renderDashboard(){
   const dashMonthPaidAmt = dashMonthPaidRems.reduce((s,r)=>s+(r.amount||0),0);
   // Current month due (used only for paid/partial status label).
   const dashCurrentMonthRemDue = totalRemittanceDue(remittances, dashAllQuotasAmt);
-  const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashCurrentMonthRemDue * PAYMENT_TOLERANCE_THRESHOLD;
+  // Use the due-at-payment snapshot (stored when the payment was submitted) as the reference
+  // for "fully paid". For old records without a snapshot, fall back to amountPaid on past
+  // periods (assume the recorded payment was a full settlement) or recalculated due otherwise.
+  const dashMonthDueSnapshot = dashMonthPaidRems.reduce((max, r) => Math.max(max, r.dueAtTimeOfPayment || 0), 0);
+  const dashKpiEffectiveDue = dashMonthDueSnapshot > 0 ? dashMonthDueSnapshot
+    : (dashIsPastPeriod && dashMonthPaidRems.length > 0 ? dashMonthPaidAmt : dashCurrentMonthRemDue);
+  const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashKpiEffectiveDue * PAYMENT_TOLERANCE_THRESHOLD;
   const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
   const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
-  // Accumulated unpaid: remittances owed on ALL income through the as-of date, minus everything already paid by then.
-  const dashAllTimeRemittances = await calcRemittancesFromRecords(allIncome, remRatesDash);
-  const dashAllTimeIncomeRemDue = totalRemittanceDue(dashAllTimeRemittances);
-  // Source array is `allIncome` (date-filtered to ≤ asOfDate for past-period views) so
-  // a historical snapshot doesn't see income that didn't exist yet.
+  // ── Outstanding remittance KPI ──────────────────────────────────────────────────────────────
+  // Strategy: only recalculate income-based remittances for UNSETTLED periods (periods that
+  // have no paid remittance record). For SETTLED periods, use the due_at_time_of_payment
+  // snapshot stored when the payment was submitted — this is rate-change-proof because it
+  // captures the rates in effect at the time, not today's rates.
+  // Old records without a snapshot fall back to amountPaid (treating the recorded payment
+  // as a full settlement, which is the correct assumption for any approved past payment).
+  //
+  // This prevents the classic bug: changing remittance percentages retroactively inflates the
+  // "due" on already-paid periods and manufactures phantom prior-period debt.
   const dashFirstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
   const dashFirstDateStr = (dashFirstIncRec ? (dashFirstIncRec.date||dashFirstIncRec.createdAt||'') : '').slice(0,10);
   // Sunday-prorate accumulated quotas so the all-time KPI uses the same basis as the
   // current-period split shown in the income card and on the Remittances page.
   // Anchor the upper bound at the as-of date — TODAY for current periods (so only
   // elapsed Sundays accrue), or the period cut-off for historical snapshots.
-  // Each Sunday's share is fixed on that Sunday, so this total is view-independent
-  // for the live case — switching between Remittance and Calendar views shouldn't
-  // change "what's owed to HQ right now". The per-period split (this period vs
-  // prior) can still differ by view; only this total must match.
   const dashAccumQuotas = dashFirstIncRec
     ? accumQuotasAcrossPeriods(dashQuotas, settingsDash, allRemsForKpi, dashFirstDateStr, dashAsOfDate)
     : 0;
-  const dashAllPaidRems = allRemsForKpi.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-  // KPI = total ever owed (all income + accumulated quotas) minus total ever paid = net unpaid.
-  const dashTotalRemDueKpi = Math.max(0, dashAllTimeIncomeRemDue + dashAccumQuotas - dashAllPaidRems);
+  // Identify settled periods (have at least one paid remittance with period dates).
+  const _dashSettledPeriodKeys = [...new Set(
+    allRemsForKpi
+      .filter(r => r.status === 'paid' && r.periodFrom && r.periodTo)
+      .map(r => `${r.periodFrom}|${r.periodTo}`)
+  )];
+  const _dashSettledPeriodRanges = _dashSettledPeriodKeys.map(k => {
+    const [from, to] = k.split('|'); return { from, to };
+  });
+  // Genuine shortfall from settled periods: snapshot_due − amount_paid.
+  // If no snapshot (old record): 0 (assume full settlement — payment was approved).
+  let dashSettledShortfall = 0;
+  _dashSettledPeriodKeys.forEach(key => {
+    const [pFrom, pTo] = key.split('|');
+    const ppRems = allRemsForKpi.filter(r => r.status === 'paid' && r.periodFrom === pFrom && r.periodTo === pTo);
+    const ppPaid = ppRems.reduce((s, r) => s + (r.amount || 0), 0);
+    const ppSnapshot = ppRems.reduce((max, r) => Math.max(max, r.dueAtTimeOfPayment || 0), 0);
+    const ppTrueDue = ppSnapshot > 0 ? ppSnapshot : ppPaid; // fallback: assume fully settled
+    dashSettledShortfall += Math.max(0, ppTrueDue - ppPaid);
+  });
+  // Income from UNSETTLED periods only — rate changes don't affect settled periods.
+  const dashUnsettledIncome = allIncome.filter(r => {
+    const d = r.date || r.createdAt || '';
+    return !d || !_dashSettledPeriodRanges.some(p => d >= p.from && d <= p.to);
+  });
+  const dashUnsettledRemCalc = await calcRemittancesFromRecords(dashUnsettledIncome, remRatesDash);
+  const dashUnsettledIncomeRemDue = totalRemittanceDue(dashUnsettledRemCalc);
+  // Quotas: subtract settled-period quotas — only unsettled-period quotas contribute to KPI.
+  const dashSettledPeriodQuotas = _dashSettledPeriodRanges.reduce((sum, pp) =>
+    sum + sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, pp.from, pp.to)), 0);
+  const dashUnsettledQuotas = dashAccumQuotas - dashSettledPeriodQuotas;
+  // KPI = unsettled-period income due + unsettled-period quotas + genuine shortfall from settled periods.
+  const dashTotalRemDueKpi = Math.max(0, dashUnsettledIncomeRemDue + dashUnsettledQuotas + dashSettledShortfall);
   // Split the all-time outstanding into "this period" vs "prior periods" so the dashboard
   // can show the selected period in the headline and surface any carryover as a sub-line.
   // The sum of the two always equals dashTotalRemDueKpi, so the Available Fund math is unchanged.
@@ -4756,7 +4793,12 @@ async function renderRemittances(){
   // --- Check for period payment ---
   const periodPayments=allRems.filter(r=>r.status==='paid'&&r.periodFrom===fromDate&&r.periodTo===toDate);
   const totalPaid=periodPayments.reduce((s,r)=>s+(r.amount||0),0);
-  const isPaid=totalPaid>0&&totalPaid>=totalDue*PAYMENT_TOLERANCE_THRESHOLD;
+  // Use the due-at-payment snapshot as the "fully paid" reference — this is rate-change-proof.
+  // Old records without a snapshot fall back to amountPaid for past periods (assume full
+  // settlement) or recalculated totalDue for the current period.
+  const _periodDueSnapshot=periodPayments.reduce((max,r)=>Math.max(max,r.dueAtTimeOfPayment||0),0);
+  const _effectiveDue=_periodDueSnapshot>0?_periodDueSnapshot:(toDate<todayStr&&totalPaid>0?totalPaid:totalDue);
+  const isPaid=totalPaid>0&&totalPaid>=_effectiveDue*PAYMENT_TOLERANCE_THRESHOLD;
   const isPartial=totalPaid>0&&!isPaid;
   const remDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid, isPartial, paidAmount: totalPaid });
@@ -5096,6 +5138,7 @@ async function showRemittancePaymentModal(){
     </div>
 
     <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="rem_notes" class="form-textarea" rows="2" placeholder="Any additional notes…"></textarea></div>
+    <input type="hidden" id="rem_total_due" value="${totalDue}" />
 
     <div class="alert alert-warn" style="margin:0 0 10px">
       <span class="alert-icon">⚠</span>
@@ -5191,6 +5234,7 @@ async function submitRemittance(btn=null){
 
   const restore = setBtnLoading(btn, 'Submitting…');
   try {
+    const dueAtTimeOfPayment = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
     await DB.addRemittance({
       label:'RCCG Monthly Remittance', amount, paidDate:date,
       reference, authorizedBy:auth,
@@ -5199,7 +5243,8 @@ async function submitRemittance(btn=null){
       bankAmount, cashAmount,
       periodFrom:fromDate, periodTo:toDate,
       submittedBy:state.user?.name||'',
-      status
+      status,
+      dueAtTimeOfPayment,
     });
     DB.addAudit('remittance_submitted',
       `Remittance ${status==='paid'?'paid':'submitted for approval'}: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}`,
