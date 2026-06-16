@@ -5340,7 +5340,7 @@ async function printRemittanceReport(fromOverride, toOverride){
   const totalParishLocal=rem.lines.filter(l=>!l.isTg).reduce((s,l)=>s+(l.local||0),0);
 
   // Explicit canonical order for the collection summary rows (form field order is unchanged)
-  const SUMMARY_ORDER=['ministersTithe','membersTithe','thanksgiving','slo','crm','workersOffering','firstFruit','childrenOffering','sundaySchool'];
+  const SUMMARY_ORDER=['ministersTithe','membersTithe','thanksgiving','slo','crm','workersOffering','firstFruit','childrenOffering','sundaySchool','trainingWeekend'];
   const getL=key=>rem.lines.find(l=>l.key===key);
   const collectionRowsHTML=SUMMARY_ORDER.map(key=>{
     const l=getL(key);
@@ -5415,6 +5415,8 @@ async function printRemittanceReport(fromOverride, toOverride){
   { const l=getLine('childrenOffering'); if(l) pushA({ desc:`Teen/Children's Offering → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
   // 11. Sunday School
   { const l=getLine('sundaySchool'); if(l) pushA({ desc:`Sunday School → National HQ`, type:`100% Based`, amount:l.national||0 }); }
+  // 11b. Training Weekend
+  { const l=getLine('trainingWeekend'); if(l) pushA({ desc:`Training Weekend → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
   // 12. CRM Add-on
   if((rem.crmAddon||0)>0) pushA({ desc:`CRM Add-on → National HQ (${Math.round(rr.crmAddon*100)}% of CRM Total)`, type:`${Math.round(rr.crmAddon*100)}% Based`, amount:rem.crmAddon });
   // 13. Coastline Worship Centre
