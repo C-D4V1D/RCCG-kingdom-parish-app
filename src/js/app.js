@@ -403,6 +403,8 @@ const DB = {
   addRemittance(d)             { return apiFetch('remittances','POST',d); },
   updateRemittance(id,d)       { return apiFetch(`remittances/${id}`,'PUT',d); },
   deleteRemittance(id)         { return apiFetch(`remittances/${id}`,'DELETE'); },
+  createSharedReport(d)          { return apiFetch('report-share','POST',d); },
+  getSharedReport(token)         { return apiFetch(`report-share/${token}`); },
 
   getCashTransactions(full=false){ return apiFetch('cash-transactions'+(full?'?full=1':'')); },
   getCashPhoto(id)             { return apiFetch(`cash-photo/${id}`); },
@@ -4837,6 +4839,7 @@ async function renderRemittances(){
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${canAction('remittance_record_payment')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Payment</button>`:''}
         <button class="btn btn-amber" onclick="App.printRemittanceReport()">📄 Download Report</button>
+        <button class="btn" onclick="App.shareRemittanceReport()">📤 Share</button>
       </div>
     </div>
 
@@ -4906,6 +4909,7 @@ async function renderRemittances(){
         <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
           ${canAction('remittance_record_payment')?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal()">📤 Record Bulk Payment (${fmt(totalDue)})</button>`:''}
           <button class="btn btn-amber" onclick="App.printRemittanceReport()">📄 Print / Download Report</button>
+          <button class="btn" onclick="App.shareRemittanceReport()">📤 Share</button>
         </div>
       </div>
 
@@ -5577,6 +5581,99 @@ async function printRemittanceReport(fromOverride, toOverride){
   w.document.write(html);
   w.document.close();
   w.focus();
+}
+
+async function shareRemittanceReport(fromOverride, toOverride){
+  if(!canAction('remittances_view')){ showAlert('You do not have permission to share reports.','danger'); return; }
+  const restore = setBtnLoading(document.activeElement, 'Creating link…');
+  try {
+    const [allIncome, settings, users] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getUsers()]);
+    const quotas=getQuotaList(settings);
+    const fromDate=fromOverride||state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
+    const toDate=toOverride||state.remToDate||new Date().toISOString().split('T')[0];
+    const income=filterByDateRange(allIncome, fromDate, toDate);
+    const rem=await calcRemittancesFromRecords(income);
+    const rr=await getRemRates();
+    const churchName=settings.churchName||'RCCG Kingdom Parish, Aguleri';
+    const quotaLines=getQuotaLinesForPeriod(quotas, fromDate, toDate);
+    const rccgQuotas=quotaLines.filter(q=>!isMummyQuotaLabel(q.label));
+    const mummyQuotas=quotaLines.filter(q=>isMummyQuotaLabel(q.label));
+    const totalCollected=rem.lines.reduce((s,l)=>s+(l.total||0),0);
+    const tgLine=rem.lines.find(l=>l.isTg);
+    const tgTotal=tgLine?.total||0;
+    const tgNatlAmt=tgLine?.national||0;
+    const tgDistributed=tgTotal-tgNatlAmt-(tgLine?.seed||0);
+    const totalToHQ=rem.lines.reduce((s,l)=>s+(l.national||0),0);
+    const totalParishLocal=rem.lines.filter(l=>!l.isTg).reduce((s,l)=>s+(l.local||0),0);
+    const quotasTotal=sumQuotaLines(quotaLines);
+    const trueNetLocal=rem.netLocal-quotasTotal;
+    const additionalLevies=(rem.crmAddon||0)+(rem.coastline||0)+(rem.insuranceGen||0)+(rem.insuranceMin||0);
+    const SUMMARY_ORDER=['ministersTithe','membersTithe','thanksgiving','slo','crm','workersOffering','firstFruit','childrenOffering','sundaySchool','trainingWeekend'];
+    const getLine=key=>rem.lines.find(l=>l.key===key);
+    const linePct=l=>l&&l.total>0?Math.round((l.national/l.total)*100):0;
+    const partARows=[];
+    const pushA=row=>{ if((row.amount||0)>0) partARows.push(row); };
+    { const l=getLine('ministersTithe'); if(l) pushA({ desc:`Ministers' Tithe → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+    { const l=getLine('membersTithe'); if(l) pushA({ desc:`Members' Tithe → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+    { const l=getLine('thanksgiving'); if(l) pushA({ desc:`Thanksgiving Offering → National HQ (${Math.round(rr.tgNational*100)}%)`, type:`${Math.round(rr.tgNational*100)}% Based`, amount:l.national||0 }); }
+    if((rem.totalSeed||0)>0) pushA({ desc:`Thanksgiving → Seed → National HQ (${Math.round(rr.tgSeed*100)}%)`, type:`${Math.round(rr.tgSeed*100)}% Based`, amount:rem.totalSeed });
+    { const l=getLine('slo'); if(l) pushA({ desc:`Sunday Love Offering → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+    if(rem.provinceRebate>0) pushA({ desc:`Province Rebate — ${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes`, type:`${Math.round(rr.provinceRebate*100)}% Based`, amount:rem.provinceRebate });
+    { const l=getLine('crm'); if(l) pushA({ desc:`CRM (Weekly Activities) → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+    { const l=getLine('workersOffering'); if(l) pushA({ desc:`Gospel Fund (Workers' Offering) → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+    { const l=getLine('firstFruit'); if(l) pushA({ desc:`First Fruit → National HQ`, type:`100% Based`, amount:l.national||0 }); }
+    { const l=getLine('childrenOffering'); if(l) pushA({ desc:`Teen/Children's Offering → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+    { const l=getLine('sundaySchool'); if(l) pushA({ desc:`Sunday School → National HQ`, type:`100% Based`, amount:l.national||0 }); }
+    { const l=getLine('trainingWeekend'); if(l) pushA({ desc:`Training Weekend → National HQ`, type:`100% Based`, amount:l.national||0 }); }
+    if((rem.crmAddon||0)>0) pushA({ desc:`CRM Add-on → National HQ (${Math.round(rr.crmAddon*100)}% of CRM Total)`, type:`${Math.round(rr.crmAddon*100)}% Based`, amount:rem.crmAddon });
+    if((rem.coastline||0)>0) pushA({ desc:`Coastline Worship Centre — ${Math.round(rr.coastline*100)}% of Ministers' Tithe`, type:`${Math.round(rr.coastline*100)}% Based`, amount:rem.coastline });
+    if((rem.insuranceGen||0)>0) pushA({ desc:`Insurance Fund (GEN TITHE) — ${+(rr.insuranceGenTithe*100).toFixed(2)}% of Members' Tithe`, type:`${+(rr.insuranceGenTithe*100).toFixed(2)}% Based`, amount:rem.insuranceGen });
+    if((rem.insuranceMin||0)>0) pushA({ desc:`Insurance Fund (MIN TITHE) — ${+(rr.insuranceMinTithe*100).toFixed(2)}% of Ministers' Tithe`, type:`${+(rr.insuranceMinTithe*100).toFixed(2)}% Based`, amount:rem.insuranceMin });
+    rccgQuotas.forEach(q=>{ if((q.amount||0)>0) partARows.push({ desc:q.label, type:quotaTypeTextForReport(q), amount:q.amount||0 }); });
+    const subTotalA=partARows.reduce((s,r)=>s+r.amount,0);
+    const partBRows=[
+      { desc:`Thanksgiving → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)`, type:`${Math.round(rr.tgArea*100)}% Based`, amount:rem.totalArea||0 },
+      { desc:`Thanksgiving → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)`, type:`${Math.round(rr.tgPastor*100)}% Based`, amount:rem.totalPastor||0 },
+      { desc:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`, type:`${Math.round(rr.tgMinisters*100)}% Based`, amount:rem.totalMinisters||0 },
+      ...mummyQuotas.map(q=>({ desc:q.label, type:quotaTypeTextForReport(q), amount:q.amount||0 }))
+    ].filter(r=>r.amount>0);
+    const subTotalB=partBRows.reduce((s,r)=>s+r.amount,0);
+    const totalDue=subTotalA+subTotalB;
+    const summaryLines=SUMMARY_ORDER.map(key=>{
+      const l=getLine(key); if(!l||!l.total) return null;
+      if(l.isTg) return { key, label:l.label, total:l.total, national:l.national, local:0, isTg:true, seed:l.seed||0, natlPct:Math.round(rr.tgNational*100), locPct:0 };
+      const natlPct=Math.round((l.national/l.total)*100);
+      const locPct=Math.round((l.local/l.total)*100);
+      return { key, label:l.label, total:l.total, national:l.national, local:l.local, natlPct, locPct };
+    }).filter(Boolean);
+    const snapshot = {
+      fromDate, toDate, churchName, incomeCount:income.length,
+      totalCollected, totalToHQ, totalParishLocal, trueNetLocal,
+      provinceRebate:rem.provinceRebate, crmAddon:rem.crmAddon, coastline:rem.coastline,
+      insuranceGen:rem.insuranceGen, insuranceMin:rem.insuranceMin, additionalLevies, quotasTotal,
+      tgDistributed, localTithe:rem.localTithe,
+      tgNational:rr.tgNational, tgSeed:rr.tgSeed, provinceRebatePct:rr.provinceRebate, crmAddonPct:rr.crmAddon,
+      summaryLines, partARows, partBRows, subTotalA, subTotalB, totalDue,
+    };
+    const { token } = await DB.createSharedReport({ periodFrom:fromDate, periodTo:toDate, churchName, createdBy:state.user?.name||'', data:snapshot });
+    restore && restore();
+    const shareUrl = `${location.origin}/report.html?t=${token}`;
+    showModal(`
+      <button class="modal-close" onclick="closeModal()">✕</button>
+      <div class="modal-title">📤 Share Remittance Report</div>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:16px">Share this link with anyone who needs to view or download the report. No login required.</p>
+      <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:12px;word-break:break-all;font-size:12px;color:var(--text)">${shareUrl}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <button class="btn btn-primary" id="copyShareLinkBtn" onclick="(function(btn){navigator.clipboard.writeText('${shareUrl.replace(/'/g,"\\'")}').then(()=>{btn.textContent='✓ Copied!';btn.style.background='#1D9E75';setTimeout(()=>{btn.textContent='📋 Copy Link';btn.style.background='';},2000)}).catch(()=>{alert('Copy failed — please copy the link above manually.');})})(this)">📋 Copy Link</button>
+        <button class="btn" onclick="window.open('${shareUrl.replace(/'/g,"\\'")}','_blank')">🔗 Open Report</button>
+      </div>
+      <p style="font-size:11px;color:var(--text3)">Period: ${fmtDate(fromDate)} — ${fmtDate(toDate)} · ${income.length} income record(s)</p>
+      <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
+    DB.addAudit('report_shared',`Remittance report shared for ${fromDate} to ${toDate}`,state.user?.name);
+  } catch(err) {
+    restore && restore();
+    showAlert(`Failed to create share link: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 // ── EXPENSES ──────────────────────────────
@@ -9915,7 +10012,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, approveRemittance, deleteRemittance,
+  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
