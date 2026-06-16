@@ -78,7 +78,8 @@ const INCOME_TYPES = [
   { key:'crm',             label:'CRM (Weekly Activities)',natl:0.60, local:0.40 },
   { key:'workersOffering', label:"Gospel Fund (Workers' Offering)", natl:0.25, local:0.75 },
   { key:'firstFruit',      label:'First Fruit',            natl:1.00, local:0 },
-  { key:'childrenOffering',label:"Teen/Children's Offering",        natl:0.35, local:0.65 }
+  { key:'childrenOffering',label:"Teen/Children's Offering",        natl:0.35, local:0.65 },
+  { key:'trainingWeekend', label:'Training Weekend',               natl:1.00, local:0 }
 ];
 
 const EXPENSE_CATS = [
@@ -149,7 +150,8 @@ const DEFAULT_REMITTANCE_RATES = {
   crm:             { natl:0.60, local:0.40 },
   workersOffering: { natl:0.25, local:0.75 },
   firstFruit:      { natl:1.00, local:0.00 },
-  childrenOffering:{ natl:0.35, local:0.65 },
+  childrenOffering: { natl:0.35, local:0.65 },
+  trainingWeekend:  { natl:1.00, local:0.00 },
   tgNational:0.75, tgArea:0.05, tgPastor:0.10, tgMinisters:0.09, tgSeed:0.01,
   provinceRebate:0.20,
   crmAddon:0.25, coastline:0.01, insuranceGenTithe:0.0125, insuranceMinTithe:0.0125
@@ -9143,12 +9145,14 @@ function renderAdminRates(s){
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Remittance Percentage Rates ${ratesBadge}</div>
     <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">Configure what percentage of each income type goes to National HQ and what stays local. National + Local should sum to 100%. Changes take effect immediately for all new calculations.</p>
     <div class="table-wrap"><table>
-      <tr><th>Income Type</th><th>→ National HQ %</th><th>→ Local Retained %</th></tr>
+      <tr><th>Income Type</th><th>→ National HQ %</th><th style="color:var(--text3)">→ Local Retained</th></tr>
       ${INCOME_TYPES.filter(t=>!t.special).map(t=>{
         const rd = r[t.key] || DEFAULT_REMITTANCE_RATES[t.key] || { natl:0, local:0 };
+        const localPct = decToPct(rd.local);
         return `<tr><td>${t.label}</td>
-          <td>${rateInput(`rate_${t.key}_natl`, rd.natl)}</td>
-          <td>${rateInput(`rate_${t.key}_local`, rd.local)}</td></tr>`;
+          <td><input type="number" id="rate_${t.key}_natl" class="form-input" value="${decToPct(rd.natl)}" min="0" max="100" step="0.1" style="width:80px;display:inline-block"
+            oninput="(function(el){var l=document.getElementById('localLbl_${t.key}');if(l){var v=parseFloat(el.value)||0;l.textContent=(Math.round((100-v)*10)/10)+'%';}})(this)" /> %</td>
+          <td><span id="localLbl_${t.key}" style="color:var(--text3);font-size:13px">${localPct}%</span></td></tr>`;
       }).join('')}
     </table></div>
     <hr class="divider">
@@ -9190,16 +9194,14 @@ async function saveRates(btn=null){
   INCOME_TYPES.filter(t=>!t.special).forEach(t=>{
     if(!r[t.key]) r[t.key]={};
     const natl = pct2dec(`rate_${t.key}_natl`);
-    const local = pct2dec(`rate_${t.key}_local`);
-    if(natl!==null) r[t.key].natl = natl;
-    if(local!==null) r[t.key].local = local;
-    if(natl!==null && local!==null){
-      const totalPct = Math.round((natl+local)*100);
-      if(totalPct !== 100) badRows.push(`${t.label} (${totalPct}%)`);
+    if(natl!==null){
+      if(natl < 0 || natl > 1){ badRows.push(`${t.label} (${Math.round(natl*100)}% — must be 0–100%)`); return; }
+      r[t.key].natl = natl;
+      r[t.key].local = Math.round((1 - natl) * 10000) / 10000;
     }
   });
   if(badRows.length){
-    showAlert(`National + Local must equal 100% for: ${badRows.join(', ')}. Please correct before saving.`,'danger');
+    showAlert(`National HQ % out of range for: ${badRows.join(', ')}. Please correct before saving.`,'danger');
     return;
   }
   ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed','provinceRebate','crmAddon','coastline','insuranceGenTithe','insuranceMinTithe'].forEach(k=>{
