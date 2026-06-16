@@ -1265,6 +1265,12 @@ export async function onRequest(context) {
       return ok({ feedback: results || [] });
     }
 
+    // ── /api/report-share ─────────────────────────────────────
+    if (route === 'report-share') {
+      if (method === 'POST' && !param) return await createSharedReport(DB, body);
+      if (method === 'GET'  &&  param) return await getSharedReport(DB, param);
+    }
+
     return err(`Route not found: ${method} /api/${path}`, 404);
 
   } catch (e) {
@@ -1717,6 +1723,15 @@ async function handleInit(DB) {
       notes           TEXT    DEFAULT '',
       created_by      TEXT    DEFAULT '',
       created_at      TEXT    DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS shared_reports (
+      token       TEXT PRIMARY KEY,
+      period_from TEXT NOT NULL,
+      period_to   TEXT NOT NULL,
+      church_name TEXT DEFAULT '',
+      data_json   TEXT NOT NULL,
+      created_by  TEXT DEFAULT '',
+      created_at  TEXT DEFAULT (datetime('now'))
     )`,
   ];
 
@@ -9339,6 +9354,31 @@ ${text}`;
   } catch (e) {
     return err('AI request failed: ' + e.message, 502);
   }
+}
+
+async function createSharedReport(DB, body) {
+  const token = newId('rpt');
+  await DB.prepare(
+    `INSERT INTO shared_reports (token,period_from,period_to,church_name,data_json,created_by,created_at) VALUES (?,?,?,?,?,?,datetime('now'))`
+  ).bind(
+    token,
+    body.periodFrom || '',
+    body.periodTo   || '',
+    body.churchName || '',
+    JSON.stringify(body.data || {}),
+    body.createdBy  || ''
+  ).run();
+  return ok({ token });
+}
+
+async function getSharedReport(DB, token) {
+  const row = await DB.prepare(
+    `SELECT token,period_from,period_to,church_name,data_json,created_by,created_at FROM shared_reports WHERE token=?`
+  ).bind(token).first();
+  if (!row) return err('Report not found', 404);
+  let data;
+  try { data = JSON.parse(row.data_json); } catch { data = {}; }
+  return ok({ token: row.token, periodFrom: row.period_from, periodTo: row.period_to, churchName: row.church_name, createdBy: row.created_by, createdAt: row.created_at, data });
 }
 
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────

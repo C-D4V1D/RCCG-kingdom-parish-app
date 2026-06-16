@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<meta name="theme-color" content="#0F6E56"/>
+<title>RCCG Remittance Report</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,Arial,sans-serif;font-size:13px;color:#1a1a1a;background:#f0f4f0;min-height:100vh}
+@media print{
+  @page{margin:16mm 14mm;size:A4}
+  body{background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .no-print{display:none!important}
+  .page-wrap{box-shadow:none;border-radius:0;padding:0;margin:0;max-width:none}
+  .section-title.collapsible{background:#0F6E56!important;color:#fff!important;border-radius:0!important;cursor:default!important}
+  .collapsible-body{display:block!important}
+  .summary-card-list{display:none!important}
+  .summary-table-wrap{display:block!important}
+}
+.top-bar{background:#0F6E56;color:#fff;padding:10px 16px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:20;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+.top-bar-brand{flex:1;min-width:0}
+.top-bar-name{font-weight:700;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.top-bar-sub{font-size:10px;opacity:.75;margin-top:1px}
+.top-bar-actions{display:flex;gap:8px;flex-shrink:0}
+.action-btn{background:rgba(255,255,255,.15);color:#fff;border:1.5px solid rgba(255,255,255,.4);padding:7px 14px;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;transition:background .15s}
+.action-btn:hover{background:rgba(255,255,255,.25)}
+.action-btn.primary{background:#fff;color:#0F6E56;border-color:#fff}
+.action-btn.primary:hover{background:#e8f4f0}
+@media(max-width:500px){.action-btn span.label{display:none}}
+.page-wrap{max-width:860px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 2px 16px rgba(0,0,0,.07);padding:24px 20px 40px;margin-top:14px;margin-bottom:24px}
+@media(max-width:600px){.page-wrap{border-radius:0;margin:0;padding:16px 12px 32px;box-shadow:none}}
+.report-header{text-align:center;padding-bottom:16px;border-bottom:3px solid #0F6E56;margin-bottom:22px}
+.org-name{font-size:19px;font-weight:700;color:#0F6E56;letter-spacing:.4px}
+.report-title{font-size:14px;font-weight:600;color:#333;margin-top:5px}
+.report-meta{font-size:11px;color:#666;margin-top:6px;line-height:1.6}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:20px}
+@media(max-width:480px){.kpi-grid{grid-template-columns:repeat(2,1fr)}}
+.kpi-tile{border:1px solid #e0e0e0;border-radius:10px;padding:14px 12px;text-align:center;background:#fff}
+.kpi-val{font-size:18px;font-weight:700;color:#0F6E56;margin-bottom:3px;word-break:break-all}
+.kpi-lbl{font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px}
+.kpi-tile.red .kpi-val{color:#c0392b}
+.kpi-tile.blue .kpi-val{color:#185FA5}
+.section{margin-bottom:20px}
+.section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#0F6E56;padding:10px 14px;margin-bottom:0;display:flex;align-items:center;justify-content:space-between;background:#e8f4f0;border:1.5px solid #b2d8cc;border-radius:8px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.section-title.open{border-radius:8px 8px 0 0;border-bottom:none;background:#0F6E56;color:#fff}
+.toggle-arrow{display:inline-block;transition:transform .2s;font-style:normal}
+.section-title.open .toggle-arrow{transform:rotate(180deg)}
+.collapsible-body{display:none;border:1.5px solid #b2d8cc;border-top:none;border-radius:0 0 8px 8px;overflow:hidden;margin-bottom:6px}
+.collapsible-body.open{display:block}
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;font-size:12px;min-width:500px}
+th{background:#0F6E56;color:#fff;padding:8px 10px;text-align:left;font-size:11px;font-weight:700;letter-spacing:.3px}
+td{padding:7px 10px;border-bottom:1px solid #eee;font-size:12px;vertical-align:middle}
+tr:nth-child(even) td{background:#f8fbf8}
+tr:last-child td{border-bottom:none}
+.td-r{text-align:right;font-weight:600}
+.td-c{text-align:center}
+.grn{color:#0F6E56}
+.red{color:#c0392b}
+.muted{color:#888;font-size:11px}
+.sec-row td{background:#e8f4f0!important;font-weight:700;font-size:10px;color:#0F6E56;letter-spacing:.7px;text-transform:uppercase;padding:6px 10px;border-top:1px solid #b2d8cc}
+.subtotal-row td{background:#f5f5f5!important;font-weight:700;border-top:1.5px solid #aaa;padding:8px 10px}
+.total-row td{border-top:2.5px solid #333;font-weight:700;font-size:13px;padding:9px 10px;background:#fff!important}
+.balance-row td{background:#e8f4f0!important;font-size:11px;color:#0F6E56;padding:6px 10px;font-style:italic}
+.deduct-row td{background:#fef9f9!important;padding:6px 10px;border-bottom:1px solid #f5c6c6}
+.net-local-row td{background:#e8f4f0!important;font-weight:700;font-size:13px;padding:9px 10px;border-top:2px solid #0F6E56;color:#0F6E56}
+.part-label{display:inline-block;background:#0F6E56;color:#fff;border-radius:3px;padding:1px 6px;font-size:10px;font-weight:700;margin-right:5px}
+.spacer-row td{height:8px;background:#fff!important;border:none}
+/* Mobile summary cards */
+.summary-card-list{display:none}
+@media(max-width:640px){
+  .summary-table-wrap{display:none}
+  .summary-card-list{display:block}
+}
+.sum-card{border:1px solid #e0ece0;border-radius:8px;padding:12px 14px;margin-bottom:8px;background:#fff}
+.sum-card-label{font-weight:600;font-size:13px;color:#1a1a1a;margin-bottom:8px}
+.sum-card-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.sum-card-item{font-size:11px;color:#555}
+.sum-card-item .val{font-size:13px;font-weight:700;display:block;margin-top:2px}
+.sum-card-item .val.grn{color:#0F6E56}
+.sum-card-item .val.red{color:#c0392b}
+.sum-card-total{margin-top:8px;padding-top:8px;border-top:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center}
+.sum-card-total span:first-child{font-size:11px;color:#555}
+.sum-card-total span:last-child{font-weight:700;font-size:14px}
+.totals-card{background:#e8f4f0;border:2px solid #0F6E56;border-radius:10px;padding:16px 18px;margin-top:16px}
+.totals-card-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #c8e4d8;font-size:13px}
+.totals-card-row:last-child{border-bottom:none}
+.totals-card-row .lbl{color:#555;font-size:12px}
+.totals-card-row .amt{font-weight:700;font-size:14px}
+.totals-card-row.big .lbl{font-weight:700;color:#0F6E56;font-size:13px}
+.totals-card-row.big .amt{color:#c0392b;font-size:17px}
+.sig-section{margin-top:32px;page-break-inside:avoid}
+.sig-grid{display:grid;grid-template-columns:1fr 1fr;gap:28px}
+@media(max-width:500px){.sig-grid{grid-template-columns:1fr}}
+.sig-line{border-top:1px solid #bbb;margin-top:44px;padding-top:7px;font-size:11px;color:#666}
+#loading-state{text-align:center;padding:60px 20px;color:#555;font-size:15px;background:#fff;border-radius:12px;margin-top:14px}
+#error-state{display:none;text-align:center;padding:60px 20px;color:#c0392b;font-size:14px;background:#fff;border-radius:12px;margin-top:14px}
+.skeleton{background:linear-gradient(90deg,#eee 25%,#f5f5f5 50%,#eee 75%);background-size:200% 100%;animation:shimmer 1.4s infinite;border-radius:6px;height:14px;margin:8px 0}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+</style>
+</head>
+<body>
+<div class="top-bar">
+  <div class="top-bar-brand">
+    <div class="top-bar-name" id="topBarName">Remittance Report</div>
+    <div class="top-bar-sub" id="topBarPeriod">Loading…</div>
+  </div>
+  <div class="top-bar-actions no-print">
+    <button class="action-btn primary" onclick="downloadPdf()" id="pdfBtn">
+      <span>⬇</span><span class="label"> Download PDF</span>
+    </button>
+    <button class="action-btn" onclick="window.print()">
+      <span>🖨</span><span class="label"> Print</span>
+    </button>
+  </div>
+</div>
+
+<div id="loading-state">
+  <div style="font-size:24px;margin-bottom:10px">⏳</div>
+  Loading report…
+  <div class="skeleton" style="max-width:300px;margin:20px auto"></div>
+  <div class="skeleton" style="max-width:220px;margin:6px auto"></div>
+</div>
+<div id="error-state">
+  <div style="font-size:40px;margin-bottom:12px">🔍</div>
+  <div id="error-msg">Report not found.</div>
+  <div style="font-size:12px;color:#888;margin-top:8px">This link may be invalid or the report has been deleted.</div>
+</div>
+
+<div id="report-root" style="display:none;padding:0 12px">
+  <div class="page-wrap" id="reportContent">
+    <div class="report-header">
+      <div class="org-name" id="rptChurchName">—</div>
+      <div class="report-title">RCCG Monthly Remittance Report</div>
+      <div class="report-meta" id="rptMeta">—</div>
+    </div>
+
+    <!-- KPI tiles -->
+    <div class="kpi-grid" id="kpiGrid"></div>
+
+    <!-- Summary Section -->
+    <div class="section" id="summarySection">
+      <div class="section-title open" onclick="toggle(this)" id="summaryTitle">
+        <span>Collections Summary</span><span class="toggle-arrow">▼</span>
+      </div>
+      <div class="collapsible-body open" id="summaryBody">
+        <!-- Desktop table -->
+        <div class="table-wrap summary-table-wrap" id="summaryTableWrap"></div>
+        <!-- Mobile cards -->
+        <div class="summary-card-list" id="summaryCardList"></div>
+      </div>
+    </div>
+
+    <!-- Remittances section -->
+    <div class="section" id="remSection">
+      <div class="section-title open" onclick="toggle(this)">
+        <span>Remittances &amp; Disbursements Due</span><span class="toggle-arrow">▼</span>
+      </div>
+      <div class="collapsible-body open" id="remBody">
+        <div class="table-wrap" id="remTableWrap"></div>
+      </div>
+    </div>
+
+    <!-- Totals card -->
+    <div class="totals-card no-print" id="totalsCard"></div>
+
+    <!-- Signature section -->
+    <div class="sig-section" id="sigSection">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:#0F6E56;margin-bottom:14px;padding-bottom:6px;border-bottom:1px solid #c8e4d8">Authorisation &amp; Payment Record</div>
+      <div class="sig-grid">
+        <div><div class="sig-line">Prepared by (Accountant)</div></div>
+        <div><div class="sig-line">Reviewed &amp; Approved (Parish Pastor)</div></div>
+        <div><div class="sig-line">Date of Payment</div></div>
+        <div><div class="sig-line">Bank Teller / Reference No.</div></div>
+      </div>
+    </div>
+
+    <p style="text-align:center;font-size:10px;color:#bbb;margin-top:32px">Generated via RCCG Kingdom Parish Admin App</p>
+  </div>
+</div>
+
+<script>
+const N = v => '₦' + (v||0).toLocaleString('en-NG', {minimumFractionDigits:2,maximumFractionDigits:2});
+const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+function toggle(el){
+  const body = el.nextElementSibling;
+  el.classList.toggle('open');
+  body.classList.toggle('open');
+}
+
+async function downloadPdf(){
+  const btn = document.getElementById('pdfBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span>⏳</span><span class="label"> Generating…</span>';
+  try {
+    if(typeof html2pdf === 'undefined'){
+      await new Promise((res,rej)=>{
+        const s=document.createElement('script');
+        s.src='https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js';
+        s.onload=res; s.onerror=rej;
+        document.head.appendChild(s);
+      });
+    }
+    const el = document.getElementById('reportContent');
+    const churchName = document.getElementById('rptChurchName').textContent;
+    const period = document.getElementById('topBarPeriod').textContent;
+    const filename = `RCCG-Remittance-${period.replace(/\s/g,'-').replace(/[^a-zA-Z0-9-]/g,'')}.pdf`;
+    // Expand all sections for PDF
+    document.querySelectorAll('.collapsible-body').forEach(b=>b.classList.add('open'));
+    document.querySelectorAll('.section-title').forEach(t=>t.classList.add('open'));
+    // Hide mobile cards for PDF (use table)
+    document.querySelectorAll('.summary-card-list').forEach(el=>el.style.display='none');
+    document.querySelectorAll('.summary-table-wrap').forEach(el=>el.style.display='block');
+    await html2pdf().set({
+      margin:[10,10,10,10],
+      filename,
+      html2canvas:{scale:2,useCORS:true,logging:false},
+      jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},
+      pagebreak:{mode:['avoid-all','css','legacy']}
+    }).from(el).save();
+  } catch(e){
+    alert('PDF generation failed. Please use the Print button and select "Save as PDF".');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<span>⬇</span><span class="label"> Download PDF</span>';
+  }
+}
+
+function renderReport(d){
+  const D = d.data;
+  // Top bar
+  document.getElementById('topBarName').textContent = d.churchName || 'RCCG Remittance Report';
+  const periodStr = formatDateRange(D.fromDate, D.toDate);
+  document.getElementById('topBarPeriod').textContent = periodStr;
+  document.title = `Remittance Report — ${periodStr}`;
+  // Header
+  document.getElementById('rptChurchName').textContent = d.churchName;
+  document.getElementById('rptMeta').innerHTML =
+    `<strong>Period:</strong> ${formatDate(D.fromDate)} — ${formatDate(D.toDate)}<br>` +
+    `<strong>Shared by:</strong> ${esc(d.createdBy||'—')} &nbsp;|&nbsp; <strong>Based on</strong> ${D.incomeCount} income record(s)`;
+  // KPIs
+  document.getElementById('kpiGrid').innerHTML = [
+    {lbl:'Total Collected', val:N(D.totalCollected), cls:''},
+    {lbl:'Total Remittances Due', val:N(D.totalDue), cls:'red'},
+    {lbl:'To RCCG HQ (Part A)', val:N(D.subTotalA), cls:'red'},
+    {lbl:'Net Parish Retained', val:N(D.trueNetLocal), cls:''},
+  ].map(k=>`<div class="kpi-tile ${k.cls}"><div class="kpi-val">${k.val}</div><div class="kpi-lbl">${k.lbl}</div></div>`).join('');
+  // Summary table (desktop)
+  let summaryTableHTML = `<table><tr>
+    <th style="width:32%">Income Type</th>
+    <th class="td-r" style="width:14%">Total Collected</th>
+    <th class="td-c" style="width:8%">% → HQ</th>
+    <th class="td-r" style="width:14%">To RCCG HQ (₦)</th>
+    <th class="td-c" style="width:8%">% Local</th>
+    <th class="td-r" style="width:14%">Parish Retained (₦)</th>
+  </tr>`;
+  let summaryCardsHTML = '';
+  (D.summaryLines||[]).forEach(l=>{
+    if(l.isTg){
+      summaryTableHTML += `<tr>
+        <td>Thanksgiving (TG) <sup style="color:#c0392b">†</sup></td>
+        <td class="td-r">${N(l.total)}</td>
+        <td class="td-c">${l.natlPct}%</td>
+        <td class="td-r">${N(l.national)}</td>
+        <td class="td-c muted">${100-l.natlPct}%</td>
+        <td class="td-r muted" style="font-style:italic">—</td>
+      </tr>`;
+      if(l.seed>0) summaryTableHTML += `<tr style="background:#fff8e1">
+        <td style="padding-left:22px;color:#7a5200;font-style:italic;font-size:11px">↳ TG Seed → National HQ</td>
+        <td class="td-r muted" style="font-size:11px">—</td>
+        <td class="td-c" style="color:#7a5200;font-size:11px">${Math.round(D.tgSeed*100)}%</td>
+        <td class="td-r" style="color:#7a5200;font-size:11px">${N(l.seed)}</td>
+        <td class="td-c muted" style="font-size:11px">—</td>
+        <td class="td-r muted" style="font-size:11px">—</td>
+      </tr>`;
+      summaryCardsHTML += `<div class="sum-card">
+        <div class="sum-card-label">Thanksgiving (TG) †</div>
+        <div class="sum-card-grid">
+          <div class="sum-card-item">Total Collected<span class="val">${N(l.total)}</span></div>
+          <div class="sum-card-item">To RCCG HQ (${l.natlPct}%)<span class="val red">${N(l.national)}</span></div>
+          <div class="sum-card-item">Distributed Locally<span class="val grn">${N(D.tgDistributed||0)}</span></div>
+          ${l.seed>0?`<div class="sum-card-item">Seed → HQ<span class="val red">${N(l.seed)}</span></div>`:''}
+        </div>
+      </div>`;
+    } else {
+      summaryTableHTML += `<tr>
+        <td>${esc(l.label)}</td>
+        <td class="td-r">${N(l.total)}</td>
+        <td class="td-c">${l.natlPct}%</td>
+        <td class="td-r red">${N(l.national)}</td>
+        <td class="td-c grn">${l.locPct}%</td>
+        <td class="td-r grn">${N(l.local)}</td>
+      </tr>`;
+      summaryCardsHTML += `<div class="sum-card">
+        <div class="sum-card-label">${esc(l.label)}</div>
+        <div class="sum-card-grid">
+          <div class="sum-card-item">Total Collected<span class="val">${N(l.total)}</span></div>
+          <div class="sum-card-item">To RCCG HQ (${l.natlPct}%)<span class="val red">${N(l.national)}</span></div>
+          <div class="sum-card-item">Parish Retained (${l.locPct}%)<span class="val grn">${N(l.local)}</span></div>
+        </div>
+      </div>`;
+    }
+  });
+  // TG distribution footnote row
+  if((D.tgDistributed||0)>0){
+    summaryTableHTML += `<tr style="background:#fff8e1"><td colspan="6" style="font-size:11px;color:#7a5200;padding:5px 10px">
+      <sup style="color:#c0392b">†</sup> TG balance ${N(D.tgDistributed)} distributed locally — see Part B for breakdown
+    </td></tr>`;
+  }
+  // Totals + deductions
+  summaryTableHTML += `<tr class="total-row">
+    <td>TOTAL COLLECTIONS</td><td class="td-r">${N(D.totalCollected)}</td>
+    <td></td><td class="td-r red">${N(D.totalToHQ)}</td>
+    <td></td><td class="td-r grn">${N(D.totalParishLocal)}</td>
+  </tr>`;
+  if(D.provinceRebate>0) summaryTableHTML += `<tr class="deduct-row">
+    <td style="padding-left:20px;color:#555;font-style:italic">less: Province Rebate</td>
+    <td></td><td class="td-c muted">${Math.round(D.provinceRebatePct*100)}% of local tithes</td>
+    <td></td><td></td><td class="td-r red">− ${N(D.provinceRebate)}</td>
+  </tr>`;
+  if(D.additionalLevies>0) summaryTableHTML += `<tr class="deduct-row">
+    <td style="padding-left:20px;color:#555;font-style:italic">less: Additional RCCG Levies</td>
+    <td></td><td class="td-c muted">CRM Add-on, Coastline, Insurance</td>
+    <td></td><td></td><td class="td-r red">− ${N(D.additionalLevies)}</td>
+  </tr>`;
+  if(D.quotasTotal>0) summaryTableHTML += `<tr class="deduct-row">
+    <td style="padding-left:20px;color:#555;font-style:italic">less: Fixed Quotas</td>
+    <td></td><td></td><td></td><td></td><td class="td-r red">− ${N(D.quotasTotal)}</td>
+  </tr>`;
+  summaryTableHTML += `<tr class="net-local-row">
+    <td><strong>NET LOCAL RETAINED</strong></td><td></td><td></td><td></td><td></td>
+    <td class="td-r grn"><strong>${N(D.trueNetLocal)}</strong></td>
+  </tr></table>`;
+  document.getElementById('summaryTableWrap').innerHTML = summaryTableHTML;
+  document.getElementById('summaryCardList').innerHTML = summaryCardsHTML;
+  // Remittances table
+  let remHTML = `<table><tr><th style="width:60%">Description</th><th class="td-c" style="width:14%">Type</th><th class="td-r" style="width:26%">Amount (₦)</th></tr>
+  <tr class="sec-row"><td colspan="3"><span class="part-label">PART A</span> Remittances to RCCG Authorities</td></tr>`;
+  (D.partARows||[]).forEach(r=>{
+    remHTML += `<tr><td>${esc(r.desc)}</td><td class="td-c muted">${esc(r.type)}</td><td class="td-r red">${N(r.amount)}</td></tr>`;
+  });
+  remHTML += `<tr class="subtotal-row"><td colspan="2">Sub-Total (A) — RCCG Authority Remittances</td><td class="td-r red">${N(D.subTotalA)}</td></tr>
+  <tr class="spacer-row"><td colspan="3"></td></tr>
+  <tr class="sec-row"><td colspan="3"><span class="part-label">PART B</span> Thanksgiving Distributions &amp; Pastoral Stipend</td></tr>`;
+  (D.partBRows||[]).forEach(r=>{
+    remHTML += `<tr><td>${esc(r.desc)}</td><td class="td-c muted">${esc(r.type)}</td><td class="td-r" style="color:#8B4513;font-weight:600">${N(r.amount)}</td></tr>`;
+  });
+  remHTML += `<tr class="subtotal-row"><td colspan="2">Sub-Total (B) — TG Distributions &amp; Pastoral Stipend</td><td class="td-r" style="color:#8B4513">${N(D.subTotalB)}</td></tr>
+  <tr class="spacer-row"><td colspan="3"></td></tr>
+  <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE <span style="font-size:11px;font-weight:normal;color:#666">(A + B)</span></td><td class="td-r red">${N(D.totalDue)}</td></tr>
+  <tr class="net-local-row"><td colspan="2">Net Local Retained <span style="font-size:11px;font-weight:normal;color:#555">(after Province Rebate &amp; Quotas)</span></td><td class="td-r grn">${N(D.trueNetLocal)}</td></tr>
+  <tr class="balance-row"><td colspan="3">✓ Balance: ${N(D.totalCollected)} Total Collected = ${N(D.totalDue)} Remittances Due + ${N(D.trueNetLocal)} Net Local Retained</td></tr>
+  </table>`;
+  document.getElementById('remTableWrap').innerHTML = remHTML;
+  // Totals card (mobile-friendly summary)
+  document.getElementById('totalsCard').innerHTML = `
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:#0F6E56;margin-bottom:10px">Summary</div>
+    <div class="totals-card-row big"><span class="lbl">Total Remittances Due</span><span class="amt">${N(D.totalDue)}</span></div>
+    <div class="totals-card-row"><span class="lbl">Part A — RCCG Authorities</span><span class="amt red">${N(D.subTotalA)}</span></div>
+    <div class="totals-card-row"><span class="lbl">Part B — TG &amp; Pastoral Stipend</span><span class="amt" style="color:#8B4513">${N(D.subTotalB)}</span></div>
+    <div class="totals-card-row"><span class="lbl">Net Parish Retained</span><span class="amt grn">${N(D.trueNetLocal)}</span></div>
+    <div class="totals-card-row" style="font-size:11px;color:#888;border-top:1px dashed #b2d8cc;margin-top:4px;padding-top:8px"><span>Total Collected</span><span>${N(D.totalCollected)}</span></div>`;
+  // Show report
+  document.getElementById('loading-state').style.display = 'none';
+  document.getElementById('report-root').style.display = 'block';
+}
+
+function formatDate(s){
+  if(!s) return '—';
+  const d = new Date(s+'T12:00:00Z');
+  return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+}
+function formatDateRange(from,to){
+  if(!from||!to) return '—';
+  const f = new Date(from+'T12:00:00Z');
+  const t = new Date(to+'T12:00:00Z');
+  const mo = f.toLocaleDateString('en-GB',{month:'long',year:'numeric'});
+  return mo;
+}
+
+async function init(){
+  const params = new URLSearchParams(location.search);
+  const token = params.get('t');
+  if(!token){
+    document.getElementById('loading-state').style.display='none';
+    document.getElementById('error-state').style.display='block';
+    document.getElementById('error-msg').textContent='No report token provided in the URL.';
+    return;
+  }
+  try {
+    const res = await fetch(`/api/report-share/${encodeURIComponent(token)}`);
+    if(!res.ok){
+      const j = await res.json().catch(()=>({error:'Unknown error'}));
+      throw new Error(j.error||`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    renderReport(data);
+  } catch(e){
+    document.getElementById('loading-state').style.display='none';
+    document.getElementById('error-state').style.display='block';
+    document.getElementById('error-msg').textContent = e.message||'Failed to load report.';
+  }
+}
+init();
+</script>
+</body>
+</html>
