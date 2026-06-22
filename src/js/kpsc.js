@@ -11877,7 +11877,11 @@ async function aiGenerateNewMonthSms(btn) {
     if (res?.message) {
       textarea.value = res.message;
       updateSmsCounter(textarea);
-      showToast('New month SMS drafted by AI! Review and save when ready.', 'success');
+      if (res.warning) {
+        showToast(res.warning, 'warn');
+      } else {
+        showToast('New month SMS drafted by AI! Review and save when ready.', 'success');
+      }
     }
   } catch {
     showToast('AI generation failed. Check your connection.', 'error');

@@ -7610,21 +7610,30 @@ Requirements:
 - Do NOT include any markdown, asterisks, or formatting symbols
 - Return only the plain SMS text, nothing else`;
 
+  const defaultMsg = `Happy New Month! Dear {{name}}, as we step into ${monthName} ${year}, we pray that God opens doors of blessing and favour for you. May His grace surround you and your household. Thank you for your faithful partnership with RCCG Kingdom Parish. - RCCG Kingdom Parish`;
+
   try {
     const resp = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
       body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 320, temperature: 0.7 }),
     });
-    if (!resp.ok) throw new Error(`DeepSeek ${resp.status}`);
+    if (!resp.ok) {
+      const errBody = await resp.json().catch(() => ({}));
+      const reason = errBody?.error?.message || errBody?.error?.code || `HTTP ${resp.status}`;
+      return ok({ message: defaultMsg, source: 'default', warning: `AI unavailable (${reason}); default template loaded.` });
+    }
     const data = await resp.json();
     let message = (data.choices?.[0]?.message?.content || '').trim();
-    if (!message) throw new Error('Empty response');
+    if (!message) {
+      const reason = data?.error?.message || data?.error?.code || 'empty response';
+      return ok({ message: defaultMsg, source: 'default', warning: `AI returned no content (${reason}); default template loaded.` });
+    }
     // Hard-trim to 459 chars if AI exceeded the limit
     if (message.length > 459) message = message.slice(0, 459).replace(/\s+\S*$/, '');
     return ok({ message, source: 'ai' });
   } catch (e) {
-    return err(`AI generation failed: ${e.message}`, 500);
+    return ok({ message: defaultMsg, source: 'default', warning: `AI request failed (${e.message}); default template loaded.` });
   }
 }
 
