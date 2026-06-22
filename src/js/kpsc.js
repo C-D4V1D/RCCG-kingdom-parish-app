@@ -130,6 +130,8 @@ const S = {
   reportsYear: new Date().getUTCFullYear(),
   reportsMonth: 0,
   progressMonth: new Date().getUTCMonth() + 1,
+  progressFilter: 'all',
+  progressSearch: '',
   reportsFilter: 'all',
   reportsSearch: '',
   reportsAssignee: '',
@@ -6736,27 +6738,27 @@ async function renderPartners(main) {
       <input class="k-input k-partners-search" type="search" placeholder="🔍 Search by name…"
         value="${esc(S.partnersSearch)}" oninput="Kpsc.setPartnersSearch(this.value)" />
       <div class="k-partners-controls">
-        <div class="k-tabs">
+        <div class="k-tabs" id="k-partner-status-tabs">
           <button class="k-tab ${S.partnersFilter === 'active' ? 'active' : ''}" onclick="Kpsc.setPartnersFilter('active')">Active</button>
           <button class="k-tab ${S.partnersFilter === 'all' ? 'active' : ''}" onclick="Kpsc.setPartnersFilter('all')">All</button>
           <button class="k-tab ${S.partnersFilter === 'inactive' ? 'active' : ''}" onclick="Kpsc.setPartnersFilter('inactive')">Inactive</button>
         </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
           <select class="k-input k-input-sm" style="min-width:160px" onchange="Kpsc.setPartnersTypeFilter(this.value)">
             <option value="" ${S.partnersTypeFilter === '' ? 'selected' : ''}>All Types</option>
             <option value="gods_kingdom_partner" ${S.partnersTypeFilter === 'gods_kingdom_partner' ? 'selected' : ''}>God's Kingdom Partner</option>
             <option value="covenant_partner" ${S.partnersTypeFilter === 'covenant_partner' ? 'selected' : ''}>Covenant Partner</option>
           </select>
           <select class="k-input k-input-sm" onchange="Kpsc.setPartnersMonth(this.value)">${monthOpts}</select>
-          <select class="k-input k-input-sm" onchange="Kpsc.setPartnersPaymentFilter(this.value)">
-            <option value="all" ${S.partnersPaymentFilter === 'all' ? 'selected' : ''}>All</option>
-            <option value="paid" ${S.partnersPaymentFilter === 'paid' ? 'selected' : ''}>Paid this month</option>
-            <option value="unpaid" ${S.partnersPaymentFilter === 'unpaid' ? 'selected' : ''}>Unpaid this month</option>
-          </select>
           <select class="k-input k-input-sm k-year-select" onchange="Kpsc.setPartnersYear(this.value)">
             ${[nowYear, nowYear-1, nowYear-2].map(y => `<option value="${y}" ${S.partnersYear === y ? 'selected' : ''}>${y}</option>`).join('')}
           </select>
         </div>
+      </div>
+      <div class="k-tabs k-tabs-wide" id="k-partner-payment-tabs" style="margin-bottom:16px">
+        <button class="k-tab ${S.partnersPaymentFilter === 'all' ? 'active' : ''}" data-filter="all" onclick="Kpsc.setPartnersPaymentFilter('all')">All</button>
+        <button class="k-tab ${S.partnersPaymentFilter === 'paid' ? 'active' : ''}" data-filter="paid" onclick="Kpsc.setPartnersPaymentFilter('paid')">Paid this month</button>
+        <button class="k-tab ${S.partnersPaymentFilter === 'unpaid' ? 'active' : ''}" data-filter="unpaid" onclick="Kpsc.setPartnersPaymentFilter('unpaid')">Unpaid this month</button>
       </div>
       <div id="kpsc-partners-list">${renderPartnersList(canManage)}</div>
     </div>`;
@@ -7017,10 +7019,10 @@ function setPartnersFilter(filter) {
   S.partnersFilter = filter;
   const list = document.getElementById('kpsc-partners-list');
   if (list) list.innerHTML = renderPartnersList(canManagePartners());
-  document.querySelectorAll('.k-tab').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.k-tab').forEach(b => {
-    if (b.textContent.toLowerCase().startsWith(filter === 'all' ? 'all' : filter === 'active' ? 'active' : 'inactive')) b.classList.add('active');
-  });
+  const statusTabs = document.getElementById('k-partner-status-tabs');
+  if (statusTabs) {
+    statusTabs.querySelectorAll('.k-tab').forEach(b => b.classList.toggle('active', b.textContent.toLowerCase() === filter));
+  }
 }
 
 function setPartnersTypeFilter(type) {
@@ -7046,6 +7048,17 @@ function setPartnersPaymentFilter(filter) {
   S.partnersPaymentFilter = String(filter || 'all');
   const list = document.getElementById('kpsc-partners-list');
   if (list) list.innerHTML = renderPartnersList(canManagePartners());
+  const paymentTabs = document.getElementById('k-partner-payment-tabs');
+  if (paymentTabs) {
+    paymentTabs.querySelectorAll('.k-tab').forEach(b => b.classList.toggle('active', b.dataset.filter === S.partnersPaymentFilter));
+  }
+}
+
+function isBeforePartnerStart(partner, month, year) {
+  if (!partner.startDate) return false;
+  const d = new Date(partner.startDate);
+  const sy = d.getUTCFullYear(), sm = d.getUTCMonth() + 1;
+  return year < sy || (year === sy && month < sm);
 }
 
 async function deletePartner(id) {
@@ -10142,6 +10155,70 @@ function rerenderActionItemsList() {
   });
 }
 
+function _buildProgressRows(partners, month, year, nowYear, nowMonth) {
+  const months = [1,2,3,4,5,6,7,8,9,10,11,12];
+  return partners.map(partner => {
+    const monthsPaid = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
+    const pct = Math.round((monthsPaid / 12) * 100);
+    const isCurrFuture = year > nowYear || (year === nowYear && month > nowMonth);
+    const isCurrPreStart = isBeforePartnerStart(partner, month, year);
+    const currentPaid = partnerMonthlyPaid(partner.id, month, year);
+    const badgeClass = currentPaid ? 'badge-green' : (isCurrFuture || isCurrPreStart) ? 'badge-gray' : 'badge-amber';
+    const badgeText = currentPaid ? '✓ Current' : isCurrFuture ? 'Future' : isCurrPreStart ? 'Not started' : 'Unpaid';
+    const dotRow = months.map(m => {
+      const isPaid = partnerMonthlyPaid(partner.id, m, year);
+      const isFuture = year > nowYear || (year === nowYear && m > nowMonth);
+      const isPreStart = isBeforePartnerStart(partner, m, year);
+      const cls = isPaid ? 'k-dot-paid' : isPreStart ? 'k-dot-pre-start' : isFuture ? 'k-dot-future' : 'k-dot-unpaid';
+      const label = isPaid ? 'Paid' : isPreStart ? 'Not started' : isFuture ? 'Future' : 'Unpaid';
+      return `<span class="k-dot-cell ${cls}" title="${monthName(m)}: ${label}"></span>`;
+    }).join('');
+    return `
+      <div class="k-meeting-card" style="cursor:default">
+        <div class="k-mc-top">
+          <div style="flex:1">
+            <div class="k-mc-title">${esc(partner.fullName)}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+              <span class="kbadge badge-type">${esc(partnerTypeLabel(partner.partnershipType))}</span>
+              <span class="kbadge ${badgeClass}">${badgeText}</span>
+            </div>
+            <div class="k-dot-row" style="margin-top:8px">${dotRow}</div>
+            <div class="k-progress-row">
+              <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
+              <span class="k-progress-label">${monthsPaid}/12 (${pct}%)</span>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+let _progressSearchTimer = null;
+
+function _rerenderProgressRows() {
+  const container = document.getElementById('k-progress-rows');
+  if (!container) return;
+  const year = S.reportsYear;
+  const nowYear = currentYear();
+  const nowMonth = currentMonth();
+  const month = S.progressMonth || nowMonth;
+  let partners = S.partners.filter(p => p.status === 'active');
+  const q = (S.progressSearch || '').toLowerCase();
+  if (q) partners = partners.filter(p => p.fullName.toLowerCase().includes(q));
+  const isFutureMonth = year > nowYear || (year === nowYear && month > nowMonth);
+  if (S.progressFilter === 'paid') {
+    partners = partners.filter(p => partnerMonthlyPaid(p.id, month, year));
+  } else if (S.progressFilter === 'unpaid') {
+    partners = partners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isFutureMonth && !isBeforePartnerStart(p, month, year));
+  } else if (S.progressFilter === 'future') {
+    partners = partners.filter(p => isFutureMonth || isBeforePartnerStart(p, month, year));
+  } else if (S.progressFilter === 'not-started') {
+    partners = partners.filter(p => isBeforePartnerStart(p, month, year));
+  }
+  container.innerHTML = _buildProgressRows(partners, month, year, nowYear, nowMonth) || '<div class="k-empty">No partners match this filter.</div>';
+  document.querySelectorAll('.k-progress-filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === S.progressFilter));
+}
+
 async function renderPartnerProgress(main) {
   const year = S.reportsYear;
   await loadPartnerData(year);
@@ -10183,34 +10260,23 @@ async function renderPartnerProgress(main) {
       <span style="font-weight:700;color:var(--navy)">₦${info.expected.toLocaleString('en-NG')}<span style="font-size:11px;font-weight:400;color:var(--text3)">/mo</span></span>
     </div>`).join('') || '<div class="k-empty" style="padding:12px 0">No active partners.</div>';
 
-  const months = [1,2,3,4,5,6,7,8,9,10,11,12];
+  // Apply search + filter for initial render
+  let displayPartners = [...activePartners];
+  const q = (S.progressSearch || '').toLowerCase();
+  if (q) displayPartners = displayPartners.filter(p => p.fullName.toLowerCase().includes(q));
+  const isFutureMonth = year > nowYear || (year === nowYear && month > nowMonth);
+  if (S.progressFilter === 'paid') {
+    displayPartners = displayPartners.filter(p => partnerMonthlyPaid(p.id, month, year));
+  } else if (S.progressFilter === 'unpaid') {
+    displayPartners = displayPartners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isFutureMonth && !isBeforePartnerStart(p, month, year));
+  } else if (S.progressFilter === 'future') {
+    displayPartners = displayPartners.filter(p => isFutureMonth || isBeforePartnerStart(p, month, year));
+  } else if (S.progressFilter === 'not-started') {
+    displayPartners = displayPartners.filter(p => isBeforePartnerStart(p, month, year));
+  }
 
-  const progressRows = activePartners.map(partner => {
-    const monthsPaid = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
-    const pct = Math.round((monthsPaid / 12) * 100);
-    const dotRow = months.map(m => {
-      const isPaid = partnerMonthlyPaid(partner.id, m, year);
-      const isFuture = year > nowYear || (year === nowYear && m > nowMonth);
-      return `<span class="k-dot-cell ${isPaid ? 'k-dot-paid' : isFuture ? 'k-dot-future' : 'k-dot-unpaid'}" title="${monthName(m)}: ${isPaid ? 'Paid' : isFuture ? 'Future' : 'Unpaid'}"></span>`;
-    }).join('');
-    return `
-      <div class="k-meeting-card" style="cursor:default">
-        <div class="k-mc-top">
-          <div style="flex:1">
-            <div class="k-mc-title">${esc(partner.fullName)}</div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
-              <span class="kbadge badge-type">${esc(partnerTypeLabel(partner.partnershipType))}</span>
-              <span class="kbadge ${partnerMonthlyPaid(partner.id, month, year) ? 'badge-green' : 'badge-amber'}">${partnerMonthlyPaid(partner.id, month, year) ? '✓ Current' : 'Unpaid'}</span>
-            </div>
-            <div class="k-dot-row" style="margin-top:8px">${dotRow}</div>
-            <div class="k-progress-row">
-              <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
-              <span class="k-progress-label">${monthsPaid}/12 (${pct}%)</span>
-            </div>
-          </div>
-        </div>
-      </div>`;
-  }).join('');
+  const pf = S.progressFilter || 'all';
+  const progressRows = _buildProgressRows(displayPartners, month, year, nowYear, nowMonth);
 
   main.innerHTML = `
     <div class="k-page">
@@ -10240,12 +10306,22 @@ async function renderPartnerProgress(main) {
           <span style="color:var(--navy)">₦${expectedMonthlyIncome.toLocaleString('en-NG')}/mo</span>
         </div>
       </div>
-      <div class="k-dot-legend">
-        <span><span class="k-dot-cell k-dot-paid"></span> Paid</span>
-        <span><span class="k-dot-cell k-dot-unpaid"></span> Unpaid</span>
-        <span><span class="k-dot-cell k-dot-future"></span> Future</span>
+      <div class="k-progress-filter" id="k-progress-filter-bar">
+        <button class="k-progress-filter-btn ${pf==='all'?'active':''}" data-filter="all" onclick="Kpsc.setProgressFilter('all')">All</button>
+        <button class="k-progress-filter-btn k-pf-paid ${pf==='paid'?'active':''}" data-filter="paid" onclick="Kpsc.setProgressFilter('paid')"><span class="k-dot-cell k-dot-paid" style="width:10px;height:10px;flex-shrink:0"></span>Paid</button>
+        <button class="k-progress-filter-btn k-pf-unpaid ${pf==='unpaid'?'active':''}" data-filter="unpaid" onclick="Kpsc.setProgressFilter('unpaid')"><span class="k-dot-cell k-dot-unpaid" style="width:10px;height:10px;flex-shrink:0"></span>Unpaid</button>
+        <button class="k-progress-filter-btn k-pf-future ${pf==='future'?'active':''}" data-filter="future" onclick="Kpsc.setProgressFilter('future')"><span class="k-dot-cell k-dot-future" style="width:10px;height:10px;flex-shrink:0"></span>Future</button>
+        <button class="k-progress-filter-btn k-pf-pre-start ${pf==='not-started'?'active':''}" data-filter="not-started" onclick="Kpsc.setProgressFilter('not-started')"><span class="k-dot-cell k-dot-pre-start" style="width:10px;height:10px;flex-shrink:0"></span>Not started</button>
       </div>
-      <div class="k-meeting-list">${progressRows || '<div class="k-empty">No active partners available.</div>'}</div>
+      <div class="k-dot-legend">
+        <span><span class="k-dot-cell k-dot-paid"></span>Paid</span>
+        <span><span class="k-dot-cell k-dot-unpaid"></span>Unpaid</span>
+        <span><span class="k-dot-cell k-dot-future"></span>Future</span>
+        <span><span class="k-dot-cell k-dot-pre-start"></span>Not started</span>
+      </div>
+      <input class="k-input" type="search" placeholder="🔍 Search by name…"
+        value="${esc(S.progressSearch || '')}" oninput="Kpsc.setProgressSearch(this.value)" style="margin-bottom:12px" />
+      <div id="k-progress-rows" class="k-meeting-list">${progressRows || '<div class="k-empty">No active partners available.</div>'}</div>
     </div>`;
 }
 
@@ -10263,6 +10339,17 @@ function setReportsYear(year) {
 function setProgressMonth(month) {
   S.progressMonth = Number(month) || currentMonth();
   renderPage('partner-progress');
+}
+
+function setProgressFilter(filter) {
+  S.progressFilter = String(filter || 'all');
+  _rerenderProgressRows();
+}
+
+function setProgressSearch(search) {
+  S.progressSearch = search || '';
+  clearTimeout(_progressSearchTimer);
+  _progressSearchTimer = setTimeout(_rerenderProgressRows, 250);
 }
 
 function setReportsMonth(month) {
@@ -16202,6 +16289,8 @@ window.Kpsc = {
   debouncedSaveReminderTemplate,
   setReportsYear,
   setProgressMonth,
+  setProgressFilter,
+  setProgressSearch,
   setReportsMonth,
   setReportsFilter,
   setReportsSearch,

@@ -668,6 +668,23 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-dot-legend{display:flex;gap:16px;font-size:12px;color:var(--text3);margin:4px 0 14px;align-items:center;}
 .k-dot-legend span{display:flex;align-items:center;gap:4px;}
 
+/* Pre-start dot — partner hadn't begun yet that month */
+.k-dot-pre-start{background:#d97706;}
+
+/* Full-width tab bar (payment filter on Partners page) */
+.k-tabs-wide{width:100%;}
+.k-tabs-wide .k-tab{flex:1;text-align:center;}
+
+/* Progress Report filter buttons */
+.k-progress-filter{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 14px;}
+.k-progress-filter-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:600;border:1.5px solid var(--border);background:var(--bg);color:var(--text2);cursor:pointer;transition:all .15s;font-family:'DM Sans',sans-serif;white-space:nowrap;}
+.k-progress-filter-btn:hover:not(.active){border-color:var(--navy);color:var(--navy);}
+.k-progress-filter-btn.active{background:var(--navy);color:#fff;border-color:var(--navy);}
+.k-pf-paid.active{background:#059669;border-color:#059669;}
+.k-pf-unpaid.active{background:#dc2626;border-color:#dc2626;}
+.k-pf-future.active{background:#6b7280;border-color:#6b7280;}
+.k-pf-pre-start.active{background:#d97706;border-color:#d97706;}
+
 /* ── RECONCILIATION TABLE ──────────────────────────────────────── */
 .k-rec-summary{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;}
 .k-rec-chip{display:inline-flex;align-items:center;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:700;}
