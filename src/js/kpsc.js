@@ -10211,7 +10211,7 @@ function _rerenderProgressRows() {
   } else if (S.progressFilter === 'unpaid') {
     partners = partners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isFutureMonth && !isBeforePartnerStart(p, month, year));
   } else if (S.progressFilter === 'future') {
-    partners = partners.filter(p => isFutureMonth || isBeforePartnerStart(p, month, year));
+    partners = partners.filter(p => (isFutureMonth || isBeforePartnerStart(p, month, year)) && !partnerMonthlyPaid(p.id, month, year));
   } else if (S.progressFilter === 'not-started') {
     partners = partners.filter(p => isBeforePartnerStart(p, month, year));
   }
@@ -10270,7 +10270,7 @@ async function renderPartnerProgress(main) {
   } else if (S.progressFilter === 'unpaid') {
     displayPartners = displayPartners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isFutureMonth && !isBeforePartnerStart(p, month, year));
   } else if (S.progressFilter === 'future') {
-    displayPartners = displayPartners.filter(p => isFutureMonth || isBeforePartnerStart(p, month, year));
+    displayPartners = displayPartners.filter(p => (isFutureMonth || isBeforePartnerStart(p, month, year)) && !partnerMonthlyPaid(p.id, month, year));
   } else if (S.progressFilter === 'not-started') {
     displayPartners = displayPartners.filter(p => isBeforePartnerStart(p, month, year));
   }
