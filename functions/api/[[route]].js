@@ -8436,8 +8436,11 @@ async function getSmsLogs(DB, url) {
   const statusFilter = String(url.searchParams.get('status') || '').trim().toLowerCase();
   const typeFilter   = String(url.searchParams.get('type')   || '').trim().toLowerCase();
 
-  const clauses = ['r.year=?', 'r.month=?'];
-  const binds = [year, month];
+  const clauses = [
+    "strftime('%Y', COALESCE(r.sent_at, r.created_at)) = ?",
+    "CAST(strftime('%m', COALESCE(r.sent_at, r.created_at)) AS INTEGER) = ?",
+  ];
+  const binds = [String(year), month];
   if (typeFilter) { clauses.push('r.reminder_type=?'); binds.push(typeFilter); }
   if (statusFilter === 'failed')    clauses.push("r.status='failed'");
   else if (statusFilter === 'skipped') clauses.push("r.status='skipped'");
@@ -8451,7 +8454,7 @@ async function getSmsLogs(DB, url) {
     FROM kpsc_reminders r
     LEFT JOIN kpsc_partners p ON p.id = r.partner_id
     WHERE ${clauses.join(' AND ')}
-    ORDER BY r.created_at DESC, r.sent_at DESC
+    ORDER BY COALESCE(r.sent_at, r.created_at) DESC
     LIMIT 500
   `).bind(...binds).all();
 
@@ -8495,16 +8498,21 @@ async function getSmsLogs(DB, url) {
       SUM(CASE WHEN delivery_status='delivered' THEN 1 ELSE 0 END) AS delivered,
       SUM(CASE WHEN delivery_status='dnd' THEN 1 ELSE 0 END) AS dnd,
       SUM(CASE WHEN status='sent' AND (delivery_status='' OR delivery_status='pending') THEN 1 ELSE 0 END) AS pending
-    FROM kpsc_reminders WHERE year=? AND month=?
-  `).bind(year, month).first();
+    FROM kpsc_reminders
+    WHERE strftime('%Y', COALESCE(sent_at, created_at)) = ?
+      AND CAST(strftime('%m', COALESCE(sent_at, created_at)) AS INTEGER) = ?
+  `).bind(String(year), month).first();
 
   // Month spend: sum SMS pages across every billed (status='sent') message.
   // Computed in JS so the GSM-7/Unicode segment logic matches the per-row cost.
   let monthPages = 0;
   try {
     const { results: sentMsgs } = await DB.prepare(
-      `SELECT message FROM kpsc_reminders WHERE year=? AND month=? AND status='sent'`
-    ).bind(year, month).all();
+      `SELECT message FROM kpsc_reminders
+       WHERE strftime('%Y', COALESCE(sent_at, created_at)) = ?
+         AND CAST(strftime('%m', COALESCE(sent_at, created_at)) AS INTEGER) = ?
+         AND status='sent'`
+    ).bind(String(year), month).all();
     for (const r of (sentMsgs || [])) monthPages += smsPagesInfo(r.message || '').pages;
   } catch { /* best-effort */ }
   const monthCost = monthPages * nairaPerPage;
