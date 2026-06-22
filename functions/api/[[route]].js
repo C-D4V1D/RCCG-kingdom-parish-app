@@ -157,14 +157,14 @@ async function getTermiiSettings(DB) {
     milestone12Text: String(map.kpsc_sms_text_milestone12 || '').trim() || '🏆 Praise God! Dear {{name}}, you have completed a FULL YEAR of faithful partnership with RCCG Kingdom Parish! Your commitment has been a tremendous blessing. May God reward you a hundredfold! 🙏 — RCCG Kingdom Parish',
     premeetingText:  String(map.kpsc_sms_text_premeeting  || '').trim() || '📅 Reminder: KPSC Committee Meeting "{{meetingTitle}}" is scheduled for tomorrow ({{meetingDate}}{{meetingTime}}). {{venue}}Please come prepared. — RCCG Kingdom Parish Secretary',
     deadlineText:    String(map.kpsc_sms_text_deadline     || '').trim() || '⏰ Reminder: Your action item "{{task}}" is due in 3 days ({{dueDate}}). Please ensure timely completion. — RCCG Kingdom Parish KPSC',
-    reminderText:    String(map.kpsc_sms_text_reminder    || '').trim() || 'Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God\'s work and your own blessing. "...he who sows generously will also reap generously." (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family',
+    reminderText:    String(map.kpsc_sms_text_reminder    || '').trim() || 'Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{unpaidMonths}} is still outstanding. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God\'s work and your own blessing. "...he who sows generously will also reap generously." (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family',
     // Rotating template variants — fall back to base template if not set
     paymentTextA:    String(map.kpsc_sms_text_payment_a   || '').trim() || String(map.kpsc_sms_text_payment || '').trim() || 'Dear {{name}}, thank you for your {{month}} partnership payment{{amtText}}. Your seed is a blessing to the Kingdom. God will reward you abundantly! — RCCG Kingdom Parish',
-    paymentTextB:    String(map.kpsc_sms_text_payment_b   || '').trim() || String(map.kpsc_sms_text_payment || '').trim() || 'Dear {{name}}, we received your {{month}} partnership payment{{amtText}}. What a faithful heart you have! The Lord sees every seed you sow for His Kingdom. God bless you richly! — RCCG Kingdom Parish',
-    paymentTextC:    String(map.kpsc_sms_text_payment_c   || '').trim() || String(map.kpsc_sms_text_payment || '').trim() || 'Praise God, {{name}}! Your {{month}} partnership gift{{amtText}} has been received. "Bring the whole tithe into the storehouse..." (Mal 3:10). We are grateful for your faithfulness. — RCCG Kingdom Parish',
-    reminderTextA:   String(map.kpsc_sms_text_reminder_a  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. When you are able, please do honour your pledge. God bless you! — RCCG Kingdom Parish',
-    reminderTextB:   String(map.kpsc_sms_text_reminder_b  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Dear {{name}}, we want to gently remind you that your {{month}} partnership pledge{{unpaidMonths}} is still outstanding. Your consistent support is what keeps God\'s work moving forward. We appreciate you! — RCCG Kingdom Parish',
-    reminderTextC:   String(map.kpsc_sms_text_reminder_c  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Hello {{name}} 🙏 A warm reminder that your {{month}} partnership pledge{{unpaidMonths}} remains outstanding. "He who is faithful in a little is also faithful in much." (Luke 16:10). We trust in your faithfulness. God bless! — RCCG Kingdom Parish',
+    paymentTextB:    String(map.kpsc_sms_text_payment_b   || '').trim() || String(map.kpsc_sms_text_payment || '').trim() || "Dear {{name}}, we have received your {{month}} partnership pledge{{amtText}} and our hearts are full of thanks! Your faithfulness keeps God's work moving here at Kingdom Parish. May the Lord bless you in return - good measure, pressed down and overflowing. God bless you! - RCCG Kingdom Parish",
+    paymentTextC:    String(map.kpsc_sms_text_payment_c   || '').trim() || String(map.kpsc_sms_text_payment || '').trim() || "Praise God, {{name}}! Your {{month}} partnership pledge{{amtText}} has been received with deep gratitude. Thank you for sowing faithfully into God's house. May every seed you plant return to you in blessing, health and favour. We celebrate you! God bless you! - RCCG Kingdom Parish",
+    reminderTextA:   String(map.kpsc_sms_text_reminder_a  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{unpaidMonths}} is still outstanding. When you are able, please do honour your pledge. God bless you! — RCCG Kingdom Parish',
+    reminderTextB:   String(map.kpsc_sms_text_reminder_b  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || "Dear {{name}}, we warmly remember you in our prayers. Your partnership pledge for {{unpaidMonths}} is still outstanding. Whenever you are able, kindly honour it - every seed you sow blesses God's work and returns to you. We are grateful for you. God bless you! - RCCG Kingdom Parish Family",
+    reminderTextC:   String(map.kpsc_sms_text_reminder_c  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || "Hello {{name}}, grace and peace to you. This is a gentle reminder that your pledge for {{unpaidMonths}} remains unpaid. There is no pressure, only love - when the Lord enables you, please sow your seed. We are praying with you. God bless you! - RCCG Kingdom Parish Family",
   };
 }
 
@@ -7414,9 +7414,12 @@ async function executeReminderRun(DB, opts = {}) {
     const paidSet = new Set((paidRows || []).map(r => `${r.year}-${r.month}`));
     const unpaidMonthsList = computeUnpaidMonths(paidSet, { year, month, startDate: p.start_date || null });
 
-    const unpaidMonthsStr = unpaidMonthsList.length > 1
-      ? ` (outstanding months: ${unpaidMonthsList.join(', ')})`
-      : '';
+    // Plain comma-separated list of outstanding month names (e.g. "May" or
+    // "May, June"). Always populated so templates can use it mid-sentence.
+    // Falls back to the current month name if nothing is computed.
+    const unpaidMonthsStr = unpaidMonthsList.length
+      ? unpaidMonthsList.join(', ')
+      : monthName;
 
     // Rotating reminder template: pick A/B/C based on how many reminders this
     // partner has actually received (failed/skipped rows must not rotate it).
@@ -7577,12 +7580,16 @@ async function aiGenerateNewMonthSms(DB, env) {
   const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
   const now = new Date();
   const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const monthName = MONTH_NAMES[now.getUTCMonth()];
-  const year = now.getUTCFullYear();
+  // Draft is for NEXT month — this SMS is sent on the 1st of the coming month
+  const rawNext = now.getUTCMonth() + 2; // +1 for 0-index, +1 for next month
+  const nextYear = rawNext > 12 ? now.getUTCFullYear() + 1 : now.getUTCFullYear();
+  const nextMonth = rawNext > 12 ? 1 : rawNext;
+  const monthName = MONTH_NAMES[nextMonth - 1];
+  const year = nextYear;
 
   if (!deepseekKey) {
     return ok({
-      message: `Happy New Month! 🎉 Dear {{name}}, as we step into ${monthName} ${year}, we pray that God opens doors of blessing and favour for you this month. May His grace surround you and your household. Thank you for your faithful partnership with RCCG Kingdom Parish. We love and appreciate you! — RCCG Kingdom Parish Family 💙`,
+      message: `Happy New Month! Dear {{name}}, as we step into ${monthName} ${year}, we pray that God opens doors of blessing and favour for you. May His grace surround you and your household. Thank you for your faithful partnership with RCCG Kingdom Parish. — RCCG Kingdom Parish`,
       source: 'default',
     });
   }
@@ -7590,14 +7597,15 @@ async function aiGenerateNewMonthSms(DB, env) {
   const prompt = `You are a warm, loving communications writer for RCCG Kingdom Parish — a vibrant Nigerian church family. Write a Happy New Month SMS message to be sent to church partners on the 1st of ${monthName} ${year}.
 
 Requirements:
-- Begin with a warm greeting acknowledging the new month
-- Include an encouraging Bible verse relevant to the season (quote it fully)
-- Add a short, heartfelt prayer or blessing for the month
+- Begin with "Happy New Month!"
+- Address the partner by name using the placeholder {{name}}
+- Include a short encouraging scripture or faith statement
+- Add a brief blessing or prayer for the month
 - Express gratitude for the partner's faithful giving/partnership
 - Close warmly in the name of RCCG Kingdom Parish
 - Tone: warm, loving, family-like — like a message from a caring church family
-- Length: no more than 2 SMS pages (max ~320 characters per page, so aim for 500–600 characters total)
-- Use simple, clear English that is easy to read and engaging
+- CRITICAL length rule: max 459 characters total (3 GSM-7 multi-page SMS pages at 153 chars each). Aim for 300-450 characters.
+- Use ONLY standard GSM-7 characters: plain letters, numbers, common punctuation (., , ! ? - ' : ;). NO emojis, NO special Unicode.
 - The message should use {{name}} as a placeholder for the partner's first name
 - Do NOT include any markdown, asterisks, or formatting symbols
 - Return only the plain SMS text, nothing else`;
@@ -7606,12 +7614,14 @@ Requirements:
     const resp = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
-      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 400, temperature: 0.7 }),
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 320, temperature: 0.7 }),
     });
     if (!resp.ok) throw new Error(`DeepSeek ${resp.status}`);
     const data = await resp.json();
-    const message = (data.choices?.[0]?.message?.content || '').trim();
+    let message = (data.choices?.[0]?.message?.content || '').trim();
     if (!message) throw new Error('Empty response');
+    // Hard-trim to 459 chars if AI exceeded the limit
+    if (message.length > 459) message = message.slice(0, 459).replace(/\s+\S*$/, '');
     return ok({ message, source: 'ai' });
   } catch (e) {
     return err(`AI generation failed: ${e.message}`, 500);
@@ -8436,8 +8446,11 @@ async function getSmsLogs(DB, url) {
   const statusFilter = String(url.searchParams.get('status') || '').trim().toLowerCase();
   const typeFilter   = String(url.searchParams.get('type')   || '').trim().toLowerCase();
 
-  const clauses = ['r.year=?', 'r.month=?'];
-  const binds = [year, month];
+  const clauses = [
+    "strftime('%Y', COALESCE(r.sent_at, r.created_at)) = ?",
+    "CAST(strftime('%m', COALESCE(r.sent_at, r.created_at)) AS INTEGER) = ?",
+  ];
+  const binds = [String(year), month];
   if (typeFilter) { clauses.push('r.reminder_type=?'); binds.push(typeFilter); }
   if (statusFilter === 'failed')    clauses.push("r.status='failed'");
   else if (statusFilter === 'skipped') clauses.push("r.status='skipped'");
@@ -8451,7 +8464,7 @@ async function getSmsLogs(DB, url) {
     FROM kpsc_reminders r
     LEFT JOIN kpsc_partners p ON p.id = r.partner_id
     WHERE ${clauses.join(' AND ')}
-    ORDER BY r.created_at DESC, r.sent_at DESC
+    ORDER BY COALESCE(r.sent_at, r.created_at) DESC
     LIMIT 500
   `).bind(...binds).all();
 
@@ -8495,16 +8508,21 @@ async function getSmsLogs(DB, url) {
       SUM(CASE WHEN delivery_status='delivered' THEN 1 ELSE 0 END) AS delivered,
       SUM(CASE WHEN delivery_status='dnd' THEN 1 ELSE 0 END) AS dnd,
       SUM(CASE WHEN status='sent' AND (delivery_status='' OR delivery_status='pending') THEN 1 ELSE 0 END) AS pending
-    FROM kpsc_reminders WHERE year=? AND month=?
-  `).bind(year, month).first();
+    FROM kpsc_reminders
+    WHERE strftime('%Y', COALESCE(sent_at, created_at)) = ?
+      AND CAST(strftime('%m', COALESCE(sent_at, created_at)) AS INTEGER) = ?
+  `).bind(String(year), month).first();
 
   // Month spend: sum SMS pages across every billed (status='sent') message.
   // Computed in JS so the GSM-7/Unicode segment logic matches the per-row cost.
   let monthPages = 0;
   try {
     const { results: sentMsgs } = await DB.prepare(
-      `SELECT message FROM kpsc_reminders WHERE year=? AND month=? AND status='sent'`
-    ).bind(year, month).all();
+      `SELECT message FROM kpsc_reminders
+       WHERE strftime('%Y', COALESCE(sent_at, created_at)) = ?
+         AND CAST(strftime('%m', COALESCE(sent_at, created_at)) AS INTEGER) = ?
+         AND status='sent'`
+    ).bind(String(year), month).all();
     for (const r of (sentMsgs || [])) monthPages += smsPagesInfo(r.message || '').pages;
   } catch { /* best-effort */ }
   const monthCost = monthPages * nairaPerPage;
@@ -8922,9 +8940,16 @@ async function runScheduledSms(DB, env, request) {
   return ok({ ok: true, processed });
 }
 
-// ── AUTO-DRAFT: HAPPY NEW MONTH SMS (runs on 3rd of each month via cron) ──────
-async function autoGenerateNewMonthDraft(DB, env) {
+// ── AUTO-DRAFT: HAPPY NEW MONTH SMS ──────────────────────────────────────────
+// Called on day 1 (after send) and on day 3 as a fallback.
+// skipIfExists=true lets the day-3 backup skip quietly when day-1 already succeeded.
+async function autoGenerateNewMonthDraft(DB, env, skipIfExists = false) {
   try {
+    if (skipIfExists) {
+      const existing = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_newmonth_sms_pending_draft'`).first().catch(() => null);
+      if (existing?.value?.trim()) return; // day-1 draft already in place
+    }
+
     const now = new Date();
     // Determine next month
     const rawNext = now.getUTCMonth() + 2; // +1 for 0-index, +1 for next month
@@ -8933,14 +8958,7 @@ async function autoGenerateNewMonthDraft(DB, env) {
     const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     const monthLabel = MONTH_NAMES[nextMonth - 1];
 
-    // Load DeepSeek key
-    const { results: dsRows } = await DB.prepare(
-      `SELECT key, value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
-    ).all();
-    const dsMap = {};
-    for (const r of (dsRows || [])) dsMap[r.key] = r.value;
-    const deepseekKey = String(dsMap.ai_deepseek_key || '').trim();
-    const deepseekModel = String(dsMap.ai_deepseek_model || 'deepseek-chat').trim();
+    const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
     if (!deepseekKey) return;
 
     const prompt = `Write a warm, faith-filled Happy New Month SMS message for RCCG Kingdom Parish church partners for the month of ${monthLabel} ${nextYear}.
@@ -8949,9 +8967,9 @@ Requirements:
 - Address the partner by name using the placeholder {{name}}
 - Include a short encouraging Bible verse or faith statement
 - Warm, personal, blessing-focused tone
-- CRITICAL: Total message must be between 306 and 459 characters (2-3 GSM-7 SMS pages at 153 chars each)
+- CRITICAL length rule: max 459 characters total (3 GSM-7 multi-page SMS pages at 153 chars each). Aim for 300-450 characters.
 - Use ONLY standard GSM-7 characters: plain letters, numbers, common punctuation (., , ! ? - ' : ;). NO emojis, NO special Unicode.
-- End with a blessing or prayer
+- End with a blessing or prayer for the month
 - Output only the SMS text, no preamble or explanation`;
 
     const resp = await fetch('https://api.deepseek.com/chat/completions', {
@@ -8960,14 +8978,16 @@ Requirements:
       body: JSON.stringify({
         model: deepseekModel,
         messages: [{ role: 'user', content: prompt }],
-        max_tokens: 220,
+        max_tokens: 320,
         temperature: 0.8,
       }),
     });
     if (!resp.ok) return;
     const aiData = await resp.json();
-    const draftText = aiData?.choices?.[0]?.message?.content?.trim() || '';
+    let draftText = aiData?.choices?.[0]?.message?.content?.trim() || '';
     if (!draftText) return;
+    // Hard-trim to 459 chars if AI exceeded the limit
+    if (draftText.length > 459) draftText = draftText.slice(0, 459).replace(/\s+\S*$/, '');
 
     const upsert = (key, val) =>
       DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
@@ -8985,12 +9005,16 @@ export async function scheduled(event, env, ctx) {
   if (!DB) return;
   const now = new Date();
   const day = now.getUTCDate();
-  if (day === 3) {
-    ctx.waitUntil(autoGenerateNewMonthDraft(DB, env));
-  }
   if (day === 1) {
-    // Build a minimal fake request for runMonthlySms (it validates cron secret on HTTP calls only)
-    ctx.waitUntil(runMonthlySmsInternal(DB, now));
+    // Send the Happy New Month SMS, then immediately draft next month's message.
+    ctx.waitUntil((async () => {
+      await runMonthlySmsInternal(DB, now);
+      await autoGenerateNewMonthDraft(DB, env);
+    })());
+  }
+  if (day === 3) {
+    // Backup: generate next-month draft only if day-1 generation failed (skipIfExists=true).
+    ctx.waitUntil(autoGenerateNewMonthDraft(DB, env, true));
   }
 }
 

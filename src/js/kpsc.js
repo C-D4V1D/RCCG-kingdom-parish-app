@@ -130,6 +130,8 @@ const S = {
   reportsYear: new Date().getUTCFullYear(),
   reportsMonth: 0,
   progressMonth: new Date().getUTCMonth() + 1,
+  progressFilter: 'all',
+  progressSearch: '',
   reportsFilter: 'all',
   reportsSearch: '',
   reportsAssignee: '',
@@ -6717,6 +6719,26 @@ function partnerMonthlyPaid(partnerId, month, year = currentYear()) {
   );
 }
 
+// Comma-separated list of a partner's unpaid month names over the last 12
+// months, excluding months before they joined (month-granular). Mirrors the
+// backend computeUnpaidMonths() so {{unpaidMonths}} reads the same whether a
+// reminder is sent by the cron or manually from the Reminders page. Always
+// returns at least the current month name.
+function computeUnpaidMonthsStr(partner, month, year) {
+  let lbYear = year, lbMonth = month - 11;
+  if (lbMonth < 1) { lbMonth += 12; lbYear--; }
+  let startOrdinal = -Infinity;
+  const sd = /^(\d{4})-(\d{2})/.exec(String(partner?.startDate || ''));
+  if (sd) startOrdinal = Number(sd[1]) * 12 + Number(sd[2]);
+  const out = [];
+  for (let y = lbYear, m = lbMonth; (y < year) || (y === year && m <= month); ) {
+    const ordinal = y * 12 + m;
+    if (!partnerMonthlyPaid(partner.id, m, y) && ordinal >= startOrdinal) out.push(monthName(m));
+    if (++m > 12) { m = 1; y++; }
+  }
+  return out.length ? out.join(', ') : monthName(month);
+}
+
 async function renderPartners(main) {
   await loadPartnerData(S.partnersYear);
   const canManage = canManagePartners();
@@ -6736,27 +6758,27 @@ async function renderPartners(main) {
       <input class="k-input k-partners-search" type="search" placeholder="🔍 Search by name…"
         value="${esc(S.partnersSearch)}" oninput="Kpsc.setPartnersSearch(this.value)" />
       <div class="k-partners-controls">
-        <div class="k-tabs">
+        <div class="k-tabs" id="k-partner-status-tabs">
           <button class="k-tab ${S.partnersFilter === 'active' ? 'active' : ''}" onclick="Kpsc.setPartnersFilter('active')">Active</button>
           <button class="k-tab ${S.partnersFilter === 'all' ? 'active' : ''}" onclick="Kpsc.setPartnersFilter('all')">All</button>
           <button class="k-tab ${S.partnersFilter === 'inactive' ? 'active' : ''}" onclick="Kpsc.setPartnersFilter('inactive')">Inactive</button>
         </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
           <select class="k-input k-input-sm" style="min-width:160px" onchange="Kpsc.setPartnersTypeFilter(this.value)">
             <option value="" ${S.partnersTypeFilter === '' ? 'selected' : ''}>All Types</option>
             <option value="gods_kingdom_partner" ${S.partnersTypeFilter === 'gods_kingdom_partner' ? 'selected' : ''}>God's Kingdom Partner</option>
             <option value="covenant_partner" ${S.partnersTypeFilter === 'covenant_partner' ? 'selected' : ''}>Covenant Partner</option>
           </select>
           <select class="k-input k-input-sm" onchange="Kpsc.setPartnersMonth(this.value)">${monthOpts}</select>
-          <select class="k-input k-input-sm" onchange="Kpsc.setPartnersPaymentFilter(this.value)">
-            <option value="all" ${S.partnersPaymentFilter === 'all' ? 'selected' : ''}>All</option>
-            <option value="paid" ${S.partnersPaymentFilter === 'paid' ? 'selected' : ''}>Paid this month</option>
-            <option value="unpaid" ${S.partnersPaymentFilter === 'unpaid' ? 'selected' : ''}>Unpaid this month</option>
-          </select>
           <select class="k-input k-input-sm k-year-select" onchange="Kpsc.setPartnersYear(this.value)">
             ${[nowYear, nowYear-1, nowYear-2].map(y => `<option value="${y}" ${S.partnersYear === y ? 'selected' : ''}>${y}</option>`).join('')}
           </select>
         </div>
+      </div>
+      <div class="k-tabs k-tabs-wide" id="k-partner-payment-tabs" style="margin-bottom:16px">
+        <button class="k-tab ${S.partnersPaymentFilter === 'all' ? 'active' : ''}" data-filter="all" onclick="Kpsc.setPartnersPaymentFilter('all')">All</button>
+        <button class="k-tab ${S.partnersPaymentFilter === 'paid' ? 'active' : ''}" data-filter="paid" onclick="Kpsc.setPartnersPaymentFilter('paid')">Paid this month</button>
+        <button class="k-tab ${S.partnersPaymentFilter === 'unpaid' ? 'active' : ''}" data-filter="unpaid" onclick="Kpsc.setPartnersPaymentFilter('unpaid')">Unpaid this month</button>
       </div>
       <div id="kpsc-partners-list">${renderPartnersList(canManage)}</div>
     </div>`;
@@ -7017,10 +7039,10 @@ function setPartnersFilter(filter) {
   S.partnersFilter = filter;
   const list = document.getElementById('kpsc-partners-list');
   if (list) list.innerHTML = renderPartnersList(canManagePartners());
-  document.querySelectorAll('.k-tab').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.k-tab').forEach(b => {
-    if (b.textContent.toLowerCase().startsWith(filter === 'all' ? 'all' : filter === 'active' ? 'active' : 'inactive')) b.classList.add('active');
-  });
+  const statusTabs = document.getElementById('k-partner-status-tabs');
+  if (statusTabs) {
+    statusTabs.querySelectorAll('.k-tab').forEach(b => b.classList.toggle('active', b.textContent.toLowerCase() === filter));
+  }
 }
 
 function setPartnersTypeFilter(type) {
@@ -7046,6 +7068,17 @@ function setPartnersPaymentFilter(filter) {
   S.partnersPaymentFilter = String(filter || 'all');
   const list = document.getElementById('kpsc-partners-list');
   if (list) list.innerHTML = renderPartnersList(canManagePartners());
+  const paymentTabs = document.getElementById('k-partner-payment-tabs');
+  if (paymentTabs) {
+    paymentTabs.querySelectorAll('.k-tab').forEach(b => b.classList.toggle('active', b.dataset.filter === S.partnersPaymentFilter));
+  }
+}
+
+function isBeforePartnerStart(partner, month, year) {
+  if (!partner.startDate) return false;
+  const d = new Date(partner.startDate);
+  const sy = d.getUTCFullYear(), sm = d.getUTCMonth() + 1;
+  return year < sy || (year === sy && month < sm);
 }
 
 async function deletePartner(id) {
@@ -8170,7 +8203,7 @@ async function renderReminders(main) {
         <p class="k-hint">${unpaid.length} unpaid active partner(s) for ${monthName(month)} ${year}.</p>
         <label class="k-label">Reminder Message Template</label>
         <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message" oninput="Kpsc.debouncedSaveReminderTemplate(this)">${esc(defaultTemplate)}</textarea>
-        <p class="k-hint">Use <code>{{name}}</code> for partner name and <code>{{month}}</code> for month name.</p>
+        <p class="k-hint">Use <code>{{name}}</code> for partner name, <code>{{month}}</code> for the current month, and <code>{{unpaidMonths}}</code> for the list of every outstanding month (e.g. "May" or "May, June").</p>
         <div class="k-room-actions" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="kbtn kbtn-primary" onclick="Kpsc.sendBulkReminders(this)">Send Bulk Reminders (${unpaid.length})</button>
           <button class="kbtn kbtn-ghost" onclick="Kpsc.navigate('sms_logs')">📋 SMS Logs &amp; Delivery</button>
@@ -8512,7 +8545,8 @@ function copyReminderMessage(partnerId) {
     const template = document.getElementById('krem-message')?.value.trim() || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge.';
     message = template
       .replace(/\{\{name\}\}/g, partner.fullName)
-      .replace(/\{\{month\}\}/g, monthName(currentMonth()));
+      .replace(/\{\{month\}\}/g, monthName(currentMonth()))
+      .replace(/\{\{unpaidMonths\}\}/g, computeUnpaidMonthsStr(partner, currentMonth(), currentYear()));
   }
   navigator.clipboard.writeText(message).then(() => {
     showToast(`Reminder copied for ${partner.fullName}`, 'success');
@@ -8559,8 +8593,14 @@ function openPersonalizeModal(partner, variants, fallbackTemplate, month, year) 
   modal.id = 'k-personalize-modal';
   modal.className = 'k-modal-overlay';
 
+  const unpaidStr = computeUnpaidMonthsStr(partner, month, year);
+  const resolveVars = (s) => String(s)
+    .replace(/\{\{name\}\}/g, partner.fullName)
+    .replace(/\{\{month\}\}/g, monthName(month))
+    .replace(/\{\{unpaidMonths\}\}/g, unpaidStr);
+
   const variantCards = variants.map((v, i) => {
-    const resolved = v.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month));
+    const resolved = resolveVars(v);
     return `
       <div class="k-remind-variant-card">
         <div class="k-remind-variant-text">${esc(resolved)}</div>
@@ -8568,9 +8608,7 @@ function openPersonalizeModal(partner, variants, fallbackTemplate, month, year) 
       </div>`;
   }).join('');
 
-  const fallbackResolved = fallbackTemplate
-    .replace(/\{\{name\}\}/g, partner.fullName)
-    .replace(/\{\{month\}\}/g, monthName(month));
+  const fallbackResolved = resolveVars(fallbackTemplate);
 
   modal.innerHTML = `
     <div class="k-modal">
@@ -8589,7 +8627,7 @@ function openPersonalizeModal(partner, variants, fallbackTemplate, month, year) 
     </div>`;
 
   // Store resolved variants on the modal element for retrieval
-  modal._variants = variants.map(v => v.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month)));
+  modal._variants = variants.map(resolveVars);
   modal._fallback = fallbackResolved;
 
   document.body.appendChild(modal);
@@ -8640,7 +8678,10 @@ async function sendBulkReminders(btn) {
     // Use personalized message if the secretary approved one, else fall back to template
     const message = _personalizedMessages.has(partner.id)
       ? _personalizedMessages.get(partner.id)
-      : template.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month));
+      : template
+          .replace(/\{\{name\}\}/g, partner.fullName)
+          .replace(/\{\{month\}\}/g, monthName(month))
+          .replace(/\{\{unpaidMonths\}\}/g, computeUnpaidMonthsStr(partner, month, year));
     return apiPost('kpsc-reminders', {
       partnerId: partner.id,
       year,
@@ -10142,6 +10183,70 @@ function rerenderActionItemsList() {
   });
 }
 
+function _buildProgressRows(partners, month, year, nowYear, nowMonth) {
+  const months = [1,2,3,4,5,6,7,8,9,10,11,12];
+  return partners.map(partner => {
+    const monthsPaid = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
+    const pct = Math.round((monthsPaid / 12) * 100);
+    const isCurrFuture = year > nowYear || (year === nowYear && month > nowMonth);
+    const isCurrPreStart = isBeforePartnerStart(partner, month, year);
+    const currentPaid = partnerMonthlyPaid(partner.id, month, year);
+    const badgeClass = currentPaid ? 'badge-green' : (isCurrFuture || isCurrPreStart) ? 'badge-gray' : 'badge-amber';
+    const badgeText = currentPaid ? '✓ Current' : isCurrFuture ? 'Future' : isCurrPreStart ? 'Not started' : 'Unpaid';
+    const dotRow = months.map(m => {
+      const isPaid = partnerMonthlyPaid(partner.id, m, year);
+      const isFuture = year > nowYear || (year === nowYear && m > nowMonth);
+      const isPreStart = isBeforePartnerStart(partner, m, year);
+      const cls = isPaid ? 'k-dot-paid' : isPreStart ? 'k-dot-pre-start' : isFuture ? 'k-dot-future' : 'k-dot-unpaid';
+      const label = isPaid ? 'Paid' : isPreStart ? 'Not started' : isFuture ? 'Future' : 'Unpaid';
+      return `<span class="k-dot-cell ${cls}" title="${monthName(m)}: ${label}"></span>`;
+    }).join('');
+    return `
+      <div class="k-meeting-card" style="cursor:default">
+        <div class="k-mc-top">
+          <div style="flex:1">
+            <div class="k-mc-title">${esc(partner.fullName)}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+              <span class="kbadge badge-type">${esc(partnerTypeLabel(partner.partnershipType))}</span>
+              <span class="kbadge ${badgeClass}">${badgeText}</span>
+            </div>
+            <div class="k-dot-row" style="margin-top:8px">${dotRow}</div>
+            <div class="k-progress-row">
+              <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
+              <span class="k-progress-label">${monthsPaid}/12 (${pct}%)</span>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+let _progressSearchTimer = null;
+
+function _rerenderProgressRows() {
+  const container = document.getElementById('k-progress-rows');
+  if (!container) return;
+  const year = S.reportsYear;
+  const nowYear = currentYear();
+  const nowMonth = currentMonth();
+  const month = S.progressMonth || nowMonth;
+  let partners = S.partners.filter(p => p.status === 'active');
+  const q = (S.progressSearch || '').toLowerCase();
+  if (q) partners = partners.filter(p => p.fullName.toLowerCase().includes(q));
+  const isFutureMonth = year > nowYear || (year === nowYear && month > nowMonth);
+  if (S.progressFilter === 'paid') {
+    partners = partners.filter(p => partnerMonthlyPaid(p.id, month, year));
+  } else if (S.progressFilter === 'unpaid') {
+    partners = partners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isFutureMonth && !isBeforePartnerStart(p, month, year));
+  } else if (S.progressFilter === 'future') {
+    partners = partners.filter(p => (isFutureMonth || isBeforePartnerStart(p, month, year)) && !partnerMonthlyPaid(p.id, month, year));
+  } else if (S.progressFilter === 'not-started') {
+    partners = partners.filter(p => isBeforePartnerStart(p, month, year));
+  }
+  container.innerHTML = _buildProgressRows(partners, month, year, nowYear, nowMonth) || '<div class="k-empty">No partners match this filter.</div>';
+  document.querySelectorAll('.k-progress-filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === S.progressFilter));
+}
+
 async function renderPartnerProgress(main) {
   const year = S.reportsYear;
   await loadPartnerData(year);
@@ -10183,34 +10288,23 @@ async function renderPartnerProgress(main) {
       <span style="font-weight:700;color:var(--navy)">₦${info.expected.toLocaleString('en-NG')}<span style="font-size:11px;font-weight:400;color:var(--text3)">/mo</span></span>
     </div>`).join('') || '<div class="k-empty" style="padding:12px 0">No active partners.</div>';
 
-  const months = [1,2,3,4,5,6,7,8,9,10,11,12];
+  // Apply search + filter for initial render
+  let displayPartners = [...activePartners];
+  const q = (S.progressSearch || '').toLowerCase();
+  if (q) displayPartners = displayPartners.filter(p => p.fullName.toLowerCase().includes(q));
+  const isFutureMonth = year > nowYear || (year === nowYear && month > nowMonth);
+  if (S.progressFilter === 'paid') {
+    displayPartners = displayPartners.filter(p => partnerMonthlyPaid(p.id, month, year));
+  } else if (S.progressFilter === 'unpaid') {
+    displayPartners = displayPartners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isFutureMonth && !isBeforePartnerStart(p, month, year));
+  } else if (S.progressFilter === 'future') {
+    displayPartners = displayPartners.filter(p => (isFutureMonth || isBeforePartnerStart(p, month, year)) && !partnerMonthlyPaid(p.id, month, year));
+  } else if (S.progressFilter === 'not-started') {
+    displayPartners = displayPartners.filter(p => isBeforePartnerStart(p, month, year));
+  }
 
-  const progressRows = activePartners.map(partner => {
-    const monthsPaid = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
-    const pct = Math.round((monthsPaid / 12) * 100);
-    const dotRow = months.map(m => {
-      const isPaid = partnerMonthlyPaid(partner.id, m, year);
-      const isFuture = year > nowYear || (year === nowYear && m > nowMonth);
-      return `<span class="k-dot-cell ${isPaid ? 'k-dot-paid' : isFuture ? 'k-dot-future' : 'k-dot-unpaid'}" title="${monthName(m)}: ${isPaid ? 'Paid' : isFuture ? 'Future' : 'Unpaid'}"></span>`;
-    }).join('');
-    return `
-      <div class="k-meeting-card" style="cursor:default">
-        <div class="k-mc-top">
-          <div style="flex:1">
-            <div class="k-mc-title">${esc(partner.fullName)}</div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
-              <span class="kbadge badge-type">${esc(partnerTypeLabel(partner.partnershipType))}</span>
-              <span class="kbadge ${partnerMonthlyPaid(partner.id, month, year) ? 'badge-green' : 'badge-amber'}">${partnerMonthlyPaid(partner.id, month, year) ? '✓ Current' : 'Unpaid'}</span>
-            </div>
-            <div class="k-dot-row" style="margin-top:8px">${dotRow}</div>
-            <div class="k-progress-row">
-              <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
-              <span class="k-progress-label">${monthsPaid}/12 (${pct}%)</span>
-            </div>
-          </div>
-        </div>
-      </div>`;
-  }).join('');
+  const pf = S.progressFilter || 'all';
+  const progressRows = _buildProgressRows(displayPartners, month, year, nowYear, nowMonth);
 
   main.innerHTML = `
     <div class="k-page">
@@ -10240,12 +10334,22 @@ async function renderPartnerProgress(main) {
           <span style="color:var(--navy)">₦${expectedMonthlyIncome.toLocaleString('en-NG')}/mo</span>
         </div>
       </div>
-      <div class="k-dot-legend">
-        <span><span class="k-dot-cell k-dot-paid"></span> Paid</span>
-        <span><span class="k-dot-cell k-dot-unpaid"></span> Unpaid</span>
-        <span><span class="k-dot-cell k-dot-future"></span> Future</span>
+      <div class="k-progress-filter" id="k-progress-filter-bar">
+        <button class="k-progress-filter-btn ${pf==='all'?'active':''}" data-filter="all" onclick="Kpsc.setProgressFilter('all')">All</button>
+        <button class="k-progress-filter-btn k-pf-paid ${pf==='paid'?'active':''}" data-filter="paid" onclick="Kpsc.setProgressFilter('paid')"><span class="k-dot-cell k-dot-paid" style="width:10px;height:10px;flex-shrink:0"></span>Paid</button>
+        <button class="k-progress-filter-btn k-pf-unpaid ${pf==='unpaid'?'active':''}" data-filter="unpaid" onclick="Kpsc.setProgressFilter('unpaid')"><span class="k-dot-cell k-dot-unpaid" style="width:10px;height:10px;flex-shrink:0"></span>Unpaid</button>
+        <button class="k-progress-filter-btn k-pf-future ${pf==='future'?'active':''}" data-filter="future" onclick="Kpsc.setProgressFilter('future')"><span class="k-dot-cell k-dot-future" style="width:10px;height:10px;flex-shrink:0"></span>Future</button>
+        <button class="k-progress-filter-btn k-pf-pre-start ${pf==='not-started'?'active':''}" data-filter="not-started" onclick="Kpsc.setProgressFilter('not-started')"><span class="k-dot-cell k-dot-pre-start" style="width:10px;height:10px;flex-shrink:0"></span>Not started</button>
       </div>
-      <div class="k-meeting-list">${progressRows || '<div class="k-empty">No active partners available.</div>'}</div>
+      <div class="k-dot-legend">
+        <span><span class="k-dot-cell k-dot-paid"></span>Paid</span>
+        <span><span class="k-dot-cell k-dot-unpaid"></span>Unpaid</span>
+        <span><span class="k-dot-cell k-dot-future"></span>Future</span>
+        <span><span class="k-dot-cell k-dot-pre-start"></span>Not started</span>
+      </div>
+      <input class="k-input" type="search" placeholder="🔍 Search by name…"
+        value="${esc(S.progressSearch || '')}" oninput="Kpsc.setProgressSearch(this.value)" style="margin-bottom:12px" />
+      <div id="k-progress-rows" class="k-meeting-list">${progressRows || '<div class="k-empty">No active partners available.</div>'}</div>
     </div>`;
 }
 
@@ -10263,6 +10367,17 @@ function setReportsYear(year) {
 function setProgressMonth(month) {
   S.progressMonth = Number(month) || currentMonth();
   renderPage('partner-progress');
+}
+
+function setProgressFilter(filter) {
+  S.progressFilter = String(filter || 'all');
+  _rerenderProgressRows();
+}
+
+function setProgressSearch(search) {
+  S.progressSearch = search || '';
+  clearTimeout(_progressSearchTimer);
+  _progressSearchTimer = setTimeout(_rerenderProgressRows, 250);
 }
 
 function setReportsMonth(month) {
@@ -10924,13 +11039,19 @@ async function renderSettings(main) {
     milestone12:`🏆 A FULL YEAR of faithful partnership — Glory to God! 🎉 Dear {{name}}, what an incredible milestone! Psalm 1:3 declares you shall be like a tree planted by rivers of water, bringing forth fruit in season. We declare over you a harvest of extraordinary blessings, divine health, and open heavens this year and beyond. You are a champion! — RCCG Kingdom Parish 💙`,
     premeeting: `Hello {{name}} 👋 This is a warm reminder that our KPSC meeting, '{{meetingTitle}}', is coming up tomorrow, {{meetingDate}}{{meetingTime}}{{venue}}. Your presence is very important to us — your voice and wisdom help shape our church family. Please come prepared and prayed up! God bless you. — RCCG Kingdom Parish Stewardship Committee`,
     deadline:   `Hello {{name}} 🔔 A quick and loving reminder: your action item '{{task}}' is due in 3 days ({{dueDate}}). We trust you are making great progress! If you need any support, please let us know. Together we are building something wonderful for God. Thank you for your dedication! — RCCG Kingdom Parish Stewardship Committee`,
-    reminder:   `Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God's work and your own blessing. "...he who sows generously will also reap generously." (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family`,
+    reminder:   `Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{unpaidMonths}} is still outstanding. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God's work and your own blessing. "...he who sows generously will also reap generously." (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family`,
+    // Rotating thank-you variants B & C (A falls back to `payment` above)
+    paymentB:   `Dear {{name}}, we have received your {{month}} partnership pledge{{amtText}} and our hearts are full of thanks! Your faithfulness keeps God's work moving here at Kingdom Parish. May the Lord bless you in return - good measure, pressed down and overflowing. God bless you! - RCCG Kingdom Parish`,
+    paymentC:   `Praise God, {{name}}! Your {{month}} partnership pledge{{amtText}} has been received with deep gratitude. Thank you for sowing faithfully into God's house. May every seed you plant return to you in blessing, health and favour. We celebrate you! God bless you! - RCCG Kingdom Parish`,
+    // Rotating reminder variants B & C (A falls back to `reminder` above)
+    reminderB:  `Dear {{name}}, we warmly remember you in our prayers. Your partnership pledge for {{unpaidMonths}} is still outstanding. Whenever you are able, kindly honour it - every seed you sow blesses God's work and returns to you. We are grateful for you. God bless you! - RCCG Kingdom Parish Family`,
+    reminderC:  `Hello {{name}}, grace and peace to you. This is a gentle reminder that your pledge for {{unpaidMonths}} remains unpaid. There is no pressure, only love - when the Lord enables you, please sow your seed. We are praying with you. God bless you! - RCCG Kingdom Parish Family`,
   };
   const smsWelcomeText    = res?.kpsc_sms_text_welcome     || SMS_DEFAULTS.welcome;
   const smsPaymentText    = res?.kpsc_sms_text_payment     || SMS_DEFAULTS.payment;
   const smsPaymentTextA   = res?.kpsc_sms_text_payment_a   || smsPaymentText;
-  const smsPaymentTextB   = res?.kpsc_sms_text_payment_b   || smsPaymentText;
-  const smsPaymentTextC   = res?.kpsc_sms_text_payment_c   || smsPaymentText;
+  const smsPaymentTextB   = res?.kpsc_sms_text_payment_b   || SMS_DEFAULTS.paymentB;
+  const smsPaymentTextC   = res?.kpsc_sms_text_payment_c   || SMS_DEFAULTS.paymentC;
   const smsNewmonthText   = res?.kpsc_sms_text_newmonth    || SMS_DEFAULTS.newmonth;
   const smsAnnivText      = res?.kpsc_sms_text_anniversary || SMS_DEFAULTS.anniversary;
   const smsMilestone6Text = res?.kpsc_sms_text_milestone6  || SMS_DEFAULTS.milestone6;
@@ -10939,8 +11060,8 @@ async function renderSettings(main) {
   const smsDeadlineText   = res?.kpsc_sms_text_deadline    || SMS_DEFAULTS.deadline;
   const smsReminderText   = res?.kpsc_sms_text_reminder    || SMS_DEFAULTS.reminder;
   const smsReminderTextA  = res?.kpsc_sms_text_reminder_a  || smsReminderText;
-  const smsReminderTextB  = res?.kpsc_sms_text_reminder_b  || smsReminderText;
-  const smsReminderTextC  = res?.kpsc_sms_text_reminder_c  || smsReminderText;
+  const smsReminderTextB  = res?.kpsc_sms_text_reminder_b  || SMS_DEFAULTS.reminderB;
+  const smsReminderTextC  = res?.kpsc_sms_text_reminder_c  || SMS_DEFAULTS.reminderC;
   const cadenceOptions = [
     { value: 'none',              label: 'No fixed cadence' },
     { value: 'weekly:sun',        label: 'Weekly on Sunday' },
@@ -11253,7 +11374,7 @@ async function renderSettings(main) {
           <strong>Anniversary:</strong> <code>{{name}}</code>, <code>{{ordinal}}</code>, <code>{{years}}</code><br>
           <strong>Pre-Meeting:</strong> <code>{{name}}</code>, <code>{{meetingTitle}}</code>, <code>{{meetingDate}}</code>, <code>{{meetingTime}}</code>, <code>{{venue}}</code><br>
           <strong>Deadline:</strong> <code>{{name}}</code>, <code>{{task}}</code>, <code>{{dueDate}}</code><br>
-          <strong>Payment Reminder:</strong> <code>{{name}}</code>, <code>{{month}}</code>, <code>{{unpaidMonths}}</code> <em>(comma-separated list of outstanding months)</em></p>
+          <strong>Payment Reminder:</strong> <code>{{name}}</code>, <code>{{month}}</code> <em>(current month)</em>, <code>{{unpaidMonths}}</code> <em>(comma-separated list of every outstanding month, e.g. "May" or "May, June")</em></p>
         <div class="k-form-group">
           <label class="k-label">👋 Welcome SMS (new partner)</label>
           <textarea id="ks-sms-welcome" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="Dear {{name}}, welcome to the RCCG Kingdom Parish family! 🎉 We are so glad to have you as a partner in this beautiful journey of faith. Your support means the world to us, and we pray that God will bless you richly — spiritually and in all your endeavours. You are loved! — RCCG Kingdom Parish">${esc(smsWelcomeText)}</textarea>
@@ -11309,7 +11430,7 @@ async function renderSettings(main) {
         </div>
         <div class="k-form-group">
           <label class="k-label">💰 Payment Reminder SMS — 3 Rotating Templates</label>
-          <p class="k-hint" style="margin-bottom:8px">These 3 templates rotate per partner based on how many reminders they have previously received. Variables: <code>{{name}}</code> · <code>{{month}}</code> · <code>{{unpaidMonths}}</code> (list of outstanding months)</p>
+          <p class="k-hint" style="margin-bottom:8px">These 3 templates rotate per partner based on how many reminders they have previously received. Variables: <code>{{name}}</code> · <code>{{month}}</code> (current month) · <code>{{unpaidMonths}}</code> (comma-separated list of every outstanding month, e.g. "May" or "May, June")</p>
           <label class="k-label" style="font-size:12px;color:var(--text3)">Template A (1st, 4th, 7th… reminder)</label>
           <textarea id="ks-sms-reminder-a" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)">${esc(smsReminderTextA)}</textarea>
           <div class="k-sms-counter" id="sms-ctr-ks-sms-reminder-a"></div>
@@ -16202,6 +16323,8 @@ window.Kpsc = {
   debouncedSaveReminderTemplate,
   setReportsYear,
   setProgressMonth,
+  setProgressFilter,
+  setProgressSearch,
   setReportsMonth,
   setReportsFilter,
   setReportsSearch,
