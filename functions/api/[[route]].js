@@ -157,14 +157,14 @@ async function getTermiiSettings(DB) {
     milestone12Text: String(map.kpsc_sms_text_milestone12 || '').trim() || '🏆 Praise God! Dear {{name}}, you have completed a FULL YEAR of faithful partnership with RCCG Kingdom Parish! Your commitment has been a tremendous blessing. May God reward you a hundredfold! 🙏 — RCCG Kingdom Parish',
     premeetingText:  String(map.kpsc_sms_text_premeeting  || '').trim() || '📅 Reminder: KPSC Committee Meeting "{{meetingTitle}}" is scheduled for tomorrow ({{meetingDate}}{{meetingTime}}). {{venue}}Please come prepared. — RCCG Kingdom Parish Secretary',
     deadlineText:    String(map.kpsc_sms_text_deadline     || '').trim() || '⏰ Reminder: Your action item "{{task}}" is due in 3 days ({{dueDate}}). Please ensure timely completion. — RCCG Kingdom Parish KPSC',
-    reminderText:    String(map.kpsc_sms_text_reminder    || '').trim() || 'Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God\'s work and your own blessing. "...he who sows generously will also reap generously." (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family',
+    reminderText:    String(map.kpsc_sms_text_reminder    || '').trim() || 'Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{unpaidMonths}} is still outstanding. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God\'s work and your own blessing. "...he who sows generously will also reap generously." (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family',
     // Rotating template variants — fall back to base template if not set
     paymentTextA:    String(map.kpsc_sms_text_payment_a   || '').trim() || String(map.kpsc_sms_text_payment || '').trim() || 'Dear {{name}}, thank you for your {{month}} partnership payment{{amtText}}. Your seed is a blessing to the Kingdom. God will reward you abundantly! — RCCG Kingdom Parish',
     paymentTextB:    String(map.kpsc_sms_text_payment_b   || '').trim() || String(map.kpsc_sms_text_payment || '').trim() || 'Dear {{name}}, we received your {{month}} partnership payment{{amtText}}. What a faithful heart you have! The Lord sees every seed you sow for His Kingdom. God bless you richly! — RCCG Kingdom Parish',
     paymentTextC:    String(map.kpsc_sms_text_payment_c   || '').trim() || String(map.kpsc_sms_text_payment || '').trim() || 'Praise God, {{name}}! Your {{month}} partnership gift{{amtText}} has been received. "Bring the whole tithe into the storehouse..." (Mal 3:10). We are grateful for your faithfulness. — RCCG Kingdom Parish',
-    reminderTextA:   String(map.kpsc_sms_text_reminder_a  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. When you are able, please do honour your pledge. God bless you! — RCCG Kingdom Parish',
-    reminderTextB:   String(map.kpsc_sms_text_reminder_b  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Dear {{name}}, we want to gently remind you that your {{month}} partnership pledge{{unpaidMonths}} is still outstanding. Your consistent support is what keeps God\'s work moving forward. We appreciate you! — RCCG Kingdom Parish',
-    reminderTextC:   String(map.kpsc_sms_text_reminder_c  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Hello {{name}} 🙏 A warm reminder that your {{month}} partnership pledge{{unpaidMonths}} remains outstanding. "He who is faithful in a little is also faithful in much." (Luke 16:10). We trust in your faithfulness. God bless! — RCCG Kingdom Parish',
+    reminderTextA:   String(map.kpsc_sms_text_reminder_a  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{unpaidMonths}} is still outstanding. When you are able, please do honour your pledge. God bless you! — RCCG Kingdom Parish',
+    reminderTextB:   String(map.kpsc_sms_text_reminder_b  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Dear {{name}}, we want to gently remind you that your partnership pledge for {{unpaidMonths}} is still outstanding. Your consistent support is what keeps God\'s work moving forward. We appreciate you! — RCCG Kingdom Parish',
+    reminderTextC:   String(map.kpsc_sms_text_reminder_c  || '').trim() || String(map.kpsc_sms_text_reminder || '').trim() || 'Hello {{name}} 🙏 A warm reminder that your partnership pledge for {{unpaidMonths}} remains outstanding. "He who is faithful in a little is also faithful in much." (Luke 16:10). We trust in your faithfulness. God bless! — RCCG Kingdom Parish',
   };
 }
 
@@ -7414,9 +7414,12 @@ async function executeReminderRun(DB, opts = {}) {
     const paidSet = new Set((paidRows || []).map(r => `${r.year}-${r.month}`));
     const unpaidMonthsList = computeUnpaidMonths(paidSet, { year, month, startDate: p.start_date || null });
 
-    const unpaidMonthsStr = unpaidMonthsList.length > 1
-      ? ` (outstanding months: ${unpaidMonthsList.join(', ')})`
-      : '';
+    // Plain comma-separated list of outstanding month names (e.g. "May" or
+    // "May, June"). Always populated so templates can use it mid-sentence.
+    // Falls back to the current month name if nothing is computed.
+    const unpaidMonthsStr = unpaidMonthsList.length
+      ? unpaidMonthsList.join(', ')
+      : monthName;
 
     // Rotating reminder template: pick A/B/C based on how many reminders this
     // partner has actually received (failed/skipped rows must not rotate it).

@@ -6719,6 +6719,26 @@ function partnerMonthlyPaid(partnerId, month, year = currentYear()) {
   );
 }
 
+// Comma-separated list of a partner's unpaid month names over the last 12
+// months, excluding months before they joined (month-granular). Mirrors the
+// backend computeUnpaidMonths() so {{unpaidMonths}} reads the same whether a
+// reminder is sent by the cron or manually from the Reminders page. Always
+// returns at least the current month name.
+function computeUnpaidMonthsStr(partner, month, year) {
+  let lbYear = year, lbMonth = month - 11;
+  if (lbMonth < 1) { lbMonth += 12; lbYear--; }
+  let startOrdinal = -Infinity;
+  const sd = /^(\d{4})-(\d{2})/.exec(String(partner?.startDate || ''));
+  if (sd) startOrdinal = Number(sd[1]) * 12 + Number(sd[2]);
+  const out = [];
+  for (let y = lbYear, m = lbMonth; (y < year) || (y === year && m <= month); ) {
+    const ordinal = y * 12 + m;
+    if (!partnerMonthlyPaid(partner.id, m, y) && ordinal >= startOrdinal) out.push(monthName(m));
+    if (++m > 12) { m = 1; y++; }
+  }
+  return out.length ? out.join(', ') : monthName(month);
+}
+
 async function renderPartners(main) {
   await loadPartnerData(S.partnersYear);
   const canManage = canManagePartners();
@@ -8183,7 +8203,7 @@ async function renderReminders(main) {
         <p class="k-hint">${unpaid.length} unpaid active partner(s) for ${monthName(month)} ${year}.</p>
         <label class="k-label">Reminder Message Template</label>
         <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message" oninput="Kpsc.debouncedSaveReminderTemplate(this)">${esc(defaultTemplate)}</textarea>
-        <p class="k-hint">Use <code>{{name}}</code> for partner name and <code>{{month}}</code> for month name.</p>
+        <p class="k-hint">Use <code>{{name}}</code> for partner name, <code>{{month}}</code> for the current month, and <code>{{unpaidMonths}}</code> for the list of every outstanding month (e.g. "May" or "May, June").</p>
         <div class="k-room-actions" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="kbtn kbtn-primary" onclick="Kpsc.sendBulkReminders(this)">Send Bulk Reminders (${unpaid.length})</button>
           <button class="kbtn kbtn-ghost" onclick="Kpsc.navigate('sms_logs')">📋 SMS Logs &amp; Delivery</button>
@@ -8525,7 +8545,8 @@ function copyReminderMessage(partnerId) {
     const template = document.getElementById('krem-message')?.value.trim() || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge.';
     message = template
       .replace(/\{\{name\}\}/g, partner.fullName)
-      .replace(/\{\{month\}\}/g, monthName(currentMonth()));
+      .replace(/\{\{month\}\}/g, monthName(currentMonth()))
+      .replace(/\{\{unpaidMonths\}\}/g, computeUnpaidMonthsStr(partner, currentMonth(), currentYear()));
   }
   navigator.clipboard.writeText(message).then(() => {
     showToast(`Reminder copied for ${partner.fullName}`, 'success');
@@ -8572,8 +8593,14 @@ function openPersonalizeModal(partner, variants, fallbackTemplate, month, year) 
   modal.id = 'k-personalize-modal';
   modal.className = 'k-modal-overlay';
 
+  const unpaidStr = computeUnpaidMonthsStr(partner, month, year);
+  const resolveVars = (s) => String(s)
+    .replace(/\{\{name\}\}/g, partner.fullName)
+    .replace(/\{\{month\}\}/g, monthName(month))
+    .replace(/\{\{unpaidMonths\}\}/g, unpaidStr);
+
   const variantCards = variants.map((v, i) => {
-    const resolved = v.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month));
+    const resolved = resolveVars(v);
     return `
       <div class="k-remind-variant-card">
         <div class="k-remind-variant-text">${esc(resolved)}</div>
@@ -8581,9 +8608,7 @@ function openPersonalizeModal(partner, variants, fallbackTemplate, month, year) 
       </div>`;
   }).join('');
 
-  const fallbackResolved = fallbackTemplate
-    .replace(/\{\{name\}\}/g, partner.fullName)
-    .replace(/\{\{month\}\}/g, monthName(month));
+  const fallbackResolved = resolveVars(fallbackTemplate);
 
   modal.innerHTML = `
     <div class="k-modal">
@@ -8602,7 +8627,7 @@ function openPersonalizeModal(partner, variants, fallbackTemplate, month, year) 
     </div>`;
 
   // Store resolved variants on the modal element for retrieval
-  modal._variants = variants.map(v => v.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month)));
+  modal._variants = variants.map(resolveVars);
   modal._fallback = fallbackResolved;
 
   document.body.appendChild(modal);
@@ -8653,7 +8678,10 @@ async function sendBulkReminders(btn) {
     // Use personalized message if the secretary approved one, else fall back to template
     const message = _personalizedMessages.has(partner.id)
       ? _personalizedMessages.get(partner.id)
-      : template.replace(/\{\{name\}\}/g, partner.fullName).replace(/\{\{month\}\}/g, monthName(month));
+      : template
+          .replace(/\{\{name\}\}/g, partner.fullName)
+          .replace(/\{\{month\}\}/g, monthName(month))
+          .replace(/\{\{unpaidMonths\}\}/g, computeUnpaidMonthsStr(partner, month, year));
     return apiPost('kpsc-reminders', {
       partnerId: partner.id,
       year,
@@ -11011,7 +11039,7 @@ async function renderSettings(main) {
     milestone12:`🏆 A FULL YEAR of faithful partnership — Glory to God! 🎉 Dear {{name}}, what an incredible milestone! Psalm 1:3 declares you shall be like a tree planted by rivers of water, bringing forth fruit in season. We declare over you a harvest of extraordinary blessings, divine health, and open heavens this year and beyond. You are a champion! — RCCG Kingdom Parish 💙`,
     premeeting: `Hello {{name}} 👋 This is a warm reminder that our KPSC meeting, '{{meetingTitle}}', is coming up tomorrow, {{meetingDate}}{{meetingTime}}{{venue}}. Your presence is very important to us — your voice and wisdom help shape our church family. Please come prepared and prayed up! God bless you. — RCCG Kingdom Parish Stewardship Committee`,
     deadline:   `Hello {{name}} 🔔 A quick and loving reminder: your action item '{{task}}' is due in 3 days ({{dueDate}}). We trust you are making great progress! If you need any support, please let us know. Together we are building something wonderful for God. Thank you for your dedication! — RCCG Kingdom Parish Stewardship Committee`,
-    reminder:   `Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{month}} is still outstanding{{unpaidMonths}}. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God's work and your own blessing. "...he who sows generously will also reap generously." (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family`,
+    reminder:   `Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{unpaidMonths}} is still outstanding. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God's work and your own blessing. "...he who sows generously will also reap generously." (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family`,
   };
   const smsWelcomeText    = res?.kpsc_sms_text_welcome     || SMS_DEFAULTS.welcome;
   const smsPaymentText    = res?.kpsc_sms_text_payment     || SMS_DEFAULTS.payment;
@@ -11340,7 +11368,7 @@ async function renderSettings(main) {
           <strong>Anniversary:</strong> <code>{{name}}</code>, <code>{{ordinal}}</code>, <code>{{years}}</code><br>
           <strong>Pre-Meeting:</strong> <code>{{name}}</code>, <code>{{meetingTitle}}</code>, <code>{{meetingDate}}</code>, <code>{{meetingTime}}</code>, <code>{{venue}}</code><br>
           <strong>Deadline:</strong> <code>{{name}}</code>, <code>{{task}}</code>, <code>{{dueDate}}</code><br>
-          <strong>Payment Reminder:</strong> <code>{{name}}</code>, <code>{{month}}</code>, <code>{{unpaidMonths}}</code> <em>(comma-separated list of outstanding months)</em></p>
+          <strong>Payment Reminder:</strong> <code>{{name}}</code>, <code>{{month}}</code> <em>(current month)</em>, <code>{{unpaidMonths}}</code> <em>(comma-separated list of every outstanding month, e.g. "May" or "May, June")</em></p>
         <div class="k-form-group">
           <label class="k-label">👋 Welcome SMS (new partner)</label>
           <textarea id="ks-sms-welcome" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="Dear {{name}}, welcome to the RCCG Kingdom Parish family! 🎉 We are so glad to have you as a partner in this beautiful journey of faith. Your support means the world to us, and we pray that God will bless you richly — spiritually and in all your endeavours. You are loved! — RCCG Kingdom Parish">${esc(smsWelcomeText)}</textarea>
@@ -11396,7 +11424,7 @@ async function renderSettings(main) {
         </div>
         <div class="k-form-group">
           <label class="k-label">💰 Payment Reminder SMS — 3 Rotating Templates</label>
-          <p class="k-hint" style="margin-bottom:8px">These 3 templates rotate per partner based on how many reminders they have previously received. Variables: <code>{{name}}</code> · <code>{{month}}</code> · <code>{{unpaidMonths}}</code> (list of outstanding months)</p>
+          <p class="k-hint" style="margin-bottom:8px">These 3 templates rotate per partner based on how many reminders they have previously received. Variables: <code>{{name}}</code> · <code>{{month}}</code> (current month) · <code>{{unpaidMonths}}</code> (comma-separated list of every outstanding month, e.g. "May" or "May, June")</p>
           <label class="k-label" style="font-size:12px;color:var(--text3)">Template A (1st, 4th, 7th… reminder)</label>
           <textarea id="ks-sms-reminder-a" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)">${esc(smsReminderTextA)}</textarea>
           <div class="k-sms-counter" id="sms-ctr-ks-sms-reminder-a"></div>
