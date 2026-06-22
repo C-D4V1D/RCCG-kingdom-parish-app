@@ -7580,12 +7580,16 @@ async function aiGenerateNewMonthSms(DB, env) {
   const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
   const now = new Date();
   const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const monthName = MONTH_NAMES[now.getUTCMonth()];
-  const year = now.getUTCFullYear();
+  // Draft is for NEXT month — this SMS is sent on the 1st of the coming month
+  const rawNext = now.getUTCMonth() + 2; // +1 for 0-index, +1 for next month
+  const nextYear = rawNext > 12 ? now.getUTCFullYear() + 1 : now.getUTCFullYear();
+  const nextMonth = rawNext > 12 ? 1 : rawNext;
+  const monthName = MONTH_NAMES[nextMonth - 1];
+  const year = nextYear;
 
   if (!deepseekKey) {
     return ok({
-      message: `Happy New Month! 🎉 Dear {{name}}, as we step into ${monthName} ${year}, we pray that God opens doors of blessing and favour for you this month. May His grace surround you and your household. Thank you for your faithful partnership with RCCG Kingdom Parish. We love and appreciate you! — RCCG Kingdom Parish Family 💙`,
+      message: `Happy New Month! Dear {{name}}, as we step into ${monthName} ${year}, we pray that God opens doors of blessing and favour for you. May His grace surround you and your household. Thank you for your faithful partnership with RCCG Kingdom Parish. — RCCG Kingdom Parish`,
       source: 'default',
     });
   }
@@ -7593,14 +7597,15 @@ async function aiGenerateNewMonthSms(DB, env) {
   const prompt = `You are a warm, loving communications writer for RCCG Kingdom Parish — a vibrant Nigerian church family. Write a Happy New Month SMS message to be sent to church partners on the 1st of ${monthName} ${year}.
 
 Requirements:
-- Begin with a warm greeting acknowledging the new month
-- Include an encouraging Bible verse relevant to the season (quote it fully)
-- Add a short, heartfelt prayer or blessing for the month
+- Begin with "Happy New Month!"
+- Address the partner by name using the placeholder {{name}}
+- Include a short encouraging scripture or faith statement
+- Add a brief blessing or prayer for the month
 - Express gratitude for the partner's faithful giving/partnership
 - Close warmly in the name of RCCG Kingdom Parish
 - Tone: warm, loving, family-like — like a message from a caring church family
-- Length: no more than 2 SMS pages (max ~320 characters per page, so aim for 500–600 characters total)
-- Use simple, clear English that is easy to read and engaging
+- CRITICAL length rule: max 459 characters total (3 GSM-7 multi-page SMS pages at 153 chars each). Aim for 300-450 characters.
+- Use ONLY standard GSM-7 characters: plain letters, numbers, common punctuation (., , ! ? - ' : ;). NO emojis, NO special Unicode.
 - The message should use {{name}} as a placeholder for the partner's first name
 - Do NOT include any markdown, asterisks, or formatting symbols
 - Return only the plain SMS text, nothing else`;
@@ -7609,12 +7614,14 @@ Requirements:
     const resp = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
-      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 400, temperature: 0.7 }),
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 320, temperature: 0.7 }),
     });
     if (!resp.ok) throw new Error(`DeepSeek ${resp.status}`);
     const data = await resp.json();
-    const message = (data.choices?.[0]?.message?.content || '').trim();
+    let message = (data.choices?.[0]?.message?.content || '').trim();
     if (!message) throw new Error('Empty response');
+    // Hard-trim to 459 chars if AI exceeded the limit
+    if (message.length > 459) message = message.slice(0, 459).replace(/\s+\S*$/, '');
     return ok({ message, source: 'ai' });
   } catch (e) {
     return err(`AI generation failed: ${e.message}`, 500);
@@ -8933,9 +8940,16 @@ async function runScheduledSms(DB, env, request) {
   return ok({ ok: true, processed });
 }
 
-// ── AUTO-DRAFT: HAPPY NEW MONTH SMS (runs on 3rd of each month via cron) ──────
-async function autoGenerateNewMonthDraft(DB, env) {
+// ── AUTO-DRAFT: HAPPY NEW MONTH SMS ──────────────────────────────────────────
+// Called on day 1 (after send) and on day 3 as a fallback.
+// skipIfExists=true lets the day-3 backup skip quietly when day-1 already succeeded.
+async function autoGenerateNewMonthDraft(DB, env, skipIfExists = false) {
   try {
+    if (skipIfExists) {
+      const existing = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_newmonth_sms_pending_draft'`).first().catch(() => null);
+      if (existing?.value?.trim()) return; // day-1 draft already in place
+    }
+
     const now = new Date();
     // Determine next month
     const rawNext = now.getUTCMonth() + 2; // +1 for 0-index, +1 for next month
@@ -8944,14 +8958,7 @@ async function autoGenerateNewMonthDraft(DB, env) {
     const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     const monthLabel = MONTH_NAMES[nextMonth - 1];
 
-    // Load DeepSeek key
-    const { results: dsRows } = await DB.prepare(
-      `SELECT key, value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
-    ).all();
-    const dsMap = {};
-    for (const r of (dsRows || [])) dsMap[r.key] = r.value;
-    const deepseekKey = String(dsMap.ai_deepseek_key || '').trim();
-    const deepseekModel = String(dsMap.ai_deepseek_model || 'deepseek-chat').trim();
+    const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
     if (!deepseekKey) return;
 
     const prompt = `Write a warm, faith-filled Happy New Month SMS message for RCCG Kingdom Parish church partners for the month of ${monthLabel} ${nextYear}.
@@ -8960,9 +8967,9 @@ Requirements:
 - Address the partner by name using the placeholder {{name}}
 - Include a short encouraging Bible verse or faith statement
 - Warm, personal, blessing-focused tone
-- CRITICAL: Total message must be between 306 and 459 characters (2-3 GSM-7 SMS pages at 153 chars each)
+- CRITICAL length rule: max 459 characters total (3 GSM-7 multi-page SMS pages at 153 chars each). Aim for 300-450 characters.
 - Use ONLY standard GSM-7 characters: plain letters, numbers, common punctuation (., , ! ? - ' : ;). NO emojis, NO special Unicode.
-- End with a blessing or prayer
+- End with a blessing or prayer for the month
 - Output only the SMS text, no preamble or explanation`;
 
     const resp = await fetch('https://api.deepseek.com/chat/completions', {
@@ -8971,14 +8978,16 @@ Requirements:
       body: JSON.stringify({
         model: deepseekModel,
         messages: [{ role: 'user', content: prompt }],
-        max_tokens: 220,
+        max_tokens: 320,
         temperature: 0.8,
       }),
     });
     if (!resp.ok) return;
     const aiData = await resp.json();
-    const draftText = aiData?.choices?.[0]?.message?.content?.trim() || '';
+    let draftText = aiData?.choices?.[0]?.message?.content?.trim() || '';
     if (!draftText) return;
+    // Hard-trim to 459 chars if AI exceeded the limit
+    if (draftText.length > 459) draftText = draftText.slice(0, 459).replace(/\s+\S*$/, '');
 
     const upsert = (key, val) =>
       DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
@@ -8996,12 +9005,16 @@ export async function scheduled(event, env, ctx) {
   if (!DB) return;
   const now = new Date();
   const day = now.getUTCDate();
-  if (day === 3) {
-    ctx.waitUntil(autoGenerateNewMonthDraft(DB, env));
-  }
   if (day === 1) {
-    // Build a minimal fake request for runMonthlySms (it validates cron secret on HTTP calls only)
-    ctx.waitUntil(runMonthlySmsInternal(DB, now));
+    // Send the Happy New Month SMS, then immediately draft next month's message.
+    ctx.waitUntil((async () => {
+      await runMonthlySmsInternal(DB, now);
+      await autoGenerateNewMonthDraft(DB, env);
+    })());
+  }
+  if (day === 3) {
+    // Backup: generate next-month draft only if day-1 generation failed (skipIfExists=true).
+    ctx.waitUntil(autoGenerateNewMonthDraft(DB, env, true));
   }
 }
 
