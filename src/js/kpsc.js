@@ -11040,12 +11040,18 @@ async function renderSettings(main) {
     premeeting: `Hello {{name}} 👋 This is a warm reminder that our KPSC meeting, '{{meetingTitle}}', is coming up tomorrow, {{meetingDate}}{{meetingTime}}{{venue}}. Your presence is very important to us — your voice and wisdom help shape our church family. Please come prepared and prayed up! God bless you. — RCCG Kingdom Parish Stewardship Committee`,
     deadline:   `Hello {{name}} 🔔 A quick and loving reminder: your action item '{{task}}' is due in 3 days ({{dueDate}}). We trust you are making great progress! If you need any support, please let us know. Together we are building something wonderful for God. Thank you for your dedication! — RCCG Kingdom Parish Stewardship Committee`,
     reminder:   `Dear {{name}} 🙏 This is a gentle and loving reminder that your partnership pledge for {{unpaidMonths}} is still outstanding. We fully understand that life can be unpredictable, and we want you to know there is no judgment — only love. When you are able, please do honour your pledge, for it is a seed sown for God's work and your own blessing. "...he who sows generously will also reap generously." (2 Cor 9:6). God bless you! — RCCG Kingdom Parish Family`,
+    // Rotating thank-you variants B & C (A falls back to `payment` above)
+    paymentB:   `Dear {{name}}, we have received your {{month}} partnership pledge{{amtText}} and our hearts are full of thanks! Your faithfulness keeps God's work moving here at Kingdom Parish. May the Lord bless you in return - good measure, pressed down and overflowing. God bless you! - RCCG Kingdom Parish`,
+    paymentC:   `Praise God, {{name}}! Your {{month}} partnership pledge{{amtText}} has been received with deep gratitude. Thank you for sowing faithfully into God's house. May every seed you plant return to you in blessing, health and favour. We celebrate you! God bless you! - RCCG Kingdom Parish`,
+    // Rotating reminder variants B & C (A falls back to `reminder` above)
+    reminderB:  `Dear {{name}}, we warmly remember you in our prayers. Your partnership pledge for {{unpaidMonths}} is still outstanding. Whenever you are able, kindly honour it - every seed you sow blesses God's work and returns to you. We are grateful for you. God bless you! - RCCG Kingdom Parish Family`,
+    reminderC:  `Hello {{name}}, grace and peace to you. This is a gentle reminder that your pledge for {{unpaidMonths}} remains unpaid. There is no pressure, only love - when the Lord enables you, please sow your seed. We are praying with you. God bless you! - RCCG Kingdom Parish Family`,
   };
   const smsWelcomeText    = res?.kpsc_sms_text_welcome     || SMS_DEFAULTS.welcome;
   const smsPaymentText    = res?.kpsc_sms_text_payment     || SMS_DEFAULTS.payment;
   const smsPaymentTextA   = res?.kpsc_sms_text_payment_a   || smsPaymentText;
-  const smsPaymentTextB   = res?.kpsc_sms_text_payment_b   || smsPaymentText;
-  const smsPaymentTextC   = res?.kpsc_sms_text_payment_c   || smsPaymentText;
+  const smsPaymentTextB   = res?.kpsc_sms_text_payment_b   || SMS_DEFAULTS.paymentB;
+  const smsPaymentTextC   = res?.kpsc_sms_text_payment_c   || SMS_DEFAULTS.paymentC;
   const smsNewmonthText   = res?.kpsc_sms_text_newmonth    || SMS_DEFAULTS.newmonth;
   const smsAnnivText      = res?.kpsc_sms_text_anniversary || SMS_DEFAULTS.anniversary;
   const smsMilestone6Text = res?.kpsc_sms_text_milestone6  || SMS_DEFAULTS.milestone6;
@@ -11054,8 +11060,8 @@ async function renderSettings(main) {
   const smsDeadlineText   = res?.kpsc_sms_text_deadline    || SMS_DEFAULTS.deadline;
   const smsReminderText   = res?.kpsc_sms_text_reminder    || SMS_DEFAULTS.reminder;
   const smsReminderTextA  = res?.kpsc_sms_text_reminder_a  || smsReminderText;
-  const smsReminderTextB  = res?.kpsc_sms_text_reminder_b  || smsReminderText;
-  const smsReminderTextC  = res?.kpsc_sms_text_reminder_c  || smsReminderText;
+  const smsReminderTextB  = res?.kpsc_sms_text_reminder_b  || SMS_DEFAULTS.reminderB;
+  const smsReminderTextC  = res?.kpsc_sms_text_reminder_c  || SMS_DEFAULTS.reminderC;
   const cadenceOptions = [
     { value: 'none',              label: 'No fixed cadence' },
     { value: 'weekly:sun',        label: 'Weekly on Sunday' },
