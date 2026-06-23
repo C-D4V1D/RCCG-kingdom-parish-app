@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<meta name="theme-color" content="#0F6E56"/>
+<title>RCCG Monthly Financial Statement</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,Arial,sans-serif;font-size:14px;color:#1a1a1a;background:#f0f4f0;min-height:100vh}
+@media print{
+  @page{margin:14mm 12mm;size:A4}
+  body{background:#fff;font-size:13px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .no-print{display:none!important}
+  .page-wrap{box-shadow:none;border-radius:0;padding:0;margin:0;max-width:none}
+  .section-title.collapsible{background:#0F6E56!important;color:#fff!important;border-radius:0!important;cursor:default!important}
+  .collapsible-body{display:block!important}
+  .card-list{display:none!important}
+  .table-wrap{display:block!important;overflow:visible!important}
+  table{min-width:0!important}
+}
+.top-bar{background:#0F6E56;color:#fff;padding:10px 16px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:20;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+.top-bar-brand{flex:1;min-width:0}
+.top-bar-name{font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.top-bar-sub{font-size:11px;opacity:.75;margin-top:1px}
+.top-bar-actions{display:flex;gap:8px;flex-shrink:0}
+.action-btn{background:rgba(255,255,255,.15);color:#fff;border:1.5px solid rgba(255,255,255,.4);padding:7px 14px;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;transition:background .15s}
+.action-btn:hover{background:rgba(255,255,255,.25)}
+.action-btn.primary{background:#fff;color:#0F6E56;border-color:#fff}
+.action-btn.primary:hover{background:#e8f4f0}
+@media(max-width:500px){.action-btn span.label{display:none}}
+.page-wrap{max-width:900px;margin:14px auto 24px;background:#fff;border-radius:12px;box-shadow:0 2px 16px rgba(0,0,0,.07);padding:26px 22px 40px}
+@media(max-width:600px){.page-wrap{border-radius:0;margin:0;padding:18px 12px 32px;box-shadow:none}}
+.report-header{text-align:center;padding-bottom:16px;border-bottom:3px double #0F6E56;margin-bottom:22px}
+.org-name{font-size:21px;font-weight:700;color:#0F6E56;letter-spacing:.4px;text-transform:uppercase}
+.org-addr{font-size:12px;color:#666;margin-top:3px}
+.report-title{font-size:16px;font-weight:700;color:#333;margin-top:7px;text-transform:uppercase;letter-spacing:.4px}
+.report-period{font-size:13px;color:#555;margin-top:3px}
+.report-meta{font-size:12px;color:#777;margin-top:6px;line-height:1.6}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:22px}
+@media(max-width:480px){.kpi-grid{grid-template-columns:repeat(2,1fr)}}
+.kpi-tile{border:1px solid #e0e0e0;border-radius:10px;padding:14px 12px;text-align:center;background:#fff}
+.kpi-val{font-size:19px;font-weight:700;color:#0F6E56;margin-bottom:3px;word-break:break-all}
+.kpi-lbl{font-size:10.5px;color:#666;text-transform:uppercase;letter-spacing:.5px}
+.kpi-tile.red .kpi-val{color:#c0392b}
+.kpi-tile.blue .kpi-val{color:#185FA5}
+.section{margin-bottom:18px}
+.section-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#0F6E56;padding:11px 14px;margin-bottom:0;display:flex;align-items:center;justify-content:space-between;background:#e8f4f0;border:1.5px solid #b2d8cc;border-radius:8px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.section-title.open{border-radius:8px 8px 0 0;border-bottom:none;background:#0F6E56;color:#fff}
+.section-title .sub{font-weight:normal;font-size:11px;opacity:.85;text-transform:none;letter-spacing:0;margin-left:8px}
+.toggle-arrow{display:inline-block;transition:transform .2s;font-style:normal}
+.section-title.open .toggle-arrow{transform:rotate(180deg)}
+.collapsible-body{display:none;border:1.5px solid #b2d8cc;border-top:none;border-radius:0 0 8px 8px;overflow:hidden;margin-bottom:6px;padding:0}
+.collapsible-body.open{display:block}
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#0F6E56;color:#fff;padding:9px 10px;text-align:left;font-size:12px;font-weight:700;letter-spacing:.3px;white-space:nowrap}
+td{padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;vertical-align:middle}
+tr:nth-child(even) td{background:#f8fbf8}
+.td-r{text-align:right;font-weight:600}
+.td-c{text-align:center}
+.td-indent{padding-left:24px;color:#555;font-style:italic}
+.grn{color:#0F6E56}
+.red{color:#c0392b}
+.muted{color:#888;font-size:12px}
+.total-row td{border-top:2.5px solid #333;font-weight:700;font-size:13.5px;padding:10px;background:#f5f5f5!important}
+.net-row td{background:#e8f4f0!important;font-weight:700;font-size:13.5px;padding:10px;border-top:2px solid #0F6E56;color:#0F6E56}
+.paid-row td{background:#e8f4f0!important;font-weight:600;color:#0F6E56}
+.deduct-row td{color:#555}
+.wide{min-width:640px}
+.badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px}
+.badge-success{background:#EAF3DE;color:#3B6D11}
+.badge-warn{background:#FAEEDA;color:#BA7517}
+.badge-info{background:#E6F1FB;color:#185FA5}
+/* Mobile card lists for summary sections */
+.card-list{display:none;padding:12px}
+@media(max-width:640px){
+  .card-toggle .table-wrap{display:none}
+  .card-toggle .card-list{display:block}
+  .wide{min-width:560px}
+}
+.sum-card{border:1px solid #e0ece0;border-radius:8px;padding:11px 13px;margin-bottom:8px;background:#fff}
+.sum-card:last-child{margin-bottom:0}
+.sum-card-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.sum-card-label{font-weight:600;font-size:13px;color:#1a1a1a}
+.sum-card-amt{font-weight:700;font-size:14px;color:#0F6E56}
+.sum-card-sub{font-size:11px;color:#777;margin-top:3px}
+.note-box{background:#fff8e1;border:1px solid #f0c040;border-radius:8px;padding:11px 14px;font-size:12.5px;margin:12px 0;color:#7a5200;line-height:1.6}
+.sig-section{margin-top:30px;page-break-inside:avoid}
+.sig-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:26px}
+@media(max-width:600px){.sig-grid{grid-template-columns:1fr;gap:30px}}
+.sig-box{border-top:1px solid #bbb;padding-top:8px;font-size:12px;color:#666;text-align:center;line-height:1.7}
+.sig-box .sig-name{font-weight:600;color:#333;margin-top:30px}
+#loading-state{text-align:center;padding:60px 20px;color:#555;font-size:15px;background:#fff;border-radius:12px;margin:14px}
+#error-state{display:none;text-align:center;padding:60px 20px;color:#c0392b;font-size:14px;background:#fff;border-radius:12px;margin:14px}
+.skeleton{background:linear-gradient(90deg,#eee 25%,#f5f5f5 50%,#eee 75%);background-size:200% 100%;animation:shimmer 1.4s infinite;border-radius:6px;height:14px;margin:8px 0}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+</style>
+</head>
+<body>
+<div class="top-bar">
+  <div class="top-bar-brand">
+    <div class="top-bar-name" id="topBarName">Monthly Financial Statement</div>
+    <div class="top-bar-sub" id="topBarPeriod">Loading…</div>
+  </div>
+  <div class="top-bar-actions no-print">
+    <button class="action-btn primary" onclick="downloadPdf()" id="pdfBtn">
+      <span>⬇</span><span class="label"> Download PDF</span>
+    </button>
+    <button class="action-btn" onclick="window.print()">
+      <span>🖨</span><span class="label"> Print</span>
+    </button>
+  </div>
+</div>
+
+<div id="loading-state">
+  <div style="font-size:24px;margin-bottom:10px">⏳</div>
+  Loading statement…
+  <div class="skeleton" style="max-width:300px;margin:20px auto"></div>
+  <div class="skeleton" style="max-width:220px;margin:6px auto"></div>
+</div>
+<div id="error-state">
+  <div style="font-size:40px;margin-bottom:12px">🔍</div>
+  <div id="error-msg">Statement not found.</div>
+  <div style="font-size:12px;color:#888;margin-top:8px">This link may be invalid or the statement has been deleted.</div>
+</div>
+
+<div id="report-root" style="display:none;padding:0 12px">
+  <div class="page-wrap" id="reportContent">
+    <div class="report-header">
+      <div class="org-name" id="rptChurchName">—</div>
+      <div class="org-addr" id="rptChurchAddr"></div>
+      <div class="report-title">Monthly Financial Statement</div>
+      <div class="report-period" id="rptPeriod"></div>
+      <div class="report-meta" id="rptMeta">—</div>
+    </div>
+    <div class="kpi-grid" id="kpiGrid"></div>
+    <div id="sections"></div>
+    <div class="sig-section" id="sigSection"></div>
+    <p style="text-align:center;font-size:10px;color:#bbb;margin-top:30px">Generated via RCCG Kingdom Parish Admin App</p>
+  </div>
+</div>
+
+<script>
+const N = v => '₦' + (Number(v)||0).toLocaleString('en-NG', {minimumFractionDigits:2,maximumFractionDigits:2});
+const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+function toggle(el){
+  el.classList.toggle('open');
+  el.nextElementSibling.classList.toggle('open');
+}
+
+function statusBadge(s){
+  if(s==='Deposited') return '<span class="badge badge-success">Deposited</span>';
+  if(s==='Partial') return '<span class="badge badge-warn">Partial</span>';
+  if(s==='Pending') return '<span class="badge badge-warn">Pending</span>';
+  return '<span class="badge badge-info">No Cash</span>';
+}
+
+// Build a collapsible section. open=true expands by default.
+// cardToggle=true swaps table↔cards on mobile.
+function section(title, sub, innerHTML, open, cardToggle){
+  return `<div class="section ${cardToggle?'card-toggle':''}">
+    <div class="section-title collapsible ${open?'open':''}" onclick="toggle(this)">
+      <span>${esc(title)}${sub?`<span class="sub">${esc(sub)}</span>`:''}</span><span class="toggle-arrow">▼</span>
+    </div>
+    <div class="collapsible-body ${open?'open':''}">${innerHTML}</div>
+  </div>`;
+}
+
+function renderReport(resp){
+  const D = resp.data || {};
+  const period = D.periodLabel || '';
+  document.getElementById('topBarName').textContent = D.churchName || 'Monthly Financial Statement';
+  document.getElementById('topBarPeriod').textContent = period;
+  document.title = `Monthly Statement — ${period}`;
+  document.getElementById('rptChurchName').textContent = D.churchName || '—';
+  document.getElementById('rptChurchAddr').textContent = D.churchAddress || '';
+  document.getElementById('rptPeriod').textContent = period;
+  document.getElementById('rptMeta').innerHTML =
+    `<strong>Shared by:</strong> ${esc(resp.createdBy||D.preparedBy||'—')} &nbsp;|&nbsp; <strong>No. of Sundays:</strong> ${D.sundayCount||0}`;
+
+  // KPIs
+  document.getElementById('kpiGrid').innerHTML = [
+    {lbl:'Total Income', val:N(D.totalIncome), cls:''},
+    {lbl:'Total Expenses', val:N(D.totalExpenses), cls:'red'},
+    {lbl:'Remittances Due', val:N(D.totalRemDue), cls:'red'},
+    {lbl:'Net Parish Balance', val:N(D.netPositionExChildren), cls:(D.netPositionExChildren>=0?'':'red')},
+  ].map(k=>`<div class="kpi-tile ${k.cls}"><div class="kpi-val">${k.val}</div><div class="kpi-lbl">${k.lbl}</div></div>`).join('');
+
+  let html = '';
+
+  // Section A — Income Summary by Type
+  {
+    const rows=(D.incomeTypeSummary||[]).map(t=>`<tr><td>${esc(t.label)}</td><td class="td-r">${N(t.total)}</td><td class="td-c">${t.pct}%</td></tr>`).join('');
+    const table=`<div class="table-wrap"><table>
+      <tr><th>Income Type</th><th class="td-r">Amount (₦)</th><th class="td-c">% of Total</th></tr>
+      ${rows}
+      <tr class="total-row"><td>TOTAL INCOME</td><td class="td-r">${N(D.totalIncome)}</td><td class="td-c">100%</td></tr>
+    </table></div>`;
+    const cards=(D.incomeTypeSummary||[]).map(t=>`<div class="sum-card"><div class="sum-card-top"><span class="sum-card-label">${esc(t.label)}</span><span class="sum-card-amt">${N(t.total)}</span></div><div class="sum-card-sub">${t.pct}% of total income</div></div>`).join('')
+      +`<div class="sum-card" style="background:#e8f4f0;border-color:#0F6E56"><div class="sum-card-top"><span class="sum-card-label">TOTAL INCOME</span><span class="sum-card-amt">${N(D.totalIncome)}</span></div></div>`;
+    html += section('Section A — Income Summary by Type', '', table+`<div class="card-list">${cards}</div>`, true, true);
+  }
+
+  // Section B — Weekly Collection Details
+  {
+    const labels=D.incomeTypeLabels||[];
+    let inner;
+    if((D.weeklyRows||[]).length){
+      const head=`<tr><th>S/N</th><th>Date</th>${labels.map(l=>`<th class="td-r">${esc(l)}</th>`).join('')}<th class="td-r">Total</th><th class="td-c">% of Month</th><th>Status</th></tr>`;
+      const body=(D.weeklyRows||[]).map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.date)}</td>${(r.cells||[]).map(c=>`<td class="td-r">${c?N(c):'—'}</td>`).join('')}<td class="td-r" style="font-weight:700">${N(r.total)}</td><td class="td-c">${r.pct}%</td><td>${statusBadge(r.status)}</td></tr>`).join('');
+      const totals=`<tr class="total-row"><td colspan="2">TOTAL COLLECTIONS</td>${(D.weeklyTotals||[]).map(s=>`<td class="td-r">${s?N(s):'—'}</td>`).join('')}<td class="td-r">${N(D.totalIncome)}</td><td class="td-c">100%</td><td></td></tr>`;
+      inner=`<div class="table-wrap"><table class="wide">${head}${body}${totals}</table></div>`;
+    } else {
+      inner=`<div style="padding:20px;text-align:center;color:#999;font-style:italic">No income records for this period.</div>`;
+    }
+    html += section('Section B — Weekly Collection Details', '', inner, false, false);
+  }
+
+  // Section C — Remittances Due
+  {
+    const rows=(D.remittanceRows||[]).map(r=>`<tr><td class="${r.indent?'td-indent':''}">${esc(r.label)}</td><td class="td-c muted">${esc(r.basis)}</td><td class="td-r red">${N(r.amount)}</td></tr>`).join('');
+    let extra=`<tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r red">${N(D.totalRemDue)}</td></tr>`;
+    if((D.totalRemPaid||0)>0) extra+=`<tr class="paid-row"><td colspan="2">Remittances Paid This Period</td><td class="td-r grn">${N(D.totalRemPaid)}</td></tr>`;
+    if((D.totalRemPaid||0)<(D.totalRemDue||0)) extra+=`<tr class="deduct-row"><td colspan="2" style="padding-left:20px">Outstanding Balance</td><td class="td-r red">− ${N(D.totalRemDue-D.totalRemPaid)}</td></tr>`;
+    extra+=`<tr class="net-row"><td colspan="2">NET LOCAL RETAINED (after all remittances)</td><td class="td-r grn">${N(D.trueNetLocal)}</td></tr>`;
+    const inner=`<div class="table-wrap"><table>
+      <tr><th>Description</th><th class="td-c">Rate / Basis</th><th class="td-r">Amount (₦)</th></tr>
+      ${rows}${extra}
+    </table></div>`;
+    html += section('Section C — Remittances Due to RCCG Authorities', '', inner, true, false);
+  }
+
+  // Section D — Expenses (full line items)
+  {
+    let inner;
+    if((D.expenseRows||[]).length){
+      const head=`<tr><th>S/N</th><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th>Method</th><th>Receipt No.</th><th class="td-r">Amount (₦)</th></tr>`;
+      const body=(D.expenseRows||[]).map(e=>`<tr><td>${e.sn}</td><td>${esc(e.date)}</td><td>${esc(e.category)}</td><td>${esc(e.subCategory||'—')}</td><td>${esc(e.description||'—')}</td><td>${esc(e.method)}</td><td>${esc(e.receiptNo||'—')}</td><td class="td-r">${N(e.amount)}</td></tr>`).join('');
+      const totals=`<tr class="total-row"><td colspan="7">TOTAL EXPENSES</td><td class="td-r">${N(D.totalExpenses)}</td></tr>`;
+      inner=`<div class="table-wrap"><table class="wide">${head}${body}${totals}</table></div>`;
+    } else {
+      inner=`<div style="padding:20px;text-align:center;color:#999;font-style:italic">No expenses recorded for this period.</div>`;
+    }
+    html += section('Section D — Expenses', `${(D.expenseRows||[]).length} entries · ${N(D.totalExpenses)}`, inner, false, false);
+  }
+
+  // Section E — Expense Summary by Category
+  if((D.expenseByCategory||[]).length){
+    const rows=(D.expenseByCategory||[]).map(c=>`<tr><td>${esc(c.label)}</td><td class="td-c">${c.count}</td><td class="td-r">${N(c.total)}</td><td class="td-c">${c.pct}%</td></tr>`).join('');
+    const tot=(D.expenseByCategory||[]).reduce((s,c)=>s+c.count,0);
+    const table=`<div class="table-wrap"><table>
+      <tr><th>Category</th><th class="td-c">No. of Items</th><th class="td-r">Amount (₦)</th><th class="td-c">% of Total</th></tr>
+      ${rows}
+      <tr class="total-row"><td>TOTAL</td><td class="td-c">${tot}</td><td class="td-r">${N(D.totalExpenses)}</td><td class="td-c">100%</td></tr>
+    </table></div>`;
+    const cards=(D.expenseByCategory||[]).map(c=>`<div class="sum-card"><div class="sum-card-top"><span class="sum-card-label">${esc(c.label)}</span><span class="sum-card-amt red">${N(c.total)}</span></div><div class="sum-card-sub">${c.count} item(s) · ${c.pct}% of expenses</div></div>`).join('');
+    html += section('Section E — Expense Summary by Category', '', table+`<div class="card-list">${cards}</div>`, false, true);
+  }
+
+  // Section F — Financial Position Summary
+  {
+    let pos=`<tr><td style="font-weight:600">Total Income for ${esc(period)}</td><td class="td-r grn">${N(D.totalIncome)}</td></tr>
+      <tr class="deduct-row"><td style="padding-left:20px">Less: Remittances Due to RCCG</td><td class="td-r red">− ${N(D.totalRemDue)}</td></tr>
+      <tr class="deduct-row"><td style="padding-left:20px">Less: Local Expenses</td><td class="td-r red">− ${N(D.totalExpenses)}</td></tr>`;
+    if((D.totalChildrenOffering||0)>0){
+      pos+=`<tr style="background:#f5f5f5"><td style="font-weight:600">Balance (incl. Children's Dept. share)</td><td class="td-r" style="font-weight:600">${N(D.netPosition)}</td></tr>
+        <tr class="deduct-row"><td style="padding-left:20px">Less: Children's Dept. local share (not admin-managed)</td><td class="td-r red">− ${N(D.childrenLocalShare)}</td></tr>`;
+    }
+    pos+=`<tr class="total-row"><td>NET PARISH BALANCE</td><td class="td-r ${D.netPositionExChildren>=0?'grn':'red'}">${N(D.netPositionExChildren)}</td></tr>`;
+    let inner=`<div class="table-wrap"><table>${pos}</table></div>`;
+    if(D.netPositionExChildren<0) inner+=`<div class="note-box">⚠️ The parish is in a deficit position this period. Expenses and remittances exceed total income (excluding Children's Dept. funds). Please review with the Parish Pastor.</div>`;
+    html += section('Section F — Financial Position Summary', '', inner, true, false);
+  }
+
+  document.getElementById('sections').innerHTML = html;
+
+  // Signatures
+  document.getElementById('sigSection').innerHTML = `
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:#0F6E56;margin-bottom:14px;padding-bottom:6px;border-bottom:1px solid #c8e4d8">Authorisation</div>
+    <div class="sig-grid">
+      <div class="sig-box">Prepared by<div class="sig-name">${esc(D.accountantName||'________________')}</div>Church Accountant</div>
+      <div class="sig-box">Reviewed &amp; Approved by<div class="sig-name">${esc(D.pastorName||'________________')}</div>Parish Pastor</div>
+      <div class="sig-box">Date<div class="sig-name">${esc(D.generatedDate||'')}</div></div>
+    </div>`;
+
+  document.getElementById('loading-state').style.display = 'none';
+  document.getElementById('report-root').style.display = 'block';
+}
+
+async function downloadPdf(){
+  const btn = document.getElementById('pdfBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span>⏳</span><span class="label"> Generating…</span>';
+  try {
+    if(typeof html2pdf === 'undefined'){
+      await new Promise((res,rej)=>{
+        const s=document.createElement('script');
+        s.src='https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js';
+        s.onload=res; s.onerror=rej;
+        document.head.appendChild(s);
+      });
+    }
+    const el = document.getElementById('reportContent');
+    const period = document.getElementById('topBarPeriod').textContent;
+    const filename = `RCCG-Monthly-Statement-${period.replace(/\s/g,'-').replace(/[^a-zA-Z0-9-]/g,'')}.pdf`;
+    // Expand all sections and force tables (not cards) for the PDF
+    document.querySelectorAll('.section-title.collapsible').forEach(t=>t.classList.add('open'));
+    document.querySelectorAll('.collapsible-body').forEach(b=>b.classList.add('open'));
+    document.querySelectorAll('.card-list').forEach(e=>e.style.display='none');
+    document.querySelectorAll('.table-wrap').forEach(e=>{e.style.display='block';e.style.overflow='visible';});
+    await html2pdf().set({
+      margin:[10,10,10,10],
+      filename,
+      html2canvas:{scale:2,useCORS:true,logging:false},
+      jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},
+      pagebreak:{mode:['avoid-all','css','legacy']}
+    }).from(el).save();
+  } catch(e){
+    alert('PDF generation failed. Please use the Print button and select "Save as PDF".');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<span>⬇</span><span class="label"> Download PDF</span>';
+  }
+}
+
+async function init(){
+  const params = new URLSearchParams(location.search);
+  const token = params.get('t');
+  if(!token){
+    document.getElementById('loading-state').style.display='none';
+    document.getElementById('error-state').style.display='block';
+    document.getElementById('error-msg').textContent='No statement token provided in the URL.';
+    return;
+  }
+  try {
+    const res = await fetch(`/api/report-share/${encodeURIComponent(token)}`);
+    if(!res.ok){
+      const j = await res.json().catch(()=>({error:'Unknown error'}));
+      throw new Error(j.error||`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if(!data || !data.data || data.data.kind !== 'monthly-statement'){
+      throw new Error('This link is not a Monthly Financial Statement.');
+    }
+    renderReport(data);
+  } catch(e){
+    document.getElementById('loading-state').style.display='none';
+    document.getElementById('error-state').style.display='block';
+    document.getElementById('error-msg').textContent = e.message||'Failed to load statement.';
+  }
+}
+init();
+</script>
+</body>
+</html>
