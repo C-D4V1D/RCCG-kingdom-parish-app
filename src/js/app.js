@@ -5677,6 +5677,152 @@ async function shareRemittanceReport(fromOverride, toOverride){
   }
 }
 
+/**
+ * Build a structured, self-contained snapshot of the Monthly Financial Statement
+ * for the given period. Mirrors the sections rendered by generateMonthlyReport()
+ * so the public statement.html page can reproduce identical figures without app
+ * access. All currency basis text is pre-formatted; amounts stay numeric.
+ */
+async function buildMonthlyStatementData(fromDate, toDate){
+  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData, users] = await Promise.all([
+    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers()
+  ]);
+  const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
+  const accountantName=(users||[]).find(u=>u.role==='accountant')?.name||'';
+  const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
+  const churchName=settings?.churchName||'RCCG Kingdom Parish, Aguleri';
+  const churchAddress=settings?.churchAddress||'Aguleri, Anambra State, Nigeria';
+  const depositMapM={};
+  allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef).forEach(t=>{depositMapM[t.incomeRef]=(depositMapM[t.incomeRef]||0)+(t.amount||0)});
+  const depositStatus=r=>{
+    const cashHeld=getSundayCashWithAccountant(r,remRates);
+    if(cashHeld===0) return 'No Cash';
+    const dep=depositMapM[r.id]||0;
+    if(dep>=cashHeld) return 'Deposited';
+    if(dep>0) return 'Partial';
+    return 'Pending';
+  };
+  const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
+  const income=filterByDateRange(allIncome,fromDate,toDate);
+  const expenses=filterByDateRange(allExpenses,fromDate,toDate).filter(e=>isLoggedExpense(e));
+  const paidRems=filterByDateRange(allRemittances,fromDate,toDate);
+  const rem=await calcRemittancesFromRecords(income);
+  const quotaList=getQuotaList(settings);
+  const quotaLines=getQuotaLinesForPeriod(quotaList, fromDate, toDate);
+  const totalFixedQuotas=sumQuotaLines(quotaLines);
+  const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
+  const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
+  const totalRemPaid=paidRems.reduce((s,r)=>s+(r.amount||0),0);
+  const totalRemDue=totalRemittanceDue(rem, totalFixedQuotas);
+  const trueNetLocal=rem.netLocal-totalFixedQuotas;
+  const netPosition=totalIncome-totalExpenses-totalRemDue;
+  const totalChildrenOffering=income.reduce((s,r)=>s+(r.childrenOffering||0),0);
+  const childrenLocalShare=totalChildrenOffering*getChildrenOfferingLocalRate(remRates);
+  const netPositionExChildren=netPosition-childrenLocalShare;
+  const sundayCount=new Set(income.filter(r=>!r.source||r.source==='sunday_collection').map(r=>r.date)).size;
+
+  // Section A — income by type
+  const incomeByType={};
+  INCOME_TYPES.forEach(t=>{incomeByType[t.key]={key:t.key,label:t.label,total:0}});
+  income.forEach(r=>{INCOME_TYPES.forEach(t=>{incomeByType[t.key].total+=(r[t.key]||0)})});
+  const incomeTypeSummary=Object.values(incomeByType).filter(t=>t.total>0)
+    .map(t=>({label:t.label, total:t.total, pct:totalIncome?Math.round(t.total/totalIncome*100):0}));
+
+  // Section B — weekly collection details (one column per income type)
+  const incomeTypeLabels=INCOME_TYPES.map(t=>t.label);
+  const weeklyRows=income.map(r=>({
+    date:fmtDate(r.date),
+    cells:INCOME_TYPES.map(t=>r[t.key]||0),
+    total:r.totalCollection||0,
+    pct:totalIncome?Math.round((r.totalCollection||0)/totalIncome*100):0,
+    status:depositStatus(r),
+  }));
+  const weeklyTotals=INCOME_TYPES.map(t=>income.reduce((a,r)=>a+(r[t.key]||0),0));
+
+  // Section C — remittances due (pre-formatted basis text)
+  const remittanceRows=[];
+  rem.lines.filter(l=>!l.isTg&&l.national>0).forEach(l=>remittanceRows.push({
+    label:`${l.label} → National HQ`, basis:l.total>0?Math.round(l.national/l.total*100)+'% of '+fmt(l.total):'% Based', amount:l.national }));
+  rem.lines.filter(l=>l.isTg&&l.national>0).forEach(l=>{
+    remittanceRows.push({ label:'Thanksgiving (TG) → National HQ', basis:`${Math.round(remRatesData.tgNational*100)}% of ${fmt(l.total)}`, amount:l.national });
+    if((l.seed||0)>0) remittanceRows.push({ label:'Thanksgiving → Seed → National HQ', basis:`${Math.round((remRatesData.tgSeed||0)*100)}% of ${fmt(l.total)}`, amount:l.seed, indent:true });
+  });
+  if(rem.provinceRebate>0) remittanceRows.push({ label:'Province Rebate (on local tithes)', basis:rem.localTithe>0?Math.round(rem.provinceRebate/rem.localTithe*100)+'% of '+fmt(rem.localTithe):'% Based', amount:rem.provinceRebate });
+  if((rem.crmAddon||0)>0) remittanceRows.push({ label:'CRM Add-on → National HQ', basis:`${Math.round(remRatesData.crmAddon*100)}% of CRM Total`, amount:rem.crmAddon });
+  if((rem.coastline||0)>0) remittanceRows.push({ label:'Coastline Worship Centre', basis:`${Math.round(remRatesData.coastline*100)}% of Min. Tithe`, amount:rem.coastline });
+  if((rem.insuranceGen||0)>0) remittanceRows.push({ label:'Insurance Fund (GEN TITHE)', basis:`${+(remRatesData.insuranceGenTithe*100).toFixed(2)}% of Mem. Tithe`, amount:rem.insuranceGen });
+  if((rem.insuranceMin||0)>0) remittanceRows.push({ label:'Insurance Fund (MIN TITHE)', basis:`${+(remRatesData.insuranceMinTithe*100).toFixed(2)}% of Min. Tithe`, amount:rem.insuranceMin });
+  if(rem.totalArea>0) remittanceRows.push({ label:'Thanksgiving → Area/Zonal Pastor', basis:`${Math.round(remRatesData.tgArea*100)}% of TG`, amount:rem.totalArea, indent:true });
+  if(rem.totalPastor>0) remittanceRows.push({ label:"Thanksgiving → Parish Pastor's Share", basis:`${Math.round(remRatesData.tgPastor*100)}% of TG`, amount:rem.totalPastor, indent:true });
+  if(rem.totalMinisters>0) remittanceRows.push({ label:"Thanksgiving → Ministers' Share", basis:`${Math.round(remRatesData.tgMinisters*100)}% of TG`, amount:rem.totalMinisters, indent:true });
+  quotaLines.forEach(q=>remittanceRows.push({ label:q.label, basis:isQuotaFullyAccrued(q)?'Fixed':(q.isProrated?`Fixed • ${q.basis}`:'Fixed Quota'), amount:q.amount }));
+
+  // Section D — expense line items (full detail)
+  const expenseRows=expenses.map((e,i)=>{
+    const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};
+    const methodLabel=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';
+    const desc=e.description&&e.description.trim()&&e.description.trim()!==e.subCategory?e.description:'';
+    return { sn:i+1, date:fmtDate(e.date||e.createdAt), category:cat.label, subCategory:e.subCategory||'', description:desc, method:methodLabel, receiptNo:e.receiptNo||'', amount:e.amount||0 };
+  });
+
+  // Section E — expense by category
+  const expByCat={};
+  EXPENSE_CATS.forEach(c=>{expByCat[c.key]={label:c.label,icon:c.icon,total:0,count:0}});
+  expenses.forEach(e=>{if(expByCat[e.category]){expByCat[e.category].total+=e.amount||0;expByCat[e.category].count++}});
+  const expenseByCategory=Object.values(expByCat).filter(c=>c.total>0).sort((a,b)=>b.total-a.total)
+    .map(c=>({label:`${c.icon} ${c.label}`, count:c.count, total:c.total, pct:totalExpenses?Math.round(c.total/totalExpenses*100):0}));
+
+  return {
+    kind:'monthly-statement',
+    churchName, churchAddress, periodLabel, fromDate, toDate,
+    preparedBy:state.user?.name||'', pastorName, accountantName,
+    generatedDate:fmtDate(new Date().toISOString()),
+    sundayCount,
+    totalIncome, totalExpenses, totalRemDue, totalRemPaid, trueNetLocal,
+    netPosition, totalChildrenOffering, childrenLocalShare, netPositionExChildren,
+    incomeTypeSummary,
+    incomeTypeLabels, weeklyRows, weeklyTotals,
+    remittanceRows,
+    expenseRows,
+    expenseByCategory,
+  };
+}
+
+/** Create & share a public link for the Monthly Financial Statement. */
+async function shareMonthlyStatement(fromOverride, toOverride){
+  // Only show the inline spinner on a real button. When triggered from the
+  // print window via window.opener, activeElement is the <body>, which must
+  // not have its innerHTML replaced.
+  const trigger = (document.activeElement && document.activeElement.tagName === 'BUTTON') ? document.activeElement : null;
+  const restore = setBtnLoading(trigger, 'Creating link…');
+  try {
+    const fromDate=fromOverride||state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
+    const toDate=toOverride||state.reportToDate||ymdLocal(new Date());
+    const snapshot=await buildMonthlyStatementData(fromDate, toDate);
+    const { token } = await DB.createSharedReport({ periodFrom:fromDate, periodTo:toDate, churchName:snapshot.churchName, createdBy:state.user?.name||'', data:snapshot });
+    restore && restore();
+    const shareUrl = `${location.origin}/statement.html?t=${token}`;
+    const safeUrl = shareUrl.replace(/'/g,"\\'");
+    const waText = encodeURIComponent(`*${snapshot.churchName}* — Monthly Financial Statement (${snapshot.periodLabel})\n\nView the full statement here:\n${shareUrl}`);
+    showModal(`
+      <button class="modal-close" onclick="closeModal()">✕</button>
+      <div class="modal-title">📤 Share Monthly Financial Statement</div>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:16px">Share this link with anyone who needs to view or download the statement. No login required.</p>
+      <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:12px;word-break:break-all;font-size:12px;color:var(--text)">${shareUrl}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <button class="btn btn-primary" id="copyShareLinkBtn" onclick="(function(btn){navigator.clipboard.writeText('${safeUrl}').then(()=>{btn.textContent='✓ Copied!';btn.style.background='#1D9E75';setTimeout(()=>{btn.textContent='📋 Copy Link';btn.style.background='';},2000)}).catch(()=>{alert('Copy failed — please copy the link above manually.');})})(this)">📋 Copy Link</button>
+        <button class="btn" onclick="window.open('${safeUrl}','_blank')">🔗 Open</button>
+        <button class="btn" style="background:#25D366;color:#fff" onclick="window.open('https://wa.me/?text=${waText}','_blank')">📲 WhatsApp</button>
+      </div>
+      <p style="font-size:11px;color:var(--text3)">Period: ${snapshot.periodLabel}</p>
+      <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
+    DB.addAudit('report_shared',`Monthly statement shared for ${fromDate} to ${toDate}`,state.user?.name);
+  } catch(err) {
+    restore && restore();
+    showAlert(`Failed to create share link: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
 // ── EXPENSES ──────────────────────────────
 async function renderExpenses(){
   renderPageSkeleton({ pageTitle: 'Expenses', pageSub: monthLabel(), kpiCount: 3, hint: 'Loading expenses…' });
@@ -8502,29 +8648,34 @@ async function submitRefill(btn=null){
 // ── REPORTS ────────────────────────────────
 
 /** Opens a print-friendly report in a new window (manual print via button inside report window) */
-function openPrintableReport(title, bodyHTML){
+function openPrintableReport(title, bodyHTML, shareConfig){
+  const shareBtn = shareConfig ? `<button class="print-btn print-btn-outline" onclick="if(window.opener&&window.opener.App){window.opener.App.shareMonthlyStatement('${esc(shareConfig.from)}','${esc(shareConfig.to)}');window.opener.focus();}else{alert('Please return to the app tab to create a shareable link.');}">🔗 Share Link</button>` : '';
   const html=`<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <title>${esc(title)}</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:'Segoe UI',Arial,sans-serif;font-size:12px;color:#333;padding:30px 36px;line-height:1.5}
+  body{font-family:'Segoe UI',Arial,sans-serif;font-size:13px;color:#333;padding:30px 36px;line-height:1.5}
   .report-header{text-align:center;border-bottom:3px double #0F6E56;padding-bottom:16px;margin-bottom:20px}
-  .report-header .church-name{font-size:20px;font-weight:700;color:#0F6E56;margin-bottom:2px;text-transform:uppercase;letter-spacing:1px}
-  .report-header .church-address{font-size:11px;color:#666;margin-bottom:8px}
-  .report-header .report-title{font-size:15px;font-weight:700;color:#333;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px}
-  .report-header .report-period{font-size:12px;color:#555}
-  .report-header .report-meta{font-size:11px;color:#777;margin-top:6px}
-  .section-title{font-size:13px;font-weight:700;color:#0F6E56;margin:20px 0 8px;padding:4px 0;border-bottom:2px solid #0F6E56;text-transform:uppercase;letter-spacing:0.5px}
-  .section-title span{font-weight:normal;font-size:11px;color:#666;margin-left:8px;text-transform:none;letter-spacing:0}
-  table{width:100%;border-collapse:collapse;margin-bottom:14px;font-size:12px}
-  th{background:#0F6E56;color:#fff;padding:7px 10px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px}
-  td{padding:6px 10px;border-bottom:1px solid #e0e0e0}
+  .report-header .church-name{font-size:22px;font-weight:700;color:#0F6E56;margin-bottom:2px;text-transform:uppercase;letter-spacing:1px}
+  .report-header .church-address{font-size:12px;color:#666;margin-bottom:8px}
+  .report-header .report-title{font-size:16px;font-weight:700;color:#333;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px}
+  .report-header .report-period{font-size:13px;color:#555}
+  .report-header .report-meta{font-size:12px;color:#777;margin-top:6px}
+  .section-title{font-size:14px;font-weight:700;color:#0F6E56;margin:20px 0 8px;padding:4px 0;border-bottom:2px solid #0F6E56;text-transform:uppercase;letter-spacing:0.5px}
+  .section-title span{font-weight:normal;font-size:12px;color:#666;margin-left:8px;text-transform:none;letter-spacing:0}
+  table{width:100%;border-collapse:collapse;margin-bottom:14px;font-size:12.5px}
+  th{background:#0F6E56;color:#fff;padding:7px 10px;text-align:left;font-size:11.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px}
+  td{padding:7px 10px;border-bottom:1px solid #e0e0e0}
   tr:nth-child(even) td{background:#fafafa}
+  /* Wide tables (many columns) stay slightly smaller so they still fit A4 width */
+  table.wide{font-size:11px}
+  table.wide th{font-size:10px;padding:6px 6px}
+  table.wide td{padding:6px 6px}
   .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:14px 0 18px;page-break-inside:avoid}
   .summary-box{border:1.5px solid #e0e0e0;border-radius:6px;padding:12px 14px;text-align:center}
-  .summary-box .label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#777;margin-bottom:4px}
-  .summary-box .value{font-size:18px;font-weight:700;color:#333}
+  .summary-box .label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#777;margin-bottom:4px}
+  .summary-box .value{font-size:20px;font-weight:700;color:#333}
   .summary-box .value.green{color:#0F6E56}
   .summary-box .value.red{color:#c0392b}
   .summary-box .value.amber{color:#BA7517}
@@ -8537,30 +8688,35 @@ function openPrintableReport(title, bodyHTML){
   .td-amber{color:#BA7517;font-weight:600}
   .total-row td{border-top:2px solid #333;font-weight:700;background:#f5f5f5!important;padding:8px 10px}
   .subtotal-row td{border-top:1.5px solid #aaa;font-weight:600;background:#fafafa!important}
-  .note-box{background:#fff8e1;border:1px solid #f0c040;border-radius:4px;padding:10px 14px;font-size:11px;margin:12px 0;color:#7a5200;line-height:1.6}
+  .note-box{background:#fff8e1;border:1px solid #f0c040;border-radius:4px;padding:10px 14px;font-size:12px;margin:12px 0;color:#7a5200;line-height:1.6}
   .sig-section{display:grid;grid-template-columns:1fr 1fr 1fr;gap:28px;margin-top:40px;page-break-inside:avoid}
-  .sig-box{border-top:1.5px solid #333;padding-top:8px;font-size:11px;text-align:center;line-height:1.6}
+  .sig-box{border-top:1.5px solid #333;padding-top:8px;font-size:12px;text-align:center;line-height:1.6}
   .sig-box .sig-name{font-weight:600;margin-top:4px}
-  .footer-note{margin-top:24px;padding-top:12px;border-top:1px solid #ddd;font-size:10px;color:#999;text-align:center}
-  .badge{display:inline-block;font-size:10px;font-weight:600;padding:2px 7px;border-radius:10px}
+  .footer-note{margin-top:24px;padding-top:12px;border-top:1px solid #ddd;font-size:10.5px;color:#999;text-align:center}
+  .badge{display:inline-block;font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:10px}
   .badge-success{background:#EAF3DE;color:#3B6D11}
   .badge-warn{background:#FAEEDA;color:#BA7517}
   .badge-danger{background:#FCEBEB;color:#A32D2D}
   .badge-info{background:#E6F1FB;color:#185FA5}
   .no-data{text-align:center;padding:30px;color:#999;font-style:italic}
   @media print{
-    body{padding:15px 20px}
+    @page{margin:14mm 12mm;size:A4}
+    body{padding:0;font-size:13px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
     .no-print{display:none!important}
-    table{page-break-inside:auto}
+    table{page-break-inside:auto;font-size:12.5px}
+    table.wide{font-size:11px}
     tr{page-break-inside:avoid}
+    .section-title{font-size:14px}
   }
-  .print-btn-bar{text-align:center;margin-bottom:20px}
+  .print-btn-bar{text-align:center;margin-bottom:20px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
   .print-btn{background:#0F6E56;color:#fff;border:none;padding:10px 28px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
   .print-btn:hover{background:#085041}
+  .print-btn-outline{background:#fff;color:#0F6E56;border:1.5px solid #0F6E56}
+  .print-btn-outline:hover{background:#e8f4f0}
 </style>
 </head>
 <body>
-  <div class="print-btn-bar no-print"><button class="print-btn" onclick="window.print()">🖨️ Print Report</button></div>
+  <div class="print-btn-bar no-print"><button class="print-btn" onclick="window.print()">🖨️ Print Report</button>${shareBtn}</div>
   ${bodyHTML}
 </body></html>`;
   const w=window.open('','_blank');
@@ -8682,6 +8838,13 @@ async function renderReports(){
       <button class="qa-btn" onclick="App.generateExpenseReport()"><div class="qa-icon" style="background:#EAF3DE">💸</div><div class="qa-label">Expense Report</div><div class="qa-sub">Detailed by category & line item</div></button>
       <button class="qa-btn" onclick="App.generatePettyCashReport()"><div class="qa-icon" style="background:#EEEDFE">💳</div><div class="qa-label">Petty Cash Report</div><div class="qa-sub">Imprest reconciliation</div></button>
     </div>
+    <div class="card" style="margin-bottom:1rem;padding:0.9rem 1.25rem;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div style="min-width:0">
+        <div style="font-size:13px;font-weight:600;color:var(--text)">🔗 Share the Monthly Financial Statement online</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px">Generate a mobile-friendly link anyone can open — no login required. Covers the selected period above.</div>
+      </div>
+      <button class="btn btn-primary" style="white-space:nowrap" onclick="App.shareMonthlyStatement()">📤 Share Statement</button>
+    </div>
     <div id="reportOutput"></div>`;
 }
 
@@ -8764,7 +8927,7 @@ async function generateMonthlyReport(){
     </table>
 
     <div class="section-title">Section B: Weekly Collection Details</div>
-    ${income.length?`<table>
+    ${income.length?`<table class="wide">
       <tr><th>S/N</th><th>Date</th>${INCOME_TYPES.map(t=>`<th class="td-r">${t.label}</th>`).join('')}<th class="td-r">Total</th><th class="td-c">% of Month</th><th>Status</th></tr>
       ${income.map((r,i)=>`<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td>${INCOME_TYPES.map(t=>`<td class="td-r">${r[t.key]?fmt(r[t.key]):'—'}</td>`).join('')}<td class="td-r td-bold">${fmt(r.totalCollection)}</td><td class="td-c">${totalIncome?Math.round((r.totalCollection||0)/totalIncome*100):0}%</td><td>${depositBadgeM(r)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">TOTAL COLLECTIONS</td>${INCOME_TYPES.map(t=>{const s=income.reduce((a,r)=>a+(r[t.key]||0),0);return `<td class="td-r">${s?fmt(s):'—'}</td>`}).join('')}<td class="td-r">${fmt(totalIncome)}</td><td class="td-c">100%</td><td></td></tr>
@@ -8791,7 +8954,7 @@ async function generateMonthlyReport(){
     </table>
 
     <div class="section-title">Section D: Expenses <span>(${expenses.length} entries totalling ${fmt(totalExpenses)})</span></div>
-    ${expenses.length?`<table>
+    ${expenses.length?`<table class="wide">
       <tr><th>S/N</th><th>Date</th><th>Category</th><th>Sub-category</th><th>Description</th><th>Method</th><th>Receipt No.</th><th class="td-r">Amount (₦)</th></tr>
       ${expenses.map((e,i)=>{const cat=EXPENSE_CATS.find(c=>c.key===e.category)||{label:e.category||'—'};const methodLabel=e.paymentMethod==='bank_transfer'?'Bank Transfer':e.paymentMethod==='petty_cash'?'Petty Cash':e.paymentMethod==='split'?`Split (${[(e.bankAmount||0)>0?`Bank:${fmt(e.bankAmount)}`:'',(e.cashAmount||0)>0?`Cash:${fmt(e.cashAmount)}`:'',(e.pettyAmount||0)>0?`Petty:${fmt(e.pettyAmount)}`:''].filter(Boolean).join('+')})`:'Cash';const desc=e.description&&e.description.trim()&&e.description.trim()!==e.subCategory?esc(e.description):'—';return `<tr><td>${i+1}</td><td>${fmtDate(e.date||e.createdAt)}</td><td>${cat.label}</td><td>${esc(e.subCategory||'—')}</td><td>${desc}</td><td>${methodLabel}</td><td>${e.receiptNo||'—'}</td><td class="td-r">${fmt(e.amount)}</td></tr>`}).join('')}
       <tr class="total-row"><td colspan="7">TOTAL EXPENSES</td><td class="td-r">${fmt(totalExpenses)}</td></tr>
@@ -8817,7 +8980,7 @@ async function generateMonthlyReport(){
 
     ${reportSignatureHTML(pastorName, undefined, accountantName)}`;
 
-  openPrintableReport('Monthly Financial Statement — '+periodLabel, body);
+  openPrintableReport('Monthly Financial Statement — '+periodLabel, body, { from:fromDate, to:toDate });
 }
 
 async function generateWeeklyReport(){
@@ -10021,7 +10184,7 @@ return {
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange,
-  generateMonthlyReport, generateWeeklyReport, generateRemittanceReport,
+  generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
   setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
     updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
