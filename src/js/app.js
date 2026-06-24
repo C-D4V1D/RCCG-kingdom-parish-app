@@ -6962,7 +6962,7 @@ async function renderBank(){
   // Period bank charges (calendar month or remittance period — follows state.periodMode)
   const periodExpenses = filterByCurrentPeriod(allExpenses, bankPeriodFrom, bankPeriodTo);
   const periodCashTx = filterByCurrentPeriod(allCashTx, bankPeriodFrom, bankPeriodTo);
-  const monthlyBankCharges = periodExpenses.filter(e=>e.category==='bank').reduce((s,e)=>s+(e.amount||0),0);
+  const monthlyBankCharges = periodExpenses.filter(e=>e.category==='bank'&&isLoggedExpense(e)).reduce((s,e)=>s+(e.amount||0),0);
   const monthlyWithdrawals = periodCashTx.filter(t=>t.type==='withdrawal');
   const monthlyDeposits = periodCashTx.filter(t=>t.type==='cash_deposit');
 
