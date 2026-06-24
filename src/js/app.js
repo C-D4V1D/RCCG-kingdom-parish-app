@@ -4002,15 +4002,13 @@ async function viewIncome(id){
   const [allCashVI, allExpensesVI] = await Promise.all([DB.getCashTransactions(), DB.getExpenses()]);
   const deposits = allCashVI.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id);
   const depositedTotal = deposits.reduce((s,t)=>s+(t.amount||0),0);
-  const globalCashExpenses = allExpensesVI.filter(isLoggedExpense).reduce((s,e)=>{
-    if(e.paymentMethod==='cash') return s+(e.amount||0);
-    if(e.paymentMethod==='split') return s+(e.cashAmount||0);
-    return s;
-  },0);
-  const undeposited = Math.max(0, cashHeld - depositedTotal);
-  // Cap attributable expenses at what's actually undeposited so we never overstate
-  const cashExpenseCovering = Math.min(undeposited, globalCashExpenses);
-  const stillWithAccountant = Math.max(0, undeposited - cashExpenseCovering);
+  // Use the same FIFO attribution (oldest income records absorb cash expenses first)
+  // as the list/report badges so this modal can never disagree with them or double-count
+  // the same expenses across multiple records.
+  const expMapVI = buildExpenseCoveringMap(allIncVI, allCashVI, remRates, allExpensesVI);
+  const entryVI = expMapVI.get(r.id);
+  const cashExpenseCovering = entryVI?.expenseCovering || 0;
+  const stillWithAccountant = entryVI ? entryVI.stillPending : 0;
   const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Sunday Collection'};
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -4109,7 +4107,7 @@ function _previewDepPhoto(input, previewId){
 
 async function confirmDeposit(id){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
-  const [allIncCD, allCashCD, remRatesData, balance] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance()]);
+  const [allIncCD, allCashCD, remRatesData, balance, allExpensesCD] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance(), DB.getExpenses()]);
   const r = allIncCD.find(x=>x.id===id);
   if(!r) return;
   const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
@@ -4118,11 +4116,15 @@ async function confirmDeposit(id){
   const alreadyDeposited = allCashCD.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
   const remaining = Math.max(0, cashHeld - alreadyDeposited);
   const totalCashWithAccountant = balance.cashWithAccountant;
-  // If cash expenses have already been recorded in the Expenses section, the global
-  // cashWithAccountant will be lower than `remaining`. Cap the deposit at what's actually
-  // available so the form pre-fills the correct amount.
-  const effectiveRemaining = Math.min(remaining, totalCashWithAccountant);
-  const expensesDeducted = Math.max(0, remaining - effectiveRemaining);
+  // Use the same FIFO attribution as the income detail modal and list badges so the
+  // pre-filled amount matches "Still with Accountant" exactly. Cash expenses already
+  // recorded in the Expenses section reduce this record's depositable cash (oldest
+  // records absorb expenses first), and the per-record figures always sum to the
+  // global cashWithAccountant.
+  const expMapCD = buildExpenseCoveringMap(allIncCD, allCashCD, remRates, allExpensesCD);
+  const entryCD = expMapCD.get(r.id);
+  const effectiveRemaining = entryCD ? entryCD.stillPending : remaining;
+  const expensesDeducted = entryCD ? entryCD.expenseCovering : 0;
   const otherCash = Math.max(0, totalCashWithAccountant - effectiveRemaining);
   const today = new Date().toISOString().split('T')[0];
   state._depositRemaining = effectiveRemaining;
