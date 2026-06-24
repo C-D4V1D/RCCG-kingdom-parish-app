@@ -8653,6 +8653,8 @@ function openPrintableReport(title, bodyHTML, shareConfig){
   const html=`<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <title>${esc(title)}</title>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"><\/script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js"><\/script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:'Segoe UI',Arial,sans-serif;font-size:14px;color:#333;line-height:1.5;background:#eef1ee;padding:20px 12px}
@@ -8722,8 +8724,7 @@ function openPrintableReport(title, bodyHTML, shareConfig){
 </style>
 </head>
 <body>
-  <div class="print-btn-bar no-print"><button class="print-btn" onclick="window.print()">⬇ Download / Save as PDF</button>${shareBtn}</div>
-  <div class="print-hint no-print">Tip: in the dialog choose <strong>“Save as PDF”</strong> and paper size <strong>A4 (Landscape)</strong>.</div>
+  <div class="print-btn-bar no-print"><button class="print-btn" id="dlBtn" onclick="if(window.opener&&window.opener.App){window.opener.App.downloadAdminReportPDF(window,this);}else{alert('Please keep the app tab open to download the PDF.');}">⬇ Download A4 PDF</button>${shareBtn}</div>
   <div id="report-sheet">${bodyHTML}</div>
 </body></html>`;
   const w=window.open('','_blank');
@@ -8731,6 +8732,129 @@ function openPrintableReport(title, bodyHTML, shareConfig){
   w.document.write(html);
   w.document.close();
   w.focus();
+}
+
+/**
+ * Build a true vector A4-landscape PDF from a rendered report DOM and download it
+ * directly (no print dialog). Reads the report's tables via jsPDF-AutoTable, so
+ * the output has crisp text, correct columns, and clean pagination. `doc` is a
+ * jsPDF instance (with the autoTable plugin) created in the same window as rootEl.
+ */
+function buildReportPdf(rootEl, doc, filename){
+  if(!rootEl) throw new Error('Report content not found.');
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const M = 8;
+  const GREEN=[15,110,86], GREY=[110,110,110], RED=[192,57,43], DARK=[40,40,40];
+  let y = M;
+  const txt = s => (s||'').replace(/\s+/g,' ').replace(/▼|▲/g,'').trim();
+  const ensure = h => { if(y+h > pageH-M){ doc.addPage(); y=M; } };
+
+  function headerBlock(el){
+    [...el.children].forEach((c,i)=>{
+      const t = txt(c.textContent); if(!t) return;
+      const cls = c.className||'';
+      let size=8, color=GREY, style='normal', uc=false;
+      if(i===0 || /church-name|org-name/.test(cls)){ size=15; color=GREEN; style='bold'; uc=true; }
+      else if(/report-title/.test(cls)){ size=11; color=DARK; style='bold'; uc=true; }
+      else if(/report-period/.test(cls)){ size=9; color=[80,80,80]; }
+      ensure(size*0.5+2);
+      doc.setFontSize(size); doc.setTextColor(color[0],color[1],color[2]); doc.setFont('helvetica',style);
+      doc.text(uc?t.toUpperCase():t, pageW/2, y+size*0.35, {align:'center', maxWidth:pageW-2*M});
+      y += size*0.5 + 1.6;
+    });
+    y += 1;
+    doc.setDrawColor(GREEN[0],GREEN[1],GREEN[2]); doc.setLineWidth(0.6); doc.line(M,y,pageW-M,y); y += 4;
+    doc.setFont('helvetica','normal');
+  }
+
+  function summaryGrid(el){
+    const boxes = [...el.querySelectorAll('.summary-box,.kpi-tile')];
+    if(!boxes.length) return;
+    const labels = boxes.map(b => txt((b.querySelector('.label,.kpi-lbl')||{}).textContent));
+    const values = boxes.map(b => txt((b.querySelector('.value,.kpi-val')||{}).textContent));
+    doc.autoTable({
+      startY:y, margin:{left:M,right:M}, head:[labels], body:[values], theme:'grid',
+      tableWidth: pageW-2*M,
+      styles:{fontSize:7, halign:'center', cellPadding:2, lineColor:[220,220,220], lineWidth:0.1, overflow:'linebreak'},
+      headStyles:{fillColor:[244,247,244], textColor:GREY, fontStyle:'bold', fontSize:6},
+      bodyStyles:{fontStyle:'bold', fontSize:9, textColor:DARK}
+    });
+    y = doc.lastAutoTable.finalY + 4;
+  }
+
+  function sectionTitle(el){
+    const t = txt(el.textContent);
+    ensure(10);
+    doc.setFillColor(GREEN[0],GREEN[1],GREEN[2]); doc.rect(M,y,pageW-2*M,6.6,'F');
+    doc.setTextColor(255,255,255); doc.setFontSize(8.5); doc.setFont('helvetica','bold');
+    doc.text(t.toUpperCase(), M+2, y+4.5, {maxWidth:pageW-2*M-4});
+    y += 6.6; doc.setFont('helvetica','normal');
+  }
+
+  function tableEl(el){
+    const wide = el.classList.contains('wide');
+    doc.autoTable({
+      html: el, includeHiddenHtml:true, startY: y, margin:{left:M,right:M,top:M,bottom:M}, theme:'grid', tableWidth: pageW-2*M,
+      styles:{fontSize: wide?6:8, cellPadding: wide?1:1.6, overflow:'linebreak', valign:'middle', lineColor:[226,226,226], lineWidth:0.1, textColor:DARK},
+      headStyles:{fillColor:GREEN, textColor:255, fontStyle:'bold', fontSize: wide?5.5:7.5, halign:'left', overflow:'linebreak'},
+      rowPageBreak:'avoid',
+      didParseCell:(data)=>{
+        const c = data.cell.raw; if(!c||!c.classList) return;
+        if(c.classList.contains('td-c')) data.cell.styles.halign='center';
+        else if(c.classList.contains('td-r')) data.cell.styles.halign='right';
+        if(c.classList.contains('grn')||c.classList.contains('td-green')) data.cell.styles.textColor=GREEN;
+        if(c.classList.contains('red')||c.classList.contains('td-red')) data.cell.styles.textColor=RED;
+        const tr = c.parentElement, rc = (tr&&tr.className)||'';
+        if(/total-row|net-row|net-local-row|subtotal-row/.test(rc)){
+          data.cell.styles.fontStyle='bold';
+          if(/total-row|net/.test(rc)) data.cell.styles.fillColor=[238,244,240];
+        }
+      }
+    });
+    y = doc.lastAutoTable.finalY + 3;
+  }
+
+  function sigSection(el){
+    const cols = [...el.querySelectorAll('.sig-box')];
+    if(!cols.length) return;
+    ensure(26); y += 6;
+    const colW = (pageW-2*M)/cols.length;
+    cols.forEach((b,i)=>{
+      const x = M + i*colW;
+      doc.setDrawColor(120,120,120); doc.setLineWidth(0.3); doc.line(x+4, y+11, x+colW-4, y+11);
+      const lines = [...b.childNodes].map(n=>txt(n.textContent)).filter(Boolean);
+      doc.setFontSize(7.5); doc.setTextColor(90,90,90); doc.setFont('helvetica','normal');
+      doc.text(lines.join('   '), x+colW/2, y+15, {align:'center', maxWidth:colW-6});
+    });
+    y += 18;
+  }
+
+  const SEL = '.report-header, .summary-grid, .kpi-grid, .section-title, table, .no-data, .note-box, .sig-section';
+  rootEl.querySelectorAll(SEL).forEach(node=>{
+    if(node.matches('.report-header')) headerBlock(node);
+    else if(node.matches('.summary-grid,.kpi-grid')) summaryGrid(node);
+    else if(node.matches('.section-title')) sectionTitle(node);
+    else if(node.tagName==='TABLE') tableEl(node);
+    else if(node.matches('.no-data')){ ensure(8); doc.setFontSize(8); doc.setTextColor(150,150,150); doc.setFont('helvetica','italic'); doc.text(txt(node.textContent), M+2, y+4); doc.setFont('helvetica','normal'); y += 8; }
+    else if(node.matches('.note-box')){ const lines = doc.splitTextToSize(txt(node.textContent), pageW-2*M-4); ensure(lines.length*4+4); doc.setFontSize(8); doc.setTextColor(122,82,0); doc.text(lines, M+2, y+4); y += lines.length*4+4; }
+    else if(node.matches('.sig-section')) sigSection(node);
+  });
+  doc.save(filename);
+}
+
+/** Build & directly download the admin report window's PDF (called by the report window). */
+function downloadAdminReportPDF(win, btn){
+  const reset = btn ? (function(){ const o=btn.textContent; btn.disabled=true; btn.textContent='Preparing…'; return ()=>{btn.disabled=false; btn.textContent=o;}; })() : ()=>{};
+  try{
+    const jspdf = win.jspdf;
+    if(!jspdf || !jspdf.jsPDF){ win.alert('PDF tools are still loading — please wait a couple of seconds and tap again.'); reset(); return; }
+    const doc = new jspdf.jsPDF({ orientation:'landscape', unit:'mm', format:'a4' });
+    if(typeof doc.autoTable !== 'function'){ win.alert('PDF tools are still loading — please wait a couple of seconds and tap again.'); reset(); return; }
+    const base = (win.document.title||'Report').replace(/[—–]/g,'-').replace(/[^a-zA-Z0-9 _-]/g,'').replace(/\s+/g,'-').replace(/^-+|-+$/g,'').slice(0,80) || 'Report';
+    buildReportPdf(win.document.getElementById('report-sheet'), doc, base+'.pdf');
+  }catch(e){ win.alert('Could not generate the PDF: '+((e&&e.message)||e)); }
+  reset();
 }
 
 /** Shared report header HTML */
@@ -10191,7 +10315,7 @@ return {
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange,
-  generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
+  generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement, downloadAdminReportPDF,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
   setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
     updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,

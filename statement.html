@@ -110,6 +110,8 @@ tr:nth-child(even) td{background:#f8fbf8}
 .skeleton{background:linear-gradient(90deg,#eee 25%,#f5f5f5 50%,#eee 75%);background-size:200% 100%;animation:shimmer 1.4s infinite;border-radius:6px;height:14px;margin:8px 0}
 @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 </style>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js"></script>
 </head>
 <body>
 <div class="top-bar">
@@ -118,8 +120,8 @@ tr:nth-child(even) td{background:#f8fbf8}
     <div class="top-bar-sub" id="topBarPeriod">Loading…</div>
   </div>
   <div class="top-bar-actions no-print">
-    <button class="action-btn primary" onclick="window.print()">
-      <span>⬇</span><span class="label"> Save as PDF / Print</span>
+    <button class="action-btn primary" id="pdfBtn" onclick="downloadPdf()">
+      <span>⬇</span><span class="label"> Download A4 PDF</span>
     </button>
   </div>
 </div>
@@ -298,6 +300,129 @@ function renderReport(resp){
 
   document.getElementById('loading-state').style.display = 'none';
   document.getElementById('report-root').style.display = 'block';
+}
+
+// Generate a true vector A4-landscape PDF from the rendered report and download it
+// directly (one tap, no print dialog). Reads the tables via jsPDF-AutoTable for
+// crisp text, correct columns and clean pagination.
+function buildReportPdf(rootEl, doc, filename){
+  if(!rootEl) throw new Error('Report content not found.');
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const M = 8;
+  const GREEN=[15,110,86], GREY=[110,110,110], RED=[192,57,43], DARK=[40,40,40];
+  let y = M;
+  const txt = s => (s||'').replace(/\s+/g,' ').replace(/▼|▲/g,'').trim();
+  const ensure = h => { if(y+h > pageH-M){ doc.addPage(); y=M; } };
+
+  function headerBlock(el){
+    [...el.children].forEach((c,i)=>{
+      const t = txt(c.textContent); if(!t) return;
+      const cls = c.className||'';
+      let size=8, color=GREY, style='normal', uc=false;
+      if(i===0 || /church-name|org-name/.test(cls)){ size=15; color=GREEN; style='bold'; uc=true; }
+      else if(/report-title/.test(cls)){ size=11; color=DARK; style='bold'; uc=true; }
+      else if(/report-period/.test(cls)){ size=9; color=[80,80,80]; }
+      ensure(size*0.5+2);
+      doc.setFontSize(size); doc.setTextColor(color[0],color[1],color[2]); doc.setFont('helvetica',style);
+      doc.text(uc?t.toUpperCase():t, pageW/2, y+size*0.35, {align:'center', maxWidth:pageW-2*M});
+      y += size*0.5 + 1.6;
+    });
+    y += 1;
+    doc.setDrawColor(GREEN[0],GREEN[1],GREEN[2]); doc.setLineWidth(0.6); doc.line(M,y,pageW-M,y); y += 4;
+    doc.setFont('helvetica','normal');
+  }
+
+  function summaryGrid(el){
+    const boxes = [...el.querySelectorAll('.summary-box,.kpi-tile')];
+    if(!boxes.length) return;
+    const labels = boxes.map(b => txt((b.querySelector('.label,.kpi-lbl')||{}).textContent));
+    const values = boxes.map(b => txt((b.querySelector('.value,.kpi-val')||{}).textContent));
+    doc.autoTable({
+      startY:y, margin:{left:M,right:M}, head:[labels], body:[values], theme:'grid',
+      tableWidth: pageW-2*M,
+      styles:{fontSize:7, halign:'center', cellPadding:2, lineColor:[220,220,220], lineWidth:0.1, overflow:'linebreak'},
+      headStyles:{fillColor:[244,247,244], textColor:GREY, fontStyle:'bold', fontSize:6},
+      bodyStyles:{fontStyle:'bold', fontSize:9, textColor:DARK}
+    });
+    y = doc.lastAutoTable.finalY + 4;
+  }
+
+  function sectionTitle(el){
+    const t = txt(el.textContent);
+    ensure(10);
+    doc.setFillColor(GREEN[0],GREEN[1],GREEN[2]); doc.rect(M,y,pageW-2*M,6.6,'F');
+    doc.setTextColor(255,255,255); doc.setFontSize(8.5); doc.setFont('helvetica','bold');
+    doc.text(t.toUpperCase(), M+2, y+4.5, {maxWidth:pageW-2*M-4});
+    y += 6.6; doc.setFont('helvetica','normal');
+  }
+
+  function tableEl(el){
+    const wide = el.classList.contains('wide');
+    doc.autoTable({
+      html: el, includeHiddenHtml:true, startY: y, margin:{left:M,right:M,top:M,bottom:M}, theme:'grid', tableWidth: pageW-2*M,
+      styles:{fontSize: wide?6:8, cellPadding: wide?1:1.6, overflow:'linebreak', valign:'middle', lineColor:[226,226,226], lineWidth:0.1, textColor:DARK},
+      headStyles:{fillColor:GREEN, textColor:255, fontStyle:'bold', fontSize: wide?5.5:7.5, halign:'left', overflow:'linebreak'},
+      rowPageBreak:'avoid',
+      didParseCell:(data)=>{
+        const c = data.cell.raw; if(!c||!c.classList) return;
+        if(c.classList.contains('td-c')) data.cell.styles.halign='center';
+        else if(c.classList.contains('td-r')) data.cell.styles.halign='right';
+        if(c.classList.contains('grn')||c.classList.contains('td-green')) data.cell.styles.textColor=GREEN;
+        if(c.classList.contains('red')||c.classList.contains('td-red')) data.cell.styles.textColor=RED;
+        const tr = c.parentElement, rc = (tr&&tr.className)||'';
+        if(/total-row|net-row|net-local-row|subtotal-row/.test(rc)){
+          data.cell.styles.fontStyle='bold';
+          if(/total-row|net/.test(rc)) data.cell.styles.fillColor=[238,244,240];
+        }
+      }
+    });
+    y = doc.lastAutoTable.finalY + 3;
+  }
+
+  function sigSection(el){
+    const cols = [...el.querySelectorAll('.sig-box')];
+    if(!cols.length) return;
+    ensure(26); y += 6;
+    const colW = (pageW-2*M)/cols.length;
+    cols.forEach((b,i)=>{
+      const x = M + i*colW;
+      doc.setDrawColor(120,120,120); doc.setLineWidth(0.3); doc.line(x+4, y+11, x+colW-4, y+11);
+      const lines = [...b.childNodes].map(n=>txt(n.textContent)).filter(Boolean);
+      doc.setFontSize(7.5); doc.setTextColor(90,90,90); doc.setFont('helvetica','normal');
+      doc.text(lines.join('   '), x+colW/2, y+15, {align:'center', maxWidth:colW-6});
+    });
+    y += 18;
+  }
+
+  const SEL = '.report-header, .summary-grid, .kpi-grid, .section-title, table, .no-data, .note-box, .sig-section';
+  rootEl.querySelectorAll(SEL).forEach(node=>{
+    if(node.matches('.report-header')) headerBlock(node);
+    else if(node.matches('.summary-grid,.kpi-grid')) summaryGrid(node);
+    else if(node.matches('.section-title')) sectionTitle(node);
+    else if(node.tagName==='TABLE') tableEl(node);
+    else if(node.matches('.no-data')){ ensure(8); doc.setFontSize(8); doc.setTextColor(150,150,150); doc.setFont('helvetica','italic'); doc.text(txt(node.textContent), M+2, y+4); doc.setFont('helvetica','normal'); y += 8; }
+    else if(node.matches('.note-box')){ const lines = doc.splitTextToSize(txt(node.textContent), pageW-2*M-4); ensure(lines.length*4+4); doc.setFontSize(8); doc.setTextColor(122,82,0); doc.text(lines, M+2, y+4); y += lines.length*4+4; }
+    else if(node.matches('.sig-section')) sigSection(node);
+  });
+  doc.save(filename);
+}
+
+function downloadPdf(){
+  const btn = document.getElementById('pdfBtn');
+  const orig = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = '<span>⏳</span><span class="label"> Preparing…</span>';
+  const reset = () => { btn.disabled=false; btn.innerHTML=orig; };
+  try {
+    if(!window.jspdf || !window.jspdf.jsPDF){ alert('PDF tools are still loading — please wait a couple of seconds and tap again.'); reset(); return; }
+    const doc = new window.jspdf.jsPDF({ orientation:'landscape', unit:'mm', format:'a4' });
+    if(typeof doc.autoTable !== 'function'){ alert('PDF tools are still loading — please wait a couple of seconds and tap again.'); reset(); return; }
+    const period = (document.getElementById('topBarPeriod').textContent||'').replace(/\s+/g,'-').replace(/[^a-zA-Z0-9-]/g,'');
+    buildReportPdf(document.getElementById('reportContent'), doc, `RCCG-Monthly-Statement-${period||'Report'}.pdf`);
+  } catch(e){
+    alert('Could not generate the PDF: '+((e&&e.message)||e));
+  }
+  reset();
 }
 
 async function init(){
