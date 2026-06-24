@@ -12,20 +12,26 @@ body{font-family:system-ui,-apple-system,Arial,sans-serif;font-size:14px;color:#
    cards). Only the wide tables get fixed layout + smaller font so all columns
    fit the page; normal tables keep their natural layout. */
 @media print{
-  @page{margin:8mm 10mm;size:A4 landscape}
-  html,body{background:#fff!important}
+  @page{margin:7mm;size:A4 landscape}
+  html,body{background:#fff!important;height:auto!important;min-height:0!important}
   body{font-size:12px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
   .no-print,.top-bar{display:none!important}
-  #report-root{padding:0!important}
-  .page-wrap{box-shadow:none;border-radius:0;padding:0;margin:0;max-width:none;width:100%}
-  .section-title.collapsible{background:#0F6E56!important;color:#fff!important;border-radius:0!important;cursor:default!important;page-break-after:avoid}
-  .collapsible-body{display:block!important;border:1px solid #b2d8cc!important}
+  #report-root{padding:0!important;display:block!important}
+  #loading-state,#error-state{display:none!important}
+  .page-wrap{box-shadow:none;border-radius:0;padding:0;margin:0;max-width:none;width:100%;min-height:0!important}
+  .report-header{margin-bottom:12px!important}
+  .kpi-grid{margin-bottom:12px!important;page-break-inside:avoid}
+  /* Sections must be breakable across pages, with the green title kept beside its table */
+  .section{margin-bottom:10px!important;page-break-inside:auto!important}
+  .section-title.collapsible{background:#0F6E56!important;color:#fff!important;border-radius:0!important;cursor:default!important;page-break-after:avoid!important;break-after:avoid!important}
+  .collapsible-body{display:block!important;overflow:visible!important;border:none!important;border-radius:0!important;margin-bottom:0!important}
   .card-list{display:none!important}
   .table-wrap{display:block!important;overflow:visible!important}
-  table.wide{min-width:0!important;width:100%!important;table-layout:fixed!important;font-size:8.5pt}
-  table.wide th,table.wide td{white-space:normal!important;overflow-wrap:break-word!important;padding:3px 4px!important}
+  table.wide{min-width:0!important;width:100%!important;table-layout:fixed!important;font-size:8pt}
+  table.wide th,table.wide td{white-space:normal!important;overflow-wrap:break-word!important;padding:2px 3px!important}
   tr{page-break-inside:avoid}
   table{page-break-inside:auto}
+  .sig-section{margin-top:16px!important;page-break-inside:avoid}
 }
 .top-bar{background:#0F6E56;color:#fff;padding:10px 16px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:20;box-shadow:0 2px 8px rgba(0,0,0,.18)}
 .top-bar-brand{flex:1;min-width:0}

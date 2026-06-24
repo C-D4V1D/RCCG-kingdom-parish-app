@@ -8709,8 +8709,9 @@ function openPrintableReport(title, bodyHTML, shareConfig){
     table{page-break-inside:auto}
     tr{page-break-inside:avoid}
     thead{display:table-header-group}
-    table.wide{font-size:8.5pt}
-    table.wide th,table.wide td{padding:3px 4px}
+    table.wide{font-size:8pt}
+    table.wide th,table.wide td{padding:2px 3px}
+    .sig-section{margin-top:20px}
   }
   .print-btn-bar{text-align:center;margin-bottom:18px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
   .print-btn{background:#0F6E56;color:#fff;border:none;padding:10px 28px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
