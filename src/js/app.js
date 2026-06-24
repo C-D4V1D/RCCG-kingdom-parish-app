@@ -7114,7 +7114,7 @@ async function renderBank(){
       <button class="tab ${tab==='reconciliation'?'active':''}" onclick="App.setBankTab('reconciliation')">Reconciliation</button>
     </div>
 
-    ${tab==='overview'?renderBankOverview(monthBankTx,bankBalance):
+    ${tab==='overview'?renderBankOverview(monthBankTx,closingBankBalance):
       tab==='withdrawals'?renderBankWithdrawals(monthlyWithdrawals):
       tab==='deposits'?renderBankDeposits(monthlyDeposits):
       tab==='charges'?renderBankCharges(periodExpenses.filter(e=>e.category==='bank')):
