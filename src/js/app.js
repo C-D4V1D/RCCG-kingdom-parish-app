@@ -8649,33 +8649,30 @@ async function submitRefill(btn=null){
 
 /** Opens a print-friendly report in a new window (manual print via button inside report window) */
 function openPrintableReport(title, bodyHTML, shareConfig){
-  const filename = (title||'Report').replace(/[—–]/g,'-').replace(/[^a-zA-Z0-9 _-]/g,'').replace(/\s+/g,'-').slice(0,80) + '.pdf';
   const shareBtn = shareConfig ? `<button class="print-btn print-btn-outline" onclick="if(window.opener&&window.opener.App){window.opener.App.shareMonthlyStatement('${esc(shareConfig.from)}','${esc(shareConfig.to)}');window.opener.focus();}else{alert('Please return to the app tab to create a shareable link.');}">🔗 Share Link</button>` : '';
   const html=`<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <title>${esc(title)}</title>
-<script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"><\/script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:'Segoe UI',Arial,sans-serif;font-size:14px;color:#333;line-height:1.5;background:#eef1ee;padding:20px 12px}
-  #report-sheet{width:1000px;max-width:1000px;margin:0 auto;background:#fff;padding:28px 32px;box-shadow:0 2px 16px rgba(0,0,0,.08)}
+  #report-sheet{width:1040px;max-width:1040px;margin:0 auto;background:#fff;padding:28px 32px;box-shadow:0 2px 16px rgba(0,0,0,.08)}
   .report-header{text-align:center;border-bottom:3px double #0F6E56;padding-bottom:16px;margin-bottom:20px}
   .report-header .church-name{font-size:24px;font-weight:700;color:#0F6E56;margin-bottom:2px;text-transform:uppercase;letter-spacing:1px}
   .report-header .church-address{font-size:13px;color:#666;margin-bottom:8px}
   .report-header .report-title{font-size:17px;font-weight:700;color:#333;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px}
   .report-header .report-period{font-size:14px;color:#555}
   .report-header .report-meta{font-size:12px;color:#777;margin-top:6px}
-  .section-title{font-size:15px;font-weight:700;color:#0F6E56;margin:20px 0 8px;padding:4px 0;border-bottom:2px solid #0F6E56;text-transform:uppercase;letter-spacing:0.5px}
+  .section-title{font-size:15px;font-weight:700;color:#0F6E56;margin:18px 0 8px;padding:4px 0;border-bottom:2px solid #0F6E56;text-transform:uppercase;letter-spacing:0.5px;page-break-after:avoid}
   .section-title span{font-weight:normal;font-size:12px;color:#666;margin-left:8px;text-transform:none;letter-spacing:0}
   table{width:100%;border-collapse:collapse;margin-bottom:14px;font-size:13px}
   th{background:#0F6E56;color:#fff;padding:8px 10px;text-align:left;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px}
-  td{padding:7px 10px;border-bottom:1px solid #e0e0e0}
-  th,td{overflow-wrap:anywhere;white-space:normal}
+  td{padding:7px 10px;border-bottom:1px solid #e0e0e0;overflow-wrap:break-word}
   tr:nth-child(even) td{background:#fafafa}
-  /* Wide tables (many columns) use fixed layout + wrapping so columns share width evenly */
-  table.wide{font-size:12px;table-layout:fixed}
-  table.wide th{font-size:11px;padding:6px 6px}
-  table.wide td{padding:6px 6px}
+  /* Wide tables (many columns) use fixed layout so columns share width and wrap by word */
+  table.wide{font-size:11px;table-layout:fixed}
+  table.wide th{font-size:10.5px;padding:5px 5px;white-space:normal;overflow-wrap:break-word}
+  table.wide td{padding:5px 5px;white-space:normal;overflow-wrap:break-word}
   .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:14px 0 18px;page-break-inside:avoid}
   .summary-box{border:1.5px solid #e0e0e0;border-radius:6px;padding:12px 14px;text-align:center}
   .summary-box .label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#777;margin-bottom:4px}
@@ -8693,7 +8690,7 @@ function openPrintableReport(title, bodyHTML, shareConfig){
   .total-row td{border-top:2px solid #333;font-weight:700;background:#f5f5f5!important;padding:8px 10px}
   .subtotal-row td{border-top:1.5px solid #aaa;font-weight:600;background:#fafafa!important}
   .note-box{background:#fff8e1;border:1px solid #f0c040;border-radius:4px;padding:10px 14px;font-size:12px;margin:12px 0;color:#7a5200;line-height:1.6}
-  .sig-section{display:grid;grid-template-columns:1fr 1fr 1fr;gap:28px;margin-top:40px;page-break-inside:avoid}
+  .sig-section{display:grid;grid-template-columns:1fr 1fr 1fr;gap:28px;margin-top:36px;page-break-inside:avoid}
   .sig-box{border-top:1.5px solid #333;padding-top:8px;font-size:12px;text-align:center;line-height:1.6}
   .sig-box .sig-name{font-weight:600;margin-top:4px}
   .footer-note{margin-top:24px;padding-top:12px;border-top:1px solid #ddd;font-size:10.5px;color:#999;text-align:center}
@@ -8704,49 +8701,29 @@ function openPrintableReport(title, bodyHTML, shareConfig){
   .badge-info{background:#E6F1FB;color:#185FA5}
   .no-data{text-align:center;padding:30px;color:#999;font-style:italic}
   @media print{
-    @page{margin:10mm;size:A4 landscape}
-    body{padding:0;background:#fff;font-size:13px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-    #report-sheet{width:100%;max-width:none;box-shadow:none;padding:0}
+    @page{margin:8mm 10mm;size:A4 landscape}
+    html,body{background:#fff!important}
+    body{padding:0;font-size:12px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    #report-sheet{width:100%;max-width:none;box-shadow:none;padding:0;margin:0}
     .no-print{display:none!important}
     table{page-break-inside:auto}
-    table.wide{font-size:12px}
     tr{page-break-inside:avoid}
+    thead{display:table-header-group}
+    table.wide{font-size:8.5pt}
+    table.wide th,table.wide td{padding:3px 4px}
   }
   .print-btn-bar{text-align:center;margin-bottom:18px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
   .print-btn{background:#0F6E56;color:#fff;border:none;padding:10px 28px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
   .print-btn:hover{background:#085041}
-  .print-btn:disabled{opacity:.6;cursor:default}
   .print-btn-outline{background:#fff;color:#0F6E56;border:1.5px solid #0F6E56}
   .print-btn-outline:hover{background:#e8f4f0}
+  .print-hint{text-align:center;font-size:12px;color:#777;margin:-8px 0 16px}
 </style>
 </head>
 <body>
-  <div class="print-btn-bar no-print"><button class="print-btn" id="dlBtn" onclick="downloadA4()">⬇ Download A4 PDF</button>${shareBtn}</div>
+  <div class="print-btn-bar no-print"><button class="print-btn" onclick="window.print()">⬇ Download / Save as PDF</button>${shareBtn}</div>
+  <div class="print-hint no-print">Tip: in the dialog choose <strong>“Save as PDF”</strong> and paper size <strong>A4 (Landscape)</strong>.</div>
   <div id="report-sheet">${bodyHTML}</div>
-  <script>
-  function downloadA4(){
-    var btn=document.getElementById('dlBtn');
-    var orig=btn.textContent; btn.disabled=true; btn.textContent='Generating…';
-    function go(){
-      html2pdf().set({
-        margin:[10,10,10,10],
-        filename:${JSON.stringify(filename)},
-        image:{type:'jpeg',quality:0.98},
-        html2canvas:{scale:2,useCORS:true,windowWidth:1040},
-        jsPDF:{unit:'mm',format:'a4',orientation:'landscape'},
-        pagebreak:{mode:['css','legacy','avoid-all']}
-      }).from(document.getElementById('report-sheet')).save()
-        .then(function(){btn.disabled=false;btn.textContent=orig;})
-        .catch(function(){alert('PDF generation failed. Use your browser menu to Print and choose Save as PDF (A4 landscape).');btn.disabled=false;btn.textContent=orig;});
-    }
-    if(typeof html2pdf==='undefined'){
-      var s=document.createElement('script');
-      s.src='https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js';
-      s.onload=go; s.onerror=function(){alert('Could not load the PDF library. Check your connection and try again.');btn.disabled=false;btn.textContent=orig;};
-      document.head.appendChild(s);
-    } else { go(); }
-  }
-  <\/script>
 </body></html>`;
   const w=window.open('','_blank');
   if(!w){ showAlert('Pop-up blocked. Please allow pop-ups for this site to download the report.','warn'); return }
