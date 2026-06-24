@@ -6966,6 +6966,40 @@ async function renderBank(){
   const monthlyWithdrawals = periodCashTx.filter(t=>t.type==='withdrawal');
   const monthlyDeposits = periodCashTx.filter(t=>t.type==='cash_deposit');
 
+  // Period summary — opening balance, period inflows/outflows, closing balance
+  const _ypd = raw => { const d = new Date(raw||''); return isNaN(d.getTime()) ? null : ymdLocal(d); };
+  const _prePeriod = raw => { const d = _ypd(raw); return d !== null && d < bankPeriodFrom; };
+
+  const openingBankBalance =
+      allIncome.filter(r => _prePeriod(r.date||r.createdAt)).reduce((s,r) => s+(r.bankTransferAmount||0), 0)
+    + allCashTx.filter(t => t.type==='cash_deposit' && _prePeriod(t.date||t.createdAt)).reduce((s,t) => s+(t.amount||0), 0)
+    - allExpenses.filter(e => isLoggedExpense(e) && _prePeriod(e.date||e.createdAt)).reduce((sum,e) => {
+        if(e.paymentMethod==='bank_transfer') return sum+(e.amount||0);
+        if(e.paymentMethod==='split') return sum+(e.bankAmount||0);
+        return sum;
+      }, 0)
+    - allRemittances.filter(r => r.status==='paid' && _prePeriod(r.date||r.createdAt)).reduce((s,r) => s+(r.amount||0), 0)
+    - allCashTx.filter(t => t.type==='withdrawal' && _prePeriod(t.date||t.createdAt)).reduce((s,t) => s+(t.amount||0), 0)
+    - pettyHistory.filter(h => h.type==='refill' && (h.status==='approved'||h.status==='settled')
+        && (h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0))
+        && _prePeriod(h.date||h.createdAt)).reduce((s,h) => s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)), 0);
+
+  const periodTotalInflows =
+      filterByCurrentPeriod(allIncome, bankPeriodFrom, bankPeriodTo).reduce((s,r) => s+(r.bankTransferAmount||0), 0)
+    + monthlyDeposits.reduce((s,t) => s+(t.amount||0), 0);
+
+  const periodTotalOutflows =
+      periodExpenses.filter(e => isLoggedExpense(e) && (e.paymentMethod==='bank_transfer'||(e.paymentMethod==='split'&&(e.bankAmount||0)>0)))
+        .reduce((sum,e) => { if(e.paymentMethod==='bank_transfer') return sum+(e.amount||0); if(e.paymentMethod==='split') return sum+(e.bankAmount||0); return sum; }, 0)
+    + filterByCurrentPeriod(allRemittances, bankPeriodFrom, bankPeriodTo).filter(r => r.status==='paid').reduce((s,r) => s+(r.amount||0), 0)
+    + monthlyWithdrawals.reduce((s,t) => s+(t.amount||0), 0)
+    + filterByCurrentPeriod(pettyHistory, bankPeriodFrom, bankPeriodTo)
+        .filter(h => h.type==='refill' && (h.status==='approved'||h.status==='settled')
+          && (h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
+        .reduce((s,h) => s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)), 0);
+
+  const closingBankBalance = openingBankBalance + periodTotalInflows - periodTotalOutflows;
+
   // Pending cash deposits (income records with undeposited cash — all time)
   const pendingDepItems = allIncome.filter(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
@@ -7047,6 +7081,28 @@ async function renderBank(){
         <div class="kpi-icon" style="background:#FAEEDA">💳</div>
         <div class="kpi-label">Bank Charges (${state.periodMode==='remittance'?'Period':MONTHS[state.month].slice(0,3)})</div>
         <div class="kpi-val">${fmt(monthlyBankCharges)}</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-header"><span class="card-title">${monthLabel()} Summary</span></div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;padding:4px 0 8px">
+        <div style="text-align:center;padding:10px 4px">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px">Opening Balance</div>
+          <div style="font-size:14px;font-weight:700;color:${openingBankBalance<0?'var(--danger)':'var(--text1)'}">${fmt(openingBankBalance)}</div>
+        </div>
+        <div style="text-align:center;padding:10px 4px;background:#E1F5EE;border-radius:8px">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px">Inflows</div>
+          <div style="font-size:14px;font-weight:700;color:var(--success,#2e7d32)">+${fmt(periodTotalInflows)}</div>
+        </div>
+        <div style="text-align:center;padding:10px 4px;background:#FCEBEB;border-radius:8px">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px">Outflows</div>
+          <div style="font-size:14px;font-weight:700;color:var(--danger)">−${fmt(periodTotalOutflows)}</div>
+        </div>
+        <div style="text-align:center;padding:10px 4px">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px">Closing Balance</div>
+          <div style="font-size:14px;font-weight:700;color:${closingBankBalance<0?'var(--danger)':'var(--primary)'}">${fmt(closingBankBalance)}</div>
+        </div>
       </div>
     </div>
 
