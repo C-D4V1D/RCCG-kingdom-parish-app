@@ -9,16 +9,29 @@
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,Arial,sans-serif;font-size:14px;color:#1a1a1a;background:#f0f4f0;min-height:100vh}
 @media print{
-  @page{margin:14mm 12mm;size:A4}
+  @page{margin:10mm;size:A4 landscape}
   body{background:#fff;font-size:13px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-  .no-print{display:none!important}
-  .page-wrap{box-shadow:none;border-radius:0;padding:0;margin:0;max-width:none}
+  .no-print,.top-bar{display:none!important}
+  #report-root{padding:0!important}
+  .page-wrap{box-shadow:none;border-radius:0;padding:0;margin:0;max-width:none;width:100%}
   .section-title.collapsible{background:#0F6E56!important;color:#fff!important;border-radius:0!important;cursor:default!important}
   .collapsible-body{display:block!important}
   .card-list{display:none!important}
   .table-wrap{display:block!important;overflow:visible!important}
-  table{min-width:0!important}
+  table,table.wide{min-width:0!important;width:100%!important;table-layout:fixed!important}
+  th,td{white-space:normal!important;overflow-wrap:anywhere!important}
+  table.wide{font-size:11px}
+  tr{page-break-inside:avoid}
+  table{page-break-inside:auto}
 }
+/* Full desktop landscape layout used while exporting to PDF (html2pdf capture) */
+.pdf-mode{width:1000px!important;max-width:1000px!important;margin:0!important;padding:24px 26px!important;border-radius:0!important;box-shadow:none!important}
+.pdf-mode .collapsible-body{display:block!important}
+.pdf-mode .card-list{display:none!important}
+.pdf-mode .table-wrap{display:block!important;overflow:visible!important}
+.pdf-mode table,.pdf-mode table.wide{min-width:0!important;width:100%!important;table-layout:fixed!important}
+.pdf-mode th,.pdf-mode td{white-space:normal!important;overflow-wrap:anywhere!important}
+.pdf-mode table.wide{font-size:12px}
 .top-bar{background:#0F6E56;color:#fff;padding:10px 16px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:20;box-shadow:0 2px 8px rgba(0,0,0,.18)}
 .top-bar-brand{flex:1;min-width:0}
 .top-bar-name{font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -305,20 +318,25 @@ async function downloadPdf(){
     const el = document.getElementById('reportContent');
     const period = document.getElementById('topBarPeriod').textContent;
     const filename = `RCCG-Monthly-Statement-${period.replace(/\s/g,'-').replace(/[^a-zA-Z0-9-]/g,'')}.pdf`;
-    // Expand all sections and force tables (not cards) for the PDF
+    // Render the full desktop report layout (not the mobile cards) into a fixed-width
+    // landscape A4 sheet so every column fits the page and nothing is clipped.
     document.querySelectorAll('.section-title.collapsible').forEach(t=>t.classList.add('open'));
     document.querySelectorAll('.collapsible-body').forEach(b=>b.classList.add('open'));
-    document.querySelectorAll('.card-list').forEach(e=>e.style.display='none');
-    document.querySelectorAll('.table-wrap').forEach(e=>{e.style.display='block';e.style.overflow='visible';});
-    await html2pdf().set({
-      margin:[10,10,10,10],
-      filename,
-      html2canvas:{scale:2,useCORS:true,logging:false},
-      jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},
-      pagebreak:{mode:['avoid-all','css','legacy']}
-    }).from(el).save();
+    el.classList.add('pdf-mode');
+    try {
+      await html2pdf().set({
+        margin:[10,10,10,10],
+        filename,
+        image:{type:'jpeg',quality:0.98},
+        html2canvas:{scale:2,useCORS:true,logging:false,windowWidth:1040},
+        jsPDF:{unit:'mm',format:'a4',orientation:'landscape'},
+        pagebreak:{mode:['css','legacy','avoid-all']}
+      }).from(el).save();
+    } finally {
+      el.classList.remove('pdf-mode');
+    }
   } catch(e){
-    alert('PDF generation failed. Please use the Print button and select "Save as PDF".');
+    alert('PDF generation failed. Please use the Print button and select "Save as PDF" (A4 landscape).');
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<span>⬇</span><span class="label"> Download PDF</span>';
