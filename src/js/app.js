@@ -6991,7 +6991,7 @@ async function renderBank(){
     ...allCashTx.filter(t=>t.type==='withdrawal').map(t=>({...t, txType:'withdrawal', txLabel:'Withdrawal', txAmt: -(t.amount||0)})),
     ...allCashTx.filter(t=>t.type==='cash_deposit').map(t=>({...t, txType:'deposit', txLabel:'Cash Deposit', txAmt: (t.amount||0)})),
     ...allExpenses
-      .filter(e=>e.paymentMethod==='bank_transfer'||(e.paymentMethod==='split'&&(e.bankAmount||0)>0))
+      .filter(e=>isLoggedExpense(e)&&(e.paymentMethod==='bank_transfer'||(e.paymentMethod==='split'&&(e.bankAmount||0)>0)))
       .map(e=>({
         ...e,
         txType:'expense',
@@ -7001,7 +7001,7 @@ async function renderBank(){
       })),
     ...allRemittances.filter(r=>r.status==='paid').map(r=>({...r, txType:'remittance', txLabel:`Remittance: ${r.incomeType||'HQ'}`, txAmt: -(r.amount||0), date:r.date||r.createdAt})),
     ...allIncome.filter(r=>(r.bankTransferAmount||0)>0).map(r=>({...r, txType:'income', txLabel:`Income deposit (bank transfer)`, txAmt: (r.bankTransferAmount||0)})),
-    ...pettyHistory.filter(h=>h.type==='refill'&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
+    ...pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
       .map(h=>({...h, txType:'petty-topup', txLabel:`Petty cash top-up (bank)`, txAmt:-(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0))}))
   ].sort((a,b)=>new Date(b.date||b.createdAt||0)-new Date(a.date||a.createdAt||0));
 
@@ -7045,7 +7045,7 @@ async function renderBank(){
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#FAEEDA">💳</div>
-        <div class="kpi-label">Bank Charges (${MONTHS[state.month].slice(0,3)})</div>
+        <div class="kpi-label">Bank Charges (${state.periodMode==='remittance'?'Period':MONTHS[state.month].slice(0,3)})</div>
         <div class="kpi-val">${fmt(monthlyBankCharges)}</div>
       </div>
     </div>
