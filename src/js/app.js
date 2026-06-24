@@ -1060,6 +1060,36 @@ function getSundayCashWithAccountant(record, remRates = DEFAULT_REMITTANCE_RATES
   return Math.max(0, total - bankTransfer - directPetty - childrenTeacherHeld);
 }
 
+// FIFO attribution of global cash expenses to income records (oldest first).
+// Returns Map<incomeId, {cashHeld, deposited, expenseCovering, stillPending, isReconciled}>.
+function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses){
+  const globalCashExpenses=(allExpenses||[]).filter(isLoggedExpense).reduce((s,e)=>{
+    if(e.paymentMethod==='cash') return s+(e.amount||0);
+    if(e.paymentMethod==='split') return s+(e.cashAmount||0);
+    return s;
+  },0);
+  const map=new Map();
+  if(globalCashExpenses<=0) return map;
+  const items=[];
+  for(const r of (allIncome||[])){
+    const isSunday=!r.source||r.source==='sunday_collection';
+    const cashHeld=isSunday?getSundayCashWithAccountant(r,remRates):r.paymentMethod==='cash'?(r.totalCollection||0):0;
+    if(cashHeld<=0) continue;
+    const deposited=(allCashTx||[]).filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+    const undeposited=Math.max(0,cashHeld-deposited);
+    if(undeposited>0) items.push({id:r.id,date:r.date||r.createdAt,cashHeld,deposited,undeposited});
+  }
+  items.sort((a,b)=>new Date(a.date)-new Date(b.date));
+  let left=globalCashExpenses;
+  for(const item of items){
+    const covering=Math.min(item.undeposited,left);
+    left-=covering;
+    const stillPending=Math.max(0,item.undeposited-covering);
+    map.set(item.id,{cashHeld:item.cashHeld,deposited:item.deposited,expenseCovering:covering,stillPending,isReconciled:stillPending<=0.5});
+  }
+  return map;
+}
+
 function totalRemittanceDue(remCalc, quotas = 0){
   return (remCalc?.totalNatl || 0)
     + (remCalc?.totalArea || 0)
@@ -3507,6 +3537,7 @@ async function renderIncome(){
     ['Remittance rates',   () => getRemRates()],
     ['Church balance',     () => calcChurchBalance()],
     ['Period range',       () => getCurrentPeriodRange()],
+    ['Expenses',           () => DB.getExpenses()],
   ];
   const _incSettled = await Promise.allSettled(_incSources.map(([, fn]) => fn()));
   const _incFailed = _incSettled.map((r, i) => r.status === 'rejected' ? { label: _incSources[i][0], err: r.reason } : null).filter(Boolean);
@@ -3514,22 +3545,25 @@ async function renderIncome(){
     renderPageErrorState({ pageId: 'income', pageTitle: 'Income Recording', pageSub: monthLabel(), failed: _incFailed });
     return;
   }
-  const [allIncomeRecs, _cashTx, remRatesData, balance, periodRange] = _incSettled.map(r => r.value);
+  const [allIncomeRecs, _cashTx, remRatesData, balance, periodRange, allExpensesRI] = _incSettled.map(r => r.value);
   const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
   const cashWithAccountant = balance.cashWithAccountant;
   const records = filterByCurrentPeriod(allIncomeRecs, periodRange.from, periodRange.to);
   const sundayRecs = records.filter(r=>!r.source||r.source==='sunday_collection');
   const otherRecs  = records.filter(r=>r.source && r.source!=='sunday_collection');
   const tab = state.incomeTab||'list';
+  const expCoveringMap = buildExpenseCoveringMap(allIncomeRecs, _cashTx, remRates, allExpensesRI);
   // Pending count for this month's income records (informational only)
-  const pendingItems = records.map(r=>{
+  const pendingItems = records.filter(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
       ? getSundayCashWithAccountant(r, remRates)
       : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
+    if(cashHeld<=0) return false;
     const dep = _cashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-    return { cashHeld, dep };
-  }).filter(p=>p.cashHeld>0 && p.dep<p.cashHeld);
+    if(dep>=cashHeld) return false;
+    return !expCoveringMap.get(r.id)?.isReconciled;
+  });
   const pendingCount = pendingItems.length;
   const totalCollected = records.reduce((s,r)=>s+(r.totalCollection||0),0);
   // Only count deposits linked to this period's income records (scoped to the active view)
@@ -3558,12 +3592,12 @@ async function renderIncome(){
       <button class="tab ${tab==='summary'?'active':''}" onclick="App.setIncomeTab('summary')">Monthly Summary</button>
       <button class="tab ${tab==='all'?'active':''}" onclick="App.setIncomeTab('all')">All Records</button>
     </div>
-    ${await (tab==='list'?renderIncomeList(sundayRecs, _cashTx, remRates):tab==='other'?renderOtherIncomeList(otherRecs):tab==='summary'?renderIncomeSummary(records):renderAllIncomeList(allIncomeRecs, _cashTx, remRates))}`;
+    ${await (tab==='list'?renderIncomeList(sundayRecs, _cashTx, remRates, expCoveringMap):tab==='other'?renderOtherIncomeList(otherRecs, expCoveringMap):tab==='summary'?renderIncomeSummary(records):renderAllIncomeList(allIncomeRecs, _cashTx, remRates, expCoveringMap))}`;
 }
 
 function setIncomeTab(t){ state.incomeTab=t; renderIncome() }
 
-async function renderIncomeList(records, cashTxOverride, remRatesOverride){
+async function renderIncomeList(records, cashTxOverride, remRatesOverride, expMapOverride){
   if(!records.length) return '<div class="card"><div class="empty-table">No Sunday collection records found for this month. Click "📥 Sunday Collections" above to add one.</div></div>';
   const allCashTxList = cashTxOverride || await DB.getCashTransactions();
   const remRates = remRatesOverride || (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
@@ -3576,13 +3610,14 @@ async function renderIncomeList(records, cashTxOverride, remRatesOverride){
         const dpAmt = r.directPettyCash||0;
         const cashHeld = getSundayCashWithAccountant(r, remRates);
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-        const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
-        const remaining = cashHeld - depositedAmt;
+        const entry = expMapOverride?.get(r.id);
+        const isFullyDeposited = cashHeld > 0 && (depositedAmt >= cashHeld || entry?.isReconciled);
+        const remaining = entry ? entry.stillPending : Math.max(0, cashHeld - depositedAmt);
         const statusBadge = cashHeld===0
           ? `<span class="badge badge-info">No Cash (All Transfer)</span>`
           : isFullyDeposited
             ? `<span class="badge badge-success">✓ Deposited</span>`
-            : depositedAmt>0
+            : depositedAmt > 0
               ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} still pending</span>`
               : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
         return `<tr>
@@ -3604,7 +3639,8 @@ async function renderIncomeList(records, cashTxOverride, remRatesOverride){
         const dpAmt = r.directPettyCash||0;
         const cashHeld = getSundayCashWithAccountant(r, remRates);
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-        const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
+        const entry = expMapOverride?.get(r.id);
+        const isFullyDeposited = cashHeld > 0 && (depositedAmt >= cashHeld || entry?.isReconciled);
         const mobileStatus = cashHeld===0
           ? `<span class="badge badge-info">No Cash</span>`
           : isFullyDeposited
@@ -3621,7 +3657,7 @@ async function renderIncomeList(records, cashTxOverride, remRatesOverride){
     </table></div></div>`;
 }
 
-async function renderOtherIncomeList(records){
+async function renderOtherIncomeList(records, expMapOverride){
   if(!records.length) return '<div class="card"><div class="empty-table">No other income records found for this month. Click "➕ Other Income" above to add one.</div></div>';
   const allCashTxList = await DB.getCashTransactions();
   return `<div class="card">
@@ -3632,10 +3668,12 @@ async function renderOtherIncomeList(records){
         const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'};
         const isCash = r.paymentMethod==='cash';
         const cashDep = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-        const remaining = Math.max(0,(r.totalCollection||0) - cashDep);
+        const entry = isCash ? expMapOverride?.get(r.id) : null;
+        const isFullyDep = cashDep>=(r.totalCollection||0) || entry?.isReconciled;
+        const remaining = entry ? entry.stillPending : Math.max(0,(r.totalCollection||0) - cashDep);
         const statusBadge = !isCash
           ? `<span class="badge badge-info">🏦 Bank Transfer</span>`
-          : cashDep>=(r.totalCollection||0)
+          : isFullyDep
             ? `<span class="badge badge-success">✓ Deposited</span>`
             : cashDep>0
               ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} pending</span>`
@@ -3649,7 +3687,7 @@ async function renderOtherIncomeList(records){
           <td>${statusBadge}</td>
           <td class="td-muted">${r.recordedBy||'—'}</td>
           <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-          ${canAction('income_deposit')&&isCash&&cashDep<(r.totalCollection||0)?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+          ${canAction('income_deposit')&&isCash&&!isFullyDep?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
         </tr>`;}).join('')}
     </table>
     <table class="tx-mobile-table">
@@ -3658,9 +3696,11 @@ async function renderOtherIncomeList(records){
         const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'};
         const isCash = r.paymentMethod==='cash';
         const cashDep = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+        const entry = isCash ? expMapOverride?.get(r.id) : null;
+        const isFullyDep = cashDep>=(r.totalCollection||0) || entry?.isReconciled;
         const mobileStatus = !isCash
           ? `<span class="badge badge-info">🏦 Bank</span>`
-          : cashDep>=(r.totalCollection||0)
+          : isFullyDep
             ? `<span class="badge badge-success">✓ Deposited</span>`
             : `<span class="badge badge-warn">⏳ Pending</span>`;
         return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(src.label)} ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
@@ -3740,7 +3780,7 @@ async function renderIncomeSummary(records){
     </div>`;
 }
 
-async function renderAllIncomeList(records, cashTxOverride, remRatesOverride){
+async function renderAllIncomeList(records, cashTxOverride, remRatesOverride, expMapOverride){
   if(!records.length) return '<div class="card"><div class="empty-table">No income records found across all months.</div></div>';
   const allCashTxList = cashTxOverride || await DB.getCashTransactions();
   const remRates = remRatesOverride || (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
@@ -3757,8 +3797,9 @@ async function renderAllIncomeList(records, cashTxOverride, remRatesOverride){
           ? getSundayCashWithAccountant(r, remRates)
           : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-        const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
-        const remaining = cashHeld - depositedAmt;
+        const entry = expMapOverride?.get(r.id);
+        const isFullyDeposited = cashHeld > 0 && (depositedAmt >= cashHeld || entry?.isReconciled);
+        const remaining = entry ? entry.stillPending : Math.max(0, cashHeld - depositedAmt);
         const statusBadge = cashHeld===0
           ? `<span class="badge badge-info">No Cash</span>`
           : isFullyDeposited
@@ -3788,7 +3829,8 @@ async function renderAllIncomeList(records, cashTxOverride, remRatesOverride){
           ? getSundayCashWithAccountant(r, remRates)
           : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-        const isFullyDeposited = cashHeld > 0 && depositedAmt >= cashHeld;
+        const entry = expMapOverride?.get(r.id);
+        const isFullyDeposited = cashHeld > 0 && (depositedAmt >= cashHeld || entry?.isReconciled);
         const mobileStatus = cashHeld===0
           ? `<span class="badge badge-info">No Cash</span>`
           : isFullyDeposited
@@ -3957,9 +3999,18 @@ async function viewIncome(id){
   const cashHeld = isSunday
     ? getSundayCashWithAccountant(r, remRates)
     : Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
-  const allCashVI = await DB.getCashTransactions();
+  const [allCashVI, allExpensesVI] = await Promise.all([DB.getCashTransactions(), DB.getExpenses()]);
   const deposits = allCashVI.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id);
   const depositedTotal = deposits.reduce((s,t)=>s+(t.amount||0),0);
+  const globalCashExpenses = allExpensesVI.filter(isLoggedExpense).reduce((s,e)=>{
+    if(e.paymentMethod==='cash') return s+(e.amount||0);
+    if(e.paymentMethod==='split') return s+(e.cashAmount||0);
+    return s;
+  },0);
+  const undeposited = Math.max(0, cashHeld - depositedTotal);
+  // Cap attributable expenses at what's actually undeposited so we never overstate
+  const cashExpenseCovering = Math.min(undeposited, globalCashExpenses);
+  const stillWithAccountant = Math.max(0, undeposited - cashExpenseCovering);
   const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Sunday Collection'};
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -3974,8 +4025,9 @@ async function viewIncome(id){
     ${childrenTeacherHeld?`<div class="status-row"><div class="status-row-label">🧒 Children Teacher Hold (for refreshments)</div><div class="status-row-amt" style="color:var(--success)">${fmt(childrenTeacherHeld)}</div></div>`:''}
     ${btAmt?`<div class="status-row"><div class="status-row-label">🏦 Bank Transfer (already in bank)</div><div class="status-row-amt" style="color:var(--primary)">${fmt(btAmt)}</div></div>`:''}
     ${dpAmt?`<div class="status-row"><div class="status-row-label">💳 Direct → Admin Officer Petty Cash</div><div class="status-row-amt" style="color:var(--success)">${fmt(dpAmt)}</div></div>`:''}
+    ${cashExpenseCovering>0?`<div class="status-row"><div class="status-row-label">💸 Cash used for expenses (recorded in Expenses)</div><div class="status-row-amt" style="color:var(--danger)">−${fmt(cashExpenseCovering)}</div></div>`:''}
     ${deposits.length?`<div class="status-row"><div class="status-row-label">✅ Deposited to Bank so far</div><div class="status-row-amt" style="color:var(--success)">${fmt(depositedTotal)}</div></div>`:''}
-    ${cashHeld>depositedTotal?`<div class="status-row"><div class="status-row-label">⏳ Still with Accountant (undeposited)</div><div class="status-row-amt" style="color:var(--danger)">${fmt(cashHeld-depositedTotal)}</div></div>`:''}
+    ${stillWithAccountant>0?`<div class="status-row"><div class="status-row-label">⏳ Still with Accountant (undeposited)</div><div class="status-row-amt" style="color:var(--danger)">${fmt(stillWithAccountant)}</div></div>`:''}
     ${isSunday?`<hr class="divider">
     <p class="card-title">Income Breakdown</p>
     ${INCOME_TYPES.filter(t=>r[t.key]).map(t=>`<div class="status-row"><div class="status-row-label">${t.label}</div><div class="status-row-amt">${fmt(r[t.key])}</div></div>`).join('')}
@@ -3994,7 +4046,7 @@ async function viewIncome(id){
     <div class="modal-footer">
     ${canAction('income_delete')?`<button class="btn btn-danger" style="margin-right:auto" onclick="closeModal();App.confirmDeleteIncome('${r.id}')">🗑 Delete</button>`:''}
     <button class="btn" onclick="closeModal()">Close</button>
-    ${canAction('income_deposit')&&cashHeld>depositedTotal?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
+    ${canAction('income_deposit')&&stillWithAccountant>0?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
 }
 
 function confirmDeleteIncome(id){
@@ -4066,9 +4118,14 @@ async function confirmDeposit(id){
   const alreadyDeposited = allCashCD.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
   const remaining = Math.max(0, cashHeld - alreadyDeposited);
   const totalCashWithAccountant = balance.cashWithAccountant;
-  const otherCash = Math.max(0, totalCashWithAccountant - remaining);
+  // If cash expenses have already been recorded in the Expenses section, the global
+  // cashWithAccountant will be lower than `remaining`. Cap the deposit at what's actually
+  // available so the form pre-fills the correct amount.
+  const effectiveRemaining = Math.min(remaining, totalCashWithAccountant);
+  const expensesDeducted = Math.max(0, remaining - effectiveRemaining);
+  const otherCash = Math.max(0, totalCashWithAccountant - effectiveRemaining);
   const today = new Date().toISOString().split('T')[0];
-  state._depositRemaining = remaining;
+  state._depositRemaining = effectiveRemaining;
   closeModal();
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -4078,19 +4135,20 @@ async function confirmDeposit(id){
       <div style="font-size:11px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">Your Total Cash with Accountant</div>
       <div style="font-size:22px;font-weight:800;color:var(--primary);line-height:1;margin-bottom:8px">${fmt(totalCashWithAccountant)}</div>
       <div style="display:flex;flex-wrap:wrap;gap:16px;font-size:13px">
-        <span style="color:var(--text2)">This record: <strong style="color:var(--text)">${fmt(remaining)}</strong></span>
+        <span style="color:var(--text2)">This record: <strong style="color:var(--text)">${fmt(effectiveRemaining)}</strong></span>
         ${otherCash > 0.5 ? `<span style="color:var(--text2)">Other cash held: <strong style="color:var(--text)">${fmt(otherCash)}</strong></span>` : `<span style="color:var(--success,#2e7d32);font-size:12px;font-weight:600">✓ Only pending record</span>`}
       </div>
       ${otherCash > 0.5 ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(0,0,0,.1);font-size:12px;color:var(--text2)">This form deposits cash from this record only. To deposit all your cash in one trip: <button class="btn btn-sm" onclick="closeModal();App.confirmBulkDeposit()" style="margin-left:4px;font-size:11px;padding:2px 8px">Deposit All Cash (${fmt(totalCashWithAccountant)}) →</button></div>` : ''}
     </div>` : ''}
     <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Record when you physically deposit the cash collected into the church bank account.</span></div>
     <div class="form-group"><label class="form-label">Cash Available from this Record</label>
-      <div style="font-size:20px;font-weight:700;color:var(--primary);padding:8px 0">${fmt(remaining)}</div>
-      ${alreadyDeposited?`<div class="form-hint">₦${alreadyDeposited.toLocaleString('en-NG')} already deposited previously from this record.</div>`:''}
+      <div style="font-size:20px;font-weight:700;color:var(--primary);padding:8px 0">${fmt(effectiveRemaining)}</div>
+      ${alreadyDeposited?`<div class="form-hint">${fmt(alreadyDeposited)} already deposited previously from this record.</div>`:''}
+      ${expensesDeducted>0?`<div class="form-hint" style="color:var(--danger)">💸 ${fmt(expensesDeducted)} deducted — cash expenses already recorded in the Expenses section.</div>`:''}
       ${childrenTeacherHeld?`<div class="form-hint">Children Teacher hold (${fmt(childrenTeacherHeld)}) is excluded from bank deposits.</div>`:''}
     </div>
     <div class="form-group"><label class="form-label">Amount Deposited *</label>
-      <input type="number" id="dep_amount" class="form-input" value="${remaining}" min="0" max="${remaining}" />
+      <input type="number" id="dep_amount" class="form-input" value="${effectiveRemaining}" min="0" max="${effectiveRemaining}" />
     </div>
     <div class="form-group"><label class="form-label">Deposit Method *</label>
       <select id="dep_method" class="form-select">
@@ -4146,7 +4204,7 @@ async function submitCashDeposit(incomeId, btn=null){
     DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${refLabel}`,state.user?.name);
     DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank${ref?` (Ref: ${ref})`:''}`,'success');
     closeModal();
-    showAlert(`${fmt(amount)} deposited to bank successfully!${ref?` Ref: ${ref}`:''}`, 'success');
+    showAlert(`${fmt(amount)} deposited to bank successfully!${expenses>0?` Cash used for expenses: ${fmt(expenses)}.`:''}${ref?` Ref: ${ref}`:''}`, 'success');
     renderIncome();
   } catch(err) {
     restore();
@@ -5694,11 +5752,13 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const churchAddress=settings?.churchAddress||'Aguleri, Anambra State, Nigeria';
   const depositMapM={};
   allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef).forEach(t=>{depositMapM[t.incomeRef]=(depositMapM[t.incomeRef]||0)+(t.amount||0)});
+  const expCoveringMapM=buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses);
   const depositStatus=r=>{
     const cashHeld=getSundayCashWithAccountant(r,remRates);
     if(cashHeld===0) return 'No Cash';
     const dep=depositMapM[r.id]||0;
-    if(dep>=cashHeld) return 'Deposited';
+    const entry=expCoveringMapM.get(r.id);
+    if(dep>=cashHeld||entry?.isReconciled) return 'Deposited';
     if(dep>0) return 'Partial';
     return 'Pending';
   };
@@ -8926,11 +8986,13 @@ async function generateMonthlyReport(){
   const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
   const depositMapM={};
   allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef).forEach(t=>{depositMapM[t.incomeRef]=(depositMapM[t.incomeRef]||0)+(t.amount||0)});
+  const expCoveringMapM=buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses);
   function depositBadgeM(r){
     const cashHeld=getSundayCashWithAccountant(r,remRates);
     if(cashHeld===0) return '<span class="badge badge-info">No Cash</span>';
     const dep=depositMapM[r.id]||0;
-    if(dep>=cashHeld) return '<span class="badge badge-success">Deposited</span>';
+    const entry=expCoveringMapM.get(r.id);
+    if(dep>=cashHeld||entry?.isReconciled) return '<span class="badge badge-success">Deposited</span>';
     if(dep>0) return '<span class="badge badge-warn">Partial</span>';
     return '<span class="badge badge-warn">Pending</span>';
   }
@@ -9047,7 +9109,7 @@ async function generateMonthlyReport(){
 }
 
 async function generateWeeklyReport(){
-  const [allIncome, settings, allCashTx, remRatesData, users] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers()]);
+  const [allIncome, allExpenses, settings, allCashTx, remRatesData, users] = await Promise.all([DB.getIncome(), DB.getExpenses(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers()]);
   const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
   const accountantName=(users||[]).find(u=>u.role==='accountant')?.name||'';
   const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
@@ -9059,11 +9121,13 @@ async function generateWeeklyReport(){
   // Build deposit map from cash_transactions
   const depositMap={};
   allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef).forEach(t=>{depositMap[t.incomeRef]=(depositMap[t.incomeRef]||0)+(t.amount||0)});
+  const expCoveringMap=buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses);
   function depositBadge(r){
     const cashHeld=getSundayCashWithAccountant(r,remRates);
     if(cashHeld===0) return '<span class="badge badge-info">No Cash</span>';
     const dep=depositMap[r.id]||0;
-    if(dep>=cashHeld) return '<span class="badge badge-success">✓ Deposited</span>';
+    const entry=expCoveringMap.get(r.id);
+    if(dep>=cashHeld||entry?.isReconciled) return '<span class="badge badge-success">✓ Deposited</span>';
     if(dep>0) return `<span class="badge badge-warn">Partial</span>`;
     return '<span class="badge badge-warn">Pending</span>';
   }
@@ -9083,7 +9147,7 @@ async function generateWeeklyReport(){
   const weeklySundayCount=new Set(sundayRecs.map(r=>r.date)).size;
   const sundayCollected=sundayRecs.reduce((s,r)=>s+(r.totalCollection||0),0);
   const avgPerSunday=weeklySundayCount?Math.round(sundayCollected/weeklySundayCount):0;
-  const deposited=income.filter(r=>{const c=getSundayCashWithAccountant(r,remRates);return c===0||(depositMap[r.id]||0)>=c}).length;
+  const deposited=income.filter(r=>{const c=getSundayCashWithAccountant(r,remRates);if(c===0) return true;const dep=depositMap[r.id]||0;return dep>=c||expCoveringMap.get(r.id)?.isReconciled;}).length;
   const pending=income.length-deposited;
 
   // Highest and lowest
