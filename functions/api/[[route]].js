@@ -1843,6 +1843,8 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_cash_handovers ADD COLUMN holder TEXT DEFAULT ''`,
     `ALTER TABLE kpsc_cash_handovers ADD COLUMN collected_total REAL DEFAULT 0`,
     `ALTER TABLE kpsc_cash_handovers ADD COLUMN expense_total REAL DEFAULT 0`,
+    // Group ID to link split records from the same bulk deposit action for consolidated display
+    `ALTER TABLE cash_transactions ADD COLUMN group_id TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -2909,7 +2911,7 @@ async function getCashTransactions(DB, includeImages = false) {
   const sql = includeImages
     ? `SELECT * FROM cash_transactions ORDER BY date DESC, created_at DESC`
     : `SELECT id,type,date,amount,description,reference,authorized_by,recorded_by,
-              deposit_method,income_ref,destination,created_at,
+              deposit_method,income_ref,destination,created_at,group_id,
               (photo_data IS NOT NULL AND photo_data != '') AS has_photo
          FROM cash_transactions ORDER BY date DESC, created_at DESC`;
   const { results } = await DB.prepare(sql).all();
@@ -2928,6 +2930,7 @@ async function getCashTransactions(DB, includeImages = false) {
     photoData:     includeImages ? row.photo_data : undefined,
     hasPhoto:      includeImages ? !!row.photo_data : row.has_photo === 1,
     createdAt:     row.created_at,
+    groupId:       row.group_id || '',
   })));
 }
 
@@ -2959,8 +2962,8 @@ async function createCashTransaction(DB, data) {
   const id = data.id || newId('CTX-');
   await DB.prepare(`
     INSERT INTO cash_transactions
-      (id,type,date,amount,description,reference,authorized_by,recorded_by,deposit_method,income_ref,destination,photo_data)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      (id,type,date,amount,description,reference,authorized_by,recorded_by,deposit_method,income_ref,destination,photo_data,group_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     data.type          || '',
@@ -2974,6 +2977,7 @@ async function createCashTransaction(DB, data) {
     data.incomeRef     || '',
     data.destination   || '',
     data.photoData     || '',
+    data.groupId       || '',
   ).run();
   return ok({ ...data, id });
 }

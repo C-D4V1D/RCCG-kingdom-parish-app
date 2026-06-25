@@ -1060,6 +1060,53 @@ function getSundayCashWithAccountant(record, remRates = DEFAULT_REMITTANCE_RATES
   return Math.max(0, total - bankTransfer - directPetty - childrenTeacherHeld);
 }
 
+// Consolidate split cash_deposit records from the same bulk deposit action into single
+// display items. Records are linked by groupId (new) or by matching reference+date+method
+// created within 2 minutes of each other (legacy records before groupId was added).
+function groupCashDeposits(deposits) {
+  const byGroupId = new Map();
+  const noGroupId = [];
+  for (const t of deposits) {
+    if (t.groupId) {
+      if (!byGroupId.has(t.groupId)) byGroupId.set(t.groupId, []);
+      byGroupId.get(t.groupId).push(t);
+    } else {
+      noGroupId.push(t);
+    }
+  }
+
+  const byLegacyKey = new Map();
+  const ungroupable = [];
+  for (const t of noGroupId) {
+    if (!t.reference) { ungroupable.push(t); continue; }
+    const key = `${t.date}|${t.reference}|${t.depositMethod}`;
+    if (!byLegacyKey.has(key)) byLegacyKey.set(key, []);
+    byLegacyKey.get(key).push(t);
+  }
+
+  function mergeDeposits(records) {
+    if (records.length === 1) return records[0];
+    const sorted = [...records].sort((a,b) => new Date(a.createdAt||0) - new Date(b.createdAt||0));
+    const total = records.reduce((s,r) => s + (r.amount||0), 0);
+    return { ...sorted[0], amount: total, _splitParts: sorted };
+  }
+
+  const result = [];
+  for (const records of byGroupId.values()) result.push(mergeDeposits(records));
+  for (const records of byLegacyKey.values()) {
+    if (records.length > 1) {
+      const times = records.map(r => new Date(r.createdAt||0).getTime()).sort((a,b)=>a-b);
+      if (times[times.length-1] - times[0] <= 2 * 60 * 1000) {
+        result.push(mergeDeposits(records));
+        continue;
+      }
+    }
+    result.push(...records);
+  }
+  result.push(...ungroupable);
+  return result;
+}
+
 // Date-aware FIFO attribution of cash expenses to income records.
 // Each expense is only attributed to income records dated on or before the expense date.
 // Expenses that predate all cash-holding income records (paid from bank-withdrawal float
@@ -4432,18 +4479,20 @@ async function submitBulkDeposit(btn=null){
     // Distribute cashToDeposit across income records sequentially (oldest first).
     // Stops when cashToDeposit is exhausted — this correctly handles cases where
     // cash expenses / petty top-ups have already consumed part of the balance.
+    // All split records share the same groupId so they display as one transaction.
+    const groupId = 'BDG-' + uid() + Math.random().toString(36).slice(2);
     let amountLeft = cashToDeposit;
     let recordCount = 0;
     for(const item of incomeItems){
       if(amountLeft < 0.5) break;
       const depositAmt = Math.min(item.remaining, amountLeft);
-      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:item.id, amount:depositAmt, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name });
+      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:item.id, amount:depositAmt, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name, groupId });
       amountLeft -= depositAmt;
       recordCount++;
     }
     // Any remainder comes from bank-withdrawal funds not tied to income records
     if(amountLeft > 0.5){
-      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:'', amount:amountLeft, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name, description:'Cash deposit (bank withdrawal funds)' });
+      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:'', amount:amountLeft, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name, description:'Cash deposit (bank withdrawal funds)', groupId });
       recordCount++;
     }
     const refLabel = ref || (photoData ? '(photo uploaded)' : '—');
@@ -7065,7 +7114,7 @@ async function renderBank(){
   const periodCashTx = filterByCurrentPeriod(allCashTx, bankPeriodFrom, bankPeriodTo);
   const monthlyBankCharges = periodExpenses.filter(e=>e.category==='bank'&&isLoggedExpense(e)).reduce((s,e)=>s+(e.amount||0),0);
   const monthlyWithdrawals = periodCashTx.filter(t=>t.type==='withdrawal');
-  const monthlyDeposits = periodCashTx.filter(t=>t.type==='cash_deposit');
+  const monthlyDeposits = groupCashDeposits(periodCashTx.filter(t=>t.type==='cash_deposit'));
 
   // Period summary — opening balance, period inflows/outflows, closing balance
   const _ypd = raw => { const d = new Date(raw||''); return isNaN(d.getTime()) ? null : ymdLocal(d); };
@@ -7129,7 +7178,7 @@ async function renderBank(){
   // All bank transactions for reconciliation (combined view)
   const bankTxAll = [
     ...allCashTx.filter(t=>t.type==='withdrawal').map(t=>({...t, txType:'withdrawal', txLabel:'Withdrawal', txAmt: -(t.amount||0)})),
-    ...allCashTx.filter(t=>t.type==='cash_deposit').map(t=>({...t, txType:'deposit', txLabel:'Cash Deposit', txAmt: (t.amount||0)})),
+    ...groupCashDeposits(allCashTx.filter(t=>t.type==='cash_deposit')).map(t=>({...t, txType:'deposit', txLabel:'Cash Deposit', txAmt: (t.amount||0)})),
     ...allExpenses
       .filter(e=>isLoggedExpense(e)&&(e.paymentMethod==='bank_transfer'||(e.paymentMethod==='split'&&(e.bankAmount||0)>0)))
       .map(e=>({
@@ -7258,7 +7307,8 @@ function renderBankOverview(monthBankTx,bankBalance){
           <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
             <div>Balance after this transaction: <strong style="color:${balColor}">${fmt(t.balAfter)}</strong></div>
             ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
-            ${(t.hasPhoto||t.photoData)?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${t.id}')" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
+            ${(()=>{ const pid=t._splitParts?t._splitParts.find(p=>p.hasPhoto||p.photoData)?.id:(t.hasPhoto||t.photoData?t.id:null); return pid?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${pid}')" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''; })()}
+            ${t._splitParts?`<div style="margin-top:4px;font-size:10px;color:var(--text3)">Split across ${t._splitParts.length} income records: ${t._splitParts.map(p=>fmt(p.amount)).join(' + ')}</div>`:''}
             <div>Time: ${fmtTime(t.createdAt||t.date)}</div>
           </div>
         </div>`;
@@ -7298,11 +7348,17 @@ function renderBankDeposits(deposits){
   return `<div class="card">
     <div class="card-header"><span class="card-title">Cash Deposits to Bank — ${monthLabel()}</span></div>
     <div style="padding:0 4px">
-      ${deposits.map(t=>`<div onclick="var d=this.querySelector('.bk-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+      ${deposits.map(t=>{
+        const parts = t._splitParts;
+        const photoId = parts ? parts.find(p=>p.hasPhoto||p.photoData)?.id : (t.hasPhoto||t.photoData?t.id:null);
+        const breakdown = parts
+          ? `<div style="margin-top:6px;padding:6px 8px;background:var(--bg2,#f7f7f7);border-radius:6px;font-size:10px;color:var(--text3)">Split across ${parts.length} income records: ${parts.map(p=>fmt(p.amount)).join(' + ')}</div>`
+          : '';
+        return `<div onclick="var d=this.querySelector('.bk-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
         <div style="display:flex;align-items:center;gap:10px">
           <div style="flex:1;min-width:0">
             <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.description||'Cash Deposit'}</div>
-            <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(t.date||t.createdAt)}${t.depositMethod?` &nbsp;·&nbsp; ${(t.depositMethod||'').replace(/_/g,' ')}`:''}${(t.hasPhoto||t.photoData)?` &nbsp;·&nbsp; <span class="badge badge-info" style="font-size:10px">📷 Photo</span>`:''}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(t.date||t.createdAt)}${t.depositMethod?` &nbsp;·&nbsp; ${(t.depositMethod||'').replace(/_/g,' ')}`:''}${photoId?` &nbsp;·&nbsp; <span class="badge badge-info" style="font-size:10px">📷 Photo</span>`:''}</div>
           </div>
           <div style="text-align:right;flex-shrink:0;margin-left:4px">
             <div style="font-size:14px;font-weight:700;color:var(--success,#2e7d32)">+${fmt(t.amount)}</div>
@@ -7312,10 +7368,12 @@ function renderBankDeposits(deposits){
         <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
           ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
           ${t.recordedBy?`<div>Recorded By: <strong>${t.recordedBy}</strong></div>`:''}
-          ${(t.hasPhoto||t.photoData)?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${t.id}')" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
+          ${photoId?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${photoId}')" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
+          ${breakdown}
           <div>Time: ${fmtTime(t.createdAt||t.date)}</div>
         </div>
-      </div>`).join('')}
+      </div>`;
+      }).join('')}
     </div>
   </div>`;
 }
