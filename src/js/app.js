@@ -1063,7 +1063,7 @@ function getSundayCashWithAccountant(record, remRates = DEFAULT_REMITTANCE_RATES
 }
 
 function getIncomeCashWithAccountant(record, remRates = DEFAULT_REMITTANCE_RATES){
-  const isSunday = !record?.source || record?.source==='sunday_collection';
+  const isSunday = !record?.source || record?.source === 'sunday_collection';
   if(isSunday) return getSundayCashWithAccountant(record, remRates);
   const total = Number(record?.totalCollection || 0);
   const bankTransfer = Number(record?.bankTransferAmount || 0);
