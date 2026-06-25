@@ -4021,13 +4021,21 @@ async function viewIncome(id){
   const [allCashVI, allExpensesVI, balanceVI] = await Promise.all([DB.getCashTransactions(), DB.getExpenses(), calcChurchBalance()]);
   const deposits = allCashVI.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id);
   const depositedTotal = deposits.reduce((s,t)=>s+(t.amount||0),0);
-  // Date-aware FIFO: each expense only attributed to income records dated on/before the expense.
-  const expMapVI = buildExpenseCoveringMap(allIncVI, allCashVI, remRates, allExpensesVI);
-  const entryVI = expMapVI.get(r.id);
-  const cashExpenseCovering = entryVI?.expenseCovering || 0;
-  const stillWithAccountant = entryVI ? entryVI.stillPending : Math.max(0, cashHeld - depositedTotal);
-  // If per-record tracking shows pending but global balance is 0, this record's cash was
-  // deposited as part of a bulk deposit whose incomeRef was assigned to an older record.
+  // Period-based: show expenses whose dates fall between this income record and the next one.
+  const sortedIncVI = [...allIncVI].sort((a,b)=>new Date(a.date||a.createdAt)-new Date(b.date||b.createdAt));
+  const rIdxVI = sortedIncVI.findIndex(x=>x.id===r.id);
+  const nextRecVI = sortedIncVI[rIdxVI+1];
+  const periodFromVI = new Date(r.date||r.createdAt).getTime();
+  const periodToVI = nextRecVI ? new Date(nextRecVI.date||nextRecVI.createdAt).getTime() : Infinity;
+  const cashExpenseCovering = (allExpensesVI||[]).filter(isLoggedExpense).reduce((s,e)=>{
+    const eMs = new Date(e.date||e.createdAt).getTime();
+    if(eMs < periodFromVI || eMs >= periodToVI) return s;
+    if(e.paymentMethod==='cash') return s+(e.amount||0);
+    if(e.paymentMethod==='split') return s+(e.cashAmount||0);
+    return s;
+  },0);
+  const stillWithAccountant = Math.max(0, cashHeld - depositedTotal - cashExpenseCovering);
+  // If still-pending is non-zero but global cash balance is 0, a bulk deposit covered this record.
   const globalCashBalance = balanceVI.cashWithAccountant;
   const isGloballySettled = stillWithAccountant > 0.5 && globalCashBalance <= 0.5;
   const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Sunday Collection'};
