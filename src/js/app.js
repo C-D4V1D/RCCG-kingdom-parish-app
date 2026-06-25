@@ -10703,20 +10703,20 @@ return {
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
   setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
-    updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
-    setPeriodMode,
-    showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
-    _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
-      _getIncomeCashWithAccountant: getIncomeCashWithAccountant,
-      _buildExpenseCoveringMap: buildExpenseCoveringMap,
-      _findIncomeRefForCashExpense: findIncomeRefForCashExpense,
-      _calcPettyFloatFromLedger: calcPettyFloatFromLedger,
-      _totalRemittanceDue: totalRemittanceDue,
-      _calcChurchBalanceFromOpening: calcChurchBalanceFromOpening,
-      _calcOutstandingRemittancesFromFlow: calcOutstandingRemittancesFromFlow,
-      _calcCurrentPeriodOutstandingRemittance: calcCurrentPeriodOutstandingRemittance,
-      _calcAvailableFundFromOpening: calcAvailableFundFromOpening
-    };
+  updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
+  setPeriodMode,
+  showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
+  _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
+  _getIncomeCashWithAccountant: getIncomeCashWithAccountant,
+  _buildExpenseCoveringMap: buildExpenseCoveringMap,
+  _findIncomeRefForCashExpense: findIncomeRefForCashExpense,
+  _calcPettyFloatFromLedger: calcPettyFloatFromLedger,
+  _totalRemittanceDue: totalRemittanceDue,
+  _calcChurchBalanceFromOpening: calcChurchBalanceFromOpening,
+  _calcOutstandingRemittancesFromFlow: calcOutstandingRemittancesFromFlow,
+  _calcCurrentPeriodOutstandingRemittance: calcCurrentPeriodOutstandingRemittance,
+  _calcAvailableFundFromOpening: calcAvailableFundFromOpening
+  };
 
 })();
 
