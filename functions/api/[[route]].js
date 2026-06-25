@@ -709,6 +709,7 @@ export async function onRequest(context) {
     if (route === 'cash-transactions') {
       if (method === 'GET'  && !param) return await getCashTransactions(DB, url.searchParams.get('full') === '1');
       if (method === 'POST' && !param) return await createCashTransaction(DB, body);
+      if (method === 'PUT'  && param)  return await updateCashTransaction(DB, param, body);
     }
 
     // ── /api/audit ─────────────────────────────────────────────
@@ -1845,6 +1846,10 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_cash_handovers ADD COLUMN expense_total REAL DEFAULT 0`,
     // Group ID to link split records from the same bulk deposit action for consolidated display
     `ALTER TABLE cash_transactions ADD COLUMN group_id TEXT DEFAULT ''`,
+    // Direct cash-pool linkage: each cash/split expense now records which income record
+    // its cash came from so the income modal and deposit form can use exact attribution
+    // instead of the FIFO date-window heuristic.
+    `ALTER TABLE expenses ADD COLUMN income_ref TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -2512,7 +2517,7 @@ async function getExpenses(DB, includeImages = false) {
     ? `SELECT * FROM expenses ORDER BY date DESC, created_at DESC`
     : `SELECT id,date,category,subcategory,description,amount,receipt_no,receipt_file_name,
               payment_method,notes,recorded_by,petty_ref,status,bank_amount,cash_amount,
-              petty_amount,no_receipt,created_at,
+              petty_amount,no_receipt,income_ref,created_at,
               (receipt_image IS NOT NULL AND receipt_image != '') AS has_receipt_image
          FROM expenses ORDER BY date DESC, created_at DESC`;
   const { results } = await DB.prepare(sql).all();
@@ -2536,6 +2541,7 @@ async function getExpenses(DB, includeImages = false) {
     cashAmount:      row.cash_amount  || 0,
     pettyAmount:     row.petty_amount || 0,
     noReceipt:       row.no_receipt === 1,
+    incomeRef:       row.income_ref || '',
     createdAt:       row.created_at,
   })));
 }
@@ -2552,8 +2558,8 @@ async function createExpense(DB, data) {
   const insertStmt = DB.prepare(`
     INSERT INTO expenses
       (id,date,category,subcategory,description,amount,receipt_no,receipt_image,receipt_file_name,
-       payment_method,notes,recorded_by,petty_ref,status,bank_amount,cash_amount,petty_amount,no_receipt)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       payment_method,notes,recorded_by,petty_ref,status,bank_amount,cash_amount,petty_amount,no_receipt,income_ref)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     data.date            || new Date().toISOString().split('T')[0],
@@ -2573,6 +2579,7 @@ async function createExpense(DB, data) {
     data.cashAmount      || 0,
     data.pettyAmount     || 0,
     data.noReceipt       ? 1 : 0,
+    data.incomeRef       || '',
   );
 
   const pettyDeduction = Number(data.pettyAmount) || 0;
@@ -2605,7 +2612,8 @@ async function updateExpense(DB, id, data) {
     bankAmount:      'bank_amount',
     cashAmount:      'cash_amount',
     pettyAmount:     'petty_amount',
-    noReceipt:       'no_receipt'
+    noReceipt:       'no_receipt',
+    incomeRef:       'income_ref',
   };
   const sets = [];
   const vals = [];
@@ -2980,6 +2988,15 @@ async function createCashTransaction(DB, data) {
     data.groupId       || '',
   ).run();
   return ok({ ...data, id });
+}
+
+async function updateCashTransaction(DB, id, data) {
+  const cols = [], vals = [];
+  if (data.amount !== undefined) { cols.push('amount=?');   vals.push(data.amount); }
+  if (!cols.length) return ok({ id });
+  vals.push(id);
+  await DB.prepare(`UPDATE cash_transactions SET ${cols.join(',')} WHERE id=?`).bind(...vals).run();
+  return ok({ id });
 }
 
 // ── AUDIT LOG ─────────────────────────────────────────────────────
