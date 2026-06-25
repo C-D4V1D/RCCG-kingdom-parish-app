@@ -409,6 +409,7 @@ const DB = {
   getCashTransactions(full=false){ return apiFetch('cash-transactions'+(full?'?full=1':'')); },
   getCashPhoto(id)             { return apiFetch(`cash-photo/${id}`); },
   addCashTransaction(d)        { return apiFetch('cash-transactions','POST',d); },
+  updateCashTransaction(id,d)  { return apiFetch(`cash-transactions/${id}`,'PUT',d); },
 
   getAudit()                   { return apiFetch('audit'); },
   // addAudit is fire-and-forget — never blocks the UI
@@ -4106,7 +4107,7 @@ async function viewIncome(id){
     ${periodCashExpenses>0?`<div class="status-row"><div class="status-row-label">💸 Cash used for expenses (recorded in Expenses)</div><div class="status-row-amt" style="color:var(--danger)">−${fmt(periodCashExpenses)}</div></div>`:''}
     ${periodCashExpenses>0?`<div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">💰 Net cash for bank deposit</div><div class="status-row-amt" style="font-weight:700;color:var(--primary)">${fmt(netCashForBank)}</div></div>`:''}
     ${deposits.length?`<div class="status-row"><div class="status-row-label">✅ Deposited to Bank so far</div><div class="status-row-amt" style="color:var(--success)">${fmt(depositedTotal)}</div></div>`:''}
-    ${depositOverage>0.5?`<div class="status-row"><div class="status-row-label" style="color:var(--danger);font-size:12px">⚠️ Deposit (${fmt(depositedTotal)}) is ${fmt(depositOverage)} more than net cash after expenses (${fmt(netCashForBank)}). The deposit was likely recorded before the expense was deducted — please verify.</div></div>`:''}
+    ${depositOverage>0.5?`<div class="status-row" style="flex-direction:column;align-items:flex-start;gap:6px"><div class="status-row-label" style="color:var(--danger);font-size:12px">⚠️ Recorded deposit (${fmt(depositedTotal)}) is ${fmt(depositOverage)} more than net cash after expenses (${fmt(netCashForBank)}). Deposit records should total ${fmt(netCashForBank)} — please verify and correct if needed.</div>${canAction('income_deposit')?`<button class="btn btn-sm btn-danger" style="font-size:11px;padding:3px 10px" onclick="App.correctIncomeDeposit('${r.id}',${netCashForBank})">Correct Deposit to ${fmt(netCashForBank)}</button>`:''}</div>`:''}
     ${isGloballySettled?`<div class="status-row"><div class="status-row-label" style="color:var(--success)">✅ Deposited to Bank (bulk deposit)</div><div class="status-row-amt" style="color:var(--success)">${fmt(stillWithAccountant)}</div></div>`:stillWithAccountant>0?`<div class="status-row"><div class="status-row-label">⏳ Still with Accountant (undeposited)</div><div class="status-row-amt" style="color:var(--danger)">${fmt(stillWithAccountant)}</div></div>`:''}
     ${isSunday?`<hr class="divider">
     <p class="card-title">Income Breakdown</p>
@@ -4185,6 +4186,38 @@ function _previewDepPhoto(input, previewId){
     preview.querySelector('img').src = e.target.result;
   };
   reader.readAsDataURL(file);
+}
+
+async function correctIncomeDeposit(incomeId, targetTotal) {
+  if(!canAction('income_deposit')){ showAlert('Access denied.','danger'); return; }
+  const allCash = await DB.getCashTransactions();
+  const linked = allCash
+    .filter(t=>t.type==='cash_deposit' && t.incomeRef===incomeId)
+    .sort((a,b)=>new Date(b.date||b.createdAt)-new Date(a.date||a.createdAt));
+  const currentTotal = linked.reduce((s,t)=>s+(t.amount||0),0);
+  if(currentTotal <= targetTotal+0.5){
+    showAlert('Deposit total is already at or below the correct amount.','info'); return;
+  }
+  let overage = currentTotal - targetTotal;
+  const updates=[];
+  for(const dep of linked){
+    if(overage < 0.005) break;
+    const reduce = Math.min(dep.amount, overage);
+    updates.push({ id:dep.id, newAmt: Math.round((dep.amount - reduce)*100)/100 });
+    overage -= reduce;
+  }
+  if(overage > 0.005){ showAlert('Cannot fully correct — not enough deposit records to adjust.','danger'); return; }
+  const lines = updates.map(u=>`• ${u.id}: new amount ${fmt(u.newAmt)}`).join('\n');
+  if(!confirm(`This will adjust ${updates.length} deposit record(s) to correct the total from ${fmt(currentTotal)} to ${fmt(targetTotal)}:\n\n${lines}\n\nContinue?`)) return;
+  try{
+    for(const u of updates) await DB.updateCashTransaction(u.id,{amount:u.newAmt});
+    DB.addAudit('deposit_corrected',`Deposit for income ${incomeId} corrected: ${fmt(currentTotal)} → ${fmt(targetTotal)} (overage ${fmt(currentTotal-targetTotal)} removed)`,state.user?.name);
+    _apiCache.delete('cash-transactions');
+    showAlert(`Deposit corrected to ${fmt(targetTotal)}.`,'success');
+    await viewIncome(incomeId);
+  }catch(err){
+    showAlert(`Failed to correct deposit: ${err.message}`,'danger');
+  }
 }
 
 async function confirmDeposit(id){
@@ -10413,7 +10446,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,

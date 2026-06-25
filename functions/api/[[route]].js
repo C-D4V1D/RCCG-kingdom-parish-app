@@ -709,6 +709,7 @@ export async function onRequest(context) {
     if (route === 'cash-transactions') {
       if (method === 'GET'  && !param) return await getCashTransactions(DB, url.searchParams.get('full') === '1');
       if (method === 'POST' && !param) return await createCashTransaction(DB, body);
+      if (method === 'PUT'  && param)  return await updateCashTransaction(DB, param, body);
     }
 
     // ── /api/audit ─────────────────────────────────────────────
@@ -2980,6 +2981,15 @@ async function createCashTransaction(DB, data) {
     data.groupId       || '',
   ).run();
   return ok({ ...data, id });
+}
+
+async function updateCashTransaction(DB, id, data) {
+  const cols = [], vals = [];
+  if (data.amount !== undefined) { cols.push('amount=?');   vals.push(data.amount); }
+  if (!cols.length) return ok({ id });
+  vals.push(id);
+  await DB.prepare(`UPDATE cash_transactions SET ${cols.join(',')} WHERE id=?`).bind(...vals).run();
+  return ok({ id });
 }
 
 // ── AUDIT LOG ─────────────────────────────────────────────────────
