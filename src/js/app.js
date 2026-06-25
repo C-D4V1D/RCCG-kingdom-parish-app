@@ -1060,16 +1060,21 @@ function getSundayCashWithAccountant(record, remRates = DEFAULT_REMITTANCE_RATES
   return Math.max(0, total - bankTransfer - directPetty - childrenTeacherHeld);
 }
 
-// FIFO attribution of global cash expenses to income records (oldest first).
+// Date-aware FIFO attribution of cash expenses to income records.
+// Each expense is only attributed to income records dated on or before the expense date.
+// Expenses that predate all cash-holding income records (paid from bank-withdrawal float
+// or pre-system cash) are left unattributed and do not inflate later records.
 // Returns Map<incomeId, {cashHeld, deposited, expenseCovering, stillPending, isReconciled}>.
 function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses){
-  const globalCashExpenses=(allExpenses||[]).filter(isLoggedExpense).reduce((s,e)=>{
-    if(e.paymentMethod==='cash') return s+(e.amount||0);
-    if(e.paymentMethod==='split') return s+(e.cashAmount||0);
-    return s;
-  },0);
+  // Collect individual cash expenses with their dates, sorted oldest first.
+  const cashExpenses=(allExpenses||[]).filter(isLoggedExpense).reduce((arr,e)=>{
+    const d=e.date||e.createdAt;
+    if(e.paymentMethod==='cash'&&(e.amount||0)>0) arr.push({date:d,amount:e.amount});
+    else if(e.paymentMethod==='split'&&(e.cashAmount||0)>0) arr.push({date:d,amount:e.cashAmount});
+    return arr;
+  },[]).sort((a,b)=>new Date(a.date)-new Date(b.date));
   const map=new Map();
-  if(globalCashExpenses<=0) return map;
+  if(!cashExpenses.length) return map;
   const items=[];
   for(const r of (allIncome||[])){
     const isSunday=!r.source||r.source==='sunday_collection';
@@ -1077,15 +1082,29 @@ function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses){
     if(cashHeld<=0) continue;
     const deposited=(allCashTx||[]).filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
     const undeposited=Math.max(0,cashHeld-deposited);
-    if(undeposited>0) items.push({id:r.id,date:r.date||r.createdAt,cashHeld,deposited,undeposited});
+    if(undeposited<=0) continue;
+    items.push({id:r.id,date:r.date||r.createdAt,cashHeld,deposited,undeposited,expenseCovering:0});
   }
   items.sort((a,b)=>new Date(a.date)-new Date(b.date));
-  let left=globalCashExpenses;
+  // For each expense (oldest first), consume from income records dated <= expense date.
+  // If no matching record has available cash, the expense was paid from bank-withdrawal
+  // float or pre-system cash — it is not carried forward to later income records.
+  for(const exp of cashExpenses){
+    const expMs=new Date(exp.date).getTime();
+    let left=exp.amount;
+    for(const item of items){
+      if(left<0.005) break;
+      if(new Date(item.date).getTime()>expMs) break;
+      const avail=item.undeposited-item.expenseCovering;
+      if(avail<0.005) continue;
+      const cover=Math.min(avail,left);
+      item.expenseCovering+=cover;
+      left-=cover;
+    }
+  }
   for(const item of items){
-    const covering=Math.min(item.undeposited,left);
-    left-=covering;
-    const stillPending=Math.max(0,item.undeposited-covering);
-    map.set(item.id,{cashHeld:item.cashHeld,deposited:item.deposited,expenseCovering:covering,stillPending,isReconciled:stillPending<=0.5});
+    const stillPending=Math.max(0,item.undeposited-item.expenseCovering);
+    map.set(item.id,{cashHeld:item.cashHeld,deposited:item.deposited,expenseCovering:item.expenseCovering,stillPending,isReconciled:stillPending<=0.5});
   }
   return map;
 }
@@ -3999,18 +4018,18 @@ async function viewIncome(id){
   const cashHeld = isSunday
     ? getSundayCashWithAccountant(r, remRates)
     : Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
-  const [allCashVI, allExpensesVI] = await Promise.all([DB.getCashTransactions(), DB.getExpenses()]);
+  const [allCashVI, allExpensesVI, balanceVI] = await Promise.all([DB.getCashTransactions(), DB.getExpenses(), calcChurchBalance()]);
   const deposits = allCashVI.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id);
   const depositedTotal = deposits.reduce((s,t)=>s+(t.amount||0),0);
-  const globalCashExpenses = allExpensesVI.filter(isLoggedExpense).reduce((s,e)=>{
-    if(e.paymentMethod==='cash') return s+(e.amount||0);
-    if(e.paymentMethod==='split') return s+(e.cashAmount||0);
-    return s;
-  },0);
-  const undeposited = Math.max(0, cashHeld - depositedTotal);
-  // Cap attributable expenses at what's actually undeposited so we never overstate
-  const cashExpenseCovering = Math.min(undeposited, globalCashExpenses);
-  const stillWithAccountant = Math.max(0, undeposited - cashExpenseCovering);
+  // Date-aware FIFO: each expense only attributed to income records dated on/before the expense.
+  const expMapVI = buildExpenseCoveringMap(allIncVI, allCashVI, remRates, allExpensesVI);
+  const entryVI = expMapVI.get(r.id);
+  const cashExpenseCovering = entryVI?.expenseCovering || 0;
+  const stillWithAccountant = entryVI ? entryVI.stillPending : Math.max(0, cashHeld - depositedTotal);
+  // If per-record tracking shows pending but global balance is 0, this record's cash was
+  // deposited as part of a bulk deposit whose incomeRef was assigned to an older record.
+  const globalCashBalance = balanceVI.cashWithAccountant;
+  const isGloballySettled = stillWithAccountant > 0.5 && globalCashBalance <= 0.5;
   const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Sunday Collection'};
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -4027,7 +4046,7 @@ async function viewIncome(id){
     ${dpAmt?`<div class="status-row"><div class="status-row-label">💳 Direct → Admin Officer Petty Cash</div><div class="status-row-amt" style="color:var(--success)">${fmt(dpAmt)}</div></div>`:''}
     ${cashExpenseCovering>0?`<div class="status-row"><div class="status-row-label">💸 Cash used for expenses (recorded in Expenses)</div><div class="status-row-amt" style="color:var(--danger)">−${fmt(cashExpenseCovering)}</div></div>`:''}
     ${deposits.length?`<div class="status-row"><div class="status-row-label">✅ Deposited to Bank so far</div><div class="status-row-amt" style="color:var(--success)">${fmt(depositedTotal)}</div></div>`:''}
-    ${stillWithAccountant>0?`<div class="status-row"><div class="status-row-label">⏳ Still with Accountant (undeposited)</div><div class="status-row-amt" style="color:var(--danger)">${fmt(stillWithAccountant)}</div></div>`:''}
+    ${isGloballySettled?`<div class="status-row"><div class="status-row-label" style="color:var(--success)">✅ Deposited to Bank (bulk deposit)</div><div class="status-row-amt" style="color:var(--success)">${fmt(stillWithAccountant)}</div></div>`:stillWithAccountant>0?`<div class="status-row"><div class="status-row-label">⏳ Still with Accountant (undeposited)</div><div class="status-row-amt" style="color:var(--danger)">${fmt(stillWithAccountant)}</div></div>`:''}
     ${isSunday?`<hr class="divider">
     <p class="card-title">Income Breakdown</p>
     ${INCOME_TYPES.filter(t=>r[t.key]).map(t=>`<div class="status-row"><div class="status-row-label">${t.label}</div><div class="status-row-amt">${fmt(r[t.key])}</div></div>`).join('')}
@@ -4046,7 +4065,7 @@ async function viewIncome(id){
     <div class="modal-footer">
     ${canAction('income_delete')?`<button class="btn btn-danger" style="margin-right:auto" onclick="closeModal();App.confirmDeleteIncome('${r.id}')">🗑 Delete</button>`:''}
     <button class="btn" onclick="closeModal()">Close</button>
-    ${canAction('income_deposit')&&stillWithAccountant>0?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
+    ${canAction('income_deposit')&&stillWithAccountant>0&&!isGloballySettled?`<button class="btn btn-primary" onclick="App.confirmDeposit('${r.id}')">Record Cash Deposit</button>`:''}</div>`);
 }
 
 function confirmDeleteIncome(id){
@@ -4109,7 +4128,7 @@ function _previewDepPhoto(input, previewId){
 
 async function confirmDeposit(id){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
-  const [allIncCD, allCashCD, remRatesData, balance] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance()]);
+  const [allIncCD, allCashCD, remRatesData, balance, allExpensesCD] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance(), DB.getExpenses()]);
   const r = allIncCD.find(x=>x.id===id);
   if(!r) return;
   const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
@@ -4118,11 +4137,15 @@ async function confirmDeposit(id){
   const alreadyDeposited = allCashCD.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
   const remaining = Math.max(0, cashHeld - alreadyDeposited);
   const totalCashWithAccountant = balance.cashWithAccountant;
-  // If cash expenses have already been recorded in the Expenses section, the global
-  // cashWithAccountant will be lower than `remaining`. Cap the deposit at what's actually
-  // available so the form pre-fills the correct amount.
-  const effectiveRemaining = Math.min(remaining, totalCashWithAccountant);
-  const expensesDeducted = Math.max(0, remaining - effectiveRemaining);
+  // Use the same FIFO attribution as the income detail modal and list badges so the
+  // pre-filled amount matches "Still with Accountant" exactly. Cash expenses already
+  // recorded in the Expenses section reduce this record's depositable cash (oldest
+  // records absorb expenses first), and the per-record figures always sum to the
+  // global cashWithAccountant.
+  const expMapCD = buildExpenseCoveringMap(allIncCD, allCashCD, remRates, allExpensesCD);
+  const entryCD = expMapCD.get(r.id);
+  const effectiveRemaining = entryCD ? entryCD.stillPending : remaining;
+  const expensesDeducted = entryCD ? entryCD.expenseCovering : 0;
   const otherCash = Math.max(0, totalCashWithAccountant - effectiveRemaining);
   const today = new Date().toISOString().split('T')[0];
   state._depositRemaining = effectiveRemaining;
@@ -4204,7 +4227,7 @@ async function submitCashDeposit(incomeId, btn=null){
     DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${refLabel}`,state.user?.name);
     DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank${ref?` (Ref: ${ref})`:''}`,'success');
     closeModal();
-    showAlert(`${fmt(amount)} deposited to bank successfully!${expenses>0?` Cash used for expenses: ${fmt(expenses)}.`:''}${ref?` Ref: ${ref}`:''}`, 'success');
+    showAlert(`${fmt(amount)} deposited to bank successfully!${ref?` Ref: ${ref}`:''}`, 'success');
     renderIncome();
   } catch(err) {
     restore();
@@ -4222,7 +4245,9 @@ async function confirmBulkDeposit(){
 
   if(cashWithAccountant < 0.5){ showAlert('No cash currently held with accountant to deposit.','warn'); return; }
 
-  // Income records with remaining cash (positive contributors)
+  // Income records with remaining cash (positive contributors) — use expense-adjusted
+  // stillPending so records fully consumed by dated expenses are excluded from display.
+  const expMapCBD = buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses);
   const incomeItems = allIncome.map(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
@@ -4230,11 +4255,12 @@ async function confirmBulkDeposit(){
       : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
     if(cashHeld<=0) return null;
     const deposited = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-    const remaining = Math.max(0, cashHeld - deposited);
-    if(remaining<=0) return null;
+    const entry = expMapCBD.get(r.id);
+    const remaining = entry ? entry.stillPending : Math.max(0, cashHeld - deposited);
+    if(remaining<=0.005) return null;
     const srcLabel = isSunday ? 'Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
     const icon = isSunday ? '📅' : '💵';
-    return { id:r.id, date:r.date, icon, label:srcLabel, cashHeld, deposited, remaining };
+    return { id:r.id, date:r.date||r.createdAt, icon, label:srcLabel, cashHeld, deposited, remaining };
   }).filter(Boolean).sort((a,b)=>new Date(a.date)-new Date(b.date));
 
   // Bank withdrawals routed to accountant's cash (positive)
@@ -4379,14 +4405,21 @@ async function submitBulkDeposit(btn=null){
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     // Re-fetch fresh data to build accurate income-record distribution
-    const [allIncome, allCashTx, remRatesData] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates()]);
+    const [allIncome, allCashTx, remRatesData, allExpensesSD] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), DB.getExpenses()]);
     const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
+    // Use the same date-aware FIFO expense map so deposit goes to records whose
+    // net cash (after expense attribution) still needs to be deposited, not to
+    // records that have already been consumed by attributed cash expenses.
+    const expMapSD = buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpensesSD);
     const incomeItems = allIncome.map(r=>{
       const isSunday = !r.source||r.source==='sunday_collection';
       const cashHeld = isSunday ? getSundayCashWithAccountant(r, remRates) : (r.paymentMethod==='cash'?(r.totalCollection||0):0);
+      if(!cashHeld) return null;
+      const entry = expMapSD.get(r.id);
       const dep = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-      return { id:r.id, date:r.date, remaining: Math.max(0, cashHeld - dep) };
-    }).filter(x=>x.remaining>0).sort((a,b)=>new Date(a.date)-new Date(b.date));
+      const remaining = entry ? entry.stillPending : Math.max(0, cashHeld - dep);
+      return { id:r.id, date:r.date, remaining };
+    }).filter(x=>x&&x.remaining>0.005).sort((a,b)=>new Date(a.date)-new Date(b.date));
 
     // Distribute cashToDeposit across income records sequentially (oldest first).
     // Stops when cashToDeposit is exhausted — this correctly handles cases where
@@ -7060,18 +7093,23 @@ async function renderBank(){
 
   const closingBankBalance = openingBankBalance + periodTotalInflows - periodTotalOutflows;
 
-  // Pending cash deposits (income records with undeposited cash — all time)
+  // Pending cash deposits (income records with net undeposited cash after expense attribution)
+  const expMapBank = buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses);
   const pendingDepItems = allIncome.filter(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
       ? getSundayCashWithAccountant(r, remRates)
       : r.paymentMethod==='cash'?(r.totalCollection||0):0;
     if(cashHeld<=0) return false;
+    const entry = expMapBank.get(r.id);
+    if(entry) return entry.stillPending > 0.5;
     const deposited = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-    return deposited < cashHeld;
+    return deposited < cashHeld - 0.5;
   });
   const pendingDepCount = pendingDepItems.length;
   const pendingDepTotal = pendingDepItems.reduce((s,r)=>{
+    const entry = expMapBank.get(r.id);
+    if(entry) return s + entry.stillPending;
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = isSunday
       ? getSundayCashWithAccountant(r, remRates)
