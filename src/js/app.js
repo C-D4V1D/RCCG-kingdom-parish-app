@@ -3722,7 +3722,7 @@ async function renderIncome(){
       <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">💵</div><div class="kpi-label">Cash with Accountant</div><div class="kpi-val" style="color:${cashWithAccountant>0?'var(--amber)':'var(--primary)'}">${fmt(cashWithAccountant)}</div><div class="kpi-delta ${cashWithAccountant>0?'warn':'up'}">${cashWithAccountant>0?'Awaiting bank deposit':'All deposited ✓'}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">🏦</div><div class="kpi-label">In Bank (this month)</div><div class="kpi-val">${fmt(totalDeposited)}</div><div class="kpi-delta up">Transfers + deposits</div></div>
     </div>
-    ${cashWithAccountant>0&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong>${pendingCount>0?` (${pendingCount} income record(s) this month pending)`:''} — not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
+    ${cashWithAccountant>0&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong>${pendingItems.length>0?` — pending: <strong>${pendingItems.map(r=>fmtDate(r.date||r.createdAt)).join(', ')}</strong>`:''} — not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
     <div class="tabs">
       <button class="tab ${tab==='list'?'active':''}" onclick="App.setIncomeTab('list')">Sunday Collections (${sundayRecs.length})</button>
       <button class="tab ${tab==='other'?'active':''}" onclick="App.setIncomeTab('other')">Other Income (${otherRecs.length})</button>
@@ -4162,7 +4162,14 @@ async function viewIncome(id){
   const stillWithAccountant = Math.max(0, netCashForBank - depositedTotal);
   // If still-pending is non-zero but global cash balance is 0, a bulk deposit covered this record.
   const globalCashBalance = balanceVI.cashWithAccountant;
-  const isGloballySettled = stillWithAccountant > 0.5 && globalCashBalance <= 0.5;
+  // Also settled when unlinked deposits made on/after this record's date cover the remainder
+  // (handles legacy lump-sum deposits that were never attributed to a specific income record).
+  const recordDate = (r.date||r.createdAt||'').slice(0,10);
+  const unlinkedDepositsAfter = allCashVI
+    .filter(t => t.type==='cash_deposit' && !t.incomeRef && (t.date||'').slice(0,10) >= recordDate)
+    .reduce((s,t) => s+(t.amount||0), 0);
+  const isGloballySettled = stillWithAccountant > 0.5 &&
+    (globalCashBalance <= 0.5 || unlinkedDepositsAfter >= stillWithAccountant - 0.5);
   const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Sunday Collection'};
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
