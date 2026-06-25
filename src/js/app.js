@@ -1108,53 +1108,120 @@ function groupCashDeposits(deposits) {
   return result;
 }
 
-// Date-aware FIFO attribution of cash expenses to income records.
-// Each expense is only attributed to income records dated on or before the expense date.
-// Expenses that predate all cash-holding income records (paid from bank-withdrawal float
-// or pre-system cash) are left unattributed and do not inflate later records.
+// Two-phase attribution of cash expenses to income records.
+// Phase 1: expenses with incomeRef set are attributed directly to the linked income record.
+// Phase 2: remaining unlinked expenses are attributed via date-aware FIFO (oldest record
+//          absorbs first, capped to undeposited cash available at the expense date).
 // Returns Map<incomeId, {cashHeld, deposited, expenseCovering, stillPending, isReconciled}>.
 function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses){
-  // Collect individual cash expenses with their dates, sorted oldest first.
-  const cashExpenses=(allExpenses||[]).filter(isLoggedExpense).reduce((arr,e)=>{
-    const d=e.date||e.createdAt;
-    if(e.paymentMethod==='cash'&&(e.amount||0)>0) arr.push({date:d,amount:e.amount});
+  const loggedExp = (allExpenses||[]).filter(isLoggedExpense);
+  const map = new Map();
+
+  // Build items: income records that still have undeposited cash.
+  const items = [];
+  for(const r of (allIncome||[])){
+    const isSunday = !r.source||r.source==='sunday_collection';
+    const cashHeld = isSunday ? getSundayCashWithAccountant(r,remRates) : r.paymentMethod==='cash'?(r.totalCollection||0):0;
+    if(cashHeld<=0) continue;
+    const deposited = (allCashTx||[]).filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+    const undeposited = Math.max(0, cashHeld-deposited);
+    if(undeposited<=0) continue;
+    items.push({id:r.id, date:r.date||r.createdAt, cashHeld, deposited, undeposited, expenseCovering:0});
+  }
+  if(!items.length) return map;
+  items.sort((a,b)=>new Date(a.date)-new Date(b.date));
+
+  // Phase 1: direct attribution — expenses that carry an explicit incomeRef.
+  for(const e of loggedExp){
+    if(!e.incomeRef) continue;
+    const cashAmt = e.paymentMethod==='cash'?(e.amount||0):e.paymentMethod==='split'?(e.cashAmount||0):0;
+    if(cashAmt<=0) continue;
+    const item = items.find(i=>i.id===e.incomeRef);
+    if(!item) continue;
+    const avail = item.undeposited - item.expenseCovering;
+    if(avail<=0) continue;
+    item.expenseCovering += Math.min(avail, cashAmt);
+  }
+
+  // Phase 2: FIFO for unlinked expenses (pre-backfill data or edge cases).
+  // Only considers expenses that have no incomeRef, sorted oldest-first.
+  const unlinked = loggedExp.reduce((arr,e)=>{
+    if(e.incomeRef) return arr;
+    const d = e.date||e.createdAt;
+    if(e.paymentMethod==='cash'&&(e.amount||0)>0)         arr.push({date:d,amount:e.amount});
     else if(e.paymentMethod==='split'&&(e.cashAmount||0)>0) arr.push({date:d,amount:e.cashAmount});
     return arr;
   },[]).sort((a,b)=>new Date(a.date)-new Date(b.date));
-  const map=new Map();
-  if(!cashExpenses.length) return map;
-  const items=[];
-  for(const r of (allIncome||[])){
-    const isSunday=!r.source||r.source==='sunday_collection';
-    const cashHeld=isSunday?getSundayCashWithAccountant(r,remRates):r.paymentMethod==='cash'?(r.totalCollection||0):0;
-    if(cashHeld<=0) continue;
-    const deposited=(allCashTx||[]).filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-    const undeposited=Math.max(0,cashHeld-deposited);
-    if(undeposited<=0) continue;
-    items.push({id:r.id,date:r.date||r.createdAt,cashHeld,deposited,undeposited,expenseCovering:0});
-  }
-  items.sort((a,b)=>new Date(a.date)-new Date(b.date));
-  // For each expense (oldest first), consume from income records dated <= expense date.
-  // If no matching record has available cash, the expense was paid from bank-withdrawal
-  // float or pre-system cash — it is not carried forward to later income records.
-  for(const exp of cashExpenses){
-    const expMs=new Date(exp.date).getTime();
-    let left=exp.amount;
+
+  for(const exp of unlinked){
+    const expMs = new Date(exp.date).getTime();
+    let left = exp.amount;
     for(const item of items){
       if(left<0.005) break;
       if(new Date(item.date).getTime()>expMs) break;
-      const avail=item.undeposited-item.expenseCovering;
+      const avail = item.undeposited-item.expenseCovering;
       if(avail<0.005) continue;
-      const cover=Math.min(avail,left);
-      item.expenseCovering+=cover;
-      left-=cover;
+      const cover = Math.min(avail,left);
+      item.expenseCovering += cover;
+      left -= cover;
     }
   }
+
   for(const item of items){
-    const stillPending=Math.max(0,item.undeposited-item.expenseCovering);
-    map.set(item.id,{cashHeld:item.cashHeld,deposited:item.deposited,expenseCovering:item.expenseCovering,stillPending,isReconciled:stillPending<=0.5});
+    const stillPending = Math.max(0, item.undeposited-item.expenseCovering);
+    map.set(item.id, {cashHeld:item.cashHeld, deposited:item.deposited, expenseCovering:item.expenseCovering, stillPending, isReconciled:stillPending<=0.5});
   }
   return map;
+}
+
+// Returns the ID of the most recent cash-holding income record whose date is on or
+// before expenseDate. Used when saving a cash/split expense to link it directly to
+// the cash pool it drew from, replacing the old FIFO-heuristic attribution.
+function findIncomeRefForCashExpense(expenseDate, allIncome, remRates){
+  const candidates = (allIncome||[])
+    .filter(r=>{
+      const d = r.date||r.createdAt||'';
+      if(d > expenseDate) return false;
+      const isSunday = !r.source||r.source==='sunday_collection';
+      const cashHeld = isSunday ? getSundayCashWithAccountant(r,remRates) : (r.paymentMethod==='cash'?(r.totalCollection||0):0);
+      return cashHeld > 0;
+    })
+    .sort((a,b)=>new Date(b.date||b.createdAt)-new Date(a.date||a.createdAt));
+  return candidates[0]?.id || '';
+}
+
+// One-time backfill: assigns incomeRef to any existing cash/split expenses that
+// were recorded before the direct-link column existed. Safe to call on every
+// startup — it short-circuits immediately when nothing needs updating.
+async function backfillExpenseIncomeRefs(){
+  try {
+    const [allInc, allExp, remRatesData] = await Promise.all([DB.getIncome(), DB.getExpenses(), getRemRates()]);
+    const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
+    const needsBackfill = allExp.filter(e=>
+      isLoggedExpense(e) && !e.incomeRef &&
+      (e.paymentMethod==='cash' || e.paymentMethod==='split')
+    );
+    if(!needsBackfill.length) return;
+    const cashIncome = allInc
+      .filter(r=>{
+        const isSunday = !r.source||r.source==='sunday_collection';
+        return isSunday ? getSundayCashWithAccountant(r,remRates)>0 : (r.paymentMethod==='cash'&&(r.totalCollection||0)>0);
+      })
+      .sort((a,b)=>new Date(a.date||a.createdAt)-new Date(b.date||b.createdAt));
+    let count = 0;
+    for(const e of needsBackfill){
+      const expDate = e.date||e.createdAt||'';
+      let match = null;
+      for(let i=cashIncome.length-1; i>=0; i--){
+        if((cashIncome[i].date||cashIncome[i].createdAt||'') <= expDate){ match=cashIncome[i]; break; }
+      }
+      if(match){ await DB.updateExpense(e.id, {incomeRef: match.id}); count++; }
+    }
+    if(count>0){
+      DB.addAudit('backfill_expense_income_refs',`Backfilled incomeRef on ${count} expense record(s)`,'System');
+      _apiCache.delete('expenses');
+    }
+  } catch(err){ console.error('backfillExpenseIncomeRefs:', err); }
 }
 
 function totalRemittanceDue(remCalc, quotas = 0){
@@ -1375,6 +1442,9 @@ function initApp(){
   updateSidebarUser();
   updateNotifBadge();
   navigate(pageFromPath(), true);
+  // Fire-and-forget: link existing cash expenses to their income record.
+  // Runs in the background; short-circuits once all records are already linked.
+  backfillExpenseIncomeRefs();
 }
 
 // Handle browser back / forward
@@ -4076,11 +4146,14 @@ async function viewIncome(id){
   const periodFromVI = new Date(r.date||r.createdAt).getTime();
   const periodToVI = nextRecVI ? new Date(nextRecVI.date||nextRecVI.createdAt).getTime() : Infinity;
   const periodCashExpenses = (allExpensesVI||[]).filter(isLoggedExpense).reduce((s,e)=>{
+    const cashAmt = e.paymentMethod==='cash'?(e.amount||0):e.paymentMethod==='split'?(e.cashAmount||0):0;
+    if(!cashAmt) return s;
+    if(e.incomeRef === r.id) return s+cashAmt;   // directly linked to this income record
+    if(e.incomeRef) return s;                     // linked to a different income record
+    // Fallback: unlinked expense — use period window (pre-backfill data)
     const eMs = new Date(e.date||e.createdAt).getTime();
     if(eMs < periodFromVI || eMs >= periodToVI) return s;
-    if(e.paymentMethod==='cash') return s+(e.amount||0);
-    if(e.paymentMethod==='split') return s+(e.cashAmount||0);
-    return s;
+    return s+cashAmt;
   },0);
   // Net cash the accountant should deposit after paying expenses from the collection cash
   const netCashForBank = Math.max(0, cashHeld - periodCashExpenses);
@@ -6664,6 +6737,17 @@ async function submitExpense(btn=null){
     }
   }
 
+  // For cash/split expenses, resolve which income record's cash pool this draws from.
+  // This makes the attribution explicit so the income modal and deposit form are exact
+  // rather than relying on the FIFO date-window heuristic.
+  let expenseIncomeRef = '';
+  if(cashAmount > 0){
+    try {
+      const [_allIncSE, _remRatesSE] = await Promise.all([DB.getIncome(), getRemRates()]);
+      expenseIncomeRef = findIncomeRefForCashExpense(date, _allIncSE, _remRatesSE.rates||DEFAULT_REMITTANCE_RATES);
+    } catch(e){ /* non-fatal — falls back to FIFO attribution */ }
+  }
+
   const fileEl = document.getElementById('exp_receipt_file');
   const file = fileEl?.files?.[0];
   const restore = setBtnLoading(btn, 'Saving…');
@@ -6681,6 +6765,7 @@ async function submitExpense(btn=null){
         bankAmount: bankAmount,
         cashAmount: cashAmount,
         pettyAmount: pettyAmount,
+        incomeRef: expenseIncomeRef,
         notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:expenseStatus });
 
       closeModal();
