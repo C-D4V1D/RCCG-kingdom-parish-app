@@ -4074,14 +4074,18 @@ async function viewIncome(id){
   const nextRecVI = sortedIncVI[rIdxVI+1];
   const periodFromVI = new Date(r.date||r.createdAt).getTime();
   const periodToVI = nextRecVI ? new Date(nextRecVI.date||nextRecVI.createdAt).getTime() : Infinity;
-  const cashExpenseCovering = (allExpensesVI||[]).filter(isLoggedExpense).reduce((s,e)=>{
+  const periodCashExpenses = (allExpensesVI||[]).filter(isLoggedExpense).reduce((s,e)=>{
     const eMs = new Date(e.date||e.createdAt).getTime();
     if(eMs < periodFromVI || eMs >= periodToVI) return s;
     if(e.paymentMethod==='cash') return s+(e.amount||0);
     if(e.paymentMethod==='split') return s+(e.cashAmount||0);
     return s;
   },0);
-  const stillWithAccountant = Math.max(0, cashHeld - depositedTotal - cashExpenseCovering);
+  // Net cash the accountant should deposit after paying expenses from the collection cash
+  const netCashForBank = Math.max(0, cashHeld - periodCashExpenses);
+  // Overage: deposit was recorded before expenses were deducted, so it's higher than it should be
+  const depositOverage = Math.max(0, depositedTotal - netCashForBank);
+  const stillWithAccountant = Math.max(0, netCashForBank - depositedTotal);
   // If still-pending is non-zero but global cash balance is 0, a bulk deposit covered this record.
   const globalCashBalance = balanceVI.cashWithAccountant;
   const isGloballySettled = stillWithAccountant > 0.5 && globalCashBalance <= 0.5;
@@ -4099,8 +4103,10 @@ async function viewIncome(id){
     ${childrenTeacherHeld?`<div class="status-row"><div class="status-row-label">🧒 Children Teacher Hold (for refreshments)</div><div class="status-row-amt" style="color:var(--success)">${fmt(childrenTeacherHeld)}</div></div>`:''}
     ${btAmt?`<div class="status-row"><div class="status-row-label">🏦 Bank Transfer (already in bank)</div><div class="status-row-amt" style="color:var(--primary)">${fmt(btAmt)}</div></div>`:''}
     ${dpAmt?`<div class="status-row"><div class="status-row-label">💳 Direct → Admin Officer Petty Cash</div><div class="status-row-amt" style="color:var(--success)">${fmt(dpAmt)}</div></div>`:''}
-    ${cashExpenseCovering>0?`<div class="status-row"><div class="status-row-label">💸 Cash used for expenses (recorded in Expenses)</div><div class="status-row-amt" style="color:var(--danger)">−${fmt(cashExpenseCovering)}</div></div>`:''}
+    ${periodCashExpenses>0?`<div class="status-row"><div class="status-row-label">💸 Cash used for expenses (recorded in Expenses)</div><div class="status-row-amt" style="color:var(--danger)">−${fmt(periodCashExpenses)}</div></div>`:''}
+    ${periodCashExpenses>0?`<div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">💰 Net cash for bank deposit</div><div class="status-row-amt" style="font-weight:700;color:var(--primary)">${fmt(netCashForBank)}</div></div>`:''}
     ${deposits.length?`<div class="status-row"><div class="status-row-label">✅ Deposited to Bank so far</div><div class="status-row-amt" style="color:var(--success)">${fmt(depositedTotal)}</div></div>`:''}
+    ${depositOverage>0.5?`<div class="status-row"><div class="status-row-label" style="color:var(--danger);font-size:12px">⚠️ Deposit (${fmt(depositedTotal)}) is ${fmt(depositOverage)} more than net cash after expenses (${fmt(netCashForBank)}). The deposit was likely recorded before the expense was deducted — please verify.</div></div>`:''}
     ${isGloballySettled?`<div class="status-row"><div class="status-row-label" style="color:var(--success)">✅ Deposited to Bank (bulk deposit)</div><div class="status-row-amt" style="color:var(--success)">${fmt(stillWithAccountant)}</div></div>`:stillWithAccountant>0?`<div class="status-row"><div class="status-row-label">⏳ Still with Accountant (undeposited)</div><div class="status-row-amt" style="color:var(--danger)">${fmt(stillWithAccountant)}</div></div>`:''}
     ${isSunday?`<hr class="divider">
     <p class="card-title">Income Breakdown</p>
