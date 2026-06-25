@@ -1145,7 +1145,7 @@ function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, al
   }
   inflowEvents.sort((a,b)=>a.ts-b.ts);
   for(const ev of inflowEvents){
-    lots.push({ incomeId:ev.incomeId, ts:ev.ts, original:ev.amount, remaining:ev.amount, deposited:0, expensed:0 });
+    lots.push({ incomeId:ev.incomeId, ts:ev.ts, original:ev.amount, remaining:ev.amount, deposited:0, expensed:0, expenseAllocations:[], depositAllocations:[], pettyAllocations:[] });
   }
   if(!lots.length) return map;
 
@@ -1153,29 +1153,30 @@ function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, al
   const outflows = [];
   for(const t of (allCashTx||[])){
     if(t.type==='cash_deposit' && (t.amount||0)>0){
-      outflows.push({ ts:new Date(t.date||t.createdAt).getTime(), kind:'deposit', incomeRef:t.incomeRef||'', amount:t.amount });
+      outflows.push({ ts:new Date(t.date||t.createdAt).getTime(), kind:'deposit', sourceId:t.id, incomeRef:t.incomeRef||'', amount:t.amount });
     }
   }
   for(const e of (allExpenses||[]).filter(isLoggedExpense)){
     const cashAmt = e.paymentMethod==='cash'?(e.amount||0):e.paymentMethod==='split'?(e.cashAmount||0):0;
     if(cashAmt<=0) continue;
-    outflows.push({ ts:new Date(e.date||e.createdAt).getTime(), kind:'expense', incomeRef:e.incomeRef||'', amount:cashAmt });
+    outflows.push({ ts:new Date(e.date||e.createdAt).getTime(), kind:'expense', sourceId:e.id, incomeRef:e.incomeRef||'', amount:cashAmt });
   }
   for(const h of (allPetty||[])){
     if(h.type!=='refill') continue;
     if(h.status!=='approved' && h.status!=='settled') continue;
     const cashAmt = h.paymentMethod==='cash_accountant'?(h.amount||0):h.paymentMethod==='split'?(h.cashAmount||0):0;
     if(cashAmt<=0) continue;
-    outflows.push({ ts:new Date(h.date||h.createdAt).getTime(), kind:'petty', incomeRef:'', amount:cashAmt });
+    outflows.push({ ts:new Date(h.date||h.createdAt).getTime(), kind:'petty', sourceId:h.id, incomeRef:'', amount:cashAmt });
   }
   outflows.sort((a,b)=>a.ts-b.ts);
 
   // 3. Consume lots — preferred lot first (if outflow carries a hint), then FIFO across all lots.
-  function consume(amount, kind, preferredIncomeRef){
+  function consume(amount, kind, preferredIncomeRef, sourceId){
     function applyToLot(lot, take){
       lot.remaining -= take;
-      if(kind==='deposit') lot.deposited += take;
-      else if(kind==='expense') lot.expensed += take;
+      if(kind==='deposit'){ lot.deposited += take; lot.depositAllocations.push({id:sourceId, amount:take}); }
+      else if(kind==='expense'){ lot.expensed += take; lot.expenseAllocations.push({id:sourceId, amount:take}); }
+      else if(kind==='petty'){ lot.pettyAllocations.push({id:sourceId, amount:take}); }
     }
     if(preferredIncomeRef){
       for(const lot of lots){
@@ -1198,17 +1199,20 @@ function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, al
     // data discrepancy. Surfaced via the global cashWithAccountant going negative
     // (clamped at 0 in calcChurchBalance, but cashDeficit reports it).
   }
-  for(const o of outflows) consume(o.amount, o.kind, o.incomeRef);
+  for(const o of outflows) consume(o.amount, o.kind, o.incomeRef, o.sourceId);
 
   // 4. Aggregate per income record.
   for(const lot of lots){
     if(lot.incomeId == null) continue;  // untagged bank-to-accountant inflow lot
     const prior = map.get(lot.incomeId);
-    const data = prior || { cashHeld:0, deposited:0, expenseCovering:0, stillPending:0 };
+    const data = prior || { cashHeld:0, deposited:0, expenseCovering:0, stillPending:0, expenseAllocations:[], depositAllocations:[], pettyAllocations:[] };
     data.cashHeld += lot.original;
     data.deposited += lot.deposited;
     data.expenseCovering += lot.expensed;
     data.stillPending += lot.remaining;
+    data.expenseAllocations.push(...lot.expenseAllocations);
+    data.depositAllocations.push(...lot.depositAllocations);
+    data.pettyAllocations.push(...lot.pettyAllocations);
     map.set(lot.incomeId, data);
   }
   for(const v of map.values()) v.isReconciled = v.stillPending <= 0.5;
@@ -4209,6 +4213,21 @@ async function viewIncome(id){
   // FIFO can't silently absorb. (Drift between raw linkage and FIFO attribution is
   // expected and handled automatically.)
   const depositOverage = Math.max(0, rawLinkedDepositTotal - cashHeld);
+  // Resolve allocations into renderable line items: which actual expense / petty
+  // records consumed cash from THIS Sunday's bucket. Lets the user see exactly
+  // where the money went — not just a total.
+  const expenseById = new Map((allExpensesVI||[]).map(e=>[e.id, e]));
+  const pettyById = new Map((allPettyVI||[]).map(h=>[h.id, h]));
+  const expAllocLines = (entryVI?.expenseAllocations||[])
+    .map(a=>{ const e = expenseById.get(a.id); if(!e) return null;
+      const cat = (typeof EXPENSE_CATS!=='undefined'?EXPENSE_CATS:[]).find(c=>c.key===e.category)||{label:e.category||'Expense',icon:''};
+      return { icon:cat.icon||'💸', label:e.description||cat.label, date:e.date||e.createdAt, amount:a.amount };
+    }).filter(Boolean).sort((a,b)=>new Date(a.date)-new Date(b.date));
+  const pettyAllocLines = (entryVI?.pettyAllocations||[])
+    .map(a=>{ const h = pettyById.get(a.id); if(!h) return null;
+      return { icon:'🏧', label:'Petty Cash Refill', date:h.date||h.createdAt, amount:a.amount };
+    }).filter(Boolean).sort((a,b)=>new Date(a.date)-new Date(b.date));
+  const allOutflowLines = [...expAllocLines, ...pettyAllocLines].sort((a,b)=>new Date(a.date)-new Date(b.date));
   const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Sunday Collection'};
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -4223,7 +4242,7 @@ async function viewIncome(id){
     ${childrenTeacherHeld?`<div class="status-row"><div class="status-row-label">🧒 Children Teacher Hold (for refreshments)</div><div class="status-row-amt" style="color:var(--success)">${fmt(childrenTeacherHeld)}</div></div>`:''}
     ${btAmt?`<div class="status-row"><div class="status-row-label">🏦 Bank Transfer (already in bank)</div><div class="status-row-amt" style="color:var(--primary)">${fmt(btAmt)}</div></div>`:''}
     ${dpAmt?`<div class="status-row"><div class="status-row-label">💳 Direct → Admin Officer Petty Cash</div><div class="status-row-amt" style="color:var(--success)">${fmt(dpAmt)}</div></div>`:''}
-    ${periodCashExpenses>0?`<div class="status-row"><div class="status-row-label">💸 Cash used for expenses (recorded in Expenses)</div><div class="status-row-amt" style="color:var(--danger)">−${fmt(periodCashExpenses)}</div></div>`:''}
+    ${periodCashExpenses>0?`<div class="status-row" style="cursor:pointer" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='none'?'block':'none'"><div class="status-row-label">💸 Cash used for expenses (recorded in Expenses) <span style="font-size:9px;color:var(--text3)">▾</span></div><div class="status-row-amt" style="color:var(--danger)">−${fmt(periodCashExpenses)}</div></div>${allOutflowLines.length?`<div style="display:none;padding:4px 8px 8px 18px;background:rgba(0,0,0,0.02);border-left:2px solid var(--border)">${allOutflowLines.map(l=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:3px 0;color:var(--text2)"><span>${l.icon} ${l.label} <span style="color:var(--text3)">· ${fmtDate(l.date)}</span></span><span style="color:var(--danger);font-weight:600">−${fmt(l.amount)}</span></div>`).join('')}</div>`:''}`:''}
     ${periodCashExpenses>0?`<div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">💰 Net cash for bank deposit</div><div class="status-row-amt" style="font-weight:700;color:var(--primary)">${fmt(netCashForBank)}</div></div>`:''}
     ${(deposits.length||depositedTotal>0.5)?`<div class="status-row"><div class="status-row-label">✅ Deposited to Bank so far</div><div class="status-row-amt" style="color:var(--success)">${fmt(depositedTotal)}</div></div>`:''}
     ${rawLinkedDepositTotal>0.5 && Math.abs(rawLinkedDepositTotal-depositedTotal)>0.5?`<div class="status-row" style="font-size:11px;color:var(--text2)"><div class="status-row-label" style="font-style:italic">↳ Linked deposit records total ${fmt(rawLinkedDepositTotal)} — redistributed across periods to balance the cash pool.</div><div class="status-row-amt"></div></div>`:''}
