@@ -96,7 +96,8 @@ const EXPENSE_CATS = [
   { key:'security',   label:'Security',                color:'#555',    icon:'🔒' },
   { key:'welfare',    label:'Church Welfare',          color:'#D85A30', icon:'❤️' },
   { key:'property',   label:'Property & Projects',     color:'#185FA5', icon:'🏗️' },
-  { key:'events',     label:'Events & Departments',    color:'#534AB7', icon:'🎉' }
+  { key:'events',     label:'Events & Departments',    color:'#534AB7', icon:'🎉' },
+  { key:'reconciliation', label:'Cash Reconciliation', color:'#666', icon:'⚖️' }
 ];
 
 const EXPENSE_SUBCATS = {
@@ -3772,6 +3773,7 @@ async function renderIncome(){
         ${canAction('income_record')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">📥 Sunday Collections</button>`:''}
         ${canAction('income_record')?`<button class="btn btn-amber" onclick="App.showOtherIncomeForm()">➕ Other Income</button>`:''}
         ${canAction('income_deposit')&&cashWithAccountant>0?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${fmt(cashWithAccountant)})</button>`:''}
+        ${canAction('income_deposit')&&state.user?.role==='it_admin'?`<button class="btn" style="border:1px solid var(--border);background:var(--bg)" onclick="App.reconcileCashWithAccountant()" title="Adjust the recorded cash balance to match what's physically with the accountant">⚖️ Reconcile Cash</button>`:''}
       </div>
     </div>
     <div class="kpi-grid" style="margin-bottom:16px">
@@ -4325,6 +4327,111 @@ function _previewDepPhoto(input, previewId){
     preview.querySelector('img').src = e.target.result;
   };
   reader.readAsDataURL(file);
+}
+
+// Reconcile the recorded "cash with accountant" balance with the physical cash
+// the accountant actually holds today. Logs a single audited adjustment so the
+// ledger matches reality without quietly editing other people's deposit or
+// expense records. Gated behind IT admin PIN — this is a sensitive operation.
+async function reconcileCashWithAccountant(){
+  if(!canAction('income_deposit')){ showAlert('Access denied.','danger'); return; }
+  const balance = await calcChurchBalance();
+  const current = Math.round(balance.cashWithAccountant * 100) / 100;
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">⚖️ Reconcile Cash with Accountant</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Log an audited adjustment that brings the ledger balance in line with the cash the accountant actually has in hand today. The variance is recorded as an explicit entry (positive or negative) so the audit trail stays intact.</span></div>
+    <div class="form-group">
+      <label class="form-label">Current Ledger Balance (Cash with Accountant)</label>
+      <div style="font-size:22px;font-weight:700;color:${current>0.5?'var(--amber)':'var(--primary)'};padding:8px 0">${fmt(current)}</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Actual Cash Counted with Accountant Today *</label>
+      <input type="number" id="recon_actual" class="form-input" value="0" min="0" step="0.01" autofocus />
+      <div class="form-hint">Enter 0 if the accountant has no cash in hand right now.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Reason for Variance *</label>
+      <textarea id="recon_reason" class="form-input" rows="3" placeholder="e.g., Phantom ₦2,000 left over from a deposit correction reducing CTX-mqjifugsv0x9 (18 Jun) from ₦23,500 to ₦21,500."></textarea>
+      <div class="form-hint">Be specific — this note shows up on every audit and report.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">IT Admin PIN *</label>
+      <input type="password" id="recon_pin" class="form-input" maxlength="6" placeholder="••••••" inputmode="numeric" />
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.submitReconcileCash(this)">Confirm Adjustment</button>
+    </div>`);
+  setTimeout(()=>document.getElementById('recon_actual')?.focus(),100);
+}
+
+async function submitReconcileCash(btn){
+  if(!canAction('income_deposit')){ showAlert('Access denied.','danger'); return; }
+  const actual = parseFloat(document.getElementById('recon_actual')?.value);
+  const reason = document.getElementById('recon_reason')?.value?.trim();
+  const pin    = document.getElementById('recon_pin')?.value?.trim();
+  if(isNaN(actual) || actual < 0){ showAlert('Enter the actual cash amount (0 or more).','danger'); return; }
+  if(!reason || reason.length < 8){ showAlert('Please provide a reason of at least 8 characters.','danger'); return; }
+  if(!pin){ showAlert('Please enter your IT Admin PIN.','danger'); return; }
+
+  const restore = setBtnLoading(btn, 'Verifying…');
+  try { await DB.login({ role:'it_admin', userId: state.user.id, pin }); }
+  catch(e){
+    restore();
+    const msg = String(e?.message||'');
+    showAlert(msg.toLowerCase().includes('invalid credentials') ? 'Incorrect PIN. Please try again.' : 'PIN verification failed: '+msg, 'danger');
+    document.getElementById('recon_pin')?.select();
+    return;
+  }
+
+  try {
+    const balance = await calcChurchBalance();
+    const current = Math.round(balance.cashWithAccountant * 100) / 100;
+    const variance = Math.round((current - actual) * 100) / 100;  // >0: ledger over-reports, write off; <0: ledger under-reports, top up
+    if(Math.abs(variance) < 0.5){
+      restore();
+      showAlert('Ledger already matches the actual cash. No adjustment needed.','info');
+      return;
+    }
+    btn.innerHTML = '<span class="btn-spinner-sm"></span> Saving…';
+    const today = new Date().toISOString().split('T')[0];
+    if(variance > 0){
+      // Ledger says more cash than reality. Write off as a cash expense in the
+      // dedicated reconciliation category — keeps the ledger arithmetic clean
+      // and shows up alongside other expenses with a clear label.
+      const expenseId = 'EXP-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      await DB.addExpense({
+        id: expenseId, date,
+        category: 'reconciliation', subCategory: 'Cash Variance Write-off',
+        description: 'Cash reconciliation — variance write-off',
+        amount: variance, paymentMethod: 'cash', cashAmount: variance, bankAmount: 0,
+        incomeRef: '', recordedBy: state.user?.name,
+        status: 'approved', approvedBy: state.user?.name,
+        notes: reason,
+      });
+    } else {
+      // Ledger says less cash than reality — log as a bank→accountant withdrawal
+      // (untagged inflow). The amount is the missing cash; the destination flag
+      // means it counts as cash IN to the accountant's pool.
+      await DB.addCashTransaction({
+        type: 'withdrawal', date, amount: -variance,
+        destination: 'accountant_cash',
+        description: 'Cash reconciliation — variance top-up',
+        reference: '', authorizedBy: state.user?.name, recordedBy: state.user?.name,
+        notes: reason,
+      });
+    }
+    DB.addAudit('cash_reconciled', `Cash with accountant reconciled: ${fmt(current)} → ${fmt(actual)} (variance ${variance>0?'−':'+'}${fmt(Math.abs(variance))}). Reason: ${reason}`, state.user?.name);
+    DB.addNotification('Cash Reconciled', `Cash with accountant adjusted by ${variance>0?'−':'+'}${fmt(Math.abs(variance))} by ${state.user?.name}`, variance>0?'warn':'success');
+    _apiCache.delete('expenses'); _apiCache.delete('cash-transactions');
+    closeModal();
+    showAlert(`Cash with accountant reconciled to ${fmt(actual)}.`,'success');
+    renderIncome();
+  } catch(err){
+    restore();
+    showAlert(`Failed to reconcile: ${err.message||'Unknown error'}`,'danger');
+  }
 }
 
 async function correctIncomeDeposit(incomeId, targetTotal) {
@@ -10597,7 +10704,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
