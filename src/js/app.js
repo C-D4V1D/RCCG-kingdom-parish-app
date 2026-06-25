@@ -1076,10 +1076,11 @@ function groupCashDeposits(deposits) {
   }
 
   const byLegacyKey = new Map();
-  const ungroupable = [];
   for (const t of noGroupId) {
-    if (!t.reference) { ungroupable.push(t); continue; }
-    const key = `${t.date}|${t.reference}|${t.depositMethod}`;
+    // Include reference when present; photo-only deposits (no reference) are keyed
+    // by date+method alone — the 2-minute window below prevents false grouping.
+    const refPart = t.reference || '';
+    const key = `${t.date}|${refPart}|${t.depositMethod}`;
     if (!byLegacyKey.has(key)) byLegacyKey.set(key, []);
     byLegacyKey.get(key).push(t);
   }
@@ -1103,7 +1104,6 @@ function groupCashDeposits(deposits) {
     }
     result.push(...records);
   }
-  result.push(...ungroupable);
   return result;
 }
 
