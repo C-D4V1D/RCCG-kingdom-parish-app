@@ -1508,6 +1508,47 @@ function initApp(){
   // Fire-and-forget: link existing cash expenses to their income record.
   // Runs in the background; short-circuits once all records are already linked.
   backfillExpenseIncomeRefs();
+  // Start version polling for auto-update detection
+  startVersionPolling();
+}
+
+// ── Auto-update detection ─────────────────────────────────────────
+let _loadedAppVersion = null;
+function startVersionPolling(){
+  // Initial load — record current version
+  checkForNewVersion();
+  // Poll every 60 seconds
+  setInterval(checkForNewVersion, 60000);
+}
+async function checkForNewVersion(){
+  try {
+    const r = await fetch('/version.json?_=' + Date.now(), { cache: 'no-store' });
+    if(!r.ok) return;
+    const { v } = await r.json();
+    if(!_loadedAppVersion){ _loadedAppVersion = v; return; }
+    if(v !== _loadedAppVersion){
+      showUpdateBanner();
+    }
+  } catch(e){ /* silently ignore — offline or version.json missing */ }
+}
+function showUpdateBanner(){
+  if(document.getElementById('updateBanner')) return; // already showing
+  const banner = document.createElement('div');
+  banner.id = 'updateBanner';
+  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#0F6E56;color:#fff;padding:10px 16px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:13px;font-weight:600;box-shadow:0 2px 12px rgba(0,0,0,0.2);animation:slideDown 0.3s ease-out';
+  banner.innerHTML = `
+    <span>🔄 A new version is available!</span>
+    <button onclick="location.reload(true)" style="background:#fff;color:#0F6E56;border:none;padding:6px 16px;border-radius:20px;font-weight:700;font-size:12px;cursor:pointer">Refresh Now</button>
+    <button onclick="this.parentElement.remove()" style="background:none;border:none;color:rgba(255,255,255,0.7);font-size:18px;cursor:pointer;padding:0 4px">✕</button>
+  `;
+  document.body.prepend(banner);
+  // Add slide-down animation
+  if(!document.getElementById('updateBannerStyle')){
+    const style = document.createElement('style');
+    style.id = 'updateBannerStyle';
+    style.textContent = '@keyframes slideDown{from{transform:translateY(-100%)}to{transform:translateY(0)}}';
+    document.head.appendChild(style);
+  }
 }
 
 // Handle browser back / forward
@@ -5247,6 +5288,32 @@ async function renderRemittances(){
   const remDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid, isPartial, paidAmount: totalPaid });
 
+  // ── Snapshot override for paid periods ──────────────────────
+  // When rates/quotas change after a period is paid, use the frozen snapshot
+  // so the breakdown reflects what was actually paid, not current rates.
+  let _snapshotActive = false;
+  if(isPaid){
+    const _snapA = periodPayments.find(r=>r.part==='a'&&r.breakdownSnapshot);
+    const _snapB = periodPayments.find(r=>r.part==='b'&&r.breakdownSnapshot);
+    if(_snapA||_snapB){
+      _snapshotActive = true;
+      if(_snapA){ try {
+        const sl=JSON.parse(_snapA.breakdownSnapshot);
+        partALines.length=0;
+        sl.forEach(l=>partALines.push({label:l.label,amount:l.amount,section:'snapshot',pct:null}));
+      } catch(e){} }
+      if(_snapB){ try {
+        const sl=JSON.parse(_snapB.breakdownSnapshot);
+        partBLines.length=0;
+        sl.forEach(l=>partBLines.push({label:l.label,amount:l.amount,section:'snapshot',pct:null}));
+      } catch(e){} }
+    }
+  }
+  // Recalculate totals from (possibly snapshot-overridden) lines
+  const _dPartATotal=partALines.reduce((s,l)=>s+l.amount,0);
+  const _dPartBTotal=partBLines.reduce((s,l)=>s+l.amount,0);
+  const _dTotalDue=_dPartATotal+_dPartBTotal;
+
   const allPaidRems=allRems.filter(r=>r.status==='paid')
     .sort((a,b)=>new Date(b.paidDate||b.createdAt||0)-new Date(a.paidDate||a.createdAt||0));
 
@@ -5278,8 +5345,8 @@ async function renderRemittances(){
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${canAction('remittance_record_payment')?`
-          ${!isPartAPaid?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal('a')">📤 Part A (${fmt(partATotal)})</button>`:''}
-          ${!isPartBPaid&&partBTotal>0?`<button class="btn btn-amber" style="color:#fff;background:var(--amber)" onclick="App.showRemittancePaymentModal('b')">🤝 Part B (${fmt(partBTotal)})</button>`:''}
+          ${!isPartAPaid?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal('a')">📤 Part A (${fmt(_dPartATotal)})</button>`:''}
+          ${!isPartBPaid&&_dPartBTotal>0?`<button class="btn btn-amber" style="color:#fff;background:var(--amber)" onclick="App.showRemittancePaymentModal('b')">🤝 Part B (${fmt(_dPartBTotal)})</button>`:''}
         `:''}
         <button class="btn btn-amber" onclick="App.printRemittanceReport()">📄 Download Report</button>
         <button class="btn" onclick="App.shareRemittanceReport()">📤 Share</button>
@@ -5318,7 +5385,7 @@ async function renderRemittances(){
     <!-- KPI Summary -->
     <div class="kpi-grid" style="margin-bottom:12px">
       <div class="kpi"><div class="kpi-icon" style="background:#E8F4FD">💰</div><div class="kpi-label">Total Collection</div><div class="kpi-val">${fmt(totalCollection)}</div></div>
-      <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Total Remittance Due</div><div class="kpi-val">${fmt(totalDue)}</div><div class="kpi-delta" style="color:var(--text3)">📅 ${remDueLabel}</div></div>
+      <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Total Remittance Due</div><div class="kpi-val">${fmt(_dTotalDue)}</div><div class="kpi-delta" style="color:var(--text3)">📅 ${remDueLabel}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">✓</div><div class="kpi-label">Total Paid</div><div class="kpi-val">${fmt(totalPaid)}</div>
         <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;justify-content:center">
           ${isPartAPaid?'<span class="badge badge-success" style="font-size:9px">A ✓</span>':'<span class="badge badge-warn" style="font-size:9px">A ✗</span>'}
@@ -5328,6 +5395,7 @@ async function renderRemittances(){
       <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">🏠</div><div class="kpi-label">Net Local Retained</div><div class="kpi-val">${fmt(trueNetLocal)}</div></div>
     </div>
 
+    ${_snapshotActive?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🔒</span><span>This period has been <strong>paid</strong>. The amounts shown are <strong>frozen from time of payment</strong> and will not change if rates or quotas are updated.</span></div>`:''}
     ${income.length===0?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span><strong>No income records found</strong> for the selected period (${fmtDateShort(fromDate)} – ${fmtDateShort(toDate)}). Please adjust the date range above or record income first.</span></div>`:''}
 
     <div class="grid-6040">
@@ -5345,17 +5413,17 @@ async function renderRemittances(){
           ${renderSection(rccgQuotaLines,'Part A — Fixed Quotas Due for This Period')}
           <tr style="border-top:2px solid var(--border);background:var(--surface)">
             <td colspan="2" class="td-bold" style="font-size:13px;padding:8px 12px">PART A SUBTOTAL — RCCG Authorities</td>
-            <td class="td-right td-bold" style="font-size:14px;color:var(--danger);padding:8px 12px">${fmt(partATotal)}</td>
+            <td class="td-right td-bold" style="font-size:14px;color:var(--danger);padding:8px 12px">${fmt(_dPartATotal)}</td>
           </tr>
           ${renderSection(tgLines,'Part B — Thanksgiving — Pastoral & Local Distribution')}
           ${renderSection(mummyQuotaLines,'Part B — Pastoral Stipend')}
           <tr style="border-top:2px solid var(--border);background:var(--surface)">
             <td colspan="2" class="td-bold" style="font-size:13px;padding:8px 12px">PART B SUBTOTAL — TG & Pastoral</td>
-            <td class="td-right td-bold" style="font-size:14px;color:var(--danger);padding:8px 12px">${fmt(partBTotal)}</td>
+            <td class="td-right td-bold" style="font-size:14px;color:var(--danger);padding:8px 12px">${fmt(_dPartBTotal)}</td>
           </tr>
           <tr style="border-top:3px solid var(--text)">
             <td colspan="2" class="td-bold" style="font-size:14px;padding:10px 12px">TOTAL REMITTANCES DUE</td>
-            <td class="td-right td-bold" style="font-size:15px;color:var(--danger);padding:10px 12px">${fmt(totalDue)}</td>
+            <td class="td-right td-bold" style="font-size:15px;color:var(--danger);padding:10px 12px">${fmt(_dTotalDue)}</td>
           </tr>
           <tr>
             <td colspan="2" style="font-size:12px;color:var(--text2);padding:6px 12px">Net Local Retained (after Province Rebate &amp; Fixed Quotas)</td>
@@ -5365,8 +5433,8 @@ async function renderRemittances(){
 
         <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
           ${canAction('remittance_record_payment')?`
-            ${!isPartAPaid?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal('a')">📤 Part A — RCCG Authority (${fmt(partATotal)})</button>`:`<span class="badge badge-success" style="padding:8px 12px;font-size:12px">✅ Part A Paid</span>`}
-            ${partBTotal>0?(!isPartBPaid?`<button class="btn btn-amber" style="color:#fff;background:var(--amber)" onclick="App.showRemittancePaymentModal('b')">🤝 Part B — TG & Pastoral (${fmt(partBTotal)})</button>`:`<span class="badge badge-success" style="padding:8px 12px;font-size:12px">✅ Part B Paid</span>`):''}
+            ${!isPartAPaid?`<button class="btn btn-primary" onclick="App.showRemittancePaymentModal('a')">📤 Part A — RCCG Authority (${fmt(_dPartATotal)})</button>`:`<span class="badge badge-success" style="padding:8px 12px;font-size:12px">✅ Part A Paid</span>`}
+            ${_dPartBTotal>0?(!isPartBPaid?`<button class="btn btn-amber" style="color:#fff;background:var(--amber)" onclick="App.showRemittancePaymentModal('b')">🤝 Part B — TG & Pastoral (${fmt(_dPartBTotal)})</button>`:`<span class="badge badge-success" style="padding:8px 12px;font-size:12px">✅ Part B Paid</span>`):''}
           `:''}
           <button class="btn btn-amber" onclick="App.printRemittanceReport()">📄 Print / Download Report</button>
           <button class="btn" onclick="App.shareRemittanceReport()">📤 Share</button>
@@ -5635,14 +5703,11 @@ async function showRemittancePaymentModal(part){
     <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="rem_notes" class="form-textarea" rows="2" placeholder="Any additional notes…"></textarea></div>
     <input type="hidden" id="rem_total_due" value="${totalDue}" />
     <input type="hidden" id="rem_part" value="${part}" />
+    <input type="hidden" id="rem_breakdown_snapshot" value='${JSON.stringify(lines).replace(/'/g,"&#39;")}' />
 
-    <div class="alert alert-warn" style="margin:0 0 10px">
-      <span class="alert-icon">⚠</span>
-      <span>Submission will create a <strong>Pending Approval</strong> record. The Pastor or a Bank Signatory must then approve it to mark it as fully paid.</span>
-    </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitRemittance(this)">📤 Submit for Approval</button>
+      <button class="btn btn-primary" onclick="App.submitRemittance(this)">✅ Record as Paid</button>
     </div>`);
   // Trigger method change to sync visibility
   onRemMethodChange();
@@ -5723,7 +5788,7 @@ async function submitRemittance(btn=null){
   const toDate=state.remToDate||new Date().toISOString().split('T')[0];
 
   const isSuperUser=['it_admin','pastor'].includes(state.user?.role);
-  const status=isSuperUser?'paid':'pending_approval';
+  const status='paid';
 
   // Build a clear description of how payment was split
   const methodLabel=isSplit
@@ -5734,6 +5799,7 @@ async function submitRemittance(btn=null){
   try {
     const dueAtTimeOfPayment = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
     const part = document.getElementById('rem_part')?.value || '';
+    const breakdownSnapshot = document.getElementById('rem_breakdown_snapshot')?.value || '';
     const partLabel = part==='a'?'Part A — RCCG Authorities':part==='b'?'Part B — TG & Pastoral':'RCCG Monthly Remittance';
     await DB.addRemittance({
       label:partLabel, amount, paidDate:date,
@@ -5746,17 +5812,14 @@ async function submitRemittance(btn=null){
       status,
       dueAtTimeOfPayment,
       part,
+      breakdownSnapshot,
     });
     DB.addAudit('remittance_submitted',
-      `Remittance ${status==='paid'?'paid':'submitted for approval'}: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}`,
+      `Remittance paid: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}`,
       state.user?.name);
-    if(status==='paid'){
-      DB.addNotification('Remittance Recorded',`RCCG remittance of ${fmt(amount)} paid (${methodLabel}) for period ${fmtDate(fromDate)} – ${fmtDate(toDate)}.`,'success');
-    } else {
-      DB.addNotification('Remittance Pending Approval',`Remittance of ${fmt(amount)} submitted by ${state.user?.name||'accountant'} — awaiting Pastor/Signatory approval.`,'warn');
-    }
+    DB.addNotification('Remittance Recorded',`RCCG remittance of ${fmt(amount)} paid (${methodLabel}) for period ${fmtDate(fromDate)} – ${fmtDate(toDate)}.`,'success');
     closeModal();
-    showAlert(status==='paid'?`Remittance of ${fmt(amount)} recorded and marked as paid!`:'Remittance submitted — pending approval by Pastor/Signatory.','success');
+    showAlert(`Remittance of ${fmt(amount)} recorded and marked as paid!`,'success');
     state.remFromDate=null; state.remToDate=null;
     renderRemittances();
   } catch(err) {

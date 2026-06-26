@@ -1779,6 +1779,7 @@ async function handleInit(DB) {
     `ALTER TABLE remittances ADD COLUMN cash_amount REAL DEFAULT 0`,
     `ALTER TABLE remittances ADD COLUMN due_at_time_of_payment REAL DEFAULT 0`,
     `ALTER TABLE remittances ADD COLUMN part TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN breakdown_snapshot TEXT DEFAULT ''`,
     `ALTER TABLE cash_transactions ADD COLUMN photo_data TEXT DEFAULT ''`,
     // Soft-delete for AI secretary meeting drafts.
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_at TEXT DEFAULT ''`,
@@ -2850,6 +2851,7 @@ async function getRemittances(DB) {
     cashAmount:           row.cash_amount            || 0,
     dueAtTimeOfPayment:   row.due_at_time_of_payment || 0,
     part:                 row.part || '',
+    breakdownSnapshot:    row.breakdown_snapshot || '',
     createdAt:     row.created_at,
   })));
 }
@@ -2860,8 +2862,8 @@ async function createRemittance(DB, data) {
     INSERT INTO remittances
       (id, label, amount, paid_date, reference, authorized_by, status,
        period_from, period_to, payment_method, notes, submitted_by, bank_amount, cash_amount,
-       due_at_time_of_payment, part)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       due_at_time_of_payment, part, breakdown_snapshot)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     data.label               || '',
@@ -2869,7 +2871,7 @@ async function createRemittance(DB, data) {
     data.paidDate            || '',
     data.reference           || '',
     data.authorizedBy        || '',
-    data.status              || 'pending_approval',
+    data.status              || 'paid',
     data.periodFrom          || '',
     data.periodTo            || '',
     data.paymentMethod       || 'bank_transfer',
@@ -2879,6 +2881,7 @@ async function createRemittance(DB, data) {
     data.cashAmount          || 0,
     data.dueAtTimeOfPayment  || 0,
     data.part                || '',
+    data.breakdownSnapshot   || '',
   ).run();
   return ok({ ...data, id });
 }

@@ -18,6 +18,8 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { createHash } from 'node:crypto';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
@@ -79,5 +81,19 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const pct = ((1 - out / src) * 100).toFixed(1);
     console.log(`  ${dest.padEnd(34)}  ${(src / 1024).toFixed(1).padStart(6)} KB  →  ${(out / 1024).toFixed(1).padStart(6)} KB  (${pct}% smaller)`);
   }
+  // Generate version.json for auto-update detection
+  const appJsBuilt = await readFile(join(ROOT, 'dist/js/app.js'), 'utf8');
+  const versionHash = createHash('md5').update(appJsBuilt).digest('hex').slice(0, 10);
+  await writeFile(join(ROOT, 'version.json'), JSON.stringify({ v: versionHash, t: Date.now() }));
+  console.log(`  version.json                        hash: ${versionHash}`);
+
+  // Update cache-busting param in index.html
+  const indexHtml = await readFile(join(ROOT, 'index.html'), 'utf8');
+  const updatedHtml = indexHtml.replace(/app\.js\?v=[a-z0-9]+/i, `app.js?v=${versionHash}`);
+  if (updatedHtml !== indexHtml) {
+    await writeFile(join(ROOT, 'index.html'), updatedHtml);
+    console.log(`  index.html                          cache-bust: ?v=${versionHash}`);
+  }
+
   console.log('Build complete.');
 }
