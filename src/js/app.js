@@ -5681,7 +5681,8 @@ async function showRemittancePaymentModal(part){
     </div>
     `:''}
 
-    <!-- Payment Method -->
+    <!-- Payment Method (hidden for Part A — always bank transfer via RCCG portal) -->
+    ${part==='a'?'':`
     <div class="form-group">
       <label class="form-label">Payment Method *</label>
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:4px">
@@ -5696,15 +5697,19 @@ async function showRemittancePaymentModal(part){
         </label>
       </div>
     </div>
+    `}
 
-    <!-- Single amount (bank or cash only) -->
+    <!-- Single amount (hidden for Part A — amount comes from area payment field) -->
+    ${part==='a'?'':`
     <div id="rem_single_amount_group" class="form-group">
       <label class="form-label">Amount to Pay (₦) *</label>
       <input type="number" id="rem_amount" class="form-input" value="${Math.round(totalDue)}" />
       <div class="form-hint">Calculated total: <strong>${fmt(totalDue)}</strong>. Adjust only if actual payment differs.</div>
     </div>
+    `}
 
-    <!-- Split amounts (shown only for split method) -->
+    <!-- Split amounts (hidden for Part A) -->
+    ${part==='a'?'':`
     <div id="rem_split_group" style="display:none">
       <div style="background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:12px">
         <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Enter the bank and cash portions — they must add up to the total due.</div>
@@ -5725,6 +5730,7 @@ async function showRemittancePaymentModal(part){
         <div id="rem_split_warning" style="display:none;margin-top:8px;font-size:12px;color:var(--danger);font-weight:500"></div>
       </div>
     </div>
+    `}
 
     <div class="form-group"><label class="form-label">Payment Date *</label><input type="date" id="rem_date" class="form-input" value="${new Date().toISOString().split('T')[0]}" /></div>
 
@@ -5814,7 +5820,8 @@ function onAreaTotalChange(ourParishShare){
 }
 
 async function submitRemittance(btn=null){
-  const method=document.querySelector('input[name="rem_method"]:checked')?.value||'bank_transfer';
+  const part = document.getElementById('rem_part')?.value || '';
+  const method = part==='a' ? 'bank_transfer' : (document.querySelector('input[name="rem_method"]:checked')?.value||'bank_transfer');
   const isSplit=method==='split';
   const date=document.getElementById('rem_date')?.value;
   const reference=(document.getElementById('rem_ref')?.value||'').trim();
@@ -5827,7 +5834,16 @@ async function submitRemittance(btn=null){
 
   // Resolve amounts
   let amount, bankAmount, cashAmount;
-  if(isSplit){
+  if(part==='a'){
+    // Part A: our parish share is the remittance amount; area total is the actual bank debit
+    const parishShare = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
+    const areaTotal = parseFloat(document.getElementById('rem_area_total')?.value) || 0;
+    amount = parishShare;
+    bankAmount = areaTotal > 0 ? areaTotal : parishShare;
+    cashAmount = 0;
+    if(!areaTotal && !parishShare){ showAlert('Please enter the total amount paid to the RCCG portal.','danger'); return; }
+    if(areaTotal > 0 && areaTotal < parishShare){ showAlert('The total area payment cannot be less than our parish share.','danger'); return; }
+  } else if(isSplit){
     bankAmount=parseFloat(document.getElementById('rem_bank_amt')?.value)||0;
     cashAmount=parseFloat(document.getElementById('rem_cash_amt')?.value)||0;
     amount=bankAmount+cashAmount;
@@ -5839,7 +5855,11 @@ async function submitRemittance(btn=null){
     cashAmount=method==='cash'?amount:0;
   }
 
-  if(!amount||!date){ showAlert('Please enter the amount and payment date.','danger'); return }
+  if(part==='a'){
+    const areaTotal = parseFloat(document.getElementById('rem_area_total')?.value) || 0;
+    if(!areaTotal&&!amount){ showAlert('Please enter the total amount paid to the RCCG portal.','danger'); return; }
+    if(!date){ showAlert('Please enter the payment date.','danger'); return; }
+  } else if(!amount||!date){ showAlert('Please enter the amount and payment date.','danger'); return; }
   if(method==='bank_transfer'&&!reference){ showAlert('Please enter the bank transfer reference number.','danger'); return }
   if(!auth){ showAlert('Please select or enter the authorizing signatories.','danger'); return }
 
@@ -5862,7 +5882,6 @@ async function submitRemittance(btn=null){
   const restore = setBtnLoading(btn, 'Submitting…');
   try {
     const dueAtTimeOfPayment = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
-    const part = document.getElementById('rem_part')?.value || '';
     const breakdownSnapshot = document.getElementById('rem_breakdown_snapshot')?.value || '';
     const areaTotalPaid = parseFloat(document.getElementById('rem_area_total')?.value) || 0;
     const otherParishesAmount = areaTotalPaid > 0 ? Math.max(0, areaTotalPaid - dueAtTimeOfPayment) : 0;
