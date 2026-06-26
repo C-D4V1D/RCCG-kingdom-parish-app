@@ -1062,6 +1062,15 @@ function getSundayCashWithAccountant(record, remRates = DEFAULT_REMITTANCE_RATES
   return Math.max(0, total - bankTransfer - directPetty - childrenTeacherHeld);
 }
 
+function getIncomeCashWithAccountant(record, remRates = DEFAULT_REMITTANCE_RATES){
+  const isSunday = !record?.source || record?.source === 'sunday_collection';
+  if(isSunday) return getSundayCashWithAccountant(record, remRates);
+  const total = Number(record?.totalCollection || 0);
+  const bankTransfer = Number(record?.bankTransferAmount || 0);
+  const directPetty = Number(record?.directPettyCash || 0);
+  return Math.max(0, total - bankTransfer - directPetty);
+}
+
 // Consolidate split cash_deposit records from the same bulk deposit action into single
 // display items. Records are linked by groupId (new) or by matching reference+date+method
 // created within 2 minutes of each other (legacy records before groupId was added).
@@ -1133,9 +1142,7 @@ function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, al
   const lots = [];
   const inflowEvents = [];
   for(const r of (allIncome||[])){
-    const isSunday = !r.source||r.source==='sunday_collection';
-    const cashHeld = isSunday ? getSundayCashWithAccountant(r,remRates)
-                              : (r.paymentMethod==='cash'?(r.totalCollection||0):0);
+    const cashHeld = getIncomeCashWithAccountant(r, remRates);
     if(cashHeld<=0) continue;
     inflowEvents.push({ ts:new Date(r.date||r.createdAt).getTime(), incomeId:r.id, amount:cashHeld });
   }
@@ -1234,15 +1241,12 @@ function findIncomeRefForCashExpense(expenseDate, allIncome, remRates, allCashTx
     .filter(r=>{
       const d = r.date||r.createdAt||'';
       if(d > expenseDate) return false;
-      const isSunday = !r.source||r.source==='sunday_collection';
-      const cashHeld = isSunday ? getSundayCashWithAccountant(r,remRates) : (r.paymentMethod==='cash'?(r.totalCollection||0):0);
-      return cashHeld > 0;
+      return getIncomeCashWithAccountant(r, remRates) > 0;
     })
     .sort((a,b)=>new Date(b.date||b.createdAt)-new Date(a.date||a.createdAt));
   if(allCashTx){
     for(const r of candidates){
-      const isSunday = !r.source||r.source==='sunday_collection';
-      const cashHeld = isSunday ? getSundayCashWithAccountant(r,remRates) : (r.paymentMethod==='cash'?(r.totalCollection||0):0);
+      const cashHeld = getIncomeCashWithAccountant(r, remRates);
       const deposited = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
       if(cashHeld - deposited > 0.5) return r.id;
     }
@@ -1264,8 +1268,7 @@ async function backfillExpenseIncomeRefs(){
     if(!needsBackfill.length) return;
     const cashIncome = allInc
       .filter(r=>{
-        const isSunday = !r.source||r.source==='sunday_collection';
-        return isSunday ? getSundayCashWithAccountant(r,remRates)>0 : (r.paymentMethod==='cash'&&(r.totalCollection||0)>0);
+        return getIncomeCashWithAccountant(r, remRates) > 0;
       })
       .sort((a,b)=>new Date(a.date||a.createdAt)-new Date(b.date||b.createdAt));
     let count = 0;
@@ -1849,7 +1852,7 @@ async function buildTransactionsLedger(){
     const isSunday = !r.source || r.source==='sunday_collection';
     const cashHeld = isSunday
       ? getSundayCashWithAccountant(r, remRates)
-      : Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
+      : getIncomeCashWithAccountant(r, remRates);
     tx.push({
       id:`income_${r.id}`,
       module:'income',
@@ -2542,11 +2545,7 @@ async function calcChurchBalance(asOfDate, prefetched){
 
   // --- CASH WITH ACCOUNTANT ---
   const cashFromCollections = income.reduce((s,r) => {
-    const isSunday = !r.source || r.source==='sunday_collection';
-    if(isSunday) return s + getSundayCashWithAccountant(r, remRates);
-    const btAmt = r.bankTransferAmount||0;
-    const dpAmt = r.directPettyCash||0;
-    return s + Math.max(0, (r.totalCollection||0) - btAmt - dpAmt);
+    return s + getIncomeCashWithAccountant(r, remRates);
   }, 0);
   const bankToAccountant = cashTxF.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
   const cashExpenses = expenses.filter(isLoggedExpense).reduce((s,e)=>{
@@ -3804,7 +3803,7 @@ async function renderIncomeList(records, cashTxOverride, remRatesOverride, expMa
       ${records.map(r=>{
         const btAmt = r.bankTransferAmount||0;
         const dpAmt = r.directPettyCash||0;
-        const cashHeld = getSundayCashWithAccountant(r, remRates);
+        const cashHeld = getIncomeCashWithAccountant(r, remRates);
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const entry = expMapOverride?.get(r.id);
         const isFullyDeposited = cashHeld > 0 && (depositedAmt >= cashHeld || entry?.isReconciled);
@@ -3833,7 +3832,7 @@ async function renderIncomeList(records, cashTxOverride, remRatesOverride, expMa
       ${records.map(r=>{
         const btAmt = r.bankTransferAmount||0;
         const dpAmt = r.directPettyCash||0;
-        const cashHeld = getSundayCashWithAccountant(r, remRates);
+        const cashHeld = getIncomeCashWithAccountant(r, remRates);
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const entry = expMapOverride?.get(r.id);
         const isFullyDeposited = cashHeld > 0 && (depositedAmt >= cashHeld || entry?.isReconciled);
@@ -3862,12 +3861,13 @@ async function renderOtherIncomeList(records, expMapOverride){
       <tr><th>Date</th><th>Source Type</th><th>Donor / Notes</th><th>Amount</th><th>Payment Method</th><th>Status</th><th>Recorded By</th><th>Actions</th></tr>
       ${records.map(r=>{
         const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'};
-        const isCash = r.paymentMethod==='cash';
+        const cashHeld = getIncomeCashWithAccountant(r, DEFAULT_REMITTANCE_RATES);
+        const hasCashComponent = cashHeld > 0.005;
         const cashDep = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-        const entry = isCash ? expMapOverride?.get(r.id) : null;
-        const isFullyDep = cashDep>=(r.totalCollection||0) || entry?.isReconciled;
-        const remaining = entry ? entry.stillPending : Math.max(0,(r.totalCollection||0) - cashDep);
-        const statusBadge = !isCash
+        const entry = hasCashComponent ? expMapOverride?.get(r.id) : null;
+        const isFullyDep = cashDep>=cashHeld || entry?.isReconciled;
+        const remaining = entry ? entry.stillPending : Math.max(0, cashHeld - cashDep);
+        const statusBadge = !hasCashComponent
           ? `<span class="badge badge-info">🏦 Bank Transfer</span>`
           : isFullyDep
             ? `<span class="badge badge-success">✓ Deposited</span>`
@@ -3883,18 +3883,19 @@ async function renderOtherIncomeList(records, expMapOverride){
           <td>${statusBadge}</td>
           <td class="td-muted">${r.recordedBy||'—'}</td>
           <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-          ${canAction('income_deposit')&&isCash&&!isFullyDep?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+          ${canAction('income_deposit')&&hasCashComponent&&!isFullyDep?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
         </tr>`;}).join('')}
     </table>
     <table class="tx-mobile-table">
       <tr><th>Date</th><th>Details</th><th class="td-right">Amount</th></tr>
       ${records.map(r=>{
         const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'};
-        const isCash = r.paymentMethod==='cash';
+        const cashHeld = getIncomeCashWithAccountant(r, DEFAULT_REMITTANCE_RATES);
+        const hasCashComponent = cashHeld > 0.005;
         const cashDep = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
-        const entry = isCash ? expMapOverride?.get(r.id) : null;
-        const isFullyDep = cashDep>=(r.totalCollection||0) || entry?.isReconciled;
-        const mobileStatus = !isCash
+        const entry = hasCashComponent ? expMapOverride?.get(r.id) : null;
+        const isFullyDep = cashDep>=cashHeld || entry?.isReconciled;
+        const mobileStatus = !hasCashComponent
           ? `<span class="badge badge-info">🏦 Bank</span>`
           : isFullyDep
             ? `<span class="badge badge-success">✓ Deposited</span>`
@@ -3991,7 +3992,7 @@ async function renderAllIncomeList(records, cashTxOverride, remRatesOverride, ex
         const dpAmt = r.directPettyCash||0;
         const cashHeld = isSunday
           ? getSundayCashWithAccountant(r, remRates)
-          : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
+          : getIncomeCashWithAccountant(r, remRates);
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const entry = expMapOverride?.get(r.id);
         const isFullyDeposited = cashHeld > 0 && (depositedAmt >= cashHeld || entry?.isReconciled);
@@ -4023,7 +4024,7 @@ async function renderAllIncomeList(records, cashTxOverride, remRatesOverride, ex
         const dpAmt = r.directPettyCash||0;
         const cashHeld = isSunday
           ? getSundayCashWithAccountant(r, remRates)
-          : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
+          : getIncomeCashWithAccountant(r, remRates);
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const entry = expMapOverride?.get(r.id);
         const isFullyDeposited = cashHeld > 0 && (depositedAmt >= cashHeld || entry?.isReconciled);
@@ -4192,9 +4193,7 @@ async function viewIncome(id){
   const btAmt = r.bankTransferAmount||0;
   const dpAmt = r.directPettyCash||0;
   const childrenTeacherHeld = isSunday ? getChildrenTeacherHeldCash(r, remRates) : 0;
-  const cashHeld = isSunday
-    ? getSundayCashWithAccountant(r, remRates)
-    : Math.max(0,(r.totalCollection||0) - btAmt - dpAmt);
+  const cashHeld = getIncomeCashWithAccountant(r, remRates);
   const [allCashVI, allExpensesVI, allPettyVI] = await Promise.all([DB.getCashTransactions(), DB.getExpenses(), DB.getPetty()]);
   // Linked deposit records — shown verbatim in the "Deposit records:" footer so the
   // user can audit each physical deposit, even when the FIFO reallocates the cash
@@ -4473,7 +4472,7 @@ async function confirmDeposit(id){
   if(!r) return;
   const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
   const childrenTeacherHeld = getChildrenTeacherHeldCash(r, remRates);
-  const cashHeld = getSundayCashWithAccountant(r, remRates);
+  const cashHeld = getIncomeCashWithAccountant(r, remRates);
   const alreadyDeposited = allCashCD.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
   const remaining = Math.max(0, cashHeld - alreadyDeposited);
   const totalCashWithAccountant = balance.cashWithAccountant;
@@ -4590,9 +4589,7 @@ async function confirmBulkDeposit(){
   const expMapCBD = buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, pettyHistory);
   const incomeItems = allIncome.map(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
-    const cashHeld = isSunday
-      ? getSundayCashWithAccountant(r, remRates)
-      : r.paymentMethod==='cash' ? (r.totalCollection||0) : 0;
+    const cashHeld = getIncomeCashWithAccountant(r, remRates);
     if(cashHeld<=0) return null;
     const deposited = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
     const entry = expMapCBD.get(r.id);
@@ -4752,8 +4749,7 @@ async function submitBulkDeposit(btn=null){
     // records that have already been consumed by attributed cash expenses.
     const expMapSD = buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpensesSD, allPettySD);
     const incomeItems = allIncome.map(r=>{
-      const isSunday = !r.source||r.source==='sunday_collection';
-      const cashHeld = isSunday ? getSundayCashWithAccountant(r, remRates) : (r.paymentMethod==='cash'?(r.totalCollection||0):0);
+      const cashHeld = getIncomeCashWithAccountant(r, remRates);
       if(!cashHeld) return null;
       const entry = expMapSD.get(r.id);
       const dep = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
@@ -7392,9 +7388,7 @@ async function renderBank(){
 
   // Cash with Accountant (mirrors calcChurchBalance, using data already fetched above)
   const cashFromCollectionsRB = allIncome.reduce((s,r)=>{
-    const isSunday = !r.source||r.source==='sunday_collection';
-    if(isSunday) return s+getSundayCashWithAccountant(r, remRates);
-    return s+Math.max(0,(r.totalCollection||0)-(r.bankTransferAmount||0)-(r.directPettyCash||0));
+    return s + getIncomeCashWithAccountant(r, remRates);
   },0);
   const bankToAccountantRB = allCashTx.filter(t=>t.type==='withdrawal'&&t.destination==='accountant_cash').reduce((s,t)=>s+(t.amount||0),0);
   const cashExpensesRB = allExpenses.filter(isLoggedExpense).reduce((s,e)=>{
@@ -7450,10 +7444,7 @@ async function renderBank(){
   // Pending cash deposits (income records with net undeposited cash after expense attribution)
   const expMapBank = buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, pettyHistory);
   const pendingDepItems = allIncome.filter(r=>{
-    const isSunday = !r.source||r.source==='sunday_collection';
-    const cashHeld = isSunday
-      ? getSundayCashWithAccountant(r, remRates)
-      : r.paymentMethod==='cash'?(r.totalCollection||0):0;
+    const cashHeld = getIncomeCashWithAccountant(r, remRates);
     if(cashHeld<=0) return false;
     const entry = expMapBank.get(r.id);
     if(entry) return entry.stillPending > 0.5;
@@ -7464,10 +7455,7 @@ async function renderBank(){
   const pendingDepTotal = pendingDepItems.reduce((s,r)=>{
     const entry = expMapBank.get(r.id);
     if(entry) return s + entry.stillPending;
-    const isSunday = !r.source||r.source==='sunday_collection';
-    const cashHeld = isSunday
-      ? getSundayCashWithAccountant(r, remRates)
-      : r.paymentMethod==='cash'?(r.totalCollection||0):0;
+    const cashHeld = getIncomeCashWithAccountant(r, remRates);
     const deposited = allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
     return s + Math.max(0, cashHeld - deposited);
   }, 0);
@@ -10715,17 +10703,20 @@ return {
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
   setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
-    updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
-    setPeriodMode,
-    showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
-    _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
-      _calcPettyFloatFromLedger: calcPettyFloatFromLedger,
-      _totalRemittanceDue: totalRemittanceDue,
-      _calcChurchBalanceFromOpening: calcChurchBalanceFromOpening,
-      _calcOutstandingRemittancesFromFlow: calcOutstandingRemittancesFromFlow,
-      _calcCurrentPeriodOutstandingRemittance: calcCurrentPeriodOutstandingRemittance,
-      _calcAvailableFundFromOpening: calcAvailableFundFromOpening
-    };
+  updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
+  setPeriodMode,
+  showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
+  _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
+  _getIncomeCashWithAccountant: getIncomeCashWithAccountant,
+  _buildExpenseCoveringMap: buildExpenseCoveringMap,
+  _findIncomeRefForCashExpense: findIncomeRefForCashExpense,
+  _calcPettyFloatFromLedger: calcPettyFloatFromLedger,
+  _totalRemittanceDue: totalRemittanceDue,
+  _calcChurchBalanceFromOpening: calcChurchBalanceFromOpening,
+  _calcOutstandingRemittancesFromFlow: calcOutstandingRemittancesFromFlow,
+  _calcCurrentPeriodOutstandingRemittance: calcCurrentPeriodOutstandingRemittance,
+  _calcAvailableFundFromOpening: calcAvailableFundFromOpening
+  };
 
 })();
 
