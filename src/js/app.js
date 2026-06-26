@@ -5648,6 +5648,39 @@ async function showRemittancePaymentModal(part){
       </div>
     </div>
 
+    ${part==='a'?`
+    <!-- Area Payment (HQ pays for all parishes combined) -->
+    <div style="background:var(--surface);border-radius:var(--r);padding:14px;margin-bottom:14px;border-left:3px solid var(--primary)">
+      <div style="font-size:12px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">🏛️ Area Payment</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:12px">
+        As Area HQ, you pay remittance for all parishes combined on the RCCG portal. Enter the <strong>total area amount</strong> paid — the system will calculate how much came from satellite parishes.
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="font-size:12px;color:var(--text2);white-space:nowrap">Our Parish Share:</span>
+        <span style="font-size:15px;font-weight:700;color:var(--text)">${fmt(totalDue)}</span>
+      </div>
+      <div class="form-group" style="margin-bottom:8px">
+        <label class="form-label">Total Amount Paid to RCCG Portal (₦)</label>
+        <input type="number" id="rem_area_total" class="form-input" placeholder="Leave blank if paying only our parish share" min="0" oninput="App.onAreaTotalChange(${Math.round(totalDue)})" />
+        <div class="form-hint">The exact amount debited from your bank to the RCCG portal for the entire area.</div>
+      </div>
+      <div id="rem_area_breakdown" style="display:none;background:#fff;border-radius:var(--r);padding:10px 12px;border:1px dashed var(--border)">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+          <span style="color:var(--text2)">🏠 Our Parish (Kingdom Parish)</span>
+          <span style="font-weight:600">${fmt(totalDue)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+          <span style="color:var(--text2)">🏘️ Satellite Parishes (3)</span>
+          <span id="rem_area_others_amt" style="font-weight:600;color:var(--primary)">₦0</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:13px;padding-top:6px;border-top:1px solid var(--border);margin-top:4px">
+          <span style="font-weight:700">Total Area Payment</span>
+          <span id="rem_area_total_display" style="font-weight:700;color:var(--danger)">₦0</span>
+        </div>
+      </div>
+    </div>
+    `:''}
+
     <!-- Payment Method -->
     <div class="form-group">
       <label class="form-label">Payment Method *</label>
@@ -5764,6 +5797,22 @@ function onRemSplitChange(totalDue){
   }
 }
 
+function onAreaTotalChange(ourParishShare){
+  const areaTotal=parseFloat(document.getElementById('rem_area_total')?.value)||0;
+  const breakdownEl=document.getElementById('rem_area_breakdown');
+  const othersEl=document.getElementById('rem_area_others_amt');
+  const totalDisplayEl=document.getElementById('rem_area_total_display');
+  if(!breakdownEl) return;
+  if(areaTotal>0){
+    const othersAmt=Math.max(0, areaTotal-ourParishShare);
+    breakdownEl.style.display='block';
+    if(othersEl) othersEl.textContent=fmt(othersAmt);
+    if(totalDisplayEl) totalDisplayEl.textContent=fmt(areaTotal);
+  } else {
+    breakdownEl.style.display='none';
+  }
+}
+
 async function submitRemittance(btn=null){
   const method=document.querySelector('input[name="rem_method"]:checked')?.value||'bank_transfer';
   const isSplit=method==='split';
@@ -5815,6 +5864,8 @@ async function submitRemittance(btn=null){
     const dueAtTimeOfPayment = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
     const part = document.getElementById('rem_part')?.value || '';
     const breakdownSnapshot = document.getElementById('rem_breakdown_snapshot')?.value || '';
+    const areaTotalPaid = parseFloat(document.getElementById('rem_area_total')?.value) || 0;
+    const otherParishesAmount = areaTotalPaid > 0 ? Math.max(0, areaTotalPaid - dueAtTimeOfPayment) : 0;
     const partLabel = part==='a'?'Part A — RCCG Authorities':part==='b'?'Part B — TG & Pastoral':'RCCG Monthly Remittance';
     await DB.addRemittance({
       label:partLabel, amount, paidDate:date,
@@ -5828,9 +5879,11 @@ async function submitRemittance(btn=null){
       dueAtTimeOfPayment,
       part,
       breakdownSnapshot,
+      areaTotalPaid,
+      otherParishesAmount,
     });
     DB.addAudit('remittance_submitted',
-      `Remittance paid: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}`,
+      `Remittance paid: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}${areaTotalPaid>0?' — Area total: '+fmt(areaTotalPaid)+' (other parishes: '+fmt(otherParishesAmount)+')':''}`,
       state.user?.name);
     DB.addNotification('Remittance Recorded',`RCCG remittance of ${fmt(amount)} paid (${methodLabel}) for period ${fmtDate(fromDate)} – ${fmtDate(toDate)}.`,'success');
     closeModal();
@@ -10836,7 +10889,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,

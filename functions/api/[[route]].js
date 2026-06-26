@@ -1780,6 +1780,8 @@ async function handleInit(DB) {
     `ALTER TABLE remittances ADD COLUMN due_at_time_of_payment REAL DEFAULT 0`,
     `ALTER TABLE remittances ADD COLUMN part TEXT DEFAULT ''`,
     `ALTER TABLE remittances ADD COLUMN breakdown_snapshot TEXT DEFAULT ''`,
+    `ALTER TABLE remittances ADD COLUMN area_total_paid REAL DEFAULT 0`,
+    `ALTER TABLE remittances ADD COLUMN other_parishes_amount REAL DEFAULT 0`,
     `ALTER TABLE cash_transactions ADD COLUMN photo_data TEXT DEFAULT ''`,
     // Soft-delete for AI secretary meeting drafts.
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_at TEXT DEFAULT ''`,
@@ -2852,6 +2854,8 @@ async function getRemittances(DB) {
     dueAtTimeOfPayment:   row.due_at_time_of_payment || 0,
     part:                 row.part || '',
     breakdownSnapshot:    row.breakdown_snapshot || '',
+    areaTotalPaid:        row.area_total_paid || 0,
+    otherParishesAmount:  row.other_parishes_amount || 0,
     createdAt:     row.created_at,
   })));
 }
@@ -2862,8 +2866,8 @@ async function createRemittance(DB, data) {
     INSERT INTO remittances
       (id, label, amount, paid_date, reference, authorized_by, status,
        period_from, period_to, payment_method, notes, submitted_by, bank_amount, cash_amount,
-       due_at_time_of_payment, part, breakdown_snapshot)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       due_at_time_of_payment, part, breakdown_snapshot, area_total_paid, other_parishes_amount)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     data.label               || '',
@@ -2882,6 +2886,8 @@ async function createRemittance(DB, data) {
     data.dueAtTimeOfPayment  || 0,
     data.part                || '',
     data.breakdownSnapshot   || '',
+    data.areaTotalPaid       || 0,
+    data.otherParishesAmount || 0,
   ).run();
   return ok({ ...data, id });
 }
