@@ -2843,7 +2843,14 @@ async function renderDashboard(){
   const dashMonthDueSnapshot = dashMonthPaidRems.reduce((max, r) => Math.max(max, r.dueAtTimeOfPayment || 0), 0);
   const dashKpiEffectiveDue = dashMonthDueSnapshot > 0 ? dashMonthDueSnapshot
     : (dashIsPastPeriod && dashMonthPaidRems.length > 0 ? dashMonthPaidAmt : dashCurrentMonthRemDue);
-  const dashKpiIsPaid = dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashKpiEffectiveDue * PAYMENT_TOLERANCE_THRESHOLD;
+  // Part A/B awareness: both parts must be paid for "fully paid" status.
+  // Legacy (no part) records are treated as covering everything.
+  const _dashHasLegacy = dashMonthPaidRems.some(r => !r.part);
+  const _dashHasPartA = dashMonthPaidRems.some(r => r.part === 'a');
+  const _dashHasPartB = dashMonthPaidRems.some(r => r.part === 'b');
+  const dashKpiIsPaid = _dashHasLegacy
+    ? (dashMonthPaidAmt > 0 && dashMonthPaidAmt >= dashKpiEffectiveDue * PAYMENT_TOLERANCE_THRESHOLD)
+    : (_dashHasPartA && _dashHasPartB);
   const dashKpiIsPartial = dashMonthPaidAmt > 0 && !dashKpiIsPaid;
   const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
@@ -2871,7 +2878,15 @@ async function renderDashboard(){
     allRemsForKpi
       .filter(r => r.status === 'paid' && r.periodFrom && r.periodTo)
       .map(r => `${r.periodFrom}|${r.periodTo}`)
-  )];
+  )].filter(key => {
+    // A period is only "settled" when BOTH Part A and Part B are paid (or a legacy payment covers all)
+    const [pFrom, pTo] = key.split('|');
+    const ppRems = allRemsForKpi.filter(r => r.status === 'paid' && r.periodFrom === pFrom && r.periodTo === pTo);
+    const hasLegacy = ppRems.some(r => !r.part);
+    const hasPartA = ppRems.some(r => r.part === 'a');
+    const hasPartB = ppRems.some(r => r.part === 'b');
+    return hasLegacy || (hasPartA && hasPartB);
+  });
   const _dashSettledPeriodRanges = _dashSettledPeriodKeys.map(k => {
     const [from, to] = k.split('|'); return { from, to };
   });
