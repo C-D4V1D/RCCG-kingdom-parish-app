@@ -2980,6 +2980,7 @@ async function getCashTransactions(DB, includeImages = false) {
     ? `SELECT * FROM cash_transactions ORDER BY date DESC, created_at DESC`
     : `SELECT id,type,date,amount,description,reference,authorized_by,recorded_by,
               deposit_method,income_ref,destination,created_at,group_id,
+              verification_status,ai_extracted_amount,ai_extracted_reference,ai_notes,
               (photo_data IS NOT NULL AND photo_data != '') AS has_photo
          FROM cash_transactions ORDER BY date DESC, created_at DESC`;
   const { results } = await DB.prepare(sql).all();
