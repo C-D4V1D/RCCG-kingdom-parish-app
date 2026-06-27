@@ -74,6 +74,75 @@ function isDepositEffective(t){
   const vs = t.verificationStatus || '';
   return vs !== 'pending' && vs !== 'flagged';
 }
+
+function depositVerificationBadge(t){
+  const vs = t.verificationStatus || '';
+  if(!vs) return ''; // legacy — no badge
+  if(vs==='verified') return '<span class="badge badge-success" style="font-size:10px">✅ AI Verified</span>';
+  if(vs==='flagged') return `<span class="badge badge-danger" style="font-size:10px">⚠️ Flagged${t.aiExtractedAmount?' — receipt: '+fmt(t.aiExtractedAmount):''}</span>`;
+  if(vs==='pending') return '<span class="badge badge-warn" style="font-size:10px">⏳ Pending Verification</span>';
+  if(vs==='auto_approved') return '<span class="badge badge-info" style="font-size:10px">ℹ️ Auto-Approved</span>';
+  return `<span class="badge" style="font-size:10px">${vs}</span>`;
+}
+
+function depositActionButtons(t){
+  const vs = t.verificationStatus || '';
+  if(vs !== 'pending' && vs !== 'flagged') return '';
+  // Check if deposit is older than 5 minutes (show buttons)
+  const created = new Date(t.createdAt || t.date || 0).getTime();
+  const age = Date.now() - created;
+  const isStale = vs === 'flagged' || age > 5 * 60 * 1000; // flagged always shows, pending after 5min
+  if(!isStale && vs === 'pending') return '<span style="font-size:10px;color:var(--text3)">Verifying…</span>';
+  const btns = [];
+  if(canAction('income_deposit')){
+    btns.push(`<button class="btn btn-sm" onclick="event.stopPropagation();App.retryDepositVerification('${t.id}')" style="font-size:10px;padding:2px 8px">🔄 Retry</button>`);
+  }
+  if(['it_admin'].includes(state.user?.role)){
+    btns.push(`<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();App.manuallyApproveDeposit('${t.id}')" style="font-size:10px;padding:2px 8px">✅ Approve</button>`);
+  }
+  return btns.join(' ');
+}
+
+async function retryDepositVerification(txId){
+  showAlert('🔄 Retrying AI verification…','info');
+  try {
+    // Fetch the transaction to get the photo
+    const allTx = await DB.getCashTransactions(true); // full=true to include photo
+    const tx = allTx.find(t=>t.id===txId);
+    if(!tx?.photoData){ showAlert('No photo found for this deposit. Cannot retry verification.','danger'); return; }
+    const resp = await fetch('/api/verify-deposit', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ transactionId:txId, photoData:tx.photoData, recordedAmount:tx.amount }),
+    });
+    const result = await resp.json();
+    if(result?.status==='verified'){
+      showAlert(`✅ Verified! ${fmt(tx.amount)} moved to bank.`,'success');
+    } else if(result?.status==='flagged'){
+      showAlert(`⚠️ Still flagged: receipt shows ${fmt(result.aiAmount||0)} but ${fmt(tx.amount)} was recorded.`,'danger');
+    } else {
+      showAlert(`Verification result: ${result?.status||'unknown'}. ${result?.reason||''}`,'info');
+    }
+    renderIncome();
+  } catch(e){
+    showAlert(`Retry failed: ${e.message}`,'danger');
+  }
+}
+
+async function manuallyApproveDeposit(txId){
+  if(!['it_admin'].includes(state.user?.role)){ showAlert('Only IT Admin can manually approve deposits.','danger'); return; }
+  if(!confirm('Manually approve this deposit? Cash will be moved from accountant to bank.')) return;
+  try {
+    await fetch('/api/cash-transactions/'+txId, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ verificationStatus:'manual_approved', aiNotes:`Manually approved by ${state.user?.name||'IT Admin'} on ${new Date().toISOString().split('T')[0]}` }),
+    });
+    DB.addAudit('deposit_manual_approve',`Deposit ${txId} manually approved by ${state.user?.name}`,state.user?.name);
+    showAlert('✅ Deposit manually approved. Cash moved to bank.','success');
+    renderIncome();
+  } catch(e){
+    showAlert(`Failed: ${e.message}`,'danger');
+  }
+}
 // Tolerance for TG split validation — percentages must sum within ±0.1% to allow for floating-point rounding
 const TG_SUM_TOLERANCE = 0.001;
 
@@ -4378,7 +4447,7 @@ async function viewIncome(id){
     <div class="status-row" style="border-top:2px solid var(--border)"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt td-green" style="font-size:15px">${fmt(rem.netLocal)}</div></div>`:''}
     <hr class="divider">
     <div class="fs-12 text-muted">Recorded by: ${r.recordedBy||'—'} · ${isSunday?'Counted with: '+r.usher:'Donor: '+(r.donorName||'—')}</div>
-    ${deposits.length?`<div class="fs-12 text-muted">Deposit records: ${deposits.map(d=>`${fmt(d.amount)} via ${d.depositMethod?.replace('_',' ')||'—'} on ${fmtDate(d.date)} (Ref: ${d.reference||'—'})`).join('; ')}</div>`:''}
+    ${deposits.length?`<div style="margin-top:8px">${deposits.map(d=>`<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--text2);padding:4px 0;border-bottom:1px solid var(--border-light,#f0f0f0)"><span>${fmt(d.amount)} via ${d.depositMethod?.replace('_',' ')||'—'} on ${fmtDate(d.date)}</span><span>${d.reference?'Ref: '+d.reference:''}</span>${depositVerificationBadge(d)} ${depositActionButtons(d)}</div>`).join('')}</div>`:''}
     <div class="modal-footer">
     ${canAction('income_delete')?`<button class="btn btn-danger" style="margin-right:auto" onclick="closeModal();App.confirmDeleteIncome('${r.id}')">🗑 Delete</button>`:''}
     <button class="btn" onclick="closeModal()">Close</button>
@@ -7916,7 +7985,7 @@ function renderBankOverview(monthBankTx,bankBalance){
           <div style="display:flex;align-items:center;gap:10px">
             <div style="flex:1;min-width:0">
               <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.txLabel}</div>
-              <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(t.date||t.createdAt)} &nbsp;·&nbsp; <span class="badge ${isCredit?'badge-success':'badge-danger'}" style="font-size:10px">${t.txType}</span></div>
+              <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(t.date||t.createdAt)} &nbsp;·&nbsp; <span class="badge ${isCredit?'badge-success':'badge-danger'}" style="font-size:10px">${t.txType}</span> ${t.verificationStatus?depositVerificationBadge(t):''}</div>
             </div>
             <div style="text-align:right;flex-shrink:0;margin-left:4px">
               <div style="font-size:14px;font-weight:700;color:${color}">${sign}${fmt(Math.abs(t.txAmt))}</div>
@@ -7928,6 +7997,7 @@ function renderBankOverview(monthBankTx,bankBalance){
             ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
             ${(()=>{ const pid=t._splitParts?t._splitParts.find(p=>p.hasPhoto||p.photoData)?.id:(t.hasPhoto||t.photoData?t.id:null); return pid?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${pid}')" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''; })()}
             ${t._splitParts?`<div style="margin-top:4px;font-size:10px;color:var(--text3)">Split across ${t._splitParts.length} income records: ${t._splitParts.map(p=>fmt(p.amount)).join(' + ')}</div>`:''}
+            ${t.verificationStatus?`<div style="margin-top:4px">${depositActionButtons(t)}</div>`:''}
             <div>Time: ${fmtTime(t.createdAt||t.date)}</div>
           </div>
         </div>`;
@@ -11095,7 +11165,7 @@ async function setPeriodMode(mode){
 // ──────────────────────────────────────────
 return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
-  onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, submitIncome,
+  onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
