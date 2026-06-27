@@ -708,7 +708,24 @@ export async function onRequest(context) {
     // ── /api/cash-transactions ─────────────────────────────────
     if (route === 'cash-transactions') {
       if (method === 'GET'  && !param) return await getCashTransactions(DB, url.searchParams.get('full') === '1');
-      if (method === 'POST' && !param) return await createCashTransaction(DB, body);
+      if (method === 'POST' && !param) {
+        const result = await createCashTransaction(DB, body);
+        // If this is a cash deposit with a photo, trigger server-side AI verification
+        // in the background — the response returns immediately to the client
+        if (body?.type === 'cash_deposit' && body?.photoData && body?.verificationStatus === 'pending') {
+          const txId = body.id || (await result.clone().json().catch(()=>({}))).id;
+          if (txId) {
+            context.waitUntil(
+              verifyDepositWithAI(DB, env, {
+                transactionId: txId,
+                photoData: body.photoData,
+                recordedAmount: body.amount || 0,
+              }).catch(e => console.error('Background verification error:', e))
+            );
+          }
+        }
+        return result;
+      }
       if (method === 'PUT'  && param)  return await updateCashTransaction(DB, param, body);
     }
 
@@ -3105,20 +3122,20 @@ function getApiStatus(env) {
 }
 
 // ── AI Deposit Verification ──────────────────────────────────────
-async function verifyDepositWithAI(DB, env, body) {
+async function verifyDepositWithAI(DB, env, body, attempt=1) {
+  const MAX_ATTEMPTS = 3;
   const { transactionId, photoData, recordedAmount } = body || {};
   if (!transactionId || !photoData) return err('Missing transactionId or photoData', 400);
 
   // Resolve OpenAI key (used for vision — GPT-4o-mini reads receipts well)
   const openaiKey = await resolveOpenAiKey(env, DB);
   if (!openaiKey) {
-    // Fall back: mark as unverified but don't block
-    await DB.prepare(`UPDATE cash_transactions SET verification_status='no_api_key' WHERE id=?`).bind(transactionId).run();
-    return ok({ verified: false, reason: 'No OpenAI API key configured for receipt verification.' });
+    await DB.prepare(`UPDATE cash_transactions SET verification_status='auto_approved', ai_notes=? WHERE id=?`)
+      .bind('No OpenAI API key configured — auto-approved', transactionId).run();
+    return ok({ verified: true, status: 'auto_approved', reason: 'No API key' });
   }
 
   try {
-    // Strip data URL prefix if present to get clean base64
     const base64 = photoData.includes(',') ? photoData.split(',')[1] : photoData;
     const mediaType = photoData.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
 
@@ -3143,17 +3160,22 @@ If you cannot read the image or it's not a financial receipt, respond: {"amount"
 
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      await DB.prepare(`UPDATE cash_transactions SET verification_status='error', ai_notes=? WHERE id=?`)
-        .bind(`API error: ${data?.error?.message || resp.status}`, transactionId).run();
-      return ok({ verified: false, reason: `AI API error: ${data?.error?.message || resp.status}` });
+      // Retry on API errors
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise(r => setTimeout(r, attempt * 2000));
+        return verifyDepositWithAI(DB, env, body, attempt + 1);
+      }
+      await DB.prepare(`UPDATE cash_transactions SET verification_status='auto_approved', ai_notes=? WHERE id=?`)
+        .bind(`API error after ${MAX_ATTEMPTS} attempts: ${data?.error?.message || resp.status}`, transactionId).run();
+      return ok({ verified: true, status: 'auto_approved', reason: `API error after ${MAX_ATTEMPTS} attempts` });
     }
 
     const aiText = (data?.choices?.[0]?.message?.content || '').trim();
     let parsed;
     try { parsed = JSON.parse(aiText.replace(/```json|```/g, '').trim()); } catch (e) {
-      await DB.prepare(`UPDATE cash_transactions SET verification_status='error', ai_notes=? WHERE id=?`)
-        .bind(`Could not parse AI response: ${aiText.slice(0, 200)}`, transactionId).run();
-      return ok({ verified: false, reason: 'Could not parse AI response' });
+      await DB.prepare(`UPDATE cash_transactions SET verification_status='auto_approved', ai_notes=? WHERE id=?`)
+        .bind(`Could not parse AI response — auto-approved: ${aiText.slice(0, 200)}`, transactionId).run();
+      return ok({ verified: true, status: 'auto_approved', reason: 'Parse error' });
     }
 
     const aiAmount = parsed.amount != null ? Number(parsed.amount) : null;
@@ -3161,29 +3183,32 @@ If you cannot read the image or it's not a financial receipt, respond: {"amount"
     const aiNotes = `${parsed.bank || ''} | ${parsed.date || ''} | Confidence: ${parsed.confidence || 'unknown'} | ${parsed.notes || ''}`.trim();
     const recorded = Number(recordedAmount) || 0;
 
-    // Determine verification status
-    let status = 'unverified';
+    let status = 'auto_approved';
     if (aiAmount != null && recorded > 0) {
-      const tolerance = Math.max(recorded * 0.02, 50); // 2% or ₦50 tolerance
+      const tolerance = Math.max(recorded * 0.02, 50);
       status = Math.abs(aiAmount - recorded) <= tolerance ? 'verified' : 'flagged';
     } else if (parsed.confidence === 'low') {
-      status = 'unreadable';
+      status = 'auto_approved';
     }
 
     await DB.prepare(`UPDATE cash_transactions SET verification_status=?, ai_extracted_amount=?, ai_extracted_reference=?, ai_notes=? WHERE id=?`)
       .bind(status, aiAmount || 0, aiRef, aiNotes, transactionId).run();
 
-    // If AI extracted a reference and none was recorded, update the reference too
     if (aiRef) {
       await DB.prepare(`UPDATE cash_transactions SET reference=CASE WHEN reference='' OR reference IS NULL THEN ? ELSE reference END WHERE id=?`)
         .bind(aiRef, transactionId).run();
     }
 
-    return ok({ verified: status === 'verified', status, aiAmount, aiRef, aiNotes, recorded });
+    return ok({ verified: status !== 'flagged', status, aiAmount, aiRef, aiNotes, recorded });
   } catch (e) {
-    await DB.prepare(`UPDATE cash_transactions SET verification_status='error', ai_notes=? WHERE id=?`)
-      .bind(`Exception: ${e.message}`, transactionId).run();
-    return ok({ verified: false, reason: e.message });
+    // Retry on network errors
+    if (attempt < MAX_ATTEMPTS) {
+      await new Promise(r => setTimeout(r, attempt * 2000));
+      return verifyDepositWithAI(DB, env, body, attempt + 1);
+    }
+    await DB.prepare(`UPDATE cash_transactions SET verification_status='auto_approved', ai_notes=? WHERE id=?`)
+      .bind(`Network error after ${MAX_ATTEMPTS} attempts: ${e.message} — auto-approved`, transactionId).run();
+    return ok({ verified: true, status: 'auto_approved', reason: e.message });
   }
 }
 

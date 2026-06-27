@@ -4742,12 +4742,8 @@ async function submitCashDeposit(incomeId, btn=null){
     DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${refLabel}`,state.user?.name);
     DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank${ref?` (Ref: ${ref})`:''}`,'success');
     closeModal();
-    showAlert(`${fmt(amount)} deposit recorded — ⏳ pending AI verification. Cash will move to bank once verified.`, 'info');
+    showAlert(`${fmt(amount)} deposit recorded — ⏳ AI is verifying the receipt on the server. Cash will move to bank once verified.`, 'info');
     renderIncome();
-    // Background AI verification (fire-and-forget — doesn't block the user)
-    if(photoData && saved?.id){
-      verifyDepositInBackground(saved.id, photoData, amount);
-    }
   } catch(err) {
     restore();
     showAlert(`Failed to record deposit: ${err.message||'Unknown error'}. Please try again.`,'danger');
