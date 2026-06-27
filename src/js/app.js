@@ -1292,7 +1292,7 @@ function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, al
   // 2. Outflows — cash deposits, cash expenses, petty top-ups from accountant's cash.
   const outflows = [];
   for(const t of (allCashTx||[])){
-    if(t.type==='cash_deposit' && (t.amount||0)>0 && isDepositEffective(t)){
+    if(t.type==='cash_deposit' && (t.amount||0)>0){
       outflows.push({ ts:new Date(t.date||t.createdAt).getTime(), kind:'deposit', sourceId:t.id, incomeRef:t.incomeRef||'', amount:t.amount });
     }
   }
@@ -5003,14 +5003,12 @@ async function confirmBulkDeposit(){
       </select>
     </div>
     <div class="form-group">
-      <label class="form-label">Proof of Deposit <span style="color:var(--danger)">*</span></label>
-      <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Provide at least one: a teller/reference number <strong>or</strong> a photo of the deposit slip.</div>
-      <input type="text" id="bulk_dep_ref" class="form-input" placeholder="Teller number / transaction reference (optional if photo uploaded)" style="margin-bottom:8px" />
-      <div style="font-size:11px;color:var(--text3);text-align:center;margin:2px 0 8px">— OR —</div>
-      <label style="font-size:12px;color:var(--text2);margin-bottom:4px;display:block">Upload Photo of Deposit Slip / POS Receipt</label>
+      <label class="form-label">Photo of Deposit Slip / Receipt <span style="color:var(--danger)">*</span></label>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Upload a clear photo of the deposit slip. AI will verify the amount and extract the teller/reference number automatically.</div>
       <input type="file" id="bulk_dep_photo" accept="image/*" class="form-input" style="padding:6px" onchange="App._previewDepPhoto(this,'bulk_dep_photo_preview')" />
       <div id="bulk_dep_photo_preview" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:6px;border:1px solid var(--border)" /></div>
     </div>
+    <input type="hidden" id="bulk_dep_ref" value="" />
     <div class="form-group"><label class="form-label">Date of Deposit *</label>
       <input type="date" id="bulk_dep_date" class="form-input" value="${today}" max="${today}" />
     </div>
@@ -5028,14 +5026,10 @@ async function submitBulkDeposit(btn=null){
   const date      = document.getElementById('bulk_dep_date')?.value;
   const photoFile = document.getElementById('bulk_dep_photo')?.files?.[0];
   if(!date){ showAlert('Please enter the deposit date.','danger'); return; }
-  if(!ref&&!photoFile){ showAlert('Please provide either a teller/reference number or upload a photo of the deposit slip. At least one is required.','danger'); return; }
+  if(!photoFile){ showAlert('Please upload a photo of the deposit slip or receipt. This is required for AI verification.','danger'); return; }
   let photoData = '';
   if(photoFile){
-    photoData = await new Promise(resolve=>{
-      const reader = new FileReader();
-      reader.onload = e => resolve(e.target.result);
-      reader.readAsDataURL(photoFile);
-    });
+    photoData = await compressPhoto(photoFile, 1200, 0.75);
   }
   const cashToDeposit = state._bulkDepositCashBalance || 0;
   if(cashToDeposit < 0.5){ showAlert('No cash to deposit.','warn'); return; }
@@ -5067,13 +5061,13 @@ async function submitBulkDeposit(btn=null){
     for(const item of incomeItems){
       if(amountLeft < 0.5) break;
       const depositAmt = Math.min(item.remaining, amountLeft);
-      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:item.id, amount:depositAmt, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name, groupId });
+      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:item.id, amount:depositAmt, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name, groupId, verificationStatus:'pending' });
       amountLeft -= depositAmt;
       recordCount++;
     }
     // Any remainder comes from bank-withdrawal funds not tied to income records
     if(amountLeft > 0.5){
-      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:'', amount:amountLeft, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name, description:'Cash deposit (bank withdrawal funds)', groupId });
+      await DB.addCashTransaction({ type:'cash_deposit', incomeRef:'', amount:amountLeft, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name, description:'Cash deposit (bank withdrawal funds)', groupId, verificationStatus:'pending' });
       recordCount++;
     }
     const refLabel = ref || (photoData ? '(photo uploaded)' : '—');
@@ -5082,7 +5076,7 @@ async function submitBulkDeposit(btn=null){
     delete state._bulkDepositPending;
     delete state._bulkDepositCashBalance;
     closeModal();
-    showAlert(`${fmt(cashToDeposit)} deposited to bank successfully!${ref?` Ref: ${ref}`:''}`, 'success');
+    showAlert(`${fmt(cashToDeposit)} deposit recorded — ⏳ AI is verifying the receipt on the server. Cash will move to bank once verified.`, 'info');
     if(state.page==='bank') renderBank(); else renderIncome();
   } catch(err) {
     restore();
