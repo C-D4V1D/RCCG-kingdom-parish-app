@@ -3079,19 +3079,34 @@ async function renderDashboard(){
   const dashOutstandingRems = dashTotalRemDueKpi;
   const dashTotalFunds = churchBal.total;
   const dashSpendable = dashTotalFunds - dashOutstandingRems;
-  const dashSpendStrong   = parseFloat(settingsDash?.spendableStrong||0)||40000;
-  const dashSpendModerate = parseFloat(settingsDash?.spendableModerate||0)||20000;
-  const dashSpendVeryLow  = parseFloat(settingsDash?.spendableVeryLow||0)||10000;
-  const dashSpendLabel = dashSpendable < 0 ? 'Deficit - Critical'
-    : dashSpendable < dashSpendVeryLow  ? 'Very Low'
-    : dashSpendable < dashSpendModerate ? 'Low'
-    : dashSpendable < dashSpendStrong   ? 'Moderate'
-    : 'Strong';
-  const dashSpendColor = dashSpendable < 0 ? 'var(--danger)'
-    : dashSpendable < dashSpendVeryLow  ? '#D97706'
-    : dashSpendable < dashSpendModerate ? '#B8860B'
-    : dashSpendable < dashSpendStrong   ? '#2d7f5e'
-    : 'var(--success)';
+
+  // ── Petty Cash Sustainability Indicator ──
+  const _pettyTarget     = parseFloat(settingsDash?.pettyTargetFloat||0)||90000;
+  const _pettyManageable = parseFloat(settingsDash?.pettyManageableFloat||0)||60000;
+  const _pettyMinimum    = parseFloat(settingsDash?.pettyMinimumFloat||0)||40000;
+  const _pettyBuffer     = parseFloat(settingsDash?.pettyBufferAmount||0)||30000;
+  const _pettyCurrentFloat = churchBal.petty || 0;
+  const _pettyTopUpNeeded  = Math.max(0, _pettyTarget - _pettyCurrentFloat);
+  const _pettyAfterObligs  = dashSpendable - _pettyTopUpNeeded;
+  const _pettyMaxFloat     = _pettyCurrentFloat + Math.max(0, dashSpendable);
+
+  let dashSpendLabel, dashSpendColor, _pettyIcon, _pettyMsg;
+  if (_pettyAfterObligs >= _pettyBuffer) {
+    dashSpendLabel = 'Healthy'; dashSpendColor = 'var(--success)'; _pettyIcon = '🟢';
+    _pettyMsg = `✅ Petty cash is sustainable. You can comfortably top up to ${fmt(_pettyTarget)} for next period.`;
+  } else if (_pettyAfterObligs >= 0) {
+    dashSpendLabel = 'Adequate'; dashSpendColor = '#1976D2'; _pettyIcon = '🔵';
+    _pettyMsg = `👍 Can reach ${fmt(_pettyTarget)} target but only ${fmt(_pettyAfterObligs)} will remain.`;
+  } else if (_pettyMaxFloat >= _pettyManageable) {
+    dashSpendLabel = 'Caution'; dashSpendColor = '#B8860B'; _pettyIcon = '🟡';
+    _pettyMsg = `⚠️ Cannot reach ${fmt(_pettyTarget)} target but can top up to ${fmt(_pettyMaxFloat)} which is above ${fmt(_pettyManageable)} manageable. Watch your spending.`;
+  } else if (_pettyMaxFloat >= _pettyMinimum) {
+    dashSpendLabel = 'Tight'; dashSpendColor = '#D97706'; _pettyIcon = '🟠';
+    _pettyMsg = `⚠️ Can only top up to ${fmt(_pettyMaxFloat)} — below ${fmt(_pettyManageable)} manageable. Consider reducing non-essential expenses.`;
+  } else {
+    dashSpendLabel = 'Critical'; dashSpendColor = 'var(--danger)'; _pettyIcon = '🔴';
+    _pettyMsg = `🚨 Can only top up to ${fmt(_pettyMaxFloat)} — below ${fmt(_pettyMinimum)} minimum. Please review expenses and income this period.`;
+  }
 
   // Reconciliation card figures — include EVERY balance-affecting expense for the period:
   //   1. Logged expenses (approved + pending_approval), EXCLUDING those auto-created when an
@@ -3614,7 +3629,7 @@ async function renderDashboard(){
       </div>
 
       <!-- 6. Available Fund After All Deductions (final answer) -->
-      <div class="flow-card" style="background:${dashSpendable<0?'rgba(163,45,45,0.04)':dashSpendable<dashSpendModerate?'rgba(184,134,11,0.04)':'rgba(29,158,117,0.04)'};border:1.5px solid ${dashSpendColor}55;border-radius:14px;padding:18px 20px;position:relative;overflow:hidden">
+      <div class="flow-card" style="background:${dashSpendColor}08;border:1.5px solid ${dashSpendColor}55;border-radius:14px;padding:18px 20px;position:relative;overflow:hidden">
         <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:${dashSpendColor}"></div>
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
@@ -3622,18 +3637,21 @@ async function renderDashboard(){
             <div style="font-size:26px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.8px;line-height:1.1">${fmt(dashSpendable)}</div>
           </div>
           <div style="display:flex;flex-direction:column;align-items:center;gap:8px;flex-shrink:0">
-            <div style="width:44px;height:44px;border-radius:12px;background:${dashSpendColor}22;display:flex;align-items:center;justify-content:center;font-size:22px">${dashSpendable<0?'🔴':dashSpendable<dashSpendVeryLow?'🟠':dashSpendable<dashSpendModerate?'🟡':dashSpendable<dashSpendStrong?'🟩':'🟢'}</div>
+            <div style="width:44px;height:44px;border-radius:12px;background:${dashSpendColor}22;display:flex;align-items:center;justify-content:center;font-size:22px">${_pettyIcon}</div>
             <span style="display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;background:${dashSpendColor}22;font-size:11.5px;font-weight:700;color:${dashSpendColor};white-space:nowrap">${dashSpendLabel}</span>
           </div>
         </div>
         <div style="margin-top:14px;padding-top:12px;border-top:1px dashed ${dashSpendColor}33">
-          <div style="height:8px;background:var(--bg);border-radius:4px;overflow:hidden;border:1.5px solid ${dashSpendColor}55">
-            <div style="height:100%;width:${dashTotalFunds>0?Math.min(100,Math.max(0,dashSpendable/dashTotalFunds*100)).toFixed(1):0}%;background:${dashSpendColor};border-radius:4px;transition:width 0.5s"></div>
+          <!-- Petty Cash Sustainability -->
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:6px">
+            <span style="color:var(--text3)">Petty top-up for next period</span>
+            <span style="font-weight:600;color:var(--text)">${fmt(_pettyTopUpNeeded)}</span>
           </div>
-          <div style="margin-top:6px;font-size:11px;color:var(--text3);display:flex;justify-content:space-between">
-            <span>${fmt(dashOutstandingRems)} still due to HQ</span>
-            <span>${dashTotalFunds>0?Math.round(dashSpendable/dashTotalFunds*100):0}% of balance</span>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <span style="font-size:12px;color:var(--text3)">After all obligations</span>
+            <span style="font-size:18px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.5px">${fmt(_pettyAfterObligs)}</span>
           </div>
+          <div style="font-size:11.5px;color:var(--text2);line-height:1.5;padding:8px 10px;background:${dashSpendColor}0D;border-radius:8px;border-left:3px solid ${dashSpendColor}">${_pettyMsg}</div>
         </div>
       </div>
 
@@ -6757,15 +6775,26 @@ async function renderExpenses(){
   const outstandingRems = Math.max(0, allTimeIncomeRemDue + accumQuotas - paidRems);
   const totalChurch = churchBal.total;
   const spendable = totalChurch - outstandingRems;
-  const spendLow = parseFloat(settings?.spendableModerate||0)||20000;
-  const spendColor = spendable < 0 ? 'var(--danger)' : spendable < spendLow ? 'var(--amber)' : 'var(--success)';
-  const spendLabel = spendable < 0 ? 'Deficit — remittances exceed available funds' : spendable < spendLow ? `Low — under ${fmt(spendLow)} threshold` : 'Sufficient';
+  const _expPettyTarget = parseFloat(settings?.pettyTargetFloat||0)||90000;
+  const _expPettyManageable = parseFloat(settings?.pettyManageableFloat||0)||60000;
+  const _expPettyMinimum = parseFloat(settings?.pettyMinimumFloat||0)||40000;
+  const _expPettyBuffer = parseFloat(settings?.pettyBufferAmount||0)||30000;
+  const _expPettyFloat = churchBal.petty||0;
+  const _expTopUpNeeded = Math.max(0, _expPettyTarget - _expPettyFloat);
+  const _expAfterObligs = spendable - _expTopUpNeeded;
+  const _expMaxFloat = _expPettyFloat + Math.max(0, spendable);
+  let spendLabel, spendColor;
+  if (_expAfterObligs >= _expPettyBuffer) { spendLabel='Healthy'; spendColor='var(--success)'; }
+  else if (_expAfterObligs >= 0) { spendLabel='Adequate'; spendColor='#1976D2'; }
+  else if (_expMaxFloat >= _expPettyManageable) { spendLabel='Caution'; spendColor='#B8860B'; }
+  else if (_expMaxFloat >= _expPettyMinimum) { spendLabel='Tight'; spendColor='#D97706'; }
+  else { spendLabel='Critical'; spendColor='var(--danger)'; }
 
   // Store spendable in state so the expense form modal can access it without re-fetching
   state._spendable = spendable;
   state._churchBal = churchBal;
   state._outstandingRems = outstandingRems;
-  state._spendLow = spendLow;
+  state._spendColor = spendColor;
 
   // Category totals for breakdown
   const catTotals = {};
@@ -10402,10 +10431,12 @@ function renderAdminSettings(s){
     <div class="form-group"><label class="form-label">Account Number</label><input type="text" id="set_acct" class="form-input" value="${s.accountNo||''}" /></div>
     <div class="form-group"><label class="form-label">Petty Cash Max Float (₦)</label><input type="number" id="set_petty" class="form-input" value="${s.pettyMax||50000}" /></div>
     <div style="margin-top:18px;margin-bottom:8px;font-size:13px;font-weight:700;color:var(--text2);border-top:1px solid var(--border);padding-top:14px">Available Balance Status Thresholds</div>
-    <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Control what status label appears on the Actual Balance card (Strong / Moderate / Low / Very Low / Deficit - Critical).</p>
-    <div class="form-group"><label class="form-label">Strong threshold (₦)</label><input type="number" id="set_spendable_strong" class="form-input" value="${s.spendableStrong||40000}" /><div class="form-hint">Shows "Strong" when Actual Balance is at or above this amount. Default: ₦40,000.</div></div>
-    <div class="form-group"><label class="form-label">Moderate threshold (₦)</label><input type="number" id="set_spendable_moderate" class="form-input" value="${s.spendableModerate||20000}" /><div class="form-hint">Shows "Moderate" when at or above this amount but below Strong. Default: ₦20,000.</div></div>
-    <div class="form-group"><label class="form-label">Low threshold (₦)</label><input type="number" id="set_spendable_very_low" class="form-input" value="${s.spendableVeryLow||10000}" /><div class="form-hint">Shows "Low" when at or above this amount. Below this shows "Very Low". Default: ₦10,000.</div></div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Set the petty cash sustainability thresholds shown on the Dashboard. These control the health indicator on the "Available Fund After All Deductions" card.</p>
+    <div class="form-group"><label class="form-label">Target Float (₦)</label><input type="number" id="set_petty_target_float" class="form-input" value="${s.pettyTargetFloat||90000}" /><div class="form-hint">Ideal petty cash balance for next period. Default: ₦90,000.</div></div>
+    <div class="form-group"><label class="form-label">Manageable Float (₦)</label><input type="number" id="set_petty_manageable_float" class="form-input" value="${s.pettyManageableFloat||60000}" /><div class="form-hint">Acceptable minimum if target isn't possible. Default: ₦60,000.</div></div>
+    <div class="form-group"><label class="form-label">Minimum Float (₦)</label><input type="number" id="set_petty_minimum_float" class="form-input" value="${s.pettyMinimumFloat||40000}" /><div class="form-hint">Absolute floor — below this is Critical. Default: ₦40,000.</div></div>
+    <div class="form-group"><label class="form-label">Buffer Above Target (₦)</label><input type="number" id="set_petty_buffer_amount" class="form-input" value="${s.pettyBufferAmount||30000}" /><div class="form-hint">Cushion above target to stay "Healthy" instead of "Adequate". Default: ₦30,000.</div></div>
+    </div>
     <button class="btn btn-primary" onclick="App.saveSettings(this)">Save Settings</button>
   </div>
   <div class="card" style="margin-top:16px;border:1.5px solid var(--border)">
@@ -10644,9 +10675,10 @@ async function saveSettings(btn=null){
   s.accountNo=document.getElementById('set_acct')?.value;
   const pettyMax = parseFloat(document.getElementById('set_petty')?.value)||50000;
   s.pettyMax=pettyMax;
-  s.spendableStrong=parseFloat(document.getElementById('set_spendable_strong')?.value)||40000;
-  s.spendableModerate=parseFloat(document.getElementById('set_spendable_moderate')?.value)||20000;
-  s.spendableVeryLow=parseFloat(document.getElementById('set_spendable_very_low')?.value)||10000;
+  s.pettyTargetFloat=parseFloat(document.getElementById('set_petty_target_float')?.value)||90000;
+  s.pettyManageableFloat=parseFloat(document.getElementById('set_petty_manageable_float')?.value)||60000;
+  s.pettyMinimumFloat=parseFloat(document.getElementById('set_petty_minimum_float')?.value)||40000;
+  s.pettyBufferAmount=parseFloat(document.getElementById('set_petty_buffer_amount')?.value)||30000;
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.saveSettings(s);
