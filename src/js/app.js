@@ -4962,40 +4962,39 @@ async function confirmBulkDeposit(){
   const hasExp     = cashExpenseItems.length > 0;
   const hasPetty   = pettyTopupItems.length > 0;
 
-  const incomeHtml = hasIncome ? `
-    <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:10px 0 2px">📥 Cash Received</div>
-    ${incomeItems.map(item=>{
-      const detail = item.deposited > 0
-        ? `Collected: ${fmt(item.cashHeld)} &nbsp;·&nbsp; Already deposited: ${fmt(item.deposited)} &nbsp;·&nbsp; <strong>Remaining: ${fmt(item.remaining)}</strong>`
-        : `Collected: ${fmt(item.cashHeld)}`;
-      return cwRow(item.icon, item.label, item.date, item.remaining, true, detail);
-    }).join('')}` : '';
+  // Per-income-record breakdown showing FIFO attribution
+  const incomeHtml = incomeItems.length > 0 ? incomeItems.map(item => {
+    const entry = expMapSD.get(item.id);
+    const cashHeld = item.cashHeld || 0;
+    const deposited = entry ? entry.deposited : 0;
+    const expensed = entry ? entry.expensed : 0;
+    const pettyUsed = entry ? (entry.pettyAllocations||[]).reduce((s,a)=>s+(a.amount||0),0) : 0;
+    const remaining = item.remaining || 0;
+    return `<div style="border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-size:15px">${item.icon||'📥'}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${item.label}</div>
+          <div style="font-size:11px;color:var(--text3)">${fmtDate(item.date)}</div>
+        </div>
+        <div style="font-size:14px;font-weight:700;color:var(--primary)">${fmt(remaining)}</div>
+      </div>
+      <div style="padding-left:30px;font-size:11px;color:var(--text2);line-height:2">
+        <div style="display:flex;justify-content:space-between"><span>Cash received</span><span style="font-weight:600">${fmt(cashHeld)}</span></div>
+        ${expensed>0?`<div style="display:flex;justify-content:space-between"><span>Less: expenses from this cash</span><span style="color:var(--danger)">−${fmt(expensed)}</span></div>`:''}
+        ${deposited>0?`<div style="display:flex;justify-content:space-between"><span>Less: already deposited</span><span style="color:var(--danger)">−${fmt(deposited)}</span></div>`:''}
+        ${pettyUsed>0?`<div style="display:flex;justify-content:space-between"><span>Less: petty cash top-ups</span><span style="color:var(--danger)">−${fmt(pettyUsed)}</span></div>`:''}
+        <div style="display:flex;justify-content:space-between;border-top:1px dashed var(--border);padding-top:3px;margin-top:2px"><span style="font-weight:700">Available for deposit</span><span style="font-weight:700;color:var(--primary)">${fmt(remaining)}</span></div>
+      </div>
+    </div>`;
+  }).join('') : '<div style="padding:12px;font-size:12px;color:var(--text3);text-align:center">No cash income pending deposit.</div>';
 
-  const bankHtml = hasBank ? `
-    <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:10px 0 2px">🏦 Bank Withdrawals to You</div>
-    ${bankToAccountantItems.map(t=>cwRow('🏦', t.description||'Bank Withdrawal', t.date||t.createdAt, t.amount||0, true,
-        (t.reference?`Ref: ${t.reference} &nbsp;·&nbsp; `:'')+(t.authorizedBy?`Authorised by: ${t.authorizedBy}`:'')
-      )).join('')}` : '';
+  const bankHtml = bankToAccountantItems.length > 0 ? `
+    <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:10px 0 2px">🏦 Bank Withdrawals to Accountant</div>
+    ${bankToAccountantItems.map(t=>`<div style="display:flex;justify-content:space-between;padding:6px 0;font-size:12px;border-bottom:1px solid var(--border-light,#f0f0f0)"><span>${t.description||'Bank Withdrawal'} (${fmtDate(t.date||t.createdAt)})</span><span style="font-weight:600;color:var(--success)">+${fmt(t.amount||0)}</span></div>`).join('')}` : '';
 
-  const expHtml = hasExp ? `
-    <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:10px 0 2px">💸 Cash Expenses Paid</div>
-    ${cashExpenseItems.map(e=>{
-      const amt = e.paymentMethod==='split' ? (e.cashAmount||0) : (e.amount||0);
-      const cat = (typeof EXPENSE_CATS!=='undefined'?EXPENSE_CATS:[]).find(c=>c.key===e.category)||{label:e.category||'Expense'};
-      return cwRow('💸', e.description||cat.label, e.date||e.createdAt, amt, false,
-        `Category: ${cat.label}`+(e.description&&e.description!==cat.label?` &nbsp;·&nbsp; ${e.description}`:'')+
-        (e.approvedBy?` &nbsp;·&nbsp; Approved by: ${e.approvedBy}`:'')
-      );
-    }).join('')}` : '';
-
-  const pettyHtml = hasPetty ? `
-    <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:10px 0 2px">🏧 Petty Cash Top-ups Paid</div>
-    ${pettyTopupItems.map(h=>{
-      const amt = h.paymentMethod==='split' ? (h.cashAmount||0) : (h.amount||0);
-      return cwRow('🏧', 'Petty Cash Refill', h.date||h.createdAt, amt, false,
-        `Amount paid: ${fmt(amt)}`+(h.status?` &nbsp;·&nbsp; Status: ${h.status}`:'')
-      );
-    }).join('')}` : '';
+  const expHtml = '';
+  const pettyHtml = '';
 
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
