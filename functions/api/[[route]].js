@@ -3231,14 +3231,22 @@ IMPORTANT CHECKS:
       const tolerance = Math.max(recorded * 0.02, 50);
       if (Math.abs(aiAmount - recorded) > tolerance) flags.push(`Amount mismatch: receipt shows ${aiAmount} but ${recorded} was recorded`);
     }
-    // Recipient check — lenient for partial names/numbers on receipts
-    // Match if ANY of: RCCG, KINGDOM, PARISH appears, OR last 4 digits of account match
+    // Recipient check — lenient for partial/masked names and account numbers
+    // Church bank: Access Bank, RCCG Kingdom Parish Account, 1473624487
     if (recipientName || recipientAcct) {
       const nameMatch = !recipientName || recipientName.includes('RCCG') || recipientName.includes('KINGDOM') || recipientName.includes('PARISH') || recipientName.includes('1473');
-      const acctMatch = !recipientAcct || recipientAcct.includes('1473624487') || recipientAcct.endsWith('4487') || recipientAcct.length < 10;
+      // Account matching: exact, starts with 147, ends with 4487 or 87, or too short to verify
+      const acctDigits = recipientAcct.replace(/[^0-9]/g, '');
+      const acctMatch = !acctDigits || acctDigits.length < 5 || acctDigits === '1473624487' || acctDigits.startsWith('147') || acctDigits.endsWith('4487') || acctDigits.endsWith('87');
       if (!nameMatch && !acctMatch) {
         flags.push(`Wrong recipient: "${parsed.recipient_name}" (${recipientAcct||'?'}) — expected RCCG Kingdom Parish Account (1473624487)`);
       }
+    }
+    // Bank name check — church bank is Access Bank
+    // No bank name visible → pass. Access Bank → pass. Different bank → flag.
+    const bankName = (parsed.bank || '').toUpperCase();
+    if (bankName && !bankName.includes('ACCESS')) {
+      flags.push(`Wrong bank: "${parsed.bank}" — church account is with Access Bank`);
     }
     // Date check — receipt date must be on or after the last Sunday before the deposit date.
     // Cash is collected on Sunday, so a receipt dated before that Sunday is an old/wrong receipt.
