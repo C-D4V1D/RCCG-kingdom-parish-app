@@ -1853,7 +1853,15 @@ async function toggleNotifications(){
     const notifs=await DB.getNotifications();
     const list=document.getElementById('notifList');
     if(!notifs.length){ list.innerHTML='<div class="notif-empty">No notifications</div>'; }
-    else{ list.innerHTML=notifs.slice(0,15).map(n=>`<div class="notif-item" style="opacity:${n.read?0.6:1}"><div class="notif-item-title">${esc(n.title)}</div><div class="notif-item-body">${esc(n.body)}</div><div class="notif-item-time">${fmtDate(n.ts)} ${fmtTime(n.ts)}</div></div>`).join('') }
+    else{
+      const aiMeta = (n)=>{
+        const status = String(n.aiStatus||'').toLowerCase();
+        if(!status || status==='filtered_out') return '';
+        if(status==='verified') return `<div class="notif-item-time" style="color:var(--success)">AI: Verified${n.aiConfidence?` (${esc(n.aiConfidence)})`:''}${n.aiExtractedAmount?` • ${fmt(n.aiExtractedAmount)}`:''}</div>`;
+        return `<div class="notif-item-time" style="color:var(--amber)">AI: Needs Review${n.aiConfidence?` (${esc(n.aiConfidence)})`:''}${n.aiNotes?` • ${esc(n.aiNotes)}`:''}</div>`;
+      };
+      list.innerHTML=notifs.slice(0,15).map(n=>`<div class="notif-item" style="opacity:${n.read?0.6:1}"><div class="notif-item-title">${esc(n.title)}</div><div class="notif-item-body">${esc(n.body)}</div>${aiMeta(n)}<div class="notif-item-time">${fmtDate(n.ts)} ${fmtTime(n.ts)}</div></div>`).join('');
+    }
     await DB.markAllRead();
     await updateNotifBadge();
   }

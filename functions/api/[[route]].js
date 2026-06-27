@@ -1459,6 +1459,13 @@ async function handleInit(DB) {
       title   TEXT NOT NULL DEFAULT '',
       body    TEXT NOT NULL DEFAULT '',
       type    TEXT DEFAULT 'info',
+      ai_status TEXT DEFAULT '',
+      ai_confidence TEXT DEFAULT '',
+      ai_notes TEXT DEFAULT '',
+      ai_extracted_amount REAL DEFAULT 0,
+      ai_extracted_reference TEXT DEFAULT '',
+      ai_provider TEXT DEFAULT '',
+      ai_reviewed_at TEXT DEFAULT '',
       is_read INTEGER DEFAULT 0,
       ts      TEXT DEFAULT (datetime('now'))
     )`,
@@ -1895,6 +1902,13 @@ async function handleInit(DB) {
     `ALTER TABLE cash_transactions ADD COLUMN ai_extracted_amount REAL DEFAULT 0`,
     `ALTER TABLE cash_transactions ADD COLUMN ai_extracted_reference TEXT DEFAULT ''`,
     `ALTER TABLE cash_transactions ADD COLUMN ai_notes TEXT DEFAULT ''`,
+    `ALTER TABLE notifications ADD COLUMN ai_status TEXT DEFAULT ''`,
+    `ALTER TABLE notifications ADD COLUMN ai_confidence TEXT DEFAULT ''`,
+    `ALTER TABLE notifications ADD COLUMN ai_notes TEXT DEFAULT ''`,
+    `ALTER TABLE notifications ADD COLUMN ai_extracted_amount REAL DEFAULT 0`,
+    `ALTER TABLE notifications ADD COLUMN ai_extracted_reference TEXT DEFAULT ''`,
+    `ALTER TABLE notifications ADD COLUMN ai_provider TEXT DEFAULT ''`,
+    `ALTER TABLE notifications ADD COLUMN ai_reviewed_at TEXT DEFAULT ''`,
     // Direct cash-pool linkage: each cash/split expense now records which income record
     // its cash came from so the income modal and deposit form can use exact attribution
     // instead of the FIFO date-window heuristic.
@@ -7122,16 +7136,124 @@ async function getNotifications(DB) {
     title: row.title,
     body:  row.body,
     type:  row.type,
+    aiStatus: row.ai_status || '',
+    aiConfidence: row.ai_confidence || '',
+    aiNotes: row.ai_notes || '',
+    aiExtractedAmount: Number(row.ai_extracted_amount || 0),
+    aiExtractedReference: row.ai_extracted_reference || '',
+    aiProvider: row.ai_provider || '',
+    aiReviewedAt: row.ai_reviewed_at || '',
     read:  row.is_read === 1,
     ts:    row.ts,
   })));
 }
 
+function aiAlertHasDebitTitle(data) {
+  const heading = String(data?.heading || data?.title || '').trim();
+  return /\bdebit\b/i.test(heading);
+}
+
+function parseDebitAlertAiResponse(text) {
+  const raw = safeJsonParse(String(text || '').replace(/```json|```/gi, '').trim(), null);
+  if (!raw || typeof raw !== 'object') return null;
+  const confidence = String(raw.confidence || '').toLowerCase();
+  const transactionType = String(raw.transactionType || '').toLowerCase();
+  const amountNum = Number(raw.amount);
+  if (!['high', 'medium', 'low'].includes(confidence)) return null;
+  if (!['debit', 'credit', 'unknown'].includes(transactionType)) return null;
+  return {
+    isDebitAlert: raw.isDebitAlert === true,
+    amount: Number.isFinite(amountNum) ? Math.abs(amountNum) : 0,
+    reference: String(raw.reference || '').trim(),
+    transactionType,
+    confidence,
+    notes: String(raw.notes || '').trim(),
+  };
+}
+
+async function analyzeDebitAlertWithDeepseek(DB, payload) {
+  if (!aiAlertHasDebitTitle(payload)) {
+    return { status: 'filtered_out', confidence: '', notes: 'Skipped: heading/title does not include "Debit".', amount: 0, reference: '', provider: '', reviewedAt: '' };
+  }
+  const { key, model } = await loadDeepseekSettings(DB);
+  if (!key) {
+    return { status: 'needs_review', confidence: '', notes: 'DeepSeek key is not configured.', amount: 0, reference: '', provider: '', reviewedAt: '' };
+  }
+  const heading = String(payload?.heading || payload?.title || '').trim();
+  const title = String(payload?.title || '').trim();
+  const body = String(payload?.body || '').trim();
+  const prompt = `You are validating a bank debit alert for accounting accuracy.
+Return ONLY valid JSON with this exact shape:
+{"isDebitAlert":true|false,"amount":number,"reference":"string","transactionType":"debit|credit|unknown","confidence":"high|medium|low","notes":"string"}
+
+Rules:
+- transactionType must be "debit" only if money left the account.
+- If uncertain, set confidence to "low" and explain in notes.
+- reference should contain a traceable transaction id/code if present.
+- amount must be numeric in major units (e.g. 12500.5).
+
+Alert heading/title: ${heading || title || '(empty)'}
+Alert body: ${body || '(empty)'}`;
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 400,
+        temperature: 0,
+      }),
+    });
+    if (!resp.ok) {
+      return { status: 'needs_review', confidence: '', notes: `DeepSeek API error ${resp.status}.`, amount: 0, reference: '', provider: 'deepseek', reviewedAt: new Date().toISOString() };
+    }
+    const aiData = await resp.json().catch(() => ({}));
+    const parsed = parseDebitAlertAiResponse(aiData?.choices?.[0]?.message?.content || '');
+    if (!parsed) {
+      return { status: 'needs_review', confidence: '', notes: 'AI response format was invalid.', amount: 0, reference: '', provider: 'deepseek', reviewedAt: new Date().toISOString() };
+    }
+    const isHigh = parsed.confidence === 'high' && parsed.isDebitAlert && parsed.transactionType === 'debit';
+    return {
+      status: isHigh ? 'verified' : 'needs_review',
+      confidence: parsed.confidence,
+      notes: parsed.notes || (isHigh ? 'AI verified debit alert.' : 'AI could not verify with high confidence.'),
+      amount: parsed.amount || 0,
+      reference: parsed.reference || '',
+      provider: 'deepseek',
+      reviewedAt: new Date().toISOString(),
+    };
+  } catch (e) {
+    return { status: 'needs_review', confidence: '', notes: `AI analysis failed: ${e.message}`, amount: 0, reference: '', provider: 'deepseek', reviewedAt: new Date().toISOString() };
+  }
+}
+
 async function createNotification(DB, data) {
   const id = newId('N');
-  await DB.prepare(`INSERT INTO notifications (id,title,body,type,ts) VALUES (?,?,?,?,?)`)
-    .bind(id, data.title || '', data.body || '', data.type || 'info', new Date().toISOString()).run();
-  return ok({ id });
+  const ai = await analyzeDebitAlertWithDeepseek(DB, data);
+  await DB.prepare(`INSERT INTO notifications (id,title,body,type,ai_status,ai_confidence,ai_notes,ai_extracted_amount,ai_extracted_reference,ai_provider,ai_reviewed_at,ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(
+      id,
+      data.title || '',
+      data.body || '',
+      data.type || 'info',
+      ai.status || '',
+      ai.confidence || '',
+      ai.notes || '',
+      Number(ai.amount || 0),
+      ai.reference || '',
+      ai.provider || '',
+      ai.reviewedAt || '',
+      new Date().toISOString()
+    ).run();
+  return ok({
+    id,
+    aiStatus: ai.status || '',
+    aiConfidence: ai.confidence || '',
+    aiNotes: ai.notes || '',
+    aiExtractedAmount: Number(ai.amount || 0),
+    aiExtractedReference: ai.reference || '',
+  });
 }
 
 async function adminClearDataOnly(DB) {

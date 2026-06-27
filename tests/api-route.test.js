@@ -92,6 +92,169 @@ test('unknown routes return 404', async () => {
   assert.match(body.error, /Route not found/);
 });
 
+test('notifications: non-debit heading is filtered out without DeepSeek call', async () => {
+  const inserts = [];
+  let fetchCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async run() {
+          if (/INSERT INTO notifications/.test(sql)) inserts.push({ sql, bound: statement._bound });
+          return { success: true, meta: { changes: 1 } };
+        },
+        async all() { return { results: [] }; },
+        async first() { return null; },
+      };
+      return statement;
+    }
+  });
+
+  try {
+    const response = await onRequest({
+      request: createRequest('https://example.com/api/notifications', 'POST', {
+        heading: 'Credit Alert',
+        title: 'Credit Alert',
+        body: 'Account credited with NGN 4,000',
+        type: 'info'
+      }),
+      env: { DB }
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.aiStatus, 'filtered_out');
+    assert.equal(fetchCalled, false);
+    assert.equal(inserts.length, 1);
+    assert.equal(inserts[0].bound[4], 'filtered_out');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('notifications: debit heading is analyzed by DeepSeek and marked verified on high confidence', async () => {
+  const inserts = [];
+  let fetchCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('api.deepseek.com')) fetchCalled = true;
+    return new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            isDebitAlert: true,
+            amount: 12500,
+            reference: 'TRX-991',
+            transactionType: 'debit',
+            confidence: 'high',
+            notes: 'Matched a bank debit alert pattern.'
+          })
+        }
+      }]
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async run() {
+          if (/INSERT INTO notifications/.test(sql)) inserts.push({ sql, bound: statement._bound });
+          return { success: true, meta: { changes: 1 } };
+        },
+        async all() {
+          if (/SELECT key,value FROM settings WHERE key IN \('ai_deepseek_key','ai_deepseek_model'\)/.test(sql)) {
+            return { results: [{ key: 'ai_deepseek_key', value: 'deepseek-test-key' }, { key: 'ai_deepseek_model', value: 'deepseek-v4-flash' }] };
+          }
+          return { results: [] };
+        },
+        async first() { return null; },
+      };
+      return statement;
+    }
+  });
+
+  try {
+    const response = await onRequest({
+      request: createRequest('https://example.com/api/notifications', 'POST', {
+        heading: 'Debit Alert',
+        title: 'Debit Alert',
+        body: 'Debit NGN 12,500 at POS 16:23 ref TRX-991',
+        type: 'warn'
+      }),
+      env: { DB }
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.aiStatus, 'verified');
+    assert.equal(body.aiExtractedAmount, 12500);
+    assert.equal(body.aiExtractedReference, 'TRX-991');
+    assert.equal(fetchCalled, true);
+    assert.equal(inserts.length, 1);
+    assert.equal(inserts[0].bound[4], 'verified');
+    assert.equal(inserts[0].bound[7], 12500);
+    assert.equal(inserts[0].bound[8], 'TRX-991');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('notifications: debit heading falls back to needs_review when DeepSeek key is missing', async () => {
+  const inserts = [];
+  let fetchCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async run() {
+          if (/INSERT INTO notifications/.test(sql)) inserts.push({ sql, bound: statement._bound });
+          return { success: true, meta: { changes: 1 } };
+        },
+        async all() {
+          if (/SELECT key,value FROM settings WHERE key IN \('ai_deepseek_key','ai_deepseek_model'\)/.test(sql)) {
+            return { results: [] };
+          }
+          return { results: [] };
+        },
+        async first() { return null; },
+      };
+      return statement;
+    }
+  });
+
+  try {
+    const response = await onRequest({
+      request: createRequest('https://example.com/api/notifications', 'POST', {
+        heading: 'Debit Alert',
+        title: 'Debit Alert',
+        body: 'Debit NGN 5,000 transfer',
+        type: 'warn'
+      }),
+      env: { DB }
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.aiStatus, 'needs_review');
+    assert.match(body.aiNotes, /DeepSeek key is not configured/i);
+    assert.equal(fetchCalled, false);
+    assert.equal(inserts.length, 1);
+    assert.equal(inserts[0].bound[4], 'needs_review');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('create user rejects invalid PIN format', async () => {
   const response = await onRequest({
     request: createRequest('https://example.com/api/users', 'POST', {
