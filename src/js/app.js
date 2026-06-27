@@ -4458,7 +4458,8 @@ function compressPhoto(file, maxDim=1200, quality=0.75){
 }
 
 // ── Background AI deposit verification (fire-and-forget) ────────
-async function verifyDepositInBackground(txId, photoData, recordedAmount){
+async function verifyDepositInBackground(txId, photoData, recordedAmount, attempt=1){
+  const MAX_ATTEMPTS = 3;
   try {
     const resp = await fetch('/api/verify-deposit', {
       method:'POST',
@@ -4468,27 +4469,32 @@ async function verifyDepositInBackground(txId, photoData, recordedAmount){
     const result = await resp.json();
     if(result?.status === 'verified'){
       showAlert(`✅ Deposit verified! ${fmt(recordedAmount)} moved from cash with accountant → bank${result.aiRef?' — Ref: '+result.aiRef:''}`,'success');
-      // Re-render to update balances now that deposit is effective
       if(typeof renderIncome==='function') renderIncome();
     } else if(result?.status === 'flagged'){
       showAlert(`⚠️ Deposit flagged: receipt shows ${fmt(result.aiAmount||0)} but ${fmt(recordedAmount)} was recorded. Cash remains with accountant until resolved.`,'danger');
       DB.addNotification('Deposit Flagged','AI detected amount mismatch on a deposit. Cash remains with accountant. Please review.','warn');
     } else if(result?.reason){
       console.warn('AI verification issue:', result.reason);
-      // If AI can't verify (no API key, error), auto-approve to not block accountant
       showAlert(`Deposit recorded. AI verification unavailable — deposit approved automatically.`,'info');
+      if(typeof renderIncome==='function') renderIncome();
     }
   } catch(e){
-    console.warn('Background verification failed:', e.message);
-    // Auto-approve on network failure so accountant isn't stuck with pending deposit
+    console.warn(`Background verification attempt ${attempt}/${MAX_ATTEMPTS} failed:`, e.message);
+    if(attempt < MAX_ATTEMPTS){
+      // Retry after a delay (3s, then 6s)
+      const delay = attempt * 3000;
+      setTimeout(()=> verifyDepositInBackground(txId, photoData, recordedAmount, attempt+1), delay);
+      return;
+    }
+    // All retries exhausted — auto-approve so accountant isn't stuck
     try {
       await fetch('/api/cash-transactions/'+txId, {
         method:'PUT', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ verificationStatus:'auto_approved', aiNotes:'Network error during AI verification — auto-approved' })
+        body: JSON.stringify({ verificationStatus:'auto_approved', aiNotes:'Network error after 3 attempts — auto-approved' })
       });
-      showAlert(`Deposit approved automatically (AI verification unavailable due to network).`,'info');
+      showAlert(`Deposit approved automatically (AI verification failed after ${MAX_ATTEMPTS} attempts).`,'info');
       if(typeof renderIncome==='function') renderIncome();
-    } catch(e2){ /* silently fail — record stays pending, can be retried */ }
+    } catch(e2){ /* silently fail — record stays pending, can be retried manually */ }
   }
 }
 
