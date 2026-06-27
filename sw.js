@@ -1,4 +1,4 @@
-const CACHE = 'kpadmin-v15';
+const CACHE = 'kpadmin-v16';
 const SHELL = [
   '/',
   '/index.html',

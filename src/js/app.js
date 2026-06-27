@@ -77,11 +77,12 @@ function isDepositEffective(t){
 
 function depositVerificationBadge(t){
   const vs = t.verificationStatus || '';
-  if(!vs) return ''; // legacy — no badge
-  if(vs==='verified') return '<span class="badge badge-success" style="font-size:10px">✅ AI Verified</span>';
-  if(vs==='flagged') return `<span class="badge badge-danger" style="font-size:10px">⚠️ Flagged${t.aiExtractedAmount?' — receipt: '+fmt(t.aiExtractedAmount):''}</span>`;
+  if(!vs) return '';
+  if(vs==='verified') return `<span class="badge badge-success" style="font-size:10px" title="${t.aiNotes||''}">✅ AI Verified</span>`;
+  if(vs==='flagged') return `<span class="badge badge-danger" style="font-size:10px" title="${t.aiNotes||''}">⚠️ Flagged${t.aiExtractedAmount?' — receipt: '+fmt(t.aiExtractedAmount):''}</span>`;
   if(vs==='pending') return '<span class="badge badge-warn" style="font-size:10px">⏳ Pending Verification</span>';
-  if(vs==='auto_approved') return '<span class="badge badge-info" style="font-size:10px">ℹ️ Auto-Approved</span>';
+  if(vs==='auto_approved') return `<span class="badge badge-info" style="font-size:10px" title="${t.aiNotes||''}">ℹ️ Auto-Approved</span>`;
+  if(vs==='manual_approved') return `<span class="badge badge-success" style="font-size:10px" title="${t.aiNotes||''}">✅ Manually Approved</span>`;
   return `<span class="badge" style="font-size:10px">${vs}</span>`;
 }
 
@@ -4447,7 +4448,7 @@ async function viewIncome(id){
     <div class="status-row" style="border-top:2px solid var(--border)"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt td-green" style="font-size:15px">${fmt(rem.netLocal)}</div></div>`:''}
     <hr class="divider">
     <div class="fs-12 text-muted">Recorded by: ${r.recordedBy||'—'} · ${isSunday?'Counted with: '+r.usher:'Donor: '+(r.donorName||'—')}</div>
-    ${deposits.length?`<div style="margin-top:8px">${deposits.map(d=>`<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--text2);padding:4px 0;border-bottom:1px solid var(--border-light,#f0f0f0)"><span>${fmt(d.amount)} via ${d.depositMethod?.replace('_',' ')||'—'} on ${fmtDate(d.date)}</span><span>${d.reference?'Ref: '+d.reference:''}</span>${depositVerificationBadge(d)} ${depositActionButtons(d)}</div>`).join('')}</div>`:''}
+    ${deposits.length?`<div style="margin-top:8px">${deposits.map(d=>`<div style="font-size:12px;color:var(--text2);padding:4px 0;border-bottom:1px solid var(--border-light,#f0f0f0)"><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span>${fmt(d.amount)} via ${d.depositMethod?.replace('_',' ')||'—'} on ${fmtDate(d.date)}</span><span>${d.reference?'Ref: '+d.reference:''}</span>${depositVerificationBadge(d)} ${depositActionButtons(d)}</div>${d.aiNotes?`<div style="font-size:10px;color:var(--text3);margin-top:2px;padding-left:4px">${d.aiNotes}</div>`:''}</div>`).join('')}</div>`:''}
     <div class="modal-footer">
     ${canAction('income_delete')?`<button class="btn btn-danger" style="margin-right:auto" onclick="closeModal();App.confirmDeleteIncome('${r.id}')">🗑 Delete</button>`:''}
     <button class="btn" onclick="closeModal()">Close</button>
@@ -7998,6 +7999,7 @@ function renderBankOverview(monthBankTx,bankBalance){
             ${(()=>{ const pid=t._splitParts?t._splitParts.find(p=>p.hasPhoto||p.photoData)?.id:(t.hasPhoto||t.photoData?t.id:null); return pid?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${pid}')" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''; })()}
             ${t._splitParts?`<div style="margin-top:4px;font-size:10px;color:var(--text3)">Split across ${t._splitParts.length} income records: ${t._splitParts.map(p=>fmt(p.amount)).join(' + ')}</div>`:''}
             ${t.verificationStatus?`<div style="margin-top:4px">${depositActionButtons(t)}</div>`:''}
+            ${t.aiNotes?`<div style="margin-top:4px;font-size:10px;color:var(--text3)">AI: ${t.aiNotes}</div>`:''}
             <div>Time: ${fmtTime(t.createdAt||t.date)}</div>
           </div>
         </div>`;

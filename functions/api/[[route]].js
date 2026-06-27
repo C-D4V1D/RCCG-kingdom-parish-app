@@ -3127,23 +3127,46 @@ async function verifyDepositWithAI(DB, env, body, attempt=1) {
   const { transactionId, photoData, recordedAmount } = body || {};
   if (!transactionId || !photoData) return err('Missing transactionId or photoData', 400);
 
-  // Resolve OpenAI key (used for vision — GPT-4o-mini reads receipts well)
-  const openaiKey = await resolveOpenAiKey(env, DB);
-  if (!openaiKey) {
-    await DB.prepare(`UPDATE cash_transactions SET verification_status='auto_approved', ai_notes=? WHERE id=?`)
-      .bind('No OpenAI API key configured — auto-approved', transactionId).run();
-    return ok({ verified: true, status: 'auto_approved', reason: 'No API key' });
+  // On attempts 1-2: use OpenAI. On attempt 3: fall back to DeepSeek.
+  const useDeepSeek = attempt >= 3;
+  let apiKey = '', apiUrl = '', model = '';
+
+  if (useDeepSeek) {
+    // Resolve DeepSeek key + model
+    try {
+      const { results: sr } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
+      const settings = Object.fromEntries((sr||[]).map(r=>[r.key, r.value]));
+      apiKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+      model = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    } catch(_){}
+    apiUrl = 'https://api.deepseek.com/chat/completions';
+  } else {
+    apiKey = await resolveOpenAiKey(env, DB);
+    apiUrl = 'https://api.openai.com/v1/chat/completions';
+    model = 'gpt-4o-mini';
   }
 
+  if (!apiKey) {
+    if (!useDeepSeek && attempt < MAX_ATTEMPTS) {
+      // OpenAI key missing — skip to DeepSeek attempt
+      return verifyDepositWithAI(DB, env, body, MAX_ATTEMPTS);
+    }
+    const reason = useDeepSeek ? 'No DeepSeek API key configured' : 'No OpenAI API key configured';
+    await DB.prepare(`UPDATE cash_transactions SET verification_status='auto_approved', ai_notes=? WHERE id=?`)
+      .bind(`${reason} — auto-approved`, transactionId).run();
+    return ok({ verified: true, status: 'auto_approved', reason });
+  }
+
+  const provider = useDeepSeek ? 'DeepSeek' : 'OpenAI';
   try {
     const base64 = photoData.includes(',') ? photoData.split(',')[1] : photoData;
     const mediaType = photoData.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
 
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    const resp = await fetch(apiUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model,
         messages: [{
           role: 'user',
           content: [
@@ -3160,27 +3183,35 @@ If you cannot read the image or it's not a financial receipt, respond: {"amount"
 
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      // Retry on API errors
+      const errMsg = data?.error?.message || data?.error?.code || `HTTP ${resp.status}`;
+      const errType = resp.status === 429 ? 'Rate limited' : resp.status === 401 ? 'API key invalid/expired' : resp.status === 402 ? 'Billing exceeded' : resp.status >= 500 ? 'Server downtime' : 'API error';
+      const fullErr = `${provider} ${errType}: ${errMsg} (attempt ${attempt}/${MAX_ATTEMPTS})`;
+
       if (attempt < MAX_ATTEMPTS) {
         await new Promise(r => setTimeout(r, attempt * 2000));
         return verifyDepositWithAI(DB, env, body, attempt + 1);
       }
       await DB.prepare(`UPDATE cash_transactions SET verification_status='auto_approved', ai_notes=? WHERE id=?`)
-        .bind(`API error after ${MAX_ATTEMPTS} attempts: ${data?.error?.message || resp.status}`, transactionId).run();
-      return ok({ verified: true, status: 'auto_approved', reason: `API error after ${MAX_ATTEMPTS} attempts` });
+        .bind(`${fullErr} — auto-approved after ${MAX_ATTEMPTS} attempts`, transactionId).run();
+      return ok({ verified: true, status: 'auto_approved', reason: fullErr });
     }
 
     const aiText = (data?.choices?.[0]?.message?.content || '').trim();
     let parsed;
     try { parsed = JSON.parse(aiText.replace(/```json|```/g, '').trim()); } catch (e) {
+      const parseErr = `${provider}: Could not parse AI response (attempt ${attempt}/${MAX_ATTEMPTS})`;
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise(r => setTimeout(r, attempt * 2000));
+        return verifyDepositWithAI(DB, env, body, attempt + 1);
+      }
       await DB.prepare(`UPDATE cash_transactions SET verification_status='auto_approved', ai_notes=? WHERE id=?`)
-        .bind(`Could not parse AI response — auto-approved: ${aiText.slice(0, 200)}`, transactionId).run();
-      return ok({ verified: true, status: 'auto_approved', reason: 'Parse error' });
+        .bind(`${parseErr} — auto-approved. Raw: ${aiText.slice(0, 200)}`, transactionId).run();
+      return ok({ verified: true, status: 'auto_approved', reason: parseErr });
     }
 
     const aiAmount = parsed.amount != null ? Number(parsed.amount) : null;
     const aiRef = parsed.reference || '';
-    const aiNotes = `${parsed.bank || ''} | ${parsed.date || ''} | Confidence: ${parsed.confidence || 'unknown'} | ${parsed.notes || ''}`.trim();
+    const aiNotes = `Verified by ${provider} (${model}) | ${parsed.bank || ''} | ${parsed.date || ''} | Confidence: ${parsed.confidence || 'unknown'} | ${parsed.notes || ''}`.trim();
     const recorded = Number(recordedAmount) || 0;
 
     let status = 'auto_approved';
@@ -3201,14 +3232,14 @@ If you cannot read the image or it's not a financial receipt, respond: {"amount"
 
     return ok({ verified: status !== 'flagged', status, aiAmount, aiRef, aiNotes, recorded });
   } catch (e) {
-    // Retry on network errors
+    const netErr = `${provider} network error: ${e.message} (attempt ${attempt}/${MAX_ATTEMPTS})`;
     if (attempt < MAX_ATTEMPTS) {
       await new Promise(r => setTimeout(r, attempt * 2000));
       return verifyDepositWithAI(DB, env, body, attempt + 1);
     }
     await DB.prepare(`UPDATE cash_transactions SET verification_status='auto_approved', ai_notes=? WHERE id=?`)
-      .bind(`Network error after ${MAX_ATTEMPTS} attempts: ${e.message} — auto-approved`, transactionId).run();
-    return ok({ verified: true, status: 'auto_approved', reason: e.message });
+      .bind(`${netErr} — auto-approved after ${MAX_ATTEMPTS} attempts`, transactionId).run();
+    return ok({ verified: true, status: 'auto_approved', reason: netErr });
   }
 }
 
