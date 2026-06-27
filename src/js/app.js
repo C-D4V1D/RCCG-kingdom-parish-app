@@ -4423,6 +4423,55 @@ async function submitDeleteIncome(id, btn=null){
   }
 }
 
+// ── Photo compression for deposit receipts ──────────────────────
+function compressPhoto(file, maxDim=1200, quality=0.75){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = ()=>{
+        const canvas = document.createElement('canvas');
+        let w = img.width, h = img.height;
+        if(w > maxDim || h > maxDim){
+          if(w > h){ h = Math.round(h * maxDim / w); w = maxDim; }
+          else { w = Math.round(w * maxDim / h); h = maxDim; }
+        }
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = ()=> resolve(e.target.result); // fallback to original
+      img.src = e.target.result;
+    };
+    reader.onerror = ()=> reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+// ── Background AI deposit verification (fire-and-forget) ────────
+async function verifyDepositInBackground(txId, photoData, recordedAmount){
+  try {
+    const resp = await fetch('/api/verify-deposit', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ transactionId:txId, photoData, recordedAmount }),
+    });
+    const result = await resp.json();
+    if(result?.status === 'verified'){
+      showAlert(`✅ AI verified deposit: amount matches${result.aiRef?' — Ref: '+result.aiRef:''}`,'success');
+    } else if(result?.status === 'flagged'){
+      showAlert(`⚠️ AI flagged deposit: receipt shows ${fmt(result.aiAmount||0)} but ${fmt(recordedAmount)} was recorded. Please check.`,'danger');
+      DB.addNotification('Deposit Flagged','AI detected amount mismatch on a deposit. Please review.','warn');
+    } else if(result?.reason){
+      // Silently log — don't bother user with verification errors
+      console.warn('AI verification issue:', result.reason);
+    }
+  } catch(e){
+    console.warn('Background verification failed (will retry later):', e.message);
+  }
+}
+
 function _previewDepPhoto(input, previewId){
   const file = input.files?.[0];
   const preview = document.getElementById(previewId);
@@ -4627,14 +4676,12 @@ async function confirmDeposit(id){
       </select>
     </div>
     <div class="form-group">
-      <label class="form-label">Proof of Deposit <span style="color:var(--danger)">*</span></label>
-      <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Provide at least one: a teller/reference number <strong>or</strong> a photo of the deposit slip.</div>
-      <input type="text" id="dep_ref" class="form-input" placeholder="Teller number / transaction reference (optional if photo uploaded)" style="margin-bottom:8px" />
-      <div style="font-size:11px;color:var(--text3);text-align:center;margin:2px 0 8px">— OR —</div>
-      <label style="font-size:12px;color:var(--text2);margin-bottom:4px;display:block">Upload Photo of Deposit Slip / POS Receipt</label>
+      <label class="form-label">Photo of Deposit Slip / Receipt <span style="color:var(--danger)">*</span></label>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Upload a clear photo of the deposit slip, POS receipt, or transfer confirmation. AI will verify the amount and extract the teller/reference number automatically.</div>
       <input type="file" id="dep_photo" accept="image/*" class="form-input" style="padding:6px" onchange="App._previewDepPhoto(this,'dep_photo_preview')" />
       <div id="dep_photo_preview" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:6px;border:1px solid var(--border)" /></div>
     </div>
+    <input type="hidden" id="dep_ref" value="" />
     <div class="form-group"><label class="form-label">Date of Deposit *</label>
       <input type="date" id="dep_date" class="form-input" value="${today}" max="${today}" />
     </div>
@@ -4652,7 +4699,7 @@ async function submitCashDeposit(incomeId, btn=null){
   const date    = document.getElementById('dep_date')?.value;
   const photoFile = document.getElementById('dep_photo')?.files?.[0];
   if(!amount||!date){ showAlert('Please fill all required fields.','danger'); return; }
-  if(!ref&&!photoFile){ showAlert('Please provide either a teller/reference number or upload a photo of the deposit slip. At least one is required.','danger'); return; }
+  if(!photoFile){ showAlert('Please upload a photo of the deposit slip or receipt. This is required for AI verification.','danger'); return; }
   const maxDeposit = state._depositRemaining ?? Infinity;
   if(amount > maxDeposit + 0.5){
     showAlert(`Deposit amount (${fmt(amount)}) exceeds the cash available for this record (${fmt(maxDeposit)}). Please enter a correct amount.`,'danger');
@@ -4660,21 +4707,21 @@ async function submitCashDeposit(incomeId, btn=null){
   }
   let photoData = '';
   if(photoFile){
-    photoData = await new Promise(resolve=>{
-      const reader = new FileReader();
-      reader.onload = e => resolve(e.target.result);
-      reader.readAsDataURL(photoFile);
-    });
+    photoData = await compressPhoto(photoFile, 1200, 0.75);
   }
   const restore = setBtnLoading(btn, 'Saving…');
   try {
-    await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name });
+    const saved = await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name });
     const refLabel = ref || (photoData ? '(photo uploaded)' : '—');
     DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${refLabel}`,state.user?.name);
     DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank${ref?` (Ref: ${ref})`:''}`,'success');
     closeModal();
-    showAlert(`${fmt(amount)} deposited to bank successfully!${ref?` Ref: ${ref}`:''}`, 'success');
+    showAlert(`${fmt(amount)} deposited to bank successfully! AI is verifying the receipt…`, 'success');
     renderIncome();
+    // Background AI verification (fire-and-forget — doesn't block the user)
+    if(photoData && saved?.id){
+      verifyDepositInBackground(saved.id, photoData, amount);
+    }
   } catch(err) {
     restore();
     showAlert(`Failed to record deposit: ${err.message||'Unknown error'}. Please try again.`,'danger');

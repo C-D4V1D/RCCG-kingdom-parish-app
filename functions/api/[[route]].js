@@ -712,6 +712,11 @@ export async function onRequest(context) {
       if (method === 'PUT'  && param)  return await updateCashTransaction(DB, param, body);
     }
 
+    // ── /api/verify-deposit ─────────────────────────────────────
+    if (route === 'verify-deposit' && method === 'POST') {
+      return await verifyDepositWithAI(DB, env, body);
+    }
+
     // ── /api/audit ─────────────────────────────────────────────
     if (route === 'audit') {
       if (method === 'GET'  && !param) return await getAudit(DB);
@@ -1851,6 +1856,10 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_cash_handovers ADD COLUMN expense_total REAL DEFAULT 0`,
     // Group ID to link split records from the same bulk deposit action for consolidated display
     `ALTER TABLE cash_transactions ADD COLUMN group_id TEXT DEFAULT ''`,
+    `ALTER TABLE cash_transactions ADD COLUMN verification_status TEXT DEFAULT ''`,
+    `ALTER TABLE cash_transactions ADD COLUMN ai_extracted_amount REAL DEFAULT 0`,
+    `ALTER TABLE cash_transactions ADD COLUMN ai_extracted_reference TEXT DEFAULT ''`,
+    `ALTER TABLE cash_transactions ADD COLUMN ai_notes TEXT DEFAULT ''`,
     // Direct cash-pool linkage: each cash/split expense now records which income record
     // its cash came from so the income modal and deposit form can use exact attribution
     // instead of the FIFO date-window heuristic.
@@ -2955,6 +2964,10 @@ async function getCashTransactions(DB, includeImages = false) {
     hasPhoto:      includeImages ? !!row.photo_data : row.has_photo === 1,
     createdAt:     row.created_at,
     groupId:       row.group_id || '',
+    verificationStatus: row.verification_status || '',
+    aiExtractedAmount: row.ai_extracted_amount || 0,
+    aiExtractedReference: row.ai_extracted_reference || '',
+    aiNotes: row.ai_notes || '',
   })));
 }
 
@@ -3080,6 +3093,89 @@ function getApiStatus(env) {
       };
     })(),
   });
+}
+
+// ── AI Deposit Verification ──────────────────────────────────────
+async function verifyDepositWithAI(DB, env, body) {
+  const { transactionId, photoData, recordedAmount } = body || {};
+  if (!transactionId || !photoData) return err('Missing transactionId or photoData', 400);
+
+  // Resolve OpenAI key (used for vision — GPT-4o-mini reads receipts well)
+  const openaiKey = await resolveOpenAiKey(env, DB);
+  if (!openaiKey) {
+    // Fall back: mark as unverified but don't block
+    await DB.prepare(`UPDATE cash_transactions SET verification_status='no_api_key' WHERE id=?`).bind(transactionId).run();
+    return ok({ verified: false, reason: 'No OpenAI API key configured for receipt verification.' });
+  }
+
+  try {
+    // Strip data URL prefix if present to get clean base64
+    const base64 = photoData.includes(',') ? photoData.split(',')[1] : photoData;
+    const mediaType = photoData.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
+
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: `data:${mediaType};base64,${base64}`, detail: 'low' } },
+            { type: 'text', text: `Analyze this Nigerian bank deposit receipt/slip/teller/POS receipt/transfer confirmation image. Extract the following information and respond ONLY with valid JSON (no markdown, no backticks):
+{"amount": <number or null>, "reference": "<teller/reference/transaction number or null>", "date": "<date in YYYY-MM-DD format or null>", "bank": "<bank name or null>", "confidence": "<high|medium|low>", "notes": "<any relevant observation>"}
+If you cannot read the image or it's not a financial receipt, respond: {"amount": null, "reference": null, "date": null, "bank": null, "confidence": "low", "notes": "Cannot read image or not a financial receipt"}` }
+          ]
+        }],
+        max_tokens: 300,
+        temperature: 0,
+      }),
+    });
+
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await DB.prepare(`UPDATE cash_transactions SET verification_status='error', ai_notes=? WHERE id=?`)
+        .bind(`API error: ${data?.error?.message || resp.status}`, transactionId).run();
+      return ok({ verified: false, reason: `AI API error: ${data?.error?.message || resp.status}` });
+    }
+
+    const aiText = (data?.choices?.[0]?.message?.content || '').trim();
+    let parsed;
+    try { parsed = JSON.parse(aiText.replace(/```json|```/g, '').trim()); } catch (e) {
+      await DB.prepare(`UPDATE cash_transactions SET verification_status='error', ai_notes=? WHERE id=?`)
+        .bind(`Could not parse AI response: ${aiText.slice(0, 200)}`, transactionId).run();
+      return ok({ verified: false, reason: 'Could not parse AI response' });
+    }
+
+    const aiAmount = parsed.amount != null ? Number(parsed.amount) : null;
+    const aiRef = parsed.reference || '';
+    const aiNotes = `${parsed.bank || ''} | ${parsed.date || ''} | Confidence: ${parsed.confidence || 'unknown'} | ${parsed.notes || ''}`.trim();
+    const recorded = Number(recordedAmount) || 0;
+
+    // Determine verification status
+    let status = 'unverified';
+    if (aiAmount != null && recorded > 0) {
+      const tolerance = Math.max(recorded * 0.02, 50); // 2% or ₦50 tolerance
+      status = Math.abs(aiAmount - recorded) <= tolerance ? 'verified' : 'flagged';
+    } else if (parsed.confidence === 'low') {
+      status = 'unreadable';
+    }
+
+    await DB.prepare(`UPDATE cash_transactions SET verification_status=?, ai_extracted_amount=?, ai_extracted_reference=?, ai_notes=? WHERE id=?`)
+      .bind(status, aiAmount || 0, aiRef, aiNotes, transactionId).run();
+
+    // If AI extracted a reference and none was recorded, update the reference too
+    if (aiRef) {
+      await DB.prepare(`UPDATE cash_transactions SET reference=CASE WHEN reference='' OR reference IS NULL THEN ? ELSE reference END WHERE id=?`)
+        .bind(aiRef, transactionId).run();
+    }
+
+    return ok({ verified: status === 'verified', status, aiAmount, aiRef, aiNotes, recorded });
+  } catch (e) {
+    await DB.prepare(`UPDATE cash_transactions SET verification_status='error', ai_notes=? WHERE id=?`)
+      .bind(`Exception: ${e.message}`, transactionId).run();
+    return ok({ verified: false, reason: e.message });
+  }
 }
 
 async function testDeepseekKey(DB, body) {
