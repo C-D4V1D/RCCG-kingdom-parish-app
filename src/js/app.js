@@ -4964,7 +4964,7 @@ async function confirmBulkDeposit(){
 
   // Per-income-record breakdown showing FIFO attribution
   const incomeHtml = incomeItems.length > 0 ? incomeItems.map(item => {
-    const entry = expMapSD.get(item.id);
+    const entry = expMapCBD.get(item.id);
     const cashHeld = item.cashHeld || 0;
     const deposited = entry ? entry.deposited : 0;
     const expensed = entry ? entry.expensed : 0;
