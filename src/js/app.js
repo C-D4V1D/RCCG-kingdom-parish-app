@@ -3085,7 +3085,7 @@ async function renderDashboard(){
   const _pettyManageable = parseFloat(settingsDash?.pettyManageableFloat||0)||60000;
   const _pettyMinimum    = parseFloat(settingsDash?.pettyMinimumFloat||0)||40000;
   const _pettyBuffer     = parseFloat(settingsDash?.pettyBufferAmount||0)||30000;
-  const _pettyCurrentFloat = churchBal.petty || 0;
+  const _pettyCurrentFloat = churchBal.pettyFloat || 0;
   const _pettyTopUpNeeded  = Math.max(0, _pettyTarget - _pettyCurrentFloat);
   const _pettyAfterObligs  = dashSpendable - _pettyTopUpNeeded;
   const _pettyMaxFloat     = _pettyCurrentFloat + Math.max(0, dashSpendable);
@@ -6803,7 +6803,7 @@ async function renderExpenses(){
   const _expPettyManageable = parseFloat(settings?.pettyManageableFloat||0)||60000;
   const _expPettyMinimum = parseFloat(settings?.pettyMinimumFloat||0)||40000;
   const _expPettyBuffer = parseFloat(settings?.pettyBufferAmount||0)||30000;
-  const _expPettyFloat = churchBal.petty||0;
+  const _expPettyFloat = churchBal.pettyFloat||0;
   const _expTopUpNeeded = Math.max(0, _expPettyTarget - _expPettyFloat);
   const _expAfterObligs = spendable - _expTopUpNeeded;
   const _expMaxFloat = _expPettyFloat + Math.max(0, spendable);
