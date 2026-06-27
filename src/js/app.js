@@ -5005,14 +5005,18 @@ async function confirmBulkDeposit(){
       <div style="font-size:22px;font-weight:800;color:var(--primary);line-height:1">${fmt(cashWithAccountant)}</div>
       <div style="font-size:12px;color:var(--text2);margin-top:4px">This is the exact amount you will deposit to the bank.</div>
     </div>
-    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Every cash movement that makes up your current balance is listed below. Tap any row to see full details. Confirm to deposit the full amount.</span></div>
-    <div style="border:1px solid var(--border);border-radius:8px;padding:0 12px;margin-bottom:16px;max-height:300px;overflow-y:auto">
-      ${incomeHtml}${bankHtml}${expHtml}${pettyHtml}
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:2px solid var(--border);margin-top:6px">
-        <span style="font-size:13px;font-weight:700">Net Cash to Deposit</span>
-        <span style="font-size:17px;font-weight:800;color:var(--primary)">${fmt(cashWithAccountant)}</span>
+    <details style="margin-bottom:16px">
+      <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;color:var(--text2);user-select:none">
+        <span>📋</span><span>How is this amount calculated?</span><span style="margin-left:auto;font-size:11px;color:var(--text3)">Tap to expand ▾</span>
+      </summary>
+      <div style="border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;padding:0 12px;max-height:300px;overflow-y:auto">
+        ${incomeHtml}${bankHtml}${expHtml}${pettyHtml}
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:2px solid var(--border);margin-top:6px">
+          <span style="font-size:13px;font-weight:700">Net Cash to Deposit</span>
+          <span style="font-size:17px;font-weight:800;color:var(--primary)">${fmt(cashWithAccountant)}</span>
+        </div>
       </div>
-    </div>
+    </details>
     <div class="form-group"><label class="form-label">Deposit Method *</label>
       <select id="bulk_dep_method" class="form-select">
         <option value="bank_teller">Bank Cash Teller</option>
