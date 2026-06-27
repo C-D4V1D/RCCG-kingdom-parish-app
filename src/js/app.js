@@ -133,12 +133,12 @@ const QUOTA_LABELS = {
 const OTHER_INCOME_SOURCES = [
   { key:'midweek_offering',   label:'Midweek / Programme Offering' },
   { key:'go_a_fishing_offering', label:'Go-a-Fishing Offering' },
-  { key:'individual_tithe',   label:'Individual Tithe (Bank Transfer)' },
   { key:'individual_donation',label:'Personal / Individual Donation' },
   { key:'seed',               label:'Seed Offering' },
   { key:'special_offering',   label:'Special Offering (e.g. Naming, Wedding)' },
-  { key:'harvest',            label:'Harvest / Thanksgiving Offering' },
   { key:'building_fund',      label:'Building / Project Fund Contribution' },
+  { key:'satellite_remittance', label:'Satellite Parish Remittance Payment' },
+  { key:'remittance_linked_credit', label:'Remittance-Linked Credits' },
   { key:'external_transfer',  label:'External Bank Transfer Received' },
   { key:'other',              label:'Other (specify in notes)' }
 ];
@@ -5681,8 +5681,7 @@ async function showRemittancePaymentModal(part){
     </div>
     `:''}
 
-    <!-- Payment Method (hidden for Part A — always bank transfer via RCCG portal) -->
-    ${part==='a'?'':`
+    <!-- Payment Method -->
     <div class="form-group">
       <label class="form-label">Payment Method *</label>
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:4px">
@@ -5697,7 +5696,6 @@ async function showRemittancePaymentModal(part){
         </label>
       </div>
     </div>
-    `}
 
     <!-- Single amount (hidden for Part A — amount comes from area payment field) -->
     ${part==='a'?'':`
@@ -5708,8 +5706,7 @@ async function showRemittancePaymentModal(part){
     </div>
     `}
 
-    <!-- Split amounts (hidden for Part A) -->
-    ${part==='a'?'':`
+    <!-- Split amounts -->
     <div id="rem_split_group" style="display:none">
       <div style="background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:12px">
         <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Enter the bank and cash portions — they must add up to the total due.</div>
@@ -5730,7 +5727,6 @@ async function showRemittancePaymentModal(part){
         <div id="rem_split_warning" style="display:none;margin-top:8px;font-size:12px;color:var(--danger);font-weight:500"></div>
       </div>
     </div>
-    `}
 
     <div class="form-group"><label class="form-label">Payment Date *</label><input type="date" id="rem_date" class="form-input" value="${new Date().toISOString().split('T')[0]}" /></div>
 
@@ -5821,7 +5817,7 @@ function onAreaTotalChange(ourParishShare){
 
 async function submitRemittance(btn=null){
   const part = document.getElementById('rem_part')?.value || '';
-  const method = part==='a' ? 'bank_transfer' : (document.querySelector('input[name="rem_method"]:checked')?.value||'bank_transfer');
+  const method = document.querySelector('input[name="rem_method"]:checked')?.value||'bank_transfer';
   const isSplit=method==='split';
   const date=document.getElementById('rem_date')?.value;
   const reference=(document.getElementById('rem_ref')?.value||'').trim();
