@@ -1974,10 +1974,10 @@ async function buildTransactionsLedger(){
       date:p.createdAt||p.dateNeeded||'',
       recordedAt:p.createdAt||p.dateNeeded||'',
       amount:p.actualAmount||p.amount||0,
-      direction:(p.type==='refill'||p.type==='topup_request')?'transfer':'debit',
+      direction:(p.type==='refill'||p.type==='topup_request'||p.type==='petty_to_bank')?'transfer':'debit',
       method:p.paymentMethod||'',
       status:p.status||'pending_approval',
-      description:`Petty Cash — ${p.type==='topup_request'?'Top-Up Request':p.type==='advance'?'Advance':p.type==='refill'?'Refill':'Disbursement'}`,
+      description:`Petty Cash — ${p.type==='topup_request'?'Top-Up Request':p.type==='advance'?'Advance':p.type==='refill'?'Refill':p.type==='petty_to_bank'?'Deposit to Bank':'Disbursement'}`,
       reference:p.reference||p.receiptNo||'',
       actor:p.requestedBy||p.approvedBy||'',
       notes:p.purpose||p.notes||''
@@ -2527,6 +2527,9 @@ function pettyFloatEvents(h){
   if(h.type === 'disbursement' && h.status === 'approved'){
     return [{ date: String(h.date || h.createdAt || '').slice(0,10), delta: -(h.amount || 0) }];
   }
+  if(h.type === 'petty_to_bank' && (h.status === 'approved' || h.status === 'settled')){
+    return [{ date: String(h.date || h.createdAt || '').slice(0,10), delta: -(h.amount || 0) }];
+  }
   return [];
 }
 
@@ -2582,7 +2585,9 @@ async function calcChurchBalance(asOfDate, prefetched){
   // deducted from the bank balance (mirrors the pettyCashTopups filter below).
   const pettyBankTopups = pettyF.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)),0);
-  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals - pettyBankTopups;
+  const pettyToBankDeposits = pettyF.filter(h=>h.type==='petty_to_bank'&&(h.status==='approved'||h.status==='settled'))
+    .reduce((s,h)=>s+(h.amount||0),0);
+  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals - pettyBankTopups + pettyToBankDeposits;
 
   // --- CASH WITH ACCOUNTANT ---
   const cashFromCollections = income.reduce((s,r) => {
@@ -7596,7 +7601,9 @@ async function renderBank(){
   const pettyHistory = await DB.getPetty();
   const pettyBankTopups = pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)),0);
-  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals - pettyBankTopups;
+  const pettyToBankDeposits = pettyHistory.filter(h=>h.type==='petty_to_bank'&&(h.status==='approved'||h.status==='settled'))
+    .reduce((s,h)=>s+(h.amount||0),0);
+  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals - pettyBankTopups + pettyToBankDeposits;
 
   // Cash with Accountant (mirrors calcChurchBalance, using data already fetched above)
   const cashFromCollectionsRB = allIncome.reduce((s,r)=>{
@@ -8101,7 +8108,7 @@ async function renderPettyCash(){
           <button class="btn btn-primary" onclick="App.showTopUpRequest()">↺ Request Top-Up</button>
           <button class="btn" onclick="App.showAdvanceRequest()">+ Request Advance</button>
         `:''}
-        ${canAction('petty_topup_payment')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">📋 Record Top-Up Payment</button>`:''}
+        ${canAction('petty_topup_payment')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">📋 Record Top-Up Payment</button>`:''}\n        ${canAction('petty_approve')?`<button class="btn" style="background:#E6F1FB;color:#0F6E56" onclick="App.showPettyToBankDeposit()">🏦 Deposit to Bank</button>`:''}
       </div>
     </div>
 
@@ -8550,6 +8557,77 @@ async function submitDeletePetty(id, btn=null){
   } catch(err){
     restore();
     showAlert('Failed to delete: '+(err?.message||'Unknown error'), 'danger');
+  }
+}
+
+// ── PETTY CASH → BANK DEPOSIT ──────────────────────────────────────────────
+async function showPettyToBankDeposit(){
+  if(!canAction('petty_approve')){ showAlert('You do not have permission to deposit petty cash to bank.','danger'); return; }
+  const pettyConfig = await DB.getPettyConfig();
+  const currentFloat = pettyConfig.float || 0;
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🏦 Deposit Petty Cash to Bank</div>
+    <div class="alert alert-info" style="margin:0 0 12px">
+      <span class="alert-icon">ℹ</span>
+      <span>Transfer cash from the petty cash wallet into the church bank account. Current wallet balance: <strong>${fmt(currentFloat)}</strong></span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Amount to Deposit (₦) *</label>
+      <input type="number" id="ptb_amount" class="form-input" placeholder="0" min="1" max="${Math.max(0,currentFloat)}" />
+      <div class="form-hint">Maximum: ${fmt(currentFloat)} (current wallet balance)</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Date *</label>
+      <input type="date" id="ptb_date" class="form-input" value="${new Date().toISOString().split('T')[0]}" />
+    </div>
+    <div class="form-group">
+      <label class="form-label">Bank Reference / Teller Number</label>
+      <input type="text" id="ptb_ref" class="form-input" placeholder="Enter the deposit reference (optional)" />
+    </div>
+    <div class="form-group">
+      <label class="form-label">Notes (optional)</label>
+      <textarea id="ptb_notes" class="form-textarea" rows="2" placeholder="Reason for depositing petty cash to bank…"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.submitPettyToBankDeposit(this)">🏦 Confirm Deposit</button>
+    </div>`);
+}
+
+async function submitPettyToBankDeposit(btn=null){
+  const amount = parseFloat(document.getElementById('ptb_amount')?.value) || 0;
+  const date = document.getElementById('ptb_date')?.value;
+  const reference = (document.getElementById('ptb_ref')?.value||'').trim();
+  const notes = (document.getElementById('ptb_notes')?.value||'').trim();
+  if(!amount || amount <= 0){ showAlert('Please enter a valid amount.','danger'); return; }
+  if(!date){ showAlert('Please enter the deposit date.','danger'); return; }
+  const pettyConfig = await DB.getPettyConfig();
+  if(amount > pettyConfig.float){ showAlert(`Amount (${fmt(amount)}) exceeds the current petty cash balance (${fmt(pettyConfig.float)}).`,'danger'); return; }
+  const restore = setBtnLoading(btn, 'Processing…');
+  try {
+    await DB.addPettyEntry({
+      type: 'petty_to_bank',
+      amount,
+      date,
+      status: 'approved',
+      paymentMethod: 'bank_transfer',
+      reference,
+      notes: notes || 'Petty cash deposited to bank',
+      requestedBy: state.user?.name || '',
+      approvedBy: state.user?.name || '',
+      approvedAt: new Date().toISOString().split('T')[0],
+    });
+    const newFloat = pettyConfig.float - amount;
+    await DB.savePettyConfig({ float: newFloat, max: pettyConfig.max });
+    DB.addAudit('petty_to_bank', `${fmt(amount)} deposited from petty cash to bank${reference?' — Ref: '+reference:''}. New petty balance: ${fmt(newFloat)}.`, state.user?.name);
+    DB.addNotification('Petty Cash Deposited', `${fmt(amount)} moved from petty cash to bank account.`, 'success');
+    closeModal();
+    showAlert(`${fmt(amount)} deposited from petty cash to bank. New wallet balance: ${fmt(newFloat)}.`, 'success');
+    renderPettyCash();
+  } catch(err){
+    restore();
+    showAlert(`Failed: ${err.message||'Unknown error'}`, 'danger');
   }
 }
 
@@ -10911,7 +10989,7 @@ return {
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
-  approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange,
+  approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, showPettyToBankDeposit, submitPettyToBankDeposit, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
   setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
