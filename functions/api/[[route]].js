@@ -1753,6 +1753,7 @@ async function handleInit(DB) {
     `ALTER TABLE income ADD COLUMN first_fruit REAL DEFAULT 0`,
     `ALTER TABLE income ADD COLUMN training_weekend REAL DEFAULT 0`,
     `ALTER TABLE income RENAME COLUMN training_weekend TO weekend_offering`,
+    `ALTER TABLE income ADD COLUMN bank_transfer_details TEXT DEFAULT ''`,
     // Expense columns
     `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
     `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
@@ -2295,6 +2296,7 @@ async function getIncome(DB) {
     weekendOffering:     row.weekend_offering || 0,
     totalCollection:     row.total_collection,
     bankTransferAmount:  row.bank_transfer_amount,
+    bankTransferDetails: row.bank_transfer_details || '',
     directPettyCash:     row.direct_petty_cash,
     source:              row.source,
     usher:               row.usher,
@@ -2458,10 +2460,12 @@ async function createIncome(DB, data) {
       data.notes           || '',
     ).run();
   }
+  // Save individual bank transfer details (JSON) if provided
+  if (data.bankTransferDetails) {
+    try { await DB.prepare(`UPDATE income SET bank_transfer_details=? WHERE id=?`).bind(data.bankTransferDetails, id).run(); } catch(e){}
+  }
   return ok({ ...data, id });
-}
-
-async function updateIncome(DB, id, data) {
+}async function updateIncome(DB, id, data) {
   // Used for confirming bank deposit
   if (data.depositConfirmed !== undefined) {
     await DB.prepare(`

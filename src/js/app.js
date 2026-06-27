@@ -4130,11 +4130,18 @@ function showIncomeForm(){
     <p style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px">📋 How was this money received?</p>
     <p style="font-size:11px;color:var(--text3);margin-bottom:12px">If part of the total was paid directly to the bank or given to the Admin Officer, record those portions below. The local share of Teen/Children's Offering is automatically treated as cash held by the Children Teacher for refreshments and is not available for bank deposit or general spending.</p>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Paid via Bank Transfer (₦)</label>
-        <input type="number" id="inc_bank_transfer" class="form-input" placeholder="0" min="0" oninput="App.updateIncomeCashBreakdown()" />
-        <div class="form-hint">Members who transferred tithe/offerings directly to the church bank account</div>
+      <div class="form-group" style="flex:2">
+        <label class="form-label">Paid via Bank Transfer (₦)</label>
+        <div class="form-hint" style="margin-bottom:8px">Individual transfers received directly to the church bank account. Add each transfer separately for easier bank reconciliation.</div>
+        <div id="inc_bank_transfers_list"></div>
+        <button type="button" class="btn btn-sm" style="margin-top:6px" onclick="App.addBankTransferRow()">+ Add Transfer</button>
+        <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--surface);border-radius:var(--r)">
+          <span style="font-size:12px;font-weight:600;color:var(--text2)">Total Bank Transfers</span>
+          <span id="inc_bank_transfer_total" style="font-size:15px;font-weight:700;color:var(--primary)">₦0</span>
+        </div>
+        <input type="hidden" id="inc_bank_transfer" value="0" />
       </div>
-      <div class="form-group"><label class="form-label">Given Directly to Admin Officer (₦)</label>
+      <div class="form-group" style="flex:1"><label class="form-label">Given Directly to Admin Officer (₦)</label>
         <input type="number" id="inc_direct_petty" class="form-input" placeholder="0" min="0" oninput="App.updateIncomeCashBreakdown()" />
         <div class="form-hint">Cash handed to the Admin Officer to top up petty cash float</div>
       </div>
@@ -4153,6 +4160,43 @@ function showIncomeForm(){
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="App.submitIncome(this)">Save & Calculate Remittances</button>
     </div>`);
+}
+
+let _bankTransferRowCount = 0;
+function addBankTransferRow(){
+  const list = document.getElementById('inc_bank_transfers_list');
+  if(!list) return;
+  const idx = _bankTransferRowCount++;
+  const today = new Date().toISOString().split('T')[0];
+  const row = document.createElement('div');
+  row.id = `bt_row_${idx}`;
+  row.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:6px';
+  row.innerHTML = `
+    <input type="number" class="form-input bt-amt" placeholder="Amount" min="0" style="flex:1;padding:8px" oninput="App.updateBankTransferTotal()" />
+    <input type="date" class="form-input bt-date" value="${today}" style="flex:1;padding:8px;font-size:12px" />
+    <button type="button" onclick="this.parentElement.remove();App.updateBankTransferTotal()" style="background:none;border:none;color:var(--danger);font-size:18px;cursor:pointer;padding:4px">✕</button>
+  `;
+  list.appendChild(row);
+}
+function updateBankTransferTotal(){
+  const rows = document.querySelectorAll('#inc_bank_transfers_list .bt-amt');
+  let total = 0;
+  rows.forEach(r => { total += parseFloat(r.value) || 0; });
+  const totalEl = document.getElementById('inc_bank_transfer_total');
+  const hiddenEl = document.getElementById('inc_bank_transfer');
+  if(totalEl) totalEl.textContent = fmt(total);
+  if(hiddenEl) hiddenEl.value = total;
+  updateIncomeCashBreakdown();
+}
+function getBankTransferDetails(){
+  const rows = document.querySelectorAll('#inc_bank_transfers_list > div');
+  const details = [];
+  rows.forEach(row => {
+    const amt = parseFloat(row.querySelector('.bt-amt')?.value) || 0;
+    const date = row.querySelector('.bt-date')?.value || '';
+    if(amt > 0) details.push({ amount: amt, date });
+  });
+  return JSON.stringify(details);
 }
 
 function updateIncomeTotal(){
@@ -4203,6 +4247,7 @@ async function submitIncome(btn=null){
   rec.totalCollection=total;
 
   const bankTransferAmount = Math.round((parseFloat(document.getElementById('inc_bank_transfer')?.value||0)||0)*100)/100;
+  const bankTransferDetails = typeof getBankTransferDetails === 'function' ? getBankTransferDetails() : '';
   const directPettyCash    = Math.round((parseFloat(document.getElementById('inc_direct_petty')?.value||0)||0)*100)/100;
   const remRates = (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
   const childrenTeacherHeld = getChildrenTeacherHeldCash(rec, remRates);
@@ -4212,6 +4257,7 @@ async function submitIncome(btn=null){
     return;
   }
   rec.bankTransferAmount = bankTransferAmount;
+  rec.bankTransferDetails = bankTransferDetails;
   rec.directPettyCash    = directPettyCash;
   rec.notes=document.getElementById('inc_notes')?.value||'';
 
@@ -10980,7 +11026,7 @@ async function setPeriodMode(mode){
 // ──────────────────────────────────────────
 return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
-  onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, submitIncome,
+  onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
