@@ -3016,12 +3016,21 @@ async function createCashTransaction(DB, data) {
     data.photoData     || '',
     data.groupId       || '',
   ).run();
+  // Set verification status if provided (for AI-verified deposits)
+  if (data.verificationStatus) {
+    try { await DB.prepare(`UPDATE cash_transactions SET verification_status=? WHERE id=?`).bind(data.verificationStatus, id).run(); } catch(e){}
+  }
   return ok({ ...data, id });
 }
 
 async function updateCashTransaction(DB, id, data) {
   const cols = [], vals = [];
-  if (data.amount !== undefined) { cols.push('amount=?');   vals.push(data.amount); }
+  if (data.amount !== undefined)              { cols.push('amount=?');               vals.push(data.amount); }
+  if (data.verificationStatus !== undefined)  { cols.push('verification_status=?');   vals.push(data.verificationStatus); }
+  if (data.aiExtractedAmount !== undefined)   { cols.push('ai_extracted_amount=?');   vals.push(data.aiExtractedAmount); }
+  if (data.aiExtractedReference !== undefined){ cols.push('ai_extracted_reference=?');vals.push(data.aiExtractedReference); }
+  if (data.aiNotes !== undefined)             { cols.push('ai_notes=?');             vals.push(data.aiNotes); }
+  if (data.reference !== undefined)           { cols.push('reference=?');            vals.push(data.reference); }
   if (!cols.length) return ok({ id });
   vals.push(id);
   await DB.prepare(`UPDATE cash_transactions SET ${cols.join(',')} WHERE id=?`).bind(...vals).run();

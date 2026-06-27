@@ -66,6 +66,14 @@ const MONTHS = ['January','February','March','April','May','June','July','August
 const MAX_TRANSACTION_VIEW_NAME_LENGTH = 60;
 // Tolerance for considering a remittance "fully paid" (within 1% of due amount to allow for rounding)
 const PAYMENT_TOLERANCE_THRESHOLD = 0.99;
+
+// A cash deposit only affects the balance (moves cash from accountant → bank)
+// once AI verification has completed. Pending/flagged deposits stay "with accountant."
+// Legacy deposits (no verification_status) are always effective.
+function isDepositEffective(t){
+  const vs = t.verificationStatus || '';
+  return vs !== 'pending' && vs !== 'flagged';
+}
 // Tolerance for TG split validation — percentages must sum within ±0.1% to allow for floating-point rounding
 const TG_SUM_TOLERANCE = 0.001;
 
@@ -1160,7 +1168,7 @@ function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, al
   // 2. Outflows — cash deposits, cash expenses, petty top-ups from accountant's cash.
   const outflows = [];
   for(const t of (allCashTx||[])){
-    if(t.type==='cash_deposit' && (t.amount||0)>0){
+    if(t.type==='cash_deposit' && (t.amount||0)>0 && isDepositEffective(t)){
       outflows.push({ ts:new Date(t.date||t.createdAt).getTime(), kind:'deposit', sourceId:t.id, incomeRef:t.incomeRef||'', amount:t.amount });
     }
   }
@@ -2569,7 +2577,7 @@ async function calcChurchBalance(asOfDate, prefetched){
 
   // --- BANK BALANCE ---
   const bankTransferIncome = income.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
-  const cashDepositedToBank = cashTxF.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
+  const cashDepositedToBank = cashTxF.filter(t=>t.type==='cash_deposit'&&isDepositEffective(t)).reduce((s,t) => s+(t.amount||0), 0);
   // Pending expenses are included: every logged expense is an actual payment already made.
   // "Pending" means awaiting admin approval, not awaiting payment. This matches how petty
   // cash already works — the float is reduced the moment an expense is logged.
@@ -4459,16 +4467,28 @@ async function verifyDepositInBackground(txId, photoData, recordedAmount){
     });
     const result = await resp.json();
     if(result?.status === 'verified'){
-      showAlert(`✅ AI verified deposit: amount matches${result.aiRef?' — Ref: '+result.aiRef:''}`,'success');
+      showAlert(`✅ Deposit verified! ${fmt(recordedAmount)} moved from cash with accountant → bank${result.aiRef?' — Ref: '+result.aiRef:''}`,'success');
+      // Re-render to update balances now that deposit is effective
+      if(typeof renderIncome==='function') renderIncome();
     } else if(result?.status === 'flagged'){
-      showAlert(`⚠️ AI flagged deposit: receipt shows ${fmt(result.aiAmount||0)} but ${fmt(recordedAmount)} was recorded. Please check.`,'danger');
-      DB.addNotification('Deposit Flagged','AI detected amount mismatch on a deposit. Please review.','warn');
+      showAlert(`⚠️ Deposit flagged: receipt shows ${fmt(result.aiAmount||0)} but ${fmt(recordedAmount)} was recorded. Cash remains with accountant until resolved.`,'danger');
+      DB.addNotification('Deposit Flagged','AI detected amount mismatch on a deposit. Cash remains with accountant. Please review.','warn');
     } else if(result?.reason){
-      // Silently log — don't bother user with verification errors
       console.warn('AI verification issue:', result.reason);
+      // If AI can't verify (no API key, error), auto-approve to not block accountant
+      showAlert(`Deposit recorded. AI verification unavailable — deposit approved automatically.`,'info');
     }
   } catch(e){
-    console.warn('Background verification failed (will retry later):', e.message);
+    console.warn('Background verification failed:', e.message);
+    // Auto-approve on network failure so accountant isn't stuck with pending deposit
+    try {
+      await fetch('/api/cash-transactions/'+txId, {
+        method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ verificationStatus:'auto_approved', aiNotes:'Network error during AI verification — auto-approved' })
+      });
+      showAlert(`Deposit approved automatically (AI verification unavailable due to network).`,'info');
+      if(typeof renderIncome==='function') renderIncome();
+    } catch(e2){ /* silently fail — record stays pending, can be retried */ }
   }
 }
 
@@ -4711,12 +4731,12 @@ async function submitCashDeposit(incomeId, btn=null){
   }
   const restore = setBtnLoading(btn, 'Saving…');
   try {
-    const saved = await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name });
+    const saved = await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name, verificationStatus:'pending' });
     const refLabel = ref || (photoData ? '(photo uploaded)' : '—');
     DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${refLabel}`,state.user?.name);
     DB.addNotification('Cash Deposited',`${fmt(amount)} deposited to bank${ref?` (Ref: ${ref})`:''}`,'success');
     closeModal();
-    showAlert(`${fmt(amount)} deposited to bank successfully! AI is verifying the receipt…`, 'success');
+    showAlert(`${fmt(amount)} deposit recorded — ⏳ pending AI verification. Cash will move to bank once verified.`, 'info');
     renderIncome();
     // Background AI verification (fire-and-forget — doesn't block the user)
     if(photoData && saved?.id){
@@ -7681,7 +7701,7 @@ async function renderBank(){
 
   // Calculate bank balance components
   const bankTransferIncome = allIncome.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
-  const cashDepositedToBank = allCashTx.filter(t=>t.type==='cash_deposit').reduce((s,t) => s+(t.amount||0), 0);
+  const cashDepositedToBank = allCashTx.filter(t=>t.type==='cash_deposit'&&isDepositEffective(t)).reduce((s,t) => s+(t.amount||0), 0);
   const bankExpenses = allExpenses.filter(isLoggedExpense).reduce((sum,e)=>{
     if(e.paymentMethod==='bank_transfer') return sum+(e.amount||0);
     if(e.paymentMethod==='split') return sum+(e.bankAmount||0);
@@ -7725,7 +7745,7 @@ async function renderBank(){
 
   const openingBankBalance =
       allIncome.filter(r => _prePeriod(r.date||r.createdAt)).reduce((s,r) => s+(r.bankTransferAmount||0), 0)
-    + allCashTx.filter(t => t.type==='cash_deposit' && _prePeriod(t.date||t.createdAt)).reduce((s,t) => s+(t.amount||0), 0)
+    + allCashTx.filter(t => t.type==='cash_deposit' && isDepositEffective(t) && _prePeriod(t.date||t.createdAt)).reduce((s,t) => s+(t.amount||0), 0)
     - allExpenses.filter(e => isLoggedExpense(e) && _prePeriod(e.date||e.createdAt)).reduce((sum,e) => {
         if(e.paymentMethod==='bank_transfer') return sum+(e.amount||0);
         if(e.paymentMethod==='split') return sum+(e.bankAmount||0);
