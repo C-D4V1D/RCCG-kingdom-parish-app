@@ -89,12 +89,14 @@ function depositVerificationBadge(t){
 function depositActionButtons(t){
   const vs = t.verificationStatus || '';
   if(vs !== 'pending' && vs !== 'flagged') return '';
-  // Check if deposit is older than 5 minutes (show buttons)
   const created = new Date(t.createdAt || t.date || 0).getTime();
   const age = Date.now() - created;
-  const isStale = vs === 'flagged' || age > 5 * 60 * 1000; // flagged always shows, pending after 5min
+  const isStale = vs === 'flagged' || age > 5 * 60 * 1000;
   if(!isStale && vs === 'pending') return '<span style="font-size:10px;color:var(--text3)">Verifying…</span>';
   const btns = [];
+  if(vs === 'flagged' && canAction('income_deposit')){
+    btns.push(`<button class="btn btn-sm btn-amber" onclick="event.stopPropagation();App.correctDepositAmount('${t.id}',${t.aiExtractedAmount||0},${t.amount||0})" style="font-size:10px;padding:2px 8px;color:#fff">✏️ Correct</button>`);
+  }
   if(canAction('income_deposit')){
     btns.push(`<button class="btn btn-sm" onclick="event.stopPropagation();App.retryDepositVerification('${t.id}')" style="font-size:10px;padding:2px 8px">🔄 Retry</button>`);
   }
@@ -102,6 +104,58 @@ function depositActionButtons(t){
     btns.push(`<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();App.manuallyApproveDeposit('${t.id}')" style="font-size:10px;padding:2px 8px">✅ Approve</button>`);
   }
   return btns.join(' ');
+}
+
+async function correctDepositAmount(txId, aiAmount, currentAmount){
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">✏️ Correct Deposit Amount</div>
+    <div class="alert alert-warn" style="margin:0 0 12px">
+      <span class="alert-icon">⚠️</span>
+      <span>AI detected a mismatch between the receipt and the recorded amount.</span>
+    </div>
+    <div style="background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">
+        <span style="color:var(--text2)">Amount on receipt (AI read):</span>
+        <span style="font-weight:700">${fmt(aiAmount)}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:13px">
+        <span style="color:var(--text2)">Amount you recorded:</span>
+        <span style="font-weight:700;color:var(--danger)">${fmt(currentAmount)}</span>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Correct Amount (₦) *</label>
+      <input type="number" id="correct_dep_amount" class="form-input" value="${aiAmount||currentAmount}" />
+      <div class="form-hint">Enter the correct deposit amount. If the receipt amount (${fmt(aiAmount)}) is correct, leave it as is.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Reason for Correction</label>
+      <input type="text" id="correct_dep_reason" class="form-input" placeholder="e.g. Typo when recording, wrong receipt, etc." />
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.submitDepositCorrection('${txId}')">✅ Correct & Re-verify</button>
+    </div>`);
+}
+
+async function submitDepositCorrection(txId){
+  const newAmount = parseFloat(document.getElementById('correct_dep_amount')?.value) || 0;
+  const reason = (document.getElementById('correct_dep_reason')?.value || '').trim();
+  if(!newAmount || newAmount <= 0){ showAlert('Please enter a valid amount.','danger'); return; }
+  try {
+    await fetch('/api/cash-transactions/'+txId, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ amount: newAmount, verificationStatus:'pending', aiNotes:`Corrected: ${reason||'Amount updated'} — re-verifying` }),
+    });
+    DB.addAudit('deposit_corrected',`Deposit ${txId} amount corrected to ${fmt(newAmount)}. Reason: ${reason||'—'}`,state.user?.name);
+    closeModal();
+    showAlert(`Amount corrected to ${fmt(newAmount)}. Re-verifying with AI…`,'info');
+    // Trigger re-verification
+    retryDepositVerification(txId);
+  } catch(e){
+    showAlert(`Failed: ${e.message}`,'danger');
+  }
 }
 
 async function retryDepositVerification(txId){
@@ -11167,7 +11221,7 @@ async function setPeriodMode(mode){
 // ──────────────────────────────────────────
 return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
-  onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, submitIncome,
+  onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,

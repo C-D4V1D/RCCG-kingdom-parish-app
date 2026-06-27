@@ -720,6 +720,7 @@ export async function onRequest(context) {
                 transactionId: txId,
                 photoData: body.photoData,
                 recordedAmount: body.amount || 0,
+                depositDate: body.date || '',
               }).catch(e => console.error('Background verification error:', e))
             );
           }
@@ -3171,9 +3172,15 @@ async function verifyDepositWithAI(DB, env, body, attempt=1) {
           role: 'user',
           content: [
             { type: 'image_url', image_url: { url: `data:${mediaType};base64,${base64}`, detail: 'low' } },
-            { type: 'text', text: `Analyze this Nigerian bank deposit receipt/slip/teller/POS receipt/transfer confirmation image. Extract the following information and respond ONLY with valid JSON (no markdown, no backticks):
-{"amount": <number or null>, "reference": "<teller/reference/transaction number or null>", "date": "<date in YYYY-MM-DD format or null>", "bank": "<bank name or null>", "confidence": "<high|medium|low>", "notes": "<any relevant observation>"}
-If you cannot read the image or it's not a financial receipt, respond: {"amount": null, "reference": null, "date": null, "bank": null, "confidence": "low", "notes": "Cannot read image or not a financial receipt"}` }
+            { type: 'text', text: `Analyze this image. Determine if it is a valid Nigerian bank deposit receipt, transfer confirmation, POS receipt, or bank teller slip. Extract information and respond ONLY with valid JSON (no markdown, no backticks):
+
+{"is_receipt": <true or false>, "amount": <number or null>, "reference": "<teller/reference/transaction number or null>", "date": "<date in YYYY-MM-DD format or null>", "bank": "<bank name or null>", "recipient_name": "<recipient/beneficiary account name or null>", "recipient_account": "<recipient/beneficiary account number or null>", "confidence": "<high|medium|low>", "notes": "<any relevant observation>"}
+
+IMPORTANT CHECKS:
+- The recipient/beneficiary bank account should be "RCCG KINGDOM PARISH ACCOUNT" or similar church name, account number 1473624487
+- If the recipient is a different person or account, flag it in notes
+- If this is NOT a financial receipt (e.g. random photo, screenshot, etc), set is_receipt to false
+- If you cannot read the image clearly, set confidence to "low"` }
           ]
         }],
         max_tokens: 300,
@@ -3211,16 +3218,35 @@ If you cannot read the image or it's not a financial receipt, respond: {"amount"
 
     const aiAmount = parsed.amount != null ? Number(parsed.amount) : null;
     const aiRef = parsed.reference || '';
-    const aiNotes = `Verified by ${provider} (${model}) | ${parsed.bank || ''} | ${parsed.date || ''} | Confidence: ${parsed.confidence || 'unknown'} | ${parsed.notes || ''}`.trim();
+    const isReceipt = parsed.is_receipt !== false;
+    const recipientName = (parsed.recipient_name || '').toUpperCase();
+    const recipientAcct = (parsed.recipient_account || '').replace(/\s/g, '');
+    const aiDate = parsed.date || '';
     const recorded = Number(recordedAmount) || 0;
 
-    let status = 'auto_approved';
+    // Build flag reasons
+    const flags = [];
+    if (!isReceipt) flags.push('Image is not a valid financial receipt');
     if (aiAmount != null && recorded > 0) {
       const tolerance = Math.max(recorded * 0.02, 50);
-      status = Math.abs(aiAmount - recorded) <= tolerance ? 'verified' : 'flagged';
-    } else if (parsed.confidence === 'low') {
-      status = 'auto_approved';
+      if (Math.abs(aiAmount - recorded) > tolerance) flags.push(`Amount mismatch: receipt shows ${aiAmount} but ${recorded} was recorded`);
     }
+    if (recipientName && !recipientName.includes('RCCG') && !recipientName.includes('KINGDOM') && !recipientName.includes('1473624487')) {
+      flags.push(`Wrong recipient: "${parsed.recipient_name}" — expected RCCG Kingdom Parish Account`);
+    }
+    if (recipientAcct && recipientAcct !== '1473624487' && recipientAcct.length >= 10) {
+      flags.push(`Wrong account number: ${recipientAcct} — expected 1473624487`);
+    }
+    // Check date — flag if receipt date is more than 7 days before the recorded deposit date
+    if (aiDate && body.depositDate) {
+      const receiptDate = new Date(aiDate);
+      const depositDate = new Date(body.depositDate);
+      const diffDays = (depositDate - receiptDate) / (1000 * 60 * 60 * 24);
+      if (diffDays > 7) flags.push(`Old receipt: dated ${aiDate} but deposit recorded on ${body.depositDate}`);
+    }
+
+    let status = flags.length > 0 ? 'flagged' : (aiAmount != null && recorded > 0 ? 'verified' : 'auto_approved');
+    const aiNotes = `${provider} (${model}) | ${parsed.bank || ''} | ${aiDate} | To: ${parsed.recipient_name||'?'} (${recipientAcct||'?'}) | Confidence: ${parsed.confidence || 'unknown'}${flags.length ? ' | FLAGS: ' + flags.join('; ') : ''} | ${parsed.notes || ''}`.trim();
 
     await DB.prepare(`UPDATE cash_transactions SET verification_status=?, ai_extracted_amount=?, ai_extracted_reference=?, ai_notes=? WHERE id=?`)
       .bind(status, aiAmount || 0, aiRef, aiNotes, transactionId).run();
