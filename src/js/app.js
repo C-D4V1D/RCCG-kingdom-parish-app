@@ -5078,6 +5078,17 @@ async function submitBulkDeposit(btn=null){
     closeModal();
     showAlert(`${fmt(cashToDeposit)} deposit recorded — ⏳ AI is verifying the receipt on the server. Cash will move to bank once verified.`, 'info');
     if(state.page==='bank') renderBank(); else renderIncome();
+    // Trigger ONE group verification for the entire bulk deposit
+    if(photoData && groupId){
+      fetch('/api/verify-deposit', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ groupId, photoData, recordedAmount:cashToDeposit, depositDate:date }),
+      }).then(r=>r.json()).then(result=>{
+        if(result?.status==='verified') showAlert(`✅ Bulk deposit verified! ${fmt(cashToDeposit)} moved to bank.`,'success');
+        else if(result?.status==='flagged') showAlert(`⚠️ Bulk deposit flagged. Please check the deposit details.`,'danger');
+        if(state.page==='bank') renderBank(); else renderIncome();
+      }).catch(()=>{});
+    }
   } catch(err) {
     restore();
     showAlert(`Failed to record deposit: ${err.message||'Unknown error'}. Please try again.`,'danger');

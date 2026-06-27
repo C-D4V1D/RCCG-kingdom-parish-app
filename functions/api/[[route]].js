@@ -712,7 +712,7 @@ export async function onRequest(context) {
         const result = await createCashTransaction(DB, body);
         // If this is a cash deposit with a photo, trigger server-side AI verification
         // in the background — the response returns immediately to the client
-        if (body?.type === 'cash_deposit' && body?.photoData && body?.verificationStatus === 'pending') {
+        if (body?.type === 'cash_deposit' && body?.photoData && body?.verificationStatus === 'pending' && !body?.groupId) {
           const txId = body.id || (await result.clone().json().catch(()=>({}))).id;
           if (txId) {
             context.waitUntil(
@@ -732,6 +732,23 @@ export async function onRequest(context) {
 
     // ── /api/verify-deposit ─────────────────────────────────────
     if (route === 'verify-deposit' && method === 'POST') {
+      // If groupId is provided, verify the total for the group and apply result to all
+      if (body?.groupId) {
+        const { results: groupTxs } = await DB.prepare(`SELECT id, amount FROM cash_transactions WHERE group_id=? AND type='cash_deposit'`).bind(body.groupId).all();
+        const groupTotal = (groupTxs || []).reduce((s, r) => s + (r.amount || 0), 0);
+        const txIds = (groupTxs || []).map(r => r.id);
+        if (!txIds.length) return err('No transactions found for this group', 404);
+        // Verify using the first transaction's ID but with the group total
+        const result = await verifyDepositWithAI(DB, env, { ...body, transactionId: txIds[0], recordedAmount: groupTotal });
+        // Apply the result to ALL sub-deposits in the group
+        const resultData = await result.clone().json().catch(() => ({}));
+        const vs = resultData.status || 'auto_approved';
+        for (const txId of txIds.slice(1)) {
+          await DB.prepare(`UPDATE cash_transactions SET verification_status=?, ai_extracted_reference=?, ai_notes=? WHERE id=?`)
+            .bind(vs, resultData.aiRef || '', resultData.aiNotes || `Group verified (total: ${groupTotal})`, txId).run();
+        }
+        return result;
+      }
       return await verifyDepositWithAI(DB, env, body);
     }
 
