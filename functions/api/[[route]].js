@@ -3231,25 +3231,43 @@ IMPORTANT CHECKS:
       const tolerance = Math.max(recorded * 0.02, 50);
       if (Math.abs(aiAmount - recorded) > tolerance) flags.push(`Amount mismatch: receipt shows ${aiAmount} but ${recorded} was recorded`);
     }
-    if (recipientName && !recipientName.includes('RCCG') && !recipientName.includes('KINGDOM') && !recipientName.includes('1473624487')) {
-      flags.push(`Wrong recipient: "${parsed.recipient_name}" — expected RCCG Kingdom Parish Account`);
+    // Recipient check — lenient for partial names/numbers on receipts
+    // Match if ANY of: RCCG, KINGDOM, PARISH appears, OR last 4 digits of account match
+    if (recipientName || recipientAcct) {
+      const nameMatch = !recipientName || recipientName.includes('RCCG') || recipientName.includes('KINGDOM') || recipientName.includes('PARISH') || recipientName.includes('1473');
+      const acctMatch = !recipientAcct || recipientAcct.includes('1473624487') || recipientAcct.endsWith('4487') || recipientAcct.length < 10;
+      if (!nameMatch && !acctMatch) {
+        flags.push(`Wrong recipient: "${parsed.recipient_name}" (${recipientAcct||'?'}) — expected RCCG Kingdom Parish Account (1473624487)`);
+      }
     }
-    if (recipientAcct && recipientAcct !== '1473624487' && recipientAcct.length >= 10) {
-      flags.push(`Wrong account number: ${recipientAcct} — expected 1473624487`);
-    }
-    // Check date — flag if receipt date is more than 7 days before the recorded deposit date
+    // Date check — receipt date must be on or after the last Sunday before the deposit date.
+    // Cash is collected on Sunday, so a receipt dated before that Sunday is an old/wrong receipt.
+    // If receipt date is between last Sunday and deposit date (e.g. deposited next day), auto-correct the date.
+    let autoCorrectDate = '';
     if (aiDate && body.depositDate) {
-      const receiptDate = new Date(aiDate);
-      const depositDate = new Date(body.depositDate);
-      const diffDays = (depositDate - receiptDate) / (1000 * 60 * 60 * 24);
-      if (diffDays > 7) flags.push(`Old receipt: dated ${aiDate} but deposit recorded on ${body.depositDate}`);
+      const receiptDate = new Date(aiDate + 'T00:00:00');
+      const depositDate = new Date(body.depositDate + 'T00:00:00');
+      // Find the last Sunday on or before the deposit date
+      const lastSunday = new Date(depositDate);
+      lastSunday.setDate(lastSunday.getDate() - lastSunday.getDay()); // getDay() 0=Sunday
+      if (receiptDate < lastSunday) {
+        flags.push(`Old receipt: dated ${aiDate} which is before last Sunday (${lastSunday.toISOString().split('T')[0]}). Cash was not yet collected.`);
+      } else if (aiDate !== body.depositDate) {
+        // Receipt date is valid but different from recorded date — auto-correct
+        autoCorrectDate = aiDate;
+      }
     }
 
     let status = flags.length > 0 ? 'flagged' : (aiAmount != null && recorded > 0 ? 'verified' : 'auto_approved');
-    const aiNotes = `${provider} (${model}) | ${parsed.bank || ''} | ${aiDate} | To: ${parsed.recipient_name||'?'} (${recipientAcct||'?'}) | Confidence: ${parsed.confidence || 'unknown'}${flags.length ? ' | FLAGS: ' + flags.join('; ') : ''} | ${parsed.notes || ''}`.trim();
+    const aiNotes = `${provider} (${model}) | ${parsed.bank || ''} | ${aiDate} | To: ${parsed.recipient_name||'?'} (${recipientAcct||'?'}) | Confidence: ${parsed.confidence || 'unknown'}${flags.length ? ' | FLAGS: ' + flags.join('; ') : ''}${autoCorrectDate ? ' | Date auto-corrected to ' + autoCorrectDate : ''} | ${parsed.notes || ''}`.trim();
 
     await DB.prepare(`UPDATE cash_transactions SET verification_status=?, ai_extracted_amount=?, ai_extracted_reference=?, ai_notes=? WHERE id=?`)
       .bind(status, aiAmount || 0, aiRef, aiNotes, transactionId).run();
+
+    // Auto-correct deposit date if receipt date is valid but different
+    if (autoCorrectDate && status === 'verified') {
+      await DB.prepare(`UPDATE cash_transactions SET date=? WHERE id=?`).bind(autoCorrectDate, transactionId).run();
+    }
 
     if (aiRef) {
       await DB.prepare(`UPDATE cash_transactions SET reference=CASE WHEN reference='' OR reference IS NULL THEN ? ELSE reference END WHERE id=?`)
