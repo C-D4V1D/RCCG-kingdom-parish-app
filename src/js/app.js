@@ -167,7 +167,7 @@ async function retryDepositVerification(txId){
     if(!tx?.photoData){ showAlert('No photo found for this deposit. Cannot retry verification.','danger'); return; }
     const resp = await fetch('/api/verify-deposit', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ transactionId:txId, photoData:tx.photoData, recordedAmount:tx.amount }),
+      body: JSON.stringify({ transactionId:txId, photoData:tx.photoData, recordedAmount:tx.amount, depositDate:tx.date||'' }),
     });
     const result = await resp.json();
     if(result?.status==='verified'){
