@@ -6757,22 +6757,46 @@ async function renderExpenses(){
   state._expAll = allExp;
   const expenses = filterByCurrentPeriod(allExp, periodRange.from, periodRange.to);
   const total = expenses.reduce((s,r)=>s+(r.amount||0),0);
-  // Outstanding remittances = accumulated all-time due minus all-time paid (same as dashboard KPI logic)
-  const allTimeRemittances = await calcRemittancesFromRecords(allIncome);
-  const allTimeIncomeRemDue = totalRemittanceDue(allTimeRemittances);
+  // Outstanding remittances — uses the same settled-period-aware logic as the Dashboard
+  // to prevent rate changes from retroactively inflating past periods' due amounts.
   const quotaList = getQuotaList(settings);
-
-  // Accumulated quotas: iterate each remittance period from the first income record
-  // through today and sum the prorated quota for each. Using a single
-  // getQuotaLinesForPeriod call across the full date span only yields 1× quota.amount
-  // regardless of how many periods have elapsed.
   const firstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
   const firstDateStr = (firstIncRec ? (firstIncRec.date||firstIncRec.createdAt||'') : '').slice(0,10);
   const accumQuotas = firstIncRec
     ? accumQuotasAcrossPeriods(quotaList, settings, allRems, firstDateStr, ymdLocal(new Date()))
     : 0;
-  const paidRems = allRems.filter(r=>r.status==='paid').reduce((s,r)=>s+(r.amount||0),0);
-  const outstandingRems = Math.max(0, allTimeIncomeRemDue + accumQuotas - paidRems);
+
+  // Identify fully settled periods (both Part A + B paid, or legacy)
+  const _expSettledKeys = [...new Set(
+    allRems.filter(r=>r.status==='paid'&&r.periodFrom&&r.periodTo).map(r=>`${r.periodFrom}|${r.periodTo}`)
+  )].filter(key=>{
+    const [pF,pT]=key.split('|');
+    const pp=allRems.filter(r=>r.status==='paid'&&r.periodFrom===pF&&r.periodTo===pT);
+    return pp.some(r=>!r.part)||(pp.some(r=>r.part==='a')&&pp.some(r=>r.part==='b'));
+  });
+  const _expSettledRanges=_expSettledKeys.map(k=>{const [f,t]=k.split('|');return{from:f,to:t};});
+
+  // Shortfall from settled periods (snapshot - paid, or 0 if no snapshot)
+  let _expSettledShortfall=0;
+  _expSettledKeys.forEach(key=>{
+    const [pF,pT]=key.split('|');
+    const pp=allRems.filter(r=>r.status==='paid'&&r.periodFrom===pF&&r.periodTo===pT);
+    const ppPaid=pp.reduce((s,r)=>s+(r.amount||0),0);
+    const ppSnap=pp.reduce((max,r)=>Math.max(max,r.dueAtTimeOfPayment||0),0);
+    _expSettledShortfall+=Math.max(0,(ppSnap>0?ppSnap:ppPaid)-ppPaid);
+  });
+
+  // Only recalculate remittance for unsettled-period income
+  const _expUnsettledIncome=allIncome.filter(r=>{
+    const d=r.date||r.createdAt||'';
+    return !d||!_expSettledRanges.some(p=>d>=p.from&&d<=p.to);
+  });
+  const _expUnsettledRem=await calcRemittancesFromRecords(_expUnsettledIncome);
+  const _expUnsettledDue=totalRemittanceDue(_expUnsettledRem);
+  const _expSettledQuotas=_expSettledRanges.reduce((s,pp)=>s+sumQuotaLines(getQuotaLinesForPeriod(quotaList,pp.from,pp.to)),0);
+  const _expUnsettledQuotas=accumQuotas-_expSettledQuotas;
+
+  const outstandingRems=Math.max(0, _expUnsettledDue+_expUnsettledQuotas+_expSettledShortfall);
   const totalChurch = churchBal.total;
   const spendable = totalChurch - outstandingRems;
   const _expPettyTarget = parseFloat(settings?.pettyTargetFloat||0)||90000;
