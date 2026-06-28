@@ -3281,16 +3281,7 @@ IMPORTANT CHECKS:
       // Find the last Sunday on or before the deposit date
       const lastSunday = new Date(depositDate);
       lastSunday.setDate(lastSunday.getDate() - lastSunday.getDay());
-      // AI sometimes misreads the year on receipts (e.g. 2023 instead of 2026).
-      // Fix: if month+day are within ±2 days of the deposit but year is off, correct the year.
-      const receiptMD = (receiptDate.getMonth() * 100) + receiptDate.getDate();
-      const depositMD = (depositDate.getMonth() * 100) + depositDate.getDate();
-      const yearOff = Math.abs(receiptDate.getFullYear() - depositDate.getFullYear());
-      if (yearOff > 0 && Math.abs(receiptMD - depositMD) <= 2) {
-        // Year misread by AI — correct to deposit year
-        receiptDate.setFullYear(depositDate.getFullYear());
-        autoCorrectDate = receiptDate.toISOString().split('T')[0];
-      } else if (receiptDate < lastSunday) {
+      if (receiptDate < lastSunday) {
         flags.push(`Old receipt: dated ${aiDate} which is before last Sunday (${lastSunday.toISOString().split('T')[0]}). Cash was not yet collected.`);
       } else if (aiDate !== body.depositDate) {
         autoCorrectDate = aiDate;
