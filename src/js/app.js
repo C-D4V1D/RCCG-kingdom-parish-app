@@ -108,7 +108,7 @@ function depositActionButtons(t){
 
 async function correctDepositAmount(txId, aiAmount, currentAmount){
   const balance = await calcChurchBalance();
-  const maxAmount = Math.round((balance.cashWithAccountant + currentAmount) * 100) / 100;
+  const maxAmount = Math.round(balance.cashWithAccountant * 100) / 100;
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">✏️ Correct Deposit</div>
