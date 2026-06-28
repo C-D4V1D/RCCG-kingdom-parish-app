@@ -3127,7 +3127,7 @@ async function renderDashboard(){
   const _pettyBuffer     = parseFloat(settingsDash?.pettyBufferAmount||0)||30000;
   const _pettyCurrentFloat = churchBal.pettyFloat || 0;
   const _pettyTopUpNeeded  = Math.max(0, _pettyTarget - _pettyCurrentFloat);
-  const _pettyAfterObligs  = dashSpendable - _pettyTopUpNeeded;
+  const _pettyAfterObligs  = dashSpendable - _pettyCurrentFloat - _pettyTopUpNeeded;
   const _pettyMaxFloat     = _pettyCurrentFloat + Math.max(0, dashSpendable);
 
   let dashSpendLabel, dashSpendColor, _pettyIcon, _pettyMsg;
@@ -3693,6 +3693,10 @@ async function renderDashboard(){
         </div>
         <div style="margin-top:14px;padding-top:12px;border-top:1px dashed ${dashSpendColor}33">
           <!-- Petty Cash Sustainability -->
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:4px">
+            <span style="color:var(--text3)">Petty cash (committed)</span>
+            <span style="font-weight:600;color:var(--text)">${fmt(_pettyCurrentFloat)}</span>
+          </div>
           <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:6px">
             <span style="color:var(--text3)">Petty top-up for next period</span>
             <span style="font-weight:600;color:var(--text)">${fmt(_pettyTopUpNeeded)}</span>
@@ -6864,7 +6868,7 @@ async function renderExpenses(){
   const _expPettyBuffer = parseFloat(settings?.pettyBufferAmount||0)||30000;
   const _expPettyFloat = churchBal.pettyFloat||0;
   const _expTopUpNeeded = Math.max(0, _expPettyTarget - _expPettyFloat);
-  const _expAfterObligs = spendable - _expTopUpNeeded;
+  const _expAfterObligs = spendable - _expPettyFloat - _expTopUpNeeded;
   const _expMaxFloat = _expPettyFloat + Math.max(0, spendable);
   let spendLabel, spendColor;
   if (_expAfterObligs >= _expPettyBuffer) { spendLabel='Healthy'; spendColor='var(--success)'; }
