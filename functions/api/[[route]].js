@@ -3067,6 +3067,7 @@ async function updateCashTransaction(DB, id, data) {
   if (data.aiExtractedReference !== undefined){ cols.push('ai_extracted_reference=?');vals.push(data.aiExtractedReference); }
   if (data.aiNotes !== undefined)             { cols.push('ai_notes=?');             vals.push(data.aiNotes); }
   if (data.reference !== undefined)           { cols.push('reference=?');            vals.push(data.reference); }
+  if (data.photoData !== undefined)            { cols.push('photo_data=?');            vals.push(data.photoData); }
   if (!cols.length) return ok({ id });
   vals.push(id);
   await DB.prepare(`UPDATE cash_transactions SET ${cols.join(',')} WHERE id=?`).bind(...vals).run();
@@ -3290,8 +3291,8 @@ IMPORTANT CHECKS:
     await DB.prepare(`UPDATE cash_transactions SET verification_status=?, ai_extracted_amount=?, ai_extracted_reference=?, ai_notes=? WHERE id=?`)
       .bind(status, aiAmount || 0, aiRef, aiNotes, transactionId).run();
 
-    // Auto-correct deposit date if receipt date is valid but different
-    if (autoCorrectDate && status === 'verified') {
+    // Auto-correct deposit date if receipt date is valid but different (regardless of flag status)
+    if (autoCorrectDate) {
       await DB.prepare(`UPDATE cash_transactions SET date=? WHERE id=?`).bind(autoCorrectDate, transactionId).run();
     }
 

@@ -72,7 +72,7 @@ const PAYMENT_TOLERANCE_THRESHOLD = 0.99;
 // Legacy deposits (no verification_status) are always effective.
 function isDepositEffective(t){
   const vs = t.verificationStatus || '';
-  return vs !== 'pending' && vs !== 'flagged';
+  return vs !== 'pending' && vs !== 'flagged' && vs !== 'deleted';
 }
 
 function depositVerificationBadge(t){
@@ -107,9 +107,11 @@ function depositActionButtons(t){
 }
 
 async function correctDepositAmount(txId, aiAmount, currentAmount){
+  const balance = await calcChurchBalance();
+  const maxAmount = Math.round((balance.cashWithAccountant + currentAmount) * 100) / 100;
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
-    <div class="modal-title">✏️ Correct Deposit Amount</div>
+    <div class="modal-title">✏️ Correct Deposit</div>
     <div class="alert alert-warn" style="margin:0 0 12px">
       <span class="alert-icon">⚠️</span>
       <span>AI detected a mismatch between the receipt and the recorded amount.</span>
@@ -119,40 +121,75 @@ async function correctDepositAmount(txId, aiAmount, currentAmount){
         <span style="color:var(--text2)">Amount on receipt (AI read):</span>
         <span style="font-weight:700">${fmt(aiAmount)}</span>
       </div>
-      <div style="display:flex;justify-content:space-between;font-size:13px">
+      <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">
         <span style="color:var(--text2)">Amount you recorded:</span>
         <span style="font-weight:700;color:var(--danger)">${fmt(currentAmount)}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:13px">
+        <span style="color:var(--text2)">Max depositable (cash available):</span>
+        <span style="font-weight:700;color:var(--primary)">${fmt(maxAmount)}</span>
       </div>
     </div>
     <div class="form-group">
       <label class="form-label">Correct Amount (₦) *</label>
-      <input type="number" id="correct_dep_amount" class="form-input" value="${aiAmount||currentAmount}" />
-      <div class="form-hint">Enter the correct deposit amount. If the receipt amount (${fmt(aiAmount)}) is correct, leave it as is.</div>
+      <input type="number" id="correct_dep_amount" class="form-input" value="${Math.min(aiAmount||currentAmount, maxAmount)}" max="${maxAmount}" />
+      <div class="form-hint">Cannot exceed ${fmt(maxAmount)} (cash available with accountant).</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Re-upload Receipt Photo (optional)</label>
+      <input type="file" id="correct_dep_photo" accept="image/*" class="form-input" style="padding:6px" />
+      <div class="form-hint">Upload a different receipt if the original was wrong.</div>
     </div>
     <div class="form-group">
       <label class="form-label">Reason for Correction</label>
       <input type="text" id="correct_dep_reason" class="form-input" placeholder="e.g. Typo when recording, wrong receipt, etc." />
     </div>
-    <div class="modal-footer">
+    <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+      <button class="btn btn-danger" onclick="App.deleteDepositRecord('${txId}')" style="font-size:12px">🗑 Delete Deposit</button>
+      <div style="flex:1"></div>
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitDepositCorrection('${txId}')">✅ Correct & Re-verify</button>
+      <button class="btn btn-primary" onclick="App.submitDepositCorrection('${txId}',${maxAmount})">✅ Correct & Re-verify</button>
     </div>`);
 }
 
-async function submitDepositCorrection(txId){
+async function submitDepositCorrection(txId, maxAmount){
   const newAmount = parseFloat(document.getElementById('correct_dep_amount')?.value) || 0;
   const reason = (document.getElementById('correct_dep_reason')?.value || '').trim();
+  const photoFile = document.getElementById('correct_dep_photo')?.files?.[0];
   if(!newAmount || newAmount <= 0){ showAlert('Please enter a valid amount.','danger'); return; }
+  if(newAmount > maxAmount){ showAlert(`Amount (${fmt(newAmount)}) exceeds cash available with accountant (${fmt(maxAmount)}).`,'danger'); return; }
   try {
+    const updateData = { amount: newAmount, verificationStatus:'pending', aiNotes:`Corrected: ${reason||'Amount updated'} — re-verifying` };
+    // Re-upload photo if provided
+    if(photoFile){
+      const photoData = await compressPhoto(photoFile, 1200, 0.75);
+      updateData.photoData = photoData;
+    }
     await fetch('/api/cash-transactions/'+txId, {
       method:'PUT', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ amount: newAmount, verificationStatus:'pending', aiNotes:`Corrected: ${reason||'Amount updated'} — re-verifying` }),
+      body: JSON.stringify(updateData),
     });
-    DB.addAudit('deposit_corrected',`Deposit ${txId} amount corrected to ${fmt(newAmount)}. Reason: ${reason||'—'}`,state.user?.name);
+    DB.addAudit('deposit_corrected',`Deposit ${txId} amount corrected to ${fmt(newAmount)}${photoFile?' + new photo uploaded':''}. Reason: ${reason||'—'}`,state.user?.name);
     closeModal();
     showAlert(`Amount corrected to ${fmt(newAmount)}. Re-verifying with AI…`,'info');
-    // Trigger re-verification
     retryDepositVerification(txId);
+  } catch(e){
+    showAlert(`Failed: ${e.message}`,'danger');
+  }
+}
+
+async function deleteDepositRecord(txId){
+  if(!confirm('Delete this deposit record? This will return the cash to "Cash with Accountant."')) return;
+  try {
+    // Delete by setting amount to 0 and marking as deleted
+    await fetch('/api/cash-transactions/'+txId, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ amount:0, verificationStatus:'deleted', aiNotes:`Deleted by ${state.user?.name||'user'} on ${new Date().toISOString().split('T')[0]}` }),
+    });
+    DB.addAudit('deposit_deleted',`Deposit ${txId} deleted by ${state.user?.name}. Cash returned to accountant.`,state.user?.name);
+    closeModal();
+    showAlert('Deposit record deleted. Cash returned to accountant.','success');
+    if(state.page==='bank') renderBank(); else renderIncome();
   } catch(e){
     showAlert(`Failed: ${e.message}`,'danger');
   }
@@ -3297,6 +3334,16 @@ async function renderDashboard(){
     if(overdueRems>0) alerts+=`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span>${overdueRems} remittance(s) are <strong>overdue</strong>. Please process immediately.</span></div>`;
     if(pendingPetty>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span>${pendingPetty} petty cash request(s) awaiting approval. <button class="btn btn-sm" onclick="App.navigate('petty_cash')" style="margin-left:8px">Review</button></span></div>`;
     if(churchBal.bankBalance<50000 && churchBal.bankBalance>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Church balance is running low. Consider notifying the KPSC if remittances cannot be covered.</span></div>`;
+    const _dashFlaggedDeps = cashTx.filter(t=>t.type==='cash_deposit'&&(t.verificationStatus==='flagged'||t.verificationStatus==='pending'));
+    if(_dashFlaggedDeps.length>0){
+      const flagCount = _dashFlaggedDeps.filter(t=>t.verificationStatus==='flagged').length;
+      const pendCount = _dashFlaggedDeps.filter(t=>t.verificationStatus==='pending').length;
+      const totalAmt = _dashFlaggedDeps.reduce((s,t)=>s+(t.amount||0),0);
+      const parts = [];
+      if(flagCount) parts.push(`${flagCount} flagged by AI`);
+      if(pendCount) parts.push(`${pendCount} pending verification`);
+      alerts+=`<div class="alert alert-danger"><span class="alert-icon">🧾</span><span><strong>${_dashFlaggedDeps.length} deposit(s)</strong> (${fmt(totalAmt)}) ${parts.join(' and ')}. Cash is held until resolved. <button class="btn btn-sm" onclick="App.navigate('bank')" style="margin-left:8px">Review on Bank Page</button></span></div>`;
+    }
   }
 
   // Monthly trend (last 4 months) — income, expenses, and netLocal retained
@@ -3987,7 +4034,7 @@ async function renderIncome(){
         ${canAction('income_record')?`<button class="btn btn-primary" onclick="App.showIncomeForm()">📥 Sunday Collections</button>`:''}
         ${canAction('income_record')?`<button class="btn btn-amber" onclick="App.showOtherIncomeForm()">➕ Other Income</button>`:''}
         ${canAction('income_deposit')&&cashWithAccountant>0&&!_hasPendingDeposits?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${fmt(cashWithAccountant)})</button>`:''}
-        ${canAction('income_deposit')&&_hasPendingDeposits?`<button class="btn" style="border:1.5px solid var(--amber);color:var(--amber);background:rgba(184,134,11,0.08)" disabled>⏳ Deposit Pending (${fmt(_pendingDepTotal)})</button>`:''}
+        ${canAction('income_deposit')&&_hasPendingDeposits?`<button class="btn" style="border:1.5px solid var(--amber);color:var(--amber);background:rgba(184,134,11,0.08)" onclick="App.navigate('bank')">⏳ Deposit Pending (${fmt(_pendingDepTotal)})</button>`:''}
         ${canAction('income_deposit')&&state.user?.role==='it_admin'?`<button class="btn" style="border:1px solid var(--border);background:var(--bg)" onclick="App.reconcileCashWithAccountant()" title="Adjust the recorded cash balance to match what's physically with the accountant">⚖️ Reconcile Cash</button>`:''}
       </div>
     </div>
@@ -8023,7 +8070,7 @@ async function renderBank(){
       <div><div class="page-title">Bank Account</div><div class="page-sub">Balance: ${fmt(bankBalance)} · ${monthLabel()}${state.periodMode === 'remittance' ? ` Remittance Period (${fmtDateShort(bankPeriodFrom)} – ${fmtDateShort(bankPeriodTo)})` : ''}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${canAction('income_deposit')&&cashWithAccountant>0&&!_bankHasPending?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${fmt(cashWithAccountant)})</button>`:''}
-        ${canAction('income_deposit')&&_bankHasPending?`<button class="btn" style="border:1.5px solid var(--amber);color:var(--amber);background:rgba(184,134,11,0.08)" disabled>⏳ Deposit Pending (${fmt(_bankPendingTotal)})</button>`:''}
+        ${canAction('income_deposit')&&_bankHasPending?`<button class="btn" style="border:1.5px solid var(--amber);color:var(--amber);background:rgba(184,134,11,0.08)" onclick="App.navigate('bank')">⏳ Deposit Pending (${fmt(_bankPendingTotal)})</button>`:''}
         ${canAction('bank_withdrawal')?`<button class="btn btn-primary" onclick="App.showBankWithdrawal()">🏦 Record Withdrawal</button>`:''}
         ${canAction('bank_charge')?`<button class="btn" onclick="App.showBankChargeForm()">💳 Bank Charge</button>`:''}
       </div>
@@ -11296,7 +11343,7 @@ async function setPeriodMode(mode){
 // ──────────────────────────────────────────
 return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
-  onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, submitIncome,
+  onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   updateExpenseSubcats, updateExpenseDescRequired,
