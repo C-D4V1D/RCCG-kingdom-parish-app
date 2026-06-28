@@ -3194,7 +3194,7 @@ async function verifyDepositWithAI(DB, env, body, attempt=1) {
         messages: [{
           role: 'user',
           content: [
-            { type: 'image_url', image_url: { url: `data:${mediaType};base64,${base64}`, detail: 'low' } },
+            { type: 'image_url', image_url: { url: `data:${mediaType};base64,${base64}`, detail: 'auto' } },
             { type: 'text', text: `Analyze this image. Determine if it is a valid Nigerian bank deposit receipt, transfer confirmation, POS receipt, or bank teller slip. Extract information and respond ONLY with valid JSON (no markdown, no backticks):
 
 {"is_receipt": <true or false>, "amount": <number or null>, "reference": "<teller/reference/transaction number or null>", "date": "<date in YYYY-MM-DD format or null>", "bank": "<bank name or null>", "recipient_name": "<recipient/beneficiary account name or null>", "recipient_account": "<recipient/beneficiary account number or null>", "confidence": "<high|medium|low>", "notes": "<any relevant observation>"}
