@@ -145,22 +145,22 @@ async function correctDepositAmount(txId, aiAmount, currentAmount){
       <input type="text" id="correct_dep_reason" class="form-input" placeholder="e.g. Typo when recording, wrong receipt, etc." />
     </div>
     <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
-      <button class="btn btn-danger" onclick="App.deleteDepositRecord('${txId}')" style="font-size:12px">🗑 Delete Deposit</button>
+      <button class="btn btn-danger" onclick="App.deleteDepositRecord('${txId}',this)" style="font-size:12px">🗑 Delete Deposit</button>
       <div style="flex:1"></div>
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitDepositCorrection('${txId}',${maxAmount})">✅ Correct & Re-verify</button>
+      <button class="btn btn-primary" onclick="App.submitDepositCorrection('${txId}',${maxAmount},this)">✅ Correct & Re-verify</button>
     </div>`);
 }
 
-async function submitDepositCorrection(txId, maxAmount){
+async function submitDepositCorrection(txId, maxAmount, btn=null){
   const newAmount = parseFloat(document.getElementById('correct_dep_amount')?.value) || 0;
   const reason = (document.getElementById('correct_dep_reason')?.value || '').trim();
   const photoFile = document.getElementById('correct_dep_photo')?.files?.[0];
   if(!newAmount || newAmount <= 0){ showAlert('Please enter a valid amount.','danger'); return; }
   if(newAmount > maxAmount){ showAlert(`Amount (${fmt(newAmount)}) exceeds cash available with accountant (${fmt(maxAmount)}).`,'danger'); return; }
+  const restore = setBtnLoading(btn, 'Correcting…');
   try {
     const updateData = { amount: newAmount, verificationStatus:'pending', aiNotes:`Corrected: ${reason||'Amount updated'} — re-verifying` };
-    // Re-upload photo if provided
     if(photoFile){
       const photoData = await compressPhoto(photoFile, 1200, 0.75);
       updateData.photoData = photoData;
@@ -174,14 +174,15 @@ async function submitDepositCorrection(txId, maxAmount){
     showAlert(`Amount corrected to ${fmt(newAmount)}. Re-verifying with AI…`,'info');
     retryDepositVerification(txId);
   } catch(e){
+    if(restore) restore();
     showAlert(`Failed: ${e.message}`,'danger');
   }
 }
 
-async function deleteDepositRecord(txId){
+async function deleteDepositRecord(txId, btn=null){
   if(!confirm('Delete this deposit record? This will return the cash to "Cash with Accountant."')) return;
+  const restore = setBtnLoading(btn, 'Deleting…');
   try {
-    // Delete by setting amount to 0 and marking as deleted
     await fetch('/api/cash-transactions/'+txId, {
       method:'PUT', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ amount:0, verificationStatus:'deleted', aiNotes:`Deleted by ${state.user?.name||'user'} on ${new Date().toISOString().split('T')[0]}` }),
@@ -191,11 +192,13 @@ async function deleteDepositRecord(txId){
     showAlert('Deposit record deleted. Cash returned to accountant.','success');
     if(state.page==='bank') renderBank(); else renderIncome();
   } catch(e){
+    if(restore) restore();
     showAlert(`Failed: ${e.message}`,'danger');
   }
 }
 
 async function retryDepositVerification(txId){
+  const btn = event?.target; if(btn) setBtnLoading(btn, 'Retrying…');
   showAlert('🔄 Retrying AI verification…','info');
   try {
     // Fetch the transaction to get the photo
@@ -223,6 +226,7 @@ async function retryDepositVerification(txId){
 async function manuallyApproveDeposit(txId){
   if(!['it_admin'].includes(state.user?.role)){ showAlert('Only IT Admin can manually approve deposits.','danger'); return; }
   if(!confirm('Manually approve this deposit? Cash will be moved from accountant to bank.')) return;
+  const btn = event?.target; if(btn) setBtnLoading(btn, 'Approving…');
   try {
     await fetch('/api/cash-transactions/'+txId, {
       method:'PUT', headers:{'Content-Type':'application/json'},
