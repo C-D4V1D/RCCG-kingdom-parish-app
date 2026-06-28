@@ -184,10 +184,9 @@ async function deleteDepositRecord(txId, btn=null){
   const restore = setBtnLoading(btn, 'Deleting…');
   try {
     await fetch('/api/cash-transactions/'+txId, {
-      method:'PUT', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ amount:0, verificationStatus:'deleted', aiNotes:`Deleted by ${state.user?.name||'user'} on ${new Date().toISOString().split('T')[0]}` }),
+      method:'DELETE', headers:{'Content-Type':'application/json'},
     });
-    DB.addAudit('deposit_deleted',`Deposit ${txId} deleted by ${state.user?.name}. Cash returned to accountant.`,state.user?.name);
+    DB.addAudit('deposit_deleted',`Deposit ${txId} fully deleted by ${state.user?.name}. Cash returned to accountant.`,state.user?.name);
     closeModal();
     showAlert('Deposit record deleted. Cash returned to accountant.','success');
     if(state.page==='bank') renderBank(); else renderIncome();
@@ -5061,9 +5060,9 @@ async function confirmBulkDeposit(){
       <div style="font-size:22px;font-weight:800;color:var(--primary);line-height:1">${fmt(cashWithAccountant)}</div>
       <div style="font-size:12px;color:var(--text2);margin-top:4px">This is the exact amount you will deposit to the bank.</div>
     </div>
-    <details style="margin-bottom:16px">
+    <details open style="margin-bottom:16px">
       <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;color:var(--text2);user-select:none">
-        <span>📋</span><span>How is this amount calculated?</span><span style="margin-left:auto;font-size:11px;color:var(--text3)">Tap to expand ▾</span>
+        <span>📋</span><span>How is this amount calculated?</span><span style="margin-left:auto;font-size:11px;color:var(--text3)">Tap to collapse ▴</span>
       </summary>
       <div style="border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;padding:0 12px;max-height:300px;overflow-y:auto">
         ${incomeHtml}${bankHtml}${expHtml}${pettyHtml}

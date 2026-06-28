@@ -728,6 +728,10 @@ export async function onRequest(context) {
         return result;
       }
       if (method === 'PUT'  && param)  return await updateCashTransaction(DB, param, body);
+      if (method === 'DELETE' && param) {
+        await DB.prepare(`DELETE FROM cash_transactions WHERE id=?`).bind(param).run();
+        return ok({ deleted: true, id: param });
+      }
     }
 
     // ── /api/verify-deposit ─────────────────────────────────────
