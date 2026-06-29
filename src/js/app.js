@@ -3133,19 +3133,19 @@ async function renderDashboard(){
   let dashSpendLabel, dashSpendColor, _pettyIcon, _pettyMsg;
   if (_pettyAfterObligs >= _pettyBuffer) {
     dashSpendLabel = 'Healthy'; dashSpendColor = 'var(--success)'; _pettyIcon = '🟢';
-    _pettyMsg = `✅ Petty cash is sustainable. You can comfortably top up to ${fmt(_pettyTarget)} for next period.`;
+    _pettyMsg = `✅ Petty cash is sustainable. You can comfortably top up to ${fmt(_pettyTarget)} petty cash for next period.`;
   } else if (_pettyAfterObligs >= 0) {
     dashSpendLabel = 'Adequate'; dashSpendColor = '#1976D2'; _pettyIcon = '🔵';
-    _pettyMsg = `👍 Can reach ${fmt(_pettyTarget)} target but only ${fmt(_pettyAfterObligs)} will remain.`;
+    _pettyMsg = `👍 Can reach ${fmt(_pettyTarget)} petty cash target for next period but only ${fmt(_pettyAfterObligs)} will remain.`;
   } else if (_pettyMaxFloat >= _pettyManageable) {
     dashSpendLabel = 'Caution'; dashSpendColor = '#B8860B'; _pettyIcon = '🟡';
-    _pettyMsg = `⚠️ Cannot reach ${fmt(_pettyTarget)} target but can top up to ${fmt(_pettyMaxFloat)} which is above ${fmt(_pettyManageable)} manageable. Watch your spending.`;
+    _pettyMsg = `⚠️ Cannot reach ${fmt(_pettyTarget)} petty cash target for next period but can top up to ${fmt(_pettyMaxFloat)} which is above ${fmt(_pettyManageable)} manageable. Watch your spending.`;
   } else if (_pettyMaxFloat >= _pettyMinimum) {
     dashSpendLabel = 'Tight'; dashSpendColor = '#D97706'; _pettyIcon = '🟠';
-    _pettyMsg = `⚠️ Can only top up to ${fmt(_pettyMaxFloat)} — below ${fmt(_pettyManageable)} manageable. Consider reducing non-essential expenses.`;
+    _pettyMsg = `⚠️ Can only top up to ${fmt(_pettyMaxFloat)} petty cash for next period — below ${fmt(_pettyManageable)} manageable. Consider reducing non-essential expenses.`;
   } else {
     dashSpendLabel = 'Critical'; dashSpendColor = 'var(--danger)'; _pettyIcon = '🔴';
-    _pettyMsg = `🚨 Can only top up to ${fmt(_pettyMaxFloat)} — below ${fmt(_pettyMinimum)} minimum. Please review expenses and income this period.`;
+    _pettyMsg = `🚨 Can only top up to ${fmt(_pettyMaxFloat)} petty cash for next period — below ${fmt(_pettyMinimum)} minimum. Please review expenses and income this period.`;
   }
 
   // Reconciliation card figures — include EVERY balance-affecting expense for the period:
@@ -4546,6 +4546,7 @@ async function viewIncome(id){
       return { icon:'🏧', label:'Petty Cash Refill', date:h.date||h.createdAt, amount:a.amount };
     }).filter(Boolean).sort((a,b)=>new Date(a.date)-new Date(b.date));
   const allOutflowLines = [...expAllocLines, ...pettyAllocLines].sort((a,b)=>new Date(a.date)-new Date(b.date));
+  const pettyAllocTotal = pettyAllocLines.reduce((s,l)=>s+(l.amount||0),0);
   const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Sunday Collection'};
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -4560,8 +4561,9 @@ async function viewIncome(id){
     ${childrenTeacherHeld?`<div class="status-row"><div class="status-row-label">🧒 Children Teacher Hold (for refreshments)</div><div class="status-row-amt" style="color:var(--success)">${fmt(childrenTeacherHeld)}</div></div>`:''}
     ${btAmt?`<div class="status-row"><div class="status-row-label">🏦 Bank Transfer (already in bank)</div><div class="status-row-amt" style="color:var(--primary)">${fmt(btAmt)}</div></div>`:''}
     ${dpAmt?`<div class="status-row"><div class="status-row-label">💳 Direct → Admin Officer Petty Cash</div><div class="status-row-amt" style="color:var(--success)">${fmt(dpAmt)}</div></div>`:''}
-    ${periodCashExpenses>0?`<div class="status-row" style="cursor:pointer" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='none'?'block':'none'"><div class="status-row-label">💸 Cash used for expenses (recorded in Expenses) <span style="font-size:9px;color:var(--text3)">▾</span></div><div class="status-row-amt" style="color:var(--danger)">−${fmt(periodCashExpenses)}</div></div>${allOutflowLines.length?`<div style="display:none;padding:4px 8px 8px 18px;background:rgba(0,0,0,0.02);border-left:2px solid var(--border)">${allOutflowLines.map(l=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:3px 0;color:var(--text2)"><span>${l.icon} ${l.label} <span style="color:var(--text3)">· ${fmtDate(l.date)}</span></span><span style="color:var(--danger);font-weight:600">−${fmt(l.amount)}</span></div>`).join('')}</div>`:''}`:''}
-    ${periodCashExpenses>0?`<div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">💰 Net cash for bank deposit</div><div class="status-row-amt" style="font-weight:700;color:var(--primary)">${fmt(netCashForBank)}</div></div>`:''}
+    ${periodCashExpenses>0?`<div class="status-row" style="cursor:pointer" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='none'?'block':'none'"><div class="status-row-label">💸 Cash used for expenses (recorded in Expenses) <span style="font-size:9px;color:var(--text3)">▾</span></div><div class="status-row-amt" style="color:var(--danger)">−${fmt(periodCashExpenses)}</div></div>${expAllocLines.length?`<div style="display:none;padding:4px 8px 8px 18px;background:rgba(0,0,0,0.02);border-left:2px solid var(--border)">${expAllocLines.map(l=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:3px 0;color:var(--text2)"><span>${l.icon} ${l.label} <span style="color:var(--text3)">· ${fmtDate(l.date)}</span></span><span style="color:var(--danger);font-weight:600">−${fmt(l.amount)}</span></div>`).join('')}</div>`:''}`:''}
+    ${pettyAllocTotal>0?`<div class="status-row" style="cursor:pointer" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='none'?'block':'none'"><div class="status-row-label">🏧 Petty cash top-ups from this cash <span style="font-size:9px;color:var(--text3)">▾</span></div><div class="status-row-amt" style="color:var(--danger)">−${fmt(pettyAllocTotal)}</div></div>${pettyAllocLines.length?`<div style="display:none;padding:4px 8px 8px 18px;background:rgba(0,0,0,0.02);border-left:2px solid var(--border)">${pettyAllocLines.map(l=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:3px 0;color:var(--text2)"><span>${l.icon} ${l.label} <span style="color:var(--text3)">· ${fmtDate(l.date)}</span></span><span style="color:var(--danger);font-weight:600">−${fmt(l.amount)}</span></div>`).join('')}</div>`:''}`:''}
+    ${(periodCashExpenses>0||pettyAllocTotal>0)?`<div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">💰 Net cash for bank deposit</div><div class="status-row-amt" style="font-weight:700;color:var(--primary)">${fmt(Math.max(0, cashHeld - periodCashExpenses - pettyAllocTotal))}</div></div>`:''}
     ${(deposits.length||depositedTotal>0.5)?`<div class="status-row"><div class="status-row-label">✅ Deposited to Bank so far</div><div class="status-row-amt" style="color:var(--success)">${fmt(depositedTotal)}</div></div>`:''}
     ${rawLinkedDepositTotal>0.5 && Math.abs(rawLinkedDepositTotal-depositedTotal)>0.5?`<div class="status-row" style="font-size:11px;color:var(--text2)"><div class="status-row-label" style="font-style:italic">↳ Linked deposit records total ${fmt(rawLinkedDepositTotal)} — redistributed across periods to balance the cash pool.</div><div class="status-row-amt"></div></div>`:''}
     ${depositOverage>0.5?`<div class="status-row" style="flex-direction:column;align-items:flex-start;gap:6px"><div class="status-row-label" style="color:var(--danger);font-size:12px">⚠️ Linked deposit records (${fmt(rawLinkedDepositTotal)}) total ${fmt(depositOverage)} more than this record's cash with accountant (${fmt(cashHeld)}). Please verify and correct.</div>${canAction('income_deposit')?`<button class="btn btn-sm btn-danger" style="font-size:11px;padding:3px 10px" onclick="App.correctIncomeDeposit('${r.id}',${cashHeld})">Correct Deposit to ${fmt(cashHeld)}</button>`:''}</div>`:''}
@@ -5027,7 +5029,7 @@ async function confirmBulkDeposit(){
     const entry = expMapCBD.get(item.id);
     const cashHeld = item.cashHeld || 0;
     const deposited = entry ? entry.deposited : 0;
-    const expensed = entry ? entry.expensed : 0;
+    const expensed = entry ? entry.expenseCovering : 0;
     const pettyUsed = entry ? (entry.pettyAllocations||[]).reduce((s,a)=>s+(a.amount||0),0) : 0;
     const remaining = item.remaining || 0;
     return `<div style="border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
