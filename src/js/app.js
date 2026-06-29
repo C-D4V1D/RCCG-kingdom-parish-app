@@ -4511,7 +4511,7 @@ async function viewIncome(id){
   const dpAmt = r.directPettyCash||0;
   const childrenTeacherHeld = isSunday ? getChildrenTeacherHeldCash(r, remRates) : 0;
   const cashHeld = getIncomeCashWithAccountant(r, remRates);
-  const [allCashVI, allExpensesVI, allPettyVI] = await Promise.all([DB.getCashTransactions(), DB.getExpenses(), DB.getPetty()]);
+  const [allCashVI, allExpensesVI, allPettyVI, settingsVI, allRemsVI] = await Promise.all([DB.getCashTransactions(), DB.getExpenses(), DB.getPetty(), DB.getSettings(), DB.getRemittances()]);
   // Linked deposit records — shown verbatim in the "Deposit records:" footer so the
   // user can audit each physical deposit, even when the FIFO reallocates the cash
   // attribution across records.
@@ -4548,6 +4548,26 @@ async function viewIncome(id){
   const allOutflowLines = [...expAllocLines, ...pettyAllocLines].sort((a,b)=>new Date(a.date)-new Date(b.date));
   const pettyAllocTotal = pettyAllocLines.reduce((s,l)=>s+(l.amount||0),0);
   const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Sunday Collection'};
+
+  // Compute per-Sunday share of fixed quotas for this income record's remittance period
+  let perSundayQuotaLines = [];
+  let viewIncQuotasTotal = 0;
+  if (isSunday) {
+    const recDateObj = parseYmdDate(r.date);
+    if (recDateObj) {
+      const { from: pFrom, to: pTo } = computeRemPeriodDates(settingsVI, allRemsVI, recDateObj.getFullYear(), recDateObj.getMonth());
+      const totalSundays = countSundaysInRange(pFrom, pTo);
+      if (totalSundays > 0) {
+        const quotaList = getQuotaList(settingsVI);
+        perSundayQuotaLines = quotaList
+          .filter(q => (q.amount || 0) > 0)
+          .map(q => ({ label: q.label, amount: (q.amount || 0) / totalSundays }));
+      }
+      viewIncQuotasTotal = perSundayQuotaLines.reduce((s, q) => s + q.amount, 0);
+    }
+  }
+  const viewIncTrueNetLocal = (rem?.netLocal || 0) - viewIncQuotasTotal;
+
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">Income Details — ${fmtDate(r.date)}</div>
@@ -4579,7 +4599,8 @@ async function viewIncome(id){
     ${(rem.coastline||0)>0?`<div class="status-row"><div class="status-row-label">Coastline Worship Centre</div><div class="status-row-amt td-amber">${fmt(rem.coastline)}</div></div>`:''}
     ${(rem.insuranceGen||0)>0?`<div class="status-row"><div class="status-row-label">Insurance Fund (GEN TITHE)</div><div class="status-row-amt td-amber">${fmt(rem.insuranceGen)}</div></div>`:''}
     ${(rem.insuranceMin||0)>0?`<div class="status-row"><div class="status-row-label">Insurance Fund (MIN TITHE)</div><div class="status-row-amt td-amber">${fmt(rem.insuranceMin)}</div></div>`:''}
-    <div class="status-row" style="border-top:2px solid var(--border)"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt td-green" style="font-size:15px">${fmt(rem.netLocal)}</div></div>`:''}
+    ${perSundayQuotaLines.map(q=>`<div class="status-row"><div class="status-row-label">${esc(q.label)}</div><div class="status-row-amt td-amber">${fmt(q.amount)}</div></div>`).join('')}
+    <div class="status-row" style="border-top:2px solid var(--border)"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt td-green" style="font-size:15px">${fmt(viewIncTrueNetLocal)}</div></div>`:''}
     <hr class="divider">
     <div class="fs-12 text-muted">Recorded by: ${r.recordedBy||'—'} · ${isSunday?'Counted with: '+r.usher:'Donor: '+(r.donorName||'—')}</div>
     ${deposits.length?`<div style="margin-top:8px">${deposits.map(d=>`<div style="font-size:12px;color:var(--text2);padding:4px 0;border-bottom:1px solid var(--border-light,#f0f0f0)"><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span>${fmt(d.amount)} via ${d.depositMethod?.replace('_',' ')||'—'} on ${fmtDate(d.date)}</span><span>${d.reference?'Ref: '+d.reference:''}</span>${depositVerificationBadge(d)} ${depositActionButtons(d)}</div>${d.aiNotes?`<div style="font-size:10px;color:var(--text3);margin-top:2px;padding-left:4px">${d.aiNotes}</div>`:''}</div>`).join('')}</div>`:''}
