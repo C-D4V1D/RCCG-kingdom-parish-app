@@ -3128,7 +3128,9 @@ async function renderDashboard(){
   const _pettyCurrentFloat = churchBal.pettyFloat || 0;
   const _pettyTopUpNeeded  = Math.max(0, _pettyTarget - _pettyCurrentFloat);
   const _pettyAfterObligs  = dashSpendable - _pettyCurrentFloat - _pettyTopUpNeeded;
-  const _pettyMaxFloat     = _pettyCurrentFloat + Math.max(0, dashSpendable);
+  // Max achievable petty float = all available funds (dashSpendable already includes
+  // pettyCurrentFloat, so adding it again would double-count the deficit).
+  const _pettyMaxFloat     = Math.max(dashSpendable, _pettyCurrentFloat);
 
   let dashSpendLabel, dashSpendColor, _pettyIcon, _pettyMsg;
   if (_pettyAfterObligs >= _pettyBuffer) {
@@ -6892,7 +6894,7 @@ async function renderExpenses(){
   const _expPettyFloat = churchBal.pettyFloat||0;
   const _expTopUpNeeded = Math.max(0, _expPettyTarget - _expPettyFloat);
   const _expAfterObligs = spendable - _expPettyFloat - _expTopUpNeeded;
-  const _expMaxFloat = _expPettyFloat + Math.max(0, spendable);
+  const _expMaxFloat = Math.max(spendable, _expPettyFloat);
   let spendLabel, spendColor;
   if (_expAfterObligs >= _expPettyBuffer) { spendLabel='Healthy'; spendColor='var(--success)'; }
   else if (_expAfterObligs >= 0) { spendLabel='Adequate'; spendColor='#1976D2'; }
