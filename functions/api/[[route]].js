@@ -1092,6 +1092,7 @@ export async function onRequest(context) {
       if (method === 'POST' && param === 'run-premeeting-sms')  return await runPremeetingSms(DB, env, request);
       if (method === 'POST' && param === 'run-actionitem-sms')  return await runActionItemDeadlineSms(DB, env, request);
       if (method === 'POST' && param === 'run-scheduled-sms')   return await runScheduledSms(DB, env, request);
+      if (method === 'POST' && param === 'run-newmonth-draft-fallback') return await runNewMonthDraftFallback(DB, env, request);
     }
 
     // ── Bulk SMS to KPSC members (meeting notification) ────────────
@@ -7541,6 +7542,10 @@ async function runMonthlySms(DB, env, request) {
     await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
       .bind('kpsc_newmonth_sms_pending_draft', '').run().catch(() => {});
   }
+  // Draft next month's message right after this month's send.
+  // skipIfGeneratedToday guards against the GitHub Actions cron polling this
+  // endpoint every 30 min all day — only the first call actually drafts.
+  await autoGenerateNewMonthDraft(DB, env, { skipIfGeneratedToday: true });
   return ok({ ok: true, sent, failed, total: (partners || []).length });
 }
 
@@ -9222,16 +9227,29 @@ async function runScheduledSms(DB, env, request) {
 }
 
 // ── AUTO-DRAFT: HAPPY NEW MONTH SMS ──────────────────────────────────────────
-// Called on day 1 (after send) and on day 3 as a fallback.
-// skipIfExists=true lets the day-3 backup skip quietly when day-1 already succeeded.
-async function autoGenerateNewMonthDraft(DB, env, skipIfExists = false) {
+// Called from runMonthlySms() right after a successful day-1 send, and again
+// (as a fallback) from runNewMonthDraftFallback() on day 3.
+// opts.skipIfExists=true          — skip quietly if a draft is already saved (day-3 backup).
+// opts.skipIfGeneratedToday=true  — skip quietly if we already generated today (the day-1
+//                                    endpoint is polled every 30 min by the GitHub Actions
+//                                    cron, so this stops it firing 48 times in one day).
+async function autoGenerateNewMonthDraft(DB, env, opts = {}) {
   try {
+    const { skipIfExists = false, skipIfGeneratedToday = false } = opts;
     if (skipIfExists) {
       const existing = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_newmonth_sms_pending_draft'`).first().catch(() => null);
       if (existing?.value?.trim()) return; // day-1 draft already in place
     }
 
     const now = new Date();
+    if (skipIfGeneratedToday) {
+      const dateRow = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_newmonth_sms_draft_date'`).first().catch(() => null);
+      const last = dateRow?.value ? new Date(dateRow.value) : null;
+      if (last && !isNaN(last) && last.getUTCFullYear() === now.getUTCFullYear() && last.getUTCMonth() === now.getUTCMonth() && last.getUTCDate() === now.getUTCDate()) {
+        return; // already generated earlier today
+      }
+    }
+
     // Determine next month
     const rawNext = now.getUTCMonth() + 2; // +1 for 0-index, +1 for next month
     const nextYear = rawNext > 12 ? now.getUTCFullYear() + 1 : now.getUTCFullYear();
@@ -9280,65 +9298,27 @@ Requirements:
   } catch { /* swallow — draft failure must not surface */ }
 }
 
-// ── CLOUDFLARE SCHEDULED HANDLER (cron triggers) ──────────────────────────────
-export async function scheduled(event, env, ctx) {
-  const DB = env.DB;
-  if (!DB) return;
+// NOTE: This project deploys as Cloudflare Pages (see wrangler.toml —
+// pages_build_output_dir, no [triggers] block). Pages Functions do not support
+// a "scheduled" cron export; all periodic jobs run instead via the GitHub
+// Actions workflow (.github/workflows/cron-followups.yml) polling the
+// /api/internal/run-* endpoints below on a timer. There is intentionally no
+// `scheduled()` export here — one existed previously but was silently never
+// invoked in production, which is what caused the new-month auto-draft
+// feature to never actually run.
+
+// ── INTERNAL CRON: HAPPY NEW MONTH DRAFT FALLBACK (day 3 backup) ──────────
+// Safety net in case the day-1 draft (generated inline at the end of
+// runMonthlySms) failed for any reason — e.g. DeepSeek was down that day.
+async function runNewMonthDraftFallback(DB, env, request) {
+  const authErr = requireCronSecret(env, request);
+  if (authErr) return authErr;
   const now = new Date();
-  const day = now.getUTCDate();
-  if (day === 1) {
-    // Send the Happy New Month SMS, then immediately draft next month's message.
-    ctx.waitUntil((async () => {
-      await runMonthlySmsInternal(DB, now);
-      await autoGenerateNewMonthDraft(DB, env);
-    })());
+  if (now.getUTCDate() !== 3) {
+    return ok({ ok: true, skipped: true, reason: 'Not the 3rd of the month' });
   }
-  if (day === 3) {
-    // Backup: generate next-month draft only if day-1 generation failed (skipIfExists=true).
-    ctx.waitUntil(autoGenerateNewMonthDraft(DB, env, true));
-  }
-}
-
-// Internal version of runMonthlySms that uses a pending draft if available
-async function runMonthlySmsInternal(DB, now) {
-  try {
-    const t = await getTermiiSettings(DB);
-    if (!t.apiKey || !t.newMonthSms) return;
-    if (!isWithinSendWindow(t)) return;
-
-    const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-    const monthName = MONTH_NAMES[now.getUTCMonth()];
-    const year = now.getUTCFullYear();
-    const nmMonth = now.getUTCMonth() + 1;
-
-    // Use pending auto-draft if available, otherwise fall back to saved template
-    const draftRow = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_newmonth_sms_pending_draft'`).first();
-    const newmonthText = (draftRow?.value && draftRow.value.trim()) ? draftRow.value.trim() : t.newmonthText;
-
-    const { results: partners } = await DB.prepare(
-      `SELECT id, full_name, phone FROM kpsc_partners WHERE COALESCE(deleted_at,'')='' AND status='active' AND phone != '' AND COALESCE(opted_out,0)=0 AND COALESCE(dnd_flagged,0)=0`
-    ).all();
-
-    let sentCount = 0;
-    for (const p of (partners || [])) {
-      const msg = newmonthText
-        .replace(/\{\{name\}\}/g, p.full_name)
-        .replace(/\{\{month\}\}/g, `${monthName} ${year}`);
-      const nmsid = t.partnerSenderId || t.senderId;
-      const result = await sendTermiiSms(t.apiKey, nmsid, p.phone, msg);
-      if (result.ok) {
-        sentCount++;
-        await DB.prepare(
-          `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
-        ).bind(newId('krm'), p.id, 'sms', msg, 'sent', 'pending', result.messageId || '', 'new_month', year, nmMonth, 'cron', now.toISOString()).run().catch(() => {});
-      }
-    }
-    // Only clear the draft if at least one SMS was delivered — preserves it for retry on total failure
-    if (draftRow?.value && sentCount > 0) {
-      await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
-        .bind('kpsc_newmonth_sms_pending_draft', '').run();
-    }
-  } catch { /* swallow */ }
+  await autoGenerateNewMonthDraft(DB, env, { skipIfExists: true });
+  return ok({ ok: true });
 }
 
 // ══════════════════════════════════════════════════════════════════════
