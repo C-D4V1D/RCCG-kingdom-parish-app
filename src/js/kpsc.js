@@ -7402,7 +7402,8 @@ async function openFinanceModal(entryToEdit = null) {
   document.getElementById('kpsc-finance-modal')?.remove();
   const settingsRes = await apiGet('settings');
   const incomeCategories = Array.isArray(settingsRes?.kpsc_income_categories) ? settingsRes.kpsc_income_categories : ['partnership_payment','one_time_donation','wealth_development_offering','other_income'];
-  const expenseCategories = Array.isArray(settingsRes?.kpsc_expense_categories) ? settingsRes.kpsc_expense_categories : ['projects','welfare','rent','church_support','committee_operations','bank_charges'];
+  const expenseCategoriesBase = Array.isArray(settingsRes?.kpsc_expense_categories) ? settingsRes.kpsc_expense_categories : ['projects','welfare','rent','church_support','committee_operations'];
+  const expenseCategories = expenseCategoriesBase.includes('bank_charges') ? expenseCategoriesBase : [...expenseCategoriesBase, 'bank_charges'];
 
   const e = entryToEdit;
   const isEdit = !!e?.id;

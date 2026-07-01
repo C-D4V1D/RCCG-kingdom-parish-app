@@ -7340,7 +7340,7 @@ async function ingestBankChargeEmail(DB, env, request, body) {
 
   if (messageId) {
     const existing = await DB.prepare(
-      `SELECT id FROM email_ingest_log WHERE message_id=? AND outcome != 'pending' AND id != ?`
+      `SELECT id FROM email_ingest_log WHERE message_id=? AND outcome IN ('inserted','skipped_not_charge','skipped_duplicate') AND id != ?`
     ).bind(messageId, logId).first();
     if (existing) {
       await DB.prepare(`UPDATE email_ingest_log SET outcome='skipped_duplicate' WHERE id=?`).bind(logId).run();
