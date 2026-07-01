@@ -7225,16 +7225,18 @@ async function setPartnerDetailYear(year) {
 async function renderFinance(main) {
   const year = S.financeYear;
   const month = S.financeMonth;
-  const [financeRes, partnersRes, allTimeRes] = await Promise.all([
+  const [financeRes, partnersRes, allTimeRes, settingsRes] = await Promise.all([
     apiGet(`kpsc-finance?year=${year}${month ? `&month=${month}` : ''}`),
     apiGet('kpsc-partners'),
     apiGet('kpsc-finance?year=all'),
+    apiGet('settings'),
   ]);
   if (financeRes?.error) throw new Error(financeRes.error);
   if (partnersRes?.error) throw new Error(partnersRes.error);
   S.financeEntries = Array.isArray(financeRes) ? financeRes : [];
   S.partners = Array.isArray(partnersRes) ? partnersRes : [];
   S.allFinanceEntries = Array.isArray(allTimeRes) ? allTimeRes : [];
+  const minimumBalance = Number(settingsRes?.kpsc_minimum_balance || 0);
 
   // Reset filter/sort state on every full page load
   S.financeSearch = '';
@@ -7275,6 +7277,7 @@ async function renderFinance(main) {
   const currentBalance = balanceIncome - balanceExpense;
   S.financeBalance = currentBalance;
   S.financeBalanceIsCurrentPeriod = isCurrentPeriod;
+  const availableForProjects = currentBalance - minimumBalance;
   const yearOpts = [nowYear, nowYear-1, nowYear-2].map(y => `<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
   const monthOpts = [0,1,2,3,4,5,6,7,8,9,10,11,12].map(m =>
     `<option value="${m}" ${month===m?'selected':''}>${m===0?'All Months':monthName(m)}</option>`
@@ -7292,7 +7295,7 @@ async function renderFinance(main) {
   main.innerHTML = `
     <div class="k-page">
 
-      <div class="k-dash-stats kf-stat-5">
+      <div class="k-dash-stats kf-stat-6">
         <div class="k-stat">
           <div class="k-stat-val" style="color:var(--green)">₦${Math.round(incomeTotal).toLocaleString('en-NG')}</div>
           <div class="k-stat-sub">${incomeEntries.length} entr${incomeEntries.length===1?'y':'ies'}</div>
@@ -7311,6 +7314,11 @@ async function renderFinance(main) {
         <div class="k-stat">
           <div class="k-stat-val" style="color:var(--navy)">₦${Math.round(partnerIncome).toLocaleString('en-NG')}</div>
           <div class="k-stat-lbl">Partner Income</div>
+        </div>
+        <div class="k-stat ${availableForProjects < 0 ? 'k-stat-balance-deficit' : 'k-stat-highlight'}" title="${minimumBalance > 0 ? `Balance above the ₦${Math.round(minimumBalance).toLocaleString('en-NG')} minimum kept in reserve` : 'Set a minimum balance in Settings to compute this'}">
+          <div class="k-stat-val" style="color:${availableForProjects<0?'var(--red)':'var(--amber)'}">₦${Math.round(Math.abs(availableForProjects)).toLocaleString('en-NG')}</div>
+          <div class="k-stat-sub" style="color:${availableForProjects<0?'var(--red)':'var(--text3)'}">${availableForProjects<0 ? 'Below minimum balance' : `above ₦${Math.round(minimumBalance).toLocaleString('en-NG')} minimum`}</div>
+          <div class="k-stat-lbl">Available for Projects</div>
         </div>
         <div class="k-stat ${unlinkedCount > 0 ? 'k-stat-highlight' : ''}">
           <div class="k-stat-val" style="color:${unlinkedCount>0?'var(--amber)':'var(--navy)'}">${unlinkedCount}</div>
@@ -11006,6 +11014,7 @@ async function renderSettings(main) {
   const expenseCategories = Array.isArray(res?.kpsc_expense_categories) ? res.kpsc_expense_categories.join('\n') : '';
   const meetingCadence = res?.kpsc_meeting_cadence || 'none';
   S.kpscMeetingCadence = meetingCadence;
+  const minimumBalance = Number(res?.kpsc_minimum_balance || 0);
   // Termii SMS settings
   const termiiApiKey         = res?.kpsc_termii_api_key             || '';
   const termiiSenderId       = res?.kpsc_termii_sender_id           || 'RCCG-KP';
@@ -11489,6 +11498,11 @@ async function renderSettings(main) {
           <label class="k-label">Expense Categories (one per line)</label>
           <textarea id="ks-expense-cats" class="k-input k-textarea" style="min-height:100px">${esc(expenseCategories)}</textarea>
           <p class="k-hint">e.g. projects, welfare, rent, church_support, committee_operations</p>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">Minimum Balance to Retain (₦)</label>
+          <input type="number" id="ks-minimum-balance" class="k-input" min="0" step="1" value="${minimumBalance}" placeholder="0" />
+          <p class="k-hint">The amount kept back as a reserve. The Finance page shows what's left over this amount as "Available for Projects".</p>
         </div>
         <div id="ks-ops-save-msg" class="k-settings-msg" style="display:none"></div>
         <button class="kbtn kbtn-primary" onclick="Kpsc.saveKpscOpsSettings()">Save Operations Settings</button>
@@ -12023,12 +12037,14 @@ async function saveKpscOpsSettings() {
   const incomeText = document.getElementById('ks-income-cats')?.value || '';
   const expenseText = document.getElementById('ks-expense-cats')?.value || '';
   const cadence = document.getElementById('ks-meeting-cadence')?.value || 'none';
+  const minimumBalance = Math.max(0, Number(document.getElementById('ks-minimum-balance')?.value) || 0);
   const incomeCategories = incomeText.split(/[\n,]/).map(s=>s.trim().toLowerCase().replace(/\s+/g,'_')).filter(Boolean);
   const expenseCategories = expenseText.split(/[\n,]/).map(s=>s.trim().toLowerCase().replace(/\s+/g,'_')).filter(Boolean);
   const res = await apiPost('settings', {
     kpsc_income_categories: incomeCategories,
     kpsc_expense_categories: expenseCategories,
     kpsc_meeting_cadence: cadence,
+    kpsc_minimum_balance: minimumBalance,
   });
   if (!res?.error) S.kpscMeetingCadence = cadence;
   if (res?.error) {

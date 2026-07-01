@@ -920,12 +920,13 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 
 /* ── FINANCE PAGE ENHANCEMENTS ────────────────────────────────────────────── */
 
-/* 5-column stat bar */
-.kf-stat-5{grid-template-columns:repeat(5,1fr);}
+/* 6-column stat bar */
+.kf-stat-6{grid-template-columns:repeat(6,1fr);}
 .k-stat-sub{font-size:11px;color:var(--text3);margin-top:2px;}
 @media(max-width:700px){
-  .kf-stat-5{grid-template-columns:repeat(2,1fr);}
-  .kf-stat-5 .k-stat:nth-child(5){grid-column:1/-1;}
+  .kf-stat-6{grid-template-columns:repeat(2,1fr);}
+  .kf-stat-6 .k-stat:nth-child(5),
+  .kf-stat-6 .k-stat:nth-child(6){grid-column:1/-1;}
 }
 
 /* Controls row */
