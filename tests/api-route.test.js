@@ -3343,3 +3343,93 @@ test('POST /api/internal/ingest-bank-charge-email deduplicates by messageId', as
   assert.equal(body.skipped, true);
   assert.equal(body.reason, 'duplicate');
 });
+
+test('POST /api/internal/ingest-bank-charge-email falls back to OpenAI when DeepSeek fails', async () => {
+  const inserted = [];
+  const onPrepare = (sql) => {
+    if (/INSERT INTO email_ingest_log/.test(sql)) return { bind() { return this; }, async run() {} };
+    if (/SELECT id FROM email_ingest_log WHERE message_id/.test(sql)) return { bind() { return this; }, async first() { return null; } };
+    if (/SELECT key,value FROM settings WHERE key IN/.test(sql)) return { bind() { return this; }, async all() { return { results: [{ key: 'ai_deepseek_key', value: 'bad-key' }] }; } };
+    if (/SELECT value FROM settings WHERE key='ai_openai_key'/.test(sql)) return { bind() { return this; }, async first() { return { value: 'openai-key' }; } };
+    if (/SELECT value FROM settings WHERE key='kpsc_bank_account_number'/.test(sql)) return { bind() { return this; }, async first() { return null; } };
+    if (/UPDATE email_ingest_log/.test(sql)) return { bind() { return this; }, async run() {} };
+    if (/SELECT id FROM kpsc_finance_entries/.test(sql)) return { bind() { return this; }, async first() { return null; } };
+    if (/INSERT INTO kpsc_finance_entries/.test(sql)) return { bind(...a) { inserted.push(a); return this; }, async run() {} };
+    return { bind() { return this; }, async run() {}, async first() { return null; }, async all() { return { results: [] }; } };
+  };
+
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('deepseek.com')) return new Response('Server error', { status: 500 });
+    if (String(url).includes('openai.com')) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          isBankCharge: true, date: '2026-06-27', amount: 70,
+          reference: 'Account Maintenance Charge', narration: 'Account Maintenance Charge',
+          accountNumber: '204XXXX358',
+        }) } }]
+      }));
+    }
+    throw new Error('unexpected fetch url: ' + url);
+  };
+
+  try {
+    const req = new Request('https://example.com/api/internal/ingest-bank-charge-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer test-secret' },
+      body: JSON.stringify({ subject: 'Debit Alert', bodyText: 'Account Maintenance Charge 70.00 DR', messageId: 'msg-fallback-1' }),
+    });
+    const res = await onRequest({
+      request: req,
+      env: { DB: createDBMock({ onPrepare }), EMAIL_INGEST_SECRET: 'test-secret' },
+    });
+    const body = await readJson(res);
+    assert.equal(res.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.amount, 70);
+    assert.equal(inserted.length, 1);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('POST /api/internal/ingest-bank-charge-email skips charges from a non-KPSC bank account', async () => {
+  const inserted = [];
+  const onPrepare = (sql) => {
+    if (/INSERT INTO email_ingest_log/.test(sql)) return { bind() { return this; }, async run() {} };
+    if (/SELECT id FROM email_ingest_log WHERE message_id/.test(sql)) return { bind() { return this; }, async first() { return null; } };
+    if (/SELECT key,value FROM settings WHERE key IN/.test(sql)) return { bind() { return this; }, async all() { return { results: [{ key: 'ai_deepseek_key', value: 'test-key' }] }; } };
+    if (/SELECT value FROM settings WHERE key='kpsc_bank_account_number'/.test(sql)) return { bind() { return this; }, async first() { return { value: '204XXXX358' }; } };
+    if (/UPDATE email_ingest_log/.test(sql)) return { bind() { return this; }, async run() {} };
+    if (/INSERT INTO kpsc_finance_entries/.test(sql)) return { bind(...a) { inserted.push(a); return this; }, async run() {} };
+    return { bind() { return this; }, async run() {}, async first() { return null; }, async all() { return { results: [] }; } };
+  };
+
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{ message: { content: JSON.stringify({
+      isBankCharge: true, date: '2026-06-27', amount: 70,
+      reference: 'Account Maintenance Charge', narration: 'Account Maintenance Charge',
+      accountNumber: '011XXXX999',
+    }) } }]
+  }));
+
+  try {
+    const req = new Request('https://example.com/api/internal/ingest-bank-charge-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer test-secret' },
+      body: JSON.stringify({ subject: 'Debit Alert', bodyText: 'Account Maintenance Charge 70.00 DR', messageId: 'msg-wrongacct-1' }),
+    });
+    const res = await onRequest({
+      request: req,
+      env: { DB: createDBMock({ onPrepare }), EMAIL_INGEST_SECRET: 'test-secret' },
+    });
+    const body = await readJson(res);
+    assert.equal(res.status, 200);
+    assert.equal(body.skipped, true);
+    assert.equal(body.reason, 'wrong_account');
+    assert.equal(inserted.length, 0);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});

@@ -7319,6 +7319,87 @@ function requireEmailIngestSecret(env, request) {
   return null;
 }
 
+function buildBankChargeClassifierPrompt(subject, bodyText) {
+  return `You are a bank transaction email classifier. Analyze this email and determine if it is a bank-initiated charge/fee (NOT a regular transfer, deposit, or withdrawal by the account holder).
+
+Bank charges include: Account Maintenance Charge, VAT on Account Maintenance, Stamp Duty Charge, SMS Alert Charge, SMS Alert Charge VAT, Commission on Turnover (COT), Card Maintenance Fee, Cheque Book Issuance Charge, VAT on Cheque Book Issuance, ATM Maintenance Charge, and any similar bank-imposed fee.
+
+NOT bank charges: regular transfers, deposits, withdrawals, payments made by the account holder, credit alerts.
+
+Email subject: ${subject}
+Email body: ${bodyText.slice(0, 1500)}
+
+Return ONLY valid JSON (no markdown, no code fences):
+{"isBankCharge":true/false,"date":"YYYY-MM-DD","amount":0.00,"reference":"narration text from email","narration":"short description of the charge type","accountNumber":"the masked account number exactly as shown in the email, e.g. 204XXXX358"}
+
+If not a bank charge, still return the JSON with isBankCharge:false and best-effort fields.`;
+}
+
+function parseAiJsonContent(rawText) {
+  const cleanText = String(rawText || '{}').replace(/```json?\s*/gi, '').replace(/```\s*/gi, '').trim();
+  const parsed = safeJsonParse(cleanText, null);
+  if (!parsed || typeof parsed !== 'object') throw new Error('AI did not return valid JSON');
+  return parsed;
+}
+
+// Classifies a bank alert email using DeepSeek, falling back to OpenAI if DeepSeek
+// is not configured or its call fails (network error, non-2xx, bad JSON).
+async function classifyBankChargeEmail(DB, env, subject, bodyText) {
+  const prompt = buildBankChargeClassifierPrompt(subject, bodyText);
+  const errors = [];
+
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-v4-flash';
+  try {
+    const { results: sr } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
+    const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
+    deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
+  } catch (_) {}
+
+  if (deepseekKey) {
+    try {
+      const resp = await fetch('https://api.deepseek.com/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+        body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 300, temperature: 0.1 }),
+      });
+      if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
+      const aiData = await resp.json();
+      const result = parseAiJsonContent(aiData.choices?.[0]?.message?.content);
+      return { result, provider: 'deepseek' };
+    } catch (e) {
+      errors.push(`DeepSeek: ${e.message}`);
+    }
+  } else {
+    errors.push('DeepSeek: no API key configured');
+  }
+
+  // Fallback: OpenAI (reuses the same key resolution as receipt OCR / statement parsing)
+  const openaiKey = await resolveOpenAiKey(env, DB);
+  if (openaiKey) {
+    try {
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+        body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], max_tokens: 300, temperature: 0.1 }),
+      });
+      if (!resp.ok) throw new Error(`OpenAI API error ${resp.status}`);
+      const aiData = await resp.json();
+      const result = parseAiJsonContent(aiData.choices?.[0]?.message?.content);
+      return { result, provider: 'openai' };
+    } catch (e) {
+      errors.push(`OpenAI: ${e.message}`);
+    }
+  } else {
+    errors.push('OpenAI: no API key configured');
+  }
+
+  throw new Error(errors.join(' | '));
+}
+
 async function ingestBankChargeEmail(DB, env, request, body) {
   const authErr = requireEmailIngestSecret(env, request);
   if (authErr) return authErr;
@@ -7340,7 +7421,7 @@ async function ingestBankChargeEmail(DB, env, request, body) {
 
   if (messageId) {
     const existing = await DB.prepare(
-      `SELECT id FROM email_ingest_log WHERE message_id=? AND outcome IN ('inserted','skipped_not_charge','skipped_duplicate') AND id != ?`
+      `SELECT id FROM email_ingest_log WHERE message_id=? AND outcome IN ('inserted','skipped_not_charge','skipped_duplicate','skipped_wrong_account') AND id != ?`
     ).bind(messageId, logId).first();
     if (existing) {
       await DB.prepare(`UPDATE email_ingest_log SET outcome='skipped_duplicate' WHERE id=?`).bind(logId).run();
@@ -7348,56 +7429,36 @@ async function ingestBankChargeEmail(DB, env, request, body) {
     }
   }
 
-  let deepseekKey = '';
-  let deepseekModel = 'deepseek-v4-flash';
+  let aiResult, aiProvider;
   try {
-    const { results: sr } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
-    const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
-    deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
-    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
-    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
-    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
-  } catch (_) {}
-
-  if (!deepseekKey) {
-    await DB.prepare(`UPDATE email_ingest_log SET outcome='error', error_detail='No DeepSeek key configured' WHERE id=?`).bind(logId).run();
-    return err('DeepSeek API key is required. Configure it in Settings → AI Provider Keys.', 503);
-  }
-
-  const prompt = `You are a bank transaction email classifier. Analyze this email and determine if it is a bank-initiated charge/fee (NOT a regular transfer, deposit, or withdrawal by the account holder).
-
-Bank charges include: Account Maintenance Charge, VAT on Account Maintenance, Stamp Duty Charge, SMS Alert Charge, SMS Alert Charge VAT, Commission on Turnover (COT), Card Maintenance Fee, Cheque Book Issuance Charge, VAT on Cheque Book Issuance, ATM Maintenance Charge, and any similar bank-imposed fee.
-
-NOT bank charges: regular transfers, deposits, withdrawals, payments made by the account holder, credit alerts.
-
-Email subject: ${subject}
-Email body: ${bodyText.slice(0, 1500)}
-
-Return ONLY valid JSON (no markdown, no code fences):
-{"isBankCharge":true/false,"date":"YYYY-MM-DD","amount":0.00,"reference":"narration text from email","narration":"short description of the charge type"}
-
-If not a bank charge, still return the JSON with isBankCharge:false and best-effort fields.`;
-
-  let aiResult;
-  try {
-    const resp = await fetch('https://api.deepseek.com/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
-      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 300, temperature: 0.1 }),
-    });
-    if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
-    const aiData = await resp.json();
-    const rawText = aiData.choices?.[0]?.message?.content || '{}';
-    const cleanText = rawText.replace(/```json?\s*/gi, '').replace(/```\s*/gi, '').trim();
-    aiResult = safeJsonParse(cleanText, null);
-    if (!aiResult || typeof aiResult !== 'object') throw new Error('AI did not return valid JSON');
+    const classified = await classifyBankChargeEmail(DB, env, subject, bodyText);
+    aiResult = classified.result;
+    aiProvider = classified.provider;
   } catch (e) {
     await DB.prepare(`UPDATE email_ingest_log SET outcome='error', error_detail=? WHERE id=?`).bind(String(e.message).slice(0, 500), logId).run();
     return err(`AI classification failed: ${e.message}`, 502);
   }
 
   await DB.prepare(`UPDATE email_ingest_log SET ai_response=? WHERE id=?`)
-    .bind(JSON.stringify(aiResult).slice(0, 2000), logId).run();
+    .bind(JSON.stringify({ ...aiResult, _provider: aiProvider }).slice(0, 2000), logId).run();
+
+  // Only record charges from the committee's own bank account(s) — filters out
+  // alerts from any other FirstBank account the user may also receive.
+  let allowedAccounts = [];
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_bank_account_number'`).first();
+    allowedAccounts = String(row?.value || '').split(',').map(s => s.trim()).filter(Boolean);
+  } catch (_) {}
+
+  const extractedAccount = String(aiResult.accountNumber || '').trim();
+  if (allowedAccounts.length > 0) {
+    const accountMatches = extractedAccount && allowedAccounts.some(a => a.toLowerCase() === extractedAccount.toLowerCase());
+    if (!accountMatches) {
+      await DB.prepare(`UPDATE email_ingest_log SET outcome='skipped_wrong_account', error_detail=? WHERE id=?`)
+        .bind(`Account "${extractedAccount || 'unknown'}" is not in the configured KPSC account list`, logId).run();
+      return ok({ skipped: true, reason: 'wrong_account' });
+    }
+  }
 
   if (!aiResult.isBankCharge) {
     await DB.prepare(`UPDATE email_ingest_log SET outcome='skipped_not_charge' WHERE id=?`).bind(logId).run();
@@ -7422,7 +7483,7 @@ If not a bank charge, still return the JSON with isBankCharge:false and best-eff
     return ok({ skipped: true, reason: 'duplicate_entry' });
   }
 
-  const subCategory = amount > 4500 ? 'review_amount' : '';
+  const subCategory = amount > 5000 ? 'review_amount' : '';
   const entryId = newId('kfe');
   await DB.prepare(`
     INSERT INTO kpsc_finance_entries

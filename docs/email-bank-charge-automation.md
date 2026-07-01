@@ -9,7 +9,10 @@ entry required.
 1. Gmail forwards all FirstBank alert emails to a Zapier address
 2. Zapier sends the email content to the KPSC portal API
 3. The portal uses DeepSeek AI to classify the email and extract fields
-4. If it's a bank charge, it's automatically recorded as an expense
+   (falling back to OpenAI automatically if DeepSeek is unavailable or fails)
+4. If the alert is from the KPSC bank account and is a charge, it's
+   automatically recorded as an expense. Alerts from any other bank account,
+   and alerts that aren't charges, are ignored.
 
 **Time to set up:** ~15 minutes  
 **Cost:** Free (Zapier free tier, Cloudflare free tier)
@@ -21,7 +24,15 @@ entry required.
 - Your KPSC portal must be deployed on Cloudflare Pages
 - DeepSeek API key must already be configured in the portal
   (Settings > AI Provider Keys -- the same key used for bank statement parsing)
+- OpenAI API key configured too, if possible (Settings > AI Provider Keys --
+  the same key used for OCR/transcription). This is optional but recommended:
+  it's used automatically as a backup only if DeepSeek is unavailable or a
+  call to it fails, so a single provider outage doesn't drop a charge.
 - Access to the Gmail account that receives FirstBank alerts
+- Know the masked account number of your KPSC committee's FirstBank account
+  exactly as it appears in the alert emails (e.g. `204XXXX358`) -- you'll enter
+  this in Step 2 so alerts from any *other* FirstBank account you may also
+  receive are correctly ignored instead of being recorded by mistake.
 
 ---
 
@@ -54,13 +65,27 @@ kpsc-email-ingest-2026-xR7mQ9pL4wN2
 
 ---
 
-## Step 2: Confirm DeepSeek Key (~1 min)
+## Step 2: Confirm AI Keys + Set Your KPSC Bank Account Number (~2 min)
 
 1. Open your KPSC portal in a browser
 2. Go to **Settings** > **AI Provider Keys**
 3. Verify the **DeepSeek API Key** field is filled in (it should be, since
-   bank-statement parsing already uses it)
-4. If empty, paste your DeepSeek key there and save
+   bank-statement parsing already uses it). If empty, paste your DeepSeek key
+   there.
+4. If you have an **OpenAI API Key** configured too (used elsewhere for OCR
+   and transcription), leave it as-is -- it will automatically be used as a
+   backup if DeepSeek ever fails or is unreachable. Not required, but
+   recommended.
+5. In the same section, find **"KPSC Bank Account Number(s) -- Bank Charge
+   Email Automation"**. Enter the masked account number exactly as it shows
+   in your FirstBank alert emails, e.g. `204XXXX358`. If you have more than
+   one KPSC-related account, separate multiple numbers with commas.
+
+   **This is the safety filter that prevents charges from a *different*
+   FirstBank account (e.g. a personal account) from ever being recorded.**
+   Any alert whose account number doesn't match what you enter here is
+   skipped automatically, no matter what else the email says.
+6. Click **Save API Keys & Policy**
 
 ---
 
@@ -90,13 +115,20 @@ Still in the same Zap:
 
    | Field | Value |
    |-------|-------|
-   | **URL** | `https://YOUR-PORTAL.pages.dev/api/internal/ingest-bank-charge-email` |
+   | **URL** | `https://rccg-kingdom-parish-app.pages.dev/api/internal/ingest-bank-charge-email` |
    | **Payload Type** | `json` |
    | **Data** | See field mapping below |
    | **Headers** | `Authorization` = `Bearer YOUR_EMAIL_INGEST_SECRET` |
 
-   Replace `YOUR-PORTAL.pages.dev` with your actual Cloudflare Pages URL.
    Replace `YOUR_EMAIL_INGEST_SECRET` with the secret from Step 1.
+
+   > **Which URL -- with or without `/kpsc`?** Always use the site root, never
+   > `/kpsc/...`. `/kpsc` is just the URL path for the KPSC portal's web page
+   > (the frontend you view in a browser); it has nothing to do with where the
+   > API lives. Every API route -- including this new one -- is served at
+   > `/api/...` directly off the site root regardless of which page you
+   > normally browse to. So the correct webhook URL is always
+   > `https://rccg-kingdom-parish-app.pages.dev/api/internal/ingest-bank-charge-email`.
 
 5. **Data field mapping** (click "+" to add each key-value pair):
 
@@ -187,10 +219,11 @@ side of skipping (you can always enter those manually).
 | Nothing appears on Finance page | Check Zapier > Zap History for the task status. If it shows an error response, check the error message. |
 | Zapier shows 401 error | The `EMAIL_INGEST_SECRET` in Zapier doesn't match the one in Cloudflare. Double-check both values. |
 | Zapier shows 503 error | Either `EMAIL_INGEST_SECRET` isn't set in Cloudflare env vars, or the DeepSeek key isn't configured in portal Settings. |
-| Zapier shows 502 error | DeepSeek API call failed. This is usually temporary -- Zapier will auto-retry up to 3 times. |
+| Zapier shows 502 error | Both DeepSeek and OpenAI (if configured) failed. This is usually temporary -- Zapier will auto-retry up to 3 times. |
 | Duplicate entries | The system has built-in duplicate detection (by email Message-ID and by date+amount+narration). If you see duplicates, they likely have slightly different narration text. |
-| Charge was skipped | The AI classified it as a non-charge. You can check the `email_ingest_log` table for details. Enter it manually on the Finance page. |
-| Amount seems flagged | Charges over 4,500 NGN get a `review_amount` sub-category flag so they stand out on the finance page for manual verification. |
+| Charge was skipped ("not_a_charge") | The AI classified it as a non-charge. You can check the `email_ingest_log` table for details. Enter it manually on the Finance page. |
+| Charge was skipped ("wrong_account") | The extracted account number didn't match what you entered in Settings. Double-check the masked account number is typed exactly as it appears in the alert emails. |
+| Amount seems flagged | Charges over 5,000 NGN get a `review_amount` sub-category flag so they stand out on the finance page for manual verification. |
 
 ---
 
