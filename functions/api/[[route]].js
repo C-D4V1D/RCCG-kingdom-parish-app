@@ -1093,6 +1093,7 @@ export async function onRequest(context) {
       if (method === 'POST' && param === 'run-actionitem-sms')  return await runActionItemDeadlineSms(DB, env, request);
       if (method === 'POST' && param === 'run-scheduled-sms')   return await runScheduledSms(DB, env, request);
       if (method === 'POST' && param === 'run-newmonth-draft-fallback') return await runNewMonthDraftFallback(DB, env, request);
+      if (method === 'POST' && param === 'ingest-bank-charge-email') return await ingestBankChargeEmail(DB, env, request, body);
     }
 
     // ── Bulk SMS to KPSC members (meeting notification) ────────────
@@ -1778,6 +1779,18 @@ async function handleInit(DB) {
       data_json   TEXT NOT NULL,
       created_by  TEXT DEFAULT '',
       created_at  TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS email_ingest_log (
+      id               TEXT PRIMARY KEY,
+      message_id       TEXT DEFAULT '',
+      subject          TEXT DEFAULT '',
+      from_addr        TEXT DEFAULT '',
+      body_text        TEXT DEFAULT '',
+      outcome          TEXT DEFAULT 'pending',
+      ai_response      TEXT DEFAULT '',
+      finance_entry_id TEXT DEFAULT '',
+      error_detail     TEXT DEFAULT '',
+      created_at       TEXT DEFAULT (datetime('now'))
     )`,
   ];
 
@@ -7296,6 +7309,132 @@ function requireCronSecret(env, request) {
   const auth = request.headers.get('Authorization') || '';
   if (auth !== `Bearer ${secret}`) return err('Unauthorized', 401);
   return null;
+}
+
+function requireEmailIngestSecret(env, request) {
+  const secret = String(env.EMAIL_INGEST_SECRET || '').trim();
+  if (!secret) return err('EMAIL_INGEST_SECRET env var not configured', 503);
+  const auth = request.headers.get('Authorization') || '';
+  if (auth !== `Bearer ${secret}`) return err('Unauthorized', 401);
+  return null;
+}
+
+async function ingestBankChargeEmail(DB, env, request, body) {
+  const authErr = requireEmailIngestSecret(env, request);
+  if (authErr) return authErr;
+
+  if (!body || typeof body !== 'object') return err('Invalid JSON body', 400);
+
+  const subject = String(body?.subject || '').trim();
+  const from = String(body?.from || '').trim();
+  const messageId = String(body?.messageId || '').trim();
+  const rawBody = String(body?.bodyText || '').trim();
+  const bodyText = rawBody.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+
+  if (!bodyText) return err('bodyText is required', 400);
+
+  const logId = newId('eil');
+  await DB.prepare(
+    `INSERT INTO email_ingest_log (id,message_id,subject,from_addr,body_text,outcome) VALUES (?,?,?,?,?,?)`
+  ).bind(logId, messageId, subject, from, bodyText.slice(0, 2000), 'pending').run();
+
+  if (messageId) {
+    const existing = await DB.prepare(
+      `SELECT id FROM email_ingest_log WHERE message_id=? AND outcome != 'pending' AND id != ?`
+    ).bind(messageId, logId).first();
+    if (existing) {
+      await DB.prepare(`UPDATE email_ingest_log SET outcome='skipped_duplicate' WHERE id=?`).bind(logId).run();
+      return ok({ skipped: true, reason: 'duplicate' });
+    }
+  }
+
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-v4-flash';
+  try {
+    const { results: sr } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
+    const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
+    deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
+  } catch (_) {}
+
+  if (!deepseekKey) {
+    await DB.prepare(`UPDATE email_ingest_log SET outcome='error', error_detail='No DeepSeek key configured' WHERE id=?`).bind(logId).run();
+    return err('DeepSeek API key is required. Configure it in Settings → AI Provider Keys.', 503);
+  }
+
+  const prompt = `You are a bank transaction email classifier. Analyze this email and determine if it is a bank-initiated charge/fee (NOT a regular transfer, deposit, or withdrawal by the account holder).
+
+Bank charges include: Account Maintenance Charge, VAT on Account Maintenance, Stamp Duty Charge, SMS Alert Charge, SMS Alert Charge VAT, Commission on Turnover (COT), Card Maintenance Fee, Cheque Book Issuance Charge, VAT on Cheque Book Issuance, ATM Maintenance Charge, and any similar bank-imposed fee.
+
+NOT bank charges: regular transfers, deposits, withdrawals, payments made by the account holder, credit alerts.
+
+Email subject: ${subject}
+Email body: ${bodyText.slice(0, 1500)}
+
+Return ONLY valid JSON (no markdown, no code fences):
+{"isBankCharge":true/false,"date":"YYYY-MM-DD","amount":0.00,"reference":"narration text from email","narration":"short description of the charge type"}
+
+If not a bank charge, still return the JSON with isBankCharge:false and best-effort fields.`;
+
+  let aiResult;
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 300, temperature: 0.1 }),
+    });
+    if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
+    const aiData = await resp.json();
+    const rawText = aiData.choices?.[0]?.message?.content || '{}';
+    const cleanText = rawText.replace(/```json?\s*/gi, '').replace(/```\s*/gi, '').trim();
+    aiResult = safeJsonParse(cleanText, null);
+    if (!aiResult || typeof aiResult !== 'object') throw new Error('AI did not return valid JSON');
+  } catch (e) {
+    await DB.prepare(`UPDATE email_ingest_log SET outcome='error', error_detail=? WHERE id=?`).bind(String(e.message).slice(0, 500), logId).run();
+    return err(`AI classification failed: ${e.message}`, 502);
+  }
+
+  await DB.prepare(`UPDATE email_ingest_log SET ai_response=? WHERE id=?`)
+    .bind(JSON.stringify(aiResult).slice(0, 2000), logId).run();
+
+  if (!aiResult.isBankCharge) {
+    await DB.prepare(`UPDATE email_ingest_log SET outcome='skipped_not_charge' WHERE id=?`).bind(logId).run();
+    return ok({ skipped: true, reason: 'not_a_charge' });
+  }
+
+  const date = String(aiResult.date || '').slice(0, 10);
+  const amount = Math.abs(Number(aiResult.amount || 0));
+  const reference = String(aiResult.reference || '').trim().slice(0, 200);
+  const narration = String(aiResult.narration || '').trim().slice(0, 200);
+
+  if (!date || !amount) {
+    await DB.prepare(`UPDATE email_ingest_log SET outcome='error', error_detail='Missing date or amount from AI' WHERE id=?`).bind(logId).run();
+    return err('AI extracted incomplete data (missing date or amount)', 502);
+  }
+
+  const dupFinance = await DB.prepare(
+    `SELECT id FROM kpsc_finance_entries WHERE entry_type='expense' AND date=? AND amount=? AND narration=? AND (deleted_at IS NULL OR deleted_at='')`
+  ).bind(date, amount, narration).first();
+  if (dupFinance) {
+    await DB.prepare(`UPDATE email_ingest_log SET outcome='skipped_duplicate', finance_entry_id=? WHERE id=?`).bind(dupFinance.id, logId).run();
+    return ok({ skipped: true, reason: 'duplicate_entry' });
+  }
+
+  const subCategory = amount > 4500 ? 'review_amount' : '';
+  const entryId = newId('kfe');
+  await DB.prepare(`
+    INSERT INTO kpsc_finance_entries
+    (id,date,entry_type,category,sub_category,amount,payment_method,reference,narration,partner_id,recorded_by,approved_by,approval_status,attachment_name,partner_payment_id,cash_box_expense,cash_holder)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `).bind(
+    entryId, date, 'expense', 'bank_charges', subCategory, amount, 'bank_transfer',
+    reference, narration, '', 'AI Email Ingest', '', 'recorded', '', '', 0, ''
+  ).run();
+
+  await DB.prepare(`UPDATE email_ingest_log SET outcome='inserted', finance_entry_id=? WHERE id=?`).bind(entryId, logId).run();
+  return ok({ ok: true, entryId, amount, date, narration });
 }
 
 async function runFollowups(DB, env, request) {
