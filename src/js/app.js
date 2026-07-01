@@ -3338,7 +3338,7 @@ async function renderDashboard(){
   if(!dashIsPastPeriod){
     if(overdueRems>0) alerts+=`<div class="alert alert-danger"><span class="alert-icon">⚠</span><span>${overdueRems} remittance(s) are <strong>overdue</strong>. Please process immediately.</span></div>`;
     if(pendingPetty>0) alerts+=`<div class="alert alert-warn"><span class="alert-icon">⏳</span><span>${pendingPetty} petty cash request(s) awaiting approval. <button class="btn btn-sm" onclick="App.navigate('petty_cash')" style="margin-left:8px">Review</button></span></div>`;
-    if(dashOutstandingRems>0 && dashTotalFunds<dashOutstandingRems) alerts+=`<div class="alert alert-warn"><span class="alert-icon">💰</span><span>Church balance cannot cover the remittance due. Consider notifying the KPSC.</span></div>`;
+    if(dashOutstandingRems>0 && dashTotalFunds<dashOutstandingRems) alerts+=`<div class="alert alert-danger"><span class="alert-icon">🚨</span><span>Church balance is <strong>critically low</strong> and cannot cover the remittance due. Notify the KPSC immediately.</span></div>`;
     const _dashFlaggedDeps = cashTxDash.filter(t=>t.type==='cash_deposit'&&(t.verificationStatus==='flagged'||t.verificationStatus==='pending'));
     if(_dashFlaggedDeps.length>0){
       const flagCount = _dashFlaggedDeps.filter(t=>t.verificationStatus==='flagged').length;
