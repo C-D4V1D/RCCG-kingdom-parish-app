@@ -4044,8 +4044,8 @@ async function getFinanceReportByToken(DB, token) {
   const lastMonth = Math.max(...months);
   const balanceCutoff = new Date(Date.UTC(year, lastMonth, 0)).toISOString().slice(0, 10);
 
-  // Fetch period entries and all-time-up-to-cutoff entries in parallel
-  const [periodRes, balanceRes] = await Promise.all([
+  // Fetch period entries, all-time-up-to-cutoff entries, and the configured minimum balance in parallel
+  const [periodRes, balanceRes, minBalRow] = await Promise.all([
     DB.prepare(`
       SELECT f.*, p.full_name AS partner_name
       FROM kpsc_finance_entries f
@@ -4059,7 +4059,13 @@ async function getFinanceReportByToken(DB, token) {
       SELECT entry_type, amount FROM kpsc_finance_entries
       WHERE date <= ? AND COALESCE(deleted_at,'') = ''
     `).bind(balanceCutoff).all(),
+    DB.prepare(`SELECT value FROM settings WHERE key='kpsc_minimum_balance'`).first(),
   ]);
+  let minimumBalance = 0;
+  if (minBalRow?.value) {
+    try { minimumBalance = Number(JSON.parse(minBalRow.value)) || 0; }
+    catch { minimumBalance = Number(minBalRow.value) || 0; }
+  }
 
   const entries = (periodRes.results || []).map(row => ({
     id: row.id,
@@ -4088,6 +4094,7 @@ async function getFinanceReportByToken(DB, token) {
     entries,
     currentBalance,
     balanceCutoff,
+    minimumBalance,
   });
 }
 

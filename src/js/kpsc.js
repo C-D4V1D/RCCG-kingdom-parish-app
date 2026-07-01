@@ -7225,16 +7225,19 @@ async function setPartnerDetailYear(year) {
 async function renderFinance(main) {
   const year = S.financeYear;
   const month = S.financeMonth;
-  const [financeRes, partnersRes, allTimeRes] = await Promise.all([
+  const [financeRes, partnersRes, allTimeRes, settingsRes] = await Promise.all([
     apiGet(`kpsc-finance?year=${year}${month ? `&month=${month}` : ''}`),
     apiGet('kpsc-partners'),
     apiGet('kpsc-finance?year=all'),
+    apiGet('settings'),
   ]);
   if (financeRes?.error) throw new Error(financeRes.error);
   if (partnersRes?.error) throw new Error(partnersRes.error);
   S.financeEntries = Array.isArray(financeRes) ? financeRes : [];
   S.partners = Array.isArray(partnersRes) ? partnersRes : [];
   S.allFinanceEntries = Array.isArray(allTimeRes) ? allTimeRes : [];
+  const minimumBalance = Number(settingsRes?.kpsc_minimum_balance || 0);
+  S.financeMinimumBalance = minimumBalance;
 
   // Reset filter/sort state on every full page load
   S.financeSearch = '';
@@ -7275,6 +7278,7 @@ async function renderFinance(main) {
   const currentBalance = balanceIncome - balanceExpense;
   S.financeBalance = currentBalance;
   S.financeBalanceIsCurrentPeriod = isCurrentPeriod;
+  const availableForProjects = currentBalance - minimumBalance;
   const yearOpts = [nowYear, nowYear-1, nowYear-2].map(y => `<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
   const monthOpts = [0,1,2,3,4,5,6,7,8,9,10,11,12].map(m =>
     `<option value="${m}" ${month===m?'selected':''}>${m===0?'All Months':monthName(m)}</option>`
@@ -7292,7 +7296,7 @@ async function renderFinance(main) {
   main.innerHTML = `
     <div class="k-page">
 
-      <div class="k-dash-stats kf-stat-5">
+      <div class="k-dash-stats kf-stat-6">
         <div class="k-stat">
           <div class="k-stat-val" style="color:var(--green)">₦${Math.round(incomeTotal).toLocaleString('en-NG')}</div>
           <div class="k-stat-sub">${incomeEntries.length} entr${incomeEntries.length===1?'y':'ies'}</div>
@@ -7311,6 +7315,11 @@ async function renderFinance(main) {
         <div class="k-stat">
           <div class="k-stat-val" style="color:var(--navy)">₦${Math.round(partnerIncome).toLocaleString('en-NG')}</div>
           <div class="k-stat-lbl">Partner Income</div>
+        </div>
+        <div class="k-stat ${availableForProjects < 0 ? 'k-stat-balance-deficit' : 'k-stat-highlight'}" title="${minimumBalance > 0 ? `Balance above the ₦${Math.round(minimumBalance).toLocaleString('en-NG')} minimum kept in reserve` : 'Set a minimum balance in Settings to compute this'}">
+          <div class="k-stat-val" style="color:${availableForProjects<0?'var(--red)':'var(--amber)'}">₦${Math.round(Math.abs(availableForProjects)).toLocaleString('en-NG')}</div>
+          <div class="k-stat-sub" style="color:${availableForProjects<0?'var(--red)':'var(--text3)'}">${availableForProjects<0 ? 'Below minimum balance' : `above ₦${Math.round(minimumBalance).toLocaleString('en-NG')} minimum`}</div>
+          <div class="k-stat-lbl">Available for Projects</div>
         </div>
         <div class="k-stat ${unlinkedCount > 0 ? 'k-stat-highlight' : ''}">
           <div class="k-stat-val" style="color:${unlinkedCount>0?'var(--amber)':'var(--navy)'}">${unlinkedCount}</div>
@@ -8001,6 +8010,9 @@ function generateFinanceReport(months) {
   const reportBalance = typeof S.financeBalance === 'number' ? S.financeBalance : null;
   const balanceColor = reportBalance !== null ? (reportBalance >= 0 ? '#1e3a5f' : '#8b1a1a') : '#555';
   const balanceLabel = S.financeBalanceIsCurrentPeriod ? 'Current Balance' : `Balance (end of ${periodLabel})`;
+  const minimumBalance = Number(S.financeMinimumBalance || 0);
+  const available = reportBalance !== null ? reportBalance - minimumBalance : null;
+  const availableColor = available !== null ? (available >= 0 ? '#8a6d00' : '#8b1a1a') : '#555';
   const safeFilename = `KPSC-Finance-Report-${monthsSorted.map(m => monthName(m).slice(0,3)).join('-')}-${year}`.replace(/[^a-zA-Z0-9-]/g, '-');
 
   function catSummaryRows(list, total) {
@@ -8035,7 +8047,7 @@ function generateFinanceReport(months) {
     prose = `During <strong>${escPrint(periodLabel)}</strong>, the committee received a total of <strong style="color:#1a5e3a">₦${Math.round(incomeTotal).toLocaleString('en-NG')}</strong> in income across ${incomeEntries.length} entr${incomeEntries.length === 1 ? 'y' : 'ies'}, and spent <strong style="color:#8b1a1a">₦${Math.round(expenseTotal).toLocaleString('en-NG')}</strong> across ${expenseEntries.length} entr${expenseEntries.length === 1 ? 'y' : 'ies'}. Expenses exceeded income, resulting in a <strong style="color:#8b1a1a">deficit of ₦${Math.round(Math.abs(net)).toLocaleString('en-NG')}</strong>.`;
   }
 
-  const html = buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, preparedBy, safeFilename, incomeEntries, expenseEntries, incomeTotal, expenseTotal, net, netColor, netLabel, reportBalance, balanceColor, balanceLabel, prose, catSummaryRows, entryRows });
+  const html = buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, preparedBy, safeFilename, incomeEntries, expenseEntries, incomeTotal, expenseTotal, net, netColor, netLabel, reportBalance, balanceColor, balanceLabel, minimumBalance, available, availableColor, prose, catSummaryRows, entryRows });
 
   const win = window.open('', '_blank');
   if (!win) { showToast('Please allow pop-ups to generate the report.', 'warn'); return; }
@@ -8043,7 +8055,7 @@ function generateFinanceReport(months) {
   win.document.close();
 }
 
-function buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, preparedBy, safeFilename, incomeEntries, expenseEntries, incomeTotal, expenseTotal, net, netColor, netLabel, reportBalance, balanceColor, balanceLabel, prose, catSummaryRows, entryRows }) {
+function buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, preparedBy, safeFilename, incomeEntries, expenseEntries, incomeTotal, expenseTotal, net, netColor, netLabel, reportBalance, balanceColor, balanceLabel, minimumBalance, available, availableColor, prose, catSummaryRows, entryRows }) {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8061,7 +8073,8 @@ function buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, prepared
   .section{margin-bottom:28px}
   .section-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#1e3a5f;border-bottom:1px solid #ddd;padding-bottom:7px;margin-bottom:14px}
   .overview-box{background:#f4f6f9;border-radius:8px;padding:14px 18px;margin-bottom:20px;line-height:1.8;font-size:13px}
-  .summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:8px}
+  .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:8px}
+  @media(max-width:600px){.summary-grid{grid-template-columns:repeat(2,1fr)}}
   .tile{border:1px solid #ddd;border-radius:8px;padding:16px;text-align:center}
   .tile-val{font-size:22px;font-weight:700}
   .tile-lbl{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
@@ -8100,6 +8113,7 @@ function buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, prepared
     <div class="tile"><div class="tile-val" style="color:#8b1a1a">₦${Math.round(expenseTotal).toLocaleString('en-NG')}</div><div class="tile-lbl">Total Spent</div></div>
     <div class="tile" style="border-color:${netColor}"><div class="tile-val" style="color:${netColor}">₦${Math.round(Math.abs(net)).toLocaleString('en-NG')}</div><div class="tile-lbl">Net ${netLabel} (Period)</div></div>
     ${reportBalance !== null ? `<div class="tile" style="border:2px solid ${balanceColor};background:${reportBalance>=0?'#eef3fb':'#fef2f2'}"><div class="tile-val" style="color:${balanceColor}">₦${Math.round(Math.abs(reportBalance)).toLocaleString('en-NG')}</div><div class="tile-lbl" style="color:${balanceColor};font-weight:700">${escPrint(balanceLabel)}</div></div>` : ''}
+    ${available !== null && minimumBalance > 0 ? `<div class="tile" style="border:2px solid ${availableColor};background:${available>=0?'#fdf8ec':'#fef2f2'}"><div class="tile-val" style="color:${availableColor}">₦${Math.round(Math.abs(available)).toLocaleString('en-NG')}</div><div class="tile-lbl" style="color:${availableColor};font-weight:700">${available>=0?'Available for Projects':'Below Minimum Balance'}</div></div>` : ''}
   </div>
 </div>
 
@@ -11006,6 +11020,7 @@ async function renderSettings(main) {
   const expenseCategories = Array.isArray(res?.kpsc_expense_categories) ? res.kpsc_expense_categories.join('\n') : '';
   const meetingCadence = res?.kpsc_meeting_cadence || 'none';
   S.kpscMeetingCadence = meetingCadence;
+  const minimumBalance = Number(res?.kpsc_minimum_balance || 0);
   // Termii SMS settings
   const termiiApiKey         = res?.kpsc_termii_api_key             || '';
   const termiiSenderId       = res?.kpsc_termii_sender_id           || 'RCCG-KP';
@@ -11489,6 +11504,11 @@ async function renderSettings(main) {
           <label class="k-label">Expense Categories (one per line)</label>
           <textarea id="ks-expense-cats" class="k-input k-textarea" style="min-height:100px">${esc(expenseCategories)}</textarea>
           <p class="k-hint">e.g. projects, welfare, rent, church_support, committee_operations</p>
+        </div>
+        <div class="k-form-group">
+          <label class="k-label">Minimum Balance to Retain (₦)</label>
+          <input type="number" id="ks-minimum-balance" class="k-input" min="0" step="1" value="${minimumBalance}" placeholder="0" />
+          <p class="k-hint">The amount kept back as a reserve. The Finance page shows what's left over this amount as "Available for Projects".</p>
         </div>
         <div id="ks-ops-save-msg" class="k-settings-msg" style="display:none"></div>
         <button class="kbtn kbtn-primary" onclick="Kpsc.saveKpscOpsSettings()">Save Operations Settings</button>
@@ -12023,12 +12043,14 @@ async function saveKpscOpsSettings() {
   const incomeText = document.getElementById('ks-income-cats')?.value || '';
   const expenseText = document.getElementById('ks-expense-cats')?.value || '';
   const cadence = document.getElementById('ks-meeting-cadence')?.value || 'none';
+  const minimumBalance = Math.max(0, Number(document.getElementById('ks-minimum-balance')?.value) || 0);
   const incomeCategories = incomeText.split(/[\n,]/).map(s=>s.trim().toLowerCase().replace(/\s+/g,'_')).filter(Boolean);
   const expenseCategories = expenseText.split(/[\n,]/).map(s=>s.trim().toLowerCase().replace(/\s+/g,'_')).filter(Boolean);
   const res = await apiPost('settings', {
     kpsc_income_categories: incomeCategories,
     kpsc_expense_categories: expenseCategories,
     kpsc_meeting_cadence: cadence,
+    kpsc_minimum_balance: minimumBalance,
   });
   if (!res?.error) S.kpscMeetingCadence = cadence;
   if (res?.error) {
