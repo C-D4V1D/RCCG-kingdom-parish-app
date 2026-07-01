@@ -7237,6 +7237,7 @@ async function renderFinance(main) {
   S.partners = Array.isArray(partnersRes) ? partnersRes : [];
   S.allFinanceEntries = Array.isArray(allTimeRes) ? allTimeRes : [];
   const minimumBalance = Number(settingsRes?.kpsc_minimum_balance || 0);
+  S.financeMinimumBalance = minimumBalance;
 
   // Reset filter/sort state on every full page load
   S.financeSearch = '';
@@ -8009,6 +8010,9 @@ function generateFinanceReport(months) {
   const reportBalance = typeof S.financeBalance === 'number' ? S.financeBalance : null;
   const balanceColor = reportBalance !== null ? (reportBalance >= 0 ? '#1e3a5f' : '#8b1a1a') : '#555';
   const balanceLabel = S.financeBalanceIsCurrentPeriod ? 'Current Balance' : `Balance (end of ${periodLabel})`;
+  const minimumBalance = Number(S.financeMinimumBalance || 0);
+  const available = reportBalance !== null ? reportBalance - minimumBalance : null;
+  const availableColor = available !== null ? (available >= 0 ? '#8a6d00' : '#8b1a1a') : '#555';
   const safeFilename = `KPSC-Finance-Report-${monthsSorted.map(m => monthName(m).slice(0,3)).join('-')}-${year}`.replace(/[^a-zA-Z0-9-]/g, '-');
 
   function catSummaryRows(list, total) {
@@ -8043,7 +8047,7 @@ function generateFinanceReport(months) {
     prose = `During <strong>${escPrint(periodLabel)}</strong>, the committee received a total of <strong style="color:#1a5e3a">₦${Math.round(incomeTotal).toLocaleString('en-NG')}</strong> in income across ${incomeEntries.length} entr${incomeEntries.length === 1 ? 'y' : 'ies'}, and spent <strong style="color:#8b1a1a">₦${Math.round(expenseTotal).toLocaleString('en-NG')}</strong> across ${expenseEntries.length} entr${expenseEntries.length === 1 ? 'y' : 'ies'}. Expenses exceeded income, resulting in a <strong style="color:#8b1a1a">deficit of ₦${Math.round(Math.abs(net)).toLocaleString('en-NG')}</strong>.`;
   }
 
-  const html = buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, preparedBy, safeFilename, incomeEntries, expenseEntries, incomeTotal, expenseTotal, net, netColor, netLabel, reportBalance, balanceColor, balanceLabel, prose, catSummaryRows, entryRows });
+  const html = buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, preparedBy, safeFilename, incomeEntries, expenseEntries, incomeTotal, expenseTotal, net, netColor, netLabel, reportBalance, balanceColor, balanceLabel, minimumBalance, available, availableColor, prose, catSummaryRows, entryRows });
 
   const win = window.open('', '_blank');
   if (!win) { showToast('Please allow pop-ups to generate the report.', 'warn'); return; }
@@ -8051,7 +8055,7 @@ function generateFinanceReport(months) {
   win.document.close();
 }
 
-function buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, preparedBy, safeFilename, incomeEntries, expenseEntries, incomeTotal, expenseTotal, net, netColor, netLabel, reportBalance, balanceColor, balanceLabel, prose, catSummaryRows, entryRows }) {
+function buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, preparedBy, safeFilename, incomeEntries, expenseEntries, incomeTotal, expenseTotal, net, netColor, netLabel, reportBalance, balanceColor, balanceLabel, minimumBalance, available, availableColor, prose, catSummaryRows, entryRows }) {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8069,7 +8073,8 @@ function buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, prepared
   .section{margin-bottom:28px}
   .section-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#1e3a5f;border-bottom:1px solid #ddd;padding-bottom:7px;margin-bottom:14px}
   .overview-box{background:#f4f6f9;border-radius:8px;padding:14px 18px;margin-bottom:20px;line-height:1.8;font-size:13px}
-  .summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:8px}
+  .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:8px}
+  @media(max-width:600px){.summary-grid{grid-template-columns:repeat(2,1fr)}}
   .tile{border:1px solid #ddd;border-radius:8px;padding:16px;text-align:center}
   .tile-val{font-size:22px;font-weight:700}
   .tile-lbl{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
@@ -8108,6 +8113,7 @@ function buildFinanceReportHtml({ escPrint, periodLabel, generatedDate, prepared
     <div class="tile"><div class="tile-val" style="color:#8b1a1a">₦${Math.round(expenseTotal).toLocaleString('en-NG')}</div><div class="tile-lbl">Total Spent</div></div>
     <div class="tile" style="border-color:${netColor}"><div class="tile-val" style="color:${netColor}">₦${Math.round(Math.abs(net)).toLocaleString('en-NG')}</div><div class="tile-lbl">Net ${netLabel} (Period)</div></div>
     ${reportBalance !== null ? `<div class="tile" style="border:2px solid ${balanceColor};background:${reportBalance>=0?'#eef3fb':'#fef2f2'}"><div class="tile-val" style="color:${balanceColor}">₦${Math.round(Math.abs(reportBalance)).toLocaleString('en-NG')}</div><div class="tile-lbl" style="color:${balanceColor};font-weight:700">${escPrint(balanceLabel)}</div></div>` : ''}
+    ${available !== null && minimumBalance > 0 ? `<div class="tile" style="border:2px solid ${availableColor};background:${available>=0?'#fdf8ec':'#fef2f2'}"><div class="tile-val" style="color:${availableColor}">₦${Math.round(Math.abs(available)).toLocaleString('en-NG')}</div><div class="tile-lbl" style="color:${availableColor};font-weight:700">${available>=0?'Available for Projects':'Below Minimum Balance'}</div></div>` : ''}
   </div>
 </div>
 
