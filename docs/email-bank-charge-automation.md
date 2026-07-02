@@ -6,8 +6,8 @@ Cheque Book Issuance, etc.) into the KPSC Finance ledger -- no manual data
 entry required.
 
 **How it works:**
-1. Make.com watches your Gmail inbox directly for FirstBank alert emails
-   (no forwarding needed -- it connects straight to your own Gmail account)
+1. Make.com watches your Zoho Mail inbox directly for FirstBank alert emails
+   (no forwarding needed -- it connects straight to your own Zoho Mail account)
 2. Make sends the email content to the KPSC portal API
 3. The portal uses DeepSeek AI to classify the email and extract fields
    (falling back to OpenAI automatically if DeepSeek is unavailable or fails)
@@ -36,8 +36,8 @@ entry required.
   the same key used for OCR/transcription). This is optional but recommended:
   it's used automatically as a backup only if DeepSeek is unavailable or a
   call to it fails, so a single provider outage doesn't drop a charge.
-- Access to the Gmail account that receives FirstBank alerts (you'll connect
-  it directly to Make -- no separate forwarding address needed)
+- Access to the Zoho Mail account that receives FirstBank alerts (you'll
+  connect it directly to Make -- no separate forwarding address needed)
 - Know the masked account number of your KPSC committee's FirstBank account
   exactly as it appears in the alert emails (e.g. `204XXXX358`) -- you'll enter
   this in Step 2 so alerts from any *other* FirstBank account you may also
@@ -98,25 +98,34 @@ kpsc-email-ingest-2026-xR7mQ9pL4wN2
 
 ---
 
-## Step 3: Create Your Make.com Account + Gmail Trigger (~5 min)
+## Step 3: Create Your Make.com Account + Zoho Mail Trigger (~5 min)
 
 1. Go to [make.com](https://www.make.com) and sign up for a free account
 2. Click **Create a new scenario**
-3. Click the **+** to add your first module and search for **"Gmail"**
-4. Select the **"Watch Emails"** trigger
-5. Click **Add** next to the connection field to connect your Gmail account
-   (the one that receives FirstBank alerts) -- this opens a Google sign-in
-   popup, sign in and grant access
+3. Click the **+** to add your first module and search for **"Zoho Mail"**
+4. Select the **"Watch Emails Based on Search"** trigger (this is the one that
+   lets you filter by sender, same idea as the Gmail search filter)
+5. Click **Add** next to the connection field to connect your Zoho Mail account
+   (the one that receives FirstBank alerts) -- this opens a Zoho sign-in
+   popup; sign in and grant access. If asked which Zoho data center/domain
+   your account is on (e.g. `.com`, `.eu`, `.in`, `.com.cn`), pick the one
+   that matches where you log in to Zoho Mail normally.
 6. Configure the trigger:
 
    | Field | Value |
    |-------|-------|
-   | **Folder** | `INBOX` |
-   | **Criteria** | `From` contains `FirstAlert@firstbanknigeria.com` (or use Gmail search syntax: `from:FirstAlert@firstbanknigeria.com`) |
-   | **Mark as read** | Your preference (either is fine) |
-   | **Maximum number of results** | `5` (plenty for this volume) |
+   | **Folder** | `Inbox` |
+   | **Search Key** | `from:FirstAlert@firstbanknigeria.com` (Zoho Mail's own search syntax, same `from:` operator as Gmail) |
+   | **Limit** | `5` (plenty for this volume) |
 
 7. Click **OK** to save the module
+
+   > If the trigger doesn't seem to pick up new mail when you test it, this
+   > is a known occasional quirk with Make's Zoho Mail connector -- try
+   > disconnecting and reconnecting the Zoho Mail connection, or switch to
+   > the plain **"Watch Emails"** trigger (without search) and instead filter
+   > by adding a **Filter** on the connector between this module and the next
+   > one, checking that `From` contains `FirstAlert@firstbanknigeria.com`.
 
 ---
 
@@ -124,7 +133,7 @@ kpsc-email-ingest-2026-xR7mQ9pL4wN2
 
 Still in the same scenario:
 
-1. Click the **+** on the right of the Gmail module to add the next module
+1. Click the **+** on the right of the Zoho Mail module to add the next module
 2. Search for **"HTTP"** and select the **"Make a request"** action
 3. Configure the request:
 
@@ -147,22 +156,25 @@ Still in the same scenario:
    > `https://rccg-kingdom-parish-app.pages.dev/api/internal/ingest-bank-charge-email`.
 
 4. In the **Request content** box, build the JSON body using the field picker
-   (click inside the box, then click the Gmail module's output fields from the
-   panel on the right to insert them):
+   (click inside the box, then click the Zoho Mail module's output fields from
+   the panel on the right to insert them):
 
    ```json
    {
      "subject": "{{1.subject}}",
-     "from": "{{1.from.address}}",
-     "bodyText": "{{1.text}}",
-     "messageId": "{{1.id}}"
+     "from": "{{1.sender}}",
+     "bodyText": "{{1.summary}}",
+     "messageId": "{{1.messageId}}"
    }
    ```
 
    The exact field names in the picker may read slightly differently
-   (e.g. "Subject", "From > Email", "Content" / "Text", "Message ID") --
-   match by meaning: subject line, sender email address, plain-text body,
-   and a unique email identifier.
+   depending on Make's current Zoho Mail connector version (e.g. "Subject",
+   "Sender" / "From Address", "Summary" / "Content", "Message Id") -- match by
+   meaning: subject line, sender email address, the email body text, and a
+   unique email identifier. If there's both a short "Summary" and a full
+   "Content"/"Body" field, prefer the fuller body field so the AI has the
+   complete narration and amount to read.
 
 5. Click **OK** to save the module
 
@@ -171,7 +183,7 @@ Still in the same scenario:
 ## Step 5: Turn On the Scenario (~1 min)
 
 1. Click **Save** (bottom-left)
-2. Set the schedule: click the clock icon on the Gmail module and choose
+2. Set the schedule: click the clock icon on the Zoho Mail module and choose
    **every 15 minutes** (the minimum interval on the free plan -- still fully
    automatic, just checks every 15 minutes rather than instantly)
 3. Toggle the scenario **ON** (top-left switch)
@@ -184,7 +196,7 @@ Still in the same scenario:
    whatever matching emails are currently in your inbox (or forward/re-send
    yourself one of your existing FirstBank charge emails first, then Run once)
 2. Check the run history (click on the scenario, then the execution log) to
-   confirm the Gmail module found the email and the HTTP module got a
+   confirm the Zoho Mail module found the email and the HTTP module got a
    successful response
 3. Open the KPSC portal > **Finance** page
 4. You should see a new expense entry with:
@@ -237,7 +249,7 @@ side of skipping (you can always enter those manually).
 
 - **Make.com free tier**: 1,000 operations/month, max 2 active scenarios,
   15-minute minimum polling interval. Each bank alert email uses about
-  2 operations (1 Gmail trigger + 1 HTTP request). Typical usage is
+  2 operations (1 Zoho Mail trigger + 1 HTTP request). Typical usage is
   4-10 alerts/month -- well within limits.
 - **DeepSeek API**: Each classification uses ~500 tokens (~$0.001 or less).
   Negligible cost.
