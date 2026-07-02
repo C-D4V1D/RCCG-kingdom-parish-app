@@ -3433,3 +3433,61 @@ test('POST /api/internal/ingest-bank-charge-email skips charges from a non-KPSC 
     globalThis.fetch = origFetch;
   }
 });
+
+test('GET /api/kpsc-email-ingest-log returns entries with needsAttention=false when no error/wrong-account rows exist', async () => {
+  const onPrepare = (sql) => {
+    if (/SELECT id, subject, outcome, error_detail, finance_entry_id, created_at\s+FROM email_ingest_log/.test(sql)) {
+      return {
+        bind() { return this; },
+        async all() {
+          return {
+            results: [
+              { id: 'eil-2', subject: 'Debit Alert', outcome: 'inserted', error_detail: '', finance_entry_id: 'kfe-1', created_at: '2026-07-02 02:30:00' },
+              { id: 'eil-1', subject: 'Debit Alert', outcome: 'skipped_not_charge', error_detail: '', finance_entry_id: '', created_at: '2026-07-01 19:17:00' },
+            ],
+          };
+        },
+      };
+    }
+    return { bind() { return this; }, async run() {}, async first() { return null; }, async all() { return { results: [] }; } };
+  };
+
+  const res = await onRequest({
+    request: createRequest('https://example.com/api/kpsc-email-ingest-log', 'GET'),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(res);
+  assert.equal(res.status, 200);
+  assert.equal(body.entries.length, 2);
+  assert.equal(body.needsAttention, false);
+  assert.equal(body.counts.inserted, 1);
+  assert.equal(body.counts.skipped_not_charge, 1);
+  assert.equal(body.lastActivityAt, '2026-07-02 02:30:00');
+});
+
+test('GET /api/kpsc-email-ingest-log sets needsAttention=true when an error or wrong-account row exists', async () => {
+  const onPrepare = (sql) => {
+    if (/SELECT id, subject, outcome, error_detail, finance_entry_id, created_at\s+FROM email_ingest_log/.test(sql)) {
+      return {
+        bind() { return this; },
+        async all() {
+          return {
+            results: [
+              { id: 'eil-3', subject: 'Debit Alert', outcome: 'error', error_detail: 'AI classification failed: DeepSeek: no API key configured | OpenAI: no API key configured', finance_entry_id: '', created_at: '2026-07-02 03:00:00' },
+            ],
+          };
+        },
+      };
+    }
+    return { bind() { return this; }, async run() {}, async first() { return null; }, async all() { return { results: [] }; } };
+  };
+
+  const res = await onRequest({
+    request: createRequest('https://example.com/api/kpsc-email-ingest-log', 'GET'),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(res);
+  assert.equal(res.status, 200);
+  assert.equal(body.needsAttention, true);
+  assert.equal(body.counts.error, 1);
+});

@@ -7222,14 +7222,71 @@ async function setPartnerDetailYear(year) {
   renderPartnerDetail(document.getElementById('kpsc-main'));
 }
 
+const INGEST_OUTCOME_LABELS = {
+  inserted: 'Recorded',
+  skipped_not_charge: 'Not a charge',
+  skipped_duplicate: 'Duplicate',
+  skipped_wrong_account: 'Wrong account',
+  error: 'Error',
+  pending: 'Pending',
+};
+const INGEST_OUTCOME_BADGES = {
+  inserted: 'badge-green',
+  skipped_not_charge: 'badge-gray',
+  skipped_duplicate: 'badge-gray',
+  skipped_wrong_account: 'badge-red',
+  error: 'badge-red',
+  pending: 'badge-blue',
+};
+
+function renderEmailIngestStatusCard(ingestLogRes) {
+  const entries = Array.isArray(ingestLogRes?.entries) ? ingestLogRes.entries : [];
+  const counts = ingestLogRes?.counts || {};
+  const needsAttention = !!ingestLogRes?.needsAttention;
+  const flaggedCount = (counts.error || 0) + (counts.skipped_wrong_account || 0);
+
+  const statusClass = needsAttention ? 'k-status-warn' : (entries.length ? 'k-status-ai' : 'k-status-rule');
+  const statusText = needsAttention
+    ? `⚠️ Needs attention — ${flaggedCount} item${flaggedCount === 1 ? '' : 's'} flagged in recent activity`
+    : (entries.length ? `🤖 Automation healthy — last activity ${esc(fmtDateTime(ingestLogRes.lastActivityAt))}` : 'No automated bank-charge emails processed yet.');
+
+  return `
+    <details class="k-collapsible" id="kf-email-automation" ${needsAttention ? 'open' : ''} style="margin-bottom:16px">
+      <summary class="k-collapsible-hdr">
+        <span class="k-collapsible-title">🤖 Bank Charge Email Automation</span>
+        <span class="k-collapsible-summary">${needsAttention ? '⚠️ Needs attention' : (entries.length ? '✅ Healthy' : 'No activity yet')}</span>
+      </summary>
+      <div class="k-settings-status ${statusClass}">${statusText}</div>
+      ${entries.length ? `
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin:4px 0 14px;font-size:13px;color:var(--text2)">
+        <span>✅ ${counts.inserted || 0} recorded</span>
+        <span>⏭️ ${(counts.skipped_not_charge || 0) + (counts.skipped_duplicate || 0)} skipped</span>
+        <span style="color:${(counts.skipped_wrong_account || 0) > 0 ? 'var(--red)' : 'inherit'}">🚫 ${counts.skipped_wrong_account || 0} wrong account</span>
+        <span style="color:${(counts.error || 0) > 0 ? 'var(--red)' : 'inherit'}">❌ ${counts.error || 0} error${counts.error === 1 ? '' : 's'}</span>
+      </div>
+      <div class="k-meeting-list" style="max-height:340px;overflow-y:auto">
+        ${entries.map(e => `
+          <div class="k-meeting-card" style="cursor:default">
+            <div class="k-mc-top">
+              <div class="k-mc-title">${esc(e.subject || '(no subject)')}</div>
+              <span class="kbadge ${INGEST_OUTCOME_BADGES[e.outcome] || 'badge-gray'}">${esc(INGEST_OUTCOME_LABELS[e.outcome] || e.outcome)}</span>
+            </div>
+            <div class="k-mc-meta"><span class="k-hint">${esc(fmtDateTime(e.createdAt))}</span></div>
+            ${(e.outcome === 'error' || e.outcome === 'skipped_wrong_account') && e.errorDetail ? `<div class="k-page-hint" style="margin-top:4px;color:var(--red)">⚠️ ${esc(e.errorDetail)}</div>` : ''}
+          </div>`).join('')}
+      </div>` : ''}
+    </details>`;
+}
+
 async function renderFinance(main) {
   const year = S.financeYear;
   const month = S.financeMonth;
-  const [financeRes, partnersRes, allTimeRes, settingsRes] = await Promise.all([
+  const [financeRes, partnersRes, allTimeRes, settingsRes, ingestLogRes] = await Promise.all([
     apiGet(`kpsc-finance?year=${year}${month ? `&month=${month}` : ''}`),
     apiGet('kpsc-partners'),
     apiGet('kpsc-finance?year=all'),
     apiGet('settings'),
+    apiGet('kpsc-email-ingest-log'),
   ]);
   if (financeRes?.error) throw new Error(financeRes.error);
   if (partnersRes?.error) throw new Error(partnersRes.error);
@@ -7326,6 +7383,8 @@ async function renderFinance(main) {
           <div class="k-stat-lbl">Unlinked Entries</div>
         </div>
       </div>
+
+      ${renderEmailIngestStatusCard(ingestLogRes)}
 
       ${canManage ? '<div id="k-cash-card-mount"></div>' : ''}
 
