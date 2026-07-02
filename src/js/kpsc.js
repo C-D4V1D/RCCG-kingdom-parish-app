@@ -2503,8 +2503,8 @@ function moneySubTabStrip() {
   if (canAccess('finance')) tabs.push({ key: 'finance',   label: 'Finance'   });
   tabs.push({ key: 'partners',  label: 'Partners'  });
   if (canAccess('partner-progress')) tabs.push({ key: 'partner-progress', label: 'Progress' });
-  if (canAccess('reminders')) tabs.push({ key: 'reminders', label: 'Reminders' });
   if (canAccess('sms_logs'))  tabs.push({ key: 'sms_logs',  label: 'SMS Logs' });
+  if (canAccess('reminders')) tabs.push({ key: 'reminders', label: 'Reminders' });
   return `<div class="ka-subtabs">${tabs.map(t =>
     `<button class="ka-subtab${cur === t.key ? ' active' : ''}" onclick="Kpsc.navigate('${t.key}')">${t.label}</button>`
   ).join('')}</div>`;
@@ -7485,7 +7485,7 @@ async function openFinanceModal(entryToEdit = null) {
     .slice().sort((a, b) => String(a.fullName || '').localeCompare(String(b.fullName || '')))
     .map(p => `<option value="${esc(p.id)}" ${(e?.partnerId || '') === p.id ? 'selected' : ''}>${esc(p.fullName || p.name || p.id)}</option>`)
     .join('');
-  const showPartner = !isExpense && (e?.category || 'partnership_payment') === 'partnership_payment';
+  const showPartner = !isExpense && e?.category === 'partnership_payment';
 
   const modal = document.createElement('div');
   modal.id = 'kpsc-finance-modal';
@@ -8451,7 +8451,10 @@ async function renderSmsLogs(main) {
         <div class="k-sms-sched">
           <div class="k-sms-sched-row">
             <span class="k-label" style="margin:0">Termii wallet balance</span>
-            <span>${esc(balanceText)}</span>
+            <span style="display:flex;align-items:center;gap:10px">
+              <span>${esc(balanceText)}</span>
+              <button class="kbtn kbtn-sm" onclick="Kpsc.showRechargeWalletModal()" style="font-size:12px">💳 Recharge SMS Wallet</button>
+            </span>
           </div>
           <div class="k-sms-sched-row">
             <span class="k-label" style="margin:0">Spent in ${monthName(month)} ${year}</span>
@@ -11113,6 +11116,14 @@ async function renderSettings(main) {
   const smsFreqCap         = res?.kpsc_sms_freq_cap      || '3';
   const smsCooloffDays     = res?.kpsc_sms_cooloff_days  || '7';
   const smsNairaPerPage    = res?.kpsc_sms_naira_per_page || '5';
+  // Recharge bank details
+  const rechargeBank1Name     = res?.kpsc_recharge_bank1_name        || '';
+  const rechargeBank1Number   = res?.kpsc_recharge_bank1_number      || '';
+  const rechargeBank1AcctName = res?.kpsc_recharge_bank1_account_name || '';
+  const rechargeBank2Name     = res?.kpsc_recharge_bank2_name        || '';
+  const rechargeBank2Number   = res?.kpsc_recharge_bank2_number      || '';
+  const rechargeBank2AcctName = res?.kpsc_recharge_bank2_account_name || '';
+  const rechargeMinAmount     = res?.kpsc_recharge_min_amount        || '';
   // System SMS message text templates — fall back to built-in defaults so textareas are always pre-filled
   const SMS_DEFAULTS = {
     welcome:    `Dear {{name}}, welcome to the RCCG Kingdom Parish family! 🎉 We are so glad to have you as a partner in this beautiful journey of faith. Your support means the world to us, and we pray that God will bless you richly — spiritually and in all your endeavours. You are loved! — RCCG Kingdom Parish`,
@@ -11441,6 +11452,39 @@ async function renderSettings(main) {
           </div>
           <p class="k-hint">Fetches your current Termii credit balance. A warning will appear when balance is low.</p>
         </div>
+      </div>
+
+      <div class="k-card" style="margin-bottom:16px">
+        <h2 class="k-card-title">💳 SMS Wallet Recharge</h2>
+        <p class="k-card-sub">Save your Termii virtual bank account details here. A <em>Recharge SMS Wallet</em> button on the SMS Logs page will show these details so any admin can quickly top up the wallet via bank transfer.</p>
+
+        <div style="display:grid;gap:16px;margin-bottom:16px">
+          ${[1, 2].map(i => `
+          <fieldset style="border:1px solid var(--border,#e0e0e0);border-radius:8px;padding:12px 14px;margin:0">
+            <legend style="font-size:12px;font-weight:600;color:var(--text2,#555);padding:0 6px">Bank Account ${i}</legend>
+            <div class="k-form-group" style="margin-bottom:8px">
+              <label class="k-label">Bank Name</label>
+              <input type="text" id="ks-recharge-bank${i}-name" class="k-input" placeholder="e.g. Wema Bank" value="${i === 1 ? esc(rechargeBank1Name) : esc(rechargeBank2Name)}" />
+            </div>
+            <div class="k-form-group" style="margin-bottom:8px">
+              <label class="k-label">Account Number</label>
+              <input type="text" id="ks-recharge-bank${i}-number" class="k-input" placeholder="10-digit account number" value="${i === 1 ? esc(rechargeBank1Number) : esc(rechargeBank2Number)}" inputmode="numeric" />
+            </div>
+            <div class="k-form-group" style="margin-bottom:0">
+              <label class="k-label">Account Name</label>
+              <input type="text" id="ks-recharge-bank${i}-acctname" class="k-input" placeholder="Name on the account" value="${i === 1 ? esc(rechargeBank1AcctName) : esc(rechargeBank2AcctName)}" />
+            </div>
+          </fieldset>`).join('')}
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">Minimum Recharge Amount (₦) <span style="font-weight:400;color:var(--text3)">(optional)</span></label>
+          <input type="text" id="ks-recharge-min-amount" class="k-input k-input-sm" placeholder="e.g. 3000" value="${esc(rechargeMinAmount)}" inputmode="numeric" style="width:140px" />
+          <p class="k-hint">Shown as a note in the recharge pop-up.</p>
+        </div>
+
+        <div id="ks-recharge-save-msg" class="k-settings-msg" style="display:none"></div>
+        <button class="kbtn kbtn-primary" onclick="Kpsc.saveRechargeBankDetails()">Save Bank Details</button>
       </div>
 
       <div class="k-card" style="margin-bottom:16px">
@@ -11826,6 +11870,29 @@ async function clearSmsKey() {
   await renderSettings(document.getElementById('kpsc-main'));
 }
 
+async function saveRechargeBankDetails() {
+  const msg = document.getElementById('ks-recharge-save-msg');
+  const payload = {};
+  for (let i = 1; i <= 2; i++) {
+    payload[`kpsc_recharge_bank${i}_name`]         = document.getElementById(`ks-recharge-bank${i}-name`)?.value.trim()        || '';
+    payload[`kpsc_recharge_bank${i}_number`]        = document.getElementById(`ks-recharge-bank${i}-number`)?.value.trim()      || '';
+    payload[`kpsc_recharge_bank${i}_account_name`]  = document.getElementById(`ks-recharge-bank${i}-acctname`)?.value.trim()   || '';
+  }
+  payload.kpsc_recharge_min_amount = document.getElementById('ks-recharge-min-amount')?.value.trim() || '';
+  const res = await apiPost('settings', payload);
+  if (msg) {
+    if (res?.error) {
+      msg.className = 'k-settings-msg k-msg-error';
+      msg.textContent = res.error;
+    } else {
+      msg.className = 'k-settings-msg k-msg-ok';
+      msg.textContent = 'Bank details saved.';
+    }
+    msg.style.display = 'block';
+    setTimeout(() => { if (msg) msg.style.display = 'none'; }, 3000);
+  }
+}
+
 // Feature 3 + 17: Save advanced SMS settings (triggers, quiet hours, frequency cap)
 async function saveAdvSmsSettings() {
   const msg = document.getElementById('ks-advsms-save-msg');
@@ -11908,6 +11975,48 @@ async function checkTermiiBalance(btn) {
   } finally {
     btn.disabled = false; btn.textContent = orig;
   }
+}
+
+async function showRechargeWalletModal() {
+  const existing = document.getElementById('k-recharge-modal');
+  if (existing) existing.remove();
+  const res = await apiGet('settings').catch(() => ({}));
+  const banks = [];
+  for (let i = 1; i <= 2; i++) {
+    const name   = res?.[`kpsc_recharge_bank${i}_name`]?.trim()           || '';
+    const number = res?.[`kpsc_recharge_bank${i}_number`]?.trim()         || '';
+    const acctName = res?.[`kpsc_recharge_bank${i}_account_name`]?.trim() || '';
+    if (name || number) banks.push({ name, number, acctName });
+  }
+  const minAmt = res?.kpsc_recharge_min_amount || '';
+  const banksHtml = banks.length
+    ? banks.map(b => `
+        <div style="background:var(--bg2,#f5f7fa);border:1px solid var(--border,#e0e0e0);border-radius:8px;padding:12px 16px;margin-bottom:10px">
+          <div style="font-size:12px;color:var(--text3,#888);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">${esc(b.name)}</div>
+          <div style="font-size:22px;font-weight:700;letter-spacing:.04em;margin-bottom:4px">${esc(b.number)}
+            <button class="kbtn kbtn-sm kbtn-ghost" style="font-size:11px;margin-left:6px;vertical-align:middle" onclick="Kpsc.copyText('${esc(b.number)}', this)" title="Copy account number">📋</button>
+          </div>
+          ${b.acctName ? `<div style="font-size:13px;color:var(--text2,#555)">${esc(b.acctName)}</div>` : ''}
+        </div>`).join('')
+    : `<p style="color:var(--text3,#888);font-size:13px">No bank details saved yet. Go to <strong>Settings → SMS Wallet Recharge</strong> to add your Termii virtual account details.</p>`;
+  const modal = document.createElement('div');
+  modal.id = 'k-recharge-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:400px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">💳 Recharge SMS Wallet</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-recharge-modal')?.remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p style="font-size:14px;margin-bottom:14px;color:var(--text2,#444)">Transfer to any of the virtual accounts below to top up your Termii SMS wallet. Your balance updates automatically after the transfer is confirmed.</p>
+        ${banksHtml}
+        ${minAmt ? `<p class="k-hint" style="margin-top:10px">Minimum recharge: <strong>₦${esc(minAmt)}</strong></p>` : ''}
+        <p class="k-hint" style="margin-top:6px">To update these bank details, go to <strong>Settings → SMS Wallet Recharge</strong>.</p>
+      </div>
+    </div>`;
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
 }
 
 // Feature 11: SMS Templates
@@ -16489,6 +16598,8 @@ window.Kpsc = {
   saveAdvSmsSettings,
   sendTestSms,
   checkTermiiBalance,
+  showRechargeWalletModal,
+  saveRechargeBankDetails,
   saveSmsTemplate,
   deleteSmsTemplate,
   aiGenerateNewMonthSms,
