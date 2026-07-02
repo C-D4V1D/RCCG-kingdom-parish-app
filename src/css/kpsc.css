@@ -400,6 +400,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-key-ok{color:#065f46;}
 .k-key-fail{color:#b91c1c;}
 .k-status-rule{background:var(--surface2);color:var(--text2);border-left:3px solid var(--border);}
+.k-status-warn{background:#fef3c7;color:#92400e;border-left:3px solid var(--amber);}
 .k-form-group{margin-bottom:20px;}
 .k-hint{font-size:12px;color:var(--text3);margin:4px 0 0;}
 .k-settings-msg{padding:10px 14px;border-radius:8px;font-size:13.5px;margin-bottom:12px;}

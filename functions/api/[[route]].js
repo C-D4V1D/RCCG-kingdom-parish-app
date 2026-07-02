@@ -549,6 +549,9 @@ export async function onRequest(context) {
         return await deleteKpscFinanceEntry(DB, param, auth);
       }
     }
+    if (route === 'kpsc-email-ingest-log' && method === 'GET') {
+      return await getEmailIngestLog(DB);
+    }
     if (route === 'kpsc-finance-share' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
       if (auth instanceof Response) return auth;
@@ -7398,6 +7401,33 @@ async function classifyBankChargeEmail(DB, env, subject, bodyText) {
   }
 
   throw new Error(errors.join(' | '));
+}
+
+const EMAIL_INGEST_ATTENTION_OUTCOMES = ['error', 'skipped_wrong_account'];
+
+async function getEmailIngestLog(DB) {
+  const { results } = await DB.prepare(
+    `SELECT id, subject, outcome, error_detail, finance_entry_id, created_at
+     FROM email_ingest_log ORDER BY created_at DESC LIMIT 20`
+  ).all();
+
+  const rows = results || [];
+  const counts = {};
+  for (const r of rows) counts[r.outcome] = (counts[r.outcome] || 0) + 1;
+
+  return ok({
+    entries: rows.map(r => ({
+      id: r.id,
+      subject: r.subject,
+      outcome: r.outcome,
+      errorDetail: r.error_detail,
+      financeEntryId: r.finance_entry_id,
+      createdAt: r.created_at,
+    })),
+    counts,
+    needsAttention: rows.some(r => EMAIL_INGEST_ATTENTION_OUTCOMES.includes(r.outcome)),
+    lastActivityAt: rows[0]?.created_at || null,
+  });
 }
 
 async function ingestBankChargeEmail(DB, env, request, body) {
