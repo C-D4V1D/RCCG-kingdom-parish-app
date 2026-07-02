@@ -7406,14 +7406,25 @@ async function classifyBankChargeEmail(DB, env, subject, bodyText) {
 const EMAIL_INGEST_ATTENTION_OUTCOMES = ['error', 'skipped_wrong_account'];
 
 async function getEmailIngestLog(DB) {
-  const { results } = await DB.prepare(
-    `SELECT id, subject, outcome, error_detail, finance_entry_id, created_at
-     FROM email_ingest_log ORDER BY created_at DESC LIMIT 20`
-  ).all();
+  const [logResult, ackRow] = await Promise.all([
+    DB.prepare(
+      `SELECT id, subject, outcome, error_detail, finance_entry_id, created_at
+       FROM email_ingest_log ORDER BY created_at DESC LIMIT 20`
+    ).all(),
+    DB.prepare(`SELECT value FROM settings WHERE key='kpsc_email_ingest_ack_at'`).first(),
+  ]);
 
-  const rows = results || [];
+  const rows = logResult.results || [];
+  const ackAt = String(ackRow?.value || '');
   const counts = {};
   for (const r of rows) counts[r.outcome] = (counts[r.outcome] || 0) + 1;
+
+  // A flagged row only counts toward needsAttention if it happened after the
+  // user last acknowledged (dates are stored in the same sortable SQLite
+  // datetime('now') format, so a plain string compare is correct).
+  const needsAttention = rows.some(r =>
+    EMAIL_INGEST_ATTENTION_OUTCOMES.includes(r.outcome) && (!ackAt || r.created_at > ackAt)
+  );
 
   return ok({
     entries: rows.map(r => ({
@@ -7425,7 +7436,7 @@ async function getEmailIngestLog(DB) {
       createdAt: r.created_at,
     })),
     counts,
-    needsAttention: rows.some(r => EMAIL_INGEST_ATTENTION_OUTCOMES.includes(r.outcome)),
+    needsAttention,
     lastActivityAt: rows[0]?.created_at || null,
   });
 }
