@@ -6,16 +6,24 @@ Cheque Book Issuance, etc.) into the KPSC Finance ledger -- no manual data
 entry required.
 
 **How it works:**
-1. Gmail forwards all FirstBank alert emails to a Zapier address
-2. Zapier sends the email content to the KPSC portal API
+1. Make.com watches your Gmail inbox directly for FirstBank alert emails
+   (no forwarding needed -- it connects straight to your own Gmail account)
+2. Make sends the email content to the KPSC portal API
 3. The portal uses DeepSeek AI to classify the email and extract fields
    (falling back to OpenAI automatically if DeepSeek is unavailable or fails)
 4. If the alert is from the KPSC bank account and is a charge, it's
    automatically recorded as an expense. Alerts from any other bank account,
    and alerts that aren't charges, are ignored.
 
-**Time to set up:** ~15 minutes  
-**Cost:** Free (Zapier free tier, Cloudflare free tier)
+**Time to set up:** ~15 minutes
+**Cost:** Free (Make.com free plan, Cloudflare free tier)
+
+> **Note on tool choice:** an earlier version of this guide used Zapier, but
+> Zapier gates the "Webhooks by Zapier" action (the piece that lets it call
+> our portal) behind its paid Professional plan ($19.99+/month) -- it's not
+> available on the free plan at all. Make.com's free plan does not have this
+> restriction, and its credit-based pricing comfortably covers the handful of
+> alerts a month this feature needs, so it's the recommended free path.
 
 ---
 
@@ -28,7 +36,8 @@ entry required.
   the same key used for OCR/transcription). This is optional but recommended:
   it's used automatically as a backup only if DeepSeek is unavailable or a
   call to it fails, so a single provider outage doesn't drop a charge.
-- Access to the Gmail account that receives FirstBank alerts
+- Access to the Gmail account that receives FirstBank alerts (you'll connect
+  it directly to Make -- no separate forwarding address needed)
 - Know the masked account number of your KPSC committee's FirstBank account
   exactly as it appears in the alert emails (e.g. `204XXXX358`) -- you'll enter
   this in Step 2 so alerts from any *other* FirstBank account you may also
@@ -39,7 +48,7 @@ entry required.
 ## Step 1: Set the Webhook Secret (~2 min)
 
 The portal needs a secret token to verify that incoming requests are legitimate
-(from your Zapier, not from a random person on the internet).
+(from your Make.com scenario, not from a random person on the internet).
 
 **Generate a secret** -- use this one (or generate your own random string):
 
@@ -89,36 +98,43 @@ kpsc-email-ingest-2026-xR7mQ9pL4wN2
 
 ---
 
-## Step 3: Create Your Zapier Account + Email Trigger (~5 min)
+## Step 3: Create Your Make.com Account + Gmail Trigger (~5 min)
 
-1. Go to [zapier.com](https://zapier.com) and sign up for a free account
-2. Click **Create** > **New Zap** (or the **+** button)
-3. For the **Trigger**, search for **"Email by Zapier"**
-4. Select it and click **Continue**
-5. Zapier will show you a **unique email address** like:
-   ```
-   abc123@zapiermail.com
-   ```
-6. **Copy this address** -- you'll need it for Gmail forwarding (Step 5)
-7. Click **Continue** and then **Test trigger** (it may say no emails yet -- that's fine)
+1. Go to [make.com](https://www.make.com) and sign up for a free account
+2. Click **Create a new scenario**
+3. Click the **+** to add your first module and search for **"Gmail"**
+4. Select the **"Watch Emails"** trigger
+5. Click **Add** next to the connection field to connect your Gmail account
+   (the one that receives FirstBank alerts) -- this opens a Google sign-in
+   popup, sign in and grant access
+6. Configure the trigger:
+
+   | Field | Value |
+   |-------|-------|
+   | **Folder** | `INBOX` |
+   | **Criteria** | `From` contains `FirstAlert@firstbanknigeria.com` (or use Gmail search syntax: `from:FirstAlert@firstbanknigeria.com`) |
+   | **Mark as read** | Your preference (either is fine) |
+   | **Maximum number of results** | `5` (plenty for this volume) |
+
+7. Click **OK** to save the module
 
 ---
 
-## Step 4: Add the Webhook Action (~3 min)
+## Step 4: Add the HTTP Action (~3 min)
 
-Still in the same Zap:
+Still in the same scenario:
 
-1. Click the **+** to add an **Action**
-2. Search for **"Webhooks by Zapier"**
-3. Choose **POST** as the action event, click **Continue**
-4. Configure the action:
+1. Click the **+** on the right of the Gmail module to add the next module
+2. Search for **"HTTP"** and select the **"Make a request"** action
+3. Configure the request:
 
    | Field | Value |
    |-------|-------|
    | **URL** | `https://rccg-kingdom-parish-app.pages.dev/api/internal/ingest-bank-charge-email` |
-   | **Payload Type** | `json` |
-   | **Data** | See field mapping below |
-   | **Headers** | `Authorization` = `Bearer YOUR_EMAIL_INGEST_SECRET` |
+   | **Method** | `POST` |
+   | **Headers** | Key: `Authorization`, Value: `Bearer YOUR_EMAIL_INGEST_SECRET` |
+   | **Body type** | `Raw` |
+   | **Content type** | `JSON (application/json)` |
 
    Replace `YOUR_EMAIL_INGEST_SECRET` with the secret from Step 1.
 
@@ -130,56 +146,46 @@ Still in the same Zap:
    > normally browse to. So the correct webhook URL is always
    > `https://rccg-kingdom-parish-app.pages.dev/api/internal/ingest-bank-charge-email`.
 
-5. **Data field mapping** (click "+" to add each key-value pair):
+4. In the **Request content** box, build the JSON body using the field picker
+   (click inside the box, then click the Gmail module's output fields from the
+   panel on the right to insert them):
 
-   | Key | Value (select from Zapier dropdown) |
-   |-----|------|
-   | `subject` | **Subject** (from the Email trigger) |
-   | `from` | **From Email** (from the Email trigger) |
-   | `bodyText` | **Body Plain** (from the Email trigger) |
-   | `messageId` | **Message ID** (from the Email trigger, if available) |
+   ```json
+   {
+     "subject": "{{1.subject}}",
+     "from": "{{1.from.address}}",
+     "bodyText": "{{1.text}}",
+     "messageId": "{{1.id}}"
+   }
+   ```
 
-6. Click **Continue**, then **Test** (it may fail since no real email has been
-   sent yet -- that's OK)
-7. **Turn the Zap ON** (toggle in the top-right)
+   The exact field names in the picker may read slightly differently
+   (e.g. "Subject", "From > Email", "Content" / "Text", "Message ID") --
+   match by meaning: subject line, sender email address, plain-text body,
+   and a unique email identifier.
 
----
-
-## Step 5: Set Up Gmail Forwarding (~4 min)
-
-### 5a: Add the Zapier address as a forwarding destination
-
-1. Open Gmail (the account that receives FirstBank alerts)
-2. Click the **gear icon** (top-right) > **See all settings**
-3. Go to the **Forwarding and POP/IMAP** tab
-4. Click **Add a forwarding address**
-5. Paste the Zapier email address from Step 3
-6. Click **Next** > **Proceed** > **OK**
-7. Gmail sends a **confirmation code** to the Zapier address
-8. Go back to Zapier > click **Zap History** (left sidebar) > find the
-   confirmation email > copy the confirmation code
-9. Back in Gmail, enter the code and click **Verify**
-
-### 5b: Create a filter to auto-forward FirstBank alerts
-
-1. In Gmail Settings, go to **Filters and Blocked Addresses**
-2. Click **Create a new filter**
-3. In the **From** field, type: `FirstAlert@firstbanknigeria.com`
-4. Click **Create filter**
-5. Check **Forward it to** and select your Zapier address
-6. (Optional) Check **Skip the Inbox (Archive it)** if you don't want these
-   cluttering your inbox
-7. (Optional) Check **Also apply filter to matching conversations** to
-   process existing alerts
-8. Click **Create filter**
+5. Click **OK** to save the module
 
 ---
 
-## Step 6: Test It (~1 min)
+## Step 5: Turn On the Scenario (~1 min)
 
-1. Forward one of your existing FirstBank charge emails to the Zapier address
-   manually (just open the email and click Forward, paste the Zapier address)
-2. Wait 1-2 minutes
+1. Click **Save** (bottom-left)
+2. Set the schedule: click the clock icon on the Gmail module and choose
+   **every 15 minutes** (the minimum interval on the free plan -- still fully
+   automatic, just checks every 15 minutes rather than instantly)
+3. Toggle the scenario **ON** (top-left switch)
+
+---
+
+## Step 6: Test It (~2 min)
+
+1. In Make, click **Run once** to trigger the scenario immediately against
+   whatever matching emails are currently in your inbox (or forward/re-send
+   yourself one of your existing FirstBank charge emails first, then Run once)
+2. Check the run history (click on the scenario, then the execution log) to
+   confirm the Gmail module found the email and the HTTP module got a
+   successful response
 3. Open the KPSC portal > **Finance** page
 4. You should see a new expense entry with:
    - Category: **Bank Charges**
@@ -216,10 +222,10 @@ side of skipping (you can always enter those manually).
 
 | Problem | Solution |
 |---------|----------|
-| Nothing appears on Finance page | Check Zapier > Zap History for the task status. If it shows an error response, check the error message. |
-| Zapier shows 401 error | The `EMAIL_INGEST_SECRET` in Zapier doesn't match the one in Cloudflare. Double-check both values. |
-| Zapier shows 503 error | Either `EMAIL_INGEST_SECRET` isn't set in Cloudflare env vars, or the DeepSeek key isn't configured in portal Settings. |
-| Zapier shows 502 error | Both DeepSeek and OpenAI (if configured) failed. This is usually temporary -- Zapier will auto-retry up to 3 times. |
+| Nothing appears on Finance page | Check Make's scenario execution history for the HTTP module's response. If it shows an error, check the error message. |
+| HTTP module shows 401 error | The `EMAIL_INGEST_SECRET` in the Make HTTP module's header doesn't match the one in Cloudflare. Double-check both values. |
+| HTTP module shows 503 error | Either `EMAIL_INGEST_SECRET` isn't set in Cloudflare env vars, or the DeepSeek key isn't configured in portal Settings. |
+| HTTP module shows 502 error | Both DeepSeek and OpenAI (if configured) failed. This is usually temporary -- re-run the scenario. |
 | Duplicate entries | The system has built-in duplicate detection (by email Message-ID and by date+amount+narration). If you see duplicates, they likely have slightly different narration text. |
 | Charge was skipped ("not_a_charge") | The AI classified it as a non-charge. You can check the `email_ingest_log` table for details. Enter it manually on the Finance page. |
 | Charge was skipped ("wrong_account") | The extracted account number didn't match what you entered in Settings. Double-check the masked account number is typed exactly as it appears in the alert emails. |
@@ -229,8 +235,10 @@ side of skipping (you can always enter those manually).
 
 ## Limits & Costs
 
-- **Zapier free tier**: 100 tasks/month. Each bank alert email = 1 task.
-  Typical usage is 4-10 alerts/month -- well within limits.
+- **Make.com free tier**: 1,000 operations/month, max 2 active scenarios,
+  15-minute minimum polling interval. Each bank alert email uses about
+  2 operations (1 Gmail trigger + 1 HTTP request). Typical usage is
+  4-10 alerts/month -- well within limits.
 - **DeepSeek API**: Each classification uses ~500 tokens (~$0.001 or less).
   Negligible cost.
 - **Cloudflare free tier**: Each email = 1 Pages Function invocation + 1 small
@@ -241,7 +249,7 @@ side of skipping (you can always enter those manually).
 ## Future Upgrade: Cloudflare Email Routing
 
 If the portal ever moves to a custom domain (e.g., `kpscparish.org`) hosted on
-Cloudflare, you can replace Zapier entirely with **Cloudflare Email Routing**:
+Cloudflare, you can replace Make.com entirely with **Cloudflare Email Routing**:
 
 - Free, built-in to Cloudflare
 - Instant delivery (no polling delay)
