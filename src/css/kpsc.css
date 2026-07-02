@@ -401,6 +401,16 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-key-fail{color:#b91c1c;}
 .k-status-rule{background:var(--surface2);color:var(--text2);border-left:3px solid var(--border);}
 .k-status-warn{background:#fef3c7;color:#92400e;border-left:3px solid var(--amber);}
+
+/* ── Bank charge email automation card — scoped compact styling ─────── */
+.kf-email-automation .k-collapsible-title{font-size:12px;}
+.kf-email-automation .k-settings-status{display:flex;align-items:center;flex-wrap:wrap;gap:6px;font-size:12px;padding:8px 10px;margin-bottom:10px;}
+.kf-email-automation-counts{display:flex;gap:10px;flex-wrap:wrap;margin:2px 0 10px;font-size:11.5px;color:var(--text2);}
+.kf-email-automation .k-meeting-card{padding:8px 10px;}
+.kf-email-automation .k-mc-title{font-size:12.5px;}
+.kf-email-automation .k-mc-meta{font-size:11px;}
+.kf-email-automation .k-page-hint{font-size:10.5px;margin-bottom:0;}
+.kf-email-automation .kbadge{font-size:10px;padding:1px 7px;}
 .k-form-group{margin-bottom:20px;}
 .k-hint{font-size:12px;color:var(--text3);margin:4px 0 0;}
 .k-settings-msg{padding:10px 14px;border-radius:8px;font-size:13.5px;margin-bottom:12px;}

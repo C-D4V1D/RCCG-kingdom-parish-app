@@ -7251,20 +7251,23 @@ function renderEmailIngestStatusCard(ingestLogRes) {
     : (entries.length ? `🤖 Automation healthy — last activity ${esc(fmtDateTime(ingestLogRes.lastActivityAt))}` : 'No automated bank-charge emails processed yet.');
 
   return `
-    <details class="k-collapsible" id="kf-email-automation" ${needsAttention ? 'open' : ''} style="margin-bottom:16px">
+    <details class="k-collapsible kf-email-automation" id="kf-email-automation" style="margin-bottom:16px">
       <summary class="k-collapsible-hdr">
-        <span class="k-collapsible-title">🤖 Bank Charge Email Automation</span>
+        <span class="k-collapsible-title">🤖 Bank Charge Automation</span>
         <span class="k-collapsible-summary">${needsAttention ? '⚠️ Needs attention' : (entries.length ? '✅ Healthy' : 'No activity yet')}</span>
       </summary>
-      <div class="k-settings-status ${statusClass}">${statusText}</div>
+      <div class="k-settings-status ${statusClass}">
+        ${statusText}
+        ${needsAttention ? `<button class="kbtn kbtn-sm kbtn-ghost" style="margin-left:10px" onclick="Kpsc.ackEmailIngestAttention('${esc(ingestLogRes.lastActivityAt || '')}')">Mark as reviewed</button>` : ''}
+      </div>
       ${entries.length ? `
-      <div style="display:flex;gap:16px;flex-wrap:wrap;margin:4px 0 14px;font-size:13px;color:var(--text2)">
+      <div class="kf-email-automation-counts">
         <span>✅ ${counts.inserted || 0} recorded</span>
         <span>⏭️ ${(counts.skipped_not_charge || 0) + (counts.skipped_duplicate || 0)} skipped</span>
         <span style="color:${(counts.skipped_wrong_account || 0) > 0 ? 'var(--red)' : 'inherit'}">🚫 ${counts.skipped_wrong_account || 0} wrong account</span>
         <span style="color:${(counts.error || 0) > 0 ? 'var(--red)' : 'inherit'}">❌ ${counts.error || 0} error${counts.error === 1 ? '' : 's'}</span>
       </div>
-      <div class="k-meeting-list" style="max-height:340px;overflow-y:auto">
+      <div class="k-meeting-list" style="max-height:280px;overflow-y:auto">
         ${entries.map(e => `
           <div class="k-meeting-card" style="cursor:default">
             <div class="k-mc-top">
@@ -7276,6 +7279,11 @@ function renderEmailIngestStatusCard(ingestLogRes) {
           </div>`).join('')}
       </div>` : ''}
     </details>`;
+}
+
+async function ackEmailIngestAttention(lastActivityAt) {
+  await apiPost('settings', { kpsc_email_ingest_ack_at: lastActivityAt || '' });
+  await renderFinance(document.getElementById('kpsc-main'));
 }
 
 async function renderFinance(main) {
@@ -16379,6 +16387,7 @@ window.Kpsc = {
   openFinanceModal,
   closeFinanceModal,
   saveFinanceEntry,
+  ackEmailIngestAttention,
   updateFinanceCategoryOptions,
   onFinanceCategoryChange,
   scanReceiptPhoto,

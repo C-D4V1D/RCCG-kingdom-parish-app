@@ -3491,3 +3491,65 @@ test('GET /api/kpsc-email-ingest-log sets needsAttention=true when an error or w
   assert.equal(body.needsAttention, true);
   assert.equal(body.counts.error, 1);
 });
+
+test('GET /api/kpsc-email-ingest-log respects the ack timestamp — old flagged rows stop needing attention, new ones still do', async () => {
+  const onPrepare = (sql) => {
+    if (/SELECT id, subject, outcome, error_detail, finance_entry_id, created_at\s+FROM email_ingest_log/.test(sql)) {
+      return {
+        bind() { return this; },
+        async all() {
+          return {
+            results: [
+              { id: 'eil-5', subject: 'Debit Alert', outcome: 'error', error_detail: 'new error', finance_entry_id: '', created_at: '2026-07-03 09:00:00' },
+              { id: 'eil-4', subject: 'Debit Alert', outcome: 'error', error_detail: 'old error, already reviewed', finance_entry_id: '', created_at: '2026-07-01 08:00:00' },
+            ],
+          };
+        },
+      };
+    }
+    if (/SELECT value FROM settings WHERE key='kpsc_email_ingest_ack_at'/.test(sql)) {
+      return { bind() { return this; }, async first() { return { value: '2026-07-02 00:00:00' }; } };
+    }
+    return { bind() { return this; }, async run() {}, async first() { return null; }, async all() { return { results: [] }; } };
+  };
+
+  const res = await onRequest({
+    request: createRequest('https://example.com/api/kpsc-email-ingest-log', 'GET'),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(res);
+  assert.equal(res.status, 200);
+  // The 2026-07-01 error is before the ack timestamp (reviewed already) but
+  // the 2026-07-03 error is after it, so needsAttention must still be true.
+  assert.equal(body.needsAttention, true);
+  assert.equal(body.counts.error, 2);
+});
+
+test('GET /api/kpsc-email-ingest-log clears needsAttention once every flagged row is before the ack timestamp', async () => {
+  const onPrepare = (sql) => {
+    if (/SELECT id, subject, outcome, error_detail, finance_entry_id, created_at\s+FROM email_ingest_log/.test(sql)) {
+      return {
+        bind() { return this; },
+        async all() {
+          return {
+            results: [
+              { id: 'eil-4', subject: 'Debit Alert', outcome: 'error', error_detail: 'old error, already reviewed', finance_entry_id: '', created_at: '2026-07-01 08:00:00' },
+            ],
+          };
+        },
+      };
+    }
+    if (/SELECT value FROM settings WHERE key='kpsc_email_ingest_ack_at'/.test(sql)) {
+      return { bind() { return this; }, async first() { return { value: '2026-07-02 00:00:00' }; } };
+    }
+    return { bind() { return this; }, async run() {}, async first() { return null; }, async all() { return { results: [] }; } };
+  };
+
+  const res = await onRequest({
+    request: createRequest('https://example.com/api/kpsc-email-ingest-log', 'GET'),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(res);
+  assert.equal(res.status, 200);
+  assert.equal(body.needsAttention, false);
+});
