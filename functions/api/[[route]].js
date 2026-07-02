@@ -2035,6 +2035,14 @@ async function handleInit(DB) {
     partnership_og_description:'',   // Custom OG/preview description
     partnership_og_image:      '',   // Custom OG image (data URL or external URL)
     partnership_favicon:       '',   // Custom favicon (data URL or external URL)
+    // SMS wallet recharge bank account details (shown in the Recharge SMS Wallet pop-up)
+    kpsc_recharge_bank1_name:         '',
+    kpsc_recharge_bank1_number:       '',
+    kpsc_recharge_bank1_account_name: '',
+    kpsc_recharge_bank2_name:         '',
+    kpsc_recharge_bank2_number:       '',
+    kpsc_recharge_bank2_account_name: '',
+    kpsc_recharge_min_amount:         '',
   };
   for (const [key, value] of Object.entries(defaultSettings)) {
     await DB.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).bind(key, value).run();
