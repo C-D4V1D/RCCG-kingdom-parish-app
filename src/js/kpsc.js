@@ -7402,7 +7402,8 @@ async function openFinanceModal(entryToEdit = null) {
   document.getElementById('kpsc-finance-modal')?.remove();
   const settingsRes = await apiGet('settings');
   const incomeCategories = Array.isArray(settingsRes?.kpsc_income_categories) ? settingsRes.kpsc_income_categories : ['partnership_payment','one_time_donation','wealth_development_offering','other_income'];
-  const expenseCategories = Array.isArray(settingsRes?.kpsc_expense_categories) ? settingsRes.kpsc_expense_categories : ['projects','welfare','rent','church_support','committee_operations'];
+  const expenseCategoriesBase = Array.isArray(settingsRes?.kpsc_expense_categories) ? settingsRes.kpsc_expense_categories : ['projects','welfare','rent','church_support','committee_operations'];
+  const expenseCategories = expenseCategoriesBase.includes('bank_charges') ? expenseCategoriesBase : [...expenseCategoriesBase, 'bank_charges'];
 
   const e = entryToEdit;
   const isEdit = !!e?.id;
@@ -11011,6 +11012,7 @@ async function renderSettings(main) {
   const openaiKey   = res?.ai_openai_key   || '';
   const policyUrl   = res?.kpsc_policy_url  || '';
   const policyNotes = res?.kpsc_policy_notes || '';
+  const bankAccountNumbers = res?.kpsc_bank_account_number || '';
   const hasDeepseek = !!deepseekKey;
   const hasOpenai   = !!openaiKey;
   const transcriptionModel = res?.ai_transcription_model || 'gpt-4o-mini-transcribe';
@@ -11172,6 +11174,13 @@ async function renderSettings(main) {
             <span class="k-key-status" id="ks-openai-status"></span>
           </div>
           <p class="k-hint">Required for audio transcription, notes OCR, and receipt scanning. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a></p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">KPSC Bank Account Number(s) — Bank Charge Email Automation</label>
+          <input type="text" id="ks-bank-account-numbers" class="k-input"
+            placeholder="e.g. 204XXXX358" value="${esc(bankAccountNumbers)}" />
+          <p class="k-hint">Masked account number(s) exactly as they appear in FirstBank alert emails (e.g. <strong>204XXXX358</strong>), comma-separated if more than one. The bank-charge email auto-recording feature only records charges from these account(s) — alerts from any other FirstBank account you receive are ignored. Leave blank to disable this filter (not recommended if you have more than one FirstBank account).</p>
         </div>
 
         <div class="k-form-group">
@@ -11665,6 +11674,7 @@ async function saveSettings() {
   const openaiKey   = document.getElementById('ks-openai-key')?.value.trim()   || '';
   const policyUrl   = document.getElementById('ks-policy-url')?.value.trim()   || '';
   const policyNotes = document.getElementById('ks-policy-notes')?.value.trim() || '';
+  const bankAccountNumbers = document.getElementById('ks-bank-account-numbers')?.value.trim() || '';
 
   btn.disabled = true;
   btn.textContent = 'Saving…';
@@ -11675,6 +11685,7 @@ async function saveSettings() {
     ai_openai_key: openaiKey,
     kpsc_policy_url: policyUrl,
     kpsc_policy_notes: policyNotes,
+    kpsc_bank_account_number: bankAccountNumbers,
   });
 
   if (res?.error) {
