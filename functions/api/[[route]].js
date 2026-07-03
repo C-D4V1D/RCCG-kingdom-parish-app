@@ -8853,11 +8853,13 @@ async function handleTermiiWebhook(DB, body, request, env) {
   const rawStatus    = String(body?.status      || '').toLowerCase().trim();
   if (!messageId) return ok({ ok: true, ignored: true, reason: 'no message_id' });
 
-  // Normalise Termii status strings
-  let deliveryStatus = rawStatus;
-  if (rawStatus === 'dnd' || rawStatus === 'do not disturb') deliveryStatus = 'dnd';
-  else if (rawStatus === 'delivered') deliveryStatus = 'delivered';
-  else if (rawStatus === 'failed' || rawStatus === 'rejected') deliveryStatus = 'failed';
+  // Normalise Termii status strings — Termii's DLR callback uses SMPP-style
+  // codes (e.g. "DELIVRD", "EXPIRED", "REJECTD", "UNDELIV") rather than the
+  // spelled-out words, so match on those in addition to the plain-English forms.
+  let deliveryStatus;
+  if (rawStatus === 'dnd' || rawStatus === 'dndactive' || rawStatus === 'do not disturb') deliveryStatus = 'dnd';
+  else if (rawStatus === 'delivered' || rawStatus === 'delivrd') deliveryStatus = 'delivered';
+  else if (rawStatus === 'failed' || rawStatus === 'rejected' || rawStatus === 'rejectd' || rawStatus === 'undeliv' || rawStatus === 'expired') deliveryStatus = 'failed';
   else deliveryStatus = rawStatus || 'unknown';
 
   // Update kpsc_reminders row that has this message_id
