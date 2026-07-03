@@ -7306,6 +7306,7 @@ async function renderFinance(main) {
   S.allFinanceEntries = Array.isArray(allTimeRes) ? allTimeRes : [];
   const minimumBalance = Number(settingsRes?.kpsc_minimum_balance || 0);
   S.financeMinimumBalance = minimumBalance;
+  _cacheRechargeBankDetails(settingsRes);
 
   // Reset filter/sort state on every full page load
   S.financeSearch = '';
@@ -11076,6 +11077,7 @@ async function renderSettings(main) {
     apiGet('kpsc-accounts').catch(() => []),
   ]);
   S.accounts = Array.isArray(accountsRes) ? accountsRes : [];
+  _cacheRechargeBankDetails(res);
   // Hydrate role permissions from DB so canAccess() reflects any saved customisations
   const savedPerms = res?.kpsc_role_permissions;
   if (savedPerms && typeof savedPerms === 'object' && !Array.isArray(savedPerms)) {
@@ -11887,6 +11889,7 @@ async function saveRechargeBankDetails() {
   }
   payload.kpsc_recharge_min_amount = document.getElementById('ks-recharge-min-amount')?.value.trim() || '';
   const res = await apiPost('settings', payload);
+  if (!res?.error) _cacheRechargeBankDetails(payload);
   if (msg) {
     if (res?.error) {
       msg.className = 'k-settings-msg k-msg-error';
@@ -12069,15 +12072,22 @@ function goToSmsWalletRecharge() {
 }
 
 // ── Recharge modal helpers ──────────────────────────────────────────────────
-function _rechargeModalBanksHtml(res) {
+
+// Extract bank details from a raw settings object and cache in S.rechargeBankDetails.
+// Call this anywhere settings are already loaded to avoid a redundant fetch in the modal.
+function _cacheRechargeBankDetails(res) {
+  if (!res || res.error) return;
   const banks = [];
   for (let i = 1; i <= 2; i++) {
-    const name     = (res?.[`kpsc_recharge_bank${i}_name`]         || '').trim();
-    const number   = (res?.[`kpsc_recharge_bank${i}_number`]       || '').trim();
-    const acctName = (res?.[`kpsc_recharge_bank${i}_account_name`] || '').trim();
+    const name     = (res[`kpsc_recharge_bank${i}_name`]         || '').trim();
+    const number   = (res[`kpsc_recharge_bank${i}_number`]       || '').trim();
+    const acctName = (res[`kpsc_recharge_bank${i}_account_name`] || '').trim();
     if (name || number) banks.push({ name, number, acctName });
   }
-  const minAmt = (res?.kpsc_recharge_min_amount || '').trim();
+  S.rechargeBankDetails = { banks, minAmt: (res.kpsc_recharge_min_amount || '').trim() };
+}
+
+function _rechargeModalBanksHtml({ banks = [], minAmt = '' } = {}) {
   const body = banks.length
     ? banks.map(b => `
         <div style="background:var(--bg2,#f5f7fa);border:1.5px solid var(--border,#dde3ec);border-radius:10px;padding:14px 18px;margin-bottom:10px">
@@ -12095,9 +12105,19 @@ function _rechargeModalBanksHtml(res) {
   return body + (minAmt ? `<p class="k-hint" style="margin-top:8px;text-align:center">Minimum recharge: <strong>₦${esc(minAmt)}</strong></p>` : '');
 }
 
+function _fillRechargeModal(details) {
+  const body = document.getElementById('k-recharge-modal-body');
+  if (!body) return;
+  body.innerHTML = `
+    <p style="font-size:14px;margin-bottom:14px;color:var(--text2,#444);line-height:1.5">
+      Transfer to any virtual account below to top up your Termii SMS wallet. Balance updates automatically once the transfer is confirmed.
+    </p>
+    ${_rechargeModalBanksHtml(details)}
+    <p class="k-hint" style="margin-top:10px">To update these details, go to <strong>Settings → SMS Wallet Recharge</strong>.</p>`;
+}
+
 async function showRechargeWalletModal() {
   document.getElementById('k-recharge-modal')?.remove();
-  // Show modal skeleton immediately so there's instant UI feedback
   const modal = document.createElement('div');
   modal.id = 'k-recharge-modal';
   modal.className = 'k-modal-overlay';
@@ -12113,20 +12133,23 @@ async function showRechargeWalletModal() {
     </div>`;
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
   document.body.appendChild(modal);
-  // Fetch settings and populate
+
+  // Use in-memory cache if available (populated when Finance/Settings pages load)
+  if (S.rechargeBankDetails) {
+    _fillRechargeModal(S.rechargeBankDetails);
+    return;
+  }
+
+  // Cache miss — fetch settings directly
   try {
     const res = await apiGet('settings');
-    const body = document.getElementById('k-recharge-modal-body');
-    if (!body) return;
-    body.innerHTML = `
-      <p style="font-size:14px;margin-bottom:14px;color:var(--text2,#444);line-height:1.5">
-        Transfer to any virtual account below to top up your Termii SMS wallet. Balance updates automatically once the transfer is confirmed.
-      </p>
-      ${_rechargeModalBanksHtml(res)}
-      <p class="k-hint" style="margin-top:10px">To update these details, go to <strong>Settings → SMS Wallet Recharge</strong>.</p>`;
+    _cacheRechargeBankDetails(res);
+    _fillRechargeModal(S.rechargeBankDetails || { banks: [], minAmt: '' });
   } catch (e) {
     const body = document.getElementById('k-recharge-modal-body');
-    if (body) body.innerHTML = `<p style="color:#c00;font-size:13px">Could not load bank details. Please try again.</p>`;
+    if (body) body.innerHTML = `
+      <p style="color:#c00;font-size:13px;margin-bottom:10px">Could not load bank details.</p>
+      <button class="kbtn kbtn-sm" onclick="Kpsc.showRechargeWalletModal()">🔄 Retry</button>`;
   }
 }
 
