@@ -12084,12 +12084,12 @@ function _cacheRechargeBankDetails(res) {
   if (!res || res.error) return;
   const banks = [];
   for (let i = 1; i <= 2; i++) {
-    const name     = (res[`kpsc_recharge_bank${i}_name`]         || '').trim();
-    const number   = (res[`kpsc_recharge_bank${i}_number`]       || '').trim();
-    const acctName = (res[`kpsc_recharge_bank${i}_account_name`] || '').trim();
+    const name     = String(res[`kpsc_recharge_bank${i}_name`]         || '').trim();
+    const number   = String(res[`kpsc_recharge_bank${i}_number`]       || '').trim();
+    const acctName = String(res[`kpsc_recharge_bank${i}_account_name`] || '').trim();
     if (name || number) banks.push({ name, number, acctName });
   }
-  S.rechargeBankDetails = { banks, minAmt: (res.kpsc_recharge_min_amount || '').trim() };
+  S.rechargeBankDetails = { banks, minAmt: String(res.kpsc_recharge_min_amount || '').trim() };
 }
 
 function _rechargeModalBanksHtml({ banks = [], minAmt = '' } = {}) {
