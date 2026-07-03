@@ -8362,13 +8362,18 @@ async function renderSmsLogs(main) {
     const m = i + 1;
     return `<option value="${m}" ${month===m?'selected':''}>${monthName(m)}</option>`;
   }).join('');
-  const res = await apiGet(`kpsc-sms-logs?${qs}`);
+  const [res, settingsRes] = await Promise.all([
+    apiGet(`kpsc-sms-logs?${qs}`),
+    apiGet('settings').catch(() => null),
+  ]);
   if (res?.error) throw new Error(res.error);
   S.smsLogsData = res;
   // Keep a fresh balance cache so Finance/Partners pages can use it without fetching
   if (res.wallet?.balance != null) {
     S.termiiWalletCache = { balance: Number(res.wallet.balance), fetchedAt: Date.now() };
   }
+  // Populate recharge bank-details cache here too — this is the page the Recharge button lives on
+  _cacheRechargeBankDetails(settingsRes);
   const c = res.counts || {};
   const sch = res.scheduler || {};
   const logs = Array.isArray(res.logs) ? res.logs : [];
@@ -12146,9 +12151,10 @@ async function showRechargeWalletModal() {
     _cacheRechargeBankDetails(res);
     _fillRechargeModal(S.rechargeBankDetails || { banks: [], minAmt: '' });
   } catch (e) {
+    console.error('showRechargeWalletModal: failed to load settings', e);
     const body = document.getElementById('k-recharge-modal-body');
     if (body) body.innerHTML = `
-      <p style="color:#c00;font-size:13px;margin-bottom:10px">Could not load bank details.</p>
+      <p style="color:#c00;font-size:13px;margin-bottom:10px">Could not load bank details${e?.message ? `: ${esc(e.message)}` : ''}.</p>
       <button class="kbtn kbtn-sm" onclick="Kpsc.showRechargeWalletModal()">🔄 Retry</button>`;
   }
 }
