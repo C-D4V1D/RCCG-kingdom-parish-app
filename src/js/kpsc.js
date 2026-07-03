@@ -2549,15 +2549,18 @@ async function renderPage(page) {
     } else if (page === 'finance') {
       await renderFinance(main);
       prependSubTabs(main, moneySubTabStrip());
+      bgCheckLowBalance(main); // background — doesn't block render
     } else if (page === 'partners') {
       await renderPartners(main);
       prependSubTabs(main, moneySubTabStrip());
+      bgCheckLowBalance(main); // background — doesn't block render
     } else if (page === 'reminders') {
       await renderReminders(main);
       prependSubTabs(main, moneySubTabStrip());
     } else if (page === 'sms_logs') {
-      await renderSmsLogs(main);
+      await renderSmsLogs(main); // sets S.termiiWalletCache from wallet API response
       prependSubTabs(main, moneySubTabStrip());
+      injectLowBalanceNotice(main); // synchronous — cache already fresh
     } else if (page === 'meeting') {
       await renderMeetingRoom(main);
     } else if (page === 'members') {
@@ -8361,6 +8364,10 @@ async function renderSmsLogs(main) {
   const res = await apiGet(`kpsc-sms-logs?${qs}`);
   if (res?.error) throw new Error(res.error);
   S.smsLogsData = res;
+  // Keep a fresh balance cache so Finance/Partners pages can use it without fetching
+  if (res.wallet?.balance != null) {
+    S.termiiWalletCache = { balance: Number(res.wallet.balance), fetchedAt: Date.now() };
+  }
   const c = res.counts || {};
   const sch = res.scheduler || {};
   const logs = Array.isArray(res.logs) ? res.logs : [];
@@ -8447,7 +8454,7 @@ async function renderSmsLogs(main) {
         <p class="k-hint" style="margin-top:8px">“Run now” sends this month's reminder to every active, unpaid partner immediately (ignoring the schedule and send-window), while still skipping opted-out / DND partners and anyone already reminded within the cool-off period.</p>
       </div>
 
-      <div class="k-section">
+      <div class="k-section" id="k-sms-wallet-section">
         <div class="k-sms-sched">
           <div class="k-sms-sched-row">
             <span class="k-label" style="margin:0">Termii wallet balance</span>
@@ -11977,46 +11984,150 @@ async function checkTermiiBalance(btn) {
   }
 }
 
-async function showRechargeWalletModal() {
-  const existing = document.getElementById('k-recharge-modal');
-  if (existing) existing.remove();
-  const res = await apiGet('settings').catch(() => ({}));
+// ── Low-balance wallet notification ────────────────────────────────────────
+const LOW_BALANCE_THRESHOLD = 200; // ₦
+
+function isBalanceCacheFresh() {
+  const c = S.termiiWalletCache;
+  return !!(c && c.fetchedAt && (Date.now() - c.fetchedAt < 10 * 60 * 1000));
+}
+
+function lowBalanceNoticeHtml(balance) {
+  const fmt = (n) => '₦' + Number(n || 0).toLocaleString('en-NG');
+  return `<div id="k-low-balance-notice" role="alert" style="
+      display:flex;align-items:center;gap:12px;
+      background:linear-gradient(135deg,#fffbeb 0%,#fef3c7 100%);
+      border:1.5px solid #f59e0b;border-left:5px solid #d97706;
+      border-radius:10px;padding:13px 16px;margin:10px 0 8px;
+      box-shadow:0 2px 12px rgba(217,119,6,0.16);
+    ">
+    <div style="font-size:22px;flex-shrink:0;line-height:1">⚠️</div>
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:700;font-size:14px;color:#92400e;margin-bottom:2px;line-height:1.3">SMS Wallet Balance Low</div>
+      <div style="font-size:13px;color:#b45309;line-height:1.4">${fmt(balance)} remaining — reminders may stop sending</div>
+    </div>
+    <button onclick="Kpsc.goToSmsWalletRecharge()" style="
+        background:#d97706;color:#fff;border:none;border-radius:7px;
+        padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;
+        white-space:nowrap;flex-shrink:0;
+      ">💳 Recharge</button>
+    <button onclick="Kpsc.dismissLowBalanceNotice()" title="Dismiss for this session" style="
+        background:none;border:none;color:#b45309;cursor:pointer;
+        font-size:18px;padding:2px 5px;flex-shrink:0;line-height:1;opacity:0.55;
+      ">✕</button>
+  </div>`;
+}
+
+function injectLowBalanceNotice(main) {
+  if (sessionStorage.getItem('k-lbn-dismissed')) return;
+  if (document.getElementById('k-low-balance-notice')) return;
+  const bal = S.termiiWalletCache?.balance;
+  if (bal == null || bal > LOW_BALANCE_THRESHOLD) return;
+  const wrap = document.createElement('div');
+  wrap.innerHTML = lowBalanceNoticeHtml(bal);
+  const notice = wrap.firstElementChild;
+  const subTabs = main.querySelector('.ka-subtabs');
+  if (subTabs) {
+    subTabs.insertAdjacentElement('afterend', notice);
+  } else {
+    const page = main.querySelector('.k-page');
+    (page || main).insertBefore(notice, (page || main).firstChild);
+  }
+}
+
+async function bgCheckLowBalance(main) {
+  if (sessionStorage.getItem('k-lbn-dismissed')) return;
+  try {
+    if (!isBalanceCacheFresh()) {
+      const res = await apiGet('kpsc-termii-balance');
+      if (res?.balance != null) {
+        S.termiiWalletCache = { balance: Number(res.balance), fetchedAt: Date.now() };
+      } else {
+        return;
+      }
+    }
+    injectLowBalanceNotice(main);
+  } catch (_) { /* non-critical — don't surface errors */ }
+}
+
+function dismissLowBalanceNotice() {
+  sessionStorage.setItem('k-lbn-dismissed', '1');
+  document.getElementById('k-low-balance-notice')?.remove();
+}
+
+function goToSmsWalletRecharge() {
+  if (S.page !== 'sms_logs') {
+    navigate('sms_logs');
+    setTimeout(() => {
+      document.getElementById('k-sms-wallet-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      showRechargeWalletModal();
+    }, 650);
+  } else {
+    document.getElementById('k-sms-wallet-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    showRechargeWalletModal();
+  }
+}
+
+// ── Recharge modal helpers ──────────────────────────────────────────────────
+function _rechargeModalBanksHtml(res) {
   const banks = [];
   for (let i = 1; i <= 2; i++) {
-    const name   = res?.[`kpsc_recharge_bank${i}_name`]?.trim()           || '';
-    const number = res?.[`kpsc_recharge_bank${i}_number`]?.trim()         || '';
-    const acctName = res?.[`kpsc_recharge_bank${i}_account_name`]?.trim() || '';
+    const name     = (res?.[`kpsc_recharge_bank${i}_name`]         || '').trim();
+    const number   = (res?.[`kpsc_recharge_bank${i}_number`]       || '').trim();
+    const acctName = (res?.[`kpsc_recharge_bank${i}_account_name`] || '').trim();
     if (name || number) banks.push({ name, number, acctName });
   }
-  const minAmt = res?.kpsc_recharge_min_amount || '';
-  const banksHtml = banks.length
+  const minAmt = (res?.kpsc_recharge_min_amount || '').trim();
+  const body = banks.length
     ? banks.map(b => `
-        <div style="background:var(--bg2,#f5f7fa);border:1px solid var(--border,#e0e0e0);border-radius:8px;padding:12px 16px;margin-bottom:10px">
-          <div style="font-size:12px;color:var(--text3,#888);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">${esc(b.name)}</div>
-          <div style="font-size:22px;font-weight:700;letter-spacing:.04em;margin-bottom:4px">${esc(b.number)}
-            <button class="kbtn kbtn-sm kbtn-ghost" style="font-size:11px;margin-left:6px;vertical-align:middle" onclick="Kpsc.copyText('${esc(b.number)}', this)" title="Copy account number">📋</button>
+        <div style="background:var(--bg2,#f5f7fa);border:1.5px solid var(--border,#dde3ec);border-radius:10px;padding:14px 18px;margin-bottom:10px">
+          <div style="font-size:11px;font-weight:700;color:var(--text3,#8a94a6);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px">${esc(b.name)}</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+            <span style="font-size:24px;font-weight:800;letter-spacing:.06em;color:var(--navy,#1a2e4a)">${esc(b.number)}</span>
+            <button class="kbtn kbtn-sm kbtn-ghost" style="font-size:11px" onclick="Kpsc.copyText('${esc(b.number)}', this)" title="Copy account number">📋 Copy</button>
           </div>
           ${b.acctName ? `<div style="font-size:13px;color:var(--text2,#555)">${esc(b.acctName)}</div>` : ''}
         </div>`).join('')
-    : `<p style="color:var(--text3,#888);font-size:13px">No bank details saved yet. Go to <strong>Settings → SMS Wallet Recharge</strong> to add your Termii virtual account details.</p>`;
+    : `<div style="text-align:center;padding:20px 0">
+        <div style="font-size:32px;margin-bottom:8px">🏦</div>
+        <p style="color:var(--text3,#888);font-size:13px;margin:0">No bank details saved yet.<br>Go to <strong>Settings → SMS Wallet Recharge</strong> to add your Termii virtual account details.</p>
+      </div>`;
+  return body + (minAmt ? `<p class="k-hint" style="margin-top:8px;text-align:center">Minimum recharge: <strong>₦${esc(minAmt)}</strong></p>` : '');
+}
+
+async function showRechargeWalletModal() {
+  document.getElementById('k-recharge-modal')?.remove();
+  // Show modal skeleton immediately so there's instant UI feedback
   const modal = document.createElement('div');
   modal.id = 'k-recharge-modal';
   modal.className = 'k-modal-overlay';
   modal.innerHTML = `
-    <div class="k-modal" style="max-width:400px">
+    <div class="k-modal" style="max-width:420px">
       <div class="k-modal-hdr">
         <span class="k-modal-title">💳 Recharge SMS Wallet</span>
         <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-recharge-modal')?.remove()">✕</button>
       </div>
-      <div class="k-modal-body">
-        <p style="font-size:14px;margin-bottom:14px;color:var(--text2,#444)">Transfer to any of the virtual accounts below to top up your Termii SMS wallet. Your balance updates automatically after the transfer is confirmed.</p>
-        ${banksHtml}
-        ${minAmt ? `<p class="k-hint" style="margin-top:10px">Minimum recharge: <strong>₦${esc(minAmt)}</strong></p>` : ''}
-        <p class="k-hint" style="margin-top:6px">To update these bank details, go to <strong>Settings → SMS Wallet Recharge</strong>.</p>
+      <div class="k-modal-body" id="k-recharge-modal-body">
+        <div class="k-loading" style="padding:24px 0">Loading bank details…</div>
       </div>
     </div>`;
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
   document.body.appendChild(modal);
+  // Fetch settings and populate
+  try {
+    const res = await apiGet('settings');
+    const body = document.getElementById('k-recharge-modal-body');
+    if (!body) return;
+    body.innerHTML = `
+      <p style="font-size:14px;margin-bottom:14px;color:var(--text2,#444);line-height:1.5">
+        Transfer to any virtual account below to top up your Termii SMS wallet. Balance updates automatically once the transfer is confirmed.
+      </p>
+      ${_rechargeModalBanksHtml(res)}
+      <p class="k-hint" style="margin-top:10px">To update these details, go to <strong>Settings → SMS Wallet Recharge</strong>.</p>`;
+  } catch (e) {
+    const body = document.getElementById('k-recharge-modal-body');
+    if (body) body.innerHTML = `<p style="color:#c00;font-size:13px">Could not load bank details. Please try again.</p>`;
+  }
 }
 
 // Feature 11: SMS Templates
@@ -16600,6 +16711,8 @@ window.Kpsc = {
   checkTermiiBalance,
   showRechargeWalletModal,
   saveRechargeBankDetails,
+  dismissLowBalanceNotice,
+  goToSmsWalletRecharge,
   saveSmsTemplate,
   deleteSmsTemplate,
   aiGenerateNewMonthSms,
