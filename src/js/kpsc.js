@@ -8455,6 +8455,7 @@ async function renderSmsLogs(main) {
         <div class="k-room-actions" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="kbtn kbtn-primary" id="ksms-runnow" onclick="Kpsc.runRemindersNow(this)">📤 Run payment reminders now</button>
           ${c.failed ? `<button class="kbtn" onclick="Kpsc.retryAllFailedSms(this)">🔁 Retry all failed (${c.failed})</button>` : ''}
+          ${c.pending ? `<button class="kbtn" onclick="Kpsc.reconcileDeliveryStatus(this)">🔄 Refresh delivery status (${c.pending})</button>` : ''}
           <button class="kbtn kbtn-ghost" onclick="Kpsc.navigate('reminders')">Reminder workflow →</button>
         </div>
         <p class="k-hint" style="margin-top:8px">“Run now” sends this month's reminder to every active, unpaid partner immediately (ignoring the schedule and send-window), while still skipping opted-out / DND partners and anyone already reminded within the cool-off period.</p>
@@ -8620,6 +8621,30 @@ async function retryAllFailedSms(btn) {
   showToast(`Retry complete: ${okCount} sent${failCount ? `, ${failCount} still failing` : ''}.`, failCount ? 'error' : 'success');
   const main = document.getElementById('kpsc-main');
   if (main) { await renderSmsLogs(main); prependSubTabs(main, moneySubTabStrip()); }
+}
+
+// Look up the real delivery status of messages stuck "awaiting delivery"
+// (covers messages sent before the DLR status-mapping fix). Processes up
+// to 40 per call, so it may need re-clicking to clear a larger backlog.
+async function reconcileDeliveryStatus(btn) {
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  try {
+    const res = await apiPost('kpsc-sms-reconcile-delivery', {});
+    if (res?.error) { showToast(res.error, 'error'); }
+    else if (!res.checked) { showToast('No messages awaiting delivery confirmation.', 'info'); }
+    else {
+      const parts = [`${res.updated} updated`];
+      if (res.stillPending) parts.push(`${res.stillPending} still awaiting a report`);
+      showToast(`Checked ${res.checked}: ${parts.join(', ')}.`, 'success');
+    }
+  } catch (e) {
+    showToast('Could not refresh delivery status: ' + (e.message || e), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+    const main = document.getElementById('kpsc-main');
+    if (main) { await renderSmsLogs(main); prependSubTabs(main, moneySubTabStrip()); }
+  }
 }
 
 // Per-partner personalized message overrides: Map<partnerId, resolvedMessageString>
@@ -16668,6 +16693,7 @@ window.Kpsc = {
   runRemindersNow,
   retrySms,
   retryAllFailedSms,
+  reconcileDeliveryStatus,
   setSmsLogsFilter,
   setSmsLogsYear,
   setSmsLogsMonth,

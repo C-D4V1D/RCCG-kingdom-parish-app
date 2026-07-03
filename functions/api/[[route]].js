@@ -1118,6 +1118,14 @@ export async function onRequest(context) {
       return await getTermiiBalance(DB);
     }
 
+    // ── Backfill delivery status for previously-stuck SMS (Feature 1) ──
+    if (route === 'kpsc-sms-reconcile-delivery' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      const result = await reconcileSmsDeliveryStatus(DB);
+      return result.ok === false ? err(result.error, 400) : ok(result);
+    }
+
     // ── Test SMS (Feature 14) ───────────────────────────────────────
     if (route === 'kpsc-sms-test' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
@@ -8808,6 +8816,24 @@ async function saveAgendaOutcomes(DB, draftId, body) {
 
 // ── FEATURE 1: TERMII DELIVERY STATUS WEBHOOK ────────────────────────────
 /**
+ * Map a raw Termii status string — either the SMPP-style DLR codes used in
+ * the webhook callback ("DELIVRD", "EXPIRED", "REJECTD", "UNDELIV",
+ * "DNDACTIVE") or the human-readable strings used by the Insights/Search
+ * API ("Delivered", "DND Active on Phone Number") — to our internal
+ * 'delivered' | 'failed' | 'dnd' vocabulary. Uses substring matching so
+ * either style resolves correctly; returns '' for anything unrecognized
+ * so callers can leave the row's status untouched rather than guessing.
+ */
+function normalizeTermiiDeliveryStatus(raw) {
+  const s = String(raw || '').toLowerCase().trim();
+  if (!s) return '';
+  if (s.includes('dnd')) return 'dnd';
+  if (s.includes('undeliver') || s.includes('expired') || s.includes('reject') || s.includes('fail')) return 'failed';
+  if (s.includes('deliver')) return 'delivered'; // matches DELIVRD, "Delivered", etc.
+  return '';
+}
+
+/**
  * POST /api/termii-webhook
  * Termii calls this when a delivery status is available.
  * Expected payload: { message_id, status, ... }
@@ -8853,14 +8879,7 @@ async function handleTermiiWebhook(DB, body, request, env) {
   const rawStatus    = String(body?.status      || '').toLowerCase().trim();
   if (!messageId) return ok({ ok: true, ignored: true, reason: 'no message_id' });
 
-  // Normalise Termii status strings — Termii's DLR callback uses SMPP-style
-  // codes (e.g. "DELIVRD", "EXPIRED", "REJECTD", "UNDELIV") rather than the
-  // spelled-out words, so match on those in addition to the plain-English forms.
-  let deliveryStatus;
-  if (rawStatus === 'dnd' || rawStatus === 'dndactive' || rawStatus === 'do not disturb') deliveryStatus = 'dnd';
-  else if (rawStatus === 'delivered' || rawStatus === 'delivrd') deliveryStatus = 'delivered';
-  else if (rawStatus === 'failed' || rawStatus === 'rejected' || rawStatus === 'rejectd' || rawStatus === 'undeliv' || rawStatus === 'expired') deliveryStatus = 'failed';
-  else deliveryStatus = rawStatus || 'unknown';
+  const deliveryStatus = normalizeTermiiDeliveryStatus(rawStatus) || rawStatus || 'unknown';
 
   // Update kpsc_reminders row that has this message_id
   const { meta } = await DB.prepare(
@@ -8877,6 +8896,59 @@ async function handleTermiiWebhook(DB, body, request, env) {
   }
 
   return ok({ ok: true, messageId, deliveryStatus, updated: meta?.changes || 0 });
+}
+
+/**
+ * Backfill: look up the real delivery status of previously-sent SMS that
+ * never resolved to a terminal status (this covers messages that were sent
+ * before the DLR status-mapping fix, whose raw unmapped status — e.g.
+ * "delivrd" — never matched 'delivered'/'failed'/'dnd' and so stayed
+ * stuck showing "Sent"). Queries Termii's per-message status lookup
+ * (Search API: GET /api/sms/inbox?message_id=...) for each stuck row and
+ * updates delivery_status when Termii reports a terminal outcome.
+ *
+ * Capped at 40 rows per call (Cloudflare Workers subrequest limits) — the
+ * caller can invoke again to keep working through a larger backlog.
+ */
+async function reconcileSmsDeliveryStatus(DB) {
+  const t = await getTermiiSettings(DB);
+  if (!t.apiKey) return { ok: false, error: 'Termii API key not configured' };
+
+  const { results: rows } = await DB.prepare(`
+    SELECT id, message_id FROM kpsc_reminders
+    WHERE status='sent' AND message_id != ''
+      AND (delivery_status IS NULL OR delivery_status NOT IN ('delivered','failed','dnd'))
+    ORDER BY sent_at DESC
+    LIMIT 40
+  `).all();
+
+  if (!rows || !rows.length) return { ok: true, checked: 0, updated: 0, stillPending: 0 };
+
+  let updated = 0, stillPending = 0;
+  for (const row of rows) {
+    try {
+      const resp = await fetch(`https://api.ng.termii.com/api/sms/inbox?api_key=${encodeURIComponent(t.apiKey)}&message_id=${encodeURIComponent(row.message_id)}`);
+      const data = await resp.json().catch(() => ({}));
+      const entry = Array.isArray(data?.data) ? data.data[0] : (Array.isArray(data) ? data[0] : data?.data);
+      const mapped = normalizeTermiiDeliveryStatus(entry?.status);
+      if (mapped) {
+        await DB.prepare(`UPDATE kpsc_reminders SET delivery_status=? WHERE id=?`).bind(mapped, row.id).run();
+        updated++;
+        if (mapped === 'dnd') {
+          const rem = await DB.prepare(`SELECT partner_id FROM kpsc_reminders WHERE id=?`).bind(row.id).first();
+          if (rem?.partner_id) {
+            await DB.prepare(`UPDATE kpsc_partners SET dnd_flagged=1, updated_at=? WHERE id=?`)
+              .bind(new Date().toISOString(), rem.partner_id).run();
+          }
+        }
+      } else {
+        stillPending++;
+      }
+    } catch (_) {
+      stillPending++;
+    }
+  }
+  return { ok: true, checked: rows.length, updated, stillPending };
 }
 
 // ── FEATURE 13: TERMII BALANCE MONITOR ───────────────────────────────────
@@ -9001,7 +9073,7 @@ async function getSmsLogs(DB, url) {
   else if (statusFilter === 'sent')    clauses.push("r.status='sent'");
   else if (statusFilter === 'delivered') clauses.push("r.delivery_status='delivered'");
   else if (statusFilter === 'dnd')     clauses.push("r.delivery_status='dnd'");
-  else if (statusFilter === 'pending') clauses.push("r.status='sent' AND (r.delivery_status='' OR r.delivery_status='pending')");
+  else if (statusFilter === 'pending') clauses.push("r.status='sent' AND (r.delivery_status IS NULL OR r.delivery_status NOT IN ('delivered','failed','dnd'))");
 
   const { results } = await DB.prepare(`
     SELECT r.*, p.full_name AS partner_name, p.phone AS partner_phone
@@ -9051,7 +9123,7 @@ async function getSmsLogs(DB, url) {
       SUM(CASE WHEN status='skipped' THEN 1 ELSE 0 END) AS skipped,
       SUM(CASE WHEN delivery_status='delivered' THEN 1 ELSE 0 END) AS delivered,
       SUM(CASE WHEN delivery_status='dnd' THEN 1 ELSE 0 END) AS dnd,
-      SUM(CASE WHEN status='sent' AND (delivery_status='' OR delivery_status='pending') THEN 1 ELSE 0 END) AS pending
+      SUM(CASE WHEN status='sent' AND (delivery_status IS NULL OR delivery_status NOT IN ('delivered','failed','dnd')) THEN 1 ELSE 0 END) AS pending
     FROM kpsc_reminders
     WHERE strftime('%Y', COALESCE(sent_at, created_at)) = ?
       AND CAST(strftime('%m', COALESCE(sent_at, created_at)) AS INTEGER) = ?
