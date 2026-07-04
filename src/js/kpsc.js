@@ -8379,6 +8379,16 @@ async function renderSmsLogs(main) {
   const logs = Array.isArray(res.logs) ? res.logs : [];
   const runs = Array.isArray(res.runs) ? res.runs : [];
 
+  if ((c.pending || 0) > 0 && !S._smsAutoReconcileRunning) {
+    S._smsAutoReconcileRunning = true;
+    apiPost('kpsc-sms-reconcile-delivery', {}).then(r => {
+      S._smsAutoReconcileRunning = false;
+      if (r?.updated > 0 && S.page === 'sms_logs') {
+        renderSmsLogs(main).then(() => prependSubTabs(main, moneySubTabStrip()));
+      }
+    }).catch(() => { S._smsAutoReconcileRunning = false; });
+  }
+
   const filters = [
     { key: 'all',     label: `All (${c.total || 0})` },
     { key: 'failed',  label: `Failed (${c.failed || 0})` },
@@ -8510,6 +8520,7 @@ async function renderSmsLogs(main) {
               </div>
               ${log.errorText ? `<div class="k-page-hint" style="margin-top:6px;color:var(--red)">⚠️ ${esc(log.errorText)}</div>` : ''}
               <div class="k-page-hint" style="margin-top:6px;font-size:13px">${esc(log.message)}</div>
+              ${log.messageId ? `<div class="k-page-hint" style="margin-top:4px;font-size:11px;color:var(--text3,#999)">Termii ID: ${esc(log.messageId)}</div>` : ''}
             </div>`).join('') : `<div class="k-empty">No SMS ${filter !== 'all' ? `(${esc(filter)}) ` : ''}logged for ${monthName(month)} ${year}.</div>`}
         </div>
       </div>

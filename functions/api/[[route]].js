@@ -95,7 +95,13 @@ async function sendTermiiSms(apiKey, senderId, to, sms, channel) {
     });
     const data = await resp.json().catch(() => ({}));
     const messageId = String(data?.message_id || data?.messageId || '');
-    return { ok: resp.ok, data, messageId };
+    if (!resp.ok) {
+      return { ok: false, error: data?.message || `Termii HTTP ${resp.status}`, data };
+    }
+    if (!messageId) {
+      return { ok: false, error: data?.message || 'Termii returned no message_id — message was not queued', data };
+    }
+    return { ok: true, data, messageId };
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -9103,6 +9109,7 @@ async function getSmsLogs(DB, url) {
       phone: row.phone || row.partner_phone || '',
       channel: row.channel || 'sms',
       message: row.message || '',
+      messageId: row.message_id || '',
       status,
       deliveryStatus: row.delivery_status || '',
       errorText: row.error_text || '',
