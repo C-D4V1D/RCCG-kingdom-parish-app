@@ -2470,7 +2470,7 @@ function fabAction() {
     } else if (subTab === 'reminders') {
       // Pass the FAB itself as the button so it can be disabled during the request.
       const fab = document.getElementById('ka-fab');
-      if (fab) sendBulkReminders(fab);
+      if (fab) runRemindersNow(fab);
     }
   }
 }
@@ -6948,6 +6948,25 @@ function showPartnerModal(partner = null) {
             </span>
           </label>
         </div>
+        ${partner ? `
+        <div style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px">
+          <div style="font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--text3);margin-bottom:10px">SMS Delivery Controls</div>
+          <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;background:var(--bg)">
+            <input type="checkbox" id="kp-opted-out" style="margin-top:2px;accent-color:var(--red)" ${partner?.optedOut ? 'checked' : ''} />
+            <span>
+              <span style="display:block;font-size:13px;font-weight:600;color:var(--text)">Opted out of SMS</span>
+              <span style="display:block;font-size:12px;color:var(--text2);margin-top:2px">Check this if the partner has asked not to receive any automated SMS. All sends (reminders, thank-you, welcome, etc.) will be skipped for them.</span>
+            </span>
+          </label>
+          ${partner?.dndFlagged ? `
+          <label style="display:flex;align-items:flex-start;gap:10px;margin-top:8px;cursor:pointer;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;background:var(--bg)">
+            <input type="checkbox" id="kp-clear-dnd" style="margin-top:2px;accent-color:var(--green)" />
+            <span>
+              <span style="display:block;font-size:13px;font-weight:600;color:var(--text)">🚫 Currently flagged DND — clear this flag</span>
+              <span style="display:block;font-size:12px;color:var(--text2);margin-top:2px">Termii reported this number as being on the Do-Not-Disturb registry, so it's excluded from all automated SMS. Check this box and save if you've confirmed the number is fine (e.g. it received a message directly, or this was a false positive).</span>
+            </span>
+          </label>` : ''}
+        </div>` : ''}
       </div>
       <div class="k-modal-footer">
         <button class="kbtn kbtn-primary" onclick="Kpsc.savePartner('${partner?.id || ''}', this)">Save</button>
@@ -6975,8 +6994,12 @@ async function savePartner(id, btn) {
     notes: document.getElementById('kp-notes')?.value.trim() || '',
     location: document.getElementById('kp-location')?.value.trim() || '',
     publicListing: document.getElementById('kp-public-listing')?.checked ? 1 : 0,
+    optedOut: document.getElementById('kp-opted-out')?.checked ? 1 : 0,
     createdBy: S.user?.name || '',
   };
+  // Only clear the DND flag when the admin explicitly checks it — it's otherwise
+  // a one-way flag set by delivery reports, so don't touch it unless asked to.
+  if (document.getElementById('kp-clear-dnd')?.checked) payload.dndFlagged = 0;
   btn.disabled = true;
   const res = id ? await apiPut(`kpsc-partners/${id}`, payload) : await apiPost('kpsc-partners', payload);
   if (res?.error) {
@@ -8291,10 +8314,10 @@ async function renderReminders(main) {
         <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message" oninput="Kpsc.debouncedSaveReminderTemplate(this)">${esc(defaultTemplate)}</textarea>
         <p class="k-hint">Use <code>{{name}}</code> for partner name, <code>{{month}}</code> for the current month, and <code>{{unpaidMonths}}</code> for the list of every outstanding month (e.g. "May" or "May, June").</p>
         <div class="k-room-actions" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-          <button class="kbtn kbtn-primary" onclick="Kpsc.sendBulkReminders(this)">Send Bulk Reminders (${unpaid.length})</button>
+          <button class="kbtn kbtn-primary" onclick="Kpsc.runRemindersNow(this)">Send Reminders Now (${unpaid.length} unpaid)</button>
           <button class="kbtn kbtn-ghost" onclick="Kpsc.navigate('sms_logs')">📋 SMS Logs &amp; Delivery</button>
         </div>
-        <p class="k-hint" style="margin-top:8px">The automated payment-reminder schedule and its delivery results (sent, failed, retries) now live on the <a href="#sms_logs" onclick="Kpsc.navigate('sms_logs');return false;">SMS Logs</a> page.</p>
+        <p class="k-hint" style="margin-top:8px">This triggers the exact same reminder engine as the automated schedule — real SMS via Termii, respecting opt-out/DND and the cool-off period — just immediately instead of waiting for the scheduled time. Results (sent, failed, retries) appear on the <a href="#sms_logs" onclick="Kpsc.navigate('sms_logs');return false;">SMS Logs</a> page.</p>
       </div>
 
       ${unpaid.length ? `
@@ -8363,6 +8386,7 @@ const SMS_TYPE_LABELS = {
   reminder: 'Payment reminder', welcome: 'Welcome', payment: 'Payment thank-you',
   new_month: 'Happy New Month', anniversary: 'Anniversary', milestone: 'Milestone',
   premeeting: 'Pre-meeting', actionitem: 'Action item', deadline: 'Deadline', bulk: 'Bulk',
+  scheduled: 'Scheduled blast', test: 'Test SMS',
 };
 
 async function renderSmsLogs(main) {
@@ -8520,7 +8544,7 @@ async function renderSmsLogs(main) {
             <div class="k-meeting-card" style="cursor:default">
               <div class="k-mc-top">
                 <div style="flex:1">
-                  <div class="k-mc-title">${esc(log.partnerName || 'Partner')}${log.phone ? ` <span class="k-hint">· ${esc(log.phone)}</span>` : ''}</div>
+                  <div class="k-mc-title">${esc(log.partnerName || SMS_TYPE_LABELS[log.reminderType] || 'Partner')}${log.phone ? ` <span class="k-hint">· ${esc(log.phone)}</span>` : ''}</div>
                   <div class="k-mc-meta">
                     <span class="kbadge badge-type">${esc(SMS_TYPE_LABELS[log.reminderType] || log.reminderType || 'sms')}</span>
                     <span>${esc(fmtDateTime(log.createdAt || log.sentAt))}</span>
@@ -8807,52 +8831,6 @@ function useReminderVariant(partnerId, variantIndex) {
 
 function closePersonalizeModal() {
   document.getElementById('k-personalize-modal')?.remove();
-}
-
-async function sendBulkReminders(btn) {
-  await loadPartnerData(currentYear());
-  const month = currentMonth();
-  const year = currentYear();
-  const unpaidPartners = S.partners.filter(p => p.status === 'active' && !partnerMonthlyPaid(p.id, month, year));
-  if (!unpaidPartners.length) {
-    showToast('No unpaid active partners for this month.', 'info');
-    return;
-  }
-  const template = document.getElementById('krem-message')?.value.trim() || '';
-  if (!template) {
-    showToast('Reminder message is required.', 'warn');
-    return;
-  }
-  btn.disabled = true;
-  const responses = await Promise.all(unpaidPartners.map(partner => {
-    // Use personalized message if the secretary approved one, else fall back to template
-    const message = _personalizedMessages.has(partner.id)
-      ? _personalizedMessages.get(partner.id)
-      : template
-          .replace(/\{\{name\}\}/g, partner.fullName)
-          .replace(/\{\{month\}\}/g, monthName(month))
-          .replace(/\{\{unpaidMonths\}\}/g, computeUnpaidMonthsStr(partner, month, year));
-    return apiPost('kpsc-reminders', {
-      partnerId: partner.id,
-      year,
-      month,
-      channel: partner.reminderPreference || 'sms',
-      sentBy: S.user?.name || '',
-      message,
-    });
-  }));
-  btn.disabled = false;
-  const failed = responses.filter(r => r?.error);
-  if (failed.length) {
-    const failedNames = unpaidPartners
-      .filter((_, i) => responses[i]?.error)
-      .map(p => p.fullName)
-      .join(', ');
-    showToast(`${failed.length} reminder(s) failed: ${failedNames}`, 'warn');
-  } else {
-    showToast(`Reminders sent to ${responses.length} partner(s).`, 'success');
-  }
-  await renderReminders(document.getElementById('kpsc-main'));
 }
 
 let _reminderTemplateSaveTimer = null;
@@ -16726,7 +16704,6 @@ window.Kpsc = {
   editFinanceEntryWithPin,
   deleteFinanceEntryWithPin,
   runReconciliation,
-  sendBulkReminders,
   copyReminderMessage,
   personalizeReminder,
   runRemindersNow,

@@ -78,8 +78,7 @@ async function sendTermiiSms(apiKey, senderId, to, sms, channel) {
   const phone = String(to || '').replace(/\D/g, '');
   if (!phone) return { ok: false, error: 'invalid phone number' };
   const ch = channel || 'generic';
-  const hasNonGsm = /[^\x20-\x7E\n\r]/.test(sms);
-  const type = hasNonGsm ? 'unicode' : 'plain';
+  const type = isGsm7Text(sms) ? 'plain' : 'unicode';
   try {
     const resp = await fetch('https://api.ng.termii.com/api/sms/send', {
       method: 'POST',
@@ -312,6 +311,18 @@ const GSM7_CHARS = new Set(
 const GSM7_EXT = new Set('{}[]~^\\|€');
 
 /**
+ * True if every character in `text` is representable in the GSM-7 default/extension
+ * alphabet. Shared by smsPagesInfo (cost display) and sendTermiiSms (actual Termii
+ * `type` param) so the two never disagree about whether a message needs Unicode.
+ */
+function isGsm7Text(text) {
+  for (const ch of String(text || '')) {
+    if (!GSM7_CHARS.has(ch) && !GSM7_EXT.has(ch)) return false;
+  }
+  return true;
+}
+
+/**
  * Number of SMS pages (segments) a message will cost, and its encoding.
  * GSM-7: 160 chars for a single page, 153 per page when concatenated.
  * Unicode (any emoji / non-GSM char): 70 single, 67 per concatenated page.
@@ -319,18 +330,13 @@ const GSM7_EXT = new Set('{}[]~^\\|€');
  */
 function smsPagesInfo(text) {
   const s = String(text || '');
-  let charCount = 0;
-  let isGsm7 = true;
-  for (const ch of s) {
-    if (GSM7_CHARS.has(ch)) charCount++;
-    else if (GSM7_EXT.has(ch)) charCount += 2;
-    else { isGsm7 = false; break; }
-  }
-  if (!isGsm7) {
+  if (!isGsm7Text(s)) {
     const len = [...s].length;
     const pageSize = len <= 70 ? 70 : 67;
     return { pages: len === 0 ? 0 : Math.ceil(len / pageSize), encoding: 'Unicode' };
   }
+  let charCount = 0;
+  for (const ch of s) charCount += GSM7_EXT.has(ch) ? 2 : 1;
   const pageSize = charCount <= 160 ? 160 : 153;
   return { pages: charCount === 0 ? 0 : Math.ceil(charCount / pageSize), encoding: 'GSM-7' };
 }
@@ -570,12 +576,11 @@ export async function onRequest(context) {
       return await getFinanceReportByToken(DB, param);
     }
     if (route === 'kpsc-reminders') {
+      // Sending is exclusively done by executeReminderRun (via kpsc-run-reminders-now
+      // or the cron job) so that a manual trigger always uses identical logic — real
+      // Termii sends, real delivery tracking, and the same frequency-cap/cooloff rules
+      // — as the automated schedule. This route is read-only.
       if (method === 'GET'  && !param) return await getKpscReminders(DB, url);
-      if (method === 'POST' && !param) {
-        const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
-        if (auth instanceof Response) return auth;
-        return await createKpscReminder(DB, body);
-      }
     }
     if (route === 'kpsc-dashboard' && method === 'GET') return await getKpscDashboard(DB, url);
     if (route === 'kpsc-reconciliation' && method === 'POST') {
@@ -1112,7 +1117,7 @@ export async function onRequest(context) {
     if (route === 'kpsc-sms-send' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
-      return await sendBulkMemberSms(DB, env, body);
+      return await sendBulkMemberSms(DB, env, body, auth.name);
     }
 
     // ── Termii delivery status webhook (Feature 1) ──────────────────
@@ -1139,7 +1144,7 @@ export async function onRequest(context) {
     if (route === 'kpsc-sms-test' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
-      return await sendTestSms(DB, body);
+      return await sendTestSms(DB, body, auth.name);
     }
 
     // ── SMS Analytics (Feature 12) ──────────────────────────────────
@@ -1940,6 +1945,9 @@ async function handleInit(DB) {
     // Keep Termii's own wording alongside our normalized delivery_status bucket, so the
     // SMS log can always show the carrier's exact reported status, not just our label.
     `ALTER TABLE kpsc_reminders ADD COLUMN delivery_status_raw TEXT DEFAULT ''`,
+    // Tracks when a row was last checked against Termii's status API, so the
+    // reconciler can rotate fairly through the backlog instead of favoring one end.
+    `ALTER TABLE kpsc_reminders ADD COLUMN delivery_checked_at TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -3532,7 +3540,7 @@ async function updateKpscPartner(DB, id, data) {
   if (!fullName) return err('fullName is required', 400);
   await DB.prepare(`
     UPDATE kpsc_partners
-    SET full_name=?, phone=?, partnership_type=?, start_date=?, monthly_pledge=?, status=?, reminder_preference=?, notes=?, location=?, public_listing=?, updated_at=?
+    SET full_name=?, phone=?, partnership_type=?, start_date=?, monthly_pledge=?, status=?, reminder_preference=?, notes=?, location=?, public_listing=?, opted_out=?, dnd_flagged=?, updated_at=?
     WHERE id=?
   `).bind(
     fullName,
@@ -3545,6 +3553,8 @@ async function updateKpscPartner(DB, id, data) {
     data?.notes !== undefined ? String(data.notes || '').trim() : row.notes,
     data?.location !== undefined ? String(data.location || '').trim() : (row.location || ''),
     data?.publicListing !== undefined ? (data.publicListing ? 1 : 0) : Number(row.public_listing || 0),
+    data?.optedOut !== undefined ? (data.optedOut ? 1 : 0) : Number(row.opted_out || 0),
+    data?.dndFlagged !== undefined ? (data.dndFlagged ? 1 : 0) : Number(row.dnd_flagged || 0),
     new Date().toISOString(),
     id,
   ).run();
@@ -4264,28 +4274,6 @@ async function getKpscReminders(DB, url) {
     sentAt: row.sent_at || '',
     createdAt: row.created_at || '',
   })));
-}
-
-async function createKpscReminder(DB, data) {
-  const partnerIds = Array.isArray(data?.partnerIds) ? data.partnerIds : [data?.partnerId];
-  const cleaned = partnerIds.map(id => String(id || '').trim()).filter(Boolean);
-  if (!cleaned.length) return err('partnerId or partnerIds is required', 400);
-  const month = normalizeMonth(data?.month) || (new Date().getUTCMonth() + 1);
-  const year = normalizeYear(data?.year);
-  const message = String(data?.message || '').trim();
-  if (!message) return err('message is required', 400);
-  const sentBy = String(data?.sentBy || '').trim();
-  const channel = String(data?.channel || 'sms').trim() || 'sms';
-  const out = [];
-  for (const partnerId of cleaned) {
-    const id = newId('krm');
-    await DB.prepare(`
-      INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    `).bind(id, partnerId, channel, message, 'sent', '', '', 'reminder', year, month, sentBy, new Date().toISOString()).run();
-    out.push({ id, partnerId, channel, status: 'sent', year, month });
-  }
-  return ok({ sent: out.length, reminders: out });
 }
 
 // ── SMART REMINDER PERSONALISATION (B4) ──────────────────────────
@@ -7334,11 +7322,24 @@ function classifyOverdueActionItems(meetings, todayStr, existingFollowupKeys = n
 }
 
 /** Verify Bearer CRON_SECRET. Returns null on success, or a Response on failure. */
+/** Constant-time string comparison to prevent timing attacks on bearer-token checks. */
+function constantTimeEqual(a, b) {
+  const encoder = new TextEncoder();
+  const aBytes = encoder.encode(String(a || ''));
+  const bBytes = encoder.encode(String(b || ''));
+  let match = aBytes.length === bBytes.length;
+  const len = Math.max(aBytes.length, bBytes.length);
+  for (let i = 0; i < len; i++) {
+    if ((aBytes[i] ?? 0) !== (bBytes[i] ?? 0)) match = false;
+  }
+  return match;
+}
+
 function requireCronSecret(env, request) {
   const secret = String(env.CRON_SECRET || '').trim();
   if (!secret) return err('CRON_SECRET env var not configured', 503);
   const auth = request.headers.get('Authorization') || '';
-  if (auth !== `Bearer ${secret}`) return err('Unauthorized', 401);
+  if (!constantTimeEqual(auth, `Bearer ${secret}`)) return err('Unauthorized', 401);
   return null;
 }
 
@@ -7346,7 +7347,7 @@ function requireEmailIngestSecret(env, request) {
   const secret = String(env.EMAIL_INGEST_SECRET || '').trim();
   if (!secret) return err('EMAIL_INGEST_SECRET env var not configured', 503);
   const auth = request.headers.get('Authorization') || '';
-  if (auth !== `Bearer ${secret}`) return err('Unauthorized', 401);
+  if (!constantTimeEqual(auth, `Bearer ${secret}`)) return err('Unauthorized', 401);
   return null;
 }
 
@@ -7811,6 +7812,9 @@ async function runMonthlySms(DB, env, request) {
       ).bind(newId('krm'), p.id, 'sms', msg, 'sent', 'pending', result.messageId || '', 'new_month', year, nmMonth, 'cron', now.toISOString()).run().catch(() => {});
     } else {
       failed++;
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), p.id, 'sms', msg, 'failed', '', '', 'new_month', year, nmMonth, 'cron', now.toISOString(), p.phone || '', String(result.error || 'Termii send failed')).run().catch(() => {});
     }
   }
   // Clear draft after successful send
@@ -8042,7 +8046,7 @@ async function executeReminderRun(DB, opts = {}) {
  * Body: { message: string, memberPhones?: string[] }
  * If memberPhones is omitted, sends to all KPSC roster members with a phone number.
  */
-async function sendBulkMemberSms(DB, env, data) {
+async function sendBulkMemberSms(DB, env, data, sentBy) {
   const message = String(data?.message || '').trim();
   if (!message) return err('message is required', 400);
 
@@ -8067,12 +8071,20 @@ async function sendBulkMemberSms(DB, env, data) {
   let sent = 0;
   let failed = 0;
   const errors = [];
+  const bmNow = new Date();
   for (const phone of phones) {
     const result = await sendTermiiSms(t.apiKey, t.senderId, phone, message, t.channel);
-    if (result.ok) sent++;
-    else {
+    if (result.ok) {
+      sent++;
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), '', 'sms', message, 'sent', 'pending', result.messageId || '', 'bulk', bmNow.getUTCFullYear(), bmNow.getUTCMonth() + 1, sentBy || '', bmNow.toISOString(), phone).run().catch(() => {});
+    } else {
       failed++;
       if (errors.length < 5) errors.push({ phone, error: result.error || 'unknown' });
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), '', 'sms', message, 'failed', '', '', 'bulk', bmNow.getUTCFullYear(), bmNow.getUTCMonth() + 1, sentBy || '', bmNow.toISOString(), phone, String(result.error || 'Termii send failed')).run().catch(() => {});
     }
   }
   return ok({ ok: true, sent, failed, total: phones.length, errors });
@@ -8816,7 +8828,17 @@ async function saveAgendaOutcomes(DB, draftId, body) {
           if (!phone) continue;
           const dueText = due ? ` by ${due}` : '';
           const msg = `Dear ${assignee}, you were assigned an action item from ${meetingTitle}: "${task}"${dueText}. Please ensure timely completion. — RCCG Kingdom Parish Secretary`;
-          await sendTermiiSms(t.apiKey, t.senderId, phone, msg, t.channel);
+          const aiResult = await sendTermiiSms(t.apiKey, t.senderId, phone, msg, t.channel);
+          const aiNow = new Date();
+          if (aiResult.ok) {
+            await DB.prepare(
+              `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+            ).bind(newId('krm'), '', 'sms', msg, 'sent', 'pending', aiResult.messageId || '', 'actionitem', aiNow.getUTCFullYear(), aiNow.getUTCMonth() + 1, 'auto', aiNow.toISOString(), phone).run().catch(() => {});
+          } else {
+            await DB.prepare(
+              `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+            ).bind(newId('krm'), '', 'sms', msg, 'failed', '', '', 'actionitem', aiNow.getUTCFullYear(), aiNow.getUTCMonth() + 1, 'auto', aiNow.toISOString(), phone, String(aiResult.error || 'Termii send failed')).run().catch(() => {});
+          }
         }
       }
     } catch { /* swallow — SMS failure must not break outcome saving */ }
@@ -8869,14 +8891,7 @@ async function handleTermiiWebhook(DB, body, request, env) {
     const cryptoKey = await crypto.subtle.importKey('raw', keyData, { name: 'HMAC', hash: 'SHA-512' }, false, ['sign']);
     const sigBuffer = await crypto.subtle.sign('HMAC', cryptoKey, msgData);
     const computedHex = Array.from(new Uint8Array(sigBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
-    // Constant-time comparison to prevent timing attacks
-    const sigBytes = encoder.encode(signature);
-    const computedBytes = encoder.encode(computedHex);
-    let match = sigBytes.length === computedBytes.length;
-    for (let i = 0; i < computedBytes.length; i++) {
-      if ((sigBytes[i] ?? 0) !== computedBytes[i]) match = false;
-    }
-    if (!match) return err('Invalid signature', 401);
+    if (!constantTimeEqual(signature, computedHex)) return err('Invalid signature', 401);
   } else {
     console.warn('TERMII_WEBHOOK_SECRET is not configured — skipping webhook signature verification');
   }
@@ -8928,17 +8943,23 @@ async function reconcileSmsDeliveryStatus(DB) {
   const t = await getTermiiSettings(DB);
   if (!t.apiKey) return { ok: false, error: 'Termii API key not configured' };
 
+  // Fair rotation: prioritize whichever rows have gone longest without being checked
+  // (never-checked rows first, via the empty string sorting before any timestamp).
+  // This way every row — new or old — eventually gets a turn, instead of one end of
+  // the backlog permanently crowding out the other whenever there are more than 40
+  // unresolved rows.
   const { results: rows } = await DB.prepare(`
     SELECT id, message_id FROM kpsc_reminders
     WHERE status='sent' AND message_id != ''
       AND (delivery_status IS NULL OR delivery_status NOT IN ('delivered','failed','dnd'))
-    ORDER BY sent_at DESC
+    ORDER BY COALESCE(delivery_checked_at, '') ASC
     LIMIT 40
   `).all();
 
   if (!rows || !rows.length) return { ok: true, checked: 0, updated: 0, stillPending: 0 };
 
   let updated = 0, stillPending = 0;
+  const checkedAt = new Date().toISOString();
   for (const row of rows) {
     try {
       const resp = await fetch(`https://api.ng.termii.com/api/sms/inbox?api_key=${encodeURIComponent(t.apiKey)}&message_id=${encodeURIComponent(row.message_id)}`);
@@ -8947,7 +8968,7 @@ async function reconcileSmsDeliveryStatus(DB) {
       const rawStatusOriginal = String(entry?.status || '').trim();
       const mapped = normalizeTermiiDeliveryStatus(rawStatusOriginal);
       if (mapped) {
-        await DB.prepare(`UPDATE kpsc_reminders SET delivery_status=?, delivery_status_raw=? WHERE id=?`).bind(mapped, rawStatusOriginal, row.id).run();
+        await DB.prepare(`UPDATE kpsc_reminders SET delivery_status=?, delivery_status_raw=?, delivery_checked_at=? WHERE id=?`).bind(mapped, rawStatusOriginal, checkedAt, row.id).run();
         updated++;
         if (mapped === 'dnd') {
           const rem = await DB.prepare(`SELECT partner_id FROM kpsc_reminders WHERE id=?`).bind(row.id).first();
@@ -8959,13 +8980,15 @@ async function reconcileSmsDeliveryStatus(DB) {
       } else {
         // Termii hasn't reached a terminal status we recognize yet — still record
         // whatever it's currently reporting (e.g. "PROCESSING", "SUBMITTED") so the
-        // log can show the real state instead of a blank "awaiting" forever.
-        if (rawStatusOriginal) {
-          await DB.prepare(`UPDATE kpsc_reminders SET delivery_status_raw=? WHERE id=?`).bind(rawStatusOriginal, row.id).run();
-        }
+        // log can show the real state instead of a blank "awaiting" forever, and
+        // stamp delivery_checked_at so this row cycles to the back of the queue.
+        await DB.prepare(`UPDATE kpsc_reminders SET delivery_status_raw=?, delivery_checked_at=? WHERE id=?`).bind(rawStatusOriginal, checkedAt, row.id).run();
         stillPending++;
       }
     } catch (_) {
+      // Still stamp delivery_checked_at even on a fetch error — otherwise a row that
+      // keeps failing to look up would jump the queue on every call and block the rest.
+      await DB.prepare(`UPDATE kpsc_reminders SET delivery_checked_at=? WHERE id=?`).bind(checkedAt, row.id).run().catch(() => {});
       stillPending++;
     }
   }
@@ -8988,16 +9011,23 @@ async function getTermiiBalance(DB) {
 }
 
 // ── FEATURE 14: TEST SMS ──────────────────────────────────────────────────
-async function sendTestSms(DB, body) {
+async function sendTestSms(DB, body, sentBy) {
   const phone   = String(body?.phone   || '').trim();
   const message = String(body?.message || '').trim() || 'Test SMS from RCCG Kingdom Parish portal. If you received this, your Termii integration is working correctly. 🎉';
   if (!phone) return err('phone is required', 400);
   const t = await getTermiiSettings(DB);
   if (!t.apiKey) return err('Termii API key not configured. Please add it in Settings → SMS.', 400);
   const result = await sendTermiiSms(t.apiKey, t.senderId, phone, message, t.channel);
+  const now = new Date().toISOString();
   if (result.ok) {
+    await DB.prepare(
+      `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(newId('krm'), '', 'sms', message, 'sent', 'pending', result.messageId || '', 'test', new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, sentBy || '', now, phone).run().catch(() => {});
     return ok({ ok: true, message: `Test SMS sent successfully to ${phone}.` });
   }
+  await DB.prepare(
+    `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(newId('krm'), '', 'sms', message, 'failed', '', '', 'test', new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, sentBy || '', now, phone, String(result.error || 'Termii send failed')).run().catch(() => {});
   return ok({ ok: false, error: result.error || 'Termii returned an error. Check your API key and sender ID.' });
 }
 
@@ -9286,8 +9316,10 @@ async function retrySmsLog(DB, body, auth) {
   const result = await sendTermiiSms(t.apiKey, rsid, phone, row.message || '', t.channel);
   const now = new Date().toISOString();
   if (result.ok) {
+    // Clear delivery_status_raw/delivery_checked_at too — otherwise stale wording
+    // from a prior failed attempt could briefly linger next to the new "pending" state.
     await DB.prepare(
-      `UPDATE kpsc_reminders SET status='sent', delivery_status='pending', message_id=?, error_text='', sent_by=?, sent_at=?, phone=? WHERE id=?`
+      `UPDATE kpsc_reminders SET status='sent', delivery_status='pending', delivery_status_raw='', delivery_checked_at='', message_id=?, error_text='', sent_by=?, sent_at=?, phone=? WHERE id=?`
     ).bind(result.messageId || '', auth?.name || 'manual-retry', now, phone, id).run();
     if (row.partner_id) {
       await DB.prepare(`UPDATE kpsc_partners SET last_sms_sent_at=? WHERE id=?`).bind(now, row.partner_id).run();
@@ -9295,7 +9327,7 @@ async function retrySmsLog(DB, body, auth) {
     return ok({ ok: true, retried: true, status: 'sent' });
   }
   await DB.prepare(
-    `UPDATE kpsc_reminders SET status='failed', error_text=?, sent_at=?, phone=? WHERE id=?`
+    `UPDATE kpsc_reminders SET status='failed', delivery_status='', delivery_status_raw='', delivery_checked_at='', error_text=?, sent_at=?, phone=? WHERE id=?`
   ).bind(String(result.error || 'Termii send failed'), now, phone, id).run();
   return ok({ ok: false, retried: true, status: 'failed', error: result.error || 'Termii send failed' });
 }
@@ -9421,7 +9453,18 @@ async function runAnniversarySms(DB, env, request) {
       .replace(/\{\{years\}\}/g, String(yearsOfPartnership));
     const asid = t.partnerSenderId || t.senderId;
     const result = await sendTermiiSms(t.apiKey, asid, p.phone, msg, t.channel);
-    if (result.ok) { sent++; } else { failed++; }
+    const anNow = new Date().toISOString();
+    if (result.ok) {
+      sent++;
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), p.id, 'sms', msg, 'sent', 'pending', result.messageId || '', 'anniversary', currentYear, now.getUTCMonth() + 1, 'cron', anNow, p.phone).run().catch(() => {});
+    } else {
+      failed++;
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), p.id, 'sms', msg, 'failed', '', '', 'anniversary', currentYear, now.getUTCMonth() + 1, 'cron', anNow, p.phone, String(result.error || 'Termii send failed')).run().catch(() => {});
+    }
   }
   return ok({ ok: true, sent, failed, total: sent + failed });
 }
@@ -9475,7 +9518,18 @@ async function runPremeetingSms(DB, env, request) {
         .replace(/\{\{meetingTime\}\}/g, meetingTime ? ' at ' + meetingTime : '')
         .replace(/\{\{venue\}\}/g, venueText ? venueText + ' ' : '');
       const result = await sendTermiiSms(t.apiKey, t.senderId, member.phone, msg, t.channel);
-      if (result.ok) { sent++; } else { failed++; }
+      const pmNow = new Date();
+      if (result.ok) {
+        sent++;
+        await DB.prepare(
+          `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ).bind(newId('krm'), '', 'sms', msg, 'sent', 'pending', result.messageId || '', 'premeeting', pmNow.getUTCFullYear(), pmNow.getUTCMonth() + 1, 'cron', pmNow.toISOString(), member.phone).run().catch(() => {});
+      } else {
+        failed++;
+        await DB.prepare(
+          `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ).bind(newId('krm'), '', 'sms', msg, 'failed', '', '', 'premeeting', pmNow.getUTCFullYear(), pmNow.getUTCMonth() + 1, 'cron', pmNow.toISOString(), member.phone, String(result.error || 'Termii send failed')).run().catch(() => {});
+      }
     }
   }
   return ok({ ok: true, sent, failed, meetings: meetings.length });
@@ -9520,13 +9574,30 @@ async function runActionItemDeadlineSms(DB, env, request) {
   for (const item of items) {
     const assignee = String(item.assignee || '').trim();
     const phone = phoneByName.get(assignee.toLowerCase());
-    if (!phone) { failed++; continue; }
+    const diNow = new Date();
+    if (!phone) {
+      failed++;
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), '', 'sms', `[deadline reminder for "${item.task || ''}"]`, 'failed', '', '', 'deadline', diNow.getUTCFullYear(), diNow.getUTCMonth() + 1, 'cron', diNow.toISOString(), '', `No phone number on file for assignee "${assignee}"`).run().catch(() => {});
+      continue;
+    }
     const msg = t.deadlineText
       .replace(/\{\{name\}\}/g, assignee)
       .replace(/\{\{task\}\}/g, item.task || '')
       .replace(/\{\{dueDate\}\}/g, item.due_date || '');
     const result = await sendTermiiSms(t.apiKey, t.senderId, phone, msg, t.channel);
-    if (result.ok) { sent++; } else { failed++; }
+    if (result.ok) {
+      sent++;
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), '', 'sms', msg, 'sent', 'pending', result.messageId || '', 'deadline', diNow.getUTCFullYear(), diNow.getUTCMonth() + 1, 'cron', diNow.toISOString(), phone).run().catch(() => {});
+    } else {
+      failed++;
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), '', 'sms', msg, 'failed', '', '', 'deadline', diNow.getUTCFullYear(), diNow.getUTCMonth() + 1, 'cron', diNow.toISOString(), phone, String(result.error || 'Termii send failed')).run().catch(() => {});
+    }
   }
   return ok({ ok: true, sent, failed, total: (items || []).length });
 }
@@ -9567,9 +9638,20 @@ async function runScheduledSms(DB, env, request) {
       try { phones = JSON.parse(blast.recipients); } catch { /* fall back to all */ }
     }
     let sent = 0; let failed = 0;
+    const blNow = new Date();
     for (const phone of phones) {
       const result = await sendTermiiSms(t.apiKey, t.senderId, phone, blast.message, t.channel);
-      if (result.ok) sent++; else failed++;
+      if (result.ok) {
+        sent++;
+        await DB.prepare(
+          `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ).bind(newId('krm'), '', 'sms', blast.message, 'sent', 'pending', result.messageId || '', 'scheduled', blNow.getUTCFullYear(), blNow.getUTCMonth() + 1, 'cron', blNow.toISOString(), phone).run().catch(() => {});
+      } else {
+        failed++;
+        await DB.prepare(
+          `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ).bind(newId('krm'), '', 'sms', blast.message, 'failed', '', '', 'scheduled', blNow.getUTCFullYear(), blNow.getUTCMonth() + 1, 'cron', blNow.toISOString(), phone, String(result.error || 'Termii send failed')).run().catch(() => {});
+      }
     }
     await DB.prepare(
       `UPDATE kpsc_scheduled_sms SET status='sent', sent_count=?, failed_count=? WHERE id=?`
