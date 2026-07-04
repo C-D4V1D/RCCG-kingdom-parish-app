@@ -8379,6 +8379,16 @@ async function renderSmsLogs(main) {
   const logs = Array.isArray(res.logs) ? res.logs : [];
   const runs = Array.isArray(res.runs) ? res.runs : [];
 
+  if ((c.pending || 0) > 0 && !S._smsAutoReconcileRunning) {
+    S._smsAutoReconcileRunning = true;
+    apiPost('kpsc-sms-reconcile-delivery', {}).then(r => {
+      S._smsAutoReconcileRunning = false;
+      if (r?.updated > 0 && S.page === 'sms_logs') {
+        renderSmsLogs(main).then(() => prependSubTabs(main, moneySubTabStrip()));
+      }
+    }).catch(() => { S._smsAutoReconcileRunning = false; });
+  }
+
   const filters = [
     { key: 'all',     label: `All (${c.total || 0})` },
     { key: 'failed',  label: `Failed (${c.failed || 0})` },
@@ -8510,6 +8520,7 @@ async function renderSmsLogs(main) {
               </div>
               ${log.errorText ? `<div class="k-page-hint" style="margin-top:6px;color:var(--red)">⚠️ ${esc(log.errorText)}</div>` : ''}
               <div class="k-page-hint" style="margin-top:6px;font-size:13px">${esc(log.message)}</div>
+              ${log.messageId ? `<div class="k-page-hint" style="margin-top:4px;font-size:11px;color:var(--text3,#999)">Termii ID: ${esc(log.messageId)}</div>` : ''}
             </div>`).join('') : `<div class="k-empty">No SMS ${filter !== 'all' ? `(${esc(filter)}) ` : ''}logged for ${monthName(month)} ${year}.</div>`}
         </div>
       </div>
@@ -11136,6 +11147,7 @@ async function renderSettings(main) {
   const termiiApiKey         = res?.kpsc_termii_api_key             || '';
   const termiiSenderId       = res?.kpsc_termii_sender_id           || 'RCCG-KP';
   const termiiPartnerSenderId = res?.kpsc_termii_partner_sender_id  || '';
+  const termiiChannel      = res?.kpsc_termii_channel             || 'dnd';
   const termiiWelcome      = res?.kpsc_termii_welcome_sms  !== '0';
   const termiiPayment      = res?.kpsc_termii_payment_sms  !== '0';
   const termiiNewMonth     = res?.kpsc_termii_newmonth_sms !== '0';
@@ -11348,6 +11360,15 @@ async function renderSettings(main) {
           <input type="text" id="ks-termii-partner-sender" class="k-input" maxlength="11"
             placeholder="e.g. KPSC-PRTNR" value="${esc(termiiPartnerSenderId)}" />
           <p class="k-hint">Separate sender ID for partner welcome, payment, reminder, and anniversary SMS. Falls back to the Sender ID above if left blank.</p>
+        </div>
+
+        <div class="k-form-group">
+          <label class="k-label">SMS Delivery Channel</label>
+          <select id="ks-termii-channel" class="k-input k-input-sm" style="max-width:300px">
+            <option value="dnd" ${termiiChannel === 'dnd' ? 'selected' : ''}>DND (recommended — delivers to all numbers)</option>
+            <option value="generic" ${termiiChannel === 'generic' ? 'selected' : ''}>Generic (cheaper — cannot reach DND numbers)</option>
+          </select>
+          <p class="k-hint">In Nigeria, most phone numbers are on the DND (Do Not Disturb) registry. The <strong>DND</strong> channel delivers to all numbers but costs slightly more per page. The <strong>Generic</strong> channel is cheaper but messages to DND numbers will silently fail.</p>
         </div>
 
         <div class="k-form-group">
@@ -11864,6 +11885,7 @@ async function saveSmsSettings() {
   const apiKey         = document.getElementById('ks-termii-key')?.value.trim()            || '';
   const senderId       = document.getElementById('ks-termii-sender')?.value.trim()         || 'RCCG-KP';
   const partnerSenderId = document.getElementById('ks-termii-partner-sender')?.value.trim() || '';
+  const channel  = document.getElementById('ks-termii-channel')?.value   || 'dnd';
   const welcome  = document.getElementById('ks-termii-welcome')?.checked  ? '1' : '0';
   const payment  = document.getElementById('ks-termii-payment')?.checked  ? '1' : '0';
   const newMonth = document.getElementById('ks-termii-newmonth')?.checked ? '1' : '0';
@@ -11876,6 +11898,7 @@ async function saveSmsSettings() {
     kpsc_termii_api_key:              apiKey,
     kpsc_termii_sender_id:            senderId,
     kpsc_termii_partner_sender_id:    partnerSenderId,
+    kpsc_termii_channel:              channel,
     kpsc_termii_welcome_sms:          welcome,
     kpsc_termii_payment_sms:          payment,
     kpsc_termii_newmonth_sms:         newMonth,
