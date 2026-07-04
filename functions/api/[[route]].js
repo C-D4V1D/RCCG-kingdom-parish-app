@@ -73,10 +73,13 @@ const OPENAI_REALTIME_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
  * Returns { ok: true, data } on success or { ok: false, error } on failure.
  * No-ops silently when apiKey is absent — callers need not guard separately.
  */
-async function sendTermiiSms(apiKey, senderId, to, sms) {
+async function sendTermiiSms(apiKey, senderId, to, sms, channel) {
   if (!apiKey) return { ok: false, error: 'Termii API key not configured' };
   const phone = String(to || '').replace(/\D/g, '');
   if (!phone) return { ok: false, error: 'invalid phone number' };
+  const ch = channel || 'dnd';
+  const hasNonGsm = /[^\x20-\x7E\n\r]/.test(sms);
+  const type = hasNonGsm ? 'unicode' : 'plain';
   try {
     const resp = await fetch('https://api.ng.termii.com/api/sms/send', {
       method: 'POST',
@@ -86,12 +89,11 @@ async function sendTermiiSms(apiKey, senderId, to, sms) {
         to: phone,
         from: senderId || 'N-Alert',
         sms,
-        type: 'plain',
-        channel: 'generic',
+        type,
+        channel: ch,
       }),
     });
     const data = await resp.json().catch(() => ({}));
-    // message_id is returned as "message_id" in Termii v3 API
     const messageId = String(data?.message_id || data?.messageId || '');
     return { ok: resp.ok, data, messageId };
   } catch (e) {
@@ -102,7 +104,7 @@ async function sendTermiiSms(apiKey, senderId, to, sms) {
 /** Load all Termii-related settings from the DB in one query. */
 async function getTermiiSettings(DB) {
   const keys = [
-    'kpsc_termii_api_key', 'kpsc_termii_sender_id', 'kpsc_termii_partner_sender_id',
+    'kpsc_termii_api_key', 'kpsc_termii_sender_id', 'kpsc_termii_partner_sender_id', 'kpsc_termii_channel',
     'kpsc_termii_welcome_sms', 'kpsc_termii_payment_sms',
     'kpsc_termii_newmonth_sms', 'kpsc_termii_reminder_day',
     'kpsc_termii_reminder_freq', 'kpsc_termii_reminder_mode',
@@ -132,6 +134,7 @@ async function getTermiiSettings(DB) {
     apiKey:          String(map.kpsc_termii_api_key  || '').trim(),
     senderId:        String(map.kpsc_termii_sender_id || 'RCCG-KP').trim(),
     partnerSenderId: String(map.kpsc_termii_partner_sender_id || '').trim(),
+    channel:         String(map.kpsc_termii_channel || 'dnd').trim(),
     welcomeSms:      map.kpsc_termii_welcome_sms   !== '0',
     paymentSms:      map.kpsc_termii_payment_sms   !== '0',
     newMonthSms:     map.kpsc_termii_newmonth_sms  !== '0',
@@ -3480,7 +3483,7 @@ async function createKpscPartner(DB, data) {
           .replace(/\{\{name\}\}/g, fullName)
           .replace(/\{\{partnerType\}\}/g, typeLabel);
         const wsid = t.partnerSenderId || t.senderId;
-        const wsResult = await sendTermiiSms(t.apiKey, wsid, phone, welcomeMsg);
+        const wsResult = await sendTermiiSms(t.apiKey, wsid, phone, welcomeMsg, t.channel);
         if (wsResult.ok) {
           const wsNow = new Date();
           await DB.prepare(
@@ -3645,7 +3648,7 @@ async function upsertKpscPartnerPayment(DB, data) {
           const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
           const monthName = MONTH_NAMES[(month - 1)] || '';
           const amount = Number(data?.amount || 0);
-          const amtText = amount > 0 ? ` of ₦${amount.toLocaleString('en-NG')}` : '';
+          const amtText = amount > 0 ? ` of N${amount.toLocaleString('en-NG')}` : '';
           // Rotating template: pick A/B/C based on (paid payment count - 1) % 3
           const payCount = await DB.prepare(
             `SELECT COUNT(*) AS cnt FROM kpsc_partner_payments WHERE partner_id=? AND paid=1 AND COALESCE(deleted_at,'')=''`
@@ -3657,7 +3660,7 @@ async function upsertKpscPartnerPayment(DB, data) {
             .replace(/\{\{month\}\}/g, monthName)
             .replace(/\{\{amtText\}\}/g, amtText);
           const sid = t.partnerSenderId || t.senderId;
-          const ptResult = await sendTermiiSms(t.apiKey, sid, partner.phone, msg);
+          const ptResult = await sendTermiiSms(t.apiKey, sid, partner.phone, msg, t.channel);
           if (ptResult.ok) {
             const ptNow = new Date();
             await DB.prepare(
@@ -3693,7 +3696,7 @@ async function upsertKpscPartnerPayment(DB, data) {
           }
           if (milestoneMsg) {
             const sid = t.partnerSenderId || t.senderId;
-            const msResult = await sendTermiiSms(t.apiKey, sid, partner.phone, milestoneMsg);
+            const msResult = await sendTermiiSms(t.apiKey, sid, partner.phone, milestoneMsg, t.channel);
             if (msResult.ok) {
               const msNow = new Date();
               await DB.prepare(
@@ -3818,7 +3821,7 @@ async function sendPartnerBatchPaymentSms(DB, data) {
       .replace(/\{\{amtText\}\}/g, amtText);
 
     const sid = t.partnerSenderId || t.senderId;
-    const bpResult = await sendTermiiSms(t.apiKey, sid, partner.phone, msg);
+    const bpResult = await sendTermiiSms(t.apiKey, sid, partner.phone, msg, t.channel);
     if (bpResult.ok) {
       const bpNow = new Date();
       await DB.prepare(
@@ -7791,7 +7794,7 @@ async function runMonthlySms(DB, env, request) {
       .replace(/\{\{name\}\}/g, p.full_name)
       .replace(/\{\{month\}\}/g, `${monthName} ${year}`);
     const nmsid = t.partnerSenderId || t.senderId;
-    const result = await sendTermiiSms(t.apiKey, nmsid, p.phone, msg);
+    const result = await sendTermiiSms(t.apiKey, nmsid, p.phone, msg, t.channel);
     if (result.ok) {
       sent++;
       await DB.prepare(
@@ -7999,7 +8002,7 @@ async function executeReminderRun(DB, opts = {}) {
     }
 
     const rsid = t.partnerSenderId || t.senderId;
-    const result = await sendTermiiSms(t.apiKey, rsid, p.phone, msg);
+    const result = await sendTermiiSms(t.apiKey, rsid, p.phone, msg, t.channel);
     if (result.ok) {
       await DB.prepare(
         `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
@@ -8056,7 +8059,7 @@ async function sendBulkMemberSms(DB, env, data) {
   let failed = 0;
   const errors = [];
   for (const phone of phones) {
-    const result = await sendTermiiSms(t.apiKey, t.senderId, phone, message);
+    const result = await sendTermiiSms(t.apiKey, t.senderId, phone, message, t.channel);
     if (result.ok) sent++;
     else {
       failed++;
@@ -8804,7 +8807,7 @@ async function saveAgendaOutcomes(DB, draftId, body) {
           if (!phone) continue;
           const dueText = due ? ` by ${due}` : '';
           const msg = `Dear ${assignee}, you were assigned an action item from ${meetingTitle}: "${task}"${dueText}. Please ensure timely completion. — RCCG Kingdom Parish Secretary`;
-          await sendTermiiSms(t.apiKey, t.senderId, phone, msg);
+          await sendTermiiSms(t.apiKey, t.senderId, phone, msg, t.channel);
         }
       }
     } catch { /* swallow — SMS failure must not break outcome saving */ }
@@ -8973,7 +8976,7 @@ async function sendTestSms(DB, body) {
   if (!phone) return err('phone is required', 400);
   const t = await getTermiiSettings(DB);
   if (!t.apiKey) return err('Termii API key not configured. Please add it in Settings → SMS.', 400);
-  const result = await sendTermiiSms(t.apiKey, t.senderId, phone, message);
+  const result = await sendTermiiSms(t.apiKey, t.senderId, phone, message, t.channel);
   if (result.ok) {
     return ok({ ok: true, message: `Test SMS sent successfully to ${phone}.` });
   }
@@ -9260,7 +9263,7 @@ async function retrySmsLog(DB, body, auth) {
   if (!phone) return err('No destination phone number on this entry', 400);
 
   const rsid = t.partnerSenderId || t.senderId;
-  const result = await sendTermiiSms(t.apiKey, rsid, phone, row.message || '');
+  const result = await sendTermiiSms(t.apiKey, rsid, phone, row.message || '', t.channel);
   const now = new Date().toISOString();
   if (result.ok) {
     await DB.prepare(
@@ -9397,7 +9400,7 @@ async function runAnniversarySms(DB, env, request) {
       .replace(/\{\{ordinal\}\}/g, ordinal)
       .replace(/\{\{years\}\}/g, String(yearsOfPartnership));
     const asid = t.partnerSenderId || t.senderId;
-    const result = await sendTermiiSms(t.apiKey, asid, p.phone, msg);
+    const result = await sendTermiiSms(t.apiKey, asid, p.phone, msg, t.channel);
     if (result.ok) { sent++; } else { failed++; }
   }
   return ok({ ok: true, sent, failed, total: sent + failed });
@@ -9451,7 +9454,7 @@ async function runPremeetingSms(DB, env, request) {
         .replace(/\{\{meetingDate\}\}/g, meetingDate)
         .replace(/\{\{meetingTime\}\}/g, meetingTime ? ' at ' + meetingTime : '')
         .replace(/\{\{venue\}\}/g, venueText ? venueText + ' ' : '');
-      const result = await sendTermiiSms(t.apiKey, t.senderId, member.phone, msg);
+      const result = await sendTermiiSms(t.apiKey, t.senderId, member.phone, msg, t.channel);
       if (result.ok) { sent++; } else { failed++; }
     }
   }
@@ -9502,7 +9505,7 @@ async function runActionItemDeadlineSms(DB, env, request) {
       .replace(/\{\{name\}\}/g, assignee)
       .replace(/\{\{task\}\}/g, item.task || '')
       .replace(/\{\{dueDate\}\}/g, item.due_date || '');
-    const result = await sendTermiiSms(t.apiKey, t.senderId, phone, msg);
+    const result = await sendTermiiSms(t.apiKey, t.senderId, phone, msg, t.channel);
     if (result.ok) { sent++; } else { failed++; }
   }
   return ok({ ok: true, sent, failed, total: (items || []).length });
@@ -9545,7 +9548,7 @@ async function runScheduledSms(DB, env, request) {
     }
     let sent = 0; let failed = 0;
     for (const phone of phones) {
-      const result = await sendTermiiSms(t.apiKey, t.senderId, phone, blast.message);
+      const result = await sendTermiiSms(t.apiKey, t.senderId, phone, blast.message, t.channel);
       if (result.ok) sent++; else failed++;
     }
     await DB.prepare(
