@@ -1940,6 +1940,9 @@ async function handleInit(DB) {
     // Keep Termii's own wording alongside our normalized delivery_status bucket, so the
     // SMS log can always show the carrier's exact reported status, not just our label.
     `ALTER TABLE kpsc_reminders ADD COLUMN delivery_status_raw TEXT DEFAULT ''`,
+    // Tracks when a row was last checked against Termii's status API, so the
+    // reconciler can rotate fairly through the backlog instead of favoring one end.
+    `ALTER TABLE kpsc_reminders ADD COLUMN delivery_checked_at TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -8928,20 +8931,23 @@ async function reconcileSmsDeliveryStatus(DB) {
   const t = await getTermiiSettings(DB);
   if (!t.apiKey) return { ok: false, error: 'Termii API key not configured' };
 
-  // Oldest-first: a steady stream of newly-sent (still genuinely in-flight) messages
-  // would otherwise dominate every "most recent 40" batch and permanently starve out
-  // older backlog rows that are actually ready to resolve.
+  // Fair rotation: prioritize whichever rows have gone longest without being checked
+  // (never-checked rows first, via the empty string sorting before any timestamp).
+  // This way every row — new or old — eventually gets a turn, instead of one end of
+  // the backlog permanently crowding out the other whenever there are more than 40
+  // unresolved rows.
   const { results: rows } = await DB.prepare(`
     SELECT id, message_id FROM kpsc_reminders
     WHERE status='sent' AND message_id != ''
       AND (delivery_status IS NULL OR delivery_status NOT IN ('delivered','failed','dnd'))
-    ORDER BY sent_at ASC
+    ORDER BY COALESCE(delivery_checked_at, '') ASC
     LIMIT 40
   `).all();
 
   if (!rows || !rows.length) return { ok: true, checked: 0, updated: 0, stillPending: 0 };
 
   let updated = 0, stillPending = 0;
+  const checkedAt = new Date().toISOString();
   for (const row of rows) {
     try {
       const resp = await fetch(`https://api.ng.termii.com/api/sms/inbox?api_key=${encodeURIComponent(t.apiKey)}&message_id=${encodeURIComponent(row.message_id)}`);
@@ -8950,7 +8956,7 @@ async function reconcileSmsDeliveryStatus(DB) {
       const rawStatusOriginal = String(entry?.status || '').trim();
       const mapped = normalizeTermiiDeliveryStatus(rawStatusOriginal);
       if (mapped) {
-        await DB.prepare(`UPDATE kpsc_reminders SET delivery_status=?, delivery_status_raw=? WHERE id=?`).bind(mapped, rawStatusOriginal, row.id).run();
+        await DB.prepare(`UPDATE kpsc_reminders SET delivery_status=?, delivery_status_raw=?, delivery_checked_at=? WHERE id=?`).bind(mapped, rawStatusOriginal, checkedAt, row.id).run();
         updated++;
         if (mapped === 'dnd') {
           const rem = await DB.prepare(`SELECT partner_id FROM kpsc_reminders WHERE id=?`).bind(row.id).first();
@@ -8962,13 +8968,15 @@ async function reconcileSmsDeliveryStatus(DB) {
       } else {
         // Termii hasn't reached a terminal status we recognize yet — still record
         // whatever it's currently reporting (e.g. "PROCESSING", "SUBMITTED") so the
-        // log can show the real state instead of a blank "awaiting" forever.
-        if (rawStatusOriginal) {
-          await DB.prepare(`UPDATE kpsc_reminders SET delivery_status_raw=? WHERE id=?`).bind(rawStatusOriginal, row.id).run();
-        }
+        // log can show the real state instead of a blank "awaiting" forever, and
+        // stamp delivery_checked_at so this row cycles to the back of the queue.
+        await DB.prepare(`UPDATE kpsc_reminders SET delivery_status_raw=?, delivery_checked_at=? WHERE id=?`).bind(rawStatusOriginal, checkedAt, row.id).run();
         stillPending++;
       }
     } catch (_) {
+      // Still stamp delivery_checked_at even on a fetch error — otherwise a row that
+      // keeps failing to look up would jump the queue on every call and block the rest.
+      await DB.prepare(`UPDATE kpsc_reminders SET delivery_checked_at=? WHERE id=?`).bind(checkedAt, row.id).run().catch(() => {});
       stillPending++;
     }
   }
