@@ -8339,9 +8339,24 @@ function smsLogStatusBadge(log) {
   if (log.status === 'skipped') return `<span class="kbadge badge-gray" title="${esc(log.errorText || 'Skipped')}">⏭️ Skipped</span>`;
   // status === 'sent' → show delivery sub-status
   if (log.deliveryStatus === 'delivered') return `<span class="kbadge badge-green">✅ Delivered</span>`;
-  if (log.deliveryStatus === 'dnd')       return `<span class="kbadge badge-red">🚫 DND</span>`;
+  if (log.deliveryStatus === 'dnd')       return `<span class="kbadge badge-red" title="Termii/network reports this number is on the DND registry">🚫 DND</span>`;
   if (log.deliveryStatus === 'failed')    return `<span class="kbadge badge-red">❌ Not delivered</span>`;
-  return `<span class="kbadge badge-amber" title="Sent to Termii; awaiting delivery confirmation">⏳ Sent</span>`;
+  if (log.deliveryStatus === 'pending' || !log.deliveryStatus) {
+    return `<span class="kbadge badge-amber" title="Sent to Termii; awaiting delivery confirmation">⏳ Sent</span>`;
+  }
+  // Termii returned a status we don't have a specific bucket for — show it verbatim rather than masking it as "Sent".
+  return `<span class="kbadge badge-amber" title="Raw status reported by Termii">⏳ ${esc(log.deliveryStatus)}</span>`;
+}
+
+// Plain-language, always-visible line showing exactly what Termii reported for this
+// message — no bucketing, no interpretation. Falls back to a clear "not received yet"
+// message rather than leaving the reader guessing.
+function smsLogRawStatusText(log) {
+  if (log.status === 'failed') return log.errorText || 'Send to Termii failed (no further detail returned)';
+  if (log.status === 'skipped') return log.errorText || 'Skipped before sending';
+  if (log.deliveryStatusRaw) return log.deliveryStatusRaw;
+  if (log.deliveryStatus && log.deliveryStatus !== 'pending') return log.deliveryStatus;
+  return 'Not yet reported by Termii';
 }
 
 const SMS_TYPE_LABELS = {
@@ -8520,7 +8535,8 @@ async function renderSmsLogs(main) {
               </div>
               ${log.errorText ? `<div class="k-page-hint" style="margin-top:6px;color:var(--red)">⚠️ ${esc(log.errorText)}</div>` : ''}
               <div class="k-page-hint" style="margin-top:6px;font-size:13px">${esc(log.message)}</div>
-              ${log.messageId ? `<div class="k-page-hint" style="margin-top:4px;font-size:11px;color:var(--text3,#999)">Termii ID: ${esc(log.messageId)}</div>` : ''}
+              <div class="k-page-hint" style="margin-top:4px;font-size:12px;font-weight:600">Termii status: ${esc(smsLogRawStatusText(log))}</div>
+              ${log.messageId ? `<div class="k-page-hint" style="margin-top:2px;font-size:11px;color:var(--text3,#999)">Termii ID: ${esc(log.messageId)}</div>` : ''}
             </div>`).join('') : `<div class="k-empty">No SMS ${filter !== 'all' ? `(${esc(filter)}) ` : ''}logged for ${monthName(month)} ${year}.</div>`}
         </div>
       </div>
@@ -11147,7 +11163,7 @@ async function renderSettings(main) {
   const termiiApiKey         = res?.kpsc_termii_api_key             || '';
   const termiiSenderId       = res?.kpsc_termii_sender_id           || 'RCCG-KP';
   const termiiPartnerSenderId = res?.kpsc_termii_partner_sender_id  || '';
-  const termiiChannel      = res?.kpsc_termii_channel             || 'dnd';
+  const termiiChannel      = res?.kpsc_termii_channel             || 'generic';
   const termiiWelcome      = res?.kpsc_termii_welcome_sms  !== '0';
   const termiiPayment      = res?.kpsc_termii_payment_sms  !== '0';
   const termiiNewMonth     = res?.kpsc_termii_newmonth_sms !== '0';
@@ -11365,10 +11381,10 @@ async function renderSettings(main) {
         <div class="k-form-group">
           <label class="k-label">SMS Delivery Channel</label>
           <select id="ks-termii-channel" class="k-input k-input-sm" style="max-width:300px">
-            <option value="dnd" ${termiiChannel === 'dnd' ? 'selected' : ''}>DND (recommended — delivers to all numbers)</option>
-            <option value="generic" ${termiiChannel === 'generic' ? 'selected' : ''}>Generic (cheaper — cannot reach DND numbers)</option>
+            <option value="generic" ${termiiChannel === 'generic' ? 'selected' : ''}>Generic (default)</option>
+            <option value="dnd" ${termiiChannel === 'dnd' ? 'selected' : ''}>DND (requires Termii account approval)</option>
           </select>
-          <p class="k-hint">In Nigeria, most phone numbers are on the DND (Do Not Disturb) registry. The <strong>DND</strong> channel delivers to all numbers but costs slightly more per page. The <strong>Generic</strong> channel is cheaper but messages to DND numbers will silently fail.</p>
+          <p class="k-hint">Only switch to <strong>DND</strong> if Termii has approved your account/sender ID for the DND-bypass route — most accounts are not. Selecting it without approval can cause sends to fail outright. Leave on <strong>Generic</strong> otherwise.</p>
         </div>
 
         <div class="k-form-group">
