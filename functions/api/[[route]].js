@@ -77,7 +77,7 @@ async function sendTermiiSms(apiKey, senderId, to, sms, channel) {
   if (!apiKey) return { ok: false, error: 'Termii API key not configured' };
   const phone = String(to || '').replace(/\D/g, '');
   if (!phone) return { ok: false, error: 'invalid phone number' };
-  const ch = channel || 'dnd';
+  const ch = channel || 'generic';
   const hasNonGsm = /[^\x20-\x7E\n\r]/.test(sms);
   const type = hasNonGsm ? 'unicode' : 'plain';
   try {
@@ -140,7 +140,7 @@ async function getTermiiSettings(DB) {
     apiKey:          String(map.kpsc_termii_api_key  || '').trim(),
     senderId:        String(map.kpsc_termii_sender_id || 'RCCG-KP').trim(),
     partnerSenderId: String(map.kpsc_termii_partner_sender_id || '').trim(),
-    channel:         String(map.kpsc_termii_channel || 'dnd').trim(),
+    channel:         String(map.kpsc_termii_channel || 'generic').trim(),
     welcomeSms:      map.kpsc_termii_welcome_sms   !== '0',
     paymentSms:      map.kpsc_termii_payment_sms   !== '0',
     newMonthSms:     map.kpsc_termii_newmonth_sms  !== '0',
