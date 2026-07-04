@@ -8348,6 +8348,17 @@ function smsLogStatusBadge(log) {
   return `<span class="kbadge badge-amber" title="Raw status reported by Termii">⏳ ${esc(log.deliveryStatus)}</span>`;
 }
 
+// Plain-language, always-visible line showing exactly what Termii reported for this
+// message — no bucketing, no interpretation. Falls back to a clear "not received yet"
+// message rather than leaving the reader guessing.
+function smsLogRawStatusText(log) {
+  if (log.status === 'failed') return log.errorText || 'Send to Termii failed (no further detail returned)';
+  if (log.status === 'skipped') return log.errorText || 'Skipped before sending';
+  if (log.deliveryStatusRaw) return log.deliveryStatusRaw;
+  if (log.deliveryStatus && log.deliveryStatus !== 'pending') return log.deliveryStatus;
+  return 'Not yet reported by Termii';
+}
+
 const SMS_TYPE_LABELS = {
   reminder: 'Payment reminder', welcome: 'Welcome', payment: 'Payment thank-you',
   new_month: 'Happy New Month', anniversary: 'Anniversary', milestone: 'Milestone',
@@ -8524,7 +8535,8 @@ async function renderSmsLogs(main) {
               </div>
               ${log.errorText ? `<div class="k-page-hint" style="margin-top:6px;color:var(--red)">⚠️ ${esc(log.errorText)}</div>` : ''}
               <div class="k-page-hint" style="margin-top:6px;font-size:13px">${esc(log.message)}</div>
-              ${log.messageId ? `<div class="k-page-hint" style="margin-top:4px;font-size:11px;color:var(--text3,#999)">Termii ID: ${esc(log.messageId)}</div>` : ''}
+              <div class="k-page-hint" style="margin-top:4px;font-size:12px;font-weight:600">Termii status: ${esc(smsLogRawStatusText(log))}</div>
+              ${log.messageId ? `<div class="k-page-hint" style="margin-top:2px;font-size:11px;color:var(--text3,#999)">Termii ID: ${esc(log.messageId)}</div>` : ''}
             </div>`).join('') : `<div class="k-empty">No SMS ${filter !== 'all' ? `(${esc(filter)}) ` : ''}logged for ${monthName(month)} ${year}.</div>`}
         </div>
       </div>

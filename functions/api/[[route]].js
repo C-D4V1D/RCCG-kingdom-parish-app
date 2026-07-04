@@ -1937,6 +1937,9 @@ async function handleInit(DB) {
     // its cash came from so the income modal and deposit form can use exact attribution
     // instead of the FIFO date-window heuristic.
     `ALTER TABLE expenses ADD COLUMN income_ref TEXT DEFAULT ''`,
+    // Keep Termii's own wording alongside our normalized delivery_status bucket, so the
+    // SMS log can always show the carrier's exact reported status, not just our label.
+    `ALTER TABLE kpsc_reminders ADD COLUMN delivery_status_raw TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -8885,15 +8888,17 @@ async function handleTermiiWebhook(DB, body, request, env) {
   } catch { /* best-effort */ }
 
   const messageId    = String(body?.message_id || body?.messageId || '').trim();
-  const rawStatus    = String(body?.status      || '').toLowerCase().trim();
+  const rawStatusOriginal = String(body?.status || '').trim();
+  const rawStatus    = rawStatusOriginal.toLowerCase();
   if (!messageId) return ok({ ok: true, ignored: true, reason: 'no message_id' });
 
   const deliveryStatus = normalizeTermiiDeliveryStatus(rawStatus) || rawStatus || 'unknown';
 
-  // Update kpsc_reminders row that has this message_id
+  // Update kpsc_reminders row that has this message_id — keep Termii's exact wording
+  // (delivery_status_raw) alongside our normalized bucket (delivery_status).
   const { meta } = await DB.prepare(
-    `UPDATE kpsc_reminders SET delivery_status=? WHERE message_id=? AND message_id != ''`
-  ).bind(deliveryStatus, messageId).run();
+    `UPDATE kpsc_reminders SET delivery_status=?, delivery_status_raw=? WHERE message_id=? AND message_id != ''`
+  ).bind(deliveryStatus, rawStatusOriginal, messageId).run();
 
   // Feature 2: If DND, auto-flag the partner so future sends are skipped
   if (deliveryStatus === 'dnd' && meta?.changes > 0) {
@@ -8939,9 +8944,10 @@ async function reconcileSmsDeliveryStatus(DB) {
       const resp = await fetch(`https://api.ng.termii.com/api/sms/inbox?api_key=${encodeURIComponent(t.apiKey)}&message_id=${encodeURIComponent(row.message_id)}`);
       const data = await resp.json().catch(() => ({}));
       const entry = Array.isArray(data?.data) ? data.data[0] : (Array.isArray(data) ? data[0] : data?.data);
-      const mapped = normalizeTermiiDeliveryStatus(entry?.status);
+      const rawStatusOriginal = String(entry?.status || '').trim();
+      const mapped = normalizeTermiiDeliveryStatus(rawStatusOriginal);
       if (mapped) {
-        await DB.prepare(`UPDATE kpsc_reminders SET delivery_status=? WHERE id=?`).bind(mapped, row.id).run();
+        await DB.prepare(`UPDATE kpsc_reminders SET delivery_status=?, delivery_status_raw=? WHERE id=?`).bind(mapped, rawStatusOriginal, row.id).run();
         updated++;
         if (mapped === 'dnd') {
           const rem = await DB.prepare(`SELECT partner_id FROM kpsc_reminders WHERE id=?`).bind(row.id).first();
@@ -8951,6 +8957,12 @@ async function reconcileSmsDeliveryStatus(DB) {
           }
         }
       } else {
+        // Termii hasn't reached a terminal status we recognize yet — still record
+        // whatever it's currently reporting (e.g. "PROCESSING", "SUBMITTED") so the
+        // log can show the real state instead of a blank "awaiting" forever.
+        if (rawStatusOriginal) {
+          await DB.prepare(`UPDATE kpsc_reminders SET delivery_status_raw=? WHERE id=?`).bind(rawStatusOriginal, row.id).run();
+        }
         stillPending++;
       }
     } catch (_) {
@@ -9112,6 +9124,7 @@ async function getSmsLogs(DB, url) {
       messageId: row.message_id || '',
       status,
       deliveryStatus: row.delivery_status || '',
+      deliveryStatusRaw: row.delivery_status_raw || '',
       errorText: row.error_text || '',
       reminderType: row.reminder_type || 'reminder',
       sentBy: row.sent_by || '',
