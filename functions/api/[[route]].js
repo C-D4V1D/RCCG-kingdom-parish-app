@@ -1139,7 +1139,7 @@ export async function onRequest(context) {
     if (route === 'kpsc-sms-test' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
-      return await sendTestSms(DB, body);
+      return await sendTestSms(DB, body, auth.name);
     }
 
     // ── SMS Analytics (Feature 12) ──────────────────────────────────
@@ -8928,11 +8928,14 @@ async function reconcileSmsDeliveryStatus(DB) {
   const t = await getTermiiSettings(DB);
   if (!t.apiKey) return { ok: false, error: 'Termii API key not configured' };
 
+  // Oldest-first: a steady stream of newly-sent (still genuinely in-flight) messages
+  // would otherwise dominate every "most recent 40" batch and permanently starve out
+  // older backlog rows that are actually ready to resolve.
   const { results: rows } = await DB.prepare(`
     SELECT id, message_id FROM kpsc_reminders
     WHERE status='sent' AND message_id != ''
       AND (delivery_status IS NULL OR delivery_status NOT IN ('delivered','failed','dnd'))
-    ORDER BY sent_at DESC
+    ORDER BY sent_at ASC
     LIMIT 40
   `).all();
 
@@ -8988,16 +8991,23 @@ async function getTermiiBalance(DB) {
 }
 
 // ── FEATURE 14: TEST SMS ──────────────────────────────────────────────────
-async function sendTestSms(DB, body) {
+async function sendTestSms(DB, body, sentBy) {
   const phone   = String(body?.phone   || '').trim();
   const message = String(body?.message || '').trim() || 'Test SMS from RCCG Kingdom Parish portal. If you received this, your Termii integration is working correctly. 🎉';
   if (!phone) return err('phone is required', 400);
   const t = await getTermiiSettings(DB);
   if (!t.apiKey) return err('Termii API key not configured. Please add it in Settings → SMS.', 400);
   const result = await sendTermiiSms(t.apiKey, t.senderId, phone, message, t.channel);
+  const now = new Date().toISOString();
   if (result.ok) {
+    await DB.prepare(
+      `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(newId('krm'), '', 'sms', message, 'sent', 'pending', result.messageId || '', 'test', new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, sentBy || '', now, phone).run().catch(() => {});
     return ok({ ok: true, message: `Test SMS sent successfully to ${phone}.` });
   }
+  await DB.prepare(
+    `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(newId('krm'), '', 'sms', message, 'failed', '', '', 'test', new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, sentBy || '', now, phone, String(result.error || 'Termii send failed')).run().catch(() => {});
   return ok({ ok: false, error: result.error || 'Termii returned an error. Check your API key and sender ID.' });
 }
 

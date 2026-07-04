@@ -8363,6 +8363,7 @@ const SMS_TYPE_LABELS = {
   reminder: 'Payment reminder', welcome: 'Welcome', payment: 'Payment thank-you',
   new_month: 'Happy New Month', anniversary: 'Anniversary', milestone: 'Milestone',
   premeeting: 'Pre-meeting', actionitem: 'Action item', deadline: 'Deadline', bulk: 'Bulk',
+  test: 'Test SMS',
 };
 
 async function renderSmsLogs(main) {
@@ -8520,7 +8521,7 @@ async function renderSmsLogs(main) {
             <div class="k-meeting-card" style="cursor:default">
               <div class="k-mc-top">
                 <div style="flex:1">
-                  <div class="k-mc-title">${esc(log.partnerName || 'Partner')}${log.phone ? ` <span class="k-hint">· ${esc(log.phone)}</span>` : ''}</div>
+                  <div class="k-mc-title">${esc(log.partnerName || (log.reminderType === 'test' ? 'Test SMS' : 'Partner'))}${log.phone ? ` <span class="k-hint">· ${esc(log.phone)}</span>` : ''}</div>
                   <div class="k-mc-meta">
                     <span class="kbadge badge-type">${esc(SMS_TYPE_LABELS[log.reminderType] || log.reminderType || 'sms')}</span>
                     <span>${esc(fmtDateTime(log.createdAt || log.sentAt))}</span>
