@@ -1189,7 +1189,7 @@ function setBtnLoading(btn, text='Loading…'){
   const orig = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = `<span class="btn-spinner-sm"></span> ${text}`;
-  const timer = setTimeout(()=>{ btn.disabled=false; btn.innerHTML=orig; }, 30000);
+  const timer = setTimeout(()=>{ btn.disabled=false; btn.innerHTML=orig; }, 120000);
   return function restore(){ clearTimeout(timer); btn.disabled=false; btn.innerHTML=orig; };
 }
 
@@ -1537,6 +1537,8 @@ function showAlert(msg,type='success'){
   const txt=document.createElement('span'); txt.textContent=msg;
   a.appendChild(icon); a.appendChild(txt);
   const duration = type==='danger' ? 6000 : 4000;
+  const modal = document.querySelector('#modalOverlay .modal');
+  if(modal){ modal.insertBefore(a,modal.firstChild); a.scrollIntoView({behavior:'smooth',block:'nearest'}); setTimeout(()=>a.remove(),duration); return; }
   const pc=document.getElementById('pageContent'); if(pc){ pc.insertBefore(a,pc.firstChild); setTimeout(()=>a.remove(),duration) }
 }
 async function updateNotifBadge(){ try{ const notifs=await DB.getNotifications(); const unread=notifs.filter(n=>!n.read).length; const el=document.getElementById('notifCount'); if(el){ el.textContent=unread; el.style.display=unread?'flex':'none' } }catch(e){ console.warn('Failed to update notification badge:', e) } }
@@ -4958,12 +4960,12 @@ async function submitCashDeposit(incomeId, btn=null){
     showAlert(`Deposit amount (${fmt(amount)}) exceeds the cash available for this record (${fmt(maxDeposit)}). Please enter a correct amount.`,'danger');
     return;
   }
-  let photoData = '';
-  if(photoFile){
-    photoData = await compressPhoto(photoFile, 1200, 0.75);
-  }
   const restore = setBtnLoading(btn, 'Saving…');
   try {
+    let photoData = '';
+    if(photoFile){
+      photoData = await compressPhoto(photoFile, 1200, 0.75);
+    }
     const saved = await DB.addCashTransaction({ type:'cash_deposit', incomeRef:incomeId, amount, depositMethod:method, reference:ref||'', photoData, date, recordedBy:state.user?.name, verificationStatus:'pending' });
     const refLabel = ref || (photoData ? '(photo uploaded)' : '—');
     DB.addAudit('cash_deposited',`Cash deposit: ${fmt(amount)} via ${method?.replace(/_/g,' ')||'—'} — Ref: ${refLabel}`,state.user?.name);
@@ -5127,20 +5129,22 @@ async function confirmBulkDeposit(){
 
 async function submitBulkDeposit(btn=null){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
+  if(state._bulkDepositInProgress){ showAlert('Deposit is already being processed. Please wait.','warn'); return; }
   const method    = document.getElementById('bulk_dep_method')?.value;
   const ref       = document.getElementById('bulk_dep_ref')?.value?.trim();
   const date      = document.getElementById('bulk_dep_date')?.value;
   const photoFile = document.getElementById('bulk_dep_photo')?.files?.[0];
   if(!date){ showAlert('Please enter the deposit date.','danger'); return; }
   if(!photoFile){ showAlert('Please upload a photo of the deposit slip or receipt. This is required for AI verification.','danger'); return; }
-  let photoData = '';
-  if(photoFile){
-    photoData = await compressPhoto(photoFile, 1200, 0.75);
-  }
   const cashToDeposit = state._bulkDepositCashBalance || 0;
   if(cashToDeposit < 0.5){ showAlert('No cash to deposit.','warn'); return; }
+  state._bulkDepositInProgress = true;
   const restore = setBtnLoading(btn, 'Saving…');
   try {
+    let photoData = '';
+    if(photoFile){
+      photoData = await compressPhoto(photoFile, 1200, 0.75);
+    }
     // Re-fetch fresh data to build accurate income-record distribution
     const [allIncome, allCashTx, remRatesData, allExpensesSD, allPettySD] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), DB.getExpenses(), DB.getPetty()]);
     const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
@@ -5181,6 +5185,7 @@ async function submitBulkDeposit(btn=null){
     DB.addNotification('Cash Deposited',`${fmt(cashToDeposit)} deposited to bank${ref?` (Ref: ${ref})`:''}`,'success');
     delete state._bulkDepositPending;
     delete state._bulkDepositCashBalance;
+    delete state._bulkDepositInProgress;
     closeModal();
     showAlert(`${fmt(cashToDeposit)} deposit recorded — ⏳ AI is verifying the receipt on the server. Cash will move to bank once verified.`, 'info');
     if(state.page==='bank') renderBank(); else renderIncome();
@@ -5196,6 +5201,7 @@ async function submitBulkDeposit(btn=null){
       }).catch(()=>{});
     }
   } catch(err) {
+    delete state._bulkDepositInProgress;
     restore();
     showAlert(`Failed to record deposit: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
