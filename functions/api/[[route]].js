@@ -3204,21 +3204,36 @@ async function verifyDepositWithAI(DB, env, body, attempt=1) {
   const { transactionId, photoData, recordedAmount } = body || {};
   if (!transactionId || !photoData) return err('Missing transactionId or photoData', 400);
 
-  // Use OpenAI for all attempts — DeepSeek does not support image_url content type
+  // Attempts 1-2: OpenAI. Attempt 3: fall back to DeepSeek V4 (supports vision).
+  const useDeepSeek = attempt >= 3;
   let apiKey = '', apiUrl = '', model = '';
 
-  apiKey = await resolveOpenAiKey(env, DB);
-  apiUrl = 'https://api.openai.com/v1/chat/completions';
-  model = 'gpt-4o-mini';
+  if (useDeepSeek) {
+    try {
+      const { results: sr } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`).all();
+      const settings = Object.fromEntries((sr||[]).map(r=>[r.key, r.value]));
+      apiKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+      model = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : '';
+    } catch(e){ console.error('DeepSeek settings read failed:', e.message); }
+    if (!model || !model.startsWith('deepseek-v4')) model = 'deepseek-v4-flash';
+    apiUrl = 'https://api.deepseek.com/chat/completions';
+  } else {
+    apiKey = await resolveOpenAiKey(env, DB);
+    apiUrl = 'https://api.openai.com/v1/chat/completions';
+    model = 'gpt-4o-mini';
+  }
 
   if (!apiKey) {
-    const reason = 'No OpenAI API key configured';
+    if (!useDeepSeek && attempt < MAX_ATTEMPTS) {
+      return verifyDepositWithAI(DB, env, body, MAX_ATTEMPTS);
+    }
+    const reason = useDeepSeek ? 'No DeepSeek API key configured' : 'No OpenAI API key configured';
     await DB.prepare(`UPDATE cash_transactions SET verification_status='pending', ai_notes=? WHERE id=?`)
       .bind(`${reason} — requires manual review`, transactionId).run();
     return ok({ verified: false, status: 'pending', reason });
   }
 
-  const provider = 'OpenAI';
+  const provider = useDeepSeek ? 'DeepSeek' : 'OpenAI';
   try {
     const base64 = photoData.includes(',') ? photoData.split(',')[1] : photoData;
     const mediaType = photoData.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
