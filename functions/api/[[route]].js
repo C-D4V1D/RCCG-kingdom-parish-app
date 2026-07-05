@@ -4980,7 +4980,8 @@ async function resolveOpenAiKey(env, DB) {
   try {
     const row = await DB.prepare(`SELECT value FROM settings WHERE key='ai_openai_key'`).first();
     return row?.value ? String(row.value).trim() : '';
-  } catch (_) {
+  } catch (e) {
+    console.error('resolveOpenAiKey DB read failed:', e.message);
     return '';
   }
 }
