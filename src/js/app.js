@@ -5193,7 +5193,9 @@ async function submitBulkDeposit(btn=null){
         if(result?.status==='verified') showAlert(`✅ Bulk deposit verified! ${fmt(cashToDeposit)} moved to bank.`,'success');
         else if(result?.status==='flagged') showAlert(`⚠️ Bulk deposit flagged. Please check the deposit details.`,'danger');
         if(state.page==='bank') renderBank(); else renderIncome();
-      }).catch(()=>{});
+      }).catch(()=>{
+        showAlert('AI verification request failed. Deposits remain pending — you can retry or manually approve.','warning');
+      });
     }
   } catch(err) {
     delete state._bulkDepositInProgress;
