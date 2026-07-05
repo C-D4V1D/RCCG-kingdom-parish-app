@@ -88,10 +88,10 @@ function depositVerificationBadge(t){
 
 function depositActionButtons(t){
   const vs = t.verificationStatus || '';
-  if(vs !== 'pending' && vs !== 'flagged') return '';
+  if(vs !== 'pending' && vs !== 'flagged' && vs !== 'auto_approved') return '';
   const created = new Date(t.createdAt || t.date || 0).getTime();
   const age = Date.now() - created;
-  const isStale = vs === 'flagged' || age > 5 * 60 * 1000;
+  const isStale = vs === 'flagged' || vs === 'auto_approved' || age > 5 * 60 * 1000;
   if(!isStale && vs === 'pending') return '<span style="font-size:10px;color:var(--text3)">Verifying…</span>';
   const btns = [];
   if(vs === 'flagged' && canAction('income_deposit')){
@@ -101,7 +101,8 @@ function depositActionButtons(t){
     btns.push(`<button class="btn btn-sm" onclick="event.stopPropagation();App.retryDepositVerification('${t.id}')" style="font-size:10px;padding:2px 8px">🔄 Retry</button>`);
   }
   if(['it_admin'].includes(state.user?.role)){
-    btns.push(`<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();App.manuallyApproveDeposit('${t.id}')" style="font-size:10px;padding:2px 8px">✅ Approve</button>`);
+    if(vs !== 'auto_approved') btns.push(`<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();App.manuallyApproveDeposit('${t.id}')" style="font-size:10px;padding:2px 8px">✅ Approve</button>`);
+    btns.push(`<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();App.deleteDepositRecord('${t.id}')" style="font-size:10px;padding:2px 8px">🗑️ Delete</button>`);
   }
   return btns.join(' ');
 }
@@ -4702,9 +4703,9 @@ async function verifyDepositInBackground(txId, photoData, recordedAmount, attemp
     } else if(result?.status === 'flagged'){
       showAlert(`⚠️ Deposit flagged: receipt shows ${fmt(result.aiAmount||0)} but ${fmt(recordedAmount)} was recorded. Cash remains with accountant until resolved.`,'danger');
       DB.addNotification('Deposit Flagged','AI detected amount mismatch on a deposit. Cash remains with accountant. Please review.','warn');
-    } else if(result?.reason){
+    } else if(result?.status === 'pending' && result?.reason){
       console.warn('AI verification issue:', result.reason);
-      showAlert(`Deposit recorded. AI verification unavailable — deposit approved automatically.`,'info');
+      showAlert(`Deposit recorded. AI verification failed — requires manual review.`,'warning');
       if(typeof renderIncome==='function') renderIncome();
     }
   } catch(e){
@@ -4715,15 +4716,9 @@ async function verifyDepositInBackground(txId, photoData, recordedAmount, attemp
       setTimeout(()=> verifyDepositInBackground(txId, photoData, recordedAmount, attempt+1), delay);
       return;
     }
-    // All retries exhausted — auto-approve so accountant isn't stuck
-    try {
-      await fetch('/api/cash-transactions/'+txId, {
-        method:'PUT', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ verificationStatus:'auto_approved', aiNotes:'Network error after 3 attempts — auto-approved' })
-      });
-      showAlert(`Deposit approved automatically (AI verification failed after ${MAX_ATTEMPTS} attempts).`,'info');
-      if(typeof renderIncome==='function') renderIncome();
-    } catch(e2){ /* silently fail — record stays pending, can be retried manually */ }
+    // All retries exhausted — leave as pending for manual review
+    showAlert(`AI verification failed after ${MAX_ATTEMPTS} attempts. Deposit requires manual review.`,'warning');
+    if(typeof renderIncome==='function') renderIncome();
   }
 }
 
@@ -5198,7 +5193,9 @@ async function submitBulkDeposit(btn=null){
         if(result?.status==='verified') showAlert(`✅ Bulk deposit verified! ${fmt(cashToDeposit)} moved to bank.`,'success');
         else if(result?.status==='flagged') showAlert(`⚠️ Bulk deposit flagged. Please check the deposit details.`,'danger');
         if(state.page==='bank') renderBank(); else renderIncome();
-      }).catch(()=>{});
+      }).catch(()=>{
+        showAlert('AI verification request failed. Deposits remain pending — you can retry or manually approve.','warning');
+      });
     }
   } catch(err) {
     delete state._bulkDepositInProgress;
