@@ -88,10 +88,10 @@ function depositVerificationBadge(t){
 
 function depositActionButtons(t){
   const vs = t.verificationStatus || '';
-  if(vs !== 'pending' && vs !== 'flagged') return '';
+  if(vs !== 'pending' && vs !== 'flagged' && vs !== 'auto_approved') return '';
   const created = new Date(t.createdAt || t.date || 0).getTime();
   const age = Date.now() - created;
-  const isStale = vs === 'flagged' || age > 5 * 60 * 1000;
+  const isStale = vs === 'flagged' || vs === 'auto_approved' || age > 5 * 60 * 1000;
   if(!isStale && vs === 'pending') return '<span style="font-size:10px;color:var(--text3)">Verifying…</span>';
   const btns = [];
   if(vs === 'flagged' && canAction('income_deposit')){
@@ -101,7 +101,8 @@ function depositActionButtons(t){
     btns.push(`<button class="btn btn-sm" onclick="event.stopPropagation();App.retryDepositVerification('${t.id}')" style="font-size:10px;padding:2px 8px">🔄 Retry</button>`);
   }
   if(['it_admin'].includes(state.user?.role)){
-    btns.push(`<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();App.manuallyApproveDeposit('${t.id}')" style="font-size:10px;padding:2px 8px">✅ Approve</button>`);
+    if(vs !== 'auto_approved') btns.push(`<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();App.manuallyApproveDeposit('${t.id}')" style="font-size:10px;padding:2px 8px">✅ Approve</button>`);
+    btns.push(`<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();App.deleteDepositRecord('${t.id}')" style="font-size:10px;padding:2px 8px">🗑️ Delete</button>`);
   }
   return btns.join(' ');
 }
