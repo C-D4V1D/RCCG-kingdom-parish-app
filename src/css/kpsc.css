@@ -662,13 +662,16 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-pgrid-paid{background:#d1fae5;border-color:#6ee7b7;}
 .k-pgrid-unpaid{background:#fee2e2;border-color:#fca5a5;}
 .k-pgrid-future{background:#f3f4f6;border-color:#e5e7eb;opacity:.6;}
+.k-pgrid-prestart{background:#fef3c7;border-color:#fde68a;opacity:.7;}
 .k-pgrid-month{font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--text3);}
 .k-pgrid-paid .k-pgrid-month{color:#065f46;}
 .k-pgrid-unpaid .k-pgrid-month{color:#991b1b;}
+.k-pgrid-prestart .k-pgrid-month{color:#92400e;}
 .k-pgrid-icon{font-size:18px;font-weight:700;line-height:1;}
 .k-pgrid-paid .k-pgrid-icon{color:#059669;}
 .k-pgrid-unpaid .k-pgrid-icon{color:#dc2626;}
 .k-pgrid-future .k-pgrid-icon{color:#9ca3af;}
+.k-pgrid-prestart .k-pgrid-icon{color:#d97706;}
 
 /* ── DOT GRID (reports) ────────────────────────────────────────── */
 .k-dot-row{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;}
@@ -899,6 +902,29 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-month-chip.selected{background:var(--navy);color:#fff;border-color:var(--navy);}
 .k-month-chip.already-paid{background:#d1fae5;color:#065f46;border-color:#6ee7b7;cursor:default;opacity:.7;}
 .k-month-chip.already-paid::after{content:' ✓';}
+
+/* ── Physical-card recorded Yes/No toggle (Record Payment modal) ─── */
+.k-cardrec-group{display:flex;gap:10px;margin-top:6px;}
+.k-cardrec-option{position:relative;flex:1;display:flex;align-items:center;justify-content:center;gap:6px;padding:12px 10px;
+  border:2px solid var(--border);border-radius:10px;cursor:pointer;font-weight:700;font-size:14px;
+  background:#f9fafb;color:var(--text2);transition:all .15s;user-select:none;}
+.k-cardrec-option input{position:absolute;opacity:0;pointer-events:none;}
+.k-cardrec-option:hover{border-color:var(--navy);}
+.k-cardrec-option.selected.yes{background:#d1fae5;border-color:#059669;color:#065f46;}
+.k-cardrec-option.selected.no{background:#fee2e2;border-color:#dc2626;color:#991b1b;}
+.k-cardrec-error{display:none;color:var(--red);font-size:13px;margin-top:6px;font-weight:600;}
+
+/* ── "Pending physical card" banner (Partners + Progress pages) ──── */
+.k-cardrec-banner{background:#fef3c7;border:1px solid #fde68a;border-radius:10px;padding:10px 14px;
+  font-size:13px;color:#92400e;line-height:1.7;margin-bottom:14px;}
+.k-cardrec-banner a{color:#92400e;font-weight:700;text-decoration:underline;cursor:pointer;}
+.k-cardrec-banner a:hover{text-decoration:none;}
+
+/* ── "Not yet recorded in physical card" per-partner list (View Info) ── */
+.k-cardrec-pending-list{margin-top:14px;padding:10px 12px;background:#fef3c7;border:1px solid #fde68a;border-radius:10px;}
+.k-cardrec-pending-hdr{font-size:12px;font-weight:700;color:#92400e;margin-bottom:8px;}
+.k-cardrec-pending-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 0;font-size:13px;color:#78350f;border-top:1px solid #fde68a;}
+.k-cardrec-pending-row:first-of-type{border-top:none;}
 
 /* ── Partner page search input ───────────────────────────────────── */
 .k-partners-search{width:100%;margin-bottom:10px;}
