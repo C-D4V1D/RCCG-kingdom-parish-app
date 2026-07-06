@@ -6177,12 +6177,12 @@ function openRecordPaymentModal(partnerId) {
 }
 
 function _selectCardRecorded(labelEl, value) {
-  const group = document.getElementById('k-pay-card-group');
+  const group = labelEl.closest('.k-cardrec-group');
   if (!group) return;
   group.querySelectorAll('.k-cardrec-option').forEach(el => el.classList.remove('selected', 'yes', 'no'));
   labelEl.classList.add('selected', value);
-  const err = document.getElementById('k-pay-card-err');
-  if (err) err.style.display = 'none';
+  const err = group.nextElementSibling;
+  if (err && err.classList.contains('k-cardrec-error')) err.style.display = 'none';
 }
 
 function _togglePaymentChip(chip) {
@@ -6866,6 +6866,7 @@ async function renderPartners(main) {
         <button class="k-tab ${S.partnersPaymentFilter === 'all' ? 'active' : ''}" data-filter="all" onclick="Kpsc.setPartnersPaymentFilter('all')">All</button>
         <button class="k-tab ${S.partnersPaymentFilter === 'paid' ? 'active' : ''}" data-filter="paid" onclick="Kpsc.setPartnersPaymentFilter('paid')">Paid this month</button>
         <button class="k-tab ${S.partnersPaymentFilter === 'unpaid' ? 'active' : ''}" data-filter="unpaid" onclick="Kpsc.setPartnersPaymentFilter('unpaid')">Unpaid this month</button>
+        <button class="k-tab ${S.partnersPaymentFilter === 'not-started' ? 'active' : ''}" data-filter="not-started" onclick="Kpsc.setPartnersPaymentFilter('not-started')">Not started</button>
       </div>
       <div id="kpsc-partners-list">${renderPartnersList(canManage)}</div>
     </div>`;
@@ -6889,6 +6890,7 @@ function renderPartnersList(canManage) {
   if (q) partners = partners.filter(p => p.fullName.toLowerCase().includes(q));
   if (S.partnersPaymentFilter === 'paid') partners = partners.filter(p => partnerMonthlyPaid(p.id, month, year));
   else if (S.partnersPaymentFilter === 'unpaid') partners = partners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isBeforePartnerStart(p, month, year));
+  else if (S.partnersPaymentFilter === 'not-started') partners = partners.filter(p => isBeforePartnerStart(p, month, year));
   if (!partners.length) {
     return `<div class="k-empty">${q ? `No partners matching "${esc(S.partnersSearch)}".` : `No ${S.partnersFilter === 'all' ? '' : S.partnersFilter + ' '}partners found.`}</div>`;
   }
@@ -6964,6 +6966,11 @@ function _normalizePartnerPhone(cc, local) {
 
 function showPartnerModal(partner = null) {
   document.getElementById('kpsc-partner-modal')?.remove();
+  // Other partners' names (lowercased), for a live duplicate-name warning below.
+  const otherNames = S.partners
+    .filter(p => !partner || p.id !== partner.id)
+    .map(p => String(p.fullName || '').trim().toLowerCase())
+    .filter(Boolean);
   const modal = document.createElement('div');
   modal.id = 'kpsc-partner-modal';
   modal.className = 'k-modal-overlay';
@@ -6976,6 +6983,16 @@ function showPartnerModal(partner = null) {
       <div class="k-modal-body">
         <label class="k-label">Full Name</label>
         <input id="kp-full-name" class="k-input" value="${esc(partner?.fullName || '')}" />
+        <div id="kp-name-warn" class="k-hint" style="color:var(--amber);display:none;margin-top:2px">⚠️ A partner with this name already exists — check it's not a duplicate.</div>
+        <script>
+          (function(){
+            var names = ${JSON.stringify(otherNames)};
+            var input = document.getElementById('kp-full-name');
+            var warn = document.getElementById('kp-name-warn');
+            function check(){ if(!input||!warn) return; var v=(input.value||'').trim().toLowerCase(); warn.style.display = v && names.indexOf(v) !== -1 ? 'block' : 'none'; }
+            if (input) { input.addEventListener('input', check); check(); }
+          })();
+        </script>
         <label class="k-label">Phone</label>
         <div style="display:flex;gap:8px;align-items:flex-start">
           <div style="flex:0 0 auto">
@@ -7065,17 +7082,35 @@ function closePartnerModal() {
 }
 
 async function savePartner(id, btn) {
+  const fullName = document.getElementById('kp-full-name')?.value.trim() || '';
+  if (!fullName) { showToast('Full name is required.', 'warn'); return; }
+  const monthlyPledge = Number(document.getElementById('kp-pledge')?.value || 0);
+  if (!Number.isFinite(monthlyPledge) || monthlyPledge < 0) {
+    showToast('Monthly pledge cannot be negative.', 'warn');
+    return;
+  }
+  const localRaw = document.getElementById('kp-phone-local')?.value || '';
+  const localDigits = String(localRaw).replace(/\D/g, '').replace(/^0+/, '');
+  const reminderPreference = document.getElementById('kp-reminder-pref')?.value || 'sms';
+  if (localDigits && (localDigits.length < 7 || localDigits.length > 11)) {
+    showToast('That phone number looks incomplete — check the digits and try again.', 'warn');
+    return;
+  }
+  if (!localDigits && reminderPreference !== 'none') {
+    showToast('Add a phone number, or set Reminder Preference to "None" if this partner has none.', 'warn');
+    return;
+  }
   const payload = {
-    fullName: document.getElementById('kp-full-name')?.value.trim() || '',
+    fullName,
     phone: _normalizePartnerPhone(
       document.getElementById('kp-phone-cc')?.value,
-      document.getElementById('kp-phone-local')?.value
+      localRaw
     ),
     partnershipType: document.getElementById('kp-type')?.value || 'gods_kingdom_partner',
-    monthlyPledge: Number(document.getElementById('kp-pledge')?.value || 0),
+    monthlyPledge,
     status: document.getElementById('kp-status')?.value || 'active',
     startDate: document.getElementById('kp-start-date')?.value || '',
-    reminderPreference: document.getElementById('kp-reminder-pref')?.value || 'sms',
+    reminderPreference,
     notes: document.getElementById('kp-notes')?.value.trim() || '',
     location: document.getElementById('kp-location')?.value.trim() || '',
     publicListing: document.getElementById('kp-public-listing')?.checked ? 1 : 0,
@@ -7098,16 +7133,81 @@ async function savePartner(id, btn) {
 }
 
 function togglePartnerMonth(partnerId, month, year, paid) {
-  const action = paid ? 'mark as paid' : 'mark as unpaid';
+  if (paid) {
+    // Marking a month paid must go through the same mandatory "recorded in physical
+    // card?" question as the Record Payment modal, so this shortcut can't be used to
+    // create paid records that silently skip that tracking.
+    _confirmMarkMonthPaid(partnerId, month, year);
+    return;
+  }
   const mName = monthName(month);
   requirePin(
     `Confirm: ${mName} ${year}`,
-    `Enter your PIN to ${action} for this partner. This helps prevent accidental changes.`,
-    () => _doTogglePartnerMonth(partnerId, month, year, paid)
+    `Enter your PIN to mark as unpaid for this partner. This helps prevent accidental changes.`,
+    () => _doTogglePartnerMonth(partnerId, month, year, false)
   );
 }
 
-async function _doTogglePartnerMonth(partnerId, month, year, paid) {
+function _confirmMarkMonthPaid(partnerId, month, year) {
+  document.getElementById('k-pin-confirm-modal')?.remove();
+  const mName = monthName(month);
+  const overlay = document.createElement('div');
+  overlay.className = 'k-pin-confirm-overlay';
+  overlay.id = 'k-pin-confirm-modal';
+  overlay.innerHTML = `
+    <div class="k-pin-confirm-box">
+      <div class="k-pin-confirm-title">Confirm: ${esc(mName)} ${year}</div>
+      <div class="k-pin-confirm-sub">Enter your PIN to mark as paid for this partner.</div>
+      <div style="text-align:left;margin:10px 0 4px">
+        <label class="k-label" style="font-size:12px">Recorded in physical card? <span style="color:var(--red)">*</span></label>
+        <div class="k-cardrec-group" id="k-quickpay-card-group">
+          <label class="k-cardrec-option" data-value="yes" onclick="Kpsc._selectCardRecorded(this,'yes')">
+            <input type="radio" name="k-quickpay-card-recorded" value="yes" /> ✅ Yes
+          </label>
+          <label class="k-cardrec-option" data-value="no" onclick="Kpsc._selectCardRecorded(this,'no')">
+            <input type="radio" name="k-quickpay-card-recorded" value="no" /> ❌ Not yet
+          </label>
+        </div>
+        <div id="k-quickpay-card-err" class="k-cardrec-error">Please select whether this has been recorded in the physical card.</div>
+      </div>
+      <input id="k-pin-confirm-input" class="k-pin-confirm-input" type="password" inputmode="numeric" maxlength="6" placeholder="••••••" autofocus />
+      <div class="k-pin-confirm-err" id="k-pin-confirm-err"></div>
+      <div class="k-pin-confirm-btns">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-pin-confirm-modal')?.remove()">Cancel</button>
+        <button class="kbtn kbtn-primary" id="k-pin-confirm-btn" onclick="Kpsc._submitQuickPayConfirm('${partnerId}', ${month}, ${year})">Confirm</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('keydown', e => { if (e.key === 'Enter') Kpsc._submitQuickPayConfirm(partnerId, month, year); });
+  document.getElementById('k-pin-confirm-input')?.focus();
+}
+
+async function _submitQuickPayConfirm(partnerId, month, year) {
+  const cardVal = document.querySelector('input[name="k-quickpay-card-recorded"]:checked')?.value;
+  if (cardVal !== 'yes' && cardVal !== 'no') {
+    const err = document.getElementById('k-quickpay-card-err');
+    if (err) err.style.display = 'block';
+    return;
+  }
+  const pin = document.getElementById('k-pin-confirm-input')?.value.trim() || '';
+  const errEl = document.getElementById('k-pin-confirm-err');
+  const btn = document.getElementById('k-pin-confirm-btn');
+  if (!pin) { if (errEl) errEl.textContent = 'Please enter your PIN.'; return; }
+  const orig = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  const res = await apiPost('kpsc-login', { accountId: S.user?.id, pin, role: S.user?.role }).catch(() => ({ error: 'Network error' }));
+  if (btn) { btn.disabled = false; btn.textContent = orig; }
+  if (res?.error) {
+    if (errEl) errEl.textContent = 'Incorrect PIN. Please try again.';
+    const input = document.getElementById('k-pin-confirm-input');
+    if (input) { input.value = ''; input.focus(); }
+    return;
+  }
+  document.getElementById('k-pin-confirm-modal')?.remove();
+  _doTogglePartnerMonth(partnerId, month, year, true, cardVal === 'yes');
+}
+
+async function _doTogglePartnerMonth(partnerId, month, year, paid, cardRecorded) {
   if (!paid) {
     const payment = S.partnerPayments.find(p => p.partnerId === partnerId && p.month === month && p.year === year && p.paymentType === 'monthly_pledge');
     if (payment) {
@@ -7126,10 +7226,11 @@ async function _doTogglePartnerMonth(partnerId, month, year, paid) {
       paid: true,
       paidAt: new Date().toISOString(),
       recordedBy: S.user?.name || '',
+      cardRecorded: !!cardRecorded,
     });
     if (res?.error) { showToast(res.error, 'error'); return; }
   }
-  await loadPartnerData(year);
+  await Promise.all([loadPartnerData(year), loadPendingCardPayments()]);
   if (S._partnerDetailId) {
     renderPartnerDetail(document.getElementById('kpsc-main'));
   } else {
@@ -7192,8 +7293,34 @@ function isBeforePartnerStart(partner, month, year) {
   return year < sy || (year === sy && month < sm);
 }
 
-async function deletePartner(id) {
-  if (!confirm('Delete this partner and all their payment records?')) return;
+function deletePartner(id) {
+  const partner = S.partners.find(p => p.id === id);
+  if (!partner) return;
+  document.getElementById('k-delete-partner-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.className = 'k-modal-overlay';
+  modal.id = 'k-delete-partner-modal';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:420px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">🗑 Delete Partner</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-delete-partner-modal')?.remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p style="font-size:14px;color:var(--text2);line-height:1.65">
+          Delete <strong>${esc(partner.fullName)}</strong>? Their profile and monthly payment log will be removed from this list.
+          Money already recorded in Finance for past payments stays on the books — it just won't be linked to this partner's name anymore.
+        </p>
+      </div>
+      <div class="k-modal-footer">
+        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-delete-partner-modal')?.remove()">Cancel</button>
+        <button class="kbtn kbtn-danger" onclick="document.getElementById('k-delete-partner-modal')?.remove();Kpsc._confirmDeletePartner('${id}')">Delete</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function _confirmDeletePartner(id) {
   const res = await apiDelete(`kpsc-partners/${id}`);
   if (res?.error) { showToast(res.error, 'error'); return; }
   await renderPartners(document.getElementById('kpsc-main'));
@@ -7333,7 +7460,7 @@ function renderPartnerDetail(main) {
       </div>
       ${partner.notes ? `<div class="k-section"><h3 class="k-sec-title">Notes (private)</h3><p style="font-size:14px;color:var(--text2);line-height:1.65">${esc(partner.notes)}</p></div>` : ''}
       <div style="margin-top:12px">
-        <button class="kbtn" onclick="Kpsc.navigate('partners')">← Back to Partners</button>
+        <button class="kbtn" onclick="Kpsc.goBack()">← Back</button>
       </div>
     </div>`;
 }
@@ -10463,9 +10590,11 @@ function _rerenderProgressRows() {
   } else if (S.progressFilter === 'unpaid') {
     partners = partners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isFutureMonth && !isBeforePartnerStart(p, month, year));
   } else if (S.progressFilter === 'future') {
-    partners = partners.filter(p => (isFutureMonth || isBeforePartnerStart(p, month, year)) && !partnerMonthlyPaid(p.id, month, year));
+    // Future takes priority over not-started when a month is both (matches the row badge,
+    // which shows "Future" before "Not started") — keeps the two tabs from overlapping.
+    partners = partners.filter(p => isFutureMonth && !partnerMonthlyPaid(p.id, month, year));
   } else if (S.progressFilter === 'not-started') {
-    partners = partners.filter(p => isBeforePartnerStart(p, month, year));
+    partners = partners.filter(p => !isFutureMonth && isBeforePartnerStart(p, month, year));
   }
   container.innerHTML = _buildProgressRows(partners, month, year, nowYear, nowMonth) || '<div class="k-empty">No partners match this filter.</div>';
   document.querySelectorAll('.k-progress-filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === S.progressFilter));
@@ -10530,9 +10659,9 @@ async function renderPartnerProgress(main) {
   } else if (S.progressFilter === 'unpaid') {
     displayPartners = displayPartners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isFutureMonth && !isBeforePartnerStart(p, month, year));
   } else if (S.progressFilter === 'future') {
-    displayPartners = displayPartners.filter(p => (isFutureMonth || isBeforePartnerStart(p, month, year)) && !partnerMonthlyPaid(p.id, month, year));
+    displayPartners = displayPartners.filter(p => isFutureMonth && !partnerMonthlyPaid(p.id, month, year));
   } else if (S.progressFilter === 'not-started') {
-    displayPartners = displayPartners.filter(p => isBeforePartnerStart(p, month, year));
+    displayPartners = displayPartners.filter(p => !isFutureMonth && isBeforePartnerStart(p, month, year));
   }
 
   const pf = S.progressFilter || 'all';
@@ -16761,6 +16890,8 @@ window.Kpsc = {
   closePartnerModal,
   savePartner,
   togglePartnerMonth,
+  _confirmMarkMonthPaid,
+  _submitQuickPayConfirm,
   setPartnersFilter,
   setPartnersTypeFilter,
   setInboxTab,
@@ -16769,6 +16900,7 @@ window.Kpsc = {
   setPartnersPaymentFilter,
   setPartnersSearch,
   deletePartner,
+  _confirmDeletePartner,
   openPartnerDetail,
   setPartnerDetailYear,
   openRecordPaymentModal,
