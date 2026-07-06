@@ -541,6 +541,9 @@ export async function onRequest(context) {
         return await deleteKpscPartnerPayment(DB, param, auth);
       }
     }
+    if (route === 'kpsc-partner-payments-pending-card' && method === 'GET') {
+      return await getKpscPendingCardPayments(DB);
+    }
     if (route === 'kpsc-partner-batch-sms' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
       if (auth instanceof Response) return auth;
@@ -1948,6 +1951,9 @@ async function handleInit(DB) {
     // Tracks when a row was last checked against Termii's status API, so the
     // reconciler can rotate fairly through the backlog instead of favoring one end.
     `ALTER TABLE kpsc_reminders ADD COLUMN delivery_checked_at TEXT DEFAULT ''`,
+    // Tri-state: NULL = not yet answered (legacy rows), 1 = yes recorded in the
+    // physical partnership card, 0 = no, still pending manual card entry.
+    `ALTER TABLE kpsc_partner_payments ADD COLUMN card_recorded INTEGER DEFAULT NULL`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -3466,7 +3472,7 @@ async function createKpscPartner(DB, data) {
     phone,
     String(data?.partnershipType || 'gods_kingdom_partner').trim(),
     String(data?.startDate || '').trim(),
-    Number(data?.monthlyPledge || 0),
+    Math.max(0, Number(data?.monthlyPledge || 0)),
     normalizeKpscAccountStatus(data?.status),
     String(data?.reminderPreference || 'sms').trim() || 'sms',
     String(data?.notes || '').trim(),
@@ -3534,7 +3540,7 @@ async function updateKpscPartner(DB, id, data) {
     data?.phone !== undefined ? String(data.phone || '').trim() : row.phone,
     data?.partnershipType !== undefined ? String(data.partnershipType || 'gods_kingdom_partner').trim() : row.partnership_type,
     data?.startDate !== undefined ? String(data.startDate || '').trim() : row.start_date,
-    data?.monthlyPledge !== undefined ? Number(data.monthlyPledge || 0) : Number(row.monthly_pledge || 0),
+    data?.monthlyPledge !== undefined ? Math.max(0, Number(data.monthlyPledge || 0)) : Number(row.monthly_pledge || 0),
     data?.status !== undefined ? normalizeKpscAccountStatus(data.status) : row.status,
     data?.reminderPreference !== undefined ? String(data.reminderPreference || 'sms').trim() : row.reminder_preference,
     data?.notes !== undefined ? String(data.notes || '').trim() : row.notes,
@@ -3604,6 +3610,7 @@ async function getKpscPartnerPayments(DB, url) {
     reference: row.reference || '',
     recordedBy: row.recorded_by || '',
     notes: row.notes || '',
+    cardRecorded: row.card_recorded === null || row.card_recorded === undefined ? null : Number(row.card_recorded) === 1,
     createdAt: row.created_at || '',
     updatedAt: row.updated_at || '',
   })));
@@ -3622,10 +3629,19 @@ async function upsertKpscPartnerPayment(DB, data) {
   const id = existing?.id || newId('kpp');
   const paid = Number(data?.paid !== false);
   const paidAt = data?.paidAt !== undefined ? String(data.paidAt || '').trim() : (paid ? new Date().toISOString() : '');
+  // Preserve the existing card_recorded answer on edits that don't touch it
+  // (e.g. amount/method corrections) — only overwrite when the caller explicitly sends it.
+  let cardRecorded = null;
+  if (data?.cardRecorded !== undefined) {
+    cardRecorded = data.cardRecorded === null ? null : (data.cardRecorded ? 1 : 0);
+  } else if (existing?.id) {
+    const prevRow = await DB.prepare(`SELECT card_recorded FROM kpsc_partner_payments WHERE id=?`).bind(existing.id).first();
+    cardRecorded = prevRow?.card_recorded ?? null;
+  }
   await DB.prepare(`
     INSERT OR REPLACE INTO kpsc_partner_payments
-    (id,partner_id,year,month,amount,payment_type,source,paid,paid_at,reference,recorded_by,notes,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,COALESCE((SELECT created_at FROM kpsc_partner_payments WHERE id=?), datetime('now')),?)
+    (id,partner_id,year,month,amount,payment_type,source,paid,paid_at,reference,recorded_by,notes,card_recorded,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE((SELECT created_at FROM kpsc_partner_payments WHERE id=?), datetime('now')),?)
   `).bind(
     id,
     partnerId,
@@ -3639,6 +3655,7 @@ async function upsertKpscPartnerPayment(DB, data) {
     String(data?.reference || '').trim(),
     String(data?.recordedBy || '').trim(),
     String(data?.notes || '').trim(),
+    cardRecorded,
     id,
     new Date().toISOString(),
   ).run();
@@ -3762,6 +3779,7 @@ async function upsertKpscPartnerPayment(DB, data) {
     reference: row.reference || '',
     recordedBy: row.recorded_by || '',
     notes: row.notes || '',
+    cardRecorded: row.card_recorded === null || row.card_recorded === undefined ? null : Number(row.card_recorded) === 1,
     createdAt: row.created_at || '',
     updatedAt: row.updated_at || '',
   });
@@ -3779,6 +3797,30 @@ async function deleteKpscPartnerPayment(DB, id, auth) {
     `UPDATE kpsc_finance_entries SET deleted_at=?, deleted_by=? WHERE partner_payment_id=? AND COALESCE(deleted_at,'')=''`
   ).bind(now, auth.name, id).run();
   return ok({ deleted: id });
+}
+
+// Payments that were recorded as paid but explicitly marked "not yet in the
+// physical card" (card_recorded=0). Legacy rows with card_recorded=NULL are
+// excluded — we only flag what was explicitly answered "No".
+async function getKpscPendingCardPayments(DB) {
+  const { results } = await DB.prepare(`
+    SELECT p.id, p.partner_id, p.year, p.month, kp.full_name AS partner_name
+    FROM kpsc_partner_payments p
+    LEFT JOIN kpsc_partners kp ON kp.id = p.partner_id
+    WHERE p.paid = 1 AND p.card_recorded = 0 AND COALESCE(p.deleted_at,'') = ''
+    ORDER BY kp.full_name, p.year DESC, p.month DESC
+  `).all();
+  const byPartner = new Map();
+  for (const row of results || []) {
+    const pid = row.partner_id;
+    if (!byPartner.has(pid)) {
+      byPartner.set(pid, { partnerId: pid, partnerName: row.partner_name || 'Unknown', count: 0, months: [] });
+    }
+    const entry = byPartner.get(pid);
+    entry.count++;
+    entry.months.push({ paymentId: row.id, month: Number(row.month), year: Number(row.year) });
+  }
+  return ok([...byPartner.values()]);
 }
 
 async function sendPartnerBatchPaymentSms(DB, data) {
@@ -3919,7 +3961,10 @@ async function getKpscCashCollection(DB) {
   for (const lot of allLots) {
     const h = getHolder(lot.cash_holder || lot.recorded_by || 'Unknown');
     h.collected += Number(lot.amount || 0);
-    h.lots.push({ id: lot.id, date: lot.date, amount: Number(lot.amount || 0), partnerId: lot.partner_id, partnerName: lot.partner_name || 'Unknown', isToday: lot.date === todayStr });
+    // Lots without a partner_id are synthetic "change retained" entries created when a
+    // handover transfers less than the full ticked amount — label them accordingly.
+    const lotName = lot.partner_id ? (lot.partner_name || 'Unknown') : 'Cash retained (change)';
+    h.lots.push({ id: lot.id, date: lot.date, amount: Number(lot.amount || 0), partnerId: lot.partner_id, partnerName: lotName, isToday: lot.date === todayStr });
   }
   for (const exp of allExpenses) {
     const h = getHolder(exp.cash_holder || exp.recorded_by || 'Unknown');
@@ -3967,6 +4012,16 @@ async function createKpscCashHandover(DB, data, auth) {
   ).bind(holder, holder).all();
   const expenseTotal = (pendingExpenses || []).reduce((s, r) => s + Number(r.amount || 0), 0);
 
+  // The ticked lots (minus this holder's pending cash-box expenses) is the most cash
+  // that can leave "in hand" right now. If the admin transfers less than that — keeping
+  // some physical cash/change back — the shortfall must stay visible as cash in hand
+  // instead of silently vanishing once the ticked lots are marked settled below.
+  const netAvailable = collectedTotal - expenseTotal;
+  if (amount > netAvailable + 0.5) {
+    return err(`Amount cannot exceed the ticked payments total minus pending expenses (₦${netAvailable.toLocaleString('en-NG')})`, 400);
+  }
+  const changeRetained = Math.max(0, netAvailable - amount);
+
   const handoverId = newId('kch');
   await DB.prepare(
     `INSERT INTO kpsc_cash_handovers (id,amount,payment_count,transferred_by,holder,transferred_at,notes,collected_total,expense_total,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
@@ -3986,8 +4041,22 @@ async function createKpscCashHandover(DB, data, auth) {
     await DB.prepare(`UPDATE kpsc_finance_entries SET handover_id=? WHERE id IN (${p})`).bind(handoverId, ...chunk).run();
   }
 
+  // Re-create the untransferred remainder as a new unsettled cash lot for this holder,
+  // so the Cash in Hand card keeps showing it instead of disappearing.
+  if (changeRetained > 0.5) {
+    await DB.prepare(`
+      INSERT INTO kpsc_finance_entries
+      (id,date,entry_type,category,sub_category,amount,payment_method,reference,narration,partner_id,recorded_by,approved_by,approval_status,attachment_name,cash_holder)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      newId('kfe'), transferredAt.slice(0, 10), 'income', 'partnership_pledge', 'retained_change',
+      changeRetained, 'cash', '', `Cash retained (change from handover to bank)`, '',
+      auth.name, '', 'recorded', '', holder
+    ).run();
+  }
+
   const row = await DB.prepare(`SELECT * FROM kpsc_cash_handovers WHERE id=?`).bind(handoverId).first();
-  return ok({ id: row.id, amount: Number(row.amount), paymentCount: Number(row.payment_count), transferredBy: row.transferred_by, holder: row.holder, transferredAt: row.transferred_at, notes: row.notes, collectedTotal: Number(row.collected_total || 0), expenseTotal: Number(row.expense_total || 0) });
+  return ok({ id: row.id, amount: Number(row.amount), paymentCount: Number(row.payment_count), transferredBy: row.transferred_by, holder: row.holder, transferredAt: row.transferred_at, notes: row.notes, collectedTotal: Number(row.collected_total || 0), expenseTotal: Number(row.expense_total || 0), changeRetained });
 }
 
 async function reassignCashHolder(DB, data, auth) {
