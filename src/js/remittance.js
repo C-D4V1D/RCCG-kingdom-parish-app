@@ -52,6 +52,11 @@ const REMITTANCE_RATES = {
     national: 0.35,
     localChildrensDept: 0.65,
     label: "Teen/Children's Offering"
+  },
+  holyCommunionOffering: {
+    national: 1.00,
+    local: 0,
+    label: "Holy Communion Offering"
   }
 };
 
@@ -187,6 +192,18 @@ function calculateRemittances(income) {
       childrensDept: amt * REMITTANCE_RATES.childrenOffering.localChildrensDept
     };
     result.totals.totalToNational += result.breakdown.childrenOffering.national;
+  }
+
+  // Holy Communion Offering (100% to National)
+  if (income.holyCommunionOffering) {
+    const amt = income.holyCommunionOffering;
+    result.breakdown.holyCommunionOffering = {
+      label: REMITTANCE_RATES.holyCommunionOffering.label,
+      total: amt,
+      national: amt,
+      local: 0
+    };
+    result.totals.totalToNational += amt;
   }
 
   // Province Rebate = 20% of local retained tithes ONLY (Members' Tithe + Ministers' Tithe)

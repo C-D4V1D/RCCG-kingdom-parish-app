@@ -1379,6 +1379,7 @@ async function handleInit(DB) {
       first_fruit           REAL DEFAULT 0,
       children_offering     REAL DEFAULT 0,
       weekend_offering      REAL DEFAULT 0,
+      holy_communion_offering REAL DEFAULT 0,
       total_collection      REAL DEFAULT 0,
       bank_transfer_amount  REAL DEFAULT 0,
       direct_petty_cash     REAL DEFAULT 0,
@@ -1840,6 +1841,7 @@ async function handleInit(DB) {
     `ALTER TABLE income ADD COLUMN training_weekend REAL DEFAULT 0`,
     `ALTER TABLE income RENAME COLUMN training_weekend TO weekend_offering`,
     `ALTER TABLE income ADD COLUMN bank_transfer_details TEXT DEFAULT ''`,
+    `ALTER TABLE income ADD COLUMN holy_communion_offering REAL DEFAULT 0`,
     // Expense columns
     `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
     `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
@@ -1996,6 +1998,7 @@ async function handleInit(DB) {
       firstFruit:      { natl:1.00, local:0.00 },
       childrenOffering:{ natl:0.35, local:0.65 },
       weekendOffering: { natl:1.00, local:0.00 },
+      holyCommunionOffering: { natl:1.00, local:0.00 },
       tgNational:0.75, tgArea:0.05, tgPastor:0.10, tgMinisters:0.09, tgSeed:0.01,
       provinceRebate:0.20,
       crmAddon:0.25, coastline:0.01, insuranceGenTithe:0.0125, insuranceMinTithe:0.0125
@@ -2401,6 +2404,7 @@ async function getIncome(DB) {
     firstFruit:          row.first_fruit,
     childrenOffering:    row.children_offering,
     weekendOffering:     row.weekend_offering || 0,
+    holyCommunionOffering: row.holy_communion_offering || 0,
     totalCollection:     row.total_collection,
     bankTransferAmount:  row.bank_transfer_amount,
     bankTransferDetails: row.bank_transfer_details || '',
@@ -2425,7 +2429,40 @@ async function createIncome(DB, data) {
   const hasMetaCols   = await tableHasColumns(DB, 'income', ['payment_method', 'donor_name']);
   const hasFirstFruit = await tableHasColumns(DB, 'income', ['first_fruit']);
   const hasWeekendOffering = await tableHasColumns(DB, 'income', ['weekend_offering']);
-  if (hasSplitCols && hasMetaCols && hasFirstFruit && hasWeekendOffering) {
+  const hasHolyCommunion = await tableHasColumns(DB, 'income', ['holy_communion_offering']);
+  if (hasSplitCols && hasMetaCols && hasFirstFruit && hasWeekendOffering && hasHolyCommunion) {
+    await DB.prepare(`
+      INSERT INTO income
+        (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
+         slo,crm,workers_offering,first_fruit,children_offering,weekend_offering,holy_communion_offering,total_collection,
+         bank_transfer_amount,direct_petty_cash,source,payment_method,donor_name,
+         usher,recorded_by,notes)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id,
+      data.date                 || new Date().toISOString().split('T')[0],
+      data.membersTithe         || 0,
+      data.ministersTithe       || 0,
+      data.thanksgiving         || 0,
+      data.sundaySchool         || 0,
+      data.slo                  || 0,
+      data.crm                  || 0,
+      data.workersOffering      || 0,
+      data.firstFruit           || 0,
+      data.childrenOffering     || 0,
+      data.weekendOffering      || 0,
+      data.holyCommunionOffering|| 0,
+      data.totalCollection      || 0,
+      data.bankTransferAmount   || 0,
+      data.directPettyCash      || 0,
+      data.source               || 'sunday_collection',
+      data.paymentMethod        || '',
+      data.donorName            || '',
+      data.usher                || '',
+      data.recordedBy           || '',
+      data.notes                || '',
+    ).run();
+  } else if (hasSplitCols && hasMetaCols && hasFirstFruit && hasWeekendOffering) {
     await DB.prepare(`
       INSERT INTO income
         (id,date,members_tithe,ministers_tithe,thanksgiving,sunday_school,
