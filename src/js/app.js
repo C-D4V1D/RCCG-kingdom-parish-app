@@ -596,6 +596,9 @@ const DB = {
   getSettings()                { return apiFetch('settings'); },
   saveSettings(d)              { return apiFetch('settings','POST',d); },
 
+  getChurchBankIngestLog()     { return apiFetch('church-bank-ingest-log'); },
+  getBankBalanceSnapshot()     { return apiFetch('bank-balance-snapshot'); },
+
   getNotifications()           { return apiFetch('notifications'); },
   addNotification(title,body,type='info'){
     apiFetch('notifications','POST',{title,body,type}).catch(()=>{});
@@ -8176,6 +8179,11 @@ async function renderBank(){
       tab==='deposits'?renderBankDeposits(monthlyDeposits):
       tab==='charges'?renderBankCharges(periodExpenses.filter(e=>e.category==='bank')):
       renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups)}`;
+
+  // These populate their own DOM regions asynchronously after the page above
+  // is already showing, so a slow/failed fetch never blocks the Bank page itself.
+  if(tab==='charges') loadBankEmailIngestCard();
+  if(tab==='reconciliation') autoCheckBankReconciliation();
 }
 
 function renderBankOverview(monthBankTx,bankBalance){
@@ -8284,14 +8292,15 @@ function renderBankDeposits(deposits){
 
 function renderBankCharges(charges){
   const total = charges.reduce((s,e)=>s+(e.amount||0),0);
-  if(!charges.length) return '<div class="card"><div class="empty-table">No bank charges recorded this month.</div></div>';
-  return `<div class="card">
+  const ingestCard = `<div id="bankEmailIngestCard"></div>`;
+  if(!charges.length) return ingestCard + '<div class="card"><div class="empty-table">No bank charges recorded this month.</div></div>';
+  return ingestCard + `<div class="card">
     <div class="card-header"><span class="card-title">Bank Charges — ${monthLabel()}</span><span style="font-size:13px;font-weight:600;color:var(--danger)">${fmt(total)}</span></div>
     <div style="padding:0 4px">
       ${charges.map(e=>`<div onclick="var d=this.querySelector('.bk-det');d.style.display=d.style.display==='none'?'block':'none'" style="cursor:pointer;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
         <div style="display:flex;align-items:center;gap:10px">
           <div style="flex:1;min-width:0">
-            <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.subCategory||'Bank Charge'}</div>
+            <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.subCategory||'Bank Charge'}${e.recordedBy==='AI Email Ingest'?' <span class="badge badge-info" style="font-size:9px;vertical-align:middle">🤖 AI Email</span>':''}</div>
             <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtDate(e.date||e.createdAt)}${e.description?` &nbsp;·&nbsp; ${e.description}`:''}</div>
           </div>
           <div style="text-align:right;flex-shrink:0;margin-left:4px">
@@ -8306,6 +8315,66 @@ function renderBankCharges(charges){
       </div>`).join('')}
     </div>
   </div>`;
+}
+
+const CHURCH_INGEST_OUTCOME_LABELS = {
+  inserted: 'Recorded', skipped_not_charge: 'Not a charge', skipped_duplicate: 'Duplicate',
+  skipped_wrong_account: 'Wrong account', error: 'Error', pending: 'Pending',
+};
+const CHURCH_INGEST_OUTCOME_BADGES = {
+  inserted: 'badge-success', skipped_not_charge: 'badge-gray', skipped_duplicate: 'badge-gray',
+  skipped_wrong_account: 'badge-danger', error: 'badge-danger', pending: 'badge-info',
+};
+
+// Fetched and rendered separately from the main Bank page data (rather than
+// inside the critical Promise.allSettled batch) so a hiccup on this
+// supplementary audit log never blocks the whole Bank page from loading.
+async function loadBankEmailIngestCard(){
+  const el = document.getElementById('bankEmailIngestCard');
+  if(!el) return;
+  try {
+    const log = await DB.getChurchBankIngestLog();
+    el.innerHTML = renderChurchBankIngestCard(log);
+  } catch(_) { /* supplementary info only — fail silently */ }
+}
+
+function renderChurchBankIngestCard(log){
+  const entries = Array.isArray(log?.entries) ? log.entries : [];
+  const counts = log?.counts || {};
+  const needsAttention = !!log?.needsAttention;
+  if(!entries.length) return '';
+  return `<div class="card" style="margin-bottom:12px">
+    <details>
+      <summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;list-style:none">
+        <span class="card-title">🤖 Bank Charge Email Automation</span>
+        <span class="badge ${needsAttention?'badge-danger':'badge-success'}">${needsAttention?'⚠ Needs attention':'✓ Healthy'}</span>
+      </summary>
+      <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--text2)">
+        <span>✅ ${counts.inserted||0} recorded</span>
+        <span>⏭ ${(counts.skipped_not_charge||0)+(counts.skipped_duplicate||0)} skipped</span>
+        <span style="color:${(counts.skipped_wrong_account||0)>0?'var(--danger)':'inherit'}">🚫 ${counts.skipped_wrong_account||0} wrong account</span>
+        <span style="color:${(counts.error||0)>0?'var(--danger)':'inherit'}">❌ ${counts.error||0} error${counts.error===1?'':'s'}</span>
+        ${needsAttention?`<button class="btn btn-sm" onclick="App.ackChurchBankIngestAttention('${esc(log.lastActivityAt||'')}')">Mark as reviewed</button>`:''}
+      </div>
+      <div style="margin-top:10px;max-height:240px;overflow-y:auto">
+        ${entries.map(e=>`<div style="padding:6px 0;border-bottom:1px solid var(--border-light,#f0f0f0);font-size:12px">
+          <div style="display:flex;justify-content:space-between;gap:8px">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.subject||'(no subject)')}</span>
+            <span class="badge ${CHURCH_INGEST_OUTCOME_BADGES[e.outcome]||'badge-gray'}" style="flex-shrink:0">${CHURCH_INGEST_OUTCOME_LABELS[e.outcome]||e.outcome}</span>
+          </div>
+          <div style="color:var(--text3);margin-top:2px">${fmtDate(e.createdAt)} ${fmtTime(e.createdAt)}</div>
+          ${(e.outcome==='error'||e.outcome==='skipped_wrong_account')&&e.errorDetail?`<div style="color:var(--danger);margin-top:2px">⚠ ${esc(e.errorDetail)}</div>`:''}
+        </div>`).join('')}
+      </div>
+    </details>
+  </div>`;
+}
+
+async function ackChurchBankIngestAttention(lastActivityAt){
+  const s = await DB.getSettings();
+  s.church_email_ingest_ack_at = lastActivityAt || '';
+  await DB.saveSettings(s);
+  loadBankEmailIngestCard();
 }
 
 function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups=0){
@@ -8330,7 +8399,7 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
 
     <div class="card">
       <div class="card-header"><span class="card-title">Statement Entry Check</span></div>
-      <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Enter your actual bank statement balance to compare with the computed balance.</p>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Automatically checked against the balance in the bank's own alert emails whenever one arrives. You can also enter a balance manually below to compare on demand.</p>
       <div class="form-row">
         <div class="form-group"><label class="form-label">Bank Statement Balance (₦)</label><input type="number" id="bank_stmt_bal" class="form-input" placeholder="Enter actual balance from bank statement" /></div>
         <div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-primary" onclick="App.compareBankBalance()">Compare</button></div>
@@ -8369,6 +8438,37 @@ function compareBankBalance(){
       el.innerHTML = `<div class="alert ${diff>0?'alert-warn':'alert-danger'}" style="margin-top:12px"><span class="alert-icon">⚠</span><span><strong>Discrepancy: ${fmt(Math.abs(diff))}</strong><br>Computed balance: ${fmt(bal.bankBalance)}<br>Statement balance: ${fmt(stmtBal)}<br>${diff>0?'System shows more than bank statement. Check for unrecorded bank charges or debits.':'Bank statement shows more than system. Check for unrecorded deposits or credits.'}</span></div>`;
     }
   });
+}
+
+// Auto-fills and auto-runs the Statement Entry Check using the balance figure
+// captured from the most recent bank alert email, comparing the computed
+// balance "as of" that same date (not "as of now") so later, legitimately
+// unreflected transactions never produce a false-positive mismatch. Reuses
+// calcChurchBalance's own asOfDate support rather than re-deriving the bank
+// balance formula server-side, so there is only ever one source of truth for it.
+async function autoCheckBankReconciliation(){
+  const input = document.getElementById('bank_stmt_bal');
+  const el = document.getElementById('bankCompareResult');
+  if(!input || !el) return;
+  try {
+    const snap = await DB.getBankBalanceSnapshot();
+    if(!snap || !snap.date || snap.balance===null || snap.balance===undefined) return;
+    if(!input.value) input.value = snap.balance;
+    const bal = await calcChurchBalance(snap.date);
+    const diff = bal.bankBalance - snap.balance;
+    const asOfNote = `<div style="font-size:11px;color:var(--text3);margin-top:4px">Auto-checked against the balance reported in the bank's own alert email as of ${fmtDate(snap.date)}.</div>`;
+    if(Math.abs(diff) < 1){
+      el.innerHTML = `<div class="alert alert-success" style="margin-top:12px"><span class="alert-icon">✓</span><span><strong>Reconciled!</strong> Computed balance matches the bank's last reported balance as of ${fmtDate(snap.date)}.</span></div>${asOfNote}`;
+    } else {
+      el.innerHTML = `<div class="alert ${diff>0?'alert-warn':'alert-danger'}" style="margin-top:12px"><span class="alert-icon">⚠</span><span><strong>Discrepancy: ${fmt(Math.abs(diff))}</strong><br>Computed balance (as of ${fmtDate(snap.date)}): ${fmt(bal.bankBalance)}<br>Bank's reported balance: ${fmt(snap.balance)}<br>${diff>0?'System shows more than the bank. Check for unrecorded bank charges or debits.':'Bank shows more than the system. Check for unrecorded deposits or credits.'}</span></div>${asOfNote}`;
+      const s = await DB.getSettings();
+      if(s.bank_balance_last_notified_snapshot_id !== snap.id){
+        DB.addNotification('Bank Balance Mismatch', `Computed bank balance differs from the bank's reported balance (as of ${fmtDate(snap.date)}) by ${fmt(Math.abs(diff))}. Check Bank → Reconciliation.`, 'warn');
+        s.bank_balance_last_notified_snapshot_id = snap.id;
+        DB.saveSettings(s);
+      }
+    }
+  } catch(_) { /* supplementary check only — fail silently */ }
 }
 
 function showBankChargeForm(){
@@ -10564,6 +10664,7 @@ function renderAdminSettings(s){
     </div>
     <button class="btn btn-primary" onclick="App.saveSettings(this)">Save Settings</button>
   </div>
+  ${renderBankEmailAutomationSettings(s)}
   <div class="card" style="margin-top:16px;border:1.5px solid var(--border)">
     <div class="modal-title" style="font-size:15px;margin-bottom:4px">🔧 Petty Float Override</div>
     <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Use this to correct the petty cash float when a deletion or data error has left it at the wrong value. A negative number means the church owes the Admin Officer that amount.</p>
@@ -10578,6 +10679,42 @@ function renderAdminSettings(s){
     </div>
     <button class="btn btn-danger" onclick="App.confirmPettyFloatOverride(this)">Override Float (requires PIN)</button>
   </div>`;
+}
+
+function renderBankEmailAutomationSettings(s){
+  const deepseekOk = !!String(s.ai_deepseek_key||'').trim();
+  const openaiOk = !!String(s.ai_openai_key||'').trim();
+  return `<div class="card" style="margin-top:16px">
+    <div class="modal-title" style="font-size:15px;margin-bottom:4px">🤖 Bank Charge Email Automation</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Automatically records bank-imposed charges (SMS alert fees, maintenance fees, COT, stamp duty, etc.) from the church's bank alert emails as Bank Charges expenses — no manual entry needed. See the setup guide for connecting the accountant's inbox via Make.com.</p>
+    <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+      <span class="badge ${deepseekOk?'badge-success':'badge-danger'}">${deepseekOk?'✓':'✗'} DeepSeek key</span>
+      <span class="badge ${openaiOk?'badge-success':'badge-danger'}">${openaiOk?'✓':'✗'} OpenAI key (fallback)</span>
+    </div>
+    ${!deepseekOk?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>No DeepSeek key configured yet — add one under KPSC → Settings → AI Provider Keys (the key is shared across the whole portal, so it only needs to be entered once).</span></div>`:''}
+    <div class="form-group">
+      <label class="form-label">Church Bank Account Number(s)</label>
+      <input type="text" id="set_church_bank_account" class="form-input" value="${esc(s.church_bank_account_number||'')}" placeholder="e.g. 147******487" />
+      <div class="form-hint">Enter the masked account number exactly as it appears in the bank's own alert emails (comma-separate if more than one). Alerts from any other account number are always ignored, never recorded.</div>
+    </div>
+    <button class="btn btn-primary" onclick="App.saveBankEmailAutomationSettings(this)">Save Automation Settings</button>
+  </div>`;
+}
+
+async function saveBankEmailAutomationSettings(btn=null){
+  if(!requireAdmin()) return;
+  const s = await DB.getSettings();
+  s.church_bank_account_number = document.getElementById('set_church_bank_account')?.value?.trim() || '';
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.saveSettings(s);
+    DB.addAudit('bank_email_automation_updated','Bank charge email automation settings updated',state.user?.name);
+    showAlert('Automation settings saved.','success');
+    restore();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to save: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 function renderAdminQuotas(s){
@@ -11389,7 +11526,7 @@ return {
   updateExpenseSubcats, updateExpenseDescRequired,
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
-  setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance,
+  setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, showPettyToBankDeposit, submitPettyToBankDeposit, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange,

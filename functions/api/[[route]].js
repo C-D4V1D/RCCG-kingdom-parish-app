@@ -570,6 +570,12 @@ export async function onRequest(context) {
     if (route === 'kpsc-email-ingest-log' && method === 'GET') {
       return await getEmailIngestLog(DB);
     }
+    if (route === 'church-bank-ingest-log' && method === 'GET') {
+      return await getChurchBankIngestLog(DB);
+    }
+    if (route === 'bank-balance-snapshot' && method === 'GET') {
+      return await getLatestBankBalanceSnapshot(DB);
+    }
     if (route === 'kpsc-finance-share' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
       if (auth instanceof Response) return auth;
@@ -1114,6 +1120,7 @@ export async function onRequest(context) {
       if (method === 'POST' && param === 'run-scheduled-sms')   return await runScheduledSms(DB, env, request);
       if (method === 'POST' && param === 'run-newmonth-draft-fallback') return await runNewMonthDraftFallback(DB, env, request);
       if (method === 'POST' && param === 'ingest-bank-charge-email') return await ingestBankChargeEmail(DB, env, request, body);
+      if (method === 'POST' && param === 'ingest-church-bank-charge-email') return await ingestChurchBankChargeEmail(DB, env, request, body);
     }
 
     // ── Bulk SMS to KPSC members (meeting notification) ────────────
@@ -1820,6 +1827,26 @@ async function handleInit(DB) {
       finance_entry_id TEXT DEFAULT '',
       error_detail     TEXT DEFAULT '',
       created_at       TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS church_bank_ingest_log (
+      id               TEXT PRIMARY KEY,
+      message_id       TEXT DEFAULT '',
+      subject          TEXT DEFAULT '',
+      from_addr        TEXT DEFAULT '',
+      body_text        TEXT DEFAULT '',
+      outcome          TEXT DEFAULT 'pending',
+      ai_response      TEXT DEFAULT '',
+      expense_id       TEXT DEFAULT '',
+      error_detail     TEXT DEFAULT '',
+      created_at       TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS bank_balance_snapshots (
+      id          TEXT PRIMARY KEY,
+      date        TEXT NOT NULL,
+      balance     REAL NOT NULL,
+      narration   TEXT DEFAULT '',
+      message_id  TEXT DEFAULT '',
+      created_at  TEXT DEFAULT (datetime('now'))
     )`,
   ];
 
@@ -7445,10 +7472,22 @@ function requireEmailIngestSecret(env, request) {
   return null;
 }
 
+// Fixed enum the AI must pick from for church bank-charge auto-entries, so they
+// land in the exact same subcategories a human would choose on the manual
+// "Record Bank Charge" form (see EXPENSE_SUBCATS.bank in src/js/app.js).
+const CHURCH_BANK_CHARGE_SUBCATS = [
+  'POS terminal charges',
+  'SMS alert fees from the bank',
+  'Money transfer charges',
+  'Monthly account maintenance fees',
+  'Cheque book issuance charges',
+  'Other bank charges',
+];
+
 function buildBankChargeClassifierPrompt(subject, bodyText) {
   return `You are a bank transaction email classifier. Analyze this email and determine if it is a bank-initiated charge/fee (NOT a regular transfer, deposit, or withdrawal by the account holder).
 
-Bank charges include: Account Maintenance Charge, VAT on Account Maintenance, Stamp Duty Charge, SMS Alert Charge, SMS Alert Charge VAT, Commission on Turnover (COT), Card Maintenance Fee, Cheque Book Issuance Charge, VAT on Cheque Book Issuance, ATM Maintenance Charge, and any similar bank-imposed fee.
+Bank charges include: Account Maintenance Charge, VAT on Account Maintenance, Stamp Duty Charge, SMS Alert Charge, SMS Alert Charge VAT, Commission on Turnover (COT), POS terminal charges, Card Maintenance Fee, Cheque Book Issuance Charge, VAT on Cheque Book Issuance, ATM Maintenance Charge, and any similar bank-imposed fee.
 
 NOT bank charges: regular transfers, deposits, withdrawals, payments made by the account holder, credit alerts.
 
@@ -7456,7 +7495,9 @@ Email subject: ${subject}
 Email body: ${bodyText.slice(0, 1500)}
 
 Return ONLY valid JSON (no markdown, no code fences):
-{"isBankCharge":true/false,"date":"YYYY-MM-DD","amount":0.00,"reference":"narration text from email","narration":"short description of the charge type","accountNumber":"the masked account number exactly as shown in the email, e.g. 204XXXX358"}
+{"isBankCharge":true/false,"date":"YYYY-MM-DD","amount":0.00,"reference":"narration text from email","narration":"short description of the charge type","accountNumber":"the masked account number exactly as shown in the email, e.g. 204XXXX358","subCategory":"pick the closest match from: ${CHURCH_BANK_CHARGE_SUBCATS.join(', ')} — use \\"Other bank charges\\" if unsure","availableBalance":0.00}
+
+Always try to extract "date" and "availableBalance" (the balance shown in the email right after this transaction) even when isBankCharge is false — e.g. for a deposit or transfer alert. These are used for balance reconciliation regardless of transaction type. Only omit availableBalance if the email truly shows no balance figure.
 
 If not a bank charge, still return the JSON with isBankCharge:false and best-effort fields.`;
 }
@@ -7660,6 +7701,170 @@ async function ingestBankChargeEmail(DB, env, request, body) {
 
   await DB.prepare(`UPDATE email_ingest_log SET outcome='inserted', finance_entry_id=? WHERE id=?`).bind(entryId, logId).run();
   return ok({ ok: true, entryId, amount, date, narration });
+}
+
+// Records every alert's stated post-transaction balance (charge or not) so the
+// Bank page's reconciliation check can compare against it later — a single
+// history table shared by any future account, not just charges.
+async function upsertBankBalanceSnapshot(DB, date, balance, narration, messageId) {
+  const numBalance = Number(balance);
+  if (!date || balance === null || balance === undefined || isNaN(numBalance)) return;
+  await DB.prepare(
+    `INSERT INTO bank_balance_snapshots (id,date,balance,narration,message_id) VALUES (?,?,?,?,?)`
+  ).bind(newId('bbs'), date, numBalance, String(narration || '').slice(0, 200), messageId || '').run();
+}
+
+// Same AI classifier as the KPSC bank-charge automation, but targets the main
+// church's Access Bank account and its `expenses` ledger (category='bank')
+// instead of `kpsc_finance_entries`. Kept as a separate function/table from the
+// KPSC pipeline so neither automation can affect the other.
+async function ingestChurchBankChargeEmail(DB, env, request, body) {
+  const authErr = requireEmailIngestSecret(env, request);
+  if (authErr) return authErr;
+
+  if (!body || typeof body !== 'object') return err('Invalid JSON body', 400);
+
+  const subject = String(body?.subject || '').trim();
+  const from = String(body?.from || '').trim();
+  const messageId = String(body?.messageId || '').trim();
+  const rawBody = String(body?.bodyText || '').trim();
+  const bodyText = rawBody.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+
+  if (!bodyText) return err('bodyText is required', 400);
+
+  const logId = newId('cbl');
+  await DB.prepare(
+    `INSERT INTO church_bank_ingest_log (id,message_id,subject,from_addr,body_text,outcome) VALUES (?,?,?,?,?,?)`
+  ).bind(logId, messageId, subject, from, bodyText.slice(0, 2000), 'pending').run();
+
+  if (messageId) {
+    const existing = await DB.prepare(
+      `SELECT id FROM church_bank_ingest_log WHERE message_id=? AND outcome IN ('inserted','skipped_not_charge','skipped_duplicate','skipped_wrong_account') AND id != ?`
+    ).bind(messageId, logId).first();
+    if (existing) {
+      await DB.prepare(`UPDATE church_bank_ingest_log SET outcome='skipped_duplicate' WHERE id=?`).bind(logId).run();
+      return ok({ skipped: true, reason: 'duplicate' });
+    }
+  }
+
+  let aiResult, aiProvider;
+  try {
+    const classified = await classifyBankChargeEmail(DB, env, subject, bodyText);
+    aiResult = classified.result;
+    aiProvider = classified.provider;
+  } catch (e) {
+    await DB.prepare(`UPDATE church_bank_ingest_log SET outcome='error', error_detail=? WHERE id=?`).bind(String(e.message).slice(0, 500), logId).run();
+    return err(`AI classification failed: ${e.message}`, 502);
+  }
+
+  await DB.prepare(`UPDATE church_bank_ingest_log SET ai_response=? WHERE id=?`)
+    .bind(JSON.stringify({ ...aiResult, _provider: aiProvider }).slice(0, 2000), logId).run();
+
+  // Only record charges from the church's own bank account(s) — filters out
+  // alerts from any other account the accountant's inbox may also receive.
+  let allowedAccounts = [];
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='church_bank_account_number'`).first();
+    allowedAccounts = String(row?.value || '').split(',').map(s => s.trim()).filter(Boolean);
+  } catch (_) {}
+
+  const extractedAccount = String(aiResult.accountNumber || '').trim();
+  if (allowedAccounts.length > 0) {
+    const accountMatches = extractedAccount && allowedAccounts.some(a => a.toLowerCase() === extractedAccount.toLowerCase());
+    if (!accountMatches) {
+      await DB.prepare(`UPDATE church_bank_ingest_log SET outcome='skipped_wrong_account', error_detail=? WHERE id=?`)
+        .bind(`Account "${extractedAccount || 'unknown'}" is not in the configured church account list`, logId).run();
+      return ok({ skipped: true, reason: 'wrong_account' });
+    }
+  }
+
+  // Every matched-account alert — charge or not — carries the balance right
+  // after that transaction. Record it regardless of what the transaction is,
+  // so reconciliation has a dated data point from every alert, not just charges.
+  const snapDate = String(aiResult.date || '').slice(0, 10);
+  await upsertBankBalanceSnapshot(DB, snapDate, aiResult.availableBalance, aiResult.narration || subject, messageId);
+
+  if (!aiResult.isBankCharge) {
+    await DB.prepare(`UPDATE church_bank_ingest_log SET outcome='skipped_not_charge' WHERE id=?`).bind(logId).run();
+    return ok({ skipped: true, reason: 'not_a_charge' });
+  }
+
+  const date = snapDate;
+  const amount = Math.abs(Number(aiResult.amount || 0));
+  const reference = String(aiResult.reference || '').trim().slice(0, 200);
+  const narration = String(aiResult.narration || '').trim().slice(0, 200);
+
+  if (!date || !amount) {
+    await DB.prepare(`UPDATE church_bank_ingest_log SET outcome='error', error_detail='Missing date or amount from AI' WHERE id=?`).bind(logId).run();
+    return err('AI extracted incomplete data (missing date or amount)', 502);
+  }
+
+  const dupExpense = await DB.prepare(
+    `SELECT id FROM expenses WHERE category='bank' AND date=? AND amount=? AND description=?`
+  ).bind(date, amount, narration).first();
+  if (dupExpense) {
+    await DB.prepare(`UPDATE church_bank_ingest_log SET outcome='skipped_duplicate', expense_id=? WHERE id=?`).bind(dupExpense.id, logId).run();
+    return ok({ skipped: true, reason: 'duplicate_entry' });
+  }
+
+  const subCategory = CHURCH_BANK_CHARGE_SUBCATS.includes(aiResult.subCategory) ? aiResult.subCategory : 'Other bank charges';
+  const notes = amount > 5000
+    ? 'Auto-recorded via AI email ingest — large amount, please verify.'
+    : 'Auto-recorded via AI email ingest.';
+
+  const entryId = newId('EXP-');
+  await createExpense(DB, {
+    id: entryId, date, category: 'bank', subCategory, description: narration,
+    amount, paymentMethod: 'bank_transfer', notes, recordedBy: 'AI Email Ingest',
+    status: 'approved', bankAmount: amount, cashAmount: 0, pettyAmount: 0,
+    receiptNo: reference,
+  });
+
+  await DB.prepare(`UPDATE church_bank_ingest_log SET outcome='inserted', expense_id=? WHERE id=?`).bind(entryId, logId).run();
+  return ok({ ok: true, entryId, amount, date, narration });
+}
+
+async function getChurchBankIngestLog(DB) {
+  const [logResult, ackRow] = await Promise.all([
+    DB.prepare(
+      `SELECT id, subject, outcome, error_detail, expense_id, created_at
+       FROM church_bank_ingest_log ORDER BY created_at DESC LIMIT 20`
+    ).all(),
+    DB.prepare(`SELECT value FROM settings WHERE key='church_email_ingest_ack_at'`).first(),
+  ]);
+
+  const rows = logResult.results || [];
+  const ackAt = String(ackRow?.value || '');
+  const counts = {};
+  for (const r of rows) counts[r.outcome] = (counts[r.outcome] || 0) + 1;
+
+  const needsAttention = rows.some(r =>
+    EMAIL_INGEST_ATTENTION_OUTCOMES.includes(r.outcome) && (!ackAt || r.created_at > ackAt)
+  );
+
+  return ok({
+    entries: rows.map(r => ({
+      id: r.id,
+      subject: r.subject,
+      outcome: r.outcome,
+      errorDetail: r.error_detail,
+      expenseId: r.expense_id,
+      createdAt: r.created_at,
+    })),
+    counts,
+    needsAttention,
+    lastActivityAt: rows[0]?.created_at || null,
+  });
+}
+
+// Latest known statement balance (from the most recent alert email of any kind),
+// used to auto-run the Bank page's reconciliation check with zero manual entry.
+async function getLatestBankBalanceSnapshot(DB) {
+  const row = await DB.prepare(
+    `SELECT id, date, balance FROM bank_balance_snapshots ORDER BY date DESC, created_at DESC LIMIT 1`
+  ).first();
+  if (!row) return ok({ date: null, balance: null });
+  return ok({ id: row.id, date: row.date, balance: row.balance });
 }
 
 async function runFollowups(DB, env, request) {
