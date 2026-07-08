@@ -728,7 +728,7 @@ export async function onRequest(context) {
       if (method === 'GET'    && !param) return await getRemittances(DB);
       if (method === 'POST'   && !param) return await createRemittance(DB, body);
       if (method === 'PUT'    &&  param) return await updateRemittance(DB, param, body);
-      if (method === 'DELETE' &&  param) return await deleteRemittance(DB, param);
+      if (method === 'DELETE' &&  param) return await deleteRemittance(DB, param, body?.force === true);
     }
 
     // ── /api/cash-transactions ─────────────────────────────────
@@ -2649,6 +2649,11 @@ async function createIncome(DB, data) {
       id
     ).run();
   }
+  // Used by IT Admin bank-ledger edit/delete to correct or zero-out the bank
+  // transfer portion of an income record without touching the rest of it.
+  if (data.bankTransferAmount !== undefined) {
+    await DB.prepare(`UPDATE income SET bank_transfer_amount=? WHERE id=?`).bind(data.bankTransferAmount, id).run();
+  }
   return ok({ id, updated: true });
 }
 
@@ -3074,16 +3079,18 @@ async function updateRemittance(DB, id, data) {
   const approvedBy  = data.approvedBy  || row.approved_by  || '';
   const approvedAt  = data.approvedAt  || row.approved_at  || '';
   const notes       = data.notes       !== undefined ? data.notes : (row.notes || '');
+  const amount      = data.amount      !== undefined ? data.amount    : row.amount;
+  const reference   = data.reference   !== undefined ? data.reference : (row.reference || '');
   await DB.prepare(
-    `UPDATE remittances SET status=?, approved_by=?, approved_at=?, notes=? WHERE id=?`
-  ).bind(status, approvedBy, approvedAt, notes, id).run();
-  return ok({ id, status, approvedBy, approvedAt });
+    `UPDATE remittances SET status=?, approved_by=?, approved_at=?, notes=?, amount=?, reference=? WHERE id=?`
+  ).bind(status, approvedBy, approvedAt, notes, amount, reference, id).run();
+  return ok({ id, status, approvedBy, approvedAt, amount, reference });
 }
 
-async function deleteRemittance(DB, id) {
+async function deleteRemittance(DB, id, force = false) {
   const row = await DB.prepare(`SELECT * FROM remittances WHERE id=?`).bind(id).first();
   if (!row) return err('Remittance not found', 404);
-  if (row.status !== 'pending_approval') return err('Only pending remittances can be deleted', 403);
+  if (row.status !== 'pending_approval' && !force) return err('Only pending remittances can be deleted', 403);
 
   const stmts = [DB.prepare(`DELETE FROM remittances WHERE id=?`).bind(id)];
   // Clear the matching unread pending-approval notification so it doesn't linger
@@ -3189,6 +3196,8 @@ async function createCashTransaction(DB, data) {
 async function updateCashTransaction(DB, id, data) {
   const cols = [], vals = [];
   if (data.amount !== undefined)              { cols.push('amount=?');               vals.push(data.amount); }
+  if (data.date !== undefined)                { cols.push('date=?');                 vals.push(data.date); }
+  if (data.description !== undefined)         { cols.push('description=?');          vals.push(data.description); }
   if (data.verificationStatus !== undefined)  { cols.push('verification_status=?');   vals.push(data.verificationStatus); }
   if (data.aiExtractedAmount !== undefined)   { cols.push('ai_extracted_amount=?');   vals.push(data.aiExtractedAmount); }
   if (data.aiExtractedReference !== undefined){ cols.push('ai_extracted_reference=?');vals.push(data.aiExtractedReference); }

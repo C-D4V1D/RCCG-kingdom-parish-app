@@ -578,7 +578,7 @@ const DB = {
   getRemittances()             { return apiFetch('remittances'); },
   addRemittance(d)             { return apiFetch('remittances','POST',d); },
   updateRemittance(id,d)       { return apiFetch(`remittances/${id}`,'PUT',d); },
-  deleteRemittance(id)         { return apiFetch(`remittances/${id}`,'DELETE'); },
+  deleteRemittance(id,force=false){ return apiFetch(`remittances/${id}`,'DELETE', force?{force:true}:null); },
   createSharedReport(d)          { return apiFetch('report-share','POST',d); },
   getSharedReport(token)         { return apiFetch(`report-share/${token}`); },
 
@@ -586,6 +586,7 @@ const DB = {
   getCashPhoto(id)             { return apiFetch(`cash-photo/${id}`); },
   addCashTransaction(d)        { return apiFetch('cash-transactions','POST',d); },
   updateCashTransaction(id,d)  { return apiFetch(`cash-transactions/${id}`,'PUT',d); },
+  deleteCashTransaction(id)    { return apiFetch(`cash-transactions/${id}`,'DELETE'); },
 
   getAudit()                   { return apiFetch('audit'); },
   // addAudit is fire-and-forget — never blocks the UI
@@ -7615,8 +7616,8 @@ async function editExpense(id){
   const all = await DB.getExpenses();
   const exp = all.find(e=>e.id===id);
   if(!exp) return;
-  if(exp.status==='approved'){ showAlert('Approved expenses cannot be edited.','danger'); return }
-  if(!canAction('expense_edit_pending')){ showAlert('You are not allowed to edit this expense.','danger'); return }
+  if(exp.status==='approved' && state.user?.role!=='it_admin'){ showAlert('Approved expenses cannot be edited.','danger'); return }
+  if(!canAction('expense_edit_pending') && state.user?.role!=='it_admin'){ showAlert('You are not allowed to edit this expense.','danger'); return }
 
   const methodLabel = exp.paymentMethod==='petty_cash'?'💳 Petty Cash'
     :exp.paymentMethod==='bank_transfer'?'🏦 Bank Transfer'
@@ -7714,7 +7715,7 @@ async function submitEditExpense(id, btn=null){
   DB.addAudit('expense_updated',`Expense updated: ${id} — ${category}/${subCategory}, amount: ${fmt(amount)}`,state.user?.name);
   closeModal();
   showAlert('Expense updated.','success');
-  renderExpenses();
+  if(state.page==='bank') renderBank(); else renderExpenses();
 }
 
 const _expenseDeleting = new Set();
@@ -8222,11 +8223,170 @@ function renderBankOverview(monthBankTx,bankBalance){
             ${t.verificationStatus?`<div style="margin-top:4px">${depositActionButtons(t)}</div>`:''}
             ${t.aiNotes?`<div style="margin-top:4px;font-size:10px;color:var(--text3)">AI: ${t.aiNotes}</div>`:''}
             <div>Time: ${fmtTime(t.createdAt||t.date)}</div>
+            ${bankTxActionButtons(t)}
           </div>
         </div>`;
       }).join('')}
     </div>
   </div>`;
+}
+
+// ── Bank Ledger — Edit / Delete (IT Admin only) ─────────────────────────────
+// The Bank Overview ledger merges several underlying record types (cash
+// deposits/withdrawals, bank-transfer expenses, paid remittances, income bank
+// transfers, petty top-ups paid via bank) into one unified view. These actions
+// are deliberately self-contained (rather than reusing each source page's own
+// edit/delete flow) since those flows carry role rules meant for other roles
+// (e.g. admin_officer expense edits, accountant approvals) that don't apply
+// to this IT-Admin-only surface, and some (paid remittances) are otherwise
+// locked from deletion entirely once paid.
+const BANK_TX_LABELS = {
+  deposit:'Cash Deposit', withdrawal:'Bank Withdrawal', expense:'Expense',
+  remittance:'Remittance', income:'Income (Bank Transfer)', 'petty-topup':'Petty Cash Top-up'
+};
+
+function bankTxActionButtons(t){
+  if(state.user?.role!=='it_admin') return '';
+  const grouped = !!t._splitParts && t._splitParts.length>1;
+  if(grouped){
+    return `<div style="margin-top:6px;font-size:10px;color:var(--text3)">This deposit combines multiple income records — edit or delete the individual entries from the Income page.</div>`;
+  }
+  return `<div style="margin-top:6px;display:flex;gap:6px">
+    <button class="btn btn-sm" onclick="event.stopPropagation();App.editBankTx('${t.txType}','${t.id}')" style="font-size:10px;padding:2px 8px">✏️ Edit</button>
+    <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();App.confirmDeleteBankTx('${t.txType}','${t.id}')" style="font-size:10px;padding:2px 8px">🗑️ Delete</button>
+  </div>`;
+}
+
+async function editBankTx(txType, id){
+  if(state.user?.role!=='it_admin'){ showAlert('Access denied.','danger'); return; }
+  if(txType==='expense') return editExpense(id);
+
+  let record, amountLabel='Amount (₦) *', extraFieldsHtml='';
+  if(txType==='deposit' || txType==='withdrawal'){
+    const all = await DB.getCashTransactions();
+    record = all.find(r=>r.id===id);
+    if(!record){ showAlert('Record not found.','danger'); return; }
+    extraFieldsHtml = `
+      <div class="form-group"><label class="form-label">Date</label><input type="date" id="btx_date" class="form-input" value="${(record.date||'').slice(0,10)}" /></div>
+      <div class="form-group"><label class="form-label">Description</label><input type="text" id="btx_desc" class="form-input" value="${esc(record.description||'')}" /></div>`;
+  } else if(txType==='petty-topup'){
+    const all = await DB.getPetty();
+    record = all.find(r=>r.id===id);
+    if(!record){ showAlert('Record not found.','danger'); return; }
+  } else if(txType==='remittance'){
+    const all = await DB.getRemittances();
+    record = all.find(r=>r.id===id);
+    if(!record){ showAlert('Record not found.','danger'); return; }
+    extraFieldsHtml = `<div class="form-group"><label class="form-label">Reference</label><input type="text" id="btx_ref" class="form-input" value="${esc(record.reference||'')}" /></div>`;
+  } else if(txType==='income'){
+    const all = await DB.getIncome();
+    record = all.find(r=>r.id===id);
+    if(!record){ showAlert('Record not found.','danger'); return; }
+    amountLabel = 'Bank Transfer Amount (₦) *';
+    record = { ...record, amount: record.bankTransferAmount||0 };
+  } else {
+    showAlert('This transaction type cannot be edited here.','danger'); return;
+  }
+
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">✏️ Edit ${BANK_TX_LABELS[txType]||'Bank Transaction'}</div>
+    <div class="form-group"><label class="form-label">${amountLabel}</label><input type="number" id="btx_amount" class="form-input" value="${record.amount||0}" min="0" step="0.01" /></div>
+    ${extraFieldsHtml}
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.submitEditBankTx('${txType}','${id}',this)">Save Changes</button>
+    </div>`);
+  setTimeout(()=>document.getElementById('btx_amount')?.focus(),100);
+}
+
+async function submitEditBankTx(txType, id, btn=null){
+  if(state.user?.role!=='it_admin'){ showAlert('Access denied.','danger'); return; }
+  const amount = parseFloat(document.getElementById('btx_amount')?.value);
+  if(isNaN(amount) || amount<0){ showAlert('Please enter a valid amount.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    if(txType==='deposit' || txType==='withdrawal'){
+      const date = document.getElementById('btx_date')?.value;
+      const description = document.getElementById('btx_desc')?.value?.trim();
+      await DB.updateCashTransaction(id, { amount, date, description });
+    } else if(txType==='petty-topup'){
+      await DB.updatePettyEntry(id, { amount });
+    } else if(txType==='remittance'){
+      const reference = document.getElementById('btx_ref')?.value?.trim();
+      await DB.updateRemittance(id, { amount, reference });
+    } else if(txType==='income'){
+      await DB.updateIncome(id, { bankTransferAmount: amount });
+    }
+    DB.addAudit('bank_tx_updated', `${BANK_TX_LABELS[txType]||'Bank transaction'} updated (${id}): amount set to ${fmt(amount)}`, state.user?.name);
+    closeModal();
+    showAlert('Bank transaction updated.','success');
+    renderBank();
+  } catch(err){
+    restore();
+    showAlert('Failed to save: '+(err?.message||'Unknown error'),'danger');
+  }
+}
+
+function confirmDeleteBankTx(txType, id){
+  if(state.user?.role!=='it_admin'){ showAlert('Access denied.','danger'); return; }
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🗑 Delete ${BANK_TX_LABELS[txType]||'Bank Transaction'}</div>
+    <div class="alert alert-warn" style="margin-bottom:16px"><span class="alert-icon">⚠</span><span><strong>This is permanent.</strong> Deleting this record will remove it from the bank ledger and all balance calculations. This cannot be undone.</span></div>
+    <div class="form-group">
+      <label class="form-label">Enter your IT Admin PIN to confirm</label>
+      <input type="password" id="del_btx_pin" class="form-input" maxlength="6" placeholder="••••••" inputmode="numeric"
+        onkeydown="if(event.key==='Enter')App.submitDeleteBankTx('${txType}','${id}',document.getElementById('del_btx_confirm_btn'))" />
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button id="del_btx_confirm_btn" class="btn btn-danger" onclick="App.submitDeleteBankTx('${txType}','${id}',this)">Confirm Delete</button>
+    </div>`);
+  setTimeout(()=>document.getElementById('del_btx_pin')?.focus(),100);
+}
+
+async function submitDeleteBankTx(txType, id, btn=null){
+  if(state.user?.role!=='it_admin'){ showAlert('Access denied.','danger'); return; }
+  const pin = document.getElementById('del_btx_pin')?.value?.trim();
+  if(!pin){ showAlert('Please enter your PIN.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Verifying…');
+  try {
+    await DB.login({ role:'it_admin', userId: state.user.id, pin });
+  } catch(e){
+    restore();
+    const msg = String(e?.message||'');
+    showAlert(msg.toLowerCase().includes('invalid credentials') ? 'Incorrect PIN. Please try again.' : 'PIN verification failed: '+msg, 'danger');
+    document.getElementById('del_btx_pin')?.select();
+    return;
+  }
+  try {
+    btn.innerHTML = '<span class="btn-spinner-sm"></span> Deleting…';
+    if(txType==='expense'){
+      const all = await DB.getExpenses();
+      const exp = all.find(e=>e.id===id);
+      await DB.deleteExpense(id);
+      if(exp && (exp.pettyAmount||0)>0){
+        DB.addAudit('petty_adjustment', `Petty float restored by ${fmt(exp.pettyAmount)} from deleted expense (${id})`, state.user?.name);
+      }
+    } else if(txType==='deposit' || txType==='withdrawal'){
+      await DB.deleteCashTransaction(id);
+    } else if(txType==='petty-topup'){
+      await DB.deletePettyEntry(id);
+    } else if(txType==='remittance'){
+      await DB.deleteRemittance(id, true);
+    } else if(txType==='income'){
+      await DB.updateIncome(id, { bankTransferAmount: 0 });
+    }
+    DB.addAudit('bank_tx_deleted', `${BANK_TX_LABELS[txType]||'Bank transaction'} deleted by ${state.user?.name}: ${id}`, state.user?.name);
+    DB.addNotification('Bank Transaction Deleted', `${BANK_TX_LABELS[txType]||'A bank transaction'} was deleted by ${state.user?.name}.`, 'warn');
+    closeModal();
+    showAlert('Bank transaction deleted.','warn');
+    renderBank();
+  } catch(err){
+    restore();
+    showAlert('Failed to delete: '+(err?.message||'Unknown error'),'danger');
+  }
 }
 
 function renderBankWithdrawals(withdrawals){
@@ -11527,6 +11687,7 @@ return {
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
+  editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, showPettyToBankDeposit, submitPettyToBankDeposit, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange,
