@@ -443,6 +443,196 @@ async function tableHasColumns(DB, table, cols) {
   return cols.every(c => existing.has(c));
 }
 
+// A Sunday's collection is often counted/entered in more than one sitting (e.g. Holy
+// Communion Offering counted and recorded separately from the main offering). These
+// additive income-type + cash-breakdown columns are what get folded together when a
+// second "Sunday Collections" submission comes in for a date that's already recorded —
+// see mergeIntoIncome() / mergeDuplicateSundayCollections() below.
+const INCOME_CAMEL_TO_SNAKE = {
+  membersTithe:           'members_tithe',
+  ministersTithe:         'ministers_tithe',
+  thanksgiving:           'thanksgiving',
+  sundaySchool:            'sunday_school',
+  slo:                     'slo',
+  crm:                     'crm',
+  workersOffering:         'workers_offering',
+  firstFruit:              'first_fruit',
+  childrenOffering:        'children_offering',
+  weekendOffering:         'weekend_offering',
+  holyCommunionOffering:   'holy_communion_offering',
+  bankTransferAmount:      'bank_transfer_amount',
+  directPettyCash:         'direct_petty_cash',
+};
+const INCOME_TYPE_LABELS = {
+  members_tithe:           "Members' Tithe",
+  ministers_tithe:         "Ministers' Tithe",
+  thanksgiving:            'Thanksgiving (TG)',
+  sunday_school:           'Sunday School',
+  slo:                     'Sunday Love Offering',
+  crm:                     'CRM (Weekly Activities)',
+  workers_offering:        "Gospel Fund (Workers' Offering)",
+  first_fruit:             'First Fruit',
+  children_offering:       "Teen/Children's Offering",
+  weekend_offering:        'Weekend Offering',
+  holy_communion_offering: 'Holy Communion Offering',
+};
+const INCOME_NUMERIC_SNAKE_COLS = Object.values(INCOME_CAMEL_TO_SNAKE);
+const num = (v) => Number(v) || 0;
+function isSundayCollectionSource(source) { return !source || source === 'sunday_collection'; }
+
+/** Fold a new Sunday-collection submission (camelCase `data`) into an existing DB row. */
+async function mergeIntoIncome(DB, existing, data) {
+  const merged = {};
+  for (const [camel, snake] of Object.entries(INCOME_CAMEL_TO_SNAKE)) {
+    merged[snake] = num(existing[snake]) + num(data[camel]);
+  }
+  merged.total_collection = Math.round((
+    merged.members_tithe + merged.ministers_tithe + merged.thanksgiving + merged.sunday_school +
+    merged.slo + merged.crm + merged.workers_offering + merged.first_fruit + merged.children_offering +
+    merged.weekend_offering + merged.holy_communion_offering
+  ) * 100) / 100;
+
+  let bankTransferDetails = existing.bank_transfer_details || '';
+  if (data.bankTransferDetails) {
+    const prev = safeJsonParse(existing.bank_transfer_details, []);
+    const next = safeJsonParse(data.bankTransferDetails, []);
+    bankTransferDetails = JSON.stringify([...(Array.isArray(prev) ? prev : []), ...(Array.isArray(next) ? next : [])]);
+  }
+
+  const addedTypeTotal = Object.keys(INCOME_TYPE_LABELS).reduce((s, snake) => {
+    const camel = Object.keys(INCOME_CAMEL_TO_SNAKE).find(c => INCOME_CAMEL_TO_SNAKE[c] === snake);
+    return s + num(data[camel]);
+  }, 0);
+  const addedTotal = Math.round((num(data.totalCollection) || addedTypeTotal) * 100) / 100;
+  const addedTypes = Object.entries(INCOME_CAMEL_TO_SNAKE)
+    .filter(([camel, snake]) => INCOME_TYPE_LABELS[snake] && num(data[camel]) > 0)
+    .map(([camel, snake]) => `${INCOME_TYPE_LABELS[snake]}: ${num(data[camel]).toLocaleString('en-NG')}`)
+    .join(', ');
+  const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+  const auditLine = `[+₦${addedTotal.toLocaleString('en-NG')} merged in by ${data.recordedBy || 'unknown'} at ${stamp}${addedTypes ? ` — ${addedTypes}` : ''}${data.usher ? ` (counted with ${data.usher})` : ''}]`;
+  const mergedNotes = [existing.notes, auditLine, data.notes].filter(Boolean).join('\n');
+
+  await DB.prepare(`
+    UPDATE income SET
+      members_tithe=?, ministers_tithe=?, thanksgiving=?, sunday_school=?,
+      slo=?, crm=?, workers_offering=?, first_fruit=?, children_offering=?,
+      weekend_offering=?, holy_communion_offering=?, total_collection=?,
+      bank_transfer_amount=?, direct_petty_cash=?, bank_transfer_details=?, notes=?
+    WHERE id=?
+  `).bind(
+    merged.members_tithe, merged.ministers_tithe, merged.thanksgiving, merged.sunday_school,
+    merged.slo, merged.crm, merged.workers_offering, merged.first_fruit, merged.children_offering,
+    merged.weekend_offering, merged.holy_communion_offering, merged.total_collection,
+    merged.bank_transfer_amount, merged.direct_petty_cash, bankTransferDetails, mergedNotes,
+    existing.id,
+  ).run();
+
+  return ok({
+    id:                    existing.id,
+    date:                  existing.date,
+    membersTithe:          merged.members_tithe,
+    ministersTithe:        merged.ministers_tithe,
+    thanksgiving:          merged.thanksgiving,
+    sundaySchool:          merged.sunday_school,
+    slo:                   merged.slo,
+    crm:                   merged.crm,
+    workersOffering:       merged.workers_offering,
+    firstFruit:            merged.first_fruit,
+    childrenOffering:      merged.children_offering,
+    weekendOffering:       merged.weekend_offering,
+    holyCommunionOffering: merged.holy_communion_offering,
+    totalCollection:       merged.total_collection,
+    bankTransferAmount:    merged.bank_transfer_amount,
+    bankTransferDetails,
+    directPettyCash:       merged.direct_petty_cash,
+    source:                existing.source || 'sunday_collection',
+    usher:                 existing.usher,
+    recordedBy:            existing.recorded_by,
+    notes:                 mergedNotes,
+    merged:                true,
+    addedAmount:           addedTotal,
+    previousTotal:         num(existing.total_collection),
+  });
+}
+
+/**
+ * One-time (but safe to re-run) cleanup: fold historical duplicate Sunday Collection
+ * rows — created before auto-merge existed, when a Sunday's collection was recorded
+ * across more than one submission — into a single surviving row per date, re-pointing
+ * any linked deposits/expenses so per-record tracking for that Sunday is complete.
+ */
+async function mergeDuplicateSundayCollections(DB) {
+  const hasSplitCols = await tableHasColumns(DB, 'income', ['bank_transfer_amount', 'direct_petty_cash', 'source']);
+  if (!hasSplitCols) return;
+
+  const { results: dupDates } = await DB.prepare(`
+    SELECT date FROM income
+    WHERE source='sunday_collection' OR source IS NULL OR source=''
+    GROUP BY date HAVING COUNT(*) > 1
+  `).all();
+  if (!dupDates || !dupDates.length) return;
+
+  for (const { date } of dupDates) {
+    const { results: rows } = await DB.prepare(
+      `SELECT * FROM income WHERE date=? AND (source='sunday_collection' OR source IS NULL OR source='') ORDER BY created_at ASC, id ASC`
+    ).bind(date).all();
+    if (!rows || rows.length < 2) continue;
+
+    const [survivor, ...dupes] = rows;
+    const merged = {};
+    for (const snake of INCOME_NUMERIC_SNAKE_COLS) {
+      merged[snake] = dupes.reduce((sum, r) => sum + num(r[snake]), num(survivor[snake]));
+    }
+    merged.total_collection = Math.round((
+      merged.members_tithe + merged.ministers_tithe + merged.thanksgiving + merged.sunday_school +
+      merged.slo + merged.crm + merged.workers_offering + merged.first_fruit + merged.children_offering +
+      merged.weekend_offering + merged.holy_communion_offering
+    ) * 100) / 100;
+
+    let bankTransferDetails = safeJsonParse(survivor.bank_transfer_details, []);
+    if (!Array.isArray(bankTransferDetails)) bankTransferDetails = [];
+    for (const d of dupes) {
+      const details = safeJsonParse(d.bank_transfer_details, []);
+      if (Array.isArray(details)) bankTransferDetails.push(...details);
+    }
+
+    const dupSummaries = dupes.map(d => {
+      const parts = Object.keys(INCOME_TYPE_LABELS)
+        .filter(snake => num(d[snake]) > 0)
+        .map(snake => `${INCOME_TYPE_LABELS[snake]}: ₦${num(d[snake]).toLocaleString('en-NG')}`)
+        .join(', ');
+      return `[Auto-merged ₦${num(d.total_collection).toLocaleString('en-NG')} from duplicate entry recorded by ${d.recorded_by || 'unknown'} at ${d.created_at}${parts ? ` — ${parts}` : ''}]`;
+    });
+    const mergedNotes = [survivor.notes, ...dupSummaries].filter(Boolean).join('\n');
+
+    await DB.prepare(`
+      UPDATE income SET
+        members_tithe=?, ministers_tithe=?, thanksgiving=?, sunday_school=?,
+        slo=?, crm=?, workers_offering=?, first_fruit=?, children_offering=?,
+        weekend_offering=?, holy_communion_offering=?, total_collection=?,
+        bank_transfer_amount=?, direct_petty_cash=?, bank_transfer_details=?, notes=?
+      WHERE id=?
+    `).bind(
+      merged.members_tithe, merged.ministers_tithe, merged.thanksgiving, merged.sunday_school,
+      merged.slo, merged.crm, merged.workers_offering, merged.first_fruit, merged.children_offering,
+      merged.weekend_offering, merged.holy_communion_offering, merged.total_collection,
+      merged.bank_transfer_amount, merged.direct_petty_cash, JSON.stringify(bankTransferDetails), mergedNotes,
+      survivor.id,
+    ).run();
+
+    // Re-point deposits and expenses linked to the duplicate rows onto the survivor so
+    // per-record deposit/expense tracking for this Sunday stays complete, then drop the
+    // now-empty duplicate rows.
+    const dupIds = dupes.map(d => d.id);
+    const placeholders = dupIds.map(() => '?').join(',');
+    await DB.prepare(`UPDATE cash_transactions SET income_ref=? WHERE income_ref IN (${placeholders})`).bind(survivor.id, ...dupIds).run();
+    try {
+      await DB.prepare(`UPDATE expenses SET income_ref=? WHERE income_ref IN (${placeholders})`).bind(survivor.id, ...dupIds).run();
+    } catch { /* income_ref column may not exist on very old schemas */ }
+    await DB.prepare(`DELETE FROM income WHERE id IN (${placeholders})`).bind(...dupIds).run();
+  }
+}
+
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
@@ -2003,6 +2193,11 @@ async function handleInit(DB) {
     }
   } catch { /* safe to skip */ }
 
+  // Merge historical duplicate Sunday Collection rows (same date, recorded across more
+  // than one submission before auto-merge existed) into a single record each. Safe to
+  // re-run — once a date is consolidated there is nothing left to merge next time.
+  try { await mergeDuplicateSundayCollections(DB); } catch { /* best-effort cleanup */ }
+
   // Seed petty config (once)
   await DB.prepare(
     `INSERT OR IGNORE INTO petty_config (id, float_amount, max_float) VALUES ('main', 50000, 50000)`
@@ -2457,6 +2652,20 @@ async function createIncome(DB, data) {
   const hasFirstFruit = await tableHasColumns(DB, 'income', ['first_fruit']);
   const hasWeekendOffering = await tableHasColumns(DB, 'income', ['weekend_offering']);
   const hasHolyCommunion = await tableHasColumns(DB, 'income', ['holy_communion_offering']);
+  const canMergeSchema = hasSplitCols && hasMetaCols && hasFirstFruit && hasWeekendOffering && hasHolyCommunion;
+
+  // A Sunday's collection is often entered in more than one sitting (e.g. Holy Communion
+  // Offering counted and recorded separately, later, from the main offering). Rather than
+  // creating a second row for the same date — which would split cash-with-accountant,
+  // deposit-tracking and remittance figures across two records — fold the new amounts into
+  // the existing same-date Sunday Collection row instead of inserting a duplicate.
+  if (canMergeSchema && isSundayCollectionSource(data.source) && data.date && !data.id) {
+    const existing = await DB.prepare(
+      `SELECT * FROM income WHERE date=? AND (source='sunday_collection' OR source IS NULL OR source='') ORDER BY created_at ASC LIMIT 1`
+    ).bind(data.date).first();
+    if (existing) return mergeIntoIncome(DB, existing, data);
+  }
+
   if (hasSplitCols && hasMetaCols && hasFirstFruit && hasWeekendOffering && hasHolyCommunion) {
     await DB.prepare(`
       INSERT INTO income
@@ -10413,4 +10622,4 @@ async function getSharedReport(DB, token) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths, smsPagesInfo };
+export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths, smsPagesInfo, createIncome, mergeDuplicateSundayCollections };
