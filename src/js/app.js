@@ -2969,7 +2969,7 @@ async function renderDashboard(){
   // the all-time accumulators (remittance due, etc.) only see what existed on that day.
   const allIncome = dashIsPastPeriod ? allIncomeDash.filter(_onOrBefore) : allIncomeDash;
   const allExpenses = dashIsPastPeriod ? allExpensesDash.filter(_onOrBefore) : allExpensesDash;
-  const allRemsForKpi = dashIsPastPeriod ? allRemsDash.filter(r => r.status === 'paid' ? _paidOnOrBefore(r) : _onOrBefore(r)) : allRemsDash;
+  const allRemsForKpi = dashIsPastPeriod ? allRemsDash.filter(r => (r.status === 'paid' || r.status === 'written_off') ? _paidOnOrBefore(r) : _onOrBefore(r)) : allRemsDash;
 
   const totalIncome = income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
@@ -3059,15 +3059,15 @@ async function renderDashboard(){
   const dashAccumQuotas = dashFirstIncRec
     ? accumQuotasAcrossPeriods(dashQuotas, settingsDash, allRemsForKpi, dashFirstDateStr, dashAsOfDate)
     : 0;
-  // Identify settled periods (have at least one paid remittance with period dates).
+  // Identify settled periods (have at least one paid or written-off remittance with period dates).
   const _dashSettledPeriodKeys = [...new Set(
     allRemsForKpi
-      .filter(r => r.status === 'paid' && r.periodFrom && r.periodTo)
+      .filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom && r.periodTo)
       .map(r => `${r.periodFrom}|${r.periodTo}`)
   )].filter(key => {
     // A period is only "settled" when BOTH Part A and Part B are paid (or a legacy payment covers all)
     const [pFrom, pTo] = key.split('|');
-    const ppRems = allRemsForKpi.filter(r => r.status === 'paid' && r.periodFrom === pFrom && r.periodTo === pTo);
+    const ppRems = allRemsForKpi.filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom === pFrom && r.periodTo === pTo);
     const hasLegacy = ppRems.some(r => !r.part);
     const hasPartA = ppRems.some(r => r.part === 'a');
     const hasPartB = ppRems.some(r => r.part === 'b');
@@ -3076,17 +3076,38 @@ async function renderDashboard(){
   const _dashSettledPeriodRanges = _dashSettledPeriodKeys.map(k => {
     const [from, to] = k.split('|'); return { from, to };
   });
-  // Genuine shortfall from settled periods: snapshot_due − amount_paid.
-  // If no snapshot (old record): 0 (assume full settlement — payment was approved).
+  // Genuine shortfall from settled periods: true_due − amount_paid − amount_written_off.
+  // If no snapshot (old record): recalculate fresh so late-added Sunday collections or
+  // quota changes surface as a reconcilable shortfall instead of silently vanishing.
   let dashSettledShortfall = 0;
-  _dashSettledPeriodKeys.forEach(key => {
+  const dashShortfallPeriods = [];
+  for(const key of _dashSettledPeriodKeys){
     const [pFrom, pTo] = key.split('|');
-    const ppRems = allRemsForKpi.filter(r => r.status === 'paid' && r.periodFrom === pFrom && r.periodTo === pTo);
-    const ppPaid = ppRems.reduce((s, r) => s + (r.amount || 0), 0);
-    const ppSnapshot = ppRems.reduce((max, r) => Math.max(max, r.dueAtTimeOfPayment || 0), 0);
-    const ppTrueDue = ppSnapshot > 0 ? ppSnapshot : ppPaid; // fallback: assume fully settled
-    dashSettledShortfall += Math.max(0, ppTrueDue - ppPaid);
-  });
+    const ppRems = allRemsForKpi.filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom === pFrom && r.periodTo === pTo);
+    const ppPaid = ppRems.filter(r => r.status === 'paid').reduce((s, r) => s + (r.amount || 0), 0);
+    const ppWrittenOff = ppRems.filter(r => r.status === 'written_off').reduce((s, r) => s + (r.amount || 0), 0);
+    const ppSnapshot = ppRems.filter(r => r.status === 'paid').reduce((max, r) => Math.max(max, r.dueAtTimeOfPayment || 0), 0);
+    let ppTrueDue;
+    if(ppSnapshot > 0){
+      ppTrueDue = ppSnapshot;
+    } else {
+      // Fresh calc: surface late-added Sunday collections or quota changes so the
+      // user can reconcile the shortfall (pay balance or write off with justification).
+      const ppIncome = allIncome.filter(r => {
+        const d = String(r?.date || r?.dateNeeded || r?.createdAt || '').slice(0,10);
+        return d && d >= pFrom && d <= pTo;
+      });
+      const ppRemCalc = await calcRemittancesFromRecords(ppIncome, remRatesDash);
+      const ppQuotaTotal = sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, pFrom, pTo));
+      ppTrueDue = totalRemittanceDue(ppRemCalc, ppQuotaTotal);
+    }
+    const shortfall = Math.max(0, ppTrueDue - ppPaid - ppWrittenOff);
+    dashSettledShortfall += shortfall;
+    if(shortfall >= 0.5){ // 50 kobo threshold — ignore floating-point noise
+      dashShortfallPeriods.push({ from: pFrom, to: pTo, due: ppTrueDue, paid: ppPaid, writtenOff: ppWrittenOff, shortfall });
+    }
+  }
+  state.reconcileShortfalls = dashShortfallPeriods;
   // Income from UNSETTLED periods only — rate changes don't affect settled periods.
   const dashUnsettledIncome = allIncome.filter(r => {
     const d = r.date || r.createdAt || '';
