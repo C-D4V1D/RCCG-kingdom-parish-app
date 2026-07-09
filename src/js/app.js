@@ -2969,7 +2969,7 @@ async function renderDashboard(){
   // the all-time accumulators (remittance due, etc.) only see what existed on that day.
   const allIncome = dashIsPastPeriod ? allIncomeDash.filter(_onOrBefore) : allIncomeDash;
   const allExpenses = dashIsPastPeriod ? allExpensesDash.filter(_onOrBefore) : allExpensesDash;
-  const allRemsForKpi = dashIsPastPeriod ? allRemsDash.filter(r => r.status === 'paid' ? _paidOnOrBefore(r) : _onOrBefore(r)) : allRemsDash;
+  const allRemsForKpi = dashIsPastPeriod ? allRemsDash.filter(r => (r.status === 'paid' || r.status === 'written_off') ? _paidOnOrBefore(r) : _onOrBefore(r)) : allRemsDash;
 
   const totalIncome = income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses = expenses.reduce((s,r)=>s+(r.amount||0),0);
@@ -3059,15 +3059,15 @@ async function renderDashboard(){
   const dashAccumQuotas = dashFirstIncRec
     ? accumQuotasAcrossPeriods(dashQuotas, settingsDash, allRemsForKpi, dashFirstDateStr, dashAsOfDate)
     : 0;
-  // Identify settled periods (have at least one paid remittance with period dates).
+  // Identify settled periods (have at least one paid or written-off remittance with period dates).
   const _dashSettledPeriodKeys = [...new Set(
     allRemsForKpi
-      .filter(r => r.status === 'paid' && r.periodFrom && r.periodTo)
+      .filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom && r.periodTo)
       .map(r => `${r.periodFrom}|${r.periodTo}`)
   )].filter(key => {
     // A period is only "settled" when BOTH Part A and Part B are paid (or a legacy payment covers all)
     const [pFrom, pTo] = key.split('|');
-    const ppRems = allRemsForKpi.filter(r => r.status === 'paid' && r.periodFrom === pFrom && r.periodTo === pTo);
+    const ppRems = allRemsForKpi.filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom === pFrom && r.periodTo === pTo);
     const hasLegacy = ppRems.some(r => !r.part);
     const hasPartA = ppRems.some(r => r.part === 'a');
     const hasPartB = ppRems.some(r => r.part === 'b');
@@ -3076,17 +3076,38 @@ async function renderDashboard(){
   const _dashSettledPeriodRanges = _dashSettledPeriodKeys.map(k => {
     const [from, to] = k.split('|'); return { from, to };
   });
-  // Genuine shortfall from settled periods: snapshot_due − amount_paid.
-  // If no snapshot (old record): 0 (assume full settlement — payment was approved).
+  // Genuine shortfall from settled periods: true_due − amount_paid − amount_written_off.
+  // If no snapshot (old record): recalculate fresh so late-added Sunday collections or
+  // quota changes surface as a reconcilable shortfall instead of silently vanishing.
   let dashSettledShortfall = 0;
-  _dashSettledPeriodKeys.forEach(key => {
+  const dashShortfallPeriods = [];
+  for(const key of _dashSettledPeriodKeys){
     const [pFrom, pTo] = key.split('|');
-    const ppRems = allRemsForKpi.filter(r => r.status === 'paid' && r.periodFrom === pFrom && r.periodTo === pTo);
-    const ppPaid = ppRems.reduce((s, r) => s + (r.amount || 0), 0);
-    const ppSnapshot = ppRems.reduce((max, r) => Math.max(max, r.dueAtTimeOfPayment || 0), 0);
-    const ppTrueDue = ppSnapshot > 0 ? ppSnapshot : ppPaid; // fallback: assume fully settled
-    dashSettledShortfall += Math.max(0, ppTrueDue - ppPaid);
-  });
+    const ppRems = allRemsForKpi.filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom === pFrom && r.periodTo === pTo);
+    const ppPaid = ppRems.filter(r => r.status === 'paid').reduce((s, r) => s + (r.amount || 0), 0);
+    const ppWrittenOff = ppRems.filter(r => r.status === 'written_off').reduce((s, r) => s + (r.amount || 0), 0);
+    const ppSnapshot = ppRems.filter(r => r.status === 'paid').reduce((max, r) => Math.max(max, r.dueAtTimeOfPayment || 0), 0);
+    let ppTrueDue;
+    if(ppSnapshot > 0){
+      ppTrueDue = ppSnapshot;
+    } else {
+      // Fresh calc: surface late-added Sunday collections or quota changes so the
+      // user can reconcile the shortfall (pay balance or write off with justification).
+      const ppIncome = allIncome.filter(r => {
+        const d = String(r?.date || r?.dateNeeded || r?.createdAt || '').slice(0,10);
+        return d && d >= pFrom && d <= pTo;
+      });
+      const ppRemCalc = await calcRemittancesFromRecords(ppIncome, remRatesDash);
+      const ppQuotaTotal = sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, pFrom, pTo));
+      ppTrueDue = totalRemittanceDue(ppRemCalc, ppQuotaTotal);
+    }
+    const shortfall = Math.max(0, ppTrueDue - ppPaid - ppWrittenOff);
+    dashSettledShortfall += shortfall;
+    if(shortfall >= 0.5){ // 50 kobo threshold — ignore floating-point noise
+      dashShortfallPeriods.push({ from: pFrom, to: pTo, due: ppTrueDue, paid: ppPaid, writtenOff: ppWrittenOff, shortfall });
+    }
+  }
+  state.reconcileShortfalls = dashShortfallPeriods;
   // Income from UNSETTLED periods only — rate changes don't affect settled periods.
   const dashUnsettledIncome = allIncome.filter(r => {
     const d = r.date || r.createdAt || '';
@@ -3226,7 +3247,7 @@ async function renderDashboard(){
     ? accumQuotasAcrossPeriods(dashQuotas, settingsDash, allRemsDash, dashOpeningFirstDateStr, dashPriorCloseDate)
     : 0;
   const dashOpeningPaidRems = allRemsDash
-    .filter(r => r.status === 'paid')
+    .filter(r => r.status === 'paid' || r.status === 'written_off')
     .filter(r => {
       const d = String(r?.paidDate || r?.createdAt || '').slice(0,10);
       return !d || d <= dashPriorCloseDate;
@@ -3676,7 +3697,10 @@ async function renderDashboard(){
         </div>
         ${dashPriorUnpaid>0?`
         <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(184,134,11,0.25);display:flex;align-items:center;justify-content:space-between;gap:12px">
-          <div style="font-size:10.5px;color:var(--text3)">Includes unpaid from previous period(s)</div>
+          <div>
+            <div style="font-size:10.5px;color:var(--text3)">Includes unpaid from previous period(s)</div>
+            ${dashShortfallPeriods.length?`<button onclick="App.openReconcileModal()" style="margin-top:4px;background:transparent;border:none;color:var(--primary);font-size:11px;font-weight:600;text-decoration:underline;cursor:pointer;padding:0">Reconcile →</button>`:''}
+          </div>
           <div style="font-size:14px;font-weight:700;color:var(--danger);white-space:nowrap;flex-shrink:0">${fmt(dashPriorUnpaid)}</div>
         </div>`:''}
       </div>
@@ -5708,7 +5732,7 @@ async function renderRemittances(){
   const _dPartBTotal=partBLines.reduce((s,l)=>s+l.amount,0);
   const _dTotalDue=_dPartATotal+_dPartBTotal;
 
-  const allPaidRems=allRems.filter(r=>r.status==='paid')
+  const allPaidRems=allRems.filter(r=>r.status==='paid'||r.status==='written_off')
     .sort((a,b)=>new Date(b.paidDate||b.createdAt||0)-new Date(a.paidDate||a.createdAt||0));
 
   const pendingApprovals=allRems.filter(r=>r.status==='pending_approval')
@@ -5874,16 +5898,19 @@ async function renderRemittances(){
 
         <div class="card" style="margin-bottom:12px">
           <div class="card-header"><span class="card-title">Payment History</span></div>
-          ${allPaidRems.length?allPaidRems.slice(0,10).map(r=>`
+          ${allPaidRems.length?allPaidRems.slice(0,10).map(r=>{
+            const isWrittenOff=r.status==='written_off';
+            return `
             <div class="feed-item">
-              <div class="feed-dot" style="background:var(--success-light)">✓</div>
+              <div class="feed-dot" style="background:${isWrittenOff?'#FDECC8':'var(--success-light)'}">${isWrittenOff?'⚖️':'✓'}</div>
               <div class="feed-body">
-                <div class="feed-title">${esc(r.label||'RCCG Remittance')}</div>
-                <div class="feed-sub">${r.periodFrom&&r.periodTo?`<em>Period: ${fmtDate(r.periodFrom)} – ${fmtDate(r.periodTo)}</em><br>`:''}${r.paymentMethod==='cash'?'💵 Cash':'🏦 Bank'} · Ref: ${esc(r.reference)||'—'} · ${esc(r.authorizedBy)||'—'}</div>
+                <div class="feed-title">${esc(r.label||'RCCG Remittance')} ${isWrittenOff?'<span class="badge badge-warn" style="font-size:9px;margin-left:4px">WRITTEN OFF</span>':''}</div>
+                <div class="feed-sub">${r.periodFrom&&r.periodTo?`<em>Period: ${fmtDate(r.periodFrom)} – ${fmtDate(r.periodTo)}</em><br>`:''}${isWrittenOff?`Reason: ${esc(r.notes)||'—'}`:`${r.paymentMethod==='cash'?'💵 Cash':'🏦 Bank'} · Ref: ${esc(r.reference)||'—'}`} · ${esc(r.authorizedBy)||'—'}</div>
                 <div class="feed-time">${fmtDate(r.paidDate)}</div>
               </div>
-              <div class="feed-right td-green">${fmt(r.amount)}</div>
-            </div>`).join(''):'<div class="empty-table">No remittance payments recorded yet.</div>'}
+              <div class="feed-right" style="color:${isWrittenOff?'var(--amber)':'var(--success)'}">${fmt(r.amount)}</div>
+            </div>`;
+          }).join(''):'<div class="empty-table">No remittance payments recorded yet.</div>'}
         </div>
 
         <div class="card">
@@ -6329,6 +6356,120 @@ async function deleteRemittance(id, btn=null){
   } catch(err) {
     restore();
     showAlert(`Failed to delete remittance: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+const WRITE_OFF_REASONS = [
+  'Approved by Area/Zonal Pastor',
+  'Small variance (rounding/pro-rata adjustment)',
+  'Data correction',
+  'Other (specify below)'
+];
+
+/** Modal listing every settled period with an unreconciled shortfall (dashboard's
+ *  RCCG Remittance Due tile "Reconcile →" link). Lets the accountant write off a
+ *  shortfall with a recorded reason instead of it silently vanishing. */
+function openReconcileModal(){
+  const periods = state.reconcileShortfalls || [];
+  if(!periods.length){ showAlert('No unreconciled shortfalls found.','info'); return; }
+  if(!canAction('remittance_record_payment')){ showAlert('You do not have permission to reconcile remittances.','danger'); return; }
+  const rows = periods.map((p,idx)=>`
+    <div class="card" style="margin-bottom:10px;padding:12px 14px" id="wo_row_${idx}">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+        <div>
+          <div style="font-weight:700;font-size:13px">${fmtDate(p.from)} – ${fmtDate(p.to)}</div>
+          <div style="font-size:11.5px;color:var(--text3);margin-top:3px">
+            Due: <strong>${fmt(p.due)}</strong> · Paid: <strong>${fmt(p.paid)}</strong>${p.writtenOff>0?` · Written off: <strong>${fmt(p.writtenOff)}</strong>`:''}
+          </div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:15px;font-weight:800;color:var(--danger)">${fmt(p.shortfall)}</div>
+          <button class="btn btn-sm btn-amber" style="margin-top:4px" onclick="App.toggleWriteOffForm(${idx})">⚖️ Write Off</button>
+        </div>
+      </div>
+      <div id="wo_form_${idx}" style="display:none;margin-top:12px;padding-top:12px;border-top:1px dashed var(--border)">
+        <div class="form-group">
+          <label class="form-label">Amount to Write Off *</label>
+          <input type="number" id="wo_amount_${idx}" class="form-input" value="${p.shortfall.toFixed(2)}" min="0.01" max="${p.shortfall}" step="0.01" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Reason *</label>
+          <select id="wo_reason_${idx}" class="form-input" onchange="App.onWriteOffReasonChange(${idx})">
+            ${WRITE_OFF_REASONS.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label" id="wo_notes_label_${idx}">Notes</label>
+          <textarea id="wo_notes_${idx}" class="form-input" rows="2" placeholder="Additional detail (required for 'Other')"></textarea>
+        </div>
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--text2);margin-bottom:12px">
+          <input type="checkbox" id="wo_confirm_${idx}" style="margin-top:2px" />
+          <span>I have authorization to record this write-off.</span>
+        </label>
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+          <button class="btn btn-sm" onclick="App.toggleWriteOffForm(${idx})">Cancel</button>
+          <button class="btn btn-sm btn-primary" onclick="App.submitWriteOff(${idx}, this)">Confirm Write-Off</button>
+        </div>
+      </div>
+    </div>`).join('');
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">⚖️ Reconcile Prior-Period Shortfalls</div>
+    <div class="alert alert-info" style="margin-bottom:14px"><span class="alert-icon">ℹ</span><span>These settled periods were paid for less than the true amount due. Pay the balance separately through Remittances, or write off the shortfall here with a recorded justification.</span></div>
+    ${rows}
+  `);
+}
+
+function toggleWriteOffForm(idx){
+  const el = document.getElementById(`wo_form_${idx}`);
+  if(el) el.style.display = el.style.display==='none' ? 'block' : 'none';
+}
+
+function onWriteOffReasonChange(idx){
+  const reason = document.getElementById(`wo_reason_${idx}`)?.value || '';
+  const label = document.getElementById(`wo_notes_label_${idx}`);
+  if(label) label.textContent = reason.startsWith('Other') ? 'Notes *' : 'Notes';
+}
+
+async function submitWriteOff(idx, btn=null){
+  if(!canAction('remittance_record_payment')){ showAlert('You do not have permission to reconcile remittances.','danger'); return; }
+  const period = (state.reconcileShortfalls||[])[idx];
+  if(!period){ showAlert('This shortfall is no longer available. Please reopen the reconcile modal.','danger'); return; }
+  const amount = parseFloat(document.getElementById(`wo_amount_${idx}`)?.value) || 0;
+  const reason = document.getElementById(`wo_reason_${idx}`)?.value || '';
+  const notes = (document.getElementById(`wo_notes_${idx}`)?.value || '').trim();
+  const confirmed = document.getElementById(`wo_confirm_${idx}`)?.checked;
+  if(!amount || amount <= 0){ showAlert('Enter a valid write-off amount.','danger'); return; }
+  if(amount > period.shortfall + 0.5){ showAlert(`Write-off amount cannot exceed the shortfall (${fmt(period.shortfall)}).`,'danger'); return; }
+  if(!reason){ showAlert('Please select a reason.','danger'); return; }
+  if(reason.startsWith('Other') && !notes){ showAlert('Please specify a reason in the notes field.','danger'); return; }
+  if(!confirmed){ showAlert('Please confirm you have authorization to record this write-off.','danger'); return; }
+
+  const periodLabel = `${fmtDate(period.from)} – ${fmtDate(period.to)}`;
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.addRemittance({
+      label: `Write-off — ${periodLabel}`,
+      amount,
+      paidDate: ymdLocal(new Date()),
+      status: 'written_off',
+      periodFrom: period.from,
+      periodTo: period.to,
+      authorizedBy: state.user?.name || '',
+      notes: `${reason}${notes ? ': ' + notes : ''}`,
+      paymentMethod: 'reconciliation',
+      part: '',
+    });
+    DB.addAudit('remittance_written_off',
+      `Remittance shortfall written off: ${fmt(amount)} for period ${periodLabel} — Reason: ${reason}${notes?': '+notes:''}`,
+      state.user?.name);
+    DB.addNotification('Remittance Written Off',`${fmt(amount)} written off for period ${periodLabel}. Reason: ${reason}`,'warn');
+    closeModal();
+    showAlert(`${fmt(amount)} written off for ${periodLabel}.`,'success');
+    renderDashboard();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to record write-off: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
 }
 
@@ -6796,7 +6937,7 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const priorFirstIncRec=priorIncome.length>0?priorIncome[priorIncome.length-1]:null;
   const priorFirstDate=priorFirstIncRec?String(priorFirstIncRec.date||priorFirstIncRec.createdAt||'').slice(0,10):'';
   const priorAccumQuotas=priorFirstIncRec?accumQuotasAcrossPeriods(quotaList, settings, allRemittances, priorFirstDate, openingBalDate):0;
-  const priorPaidRems=allRemittances.filter(r=>r.status==='paid').filter(r=>{
+  const priorPaidRems=allRemittances.filter(r=>r.status==='paid'||r.status==='written_off').filter(r=>{
     const d=String(r?.paidDate||r?.date||r?.createdAt||'').slice(0,10);
     return !d || d<=openingBalDate;
   }).reduce((s,r)=>s+(r.amount||0),0);
@@ -10519,7 +10660,7 @@ async function generateMonthlyReport(){
   const priorFirstIncRec=priorIncome.length>0?priorIncome[priorIncome.length-1]:null;
   const priorFirstDate=priorFirstIncRec?String(priorFirstIncRec.date||priorFirstIncRec.createdAt||'').slice(0,10):'';
   const priorAccumQuotas=priorFirstIncRec?accumQuotasAcrossPeriods(quotaList, settings, allRemittances, priorFirstDate, openingBalDate):0;
-  const priorPaidRems=allRemittances.filter(r=>r.status==='paid').filter(r=>{
+  const priorPaidRems=allRemittances.filter(r=>r.status==='paid'||r.status==='written_off').filter(r=>{
     const d=String(r?.paidDate||r?.date||r?.createdAt||'').slice(0,10);
     return !d || d<=openingBalDate;
   }).reduce((s,r)=>s+(r.amount||0),0);
@@ -11882,6 +12023,7 @@ return {
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
   updateExpenseSubcats, updateExpenseDescRequired,
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
