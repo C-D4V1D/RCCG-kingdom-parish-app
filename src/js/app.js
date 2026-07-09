@@ -10205,11 +10205,9 @@ async function submitRefill(btn=null){
 /** Opens a print-friendly report in a new window (manual print via button inside report window) */
 function openPrintableReport(title, bodyHTML, shareConfig){
   const shareBtn = shareConfig ? `<button class="print-btn print-btn-outline" onclick="if(window.opener&&window.opener.App){window.opener.App.shareMonthlyStatement('${esc(shareConfig.from)}','${esc(shareConfig.to)}');window.opener.focus();}else{alert('Please return to the app tab to create a shareable link.');}">🔗 Share Link</button>` : '';
-  const html2pdfUrl=window.location.origin+'/dist/js/html2pdf.bundle.min.js';
   const html=`<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <title>${esc(title)}</title>
-<script src="${html2pdfUrl}"><\/script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:'Segoe UI',Arial,sans-serif;font-size:14px;color:#333;line-height:1.5;background:#eef1ee;padding:20px 12px}
@@ -10260,15 +10258,33 @@ function openPrintableReport(title, bodyHTML, shareConfig){
   @media print{
     @page{margin:8mm 10mm;size:A4 landscape}
     html,body{background:#fff!important}
-    body{padding:0;font-size:12px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-    #report-sheet{width:100%;max-width:none;box-shadow:none;padding:0;margin:0}
+    body{padding:0;font-size:11px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    #report-sheet{width:100%!important;max-width:none!important;box-shadow:none;padding:0;margin:0}
     .no-print{display:none!important}
-    table{page-break-inside:auto}
-    tr{page-break-inside:avoid}
+    .section-title{page-break-after:avoid;break-after:avoid;margin-top:12px;margin-bottom:6px;font-size:13px}
+    table{page-break-inside:auto;margin-bottom:8px;font-size:11px}
+    tr{page-break-inside:avoid;page-break-after:auto}
     thead{display:table-header-group}
-    table.wide{font-size:8pt}
-    table.wide th,table.wide td{padding:2px 3px}
-    .sig-section{margin-top:20px}
+    tfoot{display:table-footer-group}
+    th{padding:5px 7px;font-size:10.5px}
+    td{padding:4px 7px}
+    /* Wide tables (Section B, D): shrink font & padding so all columns fit
+       A4 landscape width without column-text wrapping into single letters. */
+    table.wide{font-size:7.5pt;table-layout:fixed;width:100%}
+    table.wide th,table.wide td{padding:2px 3px;white-space:normal;overflow-wrap:break-word;word-break:normal}
+    table.wide th{font-size:7pt}
+    .summary-grid{grid-template-columns:repeat(6,1fr);gap:6px;margin:6px 0 10px}
+    .summary-box{padding:6px 8px}
+    .summary-box .label{font-size:9px;margin-bottom:2px}
+    .summary-box .value{font-size:14px}
+    .report-header{padding-bottom:8px;margin-bottom:10px}
+    .report-header .church-name{font-size:18px}
+    .report-header .report-title{font-size:14px}
+    .report-header .report-period{font-size:12px}
+    .report-header .report-meta{font-size:10.5px}
+    .note-box{font-size:10.5px;padding:6px 10px;margin:6px 0;page-break-inside:avoid}
+    .sig-section{margin-top:16px;page-break-inside:avoid}
+    .sig-box{font-size:10.5px}
   }
   .print-btn-bar{text-align:center;margin-bottom:18px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
   .print-btn{background:#0F6E56;color:#fff;border:none;padding:10px 28px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
@@ -10280,26 +10296,13 @@ function openPrintableReport(title, bodyHTML, shareConfig){
 </head>
 <body>
   <div class="print-btn-bar no-print" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin:16px 0">
-    <button class="print-btn" id="pdfBtn" onclick="downloadPDF()" style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:#185FA5;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">📄 Download PDF</button>
+    <button class="print-btn" onclick="window.print()" style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:#185FA5;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">📄 Save as PDF</button>
     <button class="print-btn" onclick="window.print()" style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:#fff;color:#185FA5;border:2px solid #185FA5;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">🖨️ Print</button>
     ${shareBtn}
   </div>
-  <script>
-  function downloadPDF(){
-    var btn=document.getElementById('pdfBtn');
-    btn.textContent='Generating PDF…';btn.disabled=true;
-    var el=document.getElementById('report-sheet');
-    html2pdf().set({
-      margin:[8,10,8,10],
-      filename:document.title.replace(/[^a-zA-Z0-9 _\\-–—]/g,'')+'.pdf',
-      image:{type:'jpeg',quality:0.95},
-      html2canvas:{scale:2,useCORS:true,scrollY:0,windowWidth:el.scrollWidth},
-      jsPDF:{unit:'mm',format:'a4',orientation:'landscape'},
-      pagebreak:{mode:['avoid-all','css','legacy']}
-    }).from(el).save().then(function(){btn.textContent='📄 Download PDF';btn.disabled=false;})
-    .catch(function(){btn.textContent='📄 Download PDF';btn.disabled=false;alert('PDF generation failed. Please use Print instead.');});
-  }
-  <\/script>
+  <div class="no-print" style="text-align:center;font-size:12px;color:#777;margin:-8px 0 16px;line-height:1.5">
+    Both buttons open your browser's print dialog. To download a PDF, pick <strong>"Save as PDF"</strong> as the destination. Paper size: <strong>A4 Landscape</strong>.
+  </div>
   <div id="report-sheet">${bodyHTML}</div>
 </body></html>`;
   const w=window.open('','_blank');
