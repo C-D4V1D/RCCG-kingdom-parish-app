@@ -10132,9 +10132,11 @@ async function submitRefill(btn=null){
 /** Opens a print-friendly report in a new window (manual print via button inside report window) */
 function openPrintableReport(title, bodyHTML, shareConfig){
   const shareBtn = shareConfig ? `<button class="print-btn print-btn-outline" onclick="if(window.opener&&window.opener.App){window.opener.App.shareMonthlyStatement('${esc(shareConfig.from)}','${esc(shareConfig.to)}');window.opener.focus();}else{alert('Please return to the app tab to create a shareable link.');}">🔗 Share Link</button>` : '';
+  const html2pdfUrl=window.location.origin+'/dist/js/html2pdf.bundle.min.js';
   const html=`<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <title>${esc(title)}</title>
+<script src="${html2pdfUrl}"><\/script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:'Segoe UI',Arial,sans-serif;font-size:14px;color:#333;line-height:1.5;background:#eef1ee;padding:20px 12px}
@@ -10205,11 +10207,26 @@ function openPrintableReport(title, bodyHTML, shareConfig){
 </head>
 <body>
   <div class="print-btn-bar no-print" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin:16px 0">
-    <button class="print-btn" onclick="window.print()" style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:#185FA5;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">📄 Download PDF</button>
+    <button class="print-btn" id="pdfBtn" onclick="downloadPDF()" style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:#185FA5;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">📄 Download PDF</button>
     <button class="print-btn" onclick="window.print()" style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:#fff;color:#185FA5;border:2px solid #185FA5;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">🖨️ Print</button>
     ${shareBtn}
   </div>
-  <div class="no-print" style="text-align:center;font-size:12px;color:#888;margin-bottom:16px">In the print dialog, select <strong>"Save as PDF"</strong> for a PDF file, or choose your printer to print. Paper size: <strong>A4 Landscape</strong>.</div>
+  <script>
+  function downloadPDF(){
+    var btn=document.getElementById('pdfBtn');
+    btn.textContent='Generating PDF…';btn.disabled=true;
+    var el=document.getElementById('report-sheet');
+    html2pdf().set({
+      margin:[8,10,8,10],
+      filename:document.title.replace(/[^a-zA-Z0-9 _\\-–—]/g,'')+'.pdf',
+      image:{type:'jpeg',quality:0.95},
+      html2canvas:{scale:2,useCORS:true,scrollY:0,windowWidth:el.scrollWidth},
+      jsPDF:{unit:'mm',format:'a4',orientation:'landscape'},
+      pagebreak:{mode:['avoid-all','css','legacy']}
+    }).from(el).save().then(function(){btn.textContent='📄 Download PDF';btn.disabled=false;})
+    .catch(function(){btn.textContent='📄 Download PDF';btn.disabled=false;alert('PDF generation failed. Please use Print instead.');});
+  }
+  <\/script>
   <div id="report-sheet">${bodyHTML}</div>
 </body></html>`;
   const w=window.open('','_blank');

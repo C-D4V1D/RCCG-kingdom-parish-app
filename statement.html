@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <meta name="theme-color" content="#0F6E56"/>
 <title>RCCG Monthly Financial Statement</title>
+<script src="/dist/js/html2pdf.bundle.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,Arial,sans-serif;font-size:14px;color:#1a1a1a;background:#f0f4f0;min-height:100vh}
@@ -118,7 +119,7 @@ tr:nth-child(even) td{background:#f8fbf8}
     <div class="top-bar-sub" id="topBarPeriod">Loading…</div>
   </div>
   <div class="top-bar-actions no-print">
-    <button class="action-btn primary" onclick="window.print()">
+    <button class="action-btn primary" id="pdfBtn" onclick="downloadPDF()">
       <span>📄</span><span class="label"> Download PDF</span>
     </button>
     <button class="action-btn" style="background:#fff;color:#185FA5;border:2px solid #185FA5" onclick="window.print()">
@@ -126,7 +127,22 @@ tr:nth-child(even) td{background:#f8fbf8}
     </button>
   </div>
 </div>
-<div class="no-print" style="text-align:center;font-size:12px;color:#888;margin:8px 0 0">In the print dialog, select <strong>"Save as PDF"</strong> for a PDF file, or choose your printer. Paper size: <strong>A4 Landscape</strong>.</div>
+<script>
+function downloadPDF(){
+  var btn=document.getElementById('pdfBtn');
+  btn.querySelector('.label').textContent=' Generating…';btn.disabled=true;
+  var el=document.getElementById('sections');
+  html2pdf().set({
+    margin:[8,10,8,10],
+    filename:document.title.replace(/[^a-zA-Z0-9 _\-–—]/g,'')+'.pdf',
+    image:{type:'jpeg',quality:0.95},
+    html2canvas:{scale:2,useCORS:true,scrollY:0,windowWidth:el.scrollWidth},
+    jsPDF:{unit:'mm',format:'a4',orientation:'landscape'},
+    pagebreak:{mode:['avoid-all','css','legacy']}
+  }).from(el).save().then(function(){btn.querySelector('.label').textContent=' Download PDF';btn.disabled=false;})
+  .catch(function(){btn.querySelector('.label').textContent=' Download PDF';btn.disabled=false;alert('PDF generation failed. Please use Print instead.');});
+}
+</script>
 
 <div id="loading-state">
   <div style="font-size:24px;margin-bottom:10px">⏳</div>
