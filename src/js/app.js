@@ -3247,7 +3247,7 @@ async function renderDashboard(){
     ? accumQuotasAcrossPeriods(dashQuotas, settingsDash, allRemsDash, dashOpeningFirstDateStr, dashPriorCloseDate)
     : 0;
   const dashOpeningPaidRems = allRemsDash
-    .filter(r => r.status === 'paid')
+    .filter(r => r.status === 'paid' || r.status === 'written_off')
     .filter(r => {
       const d = String(r?.paidDate || r?.createdAt || '').slice(0,10);
       return !d || d <= dashPriorCloseDate;
@@ -6934,7 +6934,7 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const priorFirstIncRec=priorIncome.length>0?priorIncome[priorIncome.length-1]:null;
   const priorFirstDate=priorFirstIncRec?String(priorFirstIncRec.date||priorFirstIncRec.createdAt||'').slice(0,10):'';
   const priorAccumQuotas=priorFirstIncRec?accumQuotasAcrossPeriods(quotaList, settings, allRemittances, priorFirstDate, openingBalDate):0;
-  const priorPaidRems=allRemittances.filter(r=>r.status==='paid').filter(r=>{
+  const priorPaidRems=allRemittances.filter(r=>r.status==='paid'||r.status==='written_off').filter(r=>{
     const d=String(r?.paidDate||r?.date||r?.createdAt||'').slice(0,10);
     return !d || d<=openingBalDate;
   }).reduce((s,r)=>s+(r.amount||0),0);
@@ -10657,7 +10657,7 @@ async function generateMonthlyReport(){
   const priorFirstIncRec=priorIncome.length>0?priorIncome[priorIncome.length-1]:null;
   const priorFirstDate=priorFirstIncRec?String(priorFirstIncRec.date||priorFirstIncRec.createdAt||'').slice(0,10):'';
   const priorAccumQuotas=priorFirstIncRec?accumQuotasAcrossPeriods(quotaList, settings, allRemittances, priorFirstDate, openingBalDate):0;
-  const priorPaidRems=allRemittances.filter(r=>r.status==='paid').filter(r=>{
+  const priorPaidRems=allRemittances.filter(r=>r.status==='paid'||r.status==='written_off').filter(r=>{
     const d=String(r?.paidDate||r?.date||r?.createdAt||'').slice(0,10);
     return !d || d<=openingBalDate;
   }).reduce((s,r)=>s+(r.amount||0),0);
