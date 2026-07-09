@@ -4485,8 +4485,18 @@ async function submitIncome(btn=null){
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     const saved = await DB.addIncome(rec);
-    const cashWithAccountant = getSundayCashWithAccountant(rec, remRates);
-    DB.addAudit('income_recorded',`Sunday collection ${fmt(total)} for ${fmtDate(date)} — Cash with Accountant: ${fmt(cashWithAccountant)}, Children Teacher Hold: ${fmt(childrenTeacherHeld)}, Bank Transfer: ${fmt(bankTransferAmount)}, Direct Petty: ${fmt(directPettyCash)}. Counted with: ${usher}`,state.user?.name);
+    // If this submission was folded into an already-recorded Sunday collection (e.g.
+    // Holy Communion Offering counted separately from the main offering), reflect the
+    // Sunday's cumulative totals — not just this entry — in the cash/audit figures.
+    const sundayTotal = Number(saved?.totalCollection ?? total);
+    const cashWithAccountant = getSundayCashWithAccountant(saved?.merged ? saved : rec, remRates);
+    const cashHoldForAudit = saved?.merged ? getChildrenTeacherHeldCash(saved, remRates) : childrenTeacherHeld;
+
+    if(saved?.merged){
+      DB.addAudit('income_recorded',`+${fmt(total)} merged into existing Sunday collection for ${fmtDate(date)} (new total ${fmt(sundayTotal)}) — Cash with Accountant: ${fmt(cashWithAccountant)}, Children Teacher Hold: ${fmt(cashHoldForAudit)}, Direct Petty (this entry): ${fmt(directPettyCash)}. Counted with: ${usher}`,state.user?.name);
+    } else {
+      DB.addAudit('income_recorded',`Sunday collection ${fmt(total)} for ${fmtDate(date)} — Cash with Accountant: ${fmt(cashWithAccountant)}, Children Teacher Hold: ${fmt(cashHoldForAudit)}, Bank Transfer: ${fmt(bankTransferAmount)}, Direct Petty: ${fmt(directPettyCash)}. Counted with: ${usher}`,state.user?.name);
+    }
 
     // If some cash was given directly to the admin officer, auto-create a petty refill
     if(directPettyCash > 0){
@@ -4500,9 +4510,14 @@ async function submitIncome(btn=null){
       DB.addAudit('petty_refilled',`${fmt(directPettyCash)} from Sunday collection credited to Admin Officer petty cash`,state.user?.name);
     }
 
-    DB.addNotification('Income Recorded',`${fmt(total)} recorded for ${fmtDate(date)}${childrenTeacherHeld?` | ${fmt(childrenTeacherHeld)} → Children Refreshments`:''}${directPettyCash?` | ${fmt(directPettyCash)} → Petty Cash`:''}`,'success');
     closeModal();
-    showAlert(`Income of ${fmt(total)} recorded. Cash with accountant: ${fmt(cashWithAccountant)}${childrenTeacherHeld?` | Children Teacher: ${fmt(childrenTeacherHeld)}`:''}${bankTransferAmount?` | Bank: ${fmt(bankTransferAmount)}`:''}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
+    if(saved?.merged){
+      DB.addNotification('Added to Existing Collection',`${fmt(total)} added to the ${fmtDate(date)} Sunday collection — new total ${fmt(sundayTotal)}`,'success');
+      showAlert(`Added ${fmt(total)} to the existing collection for ${fmtDate(date)}. New total: ${fmt(sundayTotal)}. Cash with accountant: ${fmt(cashWithAccountant)}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
+    } else {
+      DB.addNotification('Income Recorded',`${fmt(total)} recorded for ${fmtDate(date)}${cashHoldForAudit?` | ${fmt(cashHoldForAudit)} → Children Refreshments`:''}${directPettyCash?` | ${fmt(directPettyCash)} → Petty Cash`:''}`,'success');
+      showAlert(`Income of ${fmt(total)} recorded. Cash with accountant: ${fmt(cashWithAccountant)}${cashHoldForAudit?` | Children Teacher: ${fmt(cashHoldForAudit)}`:''}${bankTransferAmount?` | Bank: ${fmt(bankTransferAmount)}`:''}${directPettyCash?` | Petty: ${fmt(directPettyCash)}`:''}`, 'success');
+    }
     renderIncome();
     buildSidebar();
   } catch(err) {
