@@ -211,12 +211,17 @@ function renderReport(resp){
   document.getElementById('rptMeta').innerHTML =
     `<strong>Shared by:</strong> ${esc(resp.createdBy||D.preparedBy||'—')} &nbsp;|&nbsp; <strong>No. of Sundays:</strong> ${D.sundayCount||0}`;
 
-  // KPIs
+  // KPIs — v2 statements use money-in-bank + available-fund (accurate cash position);
+  // v1/legacy statements fall back to Net Parish Balance.
+  const usingV2Kpis = (D.sectionFVersion || 0) >= 2 && D.closingBalance !== undefined;
+  const balKpi = usingV2Kpis
+    ? {lbl:'Money in Bank & Cash', val:N(D.closingBalance), cls:(D.closingBalance>=0?'':'red')}
+    : {lbl:'Net Parish Balance', val:N(D.netPositionExChildren), cls:(D.netPositionExChildren>=0?'':'red')};
   document.getElementById('kpiGrid').innerHTML = [
     {lbl:'Total Income', val:N(D.totalIncome), cls:''},
     {lbl:'Total Expenses', val:N(D.totalExpenses), cls:'red'},
     {lbl:'Remittances Due', val:N(D.totalRemDue), cls:'red'},
-    {lbl:'Net Parish Balance', val:N(D.netPositionExChildren), cls:(D.netPositionExChildren>=0?'':'red')},
+    balKpi,
   ].map(k=>`<div class="kpi-tile ${k.cls}"><div class="kpi-val">${k.val}</div><div class="kpi-lbl">${k.lbl}</div></div>`).join('');
 
   let html = '';
@@ -290,11 +295,51 @@ function renderReport(resp){
     html += section('Section E — Expense Summary by Category', '', table+`<div class="card-list">${cards}</div>`, false, true);
   }
 
-  // Section F — Financial Position Summary
+  // Section F — Where The Money Stands (Financial Position Summary)
   {
-    let pos;
-    if(D.openingBalance !== undefined && D.openingBalance !== null){
-      pos = `<tr style="background:#e8f4f0"><td style="font-weight:600;color:#0F6E56">Opening Balance (carried from prior period)</td><td class="td-r" style="font-weight:600;color:#0F6E56">${N(D.openingBalance)}</td></tr>
+    const v = D.sectionFVersion || (D.openingBalance !== undefined && D.openingBalance !== null ? 1 : 0);
+    if(v >= 2){
+      // v2 — accurate cash-position anchored to calcChurchBalance()
+      const reconcileAdj = Math.abs(D.closingReconcileDiff||0) >= 1
+        ? `<tr><td style="padding-left:20px;color:#888;font-style:italic">Adjustments (internal cash movements, rounding)</td><td class="td-r" style="color:#888">${(D.closingReconcileDiff||0)>0?'+ ':'− '}${N(Math.abs(D.closingReconcileDiff||0))}</td></tr>`
+        : '';
+      const childrenLine = (D.childrenTeacherHold||0) > 0
+        ? `<tr class="deduct-row"><td style="padding-left:20px">Less: Children's Dept. cash kept with teacher</td><td class="td-r red">− ${N(D.childrenTeacherHold)}</td></tr>`
+        : '';
+      const flow = `
+        <tr style="background:#eaf5ff"><td style="font-weight:600;color:#185FA5">Money carried over from last period <span style="font-size:11px;color:#666;font-weight:normal">(as of ${esc(D.openingBalDate||'')})</span></td><td class="td-r" style="font-weight:600;color:#185FA5">${N(D.openingBalance)}</td></tr>
+        <tr><td style="padding-left:20px">Add: All money received this period</td><td class="td-r grn">+ ${N(D.totalIncome)}</td></tr>
+        <tr class="deduct-row"><td style="padding-left:20px">Less: Money spent on church needs (expenses)</td><td class="td-r red">− ${N(D.totalExpenses)}</td></tr>
+        <tr class="deduct-row"><td style="padding-left:20px">Less: RCCG remittances already paid</td><td class="td-r red">− ${N(D.totalRemPaid||0)}</td></tr>
+        ${childrenLine}
+        ${reconcileAdj}
+        <tr class="total-row" style="background:#e8f4f0"><td style="color:#0F6E56">💰 MONEY CURRENTLY IN OUR BANK &amp; CASH</td><td class="td-r ${D.closingBalance>=0?'grn':'red'}" style="font-size:15px">${N(D.closingBalance)}</td></tr>`;
+      const deficitTxt = (D.closingCashDeficit||0) > 0 ? ` <span style="color:#c0392b;font-size:11px">(deficit: ${N(D.closingCashDeficit)})</span>` : '';
+      const pettyWarn = (D.closingPettyFloat||0) < 0 ? ' <span style="font-size:11px">⚠️ owed by petty holder</span>' : '';
+      const breakdown = `
+        <table style="font-size:12px;margin-top:2px">
+          <tr><td style="padding-left:36px;color:#555;border-bottom:none">• In the Bank Account</td><td class="td-r" style="color:#333;border-bottom:none">${N(D.closingBankBalance||0)}</td></tr>
+          <tr><td style="padding-left:36px;color:#555;border-bottom:none">• Cash with Accountant</td><td class="td-r" style="color:#333;border-bottom:none">${N(D.closingCashWithAccountant||0)}${deficitTxt}</td></tr>
+          <tr><td style="padding-left:36px;color:#555">• Petty Cash Float</td><td class="td-r" style="color:${(D.closingPettyFloat||0)<0?'#c0392b':'#333'}">${N(D.closingPettyFloat||0)}${pettyWarn}</td></tr>
+        </table>`;
+      const avail = D.availableParishFund;
+      const outstanding = D.totalOutstandingRems || 0;
+      const usable = `
+        <div style="font-size:13px;font-weight:600;color:#0F6E56;margin:14px 0 6px">But some of this money is not really ours to spend…</div>
+        <table>
+          <tr><td>Money in bank &amp; cash</td><td class="td-r">${N(D.closingBalance)}</td></tr>
+          <tr class="deduct-row"><td style="padding-left:20px">Less: RCCG remittances still owed <span style="font-size:11px;color:#888">(this period + any prior unpaid)</span></td><td class="td-r red">− ${N(outstanding)}</td></tr>
+          <tr class="total-row" style="background:${avail>=0?'#e8f4f0':'#fdf0f0'}"><td style="color:${avail>=0?'#0F6E56':'#c0392b'}">✅ WHAT THE PARISH CAN ACTUALLY USE</td><td class="td-r" style="color:${avail>=0?'#0F6E56':'#c0392b'};font-size:15px">${N(avail)}</td></tr>
+        </table>`;
+      const helpNote = `<div class="note-box" style="background:#f4f9ff;border-color:#c9dcef;color:#345574"><strong>How to read this:</strong> The ${N(outstanding)} above is money currently sitting in our bank that must be sent to RCCG headquarters — think of it as money we're holding on their behalf. Once we send it, our true parish balance will be <strong>${N(avail)}</strong>.</div>`;
+      let inner = `<div class="table-wrap"><table>${flow}</table></div>${breakdown}${usable}${helpNote}`;
+      if(avail < 0) inner += `<div class="note-box">⚠️ The parish is in a deficit position — outstanding remittances exceed available cash. Please review with the Parish Pastor.</div>`;
+      if((D.closingPettyFloat||0) < 0) inner += `<div class="note-box">⚠️ Petty cash float is negative — the petty cash holder has spent more than the float. A reconciliation top-up is needed.</div>`;
+      html += section('Section F — Where The Money Stands', 'Financial Position Summary', inner, true, false);
+    } else if(v === 1){
+      // v1 — first-generation opening/closing (uses Rem DUE, not Paid — retained
+      // so previously-shared statements still render with their original numbers)
+      let pos = `<tr style="background:#e8f4f0"><td style="font-weight:600;color:#0F6E56">Opening Balance (carried from prior period)</td><td class="td-r" style="font-weight:600;color:#0F6E56">${N(D.openingBalance)}</td></tr>
         <tr><td style="padding-left:20px">Add: Total Income for ${esc(period)}</td><td class="td-r grn">${N(D.totalIncome)}</td></tr>
         <tr class="deduct-row"><td style="padding-left:20px">Less: Remittances Due to RCCG</td><td class="td-r red">− ${N(D.totalRemDue)}</td></tr>
         <tr class="deduct-row"><td style="padding-left:20px">Less: Local Expenses</td><td class="td-r red">− ${N(D.totalExpenses)}</td></tr>`;
@@ -307,7 +352,7 @@ function renderReport(resp){
       if(closingVal < 0) inner += `<div class="note-box">⚠️ The parish is in a deficit position this period. Expenses and remittances exceed total income. Please review with the Parish Pastor.</div>`;
       html += section('Section F — Financial Position Summary', '', inner, true, false);
     } else {
-      // Legacy format for old saved statements
+      // Legacy — original NET PARISH BALANCE layout
       let pos = `<tr><td style="font-weight:600">Total Income for ${esc(period)}</td><td class="td-r grn">${N(D.totalIncome)}</td></tr>
         <tr class="deduct-row"><td style="padding-left:20px">Less: Remittances Due to RCCG</td><td class="td-r red">− ${N(D.totalRemDue)}</td></tr>
         <tr class="deduct-row"><td style="padding-left:20px">Less: Local Expenses</td><td class="td-r red">− ${N(D.totalExpenses)}</td></tr>`;
