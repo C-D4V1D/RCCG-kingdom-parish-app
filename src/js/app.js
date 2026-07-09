@@ -3697,7 +3697,10 @@ async function renderDashboard(){
         </div>
         ${dashPriorUnpaid>0?`
         <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(184,134,11,0.25);display:flex;align-items:center;justify-content:space-between;gap:12px">
-          <div style="font-size:10.5px;color:var(--text3)">Includes unpaid from previous period(s)</div>
+          <div>
+            <div style="font-size:10.5px;color:var(--text3)">Includes unpaid from previous period(s)</div>
+            ${dashShortfallPeriods.length?`<button onclick="App.openReconcileModal()" style="margin-top:4px;background:transparent;border:none;color:var(--primary);font-size:11px;font-weight:600;text-decoration:underline;cursor:pointer;padding:0">Reconcile →</button>`:''}
+          </div>
           <div style="font-size:14px;font-weight:700;color:var(--danger);white-space:nowrap;flex-shrink:0">${fmt(dashPriorUnpaid)}</div>
         </div>`:''}
       </div>
