@@ -5732,7 +5732,7 @@ async function renderRemittances(){
   const _dPartBTotal=partBLines.reduce((s,l)=>s+l.amount,0);
   const _dTotalDue=_dPartATotal+_dPartBTotal;
 
-  const allPaidRems=allRems.filter(r=>r.status==='paid')
+  const allPaidRems=allRems.filter(r=>r.status==='paid'||r.status==='written_off')
     .sort((a,b)=>new Date(b.paidDate||b.createdAt||0)-new Date(a.paidDate||a.createdAt||0));
 
   const pendingApprovals=allRems.filter(r=>r.status==='pending_approval')
@@ -5898,16 +5898,19 @@ async function renderRemittances(){
 
         <div class="card" style="margin-bottom:12px">
           <div class="card-header"><span class="card-title">Payment History</span></div>
-          ${allPaidRems.length?allPaidRems.slice(0,10).map(r=>`
+          ${allPaidRems.length?allPaidRems.slice(0,10).map(r=>{
+            const isWrittenOff=r.status==='written_off';
+            return `
             <div class="feed-item">
-              <div class="feed-dot" style="background:var(--success-light)">✓</div>
+              <div class="feed-dot" style="background:${isWrittenOff?'#FDECC8':'var(--success-light)'}">${isWrittenOff?'⚖️':'✓'}</div>
               <div class="feed-body">
-                <div class="feed-title">${esc(r.label||'RCCG Remittance')}</div>
-                <div class="feed-sub">${r.periodFrom&&r.periodTo?`<em>Period: ${fmtDate(r.periodFrom)} – ${fmtDate(r.periodTo)}</em><br>`:''}${r.paymentMethod==='cash'?'💵 Cash':'🏦 Bank'} · Ref: ${esc(r.reference)||'—'} · ${esc(r.authorizedBy)||'—'}</div>
+                <div class="feed-title">${esc(r.label||'RCCG Remittance')} ${isWrittenOff?'<span class="badge badge-warn" style="font-size:9px;margin-left:4px">WRITTEN OFF</span>':''}</div>
+                <div class="feed-sub">${r.periodFrom&&r.periodTo?`<em>Period: ${fmtDate(r.periodFrom)} – ${fmtDate(r.periodTo)}</em><br>`:''}${isWrittenOff?`Reason: ${esc(r.notes)||'—'}`:`${r.paymentMethod==='cash'?'💵 Cash':'🏦 Bank'} · Ref: ${esc(r.reference)||'—'}`} · ${esc(r.authorizedBy)||'—'}</div>
                 <div class="feed-time">${fmtDate(r.paidDate)}</div>
               </div>
-              <div class="feed-right td-green">${fmt(r.amount)}</div>
-            </div>`).join(''):'<div class="empty-table">No remittance payments recorded yet.</div>'}
+              <div class="feed-right" style="color:${isWrittenOff?'var(--amber)':'var(--success)'}">${fmt(r.amount)}</div>
+            </div>`;
+          }).join(''):'<div class="empty-table">No remittance payments recorded yet.</div>'}
         </div>
 
         <div class="card">
