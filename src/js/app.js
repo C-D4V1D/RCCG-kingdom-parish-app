@@ -6730,30 +6730,81 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
   const income=filterByDateRange(allIncome,fromDate,toDate);
   const expenses=filterByDateRange(allExpenses,fromDate,toDate).filter(e=>isLoggedExpense(e));
-  const paidRems=filterByDateRange(allRemittances,fromDate,toDate);
   const rem=await calcRemittancesFromRecords(income);
   const quotaList=getQuotaList(settings);
   const quotaLines=getQuotaLinesForPeriod(quotaList, fromDate, toDate);
   const totalFixedQuotas=sumQuotaLines(quotaLines);
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
-  const totalRemPaid=paidRems.reduce((s,r)=>s+(r.amount||0),0);
+  // Remittances actually paid *during* this period — filter by paidDate on records
+  // with status='paid'. This is the only figure that matches the cash that left the
+  // bank between fromDate and toDate (dashboard uses the same filter).
+  const periodPaidRems=allRemittances.filter(r=>r.status==='paid').filter(r=>{
+    const d=String(r?.paidDate||r?.date||r?.createdAt||'').slice(0,10);
+    return d && d>=fromDate && d<=toDate;
+  });
+  const totalRemPaid=periodPaidRems.reduce((s,r)=>s+(r.amount||0),0);
   const totalRemDue=totalRemittanceDue(rem, totalFixedQuotas);
   const trueNetLocal=rem.netLocal-totalFixedQuotas;
   const netPosition=totalIncome-totalExpenses-totalRemDue;
   const totalChildrenOffering=income.reduce((s,r)=>s+(r.childrenOffering||0),0);
   const childrenLocalShare=totalChildrenOffering*getChildrenOfferingLocalRate(remRates);
   const netPositionExChildren=netPosition-childrenLocalShare;
+  // Children Teacher held cash: the portion of children's offering that stays with
+  // the teacher and never enters the church's admin-managed accounts. Sum across
+  // Sunday records only (matches dashboard's dashChildrenTeacherTotal at line 3009).
+  const sundayIncomeRecords=income.filter(r=>!r.source||r.source==='sunday_collection');
+  const childrenTeacherHold=sundayIncomeRecords.reduce((s,r)=>s+getChildrenTeacherHeldCash(r,remRates),0);
+
+  // Opening & closing balances via calcChurchBalance() — the same engine the
+  // dashboard uses. Guarantees the report's closing balance matches the
+  // dashboard's "Total Church Balance" figure exactly.
   const _msFromDate=new Date(fromDate+'T00:00:00');
   const _msDayBefore=new Date(_msFromDate);_msDayBefore.setDate(_msDayBefore.getDate()-1);
   const openingBalDate=ymdLocal(_msDayBefore);
-  const openingBalResult=await calcChurchBalance(openingBalDate,{
-    income:allIncome,expenses:allExpenses,remittances:allRemittances,
-    cashTx:allCashTx,pettyHistory:allPettyMS,remRates:remRates
-  });
+  const [openingBalResult, closingBalResult]=await Promise.all([
+    calcChurchBalance(openingBalDate,{
+      income:allIncome,expenses:allExpenses,remittances:allRemittances,
+      cashTx:allCashTx,pettyHistory:allPettyMS,remRates:remRates
+    }),
+    calcChurchBalance(toDate,{
+      income:allIncome,expenses:allExpenses,remittances:allRemittances,
+      cashTx:allCashTx,pettyHistory:allPettyMS,remRates:remRates
+    })
+  ]);
   const openingBalance=openingBalResult.total;
-  const closingBalance=openingBalance+totalIncome-totalRemDue-totalExpenses-childrenLocalShare;
-  const sundayCount=new Set(income.filter(r=>!r.source||r.source==='sunday_collection').map(r=>r.date)).size;
+  const closingBalance=closingBalResult.total;
+  const closingBankBalance=closingBalResult.bankBalance;
+  const closingCashWithAccountant=closingBalResult.cashWithAccountant;
+  const closingCashDeficit=closingBalResult.cashDeficit||0;
+  const closingPettyFloat=closingBalResult.pettyFloat;
+  // Algebraic check: opening + income − expenses − remPaid − childrenTeacherHold
+  // should equal closing. Any drift is a data-integrity signal (typically a
+  // remittance with an inconsistent paidDate vs date). Rounded to whole naira
+  // to absorb the paise-level drift from percentage splits.
+  const closingReconstructed=openingBalance+totalIncome-totalExpenses-totalRemPaid-childrenTeacherHold;
+  const closingReconcileDiff=Math.round(closingBalance-closingReconstructed);
+
+  // Total outstanding remittances (this period's due + any prior period unpaid).
+  // Mirrors the dashboard's calcOutstandingRemittancesFromFlow logic so the two
+  // views show the same "Available Fund" figure.
+  const priorIncome=allIncome.filter(r=>{
+    const d=String(r?.date||r?.createdAt||'').slice(0,10);
+    return d && d<=openingBalDate;
+  });
+  const priorRemCalc=await calcRemittancesFromRecords(priorIncome, remRatesData);
+  const priorFirstIncRec=priorIncome.length>0?priorIncome[priorIncome.length-1]:null;
+  const priorFirstDate=priorFirstIncRec?String(priorFirstIncRec.date||priorFirstIncRec.createdAt||'').slice(0,10):'';
+  const priorAccumQuotas=priorFirstIncRec?accumQuotasAcrossPeriods(quotaList, settings, allRemittances, priorFirstDate, openingBalDate):0;
+  const priorPaidRems=allRemittances.filter(r=>r.status==='paid').filter(r=>{
+    const d=String(r?.paidDate||r?.date||r?.createdAt||'').slice(0,10);
+    return !d || d<=openingBalDate;
+  }).reduce((s,r)=>s+(r.amount||0),0);
+  const openingOutstandingRems=Math.max(0, totalRemittanceDue(priorRemCalc)+priorAccumQuotas-priorPaidRems);
+  const totalOutstandingRems=calcOutstandingRemittancesFromFlow(openingOutstandingRems, totalRemDue, totalRemPaid);
+  const availableParishFund=closingBalance-totalOutstandingRems;
+
+  const sundayCount=new Set(sundayIncomeRecords.map(r=>r.date)).size;
 
   // Section A — income by type
   const incomeByType={};
@@ -6837,6 +6888,13 @@ async function buildMonthlyStatementData(fromDate, toDate){
     expenseByCategory,
     otherIncomeTotal, openingBalance, closingBalance, openingBalDate:fmtDate(openingBalDate),
     outstandingRemittance:Math.max(0, totalRemDue-totalRemPaid),
+    // Section F v2 — accurate cash-position figures anchored to calcChurchBalance()
+    closingBankBalance, closingCashWithAccountant, closingCashDeficit, closingPettyFloat,
+    childrenTeacherHold, totalOutstandingRems, availableParishFund,
+    closingReconcileDiff,
+    // sectionFVersion signals to statement.html to use the new layout. Old saved
+    // statements omit it and fall back to the legacy Opening+Income−RemDue view.
+    sectionFVersion:2,
   };
 }
 
@@ -10147,11 +10205,9 @@ async function submitRefill(btn=null){
 /** Opens a print-friendly report in a new window (manual print via button inside report window) */
 function openPrintableReport(title, bodyHTML, shareConfig){
   const shareBtn = shareConfig ? `<button class="print-btn print-btn-outline" onclick="if(window.opener&&window.opener.App){window.opener.App.shareMonthlyStatement('${esc(shareConfig.from)}','${esc(shareConfig.to)}');window.opener.focus();}else{alert('Please return to the app tab to create a shareable link.');}">🔗 Share Link</button>` : '';
-  const html2pdfUrl=window.location.origin+'/dist/js/html2pdf.bundle.min.js';
   const html=`<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <title>${esc(title)}</title>
-<script src="${html2pdfUrl}"><\/script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:'Segoe UI',Arial,sans-serif;font-size:14px;color:#333;line-height:1.5;background:#eef1ee;padding:20px 12px}
@@ -10202,15 +10258,33 @@ function openPrintableReport(title, bodyHTML, shareConfig){
   @media print{
     @page{margin:8mm 10mm;size:A4 landscape}
     html,body{background:#fff!important}
-    body{padding:0;font-size:12px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-    #report-sheet{width:100%;max-width:none;box-shadow:none;padding:0;margin:0}
+    body{padding:0;font-size:11px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    #report-sheet{width:100%!important;max-width:none!important;box-shadow:none;padding:0;margin:0}
     .no-print{display:none!important}
-    table{page-break-inside:auto}
-    tr{page-break-inside:avoid}
+    .section-title{page-break-after:avoid;break-after:avoid;margin-top:12px;margin-bottom:6px;font-size:13px}
+    table{page-break-inside:auto;margin-bottom:8px;font-size:11px}
+    tr{page-break-inside:avoid;page-break-after:auto}
     thead{display:table-header-group}
-    table.wide{font-size:8pt}
-    table.wide th,table.wide td{padding:2px 3px}
-    .sig-section{margin-top:20px}
+    tfoot{display:table-footer-group}
+    th{padding:5px 7px;font-size:10.5px}
+    td{padding:4px 7px}
+    /* Wide tables (Section B, D): shrink font & padding so all columns fit
+       A4 landscape width without column-text wrapping into single letters. */
+    table.wide{font-size:7.5pt;table-layout:fixed;width:100%}
+    table.wide th,table.wide td{padding:2px 3px;white-space:normal;overflow-wrap:break-word;word-break:normal}
+    table.wide th{font-size:7pt}
+    .summary-grid{grid-template-columns:repeat(6,1fr);gap:6px;margin:6px 0 10px}
+    .summary-box{padding:6px 8px}
+    .summary-box .label{font-size:9px;margin-bottom:2px}
+    .summary-box .value{font-size:14px}
+    .report-header{padding-bottom:8px;margin-bottom:10px}
+    .report-header .church-name{font-size:18px}
+    .report-header .report-title{font-size:14px}
+    .report-header .report-period{font-size:12px}
+    .report-header .report-meta{font-size:10.5px}
+    .note-box{font-size:10.5px;padding:6px 10px;margin:6px 0;page-break-inside:avoid}
+    .sig-section{margin-top:16px;page-break-inside:avoid}
+    .sig-box{font-size:10.5px}
   }
   .print-btn-bar{text-align:center;margin-bottom:18px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
   .print-btn{background:#0F6E56;color:#fff;border:none;padding:10px 28px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
@@ -10222,26 +10296,13 @@ function openPrintableReport(title, bodyHTML, shareConfig){
 </head>
 <body>
   <div class="print-btn-bar no-print" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin:16px 0">
-    <button class="print-btn" id="pdfBtn" onclick="downloadPDF()" style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:#185FA5;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">📄 Download PDF</button>
+    <button class="print-btn" onclick="window.print()" style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:#185FA5;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">📄 Save as PDF</button>
     <button class="print-btn" onclick="window.print()" style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:#fff;color:#185FA5;border:2px solid #185FA5;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">🖨️ Print</button>
     ${shareBtn}
   </div>
-  <script>
-  function downloadPDF(){
-    var btn=document.getElementById('pdfBtn');
-    btn.textContent='Generating PDF…';btn.disabled=true;
-    var el=document.getElementById('report-sheet');
-    html2pdf().set({
-      margin:[8,10,8,10],
-      filename:document.title.replace(/[^a-zA-Z0-9 _\\-–—]/g,'')+'.pdf',
-      image:{type:'jpeg',quality:0.95},
-      html2canvas:{scale:2,useCORS:true,scrollY:0,windowWidth:el.scrollWidth},
-      jsPDF:{unit:'mm',format:'a4',orientation:'landscape'},
-      pagebreak:{mode:['avoid-all','css','legacy']}
-    }).from(el).save().then(function(){btn.textContent='📄 Download PDF';btn.disabled=false;})
-    .catch(function(){btn.textContent='📄 Download PDF';btn.disabled=false;alert('PDF generation failed. Please use Print instead.');});
-  }
-  <\/script>
+  <div class="no-print" style="text-align:center;font-size:12px;color:#777;margin:-8px 0 16px;line-height:1.5">
+    Both buttons open your browser's print dialog. To download a PDF, pick <strong>"Save as PDF"</strong> as the destination. Paper size: <strong>A4 Landscape</strong>.
+  </div>
   <div id="report-sheet">${bodyHTML}</div>
 </body></html>`;
   const w=window.open('','_blank');
@@ -10405,31 +10466,68 @@ async function generateMonthlyReport(){
   const allMonthExpenses=filterByDateRange(allExpenses,fromDate,toDate);
   const expenses=allMonthExpenses.filter(e=>isLoggedExpense(e));
   const pendingExpCount=0;
-  const paidRems=filterByDateRange(allRemittances,fromDate,toDate);
   const rem=await calcRemittancesFromRecords(income);
   const quotaList=getQuotaList(settings);
   const quotaLines=getQuotaLinesForPeriod(quotaList, fromDate, toDate);
   const totalFixedQuotas=sumQuotaLines(quotaLines);
   const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
-  const totalRemPaid=paidRems.reduce((s,r)=>s+(r.amount||0),0);
+  // See buildMonthlyStatementData() for filter rationale — paidDate + status='paid'
+  // gives the true cash outflow within the period.
+  const periodPaidRems=allRemittances.filter(r=>r.status==='paid').filter(r=>{
+    const d=String(r?.paidDate||r?.date||r?.createdAt||'').slice(0,10);
+    return d && d>=fromDate && d<=toDate;
+  });
+  const totalRemPaid=periodPaidRems.reduce((s,r)=>s+(r.amount||0),0);
   const totalRemDue=totalRemittanceDue(rem, totalFixedQuotas);
   const trueNetLocal=rem.netLocal-totalFixedQuotas;
   const netPosition=totalIncome-totalExpenses-totalRemDue;
   const totalChildrenOffering=income.reduce((s,r)=>s+(r.childrenOffering||0),0);
   const childrenLocalShare=totalChildrenOffering*getChildrenOfferingLocalRate(remRates);
   const netPositionExChildren=netPosition-childrenLocalShare;
+  const sundayIncomeRecords=income.filter(r=>!r.source||r.source==='sunday_collection');
+  const childrenTeacherHold=sundayIncomeRecords.reduce((s,r)=>s+getChildrenTeacherHeldCash(r,remRates),0);
+
+  // Opening & closing balances via calcChurchBalance() — matches dashboard exactly.
   const _mrFromDate=new Date(fromDate+'T00:00:00');
   const _mrDayBefore=new Date(_mrFromDate);_mrDayBefore.setDate(_mrDayBefore.getDate()-1);
   const openingBalDate=ymdLocal(_mrDayBefore);
-  const openingBalResult=await calcChurchBalance(openingBalDate,{
-    income:allIncome,expenses:allExpenses,remittances:allRemittances,
-    cashTx:allCashTx,pettyHistory:allPettyMR,remRates:remRates
-  });
+  const [openingBalResult, closingBalResult]=await Promise.all([
+    calcChurchBalance(openingBalDate,{
+      income:allIncome,expenses:allExpenses,remittances:allRemittances,
+      cashTx:allCashTx,pettyHistory:allPettyMR,remRates:remRates
+    }),
+    calcChurchBalance(toDate,{
+      income:allIncome,expenses:allExpenses,remittances:allRemittances,
+      cashTx:allCashTx,pettyHistory:allPettyMR,remRates:remRates
+    })
+  ]);
   const openingBalance=openingBalResult.total;
-  const closingBalance=openingBalance+totalIncome-totalRemDue-totalExpenses-childrenLocalShare;
-  // Count unique Sundays only (exclude other-income records and duplicate dates)
-  const sundayCount=new Set(income.filter(r=>!r.source||r.source==='sunday_collection').map(r=>r.date)).size;
+  const closingBalance=closingBalResult.total;
+  const closingBankBalance=closingBalResult.bankBalance;
+  const closingCashWithAccountant=closingBalResult.cashWithAccountant;
+  const closingCashDeficit=closingBalResult.cashDeficit||0;
+  const closingPettyFloat=closingBalResult.pettyFloat;
+  const closingReconstructed=openingBalance+totalIncome-totalExpenses-totalRemPaid-childrenTeacherHold;
+  const closingReconcileDiff=Math.round(closingBalance-closingReconstructed);
+
+  const priorIncome=allIncome.filter(r=>{
+    const d=String(r?.date||r?.createdAt||'').slice(0,10);
+    return d && d<=openingBalDate;
+  });
+  const priorRemCalc=await calcRemittancesFromRecords(priorIncome, remRatesData);
+  const priorFirstIncRec=priorIncome.length>0?priorIncome[priorIncome.length-1]:null;
+  const priorFirstDate=priorFirstIncRec?String(priorFirstIncRec.date||priorFirstIncRec.createdAt||'').slice(0,10):'';
+  const priorAccumQuotas=priorFirstIncRec?accumQuotasAcrossPeriods(quotaList, settings, allRemittances, priorFirstDate, openingBalDate):0;
+  const priorPaidRems=allRemittances.filter(r=>r.status==='paid').filter(r=>{
+    const d=String(r?.paidDate||r?.date||r?.createdAt||'').slice(0,10);
+    return !d || d<=openingBalDate;
+  }).reduce((s,r)=>s+(r.amount||0),0);
+  const openingOutstandingRems=Math.max(0, totalRemittanceDue(priorRemCalc)+priorAccumQuotas-priorPaidRems);
+  const totalOutstandingRems=calcOutstandingRemittancesFromFlow(openingOutstandingRems, totalRemDue, totalRemPaid);
+  const availableParishFund=closingBalance-totalOutstandingRems;
+
+  const sundayCount=new Set(sundayIncomeRecords.map(r=>r.date)).size;
 
   // Income by type summary
   const incomeByType={};
@@ -10454,7 +10552,7 @@ async function generateMonthlyReport(){
       <div class="summary-box"><div class="label">Total Expenses</div><div class="value red">${fmt(totalExpenses)}</div></div>
       <div class="summary-box"><div class="label">Total Remittances Due</div><div class="value red">${fmt(totalRemDue)}</div></div>
       <div class="summary-box"><div class="label">Net Local Retained</div><div class="value green">${fmt(trueNetLocal)}</div></div>
-      <div class="summary-box"><div class="label">Net Parish Balance</div><div class="value ${netPositionExChildren>=0?'green':'red'}">${fmt(netPositionExChildren)}</div>${totalChildrenOffering>0?`<div style="font-size:10px;color:var(--text3);margin-top:3px">Incl. Children's Dept: ${fmt(netPosition)}</div>`:''}</div>
+      <div class="summary-box"><div class="label">Money in Bank &amp; Cash <span style="font-size:10px;color:var(--text3);font-weight:normal">(period end)</span></div><div class="value ${closingBalance>=0?'green':'red'}">${fmt(closingBalance)}</div><div style="font-size:10px;color:var(--text3);margin-top:3px">Available after remittances: ${fmt(availableParishFund)}</div></div>
       <div class="summary-box"><div class="label">No. of Sundays</div><div class="value blue">${sundayCount}</div></div>
     </div>
 
@@ -10511,16 +10609,37 @@ async function generateMonthlyReport(){
       <tr class="total-row"><td>TOTAL</td><td class="td-c">${expSorted.reduce((s,c)=>s+c.count,0)}</td><td class="td-r">${fmt(totalExpenses)}</td><td class="td-c">100%</td></tr>
     </table>`:''}
 
-    <div class="section-title">Section F: Financial Position Summary</div>
-    <table>
-      <tr style="background:#e8f4f0"><td style="font-weight:600;color:#0F6E56">Opening Balance (carried from prior period)</td><td class="td-r" style="font-weight:600;color:#0F6E56">${fmt(openingBalance)}</td></tr>
-      <tr><td style="padding-left:20px">Add: Total Income for ${periodLabel}</td><td class="td-r td-green">${fmt(totalIncome)}</td></tr>
-      <tr><td style="padding-left:20px;color:#555">Less: Remittances Due to RCCG</td><td class="td-r td-red">− ${fmt(totalRemDue)}</td></tr>
-      <tr><td style="padding-left:20px;color:#555">Less: Local Expenses</td><td class="td-r td-red">− ${fmt(totalExpenses)}</td></tr>
-      ${totalChildrenOffering>0?`<tr><td style="padding-left:20px;color:#555">Less: Children's Dept. local share</td><td class="td-r td-red">− ${fmt(childrenLocalShare)}</td></tr>`:''}
-      <tr class="total-row"><td>CLOSING BALANCE</td><td class="td-r ${closingBalance>=0?'td-green':'td-red'}">${fmt(closingBalance)}</td></tr>
+    <div class="section-title">Section F: Where The Money Stands <span>(Financial Position Summary)</span></div>
+
+    <table style="margin-bottom:6px">
+      <tr style="background:#eaf5ff"><td style="font-weight:600;color:#185FA5">Money carried over from last period <span style="font-size:11px;color:#666;font-weight:normal">(as of ${fmtDate(openingBalDate)})</span></td><td class="td-r" style="font-weight:600;color:#185FA5">${fmt(openingBalance)}</td></tr>
+      <tr><td style="padding-left:20px">Add: All money received this period</td><td class="td-r td-green">+ ${fmt(totalIncome)}</td></tr>
+      <tr><td style="padding-left:20px;color:#555">Less: Money spent on church needs (expenses)</td><td class="td-r td-red">− ${fmt(totalExpenses)}</td></tr>
+      <tr><td style="padding-left:20px;color:#555">Less: RCCG remittances already paid</td><td class="td-r td-red">− ${fmt(totalRemPaid)}</td></tr>
+      ${childrenTeacherHold>0?`<tr><td style="padding-left:20px;color:#555">Less: Children's Dept. cash kept with teacher</td><td class="td-r td-red">− ${fmt(childrenTeacherHold)}</td></tr>`:''}
+      ${Math.abs(closingReconcileDiff)>=1?`<tr><td style="padding-left:20px;color:#888;font-style:italic">Adjustments (internal cash movements, rounding)</td><td class="td-r" style="color:#888">${closingReconcileDiff>0?'+ ':'− '}${fmt(Math.abs(closingReconcileDiff))}</td></tr>`:''}
+      <tr class="total-row" style="background:#e8f4f0!important"><td style="color:#0F6E56">💰 MONEY CURRENTLY IN OUR BANK &amp; CASH <span style="font-size:11px;font-weight:normal;color:#666">(as of ${fmtDate(toDate)})</span></td><td class="td-r" style="color:${closingBalance>=0?'#0F6E56':'#c0392b'};font-size:15px">${fmt(closingBalance)}</td></tr>
     </table>
-    ${closingBalance<0?'<div class="note-box">⚠️ The parish is in a deficit position this month. Expenses and remittances exceed total income (excluding Children\'s Dept. funds). Please review with the Parish Pastor.</div>':''}
+
+    <table style="margin-bottom:14px;font-size:12px">
+      <tr><td style="padding-left:36px;color:#555;border-bottom:none">• In the Bank Account</td><td class="td-r" style="color:#333;border-bottom:none">${fmt(closingBankBalance)}</td></tr>
+      <tr><td style="padding-left:36px;color:#555;border-bottom:none">• Cash with Accountant</td><td class="td-r" style="color:#333;border-bottom:none">${fmt(closingCashWithAccountant)}${closingCashDeficit>0?` <span style="color:#c0392b;font-size:11px">(deficit: ${fmt(closingCashDeficit)})</span>`:''}</td></tr>
+      <tr><td style="padding-left:36px;color:#555">• Petty Cash Float</td><td class="td-r" style="color:${closingPettyFloat<0?'#c0392b':'#333'}">${fmt(closingPettyFloat)}${closingPettyFloat<0?' <span style="font-size:11px">⚠️ owed by petty holder</span>':''}</td></tr>
+    </table>
+
+    <div class="section-title" style="font-size:13px;margin-top:14px">But some of this money is not really ours to spend…</div>
+    <table>
+      <tr><td>Money in bank &amp; cash</td><td class="td-r">${fmt(closingBalance)}</td></tr>
+      <tr><td style="padding-left:20px;color:#555">Less: RCCG remittances still owed <span style="font-size:11px;color:#888">(this period + any prior unpaid)</span></td><td class="td-r td-red">− ${fmt(totalOutstandingRems)}</td></tr>
+      <tr class="total-row" style="background:${availableParishFund>=0?'#e8f4f0':'#fdf0f0'}!important"><td style="color:${availableParishFund>=0?'#0F6E56':'#c0392b'}">✅ WHAT THE PARISH CAN ACTUALLY USE</td><td class="td-r" style="color:${availableParishFund>=0?'#0F6E56':'#c0392b'};font-size:15px">${fmt(availableParishFund)}</td></tr>
+    </table>
+
+    <div class="note-box" style="background:#f4f9ff;border-color:#c9dcef;color:#345574">
+      <strong>How to read this:</strong> The ${fmt(totalOutstandingRems)} above is money currently sitting in our bank that must be sent to RCCG headquarters — think of it as money we're holding on their behalf. Once we send it, our true parish balance will be <strong>${fmt(availableParishFund)}</strong>.
+    </div>
+
+    ${availableParishFund<0?'<div class="note-box">⚠️ The parish is in a deficit position — outstanding remittances exceed available cash. Please review with the Parish Pastor.</div>':''}
+    ${closingPettyFloat<0?'<div class="note-box">⚠️ Petty cash float is negative — the petty cash holder has spent more than the float. A reconciliation top-up is needed.</div>':''}
 
     ${reportSignatureHTML(pastorName, undefined, accountantName)}`;
 
