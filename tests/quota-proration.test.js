@@ -239,3 +239,42 @@ test('fixed quota accrual starts at 11:30am WAT on each Sunday', () => {
     assertClose(lines[0].amount, 1500);
   } finally { globalThis.Date = RealDate; }
 });
+
+test('written-off remittance settles as of the period close, not the day it was recorded', () => {
+  // Regression test: a write-off recorded today for a May shortfall must be
+  // treated as resolved as of May's period close, so past-period dashboard
+  // snapshots and report opening-balance cutoffs (which sit between May and
+  // today) correctly stop counting the shortfall as outstanding.
+  const writtenOff = {
+    status: 'written_off',
+    periodFrom: '2026-04-27',
+    periodTo: '2026-05-24',
+    paidDate: '2026-07-09', // the date the write-off action was actually clicked
+    amount: 1858.38
+  };
+  assert.equal(App._remittanceSettledDate(writtenOff), '2026-05-24');
+
+  // A historical cutoff between the period close and today must now see it as settled.
+  const juneAsOfDate = '2026-06-21';
+  assert.ok(App._remittanceSettledDate(writtenOff) <= juneAsOfDate);
+
+  // A cutoff before the period even closed correctly still excludes it.
+  const beforePeriodClose = '2026-05-10';
+  assert.ok(App._remittanceSettledDate(writtenOff) > beforePeriodClose);
+});
+
+test('paid remittances still settle on their actual paidDate (cash movement date)', () => {
+  const paid = {
+    status: 'paid',
+    periodFrom: '2026-04-27',
+    periodTo: '2026-05-24',
+    paidDate: '2026-05-30',
+    amount: 193331
+  };
+  assert.equal(App._remittanceSettledDate(paid), '2026-05-30');
+});
+
+test('written-off remittance without a periodTo falls back to paidDate', () => {
+  const legacy = { status: 'written_off', paidDate: '2026-07-09', amount: 500 };
+  assert.equal(App._remittanceSettledDate(legacy), '2026-07-09');
+});

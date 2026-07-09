@@ -1499,6 +1499,20 @@ function calcAvailableFundFromOpening(openingBalance, openingOutstandingRems, to
   return (openingBalance - openingOutstandingRems) + (totalIncome - childrenTeacherHold) - totalExpenses - currentPeriodRemDue;
 }
 
+/**
+ * Effective settlement date for "as of X" historical filtering. A 'paid' record
+ * settles on its paidDate (real cash left the bank that day). A 'written_off'
+ * record retroactively resolves the ORIGINAL period's obligation — it should be
+ * effective as of that period's close (periodTo), not the date the write-off was
+ * clicked. Otherwise every past-period dashboard snapshot and every report whose
+ * as-of date falls before "today" would still show the shortfall as outstanding,
+ * even though it was already written off.
+ */
+function remittanceSettledDate(r){
+  if(r?.status === 'written_off' && r?.periodTo) return String(r.periodTo).slice(0,10);
+  return String(r?.paidDate || r?.createdAt || '').slice(0,10);
+}
+
 async function calcRemittances(income, preRates){
   const rr = preRates || await getRemRates();
   const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, totalSeed:0,
@@ -2959,7 +2973,7 @@ async function renderDashboard(){
     return !d || d <= dashAsOfDate;
   };
   const _paidOnOrBefore = r => {
-    const d = String(r?.paidDate || r?.createdAt || '').slice(0,10);
+    const d = remittanceSettledDate(r);
     return !d || d <= dashAsOfDate;
   };
   const income   = useRemPeriod ? filterByDateRange(allIncomeDash,   dashPeriodFrom, dashPeriodTo) : filterByMonth(allIncomeDash);
@@ -3249,7 +3263,7 @@ async function renderDashboard(){
   const dashOpeningPaidRems = allRemsDash
     .filter(r => r.status === 'paid' || r.status === 'written_off')
     .filter(r => {
-      const d = String(r?.paidDate || r?.createdAt || '').slice(0,10);
+      const d = remittanceSettledDate(r);
       return !d || d <= dashPriorCloseDate;
     })
     .reduce((s,r)=>s+(r.amount||0),0);
@@ -6938,7 +6952,7 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const priorFirstDate=priorFirstIncRec?String(priorFirstIncRec.date||priorFirstIncRec.createdAt||'').slice(0,10):'';
   const priorAccumQuotas=priorFirstIncRec?accumQuotasAcrossPeriods(quotaList, settings, allRemittances, priorFirstDate, openingBalDate):0;
   const priorPaidRems=allRemittances.filter(r=>r.status==='paid'||r.status==='written_off').filter(r=>{
-    const d=String(r?.paidDate||r?.date||r?.createdAt||'').slice(0,10);
+    const d=remittanceSettledDate(r);
     return !d || d<=openingBalDate;
   }).reduce((s,r)=>s+(r.amount||0),0);
   const openingOutstandingRems=Math.max(0, totalRemittanceDue(priorRemCalc)+priorAccumQuotas-priorPaidRems);
@@ -10661,7 +10675,7 @@ async function generateMonthlyReport(){
   const priorFirstDate=priorFirstIncRec?String(priorFirstIncRec.date||priorFirstIncRec.createdAt||'').slice(0,10):'';
   const priorAccumQuotas=priorFirstIncRec?accumQuotasAcrossPeriods(quotaList, settings, allRemittances, priorFirstDate, openingBalDate):0;
   const priorPaidRems=allRemittances.filter(r=>r.status==='paid'||r.status==='written_off').filter(r=>{
-    const d=String(r?.paidDate||r?.date||r?.createdAt||'').slice(0,10);
+    const d=remittanceSettledDate(r);
     return !d || d<=openingBalDate;
   }).reduce((s,r)=>s+(r.amount||0),0);
   const openingOutstandingRems=Math.max(0, totalRemittanceDue(priorRemCalc)+priorAccumQuotas-priorPaidRems);
@@ -12047,7 +12061,8 @@ return {
   _calcChurchBalanceFromOpening: calcChurchBalanceFromOpening,
   _calcOutstandingRemittancesFromFlow: calcOutstandingRemittancesFromFlow,
   _calcCurrentPeriodOutstandingRemittance: calcCurrentPeriodOutstandingRemittance,
-  _calcAvailableFundFromOpening: calcAvailableFundFromOpening
+  _calcAvailableFundFromOpening: calcAvailableFundFromOpening,
+  _remittanceSettledDate: remittanceSettledDate
   };
 
 })();
