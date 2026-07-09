@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <meta name="theme-color" content="#0F6E56"/>
 <title>RCCG Monthly Financial Statement</title>
+<script src="/dist/js/html2pdf.bundle.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,Arial,sans-serif;font-size:14px;color:#1a1a1a;background:#f0f4f0;min-height:100vh}
@@ -118,11 +119,30 @@ tr:nth-child(even) td{background:#f8fbf8}
     <div class="top-bar-sub" id="topBarPeriod">Loading…</div>
   </div>
   <div class="top-bar-actions no-print">
-    <button class="action-btn primary" onclick="window.print()">
-      <span>⬇</span><span class="label"> Save as PDF / Print</span>
+    <button class="action-btn primary" id="pdfBtn" onclick="downloadPDF()">
+      <span>📄</span><span class="label"> Download PDF</span>
+    </button>
+    <button class="action-btn" style="background:#fff;color:#185FA5;border:2px solid #185FA5" onclick="window.print()">
+      <span>🖨️</span><span class="label"> Print</span>
     </button>
   </div>
 </div>
+<script>
+function downloadPDF(){
+  var btn=document.getElementById('pdfBtn');
+  btn.querySelector('.label').textContent=' Generating…';btn.disabled=true;
+  var el=document.getElementById('sections');
+  html2pdf().set({
+    margin:[8,10,8,10],
+    filename:document.title.replace(/[^a-zA-Z0-9 _\-–—]/g,'')+'.pdf',
+    image:{type:'jpeg',quality:0.95},
+    html2canvas:{scale:2,useCORS:true,scrollY:0,windowWidth:el.scrollWidth},
+    jsPDF:{unit:'mm',format:'a4',orientation:'landscape'},
+    pagebreak:{mode:['avoid-all','css','legacy']}
+  }).from(el).save().then(function(){btn.querySelector('.label').textContent=' Download PDF';btn.disabled=false;})
+  .catch(function(){btn.querySelector('.label').textContent=' Download PDF';btn.disabled=false;alert('PDF generation failed. Please use Print instead.');});
+}
+</script>
 
 <div id="loading-state">
   <div style="font-size:24px;margin-bottom:10px">⏳</div>
@@ -220,7 +240,7 @@ function renderReport(resp){
     let inner;
     if((D.weeklyRows||[]).length){
       const head=`<tr><th>S/N</th><th>Date</th>${labels.map(l=>`<th class="td-r">${esc(l)}</th>`).join('')}<th class="td-r">Total</th><th class="td-c">% of Month</th><th>Status</th></tr>`;
-      const body=(D.weeklyRows||[]).map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.date)}</td>${(r.cells||[]).map(c=>`<td class="td-r">${c?N(c):'—'}</td>`).join('')}<td class="td-r" style="font-weight:700">${N(r.total)}</td><td class="td-c">${r.pct}%</td><td>${statusBadge(r.status)}</td></tr>`).join('');
+      const body=(D.weeklyRows||[]).map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.date)}${r.sourceLabel ? '<br><span style="font-size:10px;color:#666;font-style:italic">'+esc(r.sourceLabel)+'</span>' : ''}</td>${(r.cells||[]).map(c=>`<td class="td-r">${c?N(c):'—'}</td>`).join('')}<td class="td-r" style="font-weight:700">${N(r.total)}</td><td class="td-c">${r.pct}%</td><td>${statusBadge(r.status)}</td></tr>`).join('');
       const totals=`<tr class="total-row"><td colspan="2">TOTAL COLLECTIONS</td>${(D.weeklyTotals||[]).map(s=>`<td class="td-r">${s?N(s):'—'}</td>`).join('')}<td class="td-r">${N(D.totalIncome)}</td><td class="td-c">100%</td><td></td></tr>`;
       inner=`<div class="table-wrap"><table class="wide">${head}${body}${totals}</table></div>`;
     } else {
@@ -232,10 +252,10 @@ function renderReport(resp){
   // Section C — Remittances Due
   {
     const rows=(D.remittanceRows||[]).map(r=>`<tr><td class="${r.indent?'td-indent':''}">${esc(r.label)}</td><td class="td-c muted">${esc(r.basis)}</td><td class="td-r red">${N(r.amount)}</td></tr>`).join('');
-    let extra=`<tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r red">${N(D.totalRemDue)}</td></tr>`;
-    if((D.totalRemPaid||0)>0) extra+=`<tr class="paid-row"><td colspan="2">Remittances Paid This Period</td><td class="td-r grn">${N(D.totalRemPaid)}</td></tr>`;
-    if((D.totalRemPaid||0)<(D.totalRemDue||0)) extra+=`<tr class="deduct-row"><td colspan="2" style="padding-left:20px">Outstanding Balance</td><td class="td-r red">− ${N(D.totalRemDue-D.totalRemPaid)}</td></tr>`;
-    extra+=`<tr class="net-row"><td colspan="2">NET LOCAL RETAINED (after all remittances)</td><td class="td-r grn">${N(D.trueNetLocal)}</td></tr>`;
+    let extra=`<tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${N(D.totalRemDue)}</td></tr>
+    <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Period</td><td class="td-r" style="font-weight:600;color:#0F6E56">${N(D.totalRemPaid)}</td></tr>
+    <tr style="background:${(D.totalRemDue-D.totalRemPaid)>0?'#fdf0f0':'#e8f4f0'}"><td colspan="2" style="font-weight:600;color:${(D.totalRemDue-D.totalRemPaid)>0?'#c0392b':'#0F6E56'}">Outstanding Remittance Balance</td><td class="td-r" style="font-weight:700;color:${(D.totalRemDue-D.totalRemPaid)>0?'#c0392b':'#0F6E56'}">${(D.totalRemDue-D.totalRemPaid)>0?N(D.totalRemDue-D.totalRemPaid):N(0)}</td></tr>
+    <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">NET LOCAL RETAINED</td><td class="td-r" style="font-weight:600;color:#0F6E56">${N(D.trueNetLocal)}</td></tr>`;
     const inner=`<div class="table-wrap"><table>
       <tr><th>Description</th><th class="td-c">Rate / Basis</th><th class="td-r">Amount (₦)</th></tr>
       ${rows}${extra}
@@ -272,17 +292,34 @@ function renderReport(resp){
 
   // Section F — Financial Position Summary
   {
-    let pos=`<tr><td style="font-weight:600">Total Income for ${esc(period)}</td><td class="td-r grn">${N(D.totalIncome)}</td></tr>
-      <tr class="deduct-row"><td style="padding-left:20px">Less: Remittances Due to RCCG</td><td class="td-r red">− ${N(D.totalRemDue)}</td></tr>
-      <tr class="deduct-row"><td style="padding-left:20px">Less: Local Expenses</td><td class="td-r red">− ${N(D.totalExpenses)}</td></tr>`;
-    if((D.totalChildrenOffering||0)>0){
-      pos+=`<tr style="background:#f5f5f5"><td style="font-weight:600">Balance (incl. Children's Dept. share)</td><td class="td-r" style="font-weight:600">${N(D.netPosition)}</td></tr>
-        <tr class="deduct-row"><td style="padding-left:20px">Less: Children's Dept. local share (not admin-managed)</td><td class="td-r red">− ${N(D.childrenLocalShare)}</td></tr>`;
+    let pos;
+    if(D.openingBalance !== undefined && D.openingBalance !== null){
+      pos = `<tr style="background:#e8f4f0"><td style="font-weight:600;color:#0F6E56">Opening Balance (carried from prior period)</td><td class="td-r" style="font-weight:600;color:#0F6E56">${N(D.openingBalance)}</td></tr>
+        <tr><td style="padding-left:20px">Add: Total Income for ${esc(period)}</td><td class="td-r grn">${N(D.totalIncome)}</td></tr>
+        <tr class="deduct-row"><td style="padding-left:20px">Less: Remittances Due to RCCG</td><td class="td-r red">− ${N(D.totalRemDue)}</td></tr>
+        <tr class="deduct-row"><td style="padding-left:20px">Less: Local Expenses</td><td class="td-r red">− ${N(D.totalExpenses)}</td></tr>`;
+      if((D.totalChildrenOffering||0)>0){
+        pos += `<tr class="deduct-row"><td style="padding-left:20px">Less: Children's Dept. local share</td><td class="td-r red">− ${N(D.childrenLocalShare)}</td></tr>`;
+      }
+      const closingVal = D.closingBalance !== undefined ? D.closingBalance : D.netPositionExChildren;
+      pos += `<tr class="total-row"><td>CLOSING BALANCE</td><td class="td-r ${closingVal>=0?'grn':'red'}">${N(closingVal)}</td></tr>`;
+      let inner = `<div class="table-wrap"><table>${pos}</table></div>`;
+      if(closingVal < 0) inner += `<div class="note-box">⚠️ The parish is in a deficit position this period. Expenses and remittances exceed total income. Please review with the Parish Pastor.</div>`;
+      html += section('Section F — Financial Position Summary', '', inner, true, false);
+    } else {
+      // Legacy format for old saved statements
+      let pos = `<tr><td style="font-weight:600">Total Income for ${esc(period)}</td><td class="td-r grn">${N(D.totalIncome)}</td></tr>
+        <tr class="deduct-row"><td style="padding-left:20px">Less: Remittances Due to RCCG</td><td class="td-r red">− ${N(D.totalRemDue)}</td></tr>
+        <tr class="deduct-row"><td style="padding-left:20px">Less: Local Expenses</td><td class="td-r red">− ${N(D.totalExpenses)}</td></tr>`;
+      if((D.totalChildrenOffering||0)>0){
+        pos += `<tr style="background:#f5f5f5"><td style="font-weight:600">Balance (incl. Children's Dept. share)</td><td class="td-r" style="font-weight:600">${N(D.netPosition)}</td></tr>
+          <tr class="deduct-row"><td style="padding-left:20px">Less: Children's Dept. local share (not admin-managed)</td><td class="td-r red">− ${N(D.childrenLocalShare)}</td></tr>`;
+      }
+      pos += `<tr class="total-row"><td>NET PARISH BALANCE</td><td class="td-r ${D.netPositionExChildren>=0?'grn':'red'}">${N(D.netPositionExChildren)}</td></tr>`;
+      let inner = `<div class="table-wrap"><table>${pos}</table></div>`;
+      if(D.netPositionExChildren<0) inner += `<div class="note-box">⚠️ The parish is in a deficit position this period. Expenses and remittances exceed total income (excluding Children's Dept. funds). Please review with the Parish Pastor.</div>`;
+      html += section('Section F — Financial Position Summary', '', inner, true, false);
     }
-    pos+=`<tr class="total-row"><td>NET PARISH BALANCE</td><td class="td-r ${D.netPositionExChildren>=0?'grn':'red'}">${N(D.netPositionExChildren)}</td></tr>`;
-    let inner=`<div class="table-wrap"><table>${pos}</table></div>`;
-    if(D.netPositionExChildren<0) inner+=`<div class="note-box">⚠️ The parish is in a deficit position this period. Expenses and remittances exceed total income (excluding Children's Dept. funds). Please review with the Parish Pastor.</div>`;
-    html += section('Section F — Financial Position Summary', '', inner, true, false);
   }
 
   document.getElementById('sections').innerHTML = html;
