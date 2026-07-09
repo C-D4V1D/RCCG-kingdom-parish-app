@@ -6729,6 +6729,15 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const totalChildrenOffering=income.reduce((s,r)=>s+(r.childrenOffering||0),0);
   const childrenLocalShare=totalChildrenOffering*getChildrenOfferingLocalRate(remRates);
   const netPositionExChildren=netPosition-childrenLocalShare;
+  const _msFromDate=new Date(fromDate+'T00:00:00');
+  const _msDayBefore=new Date(_msFromDate);_msDayBefore.setDate(_msDayBefore.getDate()-1);
+  const openingBalDate=ymdLocal(_msDayBefore);
+  const openingBalResult=await calcChurchBalance(openingBalDate,{
+    income:allIncome,expenses:allExpenses,remittances:allRemittances,
+    cashTx:allCashTx,pettyHistory:allPettyMS,remRates:remRates
+  });
+  const openingBalance=openingBalResult.total;
+  const closingBalance=openingBalance+totalIncome-totalRemDue-totalExpenses-childrenLocalShare;
   const sundayCount=new Set(income.filter(r=>!r.source||r.source==='sunday_collection').map(r=>r.date)).size;
 
   // Section A — income by type
@@ -6737,16 +6746,32 @@ async function buildMonthlyStatementData(fromDate, toDate){
   income.forEach(r=>{INCOME_TYPES.forEach(t=>{incomeByType[t.key].total+=(r[t.key]||0)})});
   const incomeTypeSummary=Object.values(incomeByType).filter(t=>t.total>0)
     .map(t=>({label:t.label, total:t.total, pct:totalIncome?Math.round(t.total/totalIncome*100):0}));
+  const otherIncomeRecords = income.filter(r => r.source && r.source !== 'sunday_collection')
+    .filter(r => INCOME_TYPES.reduce((s,t) => s + (r[t.key]||0), 0) === 0);
+  const otherIncomeTotal = otherIncomeRecords.reduce((s,r) => s + (r.totalCollection||0), 0);
+  if(otherIncomeTotal > 0){
+    incomeTypeSummary.push({
+      label: 'Other Income (donations, midweek, etc.)',
+      total: otherIncomeTotal,
+      pct: totalIncome ? Math.round(otherIncomeTotal / totalIncome * 100) : 0
+    });
+  }
 
   // Section B — weekly collection details (one column per income type)
   const incomeTypeLabels=INCOME_TYPES.map(t=>t.label);
-  const weeklyRows=income.map(r=>({
-    date:fmtDate(r.date),
-    cells:INCOME_TYPES.map(t=>r[t.key]||0),
-    total:r.totalCollection||0,
-    pct:totalIncome?Math.round((r.totalCollection||0)/totalIncome*100):0,
-    status:depositStatus(r),
-  }));
+  const weeklyRows=income.map(r=>{
+    const isSunday=!r.source||r.source==='sunday_collection';
+    const srcMeta=!isSunday?(OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:(r.source||'Other').replace(/_/g,' ')}):null;
+    return {
+      date:fmtDate(r.date),
+      cells:INCOME_TYPES.map(t=>r[t.key]||0),
+      total:r.totalCollection||0,
+      pct:totalIncome?Math.round((r.totalCollection||0)/totalIncome*100):0,
+      status:depositStatus(r),
+      isOtherIncome:!isSunday,
+      sourceLabel:srcMeta?srcMeta.label:null
+    };
+  });
   const weeklyTotals=INCOME_TYPES.map(t=>income.reduce((a,r)=>a+(r[t.key]||0),0));
 
   // Section C — remittances due (pre-formatted basis text)
@@ -6795,6 +6820,8 @@ async function buildMonthlyStatementData(fromDate, toDate){
     remittanceRows,
     expenseRows,
     expenseByCategory,
+    otherIncomeTotal, openingBalance, closingBalance, openingBalDate:fmtDate(openingBalDate),
+    outstandingRemittance:Math.max(0, totalRemDue-totalRemPaid),
   };
 }
 
@@ -10177,8 +10204,12 @@ function openPrintableReport(title, bodyHTML, shareConfig){
 </style>
 </head>
 <body>
-  <div class="print-btn-bar no-print"><button class="print-btn" onclick="window.print()">⬇ Download / Save as PDF</button>${shareBtn}</div>
-  <div class="print-hint no-print">Tip: in the dialog choose <strong>“Save as PDF”</strong> and paper size <strong>A4 (Landscape)</strong>.</div>
+  <div class="print-btn-bar no-print" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin:16px 0">
+    <button class="print-btn" onclick="window.print()" style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:#185FA5;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">📄 Download PDF</button>
+    <button class="print-btn" onclick="window.print()" style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:#fff;color:#185FA5;border:2px solid #185FA5;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">🖨️ Print</button>
+    ${shareBtn}
+  </div>
+  <div class="no-print" style="text-align:center;font-size:12px;color:#888;margin-bottom:16px">In the print dialog, select <strong>"Save as PDF"</strong> for a PDF file, or choose your printer to print. Paper size: <strong>A4 Landscape</strong>.</div>
   <div id="report-sheet">${bodyHTML}</div>
 </body></html>`;
   const w=window.open('','_blank');
@@ -10356,6 +10387,15 @@ async function generateMonthlyReport(){
   const totalChildrenOffering=income.reduce((s,r)=>s+(r.childrenOffering||0),0);
   const childrenLocalShare=totalChildrenOffering*getChildrenOfferingLocalRate(remRates);
   const netPositionExChildren=netPosition-childrenLocalShare;
+  const _mrFromDate=new Date(fromDate+'T00:00:00');
+  const _mrDayBefore=new Date(_mrFromDate);_mrDayBefore.setDate(_mrDayBefore.getDate()-1);
+  const openingBalDate=ymdLocal(_mrDayBefore);
+  const openingBalResult=await calcChurchBalance(openingBalDate,{
+    income:allIncome,expenses:allExpenses,remittances:allRemittances,
+    cashTx:allCashTx,pettyHistory:allPettyMR,remRates:remRates
+  });
+  const openingBalance=openingBalResult.total;
+  const closingBalance=openingBalance+totalIncome-totalRemDue-totalExpenses-childrenLocalShare;
   // Count unique Sundays only (exclude other-income records and duplicate dates)
   const sundayCount=new Set(income.filter(r=>!r.source||r.source==='sunday_collection').map(r=>r.date)).size;
 
@@ -10364,6 +10404,9 @@ async function generateMonthlyReport(){
   INCOME_TYPES.forEach(t=>{incomeByType[t.key]={label:t.label,total:0}});
   income.forEach(r=>{INCOME_TYPES.forEach(t=>{incomeByType[t.key].total+=(r[t.key]||0)})});
   const incomeTypeSummary=Object.values(incomeByType).filter(t=>t.total>0);
+  const otherIncomeRecords = income.filter(r => r.source && r.source !== 'sunday_collection')
+    .filter(r => INCOME_TYPES.reduce((s,t) => s + (r[t.key]||0), 0) === 0);
+  const otherIncomeTotal = otherIncomeRecords.reduce((s,r) => s + (r.totalCollection||0), 0);
 
   // Expense by category summary
   const expByCat={};
@@ -10387,13 +10430,18 @@ async function generateMonthlyReport(){
     <table>
       <tr><th>Income Type</th><th class="td-r">Amount (₦)</th><th class="td-c">% of Total</th></tr>
       ${incomeTypeSummary.map(t=>`<tr><td>${t.label}</td><td class="td-r">${fmt(t.total)}</td><td class="td-c">${totalIncome?Math.round(t.total/totalIncome*100):0}%</td></tr>`).join('')}
+      ${otherIncomeTotal > 0 ? `<tr><td>Other Income (donations, midweek, etc.)</td><td class="td-r">${fmt(otherIncomeTotal)}</td><td class="td-c">${totalIncome?Math.round(otherIncomeTotal/totalIncome*100):0}%</td></tr>` : ''}
       <tr class="total-row"><td>TOTAL INCOME</td><td class="td-r">${fmt(totalIncome)}</td><td class="td-c">100%</td></tr>
     </table>
 
     <div class="section-title">Section B: Weekly Collection Details</div>
     ${income.length?`<table class="wide">
       <tr><th>S/N</th><th>Date</th>${INCOME_TYPES.map(t=>`<th class="td-r">${t.label}</th>`).join('')}<th class="td-r">Total</th><th class="td-c">% of Month</th><th>Status</th></tr>
-      ${income.map((r,i)=>`<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td>${INCOME_TYPES.map(t=>`<td class="td-r">${r[t.key]?fmt(r[t.key]):'—'}</td>`).join('')}<td class="td-r td-bold">${fmt(r.totalCollection)}</td><td class="td-c">${totalIncome?Math.round((r.totalCollection||0)/totalIncome*100):0}%</td><td>${depositBadgeM(r)}</td></tr>`).join('')}
+      ${income.map((r,i)=>{
+        const isSunday=!r.source||r.source==='sunday_collection';
+        const srcLabel=!isSunday?(OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label:'';
+        return `<tr><td>${i+1}</td><td>${fmtDate(r.date)}${!isSunday?`<br><span style="font-size:10px;color:#666;font-style:italic">${esc(srcLabel)}</span>`:''}</td>${INCOME_TYPES.map(t=>`<td class="td-r">${r[t.key]?fmt(r[t.key]):'—'}</td>`).join('')}<td class="td-r td-bold">${fmt(r.totalCollection)}</td><td class="td-c">${totalIncome?Math.round((r.totalCollection||0)/totalIncome*100):0}%</td><td>${depositBadgeM(r)}</td></tr>`;
+      }).join('')}
       <tr class="total-row"><td colspan="2">TOTAL COLLECTIONS</td>${INCOME_TYPES.map(t=>{const s=income.reduce((a,r)=>a+(r[t.key]||0),0);return `<td class="td-r">${s?fmt(s):'—'}</td>`}).join('')}<td class="td-r">${fmt(totalIncome)}</td><td class="td-c">100%</td><td></td></tr>
     </table>`:'<div class="no-data">No income records for this period.</div>'}
 
@@ -10412,9 +10460,9 @@ async function generateMonthlyReport(){
       ${rem.totalMinisters>0?`<tr><td style="padding-left:16px">Thanksgiving → Ministers' Share</td><td class="td-c">${Math.round(remRatesData.tgMinisters*100)}% of TG</td><td class="td-r">${fmt(rem.totalMinisters)}</td></tr>`:''}
       ${quotaLines.map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">${esc(isQuotaFullyAccrued(q)?'Fixed':(q.isProrated?`Fixed • ${q.basis}`:'Fixed Quota'))}</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${fmt(totalRemDue)}</td></tr>
-      ${totalRemPaid>0?`<tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Period</td><td class="td-r td-green">${fmt(totalRemPaid)}</td></tr>`:''}
-      ${totalRemPaid<totalRemDue?`<tr><td colspan="2" style="padding-left:20px;color:var(--danger)">Outstanding Balance</td><td class="td-r td-red">− ${fmt(totalRemDue-totalRemPaid)}</td></tr>`:''}
-      <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">NET LOCAL RETAINED (after all remittances)</td><td class="td-r td-green">${fmt(trueNetLocal)}</td></tr>
+      <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Period</td><td class="td-r" style="font-weight:600;color:#0F6E56">${fmt(totalRemPaid)}</td></tr>
+      <tr style="background:${(totalRemDue-totalRemPaid)>0?'#fdf0f0':'#e8f4f0'}"><td colspan="2" style="font-weight:600;color:${(totalRemDue-totalRemPaid)>0?'#c0392b':'#0F6E56'}">Outstanding Remittance Balance</td><td class="td-r" style="font-weight:700;color:${(totalRemDue-totalRemPaid)>0?'#c0392b':'#0F6E56'}">${(totalRemDue-totalRemPaid)>0?fmt(totalRemDue-totalRemPaid):fmt(0)}</td></tr>
+      <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">NET LOCAL RETAINED</td><td class="td-r" style="font-weight:600;color:#0F6E56">${fmt(trueNetLocal)}</td></tr>
     </table>
 
     <div class="section-title">Section D: Expenses <span>(${expenses.length} entries totalling ${fmt(totalExpenses)})</span></div>
@@ -10433,14 +10481,14 @@ async function generateMonthlyReport(){
 
     <div class="section-title">Section F: Financial Position Summary</div>
     <table>
-      <tr><td style="font-weight:600">Total Income for ${periodLabel}</td><td class="td-r td-green">${fmt(totalIncome)}</td></tr>
+      <tr style="background:#e8f4f0"><td style="font-weight:600;color:#0F6E56">Opening Balance (carried from prior period)</td><td class="td-r" style="font-weight:600;color:#0F6E56">${fmt(openingBalance)}</td></tr>
+      <tr><td style="padding-left:20px">Add: Total Income for ${periodLabel}</td><td class="td-r td-green">${fmt(totalIncome)}</td></tr>
       <tr><td style="padding-left:20px;color:#555">Less: Remittances Due to RCCG</td><td class="td-r td-red">− ${fmt(totalRemDue)}</td></tr>
       <tr><td style="padding-left:20px;color:#555">Less: Local Expenses</td><td class="td-r td-red">− ${fmt(totalExpenses)}</td></tr>
-      ${totalChildrenOffering>0?`<tr style="background:#f5f5f5"><td style="font-weight:600">Balance (incl. Children's Dept. share)</td><td class="td-r" style="font-weight:600">${fmt(netPosition)}</td></tr>
-      <tr><td style="padding-left:20px;color:#555">Less: Children's Dept. local share (not admin-managed)</td><td class="td-r td-red">− ${fmt(childrenLocalShare)}</td></tr>`:''}
-      <tr class="total-row"><td>NET PARISH BALANCE</td><td class="td-r ${netPositionExChildren>=0?'td-green':'td-red'}">${fmt(netPositionExChildren)}</td></tr>
+      ${totalChildrenOffering>0?`<tr><td style="padding-left:20px;color:#555">Less: Children's Dept. local share</td><td class="td-r td-red">− ${fmt(childrenLocalShare)}</td></tr>`:''}
+      <tr class="total-row"><td>CLOSING BALANCE</td><td class="td-r ${closingBalance>=0?'td-green':'td-red'}">${fmt(closingBalance)}</td></tr>
     </table>
-    ${netPositionExChildren<0?'<div class="note-box">⚠️ The parish is in a deficit position this month. Expenses and remittances exceed total income (excluding Children\'s Dept. funds). Please review with the Parish Pastor.</div>':''}
+    ${closingBalance<0?'<div class="note-box">⚠️ The parish is in a deficit position this month. Expenses and remittances exceed total income (excluding Children\'s Dept. funds). Please review with the Parish Pastor.</div>':''}
 
     ${reportSignatureHTML(pastorName, undefined, accountantName)}`;
 
