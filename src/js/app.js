@@ -4195,8 +4195,9 @@ async function renderDashboard(){
                 <div style="flex:1;min-width:0">
                   <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Actual Balance after Expenses</div>
                   <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:6px">
+                    <span style="font-size:11px;color:#6366F1;font-weight:700;letter-spacing:0.2px">b/w</span>
                     <span style="font-size:18px;font-weight:800;color:${_balColor};letter-spacing:-0.4px">${fmtShort(forecastBalance.min)}</span>
-                    <span style="font-size:14px;color:var(--text3);font-weight:500;line-height:1">–</span>
+                    <span style="font-size:11px;color:#6366F1;font-weight:700;letter-spacing:0.2px">to</span>
                     <span style="font-size:18px;font-weight:800;color:${_balColor};letter-spacing:-0.4px">${fmtShort(forecastBalance.max)}</span>
                   </div>
                 </div>
