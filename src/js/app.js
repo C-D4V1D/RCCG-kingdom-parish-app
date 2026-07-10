@@ -3562,10 +3562,12 @@ async function renderDashboard(){
       cursor.setDate(cursor.getDate() + 1);
     }
   }
-  // Prorate quotas correctly: compute total period quotas once, allocate per-week by Sunday count
+  // Prorate quotas correctly: use full (un-prorated) period quota divided by total Sundays.
+  // dashAllQuotasAmt is already today-capped (prorated to elapsed Sundays), so we recover
+  // the full period amount from each quota line's monthlyAmount instead.
   const _wkTotalPeriodSundays = countSundaysInRange(_wkPeriodFrom, _wkPeriodTo);
-  const _wkPeriodQuotaTotal = dashAllQuotasAmt;
-  const _wkPerSundayQuota = _wkTotalPeriodSundays > 0 ? _wkPeriodQuotaTotal / _wkTotalPeriodSundays : 0;
+  const _wkFullPeriodQuota = dashQuotaLines.reduce((s,q) => s + (q.monthlyAmount || q.amount || 0), 0);
+  const _wkPerSundayQuota = _wkTotalPeriodSundays > 0 ? _wkFullPeriodQuota / _wkTotalPeriodSundays : 0;
   // Compute per-week metrics
   const _wkData = await Promise.all(_wkBounds.map(async (wk, idx) => {
     const wkIncome = filterByDateRange(income, wk.from, wk.to);
