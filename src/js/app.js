@@ -3577,7 +3577,10 @@ async function renderDashboard(){
     let wkNetRetained = 0;
     if(wkTotalIncome > 0){
       const wkRem = await calcRemittancesFromRecords(wkIncome, remRatesDash);
-      const wkSundays = countSundaysInRange(wk.from, wk.to);
+      // Use ACCRUED Sundays, not calendar Sundays — a week's quota share should only be
+      // charged once that Sunday's collection has actually happened, so an in-progress
+      // week's future Sunday doesn't prematurely eat into unrelated non-remittance income.
+      const wkSundays = countAccruedSundaysInRange(wk.from, wk.to);
       const wkQuotas = _wkPerSundayQuota * wkSundays;
       wkNetRetained = wkRem.netLocal - wkQuotas;
     }
@@ -3623,7 +3626,7 @@ async function renderDashboard(){
     let wkNetRetained = 0;
     if(wkTotalIncome > 0){
       const wkRem = await calcRemittancesFromRecords(wkIncome, remRatesDash);
-      const wkSundays = countSundaysInRange(wk.from, wk.to);
+      const wkSundays = countAccruedSundaysInRange(wk.from, wk.to);
       wkNetRetained = wkRem.netLocal - (_wkPerSundayQuota * wkSundays);
     }
     const wkOtherLocal = wkIncome
