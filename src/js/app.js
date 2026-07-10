@@ -3637,19 +3637,19 @@ async function renderDashboard(){
     const sorted = [..._wkHistActive].sort((a,b) => a.surplus - b.surplus);
     _wkHistActive = sorted.slice(1, -1); // trim highest and lowest
   }
-  // Weighted average: recent weeks count more
+  // Simple trimmed mean — no weighting; the data shows no clear trend, just natural
+  // fluctuation, so weighting recent weeks only adds noise sensitivity.
   let _wkAvgNetRetained = 0, _wkAvgExpenses = 0, _wkAvgSurplus = 0;
   if(_wkHistActive.length > 0){
-    const wts = _wkHistActive.map((_,i) => i + 1);
-    const wtSum = wts.reduce((s,w) => s + w, 0);
-    _wkAvgNetRetained = Math.round(_wkHistActive.reduce((s,w,i) => s + w.netRetained * wts[i], 0) / wtSum);
-    _wkAvgExpenses = Math.round(_wkHistActive.reduce((s,w,i) => s + w.expenses * wts[i], 0) / wtSum);
-    _wkAvgSurplus = Math.round(_wkHistActive.reduce((s,w,i) => s + w.surplus * wts[i], 0) / wtSum);
+    const n = _wkHistActive.length;
+    _wkAvgNetRetained = Math.round(_wkHistActive.reduce((s,w) => s + w.netRetained, 0) / n);
+    _wkAvgExpenses = Math.round(_wkHistActive.reduce((s,w) => s + w.expenses, 0) / n);
+    _wkAvgSurplus = Math.round(_wkHistActive.reduce((s,w) => s + w.surplus, 0) / n);
   } else if(_wkCompleted.length > 0){
-    // Fallback to current period if no historical data
-    _wkAvgNetRetained = Math.round(_wkCompleted.reduce((s,w)=>s+w.netRetained,0) / _wkCompleted.length);
-    _wkAvgExpenses = Math.round(_wkCompleted.reduce((s,w)=>s+w.expenses,0) / _wkCompleted.length);
-    _wkAvgSurplus = Math.round(_wkCompleted.reduce((s,w)=>s+w.surplus,0) / _wkCompleted.length);
+    const n = _wkCompleted.length;
+    _wkAvgNetRetained = Math.round(_wkCompleted.reduce((s,w)=>s+w.netRetained,0) / n);
+    _wkAvgExpenses = Math.round(_wkCompleted.reduce((s,w)=>s+w.expenses,0) / n);
+    _wkAvgSurplus = Math.round(_wkCompleted.reduce((s,w)=>s+w.surplus,0) / n);
   }
   // Projection: available fund at end of period = current available + avg surplus × remaining weeks
   const _wkRemaining = _wkData.filter(w => !w.isComplete).length;
