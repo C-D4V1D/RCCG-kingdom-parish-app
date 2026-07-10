@@ -3653,9 +3653,13 @@ async function renderDashboard(){
     _wkAvgExpenses = Math.round(_wkCompleted.reduce((s,w)=>s+w.expenses,0) / n);
     _wkAvgSurplus = Math.round(_wkCompleted.reduce((s,w)=>s+w.surplus,0) / n);
   }
-  // Projection: available fund at end of period = current available + avg surplus × remaining weeks
+  // Projection: available fund at end of period = current available + avg surplus × remaining weeks.
+  // Use dashSpendable (Total Church Balance − Outstanding RCCG Remittance) as the baseline —
+  // it's the actual current cash position shown elsewhere on the dashboard. Using netLocal −
+  // totalExpenses here would measure only this period's income flow, not the real balance
+  // (which includes the carried-forward balance sitting in the bank).
   const _wkRemaining = _wkData.filter(w => !w.isComplete).length;
-  const _wkCurrentAvailable = netLocal - totalExpenses;
+  const _wkCurrentAvailable = dashSpendable;
   const _wkProjectedEnd = Math.round(_wkCurrentAvailable + (_wkAvgSurplus * _wkRemaining));
   const _wkTarget = _pettyTarget;
   const _wkProjColor = _wkProjectedEnd >= _wkTarget ? 'var(--success, #0F6E56)' : '#BA7517';
