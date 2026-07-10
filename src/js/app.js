@@ -3577,7 +3577,10 @@ async function renderDashboard(){
     let wkNetRetained = 0;
     if(wkTotalIncome > 0){
       const wkRem = await calcRemittancesFromRecords(wkIncome, remRatesDash);
-      const wkSundays = countSundaysInRange(wk.from, wk.to);
+      // Use ACCRUED Sundays, not calendar Sundays — a week's quota share should only be
+      // charged once that Sunday's collection has actually happened, so an in-progress
+      // week's future Sunday doesn't prematurely eat into unrelated non-remittance income.
+      const wkSundays = countAccruedSundaysInRange(wk.from, wk.to);
       const wkQuotas = _wkPerSundayQuota * wkSundays;
       wkNetRetained = wkRem.netLocal - wkQuotas;
     }
@@ -3623,7 +3626,7 @@ async function renderDashboard(){
     let wkNetRetained = 0;
     if(wkTotalIncome > 0){
       const wkRem = await calcRemittancesFromRecords(wkIncome, remRatesDash);
-      const wkSundays = countSundaysInRange(wk.from, wk.to);
+      const wkSundays = countAccruedSundaysInRange(wk.from, wk.to);
       wkNetRetained = wkRem.netLocal - (_wkPerSundayQuota * wkSundays);
     }
     const wkOtherLocal = wkIncome
@@ -3633,29 +3636,47 @@ async function renderDashboard(){
     wkNetRetained += wkOtherLocal;
     return { from: wk.from, to: wk.to, netRetained: wkNetRetained, expenses: wkTotalExpenses, surplus: wkNetRetained - wkTotalExpenses };
   }));
-  // Keep only completed weeks with activity, trim top & bottom outlier by surplus
-  let _wkHistActive = _wkHistData.filter(w => w.to <= _wkLookbackTo && (w.netRetained !== 0 || w.expenses > 0));
-  if(_wkHistActive.length >= 5){
-    const sorted = [..._wkHistActive].sort((a,b) => a.surplus - b.surplus);
-    _wkHistActive = sorted.slice(1, -1); // trim highest and lowest
-  }
-  // Simple trimmed mean — no weighting; the data shows no clear trend, just natural
-  // fluctuation, so weighting recent weeks only adds noise sensitivity.
+  // Keep only completed weeks with activity.
+  const _wkHistActive = _wkHistData.filter(w => w.to <= _wkLookbackTo && (w.netRetained !== 0 || w.expenses > 0));
+  // Robust trimmed mean via IQR (Tukey's fences), applied separately to income and to
+  // expenses. A single "trim the highest & lowest surplus week" pass would conflate the
+  // two — an unusually big one-off expense and an unusually big one-off income don't
+  // necessarily land in the same week, and there can be more than one outlier on a given
+  // side (e.g. two separate big-expense weeks). IQR trimming removes however many values
+  // are genuinely outside the normal spread, independently for each metric.
+  const trimmedMean = (values) => {
+    if(values.length === 0) return 0;
+    if(values.length < 5) return values.reduce((s,v)=>s+v,0) / values.length;
+    const sorted = [...values].sort((a,b)=>a-b);
+    const quantile = (p) => {
+      const idx = (sorted.length - 1) * p;
+      const lo = Math.floor(idx), hi = Math.ceil(idx);
+      return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+    };
+    const q1 = quantile(0.25), q3 = quantile(0.75);
+    const iqr = q3 - q1;
+    const lowerBound = q1 - 1.5 * iqr, upperBound = q3 + 1.5 * iqr;
+    const kept = sorted.filter(v => v >= lowerBound && v <= upperBound);
+    const use = kept.length > 0 ? kept : sorted;
+    return use.reduce((s,v)=>s+v,0) / use.length;
+  };
   let _wkAvgNetRetained = 0, _wkAvgExpenses = 0, _wkAvgSurplus = 0;
   if(_wkHistActive.length > 0){
-    const n = _wkHistActive.length;
-    _wkAvgNetRetained = Math.round(_wkHistActive.reduce((s,w) => s + w.netRetained, 0) / n);
-    _wkAvgExpenses = Math.round(_wkHistActive.reduce((s,w) => s + w.expenses, 0) / n);
-    _wkAvgSurplus = Math.round(_wkHistActive.reduce((s,w) => s + w.surplus, 0) / n);
+    _wkAvgNetRetained = Math.round(trimmedMean(_wkHistActive.map(w => w.netRetained)));
+    _wkAvgExpenses = Math.round(trimmedMean(_wkHistActive.map(w => w.expenses)));
+    _wkAvgSurplus = _wkAvgNetRetained - _wkAvgExpenses;
   } else if(_wkCompleted.length > 0){
-    const n = _wkCompleted.length;
-    _wkAvgNetRetained = Math.round(_wkCompleted.reduce((s,w)=>s+w.netRetained,0) / n);
-    _wkAvgExpenses = Math.round(_wkCompleted.reduce((s,w)=>s+w.expenses,0) / n);
-    _wkAvgSurplus = Math.round(_wkCompleted.reduce((s,w)=>s+w.surplus,0) / n);
+    _wkAvgNetRetained = Math.round(trimmedMean(_wkCompleted.map(w => w.netRetained)));
+    _wkAvgExpenses = Math.round(trimmedMean(_wkCompleted.map(w => w.expenses)));
+    _wkAvgSurplus = _wkAvgNetRetained - _wkAvgExpenses;
   }
-  // Projection: available fund at end of period = current available + avg surplus × remaining weeks
+  // Projection: available fund at end of period = current available + avg surplus × remaining weeks.
+  // Use dashSpendable (Total Church Balance − Outstanding RCCG Remittance) as the baseline —
+  // it's the actual current cash position shown elsewhere on the dashboard. Using netLocal −
+  // totalExpenses here would measure only this period's income flow, not the real balance
+  // (which includes the carried-forward balance sitting in the bank).
   const _wkRemaining = _wkData.filter(w => !w.isComplete).length;
-  const _wkCurrentAvailable = netLocal - totalExpenses;
+  const _wkCurrentAvailable = dashSpendable;
   const _wkProjectedEnd = Math.round(_wkCurrentAvailable + (_wkAvgSurplus * _wkRemaining));
   const _wkTarget = _pettyTarget;
   const _wkProjColor = _wkProjectedEnd >= _wkTarget ? 'var(--success, #0F6E56)' : '#BA7517';
