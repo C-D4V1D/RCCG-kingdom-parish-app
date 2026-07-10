@@ -3589,22 +3589,76 @@ async function renderDashboard(){
     return { idx, from: wk.from, to: wk.to, income: wkTotalIncome, expenses: wkTotalExpenses, netRetained: wkNetRetained, surplus: wkSurplus, isComplete };
   }));
   const _wkCompleted = _wkData.filter(w => w.isComplete && (w.income > 0 || w.expenses > 0));
-  // Weighted average: recent weeks count more (weight = position, so wk3 > wk2 > wk1)
-  let _wkAvgNetRetained = 0, _wkAvgExpenses = 0, _wkAvgSurplus = 0;
-  if(_wkCompleted.length > 0){
-    const wts = _wkCompleted.map((_,i) => i + 1);
-    const wtSum = wts.reduce((s,w) => s + w, 0);
-    _wkAvgNetRetained = Math.round(_wkCompleted.reduce((s,w,i) => s + w.netRetained * wts[i], 0) / wtSum);
-    _wkAvgExpenses = Math.round(_wkCompleted.reduce((s,w,i) => s + w.expenses * wts[i], 0) / wtSum);
-    _wkAvgSurplus = Math.round(_wkCompleted.reduce((s,w,i) => s + w.surplus * wts[i], 0) / wtSum);
+  // ── 3-Month Lookback for Averages (trimmed weighted mean) ──
+  // Build weekly metrics across the last ~90 days for a robust average
+  const _wkLookbackStart = new Date((_wkStart||new Date()).getFullYear(), (_wkStart||new Date()).getMonth() - 3, (_wkStart||new Date()).getDate());
+  const _wkLookbackFrom = ymdLocal(_wkLookbackStart);
+  const _wkLookbackTo = dashTodayStrForAsOf;
+  // Build week boundaries for the 3-month lookback
+  const _wkHistBounds = [];
+  const _wkHStart = parseYmdDate(_wkLookbackFrom);
+  const _wkHEnd = parseYmdDate(_wkLookbackTo);
+  if(_wkHStart && _wkHEnd){
+    let hCursor = new Date(_wkHStart.getFullYear(), _wkHStart.getMonth(), _wkHStart.getDate());
+    while(hCursor <= _wkHEnd){
+      const hFrom = new Date(hCursor);
+      const hDow = hCursor.getDay();
+      const hDaysToSun = hDow === 0 ? 0 : 7 - hDow;
+      const hSun = new Date(hCursor);
+      hSun.setDate(hSun.getDate() + hDaysToSun);
+      const hTo = hSun > _wkHEnd ? new Date(_wkHEnd) : hSun;
+      _wkHistBounds.push({ from: ymdLocal(hFrom), to: ymdLocal(hTo) });
+      hCursor = new Date(hTo);
+      hCursor.setDate(hCursor.getDate() + 1);
+    }
   }
-  // Projection: available fund at end of period = current available + weighted avg surplus × remaining weeks
+  // Compute metrics for each historical week
+  const _wkHistData = await Promise.all(_wkHistBounds.map(async (wk) => {
+    const wkIncome = filterByDateRange(allIncomeDash, wk.from, wk.to);
+    const wkExpenses = filterByDateRange(allExpensesDash, wk.from, wk.to);
+    const wkTotalIncome = wkIncome.reduce((s,r)=>s+(r.totalCollection||0),0);
+    const wkTotalExpenses = wkExpenses.reduce((s,r)=>s+(r.amount||0),0);
+    let wkNetRetained = 0;
+    if(wkTotalIncome > 0){
+      const wkRem = await calcRemittancesFromRecords(wkIncome, remRatesDash);
+      const wkSundays = countSundaysInRange(wk.from, wk.to);
+      wkNetRetained = wkRem.netLocal - (_wkPerSundayQuota * wkSundays);
+    }
+    const wkOtherLocal = wkIncome
+      .filter(r => r.source && r.source !== 'sunday_collection')
+      .filter(r => INCOME_TYPES.reduce((s,t)=>s+(r[t.key]||0),0) === 0)
+      .reduce((s,r) => s + (r.totalCollection||0), 0);
+    wkNetRetained += wkOtherLocal;
+    return { from: wk.from, to: wk.to, netRetained: wkNetRetained, expenses: wkTotalExpenses, surplus: wkNetRetained - wkTotalExpenses };
+  }));
+  // Keep only completed weeks with activity, trim top & bottom outlier by surplus
+  let _wkHistActive = _wkHistData.filter(w => w.to <= _wkLookbackTo && (w.netRetained !== 0 || w.expenses > 0));
+  if(_wkHistActive.length >= 5){
+    const sorted = [..._wkHistActive].sort((a,b) => a.surplus - b.surplus);
+    _wkHistActive = sorted.slice(1, -1); // trim highest and lowest
+  }
+  // Weighted average: recent weeks count more
+  let _wkAvgNetRetained = 0, _wkAvgExpenses = 0, _wkAvgSurplus = 0;
+  if(_wkHistActive.length > 0){
+    const wts = _wkHistActive.map((_,i) => i + 1);
+    const wtSum = wts.reduce((s,w) => s + w, 0);
+    _wkAvgNetRetained = Math.round(_wkHistActive.reduce((s,w,i) => s + w.netRetained * wts[i], 0) / wtSum);
+    _wkAvgExpenses = Math.round(_wkHistActive.reduce((s,w,i) => s + w.expenses * wts[i], 0) / wtSum);
+    _wkAvgSurplus = Math.round(_wkHistActive.reduce((s,w,i) => s + w.surplus * wts[i], 0) / wtSum);
+  } else if(_wkCompleted.length > 0){
+    // Fallback to current period if no historical data
+    _wkAvgNetRetained = Math.round(_wkCompleted.reduce((s,w)=>s+w.netRetained,0) / _wkCompleted.length);
+    _wkAvgExpenses = Math.round(_wkCompleted.reduce((s,w)=>s+w.expenses,0) / _wkCompleted.length);
+    _wkAvgSurplus = Math.round(_wkCompleted.reduce((s,w)=>s+w.surplus,0) / _wkCompleted.length);
+  }
+  // Projection: available fund at end of period = current available + avg surplus × remaining weeks
   const _wkRemaining = _wkData.filter(w => !w.isComplete).length;
   const _wkCurrentAvailable = netLocal - totalExpenses;
   const _wkProjectedEnd = Math.round(_wkCurrentAvailable + (_wkAvgSurplus * _wkRemaining));
   const _wkTarget = _pettyTarget;
   const _wkProjColor = _wkProjectedEnd >= _wkTarget ? 'var(--success, #0F6E56)' : '#BA7517';
   const _wkMaxBar = Math.max(..._wkData.map(w => Math.max(Math.abs(w.netRetained), Math.abs(w.expenses))), 1);
+  const _wkHistWeeksUsed = _wkHistActive.length;
 
   // Each period button shows its own anchor month. When the user hasn't picked a
   // month explicitly, the Remittance button shows the upcoming-anchor month
@@ -3963,7 +4017,8 @@ async function renderDashboard(){
 
         ${_wkData.length > 0 ? `<div class="card">
           <div class="card-header"><span class="card-title">Weekly Net Retained</span><span style="font-size:11px;color:var(--text3)">${_wkPeriodFrom} – ${_wkPeriodTo}</span></div>
-          <!-- Stat tiles -->
+          <!-- Stat tiles — averages based on 3-month lookback -->
+          <div style="font-size:10px;color:var(--text3);text-align:center;margin-bottom:6px">Weekly avg based on ${_wkHistWeeksUsed} week${_wkHistWeeksUsed!==1?'s':''} (last 3 months, outliers trimmed)</div>
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px">
             <div style="text-align:center;padding:10px 6px;background:var(--green-light,#E1F5EE);border-radius:10px">
               <div style="font-size:16px;font-weight:800;color:var(--primary,#0F6E56)">${fmtShort(_wkAvgNetRetained)}</div>
