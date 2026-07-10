@@ -3542,7 +3542,8 @@ async function renderDashboard(){
 
   // ── Weekly Net Retained Analysis ──────────────────────────────────────────────
   const _wkPeriodFrom = useRemPeriod ? dashPeriodFrom : dashMonthStart;
-  const _wkPeriodTo = useRemPeriod ? dashPeriodTo : dashMonthEnd;
+  // Use full period/month end for week boundaries (not today-capped) so future weeks appear
+  const _wkPeriodTo = useRemPeriod ? dashPeriodTo : ymdLocal(new Date(state.year, state.month+1, 0));
   // Build Monday–Sunday week boundaries within the period
   const _wkStart = parseYmdDate(_wkPeriodFrom);
   const _wkEnd = parseYmdDate(_wkPeriodTo);
@@ -3551,7 +3552,6 @@ async function renderDashboard(){
     let cursor = new Date(_wkStart.getFullYear(), _wkStart.getMonth(), _wkStart.getDate());
     while(cursor <= _wkEnd){
       const wkFrom = new Date(cursor);
-      // End of this week = next Sunday. dayOfWeek: 0=Sun,1=Mon,...6=Sat
       const dow = cursor.getDay();
       const daysToSun = dow === 0 ? 0 : 7 - dow;
       const sun = new Date(cursor);
@@ -3562,6 +3562,10 @@ async function renderDashboard(){
       cursor.setDate(cursor.getDate() + 1);
     }
   }
+  // Prorate quotas correctly: compute total period quotas once, allocate per-week by Sunday count
+  const _wkTotalPeriodSundays = countSundaysInRange(_wkPeriodFrom, _wkPeriodTo);
+  const _wkPeriodQuotaTotal = dashAllQuotasAmt;
+  const _wkPerSundayQuota = _wkTotalPeriodSundays > 0 ? _wkPeriodQuotaTotal / _wkTotalPeriodSundays : 0;
   // Compute per-week metrics
   const _wkData = await Promise.all(_wkBounds.map(async (wk, idx) => {
     const wkIncome = filterByDateRange(income, wk.from, wk.to);
@@ -3571,10 +3575,10 @@ async function renderDashboard(){
     let wkNetRetained = 0;
     if(wkTotalIncome > 0){
       const wkRem = await calcRemittancesFromRecords(wkIncome, remRatesDash);
-      const wkQuotas = sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, wk.from, wk.to));
+      const wkSundays = countSundaysInRange(wk.from, wk.to);
+      const wkQuotas = _wkPerSundayQuota * wkSundays;
       wkNetRetained = wkRem.netLocal - wkQuotas;
     }
-    // Include other income that has no remittable fields (local_only)
     const wkOtherLocal = wkIncome
       .filter(r => r.source && r.source !== 'sunday_collection')
       .filter(r => INCOME_TYPES.reduce((s,t)=>s+(r[t.key]||0),0) === 0)
@@ -3585,14 +3589,20 @@ async function renderDashboard(){
     return { idx, from: wk.from, to: wk.to, income: wkTotalIncome, expenses: wkTotalExpenses, netRetained: wkNetRetained, surplus: wkSurplus, isComplete };
   }));
   const _wkCompleted = _wkData.filter(w => w.isComplete && (w.income > 0 || w.expenses > 0));
-  const _wkAvgNetRetained = _wkCompleted.length > 0 ? Math.round(_wkCompleted.reduce((s,w)=>s+w.netRetained,0) / _wkCompleted.length) : 0;
-  const _wkAvgExpenses = _wkCompleted.length > 0 ? Math.round(_wkCompleted.reduce((s,w)=>s+w.expenses,0) / _wkCompleted.length) : 0;
-  const _wkAvgSurplus = _wkCompleted.length > 0 ? Math.round(_wkCompleted.reduce((s,w)=>s+w.surplus,0) / _wkCompleted.length) : 0;
-  // Projection: available fund at end of period = current available + avg surplus × remaining weeks
+  // Weighted average: recent weeks count more (weight = position, so wk3 > wk2 > wk1)
+  let _wkAvgNetRetained = 0, _wkAvgExpenses = 0, _wkAvgSurplus = 0;
+  if(_wkCompleted.length > 0){
+    const wts = _wkCompleted.map((_,i) => i + 1);
+    const wtSum = wts.reduce((s,w) => s + w, 0);
+    _wkAvgNetRetained = Math.round(_wkCompleted.reduce((s,w,i) => s + w.netRetained * wts[i], 0) / wtSum);
+    _wkAvgExpenses = Math.round(_wkCompleted.reduce((s,w,i) => s + w.expenses * wts[i], 0) / wtSum);
+    _wkAvgSurplus = Math.round(_wkCompleted.reduce((s,w,i) => s + w.surplus * wts[i], 0) / wtSum);
+  }
+  // Projection: available fund at end of period = current available + weighted avg surplus × remaining weeks
   const _wkRemaining = _wkData.filter(w => !w.isComplete).length;
   const _wkCurrentAvailable = netLocal - totalExpenses;
   const _wkProjectedEnd = Math.round(_wkCurrentAvailable + (_wkAvgSurplus * _wkRemaining));
-  const _wkTarget = _pettyTarget; // reuse the petty target (₦90k)
+  const _wkTarget = _pettyTarget;
   const _wkProjColor = _wkProjectedEnd >= _wkTarget ? 'var(--success, #0F6E56)' : '#BA7517';
   const _wkMaxBar = Math.max(..._wkData.map(w => Math.max(Math.abs(w.netRetained), Math.abs(w.expenses))), 1);
 
