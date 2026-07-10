@@ -4018,7 +4018,7 @@ async function renderDashboard(){
         </div>
 
         ${_wkData.length > 0 ? `<div class="card">
-          <div class="card-header"><span class="card-title">Weekly Net Retained</span><span style="font-size:11px;color:var(--text3)">${_wkPeriodFrom} – ${_wkPeriodTo}</span></div>
+          <div class="card-header"><span class="card-title">Weekly Net Retained</span><span style="font-size:11px;color:var(--text3)">${fmtDateShort(_wkPeriodFrom)} – ${fmtDateShort(_wkPeriodTo)}</span></div>
           <!-- Stat tiles — averages based on 3-month lookback -->
           <div style="font-size:10px;color:var(--text3);text-align:center;margin-bottom:6px">Weekly avg based on ${_wkHistWeeksUsed} week${_wkHistWeeksUsed!==1?'s':''} (last 3 months, outliers trimmed)</div>
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px">
@@ -4043,22 +4043,24 @@ async function renderDashboard(){
           </div>
           <div style="display:flex;align-items:flex-end;gap:6px;height:110px;padding:4px 0">
             ${_wkData.map(w=>{
-              const nrH = Math.max(3, Math.round((Math.max(0,w.netRetained)/_wkMaxBar)*70));
+              const nrH = w.netRetained > 0 ? Math.max(3, Math.round((w.netRetained/_wkMaxBar)*70)) : 3;
               const exH = Math.max(3, Math.round((w.expenses/_wkMaxBar)*70));
               const surpH = w.surplus>0 ? Math.max(2, Math.round((w.surplus/_wkMaxBar)*70)) : 0;
               const opacity = w.isComplete ? '1' : '0.45';
+              const nrLabel = w.netRetained > 0 ? fmtShort(w.netRetained).replace('₦','') : (w.netRetained < 0 ? '<span style="color:var(--danger)">−'+fmtShort(Math.abs(w.netRetained)).replace('₦','')+'</span>' : '');
+              const surpLabel = w.surplus > 0 ? fmtShort(w.surplus).replace('₦','') : (w.surplus < 0 ? '<span style="color:var(--danger)">−'+fmtShort(Math.abs(w.surplus)).replace('₦','')+'</span>' : '');
               return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;opacity:${opacity}">
                 <div style="display:flex;gap:2px;align-items:flex-end;width:100%;justify-content:center;height:86px">
                   <div style="width:28%;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
-                    <div style="font-size:8px;color:var(--text3);white-space:nowrap;margin-bottom:1px">${w.netRetained?fmtShort(w.netRetained).replace('₦',''):''}</div>
-                    <div style="width:100%;background:var(--primary);border-radius:3px 3px 0 0;height:${nrH}px"></div>
+                    <div style="font-size:8px;color:var(--text3);white-space:nowrap;margin-bottom:1px">${nrLabel}</div>
+                    <div style="width:100%;background:${w.netRetained<0?'var(--danger)':'var(--primary)'};border-radius:3px 3px 0 0;height:${nrH}px"></div>
                   </div>
                   <div style="width:28%;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
                     <div style="font-size:8px;color:var(--text3);white-space:nowrap;margin-bottom:1px">${w.expenses?fmtShort(w.expenses).replace('₦',''):''}</div>
                     <div style="width:100%;background:var(--danger);border-radius:3px 3px 0 0;height:${exH}px"></div>
                   </div>
                   <div style="width:28%;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
-                    <div style="font-size:8px;color:#185FA5;white-space:nowrap;margin-bottom:1px">${w.surplus>0?fmtShort(w.surplus).replace('₦',''):''}</div>
+                    <div style="font-size:8px;color:#185FA5;white-space:nowrap;margin-bottom:1px">${surpLabel}</div>
                     <div style="width:100%;background:#185FA5;border-radius:3px 3px 0 0;height:${surpH}px"></div>
                   </div>
                 </div>
@@ -4068,7 +4070,7 @@ async function renderDashboard(){
           <!-- End-of-period projection -->
           ${_wkRemaining > 0 && _wkCompleted.length > 0 ? `
           <div style="margin-top:12px;padding:12px 14px;background:${_wkProjColor}11;border:1px solid ${_wkProjColor}44;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:10px">
-            <div style="font-size:11px;color:var(--text2);line-height:1.4"><span style="font-weight:700">Projected Available Fund</span><br><span style="font-size:10px;color:var(--text3)">End of period (${_wkRemaining} wk${_wkRemaining>1?'s':''} left)</span></div>
+            <div style="font-size:11px;color:var(--text2);line-height:1.4"><span style="font-weight:700">Projected Available Fund</span><br><span style="font-size:10px;color:var(--text3)">End of period (${_wkRemaining} wk${_wkRemaining>1?'s':''} left) · Target: ${fmtShort(_wkTarget)}</span></div>
             <div style="font-size:20px;font-weight:800;color:${_wkProjColor};letter-spacing:-0.5px;white-space:nowrap">${fmt(_wkProjectedEnd)}</div>
           </div>` : ''}
           ${_wkRemaining === 0 && _wkCompleted.length > 0 ? `
