@@ -3540,6 +3540,128 @@ async function renderDashboard(){
   const _retSpread = forecastRetained ? Math.round((forecastRetained.max-forecastRetained.min)/2) : 0;
   const _balColor = forecastBalance && forecastBalance.min < 0 ? 'var(--danger)' : '#185FA5';
 
+  // ── Weekly Net Retained Analysis ──────────────────────────────────────────────
+  const _wkPeriodFrom = useRemPeriod ? dashPeriodFrom : dashMonthStart;
+  // Use full period/month end for week boundaries (not today-capped) so future weeks appear
+  const _wkPeriodTo = useRemPeriod ? dashPeriodTo : ymdLocal(new Date(state.year, state.month+1, 0));
+  // Build Monday–Sunday week boundaries within the period
+  const _wkStart = parseYmdDate(_wkPeriodFrom);
+  const _wkEnd = parseYmdDate(_wkPeriodTo);
+  const _wkBounds = [];
+  if(_wkStart && _wkEnd){
+    let cursor = new Date(_wkStart.getFullYear(), _wkStart.getMonth(), _wkStart.getDate());
+    while(cursor <= _wkEnd){
+      const wkFrom = new Date(cursor);
+      const dow = cursor.getDay();
+      const daysToSun = dow === 0 ? 0 : 7 - dow;
+      const sun = new Date(cursor);
+      sun.setDate(sun.getDate() + daysToSun);
+      const wkTo = sun > _wkEnd ? new Date(_wkEnd) : sun;
+      _wkBounds.push({ from: ymdLocal(wkFrom), to: ymdLocal(wkTo) });
+      cursor = new Date(wkTo);
+      cursor.setDate(cursor.getDate() + 1);
+    }
+  }
+  // Prorate quotas correctly: use full (un-prorated) period quota divided by total Sundays.
+  // dashAllQuotasAmt is already today-capped (prorated to elapsed Sundays), so we recover
+  // the full period amount from each quota line's monthlyAmount instead.
+  const _wkTotalPeriodSundays = countSundaysInRange(_wkPeriodFrom, _wkPeriodTo);
+  const _wkFullPeriodQuota = dashQuotaLines.reduce((s,q) => s + (q.monthlyAmount || q.amount || 0), 0);
+  const _wkPerSundayQuota = _wkTotalPeriodSundays > 0 ? _wkFullPeriodQuota / _wkTotalPeriodSundays : 0;
+  // Compute per-week metrics
+  const _wkData = await Promise.all(_wkBounds.map(async (wk, idx) => {
+    const wkIncome = filterByDateRange(income, wk.from, wk.to);
+    const wkExpenses = filterByDateRange(expenses, wk.from, wk.to);
+    const wkTotalIncome = wkIncome.reduce((s,r)=>s+(r.totalCollection||0),0);
+    const wkTotalExpenses = wkExpenses.reduce((s,r)=>s+(r.amount||0),0);
+    let wkNetRetained = 0;
+    if(wkTotalIncome > 0){
+      const wkRem = await calcRemittancesFromRecords(wkIncome, remRatesDash);
+      const wkSundays = countSundaysInRange(wk.from, wk.to);
+      const wkQuotas = _wkPerSundayQuota * wkSundays;
+      wkNetRetained = wkRem.netLocal - wkQuotas;
+    }
+    const wkOtherLocal = wkIncome
+      .filter(r => r.source && r.source !== 'sunday_collection')
+      .filter(r => INCOME_TYPES.reduce((s,t)=>s+(r[t.key]||0),0) === 0)
+      .reduce((s,r) => s + (r.totalCollection||0), 0);
+    wkNetRetained += wkOtherLocal;
+    const wkSurplus = wkNetRetained - wkTotalExpenses;
+    const isComplete = wk.to <= dashTodayStrForAsOf;
+    return { idx, from: wk.from, to: wk.to, income: wkTotalIncome, expenses: wkTotalExpenses, netRetained: wkNetRetained, surplus: wkSurplus, isComplete };
+  }));
+  const _wkCompleted = _wkData.filter(w => w.isComplete && (w.income > 0 || w.expenses > 0));
+  // ── 3-Month Lookback for Averages (trimmed weighted mean) ──
+  // Build weekly metrics across the last ~90 days for a robust average
+  const _wkLookbackStart = new Date((_wkStart||new Date()).getFullYear(), (_wkStart||new Date()).getMonth() - 3, (_wkStart||new Date()).getDate());
+  const _wkLookbackFrom = ymdLocal(_wkLookbackStart);
+  const _wkLookbackTo = dashTodayStrForAsOf;
+  // Build week boundaries for the 3-month lookback
+  const _wkHistBounds = [];
+  const _wkHStart = parseYmdDate(_wkLookbackFrom);
+  const _wkHEnd = parseYmdDate(_wkLookbackTo);
+  if(_wkHStart && _wkHEnd){
+    let hCursor = new Date(_wkHStart.getFullYear(), _wkHStart.getMonth(), _wkHStart.getDate());
+    while(hCursor <= _wkHEnd){
+      const hFrom = new Date(hCursor);
+      const hDow = hCursor.getDay();
+      const hDaysToSun = hDow === 0 ? 0 : 7 - hDow;
+      const hSun = new Date(hCursor);
+      hSun.setDate(hSun.getDate() + hDaysToSun);
+      const hTo = hSun > _wkHEnd ? new Date(_wkHEnd) : hSun;
+      _wkHistBounds.push({ from: ymdLocal(hFrom), to: ymdLocal(hTo) });
+      hCursor = new Date(hTo);
+      hCursor.setDate(hCursor.getDate() + 1);
+    }
+  }
+  // Compute metrics for each historical week
+  const _wkHistData = await Promise.all(_wkHistBounds.map(async (wk) => {
+    const wkIncome = filterByDateRange(allIncomeDash, wk.from, wk.to);
+    const wkExpenses = filterByDateRange(allExpensesDash, wk.from, wk.to);
+    const wkTotalIncome = wkIncome.reduce((s,r)=>s+(r.totalCollection||0),0);
+    const wkTotalExpenses = wkExpenses.reduce((s,r)=>s+(r.amount||0),0);
+    let wkNetRetained = 0;
+    if(wkTotalIncome > 0){
+      const wkRem = await calcRemittancesFromRecords(wkIncome, remRatesDash);
+      const wkSundays = countSundaysInRange(wk.from, wk.to);
+      wkNetRetained = wkRem.netLocal - (_wkPerSundayQuota * wkSundays);
+    }
+    const wkOtherLocal = wkIncome
+      .filter(r => r.source && r.source !== 'sunday_collection')
+      .filter(r => INCOME_TYPES.reduce((s,t)=>s+(r[t.key]||0),0) === 0)
+      .reduce((s,r) => s + (r.totalCollection||0), 0);
+    wkNetRetained += wkOtherLocal;
+    return { from: wk.from, to: wk.to, netRetained: wkNetRetained, expenses: wkTotalExpenses, surplus: wkNetRetained - wkTotalExpenses };
+  }));
+  // Keep only completed weeks with activity, trim top & bottom outlier by surplus
+  let _wkHistActive = _wkHistData.filter(w => w.to <= _wkLookbackTo && (w.netRetained !== 0 || w.expenses > 0));
+  if(_wkHistActive.length >= 5){
+    const sorted = [..._wkHistActive].sort((a,b) => a.surplus - b.surplus);
+    _wkHistActive = sorted.slice(1, -1); // trim highest and lowest
+  }
+  // Simple trimmed mean — no weighting; the data shows no clear trend, just natural
+  // fluctuation, so weighting recent weeks only adds noise sensitivity.
+  let _wkAvgNetRetained = 0, _wkAvgExpenses = 0, _wkAvgSurplus = 0;
+  if(_wkHistActive.length > 0){
+    const n = _wkHistActive.length;
+    _wkAvgNetRetained = Math.round(_wkHistActive.reduce((s,w) => s + w.netRetained, 0) / n);
+    _wkAvgExpenses = Math.round(_wkHistActive.reduce((s,w) => s + w.expenses, 0) / n);
+    _wkAvgSurplus = Math.round(_wkHistActive.reduce((s,w) => s + w.surplus, 0) / n);
+  } else if(_wkCompleted.length > 0){
+    const n = _wkCompleted.length;
+    _wkAvgNetRetained = Math.round(_wkCompleted.reduce((s,w)=>s+w.netRetained,0) / n);
+    _wkAvgExpenses = Math.round(_wkCompleted.reduce((s,w)=>s+w.expenses,0) / n);
+    _wkAvgSurplus = Math.round(_wkCompleted.reduce((s,w)=>s+w.surplus,0) / n);
+  }
+  // Projection: available fund at end of period = current available + avg surplus × remaining weeks
+  const _wkRemaining = _wkData.filter(w => !w.isComplete).length;
+  const _wkCurrentAvailable = netLocal - totalExpenses;
+  const _wkProjectedEnd = Math.round(_wkCurrentAvailable + (_wkAvgSurplus * _wkRemaining));
+  const _wkTarget = _pettyTarget;
+  const _wkProjColor = _wkProjectedEnd >= _wkTarget ? 'var(--success, #0F6E56)' : '#BA7517';
+  const _wkMaxBar = Math.max(..._wkData.map(w => Math.max(Math.abs(w.netRetained), Math.abs(w.expenses))), 1);
+  const _wkHistWeeksUsed = _wkHistActive.length;
+
   // Each period button shows its own anchor month. When the user hasn't picked a
   // month explicitly, the Remittance button shows the upcoming-anchor month
   // (June after May 24 cut-off) and the Calendar button shows today's calendar
@@ -3894,6 +4016,69 @@ async function renderDashboard(){
               <div class="feed-right" style="color:${amtColor};font-size:14px;font-weight:600">${prefix}${fmt(f.amt)}</div>
             </div>`}).join(''):'<div class="empty-table">No transactions yet.</div>'}
         </div>
+
+        ${_wkData.length > 0 ? `<div class="card">
+          <div class="card-header"><span class="card-title">Weekly Net Retained</span><span style="font-size:11px;color:var(--text3)">${fmtDateShort(_wkPeriodFrom)} – ${fmtDateShort(_wkPeriodTo)}</span></div>
+          <!-- Stat tiles — averages based on 3-month lookback -->
+          <div style="font-size:10px;color:var(--text3);text-align:center;margin-bottom:6px">Weekly avg based on ${_wkHistWeeksUsed} week${_wkHistWeeksUsed!==1?'s':''} (last 3 months, outliers trimmed)</div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px">
+            <div style="text-align:center;padding:10px 6px;background:var(--green-light,#E1F5EE);border-radius:10px">
+              <div style="font-size:16px;font-weight:800;color:var(--primary,#0F6E56)">${fmtShort(_wkAvgNetRetained)}</div>
+              <div style="font-size:9.5px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.3px;margin-top:3px">Avg Net Retained</div>
+            </div>
+            <div style="text-align:center;padding:10px 6px;background:#FCEBEB;border-radius:10px">
+              <div style="font-size:16px;font-weight:800;color:var(--danger,#c0392b)">${fmtShort(_wkAvgExpenses)}</div>
+              <div style="font-size:9.5px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.3px;margin-top:3px">Avg Expenses</div>
+            </div>
+            <div style="text-align:center;padding:10px 6px;background:#E6F1FB;border-radius:10px">
+              <div style="font-size:16px;font-weight:800;color:#185FA5">${fmtShort(_wkAvgSurplus)}</div>
+              <div style="font-size:9.5px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.3px;margin-top:3px">Avg Surplus</div>
+            </div>
+          </div>
+          <!-- Weekly bar chart -->
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;font-size:10px;color:var(--text3)">
+            <span><span style="display:inline-block;width:8px;height:8px;background:var(--primary);border-radius:2px;margin-right:3px"></span>Net Retained</span>
+            <span><span style="display:inline-block;width:8px;height:8px;background:var(--danger);border-radius:2px;margin-right:3px"></span>Expenses</span>
+            <span><span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:2px;margin-right:3px"></span>Surplus</span>
+          </div>
+          <div style="display:flex;align-items:flex-end;gap:6px;height:110px;padding:4px 0">
+            ${_wkData.map(w=>{
+              const nrH = w.netRetained > 0 ? Math.max(3, Math.round((w.netRetained/_wkMaxBar)*70)) : 3;
+              const exH = Math.max(3, Math.round((w.expenses/_wkMaxBar)*70));
+              const surpH = w.surplus>0 ? Math.max(2, Math.round((w.surplus/_wkMaxBar)*70)) : 0;
+              const opacity = w.isComplete ? '1' : '0.45';
+              const nrLabel = w.netRetained > 0 ? fmtShort(w.netRetained).replace('₦','') : (w.netRetained < 0 ? '<span style="color:var(--danger)">−'+fmtShort(Math.abs(w.netRetained)).replace('₦','')+'</span>' : '');
+              const surpLabel = w.surplus > 0 ? fmtShort(w.surplus).replace('₦','') : (w.surplus < 0 ? '<span style="color:var(--danger)">−'+fmtShort(Math.abs(w.surplus)).replace('₦','')+'</span>' : '');
+              return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;opacity:${opacity}">
+                <div style="display:flex;gap:2px;align-items:flex-end;width:100%;justify-content:center;height:86px">
+                  <div style="width:28%;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+                    <div style="font-size:8px;color:var(--text3);white-space:nowrap;margin-bottom:1px">${nrLabel}</div>
+                    <div style="width:100%;background:${w.netRetained<0?'var(--danger)':'var(--primary)'};border-radius:3px 3px 0 0;height:${nrH}px"></div>
+                  </div>
+                  <div style="width:28%;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+                    <div style="font-size:8px;color:var(--text3);white-space:nowrap;margin-bottom:1px">${w.expenses?fmtShort(w.expenses).replace('₦',''):''}</div>
+                    <div style="width:100%;background:var(--danger);border-radius:3px 3px 0 0;height:${exH}px"></div>
+                  </div>
+                  <div style="width:28%;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+                    <div style="font-size:8px;color:#185FA5;white-space:nowrap;margin-bottom:1px">${surpLabel}</div>
+                    <div style="width:100%;background:#185FA5;border-radius:3px 3px 0 0;height:${surpH}px"></div>
+                  </div>
+                </div>
+                <div style="font-size:10px;color:var(--text2);white-space:nowrap">Wk${w.idx+1}${!w.isComplete?' ⏳':''}</div>
+              </div>`;}).join('')}
+          </div>
+          <!-- End-of-period projection -->
+          ${_wkRemaining > 0 && _wkCompleted.length > 0 ? `
+          <div style="margin-top:12px;padding:12px 14px;background:${_wkProjColor}11;border:1px solid ${_wkProjColor}44;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+            <div style="font-size:11px;color:var(--text2);line-height:1.4"><span style="font-weight:700">Projected Available Fund</span><br><span style="font-size:10px;color:var(--text3)">End of period (${_wkRemaining} wk${_wkRemaining>1?'s':''} left) · Target: ${fmtShort(_wkTarget)}</span></div>
+            <div style="font-size:20px;font-weight:800;color:${_wkProjColor};letter-spacing:-0.5px;white-space:nowrap">${fmt(_wkProjectedEnd)}</div>
+          </div>` : ''}
+          ${_wkRemaining === 0 && _wkCompleted.length > 0 ? `
+          <div style="margin-top:12px;padding:10px 14px;background:var(--green-light,#E1F5EE);border-radius:10px;text-align:center">
+            <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Period Total Surplus</div>
+            <div style="font-size:20px;font-weight:800;color:var(--primary)">${fmt(_wkData.reduce((s,w)=>s+w.surplus,0))}</div>
+          </div>` : ''}
+        </div>` : ''}
 
         <div class="card">
           <div class="card-header"><span class="card-title">Monthly Trend (Income vs Expenses)</span></div>
