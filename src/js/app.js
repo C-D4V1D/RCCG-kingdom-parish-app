@@ -4043,7 +4043,7 @@ async function renderDashboard(){
     </div>`:''}
 
     <div class="grid-6040">
-      <div>
+      <div style="min-width:0">
         <div class="card">
           <div class="card-header"><span class="card-title">RECENT TRANSACTIONS</span><button class="btn btn-sm" onclick="App.navigate('transactions')">See all ↗</button></div>
           ${feedItems.length?feedItems.map(f=>{
@@ -4220,7 +4220,7 @@ async function renderDashboard(){
         </div>
       </div>
 
-      <div>
+      <div style="min-width:0">
         <div class="card">
           <div class="card-header"><span class="card-title">Income Breakdown</span><span style="color:var(--text3);font-size:11px">${MONTHS[state.month]} ${state.year} · ${sundayCount} Sunday${sundayCount!==1?'s':''}</span></div>
           ${displayIncomeCats.length?displayIncomeCats.map(([cat,amt])=>{
