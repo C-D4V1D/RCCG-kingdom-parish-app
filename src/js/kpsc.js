@@ -2421,13 +2421,14 @@ function updateFab() {
   let label = null;
 
   if (page === 'dashboard' && group === 'home') {
-    // Chairman, gen_sec, and financial_sec can start a new meeting from home
-    if (role === 'acting_chairman' || role === 'general_secretary' || role === 'financial_secretary') {
+    // Who can start a new meeting from home is governed by the Archive "Edit"
+    // permission in Settings → Role Permissions, so admins can customise it.
+    if (canWrite('archive')) {
       label = '+ New Meeting';
     }
   } else if (group === 'meetings') {
     if (subTab === 'archive' || subTab === null) {
-      if (role === 'acting_chairman' || role === 'general_secretary' || role === 'financial_secretary') label = '+ New Meeting';
+      if (canWrite('archive')) label = '+ New Meeting';
     } else if (subTab === 'projects') {
       if (role !== 'committee_viewer') label = '+ New Project';
     }
@@ -12757,7 +12758,7 @@ const PERM_ROLES = [
 
 const PERM_PAGES = [
   { key: 'dashboard',        label: 'Dashboard' },
-  { key: 'archive',          label: 'Archive' },
+  { key: 'archive',          label: 'Meetings / Archive' },
   { key: 'projects',         label: 'Projects' },
   { key: 'partners',         label: 'Partners' },
   { key: 'partner-progress', label: 'Progress' },
@@ -12831,7 +12832,7 @@ function renderRolePermissionsCard() {
   return `
     <div class="k-card" style="margin-bottom:16px">
       <h2 class="k-card-title">Role Permissions</h2>
-      <p class="k-card-sub">Control what each role can <strong>view</strong>, <strong>edit</strong>, and <strong>delete</strong> in each section. Greyed items are always enforced.</p>
+      <p class="k-card-sub">Control what each role can <strong>view</strong>, <strong>edit</strong>, and <strong>delete</strong> in each section. Greyed items are always enforced. "Meetings / Archive → Edit" also controls who can start a new meeting.</p>
       <div id="k-perm-roles-grid" class="k-perm-roles-grid">
         ${roleCards}
       </div>
