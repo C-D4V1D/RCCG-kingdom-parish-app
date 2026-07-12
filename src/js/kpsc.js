@@ -2421,13 +2421,13 @@ function updateFab() {
   let label = null;
 
   if (page === 'dashboard' && group === 'home') {
-    // Only chairman and gen_sec can start a new meeting from home
-    if (role === 'acting_chairman' || role === 'general_secretary') {
+    // Chairman, gen_sec, and financial_sec can start a new meeting from home
+    if (role === 'acting_chairman' || role === 'general_secretary' || role === 'financial_secretary') {
       label = '+ New Meeting';
     }
   } else if (group === 'meetings') {
     if (subTab === 'archive' || subTab === null) {
-      if (role === 'acting_chairman' || role === 'general_secretary') label = '+ New Meeting';
+      if (role === 'acting_chairman' || role === 'general_secretary' || role === 'financial_secretary') label = '+ New Meeting';
     } else if (subTab === 'projects') {
       if (role !== 'committee_viewer') label = '+ New Project';
     }
