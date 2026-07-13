@@ -7827,22 +7827,6 @@ function updateExpenseSubcats(){
   sel.innerHTML = `<option value="">— Select sub-category —</option>` +
     subcats.map(s=>`<option value="${s}">${s}</option>`).join('');
   updateExpenseDescRequired();
-  // Bank Charges must always be paid via bank transfer (auto-deducted from bank balance)
-  const methodSel = document.getElementById('exp_method');
-  if(methodSel){
-    if(cat === 'bank'){
-      methodSel.value = 'bank_transfer';
-      methodSel.style.opacity = '0.6';
-      methodSel.style.pointerEvents = 'none';
-      methodSel.setAttribute('aria-readonly','true');
-      methodSel.title = 'Bank charges are automatically deducted from the bank balance';
-    } else {
-      methodSel.style.opacity = '';
-      methodSel.style.pointerEvents = '';
-      methodSel.removeAttribute('aria-readonly');
-      methodSel.title = '';
-    }
-  }
 }
 
 function updateExpenseDescRequired(){
@@ -7854,6 +7838,19 @@ function updateExpenseDescRequired(){
   if(label) label.textContent = isOthers ? 'Description *' : 'Description (optional)';
   if(input) input.placeholder = isOthers ? 'Required: describe what this is for' : 'What was purchased / paid for?';
   if(hint)  hint.style.display = isOthers ? 'block' : 'none';
+  enforceExpenseMethodLock();
+}
+
+// Bank Charges are auto-deducted from the bank balance and must be paid via bank transfer —
+// except POS terminal charges, which banks may also debit from cash/petty cash on hand.
+function enforceExpenseMethodLock(){
+  const cat = document.getElementById('exp_cat')?.value;
+  const subcat = document.getElementById('exp_subcat')?.value;
+  if(cat==='bank' && subcat!=='POS terminal charges'){
+    const bankRadio = document.querySelector('input[name="exp_method"][value="bank_transfer"]');
+    const splitGrp = document.getElementById('exp_split_group');
+    if(bankRadio){ bankRadio.checked=true; if(splitGrp) splitGrp.style.display='none'; }
+  }
 }
 
 function getExpenseMethodOptionsForRole(role){
@@ -7963,12 +7960,7 @@ function onExpMethodChange(){
     splitLabel.textContent = method==='split_cash_bank' ? '💵 Cash (₦)' : '💳 Petty Cash (₦)';
   }
   if(isSplit) onExpSplitChange();
-  // Lock bank_transfer for bank category
-  const cat = document.getElementById('exp_cat')?.value;
-  if(cat==='bank'){
-    const bankRadio = document.querySelector('input[name="exp_method"][value="bank_transfer"]');
-    if(bankRadio){ bankRadio.checked=true; if(splitGrp) splitGrp.style.display='none'; }
-  }
+  enforceExpenseMethodLock();
 }
 
 function onExpSplitChange(){
