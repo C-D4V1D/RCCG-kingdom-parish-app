@@ -11456,8 +11456,10 @@ function renderAdminSettings(s){
 }
 
 function renderBankEmailAutomationSettings(s){
-  const deepseekOk = !!String(s.ai_deepseek_key||'').trim();
-  const openaiOk = !!String(s.ai_openai_key||'').trim();
+  // The server no longer sends raw key values (only a configured/not flag) —
+  // see getSettings() in functions/api/[[route]].js.
+  const deepseekOk = !!s.ai_deepseek_key_set;
+  const openaiOk = !!s.ai_openai_key_set;
   return `<div class="card" style="margin-top:16px">
     <div class="modal-title" style="font-size:15px;margin-bottom:4px">🤖 Bank Charge Email Automation</div>
     <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Automatically records bank-imposed charges (SMS alert fees, maintenance fees, COT, stamp duty, etc.) from the church's bank alert emails as Bank Charges expenses — no manual entry needed. See the setup guide for connecting the accountant's inbox via Make.com.</p>

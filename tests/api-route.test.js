@@ -67,7 +67,10 @@ test('onRequest handles CORS preflight requests', async () => {
   });
 
   assert.equal(response.status, 204);
-  assert.equal(response.headers.get('Access-Control-Allow-Origin'), '*');
+  // CORS is now locked to the app's own origin instead of '*' — see
+  // functions/api/[[route]].js APP_ORIGIN. Same-origin frontend calls are
+  // unaffected; this only stops other websites from reading responses.
+  assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'https://rccg-kingdom-parish-app.pages.dev');
 });
 
 test('onRequest returns 503 when DB binding is missing', async () => {
