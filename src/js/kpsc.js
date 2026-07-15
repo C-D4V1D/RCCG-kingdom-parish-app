@@ -178,6 +178,12 @@ const S = {
 const REC_CHUNK_MS = 5000;
 const REC_RETRY_BASE_MS = 1200;
 const REC_MAX_RETRIES = 5;
+// Safety cap: auto-stop a live recording after this many seconds of actual
+// recording time (pauses don't count). Nothing in the realtime transcription
+// pipeline previously capped session length, so a forgotten open tab could
+// stream to OpenAI's realtime API for hours or days, billing the whole time.
+// 4 hours comfortably covers any real KPSC meeting/AGM.
+const REC_MAX_DURATION_SEC = 4 * 60 * 60;
 const KPSC_SESSION_ERRORS = new Set([
   'KPSC session required',
   'KPSC session not found or expired',
@@ -800,6 +806,10 @@ function recStartTimer() {
     Rec.elapsed++;
     const el = document.getElementById('kpsc-rec-timer');
     if (el) el.textContent = recFmt();
+    if (Rec.elapsed >= REC_MAX_DURATION_SEC) {
+      recStop();
+      showToast(`Recording auto-stopped after reaching the ${Math.round(REC_MAX_DURATION_SEC / 3600)}-hour safety limit. Review and process the meeting whenever you're ready.`, 'warn');
+    }
   }, 1000);
 }
 
@@ -11361,13 +11371,16 @@ async function renderSettings(main) {
   if (savedWritePerms && typeof savedWritePerms === 'object') S.writePermissions = savedWritePerms;
   const savedDeletePerms = res?.kpsc_delete_permissions;
   if (savedDeletePerms && typeof savedDeletePerms === 'object') S.deletePermissions = savedDeletePerms;
-  const deepseekKey = res?.ai_deepseek_key || '';
-  const openaiKey   = res?.ai_openai_key   || '';
+  // The server never sends the raw key values (see getSettings() backend
+  // comment) — only whether one is configured. The key inputs below render
+  // blank with a masked placeholder; saveSettings() only sends a key field
+  // when the admin actually typed something, so leaving them untouched on
+  // save does not wipe the stored key.
   const policyUrl   = res?.kpsc_policy_url  || '';
   const policyNotes = res?.kpsc_policy_notes || '';
   const bankAccountNumbers = res?.kpsc_bank_account_number || '';
-  const hasDeepseek = !!deepseekKey;
-  const hasOpenai   = !!openaiKey;
+  const hasDeepseek = !!res?.ai_deepseek_key_set;
+  const hasOpenai   = !!res?.ai_openai_key_set;
   const transcriptionModel = res?.ai_transcription_model || 'gpt-4o-mini-transcribe';
   const ocrModel           = res?.ai_ocr_model           || 'gpt-5-mini';
   const deepseekModel      = res?.ai_deepseek_model      || 'deepseek-v4-flash';
@@ -11518,24 +11531,24 @@ async function renderSettings(main) {
           <label class="k-label">DeepSeek API Key</label>
           <input type="password" id="ks-deepseek-key" class="k-input"
             placeholder="${hasDeepseek ? '••••••••••••••••' : 'sk-...'}"
-            autocomplete="off" value="${esc(deepseekKey)}" />
+            autocomplete="off" />
           <div class="k-key-test-row">
             <button class="kbtn kbtn-sm k-key-test-btn" onclick="Kpsc.testDeepseekKey(this)">Test connection</button>
             <span class="k-key-status" id="ks-deepseek-status"></span>
           </div>
-          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at <a href="https://platform.deepseek.com" target="_blank" rel="noopener">platform.deepseek.com</a></p>
+          <p class="k-hint">Used to generate meeting minutes with AI. Get a key at <a href="https://platform.deepseek.com" target="_blank" rel="noopener">platform.deepseek.com</a>${hasDeepseek ? ' — leave blank to keep the currently saved key.' : ''}</p>
         </div>
 
         <div class="k-form-group">
           <label class="k-label">OpenAI API Key</label>
           <input type="password" id="ks-openai-key" class="k-input"
             placeholder="${hasOpenai ? '••••••••••••••••' : 'sk-...'}"
-            autocomplete="off" value="${esc(openaiKey)}" />
+            autocomplete="off" />
           <div class="k-key-test-row">
             <button class="kbtn kbtn-sm k-key-test-btn" onclick="Kpsc.testOpenaiKey(this)">Test connection</button>
             <span class="k-key-status" id="ks-openai-status"></span>
           </div>
-          <p class="k-hint">Required for audio transcription, notes OCR, and receipt scanning. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a></p>
+          <p class="k-hint">Required for audio transcription, notes OCR, and receipt scanning. Get a key at <a href="https://platform.openai.com" target="_blank" rel="noopener">platform.openai.com</a>${hasOpenai ? ' — leave blank to keep the currently saved key.' : ''}</p>
         </div>
 
         <div class="k-form-group">
@@ -12084,13 +12097,20 @@ async function saveSettings() {
   btn.textContent = 'Saving…';
   msg.style.display = 'none';
 
-  const res = await apiPost('settings', {
-    ai_deepseek_key: deepseekKey,
-    ai_openai_key: openaiKey,
+  // The key inputs render blank even when a key is already saved (the
+  // server no longer sends raw key values to the browser — see
+  // renderSettings). Only include a key field here if the admin actually
+  // typed a new one, so leaving it blank preserves the existing saved key
+  // instead of wiping it.
+  const payload = {
     kpsc_policy_url: policyUrl,
     kpsc_policy_notes: policyNotes,
     kpsc_bank_account_number: bankAccountNumbers,
-  });
+  };
+  if (deepseekKey) payload.ai_deepseek_key = deepseekKey;
+  if (openaiKey) payload.ai_openai_key = openaiKey;
+
+  const res = await apiPost('settings', payload);
 
   if (res?.error) {
     msg.className = 'k-settings-msg k-msg-error';
@@ -15528,48 +15548,13 @@ async function abDraftMemberSms(btn) {
   btn.textContent = '⏳ Drafting SMS…';
 
   try {
-    const itemsList = agendaItems.length
-      ? agendaItems.map((it, i) => `${i + 1}. ${it}`).join('\n')
-      : '(Agenda items not yet selected)';
-
-    const prompt = `Draft a concise SMS notification for KPSC committee members about an upcoming meeting.
-Meeting title: "${meetingTitle}"
-Date: "${meetingDate || 'TBC'}"
-Agenda items:
-${itemsList}
-
-Rules:
-- Keep it under 320 characters (2 SMS pages max)
-- Church-appropriate, warm but professional tone
-- Must include: meeting title, date, and a brief agenda summary
-- End with: "— RCCG Kingdom Parish"
-- No markdown, no bullet symbols — plain text only
-Return only the SMS text, nothing else.`;
-
-    const settingsRes = await apiGet('settings');
-    const deepseekKey = settingsRes?.ai_deepseek_key || '';
-    const deepseekModel = settingsRes?.ai_deepseek_model || 'deepseek-v4-flash';
-
+    // Drafted server-side (kpsc-draft-agenda-sms) — the browser no longer
+    // fetches the raw DeepSeek key from /api/settings to call DeepSeek itself.
     let smsText = '';
-
-    if (deepseekKey) {
-      try {
-        const resp = await fetch('https://api.deepseek.com/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
-          body: JSON.stringify({
-            model: deepseekModel,
-            messages: [{ role: 'user', content: prompt }],
-            max_tokens: 200,
-            temperature: 0.4,
-          }),
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          smsText = (data.choices?.[0]?.message?.content || '').trim();
-        }
-      } catch { /* fall back to template */ }
-    }
+    try {
+      const res = await apiPost('kpsc-draft-agenda-sms', { meetingTitle, meetingDate, agendaItems });
+      smsText = String(res?.smsText || '').trim();
+    } catch { /* fall back to template */ }
 
     if (!smsText) {
       const items = agendaItems.slice(0, 3).join(', ') + (agendaItems.length > 3 ? ', & more' : '');
@@ -15611,40 +15596,20 @@ async function abRefineSmsMessage(action, btn) {
   const smsEl = document.getElementById('ab-sms-text');
   if (!smsEl?.value?.trim()) { showToast('Generate an SMS draft first.', 'warn'); return; }
 
-  const settingsRes = await apiGet('settings');
-  const deepseekKey = settingsRes?.ai_deepseek_key || '';
-  if (!deepseekKey) { showToast('DeepSeek API key required for AI refinement.', 'warn'); return; }
-
   const orig = btn.textContent;
   btn.disabled = true;
   btn.textContent = '⏳…';
 
-  const actionPrompts = {
-    proofread: `Proofread and fix grammar/spelling errors in this SMS. Keep length the same. Return only the corrected SMS text:\n\n`,
-    shorten: `Shorten this SMS to under 160 characters (1 SMS page) while keeping all key info. Return only the shortened text:\n\n`,
-    formal: `Rewrite this SMS in a more formal, professional church tone. Keep it under 320 characters. Return only the text:\n\n`,
-  };
-  const promptPrefix = actionPrompts[action] || actionPrompts.proofread;
-
   try {
-    const resp = await fetch('https://api.deepseek.com/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
-      body: JSON.stringify({
-        model: settingsRes?.ai_deepseek_model || 'deepseek-v4-flash',
-        messages: [{ role: 'user', content: promptPrefix + smsEl.value }],
-        max_tokens: 200,
-        temperature: 0.3,
-      }),
-    });
-    if (resp.ok) {
-      const data = await resp.json();
-      const refined = (data.choices?.[0]?.message?.content || '').trim();
-      if (refined) {
-        smsEl.value = refined;
-        abUpdateSmsCharCount();
-        showToast('SMS refined.', 'success');
-      }
+    // Refined server-side (kpsc-refine-agenda-sms) — the browser no longer
+    // needs the raw DeepSeek key to call the API directly.
+    const res = await apiPost('kpsc-refine-agenda-sms', { action, smsText: smsEl.value });
+    if (res?.error) { showToast(res.error, 'warn'); return; }
+    const refined = String(res?.refined || '').trim();
+    if (refined) {
+      smsEl.value = refined;
+      abUpdateSmsCharCount();
+      showToast('SMS refined.', 'success');
     }
   } catch (e) {
     showToast('Refinement failed: ' + e.message, 'error');
@@ -16146,23 +16111,17 @@ async function abToggleVoice() {
       if (btn) { btn.textContent = '🎙 Record Voice Note'; btn.classList.remove('kbtn-amber'); }
       if (statusEl) statusEl.textContent = 'Transcribing…';
       try {
-        const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
-        // Map MIME type to a file extension for the Whisper API upload.
-        const mime = (mr.mimeType || 'audio/webm').split(';')[0].trim().toLowerCase();
+        // Map MIME type to a file extension for the transcription upload.
+        const mimeType = mr.mimeType || 'audio/webm';
+        const mime = mimeType.split(';')[0].trim().toLowerCase();
         const ext = AUDIO_MIME_TO_EXT[mime] || 'webm';
-        const formData = new FormData();
-        formData.append('file', blob, `note.${ext}`);
-        formData.append('model', 'whisper-1');
-        const openaiKey = await getOpenAiKey();
-        if (!openaiKey) { if (statusEl) statusEl.textContent = 'OpenAI key not set.'; return; }
-        const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${openaiKey}` },
-          body: formData,
-        });
-        if (!resp.ok) throw new Error(`Whisper error ${resp.status}`);
-        const data = await resp.json();
-        const transcribed = (data.text || '').trim();
+        const audioFile = new File(chunks, `note.${ext}`, { type: mimeType });
+        // Transcribed server-side via the existing kpsc-transcribe-audio
+        // endpoint — the browser never sees the raw OpenAI key (it used to
+        // fetch it from /api/settings and call OpenAI directly from here).
+        const data = await uploadAudioWithRetry('kpsc-transcribe-audio', audioFile, mimeType);
+        if (data?.error) throw new Error(data.error);
+        const transcribed = (data.transcript || '').trim();
         if (transcribed) {
           const ta = document.getElementById('ab-note-text');
           if (ta) {
@@ -16184,13 +16143,6 @@ async function abToggleVoice() {
   } catch (e) {
     showToast(`Microphone error: ${e.message}`, 'error');
   }
-}
-
-async function getOpenAiKey() {
-  try {
-    const res = await apiGet('settings');
-    return res?.ai_openai_key?.trim() || '';
-  } catch { return ''; }
 }
 
 function showNewMonthDraftModal() {

@@ -4,9 +4,16 @@
 // D1 binding name: DB  (set in Cloudflare Pages → Settings → Functions → D1 bindings)
 // ================================================================
 
+// Restricted from '*' to the app's own origin — this API is only ever called
+// by this site's own frontend (same-origin calls are unaffected by this
+// header; browsers only consult it for *cross-origin* requests). Locking it
+// down stops any other website/script from reading responses from this API
+// on a visitor's behalf. Non-browser callers (the GitHub Actions cron job,
+// Make.com webhooks) are untouched — CORS is a browser-only mechanism.
+const APP_ORIGIN = 'https://rccg-kingdom-parish-app.pages.dev';
 const CORS_HEADERS = {
   'Content-Type': 'application/json',
-  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Origin': APP_ORIGIN,
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, X-KPSC-Session',
 };
@@ -845,6 +852,16 @@ export async function onRequest(context) {
       if (auth instanceof Response) return auth;
       return await personalizeKpscReminder(DB, env, body);
     }
+    if (route === 'kpsc-draft-agenda-sms' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await draftAgendaMemberSms(DB, body);
+    }
+    if (route === 'kpsc-refine-agenda-sms' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      return await refineAgendaSms(DB, body);
+    }
     if (route === 'change-pin' && method === 'POST') {
       return await changeUserPin(DB, body);
     }
@@ -979,6 +996,13 @@ export async function onRequest(context) {
     }
 
     // ── /api/settings ──────────────────────────────────────────
+    // NOTE: this endpoint is shared by both the KPSC portal (which has real
+    // session auth via X-KPSC-Session) and the separate admin/finance portal
+    // (which has no server-side session concept at all — its login is a
+    // client-side PIN check only). We can't gate this route behind a KPSC
+    // session without breaking the admin portal's Settings/Quotas/Rates
+    // pages, so instead getSettings() below simply never includes the raw
+    // AI provider keys in its response — see the comment there.
     if (route === 'settings') {
       if (method === 'GET'  && param === 'api-status')       return getApiStatus(env);
       if (method === 'GET'  && !param)                       return await getSettings(DB);
@@ -3700,6 +3724,16 @@ async function getSettings(DB) {
   // Migrate: remove legacy goFishing from saved quotas
   if (out.quotas && 'goFishing' in out.quotas) { delete out.quotas.goFishing; }
   if (!out.remittanceRates) out.remittanceRates = null; // frontend uses DEFAULT_REMITTANCE_RATES as fallback
+
+  // Never send the raw OpenAI/DeepSeek API keys to the client. This endpoint
+  // has no auth (see the route comment) and used to return these in
+  // plaintext to any caller — replace with a "_set" flag the UI uses to
+  // show a configured/not-configured badge instead of the real value.
+  out.ai_openai_key_set   = !!String(out.ai_openai_key   || '').trim();
+  out.ai_deepseek_key_set = !!String(out.ai_deepseek_key || '').trim();
+  delete out.ai_openai_key;
+  delete out.ai_deepseek_key;
+
   return ok(out);
 }
 
@@ -4783,6 +4817,102 @@ Respond ONLY with a JSON array of 3 strings, no markdown, no prose. Example: ["v
     return ok({ variants: [fallbackTemplate], toneBucket, error: 'Could not parse AI response' });
   } catch (e) {
     return ok({ variants: [fallbackTemplate], toneBucket, error: `DeepSeek request failed: ${e.message}` });
+  }
+}
+
+// ── AGENDA BUILDER: MEMBER SMS DRAFTING (DeepSeek) ─────────────────────
+// Moved server-side so the browser never has to fetch the raw DeepSeek key
+// (it previously called apiGet('settings') to read ai_deepseek_key, then
+// hit api.deepseek.com directly from client JS).
+async function loadDeepseekCreds(DB) {
+  let deepseekKey = '';
+  let deepseekModel = 'deepseek-v4-flash';
+  try {
+    const { results: sr } = await DB.prepare(
+      `SELECT key,value FROM settings WHERE key IN ('ai_deepseek_key','ai_deepseek_model')`
+    ).all();
+    const settings = Object.fromEntries((sr || []).map(r => [r.key, String(r.value || '')]));
+    deepseekKey = settings.ai_deepseek_key ? String(settings.ai_deepseek_key).trim() : '';
+    deepseekModel = settings.ai_deepseek_model ? String(settings.ai_deepseek_model).trim() : 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-chat')     deepseekModel = 'deepseek-v4-flash';
+    if (deepseekModel === 'deepseek-reasoner') deepseekModel = 'deepseek-v4-pro';
+  } catch (_) { /* ignore — caller handles empty key */ }
+  return { deepseekKey, deepseekModel };
+}
+
+async function draftAgendaMemberSms(DB, body) {
+  const meetingTitle = String(body?.meetingTitle || 'KPSC Committee Meeting').trim() || 'KPSC Committee Meeting';
+  const meetingDate = String(body?.meetingDate || '').trim();
+  const agendaItems = Array.isArray(body?.agendaItems) ? body.agendaItems.map(i => String(i || '')).filter(Boolean) : [];
+
+  const { deepseekKey, deepseekModel } = await loadDeepseekCreds(DB);
+  if (!deepseekKey) return ok({ smsText: '' });
+
+  const itemsList = agendaItems.length
+    ? agendaItems.map((it, i) => `${i + 1}. ${it}`).join('\n')
+    : '(Agenda items not yet selected)';
+
+  const prompt = `Draft a concise SMS notification for KPSC committee members about an upcoming meeting.
+Meeting title: "${meetingTitle}"
+Date: "${meetingDate || 'TBC'}"
+Agenda items:
+${itemsList}
+
+Rules:
+- Keep it under 320 characters (2 SMS pages max)
+- Church-appropriate, warm but professional tone
+- Must include: meeting title, date, and a brief agenda summary
+- End with: "— RCCG Kingdom Parish"
+- No markdown, no bullet symbols — plain text only
+Return only the SMS text, nothing else.`;
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 200, temperature: 0.4 }),
+    });
+    if (!resp.ok) return ok({ smsText: '' });
+    const data = await resp.json();
+    const smsText = String(data.choices?.[0]?.message?.content || '').trim();
+    return ok({ smsText });
+  } catch (_) {
+    return ok({ smsText: '' });
+  }
+}
+
+async function refineAgendaSms(DB, body) {
+  const action = String(body?.action || 'proofread').trim();
+  const smsText = String(body?.smsText || '').trim();
+  if (!smsText) return err('smsText is required', 400);
+
+  const { deepseekKey, deepseekModel } = await loadDeepseekCreds(DB);
+  if (!deepseekKey) return ok({ refined: '', error: 'DeepSeek API key required for AI refinement.' });
+
+  const actionPrompts = {
+    proofread: `Proofread and fix grammar/spelling errors in this SMS. Keep length the same. Return only the corrected SMS text:\n\n`,
+    shorten: `Shorten this SMS to under 160 characters (1 SMS page) while keeping all key info. Return only the shortened text:\n\n`,
+    formal: `Rewrite this SMS in a more formal, professional church tone. Keep it under 320 characters. Return only the text:\n\n`,
+  };
+  const promptPrefix = actionPrompts[action] || actionPrompts.proofread;
+
+  try {
+    const resp = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+      body: JSON.stringify({
+        model: deepseekModel,
+        messages: [{ role: 'user', content: promptPrefix + smsText }],
+        max_tokens: 200,
+        temperature: 0.3,
+      }),
+    });
+    if (!resp.ok) return ok({ refined: '', error: `DeepSeek API error: ${resp.status}` });
+    const data = await resp.json();
+    const refined = (data.choices?.[0]?.message?.content || '').trim();
+    return ok({ refined });
+  } catch (e) {
+    return ok({ refined: '', error: `Refinement failed: ${e.message}` });
   }
 }
 
