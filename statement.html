@@ -366,9 +366,19 @@ function renderReport(resp){
   // statements (created before this feature) simply omit these fields.
   if(D.satelliteFundsIn !== undefined || D.satelliteFundsOut !== undefined || D.satelliteFundsHeld !== undefined){
     const sIn = D.satelliteFundsIn||0, sOut = D.satelliteFundsOut||0, sHeld = D.satelliteFundsHeld||0;
+    const sTransfer = D.satelliteFundsTransferOut||0, sGift = D.satelliteFundsGift||0;
+    const sReimb = D.satelliteFundsReimbursement||0, sCorr = D.satelliteFundsCorrection||0;
+    const transferMemo = sTransfer>0
+      ? `<div style="font-size:11px;margin-top:6px;color:#555">Transferred to parish this period: <strong>${N(sTransfer)}</strong>`
+        + (sGift>0?` — Gift/surplus: ${N(sGift)} (counted as income above, see Section A)`:'')
+        + (sReimb>0?` — Reimbursement: ${N(sReimb)} (memo only, not income)`:'')
+        + (sCorr>0?` — Correction: ${N(sCorr)} (memo only, not income)`:'')
+        + `</div>`
+      : '';
     html += `<div class="note-box" style="background:#eef0fb;border-color:#c7cdee;color:#33396b;margin-top:6px">
       <strong>Funds Received &amp; Remitted on Behalf of Satellite Parishes</strong> — In ${N(sIn)} / Out ${N(sOut)} / Held ${N(sHeld)}
       <div style="font-size:11px;margin-top:4px;color:#555">Pass-through custodial funds for the satellite parishes' Province remittance and joint area/zone payments — excluded from Income, Expenses, and Net Position above.</div>
+      ${transferMemo}
     </div>`;
   }
 

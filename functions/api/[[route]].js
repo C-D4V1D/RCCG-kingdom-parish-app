@@ -3373,9 +3373,30 @@ async function deleteRemittance(DB, id, force = false) {
 // (Province remittance contributions + joint area/zone payments). This is
 // custodial/agency money, never this parish's own income or expense, so it is
 // kept entirely out of the `income` and `expenses` tables and never feeds their
-// totals. Every In/Out is mirrored into `cash_transactions` (a plain deposit or
-// withdrawal) so the bank balance stays accurate, since this money really does
-// move through the bank account — see createCashTransaction.
+// totals. This table is the SINGLE SOURCE OF TRUTH for the held-for-satellites
+// balance (see calcChurchBalance in src/js/app.js): held = sum(in) − sum(out) −
+// sum(transfer_out).
+//
+// `direction` is one of:
+//   'in'           — money received from a satellite parish. Mirrored into
+//                     cash_transactions as a cash_deposit (destination=
+//                     'satellite_passthrough') so the bank balance matches the
+//                     real bank statement.
+//   'out'          — money forwarded to Province / joint area-zone on the
+//                     satellites' behalf. Mirrored as a withdrawal (same
+//                     destination tag) — leaves the bank for real.
+//   'transfer_out' — reclassifies some of the ALREADY-HELD balance as the
+//                     parish's own money (reasons in `purpose`: 'gift',
+//                     'reimbursement', 'correction'). The cash is already
+//                     sitting in the bank (it arrived via an 'in' deposit,
+//                     which already raised bankBalance) — a transfer must
+//                     create NO bank movement, so it has no bank_ref/mirror.
+//                     Reducing `held` by X alone is the complete balance
+//                     effect; see calcChurchBalance. Reporting layers may
+//                     additionally surface purpose='gift' transfers as parish
+//                     income (see summarizeSatelliteFunds in src/js/app.js) —
+//                     that is a display/report classification only and must
+//                     never touch the `income` table.
 async function getSatelliteFunds(DB) {
   const { results } = await DB.prepare(`SELECT * FROM satellite_funds ORDER BY date DESC, created_at DESC`).all();
   return ok((results || []).map(row => ({
@@ -3394,7 +3415,7 @@ async function getSatelliteFunds(DB) {
 
 async function createSatelliteFund(DB, data) {
   const id        = data.id || newId('SAT-');
-  const direction = data.direction === 'out' ? 'out' : 'in';
+  const direction = ['out', 'transfer_out'].includes(data.direction) ? data.direction : 'in';
   const amount    = data.amount || 0;
   const date      = data.date || new Date().toISOString().split('T')[0];
   const purpose   = data.purpose || 'other';
@@ -3402,17 +3423,23 @@ async function createSatelliteFund(DB, data) {
   const reference = data.reference || '';
   const recordedBy = data.recordedBy || '';
 
-  // Mirror into the bank ledger via the same mechanism the Bank module's normal
-  // deposit/withdrawal flows use, so the bank balance reflects this real cash
-  // movement. Deposits ('in') use a distinct destination/description so they are
-  // never mistaken for regular income; withdrawals ('out') use a destination that
-  // has no expense/petty-cash side effects — see submitBankWithdrawal for contrast.
-  const bankRefId = newId('CTX-');
-  const description = `Satellite/Zone Pass-Through Fund — ${purpose.replace(/_/g, ' ')}${note ? ': ' + note : ''}`;
-  const bankTxData = direction === 'in'
-    ? { id: bankRefId, type: 'cash_deposit', date, amount, description, reference, recordedBy, depositMethod: 'bank_transfer', incomeRef: '' }
-    : { id: bankRefId, type: 'withdrawal', date, amount, description, reference, recordedBy, authorizedBy: recordedBy, destination: 'satellite_passthrough' };
-  await createCashTransaction(DB, bankTxData);
+  let bankRefId = '';
+  if (direction === 'in' || direction === 'out') {
+    // Mirror into the bank ledger via the same mechanism the Bank module's normal
+    // deposit/withdrawal flows use, so the bank balance reflects this real cash
+    // movement. Both use destination='satellite_passthrough' — a marker that (a)
+    // keeps deposits from being mistaken for the accountant's own cash reaching the
+    // bank (see cashDepositedFromAccountant in calcChurchBalance) and (b) keeps
+    // withdrawals from triggering the accountant_cash/admin_petty_cash/direct_expense
+    // side effects a normal bank withdrawal has — see submitBankWithdrawal.
+    bankRefId = newId('CTX-');
+    const description = `Satellite/Zone Pass-Through Fund — ${purpose.replace(/_/g, ' ')}${note ? ': ' + note : ''}`;
+    const bankTxData = direction === 'in'
+      ? { id: bankRefId, type: 'cash_deposit', date, amount, description, reference, recordedBy, depositMethod: 'bank_transfer', incomeRef: '', destination: 'satellite_passthrough' }
+      : { id: bankRefId, type: 'withdrawal', date, amount, description, reference, recordedBy, authorizedBy: recordedBy, destination: 'satellite_passthrough' };
+    await createCashTransaction(DB, bankTxData);
+  }
+  // direction === 'transfer_out': deliberately NO bank mirror — see comment above.
 
   await DB.prepare(`
     INSERT INTO satellite_funds

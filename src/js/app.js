@@ -324,11 +324,20 @@ const OTHER_INCOME_SOURCES = [
   { key:'other',              label:'Other (specify in notes)' }
 ];
 
-// Purpose options for Satellite / Zone Pass-Through Fund entries (Remittances page).
+// Purpose options for Satellite / Zone Pass-Through Fund In/Out entries (Remittances page).
 const SATELLITE_FUND_PURPOSES = [
   { key:'province_remittance', label:'Province Remittance Contribution' },
   { key:'joint_area_zone',     label:'Joint Area / Zone Payment' },
   { key:'other',                label:'Other' },
+];
+
+// Reasons for a "Transfer to Parish" — reclassifies already-held satellite pool
+// balance as the parish's own money. The reason changes REPORTING classification
+// only (see summarizeSatelliteFunds) — the balance effect is identical for all three.
+const SATELLITE_TRANSFER_REASONS = [
+  { key:'gift',          label:'Gift / Surplus (satellite left it for HQ) — counted as parish income' },
+  { key:'reimbursement', label:'Reimbursement (HQ fronted a payment, now repaid) — memo only' },
+  { key:'correction',    label:"Correction (money was actually HQ's own, wrongly parked) — memo only" },
 ];
 
 const DEFAULT_REMITTANCE_RATES = {
@@ -365,6 +374,7 @@ const _inflight = new Map();   // path -> Promise            — de-dupes concur
 const _CACHE_TTL = {
   settings: 300000, 'petty-config': 300000, users: 300000,
   income: 60000, expenses: 60000, petty: 60000, remittances: 60000, 'cash-transactions': 60000,
+  'satellite-funds': 60000,
 };
 // Abort a request that stalls this long so it can be retried, rather than leaving the
 // page stuck on "Loading…" forever when a mobile connection dies mid-flight. Generous
@@ -1503,8 +1513,16 @@ function totalRemittanceDue(remCalc, quotas = 0){
     + (quotas || 0);
 }
 
-function calcChurchBalanceFromOpening(openingBalance, totalIncome, childrenTeacherHold, totalExpenses, remittancesPaid){
-  return openingBalance + (totalIncome - childrenTeacherHold) - totalExpenses - remittancesPaid;
+// satelliteTransferredToParish: satellite_funds 'transfer_out' amount(s) reclassified
+// into the parish's own money during this period (see calcChurchBalance's
+// heldForSatellites). This money never touched income/expenses, so it is not present
+// in totalIncome — it must be added here explicitly or this flow-reconstruction would
+// under-count relative to calcChurchBalance's actual total. Pass 0 (default) for a
+// caller whose own totalIncome already folds in the 'gift' portion — see
+// buildMonthlyStatementData, which instead relies on the "Adjustments" line to absorb
+// any residual (reimbursement/correction) drift.
+function calcChurchBalanceFromOpening(openingBalance, totalIncome, childrenTeacherHold, totalExpenses, remittancesPaid, satelliteTransferredToParish = 0){
+  return openingBalance + (totalIncome - childrenTeacherHold) - totalExpenses - remittancesPaid + satelliteTransferredToParish;
 }
 
 function calcOutstandingRemittancesFromFlow(openingOutstandingRems, currentPeriodRemDue, periodRemittancesPaid){
@@ -1518,8 +1536,9 @@ function calcCurrentPeriodOutstandingRemittance(currentPeriodRemDue, periodRemit
   );
 }
 
-function calcAvailableFundFromOpening(openingBalance, openingOutstandingRems, totalIncome, childrenTeacherHold, totalExpenses, currentPeriodRemDue){
-  return (openingBalance - openingOutstandingRems) + (totalIncome - childrenTeacherHold) - totalExpenses - currentPeriodRemDue;
+// See calcChurchBalanceFromOpening for satelliteTransferredToParish.
+function calcAvailableFundFromOpening(openingBalance, openingOutstandingRems, totalIncome, childrenTeacherHold, totalExpenses, currentPeriodRemDue, satelliteTransferredToParish = 0){
+  return (openingBalance - openingOutstandingRems) + (totalIncome - childrenTeacherHold) - totalExpenses - currentPeriodRemDue + satelliteTransferredToParish;
 }
 
 /**
@@ -2769,9 +2788,9 @@ function calcPettyFloatFromLedger(pettyHistory, expenses, asOfDate, recDate=()=>
  *  Pass nothing (or null) for the live "as of now" balance. */
 async function calcChurchBalance(asOfDate, prefetched){
   const pf = prefetched || {};
-  const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory] = await Promise.all([
+  const [allIncome,allExpenses,allRemittances,cashTx,pettyHistory,satelliteFunds] = await Promise.all([
     pf.income || DB.getIncome(), pf.expenses || DB.getExpenses(), pf.remittances || DB.getRemittances(),
-    pf.cashTx || DB.getCashTransactions(), pf.pettyHistory || DB.getPetty()
+    pf.cashTx || DB.getCashTransactions(), pf.pettyHistory || DB.getPetty(), pf.satelliteFunds || DB.getSatelliteFunds()
   ]);
   const remRates = pf.remRates || (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
 
@@ -2783,10 +2802,16 @@ async function calcChurchBalance(asOfDate, prefetched){
   const expenses = allExpenses.filter(onOrBefore);
   const cashTxF = cashTx.filter(onOrBefore);
   const pettyF = pettyHistory.filter(onOrBefore);
+  const satFundsF = (satelliteFunds||[]).filter(onOrBefore);
   const paidRemsList = allRemittances.filter(r => r.status === 'paid' && paidOnOrBefore(r));
 
   // --- BANK BALANCE ---
   const bankTransferIncome = income.reduce((s,r) => s + (r.bankTransferAmount||0), 0);
+  // Every effective cash deposit, INCLUDING satellite pass-through "in" mirrors (tagged
+  // destination==='satellite_passthrough' — see createSatelliteFund). The bank account
+  // really did receive this money, so bankBalance must match the real bank statement.
+  // (It is excluded from the ACCOUNTANT's cash line below via cashDepositedFromAccountant,
+  // and excluded from the parish's own available total via heldForSatellites.)
   const cashDepositedToBank = cashTxF.filter(t=>t.type==='cash_deposit'&&isDepositEffective(t)).reduce((s,t) => s+(t.amount||0), 0);
   // Pending expenses are included: every logged expense is an actual payment already made.
   // "Pending" means awaiting admin approval, not awaiting payment. This matches how petty
@@ -2797,6 +2822,8 @@ async function calcChurchBalance(asOfDate, prefetched){
     return s;
   }, 0);
   const paidRems = paidRemsList.reduce((s,r) => s+(r.amount||0), 0);
+  // Bank withdrawals — including satellite "out" mirrors. These already leave the bank
+  // for real (money forwarded to Province/joint area-zone), so this is correct as-is.
   const bankWithdrawals = cashTxF.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
   // Petty top-ups via bank transfer leave the bank account. Only approved/settled
   // refills have actually moved money — pending_approval requests must not be
@@ -2811,6 +2838,13 @@ async function calcChurchBalance(asOfDate, prefetched){
   const cashFromCollections = income.reduce((s,r) => {
     return s + getIncomeCashWithAccountant(r, remRates);
   }, 0);
+  // Deposits that actually moved the ACCOUNTANT's held cash into the bank. Satellite
+  // pass-through "in" money (destination==='satellite_passthrough') never touched the
+  // accountant — it is mirrored as a cash_deposit purely so bankBalance matches the bank
+  // statement, and must NOT be subtracted here, or it manufactures a phantom cash deficit
+  // (the accountant would appear to have disbursed money they never received). This is
+  // the P1 fix for the satellite pass-through fund feature — see cashDepositedToBank above.
+  const cashDepositedFromAccountant = cashTxF.filter(t=>t.type==='cash_deposit'&&isDepositEffective(t)&&t.destination!=='satellite_passthrough').reduce((s,t) => s+(t.amount||0), 0);
   const bankToAccountant = cashTxF.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t) => s+(t.amount||0), 0);
   const cashExpenses = expenses.filter(isLoggedExpense).reduce((s,e)=>{
     if(e.paymentMethod==='cash') return s+(e.amount||0);
@@ -2820,12 +2854,23 @@ async function calcChurchBalance(asOfDate, prefetched){
   // Petty top-ups via accountant's cash reduce the accountant's cash holding
   const pettyCashTopups = pettyF.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.cashAmount||0):(h.amount||0)),0);
-  const cashWithAccountantRaw = cashFromCollections - cashDepositedToBank + bankToAccountant - cashExpenses - pettyCashTopups;
+  const cashWithAccountantRaw = cashFromCollections - cashDepositedFromAccountant + bankToAccountant - cashExpenses - pettyCashTopups;
 
   // --- PETTY CASH (with Admin Officer) ---
   // Rebuild the float from raw ledger movements each time so historical snapshots stay
   // accurate even if the stored petty_config.float has drifted.
   const pettyFloat = calcPettyFloatFromLedger(pettyHistory, allExpenses, asOfDate, recDate);
+
+  // --- SATELLITE / ZONE PASS-THROUGH FUND — HELD ---
+  // Authoritative from the satellite_funds TABLE (not derived from cash_transactions) —
+  // satellite_funds is the single source of truth for this balance. This money IS
+  // included inside bankBalance above (it really is sitting in the bank account) but
+  // must be excluded from the parish's own available/total funds — it belongs to the
+  // satellite parishes until remitted onward or explicitly transferred to the parish.
+  const satelliteIn = satFundsF.filter(s=>s.direction==='in').reduce((s,r)=>s+(r.amount||0),0);
+  const satelliteOut = satFundsF.filter(s=>s.direction==='out').reduce((s,r)=>s+(r.amount||0),0);
+  const satelliteTransferOut = satFundsF.filter(s=>s.direction==='transfer_out').reduce((s,r)=>s+(r.amount||0),0);
+  const heldForSatellites = satelliteIn - satelliteOut - satelliteTransferOut;
 
   return {
     cashWithAccountant: Math.max(0, cashWithAccountantRaw),
@@ -2834,7 +2879,12 @@ async function calcChurchBalance(asOfDate, prefetched){
     cashDeficit: Math.max(0, -cashWithAccountantRaw),
     bankBalance,
     pettyFloat,
-    total: cashWithAccountantRaw + bankBalance + pettyFloat
+    heldForSatellites,
+    // total EXCLUDES heldForSatellites: it sits inside bankBalance (real bank money) but
+    // is not the parish's own to spend. A 'transfer_out' entry reduces heldForSatellites
+    // and — with no other change — raises `total` by the same amount, which is the
+    // correct and complete balance effect of reclassifying held money as parish money.
+    total: cashWithAccountantRaw + bankBalance + pettyFloat - heldForSatellites
   };
 }
 
@@ -2977,7 +3027,9 @@ async function renderDashboard(){
   const pettyConfigDash = _dash.pettyConfig;
   const cashTxDash      = _dash.cashTransactions;
   // Derived from settings, which loadDashboardData has already cached — no fetch.
-  const remRatesDash    = await getRemRates();
+  // satellite-funds is not part of the dashboard batch payload; fetched in parallel
+  // here so calcChurchBalance below never has to self-fetch it (cached 60s either way).
+  const [remRatesDash, allSatFundsDash] = await Promise.all([getRemRates(), DB.getSatelliteFunds()]);
   const settings = settingsDash;
   const { from: dashPeriodFrom, to: dashPeriodTo } =
     computeRemPeriodDates(settings, allRemsDash, state.year, state.month);
@@ -3177,6 +3229,7 @@ async function renderDashboard(){
   const churchBal = await calcChurchBalance(dashIsPastPeriod ? dashAsOfDate : null, {
     income: allIncomeDash, expenses: allExpensesDash, remittances: allRemsDash,
     cashTx: cashTxDash, pettyHistory: pettyHistDash, pettyConfig: pettyConfigDash,
+    satelliteFunds: allSatFundsDash,
     remRates: (remRatesDash.rates || DEFAULT_REMITTANCE_RATES)
   });
   const pendingPetty = (pettyHistDash||[]).filter(h=>h.status==='pending_approval').length;
@@ -3261,6 +3314,7 @@ async function renderDashboard(){
   const dashOpeningBal = await calcChurchBalance(dashPriorCloseDate, {
     income: allIncomeDash, expenses: allExpensesDash, remittances: allRemsDash,
     cashTx: cashTxDash, pettyHistory: pettyHistDash, pettyConfig: pettyConfigDash,
+    satelliteFunds: allSatFundsDash,
     remRates: (remRatesDash.rates || DEFAULT_REMITTANCE_RATES)
   });
   // dashCarriedForward is the opening amount shown on the card.
@@ -3301,13 +3355,29 @@ async function renderDashboard(){
       return dt.getMonth() === state.month && dt.getFullYear() === state.year;
     })
     .reduce((s,r)=>s+(r.amount||0),0);
+  // Satellite pass-through funds reclassified into the parish's own money this period
+  // (satellite_funds direction='transfer_out' — see calcChurchBalance/heldForSatellites).
+  // Dashboard's totalIncome comes purely from the income table, so none of this is baked
+  // in there — it must be added explicitly, or this flow-reconstruction under-counts
+  // relative to churchBal.total (which already reflects it via heldForSatellites).
+  const dashPeriodSatTransferOut = (allSatFundsDash||[])
+    .filter(s => s.direction === 'transfer_out')
+    .filter(s => {
+      const d = String(s?.date || s?.createdAt || '').slice(0,10);
+      if(!d) return false;
+      if(useRemPeriod) return d >= dashPeriodFrom && d <= dashPeriodTo;
+      const dt = new Date(d);
+      return dt.getMonth() === state.month && dt.getFullYear() === state.year;
+    })
+    .reduce((s,r)=>s+(r.amount||0),0);
   const dashAdminManagedIncome = totalIncome - dashChildrenTeacherTotal;
   const dashChurchBalanceFromOpening = calcChurchBalanceFromOpening(
     dashCarriedForward,
     totalIncome,
     dashChildrenTeacherTotal,
     totalPeriodAllExpenses,
-    dashPeriodRemittancesPaid
+    dashPeriodRemittancesPaid,
+    dashPeriodSatTransferOut
   );
   const dashOutstandingRemsFromFlow = calcOutstandingRemittancesFromFlow(
     dashOpeningOutstandingRems,
@@ -3320,7 +3390,8 @@ async function renderDashboard(){
     totalIncome,
     dashChildrenTeacherTotal,
     totalPeriodAllExpenses,
-    dashCurrentMonthRemDue
+    dashCurrentMonthRemDue,
+    dashPeriodSatTransferOut
   );
 
   // Feed items — richer detail for Recent Transactions card
@@ -3871,6 +3942,12 @@ async function renderDashboard(){
             <span><span style="display:inline-block;width:8px;height:8px;background:${churchBal.pettyFloat<0?'var(--danger)':'#1D9E75'};border-radius:50%;margin-right:8px"></span>${churchBal.pettyFloat<0?`<span style="color:var(--danger);font-weight:600;text-decoration:underline dotted var(--danger);text-underline-offset:3px">Petty Cash ⚠ Owes Admin Officer</span>`:`<span style="text-decoration:underline dotted #1D9E75;text-underline-offset:3px">Petty Cash</span>`}</span>
             <span style="font-weight:600;color:${churchBal.pettyFloat<0?'var(--danger)':'inherit'}">${fmt(churchBal.pettyFloat)}</span>
           </a>
+          ${Math.abs(churchBal.heldForSatellites||0)>=0.5?`
+          <a onclick="App.navigate('remittances')" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between;border-top:1px dashed var(--border);margin-top:6px;padding-top:6px">
+            <span><span style="display:inline-block;width:8px;height:8px;background:#8B4513;border-radius:50%;margin-right:8px"></span><span style="text-decoration:underline dotted #8B4513;text-underline-offset:3px">Held for satellites</span></span>
+            <span style="font-weight:600;color:#8B4513">−${fmt(churchBal.heldForSatellites)}</span>
+          </a>
+          <div style="font-size:10.5px;color:var(--text3);margin-top:2px">Held for satellites: ${fmt(churchBal.heldForSatellites)} (excluded from available funds — already inside Bank above)</div>`:''}
         </div>
       </div>
 
@@ -3977,6 +4054,11 @@ async function renderDashboard(){
                 <span style="color:var(--text3)">− Remittances paid this period</span>
                 <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashPeriodRemittancesPaid)}</span>
               </div>
+              ${dashPeriodSatTransferOut>0?`
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:var(--text3)">+ Transferred from satellite pool to parish</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">+${fmt(dashPeriodSatTransferOut)}</span>
+              </div>`:''}
               <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
                 <span>= Total Church Balance</span>
                 <span style="font-weight:700;font-family:ui-monospace,monospace;color:#185FA5">${fmt(dashChurchBalanceFromOpening)}</span>
@@ -4018,10 +4100,15 @@ async function renderDashboard(){
                 <span style="color:var(--text3)">− Total expenses this period</span>
                 <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(totalPeriodAllExpenses)}</span>
               </div>
-              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+              <div style="display:flex;justify-content:space-between;align-items:center;${dashPeriodSatTransferOut>0?'':'border-bottom:1.5px dashed var(--border);padding-bottom:6px'}">
                 <span style="color:var(--text3)">− RCCG remittance due for this period</span>
                 <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--danger)">−${fmt(dashCurrentMonthRemDue)}</span>
               </div>
+              ${dashPeriodSatTransferOut>0?`
+              <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px dashed var(--border);padding-bottom:6px">
+                <span style="color:var(--text3)">+ Transferred from satellite pool to parish</span>
+                <span style="font-weight:600;font-family:ui-monospace,monospace;color:var(--success)">+${fmt(dashPeriodSatTransferOut)}</span>
+              </div>`:''}
               <div style="display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:14px;padding-top:2px">
                 <span>= Actual Balance</span>
                 <span style="font-family:ui-monospace,monospace;color:${dashSpendColor}">${fmt(dashAvailableFromOpening)}</span>
@@ -6046,9 +6133,16 @@ async function renderRemittances(){
   // ── Satellite / Zone Pass-Through Fund — one combined pool, all-time totals ──
   // (not filtered to the remittance period above: this is a running custodial
   // balance, not a per-period figure). Excluded from every income/expense total.
+  // Held = in − out − transfer_out — identical formula to calcChurchBalance's
+  // heldForSatellites, satellite_funds being the single source of truth for both.
   const satFundsIn=allSatFunds.filter(s=>s.direction==='in').reduce((s,r)=>s+(r.amount||0),0);
   const satFundsOut=allSatFunds.filter(s=>s.direction==='out').reduce((s,r)=>s+(r.amount||0),0);
-  const satFundsHeld=satFundsIn-satFundsOut;
+  const satFundsTransferOut=allSatFunds.filter(s=>s.direction==='transfer_out').reduce((s,r)=>s+(r.amount||0),0);
+  const satFundsHeld=satFundsIn-satFundsOut-satFundsTransferOut;
+  const satFundsTransferByReason={ gift:0, reimbursement:0, correction:0 };
+  allSatFunds.filter(s=>s.direction==='transfer_out').forEach(s=>{
+    satFundsTransferByReason[s.purpose] = (satFundsTransferByReason[s.purpose]||0) + (s.amount||0);
+  });
   const satFundsRecent=[...allSatFunds].sort((a,b)=>new Date(b.date||b.createdAt||0)-new Date(a.date||a.createdAt||0)).slice(0,10);
 
   const renderSection=(rows,sectionLabel)=>rows.length?`
@@ -6283,7 +6377,7 @@ async function renderRemittances(){
       </div>
     </div>
 
-    ${renderSatelliteFundsPanel(satFundsIn, satFundsOut, satFundsHeld, satFundsRecent)}`;
+    ${renderSatelliteFundsPanel(satFundsIn, satFundsOut, satFundsTransferOut, satFundsHeld, satFundsRecent, satFundsTransferByReason)}`;
 }
 
 // ── Satellite / Zone Pass-Through Fund panel (lives on the Remittances page) ──
@@ -6291,43 +6385,62 @@ async function renderRemittances(){
 // income or expense — it is custodial funds received from and remitted on behalf
 // of the three satellite parishes (Province remittance contributions + joint
 // area/zone payments), pooled into one combined balance (no per-parish tracking;
-// the free-text note on each entry carries the trail).
-function renderSatelliteFundsPanel(totalIn, totalOut, held, recent){
+// the free-text note on each entry carries the trail). Held money sits INSIDE the
+// bank balance (it really is in the bank) but is excluded from "available funds"
+// until it is either remitted onward (direction='out') or explicitly transferred
+// to the parish (direction='transfer_out' — see App.showSatelliteTransferForm).
+function renderSatelliteFundsPanel(totalIn, totalOut, totalTransferOut, held, recent, transferByReason){
   const canRecord=canAction('satellite_fund_record');
   const canDelete=canAction('satellite_fund_delete');
-  const purposeLabel=key=>SATELLITE_FUND_PURPOSES.find(p=>p.key===key)?.label||(key||'Other');
+  const purposeLabel=(direction,key)=>{
+    const list = direction==='transfer_out' ? SATELLITE_TRANSFER_REASONS : SATELLITE_FUND_PURPOSES;
+    return list.find(p=>p.key===key)?.label||(key||'Other');
+  };
+  const reasonBits=[];
+  if(transferByReason.gift>0) reasonBits.push(`Gift ${fmt(transferByReason.gift)}`);
+  if(transferByReason.reimbursement>0) reasonBits.push(`Reimbursement ${fmt(transferByReason.reimbursement)}`);
+  if(transferByReason.correction>0) reasonBits.push(`Correction ${fmt(transferByReason.correction)}`);
   return `
     <div class="card" style="margin-top:12px;border-left:3px solid var(--primary)">
       <div class="card-header">
         <span class="card-title">🛰️ Funds Received &amp; Remitted on Behalf of Satellite Parishes</span>
       </div>
       <p style="font-size:11px;color:var(--text3);margin-bottom:10px">
-        Money the three satellite parishes send in for Province remittance and joint area/zone payments, which this parish forwards on their behalf. This is <strong>pass-through / custodial money</strong> — not our own income or expense — and is <strong>excluded from all income, expense, and remittance totals</strong>. Every entry below is mirrored into the Bank module so the bank balance stays accurate.
+        Money the three satellite parishes send in for Province remittance and joint area/zone payments, which this parish forwards on their behalf. This is <strong>pass-through / custodial money</strong> — not our own income or expense — and is <strong>excluded from all income, expense, and remittance totals</strong>. Every In/Out is mirrored into the Bank module so the bank balance stays accurate; held money sits inside the bank balance until remitted onward or transferred to the parish below.
       </p>
       <div class="kpi-grid" style="margin-bottom:12px">
         <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">📥</div><div class="kpi-label">Total Received (In)</div><div class="kpi-val" style="color:var(--success)">${fmt(totalIn)}</div></div>
-        <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Total Paid Out</div><div class="kpi-val" style="color:var(--danger)">${fmt(totalOut)}</div></div>
+        <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Paid Out (Province/Joint)</div><div class="kpi-val" style="color:var(--danger)">${fmt(totalOut)}</div></div>
+        <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">🔁</div><div class="kpi-label">Transferred to Parish</div><div class="kpi-val" style="color:var(--amber)">${fmt(totalTransferOut)}</div>${reasonBits.length?`<div class="kpi-delta" style="color:var(--text3)">${reasonBits.join(' · ')}</div>`:''}</div>
         <div class="kpi"><div class="kpi-icon" style="background:#E6F1FB">🏦</div><div class="kpi-label">Current Balance Held</div><div class="kpi-val">${fmt(held)}</div></div>
       </div>
       ${canRecord?`
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
         <button class="btn btn-primary" onclick="App.showSatelliteFundForm('in')">📥 Record Funds In</button>
         <button class="btn btn-amber" style="color:#fff;background:var(--amber)" onclick="App.showSatelliteFundForm('out')">📤 Record Funds Out</button>
+        <button class="btn" onclick="App.showSatelliteTransferForm()">🔁 Transfer to Parish</button>
       </div>`:''}
       <div class="card-header" style="padding:0;margin-bottom:6px"><span class="card-title" style="font-size:12px">Recent Entries</span></div>
-      ${recent.length?recent.map(s=>`
+      ${recent.length?recent.map(s=>{
+        const isTransfer = s.direction==='transfer_out';
+        const icon = isTransfer ? '🔁' : (s.direction==='in' ? '📥' : '📤');
+        const bg = isTransfer ? '#FAEEDA' : (s.direction==='in' ? 'var(--success-light)' : '#FCEBEB');
+        const title = isTransfer ? `Transferred to Parish — ${esc(purposeLabel('transfer_out', s.purpose))}` : `${s.direction==='in'?'Received':'Paid Out'} — ${esc(purposeLabel(s.direction, s.purpose))}`;
+        const amtClass = s.direction==='in' ? 'td-green' : (isTransfer ? '' : 'td-red');
+        const amtStyle = isTransfer ? 'color:var(--amber)' : '';
+        return `
         <div class="feed-item">
-          <div class="feed-dot" style="background:${s.direction==='in'?'var(--success-light)':'#FCEBEB'}">${s.direction==='in'?'📥':'📤'}</div>
+          <div class="feed-dot" style="background:${bg}">${icon}</div>
           <div class="feed-body">
-            <div class="feed-title">${s.direction==='in'?'Received':'Paid Out'} — ${esc(purposeLabel(s.purpose))}</div>
+            <div class="feed-title">${title}</div>
             <div class="feed-sub">${s.note?esc(s.note)+' · ':''}${s.reference?'Ref: '+esc(s.reference)+' · ':''}${esc(s.recordedBy)||'—'}</div>
             <div class="feed-time">${fmtDate(s.date)}</div>
           </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
-            <span class="td-bold ${s.direction==='in'?'td-green':'td-red'}">${s.direction==='in'?'+':'−'} ${fmt(s.amount)}</span>
+            <span class="td-bold ${amtClass}" style="${amtStyle}">${s.direction==='in'?'+':'−'} ${fmt(s.amount)}</span>
             ${canDelete?`<button class="btn btn-sm btn-danger" onclick="App.deleteSatelliteFundEntry('${s.id}', this)">🗑 Delete</button>`:''}
           </div>
-        </div>`).join(''):'<div class="empty-table">No satellite pass-through entries recorded yet.</div>'}
+        </div>`;}).join(''):'<div class="empty-table">No satellite pass-through entries recorded yet.</div>'}
     </div>`;
 }
 
@@ -6784,18 +6897,77 @@ async function deleteSatelliteFundEntry(id, btn=null){
   const all = await DB.getSatelliteFunds();
   const entry = all.find(s=>s.id===id);
   if(!entry) return;
-  if(!confirm(`Delete this satellite pass-through fund entry (${fmt(entry.amount)})?\n\nThis will also reverse the matching bank transaction. This action cannot be undone.`)) return;
+  // A transfer_out entry has no bank mirror — deleting it only reverses the held
+  // reduction (heldForSatellites goes back up, available total goes back down); an
+  // in/out entry also reverses the matching cash_transactions bank movement.
+  const hasBankMirror = !!entry.bankRef;
+  const reverseMsg = hasBankMirror ? 'This will also reverse the matching bank transaction.' : 'This has no bank transaction (transfers move no cash) — it will simply restore the held balance.';
+  if(!confirm(`Delete this satellite pass-through fund entry (${fmt(entry.amount)})?\n\n${reverseMsg} This action cannot be undone.`)) return;
   const restore = setBtnLoading(btn, 'Deleting…');
   try {
     await DB.deleteSatelliteFund(id);
+    const directionLabel = entry.direction==='in' ? 'received' : entry.direction==='out' ? 'paid out' : 'transferred to parish';
     DB.addAudit('satellite_fund_deleted',
-      `Satellite pass-through fund entry deleted: ${id} (${fmt(entry.amount)}, ${entry.direction==='in'?'received':'paid out'}) — bank movement reversed`,
+      `Satellite pass-through fund entry deleted: ${id} (${fmt(entry.amount)}, ${directionLabel})${hasBankMirror?' — bank movement reversed':' — held balance restored'}`,
       state.user?.name);
-    showAlert('Satellite pass-through fund entry deleted and bank movement reversed.','warn');
+    showAlert(`Satellite pass-through fund entry deleted${hasBankMirror?' and bank movement reversed':''}.`,'warn');
     renderRemittances();
   } catch(err) {
     restore();
     showAlert(`Failed to delete satellite pass-through fund entry: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+function showSatelliteTransferForm(){
+  if(!canAction('satellite_fund_record')){ showAlert('You do not have permission to transfer satellite pass-through funds.','danger'); return; }
+  const today = new Date().toISOString().split('T')[0];
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🔁 Transfer to Parish</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Moves some or all of the satellite pool's held balance into the parish's own money. This money is <strong>already in the bank</strong> (it arrived as a satellite deposit) — no bank transaction is created; only the held balance changes.</span></div>
+    <div class="form-group"><label class="form-label">Date *</label>
+      <input type="date" id="st_date" class="form-input" value="${today}" max="${today}" />
+    </div>
+    <div class="form-group"><label class="form-label">Amount (₦) *</label>
+      <input type="number" id="st_amount" class="form-input" placeholder="0" min="0" />
+    </div>
+    <div class="form-group"><label class="form-label">Reason *</label>
+      <select id="st_reason" class="form-select">
+        ${SATELLITE_TRANSFER_REASONS.map(p=>`<option value="${p.key}">${p.label}</option>`).join('')}
+      </select>
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">The reason only changes how this shows up in reports — Gift/Surplus is counted as parish income; Reimbursement and Correction are memo-only.</div>
+    </div>
+    <div class="form-group"><label class="form-label">Note <span style="font-size:11px;color:var(--text3)">(optional)</span></label>
+      <input type="text" id="st_note" class="form-input" placeholder="e.g. Parish A left surplus after July remittance" />
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="st_submit_btn" onclick="App.submitSatelliteTransfer(this)">Transfer to Parish</button>
+    </div>`);
+}
+
+async function submitSatelliteTransfer(btn=null){
+  if(!canAction('satellite_fund_record')){ showAlert('You do not have permission to transfer satellite pass-through funds.','danger'); return; }
+  const date   = document.getElementById('st_date')?.value;
+  const amount = parseFloat(document.getElementById('st_amount')?.value)||0;
+  const reason = document.getElementById('st_reason')?.value||'gift';
+  const note   = document.getElementById('st_note')?.value?.trim()||'';
+  if(!date||!amount){ showAlert('Please fill in the date and amount.','danger'); return; }
+
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.addSatelliteFund({ date, direction:'transfer_out', amount, purpose:reason, note, recordedBy:state.user?.name||'' });
+    const reasonLabel = SATELLITE_TRANSFER_REASONS.find(p=>p.key===reason)?.label||reason;
+    DB.addAudit('satellite_fund_transferred',
+      `${fmt(amount)} transferred from satellite pool to parish (${reasonLabel})${note?' — '+note:''}. No bank movement — already in the bank.`,
+      state.user?.name);
+    DB.addNotification('Satellite Funds Transferred to Parish',`${fmt(amount)} reclassified from the satellite pool as parish money (${reasonLabel}).`,'success');
+    closeModal();
+    showAlert(`${fmt(amount)} transferred to parish funds!`,'success');
+    renderRemittances();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to record transfer: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
 }
 
@@ -7282,25 +7454,46 @@ async function shareRemittanceReport(fromOverride, toOverride){
 }
 
 /**
- * Summarize the Satellite / Zone Pass-Through Fund for a reporting period, for
- * the "Funds Received & Remitted on Behalf of Satellite Parishes" report note.
- * In/Out are scoped to the period; `held` is the running custodial balance as
- * of the period's end date (all entries up to and including toDate), since the
- * fund is one continuous pool rather than something that resets each period.
- * This is display-only — it must never be added into income/expense totals.
+ * Summarize the Satellite / Zone Pass-Through Fund for a reporting period —
+ * the SINGLE authoritative helper (reused by the Remittances-page pool panel,
+ * the Monthly Statement report note/income line, and calcChurchBalance's
+ * heldForSatellites via the same in/out/transfer_out formula on the same table).
+ *
+ * In/Out/transfers are scoped to the period; `heldAsOf` is the running custodial
+ * balance as of the period's end date (all entries up to and including toDate),
+ * since the fund is one continuous pool rather than something that resets each
+ * period. gift/reimbursement/correction are the transfer_out sub-totals by
+ * `purpose` (reason) — see createSatelliteFund. This whole function is
+ * display-only — none of it may ever be added into income/expense totals or
+ * calcChurchBalance beyond the documented heldForSatellites / satelliteTransferred
+ * hooks (see calcChurchBalance, calcChurchBalanceFromOpening).
  */
 function summarizeSatelliteFunds(allSatFunds, fromDate, toDate){
   const entryDate = s => String(s?.date || s?.createdAt || '').slice(0,10);
-  const inPeriod  = (allSatFunds||[]).filter(s=>s.direction==='in')
-    .filter(s=>{ const d=entryDate(s); return d && d>=fromDate && d<=toDate; })
+  const inPeriodRange = s => { const d=entryDate(s); return d && d>=fromDate && d<=toDate; };
+  const sumWhere = (dir, extra) => (allSatFunds||[])
+    .filter(s=>s.direction===dir && inPeriodRange(s) && (!extra || extra(s)))
     .reduce((s,r)=>s+(r.amount||0),0);
-  const outPeriod = (allSatFunds||[]).filter(s=>s.direction==='out')
-    .filter(s=>{ const d=entryDate(s); return d && d>=fromDate && d<=toDate; })
-    .reduce((s,r)=>s+(r.amount||0),0);
+
+  const inPeriod           = sumWhere('in');
+  const outPeriod          = sumWhere('out');
+  const transferOutPeriod  = sumWhere('transfer_out');
+  const giftPeriod         = sumWhere('transfer_out', s=>s.purpose==='gift');
+  const reimbursementPeriod= sumWhere('transfer_out', s=>s.purpose==='reimbursement');
+  const correctionPeriod   = sumWhere('transfer_out', s=>s.purpose==='correction');
+
+  // held = sum(in) − sum(out) − sum(transfer_out), all up to and including toDate —
+  // identical formula to calcChurchBalance.heldForSatellites, this table being the
+  // single source of truth for both.
   const heldAsOf = (allSatFunds||[])
     .filter(s=>{ const d=entryDate(s); return !d || d<=toDate; })
-    .reduce((s,r)=>s+(r.direction==='out'?-(r.amount||0):(r.amount||0)),0);
-  return { inPeriod, outPeriod, heldAsOf };
+    .reduce((s,r)=>{
+      if(r.direction==='in') return s+(r.amount||0);
+      if(r.direction==='out'||r.direction==='transfer_out') return s-(r.amount||0);
+      return s;
+    },0);
+
+  return { inPeriod, outPeriod, transferOutPeriod, giftPeriod, reimbursementPeriod, correctionPeriod, heldAsOf };
 }
 
 /**
@@ -7338,7 +7531,14 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const quotaList=getQuotaList(settings);
   const quotaLines=getQuotaLinesForPeriod(quotaList, fromDate, toDate);
   const totalFixedQuotas=sumQuotaLines(quotaLines);
-  const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
+  // 'gift' transfers from the satellite pool (surplus the satellites left for the parish)
+  // are genuinely parish income once transferred — see summarizeSatelliteFunds/
+  // createSatelliteFund — so they are folded into totalIncome for reporting HERE only
+  // (this never touches the `income` table, so calcChurchBalance is unaffected).
+  // 'reimbursement'/'correction' transfers are NOT income — they surface only in the
+  // satellite pass-through note below, and their balance effect is absorbed by the
+  // existing "Adjustments" line via closingReconcileDiff (see below).
+  const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0) + satFundsSummary.giftPeriod;
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
   // Remittances actually paid *during* this period — filter by paidDate on records
   // with status='paid'. This is the only figure that matches the cash that left the
@@ -7369,11 +7569,11 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const [openingBalResult, closingBalResult]=await Promise.all([
     calcChurchBalance(openingBalDate,{
       income:allIncome,expenses:allExpenses,remittances:allRemittances,
-      cashTx:allCashTx,pettyHistory:allPettyMS,remRates:remRates
+      cashTx:allCashTx,pettyHistory:allPettyMS,satelliteFunds:allSatFundsMS,remRates:remRates
     }),
     calcChurchBalance(toDate,{
       income:allIncome,expenses:allExpenses,remittances:allRemittances,
-      cashTx:allCashTx,pettyHistory:allPettyMS,remRates:remRates
+      cashTx:allCashTx,pettyHistory:allPettyMS,satelliteFunds:allSatFundsMS,remRates:remRates
     })
   ]);
   const openingBalance=openingBalResult.total;
@@ -7424,6 +7624,16 @@ async function buildMonthlyStatementData(fromDate, toDate){
       label: 'Other Income (donations, midweek, etc.)',
       total: otherIncomeTotal,
       pct: totalIncome ? Math.round(otherIncomeTotal / totalIncome * 100) : 0
+    });
+  }
+  // 'Gift/surplus' transfers from the satellite pool — genuinely parish income once
+  // transferred (see totalIncome above), sourced from satellite_funds, never from the
+  // income table. Reimbursement/correction transfers are deliberately NOT added here.
+  if(satFundsSummary.giftPeriod > 0){
+    incomeTypeSummary.push({
+      label: 'Retained from Satellite Funds (Gift/Surplus)',
+      total: satFundsSummary.giftPeriod,
+      pct: totalIncome ? Math.round(satFundsSummary.giftPeriod / totalIncome * 100) : 0
     });
   }
 
@@ -7499,9 +7709,13 @@ async function buildMonthlyStatementData(fromDate, toDate){
     // sectionFVersion signals to statement.html to use the new layout. Old saved
     // statements omit it and fall back to the legacy Opening+Income−RemDue view.
     sectionFVersion:2,
-    // Satellite / Zone Pass-Through Fund — display-only, NOT part of totalIncome,
-    // totalExpenses, or any figure above. statement.html renders it as a separate note.
+    // Satellite / Zone Pass-Through Fund note — In/Out/Held are display-only, NOT part
+    // of totalIncome/totalExpenses/netPosition above. giftPeriod IS already folded into
+    // totalIncome (see above and the "Retained from Satellite Funds" row in
+    // incomeTypeSummary); reimbursement/correction are memo-only, never income.
     satelliteFundsIn:satFundsSummary.inPeriod, satelliteFundsOut:satFundsSummary.outPeriod, satelliteFundsHeld:satFundsSummary.heldAsOf,
+    satelliteFundsTransferOut:satFundsSummary.transferOutPeriod, satelliteFundsGift:satFundsSummary.giftPeriod,
+    satelliteFundsReimbursement:satFundsSummary.reimbursementPeriod, satelliteFundsCorrection:satFundsSummary.correctionPeriod,
   };
 }
 
@@ -8670,6 +8884,7 @@ async function renderBank(){
     ['Remittance history', () => DB.getRemittances()],
     ['Period range',       () => getCurrentPeriodRange()],
     ['Remittance rates',   () => getRemRates()],
+    ['Satellite pass-through funds', () => DB.getSatelliteFunds()],
   ];
   const _bankSettled = await Promise.allSettled(_bankSources.map(([, fn]) => fn()));
   const _bankFailed = _bankSettled.map((r, i) => r.status === 'rejected' ? { label: _bankSources[i][0], err: r.reason } : null).filter(Boolean);
@@ -8677,7 +8892,7 @@ async function renderBank(){
     renderPageErrorState({ pageId: 'bank', pageTitle: 'Bank Account', pageSub: monthLabel(), failed: _bankFailed });
     return;
   }
-  const [allCashTx, allExpenses, allIncome, allRemittances, periodRange, _bankRatesData] = _bankSettled.map(r => r.value);
+  const [allCashTx, allExpenses, allIncome, allRemittances, periodRange, _bankRatesData, allSatFundsRB] = _bankSettled.map(r => r.value);
   const remRates = _bankRatesData.rates || DEFAULT_REMITTANCE_RATES;
   const tab = state.bankTab||'overview';
   const { from: bankPeriodFrom, to: bankPeriodTo } = periodRange;
@@ -8705,6 +8920,10 @@ async function renderBank(){
   const cashFromCollectionsRB = allIncome.reduce((s,r)=>{
     return s + getIncomeCashWithAccountant(r, remRates);
   },0);
+  // Deposits that actually moved the ACCOUNTANT's held cash into the bank — excludes
+  // satellite pass-through "in" mirrors (destination==='satellite_passthrough'), which
+  // never touched the accountant. Mirrors the P1 fix in calcChurchBalance; see there.
+  const cashDepositedFromAccountantRB = allCashTx.filter(t=>t.type==='cash_deposit'&&isDepositEffective(t)&&t.destination!=='satellite_passthrough').reduce((s,t) => s+(t.amount||0), 0);
   const bankToAccountantRB = allCashTx.filter(t=>t.type==='withdrawal'&&t.destination==='accountant_cash').reduce((s,t)=>s+(t.amount||0),0);
   const cashExpensesRB = allExpenses.filter(isLoggedExpense).reduce((s,e)=>{
     if(e.paymentMethod==='cash') return s+(e.amount||0);
@@ -8713,10 +8932,17 @@ async function renderBank(){
   },0);
   const pettyCashTopupsRB = pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.cashAmount||0):(h.amount||0)),0);
-  const cashWithAccountant = Math.max(0, cashFromCollectionsRB - cashDepositedToBank + bankToAccountantRB - cashExpensesRB - pettyCashTopupsRB);
+  const cashWithAccountant = Math.max(0, cashFromCollectionsRB - cashDepositedFromAccountantRB + bankToAccountantRB - cashExpensesRB - pettyCashTopupsRB);
   const _bankPendingDeps = allCashTx.filter(t=>t.type==='cash_deposit'&&(t.verificationStatus==='pending'||t.verificationStatus==='flagged'));
   const _bankHasPending = _bankPendingDeps.length > 0;
   const _bankPendingTotal = _bankPendingDeps.reduce((s,t)=>s+(t.amount||0),0);
+
+  // Held for satellites — authoritative from satellite_funds (same formula as
+  // calcChurchBalance.heldForSatellites): already inside bankBalance above, excluded
+  // from the parish's own available funds.
+  const heldForSatellitesRB = (allSatFundsRB||[]).filter(s=>s.direction==='in').reduce((s,r)=>s+(r.amount||0),0)
+    - (allSatFundsRB||[]).filter(s=>s.direction==='out').reduce((s,r)=>s+(r.amount||0),0)
+    - (allSatFundsRB||[]).filter(s=>s.direction==='transfer_out').reduce((s,r)=>s+(r.amount||0),0);
 
   // Period bank charges (calendar month or remittance period — follows state.periodMode)
   const periodExpenses = filterByCurrentPeriod(allExpenses, bankPeriodFrom, bankPeriodTo);
@@ -8820,6 +9046,7 @@ async function renderBank(){
     </div>
     ${_bankHasPending?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⏳</span><span>A deposit of <strong>${fmt(_bankPendingTotal)}</strong> is ${_bankPendingDeps[0]?.verificationStatus==='flagged'?'<strong>flagged by AI</strong> — please review and correct or approve it below':'<strong>pending AI verification</strong>'}.</span></div>`:''}
     ${cashWithAccountant>0&&!_bankHasPending&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong> not yet deposited to the bank account.${pendingDepCount>0?` (${pendingDepCount} income record(s) pending)`:''} <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
+    ${Math.abs(heldForSatellitesRB||0)>=0.5?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🛰️</span><span>Held for satellites: <strong>${fmt(heldForSatellitesRB)}</strong> (excluded from available funds) — already included in the Bank Balance below; see the <a onclick="App.navigate('remittances')" style="cursor:pointer;text-decoration:underline">Satellite Pass-Through Fund panel</a> on Remittances.</span></div>`:''}
 
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
       <div class="kpi">
@@ -11070,7 +11297,10 @@ async function generateMonthlyReport(){
   const quotaList=getQuotaList(settings);
   const quotaLines=getQuotaLinesForPeriod(quotaList, fromDate, toDate);
   const totalFixedQuotas=sumQuotaLines(quotaLines);
-  const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0);
+  // 'gift' transfers from the satellite pool are genuine parish income once
+  // transferred — folded into totalIncome for reporting here only. See the matching
+  // comment in buildMonthlyStatementData for the full rationale.
+  const totalIncome=income.reduce((s,r)=>s+(r.totalCollection||0),0) + satFundsSummaryMR.giftPeriod;
   const totalExpenses=expenses.reduce((s,r)=>s+(r.amount||0),0);
   // See buildMonthlyStatementData() for filter rationale — paidDate + status='paid'
   // gives the true cash outflow within the period.
@@ -11095,11 +11325,11 @@ async function generateMonthlyReport(){
   const [openingBalResult, closingBalResult]=await Promise.all([
     calcChurchBalance(openingBalDate,{
       income:allIncome,expenses:allExpenses,remittances:allRemittances,
-      cashTx:allCashTx,pettyHistory:allPettyMR,remRates:remRates
+      cashTx:allCashTx,pettyHistory:allPettyMR,satelliteFunds:allSatFundsMR,remRates:remRates
     }),
     calcChurchBalance(toDate,{
       income:allIncome,expenses:allExpenses,remittances:allRemittances,
-      cashTx:allCashTx,pettyHistory:allPettyMR,remRates:remRates
+      cashTx:allCashTx,pettyHistory:allPettyMR,satelliteFunds:allSatFundsMR,remRates:remRates
     })
   ]);
   const openingBalance=openingBalResult.total;
@@ -11161,6 +11391,7 @@ async function generateMonthlyReport(){
       <tr><th>Income Type</th><th class="td-r">Amount (₦)</th><th class="td-c">% of Total</th></tr>
       ${incomeTypeSummary.map(t=>`<tr><td>${t.label}</td><td class="td-r">${fmt(t.total)}</td><td class="td-c">${totalIncome?Math.round(t.total/totalIncome*100):0}%</td></tr>`).join('')}
       ${otherIncomeTotal > 0 ? `<tr><td>Other Income (donations, midweek, etc.)</td><td class="td-r">${fmt(otherIncomeTotal)}</td><td class="td-c">${totalIncome?Math.round(otherIncomeTotal/totalIncome*100):0}%</td></tr>` : ''}
+      ${satFundsSummaryMR.giftPeriod > 0 ? `<tr><td>Retained from Satellite Funds (Gift/Surplus)</td><td class="td-r">${fmt(satFundsSummaryMR.giftPeriod)}</td><td class="td-c">${totalIncome?Math.round(satFundsSummaryMR.giftPeriod/totalIncome*100):0}%</td></tr>` : ''}
       <tr class="total-row"><td>TOTAL INCOME</td><td class="td-r">${fmt(totalIncome)}</td><td class="td-c">100%</td></tr>
     </table>
 
@@ -11241,10 +11472,11 @@ async function generateMonthlyReport(){
     ${availableParishFund<0?'<div class="note-box">⚠️ The parish is in a deficit position — outstanding remittances exceed available cash. Please review with the Parish Pastor.</div>':''}
     ${closingPettyFloat<0?'<div class="note-box">⚠️ Petty cash float is negative — the petty cash holder has spent more than the float. A reconciliation top-up is needed.</div>':''}
 
-    ${(satFundsSummaryMR.inPeriod>0||satFundsSummaryMR.outPeriod>0||Math.abs(satFundsSummaryMR.heldAsOf)>=1)?`
+    ${(satFundsSummaryMR.inPeriod>0||satFundsSummaryMR.outPeriod>0||satFundsSummaryMR.transferOutPeriod>0||Math.abs(satFundsSummaryMR.heldAsOf)>=1)?`
     <div class="note-box" style="background:#eef0fb;border-color:#c7cdee;color:#33396b">
       <strong>Funds Received &amp; Remitted on Behalf of Satellite Parishes</strong> — In ${fmt(satFundsSummaryMR.inPeriod)} / Out ${fmt(satFundsSummaryMR.outPeriod)} / Held ${fmt(satFundsSummaryMR.heldAsOf)}
       <div style="font-size:11px;margin-top:4px;color:#555">Pass-through custodial funds for the satellite parishes' Province remittance and joint area/zone payments — excluded from Income, Expenses, and Net Position above.</div>
+      ${satFundsSummaryMR.transferOutPeriod>0?`<div style="font-size:11px;margin-top:6px;color:#555">Transferred to parish this period: <strong>${fmt(satFundsSummaryMR.transferOutPeriod)}</strong>${satFundsSummaryMR.giftPeriod>0?` — Gift/surplus: ${fmt(satFundsSummaryMR.giftPeriod)} (counted as income above, see Section A)`:''}${satFundsSummaryMR.reimbursementPeriod>0?` — Reimbursement: ${fmt(satFundsSummaryMR.reimbursementPeriod)} (memo only, not income)`:''}${satFundsSummaryMR.correctionPeriod>0?` — Correction: ${fmt(satFundsSummaryMR.correctionPeriod)} (memo only, not income)`:''}</div>`:''}
     </div>`:''}
 
     ${reportSignatureHTML(pastorName, undefined, accountantName)}`;
@@ -12490,7 +12722,7 @@ return {
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
-  showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry,
+  showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
   updateExpenseSubcats, updateExpenseDescRequired,
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
@@ -12516,7 +12748,9 @@ return {
   _calcOutstandingRemittancesFromFlow: calcOutstandingRemittancesFromFlow,
   _calcCurrentPeriodOutstandingRemittance: calcCurrentPeriodOutstandingRemittance,
   _calcAvailableFundFromOpening: calcAvailableFundFromOpening,
-  _remittanceSettledDate: remittanceSettledDate
+  _remittanceSettledDate: remittanceSettledDate,
+  _calcChurchBalance: calcChurchBalance,
+  _summarizeSatelliteFunds: summarizeSatelliteFunds
   };
 
 })();
