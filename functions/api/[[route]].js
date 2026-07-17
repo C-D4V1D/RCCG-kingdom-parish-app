@@ -1692,6 +1692,7 @@ async function handleInit(DB) {
       status        TEXT DEFAULT 'paid',
       bank_amount   REAL DEFAULT 0,
       cash_amount   REAL DEFAULT 0,
+      satellite_fund_ref TEXT DEFAULT '',
       created_at    TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS cash_transactions (
@@ -1728,6 +1729,7 @@ async function handleInit(DB) {
       recorded_by   TEXT DEFAULT '',
       bank_ref      TEXT DEFAULT '',
       channel       TEXT DEFAULT 'bank',
+      petty_ref     TEXT DEFAULT '',
       created_at    TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS audit_log (
@@ -2143,6 +2145,10 @@ async function handleInit(DB) {
     `ALTER TABLE remittances ADD COLUMN breakdown_snapshot TEXT DEFAULT ''`,
     `ALTER TABLE remittances ADD COLUMN area_total_paid REAL DEFAULT 0`,
     `ALTER TABLE remittances ADD COLUMN other_parishes_amount REAL DEFAULT 0`,
+    // Links a Part A "Area Payment" remittance to the satellite_funds 'out' row
+    // auto-created for the satellite-parish overage (otherParishesAmount) — see
+    // submitRemittance/createRemittance and deleteRemittance's reversal of it.
+    `ALTER TABLE remittances ADD COLUMN satellite_fund_ref TEXT DEFAULT ''`,
     `ALTER TABLE cash_transactions ADD COLUMN photo_data TEXT DEFAULT ''`,
     // Soft-delete for AI secretary meeting drafts.
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_at TEXT DEFAULT ''`,
@@ -2231,6 +2237,10 @@ async function handleInit(DB) {
     // Satellite pass-through "in" receipts can now arrive as cash (with the accountant)
     // instead of only a bank deposit — see createSatelliteFund/calcChurchBalance.
     `ALTER TABLE satellite_funds ADD COLUMN channel TEXT DEFAULT 'bank'`,
+    // Satellite pass-through "out" payouts can now be funded via Petty Cash instead of
+    // only a bank withdrawal — petty_ref links to the mirrored petty_cash disbursement
+    // row (analogous to bank_ref for the bank mirror) — see createSatelliteFund.
+    `ALTER TABLE satellite_funds ADD COLUMN petty_ref TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -3303,6 +3313,7 @@ async function getRemittances(DB) {
     breakdownSnapshot:    row.breakdown_snapshot || '',
     areaTotalPaid:        row.area_total_paid || 0,
     otherParishesAmount:  row.other_parishes_amount || 0,
+    satelliteFundRef:     row.satellite_fund_ref || '',
     createdAt:     row.created_at,
   })));
 }
@@ -3313,8 +3324,8 @@ async function createRemittance(DB, data) {
     INSERT INTO remittances
       (id, label, amount, paid_date, reference, authorized_by, status,
        period_from, period_to, payment_method, notes, submitted_by, bank_amount, cash_amount,
-       due_at_time_of_payment, part, breakdown_snapshot, area_total_paid, other_parishes_amount)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       due_at_time_of_payment, part, breakdown_snapshot, area_total_paid, other_parishes_amount, satellite_fund_ref)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     id,
     data.label               || '',
@@ -3335,6 +3346,7 @@ async function createRemittance(DB, data) {
     data.breakdownSnapshot   || '',
     data.areaTotalPaid       || 0,
     data.otherParishesAmount || 0,
+    data.satelliteFundRef    || '',
   ).run();
   return ok({ ...data, id });
 }
@@ -3358,6 +3370,15 @@ async function deleteRemittance(DB, id, force = false) {
   const row = await DB.prepare(`SELECT * FROM remittances WHERE id=?`).bind(id).first();
   if (!row) return err('Remittance not found', 404);
   if (row.status !== 'pending_approval' && !force) return err('Only pending remittances can be deleted', 403);
+
+  // Reverse the linked satellite_funds 'out' entry (Part A "Area Payment" satellite
+  // overage — see createRemittance/submitRemittance in src/js/app.js) BEFORE the
+  // remittance row itself is gone. deleteSatelliteFund reverses whichever bank/petty
+  // mirror that entry created, exactly like any standalone satellite_funds deletion —
+  // non-fatal to this remittance delete if it's already gone for some reason.
+  if (row.satellite_fund_ref) {
+    try { await deleteSatelliteFund(DB, row.satellite_fund_ref); } catch (e) { /* already gone — non-fatal */ }
+  }
 
   const stmts = [DB.prepare(`DELETE FROM remittances WHERE id=?`).bind(id)];
   // Clear the matching unread pending-approval notification so it doesn't linger
@@ -3414,6 +3435,7 @@ async function getSatelliteFunds(DB) {
     recordedBy: row.recorded_by,
     bankRef:    row.bank_ref || '',
     channel:    row.channel || 'bank',
+    pettyRef:   row.petty_ref || '',
     createdAt:  row.created_at,
   })));
 }
@@ -3427,13 +3449,22 @@ async function createSatelliteFund(DB, data) {
   const note      = data.note || '';
   const reference = data.reference || '';
   const recordedBy = data.recordedBy || '';
-  // channel only matters for direction='in' — a satellite parish can hand the money to
-  // the accountant as cash instead of sending it straight to the bank. 'out'/'transfer_out'
-  // stay bank-only (scoped deliberately — see calcChurchBalance/renderBank in src/js/app.js).
-  const channel   = (direction === 'in' && data.channel === 'cash') ? 'cash' : 'bank';
+  // channel: for direction='in', a satellite parish can hand the money to the
+  // accountant as cash instead of sending it straight to the bank ('bank'|'cash').
+  // For direction='out', the officer paying on the satellites' behalf may fund it
+  // from the bank, Petty Cash, or the Accountant's own cash ('bank'|'petty_cash'|
+  // 'cash_accountant') — see calcChurchBalance/renderBank in src/js/app.js for how
+  // each funding source enters the balance. 'transfer_out' ignores channel entirely
+  // (no funding source — it never moves real cash, see below).
+  const channel = direction === 'in'
+    ? (data.channel === 'cash' ? 'cash' : 'bank')
+    : direction === 'out'
+      ? (['petty_cash', 'cash_accountant'].includes(data.channel) ? data.channel : 'bank')
+      : 'bank';
 
   let bankRefId = '';
-  if ((direction === 'in' && channel === 'bank') || direction === 'out') {
+  let pettyRefId = '';
+  if ((direction === 'in' && channel === 'bank') || (direction === 'out' && channel === 'bank')) {
     // Mirror into the bank ledger via the same mechanism the Bank module's normal
     // deposit/withdrawal flows use, so the bank balance reflects this real cash
     // movement. Both use destination='satellite_passthrough' — a marker that (a)
@@ -3447,28 +3478,48 @@ async function createSatelliteFund(DB, data) {
       ? { id: bankRefId, type: 'cash_deposit', date, amount, description, reference, recordedBy, depositMethod: 'bank_transfer', incomeRef: '', destination: 'satellite_passthrough' }
       : { id: bankRefId, type: 'withdrawal', date, amount, description, reference, recordedBy, authorizedBy: recordedBy, destination: 'satellite_passthrough' };
     await createCashTransaction(DB, bankTxData);
+  } else if (direction === 'out' && channel === 'petty_cash') {
+    // Fund the payout from the Petty Cash float instead of the bank — mirrors an
+    // ordinary petty disbursement (see createPettyEntry) so calcPettyFloatFromLedger
+    // picks it up via pettyFloatEvents' type==='disbursement'&&status==='approved'
+    // branch automatically, with no formula changes needed there.
+    pettyRefId = newId('PC-');
+    const purposeText = `Satellite/Zone Pool payout — ${purpose.replace(/_/g, ' ')}`;
+    await createPettyEntry(DB, {
+      id: pettyRefId, type: 'disbursement', status: 'approved', amount, date,
+      purpose: purposeText, notes: note, requestedBy: recordedBy, authorizedBy: recordedBy,
+      reference,
+    });
   }
-  // direction === 'transfer_out', OR direction==='in' with channel==='cash': deliberately
-  // NO bank mirror — the transfer case never moves cash at all (see comment above); the
-  // cash-channel receipt sits with the accountant instead of the bank (see
-  // calcChurchBalance's satelliteCashIn term) until it is deposited through the normal
-  // accountant cash-deposit flow, exactly like any other cash the accountant holds.
+  // direction === 'transfer_out' (never moves cash — see comment below), OR
+  // direction==='in' with channel==='cash', OR direction==='out' with
+  // channel==='cash_accountant': deliberately NO bank/petty mirror. A cash-channel
+  // 'in' receipt sits with the accountant instead of the bank (calcChurchBalance's
+  // satelliteCashIn term) until deposited via the normal accountant cash-deposit
+  // flow. A cash_accountant-channel 'out' payout is funded straight from the
+  // accountant's own cash on hand — see calcChurchBalance's satelliteCashAccountantOut
+  // term, which subtracts it from cashWithAccountantRaw the same way satelliteCashIn
+  // adds to it.
 
   await DB.prepare(`
     INSERT INTO satellite_funds
-      (id, date, direction, amount, purpose, note, reference, recorded_by, bank_ref, channel)
-    VALUES (?,?,?,?,?,?,?,?,?,?)
-  `).bind(id, date, direction, amount, purpose, note, reference, recordedBy, bankRefId, channel).run();
+      (id, date, direction, amount, purpose, note, reference, recorded_by, bank_ref, channel, petty_ref)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+  `).bind(id, date, direction, amount, purpose, note, reference, recordedBy, bankRefId, channel, pettyRefId).run();
 
-  return ok({ id, date, direction, amount, purpose, note, reference, recordedBy, bankRef: bankRefId, channel });
+  return ok({ id, date, direction, amount, purpose, note, reference, recordedBy, bankRef: bankRefId, channel, pettyRef: pettyRefId });
 }
 
 async function deleteSatelliteFund(DB, id) {
   const row = await DB.prepare(`SELECT * FROM satellite_funds WHERE id=?`).bind(id).first();
   if (!row) return err('Satellite fund entry not found', 404);
-  // Reverse the mirrored bank movement so the bank balance stays accurate.
+  // Reverse whichever mirror this entry created — exactly one of bank_ref/petty_ref
+  // is ever set (or neither, for a cash_accountant-funded 'out' or a 'transfer_out'),
+  // so the bank balance / petty float stay accurate after the delete.
   if (row.bank_ref) {
     await DB.prepare(`DELETE FROM cash_transactions WHERE id=?`).bind(row.bank_ref).run();
+  } else if (row.petty_ref) {
+    await DB.prepare(`DELETE FROM petty_cash WHERE id=?`).bind(row.petty_ref).run();
   }
   await DB.prepare(`DELETE FROM satellite_funds WHERE id=?`).bind(id).run();
   return ok({ id, deleted: true, direction: row.direction, amount: row.amount });
@@ -7831,17 +7882,17 @@ async function adminImport(DB, data) {
     for (const r of data.cashTransactions) { try { await createCashTransaction(DB, r); } catch(e) { errs.push(`ctx:${r.id}`); } }
   }
   if (Array.isArray(data.satelliteFunds)) {
-    // Insert directly rather than via createSatelliteFund — the bank mirror row it
-    // would create already exists in data.cashTransactions (imported just above), so
-    // re-mirroring here would double the bank movement.
+    // Insert directly rather than via createSatelliteFund — the bank/petty mirror row
+    // it would create already exists in data.cashTransactions/data.petty (imported
+    // just above), so re-mirroring here would double the bank movement or disbursement.
     for (const r of data.satelliteFunds) {
       try {
         await DB.prepare(`
-          INSERT INTO satellite_funds (id, date, direction, amount, purpose, note, reference, recorded_by, bank_ref, channel)
-          VALUES (?,?,?,?,?,?,?,?,?,?)
+          INSERT INTO satellite_funds (id, date, direction, amount, purpose, note, reference, recorded_by, bank_ref, channel, petty_ref)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)
         `).bind(
           r.id || newId('SAT-'), r.date || '', ['out', 'transfer_out'].includes(r.direction) ? r.direction : 'in', r.amount || 0,
-          r.purpose || 'other', r.note || '', r.reference || '', r.recordedBy || '', r.bankRef || '', r.channel || 'bank'
+          r.purpose || 'other', r.note || '', r.reference || '', r.recordedBy || '', r.bankRef || '', r.channel || 'bank', r.pettyRef || ''
         ).run();
       } catch(e) { errs.push(`sat:${r.id}`); }
     }

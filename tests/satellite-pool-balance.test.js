@@ -385,3 +385,175 @@ test('satellite cash-channel "in" followed by a normal accountant cash deposit: 
   assert.equal(afterDeposit.heldForSatellites, beforeDeposit.heldForSatellites, 'still held — just sitting in the bank instead of with the accountant now');
   assert.equal(afterDeposit.total, beforeDeposit.total, 'the satelliteCashIn term and the normal deposit cancel — total is unchanged throughout');
 });
+
+// ── Part A: expense category rename/reorder/removal (rccg_proj / zonal_area_joint) ──
+// Data-level assertions on EXPENSE_CATS/EXPENSE_SUBCATS content — the DOM-visibility
+// side of "Pay From only for rccg_proj" (applyCategoryFundSourceDefault) isn't
+// exercised here since this suite's minimal document stub has no querySelector; that
+// logic was verified by code review (see src/js/app.js showExpenseForm/
+// applyCategoryFundSourceDefault/onExpFundSourceChange).
+
+test('EXPENSE_CATS: rccg_proj key is unchanged but relabeled "RCCG Payments" and moved last; zonal_area_joint is gone', () => {
+  const cats = App._EXPENSE_CATS;
+  assert.equal(cats.some(c => c.key === 'zonal_area_joint'), false, 'zonal_area_joint must be fully removed from the selectable list');
+  const rccg = cats[cats.length - 1];
+  assert.equal(rccg.key, 'rccg_proj', 'key must stay unchanged — historical expenses reference it by key');
+  assert.equal(rccg.label, 'RCCG Payments');
+});
+
+test('EXPENSE_CATS_ALL: zonal_area_joint still resolves to a readable fallback label for historical records, but is not in the selectable list', () => {
+  const legacy = App._EXPENSE_CATS_ALL.find(c => c.key === 'zonal_area_joint');
+  assert.ok(legacy, 'a historical zonal_area_joint expense must still resolve to SOME label, not fall through to the raw key');
+  assert.match(legacy.label, /Zonal|Area|Joint/i);
+  assert.equal(App._EXPENSE_CATS.some(c => c.key === 'zonal_area_joint'), false, 'still excluded from the selectable EXPENSE_CATS list');
+  assert.deepEqual(App._LEGACY_EXPENSE_CATS.zonal_area_joint, legacy);
+});
+
+test('EXPENSE_SUBCATS.rccg_proj is replaced with exactly the new list; zonal_area_joint subcats are gone', () => {
+  assert.deepEqual(App._EXPENSE_SUBCATS.rccg_proj, [
+    'Programme or Event from Provincial / Regional / National',
+    'Project Levy from Provincial / Regional / National',
+    'Special / Emergency Request from RCCG Authorities',
+    "Let's Go A-Fishing Contribution",
+    'Others...',
+  ]);
+  assert.equal(App._EXPENSE_SUBCATS.zonal_area_joint, undefined);
+});
+
+// ── Part B: "Paid via" role-scoped options for a Satellite/Zone Pool payout ──────
+
+test('getPoolPaidViaOptionsForRole: admin_officer gets bank + petty_cash only; accountant gets bank + cash_accountant only; it_admin gets all three', () => {
+  const admin = App._getPoolPaidViaOptionsForRole('admin_officer').map(o => o.value);
+  const accountant = App._getPoolPaidViaOptionsForRole('accountant').map(o => o.value);
+  const itAdmin = App._getPoolPaidViaOptionsForRole('it_admin').map(o => o.value);
+  assert.deepEqual(admin, ['bank', 'petty_cash']);
+  assert.deepEqual(accountant, ['bank', 'cash_accountant']);
+  assert.deepEqual(itAdmin, ['bank', 'petty_cash', 'cash_accountant']);
+  assert.equal(admin[0], 'bank', '"bank" stays first/default — preserves old pool-payout behavior when nothing else applies');
+});
+
+test('getPoolPaidViaOptionsForRole: a role with neither petty nor accountant cash access (e.g. pastor) only ever sees Bank', () => {
+  assert.deepEqual(App._getPoolPaidViaOptionsForRole('pastor').map(o => o.value), ['bank']);
+});
+
+// ── Part B: pool payouts funded via Petty Cash / Cash (Accountant), not just Bank ──
+// createSatelliteFund now respects `channel` for direction='out' too (bank|petty_cash|
+// cash_accountant). calcChurchBalance's held math (heldForSatellites = in−out−transferOut)
+// is funding-source-agnostic and is DELIBERATELY UNCHANGED by this — only the term that
+// picks up the real cash movement differs (bankBalance / pettyFloat / cashWithAccountant).
+
+test('petty-funded pool payout: petty float drops by X, bank and cash-with-accountant unchanged, held goes negative by X', async () => {
+  // Pool starts holding ₦5,000 (one prior 'in', bank-funded). An officer then pays
+  // ₦15,000 entirely on the satellites' behalf via Petty Cash.
+  const cashTx = [{ type: 'cash_deposit', date: '2026-06-01', amount: 5000, destination: 'satellite_passthrough' }];
+  const inOnly = [{ direction: 'in', date: '2026-06-01', amount: 5000, channel: 'bank' }];
+  const withPayout = [...inOnly, { direction: 'out', date: '2026-06-10', amount: 15000, channel: 'petty_cash' }];
+  const pettyHistory = [{ type: 'disbursement', status: 'approved', amount: 15000, date: '2026-06-10' }];
+
+  const before = await balance({ cashTx, satelliteFunds: inOnly });
+  const after = await balance({ cashTx, satelliteFunds: withPayout, pettyHistory });
+
+  assert.equal(after.pettyFloat, before.pettyFloat - 15000, 'petty float drops by the full payout amount — picked up automatically via pettyFloatEvents\' disbursement branch, no formula change needed');
+  assert.equal(after.bankBalance, before.bankBalance, 'no bank mirror is created for a petty-funded payout');
+  assert.equal(after.cashWithAccountant, before.cashWithAccountant, 'the accountant is untouched by a petty-funded payout');
+  assert.equal(after.heldForSatellites, before.heldForSatellites - 15000);
+  assert.equal(after.heldForSatellites, -10000, 'pool started at 5000, paid out 15000 — now owed BY satellites (negative)');
+  // `total` (cash+bank+petty−held) is unaffected by a satellite in/out entry regardless
+  // of channel — this is the SAME funding-source-agnostic invariant already asserted by
+  // 'satellite pool: outbound X lowers bank and held by X, total unchanged' above; the
+  // real cash outflow (petty −15000) is exactly offset by held moving further negative
+  // (so −held adds 15000 back), matching the existing "reducing held alone is the
+  // complete balance effect" pattern used for transfer_out too.
+  assert.equal(after.total, before.total);
+});
+
+test('cash_accountant-funded pool payout: cash-with-accountant drops by X (surfacing as a deficit), bank and petty unchanged, held goes negative by X', async () => {
+  const cashTx = [{ type: 'cash_deposit', date: '2026-06-01', amount: 5000, destination: 'satellite_passthrough' }];
+  const inOnly = [{ direction: 'in', date: '2026-06-01', amount: 5000, channel: 'bank' }];
+  const withPayout = [...inOnly, { direction: 'out', date: '2026-06-10', amount: 15000, channel: 'cash_accountant' }];
+
+  const before = await balance({ cashTx, satelliteFunds: inOnly });
+  const after = await balance({ cashTx, satelliteFunds: withPayout });
+
+  assert.equal(after.cashWithAccountant, 0, 'clamped at 0 — the accountant had no cash on hand from this pool to fund it with');
+  assert.equal(after.cashDeficit, 15000, 'the negative raw cash position surfaces as a deficit, same as any other cash outflow exceeding recorded inflows');
+  assert.equal(after.bankBalance, before.bankBalance, 'no bank mirror is created for a cash_accountant-funded payout');
+  assert.equal(after.pettyFloat, before.pettyFloat, 'petty cash is untouched');
+  assert.equal(after.heldForSatellites, before.heldForSatellites - 15000);
+  assert.equal(after.heldForSatellites, -10000);
+  assert.equal(after.total, before.total, 'funding-source-agnostic — same invariant as the petty-funded case above');
+});
+
+test('bank-funded pool payout: regression — behavior unchanged from before Part B (default/explicit channel="bank")', async () => {
+  const cashTx = [{ type: 'cash_deposit', date: '2026-06-01', amount: 5000, destination: 'satellite_passthrough' }];
+  const inOnly = [{ direction: 'in', date: '2026-06-01', amount: 5000, channel: 'bank' }];
+  const before = await balance({ cashTx, satelliteFunds: inOnly });
+
+  const cashTxAfter = [...cashTx, { type: 'withdrawal', date: '2026-06-10', amount: 15000, destination: 'satellite_passthrough' }];
+  const withPayoutExplicit = [...inOnly, { direction: 'out', date: '2026-06-10', amount: 15000, channel: 'bank' }];
+  const withPayoutDefault  = [...inOnly, { direction: 'out', date: '2026-06-10', amount: 15000 }]; // channel omitted
+
+  for (const satelliteFunds of [withPayoutExplicit, withPayoutDefault]) {
+    const after = await balance({ cashTx: cashTxAfter, satelliteFunds });
+    assert.equal(after.bankBalance, before.bankBalance - 15000);
+    assert.equal(after.pettyFloat, before.pettyFloat, 'no petty movement for a bank-funded payout');
+    assert.equal(after.cashWithAccountant, before.cashWithAccountant, 'no accountant-cash movement for a bank-funded payout');
+    assert.equal(after.heldForSatellites, -10000);
+    assert.equal(after.total, before.total);
+  }
+});
+
+// ── Part C: Remittances "Area Payment" (Part A) satellite overage auto-linked ──────
+// submitRemittance auto-creates a satellite_funds 'out' entry for otherParishesAmount
+// when a Part A remittance's Area Payment total exceeds our own parish share — see
+// createRemittance's new satelliteFundRef column. Exercised here the same way the
+// expense-page pool-payout tests above are: assert the resulting DATA SHAPE (what
+// submitRemittance produces) satisfies calcChurchBalance's invariants.
+
+test('Area Payment satellite overage: bank reflects the FULL area total (not just our own share), held goes negative when the pool was empty', async () => {
+  // Our parish share ₦98,671.20, area total paid ₦200,000 → satellite overage
+  // ₦101,328.80, auto-linked as a bank-funded satellite_funds 'out' entry (the whole
+  // area payment went out via one bank transfer — the common case).
+  const ourShare = 98671.2;
+  const areaTotal = 200000;
+  const otherParishesAmount = areaTotal - ourShare;
+  const cashTx = [{ type: 'withdrawal', date: '2026-06-15', amount: otherParishesAmount, destination: 'satellite_passthrough' }];
+  const satelliteFunds = [{ direction: 'out', date: '2026-06-15', amount: otherParishesAmount, purpose: 'province_remittance', channel: 'bank' }];
+  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, part: 'a', areaTotalPaid: areaTotal, otherParishesAmount }];
+
+  const bal = await balance({ cashTx, satelliteFunds, remittances });
+
+  // paidRems (our own true obligation) is untouched — only the linked satellite_funds
+  // 'out' entry's own bank mirror contributes the satellite share to bankBalance, via
+  // the existing bankWithdrawals term (no change needed there — see calcChurchBalance).
+  assert.equal(bal.bankBalance, -otherParishesAmount - ourShare, 'bank reflects BOTH halves of the real ₦200,000 outflow — our own remittance (via paidRems) plus the linked satellite overage (via bankWithdrawals)');
+  assert.equal(bal.heldForSatellites, -otherParishesAmount, 'pool started empty — the satellite share is now owed BY satellites (negative held)');
+  assert.equal(bal.cashWithAccountant, 0, 'the accountant is untouched by a bank-funded Area Payment');
+});
+
+test('Area Payment satellite overage: held decreases (not goes negative) when the pool already had enough', async () => {
+  const ourShare = 50000;
+  const areaTotal = 150000;
+  const otherParishesAmount = areaTotal - ourShare; // 100000
+  const priorIn = { direction: 'in', date: '2026-06-01', amount: 120000, channel: 'bank' };
+  const linkedOut = { direction: 'out', date: '2026-06-15', amount: otherParishesAmount, purpose: 'province_remittance', channel: 'bank' };
+  const cashTx = [
+    { type: 'cash_deposit', date: '2026-06-01', amount: 120000, destination: 'satellite_passthrough' },
+    { type: 'withdrawal', date: '2026-06-15', amount: otherParishesAmount, destination: 'satellite_passthrough' },
+  ];
+  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, part: 'a', areaTotalPaid: areaTotal, otherParishesAmount }];
+
+  const bal = await balance({ cashTx, satelliteFunds: [priorIn, linkedOut], remittances });
+  assert.equal(bal.heldForSatellites, 120000 - otherParishesAmount, 'held decreases by the overage but stays positive — the pool had enough');
+  assert.ok(bal.heldForSatellites > 0);
+});
+
+test('Area Payment with NO satellite overage (areaTotalPaid <= our own share): no satellite_funds entry, held untouched', async () => {
+  // Paying only our own parish share (or not filling in an Area Payment total at all)
+  // must never create a satellite_funds entry — this only applies when the area total
+  // genuinely exceeds our own share.
+  const ourShare = 50000;
+  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, part: 'a', areaTotalPaid: 0, otherParishesAmount: 0 }];
+  const bal = await balance({ remittances, satelliteFunds: [] });
+  assert.equal(bal.heldForSatellites, 0);
+});
