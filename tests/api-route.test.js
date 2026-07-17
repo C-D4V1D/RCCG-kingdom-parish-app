@@ -3218,6 +3218,289 @@ test('GET /api/cash-photo/:id returns the single deposit-slip photo on demand', 
   assert.equal(body.photoData, 'data:image/png;base64,DDDD');
 });
 
+// ── Satellite / Zone Pass-Through Fund tests ─────────────────────────
+// This custodial fund (money received from and remitted on behalf of satellite
+// parishes) lives in its own `satellite_funds` table, entirely separate from
+// `income`/`expenses`, and every In/Out is mirrored into `cash_transactions` so
+// the bank balance stays accurate.
+
+test('GET /api/satellite-funds maps rows to camelCase', async () => {
+  const row = {
+    id: 'SAT-1', date: '2026-05-03', direction: 'in', amount: 5000,
+    purpose: 'province_remittance', note: 'Parish A – May remittance', reference: 'REF1',
+    recorded_by: 'Jane', bank_ref: 'CTX-1', created_at: '2026-05-03T10:00:00Z',
+  };
+  const onPrepare = (sql) => ({ bind() { return this; }, async all() { return /FROM satellite_funds/.test(sql) ? { results: [row] } : { results: [] }; } });
+  const body = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'GET'),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+  assert.equal(body.length, 1);
+  assert.equal(body[0].id, 'SAT-1');
+  assert.equal(body[0].direction, 'in');
+  assert.equal(body[0].purpose, 'province_remittance');
+  assert.equal(body[0].recordedBy, 'Jane');
+  assert.equal(body[0].bankRef, 'CTX-1');
+});
+
+test('POST /api/satellite-funds (in) mirrors a cash deposit into cash_transactions', async () => {
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'POST', {
+      date: '2026-05-03', direction: 'in', amount: 15000, purpose: 'province_remittance',
+      note: 'Parish A – May remittance', reference: 'REF1', recordedBy: 'Jane',
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.direction, 'in');
+  assert.ok(body.bankRef, 'response includes the id of the mirrored bank transaction');
+
+  assert.equal(inserts.length, 2, 'one insert into cash_transactions, one into satellite_funds');
+  assert.match(inserts[0].sql, /INSERT INTO cash_transactions/);
+  assert.equal(inserts[0].binds[1], 'cash_deposit', 'mirrored as a plain cash deposit, not income');
+  assert.match(inserts[1].sql, /INSERT INTO satellite_funds/);
+  assert.equal(inserts[1].binds[8], body.bankRef, 'satellite_funds.bank_ref links to the mirrored deposit');
+});
+
+test('POST /api/satellite-funds (out) mirrors a bank withdrawal with no expense/petty side effects', async () => {
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'POST', {
+      date: '2026-05-03', direction: 'out', amount: 12000, purpose: 'joint_area_zone',
+      recordedBy: 'Jane',
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.direction, 'out');
+  assert.match(inserts[0].sql, /INSERT INTO cash_transactions/);
+  assert.equal(inserts[0].binds[1], 'withdrawal');
+  assert.equal(inserts[0].binds[10], 'satellite_passthrough', 'a distinct destination — never admin_petty_cash/direct_expense/accountant_cash');
+});
+
+test('POST /api/satellite-funds (in) tags the deposit mirror destination=satellite_passthrough', async () => {
+  // P1 fix precondition: calcChurchBalance relies on this tag to exclude the deposit
+  // from cashWithAccountant while still including it in bankBalance.
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'POST', {
+      date: '2026-05-03', direction: 'in', amount: 6000, purpose: 'province_remittance', recordedBy: 'Jane',
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  assert.match(inserts[0].sql, /INSERT INTO cash_transactions/);
+  assert.equal(inserts[0].binds[1], 'cash_deposit');
+  assert.equal(inserts[0].binds[10], 'satellite_passthrough', 'inbound deposit mirror must carry the same destination tag as outbound');
+});
+
+test('POST /api/satellite-funds (in, channel=cash) creates NO bank mirror — money sits with the accountant instead', async () => {
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'POST', {
+      date: '2026-05-03', direction: 'in', amount: 4000, purpose: 'province_remittance',
+      channel: 'cash', recordedBy: 'Jane',
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.channel, 'cash');
+  assert.equal(body.bankRef, '', 'a cash receipt has no bank mirror to reference');
+  assert.equal(inserts.length, 1, 'exactly one insert — satellite_funds only, no cash_transactions row');
+  assert.match(inserts[0].sql, /INSERT INTO satellite_funds/);
+  assert.equal(inserts[0].binds[8], '', 'bank_ref column is empty — no mirror created');
+  assert.equal(inserts[0].binds[9], 'cash', 'channel column carries the cash tag');
+});
+
+test('POST /api/satellite-funds (in) defaults channel to "bank" and still mirrors a cash deposit', async () => {
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const body = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'POST', {
+      date: '2026-05-03', direction: 'in', amount: 4000, purpose: 'province_remittance', recordedBy: 'Jane',
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+  assert.equal(body.channel, 'bank');
+  assert.match(inserts[0].sql, /INSERT INTO cash_transactions/, 'bank channel still mirrors a cash deposit — unchanged default behavior');
+  assert.equal(inserts[1].binds[9], 'bank');
+});
+
+test('POST /api/satellite-funds (out) ignores channel=cash — direction other than "in" always stays bank-only', async () => {
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const body = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'POST', {
+      date: '2026-05-03', direction: 'out', amount: 4000, purpose: 'joint_area_zone', channel: 'cash', recordedBy: 'Jane',
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+  assert.equal(body.channel, 'bank', 'channel is scoped to receipts (direction=in) only — out stays bank-only regardless of the request body');
+  assert.match(inserts[0].sql, /INSERT INTO cash_transactions/);
+  assert.equal(inserts[0].binds[1], 'withdrawal');
+});
+
+test('POST /api/satellite-funds (transfer_out) creates NO bank mirror — only the satellite_funds row', async () => {
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'POST', {
+      date: '2026-06-10', direction: 'transfer_out', amount: 2000, purpose: 'gift',
+      note: 'Surplus left by Parish A', recordedBy: 'Jane',
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.direction, 'transfer_out');
+  assert.equal(body.bankRef, '', 'a transfer moves no cash — there is no bank mirror to reference');
+  assert.equal(inserts.length, 1, 'exactly one insert — satellite_funds only, no cash_transactions row');
+  assert.match(inserts[0].sql, /INSERT INTO satellite_funds/);
+  assert.equal(inserts[0].binds[2], 'transfer_out'); // direction column
+  assert.equal(inserts[0].binds[4], 'gift'); // purpose column carries the reason
+  assert.equal(inserts[0].binds[8], '', 'bank_ref column is empty — no mirror created');
+});
+
+test('DELETE /api/satellite-funds/:id on a transfer_out entry only deletes the satellite_funds row (no bank mirror to reverse)', async () => {
+  const deletes = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async first() { return /FROM satellite_funds/.test(sql) ? { id: 'SAT-2', direction: 'transfer_out', amount: 2000, purpose: 'gift', bank_ref: '' } : null; },
+      async run() { deletes.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds/SAT-2', 'DELETE'),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.deleted, true);
+  assert.equal(deletes.length, 1, 'no bank_ref means no cash_transactions delete is attempted');
+  assert.match(deletes[0].sql, /DELETE FROM satellite_funds/);
+});
+
+test('DELETE /api/satellite-funds/:id reverses the mirrored bank transaction', async () => {
+  const deletes = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async first() { return /FROM satellite_funds/.test(sql) ? { id: 'SAT-1', direction: 'in', amount: 5000, bank_ref: 'CTX-9' } : null; },
+      async run() { deletes.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds/SAT-1', 'DELETE'),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.deleted, true);
+  assert.equal(deletes.length, 2, 'reverses the bank mirror row, then deletes the satellite_funds row');
+  assert.match(deletes[0].sql, /DELETE FROM cash_transactions/);
+  assert.equal(deletes[0].binds[0], 'CTX-9');
+  assert.match(deletes[1].sql, /DELETE FROM satellite_funds/);
+});
+
+test('DELETE /api/satellite-funds/:id returns 404 when the entry does not exist', async () => {
+  const onPrepare = () => ({ bind() { return this; }, async first() { return null; } });
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds/SAT-X', 'DELETE'),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  assert.equal(response.status, 404);
+});
+
+test('satellite_funds are structurally excluded from /api/income and /api/expenses totals', async () => {
+  const incomeRow = { id: 'INC-1', date: '2026-05-03', total_collection: 1000, source: 'sunday_collection', created_at: '2026-05-03T10:00:00Z' };
+  // A satellite pass-through row with a deliberately huge amount — if it ever leaked
+  // into the income total this assertion would catch it immediately.
+  const satRow = { id: 'SAT-1', date: '2026-05-03', direction: 'in', amount: 999999, purpose: 'province_remittance', created_at: '2026-05-03T10:00:00Z' };
+  const onPrepare = (sql) => ({
+    bind() { return this; },
+    async all() {
+      if (/FROM income/.test(sql)) return { results: [incomeRow] };
+      if (/FROM expenses/.test(sql)) return { results: [] };
+      if (/FROM satellite_funds/.test(sql)) return { results: [satRow] };
+      return { results: [] };
+    },
+  });
+  const incomeBody = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/income', 'GET'),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+  const total = incomeBody.reduce((s, r) => s + (r.totalCollection || 0), 0);
+  assert.equal(total, 1000, 'income total must not include the satellite pass-through amount');
+  assert.equal(incomeBody.some(r => r.id === 'SAT-1'), false, 'satellite_funds rows must never appear in the income list');
+});
+
 // ── Bank charge email ingest tests ──────────────────────────────────
 
 test('POST /api/internal/ingest-bank-charge-email rejects missing bearer token', async () => {
