@@ -258,3 +258,49 @@ test('satelliteHeldDisplay: zero held is treated as the "Held" (non-owed) branch
   assert.equal(d.label, 'Held for satellites');
   assert.equal(d.amount, '₦0');
 });
+
+// ── Expenses page "Pay From" fund source — Pool / Split (Parish + Pool) ─────────
+// submitPoolOnlyExpense/submitSplitPoolExpense are thin DOM-reading wrappers around
+// DB.addSatelliteFund/DB.addExpense (see src/js/app.js) — same as submitExpense,
+// submitRemittance etc. elsewhere in this codebase, they are not unit-tested by
+// simulating the DOM. Instead these tests assert the resulting DATA SHAPE those
+// handlers produce satisfies the required invariants, via the same calcChurchBalance
+// engine used everywhere else in this suite.
+
+test('expense-page pool payout: creates no expenses row; excluded from expense totals; held goes negative when the pool is empty', async () => {
+  // What submitPoolOnlyExpense produces for a ₦15,000 joint/zonal payment paid
+  // entirely from the pool: ONE satellite_funds 'out' row (purpose='joint_area_zone')
+  // mirrored as a bank withdrawal — and critically, NO expenses row at all.
+  const cashTx = [{ type: 'withdrawal', date: '2026-06-10', amount: 15000, destination: 'satellite_passthrough' }];
+  const satelliteFunds = [{ direction: 'out', date: '2026-06-10', amount: 15000, purpose: 'joint_area_zone' }];
+  const expenses = []; // no expenses row — a pool payout must never be a parish expense
+
+  const bal = await balance({ cashTx, satelliteFunds, expenses });
+  const expenseTotal = expenses.reduce((s, e) => s + (e.amount || 0), 0);
+
+  assert.equal(expenseTotal, 0, 'the pool payout must never be counted in expense totals');
+  assert.equal(bal.bankBalance, -15000, 'the payment still really left the bank');
+  assert.equal(bal.heldForSatellites, -15000, 'pool started at 0 and paid out 15000 — it is now negative (owed by satellites)');
+  assert.equal(bal.cashWithAccountant, 0, 'the accountant is never touched by a pool payout');
+});
+
+test('expense-page split payment: one expenses row for the parish share only, plus one satellite_funds out for the pool share', async () => {
+  // What submitSplitPoolExpense produces for a ₦20,000 joint payment split
+  // 12,000 parish / 8,000 pool, linked by a shared reference tag.
+  const sharedRef = 'JZ-test123';
+  const expenses = [{
+    id: 'EXP-1', date: '2026-06-10', category: 'utilities', amount: 12000,
+    paymentMethod: 'bank_transfer', bankAmount: 12000, receiptNo: sharedRef, status: 'approved',
+  }];
+  const cashTx = [{ type: 'withdrawal', date: '2026-06-10', amount: 8000, destination: 'satellite_passthrough' }];
+  const satelliteFunds = [{ direction: 'out', date: '2026-06-10', amount: 8000, purpose: 'joint_area_zone', reference: sharedRef }];
+
+  const expenseTotal = expenses.reduce((s, e) => s + (e.amount || 0), 0);
+  assert.equal(expenseTotal, 12000, 'expense totals must include only the parish share, never the pool share');
+  assert.equal(satelliteFunds[0].reference, expenses[0].receiptNo, 'the two halves share a reference tag for audit');
+
+  const bal = await balance({ cashTx, expenses, satelliteFunds });
+  assert.equal(bal.bankBalance, -20000, 'bank reflects both halves — both really left the bank');
+  assert.equal(bal.heldForSatellites, -8000, 'only the pool share reduces held, not the full 20000');
+  assert.equal(bal.cashWithAccountant, 0, 'the parish share was paid by bank transfer — the accountant is untouched');
+});

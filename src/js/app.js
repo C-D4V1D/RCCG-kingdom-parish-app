@@ -8324,8 +8324,46 @@ function showExpenseForm(preselectedCat, preselectedSubcat){
         <span style="color:var(--text3);margin-left:6px">(Bank ${fmt(state._churchBal?.bankBalance||0)} + Cash ${fmt(Math.max(0,state._churchBal?.cashWithAccountant||0))} + Petty ${fmt(state._churchBal?.pettyFloat||0)} − ${fmt(state._outstandingRems||0)} due)</span>
       </div>`:''}
     </div>
+    ${canAction('satellite_fund_record')?`
+    <!-- Pay From (fund source) — Parish Funds (today's behavior) vs the Satellite/Zone
+         Pool pass-through vs a Split of both. Hidden entirely for roles that can't
+         record pool funds, so the form behaves exactly as before for them. -->
+    <div class="form-group">
+      <label class="form-label">Pay From *</label>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="exp_fund_source" value="parish" checked onchange="App.onExpFundSourceChange()" /> 🏛️ Parish Funds
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="exp_fund_source" value="pool" onchange="App.onExpFundSourceChange()" /> 🛰️ Satellite / Zone Pool
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="exp_fund_source" value="split_pool" onchange="App.onExpFundSourceChange()" /> 🔀 Split (Parish + Pool)
+        </label>
+      </div>
+      <div id="exp_fund_source_hint" style="font-size:11px;color:var(--text3);margin-top:4px"></div>
+    </div>
+    <div id="exp_pool_split_group" style="display:none">
+      <div style="background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:12px">
+        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">This payment is part the parish's own share, part the satellite parishes' pass-through share. They must add up to the total amount above.</div>
+        <div class="form-row">
+          <div class="form-group" style="margin-bottom:0">
+            <label class="form-label">🏛️ Parish share (₦)</label>
+            <input type="number" id="exp_parish_share" class="form-input" placeholder="0" min="0" oninput="App.onExpPoolSplitChange()" />
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label class="form-label">🛰️ Pool share (₦)</label>
+            <input type="number" id="exp_pool_share" class="form-input" placeholder="0" min="0" oninput="App.onExpPoolSplitChange()" />
+          </div>
+        </div>
+        <div id="exp_pool_split_status" style="margin-top:10px;font-size:12px;color:var(--text3)"></div>
+      </div>
+    </div>`:''}
 
-    <!-- Payment Method -->
+    <!-- Payment Method — applies to the Parish share (all of it, or its portion of a
+         Split). Hidden entirely for a pure Pool payment: pool payouts leave the bank
+         directly, there is no cash/petty choice. -->
+    <div id="exp_payment_method_group">
     <div class="form-group">
       <label class="form-label">Payment Method *</label>
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px">
@@ -8352,6 +8390,7 @@ function showExpenseForm(preselectedCat, preselectedSubcat){
         </div>
         <div id="exp_split_status" style="margin-top:10px;font-size:12px;color:var(--text3)"></div>
       </div>
+    </div>
     </div>
 
     <div class="form-row">
@@ -8386,12 +8425,57 @@ function onExpMethodChange(){
   enforceExpenseMethodLock();
 }
 
+// The Payment Method split fields (bank + petty/cash) always target the amount that
+// is actually going through the Parish payment method — the full expense amount for
+// "Parish Funds", or just the Parish share for "Split (Parish + Pool)". Reading
+// exp_fund_source is safe even when the selector doesn't exist in the DOM (roles
+// without satellite_fund_record never render it) — it falls back to 'parish', which
+// is exactly today's behavior (target = the full Total Amount).
 function onExpSplitChange(){
-  const total = parseFloat(document.getElementById('exp_amt')?.value)||0;
+  const fundSource = document.querySelector('input[name="exp_fund_source"]:checked')?.value || 'parish';
+  const total = fundSource==='split_pool'
+    ? (parseFloat(document.getElementById('exp_parish_share')?.value)||0)
+    : (parseFloat(document.getElementById('exp_amt')?.value)||0);
   const secondary = parseFloat(document.getElementById('exp_secondary_amt')?.value)||0;
   const bank  = parseFloat(document.getElementById('exp_bank_amt')?.value)||0;
   const sum   = secondary+bank;
   const statusEl = document.getElementById('exp_split_status');
+  if(!statusEl) return;
+  if(!total){ statusEl.textContent='Enter the total amount above first.'; statusEl.style.color='var(--text3)'; return; }
+  if(Math.abs(sum-total)<1){ statusEl.textContent=`✓ Total matches: ${fmt(sum)}`; statusEl.style.color='var(--success)'; }
+  else if(sum>total){ statusEl.textContent=`Over by ${fmt(sum-total)}. Reduce one of the amounts.`; statusEl.style.color='var(--danger)'; }
+  else if(sum>0){ statusEl.textContent=`${fmt(total-sum)} still unaccounted for.`; statusEl.style.color='var(--amber)'; }
+  else { statusEl.textContent=''; }
+}
+
+// ── Pay From (fund source): Parish Funds / Satellite-Zone Pool / Split ──────────
+function onExpFundSourceChange(){
+  const fundSource = document.querySelector('input[name="exp_fund_source"]:checked')?.value || 'parish';
+  const pmGroup = document.getElementById('exp_payment_method_group');
+  const poolSplitGroup = document.getElementById('exp_pool_split_group');
+  const hint = document.getElementById('exp_fund_source_hint');
+  // A pure Pool payment leaves the bank directly via the satellite pool mirror — no
+  // parish payment method (bank/cash/petty) applies, so hide that whole block.
+  if(pmGroup) pmGroup.style.display = fundSource==='pool' ? 'none' : '';
+  if(poolSplitGroup) poolSplitGroup.style.display = fundSource==='split_pool' ? '' : 'none';
+  if(hint){
+    hint.textContent = fundSource==='pool'
+      ? 'This whole payment leaves the Satellite/Zone Pool — it will NOT be logged as a parish expense.'
+      : fundSource==='split_pool'
+        ? 'Parish share is logged as a normal expense; Pool share is a pass-through payout and will NOT be logged as a parish expense.'
+        : '';
+  }
+  // The parish payment method's own split fields (if shown) now target the Parish
+  // share instead of the full total when Split is selected — re-validate both.
+  if(fundSource==='split_pool'){ onExpPoolSplitChange(); onExpSplitChange(); }
+}
+
+function onExpPoolSplitChange(){
+  const total = parseFloat(document.getElementById('exp_amt')?.value)||0;
+  const parishShare = parseFloat(document.getElementById('exp_parish_share')?.value)||0;
+  const poolShare = parseFloat(document.getElementById('exp_pool_share')?.value)||0;
+  const sum = parishShare+poolShare;
+  const statusEl = document.getElementById('exp_pool_split_status');
   if(!statusEl) return;
   if(!total){ statusEl.textContent='Enter the total amount above first.'; statusEl.style.color='var(--text3)'; return; }
   if(Math.abs(sum-total)<1){ statusEl.textContent=`✓ Total matches: ${fmt(sum)}`; statusEl.style.color='var(--success)'; }
@@ -8414,6 +8498,19 @@ async function submitExpense(btn=null){
   if(!subCategory){ showAlert('Please select a sub-category.','danger'); return }
   if(isOthers && !description){ showAlert('Description is required when "Others..." is selected.','danger'); return }
   if(!amount){ showAlert('Please enter an amount.','danger'); return }
+
+  // ── Pay From: Parish Funds (below, unchanged) / Satellite-Zone Pool / Split ──────
+  // The selector only exists in the DOM for roles holding satellite_fund_record, so
+  // this always resolves to 'parish' for everyone else — identical to today's form.
+  const fundSource = canAction('satellite_fund_record')
+    ? (document.querySelector('input[name="exp_fund_source"]:checked')?.value || 'parish')
+    : 'parish';
+  if(fundSource === 'pool'){
+    return submitPoolOnlyExpense({ date, category, subCategory, description, amount, btn });
+  }
+  if(fundSource === 'split_pool'){
+    return submitSplitPoolExpense({ date, category, subCategory, description, amount, btn });
+  }
 
   const method = document.querySelector('input[name="exp_method"]:checked')?.value || 'bank_transfer';
   const isSplitPettyBank = method==='split_petty_bank';
@@ -8510,6 +8607,151 @@ async function submitExpense(btn=null){
     reader.readAsDataURL(file);
   } else {
     await saveExpenseRecord(null, null);
+  }
+}
+
+// ── "Pay From: Satellite / Zone Pool" — the WHOLE payment is a pass-through pool
+// payout, never a parish expense. No expenses row is ever created here — the pool
+// share must never hit calcChurchBalance as an expense, or it would double-count
+// against the pool's own held/bank accounting (see calcChurchBalance/createSatelliteFund).
+// Reuses the existing satellite-funds create path exactly like the Remittances-page
+// pool panel's "Record Funds Out" — direction:'out' mirrors a bank withdrawal server-side.
+async function submitPoolOnlyExpense({ date, category, subCategory, description, amount, btn }){
+  if(_expenseSubmitting) return;
+  if(!canAction('satellite_fund_record')){ showAlert('You do not have permission to record satellite pass-through funds.','danger'); return; }
+  const receiptNo = document.getElementById('exp_receipt')?.value?.trim()||'';
+  const notesVal = document.getElementById('exp_notes')?.value?.trim()||'';
+  const catLabel = EXPENSE_CATS.find(c=>c.key===category)?.label||category;
+  const note = [`${catLabel}${subCategory?` — ${subCategory}`:''}`, description, notesVal].filter(Boolean).join(' · ');
+
+  const restore = setBtnLoading(btn, 'Saving…');
+  _expenseSubmitting = true;
+  try {
+    await DB.addSatelliteFund({
+      direction:'out', purpose:'joint_area_zone', amount, date,
+      note, reference:receiptNo, recordedBy:state.user?.name||''
+    });
+    DB.addAudit('satellite_fund_recorded',
+      `Joint/zonal payment ${fmt(amount)} paid entirely from the Satellite/Zone Pool (${catLabel}${subCategory?' — '+subCategory:''})${receiptNo?' — Ref: '+receiptNo:''}. Not logged as a parish expense.`,
+      state.user?.name);
+    DB.addNotification('Pool Payment Recorded',`${fmt(amount)} paid from the Satellite/Zone Pool for ${catLabel}${subCategory?' — '+subCategory:''}.`,'success');
+    closeModal();
+    showAlert(`${fmt(amount)} paid from the Satellite/Zone Pool — not logged as a parish expense.`,'success');
+    await renderExpenses();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to record pool payment: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  } finally {
+    _expenseSubmitting = false;
+  }
+}
+
+// ── "Pay From: Split (Parish + Pool)" — the payment is part the parish's own share
+// (a normal expense, using the parish payment method radios), part the satellite
+// parishes' pass-through share (a pool payout, no expenses row). The two halves are
+// linked with a shared reference tag for audit — the receipt/invoice no. if one was
+// entered, otherwise a generated JZ- tag — stamped into both records' reference/notes.
+async function submitSplitPoolExpense({ date, category, subCategory, description, amount, btn }){
+  if(_expenseSubmitting) return;
+  if(!canAction('satellite_fund_record')){ showAlert('You do not have permission to record satellite pass-through funds.','danger'); return; }
+  const parishShare = parseFloat(document.getElementById('exp_parish_share')?.value)||0;
+  const poolShare = parseFloat(document.getElementById('exp_pool_share')?.value)||0;
+  if(!parishShare && !poolShare){ showAlert('Please enter at least one of the Parish share / Pool share amounts.','danger'); return; }
+  if(Math.abs((parishShare+poolShare)-amount)>0.5){ showAlert(`Parish share + Pool share (${fmt(parishShare+poolShare)}) must equal the total amount (${fmt(amount)}). Please correct.`,'danger'); return; }
+
+  const receiptNo = document.getElementById('exp_receipt')?.value?.trim()||'';
+  const notesVal = document.getElementById('exp_notes')?.value?.trim()||'';
+  const catLabel = EXPENSE_CATS.find(c=>c.key===category)?.label||category;
+  // Shared reference so the two halves of one joint/zonal payment can be traced as one.
+  const sharedRef = receiptNo || `JZ-${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`;
+
+  // Parish share: resolve the SAME bank/cash/petty/split payment-method radios the
+  // "Parish Funds" path uses (see submitExpense above) — just scoped to parishShare
+  // instead of the full amount, since only the parish's own portion is ever an expense.
+  let bankAmount=0, cashAmount=0, pettyAmount=0, method='bank_transfer', isSplit=false;
+  if(parishShare > 0){
+    method = document.querySelector('input[name="exp_method"]:checked')?.value || 'bank_transfer';
+    const isSplitPettyBank = method==='split_petty_bank';
+    const isSplitCashBank = method==='split_cash_bank';
+    isSplit = isSplitPettyBank || isSplitCashBank;
+    if(isSplit){
+      const secondaryAmount=parseFloat(document.getElementById('exp_secondary_amt')?.value)||0;
+      bankAmount=parseFloat(document.getElementById('exp_bank_amt')?.value)||0;
+      if(isSplitPettyBank) pettyAmount=secondaryAmount;
+      if(isSplitCashBank) cashAmount=secondaryAmount;
+      const splitTotal = secondaryAmount + bankAmount;
+      if(!secondaryAmount&&!bankAmount){ showAlert('Please enter at least one split amount for the parish share.','danger'); return }
+      if(Math.abs(splitTotal-parishShare)>0.5){ showAlert(`Split total (${fmt(splitTotal)}) must equal the parish share (${fmt(parishShare)}). Please correct.`,'danger'); return }
+    } else if(method==='petty_cash'){
+      pettyAmount=parishShare;
+    } else if(method==='bank_transfer'){
+      bankAmount=parishShare;
+    } else {
+      cashAmount=parishShare; // cash (accountant)
+    }
+
+    // Guards: amounts must not exceed available balances — same tolerance as the Parish path.
+    if(bankAmount > 0 || cashAmount > 0){
+      const _bal = await calcChurchBalance();
+      if(bankAmount > 0){
+        const availBank = Math.max(0, _bal.bankBalance||0);
+        if(bankAmount > availBank + 0.5){
+          showAlert(`Bank balance is insufficient for the parish share.\nAvailable bank balance: ${fmt(availBank)}. Required: ${fmt(bankAmount)}`,'danger');
+          return;
+        }
+      }
+      if(cashAmount > 0){
+        const availCash = Math.max(0, _bal.cashWithAccountant||0);
+        if(cashAmount > availCash + 0.5){
+          showAlert(`Cash with Accountant is insufficient for the parish share.\nAvailable cash: ${fmt(availCash)}. Required: ${fmt(cashAmount)}`,'danger');
+          return;
+        }
+      }
+    }
+  }
+
+  let expenseIncomeRef = '';
+  if(cashAmount > 0){
+    try {
+      const [_allIncSE, _remRatesSE, _allCashSE] = await Promise.all([DB.getIncome(), getRemRates(), DB.getCashTransactions()]);
+      expenseIncomeRef = findIncomeRefForCashExpense(date, _allIncSE, _remRatesSE.rates||DEFAULT_REMITTANCE_RATES, _allCashSE);
+    } catch(e){ /* non-fatal — falls back to FIFO attribution */ }
+  }
+
+  const restore = setBtnLoading(btn, 'Saving…');
+  _expenseSubmitting = true;
+  try {
+    if(parishShare > 0){
+      const expenseId = 'EXP-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      const expenseStatus = defaultExpenseStatusForCurrentUser();
+      await DB.addExpense({ id: expenseId, date, category, subCategory,
+        description: description || subCategory, amount: parishShare,
+        receiptNo: sharedRef,
+        paymentMethod: isSplit ? 'split' : method,
+        bankAmount, cashAmount, pettyAmount,
+        incomeRef: expenseIncomeRef,
+        notes: [notesVal, poolShare>0?`Linked joint/zonal payment — pool share: ${fmt(poolShare)} (ref ${sharedRef}).`:''].filter(Boolean).join(' '),
+        recordedBy: state.user?.name, status: expenseStatus });
+    }
+    if(poolShare > 0){
+      const note = [`${catLabel}${subCategory?` — ${subCategory}`:''}`, description,
+        parishShare>0?`Linked parish expense — parish share: ${fmt(parishShare)} (ref ${sharedRef}).`:''].filter(Boolean).join(' · ');
+      await DB.addSatelliteFund({
+        direction:'out', purpose:'joint_area_zone', amount: poolShare, date,
+        note, reference: sharedRef, recordedBy: state.user?.name||''
+      });
+    }
+    DB.addAudit('expense_recorded',
+      `Split joint/zonal payment ${fmt(amount)} — Parish: ${fmt(parishShare)} (expense) · Pool: ${fmt(poolShare)} (pass-through) — Ref: ${sharedRef}`,
+      state.user?.name);
+    closeModal();
+    showAlert(`Split payment of ${fmt(amount)} recorded — Parish: ${fmt(parishShare)}, Pool: ${fmt(poolShare)}.`,'success');
+    await renderExpenses();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to save split payment: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  } finally {
+    _expenseSubmitting = false;
   }
 }
 
@@ -12751,7 +12993,7 @@ return {
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
   updateExpenseSubcats, updateExpenseDescRequired,
-  quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
+  quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
