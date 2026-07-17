@@ -361,6 +361,17 @@ function renderReport(resp){
     }
   }
 
+  // Satellite / Zone Pass-Through Fund — display-only note, kept visually and
+  // numerically separate from Income/Expenses/Net Position above. Older shared
+  // statements (created before this feature) simply omit these fields.
+  if(D.satelliteFundsIn !== undefined || D.satelliteFundsOut !== undefined || D.satelliteFundsHeld !== undefined){
+    const sIn = D.satelliteFundsIn||0, sOut = D.satelliteFundsOut||0, sHeld = D.satelliteFundsHeld||0;
+    html += `<div class="note-box" style="background:#eef0fb;border-color:#c7cdee;color:#33396b;margin-top:6px">
+      <strong>Funds Received &amp; Remitted on Behalf of Satellite Parishes</strong> — In ${N(sIn)} / Out ${N(sOut)} / Held ${N(sHeld)}
+      <div style="font-size:11px;margin-top:4px;color:#555">Pass-through custodial funds for the satellite parishes' Province remittance and joint area/zone payments — excluded from Income, Expenses, and Net Position above.</div>
+    </div>`;
+  }
+
   document.getElementById('sections').innerHTML = html;
 
   // Signatures

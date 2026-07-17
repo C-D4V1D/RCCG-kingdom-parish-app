@@ -303,7 +303,16 @@ const QUOTA_LABELS = {
   regional: 'Regional Contribution'
 };
 
-// Income source types used in the "Other Income" form
+// Income source types used in the "Other Income" form.
+// Money received from / remitted on behalf of satellite parishes (Province
+// remittance contributions, joint area/zone payments) does NOT belong here —
+// it is pass-through/custodial money, not this parish's own income. It is
+// recorded separately via the Satellite / Zone Pass-Through Fund panel on the
+// Remittances page (see renderRemittances / satellite_funds) and excluded from
+// all income totals. 'satellite_remittance' and 'remittance_linked_credit' used
+// to live in this list as an earlier, incorrect attempt at this — removed; any
+// historical records still bearing those source values fall back to the raw
+// key label wherever OTHER_INCOME_SOURCES.find(...)||{label:...} is used.
 const OTHER_INCOME_SOURCES = [
   { key:'midweek_offering',   label:'Midweek / Programme Offering' },
   { key:'go_a_fishing_offering', label:'Go-a-Fishing Offering' },
@@ -311,10 +320,15 @@ const OTHER_INCOME_SOURCES = [
   { key:'seed',               label:'Seed Offering' },
   { key:'special_offering',   label:'Special Offering (e.g. Naming, Wedding)' },
   { key:'building_fund',      label:'Building / Project Fund Contribution' },
-  { key:'satellite_remittance', label:'Satellite Parish Remittance Payment' },
-  { key:'remittance_linked_credit', label:'Remittance-Linked Credits' },
   { key:'external_transfer',  label:'External Bank Transfer Received' },
   { key:'other',              label:'Other (specify in notes)' }
+];
+
+// Purpose options for Satellite / Zone Pass-Through Fund entries (Remittances page).
+const SATELLITE_FUND_PURPOSES = [
+  { key:'province_remittance', label:'Province Remittance Contribution' },
+  { key:'joint_area_zone',     label:'Joint Area / Zone Payment' },
+  { key:'other',                label:'Other' },
 ];
 
 const DEFAULT_REMITTANCE_RATES = {
@@ -581,6 +595,13 @@ const DB = {
   deleteRemittance(id,force=false){ return apiFetch(`remittances/${id}`,'DELETE', force?{force:true}:null); },
   createSharedReport(d)          { return apiFetch('report-share','POST',d); },
   getSharedReport(token)         { return apiFetch(`report-share/${token}`); },
+
+  // Satellite / Zone Pass-Through Fund — money received from and remitted on
+  // behalf of satellite parishes. Excluded from income/expense totals; every
+  // In/Out is mirrored into a bank movement server-side (see satellite-funds API).
+  getSatelliteFunds()           { return apiFetch('satellite-funds'); },
+  addSatelliteFund(d)           { return apiFetch('satellite-funds','POST',d); },
+  deleteSatelliteFund(id)       { return apiFetch(`satellite-funds/${id}`,'DELETE'); },
 
   getCashTransactions(full=false){ return apiFetch('cash-transactions'+(full?'?full=1':'')); },
   getCashPhoto(id)             { return apiFetch(`cash-photo/${id}`); },
@@ -858,6 +879,8 @@ const ACCESS_RULES = {
     income_deposit: ['income'],
     remittance_record_payment: ['remittances'],
     remittance_delete_pending: ['remittances'],
+    satellite_fund_record: ['remittances'],
+    satellite_fund_delete: ['remittances'],
     expense_log: ['expenses'],
     bank_withdrawal: ['income'],
     bank_charge: ['expenses'],
@@ -5850,8 +5873,8 @@ async function saveRemCutoffDates(btn=null){
 }
 
 async function renderRemittances(){
-  const [allIncome, allRems, settings, allUsers, rr] = await Promise.all([
-    DB.getIncome(), DB.getRemittances(), DB.getSettings(), DB.getUsers(), getRemRates()
+  const [allIncome, allRems, settings, allUsers, rr, allSatFunds] = await Promise.all([
+    DB.getIncome(), DB.getRemittances(), DB.getSettings(), DB.getUsers(), getRemRates(), DB.getSatelliteFunds()
   ]);
   const quotas = getQuotaList(settings);
 
@@ -6019,6 +6042,14 @@ async function renderRemittances(){
 
   const pendingApprovals=allRems.filter(r=>r.status==='pending_approval')
     .sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0));
+
+  // ── Satellite / Zone Pass-Through Fund — one combined pool, all-time totals ──
+  // (not filtered to the remittance period above: this is a running custodial
+  // balance, not a per-period figure). Excluded from every income/expense total.
+  const satFundsIn=allSatFunds.filter(s=>s.direction==='in').reduce((s,r)=>s+(r.amount||0),0);
+  const satFundsOut=allSatFunds.filter(s=>s.direction==='out').reduce((s,r)=>s+(r.amount||0),0);
+  const satFundsHeld=satFundsIn-satFundsOut;
+  const satFundsRecent=[...allSatFunds].sort((a,b)=>new Date(b.date||b.createdAt||0)-new Date(a.date||a.createdAt||0)).slice(0,10);
 
   const renderSection=(rows,sectionLabel)=>rows.length?`
     <tr style="background:var(--surface)">
@@ -6250,6 +6281,53 @@ async function renderRemittances(){
           </div>
         </div>`:''}
       </div>
+    </div>
+
+    ${renderSatelliteFundsPanel(satFundsIn, satFundsOut, satFundsHeld, satFundsRecent)}`;
+}
+
+// ── Satellite / Zone Pass-Through Fund panel (lives on the Remittances page) ──
+// Shown separately from remittance totals: this money is never this parish's own
+// income or expense — it is custodial funds received from and remitted on behalf
+// of the three satellite parishes (Province remittance contributions + joint
+// area/zone payments), pooled into one combined balance (no per-parish tracking;
+// the free-text note on each entry carries the trail).
+function renderSatelliteFundsPanel(totalIn, totalOut, held, recent){
+  const canRecord=canAction('satellite_fund_record');
+  const canDelete=canAction('satellite_fund_delete');
+  const purposeLabel=key=>SATELLITE_FUND_PURPOSES.find(p=>p.key===key)?.label||(key||'Other');
+  return `
+    <div class="card" style="margin-top:12px;border-left:3px solid var(--primary)">
+      <div class="card-header">
+        <span class="card-title">🛰️ Funds Received &amp; Remitted on Behalf of Satellite Parishes</span>
+      </div>
+      <p style="font-size:11px;color:var(--text3);margin-bottom:10px">
+        Money the three satellite parishes send in for Province remittance and joint area/zone payments, which this parish forwards on their behalf. This is <strong>pass-through / custodial money</strong> — not our own income or expense — and is <strong>excluded from all income, expense, and remittance totals</strong>. Every entry below is mirrored into the Bank module so the bank balance stays accurate.
+      </p>
+      <div class="kpi-grid" style="margin-bottom:12px">
+        <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">📥</div><div class="kpi-label">Total Received (In)</div><div class="kpi-val" style="color:var(--success)">${fmt(totalIn)}</div></div>
+        <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Total Paid Out</div><div class="kpi-val" style="color:var(--danger)">${fmt(totalOut)}</div></div>
+        <div class="kpi"><div class="kpi-icon" style="background:#E6F1FB">🏦</div><div class="kpi-label">Current Balance Held</div><div class="kpi-val">${fmt(held)}</div></div>
+      </div>
+      ${canRecord?`
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+        <button class="btn btn-primary" onclick="App.showSatelliteFundForm('in')">📥 Record Funds In</button>
+        <button class="btn btn-amber" style="color:#fff;background:var(--amber)" onclick="App.showSatelliteFundForm('out')">📤 Record Funds Out</button>
+      </div>`:''}
+      <div class="card-header" style="padding:0;margin-bottom:6px"><span class="card-title" style="font-size:12px">Recent Entries</span></div>
+      ${recent.length?recent.map(s=>`
+        <div class="feed-item">
+          <div class="feed-dot" style="background:${s.direction==='in'?'var(--success-light)':'#FCEBEB'}">${s.direction==='in'?'📥':'📤'}</div>
+          <div class="feed-body">
+            <div class="feed-title">${s.direction==='in'?'Received':'Paid Out'} — ${esc(purposeLabel(s.purpose))}</div>
+            <div class="feed-sub">${s.note?esc(s.note)+' · ':''}${s.reference?'Ref: '+esc(s.reference)+' · ':''}${esc(s.recordedBy)||'—'}</div>
+            <div class="feed-time">${fmtDate(s.date)}</div>
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+            <span class="td-bold ${s.direction==='in'?'td-green':'td-red'}">${s.direction==='in'?'+':'−'} ${fmt(s.amount)}</span>
+            ${canDelete?`<button class="btn btn-sm btn-danger" onclick="App.deleteSatelliteFundEntry('${s.id}', this)">🗑 Delete</button>`:''}
+          </div>
+        </div>`).join(''):'<div class="empty-table">No satellite pass-through entries recorded yet.</div>'}
     </div>`;
 }
 
@@ -6638,6 +6716,86 @@ async function deleteRemittance(id, btn=null){
   } catch(err) {
     restore();
     showAlert(`Failed to delete remittance: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+// ── Satellite / Zone Pass-Through Fund ──────────────────────────────────────
+function showSatelliteFundForm(direction){
+  if(!canAction('satellite_fund_record')){ showAlert('You do not have permission to record satellite pass-through funds.','danger'); return; }
+  const isIn = direction === 'in';
+  const today = new Date().toISOString().split('T')[0];
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">${isIn?'📥 Satellite Funds In':'📤 Satellite Funds Out'}</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>${isIn
+      ? 'Record money received from a satellite parish for Province remittance or a joint area/zone payment. This is not our own income.'
+      : 'Record money forwarded to Province or a joint area/zone payment on behalf of the satellite parishes. This is not our own expense.'}</span></div>
+    <div class="form-group"><label class="form-label">Date *</label>
+      <input type="date" id="sf_date" class="form-input" value="${today}" max="${today}" />
+    </div>
+    <div class="form-group"><label class="form-label">Amount (₦) *</label>
+      <input type="number" id="sf_amount" class="form-input" placeholder="0" min="0" />
+    </div>
+    <div class="form-group"><label class="form-label">Purpose *</label>
+      <select id="sf_purpose" class="form-select">
+        ${SATELLITE_FUND_PURPOSES.map(p=>`<option value="${p.key}">${p.label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Note <span style="font-size:11px;color:var(--text3)">(optional — e.g. which satellite parish)</span></label>
+      <input type="text" id="sf_note" class="form-input" placeholder="e.g. Parish A – July remittance" />
+    </div>
+    <div class="form-group"><label class="form-label">Reference <span style="font-size:11px;color:var(--text3)">(optional)</span></label>
+      <input type="text" id="sf_reference" class="form-input" placeholder="Bank reference / teller no." />
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="sf_submit_btn" onclick="App.submitSatelliteFund('${direction}', this)">${isIn?'Record Funds In':'Record Funds Out'}</button>
+    </div>`);
+}
+
+async function submitSatelliteFund(direction, btn=null){
+  if(!canAction('satellite_fund_record')){ showAlert('You do not have permission to record satellite pass-through funds.','danger'); return; }
+  const date      = document.getElementById('sf_date')?.value;
+  const amount    = parseFloat(document.getElementById('sf_amount')?.value)||0;
+  const purpose   = document.getElementById('sf_purpose')?.value||'other';
+  const note      = document.getElementById('sf_note')?.value?.trim()||'';
+  const reference = document.getElementById('sf_reference')?.value?.trim()||'';
+  if(!date||!amount){ showAlert('Please fill in the date and amount.','danger'); return; }
+
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.addSatelliteFund({ date, direction, amount, purpose, note, reference, recordedBy:state.user?.name||'' });
+    const purposeLabel = SATELLITE_FUND_PURPOSES.find(p=>p.key===purpose)?.label||purpose;
+    DB.addAudit('satellite_fund_recorded',
+      `Satellite pass-through fund ${direction==='in'?'received':'paid out'}: ${fmt(amount)} (${purposeLabel})${note?' — '+note:''}${reference?' — Ref: '+reference:''}`,
+      state.user?.name);
+    DB.addNotification('Satellite Pass-Through Fund Recorded',`${fmt(amount)} ${direction==='in'?'received from':'paid out on behalf of'} a satellite parish (${purposeLabel}).`,'success');
+    closeModal();
+    showAlert(`Satellite pass-through fund of ${fmt(amount)} recorded!`,'success');
+    renderRemittances();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to record satellite pass-through fund: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+async function deleteSatelliteFundEntry(id, btn=null){
+  if(!canAction('satellite_fund_delete')){ showAlert('You do not have permission to delete satellite pass-through fund entries.','danger'); return; }
+  const all = await DB.getSatelliteFunds();
+  const entry = all.find(s=>s.id===id);
+  if(!entry) return;
+  if(!confirm(`Delete this satellite pass-through fund entry (${fmt(entry.amount)})?\n\nThis will also reverse the matching bank transaction. This action cannot be undone.`)) return;
+  const restore = setBtnLoading(btn, 'Deleting…');
+  try {
+    await DB.deleteSatelliteFund(id);
+    DB.addAudit('satellite_fund_deleted',
+      `Satellite pass-through fund entry deleted: ${id} (${fmt(entry.amount)}, ${entry.direction==='in'?'received':'paid out'}) — bank movement reversed`,
+      state.user?.name);
+    showAlert('Satellite pass-through fund entry deleted and bank movement reversed.','warn');
+    renderRemittances();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to delete satellite pass-through fund entry: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
 }
 
@@ -7124,15 +7282,38 @@ async function shareRemittanceReport(fromOverride, toOverride){
 }
 
 /**
+ * Summarize the Satellite / Zone Pass-Through Fund for a reporting period, for
+ * the "Funds Received & Remitted on Behalf of Satellite Parishes" report note.
+ * In/Out are scoped to the period; `held` is the running custodial balance as
+ * of the period's end date (all entries up to and including toDate), since the
+ * fund is one continuous pool rather than something that resets each period.
+ * This is display-only — it must never be added into income/expense totals.
+ */
+function summarizeSatelliteFunds(allSatFunds, fromDate, toDate){
+  const entryDate = s => String(s?.date || s?.createdAt || '').slice(0,10);
+  const inPeriod  = (allSatFunds||[]).filter(s=>s.direction==='in')
+    .filter(s=>{ const d=entryDate(s); return d && d>=fromDate && d<=toDate; })
+    .reduce((s,r)=>s+(r.amount||0),0);
+  const outPeriod = (allSatFunds||[]).filter(s=>s.direction==='out')
+    .filter(s=>{ const d=entryDate(s); return d && d>=fromDate && d<=toDate; })
+    .reduce((s,r)=>s+(r.amount||0),0);
+  const heldAsOf = (allSatFunds||[])
+    .filter(s=>{ const d=entryDate(s); return !d || d<=toDate; })
+    .reduce((s,r)=>s+(r.direction==='out'?-(r.amount||0):(r.amount||0)),0);
+  return { inPeriod, outPeriod, heldAsOf };
+}
+
+/**
  * Build a structured, self-contained snapshot of the Monthly Financial Statement
  * for the given period. Mirrors the sections rendered by generateMonthlyReport()
  * so the public statement.html page can reproduce identical figures without app
  * access. All currency basis text is pre-formatted; amounts stay numeric.
  */
 async function buildMonthlyStatementData(fromDate, toDate){
-  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData, users, allPettyMS] = await Promise.all([
-    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers(), DB.getPetty()
+  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData, users, allPettyMS, allSatFundsMS] = await Promise.all([
+    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers(), DB.getPetty(), DB.getSatelliteFunds()
   ]);
+  const satFundsSummary=summarizeSatelliteFunds(allSatFundsMS, fromDate, toDate);
   const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
   const accountantName=(users||[]).find(u=>u.role==='accountant')?.name||'';
   const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
@@ -7318,6 +7499,9 @@ async function buildMonthlyStatementData(fromDate, toDate){
     // sectionFVersion signals to statement.html to use the new layout. Old saved
     // statements omit it and fall back to the legacy Opening+Income−RemDue view.
     sectionFVersion:2,
+    // Satellite / Zone Pass-Through Fund — display-only, NOT part of totalIncome,
+    // totalExpenses, or any figure above. statement.html renders it as a separate note.
+    satelliteFundsIn:satFundsSummary.inPeriod, satelliteFundsOut:satFundsSummary.outPeriod, satelliteFundsHeld:satFundsSummary.heldAsOf,
   };
 }
 
@@ -10856,8 +11040,8 @@ function onReportDatesChange(){
 }
 
 async function generateMonthlyReport(){
-  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData, users, allPettyMR] = await Promise.all([
-    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers(), DB.getPetty()
+  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData, users, allPettyMR, allSatFundsMR] = await Promise.all([
+    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers(), DB.getPetty(), DB.getSatelliteFunds()
   ]);
   const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
   const accountantName=(users||[]).find(u=>u.role==='accountant')?.name||'';
@@ -10877,6 +11061,7 @@ async function generateMonthlyReport(){
   const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
   const toDate=state.reportToDate||ymdLocal(new Date());
   const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
+  const satFundsSummaryMR=summarizeSatelliteFunds(allSatFundsMR, fromDate, toDate);
   const income=filterByDateRange(allIncome,fromDate,toDate);
   const allMonthExpenses=filterByDateRange(allExpenses,fromDate,toDate);
   const expenses=allMonthExpenses.filter(e=>isLoggedExpense(e));
@@ -11055,6 +11240,12 @@ async function generateMonthlyReport(){
 
     ${availableParishFund<0?'<div class="note-box">⚠️ The parish is in a deficit position — outstanding remittances exceed available cash. Please review with the Parish Pastor.</div>':''}
     ${closingPettyFloat<0?'<div class="note-box">⚠️ Petty cash float is negative — the petty cash holder has spent more than the float. A reconciliation top-up is needed.</div>':''}
+
+    ${(satFundsSummaryMR.inPeriod>0||satFundsSummaryMR.outPeriod>0||Math.abs(satFundsSummaryMR.heldAsOf)>=1)?`
+    <div class="note-box" style="background:#eef0fb;border-color:#c7cdee;color:#33396b">
+      <strong>Funds Received &amp; Remitted on Behalf of Satellite Parishes</strong> — In ${fmt(satFundsSummaryMR.inPeriod)} / Out ${fmt(satFundsSummaryMR.outPeriod)} / Held ${fmt(satFundsSummaryMR.heldAsOf)}
+      <div style="font-size:11px;margin-top:4px;color:#555">Pass-through custodial funds for the satellite parishes' Province remittance and joint area/zone payments — excluded from Income, Expenses, and Net Position above.</div>
+    </div>`:''}
 
     ${reportSignatureHTML(pastorName, undefined, accountantName)}`;
 
@@ -12015,10 +12206,10 @@ async function exportData(btn=null){
   try {
     // Pass full=true so the backup includes receipt/deposit-slip images, which the
     // normal list endpoints now omit for speed.
-    const [usersRaw,income,remittances,expenses,petty,auditLog,settings,cashTransactions] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(true),DB.getPetty(),DB.getAudit(),DB.getSettings(),DB.getCashTransactions(true)]);
+    const [usersRaw,income,remittances,expenses,petty,auditLog,settings,cashTransactions,satelliteFunds] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(true),DB.getPetty(),DB.getAudit(),DB.getSettings(),DB.getCashTransactions(true),DB.getSatelliteFunds()]);
     // Strip sensitive auth data (PIN hashes) — they must never leave the database in any export
     const users = usersRaw.map(({pin:_pin, pinHash:_hash, ...u})=>u);
-    const data={ users,income,remittances,expenses,petty,audit:auditLog,settings,cashTransactions, exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
+    const data={ users,income,remittances,expenses,petty,audit:auditLog,settings,cashTransactions,satelliteFunds, exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
     const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
     a.download=`rccg-backup-${new Date().toISOString().split('T')[0]}.json`;
@@ -12299,6 +12490,7 @@ return {
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
   updateExpenseSubcats, updateExpenseDescRequired,
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
