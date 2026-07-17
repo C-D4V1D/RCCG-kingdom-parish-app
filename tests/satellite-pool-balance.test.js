@@ -197,3 +197,64 @@ test('summarizeSatelliteFunds: only "gift" is ever surfaced as income — reimbu
   // never be summed as income anywhere.
   assert.notEqual(summary.giftPeriod, summary.transferOutPeriod);
 });
+
+// ── Role permissions: Admin Officer may record Funds In/Out but not Transfer to Parish ──
+// satellite_fund_record reuses the 'expenses' permission (the same one that gates
+// expense logging) so one Admin Officer can complete a zonal payment single-handed.
+// satellite_fund_transfer is a separate, Accountant/Pastor/IT-only key — reclassifying
+// pool money as parish income is more sensitive than simply moving it in/out.
+
+test('permissions: Admin Officer can record Funds In/Out but cannot Transfer to Parish or delete', () => {
+  App._setTestUserRole('admin_officer');
+  assert.equal(App._canAction('satellite_fund_record'), true, 'admin_officer holds "expenses", which now also gates recording');
+  assert.equal(App._canAction('satellite_fund_transfer'), false, 'admin_officer must not be able to reclassify pool money as income');
+  assert.equal(App._canAction('satellite_fund_delete'), false);
+});
+
+test('permissions: Accountant and Pastor can record, transfer, and delete', () => {
+  for (const role of ['accountant', 'pastor']) {
+    App._setTestUserRole(role);
+    assert.equal(App._canAction('satellite_fund_record'), true, `${role} should still be able to record`);
+    assert.equal(App._canAction('satellite_fund_transfer'), true, `${role} should be able to transfer to parish`);
+    assert.equal(App._canAction('satellite_fund_delete'), true, `${role} should be able to delete entries`);
+  }
+});
+
+test('permissions: IT Admin bypasses the permission map entirely', () => {
+  App._setTestUserRole('it_admin');
+  assert.equal(App._canAction('satellite_fund_record'), true);
+  assert.equal(App._canAction('satellite_fund_transfer'), true);
+  assert.equal(App._canAction('satellite_fund_delete'), true);
+});
+
+test('permissions: Signatory and read-only Viewer can neither record, transfer, nor delete', () => {
+  for (const role of ['signatory', 'viewer']) {
+    App._setTestUserRole(role);
+    assert.equal(App._canAction('satellite_fund_record'), false, `${role} is view-only for remittances`);
+    assert.equal(App._canAction('satellite_fund_transfer'), false);
+    assert.equal(App._canAction('satellite_fund_delete'), false);
+  }
+});
+
+// ── Negative-held display label (Tweak 2) — display-only, the sign of `held` itself
+// never changes anywhere in calcChurchBalance/summarizeSatelliteFunds.
+
+test('satelliteHeldDisplay: positive held shows "Held for satellites"', () => {
+  const d = App._satelliteHeldDisplay(5000);
+  assert.equal(d.label, 'Held for satellites');
+  assert.equal(d.amount, '₦5,000');
+  assert.match(d.suffix, /excluded from available funds/);
+});
+
+test('satelliteHeldDisplay: negative held shows "Owed by satellites" with the absolute amount', () => {
+  const d = App._satelliteHeldDisplay(-2000);
+  assert.equal(d.label, 'Owed by satellites');
+  assert.equal(d.amount, '₦2,000', 'amount must be the absolute value, not the raw negative number');
+  assert.match(d.suffix, /owe the pool/);
+});
+
+test('satelliteHeldDisplay: zero held is treated as the "Held" (non-owed) branch', () => {
+  const d = App._satelliteHeldDisplay(0);
+  assert.equal(d.label, 'Held for satellites');
+  assert.equal(d.amount, '₦0');
+});

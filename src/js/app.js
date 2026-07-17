@@ -889,7 +889,13 @@ const ACCESS_RULES = {
     income_deposit: ['income'],
     remittance_record_payment: ['remittances'],
     remittance_delete_pending: ['remittances'],
-    satellite_fund_record: ['remittances'],
+    // Funds In/Out: also lets the Admin Officer complete a zonal payment single-handed —
+    // reuses the same permission that gates expense logging ('expenses'). Transferring
+    // pool money into parish income is a separate, more sensitive action — see
+    // satellite_fund_transfer below — and is deliberately NOT granted here.
+    satellite_fund_record: ['remittances', 'expenses'],
+    // Reclassifying held satellite money as parish income — Accountant/Pastor/IT only.
+    satellite_fund_transfer: ['remittances'],
     satellite_fund_delete: ['remittances'],
     expense_log: ['expenses'],
     bank_withdrawal: ['income'],
@@ -3232,6 +3238,7 @@ async function renderDashboard(){
     satelliteFunds: allSatFundsDash,
     remRates: (remRatesDash.rates || DEFAULT_REMITTANCE_RATES)
   });
+  const dashSatHeldDisp = satelliteHeldDisplay(churchBal.heldForSatellites);
   const pendingPetty = (pettyHistDash||[]).filter(h=>h.status==='pending_approval').length;
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
 
@@ -3944,10 +3951,10 @@ async function renderDashboard(){
           </a>
           ${Math.abs(churchBal.heldForSatellites||0)>=0.5?`
           <a onclick="App.navigate('remittances')" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between;border-top:1px dashed var(--border);margin-top:6px;padding-top:6px">
-            <span><span style="display:inline-block;width:8px;height:8px;background:#8B4513;border-radius:50%;margin-right:8px"></span><span style="text-decoration:underline dotted #8B4513;text-underline-offset:3px">Held for satellites</span></span>
-            <span style="font-weight:600;color:#8B4513">−${fmt(churchBal.heldForSatellites)}</span>
+            <span><span style="display:inline-block;width:8px;height:8px;background:#8B4513;border-radius:50%;margin-right:8px"></span><span style="text-decoration:underline dotted #8B4513;text-underline-offset:3px">${dashSatHeldDisp.label}</span></span>
+            <span style="font-weight:600;color:#8B4513">${churchBal.heldForSatellites>0?'−':'+'}${dashSatHeldDisp.amount}</span>
           </a>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:2px">Held for satellites: ${fmt(churchBal.heldForSatellites)} (excluded from available funds — already inside Bank above)</div>`:''}
+          <div style="font-size:10.5px;color:var(--text3);margin-top:2px">${dashSatHeldDisp.label}: ${dashSatHeldDisp.amount} (${dashSatHeldDisp.suffix}${churchBal.heldForSatellites>0?' — already inside Bank above':''})</div>`:''}
         </div>
       </div>
 
@@ -6380,6 +6387,19 @@ async function renderRemittances(){
     ${renderSatelliteFundsPanel(satFundsIn, satFundsOut, satFundsTransferOut, satFundsHeld, satFundsRecent, satFundsTransferByReason)}`;
 }
 
+// Display-only label helper for the held-for-satellites figure — used by the
+// Dashboard balance breakdown, the pool panel KPI, and the Bank page alert.
+// held>0: money this parish holds on the satellites' behalf (excluded from
+// available funds). held<0: the parish fronted money the satellites now owe back
+// (a receivable, already added into the available total). Never touches the
+// underlying sign/calc in calcChurchBalance or summarizeSatelliteFunds — display only.
+function satelliteHeldDisplay(held){
+  const h = held || 0;
+  return h < 0
+    ? { label:'Owed by satellites', amount:fmt(Math.abs(h)), suffix:'money the satellites owe the pool' }
+    : { label:'Held for satellites', amount:fmt(h), suffix:'excluded from available funds' };
+}
+
 // ── Satellite / Zone Pass-Through Fund panel (lives on the Remittances page) ──
 // Shown separately from remittance totals: this money is never this parish's own
 // income or expense — it is custodial funds received from and remitted on behalf
@@ -6391,6 +6411,7 @@ async function renderRemittances(){
 // to the parish (direction='transfer_out' — see App.showSatelliteTransferForm).
 function renderSatelliteFundsPanel(totalIn, totalOut, totalTransferOut, held, recent, transferByReason){
   const canRecord=canAction('satellite_fund_record');
+  const canTransfer=canAction('satellite_fund_transfer');
   const canDelete=canAction('satellite_fund_delete');
   const purposeLabel=(direction,key)=>{
     const list = direction==='transfer_out' ? SATELLITE_TRANSFER_REASONS : SATELLITE_FUND_PURPOSES;
@@ -6400,6 +6421,10 @@ function renderSatelliteFundsPanel(totalIn, totalOut, totalTransferOut, held, re
   if(transferByReason.gift>0) reasonBits.push(`Gift ${fmt(transferByReason.gift)}`);
   if(transferByReason.reimbursement>0) reasonBits.push(`Reimbursement ${fmt(transferByReason.reimbursement)}`);
   if(transferByReason.correction>0) reasonBits.push(`Correction ${fmt(transferByReason.correction)}`);
+  // held<0 means the parish fronted money the satellites now owe back — a receivable,
+  // not a liability, so the KPI label flips (see satelliteHeldDisplay). The tile itself
+  // always shows (unlike the Dashboard/Bank lines, which hide entirely when held===0).
+  const heldDisp = satelliteHeldDisplay(held);
   return `
     <div class="card" style="margin-top:12px;border-left:3px solid var(--primary)">
       <div class="card-header">
@@ -6412,13 +6437,13 @@ function renderSatelliteFundsPanel(totalIn, totalOut, totalTransferOut, held, re
         <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">📥</div><div class="kpi-label">Total Received (In)</div><div class="kpi-val" style="color:var(--success)">${fmt(totalIn)}</div></div>
         <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Paid Out (Province/Joint)</div><div class="kpi-val" style="color:var(--danger)">${fmt(totalOut)}</div></div>
         <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">🔁</div><div class="kpi-label">Transferred to Parish</div><div class="kpi-val" style="color:var(--amber)">${fmt(totalTransferOut)}</div>${reasonBits.length?`<div class="kpi-delta" style="color:var(--text3)">${reasonBits.join(' · ')}</div>`:''}</div>
-        <div class="kpi"><div class="kpi-icon" style="background:#E6F1FB">🏦</div><div class="kpi-label">Current Balance Held</div><div class="kpi-val">${fmt(held)}</div></div>
+        <div class="kpi"><div class="kpi-icon" style="background:#E6F1FB">🏦</div><div class="kpi-label">${held<0?heldDisp.label:'Current Balance Held'}</div><div class="kpi-val" style="color:${held<0?'var(--primary)':'inherit'}">${heldDisp.amount}</div></div>
       </div>
-      ${canRecord?`
+      ${(canRecord||canTransfer)?`
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
-        <button class="btn btn-primary" onclick="App.showSatelliteFundForm('in')">📥 Record Funds In</button>
-        <button class="btn btn-amber" style="color:#fff;background:var(--amber)" onclick="App.showSatelliteFundForm('out')">📤 Record Funds Out</button>
-        <button class="btn" onclick="App.showSatelliteTransferForm()">🔁 Transfer to Parish</button>
+        ${canRecord?`<button class="btn btn-primary" onclick="App.showSatelliteFundForm('in')">📥 Record Funds In</button>
+        <button class="btn btn-amber" style="color:#fff;background:var(--amber)" onclick="App.showSatelliteFundForm('out')">📤 Record Funds Out</button>`:''}
+        ${canTransfer?`<button class="btn" onclick="App.showSatelliteTransferForm()">🔁 Transfer to Parish</button>`:''}
       </div>`:''}
       <div class="card-header" style="padding:0;margin-bottom:6px"><span class="card-title" style="font-size:12px">Recent Entries</span></div>
       ${recent.length?recent.map(s=>{
@@ -6919,7 +6944,7 @@ async function deleteSatelliteFundEntry(id, btn=null){
 }
 
 function showSatelliteTransferForm(){
-  if(!canAction('satellite_fund_record')){ showAlert('You do not have permission to transfer satellite pass-through funds.','danger'); return; }
+  if(!canAction('satellite_fund_transfer')){ showAlert('You do not have permission to transfer satellite pass-through funds.','danger'); return; }
   const today = new Date().toISOString().split('T')[0];
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -6947,7 +6972,7 @@ function showSatelliteTransferForm(){
 }
 
 async function submitSatelliteTransfer(btn=null){
-  if(!canAction('satellite_fund_record')){ showAlert('You do not have permission to transfer satellite pass-through funds.','danger'); return; }
+  if(!canAction('satellite_fund_transfer')){ showAlert('You do not have permission to transfer satellite pass-through funds.','danger'); return; }
   const date   = document.getElementById('st_date')?.value;
   const amount = parseFloat(document.getElementById('st_amount')?.value)||0;
   const reason = document.getElementById('st_reason')?.value||'gift';
@@ -8943,6 +8968,7 @@ async function renderBank(){
   const heldForSatellitesRB = (allSatFundsRB||[]).filter(s=>s.direction==='in').reduce((s,r)=>s+(r.amount||0),0)
     - (allSatFundsRB||[]).filter(s=>s.direction==='out').reduce((s,r)=>s+(r.amount||0),0)
     - (allSatFundsRB||[]).filter(s=>s.direction==='transfer_out').reduce((s,r)=>s+(r.amount||0),0);
+  const bankSatHeldDisp = satelliteHeldDisplay(heldForSatellitesRB);
 
   // Period bank charges (calendar month or remittance period — follows state.periodMode)
   const periodExpenses = filterByCurrentPeriod(allExpenses, bankPeriodFrom, bankPeriodTo);
@@ -9046,7 +9072,7 @@ async function renderBank(){
     </div>
     ${_bankHasPending?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⏳</span><span>A deposit of <strong>${fmt(_bankPendingTotal)}</strong> is ${_bankPendingDeps[0]?.verificationStatus==='flagged'?'<strong>flagged by AI</strong> — please review and correct or approve it below':'<strong>pending AI verification</strong>'}.</span></div>`:''}
     ${cashWithAccountant>0&&!_bankHasPending&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong> not yet deposited to the bank account.${pendingDepCount>0?` (${pendingDepCount} income record(s) pending)`:''} <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
-    ${Math.abs(heldForSatellitesRB||0)>=0.5?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🛰️</span><span>Held for satellites: <strong>${fmt(heldForSatellitesRB)}</strong> (excluded from available funds) — already included in the Bank Balance below; see the <a onclick="App.navigate('remittances')" style="cursor:pointer;text-decoration:underline">Satellite Pass-Through Fund panel</a> on Remittances.</span></div>`:''}
+    ${Math.abs(heldForSatellitesRB||0)>=0.5?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🛰️</span><span>${bankSatHeldDisp.label}: <strong>${bankSatHeldDisp.amount}</strong> (${bankSatHeldDisp.suffix}) — already included in the Bank Balance below; see the <a onclick="App.navigate('remittances')" style="cursor:pointer;text-decoration:underline">Satellite Pass-Through Fund panel</a> on Remittances.</span></div>`:''}
 
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
       <div class="kpi">
@@ -12750,7 +12776,11 @@ return {
   _calcAvailableFundFromOpening: calcAvailableFundFromOpening,
   _remittanceSettledDate: remittanceSettledDate,
   _calcChurchBalance: calcChurchBalance,
-  _summarizeSatelliteFunds: summarizeSatelliteFunds
+  _summarizeSatelliteFunds: summarizeSatelliteFunds,
+  // Test-only hooks: exercise the real permission map without a login round-trip.
+  _canAction: canAction,
+  _setTestUserRole: (role) => { state.user = { name:'Test User', role }; },
+  _satelliteHeldDisplay: satelliteHeldDisplay
   };
 
 })();
