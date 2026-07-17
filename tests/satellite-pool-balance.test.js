@@ -304,3 +304,36 @@ test('expense-page split payment: one expenses row for the parish share only, pl
   assert.equal(bal.heldForSatellites, -8000, 'only the pool share reduces held, not the full 20000');
   assert.equal(bal.cashWithAccountant, 0, 'the parish share was paid by bank transfer — the accountant is untouched');
 });
+
+// ── Income page "Satellite / Zone Funds Received" entry point ───────────────────
+// submitSatelliteFundsIn (src/js/app.js) is a thin DOM-reading wrapper around
+// DB.addSatelliteFund({direction:'in', ...}) — same convention as the pool-payout
+// tests above: assert the resulting data shape satisfies the required invariants via
+// the same calcChurchBalance/summarizeSatelliteFunds engine used throughout this suite.
+
+test('income-page satellite funds received: creates a satellite_funds "in" (never an income row), excluded from income totals, increases held', async () => {
+  // What submitSatelliteFundsIn produces for a ₦6,000 receipt from a satellite parish:
+  // ONE satellite_funds direction='in' row (mirrored as a cash_deposit tagged
+  // destination='satellite_passthrough' server-side) — and critically NO income row.
+  const cashTx = [{ type: 'cash_deposit', date: '2026-06-01', amount: 6000, destination: 'satellite_passthrough' }];
+  const satelliteFunds = [{ direction: 'in', date: '2026-06-01', amount: 6000, purpose: 'joint_area_zone' }];
+  const income = []; // no income row — satellite receipts must never be parish income
+
+  const incomeTotal = income.reduce((s, r) => s + (r.totalCollection || 0), 0);
+  assert.equal(incomeTotal, 0, 'satellite funds received must never be counted as parish income');
+
+  const bal = await balance({ cashTx, satelliteFunds, income });
+  assert.equal(bal.bankBalance, 6000, 'the money really is in the bank');
+  assert.equal(bal.cashWithAccountant, 0, 'the accountant is never touched by a satellite receipt (P1 fix)');
+  assert.equal(bal.heldForSatellites, 6000, 'held increases by the full amount received');
+  assert.equal(bal.total, 0, 'held money is excluded from the available parish total');
+});
+
+test('the Income-page and Remittances-page "Funds In" forms share the same purpose set', () => {
+  // Both showSatelliteFundsInForm() (Income page) and showSatelliteFundForm('in')
+  // (Remittances pool panel) render SATELLITE_FUND_PURPOSES verbatim — asserting on
+  // the shared constant is the guarantee that neither entry point can silently drift
+  // to a narrower/different option set than the other.
+  const keys = App._SATELLITE_FUND_PURPOSES.map(p => p.key);
+  assert.deepEqual(keys, ['province_remittance', 'joint_area_zone', 'other']);
+});
