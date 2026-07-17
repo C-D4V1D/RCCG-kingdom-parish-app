@@ -337,3 +337,51 @@ test('the Income-page and Remittances-page "Funds In" forms share the same purpo
   const keys = App._SATELLITE_FUND_PURPOSES.map(p => p.key);
   assert.deepEqual(keys, ['province_remittance', 'joint_area_zone', 'other']);
 });
+
+// ── Satellite "in" CASH channel (received by cash instead of only bank) ─────────
+// createSatelliteFund only mirrors a cash_transactions bank-deposit for channel==='bank'
+// (the default); channel==='cash' creates no mirror at all — the money sits with the
+// accountant instead, exactly like any other cash they hold, until it is later deposited
+// through the normal accountant cash-deposit flow. calcChurchBalance's new
+// satelliteCashIn term is the ONLY place this channel choice affects the balance.
+
+test('satellite cash-channel "in": cashWithAccountant +X, held +X, bank unchanged, total unchanged, no phantom deficit', async () => {
+  // What submitSatelliteFund/submitSatelliteFundsIn produce for a cash receipt: a
+  // satellite_funds row with channel='cash' and NO cash_transactions mirror at all.
+  const satelliteFunds = [{ direction: 'in', date: '2026-06-01', amount: 4000, channel: 'cash' }];
+  const bal = await balance({ satelliteFunds });
+
+  assert.equal(bal.cashWithAccountant, 4000, 'a cash-channel receipt sits with the accountant');
+  assert.equal(bal.cashDeficit, 0, 'must not manufacture a phantom deficit');
+  assert.equal(bal.bankBalance, 0, 'no bank movement was ever created for a cash-channel receipt');
+  assert.equal(bal.heldForSatellites, 4000, 'held increases regardless of channel');
+  assert.equal(bal.total, 0, 'cash +X and held +X cancel — held money stays excluded from the available total');
+});
+
+test('satellite bank-channel "in" behaves exactly as before: bank +X, cash unchanged', async () => {
+  const cashTx = [{ type: 'cash_deposit', date: '2026-06-01', amount: 4000, destination: 'satellite_passthrough' }];
+  const satelliteFunds = [{ direction: 'in', date: '2026-06-01', amount: 4000, channel: 'bank' }];
+  const bal = await balance({ cashTx, satelliteFunds });
+
+  assert.equal(bal.bankBalance, 4000);
+  assert.equal(bal.cashWithAccountant, 0, 'the default/bank channel is untouched by the new satelliteCashIn term');
+  assert.equal(bal.cashDeficit, 0);
+  assert.equal(bal.heldForSatellites, 4000);
+  assert.equal(bal.total, 0);
+});
+
+test('satellite cash-channel "in" followed by a normal accountant cash deposit: money moves cash→bank, total unchanged', async () => {
+  const satelliteFunds = [{ direction: 'in', date: '2026-06-01', amount: 5000, channel: 'cash' }];
+  const beforeDeposit = await balance({ satelliteFunds });
+
+  // The accountant later banks that cash via the NORMAL cash-deposit flow — a plain
+  // cash_transactions row with no satellite_passthrough tag (same as depositing any
+  // other cash they hold; satellite_funds itself is untouched by this step).
+  const cashTx = [{ type: 'cash_deposit', date: '2026-06-05', amount: 5000 }];
+  const afterDeposit = await balance({ satelliteFunds, cashTx });
+
+  assert.equal(afterDeposit.cashWithAccountant, 0, 'the cash left the accountant');
+  assert.equal(afterDeposit.bankBalance, 5000, 'and arrived in the bank');
+  assert.equal(afterDeposit.heldForSatellites, beforeDeposit.heldForSatellites, 'still held — just sitting in the bank instead of with the accountant now');
+  assert.equal(afterDeposit.total, beforeDeposit.total, 'the satelliteCashIn term and the normal deposit cancel — total is unchanged throughout');
+});

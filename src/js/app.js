@@ -271,7 +271,12 @@ const EXPENSE_CATS = [
   { key:'welfare',    label:'Church Welfare',          color:'#D85A30', icon:'❤️' },
   { key:'property',   label:'Property & Projects',     color:'#185FA5', icon:'🏗️' },
   { key:'events',     label:'Events & Departments',    color:'#534AB7', icon:'🎉' },
-  { key:'reconciliation', label:'Cash Reconciliation', color:'#666', icon:'⚖️' }
+  { key:'reconciliation', label:'Cash Reconciliation', color:'#666', icon:'⚖️' },
+  // Selecting this category auto-switches "Pay From" to Split (Parish + Pool) in
+  // showExpenseForm — see applyCategoryFundSourceDefault — so an Admin Officer or
+  // Accountant is guided straight into the correct joint/zonal flow without needing
+  // to know the term "pool". Same brown accent used everywhere else for satellite money.
+  { key:'zonal_area_joint', label:'Zonal / Area Joint Payment', color:'#8B4513', icon:'🤝' }
 ];
 
 const EXPENSE_SUBCATS = {
@@ -288,7 +293,8 @@ const EXPENSE_SUBCATS = {
   rccg_proj:   ["Let's Go A-Fishing contributions",'Financial demands for ongoing Provincial, Regional, or National building projects','Special emergency offerings or project support requested by RCCG higher authorities','Others...'],
   property:    ['Annual land or building rent','Building construction and renovations','Buying major equipment','Others...'],
   events:      ['Flyers, banners, and posters for special programs','Church decorations for special events or festive seasons','Teaching materials and snacks for the Children\'s department','Purchasing Sunday School manuals for the parish','Others...'],
-  security:    ['Monthly salary or allowance for the night security guard','Security supplies','Occasional tips or relations with local police or community vigilantes','Others...']
+  security:    ['Monthly salary or allowance for the night security guard','Security supplies','Occasional tips or relations with local police or community vigilantes','Others...'],
+  zonal_area_joint: ['Province Remittance (joint)','Area / Zone Program','Joint Utility / Levy','Others...']
 };
 
 const DEFAULT_QUOTAS = { volunteer:2000, csr:3000, camp:5000, rmf:5000, edu:2000, mummy:8000, regional:0 };
@@ -2860,7 +2866,14 @@ async function calcChurchBalance(asOfDate, prefetched){
   // Petty top-ups via accountant's cash reduce the accountant's cash holding
   const pettyCashTopups = pettyF.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.cashAmount||0):(h.amount||0)),0);
-  const cashWithAccountantRaw = cashFromCollections - cashDepositedFromAccountant + bankToAccountant - cashExpenses - pettyCashTopups;
+  // Satellite "in" receipts handed to the accountant as CASH (channel==='cash') rather
+  // than deposited straight to the bank — see createSatelliteFund. These have no
+  // cash_transactions mirror at all, so they never touch cashDepositedToBank/bankBalance;
+  // this is the only place they enter the balance, on the accountant's cash line. When
+  // that cash is later deposited to the bank via the normal accountant cash-deposit flow,
+  // this term and cashDepositedFromAccountant cancel — see calcChurchBalance tests.
+  const satelliteCashIn = satFundsF.filter(s=>s.direction==='in' && s.channel==='cash').reduce((s,r)=>s+(r.amount||0),0);
+  const cashWithAccountantRaw = cashFromCollections - cashDepositedFromAccountant + bankToAccountant - cashExpenses - pettyCashTopups + satelliteCashIn;
 
   // --- PETTY CASH (with Admin Officer) ---
   // Rebuild the float from raw ledger movements each time so historical snapshots stay
@@ -3954,7 +3967,7 @@ async function renderDashboard(){
             <span><span style="display:inline-block;width:8px;height:8px;background:#8B4513;border-radius:50%;margin-right:8px"></span><span style="text-decoration:underline dotted #8B4513;text-underline-offset:3px">${dashSatHeldDisp.label}</span></span>
             <span style="font-weight:600;color:#8B4513">${churchBal.heldForSatellites>0?'−':'+'}${dashSatHeldDisp.amount}</span>
           </a>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:2px">${dashSatHeldDisp.label}: ${dashSatHeldDisp.amount} (${dashSatHeldDisp.suffix}${churchBal.heldForSatellites>0?' — already inside Bank above':''})</div>`:''}
+          <div style="font-size:10.5px;color:var(--text3);margin-top:2px">${dashSatHeldDisp.label}: ${dashSatHeldDisp.amount} (${dashSatHeldDisp.suffix}${churchBal.heldForSatellites>0?' — already inside Bank or Cash with Accountant above':''})</div>`:''}
         </div>
       </div>
 
@@ -4533,7 +4546,7 @@ function renderSatelliteFundsInSection(records){
         <div class="feed-item">
           <div class="feed-dot" style="background:rgba(139,69,19,0.12)">🛰️</div>
           <div class="feed-body">
-            <div class="feed-title">${esc(purposeLabel(r.purpose))}</div>
+            <div class="feed-title">${esc(purposeLabel(r.purpose))} <span class="badge badge-gray" style="font-size:9px;vertical-align:middle">${r.channel==='cash'?'💵 Cash':'🏦 Bank'}</span></div>
             <div class="feed-sub">${r.note?esc(r.note)+' · ':''}${r.reference?'Ref: '+esc(r.reference)+' · ':''}${esc(r.recordedBy)||'—'}</div>
             <div class="feed-time">${fmtDate(r.date)}</div>
           </div>
@@ -6501,7 +6514,8 @@ function renderSatelliteFundsPanel(totalIn, totalOut, totalTransferOut, held, re
         const isTransfer = s.direction==='transfer_out';
         const icon = isTransfer ? '🔁' : (s.direction==='in' ? '📥' : '📤');
         const bg = isTransfer ? '#FAEEDA' : (s.direction==='in' ? 'var(--success-light)' : '#FCEBEB');
-        const title = isTransfer ? `Transferred to Parish — ${esc(purposeLabel('transfer_out', s.purpose))}` : `${s.direction==='in'?'Received':'Paid Out'} — ${esc(purposeLabel(s.direction, s.purpose))}`;
+        const channelBadge = s.direction==='in' ? ` <span class="badge badge-gray" style="font-size:9px;vertical-align:middle">${s.channel==='cash'?'💵 Cash':'🏦 Bank'}</span>` : '';
+        const title = isTransfer ? `Transferred to Parish — ${esc(purposeLabel('transfer_out', s.purpose))}` : `${s.direction==='in'?'Received':'Paid Out'} — ${esc(purposeLabel(s.direction, s.purpose))}${channelBadge}`;
         const amtClass = s.direction==='in' ? 'td-green' : (isTransfer ? '' : 'td-red');
         const amtStyle = isTransfer ? 'color:var(--amber)' : '';
         return `
@@ -6930,6 +6944,18 @@ function showSatelliteFundForm(direction){
         ${SATELLITE_FUND_PURPOSES.map(p=>`<option value="${p.key}">${p.label}</option>`).join('')}
       </select>
     </div>
+    ${isIn?`
+    <div class="form-group"><label class="form-label">Received Via *</label>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="sf_channel" value="bank" checked /> 🏦 Bank Transfer
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="sf_channel" value="cash" /> 💵 Cash (with Accountant)
+        </label>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Cash sits with the Accountant until deposited to the bank via the normal cash-deposit flow — no separate bank movement is created here.</div>
+    </div>`:''}
     <div class="form-group"><label class="form-label">Note <span style="font-size:11px;color:var(--text3)">(optional — e.g. which satellite parish)</span></label>
       <input type="text" id="sf_note" class="form-input" placeholder="e.g. Parish A – July remittance" />
     </div>
@@ -6947,18 +6973,22 @@ async function submitSatelliteFund(direction, btn=null){
   const date      = document.getElementById('sf_date')?.value;
   const amount    = parseFloat(document.getElementById('sf_amount')?.value)||0;
   const purpose   = document.getElementById('sf_purpose')?.value||'other';
+  // Channel only applies to 'in' — 'out'/'transfer_out' stay bank-only (scoped
+  // deliberately, see createSatelliteFund/calcChurchBalance).
+  const channel   = direction==='in' ? (document.querySelector('input[name="sf_channel"]:checked')?.value||'bank') : 'bank';
   const note      = document.getElementById('sf_note')?.value?.trim()||'';
   const reference = document.getElementById('sf_reference')?.value?.trim()||'';
   if(!date||!amount){ showAlert('Please fill in the date and amount.','danger'); return; }
 
   const restore = setBtnLoading(btn, 'Saving…');
   try {
-    await DB.addSatelliteFund({ date, direction, amount, purpose, note, reference, recordedBy:state.user?.name||'' });
+    await DB.addSatelliteFund({ date, direction, amount, purpose, channel, note, reference, recordedBy:state.user?.name||'' });
     const purposeLabel = SATELLITE_FUND_PURPOSES.find(p=>p.key===purpose)?.label||purpose;
+    const channelLabel = channel==='cash' ? ' (received as cash with Accountant)' : '';
     DB.addAudit('satellite_fund_recorded',
-      `Satellite pass-through fund ${direction==='in'?'received':'paid out'}: ${fmt(amount)} (${purposeLabel})${note?' — '+note:''}${reference?' — Ref: '+reference:''}`,
+      `Satellite pass-through fund ${direction==='in'?'received':'paid out'}: ${fmt(amount)} (${purposeLabel})${channelLabel}${note?' — '+note:''}${reference?' — Ref: '+reference:''}`,
       state.user?.name);
-    DB.addNotification('Satellite Pass-Through Fund Recorded',`${fmt(amount)} ${direction==='in'?'received from':'paid out on behalf of'} a satellite parish (${purposeLabel}).`,'success');
+    DB.addNotification('Satellite Pass-Through Fund Recorded',`${fmt(amount)} ${direction==='in'?'received from':'paid out on behalf of'} a satellite parish (${purposeLabel})${channelLabel}.`,'success');
     closeModal();
     showAlert(`Satellite pass-through fund of ${fmt(amount)} recorded!`,'success');
     renderRemittances();
@@ -6992,6 +7022,17 @@ function showSatelliteFundsInForm(){
         ${SATELLITE_FUND_PURPOSES.map(p=>`<option value="${p.key}">${p.label}</option>`).join('')}
       </select>
     </div>
+    <div class="form-group"><label class="form-label">Received Via *</label>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="sfi_channel" value="bank" checked /> 🏦 Bank Transfer
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="sfi_channel" value="cash" /> 💵 Cash (with Accountant)
+        </label>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Cash sits with the Accountant until deposited to the bank via the normal cash-deposit flow — no separate bank movement is created here.</div>
+    </div>
     <div class="form-group"><label class="form-label">Note <span style="font-size:11px;color:var(--text3)">(optional — e.g. which satellite parish and what it's for)</span></label>
       <input type="text" id="sfi_note" class="form-input" placeholder="e.g. Parish A – July remittance" />
     </div>
@@ -7009,20 +7050,24 @@ async function submitSatelliteFundsIn(btn=null){
   const date      = document.getElementById('sfi_date')?.value;
   const amount    = parseFloat(document.getElementById('sfi_amount')?.value)||0;
   const purpose   = document.getElementById('sfi_purpose')?.value||'other';
+  const channel   = document.querySelector('input[name="sfi_channel"]:checked')?.value||'bank';
   const note      = document.getElementById('sfi_note')?.value?.trim()||'';
   const reference = document.getElementById('sfi_reference')?.value?.trim()||'';
   if(!date||!amount){ showAlert('Please fill in the date and amount.','danger'); return; }
 
   const restore = setBtnLoading(btn, 'Saving…');
   try {
-    // direction:'in' — mirrors a bank deposit server-side and increases heldForSatellites.
-    // Deliberately NOT DB.addIncome — this money must never enter the income table/totals.
-    await DB.addSatelliteFund({ date, direction:'in', amount, purpose, note, reference, recordedBy:state.user?.name||'' });
+    // direction:'in' — a bank-channel receipt mirrors a bank deposit server-side; a
+    // cash-channel receipt sits with the Accountant instead (see calcChurchBalance's
+    // satelliteCashIn term) — either way heldForSatellites increases. Deliberately NOT
+    // DB.addIncome — this money must never enter the income table/totals.
+    await DB.addSatelliteFund({ date, direction:'in', amount, purpose, channel, note, reference, recordedBy:state.user?.name||'' });
     const purposeLabel = SATELLITE_FUND_PURPOSES.find(p=>p.key===purpose)?.label||purpose;
+    const channelLabel = channel==='cash' ? ' (received as cash with Accountant)' : '';
     DB.addAudit('satellite_fund_recorded',
-      `Satellite pass-through fund received (via Income page): ${fmt(amount)} (${purposeLabel})${note?' — '+note:''}${reference?' — Ref: '+reference:''}`,
+      `Satellite pass-through fund received (via Income page): ${fmt(amount)} (${purposeLabel})${channelLabel}${note?' — '+note:''}${reference?' — Ref: '+reference:''}`,
       state.user?.name);
-    DB.addNotification('Satellite Funds Received',`${fmt(amount)} received from a satellite parish (${purposeLabel}) — not counted as parish income.`,'success');
+    DB.addNotification('Satellite Funds Received',`${fmt(amount)} received from a satellite parish (${purposeLabel})${channelLabel} — not counted as parish income.`,'success');
     closeModal();
     showAlert(`${fmt(amount)} recorded as satellite pass-through funds received — not counted as parish income.`,'success');
     renderIncome();
@@ -8367,6 +8412,23 @@ function updateExpenseSubcats(){
   sel.innerHTML = `<option value="">— Select sub-category —</option>` +
     subcats.map(s=>`<option value="${s}">${s}</option>`).join('');
   updateExpenseDescRequired();
+  applyCategoryFundSourceDefault(cat);
+}
+
+// Guides an Admin Officer/Accountant straight into the correct flow for a joint/zonal
+// payment without needing to know the term "pool": selecting the dedicated category
+// auto-switches "Pay From" to Split (Parish + Pool) and reveals its fields (the user
+// can still change it afterward — this only sets the default). Roles without
+// satellite_fund_record never render the Pay From selector at all (it's gated on
+// canAction('satellite_fund_record') in showExpenseForm), so exp_fund_source radios
+// simply don't exist in the DOM for them — this is then a silent no-op and the
+// category behaves as a completely normal parish expense, exactly as required.
+function applyCategoryFundSourceDefault(cat){
+  if(cat !== 'zonal_area_joint') return;
+  const splitRadio = document.querySelector('input[name="exp_fund_source"][value="split_pool"]');
+  if(!splitRadio) return;
+  splitRadio.checked = true;
+  onExpFundSourceChange();
 }
 
 function updateExpenseDescRequired(){
@@ -8410,6 +8472,7 @@ function quickLogExpense(idx){
 
 function showExpenseForm(preselectedCat, preselectedSubcat){
   if(!canAction('expense_log')){ showAlert('You do not have permission to log expenses.','danger'); return; }
+  _expPoolSplitSource = 'parish'; // reset auto-split "primary" field for this fresh modal instance
   const today=new Date().toISOString().split('T')[0];
   const methodOptions = getExpenseMethodOptionsForRole(state.user?.role);
   const defaultMethod = methodOptions[0]?.value || 'bank_transfer';
@@ -8433,7 +8496,7 @@ function showExpenseForm(preselectedCat, preselectedSubcat){
       <div id="exp_desc_hint" class="form-hint" style="display:none;color:var(--danger);font-size:11px;margin-top:4px">Description is required when "Others..." is selected.</div>
     </div>
     <div class="form-group"><label class="form-label">Total Amount (₦) *</label>
-      <input type="number" id="exp_amt" class="form-input" placeholder="0" min="0" oninput="App.onExpMethodChange()" />
+      <input type="number" id="exp_amt" class="form-input" placeholder="0" min="0" oninput="App.onExpAmountChange()" />
       ${state._spendable!=null?`<div style="margin-top:6px;padding:8px 12px;border-radius:var(--r);background:${state._spendable<0?'var(--danger-light)':state._spendable<20000?'var(--amber-light)':'var(--success-light)'};font-size:12px">
         <span style="color:${state._spendable<0?'var(--danger)':state._spendable<20000?'var(--amber)':'var(--success)'};font-weight:600" id="exp_remaining_disp">
           Spendable after remittances: ${fmt(state._spendable)}
@@ -8462,15 +8525,15 @@ function showExpenseForm(preselectedCat, preselectedSubcat){
     </div>
     <div id="exp_pool_split_group" style="display:none">
       <div style="background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:12px">
-        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">This payment is part the parish's own share, part the satellite parishes' pass-through share. They must add up to the total amount above.</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Enter the Parish share — the Pool share fills in automatically (and vice-versa). They always add up to the total amount above.</div>
         <div class="form-row">
           <div class="form-group" style="margin-bottom:0">
             <label class="form-label">🏛️ Parish share (₦)</label>
-            <input type="number" id="exp_parish_share" class="form-input" placeholder="0" min="0" oninput="App.onExpPoolSplitChange()" />
+            <input type="number" id="exp_parish_share" class="form-input" placeholder="0" min="0" oninput="App.onExpPoolSplitChange('parish')" />
           </div>
           <div class="form-group" style="margin-bottom:0">
             <label class="form-label">🛰️ Pool share (₦)</label>
-            <input type="number" id="exp_pool_share" class="form-input" placeholder="0" min="0" oninput="App.onExpPoolSplitChange()" />
+            <input type="number" id="exp_pool_share" class="form-input" placeholder="0" min="0" oninput="App.onExpPoolSplitChange('pool')" />
           </div>
         </div>
         <div id="exp_pool_split_status" style="margin-top:10px;font-size:12px;color:var(--text3)"></div>
@@ -8583,22 +8646,58 @@ function onExpFundSourceChange(){
         : '';
   }
   // The parish payment method's own split fields (if shown) now target the Parish
-  // share instead of the full total when Split is selected — re-validate both.
-  if(fundSource==='split_pool'){ onExpPoolSplitChange(); onExpSplitChange(); }
+  // share instead of the full total when Split is selected — re-validate both. Parish
+  // share is the "primary" input (see onExpPoolSplitChange), so re-entering Split
+  // always re-derives Pool share from whatever Parish share currently holds.
+  if(fundSource==='split_pool'){ onExpPoolSplitChange('parish'); }
 }
 
-function onExpPoolSplitChange(){
-  const total = parseFloat(document.getElementById('exp_amt')?.value)||0;
-  const parishShare = parseFloat(document.getElementById('exp_parish_share')?.value)||0;
-  const poolShare = parseFloat(document.getElementById('exp_pool_share')?.value)||0;
+// Auto-splits the Parish/Pool share fields so users rarely have to balance them by
+// hand: Parish share is the PRIMARY input — typing a Total + Parish share auto-fills
+// Pool share = max(0, Total − Parish share). Typing directly into Pool share instead
+// flips the roles for that edit: Parish share = max(0, Total − Pool share). `source`
+// records which field the user is actively driving so a later Total Amount edit (see
+// onExpAmountChange) knows which one to keep authoritative and which to recompute.
+let _expPoolSplitSource = 'parish';
+function onExpPoolSplitChange(source){
+  if(source) _expPoolSplitSource = source;
+  const totalEl = document.getElementById('exp_amt');
+  const parishEl = document.getElementById('exp_parish_share');
+  const poolEl = document.getElementById('exp_pool_share');
+  if(!parishEl || !poolEl) return;
+  const total = parseFloat(totalEl?.value)||0;
+  if(total > 0){
+    if(_expPoolSplitSource === 'pool'){
+      const poolShare = parseFloat(poolEl.value)||0;
+      parishEl.value = Math.max(0, total - poolShare);
+    } else {
+      const parishShare = parseFloat(parishEl.value)||0;
+      poolEl.value = Math.max(0, total - parishShare);
+    }
+  }
+  const parishShare = parseFloat(parishEl.value)||0;
+  const poolShare = parseFloat(poolEl.value)||0;
   const sum = parishShare+poolShare;
   const statusEl = document.getElementById('exp_pool_split_status');
-  if(!statusEl) return;
-  if(!total){ statusEl.textContent='Enter the total amount above first.'; statusEl.style.color='var(--text3)'; return; }
-  if(Math.abs(sum-total)<1){ statusEl.textContent=`✓ Total matches: ${fmt(sum)}`; statusEl.style.color='var(--success)'; }
-  else if(sum>total){ statusEl.textContent=`Over by ${fmt(sum-total)}. Reduce one of the amounts.`; statusEl.style.color='var(--danger)'; }
-  else if(sum>0){ statusEl.textContent=`${fmt(total-sum)} still unaccounted for.`; statusEl.style.color='var(--amber)'; }
-  else { statusEl.textContent=''; }
+  if(statusEl){
+    if(!total){ statusEl.textContent='Enter the total amount above first.'; statusEl.style.color='var(--text3)'; }
+    else if(Math.abs(sum-total)<1){ statusEl.textContent=`✓ Parish ${fmt(parishShare)} + Pool ${fmt(poolShare)} = Total ${fmt(total)} ✓`; statusEl.style.color='var(--success)'; }
+    else if(sum>total){ statusEl.textContent=`Over by ${fmt(sum-total)}. Reduce one of the amounts.`; statusEl.style.color='var(--danger)'; }
+    else if(sum>0){ statusEl.textContent=`${fmt(total-sum)} still unaccounted for.`; statusEl.style.color='var(--amber)'; }
+    else { statusEl.textContent=''; }
+  }
+  // The parish payment-method's own bank/petty split (if shown) targets exp_parish_share
+  // — keep its validation in sync since auto-fill can change that value silently.
+  onExpSplitChange();
+}
+
+// The Total Amount field drives both the parish payment-method lock (unchanged) and,
+// when Split (Parish + Pool) is active, re-derives whichever share isn't currently
+// "primary" (see onExpPoolSplitChange) so the two stay in sync as the total changes.
+function onExpAmountChange(){
+  onExpMethodChange();
+  const poolSplitGroup = document.getElementById('exp_pool_split_group');
+  if(poolSplitGroup && poolSplitGroup.style.display !== 'none') onExpPoolSplitChange();
 }
 
 let _expenseSubmitting = false;
@@ -9316,14 +9415,19 @@ async function renderBank(){
   },0);
   const pettyCashTopupsRB = pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='cash_accountant'||(h.paymentMethod==='split'&&(h.cashAmount||0)>0)))
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.cashAmount||0):(h.amount||0)),0);
-  const cashWithAccountant = Math.max(0, cashFromCollectionsRB - cashDepositedFromAccountantRB + bankToAccountantRB - cashExpensesRB - pettyCashTopupsRB);
+  // Satellite "in" receipts handed to the accountant as CASH (channel==='cash') rather
+  // than deposited to the bank — no cash_transactions mirror exists for these, so they
+  // only ever enter the balance here. Mirrors calcChurchBalance's satelliteCashIn term.
+  const satelliteCashInRB = (allSatFundsRB||[]).filter(s=>s.direction==='in' && s.channel==='cash').reduce((s,r)=>s+(r.amount||0),0);
+  const cashWithAccountant = Math.max(0, cashFromCollectionsRB - cashDepositedFromAccountantRB + bankToAccountantRB - cashExpensesRB - pettyCashTopupsRB + satelliteCashInRB);
   const _bankPendingDeps = allCashTx.filter(t=>t.type==='cash_deposit'&&(t.verificationStatus==='pending'||t.verificationStatus==='flagged'));
   const _bankHasPending = _bankPendingDeps.length > 0;
   const _bankPendingTotal = _bankPendingDeps.reduce((s,t)=>s+(t.amount||0),0);
 
   // Held for satellites — authoritative from satellite_funds (same formula as
-  // calcChurchBalance.heldForSatellites): already inside bankBalance above, excluded
-  // from the parish's own available funds.
+  // calcChurchBalance.heldForSatellites): a bank-channel receipt sits inside bankBalance
+  // above; a cash-channel receipt sits inside cashWithAccountant above instead — either
+  // way it is excluded from the parish's own available funds.
   const heldForSatellitesRB = (allSatFundsRB||[]).filter(s=>s.direction==='in').reduce((s,r)=>s+(r.amount||0),0)
     - (allSatFundsRB||[]).filter(s=>s.direction==='out').reduce((s,r)=>s+(r.amount||0),0)
     - (allSatFundsRB||[]).filter(s=>s.direction==='transfer_out').reduce((s,r)=>s+(r.amount||0),0);
@@ -9431,7 +9535,7 @@ async function renderBank(){
     </div>
     ${_bankHasPending?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⏳</span><span>A deposit of <strong>${fmt(_bankPendingTotal)}</strong> is ${_bankPendingDeps[0]?.verificationStatus==='flagged'?'<strong>flagged by AI</strong> — please review and correct or approve it below':'<strong>pending AI verification</strong>'}.</span></div>`:''}
     ${cashWithAccountant>0&&!_bankHasPending&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong> not yet deposited to the bank account.${pendingDepCount>0?` (${pendingDepCount} income record(s) pending)`:''} <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
-    ${Math.abs(heldForSatellitesRB||0)>=0.5?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🛰️</span><span>${bankSatHeldDisp.label}: <strong>${bankSatHeldDisp.amount}</strong> (${bankSatHeldDisp.suffix}) — already included in the Bank Balance below; see the <a onclick="App.navigate('remittances')" style="cursor:pointer;text-decoration:underline">Satellite Pass-Through Fund panel</a> on Remittances.</span></div>`:''}
+    ${Math.abs(heldForSatellitesRB||0)>=0.5?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🛰️</span><span>${bankSatHeldDisp.label}: <strong>${bankSatHeldDisp.amount}</strong> (${bankSatHeldDisp.suffix}) — already included in the Bank Balance or Cash with Accountant below (depending on how it was received); see the <a onclick="App.navigate('remittances')" style="cursor:pointer;text-decoration:underline">Satellite Pass-Through Fund panel</a> on Remittances.</span></div>`:''}
 
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
       <div class="kpi">
@@ -13110,7 +13214,7 @@ return {
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
   updateExpenseSubcats, updateExpenseDescRequired,
-  quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
+  quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, onExpAmountChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,

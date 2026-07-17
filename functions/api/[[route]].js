@@ -1727,6 +1727,7 @@ async function handleInit(DB) {
       reference     TEXT DEFAULT '',
       recorded_by   TEXT DEFAULT '',
       bank_ref      TEXT DEFAULT '',
+      channel       TEXT DEFAULT 'bank',
       created_at    TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS audit_log (
@@ -2227,6 +2228,9 @@ async function handleInit(DB) {
     // Tri-state: NULL = not yet answered (legacy rows), 1 = yes recorded in the
     // physical partnership card, 0 = no, still pending manual card entry.
     `ALTER TABLE kpsc_partner_payments ADD COLUMN card_recorded INTEGER DEFAULT NULL`,
+    // Satellite pass-through "in" receipts can now arrive as cash (with the accountant)
+    // instead of only a bank deposit — see createSatelliteFund/calcChurchBalance.
+    `ALTER TABLE satellite_funds ADD COLUMN channel TEXT DEFAULT 'bank'`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -3409,6 +3413,7 @@ async function getSatelliteFunds(DB) {
     reference:  row.reference,
     recordedBy: row.recorded_by,
     bankRef:    row.bank_ref || '',
+    channel:    row.channel || 'bank',
     createdAt:  row.created_at,
   })));
 }
@@ -3422,9 +3427,13 @@ async function createSatelliteFund(DB, data) {
   const note      = data.note || '';
   const reference = data.reference || '';
   const recordedBy = data.recordedBy || '';
+  // channel only matters for direction='in' — a satellite parish can hand the money to
+  // the accountant as cash instead of sending it straight to the bank. 'out'/'transfer_out'
+  // stay bank-only (scoped deliberately — see calcChurchBalance/renderBank in src/js/app.js).
+  const channel   = (direction === 'in' && data.channel === 'cash') ? 'cash' : 'bank';
 
   let bankRefId = '';
-  if (direction === 'in' || direction === 'out') {
+  if ((direction === 'in' && channel === 'bank') || direction === 'out') {
     // Mirror into the bank ledger via the same mechanism the Bank module's normal
     // deposit/withdrawal flows use, so the bank balance reflects this real cash
     // movement. Both use destination='satellite_passthrough' — a marker that (a)
@@ -3439,15 +3448,19 @@ async function createSatelliteFund(DB, data) {
       : { id: bankRefId, type: 'withdrawal', date, amount, description, reference, recordedBy, authorizedBy: recordedBy, destination: 'satellite_passthrough' };
     await createCashTransaction(DB, bankTxData);
   }
-  // direction === 'transfer_out': deliberately NO bank mirror — see comment above.
+  // direction === 'transfer_out', OR direction==='in' with channel==='cash': deliberately
+  // NO bank mirror — the transfer case never moves cash at all (see comment above); the
+  // cash-channel receipt sits with the accountant instead of the bank (see
+  // calcChurchBalance's satelliteCashIn term) until it is deposited through the normal
+  // accountant cash-deposit flow, exactly like any other cash the accountant holds.
 
   await DB.prepare(`
     INSERT INTO satellite_funds
-      (id, date, direction, amount, purpose, note, reference, recorded_by, bank_ref)
-    VALUES (?,?,?,?,?,?,?,?,?)
-  `).bind(id, date, direction, amount, purpose, note, reference, recordedBy, bankRefId).run();
+      (id, date, direction, amount, purpose, note, reference, recorded_by, bank_ref, channel)
+    VALUES (?,?,?,?,?,?,?,?,?,?)
+  `).bind(id, date, direction, amount, purpose, note, reference, recordedBy, bankRefId, channel).run();
 
-  return ok({ id, date, direction, amount, purpose, note, reference, recordedBy, bankRef: bankRefId });
+  return ok({ id, date, direction, amount, purpose, note, reference, recordedBy, bankRef: bankRefId, channel });
 }
 
 async function deleteSatelliteFund(DB, id) {
@@ -7824,11 +7837,11 @@ async function adminImport(DB, data) {
     for (const r of data.satelliteFunds) {
       try {
         await DB.prepare(`
-          INSERT INTO satellite_funds (id, date, direction, amount, purpose, note, reference, recorded_by, bank_ref)
-          VALUES (?,?,?,?,?,?,?,?,?)
+          INSERT INTO satellite_funds (id, date, direction, amount, purpose, note, reference, recorded_by, bank_ref, channel)
+          VALUES (?,?,?,?,?,?,?,?,?,?)
         `).bind(
-          r.id || newId('SAT-'), r.date || '', r.direction === 'out' ? 'out' : 'in', r.amount || 0,
-          r.purpose || 'other', r.note || '', r.reference || '', r.recordedBy || '', r.bankRef || ''
+          r.id || newId('SAT-'), r.date || '', ['out', 'transfer_out'].includes(r.direction) ? r.direction : 'in', r.amount || 0,
+          r.purpose || 'other', r.note || '', r.reference || '', r.recordedBy || '', r.bankRef || '', r.channel || 'bank'
         ).run();
       } catch(e) { errs.push(`sat:${r.id}`); }
     }
