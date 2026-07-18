@@ -3990,7 +3990,7 @@ async function renderDashboard(){
             <span style="font-weight:600;color:${churchBal.pettyFloat<0?'var(--danger)':'inherit'}">${fmt(churchBal.pettyFloat)}</span>
           </a>
           ${Math.abs(churchBal.heldForSatellites||0)>=0.5?`
-          <a onclick="App.navigate('remittances')" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between;border-top:1px dashed var(--border);margin-top:6px;padding-top:6px">
+          <a onclick="App.gotoSatellitePool()" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between;border-top:1px dashed var(--border);margin-top:6px;padding-top:6px">
             <span><span style="display:inline-block;width:8px;height:8px;background:#8B4513;border-radius:50%;margin-right:8px"></span><span style="text-decoration:underline dotted #8B4513;text-underline-offset:3px">${dashSatHeldDisp.label}</span></span>
             <span style="font-weight:600;color:#8B4513">${churchBal.heldForSatellites>0?'−':'+'}${dashSatHeldDisp.amount}</span>
           </a>
@@ -4564,6 +4564,20 @@ async function renderIncome(){
     </div>
     ${await (tab==='list'?renderIncomeList(sundayRecs, _cashTx, remRates, expCoveringMap):tab==='other'?renderOtherIncomeList(otherRecs, expCoveringMap):tab==='summary'?renderIncomeSummary(records):renderAllIncomeList(allIncomeRecs, _cashTx, remRates, expCoveringMap))}
     ${renderSatelliteFundsPanel(satFundsIn, satFundsOut, satFundsTransferOut, satFundsHeld, satFundsRecent, satFundsTransferByReason)}`;
+
+  // One-shot deep link from a "Held for satellites" figure elsewhere in the app
+  // (see gotoSatellitePool): scroll to the pool panel once it's actually painted,
+  // with a brief highlight so the eye lands on the right card.
+  if(state._scrollToSatPool){
+    state._scrollToSatPool = false;
+    const panel = document.getElementById('satellite-pool-panel');
+    if(panel){
+      panel.scrollIntoView({ behavior:'smooth', block:'start' });
+      panel.style.transition = 'box-shadow 0.4s';
+      panel.style.boxShadow = '0 0 0 3px #8B4513';
+      setTimeout(()=>{ panel.style.boxShadow = ''; }, 1800);
+    }
+  }
 }
 
 // ── Satellite / Zone Funds Received — shown on the Income page, clearly separated
@@ -6478,6 +6492,15 @@ async function renderRemittances(){
     </div>`;
 }
 
+// Jump from a "Held for satellites" figure (Dashboard breakdown, Bank page alert)
+// straight to the Satellite/Zone pool panel — the last card on the Record Income
+// page. Navigation is async (renderIncome fetches over the network), so the scroll
+// happens via a one-shot flag renderIncome honors after it paints — not a timer.
+function gotoSatellitePool(){
+  state._scrollToSatPool = true;
+  navigate('income');
+}
+
 // Display-only label helper for the held-for-satellites figure — used by the
 // Dashboard balance breakdown, the pool panel KPI, and the Bank page alert.
 // held>0: money this parish holds on the satellites' behalf (excluded from
@@ -6517,7 +6540,7 @@ function renderSatelliteFundsPanel(totalIn, totalOut, totalTransferOut, held, re
   // always shows (unlike the Dashboard/Bank lines, which hide entirely when held===0).
   const heldDisp = satelliteHeldDisplay(held);
   return `
-    <div class="card" style="margin-top:12px;border-left:3px solid var(--primary)">
+    <div class="card" id="satellite-pool-panel" style="margin-top:12px;border-left:3px solid var(--primary)">
       <div class="card-header">
         <span class="card-title">🛰️ Funds Received &amp; Remitted on Behalf of Satellite Parishes</span>
       </div>
@@ -9934,7 +9957,7 @@ async function renderBank(){
     </div>
     ${_bankHasPending?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⏳</span><span>A deposit of <strong>${fmt(_bankPendingTotal)}</strong> is ${_bankPendingDeps[0]?.verificationStatus==='flagged'?'<strong>flagged by AI</strong> — please review and correct or approve it below':'<strong>pending AI verification</strong>'}.</span></div>`:''}
     ${cashWithAccountant>0&&!_bankHasPending&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong> not yet deposited to the bank account.${pendingDepCount>0?` (${pendingDepCount} income record(s) pending)`:''} <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
-    ${Math.abs(heldForSatellitesRB||0)>=0.5?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🛰️</span><span>${bankSatHeldDisp.label}: <strong>${bankSatHeldDisp.amount}</strong> (${bankSatHeldDisp.suffix}) — already included in the Bank Balance or Cash with Accountant below (depending on how it was received); see the <a onclick="App.navigate('remittances')" style="cursor:pointer;text-decoration:underline">Satellite Pass-Through Fund panel</a> on Remittances.</span></div>`:''}
+    ${Math.abs(heldForSatellitesRB||0)>=0.5?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🛰️</span><span>${bankSatHeldDisp.label}: <strong>${bankSatHeldDisp.amount}</strong> (${bankSatHeldDisp.suffix}) — already included in the Bank Balance or Cash with Accountant below (depending on how it was received); see the <a onclick="App.gotoSatellitePool()" style="cursor:pointer;text-decoration:underline">Satellite Pass-Through Fund panel</a> on Record Income.</span></div>`:''}
 
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
       <div class="kpi">
@@ -13609,7 +13632,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
   updateExpenseSubcats, updateExpenseDescRequired,
