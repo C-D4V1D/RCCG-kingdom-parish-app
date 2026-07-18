@@ -12176,10 +12176,10 @@ async function generateMonthlyReport(){
 
     <div class="summary-grid">
       <div class="summary-box"><div class="label">Total Income</div><div class="value green">${fmt(totalIncome)}</div></div>
-      <div class="summary-box"><div class="label">Total Expenses</div><div class="value red">${fmt(totalExpenses)}</div></div>
-      <div class="summary-box"><div class="label">Total Remittances Due</div><div class="value red">${fmt(totalRemDue)}</div></div>
-      <div class="summary-box"><div class="label">Net Local Retained</div><div class="value green">${fmt(trueNetLocal)}</div></div>
-      <div class="summary-box"><div class="label">Money in Bank &amp; Cash <span style="font-size:10px;color:var(--text3);font-weight:normal">(period end)</span></div><div class="value ${closingBalance>=0?'green':'red'}">${fmt(closingBalance)}</div><div style="font-size:10px;color:var(--text3);margin-top:3px">Available after remittances: ${fmt(availableParishFund)}</div></div>
+      <div class="summary-box"><div class="label">Total Remittance Due</div><div class="value red">${fmt(totalRemDue)}</div></div>
+      <div class="summary-box"><div class="label">Local Retained Income</div><div class="value green">${fmt(trueNetLocal)}</div></div>
+      <div class="summary-box"><div class="label">Total Expense</div><div class="value red">${fmt(totalExpenses)}</div></div>
+      <div class="summary-box" style="border:2px solid ${netPosition>=0?'#0F6E56':'#c0392b'};background:${netPosition>=0?'#f0faf5':'#fff5f5'}"><div class="label" style="color:${netPosition>=0?'#0F6E56':'#c0392b'};font-weight:700">${netPosition>=0?'Net Local Retained [Surplus]':'Net Local Retained [Deficit]'}</div><div class="value ${netPosition>=0?'green':'red'}">${netPosition>=0?fmt(netPosition):'('+fmt(Math.abs(netPosition))+')'}</div></div>
       <div class="summary-box"><div class="label">No. of Sundays</div><div class="value blue">${sundayCount}</div></div>
     </div>
 
