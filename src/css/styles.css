@@ -109,6 +109,17 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .notif-item-time{font-size:11px;color:var(--text3);margin-top:4px}
 .notif-empty{padding:24px 16px;text-align:center;color:var(--text3);font-size:13px}
 
+/* Small self-contained three-dot (kebab) menu — used by the Satellite/Zone pool
+   panel's "Recent Entries" rows (renderSatelliteFundsPanel) for Edit/Delete. Visual
+   language borrowed from .notif-panel above (card surface, border, shadow). */
+.sat-entry-menu-wrap{position:relative}
+.sat-entry-menu-btn{all:unset;cursor:pointer;font-size:18px;line-height:1;color:var(--text3);padding:2px 8px;border-radius:var(--r)}
+.sat-entry-menu-btn:hover{background:var(--surface)}
+.sat-entry-menu{display:none;position:absolute;top:100%;right:0;margin-top:4px;background:var(--card);border:1px solid var(--border2);border-radius:var(--r);box-shadow:0 8px 24px rgba(0,0,0,0.12);z-index:50;min-width:130px;overflow:hidden}
+.sat-entry-menu button{all:unset;box-sizing:border-box;display:block;width:100%;padding:8px 12px;font-size:13px;cursor:pointer;color:var(--text)}
+.sat-entry-menu button:hover{background:var(--surface)}
+.sat-entry-menu button.danger{color:var(--danger)}
+
 /* PAGE CONTENT */
 .page-content{padding:1.25rem;flex:1}
 
@@ -313,6 +324,15 @@ tr:hover td{background:var(--surface)}
 @media(max-width:400px){
   .kpi-grid{grid-template-columns:1fr}
   .qa-grid{grid-template-columns:repeat(2,1fr)}
+  /* Satellite/Zone pass-through fund panel (renderSatelliteFundsPanel) — its 4 tiles
+     stay 2x2 even on very narrow phones instead of collapsing to a single column like
+     the shared .kpi-grid default above. Scoped to this one panel only via an extra
+     class alongside .kpi-grid, so every other page's kpi-grid keeps the 1-column
+     collapse it relies on for its own (often longer) tile content. */
+  .sat-kpi-grid{grid-template-columns:repeat(2,1fr)!important}
+  .sat-kpi-grid .kpi{padding:0.7rem}
+  .sat-kpi-grid .kpi-label{font-size:11px}
+  .sat-kpi-grid .kpi-val{font-size:16px}
 }
 
 /* PRINT */

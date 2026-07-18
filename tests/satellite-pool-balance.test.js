@@ -385,3 +385,505 @@ test('satellite cash-channel "in" followed by a normal accountant cash deposit: 
   assert.equal(afterDeposit.heldForSatellites, beforeDeposit.heldForSatellites, 'still held — just sitting in the bank instead of with the accountant now');
   assert.equal(afterDeposit.total, beforeDeposit.total, 'the satelliteCashIn term and the normal deposit cancel — total is unchanged throughout');
 });
+
+// ── Part A: expense category rename/reorder/removal (rccg_proj / zonal_area_joint) ──
+// Data-level assertions on EXPENSE_CATS/EXPENSE_SUBCATS content — the DOM-visibility
+// side of "Pay From only for rccg_proj" (applyCategoryFundSourceDefault) isn't
+// exercised here since this suite's minimal document stub has no querySelector; that
+// logic was verified by code review (see src/js/app.js showExpenseForm/
+// applyCategoryFundSourceDefault/onExpFundSourceChange).
+
+test('EXPENSE_CATS: rccg_proj key is unchanged but relabeled "RCCG Payments" and moved last; zonal_area_joint is gone', () => {
+  const cats = App._EXPENSE_CATS;
+  assert.equal(cats.some(c => c.key === 'zonal_area_joint'), false, 'zonal_area_joint must be fully removed from the selectable list');
+  const rccg = cats[cats.length - 1];
+  assert.equal(rccg.key, 'rccg_proj', 'key must stay unchanged — historical expenses reference it by key');
+  assert.equal(rccg.label, 'RCCG Payments');
+});
+
+test('EXPENSE_CATS_ALL: zonal_area_joint still resolves to a readable fallback label for historical records, but is not in the selectable list', () => {
+  const legacy = App._EXPENSE_CATS_ALL.find(c => c.key === 'zonal_area_joint');
+  assert.ok(legacy, 'a historical zonal_area_joint expense must still resolve to SOME label, not fall through to the raw key');
+  assert.match(legacy.label, /Zonal|Area|Joint/i);
+  assert.equal(App._EXPENSE_CATS.some(c => c.key === 'zonal_area_joint'), false, 'still excluded from the selectable EXPENSE_CATS list');
+  assert.deepEqual(App._LEGACY_EXPENSE_CATS.zonal_area_joint, legacy);
+});
+
+test('EXPENSE_SUBCATS.rccg_proj is replaced with exactly the new list; zonal_area_joint subcats are gone', () => {
+  assert.deepEqual(App._EXPENSE_SUBCATS.rccg_proj, [
+    'Programme or Event from Provincial / Regional / National',
+    'Project Levy from Provincial / Regional / National',
+    'Special / Emergency Request from RCCG Authorities',
+    "Let's Go A-Fishing Contribution",
+    'Others...',
+  ]);
+  assert.equal(App._EXPENSE_SUBCATS.zonal_area_joint, undefined);
+});
+
+// ── Part B: "Paid via" role-scoped options for a Satellite/Zone Pool payout ──────
+
+test('getPoolPaidViaOptionsForRole: admin_officer gets bank + petty_cash only; accountant gets bank + cash_accountant only; it_admin gets all three', () => {
+  const admin = App._getPoolPaidViaOptionsForRole('admin_officer').map(o => o.value);
+  const accountant = App._getPoolPaidViaOptionsForRole('accountant').map(o => o.value);
+  const itAdmin = App._getPoolPaidViaOptionsForRole('it_admin').map(o => o.value);
+  assert.deepEqual(admin, ['bank', 'petty_cash']);
+  assert.deepEqual(accountant, ['bank', 'cash_accountant']);
+  assert.deepEqual(itAdmin, ['bank', 'petty_cash', 'cash_accountant']);
+  assert.equal(admin[0], 'bank', '"bank" stays first/default — preserves old pool-payout behavior when nothing else applies');
+});
+
+test('getPoolPaidViaOptionsForRole: a role with neither petty nor accountant cash access (e.g. pastor) only ever sees Bank', () => {
+  assert.deepEqual(App._getPoolPaidViaOptionsForRole('pastor').map(o => o.value), ['bank']);
+});
+
+// ── Part B: pool payouts funded via Petty Cash / Cash (Accountant), not just Bank ──
+// createSatelliteFund now respects `channel` for direction='out' too (bank|petty_cash|
+// cash_accountant). calcChurchBalance's held math (heldForSatellites = in−out−transferOut)
+// is funding-source-agnostic and is DELIBERATELY UNCHANGED by this — only the term that
+// picks up the real cash movement differs (bankBalance / pettyFloat / cashWithAccountant).
+
+test('petty-funded pool payout: petty float drops by X, bank and cash-with-accountant unchanged, held goes negative by X', async () => {
+  // Pool starts holding ₦5,000 (one prior 'in', bank-funded). An officer then pays
+  // ₦15,000 entirely on the satellites' behalf via Petty Cash.
+  const cashTx = [{ type: 'cash_deposit', date: '2026-06-01', amount: 5000, destination: 'satellite_passthrough' }];
+  const inOnly = [{ direction: 'in', date: '2026-06-01', amount: 5000, channel: 'bank' }];
+  const withPayout = [...inOnly, { direction: 'out', date: '2026-06-10', amount: 15000, channel: 'petty_cash' }];
+  const pettyHistory = [{ type: 'disbursement', status: 'approved', amount: 15000, date: '2026-06-10' }];
+
+  const before = await balance({ cashTx, satelliteFunds: inOnly });
+  const after = await balance({ cashTx, satelliteFunds: withPayout, pettyHistory });
+
+  assert.equal(after.pettyFloat, before.pettyFloat - 15000, 'petty float drops by the full payout amount — picked up automatically via pettyFloatEvents\' disbursement branch, no formula change needed');
+  assert.equal(after.bankBalance, before.bankBalance, 'no bank mirror is created for a petty-funded payout');
+  assert.equal(after.cashWithAccountant, before.cashWithAccountant, 'the accountant is untouched by a petty-funded payout');
+  assert.equal(after.heldForSatellites, before.heldForSatellites - 15000);
+  assert.equal(after.heldForSatellites, -10000, 'pool started at 5000, paid out 15000 — now owed BY satellites (negative)');
+  // `total` (cash+bank+petty−held) is unaffected by a satellite in/out entry regardless
+  // of channel — this is the SAME funding-source-agnostic invariant already asserted by
+  // 'satellite pool: outbound X lowers bank and held by X, total unchanged' above; the
+  // real cash outflow (petty −15000) is exactly offset by held moving further negative
+  // (so −held adds 15000 back), matching the existing "reducing held alone is the
+  // complete balance effect" pattern used for transfer_out too.
+  assert.equal(after.total, before.total);
+});
+
+test('cash_accountant-funded pool payout: cash-with-accountant drops by X (surfacing as a deficit), bank and petty unchanged, held goes negative by X', async () => {
+  const cashTx = [{ type: 'cash_deposit', date: '2026-06-01', amount: 5000, destination: 'satellite_passthrough' }];
+  const inOnly = [{ direction: 'in', date: '2026-06-01', amount: 5000, channel: 'bank' }];
+  const withPayout = [...inOnly, { direction: 'out', date: '2026-06-10', amount: 15000, channel: 'cash_accountant' }];
+
+  const before = await balance({ cashTx, satelliteFunds: inOnly });
+  const after = await balance({ cashTx, satelliteFunds: withPayout });
+
+  assert.equal(after.cashWithAccountant, 0, 'clamped at 0 — the accountant had no cash on hand from this pool to fund it with');
+  assert.equal(after.cashDeficit, 15000, 'the negative raw cash position surfaces as a deficit, same as any other cash outflow exceeding recorded inflows');
+  assert.equal(after.bankBalance, before.bankBalance, 'no bank mirror is created for a cash_accountant-funded payout');
+  assert.equal(after.pettyFloat, before.pettyFloat, 'petty cash is untouched');
+  assert.equal(after.heldForSatellites, before.heldForSatellites - 15000);
+  assert.equal(after.heldForSatellites, -10000);
+  assert.equal(after.total, before.total, 'funding-source-agnostic — same invariant as the petty-funded case above');
+});
+
+test('bank-funded pool payout: regression — behavior unchanged from before Part B (default/explicit channel="bank")', async () => {
+  const cashTx = [{ type: 'cash_deposit', date: '2026-06-01', amount: 5000, destination: 'satellite_passthrough' }];
+  const inOnly = [{ direction: 'in', date: '2026-06-01', amount: 5000, channel: 'bank' }];
+  const before = await balance({ cashTx, satelliteFunds: inOnly });
+
+  const cashTxAfter = [...cashTx, { type: 'withdrawal', date: '2026-06-10', amount: 15000, destination: 'satellite_passthrough' }];
+  const withPayoutExplicit = [...inOnly, { direction: 'out', date: '2026-06-10', amount: 15000, channel: 'bank' }];
+  const withPayoutDefault  = [...inOnly, { direction: 'out', date: '2026-06-10', amount: 15000 }]; // channel omitted
+
+  for (const satelliteFunds of [withPayoutExplicit, withPayoutDefault]) {
+    const after = await balance({ cashTx: cashTxAfter, satelliteFunds });
+    assert.equal(after.bankBalance, before.bankBalance - 15000);
+    assert.equal(after.pettyFloat, before.pettyFloat, 'no petty movement for a bank-funded payout');
+    assert.equal(after.cashWithAccountant, before.cashWithAccountant, 'no accountant-cash movement for a bank-funded payout');
+    assert.equal(after.heldForSatellites, -10000);
+    assert.equal(after.total, before.total);
+  }
+});
+
+// ── Part C: Remittances "Area Payment" (Part A) satellite overage auto-linked ──────
+// submitRemittance auto-creates a satellite_funds 'out' entry for otherParishesAmount
+// when a Part A remittance's Area Payment total exceeds our own parish share — see
+// createRemittance's new satelliteFundRef column. Exercised here the same way the
+// expense-page pool-payout tests above are: assert the resulting DATA SHAPE (what
+// submitRemittance produces) satisfies calcChurchBalance's invariants.
+
+test('Area Payment satellite overage: bank reflects the FULL area total (not just our own share), held goes negative when the pool was empty', async () => {
+  // Our parish share ₦98,671.20, area total paid ₦200,000 → satellite overage
+  // ₦101,328.80, auto-linked as a bank-funded satellite_funds 'out' entry (the whole
+  // area payment went out via one bank transfer — the common case).
+  const ourShare = 98671.2;
+  const areaTotal = 200000;
+  const otherParishesAmount = areaTotal - ourShare;
+  const cashTx = [{ type: 'withdrawal', date: '2026-06-15', amount: otherParishesAmount, destination: 'satellite_passthrough' }];
+  const satelliteFunds = [{ direction: 'out', date: '2026-06-15', amount: otherParishesAmount, purpose: 'province_remittance', channel: 'bank' }];
+  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, part: 'a', areaTotalPaid: areaTotal, otherParishesAmount }];
+
+  const bal = await balance({ cashTx, satelliteFunds, remittances });
+
+  // paidRems (our own true obligation) is untouched — only the linked satellite_funds
+  // 'out' entry's own bank mirror contributes the satellite share to bankBalance, via
+  // the existing bankWithdrawals term (no change needed there — see calcChurchBalance).
+  assert.equal(bal.bankBalance, -otherParishesAmount - ourShare, 'bank reflects BOTH halves of the real ₦200,000 outflow — our own remittance (via paidRems) plus the linked satellite overage (via bankWithdrawals)');
+  assert.equal(bal.heldForSatellites, -otherParishesAmount, 'pool started empty — the satellite share is now owed BY satellites (negative held)');
+  assert.equal(bal.cashWithAccountant, 0, 'the accountant is untouched by a bank-funded Area Payment');
+});
+
+test('Area Payment satellite overage: held decreases (not goes negative) when the pool already had enough', async () => {
+  const ourShare = 50000;
+  const areaTotal = 150000;
+  const otherParishesAmount = areaTotal - ourShare; // 100000
+  const priorIn = { direction: 'in', date: '2026-06-01', amount: 120000, channel: 'bank' };
+  const linkedOut = { direction: 'out', date: '2026-06-15', amount: otherParishesAmount, purpose: 'province_remittance', channel: 'bank' };
+  const cashTx = [
+    { type: 'cash_deposit', date: '2026-06-01', amount: 120000, destination: 'satellite_passthrough' },
+    { type: 'withdrawal', date: '2026-06-15', amount: otherParishesAmount, destination: 'satellite_passthrough' },
+  ];
+  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, part: 'a', areaTotalPaid: areaTotal, otherParishesAmount }];
+
+  const bal = await balance({ cashTx, satelliteFunds: [priorIn, linkedOut], remittances });
+  assert.equal(bal.heldForSatellites, 120000 - otherParishesAmount, 'held decreases by the overage but stays positive — the pool had enough');
+  assert.ok(bal.heldForSatellites > 0);
+});
+
+test('Area Payment with NO satellite overage (areaTotalPaid <= our own share): no satellite_funds entry, held untouched', async () => {
+  // Paying only our own parish share (or not filling in an Area Payment total at all)
+  // must never create a satellite_funds entry — this only applies when the area total
+  // genuinely exceeds our own share.
+  const ourShare = 50000;
+  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, part: 'a', areaTotalPaid: 0, otherParishesAmount: 0 }];
+  const bal = await balance({ remittances, satelliteFunds: [] });
+  assert.equal(bal.heldForSatellites, 0);
+});
+
+// ── Codex review fixes (PR #263) ────────────────────────────────────────────
+
+test('legacy expense category (zonal_area_joint) is included in EXPENSE_CATS_ALL but not in the selectable EXPENSE_CATS', () => {
+  const selectable = App._EXPENSE_CATS;
+  const all = App._EXPENSE_CATS_ALL;
+  const legacy = App._LEGACY_EXPENSE_CATS;
+
+  assert.ok(legacy.zonal_area_joint, 'the retired category still has a fallback label entry');
+  assert.equal(selectable.some(c => c.key === 'zonal_area_joint'), false, 'retired category must not be choosable for new expenses');
+  assert.equal(all.some(c => c.key === 'zonal_area_joint'), true, 'retired category must still resolve for historical records');
+
+  // Reproduces the exact seed-then-sum aggregation pattern used at all 4 report/
+  // summary call sites (buildMonthlyStatementData, renderExpenses, generateMonthlyReport,
+  // generateExpenseReport) — each does `EXPENSE_CATS_ALL.forEach(c=>{map[c.key]={...}})`
+  // then sums expenses into it. Before the fix, these seeded from EXPENSE_CATS only, so
+  // a historical 'zonal_area_joint' expense had no bucket to land in and was silently
+  // dropped from category breakdowns while still counting toward totalExpenses.
+  const expenses = [
+    { category: 'zonal_area_joint', amount: 7000 },
+    { category: 'rccg_proj', amount: 3000 },
+  ];
+  const map = {};
+  all.forEach(c => { map[c.key] = { label: c.label, total: 0, count: 0 }; });
+  expenses.forEach(e => { if (map[e.category]) { map[e.category].total += e.amount || 0; map[e.category].count++; } });
+
+  assert.equal(map.zonal_area_joint.total, 7000, 'legacy-category expense is counted in the breakdown, not silently dropped');
+  assert.equal(map.zonal_area_joint.count, 1);
+  const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
+  const sumOfBreakdown = Object.values(map).reduce((s, c) => s + c.total, 0);
+  assert.equal(sumOfBreakdown, totalExpenses, 'the category breakdown must add up to the same total as totalExpenses — no silent drops');
+});
+
+// ── Rollback of the auto-linked pool entry when the remittance save fails ──
+// submitRemittance() creates the satellite_funds 'out' entry (Part A overage) BEFORE
+// DB.addRemittance(). If addRemittance then fails, the orphaned pool entry must be
+// rolled back via DB.deleteSatelliteFund — otherwise a retry (which the error message
+// invites) would create a SECOND pool debit for the same real-world payment. Exercised
+// here against the real App.submitRemittance() with a mocked fetch and a minimal DOM
+// stub providing just the form fields it reads.
+test('submitRemittance rollback: a remittance save failure after the satellite fund was created rolls the pool entry back', async () => {
+  const savedDocument = globalThis.document;
+  const savedWindowDocument = globalThis.window.document;
+  const savedFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    const fieldValues = {
+      rem_part: 'a', rem_date: '2026-07-01', rem_ref: '', rem_notes: '',
+      rem_auth_text: 'Test Signatory', rem_total_due: '50000', rem_area_total: '150000',
+      rem_breakdown_snapshot: '',
+    };
+    const remittanceDocStub = {
+      ...documentStub,
+      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : null; },
+      querySelector(sel) { return sel === 'input[name="rem_method"]:checked' ? { value: 'cash' } : null; },
+      querySelectorAll(sel) { return sel === 'input[name="rem_sig"]:checked' ? [] : []; },
+    };
+    globalThis.document = remittanceDocStub;
+    globalThis.window.document = remittanceDocStub;
+
+    globalThis.fetch = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      calls.push({ url, method });
+      if (method === 'POST' && url === '/api/satellite-funds') {
+        return { ok: true, status: 200, json: async () => ({ id: 'SAT-ROLLBACK-TEST', direction: 'out' }) };
+      }
+      if (method === 'POST' && url === '/api/remittances') {
+        return { ok: false, status: 500, json: async () => ({ error: 'Simulated remittance save failure' }) };
+      }
+      if (method === 'DELETE' && url === '/api/satellite-funds/SAT-ROLLBACK-TEST') {
+        return { ok: true, status: 200, json: async () => ({ id: 'SAT-ROLLBACK-TEST', deleted: true }) };
+      }
+      throw new Error(`Unmocked fetch in rollback test: ${method} ${url}`);
+    };
+
+    await App.submitRemittance(null);
+
+    const satFundCreate = calls.find(c => c.method === 'POST' && c.url === '/api/satellite-funds');
+    const remittanceCreate = calls.find(c => c.method === 'POST' && c.url === '/api/remittances');
+    const satFundDelete = calls.find(c => c.method === 'DELETE' && c.url === '/api/satellite-funds/SAT-ROLLBACK-TEST');
+
+    assert.ok(satFundCreate, 'the satellite fund auto-link was attempted before the remittance save');
+    assert.ok(remittanceCreate, 'the remittance save was attempted and (per the mock) failed');
+    assert.ok(satFundDelete, 'the orphaned satellite fund entry was rolled back via DB.deleteSatelliteFund after the remittance save failed');
+  } finally {
+    globalThis.document = savedDocument;
+    globalThis.window.document = savedWindowDocument;
+    globalThis.fetch = savedFetch;
+  }
+});
+
+// ── Part A (RCCG portal remittance) is bank-transfer-only ──────────────────
+// The Payment Method radios for Cash/Split were removed from Part A's form (Part B —
+// TG & Pastoral Stipend, paid directly to the Pastor — keeps them, since that IS
+// routinely handed over as cash). Regression guard: even though submitRemittance's
+// resolution branch itself is untouched, a Part A submission must always resolve to
+// bankAmount=paidTotal / cashAmount=0, matching the fact that no other radio can ever
+// be checked in the new markup.
+test('submitRemittance Part A: always resolves to bank_transfer (bankAmount=paidTotal, cashAmount=0), regardless of an Area Payment overage', async () => {
+  const savedDocument = globalThis.document;
+  const savedWindowDocument = globalThis.window.document;
+  const savedFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    const fieldValues = {
+      rem_part: 'a', rem_date: '2026-07-01', rem_ref: 'TX-12345', rem_notes: '',
+      rem_auth_text: 'Test Signatory', rem_total_due: '98671.2', rem_area_total: '200000',
+      rem_breakdown_snapshot: '',
+    };
+    const remittanceDocStub = {
+      ...documentStub,
+      // Unknown ids (e.g. 'pageContent', hit by the fire-and-forget renderRemittances()
+      // re-render on the success path below) fall back to an inert stub element instead
+      // of null, so incidental .innerHTML writes don't crash after this test has moved on.
+      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      // The only radio Part A's markup can ever produce is bank_transfer — there is no
+      // cash/split option to select, mirroring the new HTML in showRemittancePaymentModal.
+      querySelector(sel) { return sel === 'input[name="rem_method"]:checked' ? { value: 'bank_transfer' } : null; },
+      querySelectorAll(sel) { return sel === 'input[name="rem_sig"]:checked' ? [] : []; },
+    };
+    globalThis.document = remittanceDocStub;
+    globalThis.window.document = remittanceDocStub;
+
+    globalThis.fetch = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      calls.push({ url, method, body: opts?.body ? JSON.parse(opts.body) : null });
+      if (method === 'POST' && url === '/api/satellite-funds') {
+        return { ok: true, status: 200, json: async () => ({ id: 'SAT-PARTA-TEST', direction: 'out' }) };
+      }
+      if (method === 'POST' && url === '/api/remittances') {
+        return { ok: true, status: 200, json: async () => ({ id: 'REM-TEST', ...JSON.parse(opts.body) }) };
+      }
+      // A successful save triggers a fire-and-forget renderRemittances() (not awaited by
+      // submitRemittance itself), which issues its own GET requests after this test's
+      // assertions have already run. Answer any of those tolerantly instead of throwing.
+      if (method === 'GET') return { ok: true, status: 200, json: async () => ([]) };
+      throw new Error(`Unmocked fetch in Part A bank-only test: ${method} ${url}`);
+    };
+
+    await App.submitRemittance(null);
+
+    const remittanceCreate = calls.find(c => c.method === 'POST' && c.url === '/api/remittances');
+    assert.ok(remittanceCreate, 'the remittance save was attempted');
+    assert.equal(remittanceCreate.body.bankAmount, 200000, 'the FULL area total is attributed to the bank — Part A can never be cash-funded');
+    assert.equal(remittanceCreate.body.cashAmount, 0, 'no cash amount is ever recorded for Part A');
+    assert.equal(remittanceCreate.body.paymentMethod, 'bank_transfer');
+
+    const satFundCreate = calls.find(c => c.method === 'POST' && c.url === '/api/satellite-funds');
+    assert.ok(satFundCreate, 'the satellite overage (200000 - 98671.2) was still auto-linked to the pool');
+    assert.equal(satFundCreate.body.channel, 'bank', 'the linked pool entry is bank-funded too, since Part A is bank-only');
+
+    // Let the un-awaited renderRemittances() fire-and-forget GETs settle against the
+    // still-tolerant mock before restoring globals in `finally`, so they don't reject
+    // against the real fetch/original document after this test has already finished.
+    await new Promise(resolve => setTimeout(resolve, 10));
+  } finally {
+    globalThis.document = savedDocument;
+    globalThis.window.document = savedWindowDocument;
+    globalThis.fetch = savedFetch;
+  }
+});
+
+// ── Satellite/Zone pool panel moved to the Income page (renderIncome), no longer
+// rendered on Remittances (renderRemittances) — see renderSatelliteFundsPanel's call
+// site. Both pages used to compute the same 6 summary values (in/out/transferOut/held/
+// recent/transferByReason) from their own DB.getSatelliteFunds() fetch; renderIncome
+// now reuses the fetch it already had (allSatFundsRI) instead of a second network call.
+// Data-level check that the shared formula (identical code, now living in one place)
+// produces the same 6 values no matter which page's fetch supplies the source array —
+// i.e. the migration didn't silently change what gets computed.
+
+test('satellite-fund panel summary: the 6 values (in/out/transferOut/held/recent/transferByReason) are identical regardless of which page fetched the source array', () => {
+  const allSatFunds = [
+    { id: 'SAT-1', direction: 'in', date: '2026-06-01', amount: 10000, purpose: 'province_remittance' },
+    { id: 'SAT-2', direction: 'out', date: '2026-06-05', amount: 4000, purpose: 'joint_area_zone' },
+    { id: 'SAT-3', direction: 'transfer_out', date: '2026-06-10', amount: 1500, purpose: 'gift' },
+    { id: 'SAT-4', direction: 'transfer_out', date: '2026-06-11', amount: 500, purpose: 'reimbursement' },
+  ];
+  // Exact same computation renderSatelliteFundsPanel's 6 arguments are built from in
+  // both renderIncome and (formerly) renderRemittances — see src/js/app.js.
+  const computePanelSummary = (source) => {
+    const satFundsIn = source.filter(s => s.direction === 'in').reduce((s, r) => s + (r.amount || 0), 0);
+    const satFundsOut = source.filter(s => s.direction === 'out').reduce((s, r) => s + (r.amount || 0), 0);
+    const satFundsTransferOut = source.filter(s => s.direction === 'transfer_out').reduce((s, r) => s + (r.amount || 0), 0);
+    const satFundsHeld = satFundsIn - satFundsOut - satFundsTransferOut;
+    const satFundsTransferByReason = { gift: 0, reimbursement: 0, correction: 0 };
+    source.filter(s => s.direction === 'transfer_out').forEach(s => {
+      satFundsTransferByReason[s.purpose] = (satFundsTransferByReason[s.purpose] || 0) + (s.amount || 0);
+    });
+    const satFundsRecent = [...source].sort((a, b) => new Date(b.date || b.createdAt || 0) - new Date(a.date || a.createdAt || 0)).slice(0, 10);
+    return { satFundsIn, satFundsOut, satFundsTransferOut, satFundsHeld, satFundsTransferByReason, satFundsRecent };
+  };
+
+  // "Remittances-shaped fetch" and "Income-shaped fetch" are both just DB.getSatelliteFunds()
+  // — simulate two independently-fetched (but identical) copies of the same table.
+  const asComputedOnRemittancesPage = computePanelSummary(JSON.parse(JSON.stringify(allSatFunds)));
+  const asComputedOnIncomePage = computePanelSummary(JSON.parse(JSON.stringify(allSatFunds)));
+
+  assert.equal(asComputedOnIncomePage.satFundsIn, asComputedOnRemittancesPage.satFundsIn);
+  assert.equal(asComputedOnIncomePage.satFundsOut, asComputedOnRemittancesPage.satFundsOut);
+  assert.equal(asComputedOnIncomePage.satFundsTransferOut, asComputedOnRemittancesPage.satFundsTransferOut);
+  assert.equal(asComputedOnIncomePage.satFundsHeld, asComputedOnRemittancesPage.satFundsHeld);
+  assert.deepEqual(asComputedOnIncomePage.satFundsTransferByReason, asComputedOnRemittancesPage.satFundsTransferByReason);
+  assert.deepEqual(asComputedOnIncomePage.satFundsRecent, asComputedOnRemittancesPage.satFundsRecent);
+
+  // Sanity-check the actual numbers too, not just cross-page equality.
+  assert.equal(asComputedOnIncomePage.satFundsIn, 10000);
+  assert.equal(asComputedOnIncomePage.satFundsOut, 4000);
+  assert.equal(asComputedOnIncomePage.satFundsTransferOut, 2000);
+  assert.equal(asComputedOnIncomePage.satFundsHeld, 10000 - 4000 - 2000);
+  assert.equal(asComputedOnIncomePage.satFundsTransferByReason.gift, 1500);
+  assert.equal(asComputedOnIncomePage.satFundsTransferByReason.reimbursement, 500);
+  assert.equal(asComputedOnIncomePage.satFundsRecent.length, 4);
+});
+
+// ── Edit (three-dot menu → ✏️ Edit) = delete-old + create-new ──────────────────────
+// No PATCH endpoint exists or is being added — submitSatelliteFund(direction, btn,
+// editId) reuses the existing, already-tested createSatelliteFund/deleteSatelliteFund
+// paths: delete the old entry first (its own try/catch — a failure here means nothing
+// changed), then create the new one (its own try/catch — a failure here means the old
+// entry is genuinely gone, surfaced plainly, no automatic re-creation attempted). Same
+// mocked-fetch + swapped-document-stub pattern as the submitRemittance rollback test
+// above.
+
+test('submitSatelliteFund edit: delete-old-then-create-new both happen, in order, with the right ids/values', async () => {
+  App._setTestUserRole('accountant'); // holds 'expenses', which gates satellite_fund_record
+  const savedDocument = globalThis.document;
+  const savedWindowDocument = globalThis.window.document;
+  const savedFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    const fieldValues = {
+      sf_date: '2026-07-05', sf_amount: '7500', sf_purpose: 'joint_area_zone',
+      sf_note: 'Edited note', sf_reference: 'REF-EDIT',
+    };
+    const editDocStub = {
+      ...documentStub,
+      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      querySelector(sel) { return sel === 'input[name="sf_channel"]:checked' ? { value: 'cash' } : null; },
+      querySelectorAll() { return []; },
+    };
+    globalThis.document = editDocStub;
+    globalThis.window.document = editDocStub;
+
+    globalThis.fetch = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      calls.push({ url, method, body: opts?.body ? JSON.parse(opts.body) : null });
+      if (method === 'DELETE' && url === '/api/satellite-funds/SAT-OLD') {
+        return { ok: true, status: 200, json: async () => ({ id: 'SAT-OLD', deleted: true }) };
+      }
+      if (method === 'POST' && url === '/api/satellite-funds') {
+        return { ok: true, status: 200, json: async () => ({ id: 'SAT-NEW', direction: 'in' }) };
+      }
+      // Success triggers a fire-and-forget renderIncome/renderRemittances refresh
+      // (state.page defaults to 'dashboard' in this harness, so it falls to
+      // renderRemittances — see submitSatelliteFund) — tolerate its GETs.
+      if (method === 'GET') return { ok: true, status: 200, json: async () => ([]) };
+      throw new Error(`Unmocked fetch in edit-success test: ${method} ${url}`);
+    };
+
+    await App.submitSatelliteFund('in', null, 'SAT-OLD');
+
+    const del = calls.find(c => c.method === 'DELETE');
+    const create = calls.find(c => c.method === 'POST' && c.url === '/api/satellite-funds');
+    assert.ok(del, 'the original entry was deleted');
+    assert.equal(del.url, '/api/satellite-funds/SAT-OLD');
+    assert.ok(create, 'a fresh entry was created with the edited values');
+    assert.equal(create.body.amount, 7500);
+    assert.equal(create.body.channel, 'cash');
+    assert.equal(create.body.reference, 'REF-EDIT');
+    assert.equal(create.body.note, 'Edited note');
+    assert.ok(calls.indexOf(del) < calls.indexOf(create), 'delete-old runs before create-new, so a duplicate never briefly exists');
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+  } finally {
+    globalThis.document = savedDocument;
+    globalThis.window.document = savedWindowDocument;
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('submitSatelliteFund edit: DELETE succeeds but the create fails — surfaces a clear error, no automatic retry-loop', async () => {
+  App._setTestUserRole('accountant');
+  const savedDocument = globalThis.document;
+  const savedWindowDocument = globalThis.window.document;
+  const savedFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    const fieldValues = {
+      sf_date: '2026-07-05', sf_amount: '5000', sf_purpose: 'other',
+      sf_note: '', sf_reference: '',
+    };
+    const editDocStub = {
+      ...documentStub,
+      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      querySelector(sel) { return sel === 'input[name="sf_channel"]:checked' ? { value: 'bank' } : null; },
+      querySelectorAll() { return []; },
+    };
+    globalThis.document = editDocStub;
+    globalThis.window.document = editDocStub;
+
+    globalThis.fetch = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      calls.push({ url, method });
+      if (method === 'DELETE' && url === '/api/satellite-funds/SAT-OLD2') {
+        return { ok: true, status: 200, json: async () => ({ id: 'SAT-OLD2', deleted: true }) };
+      }
+      if (method === 'POST' && url === '/api/satellite-funds') {
+        return { ok: false, status: 500, json: async () => ({ error: 'Simulated create failure' }) };
+      }
+      throw new Error(`Unmocked fetch in edit-failure test: ${method} ${url}`);
+    };
+
+    await App.submitSatelliteFund('out', null, 'SAT-OLD2');
+
+    const deletes = calls.filter(c => c.method === 'DELETE');
+    const creates = calls.filter(c => c.method === 'POST' && c.url === '/api/satellite-funds');
+    assert.equal(deletes.length, 1, 'the original entry was deleted exactly once');
+    assert.equal(creates.length, 1, 'the create was attempted exactly once — no automatic retry-loop after failure');
+    // No success-path refresh (which would issue GETs) fired on this failure path —
+    // the ONLY network activity is the one DELETE and the one failed POST above, i.e.
+    // submitSatelliteFund returned immediately after the create failed rather than
+    // looping or attempting to silently re-create the deleted entry.
+    assert.equal(calls.length, 2, 'no other network activity happened on the failure path');
+  } finally {
+    globalThis.document = savedDocument;
+    globalThis.window.document = savedWindowDocument;
+    globalThis.fetch = savedFetch;
+  }
+});

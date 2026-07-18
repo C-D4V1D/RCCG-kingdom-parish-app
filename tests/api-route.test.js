@@ -3371,7 +3371,11 @@ test('POST /api/satellite-funds (in) defaults channel to "bank" and still mirror
   assert.equal(inserts[1].binds[9], 'bank');
 });
 
-test('POST /api/satellite-funds (out) ignores channel=cash — direction other than "in" always stays bank-only', async () => {
+test('POST /api/satellite-funds (out, channel=cash — not a valid OUT channel) falls back to "bank" and mirrors a withdrawal as before', async () => {
+  // 'cash' is only a valid channel for direction='in' (Received Via bank|cash) — for
+  // 'out' the valid non-bank channels are 'petty_cash'|'cash_accountant' (Paid via).
+  // An unrecognized/invalid channel value must default safely to 'bank', preserving
+  // the exact pre-existing bank-mirror regression behavior.
   const inserts = [];
   const onPrepare = (sql) => {
     const stmt = {
@@ -3387,9 +3391,99 @@ test('POST /api/satellite-funds (out) ignores channel=cash — direction other t
     }),
     env: { DB: createDBMock({ onPrepare }) },
   }));
-  assert.equal(body.channel, 'bank', 'channel is scoped to receipts (direction=in) only — out stays bank-only regardless of the request body');
+  assert.equal(body.channel, 'bank', 'an invalid out channel falls back to bank');
   assert.match(inserts[0].sql, /INSERT INTO cash_transactions/);
   assert.equal(inserts[0].binds[1], 'withdrawal');
+  assert.equal(inserts.length, 2, 'one cash_transactions withdrawal, one satellite_funds row — no petty_cash insert');
+});
+
+test('POST /api/satellite-funds (out) defaults to channel="bank" and mirrors a withdrawal — regression, unchanged from before Part B', async () => {
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const body = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'POST', {
+      date: '2026-05-03', direction: 'out', amount: 12000, purpose: 'joint_area_zone', recordedBy: 'Jane',
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+  assert.equal(body.channel, 'bank');
+  assert.ok(body.bankRef, 'bank-funded payout still gets a bank_ref');
+  assert.equal(body.pettyRef, '', 'no petty mirror for a bank-funded payout');
+  assert.equal(inserts.length, 2, 'one cash_transactions withdrawal, one satellite_funds row');
+  assert.match(inserts[0].sql, /INSERT INTO cash_transactions/);
+  assert.equal(inserts[0].binds[1], 'withdrawal');
+  assert.match(inserts[1].sql, /INSERT INTO satellite_funds/);
+  assert.equal(inserts[1].binds[8], body.bankRef, 'bank_ref links to the mirrored withdrawal');
+  assert.equal(inserts[1].binds[9], 'bank');
+  assert.equal(inserts[1].binds[10], '', 'petty_ref column is empty for a bank-funded payout');
+});
+
+test('POST /api/satellite-funds (out, channel=petty_cash) creates a petty_cash disbursement, NOT a bank mirror', async () => {
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const body = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'POST', {
+      date: '2026-06-10', direction: 'out', amount: 15000, purpose: 'joint_area_zone',
+      channel: 'petty_cash', recordedBy: 'Jane',
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+
+  assert.equal(body.channel, 'petty_cash');
+  assert.equal(body.bankRef, '', 'no bank mirror for a petty-funded payout');
+  assert.ok(body.pettyRef, 'response includes the id of the mirrored petty_cash disbursement');
+  assert.equal(inserts.length, 2, 'one petty_cash disbursement, one satellite_funds row — no cash_transactions insert');
+  assert.match(inserts[0].sql, /INSERT INTO petty_cash/);
+  // petty_cash columns: id,type,purpose,amount,category,date_needed,notes,requested_by,reference,authorized_by,status,payment_method,bank_amount,cash_amount,expense_refs,no_receipt
+  assert.equal(inserts[0].binds[1], 'disbursement');
+  assert.equal(inserts[0].binds[3], 15000);
+  assert.equal(inserts[0].binds[10], 'approved', 'the disbursement is pre-approved — it already happened');
+  assert.match(inserts[1].sql, /INSERT INTO satellite_funds/);
+  assert.equal(inserts[1].binds[8], '', 'bank_ref column is empty — no bank mirror created');
+  assert.equal(inserts[1].binds[9], 'petty_cash');
+  assert.equal(inserts[1].binds[10], body.pettyRef, 'petty_ref links to the mirrored disbursement');
+});
+
+test('POST /api/satellite-funds (out, channel=cash_accountant) creates NO bank/petty mirror at all', async () => {
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const body = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'POST', {
+      date: '2026-06-10', direction: 'out', amount: 15000, purpose: 'joint_area_zone',
+      channel: 'cash_accountant', recordedBy: 'Jane',
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+
+  assert.equal(body.channel, 'cash_accountant');
+  assert.equal(body.bankRef, '');
+  assert.equal(body.pettyRef, '');
+  assert.equal(inserts.length, 1, 'exactly one insert — satellite_funds only');
+  assert.match(inserts[0].sql, /INSERT INTO satellite_funds/);
+  assert.equal(inserts[0].binds[8], '');
+  assert.equal(inserts[0].binds[9], 'cash_accountant');
+  assert.equal(inserts[0].binds[10], '');
 });
 
 test('POST /api/satellite-funds (transfer_out) creates NO bank mirror — only the satellite_funds row', async () => {
@@ -3469,6 +3563,54 @@ test('DELETE /api/satellite-funds/:id reverses the mirrored bank transaction', a
   assert.match(deletes[1].sql, /DELETE FROM satellite_funds/);
 });
 
+test('DELETE /api/satellite-funds/:id reverses a petty-funded payout\'s petty_cash disbursement, not cash_transactions', async () => {
+  const deletes = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async first() { return /FROM satellite_funds/.test(sql) ? { id: 'SAT-3', direction: 'out', amount: 15000, bank_ref: '', petty_ref: 'PC-9' } : null; },
+      async run() { deletes.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds/SAT-3', 'DELETE'),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.deleted, true);
+  assert.equal(deletes.length, 2, 'reverses the petty_cash mirror row, then deletes the satellite_funds row');
+  assert.match(deletes[0].sql, /DELETE FROM petty_cash/);
+  assert.equal(deletes[0].binds[0], 'PC-9');
+  assert.match(deletes[1].sql, /DELETE FROM satellite_funds/);
+});
+
+test('DELETE /api/satellite-funds/:id on a cash_accountant-funded payout deletes only the satellite_funds row (no mirror to reverse)', async () => {
+  const deletes = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async first() { return /FROM satellite_funds/.test(sql) ? { id: 'SAT-4', direction: 'out', amount: 15000, bank_ref: '', petty_ref: '' } : null; },
+      async run() { deletes.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds/SAT-4', 'DELETE'),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.deleted, true);
+  assert.equal(deletes.length, 1, 'no bank_ref or petty_ref means no mirror delete is attempted');
+  assert.match(deletes[0].sql, /DELETE FROM satellite_funds/);
+});
+
 test('DELETE /api/satellite-funds/:id returns 404 when the entry does not exist', async () => {
   const onPrepare = () => ({ bind() { return this; }, async first() { return null; } });
   const response = await onRequest({
@@ -3476,6 +3618,97 @@ test('DELETE /api/satellite-funds/:id returns 404 when the entry does not exist'
     env: { DB: createDBMock({ onPrepare }) },
   });
   assert.equal(response.status, 404);
+});
+
+// ── Remittances "Area Payment" (Part A) auto-link to the Satellite/Zone Pool ────
+// A Part A remittance with a satellite-parish overage (otherParishesAmount > 0)
+// auto-creates a linked satellite_funds 'out' entry (see submitRemittance in
+// src/js/app.js) and stores its id on the remittance row as satelliteFundRef so
+// deleteRemittance can reverse it too — see createRemittance/deleteRemittance.
+
+test('POST /api/remittances persists satelliteFundRef (Area Payment auto-link)', async () => {
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const body = await readJson(await onRequest({
+    request: createRequest('https://example.com/api/remittances', 'POST', {
+      label: 'Part A — RCCG Authorities', amount: 98671.2, paidDate: '2026-06-15',
+      part: 'a', areaTotalPaid: 200000, otherParishesAmount: 101328.8,
+      satelliteFundRef: 'SAT-77',
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  }));
+  assert.equal(body.satelliteFundRef, 'SAT-77');
+  assert.match(inserts[0].sql, /INSERT INTO remittances/);
+  assert.match(inserts[0].sql, /satellite_fund_ref/);
+  assert.equal(inserts[0].binds[inserts[0].binds.length - 1], 'SAT-77', 'satellite_fund_ref is the last bound column');
+});
+
+test('DELETE /api/remittances/:id with a linked satelliteFundRef reverses the linked satellite_funds entry too', async () => {
+  const deletes = [];
+  // createDBMock only stubs prepare() — deleteRemittance is the only route handler
+  // that calls DB.batch(), so this test supplies its own minimal DB double with both.
+  const DB = {
+    prepare(sql) {
+      const stmt = {
+        binds: [],
+        bind(...args) { stmt.binds = args; return stmt; },
+        async first() {
+          if (/FROM remittances/.test(sql)) return { id: 'REM-1', status: 'pending_approval', satellite_fund_ref: 'SAT-77', submitted_by: '' };
+          if (/FROM satellite_funds/.test(sql)) return { id: 'SAT-77', direction: 'out', amount: 101328.8, bank_ref: 'CTX-88', petty_ref: '' };
+          return null;
+        },
+        async run() { deletes.push({ sql, binds: stmt.binds }); return { success: true }; },
+      };
+      return stmt;
+    },
+    async batch(stmts) { for (const s of stmts) await s.run(); return []; },
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/remittances/REM-1', 'DELETE'),
+    env: { DB },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.deleted, true);
+  // The linked satellite fund's own bank mirror is reversed first (exactly the same
+  // deleteSatelliteFund logic a standalone satellite_funds deletion uses), then the
+  // satellite_funds row itself, then the remittance row.
+  assert.ok(deletes.some(d => /DELETE FROM cash_transactions/.test(d.sql) && d.binds[0] === 'CTX-88'), "reverses the linked satellite fund's bank mirror");
+  assert.ok(deletes.some(d => /DELETE FROM satellite_funds/.test(d.sql) && d.binds[0] === 'SAT-77'), 'deletes the linked satellite_funds row');
+  assert.ok(deletes.some(d => /DELETE FROM remittances/.test(d.sql) && d.binds[0] === 'REM-1'), 'deletes the remittance row itself');
+});
+
+test('DELETE /api/remittances/:id with no satelliteFundRef does not touch satellite_funds at all', async () => {
+  const deletes = [];
+  const DB = {
+    prepare(sql) {
+      const stmt = {
+        binds: [],
+        bind(...args) { stmt.binds = args; return stmt; },
+        async first() {
+          if (/FROM remittances/.test(sql)) return { id: 'REM-2', status: 'pending_approval', satellite_fund_ref: '', submitted_by: '' };
+          return null;
+        },
+        async run() { deletes.push({ sql, binds: stmt.binds }); return { success: true }; },
+      };
+      return stmt;
+    },
+    async batch(stmts) { for (const s of stmts) await s.run(); return []; },
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/remittances/REM-2', 'DELETE'),
+    env: { DB },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(deletes.every(d => !/satellite_funds/.test(d.sql)), true, 'no satellite_funds interaction when satelliteFundRef is empty');
 });
 
 test('satellite_funds are structurally excluded from /api/income and /api/expenses totals', async () => {
@@ -3838,4 +4071,42 @@ test('GET /api/kpsc-email-ingest-log clears needsAttention once every flagged ro
   const body = await readJson(res);
   assert.equal(res.status, 200);
   assert.equal(body.needsAttention, false);
+});
+
+test('POST /api/petty-recalc subtracts petty_to_bank deposits (server recalc matches client pettyFloatEvents)', async () => {
+  // Regression: recalcPettyFloat predated the petty_to_bank entry type and silently
+  // ignored it, so every Petty Cash page load "self-healed" the float back UP as if
+  // a bank deposit never left the wallet — diverging from the client-side
+  // pettyFloatEvents() figure used by the Dashboard/Bank/Expense form.
+  let updatedFloat = null;
+  const onPrepare = (sql) => ({
+    _bound: [],
+    bind(...args) { this._bound = args; return this; },
+    async first() {
+      if (/FROM petty_config/.test(sql)) return { float_amount: 50000, max_float: 50000 };
+      if (/FROM expenses/.test(sql)) return { total: 0 };
+      return null;
+    },
+    async all() {
+      if (/FROM petty_cash/.test(sql)) return { results: [
+        { type: 'refill', status: 'approved', amount: 50000 },
+        { type: 'petty_to_bank', status: 'approved', amount: 20000 },
+      ] };
+      return { results: [] };
+    },
+    async run() {
+      if (/UPDATE petty_config SET float_amount=\?/.test(sql)) updatedFloat = this._bound[0];
+      return { success: true };
+    },
+  });
+
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/petty-recalc', 'POST'),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.correctedFloat, 30000, '50k refill − 20k deposited to bank — the deposit must not be resurrected');
+  assert.equal(updatedFloat, 30000, 'the stored float is corrected to the same figure');
 });
