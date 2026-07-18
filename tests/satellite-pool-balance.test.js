@@ -647,3 +647,74 @@ test('submitRemittance rollback: a remittance save failure after the satellite f
     globalThis.fetch = savedFetch;
   }
 });
+
+// ── Part A (RCCG portal remittance) is bank-transfer-only ──────────────────
+// The Payment Method radios for Cash/Split were removed from Part A's form (Part B —
+// TG & Pastoral Stipend, paid directly to the Pastor — keeps them, since that IS
+// routinely handed over as cash). Regression guard: even though submitRemittance's
+// resolution branch itself is untouched, a Part A submission must always resolve to
+// bankAmount=paidTotal / cashAmount=0, matching the fact that no other radio can ever
+// be checked in the new markup.
+test('submitRemittance Part A: always resolves to bank_transfer (bankAmount=paidTotal, cashAmount=0), regardless of an Area Payment overage', async () => {
+  const savedDocument = globalThis.document;
+  const savedWindowDocument = globalThis.window.document;
+  const savedFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    const fieldValues = {
+      rem_part: 'a', rem_date: '2026-07-01', rem_ref: 'TX-12345', rem_notes: '',
+      rem_auth_text: 'Test Signatory', rem_total_due: '98671.2', rem_area_total: '200000',
+      rem_breakdown_snapshot: '',
+    };
+    const remittanceDocStub = {
+      ...documentStub,
+      // Unknown ids (e.g. 'pageContent', hit by the fire-and-forget renderRemittances()
+      // re-render on the success path below) fall back to an inert stub element instead
+      // of null, so incidental .innerHTML writes don't crash after this test has moved on.
+      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      // The only radio Part A's markup can ever produce is bank_transfer — there is no
+      // cash/split option to select, mirroring the new HTML in showRemittancePaymentModal.
+      querySelector(sel) { return sel === 'input[name="rem_method"]:checked' ? { value: 'bank_transfer' } : null; },
+      querySelectorAll(sel) { return sel === 'input[name="rem_sig"]:checked' ? [] : []; },
+    };
+    globalThis.document = remittanceDocStub;
+    globalThis.window.document = remittanceDocStub;
+
+    globalThis.fetch = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      calls.push({ url, method, body: opts?.body ? JSON.parse(opts.body) : null });
+      if (method === 'POST' && url === '/api/satellite-funds') {
+        return { ok: true, status: 200, json: async () => ({ id: 'SAT-PARTA-TEST', direction: 'out' }) };
+      }
+      if (method === 'POST' && url === '/api/remittances') {
+        return { ok: true, status: 200, json: async () => ({ id: 'REM-TEST', ...JSON.parse(opts.body) }) };
+      }
+      // A successful save triggers a fire-and-forget renderRemittances() (not awaited by
+      // submitRemittance itself), which issues its own GET requests after this test's
+      // assertions have already run. Answer any of those tolerantly instead of throwing.
+      if (method === 'GET') return { ok: true, status: 200, json: async () => ([]) };
+      throw new Error(`Unmocked fetch in Part A bank-only test: ${method} ${url}`);
+    };
+
+    await App.submitRemittance(null);
+
+    const remittanceCreate = calls.find(c => c.method === 'POST' && c.url === '/api/remittances');
+    assert.ok(remittanceCreate, 'the remittance save was attempted');
+    assert.equal(remittanceCreate.body.bankAmount, 200000, 'the FULL area total is attributed to the bank — Part A can never be cash-funded');
+    assert.equal(remittanceCreate.body.cashAmount, 0, 'no cash amount is ever recorded for Part A');
+    assert.equal(remittanceCreate.body.paymentMethod, 'bank_transfer');
+
+    const satFundCreate = calls.find(c => c.method === 'POST' && c.url === '/api/satellite-funds');
+    assert.ok(satFundCreate, 'the satellite overage (200000 - 98671.2) was still auto-linked to the pool');
+    assert.equal(satFundCreate.body.channel, 'bank', 'the linked pool entry is bank-funded too, since Part A is bank-only');
+
+    // Let the un-awaited renderRemittances() fire-and-forget GETs settle against the
+    // still-tolerant mock before restoring globals in `finally`, so they don't reject
+    // against the real fetch/original document after this test has already finished.
+    await new Promise(resolve => setTimeout(resolve, 10));
+  } finally {
+    globalThis.document = savedDocument;
+    globalThis.window.document = savedWindowDocument;
+    globalThis.fetch = savedFetch;
+  }
+});

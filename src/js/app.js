@@ -21,8 +21,8 @@ const ROLES = {
 const PERMISSIONS = {
   pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','petty_view','reports','audit','signoff','rem_cutoff_edit'],
   accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit','rem_cutoff_edit','expense_delete_approved'],
-  admin_officer: ['dashboard','transactions','expenses','petty_request','petty_view','income_view'],
-  signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','bank','petty_approve','signoff'],
+  admin_officer: ['dashboard','transactions','expenses','petty_request','petty_view','income_view','petty_to_bank'],
+  signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','bank','petty_approve','signoff','petty_to_bank'],
   viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','petty_view']
 };
 
@@ -43,6 +43,7 @@ const PERMISSION_DEFS = [
   { key:'bank',             label:'Bank',                   group:'Finance'    },
   { key:'petty_request',    label:'Request Petty Cash',     group:'Petty Cash' },
   { key:'petty_approve',    label:'Approve Petty Cash',     group:'Petty Cash' },
+  { key:'petty_to_bank',    label:'Deposit Petty Cash to Bank', group:'Petty Cash' },
   { key:'petty_view',       label:'View Petty Cash',        group:'Petty Cash' },
   { key:'reports',          label:'Generate Reports',       group:'Reports'    },
   { key:'audit',            label:'View Audit Log',         group:'Reports'    },
@@ -920,6 +921,11 @@ const ACCESS_RULES = {
     petty_request: ['petty_request'],
     petty_topup_payment: ['income'],
     petty_approve_or_view: ['income','petty_approve'],
+    // Depositing petty cash INTO the bank — the Admin Officer (custodian of the float)
+    // and the Bank Signatory can both do this. Deliberately separate from
+    // petty_approve_or_view, which governs approving/rejecting petty cash TOP-UP
+    // requests — a different action with different intended holders.
+    petty_to_bank: ['petty_to_bank'],
     income_delete: { roles:['it_admin'] },
     petty_delete:  { roles:['it_admin'] },
     expense_edit_pending: { roles:['admin_officer','it_admin'] },
@@ -6674,9 +6680,18 @@ async function showRemittancePaymentModal(part){
     </div>
     `:''}
 
-    <!-- Payment Method -->
+    <!-- Payment Method — Part A (RCCG portal remittance) is bank-transfer-only, since
+         it is never paid in cash. Part B (TG & Pastoral Stipend, paid directly to the
+         Pastor) keeps Cash/Split, since that IS routinely handed over as physical cash. -->
     <div class="form-group">
       <label class="form-label">Payment Method *</label>
+      ${part==='a' ? `
+      <div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text2);margin-top:4px">
+        <input type="radio" name="rem_method" value="bank_transfer" checked style="display:none" />
+        🏦 Bank Transfer
+      </div>
+      <div class="form-hint">The RCCG portal remittance is always paid by bank transfer.</div>
+      ` : `
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:4px">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
           <input type="radio" name="rem_method" value="bank_transfer" ${defaultMethod==='bank_transfer'?'checked':''} onchange="App.onRemMethodChange()" /> 🏦 Bank Transfer only
@@ -6688,6 +6703,7 @@ async function showRemittancePaymentModal(part){
           <input type="radio" name="rem_method" value="split" onchange="App.onRemMethodChange()" /> 🏦💵 Split (Bank + Cash)
         </label>
       </div>
+      `}
     </div>
 
     <!-- Single amount (hidden for Part A — amount comes from area payment field) -->
@@ -10378,7 +10394,7 @@ async function renderPettyCash(){
           <button class="btn btn-primary" onclick="App.showTopUpRequest()">↺ Request Top-Up</button>
           <button class="btn" onclick="App.showAdvanceRequest()">+ Request Advance</button>
         `:''}
-        ${canAction('petty_topup_payment')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">📋 Record Top-Up Payment</button>`:''}\n        ${canAction('petty_approve')?`<button class="btn" style="background:#E6F1FB;color:#0F6E56" onclick="App.showPettyToBankDeposit()">🏦 Deposit to Bank</button>`:''}
+        ${canAction('petty_topup_payment')?`<button class="btn btn-amber" onclick="App.showPettyRefill()">📋 Record Top-Up Payment</button>`:''}\n        ${canAction('petty_to_bank')?`<button class="btn" style="background:#E6F1FB;color:#0F6E56" onclick="App.showPettyToBankDeposit()">🏦 Deposit to Bank</button>`:''}
       </div>
     </div>
 
@@ -10832,7 +10848,7 @@ async function submitDeletePetty(id, btn=null){
 
 // ── PETTY CASH → BANK DEPOSIT ──────────────────────────────────────────────
 async function showPettyToBankDeposit(){
-  if(!canAction('petty_approve')){ showAlert('You do not have permission to deposit petty cash to bank.','danger'); return; }
+  if(!canAction('petty_to_bank')){ showAlert('You do not have permission to deposit petty cash to bank.','danger'); return; }
   const pettyConfig = await DB.getPettyConfig();
   const currentFloat = pettyConfig.float || 0;
   showModal(`
