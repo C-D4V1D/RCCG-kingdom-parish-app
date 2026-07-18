@@ -3694,10 +3694,30 @@ async function renderDashboard(){
     : null;
   // Pre-compute midpoints and spreads for the ± display format.
   const _incMid = forecastIncome ? Math.round((forecastIncome.min+forecastIncome.max)/2) : 0;
-  const _incSpread = forecastIncome ? Math.round((forecastIncome.max-forecastIncome.min)/2) : 0;
   const _retMid = forecastRetained ? Math.round((forecastRetained.min+forecastRetained.max)/2) : 0;
-  const _retSpread = forecastRetained ? Math.round((forecastRetained.max-forecastRetained.min)/2) : 0;
   const _balColor = forecastBalance && forecastBalance.min < 0 ? 'var(--danger)' : '#185FA5';
+  // Shared Worst case / Likely / Best case display for every forecast row — the
+  // "likely" (midpoint) figure is the big number the eye lands on, flanked by the
+  // range ends, over a slim tinted track with a centre dot ("a range whose middle
+  // is the likely outcome"). Display-only: no forecast math changes. Callers pass
+  // worst/best in OUTCOME order (for expenses, worst = the HIGHER spend).
+  const _forecastRange = (worst, likely, best, color) => {
+    const cell = (lbl, val, big) => `
+      <div style="text-align:center;min-width:0;flex:1">
+        <div style="font-size:8.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">${lbl}</div>
+        <div style="font-size:${big?'18px':'12.5px'};font-weight:${big?'800':'600'};color:${big?color:'var(--text2)'};letter-spacing:-0.3px;white-space:nowrap">${fmtShort(val)}</div>
+      </div>`;
+    return `
+      <div style="max-width:340px">
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:8px">
+          ${cell('Worst case', worst, false)}${cell('Likely', likely, true)}${cell('Best case', best, false)}
+        </div>
+        <div style="position:relative;margin-top:6px">
+          <div style="height:3px;border-radius:2px;background:linear-gradient(90deg,transparent,${color} 50%,transparent);opacity:0.4"></div>
+          <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;background:${color};border:2px solid var(--card,#fff)"></div>
+        </div>
+      </div>`;
+  };
 
   // ── Weekly Net Retained Analysis ──────────────────────────────────────────────
   const _wkPeriodFrom = useRemPeriod ? dashPeriodFrom : dashMonthStart;
@@ -4321,10 +4341,7 @@ async function renderDashboard(){
                 <div style="width:3px;border-radius:2px;background:var(--primary);flex-shrink:0"></div>
                 <div style="flex:1;min-width:0">
                   <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Income for this period</div>
-                  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:7px">
-                    <span style="font-size:18px;font-weight:800;color:var(--primary);letter-spacing:-0.4px">${fmtShort(_incMid)}</span>
-                    <span style="font-size:11.5px;font-weight:700;color:var(--primary);opacity:0.75;background:rgba(29,158,117,0.12);border-radius:20px;padding:2px 9px;white-space:nowrap">± ${fmtShort(_incSpread)}</span>
-                  </div>
+                  ${_forecastRange(forecastIncome.min, _incMid, forecastIncome.max, 'var(--primary)')}
                 </div>
               </div>
 
@@ -4336,10 +4353,7 @@ async function renderDashboard(){
                 <div style="width:3px;border-radius:2px;background:#BA7517;flex-shrink:0"></div>
                 <div style="flex:1;min-width:0">
                   <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Retained Share</div>
-                  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:7px">
-                    <span style="font-size:18px;font-weight:800;color:#BA7517;letter-spacing:-0.4px">${fmtShort(_retMid)}</span>
-                    <span style="font-size:11.5px;font-weight:700;color:#BA7517;opacity:0.75;background:rgba(186,117,23,0.12);border-radius:20px;padding:2px 9px;white-space:nowrap">± ${fmtShort(_retSpread)}</span>
-                  </div>
+                  ${_forecastRange(forecastRetained.min, _retMid, forecastRetained.max, '#BA7517')}
                 </div>
               </div>
               <div style="height:1px;background:var(--border)"></div>
@@ -4350,13 +4364,8 @@ async function renderDashboard(){
               <div style="padding:13px 14px;background:${forecastBalance.min<0?'rgba(163,45,45,0.04)':'rgba(24,95,165,0.04)'};display:flex;align-items:stretch;gap:11px">
                 <div style="width:3px;border-radius:2px;background:${_balColor};flex-shrink:0"></div>
                 <div style="flex:1;min-width:0">
-                  <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Actual Balance after Expenses</div>
-                  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:6px">
-                    <span style="font-size:11px;color:#6366F1;font-weight:700;letter-spacing:0.2px">b/w</span>
-                    <span style="font-size:18px;font-weight:800;color:${_balColor};letter-spacing:-0.4px">${fmtShort(forecastBalance.min)}</span>
-                    <span style="font-size:11px;color:#6366F1;font-weight:700;letter-spacing:0.2px">to</span>
-                    <span style="font-size:18px;font-weight:800;color:${_balColor};letter-spacing:-0.4px">${fmtShort(forecastBalance.max)}</span>
-                  </div>
+                  <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Retained Income after Expenses</div>
+                  ${_forecastRange(forecastBalance.min, Math.round((forecastBalance.min+forecastBalance.max)/2), forecastBalance.max, _balColor)}
                 </div>
               </div>
               `:forecastExpenses?`
@@ -4364,10 +4373,7 @@ async function renderDashboard(){
                 <div style="width:3px;border-radius:2px;background:var(--danger);flex-shrink:0"></div>
                 <div style="flex:1;min-width:0">
                   <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Expenses</div>
-                  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:7px">
-                    <span style="font-size:18px;font-weight:800;color:var(--danger);letter-spacing:-0.4px">${fmtShort(Math.round((forecastExpenses.min+forecastExpenses.max)/2))}</span>
-                    <span style="font-size:11.5px;font-weight:700;color:var(--danger);opacity:0.75;background:rgba(163,45,45,0.12);border-radius:20px;padding:2px 9px;white-space:nowrap">± ${fmtShort(Math.round((forecastExpenses.max-forecastExpenses.min)/2))}</span>
-                  </div>
+                  ${_forecastRange(forecastExpenses.max, Math.round((forecastExpenses.min+forecastExpenses.max)/2), forecastExpenses.min, 'var(--danger)')}
                 </div>
               </div>
               `:''}
