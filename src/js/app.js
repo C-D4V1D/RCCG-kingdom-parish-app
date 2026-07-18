@@ -6196,7 +6196,14 @@ async function renderRemittances(){
   const _periodDueSnapshot=periodPayments.reduce((max,r)=>Math.max(max,r.dueAtTimeOfPayment||0),0);
   const _effectiveDue=_periodDueSnapshot>0?_periodDueSnapshot:(toDate<todayStr&&totalPaid>0?totalPaid:totalDue);
   const _isLegacyFullPaid=_legacyPaid>0&&_legacyPaid>=_effectiveDue*PAYMENT_TOLERANCE_THRESHOLD;
-  const isPartAPaid=_isLegacyFullPaid||(partATotal>0&&_paidA>0&&_paidA>=partATotal*PAYMENT_TOLERANCE_THRESHOLD);
+  // Part A settles against the payment's OWN due snapshot when one exists (an
+  // adjusted share — see submitRemittance's dueAtTimeOfPayment — genuinely changes
+  // the obligation, e.g. a waiver lowering ₦90k to ₦80k must not read as ₦10k
+  // outstanding forever). Falls back to the live-calculated partATotal for legacy
+  // records with no snapshot.
+  const _partADueSnapshot=periodPayments.filter(r=>r.part==='a').reduce((max,r)=>Math.max(max,r.dueAtTimeOfPayment||0),0);
+  const _partATarget=_partADueSnapshot>0?_partADueSnapshot:partATotal;
+  const isPartAPaid=_isLegacyFullPaid||(_partATarget>0&&_paidA>0&&_paidA>=_partATarget*PAYMENT_TOLERANCE_THRESHOLD);
   const isPartBPaid=_isLegacyFullPaid||(partBTotal>0&&_paidB>0&&_paidB>=partBTotal*PAYMENT_TOLERANCE_THRESHOLD)||(partBTotal===0);
   const isPaid=isPartAPaid&&isPartBPaid;
   const isPartial=(totalPaid>0||_paidA>0||_paidB>0)&&!isPaid;
@@ -6961,9 +6968,19 @@ async function submitRemittance(btn=null){
     // levy instructed by RCCG authorities) — see toggleRemShareAdjust. The satellite
     // overage is always derived from the EFFECTIVE share, so the pool is drawn exactly
     // what the satellites owe, never inflated/deflated by our own adjustment.
+    // With the Adjust box open, the raw input is validated directly — a cleared or
+    // non-numeric field must BLOCK, not silently fall back to the calculated due
+    // (which would skip the mandatory-reason check and record an unadjusted figure
+    // while the form showed a blank).
+    if(_remShareAdjustOpen){
+      const rawAdj = document.getElementById('rem_adjusted_share')?.value;
+      const adjVal = parseFloat(rawAdj);
+      if(rawAdj==null || String(rawAdj).trim()==='' || isNaN(adjVal) || adjVal<=0){
+        showAlert('Please enter the adjusted parish share — or close the ✏️ Adjust box to use the calculated figure.','danger'); return;
+      }
+    }
     const parishShare = remEffectiveParishShare(calculatedDue);
     const shareAdjusted = _remShareAdjustOpen && Math.abs(parishShare - calculatedDue) > 0.5;
-    if(_remShareAdjustOpen && parishShare <= 0){ showAlert('Please enter the adjusted parish share.','danger'); return; }
     const adjustReason = (document.getElementById('rem_adjust_reason')?.value||'').trim();
     if(shareAdjusted && !adjustReason){ showAlert('Please give the reason for adjusting the parish share.','danger'); return; }
     if(shareAdjusted) shareAdjustNote = `Parish share adjusted to ${fmt(parishShare)} (calculated: ${fmt(calculatedDue)}) — Reason: ${adjustReason}`;
@@ -7023,13 +7040,19 @@ async function submitRemittance(btn=null){
   // failed, and roll it back if so.
   let satelliteFundRef = '';
   try {
-    const dueAtTimeOfPayment = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
+    // dueAtTimeOfPayment is the SETTLEMENT SNAPSHOT — what this parish actually owed
+    // when it paid. For Part A that is the EFFECTIVE (possibly adjusted) share: an
+    // authority-instructed levy or waiver genuinely changes the obligation, so the
+    // paid/outstanding checks (renderRemittances' per-part target, the dashboard's
+    // due-snapshot) must settle against it — otherwise a downward adjustment shows
+    // "Part A unpaid" forever. The pre-adjustment calculated figure stays on record
+    // in the notes/audit line (see shareAdjustNote above).
+    const dueAtTimeOfPayment = part==='a' ? amount : (parseFloat(document.getElementById('rem_total_due')?.value) || 0);
     const breakdownSnapshot = document.getElementById('rem_breakdown_snapshot')?.value || '';
     const areaTotalPaid = parseFloat(document.getElementById('rem_area_total')?.value) || 0;
-    // The overage is derived from `amount` — the EFFECTIVE (possibly adjusted) parish
-    // share — not from dueAtTimeOfPayment (the calculated due, kept for reporting).
-    // With an adjusted share, using the calculated due here would over/under-draw the
-    // pool by exactly the adjustment — the bug the Adjust control exists to prevent.
+    // The overage is derived from `amount` — the effective share. Using the
+    // calculated due here would over/under-draw the pool by exactly the adjustment —
+    // the bug the Adjust control exists to prevent.
     const otherParishesAmount = areaTotalPaid > 0 ? Math.max(0, areaTotalPaid - amount) : 0;
     const partLabel = part==='a'?'Part A — RCCG Authorities':part==='b'?'Part B — TG & Pastoral':'RCCG Monthly Remittance';
 

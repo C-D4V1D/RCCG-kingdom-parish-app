@@ -937,7 +937,7 @@ test('Part A adjusted share: pool overage derives from the ADJUSTED share, remit
     const remittanceCreate = calls.find(c => c.method === 'POST' && c.url === '/api/remittances');
     assert.ok(remittanceCreate, 'the remittance was saved');
     assert.equal(remittanceCreate.body.amount, 100000, 'our remittance records the ADJUSTED share');
-    assert.equal(remittanceCreate.body.dueAtTimeOfPayment, 90000, 'the calculated due is preserved for reporting');
+    assert.equal(remittanceCreate.body.dueAtTimeOfPayment, 100000, 'the settlement snapshot is the ADJUSTED share — the real obligation — so paid/outstanding checks settle against it (the calculated 90,000 stays on record in the notes)');
     assert.equal(remittanceCreate.body.bankAmount, 200000, 'the full area total still leaves the bank');
     assert.equal(remittanceCreate.body.otherParishesAmount, 100000);
     assert.match(remittanceCreate.body.notes, /Parish share adjusted/, 'the adjustment + reason is stamped into the record notes');
@@ -981,6 +981,46 @@ test('Part A adjusted share without a reason is blocked before any network call'
     await App.submitRemittance(null);
 
     assert.equal(calls.filter(c => c.method === 'POST').length, 0, 'no satellite fund or remittance is created when the mandatory reason is missing');
+  } finally {
+    App.toggleRemShareAdjust(90000);
+    globalThis.document = savedDocument;
+    globalThis.window.document = savedWindowDocument;
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('Part A with the Adjust box open but a BLANK share field is blocked — no silent fallback to the calculated due', async () => {
+  // Codex finding: a cleared/non-numeric adjusted-share input used to fall back to
+  // the calculated due, which made shareAdjusted false, skipped the mandatory-reason
+  // check, and recorded an unadjusted figure while the form showed a blank field.
+  const savedDocument = globalThis.document;
+  const savedWindowDocument = globalThis.window.document;
+  const savedFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    const fieldValues = {
+      rem_part: 'a', rem_date: '2026-07-18', rem_ref: 'TX-779', rem_notes: '',
+      rem_auth_text: 'Test Signatory', rem_total_due: '90000', rem_area_total: '200000',
+      rem_adjusted_share: '', rem_adjust_reason: 'reason present but amount blank',
+      rem_breakdown_snapshot: '',
+    };
+    const remittanceDocStub = {
+      ...documentStub,
+      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      querySelector(sel) { return sel === 'input[name="rem_method"]:checked' ? { value: 'bank_transfer' } : null; },
+      querySelectorAll(sel) { return sel === 'input[name="rem_sig"]:checked' ? [] : []; },
+    };
+    globalThis.document = remittanceDocStub;
+    globalThis.window.document = remittanceDocStub;
+    globalThis.fetch = async (url, opts) => {
+      calls.push({ url, method: opts?.method || 'GET' });
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+
+    App.toggleRemShareAdjust(90000);
+    await App.submitRemittance(null);
+
+    assert.equal(calls.filter(c => c.method === 'POST').length, 0, 'nothing is recorded while the adjusted-share field is blank');
   } finally {
     App.toggleRemShareAdjust(90000);
     globalThis.document = savedDocument;
