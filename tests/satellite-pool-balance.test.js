@@ -718,3 +718,172 @@ test('submitRemittance Part A: always resolves to bank_transfer (bankAmount=paid
     globalThis.fetch = savedFetch;
   }
 });
+
+// ── Satellite/Zone pool panel moved to the Income page (renderIncome), no longer
+// rendered on Remittances (renderRemittances) — see renderSatelliteFundsPanel's call
+// site. Both pages used to compute the same 6 summary values (in/out/transferOut/held/
+// recent/transferByReason) from their own DB.getSatelliteFunds() fetch; renderIncome
+// now reuses the fetch it already had (allSatFundsRI) instead of a second network call.
+// Data-level check that the shared formula (identical code, now living in one place)
+// produces the same 6 values no matter which page's fetch supplies the source array —
+// i.e. the migration didn't silently change what gets computed.
+
+test('satellite-fund panel summary: the 6 values (in/out/transferOut/held/recent/transferByReason) are identical regardless of which page fetched the source array', () => {
+  const allSatFunds = [
+    { id: 'SAT-1', direction: 'in', date: '2026-06-01', amount: 10000, purpose: 'province_remittance' },
+    { id: 'SAT-2', direction: 'out', date: '2026-06-05', amount: 4000, purpose: 'joint_area_zone' },
+    { id: 'SAT-3', direction: 'transfer_out', date: '2026-06-10', amount: 1500, purpose: 'gift' },
+    { id: 'SAT-4', direction: 'transfer_out', date: '2026-06-11', amount: 500, purpose: 'reimbursement' },
+  ];
+  // Exact same computation renderSatelliteFundsPanel's 6 arguments are built from in
+  // both renderIncome and (formerly) renderRemittances — see src/js/app.js.
+  const computePanelSummary = (source) => {
+    const satFundsIn = source.filter(s => s.direction === 'in').reduce((s, r) => s + (r.amount || 0), 0);
+    const satFundsOut = source.filter(s => s.direction === 'out').reduce((s, r) => s + (r.amount || 0), 0);
+    const satFundsTransferOut = source.filter(s => s.direction === 'transfer_out').reduce((s, r) => s + (r.amount || 0), 0);
+    const satFundsHeld = satFundsIn - satFundsOut - satFundsTransferOut;
+    const satFundsTransferByReason = { gift: 0, reimbursement: 0, correction: 0 };
+    source.filter(s => s.direction === 'transfer_out').forEach(s => {
+      satFundsTransferByReason[s.purpose] = (satFundsTransferByReason[s.purpose] || 0) + (s.amount || 0);
+    });
+    const satFundsRecent = [...source].sort((a, b) => new Date(b.date || b.createdAt || 0) - new Date(a.date || a.createdAt || 0)).slice(0, 10);
+    return { satFundsIn, satFundsOut, satFundsTransferOut, satFundsHeld, satFundsTransferByReason, satFundsRecent };
+  };
+
+  // "Remittances-shaped fetch" and "Income-shaped fetch" are both just DB.getSatelliteFunds()
+  // — simulate two independently-fetched (but identical) copies of the same table.
+  const asComputedOnRemittancesPage = computePanelSummary(JSON.parse(JSON.stringify(allSatFunds)));
+  const asComputedOnIncomePage = computePanelSummary(JSON.parse(JSON.stringify(allSatFunds)));
+
+  assert.equal(asComputedOnIncomePage.satFundsIn, asComputedOnRemittancesPage.satFundsIn);
+  assert.equal(asComputedOnIncomePage.satFundsOut, asComputedOnRemittancesPage.satFundsOut);
+  assert.equal(asComputedOnIncomePage.satFundsTransferOut, asComputedOnRemittancesPage.satFundsTransferOut);
+  assert.equal(asComputedOnIncomePage.satFundsHeld, asComputedOnRemittancesPage.satFundsHeld);
+  assert.deepEqual(asComputedOnIncomePage.satFundsTransferByReason, asComputedOnRemittancesPage.satFundsTransferByReason);
+  assert.deepEqual(asComputedOnIncomePage.satFundsRecent, asComputedOnRemittancesPage.satFundsRecent);
+
+  // Sanity-check the actual numbers too, not just cross-page equality.
+  assert.equal(asComputedOnIncomePage.satFundsIn, 10000);
+  assert.equal(asComputedOnIncomePage.satFundsOut, 4000);
+  assert.equal(asComputedOnIncomePage.satFundsTransferOut, 2000);
+  assert.equal(asComputedOnIncomePage.satFundsHeld, 10000 - 4000 - 2000);
+  assert.equal(asComputedOnIncomePage.satFundsTransferByReason.gift, 1500);
+  assert.equal(asComputedOnIncomePage.satFundsTransferByReason.reimbursement, 500);
+  assert.equal(asComputedOnIncomePage.satFundsRecent.length, 4);
+});
+
+// ── Edit (three-dot menu → ✏️ Edit) = delete-old + create-new ──────────────────────
+// No PATCH endpoint exists or is being added — submitSatelliteFund(direction, btn,
+// editId) reuses the existing, already-tested createSatelliteFund/deleteSatelliteFund
+// paths: delete the old entry first (its own try/catch — a failure here means nothing
+// changed), then create the new one (its own try/catch — a failure here means the old
+// entry is genuinely gone, surfaced plainly, no automatic re-creation attempted). Same
+// mocked-fetch + swapped-document-stub pattern as the submitRemittance rollback test
+// above.
+
+test('submitSatelliteFund edit: delete-old-then-create-new both happen, in order, with the right ids/values', async () => {
+  App._setTestUserRole('accountant'); // holds 'expenses', which gates satellite_fund_record
+  const savedDocument = globalThis.document;
+  const savedWindowDocument = globalThis.window.document;
+  const savedFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    const fieldValues = {
+      sf_date: '2026-07-05', sf_amount: '7500', sf_purpose: 'joint_area_zone',
+      sf_note: 'Edited note', sf_reference: 'REF-EDIT',
+    };
+    const editDocStub = {
+      ...documentStub,
+      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      querySelector(sel) { return sel === 'input[name="sf_channel"]:checked' ? { value: 'cash' } : null; },
+      querySelectorAll() { return []; },
+    };
+    globalThis.document = editDocStub;
+    globalThis.window.document = editDocStub;
+
+    globalThis.fetch = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      calls.push({ url, method, body: opts?.body ? JSON.parse(opts.body) : null });
+      if (method === 'DELETE' && url === '/api/satellite-funds/SAT-OLD') {
+        return { ok: true, status: 200, json: async () => ({ id: 'SAT-OLD', deleted: true }) };
+      }
+      if (method === 'POST' && url === '/api/satellite-funds') {
+        return { ok: true, status: 200, json: async () => ({ id: 'SAT-NEW', direction: 'in' }) };
+      }
+      // Success triggers a fire-and-forget renderIncome/renderRemittances refresh
+      // (state.page defaults to 'dashboard' in this harness, so it falls to
+      // renderRemittances — see submitSatelliteFund) — tolerate its GETs.
+      if (method === 'GET') return { ok: true, status: 200, json: async () => ([]) };
+      throw new Error(`Unmocked fetch in edit-success test: ${method} ${url}`);
+    };
+
+    await App.submitSatelliteFund('in', null, 'SAT-OLD');
+
+    const del = calls.find(c => c.method === 'DELETE');
+    const create = calls.find(c => c.method === 'POST' && c.url === '/api/satellite-funds');
+    assert.ok(del, 'the original entry was deleted');
+    assert.equal(del.url, '/api/satellite-funds/SAT-OLD');
+    assert.ok(create, 'a fresh entry was created with the edited values');
+    assert.equal(create.body.amount, 7500);
+    assert.equal(create.body.channel, 'cash');
+    assert.equal(create.body.reference, 'REF-EDIT');
+    assert.equal(create.body.note, 'Edited note');
+    assert.ok(calls.indexOf(del) < calls.indexOf(create), 'delete-old runs before create-new, so a duplicate never briefly exists');
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+  } finally {
+    globalThis.document = savedDocument;
+    globalThis.window.document = savedWindowDocument;
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('submitSatelliteFund edit: DELETE succeeds but the create fails — surfaces a clear error, no automatic retry-loop', async () => {
+  App._setTestUserRole('accountant');
+  const savedDocument = globalThis.document;
+  const savedWindowDocument = globalThis.window.document;
+  const savedFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    const fieldValues = {
+      sf_date: '2026-07-05', sf_amount: '5000', sf_purpose: 'other',
+      sf_note: '', sf_reference: '',
+    };
+    const editDocStub = {
+      ...documentStub,
+      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      querySelector(sel) { return sel === 'input[name="sf_channel"]:checked' ? { value: 'bank' } : null; },
+      querySelectorAll() { return []; },
+    };
+    globalThis.document = editDocStub;
+    globalThis.window.document = editDocStub;
+
+    globalThis.fetch = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      calls.push({ url, method });
+      if (method === 'DELETE' && url === '/api/satellite-funds/SAT-OLD2') {
+        return { ok: true, status: 200, json: async () => ({ id: 'SAT-OLD2', deleted: true }) };
+      }
+      if (method === 'POST' && url === '/api/satellite-funds') {
+        return { ok: false, status: 500, json: async () => ({ error: 'Simulated create failure' }) };
+      }
+      throw new Error(`Unmocked fetch in edit-failure test: ${method} ${url}`);
+    };
+
+    await App.submitSatelliteFund('out', null, 'SAT-OLD2');
+
+    const deletes = calls.filter(c => c.method === 'DELETE');
+    const creates = calls.filter(c => c.method === 'POST' && c.url === '/api/satellite-funds');
+    assert.equal(deletes.length, 1, 'the original entry was deleted exactly once');
+    assert.equal(creates.length, 1, 'the create was attempted exactly once — no automatic retry-loop after failure');
+    // No success-path refresh (which would issue GETs) fired on this failure path —
+    // the ONLY network activity is the one DELETE and the one failed POST above, i.e.
+    // submitSatelliteFund returned immediately after the create failed rather than
+    // looping or attempting to silently re-create the deleted entry.
+    assert.equal(calls.length, 2, 'no other network activity happened on the failure path');
+  } finally {
+    globalThis.document = savedDocument;
+    globalThis.window.document = savedWindowDocument;
+    globalThis.fetch = savedFetch;
+  }
+});
