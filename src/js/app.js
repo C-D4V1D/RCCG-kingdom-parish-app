@@ -6966,16 +6966,10 @@ async function submitRemittance(btn=null){
     const partLabel = part==='a'?'Part A — RCCG Authorities':part==='b'?'Part B — TG & Pastoral':'RCCG Monthly Remittance';
 
     // Funding source for the auto-linked satellite_funds 'out' entry below (the
-    // satellite-parish overage): derived from how the overage portion was actually
-    // paid. A non-split payment funds the WHOLE area total (including the overage)
-    // from one source, so that source applies directly. A split payment doesn't
-    // record which specific naira funded the overage vs our own share, so — as the
-    // simplest defensible approximation — the overage is treated as coming from
-    // whichever channel funded the larger share of the total payment (defaults to
-    // 'bank' on a tie/ambiguity, preserving the old bank-only behavior).
-    const satFundChannel = (part === 'a' && otherParishesAmount > 0)
-      ? (isSplit ? (cashAmount > bankAmount ? 'cash_accountant' : 'bank') : (method === 'cash' ? 'cash_accountant' : 'bank'))
-      : 'bank';
+    // satellite-parish overage). An Area Payment overage only exists for Part A,
+    // and Part A is bank-transfer-only (its form renders no Cash/Split option —
+    // see showRemittancePaymentModal), so the overage is always bank-funded.
+    const satFundChannel = 'bank';
 
     // Auto-link a satellite_funds 'out' entry for the satellite-parish overage BEFORE
     // creating the remittance row, so its id can be stored on the remittance for

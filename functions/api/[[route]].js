@@ -3145,6 +3145,13 @@ async function recalcPettyFloat(DB) {
     if (h.type === 'disbursement' && h.status === 'approved') {
       historyDelta -= Number(h.amount) || 0;
     }
+    // Petty cash deposited into the bank leaves the float — must mirror the
+    // client-side pettyFloatEvents() branch for this type exactly, or every
+    // Petty Cash page load "self-heals" the float back UP as if the deposit
+    // never happened, silently re-inflating the balance.
+    if (h.type === 'petty_to_bank' && (h.status === 'approved' || h.status === 'settled')) {
+      historyDelta -= Number(h.amount) || 0;
+    }
   }
 
   // Start from 0 — refills add cash, expenses/advances remove it.

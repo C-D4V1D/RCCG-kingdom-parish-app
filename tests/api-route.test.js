@@ -4072,3 +4072,41 @@ test('GET /api/kpsc-email-ingest-log clears needsAttention once every flagged ro
   assert.equal(res.status, 200);
   assert.equal(body.needsAttention, false);
 });
+
+test('POST /api/petty-recalc subtracts petty_to_bank deposits (server recalc matches client pettyFloatEvents)', async () => {
+  // Regression: recalcPettyFloat predated the petty_to_bank entry type and silently
+  // ignored it, so every Petty Cash page load "self-healed" the float back UP as if
+  // a bank deposit never left the wallet — diverging from the client-side
+  // pettyFloatEvents() figure used by the Dashboard/Bank/Expense form.
+  let updatedFloat = null;
+  const onPrepare = (sql) => ({
+    _bound: [],
+    bind(...args) { this._bound = args; return this; },
+    async first() {
+      if (/FROM petty_config/.test(sql)) return { float_amount: 50000, max_float: 50000 };
+      if (/FROM expenses/.test(sql)) return { total: 0 };
+      return null;
+    },
+    async all() {
+      if (/FROM petty_cash/.test(sql)) return { results: [
+        { type: 'refill', status: 'approved', amount: 50000 },
+        { type: 'petty_to_bank', status: 'approved', amount: 20000 },
+      ] };
+      return { results: [] };
+    },
+    async run() {
+      if (/UPDATE petty_config SET float_amount=\?/.test(sql)) updatedFloat = this._bound[0];
+      return { success: true };
+    },
+  });
+
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/petty-recalc', 'POST'),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.correctedFloat, 30000, '50k refill − 20k deposited to bank — the deposit must not be resurrected');
+  assert.equal(updatedFloat, 30000, 'the stored float is corrected to the same figure');
+});
