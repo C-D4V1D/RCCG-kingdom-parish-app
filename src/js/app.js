@@ -3694,10 +3694,30 @@ async function renderDashboard(){
     : null;
   // Pre-compute midpoints and spreads for the ± display format.
   const _incMid = forecastIncome ? Math.round((forecastIncome.min+forecastIncome.max)/2) : 0;
-  const _incSpread = forecastIncome ? Math.round((forecastIncome.max-forecastIncome.min)/2) : 0;
   const _retMid = forecastRetained ? Math.round((forecastRetained.min+forecastRetained.max)/2) : 0;
-  const _retSpread = forecastRetained ? Math.round((forecastRetained.max-forecastRetained.min)/2) : 0;
   const _balColor = forecastBalance && forecastBalance.min < 0 ? 'var(--danger)' : '#185FA5';
+  // Shared Worst case / Likely / Best case display for every forecast row — the
+  // "likely" (midpoint) figure is the big number the eye lands on, flanked by the
+  // range ends, over a slim tinted track with a centre dot ("a range whose middle
+  // is the likely outcome"). Display-only: no forecast math changes. Callers pass
+  // worst/best in OUTCOME order (for expenses, worst = the HIGHER spend).
+  const _forecastRange = (worst, likely, best, color) => {
+    const cell = (lbl, val, big) => `
+      <div style="text-align:center;min-width:0;flex:1">
+        <div style="font-size:8.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">${lbl}</div>
+        <div style="font-size:${big?'18px':'12.5px'};font-weight:${big?'800':'600'};color:${big?color:'var(--text2)'};letter-spacing:-0.3px;white-space:nowrap">${fmtShort(val)}</div>
+      </div>`;
+    return `
+      <div style="max-width:340px">
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:8px">
+          ${cell('Worst case', worst, false)}${cell('Likely', likely, true)}${cell('Best case', best, false)}
+        </div>
+        <div style="position:relative;margin-top:6px">
+          <div style="height:3px;border-radius:2px;background:linear-gradient(90deg,transparent,${color} 50%,transparent);opacity:0.4"></div>
+          <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;background:${color};border:2px solid var(--card,#fff)"></div>
+        </div>
+      </div>`;
+  };
 
   // ── Weekly Net Retained Analysis ──────────────────────────────────────────────
   const _wkPeriodFrom = useRemPeriod ? dashPeriodFrom : dashMonthStart;
@@ -3990,7 +4010,7 @@ async function renderDashboard(){
             <span style="font-weight:600;color:${churchBal.pettyFloat<0?'var(--danger)':'inherit'}">${fmt(churchBal.pettyFloat)}</span>
           </a>
           ${Math.abs(churchBal.heldForSatellites||0)>=0.5?`
-          <a onclick="App.navigate('remittances')" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between;border-top:1px dashed var(--border);margin-top:6px;padding-top:6px">
+          <a onclick="App.gotoSatellitePool()" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between;border-top:1px dashed var(--border);margin-top:6px;padding-top:6px">
             <span><span style="display:inline-block;width:8px;height:8px;background:#8B4513;border-radius:50%;margin-right:8px"></span><span style="text-decoration:underline dotted #8B4513;text-underline-offset:3px">${dashSatHeldDisp.label}</span></span>
             <span style="font-weight:600;color:#8B4513">${churchBal.heldForSatellites>0?'−':'+'}${dashSatHeldDisp.amount}</span>
           </a>
@@ -4321,10 +4341,7 @@ async function renderDashboard(){
                 <div style="width:3px;border-radius:2px;background:var(--primary);flex-shrink:0"></div>
                 <div style="flex:1;min-width:0">
                   <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Income for this period</div>
-                  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:7px">
-                    <span style="font-size:18px;font-weight:800;color:var(--primary);letter-spacing:-0.4px">${fmtShort(_incMid)}</span>
-                    <span style="font-size:11.5px;font-weight:700;color:var(--primary);opacity:0.75;background:rgba(29,158,117,0.12);border-radius:20px;padding:2px 9px;white-space:nowrap">± ${fmtShort(_incSpread)}</span>
-                  </div>
+                  ${_forecastRange(forecastIncome.min, _incMid, forecastIncome.max, 'var(--primary)')}
                 </div>
               </div>
 
@@ -4336,10 +4353,7 @@ async function renderDashboard(){
                 <div style="width:3px;border-radius:2px;background:#BA7517;flex-shrink:0"></div>
                 <div style="flex:1;min-width:0">
                   <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Retained Share</div>
-                  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:7px">
-                    <span style="font-size:18px;font-weight:800;color:#BA7517;letter-spacing:-0.4px">${fmtShort(_retMid)}</span>
-                    <span style="font-size:11.5px;font-weight:700;color:#BA7517;opacity:0.75;background:rgba(186,117,23,0.12);border-radius:20px;padding:2px 9px;white-space:nowrap">± ${fmtShort(_retSpread)}</span>
-                  </div>
+                  ${_forecastRange(forecastRetained.min, _retMid, forecastRetained.max, '#BA7517')}
                 </div>
               </div>
               <div style="height:1px;background:var(--border)"></div>
@@ -4350,13 +4364,8 @@ async function renderDashboard(){
               <div style="padding:13px 14px;background:${forecastBalance.min<0?'rgba(163,45,45,0.04)':'rgba(24,95,165,0.04)'};display:flex;align-items:stretch;gap:11px">
                 <div style="width:3px;border-radius:2px;background:${_balColor};flex-shrink:0"></div>
                 <div style="flex:1;min-width:0">
-                  <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Actual Balance after Expenses</div>
-                  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:6px">
-                    <span style="font-size:11px;color:#6366F1;font-weight:700;letter-spacing:0.2px">b/w</span>
-                    <span style="font-size:18px;font-weight:800;color:${_balColor};letter-spacing:-0.4px">${fmtShort(forecastBalance.min)}</span>
-                    <span style="font-size:11px;color:#6366F1;font-weight:700;letter-spacing:0.2px">to</span>
-                    <span style="font-size:18px;font-weight:800;color:${_balColor};letter-spacing:-0.4px">${fmtShort(forecastBalance.max)}</span>
-                  </div>
+                  <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Retained Income after Expenses</div>
+                  ${_forecastRange(forecastBalance.min, Math.round((forecastBalance.min+forecastBalance.max)/2), forecastBalance.max, _balColor)}
                 </div>
               </div>
               `:forecastExpenses?`
@@ -4364,10 +4373,7 @@ async function renderDashboard(){
                 <div style="width:3px;border-radius:2px;background:var(--danger);flex-shrink:0"></div>
                 <div style="flex:1;min-width:0">
                   <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:5px">Expected Expenses</div>
-                  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:7px">
-                    <span style="font-size:18px;font-weight:800;color:var(--danger);letter-spacing:-0.4px">${fmtShort(Math.round((forecastExpenses.min+forecastExpenses.max)/2))}</span>
-                    <span style="font-size:11.5px;font-weight:700;color:var(--danger);opacity:0.75;background:rgba(163,45,45,0.12);border-radius:20px;padding:2px 9px;white-space:nowrap">± ${fmtShort(Math.round((forecastExpenses.max-forecastExpenses.min)/2))}</span>
-                  </div>
+                  ${_forecastRange(forecastExpenses.max, Math.round((forecastExpenses.min+forecastExpenses.max)/2), forecastExpenses.min, 'var(--danger)')}
                 </div>
               </div>
               `:''}
@@ -4564,6 +4570,20 @@ async function renderIncome(){
     </div>
     ${await (tab==='list'?renderIncomeList(sundayRecs, _cashTx, remRates, expCoveringMap):tab==='other'?renderOtherIncomeList(otherRecs, expCoveringMap):tab==='summary'?renderIncomeSummary(records):renderAllIncomeList(allIncomeRecs, _cashTx, remRates, expCoveringMap))}
     ${renderSatelliteFundsPanel(satFundsIn, satFundsOut, satFundsTransferOut, satFundsHeld, satFundsRecent, satFundsTransferByReason)}`;
+
+  // One-shot deep link from a "Held for satellites" figure elsewhere in the app
+  // (see gotoSatellitePool): scroll to the pool panel once it's actually painted,
+  // with a brief highlight so the eye lands on the right card.
+  if(state._scrollToSatPool){
+    state._scrollToSatPool = false;
+    const panel = document.getElementById('satellite-pool-panel');
+    if(panel){
+      panel.scrollIntoView({ behavior:'smooth', block:'start' });
+      panel.style.transition = 'box-shadow 0.4s';
+      panel.style.boxShadow = '0 0 0 3px #8B4513';
+      setTimeout(()=>{ panel.style.boxShadow = ''; }, 1800);
+    }
+  }
 }
 
 // ── Satellite / Zone Funds Received — shown on the Income page, clearly separated
@@ -6196,7 +6216,14 @@ async function renderRemittances(){
   const _periodDueSnapshot=periodPayments.reduce((max,r)=>Math.max(max,r.dueAtTimeOfPayment||0),0);
   const _effectiveDue=_periodDueSnapshot>0?_periodDueSnapshot:(toDate<todayStr&&totalPaid>0?totalPaid:totalDue);
   const _isLegacyFullPaid=_legacyPaid>0&&_legacyPaid>=_effectiveDue*PAYMENT_TOLERANCE_THRESHOLD;
-  const isPartAPaid=_isLegacyFullPaid||(partATotal>0&&_paidA>0&&_paidA>=partATotal*PAYMENT_TOLERANCE_THRESHOLD);
+  // Part A settles against the payment's OWN due snapshot when one exists (an
+  // adjusted share — see submitRemittance's dueAtTimeOfPayment — genuinely changes
+  // the obligation, e.g. a waiver lowering ₦90k to ₦80k must not read as ₦10k
+  // outstanding forever). Falls back to the live-calculated partATotal for legacy
+  // records with no snapshot.
+  const _partADueSnapshot=periodPayments.filter(r=>r.part==='a').reduce((max,r)=>Math.max(max,r.dueAtTimeOfPayment||0),0);
+  const _partATarget=_partADueSnapshot>0?_partADueSnapshot:partATotal;
+  const isPartAPaid=_isLegacyFullPaid||(_partATarget>0&&_paidA>0&&_paidA>=_partATarget*PAYMENT_TOLERANCE_THRESHOLD);
   const isPartBPaid=_isLegacyFullPaid||(partBTotal>0&&_paidB>0&&_paidB>=partBTotal*PAYMENT_TOLERANCE_THRESHOLD)||(partBTotal===0);
   const isPaid=isPartAPaid&&isPartBPaid;
   const isPartial=(totalPaid>0||_paidA>0||_paidB>0)&&!isPaid;
@@ -6471,6 +6498,15 @@ async function renderRemittances(){
     </div>`;
 }
 
+// Jump from a "Held for satellites" figure (Dashboard breakdown, Bank page alert)
+// straight to the Satellite/Zone pool panel — the last card on the Record Income
+// page. Navigation is async (renderIncome fetches over the network), so the scroll
+// happens via a one-shot flag renderIncome honors after it paints — not a timer.
+function gotoSatellitePool(){
+  state._scrollToSatPool = true;
+  navigate('income');
+}
+
 // Display-only label helper for the held-for-satellites figure — used by the
 // Dashboard balance breakdown, the pool panel KPI, and the Bank page alert.
 // held>0: money this parish holds on the satellites' behalf (excluded from
@@ -6510,7 +6546,7 @@ function renderSatelliteFundsPanel(totalIn, totalOut, totalTransferOut, held, re
   // always shows (unlike the Dashboard/Bank lines, which hide entirely when held===0).
   const heldDisp = satelliteHeldDisplay(held);
   return `
-    <div class="card" style="margin-top:12px;border-left:3px solid var(--primary)">
+    <div class="card" id="satellite-pool-panel" style="margin-top:12px;border-left:3px solid var(--primary)">
       <div class="card-header">
         <span class="card-title">🛰️ Funds Received &amp; Remitted on Behalf of Satellite Parishes</span>
       </div>
@@ -6604,6 +6640,7 @@ async function editSatelliteFundEntry(id){
 async function showRemittancePaymentModal(part){
   if(!part) part='a'; // default
   if(!canAction('remittance_record_payment')){ showAlert('You do not have permission to record remittance payments.','danger'); return; }
+  _remShareAdjustOpen = false;   // a fresh form always starts from the calculated share
   const [allIncome, settings, allUsers] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getUsers()]);
   const quotas=getQuotaList(settings);
   const fromDate=state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
@@ -6691,19 +6728,36 @@ async function showRemittancePaymentModal(part){
       <div style="font-size:12px;color:var(--text2);margin-bottom:12px">
         As Area HQ, you pay remittance for all parishes combined on the RCCG portal. Enter the <strong>total area amount</strong> paid — the system will calculate how much came from satellite parishes.
       </div>
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
         <span style="font-size:12px;color:var(--text2);white-space:nowrap">Our Parish Share:</span>
-        <span style="font-size:15px;font-weight:700;color:var(--text)">${fmt(totalDue)}</span>
+        <span id="rem_share_display" style="font-size:15px;font-weight:700;color:var(--text)">${fmt(totalDue)}</span>
+        <button type="button" class="btn btn-sm" style="font-size:11px;padding:2px 8px" onclick="App.toggleRemShareAdjust(${totalDue})">✏️ Adjust</button>
+      </div>
+      <!-- One-time adjustment of our own share (e.g. an extra levy instructed by RCCG
+           authorities that the due calculator doesn't know about). The satellite share
+           is derived from the ADJUSTED figure, so the pool is never over/under-drawn
+           when our real share differs from the calculated one. A reason is mandatory
+           whenever the adjusted figure differs from the calculated due. -->
+      <div id="rem_share_adjust_group" style="display:none;background:#fff;border-radius:var(--r);padding:10px 12px;border:1px dashed var(--amber);margin-bottom:10px">
+        <div class="form-group" style="margin-bottom:8px">
+          <label class="form-label">Our Actual Parish Share (₦) *</label>
+          <input type="number" id="rem_adjusted_share" class="form-input" value="${totalDue}" min="0" oninput="App.onAreaTotalChange(${totalDue})" />
+          <div class="form-hint">Calculated: <strong>${fmt(totalDue)}</strong>. Enter what our parish is actually paying (e.g. including a one-time levy) — the satellite share below is worked out from this figure.</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label">Reason for Adjustment *</label>
+          <input type="text" id="rem_adjust_reason" class="form-input" placeholder="e.g. One-time maintenance levy per Province instruction" />
+        </div>
       </div>
       <div class="form-group" style="margin-bottom:8px">
         <label class="form-label">Total Amount Paid to RCCG Portal (₦)</label>
-        <input type="number" id="rem_area_total" class="form-input" placeholder="Leave blank if paying only our parish share" min="0" oninput="App.onAreaTotalChange(${Math.round(totalDue)})" />
+        <input type="number" id="rem_area_total" class="form-input" placeholder="Leave blank if paying only our parish share" min="0" oninput="App.onAreaTotalChange(${totalDue})" />
         <div class="form-hint">The exact amount debited from your bank to the RCCG portal for the entire area.</div>
       </div>
       <div id="rem_area_breakdown" style="display:none;background:#fff;border-radius:var(--r);padding:10px 12px;border:1px dashed var(--border)">
         <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
           <span style="color:var(--text2)">🏠 Our Parish (Kingdom Parish)</span>
-          <span style="font-weight:600">${fmt(totalDue)}</span>
+          <span id="rem_area_ours_amt" style="font-weight:600">${fmt(totalDue)}</span>
         </div>
         <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
           <span style="color:var(--text2)">🏘️ Satellite Parishes (3)</span>
@@ -6853,15 +6907,50 @@ function onRemSplitChange(totalDue){
   }
 }
 
-function onAreaTotalChange(ourParishShare){
+// Whether the "Our Actual Parish Share" adjustment block is open on the Part A form.
+// A plain module flag (reset each time the modal opens) rather than a DOM-visibility
+// check, so submit logic can't be fooled by styling state.
+let _remShareAdjustOpen = false;
+
+// The parish share the Area Payment math should actually use: the adjusted figure
+// when the adjust block is open and holds a valid number, else the calculated due.
+function remEffectiveParishShare(calculatedDue){
+  if(_remShareAdjustOpen){
+    const v = parseFloat(document.getElementById('rem_adjusted_share')?.value);
+    if(!isNaN(v) && v >= 0) return v;
+  }
+  return calculatedDue;
+}
+
+function toggleRemShareAdjust(calculatedDue){
+  _remShareAdjustOpen = !_remShareAdjustOpen;
+  const grp = document.getElementById('rem_share_adjust_group');
+  if(grp) grp.style.display = _remShareAdjustOpen ? 'block' : 'none';
+  if(!_remShareAdjustOpen){
+    // Closing = cancelling the adjustment: restore the calculated figure and clear
+    // the reason so a half-typed adjustment can never leak into the submit.
+    const adjEl = document.getElementById('rem_adjusted_share');
+    if(adjEl) adjEl.value = calculatedDue;
+    const reasonEl = document.getElementById('rem_adjust_reason');
+    if(reasonEl) reasonEl.value = '';
+  }
+  onAreaTotalChange(calculatedDue);
+}
+
+function onAreaTotalChange(calculatedDue){
+  const ourParishShare = remEffectiveParishShare(calculatedDue);
   const areaTotal=parseFloat(document.getElementById('rem_area_total')?.value)||0;
   const breakdownEl=document.getElementById('rem_area_breakdown');
+  const oursEl=document.getElementById('rem_area_ours_amt');
   const othersEl=document.getElementById('rem_area_others_amt');
   const totalDisplayEl=document.getElementById('rem_area_total_display');
+  const shareDisplayEl=document.getElementById('rem_share_display');
+  if(shareDisplayEl) shareDisplayEl.textContent=fmt(ourParishShare)+(_remShareAdjustOpen&&Math.abs(ourParishShare-calculatedDue)>0.5?' (adjusted)':'');
   if(breakdownEl){
     if(areaTotal>0){
       const othersAmt=Math.max(0, areaTotal-ourParishShare);
       breakdownEl.style.display='block';
+      if(oursEl) oursEl.textContent=fmt(Math.min(ourParishShare, areaTotal));
       if(othersEl) othersEl.textContent=fmt(othersAmt);
       if(totalDisplayEl) totalDisplayEl.textContent=fmt(areaTotal);
     } else {
@@ -6890,6 +6979,7 @@ async function submitRemittance(btn=null){
 
   // Resolve amounts
   let amount, bankAmount, cashAmount;
+  let shareAdjustNote = '';   // set in the Part A branch when the parish share was adjusted
   if(part==='a'){
     // Part A: our parish share (parishShare) is always the remittance's own "amount"
     // (the parish's own due obligation — used for remittance-specific reporting and
@@ -6902,7 +6992,27 @@ async function submitRemittance(btn=null){
     // rem_amount field (Part A doesn't render one — see showRemittancePaymentModal).
     // Previously this always forced bankAmount=areaTotal/cashAmount=0 regardless of
     // the selected method, silently ignoring Cash/Split for Part A — fixed here.
-    const parishShare = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
+    const calculatedDue = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
+    // Our REAL share this payment may differ from the calculated due (e.g. a one-time
+    // levy instructed by RCCG authorities) — see toggleRemShareAdjust. The satellite
+    // overage is always derived from the EFFECTIVE share, so the pool is drawn exactly
+    // what the satellites owe, never inflated/deflated by our own adjustment.
+    // With the Adjust box open, the raw input is validated directly — a cleared or
+    // non-numeric field must BLOCK, not silently fall back to the calculated due
+    // (which would skip the mandatory-reason check and record an unadjusted figure
+    // while the form showed a blank).
+    if(_remShareAdjustOpen){
+      const rawAdj = document.getElementById('rem_adjusted_share')?.value;
+      const adjVal = parseFloat(rawAdj);
+      if(rawAdj==null || String(rawAdj).trim()==='' || isNaN(adjVal) || adjVal<=0){
+        showAlert('Please enter the adjusted parish share — or close the ✏️ Adjust box to use the calculated figure.','danger'); return;
+      }
+    }
+    const parishShare = remEffectiveParishShare(calculatedDue);
+    const shareAdjusted = _remShareAdjustOpen && Math.abs(parishShare - calculatedDue) > 0.5;
+    const adjustReason = (document.getElementById('rem_adjust_reason')?.value||'').trim();
+    if(shareAdjusted && !adjustReason){ showAlert('Please give the reason for adjusting the parish share.','danger'); return; }
+    if(shareAdjusted) shareAdjustNote = `Parish share adjusted to ${fmt(parishShare)} (calculated: ${fmt(calculatedDue)}) — Reason: ${adjustReason}`;
     const areaTotal = parseFloat(document.getElementById('rem_area_total')?.value) || 0;
     const paidTotal = areaTotal > 0 ? areaTotal : parishShare;
     amount = parishShare;
@@ -6959,10 +7069,20 @@ async function submitRemittance(btn=null){
   // failed, and roll it back if so.
   let satelliteFundRef = '';
   try {
-    const dueAtTimeOfPayment = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
+    // dueAtTimeOfPayment is the SETTLEMENT SNAPSHOT — what this parish actually owed
+    // when it paid. For Part A that is the EFFECTIVE (possibly adjusted) share: an
+    // authority-instructed levy or waiver genuinely changes the obligation, so the
+    // paid/outstanding checks (renderRemittances' per-part target, the dashboard's
+    // due-snapshot) must settle against it — otherwise a downward adjustment shows
+    // "Part A unpaid" forever. The pre-adjustment calculated figure stays on record
+    // in the notes/audit line (see shareAdjustNote above).
+    const dueAtTimeOfPayment = part==='a' ? amount : (parseFloat(document.getElementById('rem_total_due')?.value) || 0);
     const breakdownSnapshot = document.getElementById('rem_breakdown_snapshot')?.value || '';
     const areaTotalPaid = parseFloat(document.getElementById('rem_area_total')?.value) || 0;
-    const otherParishesAmount = areaTotalPaid > 0 ? Math.max(0, areaTotalPaid - dueAtTimeOfPayment) : 0;
+    // The overage is derived from `amount` — the effective share. Using the
+    // calculated due here would over/under-draw the pool by exactly the adjustment —
+    // the bug the Adjust control exists to prevent.
+    const otherParishesAmount = areaTotalPaid > 0 ? Math.max(0, areaTotalPaid - amount) : 0;
     const partLabel = part==='a'?'Part A — RCCG Authorities':part==='b'?'Part B — TG & Pastoral':'RCCG Monthly Remittance';
 
     // Funding source for the auto-linked satellite_funds 'out' entry below (the
@@ -6991,7 +7111,7 @@ async function submitRemittance(btn=null){
     await DB.addRemittance({
       label:partLabel, amount, paidDate:date,
       reference, authorizedBy:auth,
-      notes:(receiptFileName?`Receipt: ${receiptFileName}\n`:'')+notes,
+      notes:(receiptFileName?`Receipt: ${receiptFileName}\n`:'')+(shareAdjustNote?shareAdjustNote+'\n':'')+notes,
       paymentMethod:method,
       bankAmount, cashAmount,
       periodFrom:fromDate, periodTo:toDate,
@@ -7005,7 +7125,7 @@ async function submitRemittance(btn=null){
       satelliteFundRef,
     });
     DB.addAudit('remittance_submitted',
-      `Remittance paid: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}${areaTotalPaid>0?' — Area total: '+fmt(areaTotalPaid)+' (other parishes: '+fmt(otherParishesAmount)+')':''}${satelliteFundRef?' — satellite share auto-linked to the Satellite/Zone Pool':''}`,
+      `Remittance paid: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}${areaTotalPaid>0?' — Area total: '+fmt(areaTotalPaid)+' (other parishes: '+fmt(otherParishesAmount)+')':''}${shareAdjustNote?' — '+shareAdjustNote:''}${satelliteFundRef?' — satellite share auto-linked to the Satellite/Zone Pool':''}`,
       state.user?.name);
     DB.addNotification('Remittance Recorded',`RCCG remittance of ${fmt(amount)} paid (${methodLabel}) for period ${fmtDate(fromDate)} – ${fmtDate(toDate)}.`,'success');
     closeModal();
@@ -9843,7 +9963,7 @@ async function renderBank(){
     </div>
     ${_bankHasPending?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⏳</span><span>A deposit of <strong>${fmt(_bankPendingTotal)}</strong> is ${_bankPendingDeps[0]?.verificationStatus==='flagged'?'<strong>flagged by AI</strong> — please review and correct or approve it below':'<strong>pending AI verification</strong>'}.</span></div>`:''}
     ${cashWithAccountant>0&&!_bankHasPending&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong> not yet deposited to the bank account.${pendingDepCount>0?` (${pendingDepCount} income record(s) pending)`:''} <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
-    ${Math.abs(heldForSatellitesRB||0)>=0.5?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🛰️</span><span>${bankSatHeldDisp.label}: <strong>${bankSatHeldDisp.amount}</strong> (${bankSatHeldDisp.suffix}) — already included in the Bank Balance or Cash with Accountant below (depending on how it was received); see the <a onclick="App.navigate('remittances')" style="cursor:pointer;text-decoration:underline">Satellite Pass-Through Fund panel</a> on Remittances.</span></div>`:''}
+    ${Math.abs(heldForSatellitesRB||0)>=0.5?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🛰️</span><span>${bankSatHeldDisp.label}: <strong>${bankSatHeldDisp.amount}</strong> (${bankSatHeldDisp.suffix}) — already included in the Bank Balance or Cash with Accountant below (depending on how it was received); see the <a onclick="App.gotoSatellitePool()" style="cursor:pointer;text-decoration:underline">Satellite Pass-Through Fund panel</a> on Record Income.</span></div>`:''}
 
     <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
       <div class="kpi">
@@ -13518,7 +13638,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
   updateExpenseSubcats, updateExpenseDescRequired,
