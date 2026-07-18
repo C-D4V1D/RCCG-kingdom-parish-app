@@ -6604,6 +6604,7 @@ async function editSatelliteFundEntry(id){
 async function showRemittancePaymentModal(part){
   if(!part) part='a'; // default
   if(!canAction('remittance_record_payment')){ showAlert('You do not have permission to record remittance payments.','danger'); return; }
+  _remShareAdjustOpen = false;   // a fresh form always starts from the calculated share
   const [allIncome, settings, allUsers] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getUsers()]);
   const quotas=getQuotaList(settings);
   const fromDate=state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
@@ -6691,19 +6692,36 @@ async function showRemittancePaymentModal(part){
       <div style="font-size:12px;color:var(--text2);margin-bottom:12px">
         As Area HQ, you pay remittance for all parishes combined on the RCCG portal. Enter the <strong>total area amount</strong> paid — the system will calculate how much came from satellite parishes.
       </div>
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
         <span style="font-size:12px;color:var(--text2);white-space:nowrap">Our Parish Share:</span>
-        <span style="font-size:15px;font-weight:700;color:var(--text)">${fmt(totalDue)}</span>
+        <span id="rem_share_display" style="font-size:15px;font-weight:700;color:var(--text)">${fmt(totalDue)}</span>
+        <button type="button" class="btn btn-sm" style="font-size:11px;padding:2px 8px" onclick="App.toggleRemShareAdjust(${totalDue})">✏️ Adjust</button>
+      </div>
+      <!-- One-time adjustment of our own share (e.g. an extra levy instructed by RCCG
+           authorities that the due calculator doesn't know about). The satellite share
+           is derived from the ADJUSTED figure, so the pool is never over/under-drawn
+           when our real share differs from the calculated one. A reason is mandatory
+           whenever the adjusted figure differs from the calculated due. -->
+      <div id="rem_share_adjust_group" style="display:none;background:#fff;border-radius:var(--r);padding:10px 12px;border:1px dashed var(--amber);margin-bottom:10px">
+        <div class="form-group" style="margin-bottom:8px">
+          <label class="form-label">Our Actual Parish Share (₦) *</label>
+          <input type="number" id="rem_adjusted_share" class="form-input" value="${totalDue}" min="0" oninput="App.onAreaTotalChange(${totalDue})" />
+          <div class="form-hint">Calculated: <strong>${fmt(totalDue)}</strong>. Enter what our parish is actually paying (e.g. including a one-time levy) — the satellite share below is worked out from this figure.</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label">Reason for Adjustment *</label>
+          <input type="text" id="rem_adjust_reason" class="form-input" placeholder="e.g. One-time maintenance levy per Province instruction" />
+        </div>
       </div>
       <div class="form-group" style="margin-bottom:8px">
         <label class="form-label">Total Amount Paid to RCCG Portal (₦)</label>
-        <input type="number" id="rem_area_total" class="form-input" placeholder="Leave blank if paying only our parish share" min="0" oninput="App.onAreaTotalChange(${Math.round(totalDue)})" />
+        <input type="number" id="rem_area_total" class="form-input" placeholder="Leave blank if paying only our parish share" min="0" oninput="App.onAreaTotalChange(${totalDue})" />
         <div class="form-hint">The exact amount debited from your bank to the RCCG portal for the entire area.</div>
       </div>
       <div id="rem_area_breakdown" style="display:none;background:#fff;border-radius:var(--r);padding:10px 12px;border:1px dashed var(--border)">
         <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
           <span style="color:var(--text2)">🏠 Our Parish (Kingdom Parish)</span>
-          <span style="font-weight:600">${fmt(totalDue)}</span>
+          <span id="rem_area_ours_amt" style="font-weight:600">${fmt(totalDue)}</span>
         </div>
         <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
           <span style="color:var(--text2)">🏘️ Satellite Parishes (3)</span>
@@ -6853,15 +6871,50 @@ function onRemSplitChange(totalDue){
   }
 }
 
-function onAreaTotalChange(ourParishShare){
+// Whether the "Our Actual Parish Share" adjustment block is open on the Part A form.
+// A plain module flag (reset each time the modal opens) rather than a DOM-visibility
+// check, so submit logic can't be fooled by styling state.
+let _remShareAdjustOpen = false;
+
+// The parish share the Area Payment math should actually use: the adjusted figure
+// when the adjust block is open and holds a valid number, else the calculated due.
+function remEffectiveParishShare(calculatedDue){
+  if(_remShareAdjustOpen){
+    const v = parseFloat(document.getElementById('rem_adjusted_share')?.value);
+    if(!isNaN(v) && v >= 0) return v;
+  }
+  return calculatedDue;
+}
+
+function toggleRemShareAdjust(calculatedDue){
+  _remShareAdjustOpen = !_remShareAdjustOpen;
+  const grp = document.getElementById('rem_share_adjust_group');
+  if(grp) grp.style.display = _remShareAdjustOpen ? 'block' : 'none';
+  if(!_remShareAdjustOpen){
+    // Closing = cancelling the adjustment: restore the calculated figure and clear
+    // the reason so a half-typed adjustment can never leak into the submit.
+    const adjEl = document.getElementById('rem_adjusted_share');
+    if(adjEl) adjEl.value = calculatedDue;
+    const reasonEl = document.getElementById('rem_adjust_reason');
+    if(reasonEl) reasonEl.value = '';
+  }
+  onAreaTotalChange(calculatedDue);
+}
+
+function onAreaTotalChange(calculatedDue){
+  const ourParishShare = remEffectiveParishShare(calculatedDue);
   const areaTotal=parseFloat(document.getElementById('rem_area_total')?.value)||0;
   const breakdownEl=document.getElementById('rem_area_breakdown');
+  const oursEl=document.getElementById('rem_area_ours_amt');
   const othersEl=document.getElementById('rem_area_others_amt');
   const totalDisplayEl=document.getElementById('rem_area_total_display');
+  const shareDisplayEl=document.getElementById('rem_share_display');
+  if(shareDisplayEl) shareDisplayEl.textContent=fmt(ourParishShare)+(_remShareAdjustOpen&&Math.abs(ourParishShare-calculatedDue)>0.5?' (adjusted)':'');
   if(breakdownEl){
     if(areaTotal>0){
       const othersAmt=Math.max(0, areaTotal-ourParishShare);
       breakdownEl.style.display='block';
+      if(oursEl) oursEl.textContent=fmt(Math.min(ourParishShare, areaTotal));
       if(othersEl) othersEl.textContent=fmt(othersAmt);
       if(totalDisplayEl) totalDisplayEl.textContent=fmt(areaTotal);
     } else {
@@ -6890,6 +6943,7 @@ async function submitRemittance(btn=null){
 
   // Resolve amounts
   let amount, bankAmount, cashAmount;
+  let shareAdjustNote = '';   // set in the Part A branch when the parish share was adjusted
   if(part==='a'){
     // Part A: our parish share (parishShare) is always the remittance's own "amount"
     // (the parish's own due obligation — used for remittance-specific reporting and
@@ -6902,7 +6956,17 @@ async function submitRemittance(btn=null){
     // rem_amount field (Part A doesn't render one — see showRemittancePaymentModal).
     // Previously this always forced bankAmount=areaTotal/cashAmount=0 regardless of
     // the selected method, silently ignoring Cash/Split for Part A — fixed here.
-    const parishShare = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
+    const calculatedDue = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
+    // Our REAL share this payment may differ from the calculated due (e.g. a one-time
+    // levy instructed by RCCG authorities) — see toggleRemShareAdjust. The satellite
+    // overage is always derived from the EFFECTIVE share, so the pool is drawn exactly
+    // what the satellites owe, never inflated/deflated by our own adjustment.
+    const parishShare = remEffectiveParishShare(calculatedDue);
+    const shareAdjusted = _remShareAdjustOpen && Math.abs(parishShare - calculatedDue) > 0.5;
+    if(_remShareAdjustOpen && parishShare <= 0){ showAlert('Please enter the adjusted parish share.','danger'); return; }
+    const adjustReason = (document.getElementById('rem_adjust_reason')?.value||'').trim();
+    if(shareAdjusted && !adjustReason){ showAlert('Please give the reason for adjusting the parish share.','danger'); return; }
+    if(shareAdjusted) shareAdjustNote = `Parish share adjusted to ${fmt(parishShare)} (calculated: ${fmt(calculatedDue)}) — Reason: ${adjustReason}`;
     const areaTotal = parseFloat(document.getElementById('rem_area_total')?.value) || 0;
     const paidTotal = areaTotal > 0 ? areaTotal : parishShare;
     amount = parishShare;
@@ -6962,7 +7026,11 @@ async function submitRemittance(btn=null){
     const dueAtTimeOfPayment = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
     const breakdownSnapshot = document.getElementById('rem_breakdown_snapshot')?.value || '';
     const areaTotalPaid = parseFloat(document.getElementById('rem_area_total')?.value) || 0;
-    const otherParishesAmount = areaTotalPaid > 0 ? Math.max(0, areaTotalPaid - dueAtTimeOfPayment) : 0;
+    // The overage is derived from `amount` — the EFFECTIVE (possibly adjusted) parish
+    // share — not from dueAtTimeOfPayment (the calculated due, kept for reporting).
+    // With an adjusted share, using the calculated due here would over/under-draw the
+    // pool by exactly the adjustment — the bug the Adjust control exists to prevent.
+    const otherParishesAmount = areaTotalPaid > 0 ? Math.max(0, areaTotalPaid - amount) : 0;
     const partLabel = part==='a'?'Part A — RCCG Authorities':part==='b'?'Part B — TG & Pastoral':'RCCG Monthly Remittance';
 
     // Funding source for the auto-linked satellite_funds 'out' entry below (the
@@ -6991,7 +7059,7 @@ async function submitRemittance(btn=null){
     await DB.addRemittance({
       label:partLabel, amount, paidDate:date,
       reference, authorizedBy:auth,
-      notes:(receiptFileName?`Receipt: ${receiptFileName}\n`:'')+notes,
+      notes:(receiptFileName?`Receipt: ${receiptFileName}\n`:'')+(shareAdjustNote?shareAdjustNote+'\n':'')+notes,
       paymentMethod:method,
       bankAmount, cashAmount,
       periodFrom:fromDate, periodTo:toDate,
@@ -7005,7 +7073,7 @@ async function submitRemittance(btn=null){
       satelliteFundRef,
     });
     DB.addAudit('remittance_submitted',
-      `Remittance paid: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}${areaTotalPaid>0?' — Area total: '+fmt(areaTotalPaid)+' (other parishes: '+fmt(otherParishesAmount)+')':''}${satelliteFundRef?' — satellite share auto-linked to the Satellite/Zone Pool':''}`,
+      `Remittance paid: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}${areaTotalPaid>0?' — Area total: '+fmt(areaTotalPaid)+' (other parishes: '+fmt(otherParishesAmount)+')':''}${shareAdjustNote?' — '+shareAdjustNote:''}${satelliteFundRef?' — satellite share auto-linked to the Satellite/Zone Pool':''}`,
       state.user?.name);
     DB.addNotification('Remittance Recorded',`RCCG remittance of ${fmt(amount)} paid (${methodLabel}) for period ${fmtDate(fromDate)} – ${fmtDate(toDate)}.`,'success');
     closeModal();
@@ -13518,7 +13586,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
   updateExpenseSubcats, updateExpenseDescRequired,
