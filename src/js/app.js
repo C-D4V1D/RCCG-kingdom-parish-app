@@ -6901,6 +6901,10 @@ async function submitRemittance(btn=null){
     : method==='bank_transfer'?'Bank Transfer':'Cash';
 
   const restore = setBtnLoading(btn, 'Submitting…');
+  // Declared outside the try block so the catch handler below can see whether the
+  // satellite fund auto-link (see Part A below) succeeded before DB.addRemittance
+  // failed, and roll it back if so.
+  let satelliteFundRef = '';
   try {
     const dueAtTimeOfPayment = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
     const breakdownSnapshot = document.getElementById('rem_breakdown_snapshot')?.value || '';
@@ -6928,7 +6932,6 @@ async function submitRemittance(btn=null){
     // Zone Pool payout (see calcChurchBalance/createSatelliteFund) — so the pool's
     // held balance and the real bank/petty/cash balance both stay correct without
     // touching paidRems, which continues to represent only our own true obligation.
-    let satelliteFundRef = '';
     if(part === 'a' && otherParishesAmount > 0){
       const satNote = `Auto-linked from Remittance Part A — Area Payment (Ref: ${reference||'—'})`;
       const satResult = await DB.addSatelliteFund({
@@ -6964,7 +6967,27 @@ async function submitRemittance(btn=null){
     renderRemittances();
   } catch(err) {
     restore();
-    showAlert(`Failed to submit remittance: ${err.message||'Unknown error'}. Please try again.`,'danger');
+    // If the satellite fund auto-link (Part A overage) was created above but the
+    // remittance itself then failed to save, that satellite_funds 'out' entry (and
+    // its bank/petty mirror) is now an orphan for a payment that, from the real
+    // world's perspective, never completed. Left alone, a retry per the error
+    // message below would create a SECOND satellite fund entry for the same
+    // real-world payment — silently double-debiting the pool. Roll it back first,
+    // in its own try/catch so a rollback failure never masks the original error.
+    let rollbackFailed = false;
+    if(satelliteFundRef){
+      try {
+        await DB.deleteSatelliteFund(satelliteFundRef);
+      } catch(rollbackErr) {
+        rollbackFailed = true;
+      }
+    }
+    const rollbackNote = satelliteFundRef
+      ? (rollbackFailed
+          ? ' A linked Satellite/Zone Pool entry was created before this failure and could NOT be automatically rolled back — please check the Satellite/Zone Pool panel for a duplicate/orphaned entry before retrying.'
+          : ' (A linked Satellite/Zone Pool entry created moments ago was automatically rolled back — safe to retry.)')
+      : '';
+    showAlert(`Failed to submit remittance: ${err.message||'Unknown error'}. Please try again.${rollbackNote}`,'danger');
   }
 }
 
@@ -7970,7 +7993,7 @@ async function buildMonthlyStatementData(fromDate, toDate){
 
   // Section E — expense by category
   const expByCat={};
-  EXPENSE_CATS.forEach(c=>{expByCat[c.key]={label:c.label,icon:c.icon,total:0,count:0}});
+  EXPENSE_CATS_ALL.forEach(c=>{expByCat[c.key]={label:c.label,icon:c.icon,total:0,count:0}});
   expenses.forEach(e=>{if(expByCat[e.category]){expByCat[e.category].total+=e.amount||0;expByCat[e.category].count++}});
   const expenseByCategory=Object.values(expByCat).filter(c=>c.total>0).sort((a,b)=>b.total-a.total)
     .map(c=>({label:`${c.icon} ${c.label}`, count:c.count, total:c.total, pct:totalExpenses?Math.round(c.total/totalExpenses*100):0}));
@@ -8131,7 +8154,7 @@ async function renderExpenses(){
 
   // Category totals for breakdown
   const catTotals = {};
-  EXPENSE_CATS.forEach(c=>{ catTotals[c.key]=expenses.filter(e=>e.category===c.key).reduce((s,e)=>s+(e.amount||0),0); });
+  EXPENSE_CATS_ALL.forEach(c=>{ catTotals[c.key]=expenses.filter(e=>e.category===c.key).reduce((s,e)=>s+(e.amount||0),0); });
 
   // Quick-log: top 5 most frequent subcategories from the last 3 months
   const _3moAgo = new Date(); _3moAgo.setMonth(_3moAgo.getMonth() - 3);
@@ -12031,7 +12054,7 @@ async function generateMonthlyReport(){
 
   // Expense by category summary
   const expByCat={};
-  EXPENSE_CATS.forEach(c=>{expByCat[c.key]={label:c.label,icon:c.icon,total:0,count:0}});
+  EXPENSE_CATS_ALL.forEach(c=>{expByCat[c.key]={label:c.label,icon:c.icon,total:0,count:0}});
   expenses.forEach(e=>{if(expByCat[e.category]){expByCat[e.category].total+=e.amount||0;expByCat[e.category].count++}});
   const expSorted=Object.values(expByCat).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);
 
@@ -12310,7 +12333,7 @@ async function generateExpenseReport(){
 
   // By category
   const byCat={};
-  EXPENSE_CATS.forEach(c=>{byCat[c.key]={label:c.label,icon:c.icon,total:0,count:0,items:[]}});
+  EXPENSE_CATS_ALL.forEach(c=>{byCat[c.key]={label:c.label,icon:c.icon,total:0,count:0,items:[]}});
   expenses.forEach(e=>{if(byCat[e.category]){byCat[e.category].total+=e.amount||0;byCat[e.category].count++;byCat[e.category].items.push(e)}});
   const sorted=Object.values(byCat).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);
 

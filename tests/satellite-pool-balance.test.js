@@ -557,3 +557,93 @@ test('Area Payment with NO satellite overage (areaTotalPaid <= our own share): n
   const bal = await balance({ remittances, satelliteFunds: [] });
   assert.equal(bal.heldForSatellites, 0);
 });
+
+// ── Codex review fixes (PR #263) ────────────────────────────────────────────
+
+test('legacy expense category (zonal_area_joint) is included in EXPENSE_CATS_ALL but not in the selectable EXPENSE_CATS', () => {
+  const selectable = App._EXPENSE_CATS;
+  const all = App._EXPENSE_CATS_ALL;
+  const legacy = App._LEGACY_EXPENSE_CATS;
+
+  assert.ok(legacy.zonal_area_joint, 'the retired category still has a fallback label entry');
+  assert.equal(selectable.some(c => c.key === 'zonal_area_joint'), false, 'retired category must not be choosable for new expenses');
+  assert.equal(all.some(c => c.key === 'zonal_area_joint'), true, 'retired category must still resolve for historical records');
+
+  // Reproduces the exact seed-then-sum aggregation pattern used at all 4 report/
+  // summary call sites (buildMonthlyStatementData, renderExpenses, generateMonthlyReport,
+  // generateExpenseReport) — each does `EXPENSE_CATS_ALL.forEach(c=>{map[c.key]={...}})`
+  // then sums expenses into it. Before the fix, these seeded from EXPENSE_CATS only, so
+  // a historical 'zonal_area_joint' expense had no bucket to land in and was silently
+  // dropped from category breakdowns while still counting toward totalExpenses.
+  const expenses = [
+    { category: 'zonal_area_joint', amount: 7000 },
+    { category: 'rccg_proj', amount: 3000 },
+  ];
+  const map = {};
+  all.forEach(c => { map[c.key] = { label: c.label, total: 0, count: 0 }; });
+  expenses.forEach(e => { if (map[e.category]) { map[e.category].total += e.amount || 0; map[e.category].count++; } });
+
+  assert.equal(map.zonal_area_joint.total, 7000, 'legacy-category expense is counted in the breakdown, not silently dropped');
+  assert.equal(map.zonal_area_joint.count, 1);
+  const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
+  const sumOfBreakdown = Object.values(map).reduce((s, c) => s + c.total, 0);
+  assert.equal(sumOfBreakdown, totalExpenses, 'the category breakdown must add up to the same total as totalExpenses — no silent drops');
+});
+
+// ── Rollback of the auto-linked pool entry when the remittance save fails ──
+// submitRemittance() creates the satellite_funds 'out' entry (Part A overage) BEFORE
+// DB.addRemittance(). If addRemittance then fails, the orphaned pool entry must be
+// rolled back via DB.deleteSatelliteFund — otherwise a retry (which the error message
+// invites) would create a SECOND pool debit for the same real-world payment. Exercised
+// here against the real App.submitRemittance() with a mocked fetch and a minimal DOM
+// stub providing just the form fields it reads.
+test('submitRemittance rollback: a remittance save failure after the satellite fund was created rolls the pool entry back', async () => {
+  const savedDocument = globalThis.document;
+  const savedWindowDocument = globalThis.window.document;
+  const savedFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    const fieldValues = {
+      rem_part: 'a', rem_date: '2026-07-01', rem_ref: '', rem_notes: '',
+      rem_auth_text: 'Test Signatory', rem_total_due: '50000', rem_area_total: '150000',
+      rem_breakdown_snapshot: '',
+    };
+    const remittanceDocStub = {
+      ...documentStub,
+      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : null; },
+      querySelector(sel) { return sel === 'input[name="rem_method"]:checked' ? { value: 'cash' } : null; },
+      querySelectorAll(sel) { return sel === 'input[name="rem_sig"]:checked' ? [] : []; },
+    };
+    globalThis.document = remittanceDocStub;
+    globalThis.window.document = remittanceDocStub;
+
+    globalThis.fetch = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      calls.push({ url, method });
+      if (method === 'POST' && url === '/api/satellite-funds') {
+        return { ok: true, status: 200, json: async () => ({ id: 'SAT-ROLLBACK-TEST', direction: 'out' }) };
+      }
+      if (method === 'POST' && url === '/api/remittances') {
+        return { ok: false, status: 500, json: async () => ({ error: 'Simulated remittance save failure' }) };
+      }
+      if (method === 'DELETE' && url === '/api/satellite-funds/SAT-ROLLBACK-TEST') {
+        return { ok: true, status: 200, json: async () => ({ id: 'SAT-ROLLBACK-TEST', deleted: true }) };
+      }
+      throw new Error(`Unmocked fetch in rollback test: ${method} ${url}`);
+    };
+
+    await App.submitRemittance(null);
+
+    const satFundCreate = calls.find(c => c.method === 'POST' && c.url === '/api/satellite-funds');
+    const remittanceCreate = calls.find(c => c.method === 'POST' && c.url === '/api/remittances');
+    const satFundDelete = calls.find(c => c.method === 'DELETE' && c.url === '/api/satellite-funds/SAT-ROLLBACK-TEST');
+
+    assert.ok(satFundCreate, 'the satellite fund auto-link was attempted before the remittance save');
+    assert.ok(remittanceCreate, 'the remittance save was attempted and (per the mock) failed');
+    assert.ok(satFundDelete, 'the orphaned satellite fund entry was rolled back via DB.deleteSatelliteFund after the remittance save failed');
+  } finally {
+    globalThis.document = savedDocument;
+    globalThis.window.document = savedWindowDocument;
+    globalThis.fetch = savedFetch;
+  }
+});
