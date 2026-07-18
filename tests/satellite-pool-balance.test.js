@@ -250,7 +250,7 @@ test('satelliteHeldDisplay: negative held shows "Owed by satellites" with the ab
   const d = App._satelliteHeldDisplay(-2000);
   assert.equal(d.label, 'Owed by satellites');
   assert.equal(d.amount, '₦2,000', 'amount must be the absolute value, not the raw negative number');
-  assert.match(d.suffix, /owe the pool/);
+  assert.match(d.suffix, /not counted in the balance/, 'conservative wording: the receivable is incoming, not part of the total');
 });
 
 test('satelliteHeldDisplay: zero held is treated as the "Held" (non-owed) branch', () => {
@@ -458,13 +458,12 @@ test('petty-funded pool payout: petty float drops by X, bank and cash-with-accou
   assert.equal(after.cashWithAccountant, before.cashWithAccountant, 'the accountant is untouched by a petty-funded payout');
   assert.equal(after.heldForSatellites, before.heldForSatellites - 15000);
   assert.equal(after.heldForSatellites, -10000, 'pool started at 5000, paid out 15000 — now owed BY satellites (negative)');
-  // `total` (cash+bank+petty−held) is unaffected by a satellite in/out entry regardless
-  // of channel — this is the SAME funding-source-agnostic invariant already asserted by
-  // 'satellite pool: outbound X lowers bank and held by X, total unchanged' above; the
-  // real cash outflow (petty −15000) is exactly offset by held moving further negative
-  // (so −held adds 15000 back), matching the existing "reducing held alone is the
-  // complete balance effect" pattern used for transfer_out too.
-  assert.equal(after.total, before.total);
+  // CONSERVATIVE total: the ₦10,000 fronted beyond the pool's holdings is a
+  // receivable — money owed BY the satellites but not physically present — and is
+  // NOT counted in `total` until they repay. Real petty cash left (−15,000); the
+  // ₦5,000 that was theirs stops being excluded (held 5000 → 0), netting −10,000.
+  assert.equal(after.total, before.total - 10000);
+  assert.equal(after.satelliteReceivable, 10000, 'surfaced separately as an incoming figure');
 });
 
 test('cash_accountant-funded pool payout: cash-with-accountant drops by X (surfacing as a deficit), bank and petty unchanged, held goes negative by X', async () => {
@@ -481,7 +480,8 @@ test('cash_accountant-funded pool payout: cash-with-accountant drops by X (surfa
   assert.equal(after.pettyFloat, before.pettyFloat, 'petty cash is untouched');
   assert.equal(after.heldForSatellites, before.heldForSatellites - 15000);
   assert.equal(after.heldForSatellites, -10000);
-  assert.equal(after.total, before.total, 'funding-source-agnostic — same invariant as the petty-funded case above');
+  assert.equal(after.total, before.total - 10000, 'funding-source-agnostic — same conservative-receivable invariant as the petty-funded case above');
+  assert.equal(after.satelliteReceivable, 10000);
 });
 
 test('bank-funded pool payout: regression — behavior unchanged from before Part B (default/explicit channel="bank")', async () => {
@@ -499,8 +499,34 @@ test('bank-funded pool payout: regression — behavior unchanged from before Par
     assert.equal(after.pettyFloat, before.pettyFloat, 'no petty movement for a bank-funded payout');
     assert.equal(after.cashWithAccountant, before.cashWithAccountant, 'no accountant-cash movement for a bank-funded payout');
     assert.equal(after.heldForSatellites, -10000);
-    assert.equal(after.total, before.total);
+    assert.equal(after.total, before.total - 10000, 'conservative total: the fronted ₦10,000 receivable is not counted until repaid');
+    assert.equal(after.satelliteReceivable, 10000);
   }
+});
+
+test('conservative receivable: repayment (Funds In) restores total; receivable clears to zero', async () => {
+  // Continuation of the bank-funded fronting case above: satellites owe ₦10,000
+  // (held −10,000, excluded from total). They repay via a bank Funds In of ₦10,000 —
+  // total rises by exactly the repayment and the receivable clears.
+  const cashTx = [
+    { type: 'cash_deposit', date: '2026-06-01', amount: 5000, destination: 'satellite_passthrough' },
+    { type: 'withdrawal', date: '2026-06-10', amount: 15000, destination: 'satellite_passthrough' },
+  ];
+  const satelliteFunds = [
+    { direction: 'in', date: '2026-06-01', amount: 5000, channel: 'bank' },
+    { direction: 'out', date: '2026-06-10', amount: 15000, channel: 'bank' },
+  ];
+  const owed = await balance({ cashTx, satelliteFunds });
+
+  const cashTxRepaid = [...cashTx, { type: 'cash_deposit', date: '2026-06-20', amount: 10000, destination: 'satellite_passthrough' }];
+  const satelliteFundsRepaid = [...satelliteFunds, { direction: 'in', date: '2026-06-20', amount: 10000, channel: 'bank' }];
+  const repaid = await balance({ cashTx: cashTxRepaid, satelliteFunds: satelliteFundsRepaid });
+
+  assert.equal(owed.satelliteReceivable, 10000);
+  assert.equal(repaid.satelliteReceivable, 0, 'receivable clears once the satellites repay');
+  assert.equal(repaid.heldForSatellites, 0);
+  assert.equal(repaid.bankBalance, owed.bankBalance + 10000, 'the repayment physically lands in the bank');
+  assert.equal(repaid.total, owed.total + 10000, 'total rises only when the money actually arrives');
 });
 
 // ── Part C: Remittances "Area Payment" (Part A) satellite overage auto-linked ──────

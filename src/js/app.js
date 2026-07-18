@@ -1550,8 +1550,15 @@ function totalRemittanceDue(remCalc, quotas = 0){
 // caller whose own totalIncome already folds in the 'gift' portion — see
 // buildMonthlyStatementData, which instead relies on the "Adjustments" line to absorb
 // any residual (reimbursement/correction) drift.
-function calcChurchBalanceFromOpening(openingBalance, totalIncome, childrenTeacherHold, totalExpenses, remittancesPaid, satelliteTransferredToParish = 0){
-  return openingBalance + (totalIncome - childrenTeacherHold) - totalExpenses - remittancesPaid + satelliteTransferredToParish;
+// satelliteReceivableChange: growth of the "owed by satellites" receivable over the
+// period — max(0,−held) at period end minus the same at period start. Under the
+// conservative total (see calcChurchBalance), fronting money for the satellites
+// reduces `total` by the fronted amount until they repay, and that movement is
+// invisible to income/expenses/remittances — so the flow-reconstruction must
+// subtract it explicitly or it over-counts whenever a receivable grew (and
+// under-counts when repayments shrank it). Pass 0 when no satellite data is in play.
+function calcChurchBalanceFromOpening(openingBalance, totalIncome, childrenTeacherHold, totalExpenses, remittancesPaid, satelliteTransferredToParish = 0, satelliteReceivableChange = 0){
+  return openingBalance + (totalIncome - childrenTeacherHold) - totalExpenses - remittancesPaid + satelliteTransferredToParish - satelliteReceivableChange;
 }
 
 function calcOutstandingRemittancesFromFlow(openingOutstandingRems, currentPeriodRemDue, periodRemittancesPaid){
@@ -1565,9 +1572,10 @@ function calcCurrentPeriodOutstandingRemittance(currentPeriodRemDue, periodRemit
   );
 }
 
-// See calcChurchBalanceFromOpening for satelliteTransferredToParish.
-function calcAvailableFundFromOpening(openingBalance, openingOutstandingRems, totalIncome, childrenTeacherHold, totalExpenses, currentPeriodRemDue, satelliteTransferredToParish = 0){
-  return (openingBalance - openingOutstandingRems) + (totalIncome - childrenTeacherHold) - totalExpenses - currentPeriodRemDue + satelliteTransferredToParish;
+// See calcChurchBalanceFromOpening for satelliteTransferredToParish and
+// satelliteReceivableChange.
+function calcAvailableFundFromOpening(openingBalance, openingOutstandingRems, totalIncome, childrenTeacherHold, totalExpenses, currentPeriodRemDue, satelliteTransferredToParish = 0, satelliteReceivableChange = 0){
+  return (openingBalance - openingOutstandingRems) + (totalIncome - childrenTeacherHold) - totalExpenses - currentPeriodRemDue + satelliteTransferredToParish - satelliteReceivableChange;
 }
 
 /**
@@ -2926,11 +2934,18 @@ async function calcChurchBalance(asOfDate, prefetched){
     bankBalance,
     pettyFloat,
     heldForSatellites,
-    // total EXCLUDES heldForSatellites: it sits inside bankBalance (real bank money) but
-    // is not the parish's own to spend. A 'transfer_out' entry reduces heldForSatellites
-    // and — with no other change — raises `total` by the same amount, which is the
-    // correct and complete balance effect of reclassifying held money as parish money.
-    total: cashWithAccountantRaw + bankBalance + pettyFloat - heldForSatellites
+    // Money the satellites owe the parish (fronted on their behalf, not yet repaid).
+    // CONSERVATIVE semantics: this receivable is NOT counted in `total` — the total
+    // only ever reports money physically present (bank + cash + petty, minus what is
+    // held FOR the satellites). It is surfaced separately as an "incoming" figure and
+    // flows back into `total` only when the satellites actually repay (Funds In).
+    satelliteReceivable: Math.max(0, -heldForSatellites),
+    // total EXCLUDES positive heldForSatellites (real bank money, but not the parish's
+    // own to spend) and EXCLUDES the receivable when held is negative (money owed to
+    // the parish but not yet physically here). A 'transfer_out' entry reduces a
+    // positive held and — with no other change — raises `total` by the same amount:
+    // the correct, complete effect of reclassifying held money as parish money.
+    total: cashWithAccountantRaw + bankBalance + pettyFloat - Math.max(0, heldForSatellites)
   };
 }
 
@@ -3417,6 +3432,12 @@ async function renderDashboard(){
       return dt.getMonth() === state.month && dt.getFullYear() === state.year;
     })
     .reduce((s,r)=>s+(r.amount||0),0);
+  // Growth of the "owed by satellites" receivable this period (conservative total:
+  // fronted money leaves `total` until repaid — see calcChurchBalance). Both ends
+  // come from the same calcChurchBalance engine, so this ties the reconstruction to
+  // the KPI exactly.
+  const dashSatReceivableChange =
+    Math.max(0, -(churchBal.heldForSatellites||0)) - Math.max(0, -(dashOpeningBal.heldForSatellites||0));
   const dashAdminManagedIncome = totalIncome - dashChildrenTeacherTotal;
   const dashChurchBalanceFromOpening = calcChurchBalanceFromOpening(
     dashCarriedForward,
@@ -3424,7 +3445,8 @@ async function renderDashboard(){
     dashChildrenTeacherTotal,
     totalPeriodAllExpenses,
     dashPeriodRemittancesPaid,
-    dashPeriodSatTransferOut
+    dashPeriodSatTransferOut,
+    dashSatReceivableChange
   );
   const dashOutstandingRemsFromFlow = calcOutstandingRemittancesFromFlow(
     dashOpeningOutstandingRems,
@@ -3438,7 +3460,8 @@ async function renderDashboard(){
     dashChildrenTeacherTotal,
     totalPeriodAllExpenses,
     dashCurrentMonthRemDue,
-    dashPeriodSatTransferOut
+    dashPeriodSatTransferOut,
+    dashSatReceivableChange
   );
 
   // Feed items — richer detail for Recent Transactions card
@@ -4012,7 +4035,7 @@ async function renderDashboard(){
           ${Math.abs(churchBal.heldForSatellites||0)>=0.5?`
           <a onclick="App.gotoSatellitePool()" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between;border-top:1px dashed var(--border);margin-top:6px;padding-top:6px">
             <span><span style="display:inline-block;width:8px;height:8px;background:#8B4513;border-radius:50%;margin-right:8px"></span><span style="text-decoration:underline dotted #8B4513;text-underline-offset:3px">${dashSatHeldDisp.label}</span></span>
-            <span style="font-weight:600;color:#8B4513">${churchBal.heldForSatellites>0?'−':'+'}${dashSatHeldDisp.amount}</span>
+            <span style="font-weight:600;color:#8B4513">${churchBal.heldForSatellites>0?'− ':'↩ '}${dashSatHeldDisp.amount}</span>
           </a>
           <div style="font-size:10.5px;color:var(--text3);margin-top:2px">${dashSatHeldDisp.label}: ${dashSatHeldDisp.amount} (${dashSatHeldDisp.suffix}${churchBal.heldForSatellites>0?' — already inside Bank or Cash with Accountant above':''})</div>`:''}
         </div>
@@ -6516,7 +6539,7 @@ function gotoSatellitePool(){
 function satelliteHeldDisplay(held){
   const h = held || 0;
   return h < 0
-    ? { label:'Owed by satellites', amount:fmt(Math.abs(h)), suffix:'money the satellites owe the pool' }
+    ? { label:'Owed by satellites', amount:fmt(Math.abs(h)), suffix:'incoming when they repay — not counted in the balance until then' }
     : { label:'Held for satellites', amount:fmt(h), suffix:'excluded from available funds' };
 }
 
