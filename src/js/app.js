@@ -1135,6 +1135,12 @@ function getWATNowParts(now=new Date()){
   };
 }
 
+// Sunday's collection quota/remittance only accrues once the service is over — 11:30am WAT.
+function isAfterSundayAccrualCutoff(now=new Date()){
+  const watNow=getWATNowParts(now);
+  return (watNow.hour>11) || (watNow.hour===11 && watNow.minute>=30);
+}
+
 function countAccruedSundaysInRange(fromValue, toValue, now=new Date()){
   const from=parseYmdDate(fromValue);
   const to=parseYmdDate(toValue);
@@ -1142,12 +1148,12 @@ function countAccruedSundaysInRange(fromValue, toValue, now=new Date()){
   const watNow=getWATNowParts(now);
   // Build a plain local-midnight Date from WAT parts so comparisons stay in the same coordinate space as the loop iterator
   const watTodayLocal=new Date(watNow.year, watNow.month-1, watNow.day);
-  const isAfterSundayAccrualCutoff = (watNow.hour>11) || (watNow.hour===11 && watNow.minute>=30);
+  const afterCutoff = isAfterSundayAccrualCutoff(now);
   let count=0;
   for(let d=new Date(from.getFullYear(), from.getMonth(), from.getDate()); d<=to; d.setDate(d.getDate()+1)){
     if(d.getDay()!==0) continue;
     if(d < watTodayLocal){ count++; continue; }
-    if(d.getTime()===watTodayLocal.getTime() && isAfterSundayAccrualCutoff){ count++; }
+    if(d.getTime()===watTodayLocal.getTime() && afterCutoff){ count++; }
   }
   return count;
 }
@@ -3751,12 +3757,6 @@ async function renderDashboard(){
   const _wkTotalPeriodSundays = countSundaysInRange(_wkPeriodFrom, _wkPeriodTo);
   const _wkFullPeriodQuota = dashQuotaLines.reduce((s,q) => s + (q.monthlyAmount || q.amount || 0), 0);
   const _wkPerSundayQuota = _wkTotalPeriodSundays > 0 ? _wkFullPeriodQuota / _wkTotalPeriodSundays : 0;
-  // A week ending today shouldn't flip to "complete" the instant the date rolls over —
-  // it should wait until today's income/expense (and the remittance it deducts) has
-  // actually been recorded, otherwise the card jumps to a period-end total before the
-  // day's transactions are in.
-  const _wkTodayHasRecordedActivity = income.some(r=>ymdLocal(new Date(r.date||r.createdAt||''))===dashTodayStrForAsOf)
-    || expenses.some(r=>ymdLocal(new Date(r.date||r.createdAt||''))===dashTodayStrForAsOf);
   // Compute per-week metrics
   const _wkData = await Promise.all(_wkBounds.map(async (wk, idx) => {
     const wkIncome = filterByDateRange(income, wk.from, wk.to);
@@ -3779,7 +3779,12 @@ async function renderDashboard(){
       .reduce((s,r) => s + (r.totalCollection||0), 0);
     wkNetRetained += wkOtherLocal;
     const wkSurplus = wkNetRetained - wkTotalExpenses;
-    const isComplete = wk.to < dashTodayStrForAsOf || (wk.to === dashTodayStrForAsOf && _wkTodayHasRecordedActivity);
+    // A week ending today shouldn't flip to "complete" the instant the date rolls over.
+    // If today is a Sunday, mirror the same accrual cutoff quotas already use (11:30am
+    // WAT, once the collection service is over) instead of treating midnight as the cutoff.
+    const _wkEndsOnSundayToday = wk.to === dashTodayStrForAsOf && parseYmdDate(wk.to)?.getDay() === 0;
+    const isComplete = wk.to < dashTodayStrForAsOf
+      || (wk.to === dashTodayStrForAsOf && (!_wkEndsOnSundayToday || isAfterSundayAccrualCutoff()));
     return { idx, from: wk.from, to: wk.to, income: wkTotalIncome, expenses: wkTotalExpenses, netRetained: wkNetRetained, surplus: wkSurplus, isComplete };
   }));
   const _wkCompleted = _wkData.filter(w => w.isComplete && (w.income > 0 || w.expenses > 0));
