@@ -1571,6 +1571,33 @@ function calcCurrentPeriodOutstandingRemittance(currentPeriodRemDue, periodRemit
   );
 }
 
+// A remittance payment can be split across bank transfer and the accountant's own cash
+// (see submitRemittance's bankAmount/cashAmount resolution) — this is the single source
+// of truth for how much of a given paid remittance actually left the BANK vs actually
+// left the ACCOUNTANT'S CASH, so calcChurchBalance/renderBank never subtract a cash-funded
+// payment from the bank balance (or vice versa). Records predating the bankAmount/
+// cashAmount fields only have paymentMethod + amount — infer the split from that.
+function splitRemittancePaid(r){
+  const amount = r.amount || 0;
+  if(r.bankAmount != null || r.cashAmount != null){
+    return { bank: r.bankAmount || 0, cash: r.cashAmount || 0 };
+  }
+  return r.paymentMethod === 'cash' ? { bank: 0, cash: amount } : { bank: amount, cash: 0 };
+}
+
+// Amount already paid (or forgiven via write-off) toward periods that are NOT yet fully
+// settled — e.g. Part A paid in cash but Part B still outstanding. calcChurchBalance
+// already reflects this payment leaving the church's real cash/bank the moment it's
+// recorded (see splitRemittancePaid), so the "still owed" KPI for unsettled periods must
+// net it out here too, or the same payment gets subtracted from Available Fund twice:
+// once via the reduced actual balance, once via an un-netted "full amount still due".
+function calcUnsettledPeriodsSettledAmount(remittances, settledPeriodKeys){
+  return (remittances||[])
+    .filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom && r.periodTo)
+    .filter(r => !settledPeriodKeys.includes(`${r.periodFrom}|${r.periodTo}`))
+    .reduce((s,r) => s + (r.amount||0), 0);
+}
+
 // See calcChurchBalanceFromOpening for satelliteTransferredToParish.
 function calcAvailableFundFromOpening(openingBalance, openingOutstandingRems, totalIncome, childrenTeacherHold, totalExpenses, currentPeriodRemDue, satelliteTransferredToParish = 0){
   return (openingBalance - openingOutstandingRems) + (totalIncome - childrenTeacherHold) - totalExpenses - currentPeriodRemDue + satelliteTransferredToParish;
@@ -2856,7 +2883,14 @@ async function calcChurchBalance(asOfDate, prefetched){
     if(e.paymentMethod==='split') return s+(e.bankAmount||0);
     return s;
   }, 0);
-  const paidRems = paidRemsList.reduce((s,r) => s+(r.amount||0), 0);
+  // Split each paid remittance by how it was actually funded — a remittance paid in cash
+  // never touched the bank, and must not be deducted from bankBalance (see
+  // splitRemittancePaid). Previously the FULL amount was always subtracted from the bank
+  // balance regardless of paymentMethod, which understated the bank balance and, because
+  // cashWithAccountantRaw was never reduced either, overstated Cash with Accountant by the
+  // same amount for every cash-funded remittance payment.
+  const paidRemsBank = paidRemsList.reduce((s,r) => s + splitRemittancePaid(r).bank, 0);
+  const paidRemsCash = paidRemsList.reduce((s,r) => s + splitRemittancePaid(r).cash, 0);
   // Bank withdrawals — including satellite "out" mirrors. These already leave the bank
   // for real (money forwarded to Province/joint area-zone), so this is correct as-is.
   const bankWithdrawals = cashTxF.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
@@ -2867,7 +2901,7 @@ async function calcChurchBalance(asOfDate, prefetched){
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)),0);
   const pettyToBankDeposits = pettyF.filter(h=>h.type==='petty_to_bank'&&(h.status==='approved'||h.status==='settled'))
     .reduce((s,h)=>s+(h.amount||0),0);
-  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals - pettyBankTopups + pettyToBankDeposits;
+  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRemsBank - bankWithdrawals - pettyBankTopups + pettyToBankDeposits;
 
   // --- CASH WITH ACCOUNTANT ---
   const cashFromCollections = income.reduce((s,r) => {
@@ -2906,7 +2940,10 @@ async function calcChurchBalance(asOfDate, prefetched){
   // bankWithdrawals. heldForSatellites (below) is unaffected by channel — funding
   // source is deliberately invisible to that formula.
   const satelliteCashAccountantOut = satFundsF.filter(s=>s.direction==='out' && s.channel==='cash_accountant').reduce((s,r)=>s+(r.amount||0),0);
-  const cashWithAccountantRaw = cashFromCollections - cashDepositedFromAccountant + bankToAccountant - cashExpenses - pettyCashTopups + satelliteCashIn - satelliteCashAccountantOut;
+  // Remittances paid out of the accountant's own cash (see paidRemsCash above) really did
+  // leave their hand — must reduce this balance the same way a cash expense does, or the
+  // accountant appears to be holding money they already paid to RCCG.
+  const cashWithAccountantRaw = cashFromCollections - cashDepositedFromAccountant + bankToAccountant - cashExpenses - pettyCashTopups + satelliteCashIn - satelliteCashAccountantOut - paidRemsCash;
 
   // --- PETTY CASH (with Admin Officer) ---
   // Rebuild the float from raw ledger movements each time so historical snapshots stay
@@ -3260,8 +3297,16 @@ async function renderDashboard(){
   const dashSettledPeriodQuotas = _dashSettledPeriodRanges.reduce((sum, pp) =>
     sum + sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, pp.from, pp.to)), 0);
   const dashUnsettledQuotas = dashAccumQuotas - dashSettledPeriodQuotas;
-  // KPI = unsettled-period income due + unsettled-period quotas + genuine shortfall from settled periods.
-  const dashTotalRemDueKpi = Math.max(0, dashUnsettledIncomeRemDue + dashUnsettledQuotas + dashSettledShortfall);
+  // A partial payment toward a still-open period (e.g. Part A paid in cash, Part B not
+  // yet due) already reduced the real church balance the moment it was recorded (see
+  // calcChurchBalance) — it must be netted out of the unsettled-period due here too, or
+  // the same payment gets subtracted from Available Fund twice: once via the reduced
+  // actual balance, once via this still-full "amount due". Without this, the leftover
+  // also wrongly surfaces below as "unpaid from previous period(s)".
+  const dashUnsettledPaidOrWrittenOff = calcUnsettledPeriodsSettledAmount(allRemsForKpi, _dashSettledPeriodKeys);
+  // KPI = unsettled-period income due + unsettled-period quotas + genuine shortfall from
+  // settled periods − payments already made toward still-unsettled periods.
+  const dashTotalRemDueKpi = Math.max(0, dashUnsettledIncomeRemDue + dashUnsettledQuotas + dashSettledShortfall - dashUnsettledPaidOrWrittenOff);
   // Split the all-time outstanding into "this period" vs "prior periods" so the dashboard
   // can show the selected period in the headline and surface any carryover as a sub-line.
   // The sum of the two always equals dashTotalRemDueKpi, so the Available Fund math is unchanged.
@@ -5138,7 +5183,8 @@ async function viewIncome(id){
     </div>
     <hr class="divider">
     <p class="card-title">Cash Breakdown</p>
-    <div class="status-row"><div class="status-row-label">💵 Cash with Accountant</div><div class="status-row-amt" style="color:var(--amber)">${fmt(cashHeld)}</div></div>
+    <div style="font-size:11px;color:var(--text3);margin:-2px 0 8px;line-height:1.5">How this collection's cash was split at handover, then how much of the Accountant's share has since gone out (expenses/top-ups) or been deposited. The Accountant's <em>current</em> balance for this record is the "Still with Accountant" line at the bottom, not the line below.</div>
+    <div class="status-row"><div class="status-row-label">💵 Cash Handed to Accountant (this collection)</div><div class="status-row-amt" style="color:var(--amber)">${fmt(cashHeld)}</div></div>
     ${childrenTeacherHeld?`<div class="status-row"><div class="status-row-label">🧒 Children Teacher Hold (for refreshments)</div><div class="status-row-amt" style="color:var(--success)">${fmt(childrenTeacherHeld)}</div></div>`:''}
     ${btAmt?`<div class="status-row"><div class="status-row-label">🏦 Bank Transfer (already in bank)</div><div class="status-row-amt" style="color:var(--primary)">${fmt(btAmt)}</div></div>`:''}
     ${dpAmt?`<div class="status-row"><div class="status-row-label">💳 Direct → Admin Officer Petty Cash</div><div class="status-row-amt" style="color:var(--success)">${fmt(dpAmt)}</div></div>`:''}
@@ -9818,7 +9864,11 @@ async function renderBank(){
     if(e.paymentMethod==='split') return sum+(e.bankAmount||0);
     return sum;
   }, 0);
-  const paidRems = allRemittances.filter(r=>r.status==='paid').reduce((s,r) => s+(r.amount||0), 0);
+  // Split by funding source (see splitRemittancePaid/calcChurchBalance) — a remittance
+  // paid in cash never touched the bank and must not be deducted from bankBalance here,
+  // nor left out of cashWithAccountant below.
+  const paidRemsBank = allRemittances.filter(r=>r.status==='paid').reduce((s,r) => s + splitRemittancePaid(r).bank, 0);
+  const paidRemsCash = allRemittances.filter(r=>r.status==='paid').reduce((s,r) => s + splitRemittancePaid(r).cash, 0);
   const bankWithdrawals = allCashTx.filter(t=>t.type==='withdrawal').reduce((s,t) => s+(t.amount||0), 0);
   // Petty top-ups paid via bank transfer must be deducted (same as calcChurchBalance).
   // Status filter mirrors pettyCashTopupsRB — pending_approval requests haven't paid yet.
@@ -9827,7 +9877,7 @@ async function renderBank(){
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)),0);
   const pettyToBankDeposits = pettyHistory.filter(h=>h.type==='petty_to_bank'&&(h.status==='approved'||h.status==='settled'))
     .reduce((s,h)=>s+(h.amount||0),0);
-  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRems - bankWithdrawals - pettyBankTopups + pettyToBankDeposits;
+  const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRemsBank - bankWithdrawals - pettyBankTopups + pettyToBankDeposits;
 
   // Cash with Accountant (mirrors calcChurchBalance, using data already fetched above)
   const cashFromCollectionsRB = allIncome.reduce((s,r)=>{
@@ -9854,7 +9904,7 @@ async function renderBank(){
   // this is the only place they reduce the balance. Mirrors calcChurchBalance's
   // satelliteCashAccountantOut term.
   const satelliteCashAccountantOutRB = (allSatFundsRB||[]).filter(s=>s.direction==='out' && s.channel==='cash_accountant').reduce((s,r)=>s+(r.amount||0),0);
-  const cashWithAccountant = Math.max(0, cashFromCollectionsRB - cashDepositedFromAccountantRB + bankToAccountantRB - cashExpensesRB - pettyCashTopupsRB + satelliteCashInRB - satelliteCashAccountantOutRB);
+  const cashWithAccountant = Math.max(0, cashFromCollectionsRB - cashDepositedFromAccountantRB + bankToAccountantRB - cashExpensesRB - pettyCashTopupsRB + satelliteCashInRB - satelliteCashAccountantOutRB - paidRemsCash);
   const _bankPendingDeps = allCashTx.filter(t=>t.type==='cash_deposit'&&(t.verificationStatus==='pending'||t.verificationStatus==='flagged'));
   const _bankHasPending = _bankPendingDeps.length > 0;
   const _bankPendingTotal = _bankPendingDeps.reduce((s,t)=>s+(t.amount||0),0);
@@ -9887,7 +9937,7 @@ async function renderBank(){
         if(e.paymentMethod==='split') return sum+(e.bankAmount||0);
         return sum;
       }, 0)
-    - allRemittances.filter(r => r.status==='paid' && _prePeriod(r.date||r.createdAt)).reduce((s,r) => s+(r.amount||0), 0)
+    - allRemittances.filter(r => r.status==='paid' && _prePeriod(r.date||r.createdAt)).reduce((s,r) => s+splitRemittancePaid(r).bank, 0)
     - allCashTx.filter(t => t.type==='withdrawal' && _prePeriod(t.date||t.createdAt)).reduce((s,t) => s+(t.amount||0), 0)
     - pettyHistory.filter(h => h.type==='refill' && (h.status==='approved'||h.status==='settled')
         && (h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0))
@@ -9900,7 +9950,7 @@ async function renderBank(){
   const periodTotalOutflows =
       periodExpenses.filter(e => isLoggedExpense(e) && (e.paymentMethod==='bank_transfer'||(e.paymentMethod==='split'&&(e.bankAmount||0)>0)))
         .reduce((sum,e) => { if(e.paymentMethod==='bank_transfer') return sum+(e.amount||0); if(e.paymentMethod==='split') return sum+(e.bankAmount||0); return sum; }, 0)
-    + filterByCurrentPeriod(allRemittances, bankPeriodFrom, bankPeriodTo).filter(r => r.status==='paid').reduce((s,r) => s+(r.amount||0), 0)
+    + filterByCurrentPeriod(allRemittances, bankPeriodFrom, bankPeriodTo).filter(r => r.status==='paid').reduce((s,r) => s+splitRemittancePaid(r).bank, 0)
     + monthlyWithdrawals.reduce((s,t) => s+(t.amount||0), 0)
     + filterByCurrentPeriod(pettyHistory, bankPeriodFrom, bankPeriodTo)
         .filter(h => h.type==='refill' && (h.status==='approved'||h.status==='settled')
@@ -9941,7 +9991,7 @@ async function renderBank(){
         txAmt: -(e.paymentMethod==='split'?(e.bankAmount||0):(e.amount||0)),
         date:e.date||e.createdAt
       })),
-    ...allRemittances.filter(r=>r.status==='paid').map(r=>({...r, txType:'remittance', txLabel:`Remittance: ${r.incomeType||'HQ'}`, txAmt: -(r.amount||0), date:r.date||r.createdAt})),
+    ...allRemittances.filter(r=>r.status==='paid'&&splitRemittancePaid(r).bank>0).map(r=>({...r, txType:'remittance', txLabel:`Remittance: ${r.incomeType||'HQ'}`, txAmt: -splitRemittancePaid(r).bank, date:r.date||r.createdAt})),
     ...allIncome.filter(r=>(r.bankTransferAmount||0)>0).map(r=>({...r, txType:'income', txLabel:`Income deposit (bank transfer)`, txAmt: (r.bankTransferAmount||0)})),
     ...pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
       .map(h=>({...h, txType:'petty-topup', txLabel:`Petty cash top-up (bank)`, txAmt:-(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0))}))
@@ -9986,7 +10036,7 @@ async function renderBank(){
       <div class="kpi">
         <div class="kpi-icon" style="background:#FCEBEB">📤</div>
         <div class="kpi-label">Total Outflows</div>
-        <div class="kpi-val">${fmt(bankExpenses + paidRems + bankWithdrawals + pettyBankTopups)}</div>
+        <div class="kpi-val">${fmt(bankExpenses + paidRemsBank + bankWithdrawals + pettyBankTopups)}</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#FAEEDA">💳</div>
@@ -10029,7 +10079,7 @@ async function renderBank(){
       tab==='withdrawals'?renderBankWithdrawals(monthlyWithdrawals):
       tab==='deposits'?renderBankDeposits(monthlyDeposits):
       tab==='charges'?renderBankCharges(periodExpenses.filter(e=>e.category==='bank')):
-      renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups)}`;
+      renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRemsBank,bankWithdrawals,pettyBankTopups)}`;
 
   // These populate their own DOM regions asynchronously after the page above
   // is already showing, so a slow/failed fetch never blocks the Bank page itself.
@@ -13680,6 +13730,8 @@ return {
   _findIncomeRefForCashExpense: findIncomeRefForCashExpense,
   _calcPettyFloatFromLedger: calcPettyFloatFromLedger,
   _totalRemittanceDue: totalRemittanceDue,
+  _splitRemittancePaid: splitRemittancePaid,
+  _calcUnsettledPeriodsSettledAmount: calcUnsettledPeriodsSettledAmount,
   _calcChurchBalanceFromOpening: calcChurchBalanceFromOpening,
   _calcOutstandingRemittancesFromFlow: calcOutstandingRemittancesFromFlow,
   _calcCurrentPeriodOutstandingRemittance: calcCurrentPeriodOutstandingRemittance,
