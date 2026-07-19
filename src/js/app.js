@@ -8093,7 +8093,13 @@ async function buildMonthlyStatementData(fromDate, toDate){
   });
   const totalRemPaid=periodPaidRems.reduce((s,r)=>s+(r.amount||0),0);
   const totalRemDue=totalRemittanceDue(rem, totalFixedQuotas);
-  const trueNetLocal=rem.netLocal-totalFixedQuotas;
+  // trueNetLocal starts as remittance-eligible (Sunday collection) income net of
+  // remittance — Other Income's contribution is folded in below (see
+  // `trueNetLocal += otherIncomeTotal`), since Other Income is never part of the
+  // remittance calculation (0% remitted) and must count as fully retained locally
+  // for this statement's own arithmetic (Total Income = Total Remittance Due +
+  // Local Retained Income) to hold.
+  let trueNetLocal=rem.netLocal-totalFixedQuotas;
   const netPosition=totalIncome-totalExpenses-totalRemDue;
   const totalChildrenOffering=income.reduce((s,r)=>s+(r.childrenOffering||0),0);
   const childrenLocalShare=totalChildrenOffering*getChildrenOfferingLocalRate(remRates);
@@ -8163,6 +8169,9 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const otherIncomeRecords = income.filter(r => r.source && r.source !== 'sunday_collection')
     .filter(r => INCOME_TYPES.reduce((s,t) => s + (r[t.key]||0), 0) === 0);
   const otherIncomeTotal = otherIncomeRecords.reduce((s,r) => s + (r.totalCollection||0), 0);
+  // Other Income is 0% remitted — fold it into Local Retained Income now that it's
+  // computed (see trueNetLocal above), so the statement's own balance identity holds.
+  trueNetLocal += otherIncomeTotal;
   if(otherIncomeTotal > 0){
     incomeTypeSummary.push({
       label: 'Other Income (donations, midweek, etc.)',
@@ -12227,7 +12236,12 @@ async function generateMonthlyReport(){
   });
   const totalRemPaid=periodPaidRems.reduce((s,r)=>s+(r.amount||0),0);
   const totalRemDue=totalRemittanceDue(rem, totalFixedQuotas);
-  const trueNetLocal=rem.netLocal-totalFixedQuotas;
+  // trueNetLocal starts as remittance-eligible (Sunday collection) income net of
+  // remittance — Other Income's contribution is folded in below, once computed,
+  // since Other Income is never part of the remittance calculation (0% remitted)
+  // and must count as fully retained locally for this statement's own arithmetic
+  // (Total Income = Total Remittance Due + Local Retained Income) to hold.
+  let trueNetLocal=rem.netLocal-totalFixedQuotas;
   const netPosition=totalIncome-totalExpenses-totalRemDue;
   const totalChildrenOffering=income.reduce((s,r)=>s+(r.childrenOffering||0),0);
   const childrenLocalShare=totalChildrenOffering*getChildrenOfferingLocalRate(remRates);
@@ -12284,6 +12298,9 @@ async function generateMonthlyReport(){
   const otherIncomeRecords = income.filter(r => r.source && r.source !== 'sunday_collection')
     .filter(r => INCOME_TYPES.reduce((s,t) => s + (r[t.key]||0), 0) === 0);
   const otherIncomeTotal = otherIncomeRecords.reduce((s,r) => s + (r.totalCollection||0), 0);
+  // Other Income is 0% remitted — fold it into Local Retained Income now that it's
+  // computed (see trueNetLocal above), so this statement's own balance identity holds.
+  trueNetLocal += otherIncomeTotal;
 
   // Expense by category summary
   const expByCat={};
