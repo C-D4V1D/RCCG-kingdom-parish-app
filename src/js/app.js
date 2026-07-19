@@ -1555,6 +1555,56 @@ function computeCashPoolBreakdown(income, cashTx, expenses, pettyHistory, satell
   };
 }
 
+// Real transactions behind each expandable cash-pool row, newest first. Pairs with
+// computeCashPoolBreakdown / renderCashPoolSectionHTML so the "Cash with Accountant"
+// breakdown (both the standalone modal and the income-detail modal's Part 2) can show
+// exactly which expense, remittance, pool payout and deposit make up each total.
+function buildCashPoolDetailLines(cashTx, expenses, satelliteFunds, remittances){
+  const catOf = e => (typeof EXPENSE_CATS_ALL!=='undefined'?EXPENSE_CATS_ALL:[]).find(c=>c.key===e.category)||{label:e.category||'Expense',icon:'💸'};
+  const expenseLines = (expenses||[]).filter(isLoggedExpense).map(e=>{
+    const amt = e.paymentMethod==='cash'?(e.amount||0):e.paymentMethod==='split'?(e.cashAmount||0):0;
+    if(amt<=0) return null; const c=catOf(e);
+    return { icon:c.icon||'💸', label:e.description||e.subCategory||c.label, date:e.date||e.createdAt, amount:amt };
+  }).filter(Boolean).sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const remitLines = (remittances||[]).filter(x=>x.status==='paid').map(x=>{
+    const amt = splitRemittancePaid(x).cash; if(amt<=0) return null;
+    return { icon:'📤', label:x.label||'RCCG Remittance', date:x.paidDate||x.date||x.createdAt, amount:amt };
+  }).filter(Boolean).sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const payoutLines = (satelliteFunds||[]).filter(s=>s.direction==='out'&&s.channel==='cash_accountant'&&(s.amount||0)>0).map(s=>{
+    return { icon:'🛰️', label:s.note||(SATELLITE_FUND_PURPOSES.find(p=>p.key===s.purpose)?.label)||'Pool payment', date:s.date||s.createdAt, amount:s.amount||0 };
+  }).sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const depositLines = (cashTx||[]).filter(t=>t.type==='cash_deposit'&&isDepositEffective(t)&&t.destination!=='satellite_passthrough'&&(t.amount||0)>0).map(t=>{
+    return { icon:'✅', label:'Bank deposit'+(t.reference?' · '+t.reference:''), date:t.date||t.createdAt, amount:t.amount||0 };
+  }).sort((a,b)=>new Date(b.date)-new Date(a.date));
+  return { expenseLines, remitLines, payoutLines, depositLines };
+}
+
+// Sequential, itemised HTML for the accountant's cash pool: cash received (from
+// collections / satellite cash / bank), then each way cash left (expenses,
+// remittances, pool payments, top-ups, deposits), ending in the current balance —
+// which equals the Dashboard/Bank "Cash with Accountant". `lines` (optional) comes
+// from buildCashPoolDetailLines and makes the deduction rows expandable.
+function renderCashPoolSectionHTML(pool, lines){
+  const L = lines || {};
+  const poolRow = (icon, label, amount, rows, sign) => {
+    const has = rows && rows.length;
+    const detail = has ? `<div style="display:none;padding:4px 8px 8px 18px;background:rgba(0,0,0,0.02);border-left:2px solid var(--border)">${rows.map(l=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:3px 0;color:var(--text2)"><span>${l.icon} ${esc(l.label)} <span style="color:var(--text3)">· ${fmtDate(l.date)}</span></span><span style="font-weight:600;color:${sign==='-'?'var(--danger)':'var(--text2)'}">${sign==='-'?'−':''}${fmt(l.amount)}</span></div>`).join('')}</div>` : '';
+    return `<div class="status-row"${has?` style="cursor:pointer" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='none'?'block':'none'"`:''}><div class="status-row-label">${icon} ${label}${has?` <span style="font-size:9px;color:var(--text3)">▾</span>`:''}</div><div class="status-row-amt" style="color:${sign==='-'?'var(--danger)':'var(--text)'}">${sign==='-'?'−':''}${fmt(amount)}</div></div>${detail}`;
+  };
+  return `
+    ${poolRow('💰','Cash received from collections', pool.cashFromCollections, null, '+')}
+    ${pool.satelliteCashIn>0.5?poolRow('🛰️','Satellite/Zone cash received', pool.satelliteCashIn, null, '+'):''}
+    ${pool.bankToAccountant>0.5?poolRow('🏦','Moved from bank to accountant', pool.bankToAccountant, null, '+'):''}
+    <div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">= Total cash received</div><div class="status-row-amt" style="font-weight:700;color:var(--success)">${fmt(pool.totalIn)}</div></div>
+    ${pool.cashExpenses>0.5?poolRow('💸','Cash expenses', pool.cashExpenses, L.expenseLines, '-'):''}
+    ${pool.remittancesCash>0.5?poolRow('📤','RCCG remittance paid (cash)', pool.remittancesCash, L.remitLines, '-'):''}
+    ${pool.poolPayoutsCash>0.5?poolRow('🛰️','Satellite/Zone Pool payments (cash)', pool.poolPayoutsCash, L.payoutLines, '-'):''}
+    ${pool.pettyCashTopups>0.5?poolRow('🏧','Petty cash top-ups (from cash)', pool.pettyCashTopups, null, '-'):''}
+    ${pool.cashDeposited>0.5?poolRow('✅','Deposited to bank', pool.cashDeposited, L.depositLines, '-'):''}
+    <div class="status-row" style="border-top:2px solid var(--border);padding-top:8px"><div class="status-row-label" style="font-weight:700">= Cash with Accountant now</div><div class="status-row-amt" style="font-weight:800;font-size:16px;color:${pool.balance>0.5?'var(--amber)':'var(--primary)'}">${fmt(Math.max(0,pool.balance))}</div></div>
+    ${pool.balance<-0.5?`<div style="font-size:11px;color:var(--danger);margin-top:6px;line-height:1.5">⚠️ The cash pool is over-drawn by ${fmt(Math.abs(pool.balance))} — recorded cash payments exceed recorded cash received. Check for a missing collection or a mis-recorded cash payment.</div>`:''}`;
+}
+
 // Returns the ID of the most recent cash-holding income record whose date is on or
 // before expenseDate. Used when saving a cash/split expense to link it directly to
 // the cash pool it drew from. The linkage is a preference hint for the FIFO
@@ -4142,7 +4192,7 @@ async function renderDashboard(){
             <span><span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:8px"></span><span style="text-decoration:underline dotted #185FA5;text-underline-offset:3px">Bank</span></span>
             <span style="font-weight:600">${fmt(churchBal.bankBalance)}</span>
           </a>
-          <a onclick="App.setIncomeTab('all');App.navigate('income')" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between">
+          <a onclick="App.showCashPoolModal()" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between">
             <span><span style="display:inline-block;width:8px;height:8px;background:${churchBal.cashDeficit>0?'var(--danger)':'#BA7517'};border-radius:50%;margin-right:8px"></span>${churchBal.cashDeficit>0?`<span style="color:var(--danger);font-weight:600;text-decoration:underline dotted var(--danger);text-underline-offset:3px">Cash with Accountant ⚠ Owes</span>`:`<span style="text-decoration:underline dotted #BA7517;text-underline-offset:3px">Cash with Accountant</span>`}</span>
             <span style="font-weight:600;color:${churchBal.cashDeficit>0?'var(--danger)':'inherit'}">${churchBal.cashDeficit>0?'−'+fmt(churchBal.cashDeficit):fmt(churchBal.cashWithAccountant)}</span>
           </a>
@@ -4677,11 +4727,11 @@ async function renderIncome(){
     </div>
     <div class="kpi-grid" style="margin-bottom:16px">
       <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">📥</div><div class="kpi-label">Total Collected</div><div class="kpi-val">${fmt(totalCollected)}</div><div class="kpi-delta up">${records.length} record(s)</div></div>
-      <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">💵</div><div class="kpi-label">Cash with Accountant</div><div class="kpi-val" style="color:${cashWithAccountant>0?'var(--amber)':'var(--primary)'}">${fmt(cashWithAccountant)}</div><div class="kpi-delta ${cashWithAccountant>0?'warn':'up'}">${cashWithAccountant>0?'Awaiting bank deposit':'All deposited ✓'}</div></div>
+      <div class="kpi" onclick="App.showCashPoolModal()" style="cursor:pointer" title="Tap to see the full breakdown"><div class="kpi-icon" style="background:#FAEEDA">💵</div><div class="kpi-label">Cash with Accountant</div><div class="kpi-val" style="color:${cashWithAccountant>0?'var(--amber)':'var(--primary)'}">${fmt(cashWithAccountant)}</div><div class="kpi-delta ${cashWithAccountant>0?'warn':'up'}">${cashWithAccountant>0?'Tap for breakdown ›':'All deposited ✓'}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">🏦</div><div class="kpi-label">In Bank (this month)</div><div class="kpi-val">${fmt(totalDeposited)}</div><div class="kpi-delta up">Transfers + deposits</div></div>
     </div>
     ${_hasPendingDeposits?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⏳</span><span>A deposit of <strong>${fmt(_pendingDepTotal)}</strong> is ${_pendingFlaggedDeposits[0]?.verificationStatus==='flagged'?'<strong>flagged by AI</strong> — please review and correct or approve it':'<strong>pending AI verification</strong>'}. Check the Bank page for details.</span></div>`:''}
-    ${cashWithAccountant>0&&!_hasPendingDeposits&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong>${pendingItems.length>0?` — pending: <strong>${pendingItems.map(r=>fmtDate(r.date||r.createdAt)).join(', ')}</strong>`:''} — not yet deposited to the bank. <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
+    ${cashWithAccountant>0&&!_hasPendingDeposits&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong>${pendingItems.length>0?` — pending: <strong>${pendingItems.map(r=>fmtDate(r.date||r.createdAt)).join(', ')}</strong>`:''} — not yet deposited to the bank. <a onclick="App.showCashPoolModal()" style="cursor:pointer;text-decoration:underline;color:var(--primary);font-weight:600">View breakdown</a> · <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
     ${renderSatelliteFundsInSection(satFundsInRecords)}
     <div class="tabs">
       <button class="tab ${tab==='list'?'active':''}" onclick="App.setIncomeTab('list')">Sunday Collections (${sundayRecs.length})</button>
@@ -4748,17 +4798,20 @@ async function renderIncomeList(records, cashTxOverride, remRatesOverride, expMa
         const btAmt = r.bankTransferAmount||0;
         const dpAmt = r.directPettyCash||0;
         const cashHeld = getIncomeCashWithAccountant(r, remRates);
-        const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+        // Badge reflects actual BANK DEPOSITS only (FIFO-attributed) — never cash that was
+        // SPENT on expenses/remittances/pool. Previously it used entry.isReconciled, which
+        // is true whenever the cash was consumed by ANYTHING, so spent-but-unbanked cash
+        // wrongly showed "✓ Deposited". Cash that isn't fully banked shows "In cash pool"
+        // (its individual fate lives in the shared pool — see the Cash with Accountant view).
         const entry = expMapOverride?.get(r.id);
-        const isFullyDeposited = cashHeld > 0 && (depositedAmt >= cashHeld || entry?.isReconciled);
-        const remaining = entry ? entry.stillPending : Math.max(0, cashHeld - depositedAmt);
+        const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
+        const bankedAmt = entry ? entry.deposited : depositedAmt;
+        const isBanked = cashHeld > 0 && bankedAmt >= cashHeld - 0.5;
         const statusBadge = cashHeld===0
-          ? `<span class="badge badge-info">No Cash (All Transfer)</span>`
-          : isFullyDeposited
+          ? `<span class="badge badge-info">🏦 All to Bank</span>`
+          : isBanked
             ? `<span class="badge badge-success">✓ Deposited</span>`
-            : depositedAmt > 0
-              ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} still pending</span>`
-              : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
+            : `<span class="badge badge-warn" title="This cash joined the accountant's shared pool. Tap 'Cash with Accountant' for the full breakdown of what's been banked vs spent.">💵 In cash pool</span>`;
         return `<tr>
           <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
           <td class="td-green td-bold">${fmt(r.totalCollection)}</td>
@@ -4768,7 +4821,7 @@ async function renderIncomeList(records, cashTxOverride, remRatesOverride, expMa
           <td>${statusBadge}</td>
           <td class="td-muted">${r.recordedBy||'—'}</td>
           <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-          ${canAction('income_deposit')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+          ${canAction('income_deposit')&&cashHeld>0&&!isBanked?`<button class="btn btn-sm btn-primary" onclick="App.confirmBulkDeposit()" style="margin-left:4px">Record Deposit</button>`:''}</td>
         </tr>`;}).join('')}
     </table>
     <table class="tx-mobile-table">
@@ -4779,12 +4832,13 @@ async function renderIncomeList(records, cashTxOverride, remRatesOverride, expMa
         const cashHeld = getIncomeCashWithAccountant(r, remRates);
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const entry = expMapOverride?.get(r.id);
-        const isFullyDeposited = cashHeld > 0 && (depositedAmt >= cashHeld || entry?.isReconciled);
+        const bankedAmt = entry ? entry.deposited : depositedAmt;
+        const isBanked = cashHeld > 0 && bankedAmt >= cashHeld - 0.5;
         const mobileStatus = cashHeld===0
-          ? `<span class="badge badge-info">No Cash</span>`
-          : isFullyDeposited
+          ? `<span class="badge badge-info">🏦 All to Bank</span>`
+          : isBanked
             ? `<span class="badge badge-success">✓ Deposited</span>`
-            : `<span class="badge badge-warn">⏳ Pending</span>`;
+            : `<span class="badge badge-warn">💵 In cash pool</span>`;
         return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="Sunday Collection ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
           <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div></td>
           <td style="max-width:0;width:55%">
@@ -4809,15 +4863,14 @@ async function renderOtherIncomeList(records, expMapOverride){
         const hasCashComponent = cashHeld > 0.005;
         const cashDep = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const entry = hasCashComponent ? expMapOverride?.get(r.id) : null;
-        const isFullyDep = cashDep>=cashHeld || entry?.isReconciled;
-        const remaining = entry ? entry.stillPending : Math.max(0, cashHeld - cashDep);
+        // Bank deposits only — spent cash must not read as "Deposited" (see renderIncomeList).
+        const bankedAmt = entry ? entry.deposited : cashDep;
+        const isBanked = hasCashComponent && bankedAmt >= cashHeld - 0.5;
         const statusBadge = !hasCashComponent
           ? `<span class="badge badge-info">🏦 Bank Transfer</span>`
-          : isFullyDep
+          : isBanked
             ? `<span class="badge badge-success">✓ Deposited</span>`
-            : cashDep>0
-              ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} pending</span>`
-              : `<span class="badge badge-warn">⏳ Cash Pending Deposit</span>`;
+            : `<span class="badge badge-warn" title="This cash joined the accountant's shared pool. Tap 'Cash with Accountant' for the full breakdown of what's been banked vs spent.">💵 In cash pool</span>`;
         return `<tr>
           <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div></td>
           <td><span class="badge badge-gray">${src.label}</span></td>
@@ -4827,7 +4880,7 @@ async function renderOtherIncomeList(records, expMapOverride){
           <td>${statusBadge}</td>
           <td class="td-muted">${r.recordedBy||'—'}</td>
           <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-          ${canAction('income_deposit')&&hasCashComponent&&!isFullyDep?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+          ${canAction('income_deposit')&&hasCashComponent&&!isBanked?`<button class="btn btn-sm btn-primary" onclick="App.confirmBulkDeposit()" style="margin-left:4px">Record Deposit</button>`:''}</td>
         </tr>`;}).join('')}
     </table>
     <table class="tx-mobile-table">
@@ -4838,12 +4891,13 @@ async function renderOtherIncomeList(records, expMapOverride){
         const hasCashComponent = cashHeld > 0.005;
         const cashDep = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const entry = hasCashComponent ? expMapOverride?.get(r.id) : null;
-        const isFullyDep = cashDep>=cashHeld || entry?.isReconciled;
+        const bankedAmt = entry ? entry.deposited : cashDep;
+        const isBanked = hasCashComponent && bankedAmt >= cashHeld - 0.5;
         const mobileStatus = !hasCashComponent
           ? `<span class="badge badge-info">🏦 Bank</span>`
-          : isFullyDep
+          : isBanked
             ? `<span class="badge badge-success">✓ Deposited</span>`
-            : `<span class="badge badge-warn">⏳ Pending</span>`;
+            : `<span class="badge badge-warn">💵 In cash pool</span>`;
         return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(src.label)} ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
           <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div></td>
           <td style="max-width:0;width:55%">
@@ -4939,15 +4993,14 @@ async function renderAllIncomeList(records, cashTxOverride, remRatesOverride, ex
           : getIncomeCashWithAccountant(r, remRates);
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const entry = expMapOverride?.get(r.id);
-        const isFullyDeposited = cashHeld > 0 && (depositedAmt >= cashHeld || entry?.isReconciled);
-        const remaining = entry ? entry.stillPending : Math.max(0, cashHeld - depositedAmt);
+        // Bank deposits only — spent cash must not read as "Deposited" (see renderIncomeList).
+        const bankedAmt = entry ? entry.deposited : depositedAmt;
+        const isBanked = cashHeld > 0 && bankedAmt >= cashHeld - 0.5;
         const statusBadge = cashHeld===0
-          ? `<span class="badge badge-info">No Cash</span>`
-          : isFullyDeposited
+          ? `<span class="badge badge-info">🏦 All to Bank</span>`
+          : isBanked
             ? `<span class="badge badge-success">✓ Deposited</span>`
-            : depositedAmt>0
-              ? `<span class="badge badge-warn">Partial — ${fmt(remaining)} pending</span>`
-              : `<span class="badge badge-warn">⏳ Pending</span>`;
+            : `<span class="badge badge-warn" title="This cash joined the accountant's shared pool. Tap 'Cash with Accountant' for the full breakdown of what's been banked vs spent.">💵 In cash pool</span>`;
         const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
         return `<tr>
           <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
@@ -4957,7 +5010,7 @@ async function renderAllIncomeList(records, cashTxOverride, remRatesOverride, ex
           <td>${statusBadge}</td>
           <td class="td-muted">${r.recordedBy||'—'}</td>
           <td><button class="btn btn-sm" onclick="App.viewIncome('${r.id}')">View</button>
-          ${canAction('income_deposit')&&cashHeld>0&&!isFullyDeposited?`<button class="btn btn-sm btn-primary" onclick="App.confirmDeposit('${r.id}')" style="margin-left:4px">Record Deposit</button>`:''}</td>
+          ${canAction('income_deposit')&&cashHeld>0&&!isBanked?`<button class="btn btn-sm btn-primary" onclick="App.confirmBulkDeposit()" style="margin-left:4px">Record Deposit</button>`:''}</td>
         </tr>`;}).join('')}
     </table>
     <table class="tx-mobile-table">
@@ -4971,12 +5024,13 @@ async function renderAllIncomeList(records, cashTxOverride, remRatesOverride, ex
           : getIncomeCashWithAccountant(r, remRates);
         const depositedAmt = allCashTxList.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
         const entry = expMapOverride?.get(r.id);
-        const isFullyDeposited = cashHeld > 0 && (depositedAmt >= cashHeld || entry?.isReconciled);
+        const bankedAmt = entry ? entry.deposited : depositedAmt;
+        const isBanked = cashHeld > 0 && bankedAmt >= cashHeld - 0.5;
         const mobileStatus = cashHeld===0
-          ? `<span class="badge badge-info">No Cash</span>`
-          : isFullyDeposited
+          ? `<span class="badge badge-info">🏦 All to Bank</span>`
+          : isBanked
             ? `<span class="badge badge-success">✓ Deposited</span>`
-            : `<span class="badge badge-warn">⏳ Pending</span>`;
+            : `<span class="badge badge-warn">💵 In cash pool</span>`;
         const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
         return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(srcLabel)} ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
           <td>
@@ -5208,32 +5262,10 @@ async function viewIncome(id){
   // individual collections — that per-record attribution is what made a single payment
   // look like a strange partial amount on one record and vanish on another.
   const pool = computeCashPoolBreakdown(allIncVI, allCashVI, allExpensesVI, allPettyVI, allSatFundsVI, allRemsVI, remRates);
+  const poolLines = buildCashPoolDetailLines(allCashVI, allExpensesVI, allSatFundsVI, allRemsVI);
   // Deposits explicitly tagged to THIS record — shown (with AI-verification actions) in
   // the footer so the user can audit/act on each physical deposit slip they linked here.
   const deposits = allCashVI.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id);
-  // Real transactions behind each pool line, newest first, for the expandable rows.
-  const catOfVI = e => (typeof EXPENSE_CATS_ALL!=='undefined'?EXPENSE_CATS_ALL:[]).find(c=>c.key===e.category)||{label:e.category||'Expense',icon:'💸'};
-  const poolExpenseLines = (allExpensesVI||[]).filter(isLoggedExpense).map(e=>{
-    const amt = e.paymentMethod==='cash'?(e.amount||0):e.paymentMethod==='split'?(e.cashAmount||0):0;
-    if(amt<=0) return null; const c=catOfVI(e);
-    return { icon:c.icon||'💸', label:e.description||e.subCategory||c.label, date:e.date||e.createdAt, amount:amt };
-  }).filter(Boolean).sort((a,b)=>new Date(b.date)-new Date(a.date));
-  const poolRemitLines = (allRemsVI||[]).filter(x=>x.status==='paid').map(x=>{
-    const amt = splitRemittancePaid(x).cash; if(amt<=0) return null;
-    return { icon:'📤', label:x.label||'RCCG Remittance', date:x.paidDate||x.date||x.createdAt, amount:amt };
-  }).filter(Boolean).sort((a,b)=>new Date(b.date)-new Date(a.date));
-  const poolPayoutLines = (allSatFundsVI||[]).filter(s=>s.direction==='out'&&s.channel==='cash_accountant'&&(s.amount||0)>0).map(s=>{
-    return { icon:'🛰️', label:s.note||(SATELLITE_FUND_PURPOSES.find(p=>p.key===s.purpose)?.label)||'Pool payment', date:s.date||s.createdAt, amount:s.amount||0 };
-  }).sort((a,b)=>new Date(b.date)-new Date(a.date));
-  const poolDepositLines = (allCashVI||[]).filter(t=>t.type==='cash_deposit'&&isDepositEffective(t)&&t.destination!=='satellite_passthrough'&&(t.amount||0)>0).map(t=>{
-    return { icon:'✅', label:'Bank deposit', date:t.date||t.createdAt, amount:t.amount||0 };
-  }).sort((a,b)=>new Date(b.date)-new Date(a.date));
-  // Expandable pool row: label + amount, optional detail list of real transactions.
-  const poolRow = (icon, label, amount, lines, sign) => {
-    const has = lines && lines.length;
-    const detail = has ? `<div style="display:none;padding:4px 8px 8px 18px;background:rgba(0,0,0,0.02);border-left:2px solid var(--border)">${lines.map(l=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:3px 0;color:var(--text2)"><span>${l.icon} ${esc(l.label)} <span style="color:var(--text3)">· ${fmtDate(l.date)}</span></span><span style="font-weight:600;color:${sign==='-'?'var(--danger)':'var(--text2)'}">${sign==='-'?'−':''}${fmt(l.amount)}</span></div>`).join('')}</div>` : '';
-    return `<div class="status-row"${has?` style="cursor:pointer" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='none'?'block':'none'"`:''}><div class="status-row-label">${icon} ${label}${has?` <span style="font-size:9px;color:var(--text3)">▾</span>`:''}</div><div class="status-row-amt" style="color:${sign==='-'?'var(--danger)':'var(--text)'}">${sign==='-'?'−':''}${fmt(amount)}</div></div>${detail}`;
-  };
   const src = OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Sunday Collection'};
 
   // Compute per-Sunday share of fixed quotas for this income record's remittance period
@@ -5276,17 +5308,7 @@ async function viewIncome(id){
     <div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:rgba(186,117,23,0.08);border:1px solid rgba(186,117,23,0.22);font-size:11.5px;line-height:1.5;color:var(--text2)">ℹ️ This <strong>${fmt(cashHeld)}</strong> cash joined the Accountant's <strong>shared cash pool</strong> shown below. Cash from every collection is pooled together, so expenses, remittances, pool payments and bank deposits are tracked against the whole pool — not one collection.</div>
 
     <div style="font-size:11px;color:var(--text3);margin:14px 0 8px;line-height:1.5"><strong style="color:var(--text2)">Part 2 — the Accountant's shared cash pool</strong> (all collections combined). Every line ties to a real record — tap a ▾ row to see them. This balance matches the "Cash with Accountant" figure on the Dashboard and Bank page.</div>
-    ${poolRow('💰','Cash received from collections', pool.cashFromCollections, null, '+')}
-    ${pool.satelliteCashIn>0.5?poolRow('🛰️','Satellite/Zone cash received', pool.satelliteCashIn, null, '+'):''}
-    ${pool.bankToAccountant>0.5?poolRow('🏦','Moved from bank to accountant', pool.bankToAccountant, null, '+'):''}
-    <div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">= Total cash received</div><div class="status-row-amt" style="font-weight:700;color:var(--success)">${fmt(pool.totalIn)}</div></div>
-    ${pool.cashExpenses>0.5?poolRow('💸','Cash expenses', pool.cashExpenses, poolExpenseLines, '-'):''}
-    ${pool.remittancesCash>0.5?poolRow('📤','RCCG remittance paid (cash)', pool.remittancesCash, poolRemitLines, '-'):''}
-    ${pool.poolPayoutsCash>0.5?poolRow('🛰️','Satellite/Zone Pool payments (cash)', pool.poolPayoutsCash, poolPayoutLines, '-'):''}
-    ${pool.pettyCashTopups>0.5?poolRow('🏧','Petty cash top-ups (from cash)', pool.pettyCashTopups, null, '-'):''}
-    ${pool.cashDeposited>0.5?poolRow('✅','Deposited to bank', pool.cashDeposited, poolDepositLines, '-'):''}
-    <div class="status-row" style="border-top:2px solid var(--border);padding-top:8px"><div class="status-row-label" style="font-weight:700">= Cash with Accountant now</div><div class="status-row-amt" style="font-weight:800;font-size:16px;color:${pool.balance>0.5?'var(--amber)':'var(--primary)'}">${fmt(Math.max(0,pool.balance))}</div></div>
-    ${pool.balance<-0.5?`<div style="font-size:11px;color:var(--danger);margin-top:6px;line-height:1.5">⚠️ The cash pool is over-drawn by ${fmt(Math.abs(pool.balance))} — recorded cash payments exceed recorded cash received. Check for a missing collection or a mis-recorded cash payment.</div>`:''}
+    ${renderCashPoolSectionHTML(pool, poolLines)}
     `:''}
     ${isSunday?`<hr class="divider">
     <p class="card-title">Income Breakdown</p>
@@ -5308,6 +5330,31 @@ async function viewIncome(id){
     ${canAction('income_delete')?`<button class="btn btn-danger" style="margin-right:auto" onclick="closeModal();App.confirmDeleteIncome('${r.id}')">🗑 Delete</button>`:''}
     <button class="btn" onclick="closeModal()">Close</button>
     ${canAction('income_deposit')&&pool.balance>0.5?`<button class="btn btn-primary" onclick="closeModal();App.confirmBulkDeposit()">Record Cash Deposit</button>`:''}</div>`);
+}
+
+// Standalone "Cash with Accountant" breakdown — opened by tapping the Cash with
+// Accountant figure on the Record Income page / dashboard. Shows the full itemised
+// pool (what came in, what went out, current balance) so the accountant can see and
+// audit exactly what makes up the figure, with every deduction row expandable to its
+// real transactions.
+async function showCashPoolModal(){
+  const [inc, cashTx, exp, petty, sat, rems, rr] = await Promise.all([
+    DB.getIncome(), DB.getCashTransactions(), DB.getExpenses(), DB.getPetty(), DB.getSatelliteFunds(), DB.getRemittances(), getRemRates()
+  ]);
+  const remRates = rr.rates || DEFAULT_REMITTANCE_RATES;
+  const pool = computeCashPoolBreakdown(inc, cashTx, exp, petty, sat, rems, remRates);
+  const lines = buildCashPoolDetailLines(cashTx, exp, sat, rems);
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">💵 Cash with Accountant</div>
+    <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:12px">The accountant holds <strong>one shared pile of cash</strong>. This is everything that came in as cash, minus everything paid out or deposited — so the running total below is the cash that should physically be with the accountant right now. Every line ties to a real record; tap a ▾ row to see them.</div>
+    ${renderCashPoolSectionHTML(pool, lines)}
+    <hr class="divider">
+    <div style="font-size:11px;color:var(--text3);line-height:1.5">Physically counted a different amount? Use <strong>⚖️ Reconcile Cash with Accountant</strong> on the Bank page to log an audited adjustment.</div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Close</button>
+      ${canAction('income_deposit')&&pool.balance>0.5?`<button class="btn btn-primary" onclick="closeModal();App.confirmBulkDeposit()">Record Cash Deposit</button>`:''}
+    </div>`);
 }
 
 function confirmDeleteIncome(id){
@@ -8195,10 +8242,12 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const depositStatus=r=>{
     const cashHeld=getSundayCashWithAccountant(r,remRates);
     if(cashHeld===0) return 'No Cash';
-    const dep=depositMapM[r.id]||0;
     const entry=expCoveringMapM.get(r.id);
-    if(dep>=cashHeld||entry?.isReconciled) return 'Deposited';
-    if(dep>0) return 'Partial';
+    // Actual bank deposits only — cash SPENT on expenses/remittances must not read as
+    // "Deposited" (see renderIncomeList). entry.deposited is the FIFO-attributed deposits.
+    const banked = entry ? entry.deposited : (depositMapM[r.id]||0);
+    if(banked>=cashHeld-0.5) return 'Deposited';
+    if(banked>0.5) return 'Partial';
     return 'Pending';
   };
   const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
@@ -12347,10 +12396,11 @@ async function generateMonthlyReport(){
   function depositBadgeM(r){
     const cashHeld=getSundayCashWithAccountant(r,remRates);
     if(cashHeld===0) return '<span class="badge badge-info">No Cash</span>';
-    const dep=depositMapM[r.id]||0;
     const entry=expCoveringMapM.get(r.id);
-    if(dep>=cashHeld||entry?.isReconciled) return '<span class="badge badge-success">Deposited</span>';
-    if(dep>0) return '<span class="badge badge-warn">Partial</span>';
+    // Actual bank deposits only — spent cash must not read as "Deposited" (see renderIncomeList).
+    const banked = entry ? entry.deposited : (depositMapM[r.id]||0);
+    if(banked>=cashHeld-0.5) return '<span class="badge badge-success">Deposited</span>';
+    if(banked>0.5) return '<span class="badge badge-warn">Partial</span>';
     return '<span class="badge badge-warn">Pending</span>';
   }
   const fromDate=state.reportFromDate||ymdLocal(new Date(state.year,state.month,1));
@@ -12580,10 +12630,11 @@ async function generateWeeklyReport(){
   function depositBadge(r){
     const cashHeld=getSundayCashWithAccountant(r,remRates);
     if(cashHeld===0) return '<span class="badge badge-info">No Cash</span>';
-    const dep=depositMap[r.id]||0;
     const entry=expCoveringMap.get(r.id);
-    if(dep>=cashHeld||entry?.isReconciled) return '<span class="badge badge-success">✓ Deposited</span>';
-    if(dep>0) return `<span class="badge badge-warn">Partial</span>`;
+    // Actual bank deposits only — spent cash must not read as "Deposited" (see renderIncomeList).
+    const banked = entry ? entry.deposited : (depositMap[r.id]||0);
+    if(banked>=cashHeld-0.5) return '<span class="badge badge-success">✓ Deposited</span>';
+    if(banked>0.5) return `<span class="badge badge-warn">Partial</span>`;
     return '<span class="badge badge-warn">Pending</span>';
   }
 
@@ -12602,7 +12653,7 @@ async function generateWeeklyReport(){
   const weeklySundayCount=new Set(sundayRecs.map(r=>r.date)).size;
   const sundayCollected=sundayRecs.reduce((s,r)=>s+(r.totalCollection||0),0);
   const avgPerSunday=weeklySundayCount?Math.round(sundayCollected/weeklySundayCount):0;
-  const deposited=income.filter(r=>{const c=getSundayCashWithAccountant(r,remRates);if(c===0) return true;const dep=depositMap[r.id]||0;return dep>=c||expCoveringMap.get(r.id)?.isReconciled;}).length;
+  const deposited=income.filter(r=>{const c=getSundayCashWithAccountant(r,remRates);if(c===0) return true;const entry=expCoveringMap.get(r.id);const banked=entry?entry.deposited:(depositMap[r.id]||0);return banked>=c-0.5;}).length;
   const pending=income.length-deposited;
 
   // Highest and lowest
@@ -13800,7 +13851,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
   updateExpenseSubcats, updateExpenseDescRequired,

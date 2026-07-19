@@ -286,6 +286,30 @@ test('computeCashPoolBreakdown reconciles exactly with calcChurchBalance and ite
   assert.equal(b.balance, bal.cashWithAccountant - bal.cashDeficit);
 });
 
+test('a collection whose cash was SPENT (not banked) is fully reconciled but has zero deposited', () => {
+  // This underpins the list/report badge fix: the badge must key off entry.deposited
+  // (actual bank deposits), NOT entry.isReconciled — otherwise a collection whose cash
+  // was consumed by a cash remittance shows "✓ Deposited" when nothing was banked.
+  const income = [{
+    id: 'INC-1', source: 'sunday_collection', date: '2026-07-05',
+    totalCollection: 14200, membersTithe: 14200,
+    bankTransferAmount: 0, directPettyCash: 0, childrenOffering: 0
+  }];
+  const remittances = [{
+    id: 'REM-A', status: 'paid', part: 'a', amount: 14200,
+    paidDate: '2026-07-10', paymentMethod: 'cash', bankAmount: 0, cashAmount: 14200
+  }];
+
+  const map = App._buildExpenseCoveringMap(income, [], {}, [], [], remittances, []);
+  const entry = map.get('INC-1');
+
+  assert.ok(entry);
+  assert.equal(entry.remitCovering, 14200); // spent on the remittance
+  assert.equal(entry.deposited, 0);          // nothing actually banked
+  assert.equal(entry.isReconciled, true);    // fully accounted for → old badge said "Deposited"
+  // The new badge uses `deposited >= cashHeld`, which is false here → not "Deposited". ✓
+});
+
 test('buildExpenseCoveringMap treats a satellite cash-in receipt as an inflow lot outflows can draw from', () => {
   // Without this, a cash expense funded partly by satellite cash-in money has nowhere
   // to draw from beyond the income lots, and the excess is silently dropped instead of
