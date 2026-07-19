@@ -3751,6 +3751,12 @@ async function renderDashboard(){
   const _wkTotalPeriodSundays = countSundaysInRange(_wkPeriodFrom, _wkPeriodTo);
   const _wkFullPeriodQuota = dashQuotaLines.reduce((s,q) => s + (q.monthlyAmount || q.amount || 0), 0);
   const _wkPerSundayQuota = _wkTotalPeriodSundays > 0 ? _wkFullPeriodQuota / _wkTotalPeriodSundays : 0;
+  // A week ending today shouldn't flip to "complete" the instant the date rolls over —
+  // it should wait until today's income/expense (and the remittance it deducts) has
+  // actually been recorded, otherwise the card jumps to a period-end total before the
+  // day's transactions are in.
+  const _wkTodayHasRecordedActivity = income.some(r=>ymdLocal(new Date(r.date||r.createdAt||''))===dashTodayStrForAsOf)
+    || expenses.some(r=>ymdLocal(new Date(r.date||r.createdAt||''))===dashTodayStrForAsOf);
   // Compute per-week metrics
   const _wkData = await Promise.all(_wkBounds.map(async (wk, idx) => {
     const wkIncome = filterByDateRange(income, wk.from, wk.to);
@@ -3773,7 +3779,7 @@ async function renderDashboard(){
       .reduce((s,r) => s + (r.totalCollection||0), 0);
     wkNetRetained += wkOtherLocal;
     const wkSurplus = wkNetRetained - wkTotalExpenses;
-    const isComplete = wk.to <= dashTodayStrForAsOf;
+    const isComplete = wk.to < dashTodayStrForAsOf || (wk.to === dashTodayStrForAsOf && _wkTodayHasRecordedActivity);
     return { idx, from: wk.from, to: wk.to, income: wkTotalIncome, expenses: wkTotalExpenses, netRetained: wkNetRetained, surplus: wkSurplus, isComplete };
   }));
   const _wkCompleted = _wkData.filter(w => w.isComplete && (w.income > 0 || w.expenses > 0));
