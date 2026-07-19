@@ -176,3 +176,97 @@ test('calcUnsettledPeriodsSettledAmount ignores periods already fully settled (b
 
   assert.equal(App._calcUnsettledPeriodsSettledAmount(remittances, settledPeriodKeys), 0);
 });
+
+test('buildExpenseCoveringMap deducts a cash-funded remittance payment from the covering Sunday collection', () => {
+  // Regression test: previously buildExpenseCoveringMap only knew about deposits, cash
+  // expenses, and petty top-ups as outflows — a remittance paid from the accountant's
+  // cash was invisible to it. That meant this record's "Still with Accountant" (and the
+  // sum of "Still with Accountant" across every record) stayed too HIGH after a cash
+  // remittance payment, even though calcChurchBalance's aggregate Cash with Accountant
+  // had already correctly dropped — the per-record view and the aggregate disagreed.
+  const income = [{
+    id: 'INC-1',
+    source: 'sunday_collection',
+    date: '2026-07-05',
+    totalCollection: 50000,
+    membersTithe: 50000,
+    bankTransferAmount: 0,
+    directPettyCash: 0,
+    childrenTeacherHoldCash: 0
+  }];
+  const remittances = [{
+    id: 'REM-A',
+    status: 'paid',
+    part: 'a',
+    amount: 14200,
+    paidDate: '2026-07-10',
+    paymentMethod: 'cash',
+    bankAmount: 0,
+    cashAmount: 14200
+  }];
+
+  const map = App._buildExpenseCoveringMap(income, [], {}, [], [], remittances, []);
+  const entry = map.get('INC-1');
+
+  assert.ok(entry);
+  assert.equal(entry.remitCovering, 14200);
+  assert.equal(entry.stillPending, 50000 - 14200);
+});
+
+test('buildExpenseCoveringMap deducts a cash-funded Satellite/Zone Pool payout the same way', () => {
+  const income = [{
+    id: 'INC-1',
+    source: 'sunday_collection',
+    date: '2026-07-05',
+    totalCollection: 50000,
+    membersTithe: 50000,
+    bankTransferAmount: 0,
+    directPettyCash: 0,
+    childrenTeacherHoldCash: 0
+  }];
+  const satelliteFunds = [{
+    id: 'SAT-1',
+    direction: 'out',
+    channel: 'cash_accountant',
+    amount: 500,
+    date: '2026-07-12'
+  }];
+
+  const map = App._buildExpenseCoveringMap(income, [], {}, [], [], [], satelliteFunds);
+  const entry = map.get('INC-1');
+
+  assert.ok(entry);
+  assert.equal(entry.poolCovering, 500);
+  assert.equal(entry.stillPending, 50000 - 500);
+});
+
+test('buildExpenseCoveringMap treats a satellite cash-in receipt as an inflow lot outflows can draw from', () => {
+  // Without this, a cash expense funded partly by satellite cash-in money has nowhere
+  // to draw from beyond the income lots, and the excess is silently dropped instead of
+  // reducing anyone's "remaining" — inflating the sum of every record's stillPending.
+  const income = [{
+    id: 'INC-1',
+    source: 'sunday_collection',
+    date: '2026-07-05',
+    totalCollection: 10000,
+    membersTithe: 10000,
+    bankTransferAmount: 0,
+    directPettyCash: 0,
+    childrenTeacherHoldCash: 0
+  }];
+  const satelliteFunds = [{
+    id: 'SAT-IN', direction: 'in', channel: 'cash', amount: 5000, date: '2026-07-06'
+  }];
+  const expenses = [{
+    id: 'EXP-1', status: 'approved', paymentMethod: 'cash', amount: 12000, date: '2026-07-13'
+  }];
+
+  const map = App._buildExpenseCoveringMap(income, [], {}, expenses, [], [], satelliteFunds);
+  const entry = map.get('INC-1');
+
+  // The 12,000 cash expense is covered by the 10,000 income lot plus the 5,000
+  // satellite cash-in lot — only 10,000 of it can attribute to this record.
+  assert.ok(entry);
+  assert.equal(entry.expenseCovering, 10000);
+  assert.equal(entry.stillPending, 0);
+});

@@ -1382,10 +1382,15 @@ function groupCashDeposits(deposits) {
 // allPetty is optional — pass it when available so petty top-ups paid from
 // accountant's cash are reflected in per-record stillPending. Callers that
 // omit it get a slightly conservative answer (over-reports stillPending).
-function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, allPetty){
+function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, allPetty, allRemittances=[], allSatelliteFunds=[]){
   const map = new Map();
 
-  // 1. Inflow lots — income records that hold cash, plus bank-to-accountant withdrawals.
+  // 1. Inflow lots — income records that hold cash, bank-to-accountant withdrawals, and
+  // satellite parishes' cash-channel receipts (handed to the accountant instead of the
+  // bank — see calcChurchBalance's satelliteCashIn). Without this, cash expenses/
+  // remittances actually funded by that money have no lot to draw from below, and the
+  // leftover is silently dropped instead of reducing anyone's "remaining" — the sum of
+  // every record's "Still with Accountant" then overstates the real total.
   const lots = [];
   const inflowEvents = [];
   for(const r of (allIncome||[])){
@@ -1398,13 +1403,19 @@ function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, al
       inflowEvents.push({ ts:new Date(t.date||t.createdAt).getTime(), incomeId:null, amount:t.amount });
     }
   }
+  for(const s of (allSatelliteFunds||[])){
+    if(s.direction==='in' && s.channel==='cash' && (s.amount||0)>0){
+      inflowEvents.push({ ts:new Date(s.date||s.createdAt).getTime(), incomeId:null, amount:s.amount });
+    }
+  }
   inflowEvents.sort((a,b)=>a.ts-b.ts);
   for(const ev of inflowEvents){
-    lots.push({ incomeId:ev.incomeId, ts:ev.ts, original:ev.amount, remaining:ev.amount, deposited:0, expensed:0, expenseAllocations:[], depositAllocations:[], pettyAllocations:[] });
+    lots.push({ incomeId:ev.incomeId, ts:ev.ts, original:ev.amount, remaining:ev.amount, deposited:0, expensed:0, remitted:0, poolPaid:0, expenseAllocations:[], depositAllocations:[], pettyAllocations:[], remitAllocations:[], poolAllocations:[] });
   }
   if(!lots.length) return map;
 
-  // 2. Outflows — cash deposits, cash expenses, petty top-ups from accountant's cash.
+  // 2. Outflows — cash deposits, cash expenses, petty top-ups, remittance payments, and
+  // Satellite/Zone Pool payouts, whichever actually left the accountant's own cash.
   const outflows = [];
   for(const t of (allCashTx||[])){
     if(t.type==='cash_deposit' && (t.amount||0)>0){
@@ -1423,6 +1434,22 @@ function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, al
     if(cashAmt<=0) continue;
     outflows.push({ ts:new Date(h.date||h.createdAt).getTime(), kind:'petty', sourceId:h.id, incomeRef:'', amount:cashAmt });
   }
+  // Remittances (or a part of one) paid from the accountant's own cash — see
+  // splitRemittancePaid/calcChurchBalance. Real cash that left the church the moment it
+  // was recorded, same as a cash expense.
+  for(const rem of (allRemittances||[])){
+    if(rem.status!=='paid') continue;
+    const cashAmt = splitRemittancePaid(rem).cash;
+    if(cashAmt<=0) continue;
+    outflows.push({ ts:new Date(rem.paidDate||rem.date||rem.createdAt).getTime(), kind:'remittance', sourceId:rem.id, incomeRef:'', amount:cashAmt });
+  }
+  // Satellite/Zone Pool payouts funded straight from the accountant's own cash (channel
+  // 'cash_accountant') — see calcChurchBalance's satelliteCashAccountantOut.
+  for(const s of (allSatelliteFunds||[])){
+    if(s.direction==='out' && s.channel==='cash_accountant' && (s.amount||0)>0){
+      outflows.push({ ts:new Date(s.date||s.createdAt).getTime(), kind:'satellite', sourceId:s.id, incomeRef:'', amount:s.amount });
+    }
+  }
   outflows.sort((a,b)=>a.ts-b.ts);
 
   // 3. Consume lots — preferred lot first (if outflow carries a hint), then FIFO across all lots.
@@ -1432,6 +1459,8 @@ function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, al
       if(kind==='deposit'){ lot.deposited += take; lot.depositAllocations.push({id:sourceId, amount:take}); }
       else if(kind==='expense'){ lot.expensed += take; lot.expenseAllocations.push({id:sourceId, amount:take}); }
       else if(kind==='petty'){ lot.pettyAllocations.push({id:sourceId, amount:take}); }
+      else if(kind==='remittance'){ lot.remitted += take; lot.remitAllocations.push({id:sourceId, amount:take}); }
+      else if(kind==='satellite'){ lot.poolPaid += take; lot.poolAllocations.push({id:sourceId, amount:take}); }
     }
     if(preferredIncomeRef){
       for(const lot of lots){
@@ -1458,16 +1487,20 @@ function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, al
 
   // 4. Aggregate per income record.
   for(const lot of lots){
-    if(lot.incomeId == null) continue;  // untagged bank-to-accountant inflow lot
+    if(lot.incomeId == null) continue;  // untagged inflow lot (withdrawal/satellite cash-in)
     const prior = map.get(lot.incomeId);
-    const data = prior || { cashHeld:0, deposited:0, expenseCovering:0, stillPending:0, expenseAllocations:[], depositAllocations:[], pettyAllocations:[] };
+    const data = prior || { cashHeld:0, deposited:0, expenseCovering:0, remitCovering:0, poolCovering:0, stillPending:0, expenseAllocations:[], depositAllocations:[], pettyAllocations:[], remitAllocations:[], poolAllocations:[] };
     data.cashHeld += lot.original;
     data.deposited += lot.deposited;
     data.expenseCovering += lot.expensed;
+    data.remitCovering += lot.remitted;
+    data.poolCovering += lot.poolPaid;
     data.stillPending += lot.remaining;
     data.expenseAllocations.push(...lot.expenseAllocations);
     data.depositAllocations.push(...lot.depositAllocations);
     data.pettyAllocations.push(...lot.pettyAllocations);
+    data.remitAllocations.push(...lot.remitAllocations);
+    data.poolAllocations.push(...lot.poolAllocations);
     map.set(lot.incomeId, data);
   }
   for(const v of map.values()) v.isReconciled = v.stillPending <= 0.5;
@@ -4520,6 +4553,7 @@ async function renderIncome(){
     ['Expenses',           () => DB.getExpenses()],
     ['Petty history',      () => DB.getPetty()],
     ['Satellite pass-through funds', () => DB.getSatelliteFunds()],
+    ['Remittance history', () => DB.getRemittances()],
   ];
   const _incSettled = await Promise.allSettled(_incSources.map(([, fn]) => fn()));
   const _incFailed = _incSettled.map((r, i) => r.status === 'rejected' ? { label: _incSources[i][0], err: r.reason } : null).filter(Boolean);
@@ -4527,7 +4561,7 @@ async function renderIncome(){
     renderPageErrorState({ pageId: 'income', pageTitle: 'Income Recording', pageSub: monthLabel(), failed: _incFailed });
     return;
   }
-  const [allIncomeRecs, _cashTx, remRatesData, balance, periodRange, allExpensesRI, allPettyRI, allSatFundsRI] = _incSettled.map(r => r.value);
+  const [allIncomeRecs, _cashTx, remRatesData, balance, periodRange, allExpensesRI, allPettyRI, allSatFundsRI, allRemsRI] = _incSettled.map(r => r.value);
   const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
   const cashWithAccountant = balance.cashWithAccountant;
   // Check for deposits awaiting verification — prevents confusing "Deposit Cash" button
@@ -4538,7 +4572,7 @@ async function renderIncome(){
   const sundayRecs = records.filter(r=>!r.source||r.source==='sunday_collection');
   const otherRecs  = records.filter(r=>r.source && r.source!=='sunday_collection');
   const tab = state.incomeTab||'list';
-  const expCoveringMap = buildExpenseCoveringMap(allIncomeRecs, _cashTx, remRates, allExpensesRI, allPettyRI);
+  const expCoveringMap = buildExpenseCoveringMap(allIncomeRecs, _cashTx, remRates, allExpensesRI, allPettyRI, allRemsRI, allSatFundsRI);
   // Pending count for this month's income records (informational only).
   // Uses the FIFO-reconciled map so a record only counts as pending when its
   // share of the global cashWithAccountant pool is still positive.
@@ -5117,7 +5151,7 @@ async function viewIncome(id){
   const dpAmt = r.directPettyCash||0;
   const childrenTeacherHeld = isSunday ? getChildrenTeacherHeldCash(r, remRates) : 0;
   const cashHeld = getIncomeCashWithAccountant(r, remRates);
-  const [allCashVI, allExpensesVI, allPettyVI, settingsVI, allRemsVI] = await Promise.all([DB.getCashTransactions(), DB.getExpenses(), DB.getPetty(), DB.getSettings(), DB.getRemittances()]);
+  const [allCashVI, allExpensesVI, allPettyVI, settingsVI, allRemsVI, allSatFundsVI] = await Promise.all([DB.getCashTransactions(), DB.getExpenses(), DB.getPetty(), DB.getSettings(), DB.getRemittances(), DB.getSatelliteFunds()]);
   // Linked deposit records — shown verbatim in the "Deposit records:" footer so the
   // user can audit each physical deposit, even when the FIFO reallocates the cash
   // attribution across records.
@@ -5126,10 +5160,12 @@ async function viewIncome(id){
   // Globally-reconciled per-record breakdown. depositedTotal/expenseCovering/stillPending
   // are the FIFO-effective values — they always sum across records to the global
   // cash balance, no matter how individual deposits or expenses were tagged.
-  const expMapVI = buildExpenseCoveringMap(allIncVI, allCashVI, remRates, allExpensesVI, allPettyVI);
+  const expMapVI = buildExpenseCoveringMap(allIncVI, allCashVI, remRates, allExpensesVI, allPettyVI, allRemsVI, allSatFundsVI);
   const entryVI = expMapVI.get(r.id);
   const depositedTotal = entryVI ? entryVI.deposited : 0;
   const periodCashExpenses = entryVI ? entryVI.expenseCovering : 0;
+  const periodCashRemittances = entryVI ? entryVI.remitCovering : 0;
+  const periodCashPool = entryVI ? entryVI.poolCovering : 0;
   const netCashForBank = Math.max(0, cashHeld - periodCashExpenses);
   const stillWithAccountant = entryVI ? entryVI.stillPending : Math.max(0, netCashForBank - depositedTotal);
   // Only surface the deposit-correction warning when the user's raw linked deposit
@@ -5190,7 +5226,9 @@ async function viewIncome(id){
     ${dpAmt?`<div class="status-row"><div class="status-row-label">💳 Direct → Admin Officer Petty Cash</div><div class="status-row-amt" style="color:var(--success)">${fmt(dpAmt)}</div></div>`:''}
     ${periodCashExpenses>0?`<div class="status-row" style="cursor:pointer" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='none'?'block':'none'"><div class="status-row-label">💸 Cash used for expenses (recorded in Expenses) <span style="font-size:9px;color:var(--text3)">▾</span></div><div class="status-row-amt" style="color:var(--danger)">−${fmt(periodCashExpenses)}</div></div>${expAllocLines.length?`<div style="display:none;padding:4px 8px 8px 18px;background:rgba(0,0,0,0.02);border-left:2px solid var(--border)">${expAllocLines.map(l=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:3px 0;color:var(--text2)"><span>${l.icon} ${l.label} <span style="color:var(--text3)">· ${fmtDate(l.date)}</span></span><span style="color:var(--danger);font-weight:600">−${fmt(l.amount)}</span></div>`).join('')}</div>`:''}`:''}
     ${pettyAllocTotal>0?`<div class="status-row" style="cursor:pointer" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='none'?'block':'none'"><div class="status-row-label">🏧 Petty cash top-ups from this cash <span style="font-size:9px;color:var(--text3)">▾</span></div><div class="status-row-amt" style="color:var(--danger)">−${fmt(pettyAllocTotal)}</div></div>${pettyAllocLines.length?`<div style="display:none;padding:4px 8px 8px 18px;background:rgba(0,0,0,0.02);border-left:2px solid var(--border)">${pettyAllocLines.map(l=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:3px 0;color:var(--text2)"><span>${l.icon} ${l.label} <span style="color:var(--text3)">· ${fmtDate(l.date)}</span></span><span style="color:var(--danger);font-weight:600">−${fmt(l.amount)}</span></div>`).join('')}</div>`:''}`:''}
-    ${(periodCashExpenses>0||pettyAllocTotal>0)?`<div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">💰 Net cash for bank deposit</div><div class="status-row-amt" style="font-weight:700;color:var(--primary)">${fmt(Math.max(0, cashHeld - periodCashExpenses - pettyAllocTotal))}</div></div>`:''}
+    ${periodCashRemittances>0?`<div class="status-row"><div class="status-row-label">📤 RCCG remittance paid from this cash</div><div class="status-row-amt" style="color:var(--danger)">−${fmt(periodCashRemittances)}</div></div>`:''}
+    ${periodCashPool>0?`<div class="status-row"><div class="status-row-label">🛰️ Satellite/Zone Pool payment from this cash</div><div class="status-row-amt" style="color:var(--danger)">−${fmt(periodCashPool)}</div></div>`:''}
+    ${(periodCashExpenses>0||pettyAllocTotal>0||periodCashRemittances>0||periodCashPool>0)?`<div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">💰 Net cash for bank deposit</div><div class="status-row-amt" style="font-weight:700;color:var(--primary)">${fmt(Math.max(0, cashHeld - periodCashExpenses - pettyAllocTotal - periodCashRemittances - periodCashPool))}</div></div>`:''}
     ${(deposits.length||depositedTotal>0.5)?`<div class="status-row"><div class="status-row-label">✅ Deposited to Bank so far</div><div class="status-row-amt" style="color:var(--success)">${fmt(depositedTotal)}</div></div>`:''}
     ${rawLinkedDepositTotal>0.5 && Math.abs(rawLinkedDepositTotal-depositedTotal)>0.5?`<div class="status-row" style="font-size:11px;color:var(--text2)"><div class="status-row-label" style="font-style:italic">↳ Linked deposit records total ${fmt(rawLinkedDepositTotal)} — redistributed across periods to balance the cash pool.</div><div class="status-row-amt"></div></div>`:''}
     ${depositOverage>0.5?`<div class="status-row" style="flex-direction:column;align-items:flex-start;gap:6px"><div class="status-row-label" style="color:var(--danger);font-size:12px">⚠️ Linked deposit records (${fmt(rawLinkedDepositTotal)}) total ${fmt(depositOverage)} more than this record's cash with accountant (${fmt(cashHeld)}). Please verify and correct.</div>${canAction('income_deposit')?`<button class="btn btn-sm btn-danger" style="font-size:11px;padding:3px 10px" onclick="App.correctIncomeDeposit('${r.id}',${cashHeld})">Correct Deposit to ${fmt(cashHeld)}</button>`:''}</div>`:''}
@@ -5475,7 +5513,7 @@ async function correctIncomeDeposit(incomeId, targetTotal) {
 
 async function confirmDeposit(id){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
-  const [allIncCD, allCashCD, remRatesData, balance, allExpensesCD, allPettyCD] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance(), DB.getExpenses(), DB.getPetty()]);
+  const [allIncCD, allCashCD, remRatesData, balance, allExpensesCD, allPettyCD, allRemsCD, allSatFundsCD] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), calcChurchBalance(), DB.getExpenses(), DB.getPetty(), DB.getRemittances(), DB.getSatelliteFunds()]);
   const r = allIncCD.find(x=>x.id===id);
   if(!r) return;
   const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
@@ -5489,7 +5527,7 @@ async function confirmDeposit(id){
   // recorded in the Expenses section reduce this record's depositable cash (oldest
   // records absorb expenses first), and the per-record figures always sum to the
   // global cashWithAccountant.
-  const expMapCD = buildExpenseCoveringMap(allIncCD, allCashCD, remRates, allExpensesCD, allPettyCD);
+  const expMapCD = buildExpenseCoveringMap(allIncCD, allCashCD, remRates, allExpensesCD, allPettyCD, allRemsCD, allSatFundsCD);
   const entryCD = expMapCD.get(r.id);
   const effectiveRemaining = entryCD ? entryCD.stillPending : remaining;
   const expensesDeducted = entryCD ? entryCD.expenseCovering : 0;
@@ -5578,8 +5616,8 @@ async function submitCashDeposit(incomeId, btn=null){
 
 async function confirmBulkDeposit(){
   if(!canAction('income_deposit')){ showAlert('You do not have permission to record deposits.','danger'); return; }
-  const [allIncome, allCashTx, remRatesData, allExpenses, pettyHistory, balance] = await Promise.all([
-    DB.getIncome(), DB.getCashTransactions(), getRemRates(), DB.getExpenses(), DB.getPetty(), calcChurchBalance()
+  const [allIncome, allCashTx, remRatesData, allExpenses, pettyHistory, balance, allRemsCBD, allSatFundsCBD] = await Promise.all([
+    DB.getIncome(), DB.getCashTransactions(), getRemRates(), DB.getExpenses(), DB.getPetty(), calcChurchBalance(), DB.getRemittances(), DB.getSatelliteFunds()
   ]);
   const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
   const cashWithAccountant = balance.cashWithAccountant;
@@ -5588,7 +5626,7 @@ async function confirmBulkDeposit(){
 
   // Income records with remaining cash (positive contributors) — use expense-adjusted
   // stillPending so records fully consumed by dated expenses are excluded from display.
-  const expMapCBD = buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, pettyHistory);
+  const expMapCBD = buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, pettyHistory, allRemsCBD, allSatFundsCBD);
   const incomeItems = allIncome.map(r=>{
     const isSunday = !r.source||r.source==='sunday_collection';
     const cashHeld = getIncomeCashWithAccountant(r, remRates);
@@ -5743,12 +5781,12 @@ async function submitBulkDeposit(btn=null){
       photoData = await compressPhoto(photoFile, 1200, 0.75);
     }
     // Re-fetch fresh data to build accurate income-record distribution
-    const [allIncome, allCashTx, remRatesData, allExpensesSD, allPettySD] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), DB.getExpenses(), DB.getPetty()]);
+    const [allIncome, allCashTx, remRatesData, allExpensesSD, allPettySD, allRemsSD, allSatFundsSD] = await Promise.all([DB.getIncome(), DB.getCashTransactions(), getRemRates(), DB.getExpenses(), DB.getPetty(), DB.getRemittances(), DB.getSatelliteFunds()]);
     const remRates = remRatesData.rates || DEFAULT_REMITTANCE_RATES;
     // Use the same date-aware FIFO expense map so deposit goes to records whose
     // net cash (after expense attribution) still needs to be deposited, not to
     // records that have already been consumed by attributed cash expenses.
-    const expMapSD = buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpensesSD, allPettySD);
+    const expMapSD = buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpensesSD, allPettySD, allRemsSD, allSatFundsSD);
     const incomeItems = allIncome.map(r=>{
       const cashHeld = getIncomeCashWithAccountant(r, remRates);
       if(!cashHeld) return null;
@@ -8098,7 +8136,7 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const churchAddress=settings?.churchAddress||'Aguleri, Anambra State, Nigeria';
   const depositMapM={};
   allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef).forEach(t=>{depositMapM[t.incomeRef]=(depositMapM[t.incomeRef]||0)+(t.amount||0)});
-  const expCoveringMapM=buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, allPettyMS);
+  const expCoveringMapM=buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, allPettyMS, allRemittances, allSatFundsMS);
   const depositStatus=r=>{
     const cashHeld=getSundayCashWithAccountant(r,remRates);
     if(cashHeld===0) return 'No Cash';
@@ -9960,7 +9998,7 @@ async function renderBank(){
   const closingBankBalance = openingBankBalance + periodTotalInflows - periodTotalOutflows;
 
   // Pending cash deposits (income records with net undeposited cash after expense attribution)
-  const expMapBank = buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, pettyHistory);
+  const expMapBank = buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, pettyHistory, allRemittances, allSatFundsRB);
   const pendingDepItems = allIncome.filter(r=>{
     const cashHeld = getIncomeCashWithAccountant(r, remRates);
     if(cashHeld<=0) return false;
@@ -12250,7 +12288,7 @@ async function generateMonthlyReport(){
   const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
   const depositMapM={};
   allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef).forEach(t=>{depositMapM[t.incomeRef]=(depositMapM[t.incomeRef]||0)+(t.amount||0)});
-  const expCoveringMapM=buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, allPettyMR);
+  const expCoveringMapM=buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, allPettyMR, allRemittances, allSatFundsMR);
   function depositBadgeM(r){
     const cashHeld=getSundayCashWithAccountant(r,remRates);
     if(cashHeld===0) return '<span class="badge badge-info">No Cash</span>';
@@ -12471,7 +12509,7 @@ async function generateMonthlyReport(){
 }
 
 async function generateWeeklyReport(){
-  const [allIncome, allExpenses, settings, allCashTx, remRatesData, users, allPettyWR] = await Promise.all([DB.getIncome(), DB.getExpenses(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers(), DB.getPetty()]);
+  const [allIncome, allExpenses, settings, allCashTx, remRatesData, users, allPettyWR, allRemsWR, allSatFundsWR] = await Promise.all([DB.getIncome(), DB.getExpenses(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers(), DB.getPetty(), DB.getRemittances(), DB.getSatelliteFunds()]);
   const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
   const accountantName=(users||[]).find(u=>u.role==='accountant')?.name||'';
   const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
@@ -12483,7 +12521,7 @@ async function generateWeeklyReport(){
   // Build deposit map from cash_transactions
   const depositMap={};
   allCashTx.filter(t=>t.type==='cash_deposit'&&t.incomeRef).forEach(t=>{depositMap[t.incomeRef]=(depositMap[t.incomeRef]||0)+(t.amount||0)});
-  const expCoveringMap=buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, allPettyWR);
+  const expCoveringMap=buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, allPettyWR, allRemsWR, allSatFundsWR);
   function depositBadge(r){
     const cashHeld=getSundayCashWithAccountant(r,remRates);
     if(cashHeld===0) return '<span class="badge badge-info">No Cash</span>';
