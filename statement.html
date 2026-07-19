@@ -56,6 +56,7 @@ body{font-family:system-ui,-apple-system,Arial,sans-serif;font-size:14px;color:#
 .kpi-tile{border:1px solid #e0e0e0;border-radius:10px;padding:14px 12px;text-align:center;background:#fff}
 .kpi-val{font-size:19px;font-weight:700;color:#0F6E56;margin-bottom:3px;word-break:break-all}
 .kpi-lbl{font-size:10.5px;color:#666;text-transform:uppercase;letter-spacing:.5px}
+.kpi-sub{font-size:9px;color:#999;margin-top:5px;line-height:1.35;font-style:italic}
 .kpi-tile.red .kpi-val{color:#c0392b}
 .kpi-tile.blue .kpi-val{color:#185FA5}
 .kpi-tile-net{border-width:2px}
@@ -215,12 +216,15 @@ function renderReport(resp){
   // KPIs — 6 cards in the standard order
   const _netPos = (D.trueNetLocal||0) - (D.totalExpenses||0);
   const _netTile = `<div class="kpi-tile kpi-tile-net ${_netPos>=0?'surplus':'deficit'}"><div class="kpi-val">${_netPos>=0?N(_netPos):'('+N(Math.abs(_netPos))+')'}</div><div class="kpi-lbl">${_netPos>=0?'Net Local Retained [Surplus]':'Net Local Retained [Deficit]'}</div></div>`;
+  const _otherIncTotal = D.otherIncomeTotal || 0;
+  const _localSub = _otherIncTotal > 0
+    ? `<div class="kpi-sub">${N(D.netLocalFromSunday)} from Sunday collections<br>+ ${N(_otherIncTotal)} from other income</div>` : '';
   document.getElementById('kpiGrid').innerHTML = [
     {lbl:'Total Income', val:N(D.totalIncome), cls:''},
     {lbl:'Total Remittance Due', val:N(D.totalRemDue), cls:'red'},
-    {lbl:'Local Retained Income', val:N(D.trueNetLocal), cls:''},
+    {lbl:'Local Retained Income', val:N(D.trueNetLocal), cls:'', sub:_localSub},
     {lbl:'Total Expense', val:N(D.totalExpenses), cls:'red'},
-  ].map(k=>`<div class="kpi-tile ${k.cls}"><div class="kpi-val">${k.val}</div><div class="kpi-lbl">${k.lbl}</div></div>`).join('')
+  ].map(k=>`<div class="kpi-tile ${k.cls}"><div class="kpi-val">${k.val}</div><div class="kpi-lbl">${k.lbl}</div>${k.sub||''}</div>`).join('')
   + _netTile
   + `<div class="kpi-tile blue"><div class="kpi-val">${D.sundayCount||0}</div><div class="kpi-lbl">No. of Sundays</div></div>`;
 

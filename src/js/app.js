@@ -8169,6 +8169,10 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const otherIncomeRecords = income.filter(r => r.source && r.source !== 'sunday_collection')
     .filter(r => INCOME_TYPES.reduce((s,t) => s + (r[t.key]||0), 0) === 0);
   const otherIncomeTotal = otherIncomeRecords.reduce((s,r) => s + (r.totalCollection||0), 0);
+  // Kept for the shareable statement's "Local Retained Income" breakdown subtext — the
+  // portion that came from remittance-eligible Sunday collections, before Other Income
+  // is folded in below.
+  const netLocalFromSunday = trueNetLocal;
   // Other Income is 0% remitted — fold it into Local Retained Income now that it's
   // computed (see trueNetLocal above), so the statement's own balance identity holds.
   trueNetLocal += otherIncomeTotal;
@@ -8253,7 +8257,7 @@ async function buildMonthlyStatementData(fromDate, toDate){
     remittanceRows,
     expenseRows,
     expenseByCategory,
-    otherIncomeTotal, openingBalance, closingBalance, openingBalDate:fmtDate(openingBalDate),
+    otherIncomeTotal, netLocalFromSunday, openingBalance, closingBalance, openingBalDate:fmtDate(openingBalDate),
     outstandingRemittance:Math.max(0, totalRemDue-totalRemPaid),
     // Section F v2 — accurate cash-position figures anchored to calcChurchBalance()
     closingBankBalance, closingCashWithAccountant, closingCashDeficit, closingPettyFloat,
@@ -11988,6 +11992,7 @@ function openPrintableReport(title, bodyHTML, shareConfig){
   .summary-box .value.red{color:#c0392b}
   .summary-box .value.amber{color:#BA7517}
   .summary-box .value.blue{color:#185FA5}
+  .summary-box .sub{font-size:9.5px;color:#999;margin-top:4px;line-height:1.35;font-style:italic}
   .td-r{text-align:right}
   .td-c{text-align:center}
   .td-bold{font-weight:700}
@@ -12298,6 +12303,9 @@ async function generateMonthlyReport(){
   const otherIncomeRecords = income.filter(r => r.source && r.source !== 'sunday_collection')
     .filter(r => INCOME_TYPES.reduce((s,t) => s + (r[t.key]||0), 0) === 0);
   const otherIncomeTotal = otherIncomeRecords.reduce((s,r) => s + (r.totalCollection||0), 0);
+  // Kept for the "Local Retained Income" card's breakdown subtext — the portion that
+  // came from remittance-eligible Sunday collections, before Other Income is folded in.
+  const netLocalFromSunday = trueNetLocal;
   // Other Income is 0% remitted — fold it into Local Retained Income now that it's
   // computed (see trueNetLocal above), so this statement's own balance identity holds.
   trueNetLocal += otherIncomeTotal;
@@ -12314,7 +12322,7 @@ async function generateMonthlyReport(){
     <div class="summary-grid">
       <div class="summary-box"><div class="label">Total Income</div><div class="value green">${fmt(totalIncome)}</div></div>
       <div class="summary-box"><div class="label">Total Remittance Due</div><div class="value red">${fmt(totalRemDue)}</div></div>
-      <div class="summary-box"><div class="label">Local Retained Income</div><div class="value green">${fmt(trueNetLocal)}</div></div>
+      <div class="summary-box"><div class="label">Local Retained Income</div><div class="value green">${fmt(trueNetLocal)}</div>${otherIncomeTotal>0?`<div class="sub">${fmt(netLocalFromSunday)} from Sunday collections<br>+ ${fmt(otherIncomeTotal)} from other income</div>`:''}</div>
       <div class="summary-box"><div class="label">Total Expense</div><div class="value red">${fmt(totalExpenses)}</div></div>
       <div class="summary-box" style="border:2px solid ${netPosition>=0?'#0F6E56':'#c0392b'};background:${netPosition>=0?'#f0faf5':'#fff5f5'}"><div class="label" style="color:${netPosition>=0?'#0F6E56':'#c0392b'};font-weight:700">${netPosition>=0?'Net Local Retained [Surplus]':'Net Local Retained [Deficit]'}</div><div class="value ${netPosition>=0?'green':'red'}">${netPosition>=0?fmt(netPosition):'('+fmt(Math.abs(netPosition))+')'}</div></div>
       <div class="summary-box"><div class="label">No. of Sundays</div><div class="value blue">${sundayCount}</div></div>
