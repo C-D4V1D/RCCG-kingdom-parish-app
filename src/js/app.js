@@ -3513,8 +3513,12 @@ async function renderDashboard(){
 
   const expByCat = {};
   expenses.forEach(e=>{ expByCat[e.category]=(expByCat[e.category]||0)+(e.amount||0) });
-  const topCats = Object.entries(expByCat).sort((a,b)=>b[1]-a[1]).slice(0,7);
-  const maxCat = topCats[0]?.[1]||1;
+  const _expCatEntriesSorted = Object.entries(expByCat).sort((a,b)=>b[1]-a[1]);
+  const topCats = _expCatEntriesSorted.slice(0,7);
+  if(_expCatEntriesSorted.length > 7){
+    const _expOtherTotal = _expCatEntriesSorted.slice(7).reduce((s,e)=>s+e[1],0);
+    if(_expOtherTotal>0) topCats.push(['_other_exp', _expOtherTotal]);
+  }
 
   // Pre-compute SVG donut-chart paths for the expense breakdown pie slide.
   // Each slice is a closed SVG path arc traced from the outer ring to the inner ring.
@@ -3523,7 +3527,7 @@ async function renderDashboard(){
     const cx=100,cy=97,oR=80,iR=50;
     let angle=-90; // start at 12 o'clock
     return topCats.map(([cat,amt])=>{
-      const c=EXPENSE_CATS_ALL.find(e=>e.key===cat)||{color:'#999'};
+      const c=cat==='_other_exp'?{color:'#888'}:(EXPENSE_CATS_ALL.find(e=>e.key===cat)||{color:'#999'});
       const sweep=(amt/totalExpenses)*360;
       if(sweep<0.4) return '';
       const r=n=>n.toFixed(2);
@@ -4414,7 +4418,7 @@ async function renderDashboard(){
           <!-- Legend rows -->
           <div style="margin-top:6px;display:flex;flex-direction:column;gap:5px">
             ${topCats.map(([cat,amt])=>{
-              const c=EXPENSE_CATS_ALL.find(e=>e.key===cat)||{label:cat,color:'#888',icon:''};
+              const c=cat==='_other_exp'?{label:'Other',color:'#888',icon:'➕'}:(EXPENSE_CATS_ALL.find(e=>e.key===cat)||{label:cat,color:'#888',icon:''});
               const pct=Math.round(amt/totalExpenses*100);
               return `<div style="display:flex;align-items:center;gap:7px">
                 <div style="width:10px;height:10px;border-radius:2px;background:${c.color};flex-shrink:0"></div>
