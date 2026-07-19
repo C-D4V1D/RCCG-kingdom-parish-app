@@ -4289,11 +4289,14 @@ async function renderDashboard(){
             <div style="font-size:11px;color:var(--text2);line-height:1.4"><span style="font-weight:700">Projected Available Fund</span><br><span style="font-size:10px;color:var(--text3)">End of period (${_wkRemaining} wk${_wkRemaining>1?'s':''} left) · Target: ${fmtShort(_wkTarget)}</span></div>
             <div style="font-size:20px;font-weight:800;color:${_wkProjColor};letter-spacing:-0.5px;white-space:nowrap">${fmt(_wkProjectedEnd)}</div>
           </div>` : ''}
-          ${_wkRemaining === 0 && _wkCompleted.length > 0 ? `
-          <div style="margin-top:12px;padding:10px 14px;background:var(--green-light,#E1F5EE);border-radius:10px;text-align:center">
-            <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Period Total Surplus</div>
-            <div style="font-size:20px;font-weight:800;color:var(--primary)">${fmt(_wkData.reduce((s,w)=>s+w.surplus,0))}</div>
-          </div>` : ''}
+          ${_wkRemaining === 0 && _wkCompleted.length > 0 ? (() => {
+            const _wkPeriodTotal = _wkData.reduce((s,w)=>s+w.surplus,0);
+            const _wkPeriodIsDeficit = _wkPeriodTotal < 0;
+            return `
+          <div style="margin-top:12px;padding:10px 14px;background:${_wkPeriodIsDeficit?'#FCEBEB':'var(--green-light,#E1F5EE)'};border-radius:10px;text-align:center">
+            <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Period Total ${_wkPeriodIsDeficit?'Deficit':'Surplus'}</div>
+            <div style="font-size:20px;font-weight:800;color:${_wkPeriodIsDeficit?'var(--danger)':'var(--primary)'}">${fmt(_wkPeriodTotal)}</div>
+          </div>`; })() : ''}
         </div>` : ''}
 
         <div class="card">
@@ -4397,56 +4400,32 @@ async function renderDashboard(){
           :'<div class="empty-table">No income recorded this month.</div>'}
         </div>
 
-        <div class="card" style="padding:0;overflow:hidden">
-          <!-- Card header: always visible above the slider -->
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border)">
-            <span class="card-title">Expense Breakdown</span>
-            <div style="display:flex;align-items:center;gap:8px">
-              <span style="color:var(--text3);font-size:11px">This month</span>
-              ${topCats.length?`<div style="display:flex;background:var(--bg);border-radius:20px;padding:2px;gap:2px">
-                <button onclick="(function(){var s=document.getElementById('exp-pie-slider');s.scrollTo({left:0,behavior:'smooth'});})()" style="border:none;background:var(--card);border-radius:18px;padding:3px 10px;font-size:11px;font-weight:600;color:var(--text2);cursor:pointer;line-height:1.6">≡ List</button>
-                <button onclick="(function(){var s=document.getElementById('exp-pie-slider');s.scrollTo({left:s.offsetWidth,behavior:'smooth'});})()" style="border:none;background:transparent;border-radius:18px;padding:3px 10px;font-size:11px;font-weight:600;color:var(--text3);cursor:pointer;line-height:1.6">◑ Chart</button>
-              </div>`:''}
-            </div>
-          </div>
-          <!-- Two-slide horizontal scroller -->
-          <div id="exp-pie-slider" style="display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;-webkit-overflow-scrolling:touch;scrollbar-width:none">
-            <!-- Slide 1 — progress-bar list (original view) -->
-            <div style="flex:0 0 100%;scroll-snap-align:start;padding:14px 16px;box-sizing:border-box">
-              ${topCats.length?topCats.map(([cat,amt])=>{
-                const c=EXPENSE_CATS_ALL.find(e=>e.key===cat)||{label:cat,color:'#888',icon:''};
-                return `<div class="exp-row"><div class="exp-label">${c.icon||''} ${c.label}</div><div class="progress-bar"><div class="progress-fill" style="width:${Math.round(amt/maxCat*100)}%;background:${c.color}"></div></div><div class="exp-val">${fmt(amt)}</div></div>`;
-              }).join('')+`<div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:10px;margin-top:4px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total expenses</span><span style="font-size:16px;font-weight:700;color:var(--danger)">${fmt(totalExpenses)}</span></div>`
-              :'<div class="empty-table">No expenses recorded this month.</div>'}
-            </div>
-            <!-- Slide 2 — donut (ring) pie chart + compact legend -->
-            <div style="flex:0 0 100%;scroll-snap-align:start;padding:14px 16px;box-sizing:border-box">
-              ${topCats.length?`
-              <svg viewBox="0 0 200 195" width="100%" style="display:block;max-height:195px">
-                ${_expDonutSlices}
-                <!-- inner fill circle + centred label -->
-                <circle cx="100" cy="97" r="47" fill="var(--card,#fff)"/>
-                <text x="100" y="88" text-anchor="middle" font-size="9.5" fill="#aaa" font-family="system-ui,sans-serif" font-weight="500">Total</text>
-                <text x="100" y="105" text-anchor="middle" font-size="15" font-weight="700" fill="#A32D2D" font-family="system-ui,sans-serif">${fmtShort(totalExpenses)}</text>
-                <text x="100" y="117" text-anchor="middle" font-size="9" fill="#bbb" font-family="system-ui,sans-serif">${topCats.length} categor${topCats.length===1?'y':'ies'}</text>
-              </svg>
-              <!-- Legend rows -->
-              <div style="margin-top:6px;display:flex;flex-direction:column;gap:5px">
-                ${topCats.map(([cat,amt])=>{
-                  const c=EXPENSE_CATS_ALL.find(e=>e.key===cat)||{label:cat,color:'#888',icon:''};
-                  const pct=Math.round(amt/totalExpenses*100);
-                  return `<div style="display:flex;align-items:center;gap:7px">
-                    <div style="width:10px;height:10px;border-radius:2px;background:${c.color};flex-shrink:0"></div>
-                    <span style="font-size:12px;color:var(--text2);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.icon||''} ${c.label}</span>
-                    <span style="font-size:11px;font-weight:700;color:${c.color};flex-shrink:0;min-width:26px;text-align:right">${pct}%</span>
-                    <span style="font-size:12px;font-weight:600;color:var(--text);flex-shrink:0;min-width:64px;text-align:right">${fmt(amt)}</span>
-                  </div>`;
-                }).join('')}
-                <div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:8px;margin-top:3px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total expenses</span><span style="font-size:16px;font-weight:700;color:var(--danger)">${fmt(totalExpenses)}</span></div>
-              </div>`
-              :'<div class="empty-table">No expenses recorded this month.</div>'}
-            </div>
-          </div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">Expense Breakdown</span><span style="color:var(--text3);font-size:11px">This month</span></div>
+          ${topCats.length?`
+          <svg viewBox="0 0 200 195" width="100%" style="display:block;max-height:195px">
+            ${_expDonutSlices}
+            <!-- inner fill circle + centred label -->
+            <circle cx="100" cy="97" r="47" fill="var(--card,#fff)"/>
+            <text x="100" y="88" text-anchor="middle" font-size="9.5" fill="#aaa" font-family="system-ui,sans-serif" font-weight="500">Total</text>
+            <text x="100" y="105" text-anchor="middle" font-size="15" font-weight="700" fill="#A32D2D" font-family="system-ui,sans-serif">${fmtShort(totalExpenses)}</text>
+            <text x="100" y="117" text-anchor="middle" font-size="9" fill="#bbb" font-family="system-ui,sans-serif">${topCats.length} categor${topCats.length===1?'y':'ies'}</text>
+          </svg>
+          <!-- Legend rows -->
+          <div style="margin-top:6px;display:flex;flex-direction:column;gap:5px">
+            ${topCats.map(([cat,amt])=>{
+              const c=EXPENSE_CATS_ALL.find(e=>e.key===cat)||{label:cat,color:'#888',icon:''};
+              const pct=Math.round(amt/totalExpenses*100);
+              return `<div style="display:flex;align-items:center;gap:7px">
+                <div style="width:10px;height:10px;border-radius:2px;background:${c.color};flex-shrink:0"></div>
+                <span style="font-size:12px;color:var(--text2);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.icon||''} ${c.label}</span>
+                <span style="font-size:11px;font-weight:700;color:${c.color};flex-shrink:0;min-width:26px;text-align:right">${pct}%</span>
+                <span style="font-size:12px;font-weight:600;color:var(--text);flex-shrink:0;min-width:64px;text-align:right">${fmt(amt)}</span>
+              </div>`;
+            }).join('')}
+            <div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:8px;margin-top:3px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total expenses</span><span style="font-size:16px;font-weight:700;color:var(--danger)">${fmt(totalExpenses)}</span></div>
+          </div>`
+          :'<div class="empty-table">No expenses recorded this month.</div>'}
         </div>
 
         <div class="card">
