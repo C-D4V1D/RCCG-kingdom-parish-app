@@ -240,6 +240,76 @@ test('buildExpenseCoveringMap deducts a cash-funded Satellite/Zone Pool payout t
   assert.equal(entry.stillPending, 50000 - 500);
 });
 
+test('computeCashPoolBreakdown reconciles exactly with calcChurchBalance and itemises real amounts', async () => {
+  // Mirrors the parish's real July shape: a Sunday collection with a bank-transfer
+  // portion, a cash remittance (₦14,200 — the WHOLE payment, not a sliced ₦13,335),
+  // two cash pool payouts, a petty-funded pool payout (must NOT touch accountant cash),
+  // a satellite cash-in receipt, cash expenses, and a bank deposit.
+  const income = [{
+    id: 'INC-1', source: 'sunday_collection', date: '2026-07-05',
+    totalCollection: 50000, membersTithe: 50000,
+    bankTransferAmount: 12000, directPettyCash: 0, childrenOffering: 0
+  }];
+  const cashTx = [
+    { id: 'DEP-1', type: 'cash_deposit', amount: 6750, date: '2026-07-20', incomeRef: '' }
+  ];
+  const expenses = [
+    { id: 'EXP-1', status: 'approved', paymentMethod: 'cash', amount: 9750, date: '2026-07-19' }
+  ];
+  const remittances = [
+    { id: 'REM-B', status: 'paid', part: 'b', amount: 14200, paidDate: '2026-07-19', paymentMethod: 'cash', bankAmount: 0, cashAmount: 14200 }
+  ];
+  const satelliteFunds = [
+    { id: 'SAT-IN', direction: 'in',  channel: 'cash',           amount: 11700, date: '2026-07-19' },
+    { id: 'SAT-O1', direction: 'out', channel: 'cash_accountant', amount: 600,   date: '2026-07-19' },
+    { id: 'SAT-O2', direction: 'out', channel: 'cash_accountant', amount: 500,   date: '2026-07-19' },
+    // Petty-funded pool payout — must NOT reduce the accountant's cash pool.
+    { id: 'SAT-O3', direction: 'out', channel: 'petty_cash',      amount: 15000, date: '2026-07-17' }
+  ];
+
+  const b = App._computeCashPoolBreakdown(income, cashTx, expenses, [], satelliteFunds, remittances, {});
+
+  // Line items are whole, real amounts — no per-record slicing.
+  assert.equal(b.cashFromCollections, 38000);   // 50000 − 12000
+  assert.equal(b.satelliteCashIn, 11700);
+  assert.equal(b.totalIn, 38000 + 11700);
+  assert.equal(b.cashExpenses, 9750);
+  assert.equal(b.remittancesCash, 14200);         // whole payment, not 13,335
+  assert.equal(b.poolPayoutsCash, 1100);          // 600 + 500; the 15,000 petty payout excluded
+  assert.equal(b.cashDeposited, 6750);
+  assert.equal(b.balance, 38000 + 11700 - 9750 - 14200 - 1100 - 6750);
+
+  // And it must equal the authoritative calcChurchBalance cash figure (raw = cwa − deficit).
+  const bal = await App._calcChurchBalance(null, {
+    income, expenses, remittances, cashTx, pettyHistory: [], satelliteFunds, remRates: {}
+  });
+  assert.equal(b.balance, bal.cashWithAccountant - bal.cashDeficit);
+});
+
+test('a collection whose cash was SPENT (not banked) is fully reconciled but has zero deposited', () => {
+  // This underpins the list/report badge fix: the badge must key off entry.deposited
+  // (actual bank deposits), NOT entry.isReconciled — otherwise a collection whose cash
+  // was consumed by a cash remittance shows "✓ Deposited" when nothing was banked.
+  const income = [{
+    id: 'INC-1', source: 'sunday_collection', date: '2026-07-05',
+    totalCollection: 14200, membersTithe: 14200,
+    bankTransferAmount: 0, directPettyCash: 0, childrenOffering: 0
+  }];
+  const remittances = [{
+    id: 'REM-A', status: 'paid', part: 'a', amount: 14200,
+    paidDate: '2026-07-10', paymentMethod: 'cash', bankAmount: 0, cashAmount: 14200
+  }];
+
+  const map = App._buildExpenseCoveringMap(income, [], {}, [], [], remittances, []);
+  const entry = map.get('INC-1');
+
+  assert.ok(entry);
+  assert.equal(entry.remitCovering, 14200); // spent on the remittance
+  assert.equal(entry.deposited, 0);          // nothing actually banked
+  assert.equal(entry.isReconciled, true);    // fully accounted for → old badge said "Deposited"
+  // The new badge uses `deposited >= cashHeld`, which is false here → not "Deposited". ✓
+});
+
 test('buildExpenseCoveringMap treats a satellite cash-in receipt as an inflow lot outflows can draw from', () => {
   // Without this, a cash expense funded partly by satellite cash-in money has nowhere
   // to draw from beyond the income lots, and the excess is silently dropped instead of
