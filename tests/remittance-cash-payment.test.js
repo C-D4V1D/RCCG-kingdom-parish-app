@@ -340,3 +340,102 @@ test('buildExpenseCoveringMap treats a satellite cash-in receipt as an inflow lo
   assert.equal(entry.expenseCovering, 10000);
   assert.equal(entry.stillPending, 0);
 });
+
+test('computeSundayCashCycle scopes Sunday cash to that Sunday week and automatic deposit date', () => {
+  const sunday = {
+    id: 'INC-2',
+    source: 'sunday_collection',
+    date: '2026-07-19',
+    totalCollection: 50000,
+    membersTithe: 50000,
+    bankTransferAmount: 12000,
+    directPettyCash: 0,
+    childrenOffering: 14100
+  };
+  const cashTx = [
+    // Earlier-week deposit must not leak into 19 Jul.
+    { id: 'DEP-OLD', type: 'cash_deposit', amount: 4000, date: '2026-07-16', verificationStatus: 'verified' },
+    // This week's deposit counts automatically for 19 Jul.
+    { id: 'DEP-NEW', type: 'cash_deposit', amount: 10000, date: '2026-07-22', verificationStatus: 'verified' }
+  ];
+  const expenses = [
+    { id: 'EXP-1', status: 'approved', paymentMethod: 'cash', amount: 2000, date: '2026-07-19' },
+    { id: 'EXP-2', status: 'approved', paymentMethod: 'cash', amount: 2000, date: '2026-07-19' },
+    { id: 'EXP-3', status: 'approved', paymentMethod: 'cash', amount: 4500, date: '2026-07-19' }
+  ];
+  const remittances = [
+    { id: 'REM-1', status: 'paid', amount: 14200, paidDate: '2026-07-19', paymentMethod: 'cash', bankAmount: 0, cashAmount: 14200 }
+  ];
+  const satelliteFunds = [
+    { id: 'SAT-IN', direction: 'in', channel: 'cash', amount: 11700, date: '2026-07-19' },
+    { id: 'SAT-O1', direction: 'out', channel: 'cash_accountant', amount: 600, date: '2026-07-19' },
+    { id: 'SAT-O2', direction: 'out', channel: 'cash_accountant', amount: 500, date: '2026-07-19' }
+  ];
+
+  const cycle = App._computeSundayCashCycle(sunday, cashTx, expenses, [], satelliteFunds, remittances, {});
+
+  assert.equal(cycle.cashFromCollection, 28835);
+  assert.equal(cycle.satelliteCashIn, 11700);
+  assert.equal(cycle.cashExpenses, 8500);
+  assert.equal(cycle.remittancesCash, 14200);
+  assert.equal(cycle.poolPayoutsCash, 1100);
+  assert.equal(cycle.netCashToDeposit, 16735);
+  assert.equal(cycle.cashDeposited, 10000);
+  assert.equal(cycle.stillWithAccountant, 6735);
+  assert.equal(cycle.status, 'pending');
+});
+
+test('computeSundayCashCycle lets an exact Sunday-linked deposit override deposit week', () => {
+  const sunday = {
+    id: 'INC-3',
+    source: 'sunday_collection',
+    date: '2026-07-19',
+    totalCollection: 14200,
+    membersTithe: 14200,
+    bankTransferAmount: 0,
+    directPettyCash: 0,
+    childrenOffering: 0
+  };
+  const cashTx = [
+    { id: 'DEP-LATE', type: 'cash_deposit', amount: 14200, date: '2026-07-29', cashCycleIncomeRef: 'INC-3', verificationStatus: 'verified' }
+  ];
+
+  const cycle = App._computeSundayCashCycle(sunday, cashTx, [], [], [], [], {});
+
+  assert.equal(cycle.netCashToDeposit, 14200);
+  assert.equal(cycle.cashDeposited, 14200);
+  assert.equal(cycle.stillWithAccountant, 0);
+  assert.equal(cycle.status, 'deposited');
+});
+
+test('computeCashPoolPeriodSummary uses opening balance plus selected-period movement only', () => {
+  const income = [
+    { id: 'INC-OLD', source: 'sunday_collection', date: '2026-07-05', totalCollection: 10000, membersTithe: 10000, bankTransferAmount: 0, directPettyCash: 0, childrenOffering: 0 },
+    { id: 'INC-NEW', source: 'sunday_collection', date: '2026-07-19', totalCollection: 50000, membersTithe: 50000, bankTransferAmount: 12000, directPettyCash: 0, childrenOffering: 0 }
+  ];
+  const cashTx = [
+    { id: 'DEP-OLD', type: 'cash_deposit', amount: 4000, date: '2026-07-10', verificationStatus: 'verified' },
+    { id: 'DEP-NEW', type: 'cash_deposit', amount: 10000, date: '2026-07-22', verificationStatus: 'verified' }
+  ];
+  const expenses = [
+    { id: 'EXP-NEW', status: 'approved', paymentMethod: 'cash', amount: 8500, date: '2026-07-19' }
+  ];
+  const remittances = [
+    { id: 'REM-NEW', status: 'paid', amount: 14200, paidDate: '2026-07-19', paymentMethod: 'cash', bankAmount: 0, cashAmount: 14200 }
+  ];
+  const satelliteFunds = [
+    { id: 'SAT-IN', direction: 'in', channel: 'cash', amount: 11700, date: '2026-07-19' },
+    { id: 'SAT-O1', direction: 'out', channel: 'cash_accountant', amount: 1100, date: '2026-07-19' }
+  ];
+
+  const summary = App._computeCashPoolPeriodSummary(income, cashTx, expenses, [], satelliteFunds, remittances, {}, '2026-07-19', '2026-07-31');
+
+  assert.equal(summary.openingBalance, 6000); // 10,000 received before 19 Jul − 4,000 deposited before 19 Jul
+  assert.equal(summary.cashFromCollections, 38000);
+  assert.equal(summary.satelliteCashIn, 11700);
+  assert.equal(summary.cashDeposited, 10000);
+  assert.equal(summary.cashExpenses, 8500);
+  assert.equal(summary.remittancesCash, 14200);
+  assert.equal(summary.poolPayoutsCash, 1100);
+  assert.equal(summary.closingBalance, 21900);
+});
