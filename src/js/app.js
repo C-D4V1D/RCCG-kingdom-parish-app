@@ -2109,12 +2109,20 @@ function initApp(){
 }
 
 // ── Auto-update detection ─────────────────────────────────────────
+// version.json is a static Pages asset (not a Function), so polling it
+// costs nothing against the free-plan request quota — safe to poll tight.
 let _loadedAppVersion = null;
 function startVersionPolling(){
   // Initial load — record current version
   checkForNewVersion();
-  // Poll every 60 seconds
-  setInterval(checkForNewVersion, 60000);
+  // Poll every 10 seconds in the background
+  setInterval(checkForNewVersion, 10000);
+  // Also check the instant the tab/app regains focus, so someone switching
+  // back in doesn't have to wait out the rest of the interval
+  document.addEventListener('visibilitychange', () => {
+    if(document.visibilityState === 'visible') checkForNewVersion();
+  });
+  window.addEventListener('focus', checkForNewVersion);
 }
 async function checkForNewVersion(){
   try {
