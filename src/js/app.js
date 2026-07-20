@@ -8734,7 +8734,12 @@ async function renderExpenses(){
   const _expSettledQuotas=_expSettledRanges.reduce((s,pp)=>s+sumQuotaLines(getQuotaLinesForPeriod(quotaList,pp.from,pp.to)),0);
   const _expUnsettledQuotas=accumQuotas-_expSettledQuotas;
 
-  const outstandingRems=Math.max(0, _expUnsettledDue+_expUnsettledQuotas+_expSettledShortfall);
+  // Net out payments already made toward still-unsettled periods (e.g. Part A paid in
+  // cash, Part B not yet due) — calcChurchBalance already reflects that payment leaving
+  // the real balance, so counting the full unsettled due here too would double-subtract
+  // it from Spendable. Mirrors the Dashboard's dashTotalRemDueKpi calc.
+  const _expUnsettledPaidOrWrittenOff = calcUnsettledPeriodsSettledAmount(allRems, _expSettledKeys);
+  const outstandingRems=Math.max(0, _expUnsettledDue+_expUnsettledQuotas+_expSettledShortfall-_expUnsettledPaidOrWrittenOff);
   const totalChurch = churchBal.total;
   const spendable = totalChurch - outstandingRems;
   const _expPettyTarget = parseFloat(settings?.pettyTargetFloat||0)||90000;
@@ -10367,7 +10372,7 @@ async function renderBank(){
 
     <div class="card" style="margin-bottom:12px">
       <div class="card-header"><span class="card-title">${monthLabel()} Summary</span></div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;padding:4px 0 8px">
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:4px 0 8px">
         <div style="text-align:center;padding:10px 4px">
           <div style="font-size:11px;color:var(--text3);margin-bottom:4px">Opening Balance</div>
           <div style="font-size:14px;font-weight:700;color:${openingBankBalance<0?'var(--danger)':'var(--text1)'}">${fmt(openingBankBalance)}</div>
