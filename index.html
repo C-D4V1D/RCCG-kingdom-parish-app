@@ -298,7 +298,17 @@
       navigator.serviceWorker.register('/sw.js', {
         scope: '/',
         updateViaCache: 'none'
-      }).then(reg => { reg.update().catch(() => {}); }).catch(() => {});
+      }).then(reg => {
+        // Ask the browser to re-check sw.js for changes. A changed sw.js
+        // installs and (via skipWaiting/clients.claim in sw.js) activates
+        // immediately, firing 'controllerchange' above — so polling this
+        // is what makes a new deployment show up without a manual reload.
+        reg.update().catch(() => {});
+        setInterval(() => reg.update().catch(() => {}), 15000);
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') reg.update().catch(() => {});
+        });
+      }).catch(() => {});
     });
   }
 
@@ -344,6 +354,6 @@
     });
   }
 </script>
-<script src="dist/js/app.js?v=43b4956b24"></script>
+<script src="dist/js/app.js?v=885376626e"></script>
 </body>
 </html>

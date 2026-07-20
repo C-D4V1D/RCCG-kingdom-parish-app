@@ -2104,55 +2104,6 @@ function initApp(){
   // Fire-and-forget: link existing cash expenses to their income record.
   // Runs in the background; short-circuits once all records are already linked.
   backfillExpenseIncomeRefs();
-  // Start version polling for auto-update detection
-  startVersionPolling();
-}
-
-// ── Auto-update detection ─────────────────────────────────────────
-// version.json is a static Pages asset (not a Function), so polling it
-// costs nothing against the free-plan request quota — safe to poll tight.
-let _loadedAppVersion = null;
-function startVersionPolling(){
-  // Initial load — record current version
-  checkForNewVersion();
-  // Poll every 10 seconds in the background
-  setInterval(checkForNewVersion, 10000);
-  // Also check the instant the tab/app regains focus, so someone switching
-  // back in doesn't have to wait out the rest of the interval
-  document.addEventListener('visibilitychange', () => {
-    if(document.visibilityState === 'visible') checkForNewVersion();
-  });
-  window.addEventListener('focus', checkForNewVersion);
-}
-async function checkForNewVersion(){
-  try {
-    const r = await fetch('/version.json?_=' + Date.now(), { cache: 'no-store' });
-    if(!r.ok) return;
-    const { v } = await r.json();
-    if(!_loadedAppVersion){ _loadedAppVersion = v; return; }
-    if(v !== _loadedAppVersion){
-      showUpdateBanner();
-    }
-  } catch(e){ /* silently ignore — offline or version.json missing */ }
-}
-function showUpdateBanner(){
-  if(document.getElementById('updateBanner')) return; // already showing
-  const banner = document.createElement('div');
-  banner.id = 'updateBanner';
-  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#0F6E56;color:#fff;padding:10px 16px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:13px;font-weight:600;box-shadow:0 2px 12px rgba(0,0,0,0.2);animation:slideDown 0.3s ease-out';
-  banner.innerHTML = `
-    <span>🔄 A new version is available!</span>
-    <button onclick="location.reload(true)" style="background:#fff;color:#0F6E56;border:none;padding:6px 16px;border-radius:20px;font-weight:700;font-size:12px;cursor:pointer">Refresh Now</button>
-    <button onclick="this.parentElement.remove()" style="background:none;border:none;color:rgba(255,255,255,0.7);font-size:18px;cursor:pointer;padding:0 4px">✕</button>
-  `;
-  document.body.prepend(banner);
-  // Add slide-down animation
-  if(!document.getElementById('updateBannerStyle')){
-    const style = document.createElement('style');
-    style.id = 'updateBannerStyle';
-    style.textContent = '@keyframes slideDown{from{transform:translateY(-100%)}to{transform:translateY(0)}}';
-    document.head.appendChild(style);
-  }
 }
 
 // Handle browser back / forward
