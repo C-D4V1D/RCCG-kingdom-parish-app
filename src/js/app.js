@@ -9305,7 +9305,7 @@ function showExpenseForm(preselectedCat, preselectedSubcat){
     </div>
     <div id="exp_pool_split_group" style="display:none">
       <div style="background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:12px">
-        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Enter the Parish share — the Pool share fills in automatically (and vice-versa). They always add up to the total amount above.</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Enter the Parish share — the Pool share fills in automatically (and vice-versa). They always add up to the total amount above. Both shares are funded by the same real-world payment — choose how it was paid in <strong>Payment Method</strong> below.</div>
         <div class="form-row">
           <div class="form-group" style="margin-bottom:0">
             <label class="form-label">🏛️ Parish share (₦)</label>
@@ -9317,28 +9317,23 @@ function showExpenseForm(preselectedCat, preselectedSubcat){
           </div>
         </div>
         <div id="exp_pool_split_status" style="margin-top:10px;font-size:12px;color:var(--text3)"></div>
-        <div class="form-group" style="margin-bottom:0;margin-top:10px">
-          <label class="form-label">Pool share paid via *</label>
-          <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px">
-            ${poolPaidViaOptions.map(m=>`
-              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
-                <input type="radio" name="exp_pool_split_paidvia" value="${m.value}" ${m.value===defaultPoolPaidVia?'checked':''} /> ${m.label}
-              </label>`).join('')}
-          </div>
-        </div>
       </div>
     </div>
     </div>`:''}
 
-    <!-- Payment Method — applies to the Parish share (all of it, or its portion of a
-         Split). Hidden entirely for a pure Pool payment: pool payouts leave the bank
-         directly and use the "Paid via" selector above instead. -->
+    <!-- Payment Method — the single real-world channel the whole payment went through.
+         Applies to the Parish share (recorded as an expense) and, when Pay From is
+         Split (Parish + Pool), to the Pool share too (recorded as a pool payout on the
+         same channel) — one physical payment, split only for bookkeeping. Hidden
+         entirely for a pure Pool payment: pool payouts use the "Paid via" selector
+         above instead. Split (Petty+Bank)/(Cash+Bank) methods are hidden whenever a
+         Pool share is involved, since a pool payout can only ever record one channel. -->
     <div id="exp_payment_method_group">
     <div class="form-group">
       <label class="form-label">Payment Method *</label>
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px">
         ${methodOptions.map(m=>`
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <label id="exp_method_opt_${m.value}" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
             <input type="radio" name="exp_method" value="${m.value}" ${m.value===defaultMethod?'checked':''} onchange="App.onExpMethodChange()" /> ${m.label}
           </label>`).join('')}
       </div>
@@ -9437,6 +9432,21 @@ function onExpFundSourceChange(){
       : fundSource==='split_pool'
         ? 'Parish share is logged as a normal expense; Pool share is a pass-through payout and will NOT be logged as a parish expense.'
         : '';
+  }
+  // A Pool share can only ever record ONE payment channel (see getPoolPaidViaOptionsForRole),
+  // so Split (Petty+Bank)/(Cash+Bank) Payment Method options don't make sense once a Pool
+  // share is involved — hide them, and fall back off a split selection if one was already
+  // checked before the user switched into Split (Parish + Pool).
+  const splitMethodOpts = ['split_petty_bank','split_cash_bank']
+    .map(v=>document.getElementById(`exp_method_opt_${v}`)).filter(Boolean);
+  splitMethodOpts.forEach(el=>{ el.style.display = fundSource==='split_pool' ? 'none' : ''; });
+  if(fundSource==='split_pool'){
+    const checked = document.querySelector('input[name="exp_method"]:checked');
+    if(checked && (checked.value==='split_petty_bank' || checked.value==='split_cash_bank')){
+      const fallback = document.querySelector('input[name="exp_method"][value="bank_transfer"]')
+        || document.querySelector('input[name="exp_method"]:not([value="split_petty_bank"]):not([value="split_cash_bank"])');
+      if(fallback){ fallback.checked = true; onExpMethodChange(); }
+    }
   }
   // The parish payment method's own split fields (if shown) now target the Parish
   // share instead of the full total when Split is selected — re-validate both. Parish
@@ -9679,27 +9689,25 @@ async function submitSplitPoolExpense({ date, category, subCategory, description
   const catLabel = EXPENSE_CATS.find(c=>c.key===category)?.label||category;
   // Shared reference so the two halves of one joint/zonal payment can be traced as one.
   const sharedRef = receiptNo || `JZ-${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`;
-  // Funding source for the Pool share — see the "Pool share paid via" selector in showExpenseForm.
-  const poolChannel = document.querySelector('input[name="exp_pool_split_paidvia"]:checked')?.value || 'bank';
 
-  // Parish share: resolve the SAME bank/cash/petty/split payment-method radios the
+  // One real-world payment funds both shares, so a single Payment Method selection
+  // (below) drives both: the parish's own bank/cash/petty bookkeeping AND the Pool
+  // share's funding channel. Split (Petty+Bank)/(Cash+Bank) are hidden in the UI
+  // whenever a Pool share is involved (see onExpFundSourceChange) — a pool payout can
+  // only ever record one channel — but guard here too in case of a stale selection.
+  const method = document.querySelector('input[name="exp_method"]:checked')?.value || 'bank_transfer';
+  if(method==='split_petty_bank' || method==='split_cash_bank'){
+    showAlert('A split payment method cannot be used for a Split (Parish + Pool) payment — the Pool share can only be recorded against a single channel. Please pick Bank Transfer, Petty Cash, or Cash (Accountant).','danger');
+    return;
+  }
+  const poolChannel = method==='petty_cash' ? 'petty_cash' : method==='bank_transfer' ? 'bank' : 'cash_accountant';
+
+  // Parish share: resolve the SAME bank/cash/petty payment-method radio the
   // "Parish Funds" path uses (see submitExpense above) — just scoped to parishShare
   // instead of the full amount, since only the parish's own portion is ever an expense.
-  let bankAmount=0, cashAmount=0, pettyAmount=0, method='bank_transfer', isSplit=false;
+  let bankAmount=0, cashAmount=0, pettyAmount=0;
   if(parishShare > 0){
-    method = document.querySelector('input[name="exp_method"]:checked')?.value || 'bank_transfer';
-    const isSplitPettyBank = method==='split_petty_bank';
-    const isSplitCashBank = method==='split_cash_bank';
-    isSplit = isSplitPettyBank || isSplitCashBank;
-    if(isSplit){
-      const secondaryAmount=parseFloat(document.getElementById('exp_secondary_amt')?.value)||0;
-      bankAmount=parseFloat(document.getElementById('exp_bank_amt')?.value)||0;
-      if(isSplitPettyBank) pettyAmount=secondaryAmount;
-      if(isSplitCashBank) cashAmount=secondaryAmount;
-      const splitTotal = secondaryAmount + bankAmount;
-      if(!secondaryAmount&&!bankAmount){ showAlert('Please enter at least one split amount for the parish share.','danger'); return }
-      if(Math.abs(splitTotal-parishShare)>0.5){ showAlert(`Split total (${fmt(splitTotal)}) must equal the parish share (${fmt(parishShare)}). Please correct.`,'danger'); return }
-    } else if(method==='petty_cash'){
+    if(method==='petty_cash'){
       pettyAmount=parishShare;
     } else if(method==='bank_transfer'){
       bankAmount=parishShare;
@@ -9744,7 +9752,7 @@ async function submitSplitPoolExpense({ date, category, subCategory, description
       await DB.addExpense({ id: expenseId, date, category, subCategory,
         description: description || subCategory, amount: parishShare,
         receiptNo: sharedRef,
-        paymentMethod: isSplit ? 'split' : method,
+        paymentMethod: method,
         bankAmount, cashAmount, pettyAmount,
         incomeRef: expenseIncomeRef,
         notes: [notesVal, poolShare>0?`Linked joint/zonal payment — pool share: ${fmt(poolShare)} (ref ${sharedRef}).`:''].filter(Boolean).join(' '),
