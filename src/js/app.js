@@ -2112,7 +2112,33 @@ function initApp(){
 // version.json is a static Pages asset (not a Function), so polling it
 // costs nothing against the free-plan request quota — safe to poll tight.
 let _loadedAppVersion = null;
+
+// Temporary on-screen diagnostics for tracking down why the update banner
+// isn't firing on some devices. Enable by visiting ?vdebug=1 once (it then
+// persists via localStorage) or by running localStorage.vdebug='1'. Remove
+// this whole block once the root cause is confirmed.
+const VDEBUG = (function(){
+  try {
+    if(location.search.includes('vdebug=1')) localStorage.setItem('vdebug','1');
+    if(location.search.includes('vdebug=0')) localStorage.removeItem('vdebug');
+    return localStorage.getItem('vdebug') === '1';
+  } catch(e){ return false; }
+})();
+function vlog(msg){
+  if(!VDEBUG) return;
+  let el = document.getElementById('vdebugPanel');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'vdebugPanel';
+    el.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:999999;background:rgba(0,0,0,.92);color:#0f0;font:10px/1.4 monospace;padding:6px 8px;max-height:38vh;overflow:auto;white-space:pre-wrap';
+    document.body.appendChild(el);
+  }
+  const time = new Date().toTimeString().slice(0,8);
+  el.textContent = `[${time}] ${msg}\n` + el.textContent;
+}
+
 function startVersionPolling(){
+  vlog('startVersionPolling() called, doc.visibilityState=' + document.visibilityState);
   // Initial load — record current version
   checkForNewVersion();
   // Poll every 10 seconds in the background
@@ -2120,20 +2146,24 @@ function startVersionPolling(){
   // Also check the instant the tab/app regains focus, so someone switching
   // back in doesn't have to wait out the rest of the interval
   document.addEventListener('visibilitychange', () => {
+    vlog('visibilitychange -> ' + document.visibilityState);
     if(document.visibilityState === 'visible') checkForNewVersion();
   });
-  window.addEventListener('focus', checkForNewVersion);
+  window.addEventListener('focus', () => { vlog('focus event'); checkForNewVersion(); });
 }
 async function checkForNewVersion(){
+  vlog('poll start, baseline=' + _loadedAppVersion);
   try {
     const r = await fetch('/version.json?_=' + Date.now(), { cache: 'no-store' });
-    if(!r.ok) return;
+    if(!r.ok){ vlog('fetch not ok, status=' + r.status); return; }
     const { v } = await r.json();
-    if(!_loadedAppVersion){ _loadedAppVersion = v; return; }
+    vlog('fetched v=' + v);
+    if(!_loadedAppVersion){ _loadedAppVersion = v; vlog('baseline set'); return; }
     if(v !== _loadedAppVersion){
+      vlog('CHANGE DETECTED -> showing banner');
       showUpdateBanner();
     }
-  } catch(e){ /* silently ignore — offline or version.json missing */ }
+  } catch(e){ vlog('ERROR: ' + (e && e.message || e)); }
 }
 function showUpdateBanner(){
   if(document.getElementById('updateBanner')) return; // already showing
