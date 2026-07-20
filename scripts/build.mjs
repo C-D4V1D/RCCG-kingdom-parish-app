@@ -81,11 +81,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const pct = ((1 - out / src) * 100).toFixed(1);
     console.log(`  ${dest.padEnd(34)}  ${(src / 1024).toFixed(1).padStart(6)} KB  →  ${(out / 1024).toFixed(1).padStart(6)} KB  (${pct}% smaller)`);
   }
-  // Generate version.json for auto-update detection
+  // Cache-busting hash for the app.js script tag in index.html
   const appJsBuilt = await readFile(join(ROOT, 'dist/js/app.js'), 'utf8');
   const versionHash = createHash('md5').update(appJsBuilt).digest('hex').slice(0, 10);
-  await writeFile(join(ROOT, 'version.json'), JSON.stringify({ v: versionHash, t: Date.now() }));
-  console.log(`  version.json                        hash: ${versionHash}`);
 
   // Update cache-busting param in index.html
   const indexHtml = await readFile(join(ROOT, 'index.html'), 'utf8');
@@ -93,6 +91,19 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   if (updatedHtml !== indexHtml) {
     await writeFile(join(ROOT, 'index.html'), updatedHtml);
     console.log(`  index.html                          cache-bust: ?v=${versionHash}`);
+  }
+
+  // Stamp sw.js with the current build hash. Browsers detect a new service
+  // worker via a byte-for-byte comparison of sw.js — without this, a deploy
+  // that only changes app.js/CSS leaves sw.js byte-identical, so the browser
+  // never installs a new worker and the update banner (wired to the SW's
+  // 'controllerchange' event in index.html) never fires.
+  const swPath = join(ROOT, 'sw.js');
+  const swSrc = await readFile(swPath, 'utf8');
+  const stampedSw = `// build:${versionHash}\n` + swSrc.replace(/^\/\/ build:[a-f0-9]+\n/, '');
+  if (stampedSw !== swSrc) {
+    await writeFile(swPath, stampedSw);
+    console.log(`  sw.js                                stamped: build:${versionHash}`);
   }
 
   console.log('Build complete.');
