@@ -12690,7 +12690,7 @@ async function generateMonthlyReport(){
       <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${fmt(totalRemDue)}</td></tr>
       <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Period</td><td class="td-r" style="font-weight:600;color:#0F6E56">${fmt(totalRemPaid)}</td></tr>
       <tr style="background:${(totalRemDue-totalRemPaid)>0?'#fdf0f0':'#e8f4f0'}"><td colspan="2" style="font-weight:600;color:${(totalRemDue-totalRemPaid)>0?'#c0392b':'#0F6E56'}">Outstanding Remittance Balance</td><td class="td-r" style="font-weight:700;color:${(totalRemDue-totalRemPaid)>0?'#c0392b':'#0F6E56'}">${(totalRemDue-totalRemPaid)>0?fmt(totalRemDue-totalRemPaid):fmt(0)}</td></tr>
-      <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">NET LOCAL RETAINED</td><td class="td-r" style="font-weight:600;color:#0F6E56">${fmt(trueNetLocal)}</td></tr>
+      <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">LOCAL RETAINED INCOME</td><td class="td-r" style="font-weight:600;color:#0F6E56">${fmt(trueNetLocal)}</td></tr>
     </table>
 
     <div class="section-title">Section D: Expenses <span>(${expenses.length} entries totalling ${fmt(totalExpenses)})</span></div>
