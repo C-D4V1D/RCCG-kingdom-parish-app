@@ -1124,6 +1124,72 @@ function countSundaysInRange(fromValue, toValue){
 }
 
 
+// ── Robust statistics ─────────────────────────────────────────────────────────
+// Shared by the Dashboard forecast and the Weekly Net Retained tiles so a single
+// one-off event — an unusual windfall tithe, a one-time rent prepayment — cannot
+// dominate a projection. All operate on plain arrays of numbers.
+function median(values){
+  if(!values.length) return 0;
+  const s=[...values].sort((a,b)=>a-b);
+  const mid=Math.floor(s.length/2);
+  return s.length%2 ? s[mid] : (s[mid-1]+s[mid])/2;
+}
+// Median Absolute Deviation, scaled to a std-dev equivalent (σ̂ = 1.4826·MAD for
+// normal data). Unlike standard deviation, a single extreme value barely moves it,
+// so it measures the *normal* spread rather than the size of the outlier.
+function madScale(values){
+  if(values.length<2) return 0;
+  const m=median(values);
+  return 1.4826*median(values.map(v=>Math.abs(v-m)));
+}
+// Winsorize: clamp each value into [median − k·σ̂, median + k·σ̂]. Keeps every data
+// point (important with only a few months of history) while capping how far a
+// genuine one-off can pull an average. Returns values unchanged when there are too
+// few points, or no spread to judge outliers against.
+function winsorize(values, k=2.5){
+  if(values.length<4) return values.slice();
+  const m=median(values), scale=madScale(values);
+  if(!(scale>0)) return values.slice();
+  const lo=m-k*scale, hi=m+k*scale;
+  return values.map(v=>v<lo?lo:(v>hi?hi:v));
+}
+// True when winsorizing actually clamped a value (drives the "treated as one-off"
+// note). Small epsilon guards against float noise.
+function isClamped(raw, capped){
+  return Math.abs(raw-capped) > Math.max(1, Math.abs(raw)*1e-9);
+}
+// Recency-weighted mean of winsorized values (weights[i] applies to values[i]).
+// Winsorizing first means a one-off month is capped *before* newest-weighting can
+// amplify it. Returns {mean, cappedIdx} so callers can flag which months were adjusted.
+function robustWeightedMean(values, weights){
+  const capped=winsorize(values);
+  const cappedIdx=new Set();
+  for(let i=0;i<values.length;i++) if(isClamped(values[i],capped[i])) cappedIdx.add(i);
+  const wsum=weights.reduce((s,w)=>s+w,0);
+  const mean=wsum>0 ? capped.reduce((s,v,i)=>s+weights[i]*v,0)/wsum : 0;
+  return {mean, cappedIdx};
+}
+// Robust trimmed mean via IQR (Tukey's fences): trims values outside
+// [q1−1.5·IQR, q3+1.5·IQR], falling back to a plain mean below 5 points. Used by
+// the Weekly Net Retained tiles (separately on income and expenses).
+function trimmedMean(values){
+  if(values.length === 0) return 0;
+  if(values.length < 5) return values.reduce((s,v)=>s+v,0) / values.length;
+  const sorted = [...values].sort((a,b)=>a-b);
+  const quantile = (p) => {
+    const idx = (sorted.length - 1) * p;
+    const lo = Math.floor(idx), hi = Math.ceil(idx);
+    return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+  };
+  const q1 = quantile(0.25), q3 = quantile(0.75);
+  const iqr = q3 - q1;
+  const lowerBound = q1 - 1.5 * iqr, upperBound = q3 + 1.5 * iqr;
+  const kept = sorted.filter(v => v >= lowerBound && v <= upperBound);
+  const use = kept.length > 0 ? kept : sorted;
+  return use.reduce((s,v)=>s+v,0) / use.length;
+}
+
+
 function getWATNowParts(now=new Date()){
   const wat = new Date(now.getTime() + (60 * 60 * 1000)); // WAT = UTC+1
   return {
@@ -3867,7 +3933,7 @@ async function renderDashboard(){
 
   // Monthly trend (last 4 months) — income, expenses, and netLocal retained
   // Compute historical netLocal in parallel for accurate retention rates and chart visualisation
-  const histMonthRetention=await Promise.all([3,2,1].map(async i=>{
+  const histMonthRetention=await Promise.all([6,5,4,3,2,1].map(async i=>{
     let m=state.month-i,y=state.year;
     if(m<0){m+=12;y--;}
     let mInc, quotaFrom, quotaTo;
@@ -3899,7 +3965,8 @@ async function renderDashboard(){
       mIncome=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
       mExpenses=allExpensesDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y});
     }
-    const mNetLocal=i===0?netLocal:(histMonthRetention[3-i]?.netLocal||0);
+    // histMonthRetention is ordered [6,5,4,3,2,1] months ago, so "i months ago" is index 6-i.
+    const mNetLocal=i===0?netLocal:(histMonthRetention[6-i]?.netLocal||0);
     trendData.push({label:MONTHS[m].slice(0,3),income:mIncome.reduce((s,r)=>s+(r.totalCollection||0),0),expenses:mExpenses.reduce((s,r)=>s+(r.amount||0),0),netLocal:mNetLocal});
   }
   const maxTrend=Math.max(...trendData.map(t=>Math.max(t.income,t.expenses)),1);
@@ -3912,29 +3979,44 @@ async function renderDashboard(){
     ? countSundaysInRange(dashPeriodFrom, dashPeriodTo)
     : fullMonthSundays(state.year,state.month);
   const remainingSundays=Math.max(0,totalSundaysFullMonth-sundayCount);
-  const histMonths=[];
-  for(let i=3;i>=1;i--){let m=state.month-i,y=state.year;if(m<0){m+=12;y--;}
-    let hInc;
-    if(useRemPeriod){const{from:pf,to:pt}=computeRemPeriodDates(settings,allRemsDash,y,m);hInc=filterByDateRange(allIncomeDash,pf,pt);}
-    else{hInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});}
+  // Forecast history window: 6 months so the robust statistics (median / MAD /
+  // winsorization) have enough points to distinguish a genuine one-off from the
+  // normal spread. The Monthly Trend chart above still shows 4 months — this wider
+  // window feeds only the projection. Income & expense sums are computed directly
+  // here (not read from the 4-month trendData) so the window can exceed the chart.
+  const histMonths=[], histLabels=[];
+  for(let i=6;i>=1;i--){let m=state.month-i,y=state.year;if(m<0){m+=12;y--;}
+    let hInc,hExp;
+    if(useRemPeriod){const{from:pf,to:pt}=computeRemPeriodDates(settings,allRemsDash,y,m);hInc=filterByDateRange(allIncomeDash,pf,pt);hExp=filterByDateRange(allExpensesDash,pf,pt);}
+    else{hInc=allIncomeDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});hExp=allExpensesDash.filter(r=>{const d=new Date(r.date||r.createdAt);return d.getMonth()===m&&d.getFullYear()===y;});}
     // Count distinct Sunday DATES, not records — a single Sunday's collection is routinely
     // split across multiple entries (e.g. cash + transfer), so counting records would inflate
     // the Sunday count and deflate the per-Sunday rate. Mirrors the Sunday-count logic used in
     // the Income Breakdown so the forecast agrees with the rest of the dashboard.
     const hSundayDates=new Set(hInc.filter(r=>!r.source||r.source==='sunday_collection').map(r=>r.date));
     const hSundays=hSundayDates.size>0?hSundayDates.size:fullMonthSundays(y,m);
-    histMonths.push({income:trendData[3-i].income,expenses:trendData[3-i].expenses,sundays:hSundays});}
-  const validHist=histMonths.filter(h=>h.income>0&&h.sundays>0);
+    histMonths.push({income:hInc.reduce((s,r)=>s+(r.totalCollection||0),0),expenses:hExp.reduce((s,r)=>s+(r.amount||0),0),sundays:hSundays});
+    histLabels.push(MONTHS[m].slice(0,3));}
+  // Keep month labels aligned to the filtered subsets so we can name any month
+  // whose value gets capped (for the "treated as one-off" note).
+  const validHist=[], validHistLabels=[];
+  histMonths.forEach((h,idx)=>{if(h.income>0&&h.sundays>0){validHist.push(h);validHistLabels.push(histLabels[idx]);}});
   // Current month's per-Sunday rate (most accurate signal when available)
   const currentRate=sundayCount>0?trendData[3].income/sundayCount:null;
-  // Historical per-Sunday rate (weighted, newest months count more)
+  // Historical per-Sunday rate — winsorized weighted mean (newest months count
+  // more, but a one-off windfall month is capped before that weighting amplifies it).
   let historicalRate=null;
+  const cappedIncomeLabels=[];
   if(validHist.length>0){
+    const rates=validHist.map(h=>h.income/h.sundays);
     const wts=validHist.map((_,i)=>i+1);
-    historicalRate=validHist.reduce((s,h,i)=>s+wts[i]*(h.income/h.sundays),0)/wts.reduce((s,w)=>s+w,0);
+    const rob=robustWeightedMean(rates,wts);
+    historicalRate=rob.mean;
+    rob.cappedIdx.forEach(i=>cappedIncomeLabels.push(validHistLabels[i]));
   }
   let forecastIncome=null,forecastExpenses=null,forecastRetained=null;
-  const forecastLabel=currentRate!==null&&validHist.length>0?`${validHist.length}-mo. + live`:currentRate!==null?'live data':validHist.length>0?`${validHist.length}-mo. trend`:'';
+  const cappedExpLabels=[];
+  const forecastLabel=currentRate!==null&&validHist.length>0?`${validHist.length}-mo. robust + live`:currentRate!==null?'live data':validHist.length>0?`${validHist.length}-mo. robust`:'';
   // Skip forecasting for past periods — the period is closed, projecting it is meaningless.
   if(!dashIsPastPeriod && (currentRate!==null||historicalRate!==null)){
     // Blend: current month rate gains weight as more Sundays are recorded
@@ -3952,9 +4034,11 @@ async function renderDashboard(){
     const allRates=[...validHist.map(h=>h.income/h.sundays),...(currentRate!==null?[currentRate]:[])];
     let incomeSpread;
     if(allRates.length>=2){
-      const meanR=allRates.reduce((s,r)=>s+r,0)/allRates.length;
-      const perSundayStd=Math.sqrt(allRates.reduce((s,r)=>s+(r-meanR)**2,0)/allRates.length);
-      incomeSpread=perSundayStd*remainingSundays;
+      // MAD-based scale rather than standard deviation: a single windfall Sunday-rate
+      // barely moves it, so the band reflects normal Sunday-to-Sunday variation instead
+      // of exploding around the outlier. Falls back to a 15% band if MAD degenerates to 0.
+      const perSundayScale=madScale(allRates);
+      incomeSpread=(perSundayScale>0?perSundayScale:blendedRate*0.15)*remainingSundays;
     }else{
       incomeSpread=remainingSundays*blendedRate*0.15; // single data point: 15% band on the unbanked portion
     }
@@ -3967,9 +4051,11 @@ async function renderDashboard(){
     if(currentRetRate!==null||validHistRates.length>0){
       let blendedRetRate;
       if(currentRetRate!==null&&validHistRates.length>0){
+        const rRates=validHistRates.map(h=>h.retentionRate);
         const rwts=validHistRates.map((_,i)=>i+1);
-        const rSum=rwts.reduce((s,w)=>s+w,0);
-        const histRetRate=validHistRates.reduce((s,h,i)=>s+rwts[i]*h.retentionRate,0)/rSum;
+        // Winsorize retention rates too — a month with an unusual income mix
+        // (e.g. a big Thanksgiving with ~0% local share) shouldn't skew the blend.
+        const histRetRate=robustWeightedMean(rRates,rwts).mean;
         blendedRetRate=(currentRetRate*cw+histRetRate*hw)/(cw+hw);
       }else{
         blendedRetRate=currentRetRate??validHistRates[validHistRates.length-1].retentionRate;
@@ -3981,16 +4067,23 @@ async function renderDashboard(){
     // never end up below what's already gone out, so both the point estimate and the band
     // floor at the current month's actual spend (otherwise a month that has already overspent
     // the average would show an already-breached band, which is useless for budgeting).
-    const validExp=histMonths.filter(h=>h.expenses>0);
+    const validExp=[], validExpLabels=[];
+    histMonths.forEach((h,idx)=>{if(h.expenses>0){validExp.push(h);validExpLabels.push(histLabels[idx]);}});
     if(validExp.length>0){
       const curExp=trendData[3].expenses;
+      const expVals=validExp.map(h=>h.expenses);
       const ewts=validExp.map((_,i)=>i+1);
-      const avgExp=validExp.reduce((s,h,i)=>s+ewts[i]*h.expenses,0)/ewts.reduce((s,w)=>s+w,0);
+      // Winsorized weighted mean: a one-off capital outlay (e.g. a rent prepayment)
+      // is capped toward the median before it can inflate the projected spend.
+      const expRob=robustWeightedMean(expVals,ewts);
+      expRob.cappedIdx.forEach(i=>cappedExpLabels.push(validExpLabels[i]));
+      const avgExp=expRob.mean;
       const projExp=Math.max(curExp,avgExp);
       let expSpread;
       if(validExp.length>=2){
-        const expMean=validExp.reduce((s,h)=>s+h.expenses,0)/validExp.length;
-        expSpread=Math.sqrt(validExp.reduce((s,h)=>s+(h.expenses-expMean)**2,0)/validExp.length);
+        // MAD-based scale so a single big month doesn't blow the expense band open.
+        expSpread=madScale(expVals);
+        if(!(expSpread>0)) expSpread=avgExp*0.20;
       }else{
         expSpread=avgExp*0.20; // 20% band — single data point
       }
@@ -4007,6 +4100,15 @@ async function renderDashboard(){
   const _incMid = forecastIncome ? Math.round((forecastIncome.min+forecastIncome.max)/2) : 0;
   const _retMid = forecastRetained ? Math.round((forecastRetained.min+forecastRetained.max)/2) : 0;
   const _balColor = forecastBalance && forecastBalance.min < 0 ? 'var(--danger)' : '#185FA5';
+  // Transparency: name any month whose income or expense was capped as a one-off so
+  // the projection stays trustworthy. Dedupe within each side (uniq labels).
+  const _uniq = arr => [...new Set(arr)];
+  const _forecastNoteParts = [];
+  if(cappedIncomeLabels.length) _forecastNoteParts.push(`${_uniq(cappedIncomeLabels).join(' & ')} income`);
+  if(cappedExpLabels.length) _forecastNoteParts.push(`${_uniq(cappedExpLabels).join(' & ')} expense`);
+  const _forecastNote = _forecastNoteParts.length
+    ? `${_forecastNoteParts.join(', ')} treated as one-off (capped) so it doesn't skew the projection.`
+    : '';
   // Shared Worst case / Likely / Best case display for every forecast row — the
   // "likely" (midpoint) figure is the big number the eye lands on, flanked by the
   // range ends, over a slim tinted track with a centre dot ("a range whose middle
@@ -4133,28 +4235,13 @@ async function renderDashboard(){
   }));
   // Keep only completed weeks with activity.
   const _wkHistActive = _wkHistData.filter(w => w.to <= _wkLookbackTo && (w.netRetained !== 0 || w.expenses > 0));
-  // Robust trimmed mean via IQR (Tukey's fences), applied separately to income and to
-  // expenses. A single "trim the highest & lowest surplus week" pass would conflate the
-  // two — an unusually big one-off expense and an unusually big one-off income don't
-  // necessarily land in the same week, and there can be more than one outlier on a given
-  // side (e.g. two separate big-expense weeks). IQR trimming removes however many values
-  // are genuinely outside the normal spread, independently for each metric.
-  const trimmedMean = (values) => {
-    if(values.length === 0) return 0;
-    if(values.length < 5) return values.reduce((s,v)=>s+v,0) / values.length;
-    const sorted = [...values].sort((a,b)=>a-b);
-    const quantile = (p) => {
-      const idx = (sorted.length - 1) * p;
-      const lo = Math.floor(idx), hi = Math.ceil(idx);
-      return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
-    };
-    const q1 = quantile(0.25), q3 = quantile(0.75);
-    const iqr = q3 - q1;
-    const lowerBound = q1 - 1.5 * iqr, upperBound = q3 + 1.5 * iqr;
-    const kept = sorted.filter(v => v >= lowerBound && v <= upperBound);
-    const use = kept.length > 0 ? kept : sorted;
-    return use.reduce((s,v)=>s+v,0) / use.length;
-  };
+  // Robust trimmed mean via IQR (Tukey's fences) — the shared module-level helper,
+  // applied separately to income and to expenses. A single "trim the highest & lowest
+  // surplus week" pass would conflate the two — an unusually big one-off expense and an
+  // unusually big one-off income don't necessarily land in the same week, and there can
+  // be more than one outlier on a given side (e.g. two separate big-expense weeks). IQR
+  // trimming removes however many values are genuinely outside the normal spread,
+  // independently for each metric.
   let _wkAvgNetRetained = 0, _wkAvgExpenses = 0, _wkAvgSurplus = 0;
   if(_wkHistActive.length > 0){
     _wkAvgNetRetained = Math.round(trimmedMean(_wkHistActive.map(w => w.netRetained)));
@@ -4698,6 +4785,10 @@ async function renderDashboard(){
               `:''}
 
             </div>
+            ${_forecastNote?`
+            <div style="display:flex;align-items:flex-start;gap:6px;margin-top:8px;font-size:10.5px;line-height:1.4;color:var(--text3)">
+              <span style="flex-shrink:0">ⓘ</span><span>${_forecastNote}</span>
+            </div>`:''}
           </div>`:''}
         </div>
       </div>
