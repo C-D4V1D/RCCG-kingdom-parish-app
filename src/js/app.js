@@ -1142,15 +1142,39 @@ function madScale(values){
   const m=median(values);
   return 1.4826*median(values.map(v=>Math.abs(v-m)));
 }
+// Mean absolute deviation around the median — a fallback spread measure for when
+// MAD collapses to 0 (common at n=3: e.g. [80k,80k,275k] has a zero *median*
+// deviation even though one value is a clear outlier, since 2 of 3 points agree).
+function meanAbsDev(values){
+  if(!values.length) return 0;
+  const m=median(values);
+  return values.reduce((s,v)=>s+Math.abs(v-m),0)/values.length;
+}
+// Fence width scales with how much history we have: with only 3 months, a lone
+// spike is both more damaging (it's a third of the signal) and harder to tell
+// apart from real variation, so clamp it hard. As months accrue, trust the data
+// more and let genuine seasonal swings through. Linear ramp (0.75 per month past
+// n=2) capped at 3.0 once 6 months of history is available — a young parish with
+// exactly 3 months sees the tightest fence (an outlier month barely counts above
+// the median), and it relaxes steadily rather than jumping straight to a loose
+// 1.5 the moment a 3rd data point exists.
+function adaptiveK(n){
+  return Math.min(3.0, 0.75*(n-2));
+}
 // Winsorize: clamp each value into [median − k·σ̂, median + k·σ̂]. Keeps every data
 // point (important with only a few months of history) while capping how far a
-// genuine one-off can pull an average. Returns values unchanged when there are too
-// few points, or no spread to judge outliers against.
-function winsorize(values, k=2.5){
-  if(values.length<4) return values.slice();
-  const m=median(values), scale=madScale(values);
+// genuine one-off can pull an average. k defaults to an adaptive fence (tighter
+// with less history); pass an explicit k to override. Returns values unchanged
+// when there are too few points to judge outliers against (n<3).
+function winsorize(values, k=null){
+  if(values.length<3) return values.slice();
+  const kk = k==null ? adaptiveK(values.length) : k;
+  const m=median(values);
+  let scale=madScale(values);
+  if(!(scale>0)) scale=meanAbsDev(values);
+  if(!(scale>0)) scale=Math.abs(m)*0.5;
   if(!(scale>0)) return values.slice();
-  const lo=m-k*scale, hi=m+k*scale;
+  const lo=m-kk*scale, hi=m+kk*scale;
   return values.map(v=>v<lo?lo:(v>hi?hi:v));
 }
 // True when winsorizing actually clamped a value (drives the "treated as one-off"
@@ -4016,7 +4040,10 @@ async function renderDashboard(){
   }
   let forecastIncome=null,forecastExpenses=null,forecastRetained=null;
   const cappedExpLabels=[];
-  const forecastLabel=currentRate!==null&&validHist.length>0?`${validHist.length}-mo. robust + live`:currentRate!==null?'live data':validHist.length>0?`${validHist.length}-mo. robust`:'';
+  // Below 6 months the outlier fence is intentionally tighter (adaptiveK) — flag
+  // the estimate as small-sample so the treasurer knows it'll firm up over time.
+  const _earlyDataSuffix = validHist.length>0 && validHist.length<6 ? ', early data' : '';
+  const forecastLabel=currentRate!==null&&validHist.length>0?`${validHist.length}-mo. robust${_earlyDataSuffix} + live`:currentRate!==null?'live data':validHist.length>0?`${validHist.length}-mo. robust${_earlyDataSuffix}`:'';
   // Skip forecasting for past periods — the period is closed, projecting it is meaningless.
   if(!dashIsPastPeriod && (currentRate!==null||historicalRate!==null)){
     // Blend: current month rate gains weight as more Sundays are recorded
