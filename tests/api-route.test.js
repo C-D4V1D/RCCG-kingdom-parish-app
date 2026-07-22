@@ -3425,6 +3425,149 @@ test('POST /api/satellite-funds (out) defaults to channel="bank" and mirrors a w
   assert.equal(inserts[1].binds[10], '', 'petty_ref column is empty for a bank-funded payout');
 });
 
+// ── Fix: Remittance Part A Area Payment overage must not double-debit the bank ──
+// submitRemittance (src/js/app.js) sets the remittance's own bankAmount to the FULL
+// area total (parish share + satellite share) — that single real wire transfer is
+// already fully reflected there. Before this fix, the auto-linked satellite_funds
+// 'out' entry ALSO mirrored the satellite share as its own separate cash_transactions
+// withdrawal, so calcChurchBalance/renderBank subtracted the same money from the bank
+// twice (see the "Remittance: HQ" + separate "Withdrawal" lines the user reported).
+//
+// An earlier version of this fix let the client pass a raw `noBankMirror:true` flag
+// straight into POST /api/satellite-funds to skip the mirror — a PR review flagged
+// that as unsafe: any bank-funded Funds Out request (not just the genuine Part A
+// auto-link) could set it and quietly hide a real bank outflow. The fix now removes
+// the mirror from the OTHER side instead: createSatelliteFund always mirrors a
+// bank-funded 'out' entry like any other pool payout (regression-guarded below), and
+// createRemittance verifies the actual linked satellite_funds row against the real,
+// just-persisted remittance before removing the duplicate mirror server-side — see
+// the "Area Payment satellite overage" tests further down.
+test('POST /api/satellite-funds (out, channel=bank) ignores a client-supplied noBankMirror flag — always mirrors', async () => {
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'POST', {
+      date: '2026-07-22', direction: 'out', amount: 103211.5, purpose: 'province_remittance',
+      channel: 'bank', recordedBy: 'Jane', noBankMirror: true,
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.ok(body.bankRef, 'a client-supplied noBankMirror must NOT suppress the mirror — only createRemittance can remove it, and only after verifying the link');
+  assert.equal(inserts.length, 2, 'one cash_transactions withdrawal, one satellite_funds row — the flag has no effect');
+  assert.match(inserts[0].sql, /INSERT INTO cash_transactions/);
+  assert.equal(inserts[1].binds[8], body.bankRef, 'bank_ref links to the mirrored withdrawal, same as any other bank-funded payout');
+});
+
+// ── createRemittance's server-verified removal of the linked satellite fund's mirror ──
+test('POST /api/remittances (Part A, verified link) removes the linked satellite fund\'s bank mirror', async () => {
+  const deletes = [];
+  const updates = [];
+  const DB = {
+    prepare(sql) {
+      const stmt = {
+        binds: [],
+        bind(...args) { stmt.binds = args; return stmt; },
+        async run() {
+          if (/INSERT INTO remittances/.test(sql)) return { success: true };
+          if (/DELETE FROM cash_transactions/.test(sql)) { deletes.push({ sql, binds: stmt.binds }); return { success: true }; }
+          if (/UPDATE satellite_funds SET bank_ref/.test(sql)) { updates.push({ sql, binds: stmt.binds }); return { success: true }; }
+          return { success: true };
+        },
+        async first() {
+          if (/FROM satellite_funds/.test(sql)) {
+            return { id: 'SAT-77', direction: 'out', channel: 'bank', purpose: 'province_remittance', amount: 101328.8, bank_ref: 'CTX-88' };
+          }
+          return null;
+        },
+      };
+      return stmt;
+    },
+    async batch(stmts) { for (const s of stmts) await s.run(); return []; },
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/remittances', 'POST', {
+      label: 'Part A — RCCG Authorities', amount: 98671.2, paidDate: '2026-06-15',
+      bankAmount: 200000, cashAmount: 0,
+      part: 'a', areaTotalPaid: 200000, otherParishesAmount: 101328.8,
+      satelliteFundRef: 'SAT-77',
+    }),
+    env: { DB },
+  });
+  assert.equal(response.status, 200);
+  assert.ok(deletes.some(d => d.binds[0] === 'CTX-88'), 'deletes the linked satellite fund\'s mirrored bank withdrawal');
+  assert.ok(updates.some(u => u.binds[0] === 'SAT-77'), 'clears bank_ref on the linked satellite_funds row');
+});
+
+test('POST /api/remittances (Part A, amount mismatch) leaves the linked satellite fund\'s mirror untouched', async () => {
+  // The linked entry's own amount (101328.8) does not match this remittance's
+  // otherParishesAmount (999) — a forged/stale link must not be trusted to remove a
+  // real bank mirror. Failing safe here means a leftover mirror at worst double-counts
+  // an outflow (the original, less severe bug) — it never hides one.
+  const deletes = [];
+  const DB = {
+    prepare(sql) {
+      const stmt = {
+        binds: [],
+        bind(...args) { stmt.binds = args; return stmt; },
+        async run() {
+          if (/DELETE FROM cash_transactions/.test(sql)) { deletes.push({ sql, binds: stmt.binds }); }
+          return { success: true };
+        },
+        async first() {
+          if (/FROM satellite_funds/.test(sql)) {
+            return { id: 'SAT-77', direction: 'out', channel: 'bank', purpose: 'province_remittance', amount: 101328.8, bank_ref: 'CTX-88' };
+          }
+          return null;
+        },
+      };
+      return stmt;
+    },
+    async batch(stmts) { for (const s of stmts) await s.run(); return []; },
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/remittances', 'POST', {
+      label: 'Part A — RCCG Authorities', amount: 98671.2, paidDate: '2026-06-15',
+      bankAmount: 200000, cashAmount: 0,
+      part: 'a', areaTotalPaid: 200000, otherParishesAmount: 999,
+      satelliteFundRef: 'SAT-77',
+    }),
+    env: { DB },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(deletes.length, 0, 'mismatched amount — the mirror is left in place, not removed');
+});
+
+test('POST /api/remittances (no satelliteFundRef) never looks up satellite_funds at all', async () => {
+  const lookups = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { return { success: true }; },
+      async first() { if (/FROM satellite_funds/.test(sql)) lookups.push(sql); return null; },
+    };
+    return stmt;
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/remittances', 'POST', {
+      label: 'Part B — TG & Pastoral', amount: 14200, paidDate: '2026-06-15', part: 'b',
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(lookups.length, 0, 'no satelliteFundRef — no satellite_funds lookup or mirror-removal attempt');
+});
+
 test('POST /api/satellite-funds (out, channel=petty_cash) creates a petty_cash disbursement, NOT a bank mirror', async () => {
   const inserts = [];
   const onPrepare = (sql) => {

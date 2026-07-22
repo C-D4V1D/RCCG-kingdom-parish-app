@@ -510,23 +510,26 @@ test('bank-funded pool payout: regression — behavior unchanged from before Par
 // expense-page pool-payout tests above are: assert the resulting DATA SHAPE (what
 // submitRemittance produces) satisfies calcChurchBalance's invariants.
 
-test('Area Payment satellite overage: bank reflects the FULL area total (not just our own share), held goes negative when the pool was empty', async () => {
+test('Area Payment satellite overage: bank reflects the FULL area total EXACTLY ONCE, via the remittance\'s own bankAmount — the linked satellite entry must not also mirror a withdrawal', async () => {
   // Our parish share ₦98,671.20, area total paid ₦200,000 → satellite overage
-  // ₦101,328.80, auto-linked as a bank-funded satellite_funds 'out' entry (the whole
-  // area payment went out via one bank transfer — the common case).
+  // ₦101,328.80, auto-linked as a bank-funded satellite_funds 'out' entry — but that
+  // single real wire transfer (ref one bank statement line) is already fully carried
+  // by the remittance's own bankAmount (=areaTotal), so the linked satellite_funds
+  // entry has NO cashTx mirror of its own by the time both records exist —
+  // createRemittance verifies the link server-side and removes the mirror it was
+  // initially given (see createRemittance/createSatelliteFund in functions/api/
+  // [[route]].js). Before this fix, a matching `withdrawal` cashTx entry existed
+  // here too, and bankBalance double-subtracted the otherParishesAmount portion (the
+  // reported bug — "Remittance: HQ" + a separate "Withdrawal" line for the same money).
   const ourShare = 98671.2;
   const areaTotal = 200000;
   const otherParishesAmount = areaTotal - ourShare;
-  const cashTx = [{ type: 'withdrawal', date: '2026-06-15', amount: otherParishesAmount, destination: 'satellite_passthrough' }];
   const satelliteFunds = [{ direction: 'out', date: '2026-06-15', amount: otherParishesAmount, purpose: 'province_remittance', channel: 'bank' }];
-  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, part: 'a', areaTotalPaid: areaTotal, otherParishesAmount }];
+  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, bankAmount: areaTotal, cashAmount: 0, part: 'a', areaTotalPaid: areaTotal, otherParishesAmount }];
 
-  const bal = await balance({ cashTx, satelliteFunds, remittances });
+  const bal = await balance({ satelliteFunds, remittances });
 
-  // paidRems (our own true obligation) is untouched — only the linked satellite_funds
-  // 'out' entry's own bank mirror contributes the satellite share to bankBalance, via
-  // the existing bankWithdrawals term (no change needed there — see calcChurchBalance).
-  assert.equal(bal.bankBalance, -otherParishesAmount - ourShare, 'bank reflects BOTH halves of the real ₦200,000 outflow — our own remittance (via paidRems) plus the linked satellite overage (via bankWithdrawals)');
+  assert.equal(bal.bankBalance, -areaTotal, 'the real ₦200,000 wire transfer leaves the bank exactly once, via the remittance\'s own bankAmount — not once more via a linked satellite withdrawal');
   assert.equal(bal.heldForSatellites, -otherParishesAmount, 'pool started empty — the satellite share is now owed BY satellites (negative held)');
   assert.equal(bal.cashWithAccountant, 0, 'the accountant is untouched by a bank-funded Area Payment');
 });
@@ -536,12 +539,14 @@ test('Area Payment satellite overage: held decreases (not goes negative) when th
   const areaTotal = 150000;
   const otherParishesAmount = areaTotal - ourShare; // 100000
   const priorIn = { direction: 'in', date: '2026-06-01', amount: 120000, channel: 'bank' };
+  // linkedOut is the Part A auto-link — its bank movement is already carried by the
+  // remittance's own bankAmount below, so (once createRemittance verifies the link
+  // and removes the mirror it was initially given) it has no cashTx mirror of its own.
   const linkedOut = { direction: 'out', date: '2026-06-15', amount: otherParishesAmount, purpose: 'province_remittance', channel: 'bank' };
   const cashTx = [
     { type: 'cash_deposit', date: '2026-06-01', amount: 120000, destination: 'satellite_passthrough' },
-    { type: 'withdrawal', date: '2026-06-15', amount: otherParishesAmount, destination: 'satellite_passthrough' },
   ];
-  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, part: 'a', areaTotalPaid: areaTotal, otherParishesAmount }];
+  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, bankAmount: areaTotal, cashAmount: 0, part: 'a', areaTotalPaid: areaTotal, otherParishesAmount }];
 
   const bal = await balance({ cashTx, satelliteFunds: [priorIn, linkedOut], remittances });
   assert.equal(bal.heldForSatellites, 120000 - otherParishesAmount, 'held decreases by the overage but stays positive — the pool had enough');
@@ -707,6 +712,11 @@ test('submitRemittance Part A: always resolves to bank_transfer (bankAmount=paid
     const satFundCreate = calls.find(c => c.method === 'POST' && c.url === '/api/satellite-funds');
     assert.ok(satFundCreate, 'the satellite overage (200000 - 98671.2) was still auto-linked to the pool');
     assert.equal(satFundCreate.body.channel, 'bank', 'the linked pool entry is bank-funded too, since Part A is bank-only');
+    // The client no longer asks for the mirror to be skipped — createRemittance verifies
+    // the link server-side and removes the duplicate mirror itself (see PR #278 review:
+    // trusting a client-supplied flag here would let any bank-funded Funds Out request
+    // hide a real bank outflow).
+    assert.equal(satFundCreate.body.noBankMirror, undefined, 'the client never sends noBankMirror — the server verifies the link itself instead of trusting a client flag');
 
     // Let the un-awaited renderRemittances() fire-and-forget GETs settle against the
     // still-tolerant mock before restoring globals in `finally`, so they don't reject
@@ -881,6 +891,100 @@ test('submitSatelliteFund edit: DELETE succeeds but the create fails — surface
     // submitSatelliteFund returned immediately after the create failed rather than
     // looping or attempting to silently re-create the deleted entry.
     assert.equal(calls.length, 2, 'no other network activity happened on the failure path');
+  } finally {
+    globalThis.document = savedDocument;
+    globalThis.window.document = savedWindowDocument;
+    globalThis.fetch = savedFetch;
+  }
+});
+
+// ── Guard: a satellite_funds entry linked to a Remittance Part A payment must not be
+// edited or deleted through the generic pool panel (PR #278 review) ────────────────
+// A bank-funded 'out' entry with no bankRef only exists because createRemittance's
+// verified de-dup removed the mirror it was initially given (see createRemittance in
+// functions/api/[[route]].js) — createSatelliteFund always mirrors a bank-funded 'out'
+// entry otherwise. Editing such an entry would recreate a fresh bank withdrawal (while
+// the linked remittance still carries the full area total in its own bankAmount);
+// deleting it would misreport "no bank movement to reverse" even though the money
+// really did leave the bank. Both must be blocked — see isRemittanceLinkedPayout.
+
+test('isRemittanceLinkedPayout: true only for a bank-funded OUT entry with no bankRef', () => {
+  const f = App.isRemittanceLinkedPayout;
+  assert.equal(f({ direction: 'out', channel: 'bank', bankRef: '' }), true);
+  assert.equal(f({ direction: 'out', channel: 'bank', bankRef: 'CTX-1' }), false, 'a normal bank-funded payout has a real bankRef');
+  assert.equal(f({ direction: 'out', channel: 'petty_cash', bankRef: '' }), false, 'petty-funded payouts never get a bank mirror in the first place');
+  assert.equal(f({ direction: 'out', channel: 'cash_accountant', bankRef: '' }), false);
+  assert.equal(f({ direction: 'in', channel: 'bank', bankRef: '' }), false, 'inbound receipts are never remittance-linked');
+  assert.equal(f({ direction: 'transfer_out', channel: 'bank', bankRef: '' }), false);
+});
+
+test('editSatelliteFundEntry refuses to open the edit form for a remittance-linked entry', async () => {
+  App._setTestUserRole('accountant'); // holds 'remittances', which gates satellite_fund_record
+  const savedDocument = globalThis.document;
+  const savedWindowDocument = globalThis.window.document;
+  const savedFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    // showAlert (the guard's error message) needs a document.querySelector — the bare
+    // documentStub doesn't define one.
+    const guardDocStub = { ...documentStub, querySelector() { return null; } };
+    globalThis.document = guardDocStub;
+    globalThis.window.document = guardDocStub;
+
+    globalThis.fetch = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      calls.push({ url, method });
+      if (method === 'GET' && url === '/api/satellite-funds') {
+        return { ok: true, status: 200, json: async () => ([
+          { id: 'SAT-LINKED', direction: 'out', channel: 'bank', bankRef: '', purpose: 'province_remittance', amount: 101328.8, date: '2026-06-15' },
+        ]) };
+      }
+      throw new Error(`Unexpected fetch in linked-entry edit-guard test: ${method} ${url}`);
+    };
+
+    await App.editSatelliteFundEntry('SAT-LINKED');
+
+    // The GET lookup itself may or may not hit the network (DB.getSatelliteFunds caches
+    // reads for 60s, so a prior test's identical fetch can serve this one from cache) —
+    // the real assertion is that the guard fired before anything mutating was attempted.
+    assert.equal(calls.filter(c => c.method !== 'GET').length, 0, 'no mutating request was made — the edit form was never opened');
+  } finally {
+    globalThis.document = savedDocument;
+    globalThis.window.document = savedWindowDocument;
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('deleteSatelliteFundEntry refuses to delete a remittance-linked entry', async () => {
+  App._setTestUserRole('accountant'); // holds 'remittances', which gates satellite_fund_delete
+  const savedDocument = globalThis.document;
+  const savedWindowDocument = globalThis.window.document;
+  const savedFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    const guardDocStub = { ...documentStub, querySelector() { return null; } };
+    globalThis.document = guardDocStub;
+    globalThis.window.document = guardDocStub;
+
+    globalThis.fetch = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      calls.push({ url, method });
+      if (method === 'GET' && url === '/api/satellite-funds') {
+        return { ok: true, status: 200, json: async () => ([
+          { id: 'SAT-LINKED', direction: 'out', channel: 'bank', bankRef: '', purpose: 'province_remittance', amount: 101328.8, date: '2026-06-15' },
+        ]) };
+      }
+      throw new Error(`Unexpected fetch in linked-entry delete-guard test: ${method} ${url}`);
+    };
+
+    // No confirm() stub exists in this test environment — if the guard did not return
+    // early, the delete would fall through to the unstubbed global confirm() and throw,
+    // failing this test. Resolving cleanly IS the proof the guard fired first.
+    await App.deleteSatelliteFundEntry('SAT-LINKED');
+
+    // As above, the GET lookup may be served from DB.getSatelliteFunds's 60s cache
+    // instead of hitting the network — what matters is that no DELETE was attempted.
+    assert.equal(calls.filter(c => c.method !== 'GET').length, 0, 'no confirm prompt, no DELETE request');
   } finally {
     globalThis.document = savedDocument;
     globalThis.window.document = savedWindowDocument;

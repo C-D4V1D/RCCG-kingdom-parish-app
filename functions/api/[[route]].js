@@ -3355,6 +3355,34 @@ async function createRemittance(DB, data) {
     data.otherParishesAmount || 0,
     data.satelliteFundRef    || '',
   ).run();
+
+  // Part A Area Payment overage: the linked satellite_funds 'out' entry (created
+  // just before this remittance — see submitRemittance in src/js/app.js) was given
+  // a normal bank mirror like any other pool payout. But this specific satellite
+  // share never actually left the bank a second time — it's already fully carried
+  // by the remittance's own bank_amount above (the one real wire transfer covers
+  // parish share + satellite share together), so that duplicate mirror must be
+  // removed. Only now, with a real persisted remittance row to check against, can
+  // the server verify that safely — never trust a bare client-supplied flag for
+  // this (a raw boolean on the satellite-funds endpoint could suppress the mirror
+  // for an unrelated standalone payout too). Verification requires an exact match
+  // on direction/channel/purpose/amount against this remittance's own
+  // otherParishesAmount; anything that doesn't match is left untouched — failing
+  // toward the safe side, since a leftover mirror double-counts an outflow, it
+  // never hides one.
+  if (data.part === 'a' && data.satelliteFundRef && (data.otherParishesAmount || 0) > 0) {
+    try {
+      const sat = await DB.prepare(`SELECT * FROM satellite_funds WHERE id=?`).bind(data.satelliteFundRef).first();
+      if (sat && sat.direction === 'out' && sat.channel === 'bank' && sat.purpose === 'province_remittance'
+          && sat.bank_ref && Math.abs((sat.amount || 0) - data.otherParishesAmount) < 0.5) {
+        await DB.batch([
+          DB.prepare(`DELETE FROM cash_transactions WHERE id=?`).bind(sat.bank_ref),
+          DB.prepare(`UPDATE satellite_funds SET bank_ref='' WHERE id=?`).bind(data.satelliteFundRef),
+        ]);
+      }
+    } catch (e) { /* leave the mirror in place — safe fallback, see comment above */ }
+  }
+
   return ok({ ...data, id });
 }
 
