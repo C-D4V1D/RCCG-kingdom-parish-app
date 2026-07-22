@@ -1153,12 +1153,13 @@ function meanAbsDev(values){
 // Fence width scales with how much history we have: with only 3 months, a lone
 // spike is both more damaging (it's a third of the signal) and harder to tell
 // apart from real variation, so clamp it hard. As months accrue, trust the data
-// more and let genuine seasonal swings through.
+// more and let genuine seasonal swings through. Linear ramp (0.75 per month past
+// n=2) capped at 3.0 once 6 months of history is available — a young parish with
+// exactly 3 months sees the tightest fence (an outlier month barely counts above
+// the median), and it relaxes steadily rather than jumping straight to a loose
+// 1.5 the moment a 3rd data point exists.
 function adaptiveK(n){
-  if(n<=3) return 1.5;
-  if(n===4) return 2.0;
-  if(n===5) return 2.5;
-  return 3.0;
+  return Math.min(3.0, 0.75*(n-2));
 }
 // Winsorize: clamp each value into [median − k·σ̂, median + k·σ̂]. Keeps every data
 // point (important with only a few months of history) while capping how far a
