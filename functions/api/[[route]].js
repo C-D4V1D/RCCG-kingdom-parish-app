@@ -3355,6 +3355,34 @@ async function createRemittance(DB, data) {
     data.otherParishesAmount || 0,
     data.satelliteFundRef    || '',
   ).run();
+
+  // Part A Area Payment overage: the linked satellite_funds 'out' entry (created
+  // just before this remittance — see submitRemittance in src/js/app.js) was given
+  // a normal bank mirror like any other pool payout. But this specific satellite
+  // share never actually left the bank a second time — it's already fully carried
+  // by the remittance's own bank_amount above (the one real wire transfer covers
+  // parish share + satellite share together), so that duplicate mirror must be
+  // removed. Only now, with a real persisted remittance row to check against, can
+  // the server verify that safely — never trust a bare client-supplied flag for
+  // this (a raw boolean on the satellite-funds endpoint could suppress the mirror
+  // for an unrelated standalone payout too). Verification requires an exact match
+  // on direction/channel/purpose/amount against this remittance's own
+  // otherParishesAmount; anything that doesn't match is left untouched — failing
+  // toward the safe side, since a leftover mirror double-counts an outflow, it
+  // never hides one.
+  if (data.part === 'a' && data.satelliteFundRef && (data.otherParishesAmount || 0) > 0) {
+    try {
+      const sat = await DB.prepare(`SELECT * FROM satellite_funds WHERE id=?`).bind(data.satelliteFundRef).first();
+      if (sat && sat.direction === 'out' && sat.channel === 'bank' && sat.purpose === 'province_remittance'
+          && sat.bank_ref && Math.abs((sat.amount || 0) - data.otherParishesAmount) < 0.5) {
+        await DB.batch([
+          DB.prepare(`DELETE FROM cash_transactions WHERE id=?`).bind(sat.bank_ref),
+          DB.prepare(`UPDATE satellite_funds SET bank_ref='' WHERE id=?`).bind(data.satelliteFundRef),
+        ]);
+      }
+    } catch (e) { /* leave the mirror in place — safe fallback, see comment above */ }
+  }
+
   return ok({ ...data, id });
 }
 
@@ -3468,19 +3496,10 @@ async function createSatelliteFund(DB, data) {
     : direction === 'out'
       ? (['petty_cash', 'cash_accountant'].includes(data.channel) ? data.channel : 'bank')
       : 'bank';
-  // noBankMirror: set when this 'out' entry is auto-linked from a Remittance Part A
-  // Area Payment overage (see submitRemittance in src/js/app.js) — that single wire
-  // transfer's FULL amount (parish share + satellite share) is already recorded as
-  // the remittance's own bankAmount, so mirroring the satellite share again here
-  // would subtract it from the bank a second time. The satellite_funds row (and its
-  // effect on `held`) is still created as normal — only the bank_ref mirror is
-  // skipped. Standalone pool payouts (Record Funds Out, Expense pool payments) never
-  // set this — those really are separate real-world bank movements.
-  const noBankMirror = direction === 'out' && channel === 'bank' && !!data.noBankMirror;
 
   let bankRefId = '';
   let pettyRefId = '';
-  if (!noBankMirror && ((direction === 'in' && channel === 'bank') || (direction === 'out' && channel === 'bank'))) {
+  if ((direction === 'in' && channel === 'bank') || (direction === 'out' && channel === 'bank')) {
     // Mirror into the bank ledger via the same mechanism the Bank module's normal
     // deposit/withdrawal flows use, so the bank balance reflects this real cash
     // movement. Both use destination='satellite_passthrough' — a marker that (a)

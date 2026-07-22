@@ -6961,6 +6961,19 @@ function satelliteHeldDisplay(held){
 // bank balance (it really is in the bank) but is excluded from "available funds"
 // until it is either remitted onward (direction='out') or explicitly transferred
 // to the parish (direction='transfer_out' — see App.showSatelliteTransferForm).
+// A bank-funded 'out' entry with no bank_ref is not a plain data gap — createSatelliteFund
+// always mirrors a bank-funded 'out' entry into cash_transactions, so the only way one ends
+// up without a bank_ref is createRemittance's Part A Area Payment de-dup (see there)
+// verifying the link and removing it after the fact. Editing or deleting such an entry
+// through the generic pool-panel path would blindly recreate (edit) or misreport (delete)
+// that mirror and reintroduce the double bank debit this whole feature exists to prevent —
+// so these entries are only ever changed by editing/deleting the remittance they're linked
+// to (deleteRemittance already correctly reverses whichever mirror the linked entry
+// currently has).
+function isRemittanceLinkedPayout(s){
+  return s.direction === 'out' && s.channel === 'bank' && !s.bankRef;
+}
+
 function renderSatelliteFundsPanel(totalIn, totalOut, totalTransferOut, held, recent, transferByReason){
   const canRecord=canAction('satellite_fund_record');
   const canTransfer=canAction('satellite_fund_transfer');
@@ -7014,6 +7027,7 @@ function renderSatelliteFundsPanel(totalIn, totalOut, totalTransferOut, held, re
         // for transfer_out — see editSatelliteFundEntry, which re-derives this same
         // split server-role-agnostically from the entry's own direction.
         const canEditThis = isTransfer ? canTransfer : canRecord;
+        const linked = isRemittanceLinkedPayout(s);
         return `
         <div class="feed-item">
           <div class="feed-dot" style="background:${bg}">${icon}</div>
@@ -7024,7 +7038,9 @@ function renderSatelliteFundsPanel(totalIn, totalOut, totalTransferOut, held, re
           </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
             <span class="td-bold ${amtClass}" style="${amtStyle}">${s.direction==='in'?'+':'−'} ${fmt(s.amount)}</span>
-            ${(canEditThis||canDelete)?`
+            ${linked
+              ? `<span class="badge badge-gray" style="font-size:9px" title="This payout is part of a Remittance Part A Area Payment — edit or delete that remittance instead">🔗 Linked to Remittance</span>`
+              : (canEditThis||canDelete)?`
             <div class="sat-entry-menu-wrap">
               <button class="sat-entry-menu-btn" onclick="App.toggleSatEntryMenu('${s.id}')" aria-label="More actions" title="More actions">⋮</button>
               <div class="sat-entry-menu" id="sat_entry_menu_${s.id}">
@@ -7060,6 +7076,7 @@ async function editSatelliteFundEntry(id){
   const all = await DB.getSatelliteFunds();
   const entry = all.find(s=>s.id===id);
   if(!entry){ showAlert('This entry could not be found — it may have already been deleted.','danger'); return; }
+  if(isRemittanceLinkedPayout(entry)){ showAlert('This entry is part of a Remittance Part A Area Payment — edit or delete that remittance instead (Remittances page).','danger'); return; }
   if(entry.direction === 'transfer_out'){
     if(!canAction('satellite_fund_transfer')){ showAlert('You do not have permission to edit this entry.','danger'); return; }
     showSatelliteTransferForm(entry);
@@ -7531,17 +7548,18 @@ async function submitRemittance(btn=null){
     // Zone Pool payout (see calcChurchBalance/createSatelliteFund) — so the pool's
     // held balance stays correct without touching paidRems, which continues to
     // represent only our own true obligation.
-    // noBankMirror: the Area Payment is ONE real wire transfer for the full
-    // areaTotal (parish share + satellite share) — bankAmount above already carries
-    // that whole amount as "Remittance: HQ" in the Bank tab, so this entry must NOT
-    // also mirror the satellite share as a second bank withdrawal, or the same money
-    // gets subtracted from the bank twice (see createSatelliteFund's noBankMirror).
+    // This entry gets a normal bank mirror here, same as any other pool payout — the
+    // Area Payment is ONE real wire transfer for the full areaTotal (parish share +
+    // satellite share), and bankAmount above already carries that whole amount as
+    // "Remittance: HQ", so mirroring the satellite share again would double it up.
+    // createRemittance (functions/api/[[route]].js) removes this specific mirror
+    // right after it verifies the remittance row it's linked to — the server checks
+    // that itself rather than trusting a client-supplied flag (see PR #278 review).
     if(part === 'a' && otherParishesAmount > 0){
       const satNote = `Auto-linked from Remittance Part A — Area Payment (Ref: ${reference||'—'})`;
       const satResult = await DB.addSatelliteFund({
         direction:'out', purpose:'province_remittance', amount: otherParishesAmount, date,
-        note: satNote, reference, recordedBy: state.user?.name||'', channel: satFundChannel,
-        noBankMirror: true
+        note: satNote, reference, recordedBy: state.user?.name||'', channel: satFundChannel
       });
       satelliteFundRef = satResult?.id || '';
     }
@@ -7850,6 +7868,7 @@ async function deleteSatelliteFundEntry(id, btn=null){
   const all = await DB.getSatelliteFunds();
   const entry = all.find(s=>s.id===id);
   if(!entry) return;
+  if(isRemittanceLinkedPayout(entry)){ showAlert('This entry is part of a Remittance Part A Area Payment — edit or delete that remittance instead (Remittances page).','danger'); return; }
   // A transfer_out entry has no bank mirror — deleting it only reverses the held
   // reduction (heldForSatellites goes back up, available total goes back down); an
   // in/out entry also reverses the matching cash_transactions bank movement.
@@ -14110,7 +14129,7 @@ return {
   onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
-  showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry,
+  showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry, isRemittanceLinkedPayout,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
   updateExpenseSubcats, updateExpenseDescRequired,
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, onExpAmountChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
