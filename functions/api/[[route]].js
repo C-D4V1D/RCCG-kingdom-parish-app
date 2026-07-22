@@ -3468,10 +3468,19 @@ async function createSatelliteFund(DB, data) {
     : direction === 'out'
       ? (['petty_cash', 'cash_accountant'].includes(data.channel) ? data.channel : 'bank')
       : 'bank';
+  // noBankMirror: set when this 'out' entry is auto-linked from a Remittance Part A
+  // Area Payment overage (see submitRemittance in src/js/app.js) — that single wire
+  // transfer's FULL amount (parish share + satellite share) is already recorded as
+  // the remittance's own bankAmount, so mirroring the satellite share again here
+  // would subtract it from the bank a second time. The satellite_funds row (and its
+  // effect on `held`) is still created as normal — only the bank_ref mirror is
+  // skipped. Standalone pool payouts (Record Funds Out, Expense pool payments) never
+  // set this — those really are separate real-world bank movements.
+  const noBankMirror = direction === 'out' && channel === 'bank' && !!data.noBankMirror;
 
   let bankRefId = '';
   let pettyRefId = '';
-  if ((direction === 'in' && channel === 'bank') || (direction === 'out' && channel === 'bank')) {
+  if (!noBankMirror && ((direction === 'in' && channel === 'bank') || (direction === 'out' && channel === 'bank'))) {
     // Mirror into the bank ledger via the same mechanism the Bank module's normal
     // deposit/withdrawal flows use, so the bank balance reflects this real cash
     // movement. Both use destination='satellite_passthrough' — a marker that (a)

@@ -3425,6 +3425,43 @@ test('POST /api/satellite-funds (out) defaults to channel="bank" and mirrors a w
   assert.equal(inserts[1].binds[10], '', 'petty_ref column is empty for a bank-funded payout');
 });
 
+// ── Fix: Remittance Part A Area Payment overage must not double-debit the bank ──
+// submitRemittance (src/js/app.js) sets the remittance's own bankAmount to the FULL
+// area total (parish share + satellite share) — that single real wire transfer is
+// already fully reflected there. Before this fix, the auto-linked satellite_funds
+// 'out' entry ALSO mirrored the satellite share as its own separate cash_transactions
+// withdrawal, so calcChurchBalance/renderBank subtracted the same money from the bank
+// twice (see the "Remittance: HQ" + separate "Withdrawal" lines the user reported).
+// noBankMirror lets the caller say "this money's bank departure is already accounted
+// for elsewhere" — see submitRemittance's noBankMirror:true.
+test('POST /api/satellite-funds (out, noBankMirror=true) creates NO bank mirror — the amount is already counted elsewhere', async () => {
+  const inserts = [];
+  const onPrepare = (sql) => {
+    const stmt = {
+      binds: [],
+      bind(...args) { stmt.binds = args; return stmt; },
+      async run() { inserts.push({ sql, binds: stmt.binds }); return { success: true }; },
+    };
+    return stmt;
+  };
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/satellite-funds', 'POST', {
+      date: '2026-07-22', direction: 'out', amount: 103211.5, purpose: 'province_remittance',
+      channel: 'bank', recordedBy: 'Jane', noBankMirror: true,
+    }),
+    env: { DB: createDBMock({ onPrepare }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.channel, 'bank', 'the entry still reports its true funding channel');
+  assert.equal(body.bankRef, '', 'no mirrored bank transaction was created');
+  assert.equal(inserts.length, 1, 'exactly one insert — satellite_funds only, no cash_transactions row');
+  assert.match(inserts[0].sql, /INSERT INTO satellite_funds/);
+  assert.equal(inserts[0].binds[8], '', 'bank_ref column is empty — no mirror to double-count against the bank balance');
+  assert.equal(inserts[0].binds[9], 'bank', 'channel column still records bank as the true funding source');
+});
+
 test('POST /api/satellite-funds (out, channel=petty_cash) creates a petty_cash disbursement, NOT a bank mirror', async () => {
   const inserts = [];
   const onPrepare = (sql) => {

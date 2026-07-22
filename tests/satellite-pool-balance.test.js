@@ -510,23 +510,24 @@ test('bank-funded pool payout: regression — behavior unchanged from before Par
 // expense-page pool-payout tests above are: assert the resulting DATA SHAPE (what
 // submitRemittance produces) satisfies calcChurchBalance's invariants.
 
-test('Area Payment satellite overage: bank reflects the FULL area total (not just our own share), held goes negative when the pool was empty', async () => {
+test('Area Payment satellite overage: bank reflects the FULL area total EXACTLY ONCE, via the remittance\'s own bankAmount — the linked satellite entry must not also mirror a withdrawal', async () => {
   // Our parish share ₦98,671.20, area total paid ₦200,000 → satellite overage
-  // ₦101,328.80, auto-linked as a bank-funded satellite_funds 'out' entry (the whole
-  // area payment went out via one bank transfer — the common case).
+  // ₦101,328.80, auto-linked as a bank-funded satellite_funds 'out' entry — but that
+  // single real wire transfer (ref one bank statement line) is already fully carried
+  // by the remittance's own bankAmount (=areaTotal), so the linked satellite_funds
+  // entry gets NO cashTx mirror of its own (noBankMirror — see submitRemittance).
+  // Before this fix, a matching `withdrawal` cashTx entry existed here too, and
+  // bankBalance double-subtracted the otherParishesAmount portion (the reported bug —
+  // "Remittance: HQ" + a separate "Withdrawal" line for the same money).
   const ourShare = 98671.2;
   const areaTotal = 200000;
   const otherParishesAmount = areaTotal - ourShare;
-  const cashTx = [{ type: 'withdrawal', date: '2026-06-15', amount: otherParishesAmount, destination: 'satellite_passthrough' }];
   const satelliteFunds = [{ direction: 'out', date: '2026-06-15', amount: otherParishesAmount, purpose: 'province_remittance', channel: 'bank' }];
-  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, part: 'a', areaTotalPaid: areaTotal, otherParishesAmount }];
+  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, bankAmount: areaTotal, cashAmount: 0, part: 'a', areaTotalPaid: areaTotal, otherParishesAmount }];
 
-  const bal = await balance({ cashTx, satelliteFunds, remittances });
+  const bal = await balance({ satelliteFunds, remittances });
 
-  // paidRems (our own true obligation) is untouched — only the linked satellite_funds
-  // 'out' entry's own bank mirror contributes the satellite share to bankBalance, via
-  // the existing bankWithdrawals term (no change needed there — see calcChurchBalance).
-  assert.equal(bal.bankBalance, -otherParishesAmount - ourShare, 'bank reflects BOTH halves of the real ₦200,000 outflow — our own remittance (via paidRems) plus the linked satellite overage (via bankWithdrawals)');
+  assert.equal(bal.bankBalance, -areaTotal, 'the real ₦200,000 wire transfer leaves the bank exactly once, via the remittance\'s own bankAmount — not once more via a linked satellite withdrawal');
   assert.equal(bal.heldForSatellites, -otherParishesAmount, 'pool started empty — the satellite share is now owed BY satellites (negative held)');
   assert.equal(bal.cashWithAccountant, 0, 'the accountant is untouched by a bank-funded Area Payment');
 });
@@ -536,12 +537,13 @@ test('Area Payment satellite overage: held decreases (not goes negative) when th
   const areaTotal = 150000;
   const otherParishesAmount = areaTotal - ourShare; // 100000
   const priorIn = { direction: 'in', date: '2026-06-01', amount: 120000, channel: 'bank' };
+  // linkedOut is the Part A auto-link (noBankMirror) — its bank movement is already
+  // carried by the remittance's own bankAmount below, so it gets no cashTx mirror.
   const linkedOut = { direction: 'out', date: '2026-06-15', amount: otherParishesAmount, purpose: 'province_remittance', channel: 'bank' };
   const cashTx = [
     { type: 'cash_deposit', date: '2026-06-01', amount: 120000, destination: 'satellite_passthrough' },
-    { type: 'withdrawal', date: '2026-06-15', amount: otherParishesAmount, destination: 'satellite_passthrough' },
   ];
-  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, part: 'a', areaTotalPaid: areaTotal, otherParishesAmount }];
+  const remittances = [{ status: 'paid', paidDate: '2026-06-15', amount: ourShare, bankAmount: areaTotal, cashAmount: 0, part: 'a', areaTotalPaid: areaTotal, otherParishesAmount }];
 
   const bal = await balance({ cashTx, satelliteFunds: [priorIn, linkedOut], remittances });
   assert.equal(bal.heldForSatellites, 120000 - otherParishesAmount, 'held decreases by the overage but stays positive — the pool had enough');
@@ -707,6 +709,7 @@ test('submitRemittance Part A: always resolves to bank_transfer (bankAmount=paid
     const satFundCreate = calls.find(c => c.method === 'POST' && c.url === '/api/satellite-funds');
     assert.ok(satFundCreate, 'the satellite overage (200000 - 98671.2) was still auto-linked to the pool');
     assert.equal(satFundCreate.body.channel, 'bank', 'the linked pool entry is bank-funded too, since Part A is bank-only');
+    assert.equal(satFundCreate.body.noBankMirror, true, 'the satellite share must NOT get its own bank mirror — it is already counted inside the remittance\'s own bankAmount (200000), or the bank balance is double-debited');
 
     // Let the un-awaited renderRemittances() fire-and-forget GETs settle against the
     // still-tolerant mock before restoring globals in `finally`, so they don't reject

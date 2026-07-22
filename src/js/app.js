@@ -6983,7 +6983,7 @@ function renderSatelliteFundsPanel(totalIn, totalOut, totalTransferOut, held, re
         <span class="card-title">🛰️ Funds Received &amp; Remitted on Behalf of Satellite Parishes</span>
       </div>
       <p style="font-size:11px;color:var(--text3);margin-bottom:10px">
-        Money the three satellite parishes send in for Province remittance and joint area/zone payments, which this parish forwards on their behalf. This is <strong>pass-through / custodial money</strong> — not our own income or expense — and is <strong>excluded from all income, expense, and remittance totals</strong>. Every In/Out is mirrored into the Bank module so the bank balance stays accurate; held money sits inside the bank balance until remitted onward or transferred to the parish below.
+        Money the three satellite parishes send in for Province remittance and joint area/zone payments, which this parish forwards on their behalf. This is <strong>pass-through / custodial money</strong> — not our own income or expense — and is <strong>excluded from all income, expense, and remittance totals</strong>. Every In/Out is mirrored into the Bank module so the bank balance stays accurate — except an Out entry auto-linked from a Remittance Part A Area Payment, whose bank movement is already carried by that remittance itself. Held money sits inside the bank balance until remitted onward or transferred to the parish below.
       </p>
       <div class="kpi-grid sat-kpi-grid" style="margin-bottom:12px">
         <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">📥</div><div class="kpi-label">Total Received (In)</div><div class="kpi-val" style="color:var(--success)">${fmt(totalIn)}</div></div>
@@ -7529,13 +7529,19 @@ async function submitRemittance(btn=null){
     // functions/api/[[route]].js). This is pass-through money paid on the satellites'
     // behalf, never our own remittance/expense — exactly like any other Satellite/
     // Zone Pool payout (see calcChurchBalance/createSatelliteFund) — so the pool's
-    // held balance and the real bank/petty/cash balance both stay correct without
-    // touching paidRems, which continues to represent only our own true obligation.
+    // held balance stays correct without touching paidRems, which continues to
+    // represent only our own true obligation.
+    // noBankMirror: the Area Payment is ONE real wire transfer for the full
+    // areaTotal (parish share + satellite share) — bankAmount above already carries
+    // that whole amount as "Remittance: HQ" in the Bank tab, so this entry must NOT
+    // also mirror the satellite share as a second bank withdrawal, or the same money
+    // gets subtracted from the bank twice (see createSatelliteFund's noBankMirror).
     if(part === 'a' && otherParishesAmount > 0){
       const satNote = `Auto-linked from Remittance Part A — Area Payment (Ref: ${reference||'—'})`;
       const satResult = await DB.addSatelliteFund({
         direction:'out', purpose:'province_remittance', amount: otherParishesAmount, date,
-        note: satNote, reference, recordedBy: state.user?.name||'', channel: satFundChannel
+        note: satNote, reference, recordedBy: state.user?.name||'', channel: satFundChannel,
+        noBankMirror: true
       });
       satelliteFundRef = satResult?.id || '';
     }
