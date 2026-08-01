@@ -7113,6 +7113,32 @@ function computeUnpaidMonthsStr(partner, month, year) {
   return out.length ? out.join(', ') : monthName(month);
 }
 
+/**
+ * Fill a reminder template for one partner — the manual Copy / Personalize path.
+ *
+ * Mirrors the automated send in the backend (sendReminders) so a secretary
+ * copying a message by hand gets exactly what the cron would have sent,
+ * including the {{balance}} shortfall and the same fallback sentence for
+ * templates written before part payments existed.
+ *
+ * SMS uses "N" rather than "₦" to stay in the GSM-7 charset — matching the
+ * backend keeps the segment count (and cost) identical either way.
+ */
+function resolveReminderVars(template, partner, month, year) {
+  const summary = partnerMonthSummary(partner.id, month, year);
+  const balanceStr = summary.collected > 0 && summary.balance > 0
+    ? `N${Math.round(summary.balance).toLocaleString('en-NG')}`
+    : '';
+  const text = String(template)
+    .replace(/\{\{name\}\}/g, partner.fullName)
+    .replace(/\{\{month\}\}/g, monthName(month))
+    .replace(/\{\{unpaidMonths\}\}/g, computeUnpaidMonthsStr(partner, month, year))
+    .replace(/\{\{balance\}\}/g, balanceStr);
+  return text + ((balanceStr && !/\{\{balance\}\}/.test(String(template)))
+    ? ` We have received part of your ${monthName(month)} pledge — balance outstanding: ${balanceStr}.`
+    : '');
+}
+
 async function renderPartners(main) {
   await Promise.all([loadPartnerData(S.partnersYear), loadPendingCardPayments()]);
   const canManage = canManagePartners();
@@ -9309,10 +9335,7 @@ function copyReminderMessage(partnerId) {
     message = _personalizedMessages.get(partnerId);
   } else {
     const template = document.getElementById('krem-message')?.value.trim() || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge.';
-    message = template
-      .replace(/\{\{name\}\}/g, partner.fullName)
-      .replace(/\{\{month\}\}/g, monthName(currentMonth()))
-      .replace(/\{\{unpaidMonths\}\}/g, computeUnpaidMonthsStr(partner, currentMonth(), currentYear()));
+    message = resolveReminderVars(template, partner, currentMonth(), currentYear());
   }
   navigator.clipboard.writeText(message).then(() => {
     showToast(`Reminder copied for ${partner.fullName}`, 'success');
@@ -9359,11 +9382,7 @@ function openPersonalizeModal(partner, variants, fallbackTemplate, month, year) 
   modal.id = 'k-personalize-modal';
   modal.className = 'k-modal-overlay';
 
-  const unpaidStr = computeUnpaidMonthsStr(partner, month, year);
-  const resolveVars = (s) => String(s)
-    .replace(/\{\{name\}\}/g, partner.fullName)
-    .replace(/\{\{month\}\}/g, monthName(month))
-    .replace(/\{\{unpaidMonths\}\}/g, unpaidStr);
+  const resolveVars = (s) => resolveReminderVars(s, partner, month, year);
 
   const variantCards = variants.map((v, i) => {
     const resolved = resolveVars(v);
