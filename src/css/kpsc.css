@@ -9,6 +9,7 @@
   --green:     #1a7a5e;
   --amber:     #b45309;
   --red:       #c0392b;
+  --partial:   #0284c7;
   --text:      #1a1a1a;
   --text2:     #4a4a4a;
   --text3:     #7a7a7a;
@@ -143,6 +144,10 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .badge-amber {background:#fef3c7;  color:#92400e;}
 .badge-green {background:#d1fae5;  color:#065f46;}
 .badge-red   {background:#fee2e2;  color:#991b1b;}
+/* Part-paid: deliberately blue. Green/red/gray/amber are all taken by
+   paid/unpaid/future/not-started, so partial needs its own hue — always shown
+   with a ◐ glyph and a naira figure so it never relies on colour alone. */
+.badge-partial{background:#e0f2fe;  color:#075985;}
 .badge-type  {background:var(--navy-light);color:var(--navy);}
 
 /* ── BUTTONS ───────────────────────────────────────────────────── */
@@ -663,15 +668,20 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-pgrid-unpaid{background:#fee2e2;border-color:#fca5a5;}
 .k-pgrid-future{background:#f3f4f6;border-color:#e5e7eb;opacity:.6;}
 .k-pgrid-prestart{background:#fef3c7;border-color:#fde68a;opacity:.7;}
+.k-pgrid-partial{background:#e0f2fe;border-color:#7dd3fc;}
 .k-pgrid-month{font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--text3);}
 .k-pgrid-paid .k-pgrid-month{color:#065f46;}
 .k-pgrid-unpaid .k-pgrid-month{color:#991b1b;}
 .k-pgrid-prestart .k-pgrid-month{color:#92400e;}
+.k-pgrid-partial .k-pgrid-month{color:#075985;}
 .k-pgrid-icon{font-size:18px;font-weight:700;line-height:1;}
 .k-pgrid-paid .k-pgrid-icon{color:#059669;}
 .k-pgrid-unpaid .k-pgrid-icon{color:#dc2626;}
 .k-pgrid-future .k-pgrid-icon{color:#9ca3af;}
 .k-pgrid-prestart .k-pgrid-icon{color:#d97706;}
+.k-pgrid-partial .k-pgrid-icon{color:#0284c7;}
+.k-pgrid-partial .k-pgrid-amount{color:#075985;}
+.k-pgrid-partial .k-pgrid-recorder{color:#0369a1;}
 
 /* ── DOT GRID (reports) ────────────────────────────────────────── */
 .k-dot-row{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;}
@@ -679,6 +689,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-dot-paid{background:#059669;}
 .k-dot-unpaid{background:#dc2626;}
 .k-dot-future{background:#d1d5db;}
+.k-dot-partial{background:#0284c7;}
 .k-dot-legend{display:flex;gap:16px;font-size:12px;color:var(--text3);margin:4px 0 14px;align-items:center;}
 .k-dot-legend span{display:flex;align-items:center;gap:4px;}
 
@@ -695,6 +706,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-progress-filter-btn:hover:not(.active){border-color:var(--navy);color:var(--navy);}
 .k-progress-filter-btn.active{background:var(--navy);color:#fff;border-color:var(--navy);}
 .k-pf-paid.active{background:#059669;border-color:#059669;}
+.k-pf-partial.active{background:#0284c7;border-color:#0284c7;}
 .k-pf-unpaid.active{background:#dc2626;border-color:#dc2626;}
 .k-pf-future.active{background:#6b7280;border-color:#6b7280;}
 .k-pf-pre-start.active{background:#d97706;border-color:#d97706;}
@@ -902,6 +914,10 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-month-chip.selected{background:var(--navy);color:#fff;border-color:var(--navy);}
 .k-month-chip.already-paid{background:#d1fae5;color:#065f46;border-color:#6ee7b7;cursor:default;opacity:.7;}
 .k-month-chip.already-paid::after{content:' ✓';}
+/* Part paid — still selectable so the balance can be topped up. */
+.k-month-chip.partial{background:#e0f2fe;color:#075985;border-color:#7dd3fc;}
+.k-month-chip.partial.selected{background:#0284c7;color:#fff;border-color:#0284c7;}
+.k-month-chip.partial .k-month-chip-sub{display:block;font-size:9px;font-weight:600;opacity:.85;margin-top:1px;}
 
 /* ── Physical-card recorded Yes/No toggle (Record Payment modal) ─── */
 .k-cardrec-group{display:flex;gap:10px;margin-top:6px;}
@@ -1072,3 +1088,33 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-handover-item-amount{font-size:14px;font-weight:700;color:var(--green);font-variant-numeric:tabular-nums;}
 .k-handover-item-count{font-size:12px;color:var(--text3);}
 .k-handover-item-meta{font-size:11px;color:var(--text3);line-height:1.4;}
+
+/* ── PARTIAL PAYMENTS: Record Payment mode switch + allocation preview ──
+   Two ways to enter money: a flat amount per selected month, or one lump sum
+   spread across them oldest-first. The preview shows exactly what will be
+   saved before the operator commits. */
+.k-pay-mode{display:flex;gap:4px;padding:3px;background:var(--bg);border-radius:8px;margin-top:6px;}
+.k-pay-mode-btn{flex:1;padding:7px 10px;border:none;border-radius:6px;background:transparent;cursor:pointer;
+  font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;color:var(--text2);transition:background .15s,color .15s;}
+.k-pay-mode-btn.active{background:var(--white);color:var(--navy);box-shadow:0 1px 4px rgba(0,0,0,.08);}
+.k-pay-mode-btn:hover:not(.active){color:var(--navy);}
+
+.k-pay-alloc{margin-top:10px;padding:10px 12px;background:var(--bg);border-radius:8px;font-size:13px;}
+.k-alloc-hdr{font-weight:700;color:var(--navy);margin-bottom:6px;}
+.k-alloc-total{color:#059669;}
+.k-alloc-row{display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid var(--border);}
+.k-alloc-row:first-of-type{border-top:none;}
+.k-alloc-month{flex:0 0 34px;font-weight:700;color:var(--text2);}
+.k-alloc-amount{flex:0 0 auto;min-width:74px;font-weight:700;color:var(--navy);}
+.k-alloc-paid{color:#059669;font-weight:600;}
+.k-alloc-partial{color:#0284c7;font-weight:600;}
+.k-alloc-none{color:var(--text3);}
+
+/* Secondary line under a money progress bar — the months breakdown that used
+   to be the bar's only label. */
+.k-progress-sub{font-size:11px;color:var(--text3);margin-top:3px;}
+.k-partial-note{font-size:11px;color:#0284c7;font-weight:600;}
+
+/* Instalment markers in the payment log — a month can appear more than once. */
+.k-payment-log .pl-inst{font-weight:600;color:var(--text3);font-size:10px;}
+.k-payment-log tr.pl-subtotal td{background:#f9fafb;font-size:11px;border-bottom:2px solid var(--border);}

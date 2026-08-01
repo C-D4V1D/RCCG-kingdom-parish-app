@@ -2801,20 +2801,26 @@ function buildDashboardContext() {
   // Unreconciled: income entries this month with no reference
   const unreconciledCount = monthEntries.filter(e => !String(e.reference || '').trim()).length;
 
-  // Unpaid partners this month (excludes partners who haven't started yet)
+  // Partners who still owe something on this month — a part payment leaves a
+  // balance, so it belongs here rather than in the paid column.
   const activePartners = S.partners.filter(p => p.status === 'active');
-  const unpaidThisMonth = activePartners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isBeforePartnerStart(p, month, year));
+  const unpaidThisMonth = activePartners.filter(p => {
+    const s = partnerMonthSummary(p.id, month, year);
+    return s.status === 'partial' || (s.status === 'unpaid' && !isBeforePartnerStart(p, month, year));
+  });
+  const partialThisMonth = activePartners.filter(p => partnerMonthlyPartial(p.id, month, year));
 
-  // Partner progress this year: paid months / (active partners * 12)
+  // Partner progress this year: money collected / money pledged. Counting whole
+  // months would ignore every part payment.
   let partnerYearPct = 0;
   if (activePartners.length > 0) {
-    const totalPossible = activePartners.length * 12;
-    const totalPaid = activePartners.reduce((sum, p) => {
-      let c = 0;
-      for (let m2 = 1; m2 <= 12; m2++) if (partnerMonthlyPaid(p.id, m2, year)) c++;
-      return sum + c;
-    }, 0);
-    partnerYearPct = Math.round((totalPaid / totalPossible) * 100);
+    let collected = 0, expected = 0;
+    for (const p of activePartners) {
+      const ys = partnerYearSummary(p.id, year);
+      collected += ys.collected;
+      expected += ys.expected;
+    }
+    partnerYearPct = expected > 0 ? Math.min(100, Math.round((collected / expected) * 100)) : 0;
   }
 
   // Recent finance entries (top 5)
@@ -2844,7 +2850,7 @@ function buildDashboardContext() {
     lastAttendancePct, proposedProjects, inProgressProjects,
     needsReview, pendingDistribution,
     incomeThisMonth, expenseThisMonth,
-    unreconciledCount, unpaidThisMonth, activePartners,
+    unreconciledCount, unpaidThisMonth, partialThisMonth, activePartners,
     partnerYearPct, recentFinance,
     activeProjects: inProgressProjects.slice(0, 5),
     pendingFollowups,
@@ -3217,9 +3223,9 @@ function dashboardCardsForRole(role, ctx) {
           highlight: ctx.unreconciledCount > 0,
         })}
         ${dashTile({
-          title: 'Unpaid Partners This Month',
+          title: 'Partners Owing This Month',
           value: ctx.unpaidThisMonth.length,
-          sub: `of ${ctx.activePartners.length} active partners`,
+          sub: `of ${ctx.activePartners.length} active partners${ctx.partialThisMonth.length ? ` · ${ctx.partialThisMonth.length} part paid` : ''}`,
           onclick: "Kpsc.navigate('reminders')",
           highlight: ctx.unpaidThisMonth.length > 0,
         })}
@@ -3285,7 +3291,7 @@ function dashboardCardsForRole(role, ctx) {
       ${dashTile({
         title: 'Partner Progress This Year',
         value: `${ctx.partnerYearPct}%`,
-        sub: `${ctx.activePartners.length} active partners`,
+        sub: `of pledged income · ${ctx.activePartners.length} active partners`,
         onclick: "Kpsc.navigate('partners')",
       })}
     </div>`;
@@ -6100,16 +6106,34 @@ function openRecordPaymentModal(partnerId) {
   const now = new Date();
   const currentMo = now.getUTCMonth() + 1;
   const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const paidSet = new Set(
-    S.partnerPayments
-      .filter(p => p.partnerId === partnerId && p.year === year && p.paid && p.paymentType === 'monthly_pledge')
-      .map(p => p.month)
-  );
-  const chips = MONTHS.map((mn, i) => {
+  // Every month carries its own outstanding balance now, so the chips advertise
+  // it and part-paid months stay selectable for a top-up.
+  const monthState = MONTHS.map((mn, i) => {
     const mo = i + 1;
-    const isPaid = paidSet.has(mo);
-    return `<div class="k-month-chip${isPaid ? ' already-paid' : mo === currentMo ? ' selected' : ''}" data-month="${mo}" data-paid="${isPaid ? '1' : '0'}" onclick="Kpsc._togglePaymentChip(this);Kpsc._updatePaymentTotal()">${mn}</div>`;
+    const s = partnerMonthSummary(partnerId, mo, year);
+    return { month: mo, short: mn, ...s };
+  });
+  const chips = monthState.map(s => {
+    const locked = s.status === 'paid';
+    const selected = !locked && (s.status === 'partial' || s.month === currentMo);
+    const cls = ['k-month-chip'];
+    if (locked) cls.push('already-paid');
+    if (s.status === 'partial') cls.push('partial');
+    if (selected) cls.push('selected');
+    // Part-paid months show what is still owed; empty months show nothing extra.
+    const sub = s.status === 'partial'
+      ? `<span class="k-month-chip-sub">${fmtNaira(s.balance)} left</span>`
+      : '';
+    return `<div class="${cls.join(' ')}" data-month="${s.month}" data-paid="${locked ? '1' : '0'}"
+      data-expected="${s.expected}" data-collected="${s.collected}" data-balance="${s.balance}"
+      onclick="Kpsc._togglePaymentChip(this);Kpsc._updatePaymentAllocation()">${s.short}${sub}</div>`;
   }).join('');
+
+  const pledge = Number(partner.monthlyPledge || 0);
+  const yearSummary = partnerYearSummary(partnerId, year);
+  const outstandingHtml = yearSummary.outstanding > 0
+    ? `<div style="font-size:12px;color:var(--text2);margin-top:4px">Outstanding for ${year}: <strong>${fmtNaira(yearSummary.outstanding)}</strong></div>`
+    : '';
 
   document.getElementById('k-rec-payment-modal')?.remove();
   const modal = document.createElement('div');
@@ -6125,26 +6149,41 @@ function openRecordPaymentModal(partnerId) {
         <div style="background:var(--bg);border-radius:10px;padding:10px 12px;margin-bottom:14px;">
           <div style="font-weight:700;font-size:15px;color:var(--navy)">${esc(partner.fullName)}</div>
           <div style="font-size:13px;color:var(--text2);margin-top:2px">
-            Monthly pledge: <strong>₦${Number(partner.monthlyPledge || 0).toLocaleString('en-NG')}</strong> &nbsp;·&nbsp; Year: ${year}
+            Monthly pledge: <strong>${fmtNaira(pledge)}</strong> &nbsp;·&nbsp; Year: ${year}
           </div>
+          ${outstandingHtml}
         </div>
 
         <div class="k-form-group">
           <label class="k-label">Select Month(s) to Record</label>
-          <p class="k-hint" style="margin-bottom:6px">Tap to select. Green months already have a payment. You can select multiple months for catch-up or upfront payment.</p>
+          <p class="k-hint" style="margin-bottom:6px">Tap to select. Green months are fully paid. Blue months are part paid — select one to record the balance or another instalment.</p>
           <div class="k-month-chips" id="k-pay-month-chips">${chips}</div>
         </div>
 
         <div class="k-form-group">
-          <label class="k-label">Amount per Month</label>
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <input id="k-pay-amount" class="k-input" type="number" min="0" step="100"
-              value="${Number(partner.monthlyPledge || 0)}" style="flex:1;min-width:140px" placeholder="Amount (₦)"
-              oninput="Kpsc._updatePaymentTotal()" />
-            <button class="kbtn kbtn-sm" onclick="document.getElementById('k-pay-amount').value='${Number(partner.monthlyPledge || 0)}';Kpsc._updatePaymentTotal()">Use pledge (₦${Number(partner.monthlyPledge || 0).toLocaleString('en-NG')})</button>
+          <label class="k-label">How much was received?</label>
+          <div class="k-pay-mode" id="k-pay-mode">
+            <button type="button" class="k-pay-mode-btn active" data-mode="per-month" onclick="Kpsc._setPaymentMode('per-month')">Per month</button>
+            <button type="button" class="k-pay-mode-btn" data-mode="total" onclick="Kpsc._setPaymentMode('total')">Total received</button>
           </div>
-          <div id="k-pay-total" style="margin-top:8px;padding:8px 12px;background:var(--bg);border-radius:8px;font-size:14px;font-weight:600;color:var(--navy);display:none"></div>
-          <p class="k-hint" style="margin-top:4px">Each selected month gets this amount recorded. Enter a higher amount if they paid more than the pledge.</p>
+
+          <div id="k-pay-mode-per-month" style="margin-top:8px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input id="k-pay-amount" class="k-input" type="number" min="0" step="100"
+                value="${pledge}" style="flex:1;min-width:140px" placeholder="Amount per month (₦)"
+                oninput="Kpsc._updatePaymentAllocation()" />
+              <button class="kbtn kbtn-sm" onclick="document.getElementById('k-pay-amount').value='${pledge}';Kpsc._updatePaymentAllocation()">Use pledge (${fmtNaira(pledge)})</button>
+            </div>
+            <p class="k-hint" style="margin-top:4px">Each selected month gets this amount. Below the pledge is fine — the month is recorded as a part payment and keeps its balance.</p>
+          </div>
+
+          <div id="k-pay-mode-total" style="margin-top:8px;display:none">
+            <input id="k-pay-total-amount" class="k-input" type="number" min="0" step="100"
+              value="" placeholder="Total amount received (₦)" oninput="Kpsc._updatePaymentAllocation()" />
+            <p class="k-hint" style="margin-top:4px">Spread across the selected months oldest first — each is filled up to its balance before the next.</p>
+          </div>
+
+          <div id="k-pay-total" class="k-pay-alloc" style="display:none"></div>
         </div>
 
         <div class="k-form-group">
@@ -6183,8 +6222,10 @@ function openRecordPaymentModal(partnerId) {
       </div>
     </div>`;
   document.body.appendChild(modal);
-  // Show total immediately if current month is pre-selected
-  _updatePaymentTotal();
+  // Each modal starts in per-month mode; show the preview immediately for the
+  // months pre-selected above (current month, plus anything part paid).
+  S._paymentMode = 'per-month';
+  _setPaymentMode('per-month');
 }
 
 function _selectCardRecorded(labelEl, value) {
@@ -6197,24 +6238,95 @@ function _selectCardRecorded(labelEl, value) {
 }
 
 function _togglePaymentChip(chip) {
+  // Fully-paid months stay locked; part-paid ones are selectable so a balance
+  // can be topped up.
   if (chip.dataset.paid === '1') return;
   chip.classList.toggle('selected');
 }
 
-function _updatePaymentTotal() {
-  const chips = document.querySelectorAll('#k-pay-month-chips .k-month-chip.selected');
-  const count = chips.length;
+function _setPaymentMode(mode) {
+  S._paymentMode = mode === 'total' ? 'total' : 'per-month';
+  document.querySelectorAll('#k-pay-mode .k-pay-mode-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === S._paymentMode);
+  });
+  const perMonth = document.getElementById('k-pay-mode-per-month');
+  const total = document.getElementById('k-pay-mode-total');
+  if (perMonth) perMonth.style.display = S._paymentMode === 'per-month' ? '' : 'none';
+  if (total) total.style.display = S._paymentMode === 'total' ? '' : 'none';
+  _updatePaymentAllocation();
+}
+
+const PAY_MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+/**
+ * What will actually be recorded, per month, for the current inputs.
+ * Single source of truth for both the preview and the save — the operator saves
+ * exactly what they were shown.
+ */
+function _currentPaymentAllocation() {
+  const chips = [...document.querySelectorAll('#k-pay-month-chips .k-month-chip.selected')];
+  const months = chips.map(c => ({
+    month: Number(c.dataset.month),
+    expected: Number(c.dataset.expected || 0),
+    collected: Number(c.dataset.collected || 0),
+    balance: Number(c.dataset.balance || 0),
+  })).filter(m => m.month > 0).sort((a, b) => a.month - b.month);
+
+  if (S._paymentMode === 'total') {
+    const total = Number(document.getElementById('k-pay-total-amount')?.value || 0);
+    return { mode: 'total', months, ...allocateAcrossMonths(total, months), entered: total };
+  }
+
+  // Per-month: the same amount against every selected month.
   const amount = Number(document.getElementById('k-pay-amount')?.value || 0);
-  const totalEl = document.getElementById('k-pay-total');
-  if (!totalEl) return;
-  if (count === 0 || amount <= 0) { totalEl.style.display = 'none'; return; }
-  const total = count * amount;
-  const monthNames = [...chips].map(c => {
-    const mn = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    return mn[Number(c.dataset.month) - 1] || '';
-  }).join(', ');
-  totalEl.style.display = 'block';
-  totalEl.innerHTML = `${count} month${count > 1 ? 's' : ''} × ₦${amount.toLocaleString('en-NG')} = <span style="color:var(--green,#059669)">₦${total.toLocaleString('en-NG')} total</span><br><span style="font-size:11px;font-weight:400;color:var(--text2)">${monthNames}</span>`;
+  const allocations = months.map(m => {
+    const collectedAfter = m.collected + amount;
+    const { status, balance } = monthPaymentStatus(collectedAfter, m.expected);
+    return { month: m.month, amount, expected: m.expected, collectedAfter, resultingStatus: status, balanceAfter: balance };
+  });
+  return {
+    mode: 'per-month',
+    months,
+    allocations,
+    allocated: amount * months.length,
+    overpayment: 0,
+    entered: amount,
+  };
+}
+
+function _updatePaymentAllocation() {
+  const el = document.getElementById('k-pay-total');
+  if (!el) return;
+  const { mode, allocations, allocated, overpayment, entered } = _currentPaymentAllocation();
+  if (!allocations.length || entered <= 0) { el.style.display = 'none'; return; }
+
+  const rows = allocations.map(a => {
+    const short = PAY_MONTH_SHORT[a.month - 1] || '';
+    const outcome = a.amount <= 0
+      ? `<span class="k-alloc-none">nothing allocated</span>`
+      : a.resultingStatus === 'paid'
+        ? `<span class="k-alloc-paid">✓ complete</span>`
+        : `<span class="k-alloc-partial">◐ ${fmtNaira(a.balanceAfter)} left</span>`;
+    return `<div class="k-alloc-row">
+      <span class="k-alloc-month">${short}</span>
+      <span class="k-alloc-amount">${fmtNaira(a.amount)}</span>
+      ${outcome}
+    </div>`;
+  }).join('');
+
+  const n = allocations.length;
+  const heading = mode === 'total'
+    ? `${fmtNaira(entered)} across ${n} month${n > 1 ? 's' : ''}`
+    : `${n} month${n > 1 ? 's' : ''} × ${fmtNaira(entered)} = <span class="k-alloc-total">${fmtNaira(allocated)}</span>`;
+  const overpayNote = overpayment > 0
+    ? `<p class="k-hint" style="margin:6px 0 0">${fmtNaira(overpayment)} more than the selected months need — recorded as an overpayment on ${PAY_MONTH_SHORT[allocations[allocations.length - 1].month - 1]}. Select another month to spread it instead.</p>`
+    : '';
+  const shortNote = mode === 'per-month' && allocations.some(a => a.resultingStatus === 'partial')
+    ? `<p class="k-hint" style="margin:6px 0 0">Below the pledge — these months are recorded as part payments and keep their balance.</p>`
+    : '';
+
+  el.style.display = 'block';
+  el.innerHTML = `<div class="k-alloc-hdr">${heading}</div>${rows}${overpayNote}${shortNote}`;
 }
 
 function _handleIllustrationUpload(targetInputId, fileInput, targetW, targetH, quality = 0.82) {
@@ -6275,6 +6387,13 @@ function editPartnerPaymentWithPin(paymentId, partnerId) {
 function openEditPartnerPaymentModal(payment, partnerId) {
   document.getElementById('k-edit-payment-modal')?.remove();
   const method = String(payment.reference || '').toLowerCase() || 'cash';
+  // A month can hold several instalments — be explicit about which one is being
+  // edited, and where the month stands overall.
+  const summary = partnerMonthSummary(partnerId, payment.month, payment.year);
+  const idx = summary.installments.findIndex(p => p.id === payment.id);
+  const context = summary.installments.length > 1
+    ? `<div class="k-hint" style="margin-bottom:10px">Instalment ${idx + 1} of ${summary.installments.length} for ${esc(monthName(payment.month))} — ${fmtNaira(summary.collected)} collected of ${fmtNaira(summary.expected)}.</div>`
+    : '';
   const modal = document.createElement('div');
   modal.className = 'k-modal-overlay';
   modal.id = 'k-edit-payment-modal';
@@ -6285,6 +6404,7 @@ function openEditPartnerPaymentModal(payment, partnerId) {
         <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-edit-payment-modal')?.remove()">✕</button>
       </div>
       <div class="k-modal-body">
+        ${context}
         <label class="k-label">Amount (₦)</label>
         <input id="k-ep-amount" class="k-input" type="number" min="0" step="100" value="${Number(payment.amount || 0)}" />
         <label class="k-label" style="margin-top:12px">Payment Method</label>
@@ -6313,10 +6433,17 @@ async function saveEditedPartnerPayment(paymentId, partnerId, month, year, payme
   const notes = document.getElementById('k-ep-notes')?.value.trim() || '';
   const orig = btn.textContent;
   btn.disabled = true; btn.textContent = 'Saving…';
+  const existing = S.partnerPayments.find(p => p.id === paymentId);
+  // `id` targets this one instalment — without it the save would record another.
   const res = await apiPost('kpsc-partner-payments', {
+    id: paymentId,
     partnerId, year: Number(year), month: Number(month), amount,
+    // Omit when unknown so the server re-derives it rather than storing a zero.
+    expectedAmount: Number(existing?.expectedAmount || 0) > 0 ? Number(existing.expectedAmount) : undefined,
     paymentType, source: 'partnership', paid: true,
+    paidAt: existing?.paidAt || undefined,  // correcting an amount must not move the collection date
     reference: method, recordedBy: S.user?.name || '', notes,
+    skipSms: true,  // an amount correction is not a new payment to thank them for
   });
   btn.disabled = false; btn.textContent = orig;
   if (res?.error) { showToast(res.error, 'error'); return; }
@@ -6334,11 +6461,15 @@ async function saveEditedPartnerPayment(paymentId, partnerId, month, year, payme
 
 async function saveRecordedPayments(partnerId, btn) {
   const year = S._partnerDetailId === partnerId ? (S._partnerDetailYear || S.partnersYear) : S.partnersYear;
-  const chips = document.querySelectorAll('#k-pay-month-chips .k-month-chip.selected');
-  const selectedMonths = [...chips].map(c => Number(c.dataset.month)).filter(m => m > 0);
-  if (!selectedMonths.length) { showToast('Please select at least one month.', 'warn'); return; }
-  const amount = Number(document.getElementById('k-pay-amount')?.value || 0);
-  if (amount < 0) { showToast('Amount cannot be negative.', 'warn'); return; }
+  // Save exactly what the preview showed — same allocation, no re-derivation.
+  const { allocations, allocated, entered } = _currentPaymentAllocation();
+  if (!allocations.length) { showToast('Please select at least one month.', 'warn'); return; }
+  if (entered < 0) { showToast('Amount cannot be negative.', 'warn'); return; }
+  if (allocated <= 0) { showToast('Enter an amount greater than zero.', 'warn'); return; }
+  // In "total received" mode a small lump sum can leave later months with nothing —
+  // don't create ₦0 rows for them.
+  const payable = allocations.filter(a => a.amount > 0);
+  const selectedMonths = payable.map(a => a.month);
   const cardRecordedVal = document.querySelector('input[name="k-pay-card-recorded"]:checked')?.value;
   if (cardRecordedVal !== 'yes' && cardRecordedVal !== 'no') {
     const err = document.getElementById('k-pay-card-err');
@@ -6355,9 +6486,14 @@ async function saveRecordedPayments(partnerId, btn) {
   btn.textContent = `Saving ${selectedMonths.length} payment${selectedMonths.length > 1 ? 's' : ''}…`;
   const now = new Date().toISOString();
   let errorCount = 0;
-  for (const month of selectedMonths) {
+  for (const alloc of payable) {
+    // No `id` — each save records a NEW instalment rather than replacing the
+    // month, so a ₦500 top-up sits alongside the ₦1,500 already collected.
     const res = await apiPost('kpsc-partner-payments', {
-      partnerId, year, month, amount,
+      partnerId, year,
+      month: alloc.month,
+      amount: alloc.amount,
+      expectedAmount: alloc.expected,
       paymentType: 'monthly_pledge',
       source: 'partnership',
       paid: true,
@@ -6373,14 +6509,20 @@ async function saveRecordedPayments(partnerId, btn) {
   // Send one combined thank-you SMS for all months instead of one per month
   if (!errorCount) {
     apiPost('kpsc-partner-batch-sms', {
-      partnerId, months: selectedMonths, year, amount,
+      partnerId, months: selectedMonths, year, total: allocated,
     }).catch(() => {});  // fire-and-forget; SMS failure must not block UI
   }
   btn.disabled = false;
   btn.textContent = orig;
   document.getElementById('k-rec-payment-modal')?.remove();
+  const stillShort = payable.filter(a => a.resultingStatus === 'partial');
   if (errorCount) showToast(`${errorCount} payment(s) failed to save. Check and retry.`, 'error');
-  else showToast(`Payment recorded for ${selectedMonths.length} month${selectedMonths.length > 1 ? 's' : ''}.`, 'success');
+  else if (stillShort.length) {
+    const balance = stillShort.reduce((s, a) => s + a.balanceAfter, 0);
+    showToast(`${fmtNaira(allocated)} recorded. ${fmtNaira(balance)} still outstanding.`, 'success');
+  } else {
+    showToast(`Payment recorded for ${selectedMonths.length} month${selectedMonths.length > 1 ? 's' : ''}.`, 'success');
+  }
   if (!errorCount && method === 'cash') loadCashCollection(); // fire-and-forget — updates cash widget
   await Promise.all([loadPartnerData(year), loadPendingCardPayments()]);
   const main = document.getElementById('kpsc-main');
@@ -6400,9 +6542,11 @@ async function markPaymentCardRecorded(paymentId, btn) {
   const orig = btn?.textContent;
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
   const res = await apiPost('kpsc-partner-payments', {
+    id: paymentId,  // flip this one instalment, don't record another
     partnerId: payment.partnerId, year: payment.year, month: payment.month,
     paymentType: payment.paymentType || 'monthly_pledge', source: payment.source || 'partnership',
     paid: true, paidAt: payment.paidAt, amount: payment.amount, reference: payment.reference,
+    expectedAmount: Number(payment.expectedAmount || 0) > 0 ? Number(payment.expectedAmount) : undefined,
     recordedBy: payment.recordedBy, notes: payment.notes,
     cardRecorded: true, skipSms: true,
   });
@@ -6806,14 +6950,147 @@ function _promptReassign(paymentId) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-function partnerPaymentsByPartner(partnerId, year = currentYear()) {
-  return S.partnerPayments.filter(p => p.partnerId === partnerId && Number(p.year) === Number(year) && p.paid);
+// ── PARTIAL PLEDGE PAYMENTS ───────────────────────────────────────
+// A month can hold several installments (₦500 on the 3rd, ₦1,500 on the 20th).
+// Its status comes from money collected vs money expected, not from a payment
+// row merely existing.
+//
+// Canonical source: src/js/partner-payment-utils.js (ES module version used by
+// unit tests). Keep the two in step — the backend mirrors the same rules in
+// monthPaymentStatus() / FULLY_PAID_MONTHS_SQL.
+
+// Amounts are SQLite REAL, so a month settled to the kobo must not read as a
+// fraction short and stay outstanding forever.
+const PLEDGE_EPSILON = 0.005;
+
+function monthPaymentStatus(collected, expected) {
+  const got = Math.max(0, Number.isFinite(Number(collected)) ? Number(collected) : 0);
+  const due = Math.max(0, Number.isFinite(Number(expected)) ? Number(expected) : 0);
+  // No pledge on record — any money at all settles the month.
+  if (due <= 0) return { status: got > 0 ? 'paid' : 'unpaid', balance: 0 };
+  if (got <= 0) return { status: 'unpaid', balance: due };
+  if (got >= due - PLEDGE_EPSILON) return { status: 'paid', balance: 0 };
+  return { status: 'partial', balance: due - got };
 }
 
+// Every installment recorded against one month, oldest first.
+function partnerMonthInstallments(partnerId, month, year) {
+  return S.partnerPayments
+    .filter(p =>
+      p.partnerId === partnerId &&
+      Number(p.year) === Number(year) &&
+      Number(p.month) === Number(month) &&
+      p.paid && p.paymentType === 'monthly_pledge'
+    )
+    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.id || '').localeCompare(String(b.id || '')));
+}
+
+/**
+ * Collected / expected / status / balance for one month.
+ *
+ * `expected` is the snapshot taken when the installments were recorded, so
+ * raising a partner's pledge never turns already-settled months amber. Highest
+ * non-zero snapshot wins (matching the backend); legacy rows carry none and
+ * fall back to the live pledge.
+ */
+function partnerMonthSummary(partnerId, month, year = currentYear()) {
+  const installments = partnerMonthInstallments(partnerId, month, year);
+  const collected = installments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+  const snapshot = installments.reduce((max, p) => Math.max(max, Number(p.expectedAmount || 0)), 0);
+  const partner = S.partners.find(p => p.id === partnerId);
+  const expected = snapshot > 0 ? snapshot : Math.max(0, Number(partner?.monthlyPledge || 0));
+  const { status, balance } = monthPaymentStatus(collected, expected);
+  return { month: Number(month), year: Number(year), installments, collected, expected, status, balance };
+}
+
+// First month of `year` the partner is actually expected to give in. Returns 13
+// when the partnership starts after this year entirely.
+function partnerFirstActiveMonth(partner, year) {
+  if (!partner?.startDate) return 1;
+  const d = new Date(partner.startDate);
+  if (Number.isNaN(d.getTime())) return 1;
+  const sy = d.getUTCFullYear(), sm = d.getUTCMonth() + 1;
+  if (Number(year) < sy) return 13;
+  if (Number(year) > sy) return 1;
+  return sm;
+}
+
+/**
+ * Year roll-up behind the money-based progress bars. `expected` only counts
+ * months from the partner's start month onward — someone who joined in June is
+ * not in arrears for January.
+ */
+function partnerYearSummary(partnerId, year = currentYear()) {
+  const partner = S.partners.find(p => p.id === partnerId);
+  const startMonth = partnerFirstActiveMonth(partner, year);
+  const months = [];
+  let collected = 0, expected = 0, outstanding = 0, paidMonths = 0, partialMonths = 0;
+  for (let m = 1; m <= 12; m++) {
+    const s = partnerMonthSummary(partnerId, m, year);
+    months.push(s);
+    collected += s.collected;
+    if (m >= startMonth) { expected += s.expected; outstanding += s.balance; }
+    if (s.status === 'paid') paidMonths++;
+    else if (s.status === 'partial') partialMonths++;
+  }
+  const pct = expected > 0
+    ? Math.min(100, Math.round((collected / expected) * 100))
+    : (collected > 0 ? 100 : 0);
+  return { months, collected, expected, outstanding, pct, paidMonths, partialMonths, startMonth };
+}
+
+// Fully settled. Callers that also care about part payments use
+// partnerMonthSummary().status directly.
 function partnerMonthlyPaid(partnerId, month, year = currentYear()) {
-  return S.partnerPayments.some(p =>
-    p.partnerId === partnerId && Number(p.year) === Number(year) && Number(p.month) === Number(month) && p.paid && p.paymentType === 'monthly_pledge'
-  );
+  return partnerMonthSummary(partnerId, month, year).status === 'paid';
+}
+
+// Money received but the month is still short.
+function partnerMonthlyPartial(partnerId, month, year = currentYear()) {
+  return partnerMonthSummary(partnerId, month, year).status === 'partial';
+}
+
+/**
+ * Spread a lump sum across the selected months, oldest first — each absorbs up
+ * to its outstanding balance before the next gets anything. Anything left once
+ * every selected month is settled lands on the last month as an overpayment, so
+ * money in hand is always recorded somewhere rather than silently dropped.
+ */
+function allocateAcrossMonths(total, months) {
+  const rows = (months || [])
+    .map(m => ({
+      month: Number(m.month),
+      expected: Math.max(0, Number(m.expected || 0)),
+      collected: Math.max(0, Number(m.collected || 0)),
+      balance: Math.max(0, Number(m.balance || 0)),
+    }))
+    .sort((a, b) => a.month - b.month);
+
+  let left = Math.max(0, Number(total) || 0);
+  const amounts = rows.map(() => 0);
+  rows.forEach((row, i) => {
+    if (left <= 0) return;
+    const take = Math.min(left, row.balance);
+    amounts[i] = take;
+    left -= take;
+  });
+
+  let overpayment = 0;
+  if (left > PLEDGE_EPSILON && rows.length) {
+    amounts[amounts.length - 1] += left;
+    overpayment = left;
+  }
+
+  const allocations = rows.map((row, i) => {
+    const collectedAfter = row.collected + amounts[i];
+    const { status, balance } = monthPaymentStatus(collectedAfter, row.expected);
+    return { month: row.month, amount: amounts[i], expected: row.expected, collectedAfter, resultingStatus: status, balanceAfter: balance };
+  });
+  return { allocations, allocated: allocations.reduce((s, a) => s + a.amount, 0), overpayment };
+}
+
+function fmtNaira(amount) {
+  return `₦${Math.round(Number(amount) || 0).toLocaleString('en-NG')}`;
 }
 
 // Comma-separated list of a partner's unpaid month names over the last 12
@@ -6834,6 +7111,32 @@ function computeUnpaidMonthsStr(partner, month, year) {
     if (++m > 12) { m = 1; y++; }
   }
   return out.length ? out.join(', ') : monthName(month);
+}
+
+/**
+ * Fill a reminder template for one partner — the manual Copy / Personalize path.
+ *
+ * Mirrors the automated send in the backend (sendReminders) so a secretary
+ * copying a message by hand gets exactly what the cron would have sent,
+ * including the {{balance}} shortfall and the same fallback sentence for
+ * templates written before part payments existed.
+ *
+ * SMS uses "N" rather than "₦" to stay in the GSM-7 charset — matching the
+ * backend keeps the segment count (and cost) identical either way.
+ */
+function resolveReminderVars(template, partner, month, year) {
+  const summary = partnerMonthSummary(partner.id, month, year);
+  const balanceStr = summary.collected > 0 && summary.balance > 0
+    ? `N${Math.round(summary.balance).toLocaleString('en-NG')}`
+    : '';
+  const text = String(template)
+    .replace(/\{\{name\}\}/g, partner.fullName)
+    .replace(/\{\{month\}\}/g, monthName(month))
+    .replace(/\{\{unpaidMonths\}\}/g, computeUnpaidMonthsStr(partner, month, year))
+    .replace(/\{\{balance\}\}/g, balanceStr);
+  return text + ((balanceStr && !/\{\{balance\}\}/.test(String(template)))
+    ? ` We have received part of your ${monthName(month)} pledge — balance outstanding: ${balanceStr}.`
+    : '');
 }
 
 async function renderPartners(main) {
@@ -6876,6 +7179,7 @@ async function renderPartners(main) {
       <div class="k-tabs k-tabs-wide" id="k-partner-payment-tabs" style="margin-bottom:16px">
         <button class="k-tab ${S.partnersPaymentFilter === 'all' ? 'active' : ''}" data-filter="all" onclick="Kpsc.setPartnersPaymentFilter('all')">All</button>
         <button class="k-tab ${S.partnersPaymentFilter === 'paid' ? 'active' : ''}" data-filter="paid" onclick="Kpsc.setPartnersPaymentFilter('paid')">Paid this month</button>
+        <button class="k-tab ${S.partnersPaymentFilter === 'partial' ? 'active' : ''}" data-filter="partial" onclick="Kpsc.setPartnersPaymentFilter('partial')">Part paid</button>
         <button class="k-tab ${S.partnersPaymentFilter === 'unpaid' ? 'active' : ''}" data-filter="unpaid" onclick="Kpsc.setPartnersPaymentFilter('unpaid')">Unpaid this month</button>
         <button class="k-tab ${S.partnersPaymentFilter === 'not-started' ? 'active' : ''}" data-filter="not-started" onclick="Kpsc.setPartnersPaymentFilter('not-started')">Not started</button>
       </div>
@@ -6899,18 +7203,24 @@ function renderPartnersList(canManage) {
   if (S.partnersTypeFilter) partners = partners.filter(p => p.partnershipType === S.partnersTypeFilter);
   const q = S.partnersSearch.toLowerCase();
   if (q) partners = partners.filter(p => p.fullName.toLowerCase().includes(q));
-  if (S.partnersPaymentFilter === 'paid') partners = partners.filter(p => partnerMonthlyPaid(p.id, month, year));
-  else if (S.partnersPaymentFilter === 'unpaid') partners = partners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isBeforePartnerStart(p, month, year));
-  else if (S.partnersPaymentFilter === 'not-started') partners = partners.filter(p => isBeforePartnerStart(p, month, year));
+  // Buckets are mutually exclusive: fully paid / part paid / nothing paid.
+  if (S.partnersPaymentFilter === 'paid') partners = partners.filter(p => partnerMonthSummary(p.id, month, year).status === 'paid');
+  else if (S.partnersPaymentFilter === 'partial') partners = partners.filter(p => partnerMonthSummary(p.id, month, year).status === 'partial');
+  else if (S.partnersPaymentFilter === 'unpaid') partners = partners.filter(p => partnerMonthSummary(p.id, month, year).status === 'unpaid' && !isBeforePartnerStart(p, month, year));
+  else if (S.partnersPaymentFilter === 'not-started') partners = partners.filter(p => isBeforePartnerStart(p, month, year) && partnerMonthSummary(p.id, month, year).status === 'unpaid');
   if (!partners.length) {
     return `<div class="k-empty">${q ? `No partners matching "${esc(S.partnersSearch)}".` : `No ${S.partnersFilter === 'all' ? '' : S.partnersFilter + ' '}partners found.`}</div>`;
   }
   const canFinance = canManageFinance();
   return `<div class="k-meeting-list">${partners.map(partner => {
-    const paidMonths = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
-    const currentPaid = partnerMonthlyPaid(partner.id, month, year);
-    const notStartedYet = !currentPaid && isBeforePartnerStart(partner, month, year);
-    const pct = Math.round((paidMonths / 12) * 100);
+    const ys = partnerYearSummary(partner.id, year);
+    const monthStatus = partnerMonthSummary(partner.id, month, year);
+    const currentPaid = monthStatus.status === 'paid';
+    const currentPartial = monthStatus.status === 'partial';
+    const notStartedYet = monthStatus.status === 'unpaid' && isBeforePartnerStart(partner, month, year);
+    // Progress is money collected against money pledged, so a run of part
+    // payments shows real movement instead of a flat "0/12 months".
+    const pct = ys.pct;
     const nameHtml = q
       ? esc(partner.fullName).replace(new RegExp(esc(S.partnersSearch).replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'gi'), m => `<mark>${m}</mark>`)
       : esc(partner.fullName);
@@ -6934,12 +7244,17 @@ function renderPartnersList(canManage) {
               ${partner.optedOut ? `&nbsp;·&nbsp; <span title="Opted out of SMS">📵 Opted-out</span>` : ''}
             </div>
             <div style="margin-top:5px">
-              <span class="kbadge ${currentPaid ? 'badge-green' : notStartedYet ? 'badge-gray' : 'badge-amber'}" style="white-space:nowrap">${currentPaid ? '✓ Paid this month' : notStartedYet ? '· Not started' : '✗ Unpaid this month'}</span>
+              <span class="kbadge ${currentPaid ? 'badge-green' : currentPartial ? 'badge-partial' : notStartedYet ? 'badge-gray' : 'badge-amber'}" style="white-space:nowrap">${
+                currentPaid ? '✓ Paid this month'
+                : currentPartial ? `◐ Part paid — ${fmtNaira(monthStatus.balance)} left`
+                : notStartedYet ? '· Not started'
+                : '✗ Unpaid this month'}</span>
             </div>
             <div class="k-progress-row">
               <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
-              <span class="k-progress-label">${paidMonths}/12 months paid (${year})</span>
+              <span class="k-progress-label">${canManageFinance() ? `${fmtNaira(ys.collected)} of ${fmtNaira(ys.expected)}` : `${pct}%`} (${year})</span>
             </div>
+            <div class="k-progress-sub">${ys.paidMonths}/12 months paid${ys.partialMonths ? ` · ${ys.partialMonths} part paid` : ''}</div>
           </div>
         </div>
         <div class="k-room-actions" style="flex-wrap:wrap">
@@ -7152,9 +7467,16 @@ function togglePartnerMonth(partnerId, month, year, paid) {
     return;
   }
   const mName = monthName(month);
+  // Clearing a month removes every instalment recorded against it — say how many
+  // so a two-payment month isn't wiped by surprise.
+  const summary = partnerMonthSummary(partnerId, month, year);
+  const n = summary.installments.length;
+  const detail = n > 1
+    ? `This removes all ${n} payments recorded for ${mName} (${fmtNaira(summary.collected)}) and their income entries.`
+    : `Enter your PIN to mark as unpaid for this partner. This helps prevent accidental changes.`;
   requirePin(
     `Confirm: ${mName} ${year}`,
-    `Enter your PIN to mark as unpaid for this partner. This helps prevent accidental changes.`,
+    detail,
     () => _doTogglePartnerMonth(partnerId, month, year, false)
   );
 }
@@ -7162,13 +7484,21 @@ function togglePartnerMonth(partnerId, month, year, paid) {
 function _confirmMarkMonthPaid(partnerId, month, year) {
   document.getElementById('k-pin-confirm-modal')?.remove();
   const mName = monthName(month);
+  // A part-paid month is completed by recording its balance, not the full pledge.
+  const summary = partnerMonthSummary(partnerId, month, year);
+  const isTopUp = summary.status === 'partial';
+  const due = isTopUp ? summary.balance : summary.expected;
+  const title = isTopUp ? `Complete ${mName} ${year}` : `Confirm: ${mName} ${year}`;
+  const sub = isTopUp
+    ? `${fmtNaira(summary.collected)} of ${fmtNaira(summary.expected)} already collected. This records the ${fmtNaira(due)} balance. Enter your PIN to confirm.`
+    : `Enter your PIN to mark as paid (${fmtNaira(due)}) for this partner.`;
   const overlay = document.createElement('div');
   overlay.className = 'k-pin-confirm-overlay';
   overlay.id = 'k-pin-confirm-modal';
   overlay.innerHTML = `
     <div class="k-pin-confirm-box">
-      <div class="k-pin-confirm-title">Confirm: ${esc(mName)} ${year}</div>
-      <div class="k-pin-confirm-sub">Enter your PIN to mark as paid for this partner.</div>
+      <div class="k-pin-confirm-title">${esc(title)}</div>
+      <div class="k-pin-confirm-sub">${esc(sub)}</div>
       <div style="text-align:left;margin:10px 0 4px">
         <label class="k-label" style="font-size:12px">Recorded in physical card? <span style="color:var(--red)">*</span></label>
         <div class="k-cardrec-group" id="k-quickpay-card-group">
@@ -7219,19 +7549,24 @@ async function _submitQuickPayConfirm(partnerId, month, year) {
 }
 
 async function _doTogglePartnerMonth(partnerId, month, year, paid, cardRecorded) {
+  const summary = partnerMonthSummary(partnerId, month, year);
   if (!paid) {
-    const payment = S.partnerPayments.find(p => p.partnerId === partnerId && p.month === month && p.year === year && p.paymentType === 'monthly_pledge');
-    if (payment) {
+    // The month may hold several instalments — clear them all, or the cell would
+    // go red while money stays on the books.
+    for (const payment of summary.installments) {
       const res = await apiDelete(`kpsc-partner-payments/${payment.id}`);
       if (res?.error) { showToast(res.error, 'error'); return; }
     }
   } else {
-    const partner = S.partners.find(p => p.id === partnerId);
+    // Record only what is still owed: the full pledge for an empty month, the
+    // remaining balance when the month is already part paid.
+    const amount = summary.status === 'partial' ? summary.balance : summary.expected;
     const res = await apiPost('kpsc-partner-payments', {
       partnerId,
       year,
       month,
-      amount: Number(partner?.monthlyPledge || 0),
+      amount,
+      expectedAmount: summary.expected > 0 ? summary.expected : undefined,
       paymentType: 'monthly_pledge',
       source: 'partnership',
       paid: true,
@@ -7366,18 +7701,35 @@ function renderPartnerDetail(main) {
   const nowYear = now.getUTCFullYear();
   const nowMonth = now.getUTCMonth() + 1;
 
+  const yearSummary = partnerYearSummary(partner.id, year);
+
   const gridCells = months.map(m => {
-    const payment = S.partnerPayments.find(p => p.partnerId === partner.id && Number(p.month) === m && Number(p.year) === year && p.paid && p.paymentType === 'monthly_pledge');
-    const isPaid = !!payment;
+    const s = yearSummary.months[m - 1];
+    const isPaid = s.status === 'paid';
+    const isPartial = s.status === 'partial';
     const isFuture = year > nowYear || (year === nowYear && m > nowMonth);
-    const isPreStart = !isPaid && isBeforePartnerStart(partner, m, year);
-    const cls = isPreStart ? 'k-pgrid-cell k-pgrid-prestart' : isFuture ? 'k-pgrid-cell k-pgrid-future' : isPaid ? 'k-pgrid-cell k-pgrid-paid' : 'k-pgrid-cell k-pgrid-unpaid';
-    const icon = isPreStart ? '·' : isFuture ? '·' : isPaid ? '✓' : '✗';
-    const clickable = canManage && !isFuture && !isPreStart;
-    const amtHtml = isPaid && payment.amount > 0 ? `<span class="k-pgrid-amount">₦${Number(payment.amount).toLocaleString('en-NG')}</span>` : '';
-    const recHtml = isPaid && payment.recordedBy ? `<span class="k-pgrid-recorder">${esc(payment.recordedBy.split(' ')[0])}</span>` : '';
-    const titleTip = isPaid
-      ? `${monthName(m)} · ₦${Number(payment.amount||0).toLocaleString('en-NG')}${payment.recordedBy ? ' · by ' + payment.recordedBy : ''}${payment.reference ? ' · ' + payment.reference : ''}`
+    // A part payment beats "not started"/"future": money has changed hands, so
+    // the cell must show it rather than pretend the month is out of scope.
+    const isPreStart = !isPaid && !isPartial && isBeforePartnerStart(partner, m, year);
+    const cls = isPreStart ? 'k-pgrid-cell k-pgrid-prestart'
+      : isPartial ? 'k-pgrid-cell k-pgrid-partial'
+      : isFuture ? 'k-pgrid-cell k-pgrid-future'
+      : isPaid ? 'k-pgrid-cell k-pgrid-paid'
+      : 'k-pgrid-cell k-pgrid-unpaid';
+    const icon = isPreStart ? '·' : isPartial ? '◐' : isFuture ? '·' : isPaid ? '✓' : '✗';
+    const clickable = canManage && (isPartial || (!isFuture && !isPreStart));
+    // Part-paid months show progress toward the pledge; settled months show what came in.
+    const amtHtml = isPartial
+      ? `<span class="k-pgrid-amount">${fmtNaira(s.collected)} / ${fmtNaira(s.expected)}</span>`
+      : isPaid && s.collected > 0 ? `<span class="k-pgrid-amount">${fmtNaira(s.collected)}</span>` : '';
+    const lastRecorder = s.installments.length ? s.installments[s.installments.length - 1].recordedBy : '';
+    const recHtml = (isPaid || isPartial) && lastRecorder
+      ? `<span class="k-pgrid-recorder">${esc(lastRecorder.split(' ')[0])}${s.installments.length > 1 ? ` +${s.installments.length - 1}` : ''}</span>`
+      : '';
+    const titleTip = isPartial
+      ? `${monthName(m)} · part paid ${fmtNaira(s.collected)} of ${fmtNaira(s.expected)} · ${fmtNaira(s.balance)} outstanding${s.installments.length > 1 ? ` · ${s.installments.length} payments` : ''}`
+      : isPaid
+      ? `${monthName(m)} · ${fmtNaira(s.collected)}${s.installments.length > 1 ? ` over ${s.installments.length} payments` : ''}${lastRecorder ? ' · by ' + lastRecorder : ''}`
       : isPreStart ? `${monthName(m)}: Not started yet` : monthName(m);
     return `<div class="${cls}${clickable ? ' k-pgrid-clickable' : ''}" title="${esc(titleTip)}" ${clickable ? `onclick="Kpsc.togglePartnerMonth('${partner.id}', ${m}, ${year}, ${!isPaid})"` : ''}>
       <span class="k-pgrid-month">${monthName(m).slice(0,3)}</span>
@@ -7386,17 +7738,30 @@ function renderPartnerDetail(main) {
     </div>`;
   }).join('');
 
-  const paidCount = months.filter(m => partnerMonthlyPaid(partner.id, m, year)).length;
+  const paidCount = yearSummary.paidMonths;
+  const partialCount = yearSummary.partialMonths;
   const yearOptions = [nowYear, nowYear-1, nowYear-2].map(y => `<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('');
 
+  // Every instalment gets its own row — two collections in July are two lines,
+  // each with its own date and collector.
   const yearPayments = S.partnerPayments
     .filter(p => p.partnerId === partner.id && Number(p.year) === year && p.paid && p.paymentType === 'monthly_pledge')
-    .sort((a, b) => Number(a.month) - Number(b.month));
+    .sort((a, b) => Number(a.month) - Number(b.month) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
 
-  const totalPaid = yearPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+  const totalPaid = yearSummary.collected;
   const pendingCardMonths = yearPayments.filter(p => p.cardRecorded === false);
+  const monthRowCounts = yearPayments.reduce((acc, p) => {
+    acc[p.month] = (acc[p.month] || 0) + 1;
+    return acc;
+  }, {});
+  const monthRowSeen = {};
 
   const paymentLogRows = yearPayments.length ? yearPayments.map(p => {
+    // Label repeated months so "July, July" reads as two instalments, not a bug.
+    monthRowSeen[p.month] = (monthRowSeen[p.month] || 0) + 1;
+    const monthLabel = monthRowCounts[p.month] > 1
+      ? `${monthName(Number(p.month))} <span class="pl-inst">#${monthRowSeen[p.month]}</span>`
+      : monthName(Number(p.month));
     const method = String(p.reference || '').toLowerCase();
     const methodBadge = method === 'transfer'
       ? `<span class="pl-method pl-transfer">🏦 Transfer</span>`
@@ -7414,14 +7779,25 @@ function renderPartnerDetail(main) {
           <button class="k-ctx-danger" onclick="document.getElementById('${menuId}').style.display='none';Kpsc.deletePartnerPaymentWithPin('${p.id}','${partner.id}')">🗑 Delete</button>
         </div>
       </div>` : '';
+    // After the last instalment of a multi-payment month, show what it adds up to.
+    const monthSummary = partnerMonthSummary(partner.id, p.month, year);
+    const subtotal = (monthRowCounts[p.month] > 1 && monthRowSeen[p.month] === monthRowCounts[p.month])
+      ? `<tr class="pl-subtotal">
+          <td><strong>${monthName(Number(p.month))} total</strong></td>
+          <td class="pl-amount">${fmtNaira(monthSummary.collected)}</td>
+          <td colspan="4" style="color:var(--text2)">${monthSummary.status === 'partial'
+            ? `of ${fmtNaira(monthSummary.expected)} — ${fmtNaira(monthSummary.balance)} outstanding`
+            : `of ${fmtNaira(monthSummary.expected)} — settled`}</td>
+        </tr>`
+      : '';
     return `<tr>
-      <td><strong>${monthName(Number(p.month))}</strong></td>
-      <td class="pl-amount">₦${Number(p.amount||0).toLocaleString('en-NG')}</td>
+      <td><strong>${monthLabel}</strong></td>
+      <td class="pl-amount">${fmtNaira(p.amount)}</td>
       <td>${methodBadge}</td>
       <td style="color:var(--text2)">${esc(p.recordedBy || '—')}</td>
       <td style="color:var(--text3)">${dateStr}</td>
       <td style="text-align:right">${ctxMenu}</td>
-    </tr>`;
+    </tr>${subtotal}`;
   }).join('') : `<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:16px">No payments recorded for ${year}.</td></tr>`;
 
   main.innerHTML = `
@@ -7438,17 +7814,18 @@ function renderPartnerDetail(main) {
           ${partner.phone ? `<span class="kbadge badge-gray">📞 ${esc(partner.phone)}</span>` : ''}
         </div>
         <div class="k-about-row"><span class="k-about-label">Year</span><span>${year}</span></div>
-        <div class="k-about-row"><span class="k-about-label">Months Paid</span><span>${paidCount} / 12</span></div>
-        <div class="k-about-row"><span class="k-about-label">Progress</span><span>${Math.round((paidCount/12)*100)}%</span></div>
+        <div class="k-about-row"><span class="k-about-label">Months Paid</span><span>${paidCount} / 12${partialCount ? ` <span class="k-partial-note">+${partialCount} part paid</span>` : ''}</span></div>
+        <div class="k-about-row"><span class="k-about-label">Progress</span><span>${yearSummary.pct}% of pledge</span></div>
         ${canManageFinance() ? `<div class="k-about-row"><span class="k-about-label">Monthly Pledge</span><span>₦${Number(partner.monthlyPledge||0).toLocaleString('en-NG')}/mo</span></div>` : ''}
-        ${canManageFinance() && totalPaid > 0 ? `<div class="k-about-row"><span class="k-about-label">Total Paid (${year})</span><span style="font-weight:700;color:var(--navy)">₦${totalPaid.toLocaleString('en-NG')}</span></div>` : ''}
+        ${canManageFinance() && totalPaid > 0 ? `<div class="k-about-row"><span class="k-about-label">Total Paid (${year})</span><span style="font-weight:700;color:var(--navy)">${fmtNaira(totalPaid)}</span></div>` : ''}
+        ${canManageFinance() && yearSummary.outstanding > 0 ? `<div class="k-about-row"><span class="k-about-label">Outstanding (${year})</span><span style="font-weight:700;color:var(--red,#dc2626)">${fmtNaira(yearSummary.outstanding)}</span></div>` : ''}
       </div>
       <div class="k-section">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px">
           <h3 class="k-sec-title" style="margin:0">${year} Payment Calendar</h3>
           ${canManageFinance() ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.openRecordPaymentModal('${partner.id}')">💳 Record Payment</button>` : ''}
         </div>
-        ${canManage ? `<p class="k-hint" style="margin-bottom:12px">Tap a month to toggle paid/unpaid (PIN required). Green cells show the amount paid. Hover for details.</p>` : ''}
+        ${canManage ? `<p class="k-hint" style="margin-bottom:12px">Tap a month to toggle paid/unpaid (PIN required). Green cells are fully paid; blue cells are part paid — tapping one records the balance. Hover for details.</p>` : ''}
         <div class="k-payment-grid">${gridCells}</div>
         ${pendingCardMonths.length ? `
         <div class="k-cardrec-pending-list">
@@ -8533,7 +8910,14 @@ async function renderReminders(main) {
   const settingsRes = await apiGet('settings');
   const month = currentMonth();
   const year = currentYear();
-  const unpaid = S.partners.filter(p => p.status === 'active' && !partnerMonthlyPaid(p.id, month, year));
+  // Anyone still owing on this month — part payers included, since a balance is
+  // exactly what a reminder is for. Partners who haven't started yet are excluded
+  // (the backend send-list applies the same cutoff via computeUnpaidMonths).
+  const unpaid = S.partners.filter(p => {
+    if (p.status !== 'active') return false;
+    const s = partnerMonthSummary(p.id, month, year);
+    return s.status === 'partial' || (s.status === 'unpaid' && !isBeforePartnerStart(p, month, year));
+  });
   const remindersRes = await apiGet(`kpsc-reminders?year=${year}&month=${month}`);
   if (remindersRes?.error) throw new Error(remindersRes.error);
   const defaultTemplate = String(settingsRes?.kpsc_sms_text_reminder || '').trim()
@@ -8546,7 +8930,7 @@ async function renderReminders(main) {
         <p class="k-hint">${unpaid.length} unpaid active partner(s) for ${monthName(month)} ${year}.</p>
         <label class="k-label">Reminder Message Template</label>
         <textarea id="krem-message" class="k-input k-textarea" placeholder="Reminder message" oninput="Kpsc.debouncedSaveReminderTemplate(this)">${esc(defaultTemplate)}</textarea>
-        <p class="k-hint">Use <code>{{name}}</code> for partner name, <code>{{month}}</code> for the current month, and <code>{{unpaidMonths}}</code> for the list of every outstanding month (e.g. "May" or "May, June").</p>
+        <p class="k-hint">Use <code>{{name}}</code> for partner name, <code>{{month}}</code> for the current month, <code>{{unpaidMonths}}</code> for the list of every outstanding month (e.g. "May" or "May, June"), and <code>{{balance}}</code> for the amount still owed on this month when they have part paid (blank otherwise).</p>
         <div class="k-room-actions" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="kbtn kbtn-primary" onclick="Kpsc.runRemindersNow(this)">Send Reminders Now (${unpaid.length} unpaid)</button>
           <button class="kbtn kbtn-ghost" onclick="Kpsc.navigate('sms_logs')">📋 SMS Logs &amp; Delivery</button>
@@ -8951,10 +9335,7 @@ function copyReminderMessage(partnerId) {
     message = _personalizedMessages.get(partnerId);
   } else {
     const template = document.getElementById('krem-message')?.value.trim() || 'Dear {{name}}, this is a reminder for your {{month}} partnership pledge.';
-    message = template
-      .replace(/\{\{name\}\}/g, partner.fullName)
-      .replace(/\{\{month\}\}/g, monthName(currentMonth()))
-      .replace(/\{\{unpaidMonths\}\}/g, computeUnpaidMonthsStr(partner, currentMonth(), currentYear()));
+    message = resolveReminderVars(template, partner, currentMonth(), currentYear());
   }
   navigator.clipboard.writeText(message).then(() => {
     showToast(`Reminder copied for ${partner.fullName}`, 'success');
@@ -9001,11 +9382,7 @@ function openPersonalizeModal(partner, variants, fallbackTemplate, month, year) 
   modal.id = 'k-personalize-modal';
   modal.className = 'k-modal-overlay';
 
-  const unpaidStr = computeUnpaidMonthsStr(partner, month, year);
-  const resolveVars = (s) => String(s)
-    .replace(/\{\{name\}\}/g, partner.fullName)
-    .replace(/\{\{month\}\}/g, monthName(month))
-    .replace(/\{\{unpaidMonths\}\}/g, unpaidStr);
+  const resolveVars = (s) => resolveReminderVars(s, partner, month, year);
 
   const variantCards = variants.map((v, i) => {
     const resolved = resolveVars(v);
@@ -10548,19 +10925,28 @@ function rerenderActionItemsList() {
 function _buildProgressRows(partners, month, year, nowYear, nowMonth) {
   const months = [1,2,3,4,5,6,7,8,9,10,11,12];
   return partners.map(partner => {
-    const monthsPaid = partnerPaymentsByPartner(partner.id, year).filter(p => p.paymentType === 'monthly_pledge').length;
-    const pct = Math.round((monthsPaid / 12) * 100);
+    const ys = partnerYearSummary(partner.id, year);
+    const monthsPaid = ys.paidMonths;
+    const pct = ys.pct;
     const isCurrFuture = year > nowYear || (year === nowYear && month > nowMonth);
     const isCurrPreStart = isBeforePartnerStart(partner, month, year);
-    const currentPaid = partnerMonthlyPaid(partner.id, month, year);
-    const badgeClass = currentPaid ? 'badge-green' : (isCurrFuture || isCurrPreStart) ? 'badge-gray' : 'badge-amber';
-    const badgeText = currentPaid ? '✓ Current' : isCurrFuture ? 'Future' : isCurrPreStart ? 'Not started' : 'Unpaid';
+    const currentSummary = ys.months[month - 1];
+    const currentPaid = currentSummary.status === 'paid';
+    const currentPartial = currentSummary.status === 'partial';
+    const badgeClass = currentPaid ? 'badge-green' : currentPartial ? 'badge-partial' : (isCurrFuture || isCurrPreStart) ? 'badge-gray' : 'badge-amber';
+    const badgeText = currentPaid ? '✓ Current'
+      : currentPartial ? `◐ ${fmtNaira(currentSummary.balance)} left`
+      : isCurrFuture ? 'Future' : isCurrPreStart ? 'Not started' : 'Unpaid';
     const dotRow = months.map(m => {
-      const isPaid = partnerMonthlyPaid(partner.id, m, year);
+      const ms = ys.months[m - 1];
+      const isPaid = ms.status === 'paid';
+      const isPartial = ms.status === 'partial';
       const isFuture = year > nowYear || (year === nowYear && m > nowMonth);
       const isPreStart = isBeforePartnerStart(partner, m, year);
-      const cls = isPaid ? 'k-dot-paid' : isPreStart ? 'k-dot-pre-start' : isFuture ? 'k-dot-future' : 'k-dot-unpaid';
-      const label = isPaid ? 'Paid' : isPreStart ? 'Not started' : isFuture ? 'Future' : 'Unpaid';
+      const cls = isPaid ? 'k-dot-paid' : isPartial ? 'k-dot-partial' : isPreStart ? 'k-dot-pre-start' : isFuture ? 'k-dot-future' : 'k-dot-unpaid';
+      const label = isPaid ? `Paid ${fmtNaira(ms.collected)}`
+        : isPartial ? `Part paid ${fmtNaira(ms.collected)} of ${fmtNaira(ms.expected)} — ${fmtNaira(ms.balance)} left`
+        : isPreStart ? 'Not started' : isFuture ? 'Future' : 'Unpaid';
       return `<span class="k-dot-cell ${cls}" title="${monthName(m)}: ${label}"></span>`;
     }).join('');
     return `
@@ -10575,8 +10961,9 @@ function _buildProgressRows(partners, month, year, nowYear, nowMonth) {
             <div class="k-dot-row" style="margin-top:8px">${dotRow}</div>
             <div class="k-progress-row">
               <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
-              <span class="k-progress-label">${monthsPaid}/12 (${pct}%)</span>
+              <span class="k-progress-label">${fmtNaira(ys.collected)}/${fmtNaira(ys.expected)} (${pct}%)</span>
             </div>
+            <div class="k-progress-sub">${monthsPaid}/12 months paid${ys.partialMonths ? ` · ${ys.partialMonths} part paid` : ''}${ys.outstanding > 0 ? ` · ${fmtNaira(ys.outstanding)} outstanding` : ''}</div>
           </div>
         </div>
       </div>`;
@@ -10596,16 +10983,21 @@ function _rerenderProgressRows() {
   const q = (S.progressSearch || '').toLowerCase();
   if (q) partners = partners.filter(p => p.fullName.toLowerCase().includes(q));
   const isFutureMonth = year > nowYear || (year === nowYear && month > nowMonth);
+  // Buckets stay mutually exclusive; a part payment outranks future/not-started
+  // because money has actually come in for that month.
+  const statusOf = p => partnerMonthSummary(p.id, month, year).status;
   if (S.progressFilter === 'paid') {
-    partners = partners.filter(p => partnerMonthlyPaid(p.id, month, year));
+    partners = partners.filter(p => statusOf(p) === 'paid');
+  } else if (S.progressFilter === 'partial') {
+    partners = partners.filter(p => statusOf(p) === 'partial');
   } else if (S.progressFilter === 'unpaid') {
-    partners = partners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isFutureMonth && !isBeforePartnerStart(p, month, year));
+    partners = partners.filter(p => statusOf(p) === 'unpaid' && !isFutureMonth && !isBeforePartnerStart(p, month, year));
   } else if (S.progressFilter === 'future') {
     // Future takes priority over not-started when a month is both (matches the row badge,
     // which shows "Future" before "Not started") — keeps the two tabs from overlapping.
-    partners = partners.filter(p => isFutureMonth && !partnerMonthlyPaid(p.id, month, year));
+    partners = partners.filter(p => isFutureMonth && statusOf(p) === 'unpaid');
   } else if (S.progressFilter === 'not-started') {
-    partners = partners.filter(p => !isFutureMonth && isBeforePartnerStart(p, month, year));
+    partners = partners.filter(p => !isFutureMonth && isBeforePartnerStart(p, month, year) && statusOf(p) === 'unpaid');
   }
   container.innerHTML = _buildProgressRows(partners, month, year, nowYear, nowMonth) || '<div class="k-empty">No partners match this filter.</div>';
   document.querySelectorAll('.k-progress-filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === S.progressFilter));
@@ -10625,23 +11017,27 @@ async function renderPartnerProgress(main) {
 
   const activePartners = S.partners.filter(p => p.status === 'active');
   const isFutureMonthStat = year > nowYear || (year === nowYear && month > nowMonth);
-  const paidThisMonthPartners = activePartners.filter(p => partnerMonthlyPaid(p.id, month, year));
+  const monthSummaries = activePartners.map(p => ({ partner: p, ...partnerMonthSummary(p.id, month, year) }));
+  const paidThisMonthPartners = monthSummaries.filter(s => s.status === 'paid');
   const allPaidThisMonth = paidThisMonthPartners.length;
+  const partialThisMonthPartners = monthSummaries.filter(s => s.status === 'partial');
+  const allPartialThisMonth = partialThisMonthPartners.length;
   // "Unpaid this month" must only count partners who have actually started their
   // partnership by this month and aren't just future-dated — not partners who
   // haven't started yet, who belong under "Not started" instead.
-  const unpaidThisMonthPartners = activePartners.filter(p =>
-    !partnerMonthlyPaid(p.id, month, year) && !isFutureMonthStat && !isBeforePartnerStart(p, month, year)
+  const unpaidThisMonthPartners = monthSummaries.filter(s =>
+    s.status === 'unpaid' && !isFutureMonthStat && !isBeforePartnerStart(s.partner, month, year)
   );
   const allUnpaidThisMonth = unpaidThisMonthPartners.length;
-  const unpaidAmountThisMonth = unpaidThisMonthPartners.reduce((sum, p) => sum + Number(p.monthlyPledge || 0), 0);
+  // True outstanding: the shortfall on every in-scope month, so a partner who
+  // paid ₦500 of ₦2,000 contributes ₦1,500 rather than ₦0 or the whole pledge.
+  const unpaidAmountThisMonth = monthSummaries
+    .filter(s => !isFutureMonthStat && (s.status === 'partial' || !isBeforePartnerStart(s.partner, month, year)))
+    .reduce((sum, s) => sum + s.balance, 0);
   const expectedMonthlyIncome = activePartners.reduce((sum, p) => sum + Number(p.monthlyPledge || 0), 0);
 
-  // Paid amount this month (sum of actual payments recorded for monthly_pledge in current month)
-  const allPayments = S.partnerPayments || [];
-  const paidAmountThisMonth = allPayments
-    .filter(pmt => pmt.paymentType === 'monthly_pledge' && pmt.month === month && pmt.year === year)
-    .reduce((sum, pmt) => sum + Number(pmt.amount || 0), 0);
+  // Money actually collected for this month, part payments included.
+  const paidAmountThisMonth = monthSummaries.reduce((sum, s) => sum + s.collected, 0);
 
   // Income breakdown by partnership type
   const typeBreakdown = {};
@@ -10665,14 +11061,18 @@ async function renderPartnerProgress(main) {
   const q = (S.progressSearch || '').toLowerCase();
   if (q) displayPartners = displayPartners.filter(p => p.fullName.toLowerCase().includes(q));
   const isFutureMonth = year > nowYear || (year === nowYear && month > nowMonth);
+  // Same bucketing as _rerenderProgressRows — keep the two in step.
+  const statusOfDisplay = p => partnerMonthSummary(p.id, month, year).status;
   if (S.progressFilter === 'paid') {
-    displayPartners = displayPartners.filter(p => partnerMonthlyPaid(p.id, month, year));
+    displayPartners = displayPartners.filter(p => statusOfDisplay(p) === 'paid');
+  } else if (S.progressFilter === 'partial') {
+    displayPartners = displayPartners.filter(p => statusOfDisplay(p) === 'partial');
   } else if (S.progressFilter === 'unpaid') {
-    displayPartners = displayPartners.filter(p => !partnerMonthlyPaid(p.id, month, year) && !isFutureMonth && !isBeforePartnerStart(p, month, year));
+    displayPartners = displayPartners.filter(p => statusOfDisplay(p) === 'unpaid' && !isFutureMonth && !isBeforePartnerStart(p, month, year));
   } else if (S.progressFilter === 'future') {
-    displayPartners = displayPartners.filter(p => isFutureMonth && !partnerMonthlyPaid(p.id, month, year));
+    displayPartners = displayPartners.filter(p => isFutureMonth && statusOfDisplay(p) === 'unpaid');
   } else if (S.progressFilter === 'not-started') {
-    displayPartners = displayPartners.filter(p => !isFutureMonth && isBeforePartnerStart(p, month, year));
+    displayPartners = displayPartners.filter(p => !isFutureMonth && isBeforePartnerStart(p, month, year) && statusOfDisplay(p) === 'unpaid');
   }
 
   const pf = S.progressFilter || 'all';
@@ -10696,10 +11096,16 @@ async function renderPartnerProgress(main) {
           <div class="k-stat-lbl">Paid This Month</div>
           ${paidAmountThisMonth > 0 ? `<div style="font-size:12px;font-weight:600;color:var(--green);margin-top:3px">₦${paidAmountThisMonth.toLocaleString('en-NG')} received</div>` : ''}
         </div>
+        ${allPartialThisMonth > 0 ? `
+        <div class="k-stat">
+          <div class="k-stat-val">${allPartialThisMonth}</div>
+          <div class="k-stat-lbl">Part Paid This Month</div>
+          <div style="font-size:12px;font-weight:600;color:var(--partial,#0284c7);margin-top:3px">${fmtNaira(partialThisMonthPartners.reduce((s, x) => s + x.balance, 0))} still due</div>
+        </div>` : ''}
         <div class="k-stat k-stat-highlight">
           <div class="k-stat-val">${allUnpaidThisMonth}</div>
           <div class="k-stat-lbl">Unpaid This Month</div>
-          ${unpaidAmountThisMonth > 0 ? `<div style="font-size:12px;font-weight:600;color:var(--amber);margin-top:3px">₦${unpaidAmountThisMonth.toLocaleString('en-NG')} outstanding</div>` : ''}
+          ${unpaidAmountThisMonth > 0 ? `<div style="font-size:12px;font-weight:600;color:var(--amber);margin-top:3px">${fmtNaira(unpaidAmountThisMonth)} outstanding</div>` : ''}
         </div>
         <div class="k-stat"><div class="k-stat-val">₦${expectedMonthlyIncome.toLocaleString('en-NG')}</div><div class="k-stat-lbl">Expected Monthly Income</div></div>
       </div>
@@ -10714,12 +11120,14 @@ async function renderPartnerProgress(main) {
       <div class="k-progress-filter" id="k-progress-filter-bar">
         <button class="k-progress-filter-btn ${pf==='all'?'active':''}" data-filter="all" onclick="Kpsc.setProgressFilter('all')">All</button>
         <button class="k-progress-filter-btn k-pf-paid ${pf==='paid'?'active':''}" data-filter="paid" onclick="Kpsc.setProgressFilter('paid')"><span class="k-dot-cell k-dot-paid" style="width:10px;height:10px;flex-shrink:0"></span>Paid</button>
+        <button class="k-progress-filter-btn k-pf-partial ${pf==='partial'?'active':''}" data-filter="partial" onclick="Kpsc.setProgressFilter('partial')"><span class="k-dot-cell k-dot-partial" style="width:10px;height:10px;flex-shrink:0"></span>Part paid</button>
         <button class="k-progress-filter-btn k-pf-unpaid ${pf==='unpaid'?'active':''}" data-filter="unpaid" onclick="Kpsc.setProgressFilter('unpaid')"><span class="k-dot-cell k-dot-unpaid" style="width:10px;height:10px;flex-shrink:0"></span>Unpaid</button>
         <button class="k-progress-filter-btn k-pf-future ${pf==='future'?'active':''}" data-filter="future" onclick="Kpsc.setProgressFilter('future')"><span class="k-dot-cell k-dot-future" style="width:10px;height:10px;flex-shrink:0"></span>Future</button>
         <button class="k-progress-filter-btn k-pf-pre-start ${pf==='not-started'?'active':''}" data-filter="not-started" onclick="Kpsc.setProgressFilter('not-started')"><span class="k-dot-cell k-dot-pre-start" style="width:10px;height:10px;flex-shrink:0"></span>Not started</button>
       </div>
       <div class="k-dot-legend">
         <span><span class="k-dot-cell k-dot-paid"></span>Paid</span>
+        <span><span class="k-dot-cell k-dot-partial"></span>Part paid</span>
         <span><span class="k-dot-cell k-dot-unpaid"></span>Unpaid</span>
         <span><span class="k-dot-cell k-dot-future"></span>Future</span>
         <span><span class="k-dot-cell k-dot-pre-start"></span>Not started</span>
@@ -11810,12 +12218,12 @@ async function renderSettings(main) {
         <h2 class="k-card-title">✏️ System SMS Message Templates</h2>
         <p class="k-card-sub">Edit the text for each automated SMS the portal sends. Leave blank to use the built-in default text. Available variables by template:<br>
           <strong>Welcome:</strong> <code>{{name}}</code><br>
-          <strong>Payment Thank-you:</strong> <code>{{name}}</code>, <code>{{month}}</code>, <code>{{amount}}</code>, <code>{{amtText}}</code>, <code>{{partnerType}}</code><br>
+          <strong>Payment Thank-you:</strong> <code>{{name}}</code>, <code>{{month}}</code>, <code>{{amount}}</code>, <code>{{amtText}}</code>, <code>{{balanceText}}</code> <em>(part payments only)</em>, <code>{{partnerType}}</code><br>
           <strong>New Month / Milestone:</strong> <code>{{name}}</code><br>
           <strong>Anniversary:</strong> <code>{{name}}</code>, <code>{{ordinal}}</code>, <code>{{years}}</code><br>
           <strong>Pre-Meeting:</strong> <code>{{name}}</code>, <code>{{meetingTitle}}</code>, <code>{{meetingDate}}</code>, <code>{{meetingTime}}</code>, <code>{{venue}}</code><br>
           <strong>Deadline:</strong> <code>{{name}}</code>, <code>{{task}}</code>, <code>{{dueDate}}</code><br>
-          <strong>Payment Reminder:</strong> <code>{{name}}</code>, <code>{{month}}</code> <em>(current month)</em>, <code>{{unpaidMonths}}</code> <em>(comma-separated list of every outstanding month, e.g. "May" or "May, June")</em></p>
+          <strong>Payment Reminder:</strong> <code>{{name}}</code>, <code>{{month}}</code> <em>(current month)</em>, <code>{{unpaidMonths}}</code> <em>(comma-separated list of every outstanding month, e.g. "May" or "May, June")</em>, <code>{{balance}}</code> <em>(amount still owed on the current month when part paid, e.g. "N1,500" — blank when nothing has been paid)</em></p>
         <div class="k-form-group">
           <label class="k-label">👋 Welcome SMS (new partner)</label>
           <textarea id="ks-sms-welcome" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)" placeholder="Dear {{name}}, welcome to the RCCG Kingdom Parish family! 🎉 We are so glad to have you as a partner in this beautiful journey of faith. Your support means the world to us, and we pray that God will bless you richly — spiritually and in all your endeavours. You are loved! — RCCG Kingdom Parish">${esc(smsWelcomeText)}</textarea>
@@ -11823,7 +12231,7 @@ async function renderSettings(main) {
         </div>
         <div class="k-form-group">
           <label class="k-label">🙏 Thank-you SMS (partner payment) — 3 Rotating Templates</label>
-          <p class="k-hint" style="margin-bottom:8px">These 3 templates rotate per partner: Template A on their 1st payment, B on 2nd, C on 3rd, then back to A on 4th, and so on. Variables: <code>{{name}}</code> · <code>{{month}}</code> · <code>{{amtText}}</code></p>
+          <p class="k-hint" style="margin-bottom:8px">These 3 templates rotate per partner: Template A on their 1st payment, B on 2nd, C on 3rd, then back to A on 4th, and so on. Variables: <code>{{name}}</code> · <code>{{month}}</code> · <code>{{amtText}}</code> · <code>{{balanceText}}</code> (part payments only — appended automatically if you leave it out)</p>
           <label class="k-label" style="font-size:12px;color:var(--text3)">Template A (1st, 4th, 7th… payment)</label>
           <textarea id="ks-sms-payment-a" class="k-input k-textarea" rows="3" oninput="Kpsc.updateSmsCounter(this)">${esc(smsPaymentTextA)}</textarea>
           <div class="k-sms-counter" id="sms-ctr-ks-sms-payment-a"></div>
@@ -11871,7 +12279,7 @@ async function renderSettings(main) {
         </div>
         <div class="k-form-group">
           <label class="k-label">💰 Payment Reminder SMS — 3 Rotating Templates</label>
-          <p class="k-hint" style="margin-bottom:8px">These 3 templates rotate per partner based on how many reminders they have previously received. Variables: <code>{{name}}</code> · <code>{{month}}</code> (current month) · <code>{{unpaidMonths}}</code> (comma-separated list of every outstanding month, e.g. "May" or "May, June")</p>
+          <p class="k-hint" style="margin-bottom:8px">These 3 templates rotate per partner based on how many reminders they have previously received. Variables: <code>{{name}}</code> · <code>{{month}}</code> (current month) · <code>{{unpaidMonths}}</code> (comma-separated list of every outstanding month, e.g. "May" or "May, June") · <code>{{balance}}</code> (owed on the current month when part paid — a sentence is appended automatically if you leave it out)</p>
           <label class="k-label" style="font-size:12px;color:var(--text3)">Template A (1st, 4th, 7th… reminder)</label>
           <textarea id="ks-sms-reminder-a" class="k-input k-textarea" rows="4" oninput="Kpsc.updateSmsCounter(this)">${esc(smsReminderTextA)}</textarea>
           <div class="k-sms-counter" id="sms-ctr-ks-sms-reminder-a"></div>
@@ -16858,7 +17266,8 @@ window.Kpsc = {
   setPartnerDetailYear,
   openRecordPaymentModal,
   _togglePaymentChip,
-  _updatePaymentTotal,
+  _updatePaymentAllocation,
+  _setPaymentMode,
   _selectCardRecorded,
   markPaymentCardRecorded,
   _handleIllustrationUpload,

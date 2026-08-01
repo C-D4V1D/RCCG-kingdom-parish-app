@@ -309,6 +309,54 @@ function computeUnpaidMonths(paidSet, { year, month, startDate }) {
   return out;
 }
 
+// ── PARTIAL PLEDGE PAYMENTS ───────────────────────────────────────
+// A partner's month can hold several installments (₦500 on the 3rd, ₦1,500 on
+// the 20th). Its status is derived from money collected vs money expected, not
+// from a payment row merely existing. Canonical copy of the frontend helper in
+// src/js/partner-payment-utils.js — keep the two in step.
+//
+// Amounts are SQLite REAL, so a month settled to the kobo must not read as a
+// fraction short and stay outstanding forever.
+const PLEDGE_EPSILON = 0.005;
+
+/**
+ * Classify one month from its totals. Pure function — exported for unit tests.
+ * @param {{collected:number, expected:number}} totals
+ * @returns {{status:'paid'|'partial'|'unpaid', balance:number}}
+ */
+function monthPaymentStatus({ collected, expected } = {}) {
+  const gotRaw = Number(collected);
+  const dueRaw = Number(expected);
+  const got = Math.max(0, Number.isFinite(gotRaw) ? gotRaw : 0);
+  const due = Math.max(0, Number.isFinite(dueRaw) ? dueRaw : 0);
+  // No pledge on record — any money at all settles the month, and there is
+  // nothing to chase when nothing was promised.
+  if (due <= 0) return { status: got > 0 ? 'paid' : 'unpaid', balance: 0 };
+  if (got <= 0) return { status: 'unpaid', balance: due };
+  if (got >= due - PLEDGE_EPSILON) return { status: 'paid', balance: 0 };
+  return { status: 'partial', balance: due - got };
+}
+
+/**
+ * SQL selecting (partner_id, year, month) for months a partner has FULLY settled.
+ * Partially-paid months are deliberately absent, so they keep showing up in
+ * reminders and never count toward a milestone streak. Callers bind nothing —
+ * filter the result with an outer WHERE.
+ */
+const FULLY_PAID_MONTHS_SQL = `
+  SELECT p.partner_id, p.year, p.month, SUM(p.amount) AS collected
+  FROM kpsc_partner_payments p
+  WHERE p.payment_type='monthly_pledge' AND p.paid=1 AND COALESCE(p.deleted_at,'')=''
+  GROUP BY p.partner_id, p.year, p.month
+  HAVING SUM(p.amount) >= COALESCE(
+    NULLIF((SELECT MAX(e.expected_amount) FROM kpsc_partner_payments e
+      WHERE e.partner_id=p.partner_id AND e.year=p.year AND e.month=p.month
+        AND e.payment_type='monthly_pledge' AND COALESCE(e.deleted_at,'')=''), 0),
+    (SELECT monthly_pledge FROM kpsc_partners WHERE id=p.partner_id),
+    0
+  ) - ${PLEDGE_EPSILON}
+`;
+
 // GSM-7 charset used to decide SMS segment encoding (mirrors the frontend
 // smsCharInfo so per-message cost is computed identically on both sides).
 const GSM7_CHARS = new Set(
@@ -1814,6 +1862,7 @@ async function handleInit(DB) {
       year          INTEGER NOT NULL,
       month         INTEGER NOT NULL,
       amount        REAL DEFAULT 0,
+      expected_amount REAL DEFAULT 0,
       payment_type  TEXT NOT NULL DEFAULT 'monthly_pledge',
       source        TEXT DEFAULT 'partnership',
       paid          INTEGER DEFAULT 1,
@@ -2241,12 +2290,23 @@ async function handleInit(DB) {
     // only a bank withdrawal — petty_ref links to the mirrored petty_cash disbursement
     // row (analogous to bank_ref for the bank mirror) — see createSatelliteFund.
     `ALTER TABLE satellite_funds ADD COLUMN petty_ref TEXT DEFAULT ''`,
+    // Partial pledge payments: what the month was expected to bring in, snapshotted
+    // when the first installment is recorded. Raising a partner's monthly_pledge must
+    // not retroactively turn already-settled months into shortfalls.
+    `ALTER TABLE kpsc_partner_payments ADD COLUMN expected_amount REAL DEFAULT 0`,
+    // Backfill: every pre-existing row was treated as a complete month, so snapshot
+    // expected = amount to preserve that meaning. Without this, any partner whose
+    // pledge was raised since would silently flip to "partial" across their history.
+    `UPDATE kpsc_partner_payments SET expected_amount = amount WHERE COALESCE(expected_amount,0) = 0`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
   }
 
-  await DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_kpsc_partner_payment_period ON kpsc_partner_payments(partner_id, year, month, payment_type)`).run();
+  // A month can now hold several installments, so the old one-row-per-period unique
+  // index has to go. The lookup pattern is unchanged, hence the same columns.
+  try { await DB.prepare(`DROP INDEX IF EXISTS idx_kpsc_partner_payment_period`).run(); } catch { /* safe */ }
+  await DB.prepare(`CREATE INDEX IF NOT EXISTS idx_kpsc_partner_payment_month ON kpsc_partner_payments(partner_id, year, month, payment_type)`).run();
   try { await DB.prepare(`CREATE INDEX IF NOT EXISTS idx_followups_status ON kpsc_followups(status)`).run(); } catch { /* safe */ }
 
   // Migrate legacy: remove goFishing from saved quotas setting
@@ -4141,6 +4201,7 @@ async function getKpscPartnerPayments(DB, url) {
     year: Number(row.year || 0),
     month: Number(row.month || 0),
     amount: Number(row.amount || 0),
+    expectedAmount: Number(row.expected_amount || 0),
     paymentType: row.payment_type || 'monthly_pledge',
     source: row.source || 'partnership',
     paid: Number(row.paid || 0) === 1,
@@ -4159,12 +4220,39 @@ async function upsertKpscPartnerPayment(DB, data) {
   const year = normalizeYear(data?.year);
   const month = normalizeMonth(data?.month);
   if (!partnerId || !month) return err('partnerId, year, and month are required', 400);
+  const amount = Number(data?.amount || 0);
+  if (!Number.isFinite(amount) || amount < 0) return err('amount must be zero or greater', 400);
   const paymentType = String(data?.paymentType || 'monthly_pledge').trim() || 'monthly_pledge';
-  const existing = await DB.prepare(`
-    SELECT id FROM kpsc_partner_payments
-    WHERE partner_id=? AND year=? AND month=? AND payment_type=?
-  `).bind(partnerId, year, month, paymentType).first();
+
+  // A month can hold several installments, so identity is explicit rather than
+  // inferred from the period: an `id` means "correct this installment", no `id`
+  // means "record another one".
+  const requestedId = String(data?.id || '').trim();
+  const existing = requestedId
+    ? await DB.prepare(
+        `SELECT id, card_recorded, expected_amount FROM kpsc_partner_payments WHERE id=? AND COALESCE(deleted_at,'')=''`
+      ).bind(requestedId).first()
+    : null;
+  if (requestedId && !existing) return err('Partner payment not found', 404);
   const id = existing?.id || newId('kpp');
+
+  // What this month was expected to bring in, snapshotted so a later pledge
+  // change cannot rewrite history. Fall back to the month's existing snapshot,
+  // then to the partner's current pledge.
+  let expectedAmount = Number(data?.expectedAmount);
+  if (!Number.isFinite(expectedAmount) || expectedAmount < 0) expectedAmount = NaN;
+  if (!Number.isFinite(expectedAmount)) {
+    const snapshot = await DB.prepare(`
+      SELECT MAX(expected_amount) AS expected FROM kpsc_partner_payments
+      WHERE partner_id=? AND year=? AND month=? AND payment_type=? AND COALESCE(deleted_at,'')=''
+    `).bind(partnerId, year, month, paymentType).first().catch(() => null);
+    expectedAmount = Number(snapshot?.expected || 0);
+    if (!(expectedAmount > 0)) {
+      const pledgeRow = await DB.prepare(`SELECT monthly_pledge FROM kpsc_partners WHERE id=?`).bind(partnerId).first().catch(() => null);
+      expectedAmount = Number(pledgeRow?.monthly_pledge || 0);
+    }
+  }
+
   const paid = Number(data?.paid !== false);
   const paidAt = data?.paidAt !== undefined ? String(data.paidAt || '').trim() : (paid ? new Date().toISOString() : '');
   // Preserve the existing card_recorded answer on edits that don't touch it
@@ -4173,30 +4261,57 @@ async function upsertKpscPartnerPayment(DB, data) {
   if (data?.cardRecorded !== undefined) {
     cardRecorded = data.cardRecorded === null ? null : (data.cardRecorded ? 1 : 0);
   } else if (existing?.id) {
-    const prevRow = await DB.prepare(`SELECT card_recorded FROM kpsc_partner_payments WHERE id=?`).bind(existing.id).first();
-    cardRecorded = prevRow?.card_recorded ?? null;
+    cardRecorded = existing.card_recorded ?? null;
   }
-  await DB.prepare(`
-    INSERT OR REPLACE INTO kpsc_partner_payments
-    (id,partner_id,year,month,amount,payment_type,source,paid,paid_at,reference,recorded_by,notes,card_recorded,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE((SELECT created_at FROM kpsc_partner_payments WHERE id=?), datetime('now')),?)
-  `).bind(
-    id,
-    partnerId,
-    year,
-    month,
-    Number(data?.amount || 0),
-    paymentType,
-    String(data?.source || 'partnership').trim() || 'partnership',
-    paid,
-    paidAt,
-    String(data?.reference || '').trim(),
-    String(data?.recordedBy || '').trim(),
-    String(data?.notes || '').trim(),
-    cardRecorded,
-    id,
-    new Date().toISOString(),
-  ).run();
+
+  if (existing) {
+    await DB.prepare(`
+      UPDATE kpsc_partner_payments
+      SET partner_id=?,year=?,month=?,amount=?,expected_amount=?,payment_type=?,source=?,paid=?,paid_at=?,
+          reference=?,recorded_by=?,notes=?,card_recorded=?,updated_at=?
+      WHERE id=?
+    `).bind(
+      partnerId, year, month, amount, expectedAmount, paymentType,
+      String(data?.source || 'partnership').trim() || 'partnership',
+      paid, paidAt,
+      String(data?.reference || '').trim(),
+      String(data?.recordedBy || '').trim(),
+      String(data?.notes || '').trim(),
+      cardRecorded,
+      new Date().toISOString(),
+      id,
+    ).run();
+  } else {
+    await DB.prepare(`
+      INSERT INTO kpsc_partner_payments
+      (id,partner_id,year,month,amount,expected_amount,payment_type,source,paid,paid_at,reference,recorded_by,notes,card_recorded,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),?)
+    `).bind(
+      id,
+      partnerId,
+      year,
+      month,
+      amount,
+      expectedAmount,
+      paymentType,
+      String(data?.source || 'partnership').trim() || 'partnership',
+      paid,
+      paidAt,
+      String(data?.reference || '').trim(),
+      String(data?.recordedBy || '').trim(),
+      String(data?.notes || '').trim(),
+      cardRecorded,
+      new Date().toISOString(),
+    ).run();
+  }
+
+  // Where the month stands once this installment is in — drives the "part
+  // payment" narration on the income entry and the balance line in the SMS.
+  const monthTotalRow = await DB.prepare(`
+    SELECT COALESCE(SUM(amount),0) AS collected FROM kpsc_partner_payments
+    WHERE partner_id=? AND year=? AND month=? AND payment_type=? AND paid=1 AND COALESCE(deleted_at,'')=''
+  `).bind(partnerId, year, month, paymentType).first().catch(() => ({ collected: amount }));
+  const monthStatus = monthPaymentStatus({ collected: Number(monthTotalRow?.collected || 0), expected: expectedAmount });
 
   // ── Thank-you SMS when payment is marked paid (fire-and-forget) ──
   // skipSms=true means the caller will send a batch SMS (e.g. multi-month recording)
@@ -4208,8 +4323,12 @@ async function upsertKpscPartnerPayment(DB, data) {
         if (partner?.phone && !Number(partner.opted_out) && !Number(partner.dnd_flagged)) {
           const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
           const monthName = MONTH_NAMES[(month - 1)] || '';
-          const amount = Number(data?.amount || 0);
           const amtText = amount > 0 ? ` of N${amount.toLocaleString('en-NG')}` : '';
+          // Part payment: tell them what is still outstanding on the month, so
+          // the thank-you doesn't read as though the pledge is settled.
+          const balanceText = monthStatus.status === 'partial'
+            ? ` Balance on ${monthName}: N${Math.round(monthStatus.balance).toLocaleString('en-NG')}.`
+            : '';
           // Rotating template: pick A/B/C based on (paid payment count - 1) % 3
           const payCount = await DB.prepare(
             `SELECT COUNT(*) AS cnt FROM kpsc_partner_payments WHERE partner_id=? AND paid=1 AND COALESCE(deleted_at,'')=''`
@@ -4219,7 +4338,11 @@ async function upsertKpscPartnerPayment(DB, data) {
           const msg = (ptTemplates[tidx] || t.paymentText)
             .replace(/\{\{name\}\}/g, partner.full_name)
             .replace(/\{\{month\}\}/g, monthName)
-            .replace(/\{\{amtText\}\}/g, amtText);
+            .replace(/\{\{amtText\}\}/g, amtText)
+            .replace(/\{\{balanceText\}\}/g, balanceText)
+            // Templates written before part payments existed end at {{amtText}};
+            // append the balance rather than let it go unsaid.
+            + ((balanceText && !/\{\{balanceText\}\}/.test(ptTemplates[tidx] || t.paymentText)) ? balanceText : '');
           const sid = t.partnerSenderId || t.senderId;
           const ptResult = await sendTermiiSms(t.apiKey, sid, partner.phone, msg, t.channel);
           if (ptResult.ok) {
@@ -4235,10 +4358,11 @@ async function upsertKpscPartnerPayment(DB, data) {
       if (t.apiKey && t.milestoneSms) {
         const partner = await DB.prepare(`SELECT full_name, phone, COALESCE(opted_out,0) AS opted_out, COALESCE(dnd_flagged,0) AS dnd_flagged FROM kpsc_partners WHERE id=?`).bind(partnerId).first();
         if (partner?.phone && !Number(partner.opted_out) && !Number(partner.dnd_flagged)) {
-          // Count how many consecutive months paid ending at current month
+          // Count how many consecutive months paid ending at current month.
+          // Only fully-settled months count — a part payment does not extend a streak.
           const { results: allPaid } = await DB.prepare(`
-            SELECT year, month FROM kpsc_partner_payments
-            WHERE partner_id=? AND payment_type='monthly_pledge' AND paid=1 AND COALESCE(deleted_at,'')=''
+            SELECT year, month FROM (${FULLY_PAID_MONTHS_SQL}) fp
+            WHERE fp.partner_id=?
             ORDER BY year DESC, month DESC
           `).bind(partnerId).all();
           const paidSet = new Set((allPaid || []).map(r => `${r.year}-${r.month}`));
@@ -4277,7 +4401,11 @@ async function upsertKpscPartnerPayment(DB, data) {
       const monthLabel = MONTH_NAMES_FIN[(month - 1)] || '';
       const partnerRow = await DB.prepare(`SELECT full_name FROM kpsc_partners WHERE id=?`).bind(partnerId).first();
       const partnerName = partnerRow?.full_name || '';
-      const narration = `${monthLabel} ${year} partnership pledge${partnerName ? ' — ' + partnerName : ''}`;
+      // Each installment keeps its own income line (its own date, collector and
+      // cash lot) — flag the ones that don't settle the month on their own so the
+      // ledger reads honestly.
+      const isPartPayment = expectedAmount > 0 && amount > 0 && amount < expectedAmount - PLEDGE_EPSILON;
+      const narration = `${monthLabel} ${year} partnership pledge${isPartPayment ? ' (part payment)' : ''}${partnerName ? ' — ' + partnerName : ''}`;
       const paymentMethod = String(data?.reference || '').trim() === 'transfer' ? 'bank_transfer' : (String(data?.reference || '').trim() || 'cash');
       const existingFin = await DB.prepare(
         `SELECT id FROM kpsc_finance_entries WHERE partner_payment_id=? AND COALESCE(deleted_at,'')=''`
@@ -4285,7 +4413,7 @@ async function upsertKpscPartnerPayment(DB, data) {
       if (existingFin) {
         await DB.prepare(`
           UPDATE kpsc_finance_entries SET amount=?,payment_method=?,narration=?,recorded_by=?,updated_at=datetime('now') WHERE id=?
-        `).bind(Number(data?.amount || 0), paymentMethod, narration, String(data?.recordedBy || '').trim(), existingFin.id).run();
+        `).bind(amount, paymentMethod, narration, String(data?.recordedBy || '').trim(), existingFin.id).run();
       } else {
         const finId = newId('kfe');
         const dateStr = paidAt ? paidAt.slice(0, 10) : new Date().toISOString().slice(0, 10);
@@ -4296,7 +4424,7 @@ async function upsertKpscPartnerPayment(DB, data) {
           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         `).bind(
           finId, dateStr, 'income', 'partnership_pledge', paymentType === 'monthly_pledge' ? 'monthly_pledge' : paymentType,
-          Number(data?.amount || 0), paymentMethod, '', narration, partnerId,
+          amount, paymentMethod, '', narration, partnerId,
           String(data?.recordedBy || '').trim(), '', 'recorded', '', id, cashHolder
         ).run();
       }
@@ -4310,6 +4438,9 @@ async function upsertKpscPartnerPayment(DB, data) {
     year: Number(row.year || 0),
     month: Number(row.month || 0),
     amount: Number(row.amount || 0),
+    expectedAmount: Number(row.expected_amount || 0),
+    monthStatus: monthStatus.status,
+    monthBalance: monthStatus.balance,
     paymentType: row.payment_type || 'monthly_pledge',
     source: row.source || 'partnership',
     paid: Number(row.paid || 0) === 1,
@@ -4383,17 +4514,46 @@ async function sendPartnerBatchPaymentSms(DB, data) {
     const sortedMonths = [...months].sort((a, b) => a - b);
     const n = sortedMonths.length;
 
+    // Months can now be recorded at different amounts (a lump sum allocated
+    // oldest-first), so the caller sends the true total. `amount` stays supported
+    // for older callers that recorded one flat amount per month.
+    const total = Number.isFinite(Number(data?.total)) && Number(data?.total) > 0
+      ? Number(data.total)
+      : amount * n;
+
     let monthLabel, amtText;
     if (n === 1) {
       monthLabel = `${MONTH_SHORT[sortedMonths[0] - 1]} ${year}`;
-      amtText = amount > 0 ? ` of N${amount.toLocaleString('en-NG')}` : '';
+      amtText = total > 0 ? ` of N${total.toLocaleString('en-NG')}` : '';
     } else {
       const first = MONTH_SHORT[sortedMonths[0] - 1];
       const last  = MONTH_SHORT[sortedMonths[n - 1] - 1];
       monthLabel = `${first} - ${last} ${year} (${n} months)`;
-      const total = amount * n;
-      amtText = amount > 0 ? ` totalling N${total.toLocaleString('en-NG')}` : '';
+      amtText = total > 0 ? ` totalling N${total.toLocaleString('en-NG')}` : '';
     }
+
+    // Any of those months still short after this batch? Read it back from the DB
+    // rather than trusting the caller's arithmetic.
+    let balanceText = '';
+    try {
+      const placeholders = sortedMonths.map(() => '?').join(',');
+      const { results: shortRows } = await DB.prepare(`
+        SELECT p.month,
+               COALESCE(SUM(p.amount),0) AS collected,
+               COALESCE(NULLIF(MAX(p.expected_amount),0), (SELECT monthly_pledge FROM kpsc_partners WHERE id=p.partner_id), 0) AS expected
+        FROM kpsc_partner_payments p
+        WHERE p.partner_id=? AND p.year=? AND p.month IN (${placeholders})
+          AND p.payment_type='monthly_pledge' AND p.paid=1 AND COALESCE(p.deleted_at,'')=''
+        GROUP BY p.month
+      `).bind(partnerId, year, ...sortedMonths).all();
+      const outstanding = (shortRows || []).reduce(
+        (sum, r) => sum + monthPaymentStatus({ collected: Number(r.collected || 0), expected: Number(r.expected || 0) }).balance,
+        0
+      );
+      if (outstanding > 0) {
+        balanceText = ` Balance outstanding: N${Math.round(outstanding).toLocaleString('en-NG')}.`;
+      }
+    } catch { /* a missing balance line must not stop the thank-you going out */ }
 
     // Rotating template: pick A/B/C based on (paid payment count - 1) % 3
     const bpPayCount = await DB.prepare(
@@ -4401,10 +4561,13 @@ async function sendPartnerBatchPaymentSms(DB, data) {
     ).bind(partnerId).first().catch(() => ({ cnt: 0 }));
     const bpTidx = ((Number(bpPayCount?.cnt || 0) - 1) % 3 + 3) % 3;
     const bpTemplates = [t.paymentTextA, t.paymentTextB, t.paymentTextC];
-    const msg = (bpTemplates[bpTidx] || t.paymentText)
+    const bpTemplate = bpTemplates[bpTidx] || t.paymentText;
+    const msg = bpTemplate
       .replace(/\{\{name\}\}/g, partner.full_name)
       .replace(/\{\{month\}\}/g, monthLabel)
-      .replace(/\{\{amtText\}\}/g, amtText);
+      .replace(/\{\{amtText\}\}/g, amtText)
+      .replace(/\{\{balanceText\}\}/g, balanceText)
+      + ((balanceText && !/\{\{balanceText\}\}/.test(bpTemplate)) ? balanceText : '');
 
     const sid = t.partnerSenderId || t.senderId;
     const bpResult = await sendTermiiSms(t.apiKey, sid, partner.phone, msg, t.channel);
@@ -4957,11 +5120,13 @@ async function personalizeKpscReminder(DB, env, data) {
     let startYear = year;
     let startMonth = month - 11;
     if (startMonth < 1) { startMonth += 12; startYear--; }
+    // One row per FULLY-settled month. classifyPartnerTone counts rows as months,
+    // so feeding it raw installments would both double-count multi-installment
+    // months and credit a part payment as a month kept.
     const { results: payRows } = await DB.prepare(`
-      SELECT year, month, amount, paid_at
-      FROM kpsc_partner_payments
-      WHERE partner_id=? AND paid=1
-        AND ((year > ?) OR (year = ? AND month >= ?))
+      SELECT year, month, collected AS amount
+      FROM (${FULLY_PAID_MONTHS_SQL}) fp
+      WHERE fp.partner_id=? AND ((fp.year > ?) OR (fp.year = ? AND fp.month >= ?))
       ORDER BY year, month
     `).bind(partnerId, startYear, startYear, startMonth).all();
     payments = payRows || [];
@@ -5161,19 +5326,21 @@ async function getKpscDashboard(DB, url) {
     FROM kpsc_partners
   `).first();
 
+  // Paid = the month is fully settled. A part payer counts as unpaid here, which
+  // is what the dashboard tile means: someone still owes on this month.
   const paidPartnersRow = await DB.prepare(`
-    SELECT COUNT(DISTINCT partner_id) AS paid_count
-    FROM kpsc_partner_payments
-    WHERE year=? AND month=? AND paid=1
+    SELECT COUNT(DISTINCT fp.partner_id) AS paid_count
+    FROM (${FULLY_PAID_MONTHS_SQL}) fp
+    WHERE fp.year=? AND fp.month=?
   `).bind(year, month).first();
 
   const unpaidPartnersRow = await DB.prepare(`
     SELECT COUNT(*) AS unpaid_count
     FROM kpsc_partners p
     WHERE p.status='active'
-      AND NOT EXISTS (
-        SELECT 1 FROM kpsc_partner_payments pay
-        WHERE pay.partner_id=p.id AND pay.year=? AND pay.month=? AND pay.paid=1
+      AND p.id NOT IN (
+        SELECT fp.partner_id FROM (${FULLY_PAID_MONTHS_SQL}) fp
+        WHERE fp.year=? AND fp.month=?
       )
   `).bind(year, month).first();
 
@@ -8818,18 +8985,19 @@ async function executeReminderRun(DB, opts = {}) {
   let lookbackYear = year; let lookbackMonth = month - 11;
   if (lookbackMonth < 1) { lookbackMonth += 12; lookbackYear--; }
 
-  // Find active partners who haven't paid this month, not opted-out or DND
+  // Find active partners who haven't FULLY paid this month, not opted-out or DND.
+  // A part payment leaves the month outstanding, so those partners stay on the
+  // list — the message names the balance rather than the whole pledge.
   const { results: unpaid } = await DB.prepare(`
-    SELECT kp.id, kp.full_name, kp.phone, kp.reminder_preference, kp.start_date
+    SELECT kp.id, kp.full_name, kp.phone, kp.reminder_preference, kp.start_date, COALESCE(kp.monthly_pledge,0) AS monthly_pledge
     FROM kpsc_partners kp
     WHERE COALESCE(kp.deleted_at,'')='' AND kp.status='active' AND kp.phone != ''
       AND kp.reminder_preference != 'none'
       AND COALESCE(kp.opted_out,0)=0
       AND COALESCE(kp.dnd_flagged,0)=0
       AND kp.id NOT IN (
-        SELECT DISTINCT partner_id FROM kpsc_partner_payments
-        WHERE year=? AND month=? AND payment_type='monthly_pledge' AND paid=1
-          AND COALESCE(deleted_at,'')=''
+        SELECT fp.partner_id FROM (${FULLY_PAID_MONTHS_SQL}) fp
+        WHERE fp.year=? AND fp.month=?
       )
   `).bind(year, month).all();
 
@@ -8847,14 +9015,31 @@ async function executeReminderRun(DB, opts = {}) {
 
     // Build list of all unpaid months (last 12) for this partner, excluding any
     // month before they joined the portal (month-granular — see computeUnpaidMonths).
+    // Only fully-settled months count as paid, so a part-paid month is still listed.
     const { results: paidRows } = await DB.prepare(`
-      SELECT year, month FROM kpsc_partner_payments
-      WHERE partner_id=? AND paid=1 AND payment_type='monthly_pledge'
-        AND ((year > ?) OR (year = ? AND month >= ?))
-        AND COALESCE(deleted_at,'')=''
+      SELECT year, month FROM (${FULLY_PAID_MONTHS_SQL}) fp
+      WHERE fp.partner_id=? AND ((fp.year > ?) OR (fp.year = ? AND fp.month >= ?))
     `).bind(p.id, lookbackYear, lookbackYear, lookbackMonth).all();
     const paidSet = new Set((paidRows || []).map(r => `${r.year}-${r.month}`));
     const unpaidMonthsList = computeUnpaidMonths(paidSet, { year, month, startDate: p.start_date || null });
+
+    // {{balance}} — what is still owed on the CURRENT month. Empty when nothing
+    // has been paid yet, so templates read naturally for both cases.
+    const collectedRow = await DB.prepare(`
+      SELECT COALESCE(SUM(amount),0) AS collected,
+             COALESCE(MAX(expected_amount),0) AS expected
+      FROM kpsc_partner_payments
+      WHERE partner_id=? AND year=? AND month=? AND payment_type='monthly_pledge'
+        AND paid=1 AND COALESCE(deleted_at,'')=''
+    `).bind(p.id, year, month).first().catch(() => null);
+    const collectedThisMonth = Number(collectedRow?.collected || 0);
+    const expectedThisMonth = Number(collectedRow?.expected || 0) > 0
+      ? Number(collectedRow.expected)
+      : Number(p.monthly_pledge || 0);
+    const balanceInfo = monthPaymentStatus({ collected: collectedThisMonth, expected: expectedThisMonth });
+    const balanceStr = collectedThisMonth > 0 && balanceInfo.balance > 0
+      ? `N${Math.round(balanceInfo.balance).toLocaleString('en-NG')}`
+      : '';
 
     // Plain comma-separated list of outstanding month names (e.g. "May" or
     // "May, June"). Always populated so templates can use it mid-sentence.
@@ -8875,7 +9060,13 @@ async function executeReminderRun(DB, opts = {}) {
     let msg = rTemplate
       .replace(/\{\{name\}\}/g, p.full_name)
       .replace(/\{\{month\}\}/g, monthName)
-      .replace(/\{\{unpaidMonths\}\}/g, unpaidMonthsStr);
+      .replace(/\{\{unpaidMonths\}\}/g, unpaidMonthsStr)
+      .replace(/\{\{balance\}\}/g, balanceStr)
+      // Templates written before part payments existed have no {{balance}} slot.
+      // Rather than let a part payment read as though nothing was given, say so.
+      + ((balanceStr && !/\{\{balance\}\}/.test(rTemplate))
+        ? ` We have received part of your ${monthName} pledge — balance outstanding: ${balanceStr}.`
+        : '');
 
     // Feature 6: tone-based lapsed re-engagement messaging
     if (t.lapsedSms) {
@@ -8883,11 +9074,11 @@ async function executeReminderRun(DB, opts = {}) {
         // Load last 12 months payments
         let startYear = year; let startMonth = month - 11;
         if (startMonth < 1) { startMonth += 12; startYear--; }
+        // One row per FULLY-settled month — see the note in getPartnerReminderPreview.
         const { results: payRows } = await DB.prepare(`
-          SELECT year, month, amount, paid_at FROM kpsc_partner_payments
-          WHERE partner_id=? AND paid=1
-            AND ((year > ?) OR (year = ? AND month >= ?))
-            AND COALESCE(deleted_at,'')=''
+          SELECT year, month, collected AS amount
+          FROM (${FULLY_PAID_MONTHS_SQL}) fp
+          WHERE fp.partner_id=? AND ((fp.year > ?) OR (fp.year = ? AND fp.month >= ?))
           ORDER BY year, month
         `).bind(p.id, startYear, startYear, startMonth).all();
         const tone = classifyPartnerTone(p, payRows || [], year, month);
@@ -10990,4 +11181,4 @@ async function getSharedReport(DB, token) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths, smsPagesInfo, createIncome, mergeDuplicateSundayCollections };
+export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections };
