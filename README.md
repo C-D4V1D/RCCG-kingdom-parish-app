@@ -15,6 +15,7 @@ A comprehensive church accounting and reporting system built for the RCCG Kingdo
 - **Monthly Reports** — Auto-generated financial statements with Pastor sign-off workflow
 - **Audit Log** — Timestamped activity log of the last 100 system actions
 - **Notifications** — In-app notification centre with unread badge
+- **Committee SMS (KPSC portal)** — One-screen composer for messaging the KPSC committee roster: ready-made meeting-reminder templates that fit two GSM-7 pages, per-group recipient picker, live page/cost estimate, one-click emoji→GSM-7 conversion, and optional scheduling. Numbers come from the roster, falling back to the phone already registered against the same person as a partner; messages go out under the Members & Staff Termii sender ID and land in the SMS Logs with delivery status
 - **IT Admin Panel** — User management, church settings, monthly quota configuration, remittance rate overrides, role permission editor, and backup & restore
 
 ## Roles

@@ -1401,6 +1401,15 @@ export async function onRequest(context) {
       return await sendBulkMemberSms(DB, env, body, auth.name);
     }
 
+    // ── Committee SMS composer (KPSC roster blast) ─────────────────
+    if (route === 'kpsc-committee-sms') {
+      const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
+      if (auth instanceof Response) return auth;
+      if (method === 'GET'  && param === 'recipients')    return await getCommitteeSmsRecipients(DB);
+      if (method === 'POST' && param === 'adopt-phones')  return await adoptPartnerPhonesIntoRoster(DB);
+      if (method === 'POST' && !param)                    return await sendCommitteeSms(DB, body, auth.name);
+    }
+
     // ── Termii delivery status webhook (Feature 1) ──────────────────
     if (route === 'termii-webhook' && method === 'POST') {
       return await handleTermiiWebhook(DB, body, request, env);
@@ -9166,7 +9175,285 @@ async function sendBulkMemberSms(DB, env, data, sentBy) {
   return ok({ ok: true, sent, failed, total: phones.length, errors });
 }
 
+// ── COMMITTEE SMS (KPSC roster blast) ─────────────────────────────────────
+// Canonical source for the helpers below: src/js/committee-sms-utils.js
+// (inlined here because this Pages Function ships as its own bundle).
 
+/**
+ * Normalise a phone number to the digits-only international form Termii
+ * expects, defaulting to Nigeria (+234) — the same shape the Partners module
+ * already stores.  "08031234567" → "2348031234567".
+ */
+function normalizeNgPhone(raw) {
+  let d = String(raw || '').replace(/\D/g, '').replace(/^0+/, '');
+  if (!d) return '';
+  if (d.startsWith('2340')) d = '234' + d.slice(3).replace(/^0+/, '');
+  if (d.startsWith('234')) return d;
+  if (d.length === 10) return '234' + d;
+  return d;
+}
+
+/** True when a normalised number looks dialable (NG numbers are 234 + 10 digits). */
+function isLikelyValidPhone(normalized) {
+  const d = String(normalized || '');
+  if (!d) return false;
+  if (d.startsWith('234')) return d.length === 13;
+  return d.length >= 10 && d.length <= 15;
+}
+
+// Honorifics that appear on the roster but not in the partner register (or the
+// other way round) and would otherwise block an obvious match.
+const NAME_TITLE_WORDS = new Set([
+  'bro', 'bros', 'brother', 'sis', 'sister', 'mr', 'mrs', 'miss', 'ms', 'mister',
+  'dr', 'doc', 'pst', 'pastor', 'rev', 'reverend', 'elder', 'eld', 'dcn', 'deacon',
+  'deaconess', 'dns', 'chief', 'engr', 'engineer', 'barr', 'barrister', 'prof',
+  'professor', 'evang', 'evangelist', 'min', 'minister', 'bishop', 'sir', 'lady',
+  'hon', 'mama', 'papa', 'daddy', 'mummy',
+]);
+
+/**
+ * Reduce a person's name to a comparison key: lowercase, punctuation and
+ * honorifics stripped, tokens sorted so "Okeke John" matches "John Okeke".
+ */
+function normalizePersonName(raw) {
+  const tokens = String(raw || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter(t => !NAME_TITLE_WORDS.has(t));
+  if (!tokens.length) return '';
+  return tokens.sort().join(' ');
+}
+
+/**
+ * The name to greet somebody by — the first token that is not an honorific, so
+ * "Bro. John Okeke" greets as "John" rather than "Bro.".
+ */
+function firstNameOf(fullName) {
+  const tokens = String(fullName || '').trim().split(/\s+/).filter(Boolean);
+  for (const token of tokens) {
+    const bare = token.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (bare && !NAME_TITLE_WORDS.has(bare)) return token.replace(/[.,;:]+$/, '');
+  }
+  return (tokens[0] || '').replace(/[.,;:]+$/, '');
+}
+
+const COMMITTEE_SMS_PLACEHOLDERS = ['name', 'firstname', 'position', 'group'];
+const COMMITTEE_GROUP_LABELS = { men: 'Men', women: 'Women', youth: 'Youth', ministers: 'Ministers' };
+
+/** Substitute the per-recipient placeholders in a committee message body. */
+function applyCommitteePlaceholders(template, recipient) {
+  const name = String(recipient?.name || '').trim();
+  const first = firstNameOf(name);
+  const position = String(recipient?.position || '').trim();
+  const groupKey = String(recipient?.group || '').trim().toLowerCase();
+  return String(template || '')
+    .replace(/\{\{\s*firstname\s*\}\}/gi, first)
+    .replace(/\{\{\s*name\s*\}\}/gi, name)
+    .replace(/\{\{\s*position\s*\}\}/gi, position)
+    .replace(/\{\{\s*group\s*\}\}/gi, COMMITTEE_GROUP_LABELS[groupKey] || groupKey);
+}
+
+/** Placeholders the composer cannot fill — sending these would leak "{{venue}}". */
+function findUnknownPlaceholders(text) {
+  const found = String(text || '').match(/\{\{[^{}]*\}\}/g) || [];
+  const unknown = found.filter(token => !COMMITTEE_SMS_PLACEHOLDERS.includes(token.slice(2, -2).trim().toLowerCase()));
+  return [...new Set(unknown)];
+}
+
+/** Naira charged per SMS page (configurable; Termii default route ≈ ₦5/page). */
+async function getSmsNairaPerPage(DB) {
+  const row = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_sms_naira_per_page'`).first().catch(() => null);
+  return Number(row?.value) > 0 ? Number(row.value) : 5;
+}
+
+/** Read the KPSC roster out of the settings blob, defensively. */
+async function loadKpscRoster(DB) {
+  const row = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_members'`).first().catch(() => null);
+  let members = [];
+  try { members = row?.value ? JSON.parse(row.value) : []; } catch { members = []; }
+  return Array.isArray(members) ? members : [];
+}
+
+/**
+ * Index partners that have a usable phone number by their normalised name, so
+ * a roster member with no phone of their own can inherit the number already
+ * registered against them as a partner.
+ */
+async function loadPartnerPhoneIndex(DB) {
+  const { results } = await DB.prepare(
+    `SELECT id, full_name, phone, status FROM kpsc_partners WHERE COALESCE(deleted_at,'') = ''`
+  ).all();
+  const index = new Map();
+  for (const p of (results || [])) {
+    const key = normalizePersonName(p.full_name);
+    if (!key || !normalizeNgPhone(p.phone)) continue;
+    if (!index.has(key)) index.set(key, []);
+    index.get(key).push(p);
+  }
+  return index;
+}
+
+/**
+ * Resolve one roster member to a sendable recipient, inheriting the partner
+ * phone number when the roster has none. A name that matches more than one
+ * partner is reported as ambiguous rather than guessed at.
+ */
+function resolveCommitteeRecipient(member, index, position) {
+  const name = String(member?.name || '').trim();
+  const rosterPhone = normalizeNgPhone(member?.phone);
+  const key = normalizePersonName(name);
+  const all = key ? (index.get(key) || []) : [];
+  const active = all.filter(p => String(p.status || '').toLowerCase() === 'active');
+  const pool = active.length ? active : all;
+  const partner = pool.length === 1 ? pool[0] : null;
+  const partnerPhone = partner ? normalizeNgPhone(partner.phone) : '';
+  const phone = rosterPhone || partnerPhone;
+  return {
+    index: position,
+    name,
+    group: String(member?.group || ''),
+    position: String(member?.position || ''),
+    phone,
+    phoneSource: rosterPhone ? 'roster' : (partnerPhone ? 'partner' : 'none'),
+    partnerId: partner?.id || '',
+    partnerName: partner?.full_name || '',
+    partnerPhone,
+    ambiguous: pool.length > 1,
+    valid: isLikelyValidPhone(phone),
+  };
+}
+
+/**
+ * GET /api/kpsc-committee-sms/recipients
+ * The committee roster with a sendable phone number resolved for each member.
+ */
+async function getCommitteeSmsRecipients(DB) {
+  const [t, members, index, nairaPerPage] = await Promise.all([
+    getTermiiSettings(DB),
+    loadKpscRoster(DB),
+    loadPartnerPhoneIndex(DB),
+    getSmsNairaPerPage(DB),
+  ]);
+  const recipients = members
+    .map((m, i) => resolveCommitteeRecipient(m, index, i))
+    .filter(r => r.name);
+  return ok({
+    recipients,
+    senderId: t.senderId,
+    apiKeyConfigured: !!t.apiKey,
+    nairaPerPage,
+    sendWindow: { start: t.sendWindowStart, end: t.sendWindowEnd },
+  });
+}
+
+/**
+ * POST /api/kpsc-committee-sms/adopt-phones
+ * Copy matched partner phone numbers onto roster members that have none, so
+ * the roster stops depending on the name match from then on.
+ */
+async function adoptPartnerPhonesIntoRoster(DB) {
+  const members = await loadKpscRoster(DB);
+  if (!members.length) return err('No committee members on the roster yet.', 400);
+  const index = await loadPartnerPhoneIndex(DB);
+  let updated = 0;
+  const next = members.map((m, i) => {
+    if (normalizeNgPhone(m?.phone)) return m;
+    const resolved = resolveCommitteeRecipient(m, index, i);
+    if (resolved.phoneSource !== 'partner' || !resolved.phone) return m;
+    updated++;
+    return { ...m, phone: resolved.phone };
+  });
+  if (updated > 0) {
+    await DB.prepare(
+      `INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`
+    ).bind('kpsc_members', JSON.stringify(next)).run();
+  }
+  return ok({ ok: true, updated });
+}
+
+/**
+ * POST /api/kpsc-committee-sms
+ * Body: { message: string, phones: string[] }
+ *
+ * Sends the message to the given committee members using the Members & Staff
+ * sender ID. Destination numbers must resolve to somebody on the KPSC roster —
+ * this endpoint is a roster blast, not an open SMS gateway.
+ */
+async function sendCommitteeSms(DB, data, sentBy) {
+  const message = String(data?.message || '').trim();
+  if (!message) return err('message is required', 400);
+  if (message.length > 1600) return err('Message is too long — keep it under 1600 characters.', 400);
+
+  const unknown = findUnknownPlaceholders(message);
+  if (unknown.length) {
+    return err(`Unknown placeholder(s): ${unknown.join(', ')}. Supported: {{name}}, {{firstName}}, {{position}}, {{group}}.`, 400);
+  }
+
+  const t = await getTermiiSettings(DB);
+  if (!t.apiKey) return err('Termii API key not configured. Please add it in Settings → SMS.', 400);
+
+  const requested = Array.isArray(data?.phones) ? data.phones : [];
+  if (!requested.length) return err('Select at least one committee member to send to.', 400);
+
+  // Resolve the roster once and only send to numbers that belong to it.
+  const [members, index] = await Promise.all([loadKpscRoster(DB), loadPartnerPhoneIndex(DB)]);
+  const byPhone = new Map();
+  members.forEach((m, i) => {
+    const r = resolveCommitteeRecipient(m, index, i);
+    if (r.name && r.phone && !byPhone.has(r.phone)) byPhone.set(r.phone, r);
+  });
+
+  const targets = [];
+  const seen = new Set();
+  const unknownNumbers = [];
+  for (const raw of requested) {
+    const phone = normalizeNgPhone(raw);
+    if (!phone || seen.has(phone)) continue;
+    seen.add(phone);
+    const recipient = byPhone.get(phone);
+    if (!recipient) { unknownNumbers.push(phone); continue; }
+    targets.push(recipient);
+  }
+  if (unknownNumbers.length) {
+    return err(`${unknownNumbers.length} selected number(s) are no longer on the committee roster. Reload the page and try again.`, 400);
+  }
+  if (!targets.length) return err('None of the selected members has a usable phone number.', 400);
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth() + 1;
+  let sent = 0;
+  let failed = 0;
+  let pages = 0;
+  const errors = [];
+
+  for (const target of targets) {
+    const body = applyCommitteePlaceholders(message, target);
+    const result = await sendTermiiSms(t.apiKey, t.senderId, target.phone, body, t.channel);
+    if (result.ok) {
+      sent++;
+      pages += smsPagesInfo(body).pages;
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), '', 'sms', body, 'sent', 'pending', result.messageId || '', 'committee', year, month, sentBy || '', nowIso, target.phone).run().catch(() => {});
+    } else {
+      failed++;
+      if (errors.length < 10) errors.push({ name: target.name, phone: target.phone, error: result.error || 'unknown' });
+      await DB.prepare(
+        `INSERT INTO kpsc_reminders (id,partner_id,channel,message,status,delivery_status,message_id,reminder_type,year,month,sent_by,sent_at,phone,error_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(newId('krm'), '', 'sms', body, 'failed', '', '', 'committee', year, month, sentBy || '', nowIso, target.phone, String(result.error || 'Termii send failed')).run().catch(() => {});
+    }
+  }
+
+  const nairaPerPage = await getSmsNairaPerPage(DB);
+  return ok({
+    ok: true, sent, failed, total: targets.length, pages,
+    cost: pages * nairaPerPage, senderId: t.senderId, errors,
+  });
+}
 
 async function getAgendaNotes(DB) {
   const { results } = await DB.prepare(
@@ -10212,8 +10499,7 @@ async function getSmsLogs(DB, url) {
   `).bind(...binds).all();
 
   // Naira charged per SMS page (configurable; Termii default route ≈ ₦5/page).
-  const rateRow = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_sms_naira_per_page'`).first().catch(() => null);
-  const nairaPerPage = Number(rateRow?.value) > 0 ? Number(rateRow.value) : 5;
+  const nairaPerPage = await getSmsNairaPerPage(DB);
 
   const logs = (results || []).map(row => {
     const status = row.status || 'sent';
@@ -10370,6 +10656,12 @@ async function getSmsLogs(DB, url) {
  * row is flipped to 'sent' (so it leaves the retry queue); on failure the error
  * text is refreshed.
  */
+// Message types whose recipients are committee members / staff rather than
+// partners — these send under the Members & Staff sender ID.
+const MEMBER_DIRECTED_SMS_TYPES = new Set([
+  'committee', 'bulk', 'premeeting', 'actionitem', 'deadline', 'scheduled', 'test',
+]);
+
 async function retrySmsLog(DB, body, auth) {
   const id = String(body?.id || '').trim();
   if (!id) return err('id is required', 400);
@@ -10388,7 +10680,12 @@ async function retrySmsLog(DB, body, auth) {
   }
   if (!phone) return err('No destination phone number on this entry', 400);
 
-  const rsid = t.partnerSenderId || t.senderId;
+  // Retry from the same sender ID the original send used: messages aimed at
+  // members/staff go out under the Members & Staff sender, partner messages
+  // under the partner sender (falling back to the shared one when unset).
+  const rsid = MEMBER_DIRECTED_SMS_TYPES.has(String(row.reminder_type || '').toLowerCase())
+    ? t.senderId
+    : (t.partnerSenderId || t.senderId);
   const result = await sendTermiiSms(t.apiKey, rsid, phone, row.message || '', t.channel);
   const now = new Date().toISOString();
   if (result.ok) {
@@ -11181,4 +11478,4 @@ async function getSharedReport(DB, token) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections };
+export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient };
