@@ -27,18 +27,18 @@ const STATUS_CONFIG = {
 };
 
 const KPSC_PERMISSIONS = {
-  acting_chairman:    ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'archive', 'reports', 'agenda_builder', 'settings', 'inbox'],
-  general_secretary:  ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'reminders', 'members', 'archive', 'reports', 'agenda_builder', 'settings', 'inbox'],
+  acting_chairman:    ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'member_sms', 'archive', 'reports', 'agenda_builder', 'settings', 'inbox'],
+  general_secretary:  ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'reminders', 'members', 'member_sms', 'archive', 'reports', 'agenda_builder', 'settings', 'inbox'],
   financial_secretary:['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports', 'inbox'],
   treasurer:          ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'archive', 'reports', 'inbox'],
   committee_viewer:   ['dashboard', 'projects', 'action_items', 'partners', 'partner-progress', 'reports', 'archive', 'inbox'],
   // IT admin: full read access + account/settings management; no operational write actions.
-  it_admin:           ['dashboard', 'archive', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'reports', 'agenda_builder', 'settings', 'inbox'],
+  it_admin:           ['dashboard', 'archive', 'projects', 'action_items', 'partners', 'partner-progress', 'finance', 'reminders', 'members', 'member_sms', 'reports', 'agenda_builder', 'settings', 'inbox'],
 };
 // Default write (modify/edit) permissions per role per page
 const KPSC_WRITE_PERMISSIONS = {
-  acting_chairman:     ['dashboard','projects','action_items','partners','partner-progress','finance','reminders','members','archive','reports','agenda_builder','settings'],
-  general_secretary:   ['dashboard','projects','action_items','partners','partner-progress','reminders','members','archive','reports','agenda_builder','settings'],
+  acting_chairman:     ['dashboard','projects','action_items','partners','partner-progress','finance','reminders','members','member_sms','archive','reports','agenda_builder','settings'],
+  general_secretary:   ['dashboard','projects','action_items','partners','partner-progress','reminders','members','member_sms','archive','reports','agenda_builder','settings'],
   financial_secretary: ['finance','partners','partner-progress','archive','reports'],
   treasurer:           ['finance','partners','partner-progress','archive','reports'],
   committee_viewer:    [],
@@ -73,6 +73,7 @@ const PAGE_TO_GROUP = {
   reminders:       { group: 'money',    subTab: 'reminders'       },
   sms_logs:        { group: 'money',    subTab: 'sms_logs'        },
   members:         { group: 'more',     subTab: 'members'         },
+  member_sms:      { group: 'more',     subTab: 'member_sms'      },
   settings:        { group: 'more',     subTab: 'settings'        },
   // Group-level pseudo-pages (rendered inline by their own renderer)
   more:            { group: 'more',     subTab: null },
@@ -103,6 +104,13 @@ const S = {
   partnerPayments: [],
   financeEntries: [],
   reminders: [],
+  // Committee SMS composer. `committeeSmsMessage` starts as null so the first
+  // visit loads the default meeting reminder, while a message the user has
+  // deliberately cleared ('') stays cleared for the rest of the session.
+  committeeSms: null,
+  committeeSmsSelected: null,
+  committeeSmsMessage: null,
+  committeeSmsTemplates: [],
   smsLogsFilter: 'all',
   smsLogsData: null,
   smsLogsYear: new Date().getUTCFullYear(),
@@ -2298,6 +2306,11 @@ function logout() {
   }
   clearSession();
   S.user = null;
+  // Don't leave one member's half-written committee blast on a shared device.
+  S.committeeSms = null;
+  S.committeeSmsSelected = null;
+  S.committeeSmsMessage = null;
+  S.committeeSmsTemplates = [];
   S.page = 'dashboard';
   S.group = 'home';
   S.subTab = null;
@@ -2409,6 +2422,7 @@ function navigate(page, opts) {
     finance: 'Finance',
     reminders: 'Reminders',
     members: 'Members',
+    member_sms: 'Committee SMS',
     archive: 'Meeting Archive',
     reports: 'Meeting Insights',
     settings: 'Settings',
@@ -2578,6 +2592,10 @@ async function renderPage(page) {
     } else if (page === 'members') {
       await renderMembers(main);
       prependSubTabs(main, moreSubTabStrip());
+    } else if (page === 'member_sms') {
+      await renderCommitteeSms(main);
+      prependSubTabs(main, moreSubTabStrip());
+      bgCheckLowBalance(main); // background — doesn't block render
     } else if (page === 'settings') {
       await renderSettings(main);
       prependSubTabs(main, moreSubTabStrip());
@@ -2600,6 +2618,7 @@ function moreSubTabStrip() {
   const cur = S.subTab;
   const tabs = [];
   if (role !== 'committee_viewer') tabs.push({ key: 'members',  label: 'Members'  });
+  if (canAccess('member_sms'))      tabs.push({ key: 'member_sms', label: '📱 SMS' });
   if (role !== 'committee_viewer') tabs.push({ key: 'settings', label: 'Settings' });
   tabs.push({ key: 'inbox', label: 'Inbox' });
   if (!tabs.length) return '';
@@ -2620,7 +2639,14 @@ function renderMoreMenu(main) {
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <span>Members</span>
           <svg class="ka-more-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
-        </button>
+        </button>` : ''}
+        ${canAccess('member_sms') ? `
+        <button class="ka-more-item" onclick="Kpsc.navigate('member_sms')">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+          <span>Committee SMS</span>
+          <svg class="ka-more-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>` : ''}
+        ${!isViewer ? `
         <button class="ka-more-item" onclick="Kpsc.navigate('settings')">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           <span>Settings</span>
@@ -3029,9 +3055,10 @@ function dashCardUpcomingMeeting(ctx) {
         </ol>
       </details>` : ''}
       ${canBuildAgenda ? `
-      <div style="margin-top:10px">
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
         <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('agenda_builder')">📋 Edit Agenda</button>
-        ${um.linkedMeetingId ? `<button class="kbtn kbtn-sm kbtn-primary" style="margin-left:8px" onclick="Kpsc.openMeeting('${esc(um.linkedMeetingId)}')">▶ Open Meeting Draft</button>` : ''}
+        ${canAccess('member_sms') ? `<button class="kbtn kbtn-sm" onclick="Kpsc.navigate('member_sms')">📱 Text the Committee</button>` : ''}
+        ${um.linkedMeetingId ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.openMeeting('${esc(um.linkedMeetingId)}')">▶ Open Meeting Draft</button>` : ''}
       </div>` : ''}
     </div>`;
 }
@@ -5547,9 +5574,12 @@ async function renderMembers(main) {
     <div class="k-page">
       <div class="k-section-hdr">
         <h2>KPSC Roster</h2>
-        <button class="kbtn kbtn-primary" onclick="Kpsc.addMember()">+ Add Member</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          ${canAccess('member_sms') ? `<button class="kbtn" onclick="Kpsc.navigate('member_sms')">📱 Send SMS</button>` : ''}
+          <button class="kbtn kbtn-primary" onclick="Kpsc.addMember()">+ Add Member</button>
+        </div>
       </div>
-      <p class="k-page-hint">These names pre-fill attendance at each meeting. Add all committee members here.</p>
+      <p class="k-page-hint">These names pre-fill attendance at each meeting. Add all committee members here. Members without a phone number here fall back to the number on their partner record when sending SMS.</p>
       <div id="km-members-list">
         ${renderMembersList()}
       </div>
@@ -6051,6 +6081,807 @@ function initSmsCounters() {
    'ks-sms-payment-a','ks-sms-payment-b','ks-sms-payment-c',
    'ks-sms-reminder-a','ks-sms-reminder-b','ks-sms-reminder-c']
     .forEach(id => { const el = document.getElementById(id); if (el) updateSmsCounter(el); });
+}
+
+// ── COMMITTEE SMS COMPOSER ────────────────────────────────────────
+// Send an SMS to the KPSC committee roster in a few taps. Numbers come from
+// the roster, falling back to the phone already registered against the same
+// person in the partner register. Messages go out under the Members & Staff
+// sender ID (Settings → SMS), never the partner one.
+//
+// Canonical source for the pure helpers below: src/js/committee-sms-utils.js
+// (inlined here because kpsc.js ships as a single minified bundle — same
+// arrangement as partner-payment-utils.js).
+
+// Two GSM-7 pages. A committee announcement that fits here costs 2 SMS pages
+// per member; one stray emoji would cost 5. The composer keeps score.
+const CS_TARGET_PAGES = 2;
+const CS_GSM7_PAGE_LIMIT = 306; // 2 × 153 chars once a message is concatenated
+
+const COMMITTEE_SMS_PRESETS = [
+  {
+    key: 'meeting_today',
+    label: '🔔 Meeting Today',
+    body: 'Dear Committee Member,\n\nGood morning. Just a reminder that our KPSC meeting is today, immediately after Sunday service.\n\nWe have important matters to discuss on the development and welfare of the church, and your input is essential.\n\nThere will also be some refreshments. See you after service. God bless!',
+  },
+  {
+    key: 'meeting_tomorrow',
+    label: '📅 Meeting Tomorrow',
+    body: 'Dear Committee Member,\n\nGreetings. Just a reminder that our KPSC meeting is tomorrow, immediately after Sunday service.\n\nWe have important matters to discuss on the development and welfare of the church, and your input is essential.\n\nPlease come prepared. God bless!',
+  },
+  {
+    key: 'starting_soon',
+    label: '⏰ Starting Shortly',
+    body: 'Dear Committee Member,\n\nOur KPSC meeting is starting shortly. Please join us now - your presence and input are needed.\n\nGod bless!',
+  },
+  {
+    key: 'thank_you',
+    label: '🙏 Thank You',
+    body: "Dear Committee Member,\n\nThank you for attending today's KPSC meeting and for your valuable contributions.\n\nThe resolutions reached will be circulated shortly. May God bless and reward your service to His house.",
+  },
+];
+
+// Characters people routinely paste from Word/WhatsApp that are not GSM-7 but
+// have an obvious plain-text equivalent. Anything else outside GSM-7 (emoji,
+// other scripts) is dropped by toGsm7Safe().
+const GSM7_REPLACEMENTS = {
+  '‘': "'", '’': "'", '‚': "'", '‛': "'",
+  '“': '"', '”': '"', '„': '"', '‟': '"',
+  '«': '"', '»': '"', '′': "'", '″': '"',
+  '–': '-', '—': '-', '―': '-', '−': '-', '•': '-',
+  '…': '...', '·': '.', '⁄': '/', '×': 'x',
+  ' ': ' ', ' ': ' ', ' ': ' ', ' ': ' ', '​': '',
+  '₦': 'N', '™': 'TM', '®': '(R)', '©': '(C)',
+  'Œ': 'OE', 'œ': 'oe', '←': '<-', '→': '->',
+};
+
+/**
+ * Rewrite a message so every character is GSM-7 representable. Paragraph
+ * breaks are preserved; only the horizontal whitespace left behind by dropped
+ * characters is collapsed.
+ */
+function toGsm7Safe(text) {
+  let out = '';
+  for (const ch of String(text || '')) {
+    if (GSM7_CHARS.has(ch) || GSM7_EXT.has(ch)) { out += ch; continue; }
+    const replacement = GSM7_REPLACEMENTS[ch];
+    out += replacement === undefined ? ' ' : replacement;
+  }
+  return out
+    .replace(/[^\S\n\r]+/g, ' ')
+    .replace(/ +([,.!?;:])/g, '$1')
+    .replace(/[^\S\n\r]+$/gm, '')
+    .replace(/^[^\S\n\r]+/gm, '')
+    .trim();
+}
+
+// Honorifics to skip when working out what to call somebody.
+const CS_TITLE_WORDS = new Set([
+  'bro', 'bros', 'brother', 'sis', 'sister', 'mr', 'mrs', 'miss', 'ms', 'mister',
+  'dr', 'doc', 'pst', 'pastor', 'rev', 'reverend', 'elder', 'eld', 'dcn', 'deacon',
+  'deaconess', 'dns', 'chief', 'engr', 'engineer', 'barr', 'barrister', 'prof',
+  'professor', 'evang', 'evangelist', 'min', 'minister', 'bishop', 'sir', 'lady',
+  'hon', 'mama', 'papa', 'daddy', 'mummy',
+]);
+
+/** "Bro. John Okeke" → "John" — the first token that is not an honorific. */
+function firstNameOf(fullName) {
+  const tokens = String(fullName || '').trim().split(/\s+/).filter(Boolean);
+  for (const token of tokens) {
+    const bare = token.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (bare && !CS_TITLE_WORDS.has(bare)) return token.replace(/[.,;:]+$/, '');
+  }
+  return (tokens[0] || '').replace(/[.,;:]+$/, '');
+}
+
+const COMMITTEE_SMS_PLACEHOLDERS = ['name', 'firstname', 'position', 'group'];
+const CS_GROUP_LABELS = { men: 'Men', women: 'Women', youth: 'Youth', ministers: 'Ministers' };
+
+/** Substitute the per-recipient placeholders in a committee message body. */
+function applyCommitteePlaceholders(template, recipient) {
+  const name = String(recipient?.name || '').trim();
+  const first = firstNameOf(name);
+  const position = String(recipient?.position || '').trim();
+  const groupKey = String(recipient?.group || '').trim().toLowerCase();
+  return String(template || '')
+    .replace(/\{\{\s*firstname\s*\}\}/gi, first)
+    .replace(/\{\{\s*name\s*\}\}/gi, name)
+    .replace(/\{\{\s*position\s*\}\}/gi, position)
+    .replace(/\{\{\s*group\s*\}\}/gi, CS_GROUP_LABELS[groupKey] || groupKey);
+}
+
+/** Placeholders the composer cannot fill — sending these would leak "{{venue}}". */
+function findUnknownPlaceholders(text) {
+  const found = String(text || '').match(/\{\{[^{}]*\}\}/g) || [];
+  return [...new Set(found.filter(token =>
+    !COMMITTEE_SMS_PLACEHOLDERS.includes(token.slice(2, -2).trim().toLowerCase())))];
+}
+
+const csNaira = n => '₦' + Math.round(Number(n) || 0).toLocaleString('en-NG');
+
+/** The selected recipients, de-duplicated by phone exactly as the server does. */
+function csSelectedRecipients() {
+  const selected = S.committeeSmsSelected || new Set();
+  const seen = new Set();
+  const out = [];
+  for (const r of (S.committeeSms?.recipients || [])) {
+    if (!r.phone || !selected.has(r.phone) || seen.has(r.phone)) continue;
+    seen.add(r.phone);
+    out.push(r);
+  }
+  return out;
+}
+
+/** Everyone on the roster who has a number we could actually dial. */
+function csSendableRecipients() {
+  return (S.committeeSms?.recipients || []).filter(r => r.phone);
+}
+
+/**
+ * Cost of the message as currently composed. Placeholders make the body a
+ * different length for each person, so pages are summed per recipient rather
+ * than multiplied.
+ */
+function csCostEstimate() {
+  const text = S.committeeSmsMessage || '';
+  const selected = csSelectedRecipients();
+  const bodyInfo = smsCharInfo(text);
+  const perRecipient = selected.map(r => smsCharInfo(applyCommitteePlaceholders(text, r)));
+  const totalPages = perRecipient.reduce((sum, info) => sum + info.pages, 0);
+  const maxPages = perRecipient.length
+    ? perRecipient.reduce((max, info) => Math.max(max, info.pages), 0)
+    : bodyInfo.pages;
+  const rate = Number(S.committeeSms?.nairaPerPage) > 0 ? Number(S.committeeSms.nairaPerPage) : 5;
+  return {
+    chars: bodyInfo.chars,
+    encoding: bodyInfo.encoding,
+    pagesPerMessage: maxPages,
+    totalPages,
+    recipients: selected.length,
+    cost: totalPages * rate,
+    rate,
+  };
+}
+
+/** Why the Send button is unavailable, or '' when it is ready to go. */
+function csBlockingReason() {
+  const text = (S.committeeSmsMessage || '').trim();
+  if (!S.committeeSms?.apiKeyConfigured) return 'Add the Termii API key in Settings → SMS before sending.';
+  if (!text) return 'Type a message first.';
+  const unknown = findUnknownPlaceholders(text);
+  if (unknown.length) return `Unsupported placeholder ${unknown.join(', ')} — remove it or use {{name}}, {{firstName}}, {{position}} or {{group}}.`;
+  if (!csSelectedRecipients().length) return 'Select at least one committee member.';
+  return '';
+}
+
+async function renderCommitteeSms(main) {
+  main.innerHTML = '<div class="k-loading">Loading committee roster…</div>';
+  const [data, templatesRes] = await Promise.all([
+    apiGet('kpsc-committee-sms/recipients'),
+    apiGet('kpsc-sms-templates').catch(() => []),
+  ]);
+  if (data?.error) throw new Error(data.error);
+
+  S.committeeSms = data;
+  S.committeeSmsTemplates = Array.isArray(templatesRes) ? templatesRes : [];
+  const recipients = Array.isArray(data.recipients) ? data.recipients : [];
+
+  // First visit this session — start from the meeting reminder with everyone
+  // dialable ticked. On a return visit keep the draft, but drop any selection
+  // whose member has since left the roster.
+  if (S.committeeSmsMessage === null) S.committeeSmsMessage = COMMITTEE_SMS_PRESETS[0].body;
+  const live = new Set(csSendableRecipients().map(r => r.phone));
+  if (!S.committeeSmsSelected) {
+    S.committeeSmsSelected = new Set(csBulkSelectable().map(r => r.phone));
+  } else {
+    S.committeeSmsSelected = new Set([...S.committeeSmsSelected].filter(p => live.has(p)));
+  }
+
+  const missing   = recipients.filter(r => !r.phone);
+  const fromPartner = recipients.filter(r => r.phoneSource === 'partner');
+  const invalid   = recipients.filter(r => r.phone && !r.valid);
+  const senderId  = data.senderId || 'RCCG-KP';
+
+  main.innerHTML = `
+    <div class="k-page">
+      <div class="k-section" style="padding:16px">
+        <div class="k-section-hdr" style="margin-bottom:8px">
+          <h2 style="font-size:17px;margin:0">📱 Committee SMS</h2>
+          <span class="kbadge badge-blue" title="Sender ID configured for Members &amp; Staff in Settings → SMS">From: ${esc(senderId)}</span>
+        </div>
+        <p class="k-hint" style="margin:0">Send a message straight to the KPSC committee. Members without a number on the roster automatically use the phone registered against them in the partner register.</p>
+        ${!data.apiKeyConfigured ? `
+        <div class="k-error-box" style="margin-top:12px">
+          <strong>SMS is not configured yet.</strong><br>
+          Add the Termii API key in Settings → SMS, then come back here.
+          <div style="margin-top:8px"><button class="kbtn kbtn-sm" onclick="Kpsc.navigate('settings')">Open Settings →</button></div>
+        </div>` : ''}
+      </div>
+
+      <div class="k-section">
+        <h3 class="k-sec-title" style="margin-top:0">1 · Message</h3>
+        <div class="k-cs-presets">
+          ${COMMITTEE_SMS_PRESETS.map(p =>
+            `<button type="button" class="k-cs-preset" onclick="Kpsc.csApplyPreset('${esc(p.key)}')">${esc(p.label)}</button>`
+          ).join('')}
+        </div>
+        ${S.committeeSmsTemplates.length ? `
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+          <select id="cs-template-select" class="k-input k-input-sm" style="flex:1;min-width:180px">
+            <option value="">Load a saved template…</option>
+            ${S.committeeSmsTemplates.map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('')}
+          </select>
+          <button class="kbtn kbtn-sm" onclick="Kpsc.csLoadTemplate()">Load</button>
+        </div>` : ''}
+        <textarea id="cs-message" class="k-input k-textarea" rows="9"
+          style="font-size:14px;line-height:1.6"
+          placeholder="Type the message to send to the committee…"
+          oninput="Kpsc.csOnMessageInput()">${esc(S.committeeSmsMessage)}</textarea>
+        <div id="cs-counter" class="k-sms-counter"></div>
+        <div id="cs-message-warn"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <button class="kbtn kbtn-sm" onclick="Kpsc.csMakeGsm7()">✨ Convert to plain GSM-7</button>
+          <button class="kbtn kbtn-sm" onclick="Kpsc.csCopyMessage()">📋 Copy</button>
+          <button class="kbtn kbtn-sm" onclick="Kpsc.csSaveTemplate(this)">💾 Save as template</button>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.csClearMessage()">Clear</button>
+        </div>
+        <p class="k-hint" style="margin-top:10px">
+          Personalise with <code>{{name}}</code>, <code>{{firstName}}</code>, <code>{{position}}</code> or <code>{{group}}</code>.
+          Plain (GSM-7) text bills 153 characters per page; a single emoji drops that to 67, so the same message can cost more than twice as much.
+        </p>
+      </div>
+
+      <div class="k-section">
+        <div class="k-section-hdr" style="margin-bottom:8px">
+          <h3 class="k-sec-title" style="margin:0">2 · Recipients</h3>
+          <span id="cs-recipient-count" class="kbadge badge-gray"></span>
+        </div>
+        ${recipients.length ? `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+          <button class="kbtn kbtn-sm" onclick="Kpsc.csSelectAll(true)">Select all</button>
+          <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.csSelectAll(false)">Clear selection</button>
+        </div>
+        ${fromPartner.length ? `
+        <div class="k-cs-note k-cs-note-info">
+          <span>📇 ${fromPartner.length} member${fromPartner.length !== 1 ? 's are' : ' is'} using the phone number from their partner record.</span>
+          <button class="kbtn kbtn-sm" onclick="Kpsc.csAdoptPartnerPhones(this)">Save to roster</button>
+        </div>` : ''}
+        ${invalid.length ? `
+        <div class="k-cs-note k-cs-note-warn">
+          <span>⚠️ ${invalid.length} number${invalid.length !== 1 ? 's do' : ' does'} not look like a valid phone number — ${esc(invalid.map(r => r.name).join(', '))}. Bulk selection skips them; fix them on the roster, or tick one by hand if you know it is right.</span>
+          <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('members')">Open roster</button>
+        </div>` : ''}
+        ${missing.length ? `
+        <div class="k-cs-note k-cs-note-warn">
+          <span>📵 No phone number for ${esc(missing.map(r => r.name).join(', '))}. They cannot be reached by SMS.</span>
+          <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('members')">Open roster</button>
+        </div>` : ''}
+        <div id="cs-recipient-list">${csRecipientListHtml(recipients)}</div>
+        ` : `<div class="k-empty">No committee members on the roster yet.
+          <div style="margin-top:10px"><button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.navigate('members')">Add members →</button></div>
+        </div>`}
+      </div>
+
+      <div class="k-section">
+        <h3 class="k-sec-title" style="margin-top:0">3 · Send</h3>
+        <div id="cs-summary" class="k-cs-summary"></div>
+        <div id="cs-blocker" class="k-cs-note k-cs-note-warn" style="display:none"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <button class="kbtn kbtn-primary" id="cs-send-btn" style="flex:1;min-width:200px;justify-content:center" onclick="Kpsc.csSend()">📤 Review &amp; Send</button>
+          <button class="kbtn" onclick="Kpsc.csOpenSchedule()">🕒 Schedule…</button>
+          <button class="kbtn" onclick="Kpsc.csOpenTestModal()">✉️ Send test</button>
+        </div>
+        <p class="k-hint" style="margin-top:10px">Every message is logged with its delivery status on the <button class="kbtn-link" onclick="Kpsc.navigate('sms_logs')">SMS Logs</button> page, where failed sends can be retried.</p>
+        <div id="cs-result" style="display:none;margin-top:12px"></div>
+      </div>
+    </div>`;
+
+  csRefreshSummary();
+}
+
+function csRecipientListHtml(recipients) {
+  const selected = S.committeeSmsSelected || new Set();
+  const rows = GROUPS.map(g => {
+    const members = recipients.filter(r => r.group === g.key);
+    if (!members.length) return '';
+    const dialable = members.filter(r => r.phone);
+    const selectable = csBulkSelectable(g.key);
+    const allTicked = selectable.length > 0 && selectable.every(r => selected.has(r.phone));
+    return `
+      <div class="k-cs-group">
+        <label class="k-cs-group-hdr">
+          <input type="checkbox" data-cs-group="${esc(g.key)}" ${allTicked ? 'checked' : ''} ${selectable.length ? '' : 'disabled'}
+            onchange="Kpsc.csToggleGroup('${esc(g.key)}', this.checked)" />
+          <span>${g.icon} ${esc(g.label)}</span>
+          <span class="k-cs-group-count">${dialable.length}/${members.length}</span>
+        </label>
+        ${members.map(r => csRecipientRowHtml(r, selected)).join('')}
+      </div>`;
+  }).join('');
+
+  // Anyone whose group key is not one of the four standard groups still needs
+  // to be reachable rather than silently dropped.
+  const known = new Set(GROUPS.map(g => g.key));
+  const others = recipients.filter(r => !known.has(r.group));
+  const otherRows = others.length ? `
+    <div class="k-cs-group">
+      <div class="k-cs-group-hdr"><span>👥 Other</span><span class="k-cs-group-count">${others.filter(r => r.phone).length}/${others.length}</span></div>
+      ${others.map(r => csRecipientRowHtml(r, selected)).join('')}
+    </div>` : '';
+
+  return (rows + otherRows) || '<div class="k-empty">No committee members on the roster yet.</div>';
+}
+
+function csRecipientRowHtml(r, selected) {
+  const sourceBadge = r.phoneSource === 'partner'
+    ? '<span class="kbadge badge-blue" title="Number taken from this member\'s partner record">partner</span>'
+    : '';
+  const problem = !r.phone
+    ? `<span class="k-cs-problem">${r.ambiguous ? 'more than one partner matches this name' : 'no phone number'}</span>`
+    : (!r.valid ? '<span class="k-cs-problem">number looks incomplete</span>' : '');
+  return `
+    <label class="k-cs-row${r.phone ? '' : ' k-cs-row-disabled'}">
+      <input type="checkbox" data-cs-phone="${esc(r.phone)}"
+        ${r.phone ? '' : 'disabled'} ${r.phone && selected.has(r.phone) ? 'checked' : ''}
+        onchange="Kpsc.csToggle('${esc(r.phone)}', this.checked)" />
+      <span class="k-cs-row-main">
+        <span class="k-cs-row-name">${esc(r.name)}${r.position ? ` <span class="k-cs-row-pos">· ${esc(r.position)}</span>` : ''}</span>
+        <span class="k-cs-row-phone">${r.phone ? esc(csDisplayPhone(r.phone)) : ''} ${sourceBadge} ${problem}</span>
+      </span>
+    </label>`;
+}
+
+/** "2348031234567" → "0803 123 4567" — how the number reads on a Nigerian phone. */
+function csDisplayPhone(normalized) {
+  const d = String(normalized || '');
+  if (!/^234\d{10}$/.test(d)) return d ? '+' + d : '';
+  const local = '0' + d.slice(3);
+  return `${local.slice(0, 4)} ${local.slice(4, 7)} ${local.slice(7)}`;
+}
+
+function csOnMessageInput() {
+  const ta = document.getElementById('cs-message');
+  if (ta) S.committeeSmsMessage = ta.value;
+  csRefreshSummary();
+}
+
+/** Recompute the counter, warnings, recipient tally and the send summary. */
+function csRefreshSummary() {
+  const est = csCostEstimate();
+  const text = S.committeeSmsMessage || '';
+
+  const counter = document.getElementById('cs-counter');
+  if (counter) {
+    counter.textContent = est.chars === 0
+      ? ''
+      : `${est.chars} char${est.chars !== 1 ? 's' : ''} · ${est.pagesPerMessage} SMS page${est.pagesPerMessage !== 1 ? 's' : ''} (${est.encoding})`;
+    counter.className = 'k-sms-counter';
+    if (est.encoding === 'Unicode') counter.classList.add('unicode');
+    else if (est.pagesPerMessage > CS_TARGET_PAGES) counter.classList.add('danger');
+    else if (est.pagesPerMessage === CS_TARGET_PAGES) counter.classList.add('warn');
+  }
+
+  const warn = document.getElementById('cs-message-warn');
+  if (warn) {
+    const notes = [];
+    if (est.encoding === 'Unicode' && text) {
+      const cleanedPages = smsCharInfo(toGsm7Safe(text)).pages;
+      notes.push(`<div class="k-cs-note k-cs-note-warn">
+        <span>😀 Emoji or special characters detected, so this message bills as Unicode — ${est.pagesPerMessage} page${est.pagesPerMessage !== 1 ? 's' : ''} each instead of ${cleanedPages}.</span>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.csMakeGsm7()">Convert to GSM-7</button>
+      </div>`);
+    } else if (est.encoding === 'GSM-7' && est.chars > CS_GSM7_PAGE_LIMIT) {
+      notes.push(`<div class="k-cs-note k-cs-note-warn">
+        <span>✂️ ${est.chars - CS_GSM7_PAGE_LIMIT} character${est.chars - CS_GSM7_PAGE_LIMIT !== 1 ? 's' : ''} over the ${CS_TARGET_PAGES}-page target — trim it to keep the blast at ${CS_TARGET_PAGES} pages per member.</span>
+      </div>`);
+    }
+    const unknown = findUnknownPlaceholders(text);
+    if (unknown.length) {
+      notes.push(`<div class="k-cs-note k-cs-note-error">
+        <span>🚫 ${esc(unknown.join(', '))} cannot be filled in and would be sent literally. Replace it with real text, or use {{name}}, {{firstName}}, {{position}} or {{group}}.</span>
+      </div>`);
+    }
+    warn.innerHTML = notes.join('');
+  }
+
+  const sendable = csSendableRecipients().length;
+  const tally = document.getElementById('cs-recipient-count');
+  if (tally) tally.textContent = `${est.recipients} of ${sendable} selected`;
+
+  const summary = document.getElementById('cs-summary');
+  if (summary) {
+    summary.innerHTML = est.recipients === 0
+      ? '<span class="k-cs-summary-muted">No members selected yet.</span>'
+      : `<span><strong>${est.recipients}</strong> member${est.recipients !== 1 ? 's' : ''}</span>
+         <span><strong>${est.totalPages}</strong> SMS page${est.totalPages !== 1 ? 's' : ''}</span>
+         <span>about <strong>${csNaira(est.cost)}</strong></span>
+         <span class="k-cs-summary-muted">from ${esc(S.committeeSms?.senderId || 'RCCG-KP')}</span>`;
+  }
+
+  const reason = csBlockingReason();
+  const blocker = document.getElementById('cs-blocker');
+  if (blocker) {
+    blocker.innerHTML = reason ? `<span>${esc(reason)}</span>` : '';
+    blocker.style.display = reason ? '' : 'none';
+  }
+  const sendBtn = document.getElementById('cs-send-btn');
+  if (sendBtn) sendBtn.disabled = !!reason;
+}
+
+function csApplyPreset(key) {
+  const preset = COMMITTEE_SMS_PRESETS.find(p => p.key === key);
+  if (!preset) return;
+  S.committeeSmsMessage = preset.body;
+  const ta = document.getElementById('cs-message');
+  if (ta) ta.value = preset.body;
+  csRefreshSummary();
+  showToast(`"${preset.label.replace(/^\S+\s/, '')}" template loaded.`, 'success');
+}
+
+function csLoadTemplate() {
+  const select = document.getElementById('cs-template-select');
+  const id = select?.value;
+  if (!id) { showToast('Pick a saved template first.', 'warn'); return; }
+  const template = S.committeeSmsTemplates.find(t => t.id === id);
+  if (!template) return;
+  S.committeeSmsMessage = template.body || '';
+  const ta = document.getElementById('cs-message');
+  if (ta) ta.value = S.committeeSmsMessage;
+  csRefreshSummary();
+  showToast(`Template "${template.name}" loaded.`, 'success');
+}
+
+async function csSaveTemplate(btn) {
+  const body = (S.committeeSmsMessage || '').trim();
+  if (!body) { showToast('Type a message before saving it as a template.', 'warn'); return; }
+  const name = prompt('Template name (e.g. "Sunday meeting reminder"):')?.trim();
+  if (!name) return;
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Saving…';
+  let saved = false;
+  try {
+    const res = await apiPost('kpsc-sms-templates', { name, body });
+    if (res?.error) { showToast(res.error, 'error'); return; }
+    saved = true;
+    showToast(`Template "${name}" saved.`, 'success');
+  } catch (e) {
+    showToast('Could not save the template: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
+  // Re-render last: it replaces the whole page body, `btn` included.
+  if (saved) await csReloadPage();
+}
+
+/** Re-render the composer in place, keeping the "More" sub-tab strip. */
+async function csReloadPage() {
+  const main = document.getElementById('kpsc-main');
+  if (!main || S.page !== 'member_sms') return;
+  await renderCommitteeSms(main);
+  prependSubTabs(main, moreSubTabStrip());
+}
+
+function csMakeGsm7() {
+  const text = S.committeeSmsMessage || '';
+  const cleaned = toGsm7Safe(text);
+  if (cleaned === text) { showToast('This message is already plain GSM-7 text.', 'info'); return; }
+  S.committeeSmsMessage = cleaned;
+  const ta = document.getElementById('cs-message');
+  if (ta) ta.value = cleaned;
+  csRefreshSummary();
+  showToast('Converted to plain GSM-7 text.', 'success');
+}
+
+function csCopyMessage() {
+  const text = (S.committeeSmsMessage || '').trim();
+  if (!text) { showToast('Nothing to copy yet.', 'warn'); return; }
+  navigator.clipboard.writeText(text).then(
+    () => showToast('Message copied.', 'success'),
+    () => showToast('Could not copy — please select and copy manually.', 'warn'),
+  );
+}
+
+function csClearMessage() {
+  S.committeeSmsMessage = '';
+  const ta = document.getElementById('cs-message');
+  if (ta) { ta.value = ''; ta.focus(); }
+  csRefreshSummary();
+}
+
+/**
+ * Members a bulk action may tick: dialable AND not flagged as incomplete.
+ * "Select all" and the group headers deliberately skip numbers that don't look
+ * valid — the note above the list promises they stay unticked. A single
+ * checkbox can still override that for a number we've judged wrongly.
+ * Pass a group key to scope it to one group.
+ */
+function csBulkSelectable(groupKey) {
+  return (S.committeeSms?.recipients || [])
+    .filter(r => r.phone && r.valid && (groupKey === undefined || r.group === groupKey));
+}
+
+function csToggle(phone, checked) {
+  if (!phone) return;
+  if (!S.committeeSmsSelected) S.committeeSmsSelected = new Set();
+  if (checked) S.committeeSmsSelected.add(phone);
+  else S.committeeSmsSelected.delete(phone);
+  csSyncCheckboxes();
+  csRefreshSummary();
+}
+
+function csToggleGroup(groupKey, checked) {
+  if (!S.committeeSmsSelected) S.committeeSmsSelected = new Set();
+  if (checked) {
+    for (const r of csBulkSelectable(groupKey)) S.committeeSmsSelected.add(r.phone);
+  } else {
+    // Clearing drops everyone in the group, manual overrides included.
+    for (const r of (S.committeeSms?.recipients || [])) {
+      if (r.group === groupKey && r.phone) S.committeeSmsSelected.delete(r.phone);
+    }
+  }
+  csSyncCheckboxes();
+  csRefreshSummary();
+}
+
+function csSelectAll(checked) {
+  if (!checked) {
+    S.committeeSmsSelected = new Set();
+  } else {
+    if (!S.committeeSmsSelected) S.committeeSmsSelected = new Set();
+    for (const r of csBulkSelectable()) S.committeeSmsSelected.add(r.phone);
+  }
+  csSyncCheckboxes();
+  csRefreshSummary();
+}
+
+/**
+ * Push the current selection back onto every checkbox. Driving the DOM from
+ * the Set (rather than from whatever was just clicked) keeps two roster rows
+ * that share one number in step, and keeps each group header honest.
+ */
+function csSyncCheckboxes() {
+  const selected = S.committeeSmsSelected || new Set();
+  document.querySelectorAll('#cs-recipient-list input[data-cs-phone]').forEach(box => {
+    const phone = box.dataset.csPhone;
+    if (phone) box.checked = selected.has(phone);
+  });
+  document.querySelectorAll('#cs-recipient-list input[data-cs-group]').forEach(box => {
+    const selectable = csBulkSelectable(box.dataset.csGroup);
+    box.checked = selectable.length > 0 && selectable.every(r => selected.has(r.phone));
+  });
+}
+
+async function csAdoptPartnerPhones(btn) {
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Saving…';
+  let adopted = false;
+  try {
+    const res = await apiPost('kpsc-committee-sms/adopt-phones', {});
+    if (res?.error) { showToast(res.error, 'error'); return; }
+    showToast(res.updated
+      ? `${res.updated} number${res.updated !== 1 ? 's' : ''} saved to the roster.`
+      : 'Nothing to save — the roster already has these numbers.', 'success');
+    adopted = true;
+  } catch (e) {
+    showToast('Could not update the roster: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
+  // Re-render last: it replaces the whole page body, `btn` included.
+  if (adopted) await csReloadPage();
+}
+
+// ── Send: confirmation, then the actual blast ─────────────────────
+function csSend() {
+  const reason = csBlockingReason();
+  if (reason) { showToast(reason, 'warn'); return; }
+  const est = csCostEstimate();
+  const recipients = csSelectedRecipients();
+  const preview = applyCommitteePlaceholders(S.committeeSmsMessage || '', recipients[0]);
+
+  document.getElementById('cs-confirm-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'cs-confirm-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:460px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">Send to ${est.recipients} committee member${est.recipients !== 1 ? 's' : ''}?</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="Kpsc.csCloseConfirm()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <div class="k-cs-summary" style="margin-bottom:12px">
+          <span><strong>${est.totalPages}</strong> SMS page${est.totalPages !== 1 ? 's' : ''}</span>
+          <span>about <strong>${csNaira(est.cost)}</strong></span>
+          <span class="k-cs-summary-muted">from ${esc(S.committeeSms?.senderId || 'RCCG-KP')}</span>
+        </div>
+        <div class="k-label" style="margin-bottom:4px">Message ${recipients.length ? `as ${esc(recipients[0].name)} will read it` : ''}</div>
+        <div class="k-cs-preview">${esc(preview)}</div>
+        <details style="margin-top:12px">
+          <summary style="font-size:12px;color:var(--text3);cursor:pointer">Recipients (${est.recipients})</summary>
+          <div style="font-size:12px;color:var(--text2);margin-top:6px;line-height:1.7">
+            ${recipients.map(r => `${esc(r.name)} — ${esc(csDisplayPhone(r.phone))}`).join('<br>')}
+          </div>
+        </details>
+        <p class="k-hint" style="margin-top:12px">This sends real SMS messages immediately and cannot be recalled.</p>
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button class="kbtn" style="flex:1;justify-content:center" onclick="Kpsc.csCloseConfirm()">Cancel</button>
+          <button class="kbtn kbtn-primary" style="flex:2;justify-content:center" onclick="Kpsc.csConfirmSend(this)">📤 Send now</button>
+        </div>
+      </div>
+    </div>`;
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+}
+
+function csCloseConfirm() {
+  document.getElementById('cs-confirm-modal')?.remove();
+}
+
+async function csConfirmSend(btn) {
+  const message = (S.committeeSmsMessage || '').trim();
+  const phones = csSelectedRecipients().map(r => r.phone);
+  if (!message || !phones.length) { csCloseConfirm(); return; }
+
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ Sending…';
+  try {
+    const res = await apiPost('kpsc-committee-sms', { message, phones });
+    csCloseConfirm();
+    const result = document.getElementById('cs-result');
+    if (res?.error) {
+      showToast(res.error, 'error');
+      if (result) {
+        result.style.display = 'block';
+        result.innerHTML = `<div class="k-cs-note k-cs-note-error"><span>❌ ${esc(res.error)}</span></div>`;
+      }
+      return;
+    }
+    const failedNote = res.failed > 0
+      ? `<div style="margin-top:6px">${res.failed} could not be sent: ${esc((res.errors || []).map(e => `${e.name || e.phone} (${e.error})`).join('; '))}</div>`
+      : '';
+    showToast(`Sent to ${res.sent} member${res.sent !== 1 ? 's' : ''}${res.failed ? ` — ${res.failed} failed` : ''}.`,
+      res.failed > 0 ? 'warn' : 'success');
+    if (result) {
+      result.style.display = 'block';
+      result.innerHTML = `<div class="k-cs-note ${res.failed > 0 ? 'k-cs-note-warn' : 'k-cs-note-ok'}">
+        <span>${res.failed > 0 ? '⚠️' : '✅'} Sent to ${res.sent} member${res.sent !== 1 ? 's' : ''} · ${res.pages} page${res.pages !== 1 ? 's' : ''} · about ${csNaira(res.cost)}${failedNote}</span>
+        <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('sms_logs')">View delivery</button>
+      </div>`;
+    }
+  } catch (e) {
+    csCloseConfirm();
+    showToast('Could not send: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
+}
+
+// ── Send a test copy to a single number ───────────────────────────
+function csOpenTestModal() {
+  const message = (S.committeeSmsMessage || '').trim();
+  if (!message) { showToast('Type a message first.', 'warn'); return; }
+  // Pre-fill with the signed-in member's own number when we can spot them.
+  const me = String(S.user?.name || '').trim().toLowerCase();
+  const match = csSendableRecipients().find(r => String(r.name).trim().toLowerCase() === me);
+
+  document.getElementById('cs-test-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'cs-test-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:400px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">✉️ Send a test copy</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('cs-test-modal')?.remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p class="k-hint" style="margin-top:0">Sends this exact message to one number so you can check how it reads before the blast. Placeholders are filled in with your own name.</p>
+        <label class="k-label">Phone number</label>
+        <input id="cs-test-phone" class="k-input" type="tel" inputmode="numeric"
+          placeholder="08031234567" value="${esc(match ? csDisplayPhone(match.phone).replace(/\s/g, '') : '')}" />
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button class="kbtn" style="flex:1;justify-content:center" onclick="document.getElementById('cs-test-modal')?.remove()">Cancel</button>
+          <button class="kbtn kbtn-primary" style="flex:1;justify-content:center" onclick="Kpsc.csSendTest(this)">Send test</button>
+        </div>
+        <p id="cs-test-result" class="k-hint" style="margin-top:10px"></p>
+      </div>
+    </div>`;
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+}
+
+async function csSendTest(btn) {
+  const phone = document.getElementById('cs-test-phone')?.value.trim() || '';
+  const result = document.getElementById('cs-test-result');
+  if (!phone) { if (result) { result.textContent = 'Enter a phone number first.'; result.style.color = 'var(--red)'; } return; }
+  const message = applyCommitteePlaceholders(S.committeeSmsMessage || '', {
+    name: S.user?.name || 'Committee Member', position: '', group: '',
+  });
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Sending…';
+  if (result) { result.textContent = ''; result.style.color = ''; }
+  try {
+    const res = await apiPost('kpsc-sms-test', { phone, message });
+    if (result) {
+      result.textContent = res?.ok ? `✅ ${res.message}` : `❌ ${res?.error || 'Send failed'}`;
+      result.style.color = res?.ok ? 'var(--green)' : 'var(--red)';
+    }
+  } catch (e) {
+    if (result) { result.textContent = `❌ ${e.message}`; result.style.color = 'var(--red)'; }
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
+}
+
+// ── Schedule the blast for later ──────────────────────────────────
+function csOpenSchedule() {
+  const reason = csBlockingReason();
+  if (reason) { showToast(reason, 'warn'); return; }
+  // The scheduler sends the stored text verbatim, so a personalised message
+  // would arrive with "{{firstName}}" in it.
+  if (/\{\{[^{}]*\}\}/.test(S.committeeSmsMessage || '')) {
+    showToast('Scheduled messages cannot be personalised — remove the {{…}} placeholders first.', 'warn');
+    return;
+  }
+  const est = csCostEstimate();
+  // Default to one hour from now, in the local time the picker expects.
+  const soon = new Date(Date.now() + 60 * 60 * 1000 - new Date().getTimezoneOffset() * 60 * 1000);
+  const defaultValue = soon.toISOString().slice(0, 16);
+  const sendWindow = S.committeeSms?.sendWindow || {};
+
+  document.getElementById('cs-schedule-modal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'cs-schedule-modal';
+  modal.className = 'k-modal-overlay';
+  modal.innerHTML = `
+    <div class="k-modal" style="max-width:420px">
+      <div class="k-modal-hdr">
+        <span class="k-modal-title">🕒 Schedule this message</span>
+        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('cs-schedule-modal')?.remove()">✕</button>
+      </div>
+      <div class="k-modal-body">
+        <p class="k-hint" style="margin-top:0">${est.recipients} member${est.recipients !== 1 ? 's' : ''} · ${est.totalPages} page${est.totalPages !== 1 ? 's' : ''} · about ${csNaira(est.cost)}.</p>
+        <label class="k-label">Send at</label>
+        <input id="cs-schedule-at" class="k-input" type="datetime-local" value="${esc(defaultValue)}" />
+        <p class="k-hint">The scheduler checks every 30 minutes and only sends inside the quiet-hours window${sendWindow.start ? ` (${esc(sendWindow.start)}–${esc(sendWindow.end)} WAT)` : ''}, so delivery can be a little after the time you pick. Pending blasts can be cancelled in Settings → SMS.</p>
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button class="kbtn" style="flex:1;justify-content:center" onclick="document.getElementById('cs-schedule-modal')?.remove()">Cancel</button>
+          <button class="kbtn kbtn-primary" style="flex:1;justify-content:center" onclick="Kpsc.csSubmitSchedule(this)">Schedule</button>
+        </div>
+        <p id="cs-schedule-result" class="k-hint" style="margin-top:10px"></p>
+      </div>
+    </div>`;
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+}
+
+async function csSubmitSchedule(btn) {
+  const value = document.getElementById('cs-schedule-at')?.value || '';
+  const result = document.getElementById('cs-schedule-result');
+  const fail = (text) => { if (result) { result.textContent = text; result.style.color = 'var(--red)'; } };
+  if (!value) { fail('Pick a date and time first.'); return; }
+  const when = new Date(value);
+  if (isNaN(when.getTime())) { fail('That date and time could not be read.'); return; }
+  if (when.getTime() <= Date.now()) { fail('Pick a time in the future.'); return; }
+
+  const phones = csSelectedRecipients().map(r => r.phone);
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Scheduling…';
+  try {
+    const res = await apiPost('kpsc-scheduled-sms', {
+      message: (S.committeeSmsMessage || '').trim(),
+      sendAt: when.toISOString(),
+      recipients: JSON.stringify(phones),
+    });
+    if (res?.error) { fail(res.error); return; }
+    document.getElementById('cs-schedule-modal')?.remove();
+    showToast(`Scheduled for ${fmtDateTime(when.toISOString())}.`, 'success');
+  } catch (e) {
+    fail('Could not schedule: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
 }
 
 // ── PIN confirmation gate ─────────────────────────────────────────
@@ -9004,7 +9835,7 @@ const SMS_TYPE_LABELS = {
   reminder: 'Payment reminder', welcome: 'Welcome', payment: 'Payment thank-you',
   new_month: 'Happy New Month', anniversary: 'Anniversary', milestone: 'Milestone',
   premeeting: 'Pre-meeting', actionitem: 'Action item', deadline: 'Deadline', bulk: 'Bulk',
-  scheduled: 'Scheduled blast', test: 'Test SMS',
+  scheduled: 'Scheduled blast', test: 'Test SMS', committee: 'Committee SMS',
 };
 
 async function renderSmsLogs(main) {
@@ -15482,6 +16313,7 @@ function renderAbDraftStep(latestDraft) {
           </button>
           <p id="ab-sms-result" class="k-hint" style="margin-top:8px;display:none"></p>
         </div>
+        <p class="k-hint" style="margin-top:10px">Sending something other than a meeting agenda? The <button class="kbtn-link" onclick="Kpsc.navigate('member_sms')">Committee SMS composer</button> lets you pick recipients, see the page count and check the cost before sending.</p>
       </div>
       ` : `<p class="k-hint" style="padding:20px;text-align:center;background:var(--surface,#f8fafc);border:1px dashed var(--border);border-radius:6px">Click <strong>Generate WhatsApp Message</strong> above to draft the notification.</p>`}
 
@@ -17493,6 +18325,25 @@ window.Kpsc = {
   abCopyMessage,
   abShareWhatsApp,
   abFinalizeAndOpenMeeting,
+  // Committee SMS composer
+  csApplyPreset,
+  csLoadTemplate,
+  csSaveTemplate,
+  csOnMessageInput,
+  csMakeGsm7,
+  csCopyMessage,
+  csClearMessage,
+  csToggle,
+  csToggleGroup,
+  csSelectAll,
+  csAdoptPartnerPhones,
+  csSend,
+  csCloseConfirm,
+  csConfirmSend,
+  csOpenTestModal,
+  csSendTest,
+  csOpenSchedule,
+  csSubmitSchedule,
   // Agenda Builder: Member SMS Blast
   abDraftMemberSms,
   abUpdateSmsCharCount,
