@@ -9993,7 +9993,7 @@ async function renderSmsLogs(main) {
             <div class="k-meeting-card" style="cursor:default">
               <div class="k-mc-top">
                 <div style="flex:1">
-                  <div class="k-mc-title">${esc(log.partnerName || SMS_TYPE_LABELS[log.reminderType] || 'Partner')}${log.phone ? ` <span class="k-hint">· ${esc(log.phone)}</span>` : ''}</div>
+                  <div class="k-mc-title">${esc(log.recipientName || log.partnerName || SMS_TYPE_LABELS[log.reminderType] || 'Recipient')}${log.phone ? ` <span class="k-hint">· ${esc(log.phone)}</span>` : ''}</div>
                   <div class="k-mc-meta">
                     <span class="kbadge badge-type">${esc(SMS_TYPE_LABELS[log.reminderType] || log.reminderType || 'sms')}</span>
                     <span>${esc(fmtDateTime(log.createdAt || log.sentAt))}</span>
@@ -11865,14 +11865,21 @@ async function renderPartnerProgress(main) {
   const unpaidAmountThisMonth = monthSummaries
     .filter(s => !isFutureMonthStat && (s.status === 'partial' || !isBeforePartnerStart(s.partner, month, year)))
     .reduce((sum, s) => sum + s.balance, 0);
-  const expectedMonthlyIncome = activePartners.reduce((sum, p) => sum + Number(p.monthlyPledge || 0), 0);
+  // Expected income is a per-month figure, so a partner whose partnership has
+  // not begun by this month owes nothing for it and must not inflate the total.
+  // Same rule partnerYearSummary already applies when it skips pre-start months,
+  // and it keeps this figure reconcilable: expected = collected + outstanding.
+  const startedPartners = activePartners.filter(p => !isBeforePartnerStart(p, month, year));
+  const notStartedCount = activePartners.length - startedPartners.length;
+  const expectedMonthlyIncome = startedPartners.reduce((sum, p) => sum + Number(p.monthlyPledge || 0), 0);
 
   // Money actually collected for this month, part payments included.
   const paidAmountThisMonth = monthSummaries.reduce((sum, s) => sum + s.collected, 0);
 
-  // Income breakdown by partnership type
+  // Income breakdown by partnership type — same started-by-this-month basis, so
+  // the per-type rows always add up to the Expected Monthly Income above.
   const typeBreakdown = {};
-  activePartners.forEach(p => {
+  startedPartners.forEach(p => {
     const t = p.partnershipType || 'other';
     if (!typeBreakdown[t]) typeBreakdown[t] = { count: 0, expected: 0 };
     typeBreakdown[t].count++;
@@ -11885,7 +11892,7 @@ async function renderPartnerProgress(main) {
         <span style="font-size:12px;color:var(--text3);margin-left:6px">${info.count} partner${info.count !== 1 ? 's' : ''}</span>
       </div>
       <span style="font-weight:700;color:var(--navy)">₦${info.expected.toLocaleString('en-NG')}<span style="font-size:11px;font-weight:400;color:var(--text3)">/mo</span></span>
-    </div>`).join('') || '<div class="k-empty" style="padding:12px 0">No active partners.</div>';
+    </div>`).join('') || `<div class="k-empty" style="padding:12px 0">No partner has started by ${esc(monthName(month))} ${year}.</div>`;
 
   // Apply search + filter for initial render
   let displayPartners = [...activePartners];
@@ -11938,7 +11945,11 @@ async function renderPartnerProgress(main) {
           <div class="k-stat-lbl">Unpaid This Month</div>
           ${unpaidAmountThisMonth > 0 ? `<div style="font-size:12px;font-weight:600;color:var(--amber);margin-top:3px">${fmtNaira(unpaidAmountThisMonth)} outstanding</div>` : ''}
         </div>
-        <div class="k-stat"><div class="k-stat-val">₦${expectedMonthlyIncome.toLocaleString('en-NG')}</div><div class="k-stat-lbl">Expected Monthly Income</div></div>
+        <div class="k-stat">
+          <div class="k-stat-val">₦${expectedMonthlyIncome.toLocaleString('en-NG')}</div>
+          <div class="k-stat-lbl">Expected Monthly Income</div>
+          ${notStartedCount > 0 ? `<div style="font-size:12px;color:var(--text3);margin-top:3px">${startedPartners.length} of ${activePartners.length} started by ${esc(monthName(month))}</div>` : ''}
+        </div>
       </div>
       <div class="k-section" style="margin-top:16px">
         <h3 class="k-sec-title" style="margin-bottom:10px">📊 Expected Monthly Income by Partnership Type</h3>

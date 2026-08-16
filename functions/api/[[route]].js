@@ -9326,6 +9326,38 @@ function resolveCommitteeRecipient(member, index, position) {
 }
 
 /**
+ * Map every phone number we know of to the person it belongs to, so a logged
+ * message can name its recipient even when it has no partner_id (committee
+ * blasts, pre-meeting notices, action-item nudges — all member-directed).
+ *
+ * Roster names win over partner names: these messages go to somebody in their
+ * capacity as a committee member, and the roster is where that name is kept.
+ */
+async function buildRecipientNameIndex(DB) {
+  const byPhone = new Map();
+  const [members, partnerIndex] = await Promise.all([loadKpscRoster(DB), loadPartnerPhoneIndex(DB)]);
+
+  // Roster first, so its names win. Within the roster the FIRST row holding a
+  // number wins, matching sendCommitteeSms — when two members share a phone,
+  // the log must name whoever the message was actually personalised for.
+  members.forEach((m, i) => {
+    const r = resolveCommitteeRecipient(m, partnerIndex, i);
+    if (r.name && r.phone && !byPhone.has(r.phone)) byPhone.set(r.phone, r.name);
+  });
+
+  // Partners fill in numbers the roster doesn't claim.
+  for (const matches of partnerIndex.values()) {
+    for (const p of matches) {
+      const phone = normalizeNgPhone(p.phone);
+      const name = String(p.full_name || '').trim();
+      if (phone && name && !byPhone.has(phone)) byPhone.set(phone, name);
+    }
+  }
+
+  return byPhone;
+}
+
+/**
  * GET /api/kpsc-committee-sms/recipients
  * The committee roster with a sendable phone number resolved for each member.
  */
@@ -10501,16 +10533,24 @@ async function getSmsLogs(DB, url) {
   // Naira charged per SMS page (configurable; Termii default route ≈ ₦5/page).
   const nairaPerPage = await getSmsNairaPerPage(DB);
 
+  // Messages aimed at committee members and staff carry no partner_id, so the
+  // join above leaves them nameless and the log would only say "Committee SMS".
+  // Look the recipient up by destination number instead.
+  const needsLookup = (results || []).some(row => !row.partner_name && (row.phone || '').trim());
+  const nameByPhone = needsLookup ? await buildRecipientNameIndex(DB) : new Map();
+
   const logs = (results || []).map(row => {
     const status = row.status || 'sent';
     const seg = smsPagesInfo(row.message || '');
     // Only successfully-submitted messages are billed by Termii.
     const charged = status === 'sent';
+    const phone = row.phone || row.partner_phone || '';
     return {
       id: row.id,
       partnerId: row.partner_id,
       partnerName: row.partner_name || '',
-      phone: row.phone || row.partner_phone || '',
+      recipientName: row.partner_name || nameByPhone.get(normalizeNgPhone(phone)) || '',
+      phone,
       channel: row.channel || 'sms',
       message: row.message || '',
       messageId: row.message_id || '',
