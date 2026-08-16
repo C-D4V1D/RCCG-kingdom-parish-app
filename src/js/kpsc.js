@@ -6272,7 +6272,7 @@ async function renderCommitteeSms(main) {
   if (S.committeeSmsMessage === null) S.committeeSmsMessage = COMMITTEE_SMS_PRESETS[0].body;
   const live = new Set(csSendableRecipients().map(r => r.phone));
   if (!S.committeeSmsSelected) {
-    S.committeeSmsSelected = new Set(recipients.filter(r => r.phone && r.valid).map(r => r.phone));
+    S.committeeSmsSelected = new Set(csBulkSelectable().map(r => r.phone));
   } else {
     S.committeeSmsSelected = new Set([...S.committeeSmsSelected].filter(p => live.has(p)));
   }
@@ -6348,7 +6348,7 @@ async function renderCommitteeSms(main) {
         </div>` : ''}
         ${invalid.length ? `
         <div class="k-cs-note k-cs-note-warn">
-          <span>⚠️ ${invalid.length} number${invalid.length !== 1 ? 's do' : ' does'} not look like a valid phone number — ${esc(invalid.map(r => r.name).join(', '))}. They are left unticked; fix them on the roster.</span>
+          <span>⚠️ ${invalid.length} number${invalid.length !== 1 ? 's do' : ' does'} not look like a valid phone number — ${esc(invalid.map(r => r.name).join(', '))}. Bulk selection skips them; fix them on the roster, or tick one by hand if you know it is right.</span>
           <button class="kbtn kbtn-sm" onclick="Kpsc.navigate('members')">Open roster</button>
         </div>` : ''}
         ${missing.length ? `
@@ -6385,11 +6385,12 @@ function csRecipientListHtml(recipients) {
     const members = recipients.filter(r => r.group === g.key);
     if (!members.length) return '';
     const dialable = members.filter(r => r.phone);
-    const allTicked = dialable.length > 0 && dialable.every(r => selected.has(r.phone));
+    const selectable = csBulkSelectable(g.key);
+    const allTicked = selectable.length > 0 && selectable.every(r => selected.has(r.phone));
     return `
       <div class="k-cs-group">
         <label class="k-cs-group-hdr">
-          <input type="checkbox" data-cs-group="${esc(g.key)}" ${allTicked ? 'checked' : ''} ${dialable.length ? '' : 'disabled'}
+          <input type="checkbox" data-cs-group="${esc(g.key)}" ${allTicked ? 'checked' : ''} ${selectable.length ? '' : 'disabled'}
             onchange="Kpsc.csToggleGroup('${esc(g.key)}', this.checked)" />
           <span>${g.icon} ${esc(g.label)}</span>
           <span class="k-cs-group-count">${dialable.length}/${members.length}</span>
@@ -6587,51 +6588,66 @@ function csClearMessage() {
   csRefreshSummary();
 }
 
+/**
+ * Members a bulk action may tick: dialable AND not flagged as incomplete.
+ * "Select all" and the group headers deliberately skip numbers that don't look
+ * valid — the note above the list promises they stay unticked. A single
+ * checkbox can still override that for a number we've judged wrongly.
+ * Pass a group key to scope it to one group.
+ */
+function csBulkSelectable(groupKey) {
+  return (S.committeeSms?.recipients || [])
+    .filter(r => r.phone && r.valid && (groupKey === undefined || r.group === groupKey));
+}
+
 function csToggle(phone, checked) {
   if (!phone) return;
   if (!S.committeeSmsSelected) S.committeeSmsSelected = new Set();
   if (checked) S.committeeSmsSelected.add(phone);
   else S.committeeSmsSelected.delete(phone);
-  // Two roster rows can share one number — keep every box for it in step.
-  document.querySelectorAll(`#cs-recipient-list input[data-cs-phone="${phone}"]`)
-    .forEach(box => { box.checked = checked; });
-  csSyncGroupCheckboxes();
+  csSyncCheckboxes();
   csRefreshSummary();
 }
 
 function csToggleGroup(groupKey, checked) {
-  const members = (S.committeeSms?.recipients || []).filter(r => r.group === groupKey && r.phone);
   if (!S.committeeSmsSelected) S.committeeSmsSelected = new Set();
-  for (const r of members) {
-    if (checked) S.committeeSmsSelected.add(r.phone);
-    else S.committeeSmsSelected.delete(r.phone);
-    document.querySelectorAll(`#cs-recipient-list input[data-cs-phone="${r.phone}"]`)
-      .forEach(box => { box.checked = checked; });
+  if (checked) {
+    for (const r of csBulkSelectable(groupKey)) S.committeeSmsSelected.add(r.phone);
+  } else {
+    // Clearing drops everyone in the group, manual overrides included.
+    for (const r of (S.committeeSms?.recipients || [])) {
+      if (r.group === groupKey && r.phone) S.committeeSmsSelected.delete(r.phone);
+    }
   }
-  csSyncGroupCheckboxes();
+  csSyncCheckboxes();
   csRefreshSummary();
 }
 
 function csSelectAll(checked) {
-  if (!S.committeeSmsSelected) S.committeeSmsSelected = new Set();
-  for (const r of csSendableRecipients()) {
-    if (checked) S.committeeSmsSelected.add(r.phone);
-    else S.committeeSmsSelected.delete(r.phone);
+  if (!checked) {
+    S.committeeSmsSelected = new Set();
+  } else {
+    if (!S.committeeSmsSelected) S.committeeSmsSelected = new Set();
+    for (const r of csBulkSelectable()) S.committeeSmsSelected.add(r.phone);
   }
-  document.querySelectorAll('#cs-recipient-list input[data-cs-phone]')
-    .forEach(box => { if (!box.disabled) box.checked = checked; });
-  csSyncGroupCheckboxes();
+  csSyncCheckboxes();
   csRefreshSummary();
 }
 
-/** Re-tick each group header to match the members currently ticked below it. */
-function csSyncGroupCheckboxes() {
+/**
+ * Push the current selection back onto every checkbox. Driving the DOM from
+ * the Set (rather than from whatever was just clicked) keeps two roster rows
+ * that share one number in step, and keeps each group header honest.
+ */
+function csSyncCheckboxes() {
   const selected = S.committeeSmsSelected || new Set();
-  const recipients = S.committeeSms?.recipients || [];
+  document.querySelectorAll('#cs-recipient-list input[data-cs-phone]').forEach(box => {
+    const phone = box.dataset.csPhone;
+    if (phone) box.checked = selected.has(phone);
+  });
   document.querySelectorAll('#cs-recipient-list input[data-cs-group]').forEach(box => {
-    const groupKey = box.dataset.csGroup;
-    const dialable = recipients.filter(r => r.group === groupKey && r.phone);
-    box.checked = dialable.length > 0 && dialable.every(r => selected.has(r.phone));
+    const selectable = csBulkSelectable(box.dataset.csGroup);
+    box.checked = selectable.length > 0 && selectable.every(r => selected.has(r.phone));
   });
 }
 
