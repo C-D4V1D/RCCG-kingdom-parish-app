@@ -9993,7 +9993,7 @@ async function renderSmsLogs(main) {
             <div class="k-meeting-card" style="cursor:default">
               <div class="k-mc-top">
                 <div style="flex:1">
-                  <div class="k-mc-title">${esc(log.partnerName || SMS_TYPE_LABELS[log.reminderType] || 'Partner')}${log.phone ? ` <span class="k-hint">· ${esc(log.phone)}</span>` : ''}</div>
+                  <div class="k-mc-title">${esc(log.recipientName || log.partnerName || SMS_TYPE_LABELS[log.reminderType] || 'Recipient')}${log.phone ? ` <span class="k-hint">· ${esc(log.phone)}</span>` : ''}</div>
                   <div class="k-mc-meta">
                     <span class="kbadge badge-type">${esc(SMS_TYPE_LABELS[log.reminderType] || log.reminderType || 'sms')}</span>
                     <span>${esc(fmtDateTime(log.createdAt || log.sentAt))}</span>

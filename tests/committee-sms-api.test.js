@@ -373,6 +373,74 @@ test('committee SMS requires a signed-in KPSC account', async () => {
   assert.equal(res.status, 401);
 });
 
+// ── SMS Logs names the recipient, not just the message type ───────────────
+function createLogsDB(state, logRows) {
+  return {
+    prepare(sql) {
+      const st = {
+        _bound: [],
+        bind(...args) { st._bound = args; return st; },
+        async first() {
+          if (/FROM kpsc_sessions/.test(sql)) return { account_id: 'ka-test', expires_at: Date.now() + 3_600_000 };
+          if (/FROM kpsc_accounts/.test(sql)) return { id: 'ka-test', name: 'Test Secretary', role: 'general_secretary', status: 'active' };
+          if (/key='kpsc_members'/.test(sql)) return { value: JSON.stringify(state.roster) };
+          if (/key='kpsc_sms_naira_per_page'/.test(sql)) return null;
+          if (/COUNT\(\*\) AS total/.test(sql)) return { total: logRows.length, sent: logRows.length, failed: 0, skipped: 0, delivered: 0, dnd: 0, pending: 0 };
+          if (/FROM settings WHERE key='kpsc_termii_api_key'/.test(sql)) return null;
+          return null;
+        },
+        async all() {
+          if (/FROM kpsc_reminders r/.test(sql)) return { results: logRows };
+          if (/FROM kpsc_partners/.test(sql)) return { results: state.partners || [] };
+          if (/FROM settings WHERE key IN/.test(sql)) {
+            return { results: Object.entries(state.settings || {}).map(([key, value]) => ({ key, value })) };
+          }
+          return { results: [] };
+        },
+        async run() { return { success: true, meta: { changes: 1 } }; },
+      };
+      return st;
+    },
+  };
+}
+
+test('SMS logs name a committee recipient resolved from the destination number', async () => {
+  const state = BASE_STATE();
+  const DB = createLogsDB(state, [
+    { id: 'k1', partner_id: '', phone: '2348031234567', message: 'Meeting today.', status: 'sent', delivery_status: 'delivered', reminder_type: 'committee', sent_at: '2026-08-16T08:48:00.000Z', created_at: '2026-08-16T08:48:00.000Z' },
+    { id: 'k2', partner_id: '', phone: '2348020000001', message: 'Meeting today.', status: 'sent', delivery_status: 'delivered', reminder_type: 'committee', sent_at: '2026-08-16T08:48:00.000Z', created_at: '2026-08-16T08:48:00.000Z' },
+    { id: 'k3', partner_id: '', phone: '2349999999999', message: 'Meeting today.', status: 'sent', delivery_status: 'delivered', reminder_type: 'committee', sent_at: '2026-08-16T08:48:00.000Z', created_at: '2026-08-16T08:48:00.000Z' },
+  ]);
+  const res = await onRequest({
+    request: kpscRequest('https://x.test/api/kpsc-sms-logs?year=2026&month=8'),
+    env: { DB },
+  });
+  const body = await readJson(res);
+  assert.equal(res.status, 200);
+
+  // Roster phone → roster name.
+  assert.equal(body.logs[0].recipientName, 'Bro. John Okeke');
+  // Number inherited from the partner record → still the roster name, since the
+  // message went to them as a committee member.
+  assert.equal(body.logs[1].recipientName, 'Grace Eze');
+  // Nobody we know — falls back to the message-type label in the UI.
+  assert.equal(body.logs[2].recipientName, '');
+});
+
+test('SMS logs keep the joined partner name when there is one', async () => {
+  const state = BASE_STATE();
+  const DB = createLogsDB(state, [
+    { id: 'k1', partner_id: 'P2', partner_name: 'Samuel Ade', phone: '2348020000002', message: 'Pledge reminder.', status: 'sent', reminder_type: 'reminder', sent_at: '2026-08-16T08:00:00.000Z', created_at: '2026-08-16T08:00:00.000Z' },
+  ]);
+  const res = await onRequest({
+    request: kpscRequest('https://x.test/api/kpsc-sms-logs?year=2026&month=8'),
+    env: { DB },
+  });
+  const body = await readJson(res);
+  assert.equal(body.logs[0].partnerName, 'Samuel Ade');
+  assert.equal(body.logs[0].recipientName, 'Samuel Ade');
+});
+
 // ── retry picks the sender ID the original send used ──────────────────────
 function createRetryDB(logRow) {
   const updates = [];
