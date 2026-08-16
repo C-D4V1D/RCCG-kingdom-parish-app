@@ -427,6 +427,47 @@ test('SMS logs name a committee recipient resolved from the destination number',
   assert.equal(body.logs[2].recipientName, '');
 });
 
+test('SMS logs name the member the message was personalised for when two share a number', async () => {
+  // A husband and wife on the roster sharing one handset. sendCommitteeSms
+  // keeps the first roster row for that number, so the log must agree.
+  const state = BASE_STATE();
+  state.roster = [
+    { group: 'men',   name: 'John Okeke', position: 'Secretary', phone: '08031234567' },
+    { group: 'women', name: 'Ada Okeke',  position: '',          phone: '08031234567' },
+  ];
+  const shared = '2348031234567';
+
+  const logsDB = createLogsDB(state, [
+    { id: 'k1', partner_id: '', phone: shared, message: 'Meeting today.', status: 'sent', reminder_type: 'committee', sent_at: '2026-08-16T08:48:00.000Z', created_at: '2026-08-16T08:48:00.000Z' },
+  ]);
+  const logsRes = await onRequest({
+    request: kpscRequest('https://x.test/api/kpsc-sms-logs?year=2026&month=8'),
+    env: { DB: logsDB },
+  });
+  const loggedName = (await readJson(logsRes)).logs[0].recipientName;
+
+  // Now confirm that is the same member the send path personalises for.
+  const { DB } = createDB(state);
+  const termii = stubTermii();
+  let personalisedFor = null;
+  try {
+    await onRequest({
+      request: kpscRequest('https://x.test/api/kpsc-committee-sms', 'POST', {
+        message: 'Dear {{name}}, meeting today.',
+        phones: [shared],
+      }),
+      env: { DB },
+    });
+    assert.equal(termii.calls.length, 1, 'one handset, one message');
+    personalisedFor = termii.calls[0].sms.replace(/^Dear (.*?), meeting today\.$/, '$1');
+  } finally {
+    termii.restore();
+  }
+
+  assert.equal(personalisedFor, 'John Okeke');
+  assert.equal(loggedName, personalisedFor, 'the log must name whoever the message was addressed to');
+});
+
 test('SMS logs keep the joined partner name when there is one', async () => {
   const state = BASE_STATE();
   const DB = createLogsDB(state, [

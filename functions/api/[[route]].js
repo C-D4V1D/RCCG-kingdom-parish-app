@@ -9337,17 +9337,22 @@ async function buildRecipientNameIndex(DB) {
   const byPhone = new Map();
   const [members, partnerIndex] = await Promise.all([loadKpscRoster(DB), loadPartnerPhoneIndex(DB)]);
 
-  // Partners first, so a roster entry for the same number overwrites them.
+  // Roster first, so its names win. Within the roster the FIRST row holding a
+  // number wins, matching sendCommitteeSms — when two members share a phone,
+  // the log must name whoever the message was actually personalised for.
+  members.forEach((m, i) => {
+    const r = resolveCommitteeRecipient(m, partnerIndex, i);
+    if (r.name && r.phone && !byPhone.has(r.phone)) byPhone.set(r.phone, r.name);
+  });
+
+  // Partners fill in numbers the roster doesn't claim.
   for (const matches of partnerIndex.values()) {
     for (const p of matches) {
       const phone = normalizeNgPhone(p.phone);
-      if (phone && !byPhone.has(phone)) byPhone.set(phone, String(p.full_name || '').trim());
+      const name = String(p.full_name || '').trim();
+      if (phone && name && !byPhone.has(phone)) byPhone.set(phone, name);
     }
   }
-  members.forEach((m, i) => {
-    const r = resolveCommitteeRecipient(m, partnerIndex, i);
-    if (r.name && r.phone) byPhone.set(r.phone, r.name);
-  });
 
   return byPhone;
 }
