@@ -906,6 +906,53 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-sms-counter.danger{color:#dc2626;font-weight:600;}
 .k-sms-counter.unicode{color:#7c3aed;}
 
+/* ── Partner Progress: pledge distribution ───────────────────────── */
+.k-tier-list{display:flex;flex-direction:column;gap:14px;}
+.k-tier-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:5px;}
+.k-tier-amt{font-size:14px;font-weight:700;color:var(--navy);}
+.k-tier-count{font-size:12px;color:var(--text2);white-space:nowrap;}
+.k-tier-count strong{color:var(--navy);font-size:13px;}
+.k-tier-bar-bg{height:9px;background:#eceff4;border-radius:5px;overflow:hidden;}
+.k-tier-bar{height:9px;border-radius:5px;background:linear-gradient(90deg,var(--navy-mid),var(--navy));transition:width .35s ease;}
+.k-tier-bar-unset{background:repeating-linear-gradient(45deg,#d8b45c,#d8b45c 5px,#e8cd8e 5px,#e8cd8e 10px);}
+.k-tier-sub{font-size:11px;color:var(--text3);margin-top:4px;line-height:1.5;}
+.k-tier-row-unset .k-tier-amt{color:var(--amber);}
+.k-tier-total{display:flex;justify-content:space-between;align-items:center;
+  margin-top:14px;padding-top:11px;border-top:1px solid var(--border);
+  font-size:13px;font-weight:700;color:var(--navy);}
+
+/* ── Partner Progress: payment health ────────────────────────────── */
+.k-health-headline{display:flex;align-items:center;gap:14px;margin-bottom:12px;}
+.k-health-pct{font-size:34px;font-weight:700;color:var(--green);line-height:1;flex-shrink:0;}
+.k-health-headline-sub{font-size:13px;color:var(--text2);line-height:1.5;}
+.k-health-headline-sub strong{color:var(--navy);}
+.k-health-owed-total{font-size:12px;color:var(--amber);font-weight:600;margin-top:2px;}
+.k-health-stack{display:flex;height:14px;border-radius:7px;overflow:hidden;background:#eceff4;margin-bottom:14px;}
+.k-health-seg{display:block;height:100%;transition:width .35s ease;}
+.k-health-ok  {background:var(--green);}
+.k-health-warn{background:#eab308;}
+.k-health-bad {background:#f97316;}
+.k-health-crit{background:var(--red);}
+.k-health-rows{display:flex;flex-direction:column;gap:2px;}
+.k-health-row{display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+  padding:9px 10px;border:1.5px solid transparent;border-radius:9px;background:none;
+  font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text);cursor:pointer;transition:all .15s;}
+.k-health-row:hover:not(:disabled){background:#f6f8fb;}
+.k-health-row.active{border-color:var(--navy);background:var(--navy-light);}
+.k-health-row:disabled{opacity:.45;cursor:default;}
+.k-health-dot{width:12px;height:12px;border-radius:3px;flex-shrink:0;}
+.k-health-name{flex:1;min-width:0;}
+.k-health-row.active .k-health-name{font-weight:700;color:var(--navy);}
+.k-health-figs{display:flex;align-items:baseline;gap:8px;flex-shrink:0;color:var(--text2);font-size:12px;}
+.k-health-figs strong{font-size:15px;color:var(--navy);}
+.k-health-owed{color:var(--amber);font-weight:600;}
+.k-progress-behind{color:var(--amber);font-weight:600;}
+
+@media (max-width:380px){
+  .k-health-pct{font-size:28px;}
+  .k-health-owed{display:block;}
+}
+
 /* ── Committee SMS composer ──────────────────────────────────────── */
 .k-cs-presets{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}
 .k-cs-preset{padding:7px 12px;border-radius:20px;border:1.5px solid var(--border);background:#f9fafb;

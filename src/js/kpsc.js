@@ -7870,6 +7870,176 @@ function partnerYearSummary(partnerId, year = currentYear()) {
   return { months, collected, expected, outstanding, pct, paidMonths, partialMonths, startMonth };
 }
 
+// ── PARTNER PROGRESS STATISTICS ───────────────────────────────────
+// Canonical source for the helpers below: src/js/partner-progress-stats.js
+// (inlined here because kpsc.js ships as a single minified bundle).
+
+/**
+ * Whole-number percentages that always add up to 100 (largest-remainder
+ * method). Naive rounding gives rows like 50 + 25 + 13 + 13 = 101, which looks
+ * like a bug to anyone checking the arithmetic on a report.
+ */
+function wholePercentages(counts, total) {
+  const list = (counts || []).map(v => Number(v) || 0);
+  const whole = Number(total) || 0;
+  if (whole <= 0) return list.map(() => 0);
+  const exact = list.map(c => (c * 100) / whole);
+  const out = exact.map(Math.floor);
+  const floorSum = out.reduce((a, b) => a + b, 0);
+  // Only top up to 100 when the parts really do make up the whole.
+  const spare = Math.min(Math.round(exact.reduce((a, b) => a + b, 0)), 100) - floorSum;
+  const byFraction = exact
+    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  for (let i = 0; i < spare && i < byFraction.length; i++) out[byFraction[i].index] += 1;
+  return out;
+}
+
+/** Group partners by what they pledge each month. */
+function buildPledgeTiers(pledges, { maxRows = 10 } = {}) {
+  const list = (pledges || []).map(v => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; });
+  const total = list.length;
+  const counts = new Map();
+  for (const amount of list) counts.set(amount, (counts.get(amount) || 0) + 1);
+
+  // A pledge of 0 is missing data, not a tier — it always sits last.
+  const unsetCount = counts.get(0) || 0;
+  counts.delete(0);
+
+  let priced = [...counts.entries()]
+    .map(([amount, count]) => ({ amount, count, income: amount * count }))
+    .sort((a, b) => a.amount - b.amount);
+
+  // Fold the long tail so odd pledges can't produce one row per partner.
+  const room = Math.max(1, maxRows - (unsetCount > 0 ? 1 : 0));
+  let other = null;
+  if (priced.length > room) {
+    const ranked = [...priced].sort((a, b) => b.count - a.count || b.amount - a.amount);
+    const keep = new Set(ranked.slice(0, room - 1).map(t => t.amount));
+    const folded = priced.filter(t => !keep.has(t.amount));
+    priced = priced.filter(t => keep.has(t.amount));
+    other = {
+      amount: 0, isOther: true,
+      count: folded.reduce((sum, t) => sum + t.count, 0),
+      income: folded.reduce((sum, t) => sum + t.income, 0),
+      amounts: folded.map(t => t.amount).sort((a, b) => a - b),
+    };
+  }
+
+  const rows = [...priced];
+  if (other) rows.push(other);
+  if (unsetCount > 0) rows.push({ amount: 0, count: unsetCount, income: 0, isUnset: true });
+
+  const income = rows.reduce((sum, t) => sum + t.income, 0);
+  const pcts = wholePercentages(rows.map(t => t.count), total);
+  const incomePcts = wholePercentages(rows.map(t => t.income), income);
+  const tiers = rows.map((t, i) => ({
+    amount: t.amount, count: t.count, pct: pcts[i],
+    income: t.income, incomePct: incomePcts[i],
+    isUnset: !!t.isUnset, isOther: !!t.isOther, amounts: t.amounts || [],
+  }));
+
+  const commonest = tiers
+    .filter(t => !t.isUnset && !t.isOther)
+    .reduce((best, t) => (!best || t.count > best.count || (t.count === best.count && t.amount < best.amount) ? t : best), null);
+
+  return { total, income, tiers, commonest };
+}
+
+/**
+ * How far behind one partner is, over the months that have actually come due.
+ * A month counts only when money is genuinely outstanding — a partner with no
+ * pledge on record reads as "unpaid" every month but owes nothing.
+ */
+function arrearsFor(months, { startMonth = 1, scopeEndMonth = 12 } = {}) {
+  const list = months || [];
+  const from = Math.max(1, Number(startMonth) || 0);
+  const to = Math.min(12, Number(scopeEndMonth) || 0);
+  let monthsBehind = 0, outstanding = 0, monthsInScope = 0;
+  for (let m = from; m <= to; m++) {
+    const summary = list[m - 1];
+    if (!summary) continue;
+    monthsInScope++;
+    const balance = Number(summary.balance) || 0;
+    if (balance > 0) { monthsBehind++; outstanding += balance; }
+  }
+  return { monthsBehind, outstanding, monthsInScope };
+}
+
+/** Bands the Payment Health bar is split into, best first. */
+const ARREARS_BUCKETS = [
+  { key: 'up-to-date',   label: 'Up to date',       short: 'Up to date', min: 0, max: 0,        cls: 'k-health-ok'   },
+  { key: 'behind-1',     label: '1 month behind',   short: '1 month',    min: 1, max: 1,        cls: 'k-health-warn' },
+  { key: 'behind-2',     label: '2 months behind',  short: '2 months',   min: 2, max: 2,        cls: 'k-health-bad'  },
+  { key: 'behind-3plus', label: '3+ months behind', short: '3+ months',  min: 3, max: Infinity, cls: 'k-health-crit' },
+];
+const ARREARS_FILTER_KEYS = ARREARS_BUCKETS.map(b => b.key);
+
+/** The band a given number of outstanding months falls into. */
+function arrearsBucketKey(monthsBehind) {
+  const n = Math.max(0, Number(monthsBehind) || 0);
+  const bucket = ARREARS_BUCKETS.find(b => n >= b.min && n <= b.max);
+  return bucket ? bucket.key : 'up-to-date';
+}
+
+/** Roll individual arrears up into the four bands. */
+function buildArrearsBuckets(entries) {
+  const list = entries || [];
+  const total = list.length;
+  const tally = new Map(ARREARS_BUCKETS.map(b => [b.key, { count: 0, outstanding: 0 }]));
+  for (const entry of list) {
+    const slot = tally.get(arrearsBucketKey(entry?.monthsBehind));
+    slot.count++;
+    slot.outstanding += Math.max(0, Number(entry?.outstanding) || 0);
+  }
+  const pcts = wholePercentages(ARREARS_BUCKETS.map(b => tally.get(b.key).count), total);
+  const buckets = ARREARS_BUCKETS.map((b, i) => ({
+    key: b.key, label: b.label, short: b.short, cls: b.cls,
+    count: tally.get(b.key).count, pct: pcts[i], outstanding: tally.get(b.key).outstanding,
+  }));
+  return {
+    total,
+    totalOutstanding: buckets.reduce((sum, b) => sum + b.outstanding, 0),
+    upToDate: buckets[0].count,
+    upToDatePct: buckets[0].pct,
+    buckets,
+  };
+}
+
+/**
+ * Last month that has actually come due for the selected period. You cannot be
+ * behind on a month that has not happened yet.
+ */
+function progressScopeEndMonth(month, year, nowMonth, nowYear) {
+  const m = Number(month) || 0, y = Number(year) || 0;
+  if (y > nowYear) return 0;
+  if (y < nowYear) return Math.min(12, Math.max(0, m));
+  return Math.min(Math.max(0, m), nowMonth);
+}
+
+/** Arrears for one partner, bridging the year roll-up to arrearsFor(). */
+function partnerArrears(partner, year, scopeEndMonth) {
+  const ys = partnerYearSummary(partner.id, year);
+  return arrearsFor(ys.months, { startMonth: ys.startMonth, scopeEndMonth });
+}
+
+/**
+ * The partners whose payment health can actually be measured for this period,
+ * each with their arrears attached. A partner is in scope when they have
+ * started, have at least one month that has come due, and have a pledge on
+ * record — without a pledge there is no way to say whether they are behind.
+ *
+ * The Payment Health bands and the filter that opens each band both come from
+ * here, so the count on a band always matches the list behind it.
+ */
+function progressHealthRows(partners, month, year, nowYear, nowMonth) {
+  const scopeEndMonth = progressScopeEndMonth(month, year, nowMonth, nowYear);
+  return (partners || [])
+    .filter(p => !isBeforePartnerStart(p, month, year) && Number(p.monthlyPledge) > 0)
+    .map(p => ({ partner: p, ...partnerArrears(p, year, scopeEndMonth) }))
+    .filter(row => row.monthsInScope > 0);
+}
+
 // Fully settled. Callers that also care about part payments use
 // partnerMonthSummary().status directly.
 function partnerMonthlyPaid(partnerId, month, year = currentYear()) {
@@ -11755,9 +11925,14 @@ function rerenderActionItemsList() {
 
 function _buildProgressRows(partners, month, year, nowYear, nowMonth) {
   const months = [1,2,3,4,5,6,7,8,9,10,11,12];
+  const scopeEndMonth = progressScopeEndMonth(month, year, nowMonth, nowYear);
   return partners.map(partner => {
     const ys = partnerYearSummary(partner.id, year);
     const monthsPaid = ys.paidMonths;
+    const { monthsBehind } = arrearsFor(ys.months, { startMonth: ys.startMonth, scopeEndMonth });
+    const behindLabel = monthsBehind > 0
+      ? ` · <span class="k-progress-behind">${monthsBehind} month${monthsBehind !== 1 ? 's' : ''} behind</span>`
+      : '';
     const pct = ys.pct;
     const isCurrFuture = year > nowYear || (year === nowYear && month > nowMonth);
     const isCurrPreStart = isBeforePartnerStart(partner, month, year);
@@ -11794,7 +11969,7 @@ function _buildProgressRows(partners, month, year, nowYear, nowMonth) {
               <div class="k-progress-bar-bg"><div class="k-progress-bar" style="width:${pct}%"></div></div>
               <span class="k-progress-label">${fmtNaira(ys.collected)}/${fmtNaira(ys.expected)} (${pct}%)</span>
             </div>
-            <div class="k-progress-sub">${monthsPaid}/12 months paid${ys.partialMonths ? ` · ${ys.partialMonths} part paid` : ''}${ys.outstanding > 0 ? ` · ${fmtNaira(ys.outstanding)} outstanding` : ''}</div>
+            <div class="k-progress-sub">${monthsPaid}/12 months paid${ys.partialMonths ? ` · ${ys.partialMonths} part paid` : ''}${ys.outstanding > 0 ? ` · ${fmtNaira(ys.outstanding)} outstanding` : ''}${behindLabel}</div>
           </div>
         </div>
       </div>`;
@@ -11803,6 +11978,50 @@ function _buildProgressRows(partners, month, year, nowYear, nowMonth) {
 
 let _progressSearchTimer = null;
 
+/**
+ * Narrow the active partners down to the current search box and filter chip.
+ * The initial render and every re-render share this so the list can never
+ * disagree with itself about what a filter means.
+ */
+function _filterProgressPartners(partners, month, year, nowYear, nowMonth) {
+  let list = partners;
+  const q = (S.progressSearch || '').toLowerCase();
+  if (q) list = list.filter(p => String(p.fullName || '').toLowerCase().includes(q));
+
+  const filter = S.progressFilter || 'all';
+  if (filter === 'all') return list;
+
+  // Arrears bands span every month that has come due, not just the one on screen.
+  if (ARREARS_FILTER_KEYS.includes(filter)) {
+    const inBand = new Set(
+      progressHealthRows(list, month, year, nowYear, nowMonth)
+        .filter(row => arrearsBucketKey(row.monthsBehind) === filter)
+        .map(row => row.partner.id),
+    );
+    return list.filter(p => inBand.has(p.id));
+  }
+
+  const isFutureMonth = year > nowYear || (year === nowYear && month > nowMonth);
+  // Buckets stay mutually exclusive; a part payment outranks future/not-started
+  // because money has actually come in for that month.
+  const statusOf = p => partnerMonthSummary(p.id, month, year).status;
+  if (filter === 'paid')    return list.filter(p => statusOf(p) === 'paid');
+  if (filter === 'partial') return list.filter(p => statusOf(p) === 'partial');
+  if (filter === 'unpaid')  return list.filter(p => statusOf(p) === 'unpaid' && !isFutureMonth && !isBeforePartnerStart(p, month, year));
+  // Future takes priority over not-started when a month is both (matches the row badge,
+  // which shows "Future" before "Not started") — keeps the two tabs from overlapping.
+  if (filter === 'future')  return list.filter(p => isFutureMonth && statusOf(p) === 'unpaid');
+  if (filter === 'not-started') return list.filter(p => !isFutureMonth && isBeforePartnerStart(p, month, year) && statusOf(p) === 'unpaid');
+  return list;
+}
+
+/** Highlight whichever chip or health band matches the active filter. */
+function _syncProgressFilterButtons() {
+  const filter = S.progressFilter || 'all';
+  document.querySelectorAll('.k-progress-filter-btn, .k-health-row')
+    .forEach(b => b.classList.toggle('active', b.dataset.filter === filter));
+}
+
 function _rerenderProgressRows() {
   const container = document.getElementById('k-progress-rows');
   if (!container) return;
@@ -11810,28 +12029,11 @@ function _rerenderProgressRows() {
   const nowYear = currentYear();
   const nowMonth = currentMonth();
   const month = S.progressMonth || nowMonth;
-  let partners = S.partners.filter(p => p.status === 'active');
-  const q = (S.progressSearch || '').toLowerCase();
-  if (q) partners = partners.filter(p => p.fullName.toLowerCase().includes(q));
-  const isFutureMonth = year > nowYear || (year === nowYear && month > nowMonth);
-  // Buckets stay mutually exclusive; a part payment outranks future/not-started
-  // because money has actually come in for that month.
-  const statusOf = p => partnerMonthSummary(p.id, month, year).status;
-  if (S.progressFilter === 'paid') {
-    partners = partners.filter(p => statusOf(p) === 'paid');
-  } else if (S.progressFilter === 'partial') {
-    partners = partners.filter(p => statusOf(p) === 'partial');
-  } else if (S.progressFilter === 'unpaid') {
-    partners = partners.filter(p => statusOf(p) === 'unpaid' && !isFutureMonth && !isBeforePartnerStart(p, month, year));
-  } else if (S.progressFilter === 'future') {
-    // Future takes priority over not-started when a month is both (matches the row badge,
-    // which shows "Future" before "Not started") — keeps the two tabs from overlapping.
-    partners = partners.filter(p => isFutureMonth && statusOf(p) === 'unpaid');
-  } else if (S.progressFilter === 'not-started') {
-    partners = partners.filter(p => !isFutureMonth && isBeforePartnerStart(p, month, year) && statusOf(p) === 'unpaid');
-  }
+  const partners = _filterProgressPartners(
+    S.partners.filter(p => p.status === 'active'), month, year, nowYear, nowMonth,
+  );
   container.innerHTML = _buildProgressRows(partners, month, year, nowYear, nowMonth) || '<div class="k-empty">No partners match this filter.</div>';
-  document.querySelectorAll('.k-progress-filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === S.progressFilter));
+  _syncProgressFilterButtons();
 }
 
 async function renderPartnerProgress(main) {
@@ -11885,6 +12087,18 @@ async function renderPartnerProgress(main) {
     typeBreakdown[t].count++;
     typeBreakdown[t].expected += Number(p.monthlyPledge || 0);
   });
+  // Pledge Distribution — how the started partners split across pledge amounts.
+  const pledgeTiers = buildPledgeTiers(startedPartners.map(p => p.monthlyPledge));
+
+  // Payment Health — arrears across every month that has actually come due.
+  // Partners with no pledge on record are left out rather than counted as up to
+  // date: we cannot say whether they are behind, and folding them in would
+  // flatter the collection rate. The Pledge Distribution above names them.
+  const scopeEndMonth = progressScopeEndMonth(month, year, nowMonth, nowYear);
+  const healthRows = progressHealthRows(activePartners, month, year, nowYear, nowMonth);
+  const unmeasurable = startedPartners.filter(p => !(Number(p.monthlyPledge) > 0)).length;
+  const health = buildArrearsBuckets(healthRows);
+
   const typeBreakdownHtml = Object.entries(typeBreakdown).map(([type, info]) => `
     <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
       <div>
@@ -11894,24 +12108,8 @@ async function renderPartnerProgress(main) {
       <span style="font-weight:700;color:var(--navy)">₦${info.expected.toLocaleString('en-NG')}<span style="font-size:11px;font-weight:400;color:var(--text3)">/mo</span></span>
     </div>`).join('') || `<div class="k-empty" style="padding:12px 0">No partner has started by ${esc(monthName(month))} ${year}.</div>`;
 
-  // Apply search + filter for initial render
-  let displayPartners = [...activePartners];
-  const q = (S.progressSearch || '').toLowerCase();
-  if (q) displayPartners = displayPartners.filter(p => p.fullName.toLowerCase().includes(q));
-  const isFutureMonth = year > nowYear || (year === nowYear && month > nowMonth);
-  // Same bucketing as _rerenderProgressRows — keep the two in step.
-  const statusOfDisplay = p => partnerMonthSummary(p.id, month, year).status;
-  if (S.progressFilter === 'paid') {
-    displayPartners = displayPartners.filter(p => statusOfDisplay(p) === 'paid');
-  } else if (S.progressFilter === 'partial') {
-    displayPartners = displayPartners.filter(p => statusOfDisplay(p) === 'partial');
-  } else if (S.progressFilter === 'unpaid') {
-    displayPartners = displayPartners.filter(p => statusOfDisplay(p) === 'unpaid' && !isFutureMonth && !isBeforePartnerStart(p, month, year));
-  } else if (S.progressFilter === 'future') {
-    displayPartners = displayPartners.filter(p => isFutureMonth && statusOfDisplay(p) === 'unpaid');
-  } else if (S.progressFilter === 'not-started') {
-    displayPartners = displayPartners.filter(p => !isFutureMonth && isBeforePartnerStart(p, month, year) && statusOfDisplay(p) === 'unpaid');
-  }
+  // Apply search + filter for initial render — same helper the re-render uses.
+  const displayPartners = _filterProgressPartners(activePartners, month, year, nowYear, nowMonth);
 
   const pf = S.progressFilter || 'all';
   const progressRows = _buildProgressRows(displayPartners, month, year, nowYear, nowMonth);
@@ -11925,7 +12123,7 @@ async function renderPartnerProgress(main) {
           <select class="k-input k-input-sm" style="width:auto" onchange="Kpsc.setReportsYear(this.value)">${yearOpts}</select>
         </div>
       </div>
-      <p class="k-page-hint">Progress view — pledge amounts are private and not shown here.</p>
+      <p class="k-page-hint">Progress view — no partner's own pledge is shown. Every figure below is an aggregate across partners.</p>
       ${renderPendingCardBanner()}
       <div class="k-dash-stats">
         <div class="k-stat"><div class="k-stat-val">${activePartners.length}</div><div class="k-stat-lbl">Active Partners</div></div>
@@ -11959,6 +12157,8 @@ async function renderPartnerProgress(main) {
           <span style="color:var(--navy)">₦${expectedMonthlyIncome.toLocaleString('en-NG')}/mo</span>
         </div>
       </div>
+      ${renderPledgeTiersSection(pledgeTiers, month)}
+      ${renderPaymentHealthSection(health, month, year, scopeEndMonth, unmeasurable)}
       <div class="k-progress-filter" id="k-progress-filter-bar">
         <button class="k-progress-filter-btn ${pf==='all'?'active':''}" data-filter="all" onclick="Kpsc.setProgressFilter('all')">All</button>
         <button class="k-progress-filter-btn k-pf-paid ${pf==='paid'?'active':''}" data-filter="paid" onclick="Kpsc.setProgressFilter('paid')"><span class="k-dot-cell k-dot-paid" style="width:10px;height:10px;flex-shrink:0"></span>Paid</button>
@@ -11977,6 +12177,98 @@ async function renderPartnerProgress(main) {
       <input class="k-input" type="search" placeholder="🔍 Search by name…"
         value="${esc(S.progressSearch || '')}" oninput="Kpsc.setProgressSearch(this.value)" style="margin-bottom:12px" />
       <div id="k-progress-rows" class="k-meeting-list">${progressRows || '<div class="k-empty">No active partners available.</div>'}</div>
+    </div>`;
+}
+
+/**
+ * 💰 Pledge Distribution — one bar per pledge amount, showing how many partners
+ * give that much and how much of the month's expected income they bring in.
+ * Bars (not a pie) because comparing lengths beats comparing angles, and a
+ * ranked list still reads on a phone once there are more than three slices.
+ */
+function renderPledgeTiersSection(tiers, month) {
+  const { total, income, commonest } = tiers;
+  const rows = tiers.tiers.map(tier => {
+    const label = tier.isUnset ? 'No pledge set'
+      : tier.isOther ? 'Other amounts'
+      : fmtNaira(tier.amount);
+    const sub = tier.isUnset
+      ? 'Set their monthly pledge so they count toward expected income'
+      : tier.isOther
+        ? `${tier.amounts.map(a => fmtNaira(a)).join(', ')} · ${fmtNaira(tier.income)}/mo`
+        : `${fmtNaira(tier.income)}/mo · ${tier.incomePct}% of expected income`;
+    const barCls = tier.isUnset ? 'k-tier-bar k-tier-bar-unset' : 'k-tier-bar';
+    return `
+      <div class="k-tier-row${tier.isUnset ? ' k-tier-row-unset' : ''}">
+        <div class="k-tier-head">
+          <span class="k-tier-amt">${esc(label)}</span>
+          <span class="k-tier-count">${tier.count} partner${tier.count !== 1 ? 's' : ''} · <strong>${tier.pct}%</strong></span>
+        </div>
+        <div class="k-tier-bar-bg"><div class="${barCls}" style="width:${Math.max(tier.pct, tier.count > 0 ? 2 : 0)}%"></div></div>
+        <div class="k-tier-sub">${esc(sub)}</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="k-section" style="margin-top:16px">
+      <h3 class="k-sec-title" style="margin-bottom:6px">💰 Pledge Distribution</h3>
+      <p class="k-hint" style="margin:0 0 12px">${total} partner${total !== 1 ? 's' : ''} giving in ${esc(monthName(month))}${commonest ? ` · most common pledge <strong>${fmtNaira(commonest.amount)}</strong> (${commonest.count} partner${commonest.count !== 1 ? 's' : ''})` : ''}</p>
+      ${total ? `<div class="k-tier-list">${rows}</div>
+      <div class="k-tier-total"><span>${total} partners</span><span>${fmtNaira(income)}/mo</span></div>`
+        : `<div class="k-empty" style="padding:12px 0">No partner has started by ${esc(monthName(month))}.</div>`}
+    </div>`;
+}
+
+/**
+ * 📈 Payment Health — one stacked bar plus a tappable band per arrears level.
+ * Tapping a band filters the partner list below, so "3 people are 3+ months
+ * behind" turns straight into "here they are" rather than a dead statistic.
+ */
+function renderPaymentHealthSection(health, month, year, scopeEndMonth, unmeasurable = 0) {
+  if (scopeEndMonth <= 0 || health.total === 0) {
+    // Two very different reasons for an empty panel — saying the wrong one
+    // would send someone hunting for a problem that isn't there.
+    const reason = unmeasurable > 0
+      ? `No pledge is on record for ${unmeasurable === 1 ? 'the partner giving' : `any of the ${unmeasurable} partners giving`} in ${esc(monthName(month))}, so there is no way to tell who is behind. Set their monthly pledge to start tracking this.`
+      : `No month has come due for ${esc(monthName(month))} ${year} yet, so there is nothing to be behind on.`;
+    return `
+      <div class="k-section">
+        <h3 class="k-sec-title" style="margin-bottom:6px">📈 Payment Health</h3>
+        <div class="k-empty" style="padding:12px 0">${reason}</div>
+      </div>`;
+  }
+
+  const stack = health.buckets.filter(b => b.count > 0).map(b => `
+    <span class="k-health-seg ${b.cls}" style="width:${b.pct}%"
+      title="${esc(b.label)}: ${b.count} partner${b.count !== 1 ? 's' : ''} (${b.pct}%)"></span>`).join('');
+
+  const rows = health.buckets.map(b => `
+    <button type="button" class="k-health-row${(S.progressFilter || 'all') === b.key ? ' active' : ''}"
+      data-filter="${esc(b.key)}" onclick="Kpsc.setProgressArrearsFilter('${esc(b.key)}')"
+      ${b.count === 0 ? 'disabled' : ''}>
+      <span class="k-health-dot ${b.cls}"></span>
+      <span class="k-health-name">${esc(b.label)}</span>
+      <span class="k-health-figs">
+        <strong>${b.count}</strong> · ${b.pct}%
+        ${b.outstanding > 0 ? `<span class="k-health-owed">${fmtNaira(b.outstanding)} owed</span>` : ''}
+      </span>
+    </button>`).join('');
+
+  const asAt = `${monthName(scopeEndMonth)} ${year}`;
+  return `
+    <div class="k-section">
+      <h3 class="k-sec-title" style="margin-bottom:6px">📈 Payment Health</h3>
+      <p class="k-hint" style="margin:0 0 12px">Months still owing as at ${esc(asAt)}, counted from each partner's own start month. Tap a band to see who is in it.</p>
+      <div class="k-health-headline">
+        <div class="k-health-pct">${health.upToDatePct}%</div>
+        <div class="k-health-headline-sub">
+          <strong>${health.upToDate} of ${health.total}</strong> partners fully up to date
+          ${health.totalOutstanding > 0 ? `<div class="k-health-owed-total">${fmtNaira(health.totalOutstanding)} outstanding in total</div>` : ''}
+        </div>
+      </div>
+      <div class="k-health-stack" role="img" aria-label="${health.upToDatePct}% of partners up to date">${stack}</div>
+      <div class="k-health-rows">${rows}</div>
+      ${unmeasurable > 0 ? `<p class="k-hint" style="margin-top:10px">${unmeasurable} partner${unmeasurable !== 1 ? 's are' : ' is'} not counted here — no monthly pledge on record, so there is no way to tell whether they are behind.</p>` : ''}
     </div>`;
 }
 
@@ -11999,6 +12291,18 @@ function setProgressMonth(month) {
 function setProgressFilter(filter) {
   S.progressFilter = String(filter || 'all');
   _rerenderProgressRows();
+}
+
+/**
+ * Filter by an arrears band. Tapping the same band again clears it, so a band
+ * is a toggle rather than a state you can only escape via the "All" chip.
+ */
+function setProgressArrearsFilter(key) {
+  const next = String(key || '');
+  S.progressFilter = (S.progressFilter === next) ? 'all' : next;
+  _rerenderProgressRows();
+  // The list lives below the fold on a phone — take the reader to the answer.
+  document.getElementById('k-progress-rows')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function setProgressSearch(search) {
@@ -18169,6 +18473,7 @@ window.Kpsc = {
   setProgressMonth,
   setProgressFilter,
   setProgressSearch,
+  setProgressArrearsFilter,
   setReportsMonth,
   setReportsFilter,
   setReportsSearch,
