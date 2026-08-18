@@ -535,16 +535,160 @@ const INCOME_NUMERIC_SNAKE_COLS = Object.values(INCOME_CAMEL_TO_SNAKE);
 const num = (v) => Number(v) || 0;
 function isSundayCollectionSource(source) { return !source || source === 'sunday_collection'; }
 
+// ── ADMIN-DEFINED (CUSTOM) COLLECTION TYPES ─────────────────────────────────
+// New Sunday-collection types keep appearing (Weekend Offering and Holy Communion
+// Offering were both added long after the first release, each needing a schema
+// change and a code deploy). IT Admin can now define them in Admin → Collection
+// Types instead. The definitions live in the `customIncomeTypes` setting; the
+// per-record amounts live in the income.custom_collections JSON column keyed by
+// the type's generated `custom_*` key — so a new type never needs an ALTER TABLE.
+//
+// On the wire the amounts are flattened onto the income record as ordinary
+// top-level fields (income.custom_harvest_offering = 1500), exactly like the
+// built-in camelCase fields, so every existing client/report path that reads
+// `record[typeKey]` works with custom types untouched.
+const CUSTOM_INCOME_KEY_RE = /^custom_[a-z0-9_]{1,60}$/;
+const CUSTOM_INCOME_LABEL_MAX = 60;
+
+/**
+ * Custom labels are typed by an IT Admin but end up inside generated HTML on the
+ * client (summaries, printable reports, shared statements). Stripping the markup
+ * characters here — the same rule the client applies — keeps the stored label safe
+ * as HTML text and inside double-quoted attributes on every render path.
+ */
+function sanitizeCustomIncomeLabel(raw) {
+  return String(raw || '')
+    .replace(/[<>"`\u0000-\u001F\u007F]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, CUSTOM_INCOME_LABEL_MAX);
+}
+
+/** Parse the stored income.custom_collections JSON into a clean {key: amount} map. */
+function parseCustomCollections(raw) {
+  const parsed = safeJsonParse(raw, null);
+  const out = {};
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return out;
+  for (const [k, v] of Object.entries(parsed)) {
+    if (!CUSTOM_INCOME_KEY_RE.test(k)) continue;
+    const n = num(v);
+    if (n) out[k] = n;
+  }
+  return out;
+}
+
+/**
+ * Pull custom-type amounts out of an incoming payload. Accepts either a nested
+ * `customCollections` object or the flattened `custom_*` top-level fields the
+ * client (and a backup export) sends — never both, so nothing is double-counted.
+ */
+function extractCustomCollections(data) {
+  if (!data || typeof data !== 'object') return {};
+  const nested = data.customCollections;
+  const src = (nested && typeof nested === 'object' && !Array.isArray(nested)) ? nested : data;
+  const out = {};
+  for (const [k, v] of Object.entries(src)) {
+    if (!CUSTOM_INCOME_KEY_RE.test(k)) continue;
+    const n = num(v);
+    if (n) out[k] = n;
+  }
+  return out;
+}
+
+function sumCustomCollections(map) {
+  return Object.values(map || {}).reduce((s, v) => s + num(v), 0);
+}
+
+function addCustomCollections(...maps) {
+  const out = {};
+  for (const m of maps) {
+    for (const [k, v] of Object.entries(m || {})) {
+      const n = num(out[k]) + num(v);
+      if (n) out[k] = Math.round(n * 100) / 100;
+      else delete out[k];
+    }
+  }
+  return out;
+}
+
+/**
+ * Persist a record's custom-type amounts. The column is added by handleInit, which
+ * every login runs, so it exists long before an admin can define a type. Should the
+ * write still fail (an un-migrated DB), the built-in types are unaffected — but log
+ * it, because the record's total would then include an amount with no type behind it.
+ */
+async function saveCustomCollections(DB, id, map) {
+  try {
+    await DB.prepare(`UPDATE income SET custom_collections=? WHERE id=?`)
+      .bind(JSON.stringify(map || {}), id).run();
+  } catch (e) {
+    console.error(`[income] could not store custom collection types on ${id}:`, e.message);
+  }
+}
+
+/**
+ * Validate/normalize the admin-defined collection-type list before it is stored.
+ * Guards the whole app against a malformed key ever reaching the income records:
+ * anything without a well-formed `custom_*` key and a label is dropped, the
+ * National share is clamped to 0–100%, and Local is always derived from it.
+ */
+function normalizeCustomIncomeTypeDefs(raw) {
+  const list = Array.isArray(raw) ? raw : safeJsonParse(raw, []);
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const out = [];
+  list.forEach((t, i) => {
+    if (!t || typeof t !== 'object') return;
+    const key = String(t.key || '').trim();
+    const label = sanitizeCustomIncomeLabel(t.label);
+    if (!CUSTOM_INCOME_KEY_RE.test(key) || seen.has(key) || !label) return;
+    let natl = Number(t.natl);
+    if (!isFinite(natl) || natl < 0) natl = 0;
+    if (natl > 1) natl = 1;
+    natl = Math.round(natl * 10000) / 10000;
+    seen.add(key);
+    out.push({
+      key,
+      label,
+      natl,
+      local: Math.round((1 - natl) * 10000) / 10000,
+      active: t.active !== false,
+      order: Number.isFinite(Number(t.order)) ? Number(t.order) : i,
+      createdAt: String(t.createdAt || ''),
+      createdBy: String(t.createdBy || ''),
+    });
+  });
+  out.sort((a, b) => a.order - b.order);
+  return out.map((t, i) => ({ ...t, order: i }));
+}
+
+/** {key: label} for the admin-defined types, used for human-readable merge notes. */
+async function getCustomIncomeTypeLabels(DB) {
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='customIncomeTypes'`).first();
+    const list = safeJsonParse(row?.value, null);
+    const out = {};
+    if (Array.isArray(list)) {
+      for (const t of list) {
+        if (t && CUSTOM_INCOME_KEY_RE.test(String(t.key || ''))) out[t.key] = String(t.label || t.key);
+      }
+    }
+    return out;
+  } catch { return {}; }
+}
+
 /** Fold a new Sunday-collection submission (camelCase `data`) into an existing DB row. */
 async function mergeIntoIncome(DB, existing, data) {
   const merged = {};
   for (const [camel, snake] of Object.entries(INCOME_CAMEL_TO_SNAKE)) {
     merged[snake] = num(existing[snake]) + num(data[camel]);
   }
+  const addedCustom  = extractCustomCollections(data);
+  const mergedCustom = addCustomCollections(parseCustomCollections(existing.custom_collections), addedCustom);
   merged.total_collection = Math.round((
     merged.members_tithe + merged.ministers_tithe + merged.thanksgiving + merged.sunday_school +
     merged.slo + merged.crm + merged.workers_offering + merged.first_fruit + merged.children_offering +
-    merged.weekend_offering + merged.holy_communion_offering
+    merged.weekend_offering + merged.holy_communion_offering + sumCustomCollections(mergedCustom)
   ) * 100) / 100;
 
   let bankTransferDetails = existing.bank_transfer_details || '';
@@ -554,15 +698,19 @@ async function mergeIntoIncome(DB, existing, data) {
     bankTransferDetails = JSON.stringify([...(Array.isArray(prev) ? prev : []), ...(Array.isArray(next) ? next : [])]);
   }
 
+  const customLabels = await getCustomIncomeTypeLabels(DB);
   const addedTypeTotal = Object.keys(INCOME_TYPE_LABELS).reduce((s, snake) => {
     const camel = Object.keys(INCOME_CAMEL_TO_SNAKE).find(c => INCOME_CAMEL_TO_SNAKE[c] === snake);
     return s + num(data[camel]);
-  }, 0);
+  }, 0) + sumCustomCollections(addedCustom);
   const addedTotal = Math.round((num(data.totalCollection) || addedTypeTotal) * 100) / 100;
-  const addedTypes = Object.entries(INCOME_CAMEL_TO_SNAKE)
-    .filter(([camel, snake]) => INCOME_TYPE_LABELS[snake] && num(data[camel]) > 0)
-    .map(([camel, snake]) => `${INCOME_TYPE_LABELS[snake]}: ${num(data[camel]).toLocaleString('en-NG')}`)
-    .join(', ');
+  const addedTypes = [
+    ...Object.entries(INCOME_CAMEL_TO_SNAKE)
+      .filter(([camel, snake]) => INCOME_TYPE_LABELS[snake] && num(data[camel]) > 0)
+      .map(([camel, snake]) => `${INCOME_TYPE_LABELS[snake]}: ${num(data[camel]).toLocaleString('en-NG')}`),
+    ...Object.entries(addedCustom)
+      .map(([key, amt]) => `${customLabels[key] || key}: ${num(amt).toLocaleString('en-NG')}`),
+  ].join(', ');
   const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
   const auditLine = `[+₦${addedTotal.toLocaleString('en-NG')} merged in by ${data.recordedBy || 'unknown'} at ${stamp}${addedTypes ? ` — ${addedTypes}` : ''}${data.usher ? ` (counted with ${data.usher})` : ''}]`;
   const mergedNotes = [existing.notes, auditLine, data.notes].filter(Boolean).join('\n');
@@ -581,8 +729,10 @@ async function mergeIntoIncome(DB, existing, data) {
     merged.bank_transfer_amount, merged.direct_petty_cash, bankTransferDetails, mergedNotes,
     existing.id,
   ).run();
+  await saveCustomCollections(DB, existing.id, mergedCustom);
 
   return ok({
+    ...mergedCustom,
     id:                    existing.id,
     date:                  existing.date,
     membersTithe:          merged.members_tithe,
@@ -627,6 +777,8 @@ async function mergeDuplicateSundayCollections(DB) {
   `).all();
   if (!dupDates || !dupDates.length) return;
 
+  const customLabels = await getCustomIncomeTypeLabels(DB);
+
   for (const { date } of dupDates) {
     const { results: rows } = await DB.prepare(
       `SELECT * FROM income WHERE date=? AND (source='sunday_collection' OR source IS NULL OR source='') ORDER BY created_at ASC, id ASC`
@@ -638,10 +790,14 @@ async function mergeDuplicateSundayCollections(DB) {
     for (const snake of INCOME_NUMERIC_SNAKE_COLS) {
       merged[snake] = dupes.reduce((sum, r) => sum + num(r[snake]), num(survivor[snake]));
     }
+    const mergedCustom = addCustomCollections(
+      parseCustomCollections(survivor.custom_collections),
+      ...dupes.map(d => parseCustomCollections(d.custom_collections)),
+    );
     merged.total_collection = Math.round((
       merged.members_tithe + merged.ministers_tithe + merged.thanksgiving + merged.sunday_school +
       merged.slo + merged.crm + merged.workers_offering + merged.first_fruit + merged.children_offering +
-      merged.weekend_offering + merged.holy_communion_offering
+      merged.weekend_offering + merged.holy_communion_offering + sumCustomCollections(mergedCustom)
     ) * 100) / 100;
 
     let bankTransferDetails = safeJsonParse(survivor.bank_transfer_details, []);
@@ -652,10 +808,13 @@ async function mergeDuplicateSundayCollections(DB) {
     }
 
     const dupSummaries = dupes.map(d => {
-      const parts = Object.keys(INCOME_TYPE_LABELS)
-        .filter(snake => num(d[snake]) > 0)
-        .map(snake => `${INCOME_TYPE_LABELS[snake]}: ₦${num(d[snake]).toLocaleString('en-NG')}`)
-        .join(', ');
+      const parts = [
+        ...Object.keys(INCOME_TYPE_LABELS)
+          .filter(snake => num(d[snake]) > 0)
+          .map(snake => `${INCOME_TYPE_LABELS[snake]}: ₦${num(d[snake]).toLocaleString('en-NG')}`),
+        ...Object.entries(parseCustomCollections(d.custom_collections))
+          .map(([key, amt]) => `${customLabels[key] || key}: ₦${num(amt).toLocaleString('en-NG')}`),
+      ].join(', ');
       return `[Auto-merged ₦${num(d.total_collection).toLocaleString('en-NG')} from duplicate entry recorded by ${d.recorded_by || 'unknown'} at ${d.created_at}${parts ? ` — ${parts}` : ''}]`;
     });
     const mergedNotes = [survivor.notes, ...dupSummaries].filter(Boolean).join('\n');
@@ -674,6 +833,7 @@ async function mergeDuplicateSundayCollections(DB) {
       merged.bank_transfer_amount, merged.direct_petty_cash, JSON.stringify(bankTransferDetails), mergedNotes,
       survivor.id,
     ).run();
+    await saveCustomCollections(DB, survivor.id, mergedCustom);
 
     // Re-point deposits and expenses linked to the duplicate rows onto the survivor so
     // per-record deposit/expense tracking for this Sunday stays complete, then drop the
@@ -1667,6 +1827,7 @@ async function handleInit(DB) {
       children_offering     REAL DEFAULT 0,
       weekend_offering      REAL DEFAULT 0,
       holy_communion_offering REAL DEFAULT 0,
+      custom_collections    TEXT DEFAULT '',
       total_collection      REAL DEFAULT 0,
       bank_transfer_amount  REAL DEFAULT 0,
       direct_petty_cash     REAL DEFAULT 0,
@@ -2174,6 +2335,9 @@ async function handleInit(DB) {
     `ALTER TABLE income RENAME COLUMN training_weekend TO weekend_offering`,
     `ALTER TABLE income ADD COLUMN bank_transfer_details TEXT DEFAULT ''`,
     `ALTER TABLE income ADD COLUMN holy_communion_offering REAL DEFAULT 0`,
+    // Amounts for admin-defined collection types (Admin → Collection Types), stored as
+    // a {customKey: amount} JSON map so a new type never needs its own column.
+    `ALTER TABLE income ADD COLUMN custom_collections TEXT DEFAULT ''`,
     // Expense columns
     `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
     `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
@@ -2362,6 +2526,9 @@ async function handleInit(DB) {
       provinceRebate:0.20,
       crmAddon:0.25, coastline:0.01, insuranceGenTithe:0.0125, insuranceMinTithe:0.0125
     }),
+    // Admin-defined Sunday collection types (Admin → Collection Types). Empty by
+    // default — the eleven built-in RCCG types are hard-coded in the client.
+    customIncomeTypes: JSON.stringify([]),
     kpsc_default_pin: '1234',
     // Default to the mini variant — ~half the cost of gpt-4o-transcribe
     // with very similar accuracy on typical meeting-room speech. The
@@ -2751,6 +2918,11 @@ function inferIncomePaymentMethod(row) {
 async function getIncome(DB) {
   const { results } = await DB.prepare(`SELECT * FROM income ORDER BY date DESC, created_at DESC`).all();
   return ok((results || []).map(row => ({
+    // Admin-defined collection types are flattened onto the record as ordinary
+    // top-level fields (see parseCustomCollections) so every consumer that reads
+    // record[typeKey] handles them exactly like the built-in types. Spread first
+    // so a built-in field can never be shadowed by stored JSON.
+    ...parseCustomCollections(row.custom_collections),
     id:                  row.id,
     date:                row.date,
     membersTithe:        row.members_tithe,
@@ -2981,6 +3153,11 @@ async function createIncome(DB, data) {
   if (data.bankTransferDetails) {
     try { await DB.prepare(`UPDATE income SET bank_transfer_details=? WHERE id=?`).bind(data.bankTransferDetails, id).run(); } catch(e){}
   }
+  // Amounts for admin-defined collection types live in their own JSON column, so they
+  // are written after the insert — this keeps every legacy-schema INSERT branch above
+  // untouched and degrades to a no-op on a DB that hasn't run the migration yet.
+  const customAmounts = extractCustomCollections(data);
+  if (Object.keys(customAmounts).length) await saveCustomCollections(DB, id, customAmounts);
   return ok({ ...data, id });
 }async function updateIncome(DB, id, data) {
   // Used for confirming bank deposit
@@ -4030,7 +4207,8 @@ async function getSettings(DB) {
 
 async function saveSettings(DB, data) {
   for (const [key, value] of Object.entries(data)) {
-    const stored = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    const clean = key === 'customIncomeTypes' ? normalizeCustomIncomeTypeDefs(value) : value;
+    const stored = typeof clean === 'object' ? JSON.stringify(clean) : String(clean);
     await DB.prepare(`INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)`).bind(key, stored).run();
   }
   return ok({ saved: true });
@@ -11518,4 +11696,4 @@ async function getSharedReport(DB, token) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient };
+export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings };

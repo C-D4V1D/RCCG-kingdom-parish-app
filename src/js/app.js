@@ -243,7 +243,10 @@ async function manuallyApproveDeposit(txId){
 // Tolerance for TG split validation — percentages must sum within ±0.1% to allow for floating-point rounding
 const TG_SUM_TOLERANCE = 0.001;
 
-const INCOME_TYPES = [
+// The eleven RCCG collection types that ship with the app. Each has its own column
+// on the income table and its own remittance rule, so this list is never edited at
+// runtime — new parish-level types are added by IT Admin instead (see below).
+const BUILTIN_INCOME_TYPES = [
   { key:'membersTithe',    label:"Members' Tithe",         natl:0.58, local:0.42 },
   { key:'ministersTithe',  label:"Ministers' Tithe",       natl:0.62, local:0.38 },
   { key:'thanksgiving',    label:'Thanksgiving (TG)',      special:'tg' },
@@ -256,6 +259,113 @@ const INCOME_TYPES = [
   { key:'weekendOffering', label:'Weekend Offering',               natl:1.00, local:0 },
   { key:'holyCommunionOffering', label:'Holy Communion Offering',  natl:1.00, local:0 }
 ];
+
+// ── ADMIN-DEFINED (CUSTOM) COLLECTION TYPES ────────────────────────────────
+// Weekend Offering and Holy Communion Offering were both introduced long after
+// the parish started using this app, and each needed a code change. IT Admin can
+// now add a new collection type from Admin Panel → Collection Types, and it flows
+// straight through every screen that reads INCOME_TYPES: the Sunday Collections
+// form, income summaries, the remittance calculator, Part A of the remittance
+// report, the monthly/weekly statements and the Remittance Rates editor.
+//
+// The live list below is the built-ins followed by the admin-defined types. It is
+// mutated IN PLACE by applyCustomIncomeTypes (never reassigned) so every module
+// scope that closed over it keeps seeing the current set.
+const INCOME_TYPES = [...BUILTIN_INCOME_TYPES];
+
+// Custom keys are always `custom_<slug>`. The prefix keeps them from ever colliding
+// with a built-in camelCase key, with a DOM id, or with an income-table column.
+const CUSTOM_INCOME_KEY_RE = /^custom_[a-z0-9_]{1,60}$/;
+const CUSTOM_INCOME_LABEL_MAX = 60;
+
+// Custom labels are typed by an IT Admin but end up inside dozens of generated HTML
+// strings (summaries, printable reports, shared statements). Stripping the markup
+// characters at the point the label is normalised — on the client AND on the server —
+// makes the stored label safe as HTML text and inside double-quoted attributes
+// everywhere, whichever render path it reaches. Labels are never interpolated into an
+// inline JS handler; those take the `custom_*` key, which the key regex already limits
+// to lowercase letters, digits and underscores.
+function sanitizeCustomIncomeLabel(raw){
+  return String(raw||'')
+    .replace(/[<>"`\u0000-\u001F\u007F]/g,'')
+    .replace(/\s+/g,' ')
+    .trim()
+    .slice(0,CUSTOM_INCOME_LABEL_MAX);
+}
+
+/** Turn a user-typed label into a unique `custom_*` key. */
+function customIncomeKeyFromLabel(label, takenKeys = []){
+  const slug = String(label||'').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,50);
+  const base = 'custom_' + (slug || 'collection');
+  const taken = new Set(takenKeys);
+  if(!taken.has(base)) return base;
+  for(let i=2; i<1000; i++){ const k = `${base}_${i}`; if(!taken.has(k)) return k; }
+  return `${base}_${Date.now().toString(36)}`;
+}
+
+/** Clean the raw `customIncomeTypes` setting into a predictable, ordered list. */
+function normalizeCustomIncomeTypes(raw){
+  let list = raw;
+  if(typeof list === 'string'){ try { list = JSON.parse(list); } catch { list = []; } }
+  if(!Array.isArray(list)) return [];
+  const seen = new Set();
+  const out = [];
+  list.forEach((t,i)=>{
+    if(!t || typeof t !== 'object') return;
+    const key = String(t.key||'').trim();
+    const label = sanitizeCustomIncomeLabel(t.label);
+    if(!CUSTOM_INCOME_KEY_RE.test(key) || seen.has(key) || !label) return;
+    let natl = Number(t.natl);
+    if(!isFinite(natl) || natl < 0) natl = 0;
+    if(natl > 1) natl = 1;
+    natl = Math.round(natl*10000)/10000;
+    seen.add(key);
+    out.push({
+      key, label,
+      natl, local: Math.round((1-natl)*10000)/10000,
+      active: t.active !== false,
+      order: Number.isFinite(Number(t.order)) ? Number(t.order) : i,
+      createdAt: String(t.createdAt||''), createdBy: String(t.createdBy||'')
+    });
+  });
+  out.sort((a,b)=>a.order-b.order);
+  return out.map((t,i)=>({ ...t, order:i }));
+}
+
+function getCustomIncomeTypes(settings){ return normalizeCustomIncomeTypes(settings?.customIncomeTypes); }
+
+/**
+ * Rebuild INCOME_TYPES from the settings payload. Called from every settings
+ * fetch (see DB.getSettings), so any screen rendered after a settings load
+ * already knows about the admin-defined types.
+ *
+ * Deactivated types stay in the list — dropping them would erase historical
+ * amounts from summaries, reports and the remittance split, and would leave
+ * totalCollection unexplained. They are only hidden from the entry forms.
+ */
+function applyCustomIncomeTypes(settings){
+  // A missing/!object payload means "settings weren't loaded", not "no custom types" —
+  // rebuilding from it would silently drop the configured types from every screen.
+  if(!settings || typeof settings !== 'object') return INCOME_TYPES.filter(t=>t.custom);
+  const custom = getCustomIncomeTypes(settings);
+  INCOME_TYPES.length = 0;
+  BUILTIN_INCOME_TYPES.forEach(t=>INCOME_TYPES.push(t));
+  custom.forEach(t=>INCOME_TYPES.push({
+    key:t.key, label:t.label, natl:t.natl, local:t.local, custom:true, inactive:!t.active
+  }));
+  return custom;
+}
+
+/** Types offered on the data-entry forms — everything except deactivated ones. */
+function selectableIncomeTypes(){ return INCOME_TYPES.filter(t=>!t.inactive); }
+
+/** Keys of the admin-defined types, in configured order. */
+function customIncomeTypeKeys(){ return INCOME_TYPES.filter(t=>t.custom).map(t=>t.key); }
+
+// Canonical order of the built-in types in the remittance report's collection
+// summary (the entry form's own field order is deliberately different). Any
+// admin-defined type is appended after these — see customIncomeTypeKeys().
+const BUILTIN_SUMMARY_ORDER = ['ministersTithe','membersTithe','thanksgiving','slo','crm','workersOffering','firstFruit','childrenOffering','sundaySchool','weekendOffering','holyCommunionOffering'];
 
 const EXPENSE_CATS = [
   { key:'power',      label:'Power & Energy',          color:'#EF9F27', icon:'⚡' },
@@ -643,7 +753,9 @@ const DB = {
     apiFetch('audit','POST',{type,detail,by:by||'System'}).catch(()=>{});
   },
 
-  getSettings()                { return apiFetch('settings'); },
+  // Every settings read refreshes the admin-defined collection types, so INCOME_TYPES
+  // is current on any screen that loads settings first (which all of them do).
+  getSettings()                { return apiFetch('settings').then(s=>{ applyCustomIncomeTypes(s); return s; }); },
   saveSettings(d)              { return apiFetch('settings','POST',d); },
 
   getChurchBankIngestLog()     { return apiFetch('church-bank-ingest-log'); },
@@ -696,6 +808,7 @@ function _assembleDashFromCache(){
 
 function _seedDashCache(batch){
   const now = Date.now();
+  applyCustomIncomeTypes(batch.settings);
   _apiCache.set('income',            { data: batch.income,            ts: now });
   _apiCache.set('expenses',          { data: batch.expenses,          ts: now });
   _apiCache.set('petty',             { data: batch.petty,             ts: now });
@@ -2206,7 +2319,7 @@ window.addEventListener('popstate', ()=>{
 window.addEventListener('hashchange', ()=>{
   if(!state.user || state.page !== 'admin') return;
   const hashTab = (window.location.hash||'').replace(/^#admin-/,'').trim();
-  if(hashTab && ['users','settings','quotas','rates','perms','backup'].includes(hashTab)){
+  if(hashTab && ADMIN_TABS.includes(hashTab)){
     state.adminTab = hashTab;
     renderAdmin();
   }
@@ -4827,7 +4940,7 @@ async function renderDashboard(){
             const t = cat==='_others' ? {label:'CRM + Others'} : (INCOME_TYPES.find(e=>e.key===cat) || OTHER_INCOME_SOURCES.find(e=>e.key===cat) || {label:cat.replace(/_/g,' ')});
             const pct = totalIncome ? Math.round(amt/totalIncome*100) : 0;
             return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
-              <div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;color:var(--text)">${t.label}</div></div>
+              <div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;color:var(--text)">${esc(t.label)}</div></div>
               <div style="text-align:right;flex-shrink:0;margin-left:12px"><div style="font-size:13px;font-weight:600;color:var(--text)">${fmt(amt)}</div><div style="font-size:11px;color:var(--text3)">${pct}%</div></div>
             </div>`;
           }).join('')+`<div style="display:flex;justify-content:space-between;padding-top:10px;margin-top:4px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total income</span><span style="font-size:16px;font-weight:700;color:var(--primary)">${fmt(totalIncome)}</span></div>`
@@ -5182,7 +5295,7 @@ async function renderIncomeSummary(records){
         <div class="card-header"><span class="card-title">Income by Type (Sunday Collections)</span></div>
         ${INCOME_TYPES.map(t=>`
           <div class="status-row">
-            <div class="status-row-label">${t.label}</div>
+            <div class="status-row-label">${esc(t.label)}</div>
             <div class="status-row-amt">${totals[t.key]>0?fmt(totals[t.key]):'—'}</div>
           </div>`).join('')}
         <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Sunday Sub-total</div><div class="status-row-amt" style="color:var(--primary)">${fmt(sundayGrand)}</div></div>
@@ -5195,7 +5308,7 @@ async function renderIncomeSummary(records){
           if(l.isTg){
             return `
             <div class="status-row">
-              <div><div class="status-row-label">${l.label} → HQ</div><div class="status-row-sub">From ${fmt(l.total)}</div></div>
+              <div><div class="status-row-label">${esc(l.label)} → HQ</div><div class="status-row-sub">From ${fmt(l.total)}</div></div>
               <div class="status-row-amt td-red">${fmt(l.national||0)}</div>
             </div>
             ${(l.area||0)>0?`<div class="status-row" style="padding-left:14px"><div><div class="status-row-label" style="font-size:12px">TG → Area / Zonal</div></div><div class="status-row-amt td-red" style="font-size:12px">${fmt(l.area)}</div></div>`:''}
@@ -5205,7 +5318,7 @@ async function renderIncomeSummary(records){
           }
           return `
           <div class="status-row">
-            <div><div class="status-row-label">${l.label} → HQ</div><div class="status-row-sub">From ${fmt(l.total)}</div></div>
+            <div><div class="status-row-label">${esc(l.label)} → HQ</div><div class="status-row-sub">From ${fmt(l.total)}</div></div>
             <div class="status-row-amt td-red">${fmt(l.national||0)}</div>
           </div>`;
         }).join(''):'<div class="empty-table">No Sunday collections recorded yet.</div>'}
@@ -5307,7 +5420,7 @@ function showIncomeForm(){
     <div class="form-group"><label class="form-label">Collection Date *</label><input type="date" id="inc_date" class="form-input" value="${today}" max="${today}" /></div>
     <div class="form-group"><label class="form-label">Counted Together With (Head Usher Name) *</label><input type="text" id="inc_usher" class="form-input" placeholder="e.g. Bro. Emmanuel Okafor" /></div>
     <hr class="divider"><p style="font-size:12px;color:var(--text3);margin-bottom:12px">Enter the amount counted for each collection category. Leave blank if none was collected.</p>
-    ${INCOME_TYPES.map(t=>`<div class="form-group"><label class="form-label">${t.label}</label><input type="number" id="inc_${t.key}" class="form-input" placeholder="₦0" min="0" oninput="App.updateIncomeTotal()" /></div>`).join('')}
+    ${selectableIncomeTypes().map(t=>`<div class="form-group"><label class="form-label">${esc(t.label)}</label><input type="number" id="inc_${t.key}" class="form-input" placeholder="₦0" min="0" oninput="App.updateIncomeTotal()" /></div>`).join('')}
     <div class="card" style="background:var(--primary-light);border-color:var(--primary-mid);margin-top:8px">
       <div class="amount-label">Total Collection</div>
       <div class="amount-display" id="inc_total">₦0</div>
@@ -5552,10 +5665,10 @@ async function viewIncome(id){
     `:''}
     ${isSunday?`<hr class="divider">
     <p class="card-title">Income Breakdown</p>
-    ${INCOME_TYPES.filter(t=>r[t.key]).map(t=>`<div class="status-row"><div class="status-row-label">${t.label}</div><div class="status-row-amt">${fmt(r[t.key])}</div></div>`).join('')}
+    ${INCOME_TYPES.filter(t=>r[t.key]).map(t=>`<div class="status-row"><div class="status-row-label">${esc(t.label)}</div><div class="status-row-amt">${fmt(r[t.key])}</div></div>`).join('')}
     <hr class="divider">
     <p class="card-title">Remittances Due</p>
-    ${rem.lines.map(l=>`<div class="status-row"><div class="status-row-label">${l.label} → HQ</div><div class="status-row-amt td-red">${fmt(l.national||0)}</div></div>`).join('')}
+    ${rem.lines.map(l=>`<div class="status-row"><div class="status-row-label">${esc(l.label)} → HQ</div><div class="status-row-amt td-red">${fmt(l.national||0)}</div></div>`).join('')}
     <div class="status-row"><div class="status-row-label">Province Rebate</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div></div>
     ${(rem.crmAddon||0)>0?`<div class="status-row"><div class="status-row-label">CRM Add-on → National HQ</div><div class="status-row-amt td-amber">${fmt(rem.crmAddon)}</div></div>`:''}
     ${(rem.coastline||0)>0?`<div class="status-row"><div class="status-row-label">Coastline Worship Centre</div><div class="status-row-amt td-amber">${fmt(rem.coastline)}</div></div>`:''}
@@ -6220,7 +6333,7 @@ function showOtherIncomeForm(){
     <div class="form-group"><label class="form-label">Which income category does this belong to?</label>
       <select id="oi_category" class="form-select">
         <option value="local_only">Local Church Use Only (donation, etc.)</option>
-        ${INCOME_TYPES.map(t=>`<option value="${t.key}">${t.label} (affects remittance split)</option>`).join('')}
+        ${selectableIncomeTypes().map(t=>`<option value="${t.key}">${esc(t.label)} (affects remittance split)</option>`).join('')}
       </select>
     </div>
     <div class="form-group"><label class="form-label">Amount (₦) *</label>
@@ -8118,7 +8231,7 @@ async function printRemittanceReport(fromOverride, toOverride){
   const totalParishLocal=rem.lines.filter(l=>!l.isTg).reduce((s,l)=>s+(l.local||0),0);
 
   // Explicit canonical order for the collection summary rows (form field order is unchanged)
-  const SUMMARY_ORDER=['ministersTithe','membersTithe','thanksgiving','slo','crm','workersOffering','firstFruit','childrenOffering','sundaySchool','weekendOffering','holyCommunionOffering'];
+  const SUMMARY_ORDER=[...BUILTIN_SUMMARY_ORDER, ...customIncomeTypeKeys()];
   const getL=key=>rem.lines.find(l=>l.key===key);
   const collectionRowsHTML=SUMMARY_ORDER.map(key=>{
     const l=getL(key);
@@ -8197,6 +8310,11 @@ async function printRemittanceReport(fromOverride, toOverride){
   { const l=getLine('weekendOffering'); if(l) pushA({ desc:`Weekend Offering → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
   // 11c. Holy Communion Offering
   { const l=getLine('holyCommunionOffering'); if(l) pushA({ desc:`Holy Communion Offering → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 }); }
+  // 11d. Any collection types added by IT Admin (Admin Panel → Collection Types),
+  // in the order they were configured, immediately after the built-in RCCG types.
+  INCOME_TYPES.filter(t=>t.custom).forEach(t=>{
+    const l=getLine(t.key); if(l) pushA({ desc:`${t.label} → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 });
+  });
   // 12. CRM Add-on
   if((rem.crmAddon||0)>0) pushA({ desc:`CRM Add-on → National HQ (${Math.round(rr.crmAddon*100)}% of CRM Total)`, type:`${Math.round(rr.crmAddon*100)}% Based`, amount:rem.crmAddon });
   // 13. Coastline Worship Centre
@@ -8385,7 +8503,7 @@ async function shareRemittanceReport(fromOverride, toOverride){
     const quotasTotal=sumQuotaLines(quotaLines);
     const trueNetLocal=rem.netLocal-quotasTotal;
     const additionalLevies=(rem.crmAddon||0)+(rem.coastline||0)+(rem.insuranceGen||0)+(rem.insuranceMin||0);
-    const SUMMARY_ORDER=['ministersTithe','membersTithe','thanksgiving','slo','crm','workersOffering','firstFruit','childrenOffering','sundaySchool','weekendOffering','holyCommunionOffering'];
+    const SUMMARY_ORDER=[...BUILTIN_SUMMARY_ORDER, ...customIncomeTypeKeys()];
     const getLine=key=>rem.lines.find(l=>l.key===key);
     const linePct=l=>l&&l.total>0?Math.round((l.national/l.total)*100):0;
     const partARows=[];
@@ -8403,6 +8521,9 @@ async function shareRemittanceReport(fromOverride, toOverride){
     { const l=getLine('sundaySchool'); if(l) pushA({ desc:`Sunday School → National HQ`, type:`100% Based`, amount:l.national||0 }); }
     { const l=getLine('weekendOffering'); if(l) pushA({ desc:`Weekend Offering → National HQ`, type:`100% Based`, amount:l.national||0 }); }
     { const l=getLine('holyCommunionOffering'); if(l) pushA({ desc:`Holy Communion Offering → National HQ`, type:`100% Based`, amount:l.national||0 }); }
+    INCOME_TYPES.filter(t=>t.custom).forEach(t=>{
+      const l=getLine(t.key); if(l) pushA({ desc:`${t.label} → National HQ`, type:`${linePct(l)}% Based`, amount:l.national||0 });
+    });
     if((rem.crmAddon||0)>0) pushA({ desc:`CRM Add-on → National HQ (${Math.round(rr.crmAddon*100)}% of CRM Total)`, type:`${Math.round(rr.crmAddon*100)}% Based`, amount:rem.crmAddon });
     if((rem.coastline||0)>0) pushA({ desc:`Coastline Worship Centre — ${Math.round(rr.coastline*100)}% of Ministers' Tithe`, type:`${Math.round(rr.coastline*100)}% Based`, amount:rem.coastline });
     if((rem.insuranceGen||0)>0) pushA({ desc:`Insurance Fund (GEN TITHE) — ${+(rr.insuranceGenTithe*100).toFixed(2)}% of Members' Tithe`, type:`${+(rr.insuranceGenTithe*100).toFixed(2)}% Based`, amount:rem.insuranceGen });
@@ -12807,7 +12928,7 @@ async function generateMonthlyReport(){
 
     <div class="section-title">Section B: Weekly Collection Details</div>
     ${income.length?`<table class="wide">
-      <tr><th>S/N</th><th>Date</th>${INCOME_TYPES.map(t=>`<th class="td-r">${t.label}</th>`).join('')}<th class="td-r">Total</th><th class="td-c">% of Month</th><th>Status</th></tr>
+      <tr><th>S/N</th><th>Date</th>${INCOME_TYPES.map(t=>`<th class="td-r">${esc(t.label)}</th>`).join('')}<th class="td-r">Total</th><th class="td-c">% of Month</th><th>Status</th></tr>
       ${income.map((r,i)=>{
         const isSunday=!r.source||r.source==='sunday_collection';
         const srcLabel=!isSunday?(OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label:'';
@@ -12951,7 +13072,7 @@ async function generateWeeklyReport(){
 
     <div class="section-title">Detailed Weekly Breakdown</div>
     ${income.length?`<table>
-      <tr><th>S/N</th><th>Date</th>${INCOME_TYPES.map(t=>`<th class="td-r">${t.label}</th>`).join('')}<th class="td-r">Total</th><th>Deposit Status</th></tr>
+      <tr><th>S/N</th><th>Date</th>${INCOME_TYPES.map(t=>`<th class="td-r">${esc(t.label)}</th>`).join('')}<th class="td-r">Total</th><th>Deposit Status</th></tr>
       ${income.map((r,i)=>`<tr><td>${i+1}</td><td>${fmtDate(r.date)}</td>${INCOME_TYPES.map(t=>`<td class="td-r">${r[t.key]?fmt(r[t.key]):'—'}</td>`).join('')}<td class="td-r td-bold">${fmt(r.totalCollection)}</td><td>${depositBadge(r)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">GRAND TOTAL</td>${INCOME_TYPES.map(t=>{const sum=income.reduce((s,r)=>s+(r[t.key]||0),0);return `<td class="td-r">${sum?fmt(sum):'—'}</td>`}).join('')}<td class="td-r">${fmt(totalCollected)}</td><td></td></tr>
     </table>`:'<div class="no-data">No Sunday collections recorded for this period.</div>'}
@@ -13178,20 +13299,24 @@ async function renderAudit(){
 }
 
 // ── IT ADMIN ──────────────────────────────
+// Tabs of the IT Admin panel, also the whitelist for #admin-<tab> deep links.
+const ADMIN_TABS = ['users','settings','quotas','types','rates','perms','backup'];
+
 async function renderAdmin(){
   if(state.user?.role!=='it_admin'){ document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--danger)">Access denied. IT Administrators only.</p></div>'; return }
   // Show loading skeleton immediately
   document.getElementById('pageContent').innerHTML='<div class="card"><p style="color:var(--text3)">Loading admin panel…</p></div>';
   // Sync tab state from URL hash (e.g. #admin-settings → 'settings')
   const hashTab = (window.location.hash||'').replace(/^#admin-/,'').trim();
-  if(hashTab && ['users','settings','quotas','rates','perms','backup'].includes(hashTab)){
+  if(hashTab && ADMIN_TABS.includes(hashTab)){
     state.adminTab = hashTab;
   }
-  const [users, settings, auditLog, pettyConfig] = await Promise.all([
+  const [users, settings, auditLog, pettyConfig, income] = await Promise.all([
     DB.getUsers(),
     DB.getSettings(),
     DB.getAudit(),
-    DB.getPettyConfig()
+    DB.getPettyConfig(),
+    DB.getIncome()
   ]);
   const settingsForView = { ...settings, pettyMax: pettyConfig?.max ?? settings.pettyMax, pettyFloat: pettyConfig?.float ?? 0 };
   const tab=state.adminTab||'users';
@@ -13200,18 +13325,19 @@ async function renderAdmin(){
     <div class="page-header"><div class="page-title">IT Admin Panel</div><div class="page-sub">System management — full access</div></div>
     <div class="admin-grid" style="margin-bottom:1rem">
       <div class="admin-stat"><div class="admin-stat-val">${users.length}</div><div class="admin-stat-label">Total Users</div></div>
-      <div class="admin-stat"><div class="admin-stat-val">${(await DB.getIncome()).length}</div><div class="admin-stat-label">Income Records</div></div>
+      <div class="admin-stat"><div class="admin-stat-val">${income.length}</div><div class="admin-stat-label">Income Records</div></div>
       <div class="admin-stat"><div class="admin-stat-val">${auditLog.length}</div><div class="admin-stat-label">Audit Events</div></div>
     </div>
     <div class="tabs">
       <button class="tab ${tab==='users'?'active':''}" onclick="App.setAdminTab('users')">Users & Roles</button>
       <button class="tab ${tab==='settings'?'active':''}" onclick="App.setAdminTab('settings')">Church Settings</button>
       <button class="tab ${tab==='quotas'?'active':''}" onclick="App.setAdminTab('quotas')">Monthly Quotas</button>
+      <button class="tab ${tab==='types'?'active':''}" onclick="App.setAdminTab('types')">Collection Types</button>
       <button class="tab ${tab==='rates'?'active':''}" onclick="App.setAdminTab('rates')">Remittance Rates</button>
       <button class="tab ${tab==='perms'?'active':''}" onclick="App.setAdminTab('perms')">Role Permissions</button>
       <button class="tab ${tab==='backup'?'active':''}" onclick="App.setAdminTab('backup')">Backup & Restore</button>
     </div>
-    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settingsForView):tab==='quotas'?renderAdminQuotas(settings):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
+    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settingsForView):tab==='quotas'?renderAdminQuotas(settings):tab==='types'?renderAdminIncomeTypes(settings,income):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
   if(tab==='quotas') initQuotaDnd();
 }
 
@@ -13359,9 +13485,9 @@ function renderAdminRates(s){
     <div class="table-wrap"><table>
       <tr><th>Income Type</th><th>→ National HQ %</th><th style="color:var(--text3)">→ Local Retained</th></tr>
       ${INCOME_TYPES.filter(t=>!t.special).map(t=>{
-        const rd = r[t.key] || DEFAULT_REMITTANCE_RATES[t.key] || { natl:0, local:0 };
+        const rd = r[t.key] || DEFAULT_REMITTANCE_RATES[t.key] || { natl:t.natl||0, local:t.local||0 };
         const localPct = decToPct(rd.local);
-        return `<tr><td>${t.label}</td>
+        return `<tr><td>${esc(t.label)}${t.custom?` <span class="badge" style="background:#E6F1FB;color:#185FA5;font-size:10px">Custom${t.inactive?' · Inactive':''}</span>`:''}</td>
           <td><input type="number" id="rate_${t.key}_natl" class="form-input" value="${decToPct(rd.natl)}" min="0" max="100" step="0.1" style="width:80px;display:inline-block"
             oninput="(function(el){var l=document.getElementById('localLbl_${t.key}');if(l){var v=parseFloat(el.value)||0;l.textContent=(Math.round((100-v)*10)/10)+'%';}})(this)" /> %</td>
           <td><span id="localLbl_${t.key}" style="color:var(--text3);font-size:13px">${localPct}%</span></td></tr>`;
@@ -13437,6 +13563,262 @@ async function saveRates(btn=null){
   } catch(err) {
     restore();
     showAlert(`Failed to save rates: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+// ── ADMIN: COLLECTION TYPES ───────────────────────────────────────
+// Lets IT Admin add a Sunday-collection type that RCCG introduces after this app
+// shipped (Weekend Offering and Holy Communion Offering both arrived that way).
+// A type added here immediately appears on the Sunday Collections form, in the
+// income summaries, in the remittance calculation and reports, in the monthly and
+// weekly statements, and in the Remittance Rates editor.
+
+/** How many income records carry a non-zero amount for each custom type key. */
+function customIncomeTypeUsage(income, keys){
+  const usage = {};
+  keys.forEach(k=>{ usage[k] = { records:0, total:0 }; });
+  (income||[]).forEach(r=>{
+    keys.forEach(k=>{
+      const amt = Number(r[k]||0);
+      if(amt){ usage[k].records++; usage[k].total += amt; }
+    });
+  });
+  return usage;
+}
+
+function renderAdminIncomeTypes(s, income){
+  const custom = getCustomIncomeTypes(s);
+  const usage = customIncomeTypeUsage(income, custom.map(t=>t.key));
+  const rates = s.remittanceRates || DEFAULT_REMITTANCE_RATES;
+  const pct = v => +(((v??0)*100).toFixed(4));
+  // The saved rate wins over the type's own stored split — the Remittance Rates tab
+  // edits the same numbers, and that tab is the authority the calculator reads.
+  const effNatl = t => pct(rates[t.key]?.natl ?? t.natl);
+  const localPct = natl => Math.round((100-natl)*10000)/10000;
+
+  const builtinRows = BUILTIN_INCOME_TYPES.map(t=>{
+    const isTg = t.special === 'tg';
+    const natl = isTg ? pct(rates.tgNational ?? DEFAULT_REMITTANCE_RATES.tgNational) : effNatl(t);
+    return `<tr>
+      <td>${esc(t.label)}</td>
+      <td class="td-c">${natl}%</td>
+      <td class="td-c" style="color:var(--text3)">${isTg?'Split — see Remittance Rates':localPct(natl)+'%'}</td>
+    </tr>`;
+  }).join('');
+
+  const customRows = custom.map(t=>{
+    const u = usage[t.key] || { records:0, total:0 };
+    const natl = effNatl(t);
+    return `<tr${t.active?'':' style="opacity:0.6"'}>
+      <td>
+        <input type="text" id="cit_label_${t.key}" class="form-input" value="${esc(t.label)}" maxlength="${CUSTOM_INCOME_LABEL_MAX}" style="min-width:170px" />
+        <div style="font-size:10px;color:var(--text3);margin-top:3px">key: ${t.key}</div>
+      </td>
+      <td class="td-c"><input type="number" id="cit_natl_${t.key}" class="form-input" value="${natl}" min="0" max="100" step="0.1" style="width:82px;display:inline-block"
+        oninput="(function(el){var l=document.getElementById('citLocal_${t.key}');if(l){var v=parseFloat(el.value)||0;l.textContent=(Math.round((100-v)*10)/10)+'%';}})(this)" /> %</td>
+      <td class="td-c"><span id="citLocal_${t.key}" style="color:var(--text3)">${localPct(natl)}%</span></td>
+      <td class="td-c">${t.active
+        ? '<span class="badge badge-success">Active</span>'
+        : '<span class="badge badge-gray">Inactive</span>'}</td>
+      <td class="td-c" style="font-size:12px;color:var(--text3);white-space:nowrap">${u.records
+        ? `${u.records} record${u.records===1?'':'s'}<br>${fmt(u.total)}`
+        : 'Not used yet'}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-sm" onclick="App.toggleIncomeTypeActive('${t.key}', this)">${t.active?'Deactivate':'Reactivate'}</button>
+        <button class="btn btn-sm btn-danger" onclick="App.confirmDeleteIncomeType('${t.key}')" style="margin-left:4px"${u.records?' disabled title="Collections have already been recorded under this type — deactivate it instead"':''}>Delete</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  return `<div class="card">
+    <div class="modal-title" style="font-size:15px;margin-bottom:8px">Sunday Collection Types</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">When RCCG introduces a new collection (the way Weekend Offering and Holy Communion Offering were introduced), add it here instead of waiting for an app update. A type added here appears immediately on the Sunday Collections entry form, in the Income summaries, in the remittance calculation and the RCCG remittance report, and in the monthly and weekly statements.</p>
+
+    <div class="modal-title" style="font-size:13px;margin-bottom:8px;color:var(--text2)">Built-in RCCG Types</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:10px">These ship with the app and cannot be removed. Their percentages are edited on the <strong>Remittance Rates</strong> tab.</p>
+    <div class="table-wrap"><table>
+      <tr><th>Collection Type</th><th class="td-c">→ National HQ %</th><th class="td-c" style="color:var(--text3)">→ Local Retained</th></tr>
+      ${builtinRows}
+    </table></div>
+
+    <hr class="divider">
+    <div class="modal-title" style="font-size:13px;margin-bottom:8px;color:var(--text2)">Types Added by This Parish</div>
+    ${custom.length ? `
+    <div class="alert alert-info" style="margin-bottom:10px"><span class="alert-icon">ℹ</span><span>Edit the label or the National HQ share, then click <strong>Save Collection Types</strong>. Local Retained is always the remainder. A type that already has collections recorded against it can only be <strong>deactivated</strong> (hidden from the entry form, still counted in every past report) — never deleted, so history stays intact.</span></div>
+    <div class="table-wrap"><table>
+      <tr><th>Label</th><th class="td-c">→ National HQ %</th><th class="td-c" style="color:var(--text3)">→ Local</th><th class="td-c">Status</th><th class="td-c">Recorded</th><th>Actions</th></tr>
+      ${customRows}
+    </table></div>
+    <br><button class="btn btn-primary" onclick="App.saveIncomeTypes(this)">Save Collection Types</button>
+    ` : '<div class="empty-table">No extra collection types yet. Add the first one below.</div>'}
+
+    <hr class="divider">
+    <div class="modal-title" style="font-size:13px;margin-bottom:8px;color:var(--text2)">Add a New Collection Type</div>
+    <div class="form-row" style="align-items:flex-end;gap:12px;flex-wrap:wrap">
+      <div class="form-group" style="flex:2;min-width:200px">
+        <label class="form-label">Collection Name *</label>
+        <input type="text" id="cit_new_label" class="form-input" placeholder="e.g. Harvest Thanksgiving Offering" maxlength="${CUSTOM_INCOME_LABEL_MAX}" />
+      </div>
+      <div class="form-group" style="flex:1;min-width:150px">
+        <label class="form-label">→ National HQ (%) *</label>
+        <input type="number" id="cit_new_natl" class="form-input" placeholder="e.g. 100" min="0" max="100" step="0.1"
+          oninput="(function(el){var l=document.getElementById('cit_new_local');if(l){var v=parseFloat(el.value);l.textContent=isFinite(v)?(Math.round((100-v)*10)/10)+'%':'—';}})(this)" />
+        <div class="form-hint">Local Retained: <strong id="cit_new_local">—</strong></div>
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="App.addIncomeType(this)">➕ Add Collection Type</button>
+    <p style="font-size:11px;color:var(--text3);margin-top:12px;line-height:1.6">Note: the National HQ share is remitted, the remainder stays with the parish and is available for bank deposit and spending like every other local retained share. Province Rebate is charged on tithes only, so a new type never attracts it. If a new type needs a special treatment (such as the Teen/Children's Offering share held by the Children Teacher), that still needs a code change — raise it with the developer.</p>
+  </div>`;
+}
+
+/** Read back the edited rows of the custom-type table. Returns null if invalid. */
+function readIncomeTypeRows(existing){
+  const out = [];
+  const bad = [];
+  existing.forEach((t,i)=>{
+    const labelEl = document.getElementById(`cit_label_${t.key}`);
+    const natlEl  = document.getElementById(`cit_natl_${t.key}`);
+    const label = sanitizeCustomIncomeLabel(labelEl ? labelEl.value : t.label);
+    const natlPct = natlEl ? parseFloat(natlEl.value) : t.natl*100;
+    if(!label){ bad.push(`Row ${i+1}: name cannot be empty`); return; }
+    if(!isFinite(natlPct) || natlPct < 0 || natlPct > 100){ bad.push(`${label}: National HQ % must be between 0 and 100`); return; }
+    out.push({ ...t, label, natl: Math.round((natlPct/100)*10000)/10000, local: Math.round((1-natlPct/100)*10000)/10000, order:i });
+  });
+  if(bad.length){ showAlert(bad.join(' · '),'danger'); return null; }
+  const seenLabels = new Set();
+  for(const t of out){
+    const norm = t.label.toLowerCase();
+    if(seenLabels.has(norm)){ showAlert(`Two collection types are both named "${t.label}". Give each one a distinct name.`,'danger'); return null; }
+    seenLabels.add(norm);
+  }
+  return out;
+}
+
+/**
+ * Persist the type list. The split is written to BOTH the type definition and
+ * settings.remittanceRates — the remittance calculator reads remittanceRates, and
+ * the Remittance Rates tab edits it, so the two must never drift apart.
+ */
+async function persistIncomeTypes(list, auditDetail){
+  const s = await DB.getSettings();
+  const rates = s.remittanceRates
+    ? JSON.parse(JSON.stringify(s.remittanceRates))
+    : JSON.parse(JSON.stringify(DEFAULT_REMITTANCE_RATES));
+  list.forEach(t=>{ rates[t.key] = { natl:t.natl, local:t.local }; });
+  await DB.saveSettings({ customIncomeTypes:list, remittanceRates:rates });
+  DB.addAudit('income_types_updated', auditDetail, state.user?.name);
+}
+
+async function addIncomeType(btn=null){
+  if(!requireAdmin()) return;
+  const label = sanitizeCustomIncomeLabel(document.getElementById('cit_new_label')?.value);
+  const natlPct = parseFloat(document.getElementById('cit_new_natl')?.value);
+  if(!label){ showAlert('Please enter a name for the new collection type.','danger'); return; }
+  if(!isFinite(natlPct) || natlPct < 0 || natlPct > 100){ showAlert('Please enter the National HQ share as a percentage between 0 and 100.','danger'); return; }
+
+  const s = await DB.getSettings();
+  const existing = getCustomIncomeTypes(s);
+  const allLabels = [...BUILTIN_INCOME_TYPES, ...existing].map(t=>t.label.toLowerCase());
+  if(allLabels.includes(label.toLowerCase())){ showAlert(`"${label}" already exists as a collection type.`,'danger'); return; }
+
+  const key = customIncomeKeyFromLabel(label, existing.map(t=>t.key));
+  const natl = Math.round((natlPct/100)*10000)/10000;
+  const list = [...existing, {
+    key, label, natl, local: Math.round((1-natl)*10000)/10000,
+    active:true, order:existing.length,
+    createdAt:new Date().toISOString(), createdBy:state.user?.name||''
+  }];
+
+  const restore = setBtnLoading(btn, 'Adding…');
+  try {
+    await persistIncomeTypes(list, `Collection type "${label}" added (${natlPct}% → National HQ)`);
+    DB.addNotification('Collection Type Added',`"${label}" is now available on the Sunday Collections form`,'success');
+    showAlert(`"${label}" added. It now appears on the Sunday Collections form and in every income and remittance report.`,'success');
+    renderAdmin();
+  } catch(err){
+    restore();
+    showAlert(`Failed to add collection type: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+async function saveIncomeTypes(btn=null){
+  if(!requireAdmin()) return;
+  const s = await DB.getSettings();
+  const list = readIncomeTypeRows(getCustomIncomeTypes(s));
+  if(!list) return;
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await persistIncomeTypes(list, `Collection types updated (${list.length} parish-defined type${list.length===1?'':'s'})`);
+    showAlert('Collection types saved. New figures apply to every calculation from now on.','success');
+    renderAdmin();
+  } catch(err){
+    restore();
+    showAlert(`Failed to save collection types: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+async function toggleIncomeTypeActive(key, btn=null){
+  if(!requireAdmin()) return;
+  const s = await DB.getSettings();
+  const existing = getCustomIncomeTypes(s);
+  const target = existing.find(t=>t.key===key);
+  if(!target){ showAlert('That collection type no longer exists.','danger'); return; }
+  const list = existing.map(t=>t.key===key ? { ...t, active:!t.active } : t);
+  const restore = setBtnLoading(btn, target.active?'Deactivating…':'Reactivating…');
+  try {
+    await persistIncomeTypes(list, `Collection type "${target.label}" ${target.active?'deactivated':'reactivated'}`);
+    showAlert(target.active
+      ? `"${target.label}" is no longer offered on the entry form. Amounts already recorded under it still appear in every summary and report.`
+      : `"${target.label}" is available on the Sunday Collections form again.`,'success');
+    renderAdmin();
+  } catch(err){
+    restore();
+    showAlert(`Failed to update collection type: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+async function confirmDeleteIncomeType(key){
+  if(!requireAdmin()) return;
+  const [s, income] = await Promise.all([DB.getSettings(), DB.getIncome()]);
+  const target = getCustomIncomeTypes(s).find(t=>t.key===key);
+  if(!target){ showAlert('That collection type no longer exists.','danger'); return; }
+  const used = (income||[]).filter(r=>Number(r[key]||0) > 0).length;
+  if(used){
+    showAlert(`"${target.label}" cannot be deleted — ${used} collection record${used===1?' uses':'s use'} it. Deactivate it instead so past figures stay intact.`,'danger');
+    return;
+  }
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🗑 Delete Collection Type</div>
+    <div class="alert alert-warn"><span class="alert-icon">⚠</span><span>Remove <strong>${esc(target.label)}</strong> from the Sunday Collections form? No collection has ever been recorded under it, so nothing in the ledger or in any past report changes.</span></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger" onclick="App.deleteIncomeType('${key}', this)">Delete Type</button>
+    </div>`);
+}
+
+async function deleteIncomeType(key, btn=null){
+  if(!requireAdmin()) return;
+  const [s, income] = await Promise.all([DB.getSettings(), DB.getIncome()]);
+  const existing = getCustomIncomeTypes(s);
+  const target = existing.find(t=>t.key===key);
+  if(!target){ closeModal(); showAlert('That collection type no longer exists.','danger'); return; }
+  // Re-check under the button press — a collection could have been recorded between
+  // opening this confirmation and confirming it.
+  if((income||[]).some(r=>Number(r[key]||0) > 0)){
+    closeModal();
+    showAlert(`"${target.label}" now has recorded collections and can no longer be deleted. Deactivate it instead.`,'danger');
+    return;
+  }
+  const restore = setBtnLoading(btn, 'Deleting…');
+  try {
+    await persistIncomeTypes(existing.filter(t=>t.key!==key), `Collection type "${target.label}" deleted (never used)`);
+    closeModal();
+    showAlert(`"${target.label}" removed from the collection types.`,'success');
+    renderAdmin();
+  } catch(err){
+    restore();
+    showAlert(`Failed to delete collection type: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
 }
 
@@ -14141,7 +14523,7 @@ return {
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, showPettyToBankDeposit, submitPettyToBankDeposit, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
-  setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
+  setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, addIncomeType, saveIncomeTypes, toggleIncomeTypeActive, confirmDeleteIncomeType, deleteIncomeType, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   setPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
@@ -14168,6 +14550,17 @@ return {
   _setTestUserRole: (role) => { state.user = { name:'Test User', role }; },
   _satelliteHeldDisplay: satelliteHeldDisplay,
   _SATELLITE_FUND_PURPOSES: SATELLITE_FUND_PURPOSES,
+  _BUILTIN_INCOME_TYPES: BUILTIN_INCOME_TYPES,
+  _INCOME_TYPES: INCOME_TYPES,
+  _applyCustomIncomeTypes: applyCustomIncomeTypes,
+  _normalizeCustomIncomeTypes: normalizeCustomIncomeTypes,
+  _sanitizeCustomIncomeLabel: sanitizeCustomIncomeLabel,
+  _customIncomeKeyFromLabel: customIncomeKeyFromLabel,
+  _selectableIncomeTypes: selectableIncomeTypes,
+  _customIncomeTypeUsage: customIncomeTypeUsage,
+  _renderAdminIncomeTypes: renderAdminIncomeTypes,
+  _readIncomeTypeRows: readIncomeTypeRows,
+  _calcRemittances: calcRemittances,
   _EXPENSE_CATS: EXPENSE_CATS,
   _EXPENSE_CATS_ALL: EXPENSE_CATS_ALL,
   _LEGACY_EXPENSE_CATS: LEGACY_EXPENSE_CATS,

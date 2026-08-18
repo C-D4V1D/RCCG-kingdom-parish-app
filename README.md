@@ -8,6 +8,7 @@ A comprehensive church accounting and reporting system built for the RCCG Kingdo
 - **Dashboard** — Monthly summary cards showing income, expenses, remittance status, and petty cash float
 - **Transactions** — Unified ledger view of all income, expense, remittance, petty cash, and bank movements with filtering, sorting, and pagination
 - **Income Recording** — Log Sunday collections (Tithes, Thanksgiving, SLO, CRM, Gospel Fund, Sunday School, First Fruit, Teen/Children's Offering, Weekend Offering, Holy Communion Offering) plus Other Income types (midweek offerings, donations, bank transfers, building fund, etc.)
+- **Custom Collection Types** — IT Admin can add a new Sunday collection type (with its own National HQ / Local split) from the admin panel when RCCG introduces one, without a code change. A new type appears immediately on the Sunday Collections form, in the income summaries, in the remittance calculation and RCCG remittance report, and in the monthly/weekly statements. Types that already have money recorded against them can be deactivated but never deleted, so past figures stay intact
 - **RCCG Remittance Calculator** — Auto-computes all HQ percentages, fixed quotas (RMF, CSR, Education, Camp, Mummy Stipend, Volunteer, Regional), province rebate, and payment tracking with cut-off date management
 - **Expense Tracking** — Categorised by Power & Energy, Facility & Cleaning, Repairs & Maintenance, Sound & Media, Communication, Office & Stationery, Bank Charges, Transportation, RCCG Special Projects, Hospitality, Security, Church Welfare, Property & Projects, Events & Departments; with subcategory suggestions and approval workflow
 - **Bank Module** — Bank account balance tracking, deposits, withdrawals, bank charges, and monthly reconciliation
@@ -16,7 +17,7 @@ A comprehensive church accounting and reporting system built for the RCCG Kingdo
 - **Audit Log** — Timestamped activity log of the last 100 system actions
 - **Notifications** — In-app notification centre with unread badge
 - **Committee SMS (KPSC portal)** — One-screen composer for messaging the KPSC committee roster: ready-made meeting-reminder templates that fit two GSM-7 pages, per-group recipient picker, live page/cost estimate, one-click emoji→GSM-7 conversion, and optional scheduling. Numbers come from the roster, falling back to the phone already registered against the same person as a partner; messages go out under the Members & Staff Termii sender ID and land in the SMS Logs with delivery status
-- **IT Admin Panel** — User management, church settings, monthly quota configuration, remittance rate overrides, role permission editor, and backup & restore
+- **IT Admin Panel** — User management, church settings, monthly quota configuration, collection-type management, remittance rate overrides, role permission editor, and backup & restore
 
 ## Roles
 
@@ -70,6 +71,8 @@ rccg-kingdom-parish-app/
 - Teen/Children's Offering → National: 35% | Local Children's Dept: 65%
 - Weekend Offering → National: 100%
 - Holy Communion Offering → National: 100%
+
+Any further collection type is added by IT Admin under **Admin Panel → Collection Types**; its National/Local split is set there (and stays editable on the Remittance Rates tab). Province Rebate applies to tithes only, so an added type never attracts it.
 
 ## Branch Strategy
 
