@@ -612,17 +612,35 @@ function addCustomCollections(...maps) {
 }
 
 /**
- * Persist a record's custom-type amounts. The column is added by handleInit, which
- * every login runs, so it exists long before an admin can define a type. Should the
- * write still fail (an un-migrated DB), the built-in types are unaffected — but log
- * it, because the record's total would then include an amount with no type behind it.
+ * Persist a record's custom-type amounts, adding the column on demand if it is
+ * missing. handleInit creates it, but ONLY /api/init runs migrations and only a
+ * fresh sign-in calls that route — a browser session restored from localStorage
+ * never did. A parish that stays signed in on the PWA could therefore start
+ * recording custom collection types against a database that has no column to put
+ * them in, and the amount would vanish from the per-type breakdown while still
+ * being counted in total_collection. Healing the schema here makes the write
+ * correct no matter which route reached the database first.
+ *
+ * Returns true when the amounts are safely stored.
  */
 async function saveCustomCollections(DB, id, map) {
+  const json = JSON.stringify(map || {});
+  const write = () => DB.prepare(`UPDATE income SET custom_collections=? WHERE id=?`).bind(json, id).run();
   try {
-    await DB.prepare(`UPDATE income SET custom_collections=? WHERE id=?`)
-      .bind(JSON.stringify(map || {}), id).run();
-  } catch (e) {
-    console.error(`[income] could not store custom collection types on ${id}:`, e.message);
+    await write();
+    return true;
+  } catch {
+    try {
+      await DB.prepare(`ALTER TABLE income ADD COLUMN custom_collections TEXT DEFAULT ''`).run();
+      SCHEMA_CACHE.delete('income');
+    } catch { /* column already exists — the first failure was something else */ }
+    try {
+      await write();
+      return true;
+    } catch (e) {
+      console.error(`[income] could not store custom collection types on ${id}:`, e.message);
+      return false;
+    }
   }
 }
 
@@ -660,6 +678,80 @@ function normalizeCustomIncomeTypeDefs(raw) {
   });
   out.sort((a, b) => a.order - b.order);
   return out.map((t, i) => ({ ...t, order: i }));
+}
+
+/** The eleven built-in collection-type columns (excludes the cash-split columns). */
+const INCOME_TYPE_SNAKE_COLS = Object.keys(INCOME_TYPE_LABELS);
+
+/**
+ * Recover what an admin-defined type contributed to a record from the merge audit
+ * note this API writes itself — the fallback used when the amount was accepted into
+ * total_collection but could not be stored (see saveCustomCollections).
+ *
+ * Only the `— Label: 1,234` / `, Label: 1,234` segments of a `[+₦… merged in by …]`
+ * line are read, and only labels matching a currently-defined custom type, so
+ * free-text notes an accountant typed can never be mistaken for an amount.
+ */
+function customAmountsFromMergeNotes(notes, labelsByKey) {
+  const text = String(notes || '');
+  const found = {};
+  if (!text.includes('merged in by')) return found;
+  for (const [key, label] of Object.entries(labelsByKey)) {
+    const escaped = String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`[\u2014,]\\s*${escaped}:\\s*([\\d,]+(?:\\.\\d+)?)`, 'g');
+    let m, sum = 0;
+    while ((m = re.exec(text)) !== null) sum += Number(String(m[1]).replace(/,/g, '')) || 0;
+    if (sum) found[key] = Math.round(sum * 100) / 100;
+  }
+  return found;
+}
+
+/**
+ * Repair records whose custom-type amounts were counted into total_collection but
+ * never stored, because income.custom_collections did not exist on this database at
+ * the time (see saveCustomCollections for how that happens). The parish total was
+ * always right; what was missing is the per-type breakdown — and with it the HQ
+ * remittance share those amounts attract.
+ *
+ * Deliberately conservative: a record is only touched when the arithmetic proves an
+ * amount is unaccounted for AND the merge note explains the gap to the kobo. Anything
+ * that does not reconcile exactly is left alone for a human — the Collection Types
+ * admin tab lists those. Safe to re-run: a repaired record has no gap left to find.
+ */
+async function backfillCustomCollectionsFromNotes(DB) {
+  const labels = await getCustomIncomeTypeLabels(DB);
+  if (!Object.keys(labels).length) return;
+
+  let rows;
+  try {
+    ({ results: rows } = await DB.prepare(
+      `SELECT * FROM income WHERE COALESCE(notes,'') LIKE '%merged in by%'`
+    ).all());
+  } catch { return; }
+  if (!rows || !rows.length) return;
+
+  for (const row of rows) {
+    const stored    = parseCustomCollections(row.custom_collections);
+    const typeTotal = INCOME_TYPE_SNAKE_COLS.reduce((sum, col) => sum + num(row[col]), 0);
+    const shortfall = Math.round((num(row.total_collection) - typeTotal - sumCustomCollections(stored)) * 100) / 100;
+    if (shortfall <= 0.005) continue;
+
+    const recovered      = customAmountsFromMergeNotes(row.notes, labels);
+    const recoveredTotal = sumCustomCollections(recovered);
+    if (!recoveredTotal || Math.abs(recoveredTotal - shortfall) > 0.01) continue;
+
+    if (!(await saveCustomCollections(DB, row.id, addCustomCollections(stored, recovered)))) continue;
+
+    const summary = Object.entries(recovered)
+      .map(([key, amt]) => `${labels[key]}: ₦${num(amt).toLocaleString('en-NG')}`).join(', ');
+    try {
+      await createAuditEntry(DB, {
+        type: 'income_custom_type_restored',
+        detail: `Restored unattributed collection amounts on ${row.date} (${row.id}) from its merge record — ${summary}. The recorded total was already correct; the per-type breakdown and its HQ remittance share had been missing.`,
+        by: 'System',
+      });
+    } catch { /* audit trail is best-effort */ }
+  }
 }
 
 /** {key: label} for the admin-defined types, used for human-readable merge notes. */
@@ -2493,6 +2585,12 @@ async function handleInit(DB) {
       }
     }
   } catch { /* safe to skip */ }
+
+  // Put back any custom-type amounts that were accepted into a record's total but had
+  // no column to be stored in. Runs BEFORE the duplicate merge below, which recomputes
+  // total_collection from the per-type figures — consolidating a record whose breakdown
+  // is still incomplete would turn a recoverable gap into money missing from the total.
+  try { await backfillCustomCollectionsFromNotes(DB); } catch { /* best-effort repair */ }
 
   // Merge historical duplicate Sunday Collection rows (same date, recorded across more
   // than one submission before auto-merge existed) into a single record each. Safe to
@@ -11696,4 +11794,4 @@ async function getSharedReport(DB, token) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings };
+export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes };
