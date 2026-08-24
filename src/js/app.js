@@ -1361,6 +1361,38 @@ function countAccruedSundaysInRange(fromValue, toValue, now=new Date()){
   return count;
 }
 
+/**
+ * Identifies the remittance period a quota override belongs to, as YYYY-MM.
+ *
+ * Derived from the period's UNCAPPED end date, which is the month the period is
+ * labelled by throughout the app (20 Jul – 23 Aug is the "August 2026" period).
+ * Never derive it from the working `to` date: getQuotaLinesForPeriod caps that at
+ * today, so mid-period — viewed on 25 July — it would resolve to 2026-07 and the
+ * August override would silently not apply.
+ */
+function quotaPeriodKey(date){
+  if(!(date instanceof Date) || isNaN(date.getTime())) return '';
+  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}`;
+}
+
+/**
+ * The amount a quota is set to for one specific period, or null when it follows its
+ * normal monthly amount. 0 means the authority did not ask for it that period.
+ */
+function quotaOverrideForPeriod(quota, periodKey){
+  if(!periodKey) return null;
+  const map = quota?.overrides;
+  if(!map || typeof map !== 'object' || Array.isArray(map)) return null;
+  if(!Object.prototype.hasOwnProperty.call(map, periodKey)) return null;
+  // Only a real number is an override. null/''/undefined would each coerce to 0 —
+  // i.e. silently read as "not due" — which is the one mistake that must not happen.
+  const raw = map[periodKey];
+  if(raw === null || raw === undefined || raw === '') return null;
+  const v = Number(raw);
+  if(!isFinite(v) || v < 0) return null;
+  return Math.round(v * 100) / 100;
+}
+
 function getQuotaLinesForPeriod(quotas, fromDate, toDate){
   const list=Array.isArray(quotas)?quotas:[];
   const from=parseYmdDate(fromDate);
@@ -1373,20 +1405,46 @@ function getQuotaLinesForPeriod(quotas, fromDate, toDate){
   const fullPeriodEnd=(toRaw && from && toRaw>=from) ? toRaw : to;
   const coveredSundays=canProrate ? countAccruedSundaysInRange(from, to, now) : 0;
   const periodSundays=canProrate ? countSundaysInRange(from, fullPeriodEnd) : 0;
+  const periodKey=quotaPeriodKey(fullPeriodEnd || toRaw || to);
 
-  return list.map(q=>{
+  return list.map((q, quotaIndex)=>{
     const label=q?.label||'';
-    const periodAmount=Number(q?.amount||0);
-    if(!(periodAmount>0)) return null;
+    const monthly=Number(q?.amount||0);
+    // A quota can be set to a different figure for one period only — most often ₦0,
+    // when the authority does not ask for it that month. Held per period on the quota
+    // itself so past periods keep whatever they were actually charged: the quota list
+    // is global and every unpaid period is recomputed from it, so simply editing the
+    // monthly amount would rewrite history.
+    const override=quotaOverrideForPeriod(q, periodKey);
+    const periodAmount=override === null ? monthly : override;
+
+    // Not configured at all — nothing to charge and nothing to explain.
+    if(!(monthly>0) && !(periodAmount>0)) return null;
+
+    // Set to nothing for this period. Returned as a zero line rather than dropped so
+    // the Remittances page can show WHY it is absent. Every total already ignores it
+    // (it adds 0) and the reports omit any quota row that is not above zero.
+    if(!(periodAmount>0)){
+      return { label, amount:0, section:'quota', monthlyAmount:monthly, baseMonthlyAmount:monthly,
+               isProrated:false, isWaived:true, isOverridden:true, overrideAmount:0,
+               periodKey, quotaIndex, basis:'Not due for this period' };
+    }
+
+    const common={ label, section:'quota', monthlyAmount:periodAmount, baseMonthlyAmount:monthly,
+                   isWaived:false, isOverridden:override !== null, overrideAmount:override,
+                   periodKey, quotaIndex };
     if(!canProrate){
-      return { label, amount:periodAmount, section:'quota', monthlyAmount:periodAmount, isProrated:false, basis:'Fixed remittance-period amount' };
+      return { ...common, amount:periodAmount, isProrated:false, basis:'Fixed remittance-period amount' };
     }
     if(periodSundays<=0) return null;
     const amount = periodAmount * (coveredSundays / periodSundays);
     const basis = `Proportion of ${coveredSundays} of ${periodSundays} Sundays in the rem. period.`;
-    return { label, amount, section:'quota', monthlyAmount:periodAmount, isProrated:true, basis };
+    return { ...common, amount, isProrated:true, basis };
   }).filter(Boolean);
 }
+
+/** Quota lines that actually carry money — drops the "not due this period" ones. */
+function payableQuotaLines(lines){ return (lines||[]).filter(l=>!l?.isWaived); }
 
 
 
@@ -5326,7 +5384,7 @@ async function renderIncomeSummary(records){
         <div class="status-row" style="background:var(--amber-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
           <div class="status-row-label">Province Rebate (20%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div>
         </div>
-        ${quotaLines.map(q=>`
+        ${payableQuotaLines(quotaLines).map(q=>`
         <div class="status-row" style="background:var(--info-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
           <div><div class="status-row-label" style="color:var(--info)">${esc(q.label)}</div><div class="status-row-sub">${esc(q.basis||'Fixed monthly amount')}</div></div>
           <div class="status-row-amt" style="color:var(--info)">${fmt(q.amount)}</div>
@@ -6771,6 +6829,8 @@ async function renderRemittances(){
   const isPartAPaid=_isLegacyFullPaid||(_partATarget>0&&_paidA>0&&_paidA>=_partATarget*PAYMENT_TOLERANCE_THRESHOLD);
   const isPartBPaid=_isLegacyFullPaid||(partBTotal>0&&_paidB>0&&_paidB>=partBTotal*PAYMENT_TOLERANCE_THRESHOLD)||(partBTotal===0);
   const isPaid=isPartAPaid&&isPartBPaid;
+  // Read by confirmQuotaPeriodWaiver to warn before changing a period that is settled.
+  state.remPeriodIsPaid = isPaid || isPartAPaid;
   const isPartial=(totalPaid>0||_paidA>0||_paidB>0)&&!isPaid;
   const remDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid, isPartial, paidAmount: totalPaid });
@@ -6814,18 +6874,31 @@ async function renderRemittances(){
     <tr style="background:var(--surface)">
       <td colspan="3" style="font-size:10px;font-weight:700;color:var(--text3);padding:5px 12px;letter-spacing:0.6px;text-transform:uppercase">${sectionLabel}</td>
     </tr>
-    ${rows.map(l=>`<tr>
+    ${rows.map(l=>{
+      // A quota can be marked "not due" for a single period (see quotaOverrideForPeriod).
+      // It stays on screen at ₦0 so the accountant can see WHY it is absent from the
+      // total, and can put it back in one click. Reports omit it entirely.
+      const quotaBadge = l.isWaived
+        ? '<span class="badge badge-gray">Not due</span>'
+        // "Partial" only when it genuinely is: isProrated is true whenever proration
+        // applies at all, so on its own it mislabels a fully-accrued quota (5 of 5
+        // Sundays) as partial. The printed report already gates on accrual this way.
+        : `<span class="badge badge-info">${l.isProrated && !isQuotaFullyAccrued(l) ? 'Partial' : 'Fixed Quota'}</span>`;
+      const canWaive = l.section==='quota' && canAction('remittances') && l.periodKey;
+      return `<tr${l.isWaived?' style="opacity:0.55"':''}>
       <td style="padding:7px 12px">
-        <strong>${l.label}</strong>
+        <strong${l.isWaived?' style="text-decoration:line-through"':''}>${esc(l.label)}</strong>
         ${l.pct!=null?`<span style="margin-left:6px;font-size:11px;color:var(--text3);font-weight:400">(${l.pct}%)</span>`:''}
         ${l.basis?`<div style="font-size:11px;color:var(--text3);font-weight:400;margin-top:2px">${esc(l.basis)}</div>`:''}
-        ${l.section==='quota'&&l.isProrated&&l.monthlyAmount>l.amount?`<div style="font-size:11px;color:var(--text3);font-weight:400;margin-top:1px">Full monthly quota: <strong style="color:var(--text2)">${fmt(l.monthlyAmount)}</strong></div>`:''}
+        ${!l.isWaived&&l.isOverridden?`<div style="font-size:11px;color:var(--info);font-weight:600;margin-top:1px">Adjusted for this period (normally ${fmt(l.baseMonthlyAmount||0)})</div>`:''}
+        ${!l.isWaived&&l.section==='quota'&&l.isProrated&&l.monthlyAmount>l.amount?`<div style="font-size:11px;color:var(--text3);font-weight:400;margin-top:1px">Full monthly quota: <strong style="color:var(--text2)">${fmt(l.monthlyAmount)}</strong></div>`:''}
+        ${canWaive?`<div style="margin-top:4px"><button class="btn btn-sm" style="padding:3px 8px;font-size:11px" onclick="App.confirmQuotaPeriodWaiver(${l.quotaIndex}, '${l.periodKey}', ${l.isWaived?'true':'false'})">${l.isWaived?'↩ Mark as due again':'Not due this period'}</button></div>`:''}
       </td>
       <td style="padding:7px 8px">
-        <span class="badge ${l.section==='quota'?'badge-info':'badge-purple'}">${l.section==='quota'?(l.isProrated?'Partial':'Fixed Quota'):'% Based'}</span>
+        ${l.section==='quota'?quotaBadge:'<span class="badge badge-purple">% Based</span>'}
       </td>
-      <td class="td-right td-bold td-red" style="padding:7px 12px">${fmt(l.amount)}</td>
-    </tr>`).join('')}`:'';
+      <td class="td-right td-bold ${l.isWaived?'td-muted':'td-red'}" style="padding:7px 12px">${l.isWaived?'—':fmt(l.amount)}</td>
+    </tr>`;}).join('')}`:'';
 
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
@@ -8802,7 +8875,7 @@ async function buildMonthlyStatementData(fromDate, toDate){
   if(rem.totalArea>0) remittanceRows.push({ label:'Thanksgiving → Area/Zonal Pastor', basis:`${Math.round(remRatesData.tgArea*100)}% of TG`, amount:rem.totalArea, indent:true });
   if(rem.totalPastor>0) remittanceRows.push({ label:"Thanksgiving → Parish Pastor's Share", basis:`${Math.round(remRatesData.tgPastor*100)}% of TG`, amount:rem.totalPastor, indent:true });
   if(rem.totalMinisters>0) remittanceRows.push({ label:"Thanksgiving → Ministers' Share", basis:`${Math.round(remRatesData.tgMinisters*100)}% of TG`, amount:rem.totalMinisters, indent:true });
-  quotaLines.forEach(q=>remittanceRows.push({ label:q.label, basis:isQuotaFullyAccrued(q)?'Fixed':(q.isProrated?`Fixed • ${q.basis}`:'Fixed Quota'), amount:q.amount }));
+  payableQuotaLines(quotaLines).forEach(q=>remittanceRows.push({ label:q.label, basis:isQuotaFullyAccrued(q)?'Fixed':(q.isProrated?`Fixed • ${q.basis}`:'Fixed Quota'), amount:q.amount }));
 
   // Section D — expense line items (full detail)
   const expenseRows=expenses.map((e,i)=>{
@@ -12950,7 +13023,7 @@ async function generateMonthlyReport(){
       ${rem.totalArea>0?`<tr><td style="padding-left:16px">Thanksgiving → Area/Zonal Pastor</td><td class="td-c">${Math.round(remRatesData.tgArea*100)}% of TG</td><td class="td-r">${fmt(rem.totalArea)}</td></tr>`:''}
       ${rem.totalPastor>0?`<tr><td style="padding-left:16px">Thanksgiving → Parish Pastor's Share</td><td class="td-c">${Math.round(remRatesData.tgPastor*100)}% of TG</td><td class="td-r">${fmt(rem.totalPastor)}</td></tr>`:''}
       ${rem.totalMinisters>0?`<tr><td style="padding-left:16px">Thanksgiving → Ministers' Share</td><td class="td-c">${Math.round(remRatesData.tgMinisters*100)}% of TG</td><td class="td-r">${fmt(rem.totalMinisters)}</td></tr>`:''}
-      ${quotaLines.map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">${esc(isQuotaFullyAccrued(q)?'Fixed':(q.isProrated?`Fixed • ${q.basis}`:'Fixed Quota'))}</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
+      ${payableQuotaLines(quotaLines).map(q=>`<tr><td>${esc(q.label)}</td><td class="td-c">${esc(isQuotaFullyAccrued(q)?'Fixed':(q.isProrated?`Fixed • ${q.basis}`:'Fixed Quota'))}</td><td class="td-r">${fmt(q.amount)}</td></tr>`).join('')}
       <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${fmt(totalRemDue)}</td></tr>
       <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Period</td><td class="td-r" style="font-weight:600;color:#0F6E56">${fmt(totalRemPaid)}</td></tr>
       <tr style="background:${(totalRemDue-totalRemPaid)>0?'#fdf0f0':'#e8f4f0'}"><td colspan="2" style="font-weight:600;color:${(totalRemDue-totalRemPaid)>0?'#c0392b':'#0F6E56'}">Outstanding Remittance Balance</td><td class="td-r" style="font-weight:700;color:${(totalRemDue-totalRemPaid)>0?'#c0392b':'#0F6E56'}">${(totalRemDue-totalRemPaid)>0?fmt(totalRemDue-totalRemPaid):fmt(0)}</td></tr>
@@ -13451,8 +13524,8 @@ async function saveBankEmailAutomationSettings(btn=null){
 
 function renderAdminQuotas(s){
   const list=getQuotaList(s);
-  const rows=list.map((q)=>`
-    <div class="quota-row" draggable="true">
+  const rows=list.map((q,i)=>`
+    <div class="quota-row" draggable="true" data-quota-idx="${i}">
       <span class="dnd-handle" title="Drag to reorder">⠿</span>
       <div style="flex:2"><label class="form-label">Label</label><input type="text" class="form-input" value="${esc(q.label)}" placeholder="e.g. Building Fund" /></div>
       <div style="flex:1"><label class="form-label">Amount (₦)</label><input type="number" class="form-input" value="${q.amount||0}" min="0" /></div>
@@ -14136,17 +14209,98 @@ function initQuotaDnd(){
   });
 }
 
+/**
+ * Mark a fixed quota as not due for one remittance period (or put it back).
+ *
+ * Recorded as a per-period override on the quota rather than by changing its monthly
+ * amount: the quota list is global and every unpaid period is recomputed from it, so
+ * editing the amount would also erase the quota from previous periods and re-charge
+ * this one the moment it was restored.
+ */
+function confirmQuotaPeriodWaiver(quotaIndex, periodKey, isWaived){
+  if(!canAction('remittances')){ showAlert('You do not have permission to change remittance figures.','danger'); return; }
+  DB.getSettings().then(s=>{
+    const quota = getQuotaList(s)[quotaIndex];
+    if(!quota){ showAlert('That quota no longer exists.','danger'); return; }
+    const label = quota.label || 'this quota';
+    const periodLabel = quotaPeriodLabel(periodKey);
+    const paidNote = state.remPeriodIsPaid
+      ? `<div class="alert alert-warn" style="margin-top:10px"><span class="alert-icon">⚠</span><span>This period has already been paid. The payment record keeps the figure it settled, but the outstanding balance will change. Only do this if the authority confirmed the quota was not owed.</span></div>`
+      : '';
+    showModal(`
+      <button class="modal-close" onclick="closeModal()">✕</button>
+      <div class="modal-title">${isWaived?'↩ Mark quota as due again':'Mark quota as not due'}</div>
+      <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>${isWaived
+        ? `<strong>${esc(label)}</strong> will be charged again for <strong>${esc(periodLabel)}</strong>, at its normal ${fmt(quota.amount||0)}.`
+        : `<strong>${esc(label)}</strong> will not be charged for <strong>${esc(periodLabel)}</strong>. Every other period keeps its own figure, and the quota returns automatically next period.`}</span></div>
+      ${paidNote}
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="App.applyQuotaPeriodWaiver(${quotaIndex}, '${periodKey}', ${isWaived?'true':'false'}, this)">${isWaived?'Charge it again':'Mark as not due'}</button>
+      </div>`);
+  }).catch(err=>showAlert(`Could not load quotas: ${err.message||'Unknown error'}`,'danger'));
+}
+
+/** "2026-08" → "August 2026", for the confirmation copy and the audit trail. */
+function quotaPeriodLabel(periodKey){
+  const m = /^(\d{4})-(\d{2})$/.exec(String(periodKey||''));
+  if(!m) return String(periodKey||'this period');
+  const idx = Number(m[2]) - 1;
+  return `${MONTHS[idx]||m[2]} ${m[1]}`;
+}
+
+async function applyQuotaPeriodWaiver(quotaIndex, periodKey, isWaived, btn=null){
+  if(!canAction('remittances')){ showAlert('You do not have permission to change remittance figures.','danger'); return; }
+  if(!/^\d{4}-\d{2}$/.test(String(periodKey||''))){ showAlert('Could not identify the remittance period.','danger'); return; }
+  const s = await DB.getSettings();
+  const list = getQuotaList(s).map(q=>({ ...q, overrides:{ ...(q.overrides||{}) } }));
+  const quota = list[quotaIndex];
+  if(!quota){ closeModal(); showAlert('That quota no longer exists.','danger'); return; }
+
+  if(isWaived) delete quota.overrides[periodKey];
+  else quota.overrides[periodKey] = 0;
+  if(!Object.keys(quota.overrides).length) delete quota.overrides;
+
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.saveSettings({ quotaList:list });
+    const periodLabel = quotaPeriodLabel(periodKey);
+    DB.addAudit('quota_period_waiver',
+      isWaived
+        ? `${quota.label} restored as due for ${periodLabel} (${fmt(quota.amount||0)})`
+        : `${quota.label} marked not due for ${periodLabel} — ${fmt(quota.amount||0)} not charged for this period only`,
+      state.user?.name);
+    closeModal();
+    showAlert(isWaived
+      ? `${quota.label} will be charged again for ${periodLabel}.`
+      : `${quota.label} is not due for ${periodLabel}. Other periods are unchanged.`,'success');
+    renderRemittances();
+  } catch(err){
+    restore();
+    showAlert(`Failed to update the quota: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
 async function saveQuotas(btn=null){
   if(!requireAdmin()) return;
   const container=document.getElementById('quota-rows-container');
   const list=[];
   if(container){
+    // data-quota-idx points back at the quota this row was rendered from — it rides
+    // along when a row is dragged, so per-period overrides survive both reordering
+    // and a rename. Rows added in this session carry no index and start clean.
+    const existing=getQuotaList(await DB.getSettings());
     container.querySelectorAll('.quota-row').forEach((row)=>{
       const labelEl=row.querySelector('input[type="text"]');
       const amountEl=row.querySelector('input[type="number"]');
       const label=(labelEl?.value||'').trim();
       const amount=parseFloat(amountEl?.value)||0;
-      if(label) list.push({ label, amount });
+      if(!label) return;
+      const idx=Number(row.getAttribute('data-quota-idx'));
+      const overrides=Number.isInteger(idx) ? existing[idx]?.overrides : null;
+      const entry={ label, amount };
+      if(overrides && Object.keys(overrides).length) entry.overrides={ ...overrides };
+      list.push(entry);
     });
   }
   const s=await DB.getSettings();
@@ -14568,11 +14722,16 @@ return {
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, showPettyToBankDeposit, submitPettyToBankDeposit, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
-  setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, saveRates, addIncomeType, saveIncomeTypes, toggleIncomeTypeActive, confirmDeleteIncomeType, deleteIncomeType, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
+  setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, confirmQuotaPeriodWaiver, applyQuotaPeriodWaiver, saveRates, addIncomeType, saveIncomeTypes, toggleIncomeTypeActive, confirmDeleteIncomeType, deleteIncomeType, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   setPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
   _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
+  _quotaPeriodKey: quotaPeriodKey,
+  _quotaOverrideForPeriod: quotaOverrideForPeriod,
+  _payableQuotaLines: payableQuotaLines,
+  _quotaPeriodLabel: quotaPeriodLabel,
+  _sumQuotaLines: sumQuotaLines,
   _getIncomeCashWithAccountant: getIncomeCashWithAccountant,
   _buildExpenseCoveringMap: buildExpenseCoveringMap,
   _findIncomeRefForCashExpense: findIncomeRefForCashExpense,
