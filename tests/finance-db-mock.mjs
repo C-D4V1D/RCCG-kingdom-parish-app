@@ -11,10 +11,15 @@ const INCOME_COLUMNS = [
 ];
 
 export function createFinanceDBMock(seed = {}) {
+  // seed.noCustomColumn reproduces a database that never ran the /api/init migration:
+  // any read/write of income.custom_collections fails the way D1 fails, until an
+  // ALTER TABLE adds it.
+  let hasCustomColumn = !seed.noCustomColumn;
   const tables = {
     income: [...(seed.income || [])],
     cash_transactions: [...(seed.cash_transactions || [])],
     expenses: [...(seed.expenses || [])],
+    audit_log: [...(seed.audit_log || [])],
   };
   let seq = 0;
 
@@ -49,10 +54,25 @@ export function createFinanceDBMock(seed = {}) {
       if (row) row.bank_transfer_details = details;
       return null;
     }
+    if (sql.includes('ALTER TABLE income ADD COLUMN custom_collections')) {
+      if (hasCustomColumn) throw new Error('duplicate column name: custom_collections');
+      hasCustomColumn = true;
+      return null;
+    }
     if (sql.includes('UPDATE income SET custom_collections=?')) {
+      if (!hasCustomColumn) throw new Error('no such column: custom_collections');
       const [json, id] = binds;
       const row = tables.income.find(r => r.id === id);
       if (row) row.custom_collections = json;
+      return null;
+    }
+    if (sql.includes("LIKE '%merged in by%'")) {
+      return tables.income
+        .filter(r => String(r.notes || '').includes('merged in by'))
+        .map(r => ({ ...r }));
+    }
+    if (sql.includes('INSERT INTO audit_log')) {
+      tables.audit_log.push({ id: binds[0], type: binds[1], detail: binds[2] });
       return null;
     }
     if (sql.includes("SELECT value FROM settings WHERE key='customIncomeTypes'")) {
@@ -116,7 +136,11 @@ export function createFinanceDBMock(seed = {}) {
       return null;
     }
     if (sql.includes('SELECT * FROM income ORDER BY date DESC')) {
-      return tables.income.map(r => ({ ...r }));
+      return tables.income.map(r => {
+        const row = { ...r };
+        if (!hasCustomColumn) delete row.custom_collections;
+        return row;
+      });
     }
     throw new Error(`Unhandled SQL in test mock: ${sql}`);
   }

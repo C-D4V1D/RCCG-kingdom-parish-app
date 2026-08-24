@@ -13586,8 +13586,32 @@ function customIncomeTypeUsage(income, keys){
   return usage;
 }
 
+/**
+ * Sunday records whose per-type figures no longer add up to the recorded total.
+ * The total is the figure the money was actually banked against, so a gap means an
+ * amount is sitting in the ledger with no collection type behind it — and therefore
+ * no remittance share. The server repairs these automatically where its own merge
+ * record explains the gap exactly (see backfillCustomCollectionsFromNotes); whatever
+ * is left needs a human, so it is surfaced here rather than left silent.
+ */
+function findUnattributedSundayIncome(income, types = INCOME_TYPES){
+  return (income||[])
+    .filter(r => !r.source || r.source === 'sunday_collection')
+    .map(r => {
+      const typed = types.reduce((sum,t)=>sum+(Number(r[t.key])||0), 0);
+      return { id:r.id, date:r.date, total:Number(r.totalCollection)||0, typed,
+               gap: Math.round(((Number(r.totalCollection)||0) - typed) * 100) / 100 };
+    })
+    .filter(r => r.gap > 0.5)
+    .sort((a,b)=> String(b.date||'').localeCompare(String(a.date||'')));
+}
+
 function renderAdminIncomeTypes(s, income){
   const custom = getCustomIncomeTypes(s);
+  // Built from the settings this tab was handed, not the live INCOME_TYPES global, so
+  // the gap is measured against the types that actually exist rather than whatever the
+  // last settings load happened to leave behind.
+  const unattributed = findUnattributedSundayIncome(income, [...BUILTIN_INCOME_TYPES, ...custom]);
   const usage = customIncomeTypeUsage(income, custom.map(t=>t.key));
   const rates = s.remittanceRates || DEFAULT_REMITTANCE_RATES;
   const pct = v => +(((v??0)*100).toFixed(4));
@@ -13630,7 +13654,21 @@ function renderAdminIncomeTypes(s, income){
     </tr>`;
   }).join('');
 
-  return `<div class="card">
+  const unattributedCard = unattributed.length ? `<div class="card" style="margin-bottom:16px;border:1.5px solid var(--danger)">
+    <div class="modal-title" style="font-size:15px;margin-bottom:4px;color:var(--danger)">⚠ Collections with no type behind them</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:12px">On ${unattributed.length===1?'this Sunday':'these Sundays'} the recorded total is more than the collection types add up to. The money is in the ledger and the bank figures are correct, but the unexplained part attracts <strong>no remittance share</strong>. This happens to a collection recorded while its type could not yet be saved. Delete the record and re-enter it to correct the breakdown.</p>
+    <div class="table-wrap"><table>
+      <tr><th>Date</th><th class="td-c">Recorded Total</th><th class="td-c">Types Add Up To</th><th class="td-c">Unexplained</th></tr>
+      ${unattributed.map(u=>`<tr>
+        <td>${fmtDate(u.date)}</td>
+        <td class="td-c">${fmt(u.total)}</td>
+        <td class="td-c" style="color:var(--text3)">${fmt(u.typed)}</td>
+        <td class="td-c" style="color:var(--danger);font-weight:700">${fmt(u.gap)}</td>
+      </tr>`).join('')}
+    </table></div>
+  </div>` : '';
+
+  return `${unattributedCard}<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:8px">Sunday Collection Types</div>
     <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">When RCCG introduces a new collection (the way Weekend Offering and Holy Communion Offering were introduced), add it here instead of waiting for an app update. A type added here appears immediately on the Sunday Collections entry form, in the Income summaries, in the remittance calculation and the RCCG remittance report, and in the monthly and weekly statements.</p>
 
@@ -14480,6 +14518,13 @@ function submitKPSCAlert(){
     if (!loginEl || !appEl) return;
     loginEl.style.display = 'none';
     appEl.style.display = 'flex';
+    // Run schema migrations for a restored session too. login() already does this,
+    // but a session restored from localStorage never did — so a parish that simply
+    // stays signed in on the PWA can run for weeks against a database missing columns
+    // that shipped in the meantime. That is exactly how income.custom_collections came
+    // to be absent while the app was already accepting custom collection types.
+    // Fire-and-forget: this must never delay or block first paint.
+    apiFetch('init').catch(err => console.warn('init skipped:', err.message));
     DB.getSettings()
       .then(s => { state.rolePermissions = s.rolePermissions || null; initApp(); })
       .catch(() => initApp());
@@ -14558,6 +14603,7 @@ return {
   _customIncomeKeyFromLabel: customIncomeKeyFromLabel,
   _selectableIncomeTypes: selectableIncomeTypes,
   _customIncomeTypeUsage: customIncomeTypeUsage,
+  _findUnattributedSundayIncome: findUnattributedSundayIncome,
   _renderAdminIncomeTypes: renderAdminIncomeTypes,
   _readIncomeTypeRows: readIncomeTypeRows,
   _calcRemittances: calcRemittances,

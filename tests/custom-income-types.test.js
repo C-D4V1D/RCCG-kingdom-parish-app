@@ -335,3 +335,38 @@ test('a custom label containing markup is rendered escaped in the admin table', 
   );
   assert.ok(!html.includes('<img src=x'), 'the label must never reach the page as markup');
 });
+
+// ── Unattributed-income detection ────────────────────────────────────────────
+
+test('a Sunday record whose types no longer add up to its total is flagged', () => {
+  withCustomTypes([{ key: 'custom_convention_thanksgiving', label: 'Convention Thanksgiving', natl: 1 }], () => {
+    const flagged = App._findUnattributedSundayIncome([
+      // Broken: ₦7,000 counted in the total with no type behind it.
+      { id: 'INC-1', date: '2026-08-16', source: 'sunday_collection', membersTithe: 55450, totalCollection: 62450 },
+      // Healthy: the breakdown accounts for the whole total.
+      { id: 'INC-2', date: '2026-08-23', source: 'sunday_collection', membersTithe: 40000, custom_convention_thanksgiving: 5000, totalCollection: 45000 },
+      // Other Income legitimately carries a total with no collection type at all.
+      { id: 'INC-3', date: '2026-08-20', source: 'individual_donation', totalCollection: 10000 },
+    ]);
+    assert.deepEqual(flagged.map(f => f.id), ['INC-1']);
+    assert.equal(flagged[0].gap, 7000);
+  });
+});
+
+test('the admin tab shows the unattributed-income warning above the type tables', () => {
+  const html = App._renderAdminIncomeTypes(
+    { customIncomeTypes: [{ key: 'custom_convention_thanksgiving', label: 'Convention Thanksgiving', natl: 1 }] },
+    [{ id: 'INC-1', date: '2026-08-16', source: 'sunday_collection', membersTithe: 55450, totalCollection: 62450 }],
+  );
+  assert.match(html, /Collections with no type behind them/);
+  assert.match(html, /no remittance share/);
+  assert.ok(html.indexOf('Collections with no type behind them') < html.indexOf('Sunday Collection Types'));
+});
+
+test('no warning is rendered when every Sunday record adds up', () => {
+  const html = App._renderAdminIncomeTypes(
+    { customIncomeTypes: [{ key: 'custom_convention_thanksgiving', label: 'Convention Thanksgiving', natl: 1 }] },
+    [{ id: 'INC-1', date: '2026-08-16', source: 'sunday_collection', membersTithe: 55450, custom_convention_thanksgiving: 7000, totalCollection: 62450 }],
+  );
+  assert.ok(!html.includes('Collections with no type behind them'));
+});
