@@ -1020,6 +1020,9 @@ const ACCESS_RULES = {
     income_deposit: ['income'],
     remittance_record_payment: ['remittances'],
     remittance_delete_pending: ['remittances'],
+    // Marking a fixed quota not due (or adjusting it) for a single remittance period —
+    // an accounting judgement, so the same holders who record remittance payments.
+    quota_period_waiver: ['remittances'],
     // Funds In/Out: also lets the Admin Officer complete a zonal payment single-handed —
     // reuses the same permission that gates expense logging ('expenses'). Transferring
     // pool money into parish income is a separate, more sensitive action — see
@@ -6884,7 +6887,7 @@ async function renderRemittances(){
         // applies at all, so on its own it mislabels a fully-accrued quota (5 of 5
         // Sundays) as partial. The printed report already gates on accrual this way.
         : `<span class="badge badge-info">${l.isProrated && !isQuotaFullyAccrued(l) ? 'Partial' : 'Fixed Quota'}</span>`;
-      const canWaive = l.section==='quota' && canAction('remittances') && l.periodKey;
+      const canWaive = l.section==='quota' && canAction('quota_period_waiver') && l.periodKey;
       return `<tr${l.isWaived?' style="opacity:0.55"':''}>
       <td style="padding:7px 12px">
         <strong${l.isWaived?' style="text-decoration:line-through"':''}>${esc(l.label)}</strong>
@@ -14218,7 +14221,7 @@ function initQuotaDnd(){
  * this one the moment it was restored.
  */
 function confirmQuotaPeriodWaiver(quotaIndex, periodKey, isWaived){
-  if(!canAction('remittances')){ showAlert('You do not have permission to change remittance figures.','danger'); return; }
+  if(!canAction('quota_period_waiver')){ showAlert('You do not have permission to change remittance figures.','danger'); return; }
   DB.getSettings().then(s=>{
     const quota = getQuotaList(s)[quotaIndex];
     if(!quota){ showAlert('That quota no longer exists.','danger'); return; }
@@ -14250,7 +14253,7 @@ function quotaPeriodLabel(periodKey){
 }
 
 async function applyQuotaPeriodWaiver(quotaIndex, periodKey, isWaived, btn=null){
-  if(!canAction('remittances')){ showAlert('You do not have permission to change remittance figures.','danger'); return; }
+  if(!canAction('quota_period_waiver')){ showAlert('You do not have permission to change remittance figures.','danger'); return; }
   if(!/^\d{4}-\d{2}$/.test(String(periodKey||''))){ showAlert('Could not identify the remittance period.','danger'); return; }
   const s = await DB.getSettings();
   const list = getQuotaList(s).map(q=>({ ...q, overrides:{ ...(q.overrides||{}) } }));
@@ -14751,6 +14754,7 @@ return {
   _summarizeSatelliteFunds: summarizeSatelliteFunds,
   // Test-only hooks: exercise the real permission map without a login round-trip.
   _canAction: canAction,
+  _ACCESS_RULES: ACCESS_RULES,
   _setTestUserRole: (role) => { state.user = { name:'Test User', role }; },
   _satelliteHeldDisplay: satelliteHeldDisplay,
   _SATELLITE_FUND_PURPOSES: SATELLITE_FUND_PURPOSES,
