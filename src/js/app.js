@@ -2640,12 +2640,22 @@ function txCurrentMonthDefaults(){
   };
 }
 
+/**
+ * The expense categories the Transactions list is currently narrowed to. Held as a
+ * comma-separated string because the Dashboard's aggregated "Other" slice covers
+ * several categories at once; the dropdown only ever sets a single key.
+ */
+function txCategoryFilterKeys(){
+  return String(state.txCategoryFilter||'').split(',').map(k=>k.trim()).filter(Boolean);
+}
+
 function applyTxFilters(all){
   const search = (state.txSearch||'').trim().toLowerCase();
   const typeFilter = state.txTypeFilter||'';
   const statusFilter = state.txStatusFilter||'';
   const methodFilter = state.txMethodFilter||'';
   const moduleFilter = state.txModuleFilter||'';
+  const categoryFilter = txCategoryFilterKeys();
   const fromDate = state.txFromDate||'';
   const toDate = state.txToDate||'';
   const minAmount = parseFloat(state.txMinAmount);
@@ -2659,6 +2669,7 @@ function applyTxFilters(all){
     if(statusFilter && String(t.status||'').toLowerCase()!==statusFilter) return false;
     if(methodFilter && String(t.method||'').toLowerCase()!==methodFilter) return false;
     if(moduleFilter && t.module!==moduleFilter) return false;
+    if(categoryFilter.length && !categoryFilter.includes(t.category||'')) return false;
     if(fromDate && tDate && tDate < fromDate) return false;
     if(toDate && tDate && tDate > toDate) return false;
     if(!Number.isNaN(minAmount) && minAmount>=0 && (t.amount||0) < minAmount) return false;
@@ -2741,6 +2752,9 @@ async function buildTransactionsLedger(){
       direction:'debit',
       method:e.paymentMethod||'',
       status:e.status||'approved',
+      // Carried so the Dashboard's Expense Breakdown can drill straight into this
+      // category (see showExpenseCategoryTransactions).
+      category:e.category||'',
       description:`Expense — ${(EXPENSE_CATS_ALL.find(c=>c.key===e.category)?.label)||e.category||'Uncategorized'}${e.subCategory?` · ${e.subCategory}`:''}`,
       reference:e.receiptNo||'',
       actor:e.recordedBy||'',
@@ -2851,6 +2865,15 @@ async function renderTransactions(){
   const statusOptions = [...new Set(all.map(t=>String(t.status||'').toLowerCase()).filter(Boolean))].sort();
   const methodOptions = [...new Set(all.map(t=>String(t.method||'').toLowerCase()).filter(Boolean))].sort();
   const moduleOptions = [...new Set(all.map(t=>t.module).filter(Boolean))].sort();
+  const categoryLabel = key => EXPENSE_CATS_ALL.find(c=>c.key===key)?.label || String(key).replace(/_/g,' ');
+  const categoryOptions = [...new Set(all.map(t=>t.category).filter(Boolean))]
+    .sort((a,b)=>categoryLabel(a).localeCompare(categoryLabel(b)));
+  const categoryFilterKeys = txCategoryFilterKeys();
+  // Drilling in from the Dashboard's aggregated "Other" slice narrows to several
+  // categories at once, which no single dropdown entry can represent — surface it as
+  // its own option so the state stays visible and clearable.
+  const categoryFilterValue = categoryFilterKeys.join(',');
+  const categoryIsMulti = categoryFilterKeys.length > 1;
 
   const savedViews = getTxSavedViews();
 
@@ -2958,6 +2981,15 @@ async function renderTransactions(){
             ${moduleOptions.map(v=>`<option value="${esc(v)}" ${moduleFilter===v?'selected':''}>${esc(txModuleLabel(v))}</option>`).join('')}
           </select>
           <div class="form-hint">Which area of the app recorded it?</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label" title="Filter by the expense category — matches the Expense Breakdown on the Dashboard">Expense Category</label>
+          <select class="form-select" onchange="App.setTxFilter('category',this.value)">
+            <option value="">All Categories</option>
+            ${categoryIsMulti?`<option value="${esc(categoryFilterValue)}" selected>Several categories (${categoryFilterKeys.length})</option>`:''}
+            ${categoryOptions.map(v=>`<option value="${esc(v)}" ${!categoryIsMulti&&categoryFilterValue===v?'selected':''}>${esc(categoryLabel(v))}</option>`).join('')}
+          </select>
+          <div class="form-hint">Only applies to expenses</div>
         </div>
         <div class="form-group" style="margin-bottom:0">
           <label class="form-label" title="Filter by whether the transaction has been completed, is still waiting, or was rejected">Status</label>
@@ -3069,6 +3101,7 @@ function setTxFilter(key, value){
   else if(key==='status') state.txStatusFilter=value||'';
   else if(key==='method') state.txMethodFilter=value||'';
   else if(key==='module') state.txModuleFilter=value||'';
+  else if(key==='category') state.txCategoryFilter=value||'';
   else if(key==='fromDate') state.txFromDate=value||'';
   else if(key==='toDate') state.txToDate=value||'';
   else if(key==='minAmount') state.txMinAmount=value;
@@ -3077,6 +3110,25 @@ function setTxFilter(key, value){
   else if(key==='sortDir') state.txSortDir=value||'desc';
   state.txPage=1;
   renderTransactions();
+}
+
+/**
+ * Drill from the Dashboard's Expense Breakdown into the matching transactions.
+ * `categoryKeys` may name several categories (the aggregated "Other" slice), and the
+ * date range is the exact window the breakdown was computed over, so the list adds up
+ * to the figure that was clicked.
+ */
+async function showExpenseCategoryTransactions(categoryKeys, fromDate, toDate){
+  if(!canAccessPage('transactions')){ showAlert('You do not have permission to view transactions.','danger'); return; }
+  // Reset first: the drill-down must show exactly what was clicked, not whatever
+  // filters happened to be left on the Transactions page from an earlier visit.
+  state.txSearch=''; state.txTypeFilter=''; state.txStatusFilter=''; state.txMethodFilter='';
+  state.txMinAmount=''; state.txMaxAmount='';
+  state.txSortField='date'; state.txSortDir='desc'; state.txPage=1;
+  state.txModuleFilter='expenses';
+  state.txCategoryFilter=String(categoryKeys||'');
+  state.txFromDate=fromDate||''; state.txToDate=toDate||'';
+  await navigate('transactions');
 }
 
 function setTxPage(page){
@@ -3097,6 +3149,7 @@ function clearTxFilters(){
   state.txStatusFilter='';
   state.txMethodFilter='';
   state.txModuleFilter='';
+  state.txCategoryFilter='';
   state.txFromDate=d.from;
   state.txToDate=d.to;
   state.txMinAmount='';
@@ -3278,7 +3331,8 @@ function saveTxView(){
   const filters = {
     txSearch:state.txSearch||'', txTypeFilter:state.txTypeFilter||'',
     txStatusFilter:state.txStatusFilter||'', txMethodFilter:state.txMethodFilter||'',
-    txModuleFilter:state.txModuleFilter||'', txFromDate:state.txFromDate||'',
+    txModuleFilter:state.txModuleFilter||'', txCategoryFilter:state.txCategoryFilter||'',
+    txFromDate:state.txFromDate||'',
     txToDate:state.txToDate||'', txMinAmount:state.txMinAmount||'',
     txMaxAmount:state.txMaxAmount||'', txSortField:state.txSortField||'date',
     txSortDir:state.txSortDir||'desc'
@@ -3302,6 +3356,8 @@ function loadTxView(idx){
   Object.assign(state, { txSearch, txTypeFilter, txStatusFilter, txMethodFilter,
           txModuleFilter, txFromDate, txToDate, txMinAmount, txMaxAmount,
           txSortField, txSortDir });
+  // Older saved views predate the category filter — treat a missing value as "all".
+  state.txCategoryFilter = f.txCategoryFilter || '';
   state.txPage = 1;
   renderTransactions();
 }
@@ -4086,10 +4142,20 @@ async function renderDashboard(){
   expenses.forEach(e=>{ expByCat[e.category]=(expByCat[e.category]||0)+(e.amount||0) });
   const _expCatEntriesSorted = Object.entries(expByCat).sort((a,b)=>b[1]-a[1]);
   const topCats = _expCatEntriesSorted.slice(0,7);
+  // Categories folded into the aggregated "Other" legend row — kept so clicking it can
+  // drill into exactly the categories it stands for rather than into all expenses.
+  const _expOtherCatKeys = _expCatEntriesSorted.slice(7).map(([k])=>k);
   if(_expCatEntriesSorted.length > 7){
     const _expOtherTotal = _expCatEntriesSorted.slice(7).reduce((s,e)=>s+e[1],0);
     if(_expOtherTotal>0) topCats.push(['_other_exp', _expOtherTotal]);
   }
+  // The exact window the breakdown was computed over, so the drill-down lands on the
+  // same set of expenses the figure was made from (see the `expenses` filter above).
+  const _expRangeFrom = useRemPeriod ? dashPeriodFrom : ymdLocal(new Date(state.year, state.month, 1));
+  const _expRangeTo   = useRemPeriod ? dashPeriodTo   : ymdLocal(new Date(state.year, state.month+1, 0));
+  // Category keys reach an inline handler, so only plain slugs are made clickable.
+  const _catKeysSafe = keys => keys.length>0 && keys.every(k=>/^[A-Za-z0-9_-]+$/.test(k));
+  const _canDrillExpenses = canAccessPage('transactions');
 
   // Pre-compute SVG donut-chart paths for the expense breakdown pie slide.
   // Each slice is a closed SVG path arc traced from the outer ring to the inner ring.
@@ -5024,12 +5090,21 @@ async function renderDashboard(){
             ${topCats.map(([cat,amt])=>{
               const c=cat==='_other_exp'?{label:'Other',color:'#888',icon:'➕'}:(EXPENSE_CATS_ALL.find(e=>e.key===cat)||{label:cat,color:'#888',icon:''});
               const pct=Math.round(amt/totalExpenses*100);
-              return `<div style="display:flex;align-items:center;gap:7px">
+              const keys = cat==='_other_exp' ? _expOtherCatKeys : [cat];
+              const drillable = _canDrillExpenses && _catKeysSafe(keys);
+              const inner = `
                 <div style="width:10px;height:10px;border-radius:2px;background:${c.color};flex-shrink:0"></div>
-                <span style="font-size:12px;color:var(--text2);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.icon||''} ${c.label}</span>
+                <span style="font-size:12px;color:var(--text2);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left">${c.icon||''} ${esc(c.label)}</span>
                 <span style="font-size:11px;font-weight:700;color:${c.color};flex-shrink:0;min-width:26px;text-align:right">${pct}%</span>
-                <span style="font-size:12px;font-weight:600;color:var(--text);flex-shrink:0;min-width:64px;text-align:right">${fmt(amt)}</span>
-              </div>`;
+                <span style="font-size:12px;font-weight:600;color:var(--text);flex-shrink:0;min-width:64px;text-align:right">${fmt(amt)}</span>`;
+              if(!drillable) return `<div style="display:flex;align-items:center;gap:7px">${inner}</div>`;
+              const title = cat==='_other_exp'
+                ? `See the ${keys.length} smaller expense categories in Transactions`
+                : `See ${c.label} expenses in Transactions`;
+              return `<button type="button" class="legend-row" title="${esc(title)}" aria-label="${esc(title)}"
+                onclick="App.showExpenseCategoryTransactions('${keys.join(',')}','${_expRangeFrom}','${_expRangeTo}')">${inner}
+                <span class="legend-row-chevron" aria-hidden="true">›</span>
+              </button>`;
             }).join('')}
             <div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:8px;margin-top:3px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total expenses</span><span style="font-size:16px;font-weight:700;color:var(--danger)">${fmt(totalExpenses)}</span></div>
           </div>`
@@ -14720,7 +14795,7 @@ return {
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
-  setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
+  setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showExpenseCategoryTransactions, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, showPettyToBankDeposit, submitPettyToBankDeposit, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
@@ -14736,6 +14811,12 @@ return {
   _quotaPeriodLabel: quotaPeriodLabel,
   _sumQuotaLines: sumQuotaLines,
   _getIncomeCashWithAccountant: getIncomeCashWithAccountant,
+  _applyTxFilters: applyTxFilters,
+  _txCategoryFilterKeys: txCategoryFilterKeys,
+  // Set transaction filter state directly — setTxFilter() re-renders the page, which
+  // a headless test has no DOM for.
+  _setTxFilterState: (patch) => { Object.assign(state, patch); },
+  _txFilterState: () => ({ ...state }),
   _buildExpenseCoveringMap: buildExpenseCoveringMap,
   _findIncomeRefForCashExpense: findIncomeRefForCashExpense,
   _calcPettyFloatFromLedger: calcPettyFloatFromLedger,
