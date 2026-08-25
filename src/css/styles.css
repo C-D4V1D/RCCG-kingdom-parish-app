@@ -148,7 +148,13 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .grid-4060{display:grid;grid-template-columns:2fr 3fr;gap:1rem}
 
 /* TABLES */
-.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;min-width:0;max-width:100%}
+/* A grid item defaults to min-width:auto, so it refuses to shrink below its content's
+   natural width. A wide child — the Remittances "Full Remittance Breakdown" table —
+   then stretched its column and pushed the whole page sideways on a phone instead of
+   scrolling inside its own .table-wrap. Letting grid children shrink to zero restores
+   that: the page fits the screen and only the table scrolls. */
+.grid-2>*,.grid-3>*,.grid-6040>*,.grid-4060>*{min-width:0}
 table{width:100%;border-collapse:collapse}
 th{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);padding:8px 12px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
 td{padding:10px 12px;font-size:13px;border-bottom:1px solid var(--border);color:var(--text);vertical-align:middle}

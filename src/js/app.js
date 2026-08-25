@@ -3810,6 +3810,17 @@ async function renderDashboard(){
   // Handed to the Children Teacher, so neither the parish's to spend nor RCCG's — it
   // needs its own line here or it would be silently absorbed into the RCCG share.
   const dashChildrenDeptShare = Math.max(0, remittances.childrenDept || 0);
+  // Everything that ends up at National HQ, not just the headline percentage shares:
+  // the Thanksgiving Seed and the four additional levies are all remitted there too
+  // (see Part A of the remittance report). Leaving them out made the summary rows fall
+  // short of the period's Total Remittance Due by exactly those amounts.
+  const dashNationalHqTotal = (remittances.totalNatl||0) + (remittances.totalSeed||0)
+    + (remittances.crmAddon||0) + (remittances.coastline||0)
+    + (remittances.insuranceGen||0) + (remittances.insuranceMin||0)
+    + dashNatlQuotasAmt;
+  // Identical to totalRemittanceDue() for the period — the rows above are exactly its
+  // parts, so the card can be added up and checked against the Remittances page.
+  const dashTotalRemDue = totalRemittanceDue(remittances, dashAllQuotasAmt);
   const rccgAuthorityShare = Math.max(0, totalIncome - parishRetains - otherUnremittedIncome - dashChildrenDeptShare);
   const dashRemRates = remRatesDash?.rates || DEFAULT_REMITTANCE_RATES;
   const dashSundayRecs = income.filter(r => !r.source || r.source === 'sunday_collection');
@@ -4637,7 +4648,7 @@ async function renderDashboard(){
             <span style="font-weight:700;color:#1D9E75">${fmt(parishRetains)} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${Math.round(parishRetains/totalIncome*100)}%)</span></span>
           </div>
           ${dashChildrenDeptShare>0?`<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;margin-bottom:${otherUnremittedIncome>0?'5px':'0'}">
-            <span style="color:var(--text2)">🧒 Children's Dept (held by teacher)</span>
+            <span style="color:var(--text2)">🧒 Children's Dept</span>
             <span style="font-weight:600;color:var(--text3)">${fmt(dashChildrenDeptShare)} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${Math.round(dashChildrenDeptShare/totalIncome*100)}%)</span></span>
           </div>`:''}
           ${otherUnremittedIncome>0?`<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px">
@@ -5139,15 +5150,16 @@ async function renderDashboard(){
 
         <div class="card">
           <div class="card-header"><span class="card-title">Remittance Summary</span></div>
-          <div class="status-row"><div><div class="status-row-label">National HQ</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalNatl+dashNatlQuotasAmt)}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">National HQ</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(dashNationalHqTotal)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Regional</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(dashRegionalAmt)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Provincial</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.provinceRebate)}</div></div></div>
-          <div class="status-row"><div><div class="status-row-label">Pastor</div><div class="status-row-sub">Thanksgiving shares — Parish Pastor and Area / Zonal Pastor</div></div><div class="status-row-right"><div class="status-row-amt">${fmt((remittances.totalPastor||0)+(remittances.totalArea||0))}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">Pastor</div></div><div class="status-row-right"><div class="status-row-amt">${fmt((remittances.totalPastor||0)+(remittances.totalArea||0))}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">${esc(dashMummyLabel)}</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(dashMummyAmt)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Ministers</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalMinisters)}</div></div></div>
-          <div class="status-row"><div><div class="status-row-label">Children's Department</div><div class="status-row-sub">Teen/Children's Offering share held by the Children Teacher — not parish money</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(dashChildrenDeptShare)}</div></div></div>
-          <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-sub">From Sunday collections, after every share above</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(netLocal)}</div></div></div>
-          <div class="status-row"><div><div class="status-row-label">+ Other Income (not remitted)</div><div class="status-row-sub">Donations, midweek and similar income that attracts no HQ share</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(otherUnremittedIncome)}</div></div></div>
+          <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Total Remittance Due</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--danger);font-size:15px">${fmt(dashTotalRemDue)}</div></div></div>
+          <div class="status-row" style="margin-top:8px"><div><div class="status-row-label">Children's Department</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(dashChildrenDeptShare)}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label fw-bold">Net Local Retained</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(netLocal)}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">+ Other Income (not remitted)</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(otherUnremittedIncome)}</div></div></div>
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Total Local Retained Income</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(netLocal + otherUnremittedIncome)}</div></div></div>
         </div>
       </div>
@@ -12560,6 +12572,8 @@ async function showPettyRefill(prefillAmount, topupRequestId=''){
       ${petty.float<0?`<div style="margin-top:8px;font-size:12px;color:var(--danger);font-weight:600">⚠ The Admin Officer is owed ${fmt(Math.abs(petty.float))} of personal funds. Top this up to clear the debt.</div>`:''}
     </div>
 
+    <input type="hidden" id="ref_current_float" value="${petty.float}" />
+    <input type="hidden" id="ref_max_float" value="${petty.max}" />
     ${fixedTopupId || outstandingTopups.length === 0 ? `
       <input type="hidden" id="ref_topup_id" value="${esc(fixedTopupId)}" />
     ` : `
@@ -12571,9 +12585,28 @@ async function showPettyRefill(prefillAmount, topupRequestId=''){
       <div class="form-hint">Linking this payment to an approved request marks it as settled once fully paid. Leave as "None" for an ad-hoc top-up.</div>
     </div>`}
 
-    <div class="form-group"><label class="form-label">Top-Up Amount (₦) <span style="color:var(--danger)">*</span></label>
-      <input type="number" id="ref_amt" class="form-input" placeholder="0" value="${suggested||''}" />
-      <div class="form-hint">Max top-up: ${fmt(Math.max(0,spaceInFloat))} (total cannot exceed the approved max of ${fmt(petty.max)})</div>
+    <div class="form-group">
+      <label class="form-label">How do you want to enter this? *</label>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:4px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="ref_entry_mode" value="amount" checked onchange="App.onRefillEntryModeChange()" /> ➕ Amount to add
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="ref_entry_mode" value="target" onchange="App.onRefillEntryModeChange()" /> 🎯 Balance to leave him with
+        </label>
+      </div>
+    </div>
+
+    <div class="form-group" id="ref_target_group" style="display:none">
+      <label class="form-label">Total the Admin Officer should hold (₦) <span style="color:var(--danger)">*</span></label>
+      <input type="number" id="ref_target" class="form-input" placeholder="e.g. ${Math.round(petty.max)}" min="0" oninput="App.onRefillTargetChange()" />
+      <div class="form-hint" id="ref_target_hint">Enter the balance you want him to end up with — the top-up needed is worked out below.</div>
+    </div>
+
+    <div class="form-group"><label class="form-label" id="ref_amt_label">Top-Up Amount (₦) <span style="color:var(--danger)">*</span></label>
+      <input type="number" id="ref_amt" class="form-input" placeholder="0" value="${suggested||''}" oninput="App.onRefillAmountChange()" />
+      <div class="form-hint" id="ref_amt_hint">Max top-up: ${fmt(Math.max(0,spaceInFloat))} (total cannot exceed the approved max of ${fmt(petty.max)})</div>
+      <div id="ref_amt_resulting" style="font-size:12px;color:var(--text2);margin-top:6px"></div>
     </div>
 
     <!-- Payment method for the top-up -->
@@ -12637,6 +12670,74 @@ function onRefillTopupChange(){
   // common "pay it off" action settles it. Clearing the selection leaves the
   // amount untouched (it may be an ad-hoc top-up).
   if(amtInput && Number.isFinite(remaining) && remaining > 0){ amtInput.value = remaining; }
+  onRefillAmountChange();
+}
+
+/**
+ * The Top Up modal accepts either the amount being added or the balance the Admin
+ * Officer should be left holding — the parish usually decides the latter ("give him
+ * enough to have ₦100,000") and should not have to do the subtraction, least of all
+ * when the float is negative and he is owed his own money back.
+ *
+ * The stored figure is always the top-up amount; the target is only an input aid.
+ */
+function refillCurrentFloat(){
+  const el = document.getElementById('ref_current_float');
+  const v = el ? parseFloat(el.value) : NaN;
+  return Number.isFinite(v) ? v : 0;
+}
+
+function onRefillEntryModeChange(){
+  const mode = document.querySelector('input[name="ref_entry_mode"]:checked')?.value || 'amount';
+  const targetGroup = document.getElementById('ref_target_group');
+  const amtLabel = document.getElementById('ref_amt_label');
+  const amtInput = document.getElementById('ref_amt');
+  const byTarget = mode === 'target';
+  if(targetGroup) targetGroup.style.display = byTarget ? '' : 'none';
+  if(amtLabel) amtLabel.innerHTML = byTarget
+    ? 'Top-Up Needed (₦) <span style="color:var(--text3);font-weight:400;font-size:12px">— worked out for you</span>'
+    : 'Top-Up Amount (₦) <span style="color:var(--danger)">*</span>';
+  // The amount stays editable in target mode: the computed figure is a starting point,
+  // not a lock — the accountant may round it to what they can actually hand over.
+  if(byTarget) onRefillTargetChange(); else onRefillAmountChange();
+}
+
+function onRefillTargetChange(){
+  const target = parseFloat(document.getElementById('ref_target')?.value);
+  const amtInput = document.getElementById('ref_amt');
+  const hint = document.getElementById('ref_target_hint');
+  if(!Number.isFinite(target)){
+    if(hint) hint.textContent = 'Enter the balance you want him to end up with — the top-up needed is worked out below.';
+    onRefillAmountChange();
+    return;
+  }
+  const current = refillCurrentFloat();
+  const needed = Math.round((target - current) * 100) / 100;
+  if(amtInput) amtInput.value = needed > 0 ? needed : 0;
+  if(hint){
+    hint.textContent = needed > 0
+      ? `He holds ${fmt(current)} now, so ${fmt(needed)} is needed to reach ${fmt(target)}.`
+      : needed === 0
+        ? `He already holds exactly ${fmt(target)} — nothing to top up.`
+        : `He already holds ${fmt(current)}, which is ${fmt(Math.abs(needed))} more than ${fmt(target)}. Nothing to top up.`;
+  }
+  onRefillAmountChange();
+}
+
+/** Show the balance the entered top-up will leave, and flag it if it breaches the max. */
+function onRefillAmountChange(){
+  const amt = parseFloat(document.getElementById('ref_amt')?.value);
+  const out = document.getElementById('ref_amt_resulting');
+  if(!out) return;
+  if(!Number.isFinite(amt) || amt <= 0){ out.textContent = ''; return; }
+  const current = refillCurrentFloat();
+  const maxEl = document.getElementById('ref_max_float');
+  const max = maxEl ? parseFloat(maxEl.value) : NaN;
+  const resulting = Math.round((current + amt) * 100) / 100;
+  const overMax = Number.isFinite(max) && resulting > max;
+  out.innerHTML = overMax
+    ? `<span style="color:var(--danger);font-weight:600">⚠ Would leave ${fmt(resulting)} — over the approved maximum of ${fmt(max)}.</span>`
+    : `Leaves the Admin Officer holding <strong>${fmt(resulting)}</strong>.`;
 }
 
 function onRefillMethodChange(){
@@ -14868,7 +14969,7 @@ return {
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showExpenseCategoryTransactions, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
-  approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, showPettyToBankDeposit, submitPettyToBankDeposit, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange,
+  approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, showPettyToBankDeposit, submitPettyToBankDeposit, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange, onRefillEntryModeChange, onRefillTargetChange, onRefillAmountChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
   setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, confirmQuotaPeriodWaiver, applyQuotaPeriodWaiver, saveRates, addIncomeType, saveIncomeTypes, toggleIncomeTypeActive, confirmDeleteIncomeType, deleteIncomeType, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
