@@ -1228,6 +1228,41 @@ function isMummyQuotaLabel(label){
   return String(label||'').toLowerCase().includes('mummy');
 }
 
+/**
+ * Split a period into weeks that each end on a Sunday — the parish's week runs to its
+ * collection day, so one week means one Sunday's cycle and the week count should equal
+ * the number of Sundays in the period.
+ *
+ * The final stretch is clipped by the period end, so it can contain no Sunday at all
+ * (August 2026 begins on a Saturday and ends on Monday the 31st, leaving a one-day
+ * tail). Such a stub is merged into the week before it instead of being shown as a
+ * week of its own: the week count then matches the Sundays, and any spending in those
+ * days is still counted rather than stranded in a phantom week.
+ */
+function buildSundayWeekBounds(fromValue, toValue){
+  const start = parseYmdDate(fromValue);
+  const end   = parseYmdDate(toValue);
+  const bounds = [];
+  if(!start || !end || start > end) return bounds;
+  let cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  while(cursor <= end){
+    const wkFrom = new Date(cursor);
+    const dow = cursor.getDay();
+    const sun = new Date(cursor);
+    sun.setDate(sun.getDate() + (dow === 0 ? 0 : 7 - dow));
+    const wkTo = sun > end ? new Date(end) : sun;
+    bounds.push({ from: ymdLocal(wkFrom), to: ymdLocal(wkTo) });
+    cursor = new Date(wkTo);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  const last = bounds[bounds.length - 1];
+  if(bounds.length > 1 && countSundaysInRange(last.from, last.to) === 0){
+    bounds[bounds.length - 2].to = last.to;
+    bounds.pop();
+  }
+  return bounds;
+}
+
 function countSundaysInRange(fromValue, toValue){
   const from=parseYmdDate(fromValue);
   const to=parseYmdDate(toValue);
@@ -3743,7 +3778,9 @@ async function renderDashboard(){
     useRemPeriod ? dashPeriodTo : dashMonthEnd
   );
   const dashRegionalAmt  = dashQuotaLines.find(q=>q.label.toLowerCase().includes('regional contribution'))?.amount||0;
-  const dashMummyAmt     = dashQuotaLines.find(q=>isMummyQuotaLabel(q.label))?.amount||0;
+  const dashMummyLine    = dashQuotaLines.find(q=>isMummyQuotaLabel(q.label));
+  const dashMummyAmt     = dashMummyLine?.amount||0;
+  const dashMummyLabel   = dashMummyLine?.label || 'Zonal Mummy Stipend';
   const dashNatlQuotasAmt = dashQuotaLines
     .filter(q=>!q.label.toLowerCase().includes('regional contribution') && !isMummyQuotaLabel(q.label))
     .reduce((s,q)=>s+(q.amount||0),0);
@@ -4403,24 +4440,9 @@ async function renderDashboard(){
   const _wkPeriodFrom = useRemPeriod ? dashPeriodFrom : dashMonthStart;
   // Use full period/month end for week boundaries (not today-capped) so future weeks appear
   const _wkPeriodTo = useRemPeriod ? dashPeriodTo : ymdLocal(new Date(state.year, state.month+1, 0));
-  // Build Monday–Sunday week boundaries within the period
+  // Week boundaries within the period — one week per Sunday (see buildSundayWeekBounds).
   const _wkStart = parseYmdDate(_wkPeriodFrom);
-  const _wkEnd = parseYmdDate(_wkPeriodTo);
-  const _wkBounds = [];
-  if(_wkStart && _wkEnd){
-    let cursor = new Date(_wkStart.getFullYear(), _wkStart.getMonth(), _wkStart.getDate());
-    while(cursor <= _wkEnd){
-      const wkFrom = new Date(cursor);
-      const dow = cursor.getDay();
-      const daysToSun = dow === 0 ? 0 : 7 - dow;
-      const sun = new Date(cursor);
-      sun.setDate(sun.getDate() + daysToSun);
-      const wkTo = sun > _wkEnd ? new Date(_wkEnd) : sun;
-      _wkBounds.push({ from: ymdLocal(wkFrom), to: ymdLocal(wkTo) });
-      cursor = new Date(wkTo);
-      cursor.setDate(cursor.getDate() + 1);
-    }
-  }
+  const _wkBounds = buildSundayWeekBounds(_wkPeriodFrom, _wkPeriodTo);
   // Prorate quotas correctly: use full (un-prorated) period quota divided by total Sundays.
   // dashAllQuotasAmt is already today-capped (prorated to elapsed Sundays), so we recover
   // the full period amount from each quota line's monthlyAmount instead.
@@ -4464,23 +4486,7 @@ async function renderDashboard(){
   const _wkLookbackFrom = ymdLocal(_wkLookbackStart);
   const _wkLookbackTo = dashTodayStrForAsOf;
   // Build week boundaries for the 3-month lookback
-  const _wkHistBounds = [];
-  const _wkHStart = parseYmdDate(_wkLookbackFrom);
-  const _wkHEnd = parseYmdDate(_wkLookbackTo);
-  if(_wkHStart && _wkHEnd){
-    let hCursor = new Date(_wkHStart.getFullYear(), _wkHStart.getMonth(), _wkHStart.getDate());
-    while(hCursor <= _wkHEnd){
-      const hFrom = new Date(hCursor);
-      const hDow = hCursor.getDay();
-      const hDaysToSun = hDow === 0 ? 0 : 7 - hDow;
-      const hSun = new Date(hCursor);
-      hSun.setDate(hSun.getDate() + hDaysToSun);
-      const hTo = hSun > _wkHEnd ? new Date(_wkHEnd) : hSun;
-      _wkHistBounds.push({ from: ymdLocal(hFrom), to: ymdLocal(hTo) });
-      hCursor = new Date(hTo);
-      hCursor.setDate(hCursor.getDate() + 1);
-    }
-  }
+  const _wkHistBounds = buildSundayWeekBounds(_wkLookbackFrom, _wkLookbackTo);
   // Compute metrics for each historical week
   const _wkHistData = await Promise.all(_wkHistBounds.map(async (wk) => {
     const wkIncome = filterByDateRange(allIncomeDash, wk.from, wk.to);
@@ -5116,9 +5122,12 @@ async function renderDashboard(){
           <div class="status-row"><div><div class="status-row-label">National HQ</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalNatl+dashNatlQuotasAmt)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Regional</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(dashRegionalAmt)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Provincial</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.provinceRebate)}</div></div></div>
-          <div class="status-row"><div><div class="status-row-label">Pastor Family</div></div><div class="status-row-right"><div class="status-row-amt">${fmt((remittances.totalPastor||0)+(remittances.totalArea||0)+dashMummyAmt)}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">Pastor</div><div class="status-row-sub">Thanksgiving shares — Parish Pastor and Area / Zonal Pastor</div></div><div class="status-row-right"><div class="status-row-amt">${fmt((remittances.totalPastor||0)+(remittances.totalArea||0))}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">${esc(dashMummyLabel)}</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(dashMummyAmt)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Ministers</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalMinisters)}</div></div></div>
-          <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Net Local Retained</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(netLocal)}</div></div></div>
+          <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-sub">From Sunday collections, after every share above</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(netLocal)}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">+ Other Income (not remitted)</div><div class="status-row-sub">Donations, midweek and similar income that attracts no HQ share</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(otherUnremittedIncome)}</div></div></div>
+          <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Total Local Retained Income</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(netLocal + otherUnremittedIncome)}</div></div></div>
         </div>
       </div>
     </div>`;
@@ -14804,7 +14813,8 @@ return {
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   setPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
-  _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
+  _countSundaysInRange: countSundaysInRange,
+  _buildSundayWeekBounds: buildSundayWeekBounds, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
   _quotaPeriodKey: quotaPeriodKey,
   _quotaOverrideForPeriod: quotaOverrideForPeriod,
   _payableQuotaLines: payableQuotaLines,
