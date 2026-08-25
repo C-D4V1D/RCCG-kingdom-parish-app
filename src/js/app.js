@@ -4648,7 +4648,7 @@ async function renderDashboard(){
             <span style="font-weight:700;color:#1D9E75">${fmt(parishRetains)} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${Math.round(parishRetains/totalIncome*100)}%)</span></span>
           </div>
           ${dashChildrenDeptShare>0?`<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;margin-bottom:${otherUnremittedIncome>0?'5px':'0'}">
-            <span style="color:var(--text2)">🧒 Children's Dept (held by teacher)</span>
+            <span style="color:var(--text2)">🧒 Children's Dept</span>
             <span style="font-weight:600;color:var(--text3)">${fmt(dashChildrenDeptShare)} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${Math.round(dashChildrenDeptShare/totalIncome*100)}%)</span></span>
           </div>`:''}
           ${otherUnremittedIncome>0?`<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px">
