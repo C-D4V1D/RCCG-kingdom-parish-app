@@ -217,8 +217,11 @@ function renderReport(resp){
   const _netPos = (D.trueNetLocal||0) - (D.totalExpenses||0);
   const _netTile = `<div class="kpi-tile kpi-tile-net ${_netPos>=0?'surplus':'deficit'}"><div class="kpi-val">${_netPos>=0?N(_netPos):'('+N(Math.abs(_netPos))+')'}</div><div class="kpi-lbl">${_netPos>=0?'Net Local Retained [Surplus]':'Net Local Retained [Deficit]'}</div></div>`;
   const _otherIncTotal = D.otherIncomeTotal || 0;
-  const _localSub = _otherIncTotal > 0
-    ? `<div class="kpi-sub">${N(D.netLocalFromSunday)} from Sunday collections<br>+ ${N(_otherIncTotal)} from other income</div>` : '';
+  const _childrenOut = D.localRetainedExcludesChildren && (D.childrenDeptShare||0) > 0;
+  const _localSubParts = [];
+  if(_otherIncTotal > 0) _localSubParts.push(`${N(D.netLocalFromSunday)} from Sunday collections`, `+ ${N(_otherIncTotal)} from other income`);
+  if(_childrenOut) _localSubParts.push(`after ${N(D.childrenDeptShare)} to Children's Dept`);
+  const _localSub = _localSubParts.length ? `<div class="kpi-sub">${_localSubParts.join('<br>')}</div>` : '';
   document.getElementById('kpiGrid').innerHTML = [
     {lbl:'Total Income', val:N(D.totalIncome), cls:''},
     {lbl:'Total Remittance Due', val:N(D.totalRemDue), cls:'red'},
@@ -264,6 +267,9 @@ function renderReport(resp){
     let extra=`<tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE</td><td class="td-r">${N(D.totalRemDue)}</td></tr>
     <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">Remittances Paid This Period</td><td class="td-r" style="font-weight:600;color:#0F6E56">${N(D.totalRemPaid)}</td></tr>
     <tr style="background:${(D.totalRemDue-D.totalRemPaid)>0?'#fdf0f0':'#e8f4f0'}"><td colspan="2" style="font-weight:600;color:${(D.totalRemDue-D.totalRemPaid)>0?'#c0392b':'#0F6E56'}">Outstanding Remittance Balance</td><td class="td-r" style="font-weight:700;color:${(D.totalRemDue-D.totalRemPaid)>0?'#c0392b':'#0F6E56'}">${(D.totalRemDue-D.totalRemPaid)>0?N(D.totalRemDue-D.totalRemPaid):N(0)}</td></tr>
+    ${D.localRetainedExcludesChildren && (D.childrenDeptShare||0) > 0
+      ? `<tr class="deduct-row"><td colspan="2">Less: Children's Dept. share — held by the Children Teacher, not parish funds</td><td class="td-r red">− ${N(D.childrenDeptShare)}</td></tr>`
+      : ''}
     <tr style="background:#e8f4f0"><td colspan="2" style="font-weight:600;color:#0F6E56">LOCAL RETAINED INCOME</td><td class="td-r" style="font-weight:600;color:#0F6E56">${N(D.trueNetLocal)}</td></tr>`;
     const inner=`<div class="table-wrap"><table>
       <tr><th>Description</th><th class="td-c">Rate / Basis</th><th class="td-r">Amount (₦)</th></tr>

@@ -284,6 +284,28 @@ function renderReport(d){
           ${l.seed>0?`<div class="sum-card-item">Seed → HQ<span class="val red">${N(l.seed)}</span></div>`:''}
         </div>
       </div>`;
+    } else if(l.childrensDept > 0){
+      // The Children's Offering local share goes to the Children Teacher, not the
+      // parish. Shown here so the split still reads 35/65, but styled as departmental
+      // rather than parish-retained. Snapshots taken before this distinction existed
+      // carry no childrensDept and fall through to the parish-retained branch below.
+      const cdPct = l.total > 0 ? Math.round((l.childrensDept / l.total) * 100) : 0;
+      summaryTableHTML += `<tr>
+        <td>${esc(l.label)} <sup style="color:#c0392b">‡</sup></td>
+        <td class="td-r">${N(l.total)}</td>
+        <td class="td-c">${l.natlPct}%</td>
+        <td class="td-r red">${N(l.national)}</td>
+        <td class="td-c muted">${cdPct}%</td>
+        <td class="td-r muted" style="font-style:italic">${N(l.childrensDept)}</td>
+      </tr>`;
+      summaryCardsHTML += `<div class="sum-card">
+        <div class="sum-card-label">${esc(l.label)} ‡</div>
+        <div class="sum-card-grid">
+          <div class="sum-card-item">Total Collected<span class="val">${N(l.total)}</span></div>
+          <div class="sum-card-item">To RCCG HQ (${l.natlPct}%)<span class="val red">${N(l.national)}</span></div>
+          <div class="sum-card-item">Children's Dept (${cdPct}%)<span class="val">${N(l.childrensDept)}</span></div>
+        </div>
+      </div>`;
     } else {
       summaryTableHTML += `<tr>
         <td>${esc(l.label)}</td>

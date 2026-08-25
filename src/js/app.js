@@ -1228,6 +1228,41 @@ function isMummyQuotaLabel(label){
   return String(label||'').toLowerCase().includes('mummy');
 }
 
+/**
+ * Split a period into weeks that each end on a Sunday — the parish's week runs to its
+ * collection day, so one week means one Sunday's cycle and the week count should equal
+ * the number of Sundays in the period.
+ *
+ * The final stretch is clipped by the period end, so it can contain no Sunday at all
+ * (August 2026 begins on a Saturday and ends on Monday the 31st, leaving a one-day
+ * tail). Such a stub is merged into the week before it instead of being shown as a
+ * week of its own: the week count then matches the Sundays, and any spending in those
+ * days is still counted rather than stranded in a phantom week.
+ */
+function buildSundayWeekBounds(fromValue, toValue){
+  const start = parseYmdDate(fromValue);
+  const end   = parseYmdDate(toValue);
+  const bounds = [];
+  if(!start || !end || start > end) return bounds;
+  let cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  while(cursor <= end){
+    const wkFrom = new Date(cursor);
+    const dow = cursor.getDay();
+    const sun = new Date(cursor);
+    sun.setDate(sun.getDate() + (dow === 0 ? 0 : 7 - dow));
+    const wkTo = sun > end ? new Date(end) : sun;
+    bounds.push({ from: ymdLocal(wkFrom), to: ymdLocal(wkTo) });
+    cursor = new Date(wkTo);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  const last = bounds[bounds.length - 1];
+  if(bounds.length > 1 && countSundaysInRange(last.from, last.to) === 0){
+    bounds[bounds.length - 2].to = last.to;
+    bounds.pop();
+  }
+  return bounds;
+}
+
 function countSundaysInRange(fromValue, toValue){
   const from=parseYmdDate(fromValue);
   const to=parseYmdDate(toValue);
@@ -2181,6 +2216,7 @@ function remittanceSettledDate(r){
 async function calcRemittances(income, preRates){
   const rr = preRates || await getRemRates();
   const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, totalSeed:0,
+                childrenDept:0,
                 localBefore:0, localTithe:0, provinceRebate:0, netLocal:0,
                 crmAddon:0, coastline:0, insuranceGen:0, insuranceMin:0 };
   let rawCrm=0, rawMembersTithe=0, rawMinisTithe=0;
@@ -2197,6 +2233,18 @@ async function calcRemittances(income, preRates){
       const rateEntry = (rr.rates[t.key]) || { natl: t.natl||0, local: t.local||0 };
       const local = amt*(rateEntry.local);
       const natl  = amt*(rateEntry.natl);
+      // The Teen/Children's Offering local share is handed straight to the Children
+      // Teacher for the department's own use. The parish never holds it, never banks it
+      // and never records what it is spent on — the cash-with-accountant and church
+      // balance figures already exclude it for exactly that reason. Counting it as
+      // retained income overstated what the parish has to spend and could show a
+      // surplus while the parish was actually in deficit. Track it as a departmental
+      // disbursement, the same way the Thanksgiving pastor/minister shares are.
+      if(t.key==='childrenOffering'){
+        res.lines.push({ key:t.key, label:t.label, total:amt, national:natl, local:0, childrensDept:local });
+        res.totalNatl+=natl; res.childrenDept+=local;
+        return;
+      }
       res.lines.push({ key:t.key, label:t.label, total:amt, national:natl, local });
       res.totalNatl+=natl; res.localBefore+=local;
       if(t.key==='membersTithe'){ res.localTithe+=local; rawMembersTithe=amt; }
@@ -3743,7 +3791,9 @@ async function renderDashboard(){
     useRemPeriod ? dashPeriodTo : dashMonthEnd
   );
   const dashRegionalAmt  = dashQuotaLines.find(q=>q.label.toLowerCase().includes('regional contribution'))?.amount||0;
-  const dashMummyAmt     = dashQuotaLines.find(q=>isMummyQuotaLabel(q.label))?.amount||0;
+  const dashMummyLine    = dashQuotaLines.find(q=>isMummyQuotaLabel(q.label));
+  const dashMummyAmt     = dashMummyLine?.amount||0;
+  const dashMummyLabel   = dashMummyLine?.label || 'Zonal Mummy Stipend';
   const dashNatlQuotasAmt = dashQuotaLines
     .filter(q=>!q.label.toLowerCase().includes('regional contribution') && !isMummyQuotaLabel(q.label))
     .reduce((s,q)=>s+(q.amount||0),0);
@@ -3757,7 +3807,10 @@ async function renderDashboard(){
     .filter(r => INCOME_TYPES.reduce((s,t)=>s+(r[t.key]||0),0) === 0)
     .reduce((s,r) => s + (r.totalCollection||0), 0);
   const parishRetains      = Math.max(0, netLocal);
-  const rccgAuthorityShare = Math.max(0, totalIncome - parishRetains - otherUnremittedIncome);
+  // Handed to the Children Teacher, so neither the parish's to spend nor RCCG's — it
+  // needs its own line here or it would be silently absorbed into the RCCG share.
+  const dashChildrenDeptShare = Math.max(0, remittances.childrenDept || 0);
+  const rccgAuthorityShare = Math.max(0, totalIncome - parishRetains - otherUnremittedIncome - dashChildrenDeptShare);
   const dashRemRates = remRatesDash?.rates || DEFAULT_REMITTANCE_RATES;
   const dashSundayRecs = income.filter(r => !r.source || r.source === 'sunday_collection');
   const dashChildrenTeacherTotal = dashSundayRecs.reduce((s, r) => s + getChildrenTeacherHeldCash(r, dashRemRates), 0);
@@ -4403,24 +4456,9 @@ async function renderDashboard(){
   const _wkPeriodFrom = useRemPeriod ? dashPeriodFrom : dashMonthStart;
   // Use full period/month end for week boundaries (not today-capped) so future weeks appear
   const _wkPeriodTo = useRemPeriod ? dashPeriodTo : ymdLocal(new Date(state.year, state.month+1, 0));
-  // Build Monday–Sunday week boundaries within the period
+  // Week boundaries within the period — one week per Sunday (see buildSundayWeekBounds).
   const _wkStart = parseYmdDate(_wkPeriodFrom);
-  const _wkEnd = parseYmdDate(_wkPeriodTo);
-  const _wkBounds = [];
-  if(_wkStart && _wkEnd){
-    let cursor = new Date(_wkStart.getFullYear(), _wkStart.getMonth(), _wkStart.getDate());
-    while(cursor <= _wkEnd){
-      const wkFrom = new Date(cursor);
-      const dow = cursor.getDay();
-      const daysToSun = dow === 0 ? 0 : 7 - dow;
-      const sun = new Date(cursor);
-      sun.setDate(sun.getDate() + daysToSun);
-      const wkTo = sun > _wkEnd ? new Date(_wkEnd) : sun;
-      _wkBounds.push({ from: ymdLocal(wkFrom), to: ymdLocal(wkTo) });
-      cursor = new Date(wkTo);
-      cursor.setDate(cursor.getDate() + 1);
-    }
-  }
+  const _wkBounds = buildSundayWeekBounds(_wkPeriodFrom, _wkPeriodTo);
   // Prorate quotas correctly: use full (un-prorated) period quota divided by total Sundays.
   // dashAllQuotasAmt is already today-capped (prorated to elapsed Sundays), so we recover
   // the full period amount from each quota line's monthlyAmount instead.
@@ -4464,23 +4502,7 @@ async function renderDashboard(){
   const _wkLookbackFrom = ymdLocal(_wkLookbackStart);
   const _wkLookbackTo = dashTodayStrForAsOf;
   // Build week boundaries for the 3-month lookback
-  const _wkHistBounds = [];
-  const _wkHStart = parseYmdDate(_wkLookbackFrom);
-  const _wkHEnd = parseYmdDate(_wkLookbackTo);
-  if(_wkHStart && _wkHEnd){
-    let hCursor = new Date(_wkHStart.getFullYear(), _wkHStart.getMonth(), _wkHStart.getDate());
-    while(hCursor <= _wkHEnd){
-      const hFrom = new Date(hCursor);
-      const hDow = hCursor.getDay();
-      const hDaysToSun = hDow === 0 ? 0 : 7 - hDow;
-      const hSun = new Date(hCursor);
-      hSun.setDate(hSun.getDate() + hDaysToSun);
-      const hTo = hSun > _wkHEnd ? new Date(_wkHEnd) : hSun;
-      _wkHistBounds.push({ from: ymdLocal(hFrom), to: ymdLocal(hTo) });
-      hCursor = new Date(hTo);
-      hCursor.setDate(hCursor.getDate() + 1);
-    }
-  }
+  const _wkHistBounds = buildSundayWeekBounds(_wkLookbackFrom, _wkLookbackTo);
   // Compute metrics for each historical week
   const _wkHistData = await Promise.all(_wkHistBounds.map(async (wk) => {
     const wkIncome = filterByDateRange(allIncomeDash, wk.from, wk.to);
@@ -4614,6 +4636,10 @@ async function renderDashboard(){
             <span style="color:var(--text2)">🏛 Parish retains</span>
             <span style="font-weight:700;color:#1D9E75">${fmt(parishRetains)} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${Math.round(parishRetains/totalIncome*100)}%)</span></span>
           </div>
+          ${dashChildrenDeptShare>0?`<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;margin-bottom:${otherUnremittedIncome>0?'5px':'0'}">
+            <span style="color:var(--text2)">🧒 Children's Dept (held by teacher)</span>
+            <span style="font-weight:600;color:var(--text3)">${fmt(dashChildrenDeptShare)} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${Math.round(dashChildrenDeptShare/totalIncome*100)}%)</span></span>
+          </div>`:''}
           ${otherUnremittedIncome>0?`<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px">
             <span style="color:var(--text2)">🤝 Other unremitted income</span>
             <span style="font-weight:700;color:#1D9E75">${fmt(otherUnremittedIncome)} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${Math.round(otherUnremittedIncome/totalIncome*100)}%)</span></span>
@@ -5116,9 +5142,13 @@ async function renderDashboard(){
           <div class="status-row"><div><div class="status-row-label">National HQ</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalNatl+dashNatlQuotasAmt)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Regional</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(dashRegionalAmt)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Provincial</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.provinceRebate)}</div></div></div>
-          <div class="status-row"><div><div class="status-row-label">Pastor Family</div></div><div class="status-row-right"><div class="status-row-amt">${fmt((remittances.totalPastor||0)+(remittances.totalArea||0)+dashMummyAmt)}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">Pastor</div><div class="status-row-sub">Thanksgiving shares — Parish Pastor and Area / Zonal Pastor</div></div><div class="status-row-right"><div class="status-row-amt">${fmt((remittances.totalPastor||0)+(remittances.totalArea||0))}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">${esc(dashMummyLabel)}</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(dashMummyAmt)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">Ministers</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalMinisters)}</div></div></div>
-          <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Net Local Retained</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(netLocal)}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">Children's Department</div><div class="status-row-sub">Teen/Children's Offering share held by the Children Teacher — not parish money</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(dashChildrenDeptShare)}</div></div></div>
+          <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-sub">From Sunday collections, after every share above</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(netLocal)}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label">+ Other Income (not remitted)</div><div class="status-row-sub">Donations, midweek and similar income that attracts no HQ share</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(otherUnremittedIncome)}</div></div></div>
+          <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Total Local Retained Income</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(netLocal + otherUnremittedIncome)}</div></div></div>
         </div>
       </div>
     </div>`;
@@ -5467,6 +5497,9 @@ async function renderIncomeSummary(records){
           <div><div class="status-row-label" style="color:var(--info)">${esc(q.label)}</div><div class="status-row-sub">${esc(q.basis||'Fixed monthly amount')}</div></div>
           <div class="status-row-amt" style="color:var(--info)">${fmt(q.amount)}</div>
         </div>`).join('')}
+        ${(rem.childrenDept||0)>0?`<div class="status-row" style="background:var(--surface);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
+          <div><div class="status-row-label">Children's Department</div><div class="status-row-sub">Held by the Children Teacher — not parish money</div></div><div class="status-row-amt" style="color:var(--text2)">${fmt(rem.childrenDept)}</div>
+        </div>`:''}
         <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(trueNetLocal)}</div></div>`:''}
       </div>
     </div>`;
@@ -6857,6 +6890,13 @@ async function renderRemittances(){
     { label:`Thanksgiving → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)`,         amount:rem.totalPastor,   section:'tg' },
     { label:`Thanksgiving → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)`,    amount:rem.totalMinisters,section:'tg' },
   ].filter(l=>l.amount>0);
+  // The Children's Department share is deliberately NOT a Part A or Part B line: those
+  // totals drive payment tracking, and this money is already with the Children Teacher —
+  // nothing is owed and nothing will ever be paid against it. It is displayed on its own
+  // instead, so a period's collections still reconcile without inflating what is due.
+  const childrenDeptLine = (rem.childrenDept||0) > 0
+    ? { label:`Teen/Children's Offering → Children's Department (held by the teacher)`, amount:rem.childrenDept, section:'children' }
+    : null;
 
   const provinceLines=rem.provinceRebate>0?[
     { label:`Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`, amount:rem.provinceRebate, section:'province' }
@@ -8380,6 +8420,7 @@ async function printRemittanceReport(fromOverride, toOverride){
   const tgDistributed=tgTotal-tgNatlAmt-(tgLine?.seed||0); // area+pastor+ministers only
   const totalToHQ=rem.lines.reduce((s,l)=>s+(l.national||0),0); // incl. TG national
   const totalParishLocal=rem.lines.filter(l=>!l.isTg).reduce((s,l)=>s+(l.local||0),0);
+  const childrenDeptTotal=rem.childrenDept||0;
 
   // Explicit canonical order for the collection summary rows (form field order is unchanged)
   const SUMMARY_ORDER=[...BUILTIN_SUMMARY_ORDER, ...customIncomeTypeKeys()];
@@ -8411,6 +8452,19 @@ async function printRemittanceReport(fromOverride, toOverride){
     }
     const natlPct=Math.round((l.national/l.total)*100);
     const locPct=Math.round((l.local/l.total)*100);
+    // The Children's Offering local share goes to the department, not the parish, so it
+    // is shown in its own right rather than as parish-retained income.
+    if(l.childrensDept>0){
+      const cdPct=Math.round((l.childrensDept/l.total)*100);
+      return `<tr>
+        <td>${l.label} <sup style="color:#c0392b">‡</sup></td>
+        <td class="td-r">${fmt(l.total)}</td>
+        <td class="td-c">${natlPct}%</td>
+        <td class="td-r">${fmt(l.national)}</td>
+        <td class="td-c muted">${cdPct}%</td>
+        <td class="td-r muted" style="font-style:italic">${fmt(l.childrensDept)}</td>
+      </tr>`;
+    }
     return `<tr>
       <td>${l.label}</td>
       <td class="td-r">${fmt(l.total)}</td>
@@ -8424,6 +8478,11 @@ async function printRemittanceReport(fromOverride, toOverride){
   const tgDistNote=tgDistributed>0
     ?`<tr style="background:#fff8e1"><td colspan="6" style="font-size:11px;color:#7a5200;padding:5px 10px">
         <sup style="color:#c0392b">†</sup> TG balance ${fmt(tgDistributed)} (${100-Math.round((rr.tgNational+(rr.tgSeed||0))*100)}%) distributed locally — Area/Zonal: ${fmt(rem.totalArea)} · Pastor: ${fmt(rem.totalPastor)} · Ministers: ${fmt(rem.totalMinisters)} — shown in Part B
+      </td></tr>`:'';
+
+  const childrenDistNote=childrenDeptTotal>0
+    ?`<tr style="background:#fff8e1"><td colspan="6" style="font-size:11px;color:#7a5200;padding:5px 10px">
+        <sup style="color:#c0392b">‡</sup> Teen/Children's Offering local share ${fmt(childrenDeptTotal)} is handed to the Children Teacher for the department's own use. The parish does not hold it, bank it, or record what it is spent on, so it is excluded from Net Local Retained.
       </td></tr>`:'';
 
   const quotasTotal=sumQuotaLines(quotaLines);
@@ -8486,6 +8545,8 @@ async function printRemittanceReport(fromOverride, toOverride){
     ...mummyQuotas.map(q=>({ desc:q.label, type:quotaTypeTextForReport(q), amount:q.amount||0 }))
   ].filter(r=>r.amount>0);
   const subTotalB=partBRows.reduce((s,r)=>s+r.amount,0);
+  // Neither remitted nor retained — shown on its own line below the A+B total.
+  const childrenDeptPct=Math.round((rr.rates?.childrenOffering?.local ?? DEFAULT_REMITTANCE_RATES.childrenOffering.local)*100);
 
   const totalDue=subTotalA+subTotalB;
 
@@ -8552,6 +8613,7 @@ async function printRemittanceReport(fromOverride, toOverride){
     </tr>
     ${collectionRowsHTML}
     ${tgDistNote}
+    ${childrenDistNote}
     <tr class="total-row">
       <td>TOTAL COLLECTIONS</td>
       <td class="td-r">${fmt(totalCollected)}</td>
@@ -8611,8 +8673,9 @@ async function printRemittanceReport(fromOverride, toOverride){
     <tr class="spacer-row"><td colspan="3"></td></tr>
 
     <tr class="total-row"><td colspan="2">TOTAL REMITTANCES DUE &nbsp;<span style="font-size:11px;font-weight:normal;color:#666">(A + B)</span></td><td class="td-r danger">${fmt(totalDue)}</td></tr>
+    ${(rem.childrenDept||0)>0?`<tr><td colspan="2" style="color:#555">Held by Children's Department &nbsp;<span style="font-size:11px;color:#666">(${childrenDeptPct}% of Teen/Children's Offering — with the Children Teacher, not remitted and not parish funds)</span></td><td class="td-r" style="color:#555">${fmt(rem.childrenDept)}</td></tr>`:''}
     <tr class="local-row"><td colspan="2">Net Local Retained &nbsp;<span style="font-size:11px;font-weight:normal;color:#555">(after Province Rebate &amp; Quotas)</span></td><td class="td-r grn">${fmt(trueNetLocal)}</td></tr>
-    <tr class="balance-row"><td colspan="3">✓ Balance: ${fmt(totalCollected)} Total Collected = ${fmt(totalDue)} Remittances Due + ${fmt(trueNetLocal)} Net Local Retained</td></tr>
+    <tr class="balance-row"><td colspan="3">✓ Balance: ${fmt(totalCollected)} Total Collected = ${fmt(totalDue)} Remittances Due${(rem.childrenDept||0)>0?` + ${fmt(rem.childrenDept)} Children's Dept`:''} + ${fmt(trueNetLocal)} Net Local Retained</td></tr>
   </table>
 
   <div class="sig">
@@ -8694,7 +8757,10 @@ async function shareRemittanceReport(fromOverride, toOverride){
       if(l.isTg) return { key, label:l.label, total:l.total, national:l.national, local:0, isTg:true, seed:l.seed||0, natlPct:Math.round(rr.tgNational*100), locPct:0 };
       const natlPct=Math.round((l.national/l.total)*100);
       const locPct=Math.round((l.local/l.total)*100);
-      return { key, label:l.label, total:l.total, national:l.national, local:l.local, natlPct, locPct };
+      // childrensDept is carried separately: report.html shows it in the local column but
+      // keeps it out of the parish-retained totals. Snapshots taken before this change
+      // have no such field and still render from `local`, so old reports are unaffected.
+      return { key, label:l.label, total:l.total, national:l.national, local:l.local, natlPct, locPct, childrensDept:l.childrensDept||0 };
     }).filter(Boolean);
     const snapshot = {
       fromDate, toDate, churchName, incomeCount:income.length,
@@ -8984,6 +9050,11 @@ async function buildMonthlyStatementData(fromDate, toDate){
     expenseRows,
     expenseByCategory,
     otherIncomeTotal, netLocalFromSunday, openingBalance, closingBalance, openingBalDate:fmtDate(openingBalDate),
+    // Signals that trueNetLocal (Local Retained Income) already has the Children's Dept
+    // share taken out. Statements shared before this change carry no flag and still had
+    // it folded in, so they must keep rendering exactly as they were shared.
+    localRetainedExcludesChildren: true,
+    childrenDeptShare: rem.childrenDept || 0,
     outstandingRemittance:Math.max(0, totalRemDue-totalRemPaid),
     // Section F v2 — accurate cash-position figures anchored to calcChurchBalance()
     closingBankBalance, closingCashWithAccountant, closingCashDeficit, closingPettyFloat,
@@ -14804,7 +14875,8 @@ return {
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   setPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
-  _countSundaysInRange: countSundaysInRange, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
+  _countSundaysInRange: countSundaysInRange,
+  _buildSundayWeekBounds: buildSundayWeekBounds, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
   _quotaPeriodKey: quotaPeriodKey,
   _quotaOverrideForPeriod: quotaOverrideForPeriod,
   _payableQuotaLines: payableQuotaLines,
