@@ -416,3 +416,12 @@ tr:hover td{background:var(--surface)}
 .ai-sec-member-row .form-input{flex:1;min-width:0}
 @media(max-width:900px){.ai-sec-grid{grid-template-columns:1fr}.ai-sec-attendance{grid-template-columns:1fr}.ai-sec-quorum{align-items:flex-start;flex-direction:column}.ai-sec-person{grid-template-columns:auto 70px minmax(0,1fr)}.ai-sec-stepper{overflow-x:auto}.ai-sec-card-grid{grid-template-columns:1fr}}
 .no-scrollbar{scrollbar-width:none;-ms-overflow-style:none}.no-scrollbar::-webkit-scrollbar{display:none}
+/* Clickable legend row in the Dashboard's Expense Breakdown — drills into the matching
+   transactions. A real <button> so keyboard focus and Enter/Space work without extra
+   handlers; the reset below keeps it looking exactly like the static rows it replaced. */
+.legend-row{display:flex;align-items:center;gap:7px;width:100%;background:none;border:0;padding:3px 4px;margin:-3px -4px;border-radius:6px;font:inherit;color:inherit;text-align:left;cursor:pointer;transition:background .12s ease}
+.legend-row:hover,.legend-row:focus-visible{background:var(--surface)}
+.legend-row:focus-visible{outline:2px solid var(--primary);outline-offset:1px}
+.legend-row-chevron{flex-shrink:0;font-size:14px;line-height:1;color:var(--text3);opacity:0;transition:opacity .12s ease}
+.legend-row:hover .legend-row-chevron,.legend-row:focus-visible .legend-row-chevron{opacity:1}
+@media(hover:none){.legend-row-chevron{opacity:.55}}
