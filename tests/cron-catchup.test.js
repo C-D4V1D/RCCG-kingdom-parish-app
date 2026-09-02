@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey } from '../functions/api/[[route]].js';
+import { onRequest } from '../functions/api/[[route]].js';
 
 // The GitHub Actions scheduler only delivers a fraction of its `*/30` ticks, so
 // both monthly jobs stay *due* until they have run rather than firing only on
@@ -147,4 +148,55 @@ test('newMonth: a stale marker from an older month does not block the new one', 
   const d = newMonthDueInfo({ year: 2027, month: 1, dayOfMonth: 1, lastPeriod: '2026-12' });
   assert.equal(d.due, true);
   assert.equal(d.key, '2027-01');
+});
+
+// ── run-all: one URL that drives every job ─────────────────────────────────
+// Nine separately-configured URLs is itself a failure mode — a scheduler
+// pointed at only some of them silently runs only some of the jobs, which is
+// how the Happy New Month SMS kept sending while the payment reminder did not.
+test('run-all requires the cron secret', async () => {
+  const DB = { prepare() { throw new Error('DB must not be touched before authorization'); } };
+  const req = new Request('https://example.com/api/internal/run-all', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer wrong-secret' },
+  });
+  const res = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-secret' } });
+  assert.equal(res.status, 401);
+});
+
+test('run-all reports every job, and one failure never stops the rest', async () => {
+  // Settings come back empty, so each job takes its own "nothing to do" path
+  // rather than reaching for Termii.
+  const DB = {
+    prepare(sql) {
+      if (/SELECT value FROM settings WHERE key=\?/.test(sql)) {
+        return { bind() { return this; }, async first() { return null; } };
+      }
+      if (/INSERT INTO settings/.test(sql)) {
+        return { bind() { return this; }, async run() { return {}; } };
+      }
+      return {
+        bind() { return this; },
+        async all() { return { results: [] }; },
+        async first() { return null; },
+        async run() { return {}; },
+      };
+    },
+  };
+  const req = new Request('https://example.com/api/internal/run-all', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-secret' },
+  });
+  const res = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-secret' } });
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  // Every job is attempted and accounted for — none may be silently dropped.
+  for (const job of ['monthly-sms', 'reminder-sms', 'anniversary-sms', 'premeeting-sms',
+                     'actionitem-sms', 'scheduled-sms', 'newmonth-draft', 'followups', 'prebriefs']) {
+    assert.ok(body.results[job], `${job} missing from run-all results`);
+  }
+  // The payment reminder is the job that was being missed; it must be driven
+  // by the same single call that drives the Happy New Month SMS.
+  assert.ok(body.results['reminder-sms']);
+  assert.ok(body.results['monthly-sms']);
 });

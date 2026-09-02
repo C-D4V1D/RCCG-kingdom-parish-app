@@ -10065,6 +10065,7 @@ async function renderSmsLogs(main) {
   // New Month, no anniversary SMS will go out until it is fixed. Say so loudly:
   // this went unnoticed for two months when the page only showed a "last ran"
   // date and left the reader to work out that it had stopped moving.
+  const runAllUrl = `${location.origin}/api/internal/run-all`;
   const hbAge = sch.heartbeatAgeMins;
   const hbAgeText = hbAge == null ? '' :
     hbAge < 120 ? `${hbAge} minute(s) ago` :
@@ -10078,6 +10079,13 @@ async function renderSmsLogs(main) {
        No automated SMS — payment reminders, Happy New Month, anniversaries — is being sent while this is the case.
        <div style="margin-top:8px">Check the <strong>Cron — Follow-ups &amp; Pre-briefs</strong> workflow in GitHub Actions, and that the
        <code>CRON_SECRET</code> repository secret matches the <code>CRON_SECRET</code> environment variable in Cloudflare Pages.</div>
+       <div style="margin-top:8px">Any scheduler can drive everything by POSTing to this one URL every 30 minutes, with
+       <code>Authorization: Bearer &lt;CRON_SECRET&gt;</code>:
+         <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+           <code style="background:#fff;padding:4px 8px;border-radius:6px;border:1px solid var(--border);word-break:break-all">${esc(runAllUrl)}</code>
+           <button class="kbtn kbtn-sm" onclick="Kpsc.copyText('${esc(runAllUrl)}', this)">📋 Copy</button>
+         </div>
+       </div>
      </div>`;
 
   // Wallet / credits

@@ -18,6 +18,16 @@ name: Cron — Follow-ups & Pre-briefs
 #   POST /api/internal/run-actionitem-sms            — action item deadline SMS
 #   POST /api/internal/run-scheduled-sms             — scheduled SMS blasts
 #
+# There is also POST /api/internal/run-all, which runs every one of the jobs
+# above in a single request. This workflow deliberately keeps calling them
+# individually so that one hung endpoint cannot eat the others' time budget
+# (see the timing notes on the poll step). run-all exists for any OTHER
+# scheduler pointed at this app — an external cron service, say — where
+# configuring nine URLs correctly is itself a failure mode: a scheduler that
+# knows about only some of them runs only some of the jobs, silently. That is
+# precisely how the Happy New Month SMS kept going out every month while the
+# payment reminder had not run since July.
+#
 # ── Required configuration ────────────────────────────────────────────────────
 #   CRON_SECRET   (repo secret)  — random token; the SAME value must be set as an
 #                                  environment variable in Cloudflare Pages

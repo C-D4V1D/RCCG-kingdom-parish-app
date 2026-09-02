@@ -202,10 +202,17 @@ function isWithinSendWindow(settings) {
 }
 
 /**
- * Returns true if a partner is eligible for another reminder SMS.
+ * Returns true if a partner is eligible for another payment-reminder SMS.
  * Checks:
  *   1. cooloffDays — no reminder sent in the last N days
  *   2. freqCap     — no more than N reminders sent in the last 7 days
+ *
+ * Scoped to reminder_type='reminder' on purpose. This cap exists to stop the
+ * same partner being nagged repeatedly about the same debt; it is not a global
+ * quiet period, and counting every SMS made unrelated traffic mute reminders.
+ * The Happy New Month blast reaches every partner on the 1st, so a global count
+ * put the whole register inside the cool-off for the first week of every month
+ * — silently sending nothing on any reminder catch-up that landed there.
  */
 async function isWithinFreqCap(DB, partnerId, freqCap, cooloffDays) {
   const now = new Date();
@@ -215,12 +222,12 @@ async function isWithinFreqCap(DB, partnerId, freqCap, cooloffDays) {
   // Only successfully-sent messages count toward the cooloff/cap — skipped and
   // failed attempts are logged too, but must never block a future genuine send.
   const recent = await DB.prepare(
-    `SELECT COUNT(*) AS cnt FROM kpsc_reminders WHERE partner_id=? AND sent_at >= ? AND channel='sms' AND status='sent'`
+    `SELECT COUNT(*) AS cnt FROM kpsc_reminders WHERE partner_id=? AND sent_at >= ? AND channel='sms' AND status='sent' AND reminder_type='reminder'`
   ).bind(partnerId, cooloffCutoff).first();
   if (Number(recent?.cnt || 0) > 0) return false; // within cooloff — do not send
   // Check weekly frequency cap
   const weekly = await DB.prepare(
-    `SELECT COUNT(*) AS cnt FROM kpsc_reminders WHERE partner_id=? AND sent_at >= ? AND channel='sms' AND status='sent'`
+    `SELECT COUNT(*) AS cnt FROM kpsc_reminders WHERE partner_id=? AND sent_at >= ? AND channel='sms' AND status='sent' AND reminder_type='reminder'`
   ).bind(partnerId, weekCutoff).first();
   return Number(weekly?.cnt || 0) < freqCap;
 }
@@ -1789,6 +1796,7 @@ export async function onRequest(context) {
     if (route === 'internal') {
       if (method === 'POST' && param === 'run-followups')       return await runFollowups(DB, env, request);
       if (method === 'POST' && param === 'run-prebriefs')       return await runPrebriefs(DB, env, request);
+      if (method === 'POST' && param === 'run-all')             return await runAllCronJobs(DB, env, request);
       if (method === 'POST' && param === 'run-monthly-sms')     return await runMonthlySms(DB, env, request);
       if (method === 'POST' && param === 'run-reminder-sms')    return await runReminderSms(DB, env, request);
       if (method === 'POST' && param === 'run-anniversary-sms') return await runAnniversarySms(DB, env, request);
@@ -9256,6 +9264,60 @@ Keep the total brief under 400 words. Cite specifics (names, dates, amounts) —
   return ok({ ok: true, generated });
 }
 
+// ── INTERNAL CRON: RUN EVERY DUE JOB IN ONE CALL ──────────────────────────
+/**
+ * POST /api/internal/run-all — one URL that drives every scheduled job.
+ *
+ * Each job already decides for itself whether it is due and no-ops otherwise,
+ * so calling them all on every tick is cheap. The reason this exists is that
+ * needing nine separate URLs configured correctly is itself a failure mode: if
+ * a scheduler is only pointed at some of them, the jobs it does not know about
+ * never run and nothing says so. That is exactly what happened here — the
+ * Happy New Month SMS kept going out every month while the payment reminder
+ * had not run since July, because whatever was calling the app was reaching
+ * run-monthly-sms and not run-reminder-sms.
+ *
+ * One failing job must never stop the others, so each is caught individually
+ * and reported in `results`; the response is 200 with `ok:false` when any job
+ * failed, so a caller that only checks the status code still gets its work done
+ * while one that checks the body can alert.
+ */
+async function runAllCronJobs(DB, env, request) {
+  const authErr = requireCronSecret(env, request);
+  if (authErr) return authErr;
+
+  // Money-sending jobs first: if the platform cuts the request short, the sends
+  // that matter have already happened.
+  const jobs = [
+    ['monthly-sms',      () => runMonthlySms(DB, env, request)],
+    ['reminder-sms',     () => runReminderSms(DB, env, request)],
+    ['anniversary-sms',  () => runAnniversarySms(DB, env, request)],
+    ['premeeting-sms',   () => runPremeetingSms(DB, env, request)],
+    ['actionitem-sms',   () => runActionItemDeadlineSms(DB, env, request)],
+    ['scheduled-sms',    () => runScheduledSms(DB, env, request)],
+    ['newmonth-draft',   () => runNewMonthDraftFallback(DB, env, request)],
+    ['followups',        () => runFollowups(DB, env, request)],
+    ['prebriefs',        () => runPrebriefs(DB, env, request)],
+  ];
+
+  const results = {};
+  let failed = 0;
+  for (const [name, run] of jobs) {
+    try {
+      const res = await run();
+      let body = null;
+      try { body = await res.clone().json(); } catch { /* non-JSON body */ }
+      results[name] = { status: res.status, ...(body || {}) };
+      if (res.status !== 200) failed++;
+    } catch (e) {
+      results[name] = { status: 500, error: String(e?.message || e) };
+      failed++;
+    }
+  }
+  await recordCronHeartbeat(DB, 'all', failed ? `${failed} job(s) failed` : 'all jobs ok');
+  return ok({ ok: failed === 0, failed, results });
+}
+
 // ── TERMII CRON: HAPPY NEW MONTH SMS (once per month, from the 1st) ───────
 async function runMonthlySms(DB, env, request) {
   const authErr = requireCronSecret(env, request);
@@ -9529,7 +9591,7 @@ async function executeReminderRun(DB, opts = {}) {
     SELECT kp.id, kp.full_name, kp.phone, kp.reminder_preference, kp.start_date, COALESCE(kp.monthly_pledge,0) AS monthly_pledge
     FROM kpsc_partners kp
     WHERE COALESCE(kp.deleted_at,'')='' AND kp.status='active' AND kp.phone != ''
-      AND kp.reminder_preference != 'none'
+      AND COALESCE(kp.reminder_preference,'sms') != 'none'
       AND COALESCE(kp.opted_out,0)=0
       AND COALESCE(kp.dnd_flagged,0)=0
       AND kp.id NOT IN (
@@ -9653,13 +9715,24 @@ async function executeReminderRun(DB, opts = {}) {
     await putSettingValue(DB, 'kpsc_reminder_last_send_key', dayInfo.key);
   }
 
+  // A run that reached nobody must say why. "0 sent" with no explanation is
+  // indistinguishable from "the scheduler never fired", which is what made the
+  // difference between this job and the Happy New Month one so hard to see.
+  const total = (unpaid || []).length;
+  let outcome = (force && !dayInfo.due) ? 'Manual run (forced, not a scheduled send day)' : dayInfo.reason;
+  if (total === 0) {
+    outcome = `No partners were due a reminder for ${MONTH_NAMES_FULL[month - 1]} ${year} — every active partner has either paid in full, opted out, been flagged DND, has no phone number, or has reminders turned off.`;
+  } else if (sent === 0 && failed === 0 && skippedCount === total) {
+    outcome = `All ${total} unpaid partner(s) were inside the ${t.cooloffDays}-day cool-off or over the ${t.freqCap}-per-week cap, so none were messaged.`;
+  }
+
   await logCronRun(DB, 'reminder-sms', {
     isSendDay: dayInfo.isSendDay, windowOk: true, trigger,
-    sent, failed, skipped: skippedCount, total: (unpaid || []).length,
-    reason: (force && !dayInfo.due) ? 'Manual run (forced, not a scheduled send day)' : dayInfo.reason,
+    sent, failed, skipped: skippedCount, total,
+    reason: outcome,
   });
 
-  return { ok: true, sent, failed, skippedCount, total: (unpaid || []).length, isSendDay: dayInfo.isSendDay, trigger };
+  return { ok: true, sent, failed, skippedCount, total, reason: outcome, isSendDay: dayInfo.isSendDay, trigger };
 }
 
 // ── BULK MEMBER SMS (meeting notification) ────────────────────────────────
