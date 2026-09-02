@@ -3098,8 +3098,27 @@ function dashCardMeetingFrequencyAlert(ctx) {
 
 function newMonthDraftBanner() {
   const d = S.newmonthDraft;
-  if (!d?.draft) return '';
   const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  // No draft, and the last attempt to write one failed — say so. A missing AI
+  // draft is otherwise indistinguishable from one that was never attempted,
+  // and the month would quietly go out on the plain saved template instead.
+  if (!d?.draft) {
+    const st = d?.draftStatus;
+    if (!st || st.ok) return '';
+    return `
+    <div id="nm-draft-banner" class="k-meeting-card" style="background:linear-gradient(135deg,#fff4e5,#fdf1e0);border-left:4px solid #ef6c00;margin-bottom:12px">
+      <div class="k-mc-top">
+        <div style="flex:1">
+          <div class="k-mc-title" style="color:#c65100">⚠️ Happy New Month SMS could not be AI-drafted</div>
+          <div style="font-size:12px;color:#555;margin:4px 0">${esc(st.reason || 'The AI draft could not be written.')}</div>
+          <div style="font-size:12px;color:#777">Last tried ${esc(fmtDateTime(st.at))}. You can write the message yourself in Settings → SMS, or fix the AI key and it will retry.</div>
+        </div>
+        <button class="kbtn kbtn-sm kbtn-ghost" style="margin-left:4px" onclick="Kpsc.dismissNewMonthDraft()" title="Dismiss">✕</button>
+      </div>
+    </div>`;
+  }
+
   const monthLabel = d.draftMonth ? (MONTH_NAMES[d.draftMonth - 1] || '') : '';
   const yearLabel  = d.draftYear || '';
   return `
@@ -3107,7 +3126,7 @@ function newMonthDraftBanner() {
       <div class="k-mc-top">
         <div style="flex:1">
           <div class="k-mc-title" style="color:#2e7d32">📝 Happy New Month SMS Drafted — ${monthLabel} ${yearLabel}</div>
-          <div style="font-size:12px;color:#555;margin:4px 0">An AI draft has been prepared for the 1st. Review and edit before it auto-sends.</div>
+          <div style="font-size:12px;color:#555;margin:4px 0">An AI draft is ready for ${monthLabel}. Review and edit it before it sends.</div>
         </div>
         <button class="kbtn kbtn-sm" style="margin-left:8px" onclick="Kpsc.showNewMonthDraftModal()" title="Review draft">Review</button>
         <button class="kbtn kbtn-sm kbtn-ghost" style="margin-left:4px" onclick="Kpsc.dismissNewMonthDraft()" title="Dismiss">✕</button>
@@ -17748,7 +17767,7 @@ function showNewMonthDraftModal() {
         <button class="kbtn kbtn-ghost kbtn-sm" onclick="Kpsc.dismissNewMonthDraft()">✕</button>
       </div>
       <div class="k-modal-body">
-        <p class="k-hint" style="margin-bottom:12px">AI-drafted on the 3rd. This will auto-send on the 1st of ${monthLabel}. Edit if needed, then save.</p>
+        <p class="k-hint" style="margin-bottom:12px">AI-drafted automatically. This sends on the 1st of ${monthLabel} — or on the first day after that the scheduler gets through, up to the 5th. Edit if needed, then save.</p>
         <textarea id="nm-draft-text" class="k-textarea" style="width:100%;min-height:120px;font-size:14px;padding:10px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;resize:vertical">${esc(d.draft || '')}</textarea>
         <div id="nm-draft-charcount" style="font-size:12px;color:var(--text3);margin:4px 0 0">
           ${charCount} chars — ${pages} SMS page${pages !== 1 ? 's' : ''} (GSM-7)

@@ -1680,7 +1680,7 @@ export async function onRequest(context) {
       return await aiGenerateNewMonthSms(DB, env);
     }
 
-    // ── New Month SMS pending draft (auto-generated on 3rd of month) ──
+    // ── New Month SMS pending draft (auto-generated; see autoGenerateNewMonthDraft) ──
     if (route === 'kpsc-newmonth-draft') {
       const auth = await requireKpscRole(DB, request, KPSC_WRITE_ROLES);
       if (auth instanceof Response) return auth;
@@ -1691,11 +1691,17 @@ export async function onRequest(context) {
         const { results: rows } = await DB.prepare(`SELECT key,value FROM settings WHERE key IN (${keys.map(()=>'?').join(',')})`).bind(...keys).all();
         const m = {};
         for (const r of (rows||[])) m[r.key] = r.value;
+        let draftStatus = null;
+        try {
+          const st = await getSettingValue(DB, 'kpsc_newmonth_draft_status');
+          if (st) draftStatus = JSON.parse(st);
+        } catch { /* status is advisory only */ }
         return ok({
           draft: String(m.kpsc_newmonth_sms_pending_draft || '').trim(),
           draftDate: String(m.kpsc_newmonth_sms_draft_date || ''),
           draftMonth: parseInt(m.kpsc_newmonth_sms_draft_month || '0', 10),
           draftYear: parseInt(m.kpsc_newmonth_sms_draft_year || '0', 10),
+          draftStatus,
         });
       }
       if (method === 'POST') {
@@ -11799,8 +11805,15 @@ async function autoGenerateNewMonthDraft(DB, env, opts = {}) {
       if (existing.text && existing.year === nextYear && existing.month === nextMonth) return;
     }
 
+    const target = periodKey(nextYear, nextMonth);
+    const record = (ok, reason) => putSettingValue(DB, 'kpsc_newmonth_draft_status',
+      JSON.stringify({ at: new Date().toISOString(), ok, target, reason: reason || '' }));
+
     const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
-    if (!deepseekKey) return;
+    if (!deepseekKey) {
+      await record(false, 'No DeepSeek API key is configured, so no AI draft can be written. The saved Happy New Month template will be sent instead.');
+      return;
+    }
 
     const prompt = `Write a warm, faith-filled Happy New Month SMS message for RCCG Kingdom Parish church partners for the month of ${monthLabel} ${nextYear}.
 Requirements:
@@ -11823,10 +11836,16 @@ Requirements:
         temperature: 0.8,
       }),
     });
-    if (!resp.ok) return;
+    if (!resp.ok) {
+      await record(false, `DeepSeek returned HTTP ${resp.status} — the saved Happy New Month template will be sent instead.`);
+      return;
+    }
     const aiData = await resp.json();
     let draftText = aiData?.choices?.[0]?.message?.content?.trim() || '';
-    if (!draftText) return;
+    if (!draftText) {
+      await record(false, 'DeepSeek returned an empty message — the saved Happy New Month template will be sent instead.');
+      return;
+    }
     // Hard-trim to 459 chars if AI exceeded the limit
     if (draftText.length > 459) draftText = draftText.slice(0, 459).replace(/\s+\S*$/, '');
 
@@ -11839,7 +11858,14 @@ Requirements:
     await upsert('kpsc_newmonth_sms_draft_date', now.toISOString());
     await upsert('kpsc_newmonth_sms_draft_month', String(nextMonth));
     await upsert('kpsc_newmonth_sms_draft_year', String(nextYear));
-  } catch { /* swallow — draft failure must not surface */ }
+    await record(true, '');
+  } catch (e) {
+    // A draft failure must never break the send that called us — but it must
+    // not vanish either. Every exit above records why, so a missing draft can
+    // be told apart from one that was never attempted.
+    await putSettingValue(DB, 'kpsc_newmonth_draft_status',
+      JSON.stringify({ at: new Date().toISOString(), ok: false, target: '', reason: String(e?.message || e) })).catch(() => {});
+  }
 }
 
 // NOTE: This project deploys as Cloudflare Pages (see wrangler.toml —

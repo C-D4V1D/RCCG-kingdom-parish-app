@@ -280,3 +280,42 @@ test('every cron endpoint still requires the secret', async () => {
     assert.equal(res.status, 401, `${ep} should reject a bad secret`);
   }
 });
+
+// ── AI redraft outcome is recorded, not swallowed ──────────────────────────
+// Every failure path in autoGenerateNewMonthDraft used to `return` silently, so
+// a month with no AI draft looked exactly like a month where drafting was never
+// attempted — and the plain template went out with nobody the wiser.
+test('a draft attempt with no AI key records why, instead of failing silently', async () => {
+  const written = {};
+  const DB = {
+    prepare(sql) {
+      if (/SELECT value FROM settings WHERE key=\?/.test(sql)) {
+        return { bind(k) { this._k = k; return this; }, async first() { return null; } };
+      }
+      if (/INSERT INTO settings/.test(sql)) {
+        return { bind(k, v) { written[k] = v; return this; }, async run() { return {}; } };
+      }
+      return {
+        bind() { return this; },
+        async all() { return { results: [] }; },
+        async first() { return null; },
+        async run() { return {}; },
+      };
+    },
+  };
+  // run-newmonth-draft-fallback drives autoGenerateNewMonthDraft with no
+  // DeepSeek key configured, so it must record the reason.
+  const req = new Request('https://example.com/api/internal/run-newmonth-draft-fallback', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-secret' },
+  });
+  const res = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-secret' } });
+  assert.equal(res.status, 200);
+
+  const status = written['kpsc_newmonth_draft_status'];
+  assert.ok(status, 'the draft attempt must record an outcome');
+  const parsed = JSON.parse(status);
+  assert.equal(parsed.ok, false);
+  assert.match(parsed.reason, /DeepSeek API key/i);
+  assert.ok(parsed.at, 'the outcome must carry a timestamp');
+});
