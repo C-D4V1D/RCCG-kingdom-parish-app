@@ -11364,6 +11364,134 @@ async function submitBankCharge(btn=null){
 // They spend from it, log expenses in the Expenses page, and request a top-up when low.
 // Advance requests are for unusual or larger purchases that need approval before buying.
 
+// ── PETTY CASH CLAIMS ─────────────────────────────────────────────────────
+// A top-up request recovers money that has already left the Admin Officer's
+// wallet, and TWO different records can put money out of it:
+//
+//   • an expense paid from petty cash — paymentMethod 'petty_cash', or 'split'
+//     with a pettyAmount; and
+//   • a petty 'disbursement' entry — cash paid straight out of the wallet that
+//     is not a parish expense. Today the only source is the Satellite/Zone pool
+//     share of a joint payment (addSatelliteFund with channel 'petty_cash', see
+//     the server's createSatelliteFund): a ₦15,000 joint payment split ₦10,000
+//     parish / ₦5,000 pool writes the parish share as an expense and the pool
+//     share as a disbursement. Both left the same wallet, so both have to be
+//     recoverable — the pool share used to be invisible to the top-up list and
+//     the Admin Officer was silently left out of pocket for it.
+//
+// Claim ids from either source live together in a request's expenseRefs. The
+// two id namespaces never collide (expenses are EXP-…, petty entries PC-…).
+
+/**
+ * Type badge for a petty history row. The old inline ternaries fell through to
+ * "Advance" for anything that was not a refill or a top-up request, so pool
+ * payouts (type 'disbursement') and wallet-to-bank deposits both showed as
+ * advances — see the Satellite/Zone note above.
+ */
+function pettyTypeBadge(r, opts={}){
+  const style = opts.margin ? ' style="margin-right:6px"' : '';
+  const t = r?.type;
+  if(t==='refill')        return `<span class="badge badge-success"${style}>↺ Top-Up Paid</span>`;
+  if(t==='topup_request') return `<span class="badge badge-info"${style}>↺ ${opts.short?'Top-Up Req':'Top-Up Request'}</span>`;
+  if(t==='disbursement')  return `<span class="badge badge-warn"${style}>🛰️ Pool Payout</span>`;
+  if(t==='petty_to_bank') return `<span class="badge badge-info"${style}>🏦 Deposit to Bank</span>`;
+  return `<span class="badge badge-warn"${style}>💳 Advance</span>`;
+}
+
+/** Ids already covered by a top-up request that is pending, approved or settled. */
+function pettyClaimedIds(pettyHistory){
+  return new Set(
+    (pettyHistory||[])
+      .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'||h.status==='settled'))
+      .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
+  );
+}
+
+/** The petty-cash amount an expense row puts on a claim. */
+function pettyAmountOfExpense(e){
+  return e.paymentMethod==='split' ? (e.pettyAmount||0) : (e.amount||0);
+}
+
+/** Normalise an expense into a claim line the top-up tables can render. */
+function pettyClaimFromExpense(e){
+  const c = EXPENSE_CATS_ALL.find(x=>x.key===e.category) || {icon:'💸', label:e.category||'Other'};
+  return {
+    id: e.id, kind: 'expense',
+    date: e.date||e.createdAt, createdAt: e.createdAt||e.date,
+    amount: pettyAmountOfExpense(e),
+    icon: c.icon, label: c.label,
+    details: [e.subCategory, e.description&&e.description!==e.subCategory?e.description:'', e.notes?`Notes: ${e.notes}`:''].filter(Boolean),
+    receiptNo: e.receiptNo||'',
+    noReceipt: !!(e.notes && e.notes.includes('NO-RECEIPT')),
+  };
+}
+
+/** Normalise a petty disbursement (a pool payout) into the same shape. */
+function pettyClaimFromDisbursement(h){
+  return {
+    id: h.id, kind: 'disbursement',
+    date: h.date||h.createdAt, createdAt: h.createdAt||h.date,
+    amount: h.amount||0,
+    icon: '🛰️', label: 'Satellite / Zone Pool',
+    details: [h.purpose, h.notes].filter(Boolean),
+    receiptNo: h.receiptNo||h.reference||'',
+    noReceipt: false,
+  };
+}
+
+/**
+ * Every wallet outflow not yet covered by a top-up request, oldest first.
+ * Deliberately not cut off at the last refill date — the goal is to recover
+ * every unclaimed outflow so the suggested top-up restores the Admin Officer
+ * to the full cash level they were given.
+ */
+function pettyUnclaimedOutflows(allExpenses, pettyHistory){
+  const claimed = pettyClaimedIds(pettyHistory);
+  const fromExpenses = (allExpenses||[])
+    .filter(e=>e.status==='approved'||e.status==='pending_approval')
+    .filter(e=>e.paymentMethod==='petty_cash'||(e.paymentMethod==='split'&&(e.pettyAmount||0)>0))
+    .filter(e=>!claimed.has(e.id))
+    .map(pettyClaimFromExpense);
+  const fromDisbursements = (pettyHistory||[])
+    .filter(h=>h.type==='disbursement'&&h.status==='approved')
+    .filter(h=>!claimed.has(h.id))
+    .map(pettyClaimFromDisbursement);
+  return [...fromExpenses, ...fromDisbursements]
+    .filter(c=>(c.amount||0)>0)
+    .sort((a,b)=>new Date(a.createdAt||a.date||0)-new Date(b.createdAt||b.date||0));
+}
+
+/**
+ * Re-resolve a request's expenseRefs against what those records say NOW, so a
+ * record deleted after the request was raised cannot strand it. Refs that no
+ * longer resolve contribute nothing. Handles both claim kinds — resolving only
+ * expenses would silently value a pool payout at zero.
+ */
+function pettyClaimsTotal(refs, allExpenses, pettyHistory){
+  const expenseMap = new Map((allExpenses||[]).map(e=>[e.id, e]));
+  const pettyMap = new Map((pettyHistory||[]).map(h=>[h.id, h]));
+  return (refs||[]).reduce((s, id)=>{
+    const e = expenseMap.get(id);
+    if(e) return s + pettyAmountOfExpense(e);
+    const h = pettyMap.get(id);
+    if(h && h.type==='disbursement') return s + (h.amount||0);
+    return s;
+  }, 0);
+}
+
+/** Resolve a request's refs to renderable claim lines, for the review tables. */
+function pettyClaimsFromRefs(refs, allExpenses, pettyHistory){
+  const expenseMap = new Map((allExpenses||[]).map(e=>[e.id, e]));
+  const pettyMap = new Map((pettyHistory||[]).map(h=>[h.id, h]));
+  return (refs||[]).map(id=>{
+    const e = expenseMap.get(id);
+    if(e) return pettyClaimFromExpense(e);
+    const h = pettyMap.get(id);
+    if(h && h.type==='disbursement') return pettyClaimFromDisbursement(h);
+    return null;
+  }).filter(Boolean);
+}
+
 function pettyMonthHistory(history){
   return (history||[]).filter(h=>{
     const d=new Date(h.createdAt||h.date||0);
@@ -11398,15 +11526,10 @@ async function renderPettyCash(){
   // Approved top-up requests awaiting payment — only show those with remaining balance
   // Recalculate effective amount from expenseRefs against current expenses to handle
   // cases where an expense was deleted after the request was created/approved.
-  const expenseMap = new Map(allExpenses.map(e => [e.id, e]));
   const approvedTopups = history.filter(h=>h.status==='approved'&&h.type==='topup_request')
     .map(h => {
       const refs = Array.isArray(h.expenseRefs) ? h.expenseRefs : [];
-      const liveTotal = refs.reduce((s, id) => {
-        const e = expenseMap.get(id);
-        if (!e) return s;
-        return s + (e.paymentMethod === 'split' ? (e.pettyAmount || 0) : (e.amount || 0));
-      }, 0);
+      const liveTotal = pettyClaimsTotal(refs, allExpenses, history);
       const effectiveAmount = refs.length > 0 ? liveTotal : (h.amount || 0);
       return { ...h, _effectiveAmount: effectiveAmount };
     })
@@ -11420,22 +11543,10 @@ async function renderPettyCash(){
   const monthTopups = monthHistory.filter(h=>h.type==='refill').reduce((s,h)=>s+(h.amount||0),0);
   const monthAdvancesDisbursed = monthHistory.filter(h=>h.type==='advance'&&(h.status==='approved'||h.status==='settled')).reduce((s,h)=>s+(h.amount||0),0);
 
-  // All petty cash expenses not yet covered by any top-up request (pending, approved, or settled).
-  // We do NOT filter by last refill date — the goal is to recover every unclaimed expense
-  // regardless of when the last cash handover was, so the suggested top-up always restores
-  // the admin to the total cash level they have been given.
-  const alreadyClaimedExpIds = new Set(
-    history
-      .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'||h.status==='settled'))
-      .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
-  );
-  const expensesSinceRefill = allExpenses.filter(e=>{
-    if(e.status!=='approved' && e.status!=='pending_approval') return false;
-    if(e.paymentMethod!=='petty_cash' && !(e.paymentMethod==='split' && (e.pettyAmount||0)>0)) return false;
-    return !alreadyClaimedExpIds.has(e.id);
-  });
-  const expensesSinceRefillTotal = expensesSinceRefill.reduce((s,e)=>
-    s+(e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)), 0);
+  // Every wallet outflow not yet covered by a top-up request — petty-cash
+  // expenses AND pool payouts paid from the wallet. See pettyUnclaimedOutflows.
+  const expensesSinceRefill = pettyUnclaimedOutflows(allExpenses, history);
+  const expensesSinceRefillTotal = expensesSinceRefill.reduce((s,c)=>s+(c.amount||0), 0);
 
   const pctColor = petty.float<0?'var(--danger)':pct<20?'var(--danger)':pct<50?'var(--amber)':'var(--primary)';
 
@@ -11477,7 +11588,7 @@ async function renderPettyCash(){
           <div style="margin-bottom:10px">
             <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Not yet refunded</div>
             <div style="font-size:16px;font-weight:700;color:var(--danger)">${fmt(expensesSinceRefillTotal)}</div>
-            <div style="font-size:11px;color:var(--text3)">${expensesSinceRefill.length} expense(s) not yet covered</div>
+            <div style="font-size:11px;color:var(--text3)">${expensesSinceRefill.length} item(s) not yet covered</div>
           </div>
           <div style="margin-bottom:10px">
             <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Topped up this month</div>
@@ -11492,7 +11603,7 @@ async function renderPettyCash(){
       ${expensesSinceRefillTotal>0&&canAction('petty_request')?`
       <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
         <div style="font-size:13px;color:var(--text2);margin-bottom:8px">
-          ${fmt(expensesSinceRefillTotal)} in expenses have not yet been covered by a top-up request.
+          ${fmt(expensesSinceRefillTotal)} paid from the wallet has not yet been covered by a top-up request.
           ${petty.float/petty.max < 0.4 ? ' The balance is getting low — consider requesting a top-up.' : ''}
         </div>
         <button class="btn btn-primary btn-sm" onclick="App.showTopUpRequest()">↺ Request Top-Up (${fmt(expensesSinceRefillTotal)})</button>
@@ -11504,9 +11615,7 @@ async function renderPettyCash(){
       <div class="card-header"><span class="card-title">Pending Approval (${pending.length})</span></div>
       ${pending.length ? pending.map(r=>{
         const isTopup = r.type==='topup_request';
-        const typeLabel = isTopup
-          ? `<span class="badge badge-info" style="margin-right:6px">↺ Top-Up</span>`
-          : `<span class="badge badge-warn" style="margin-right:6px">💳 Advance</span>`;
+        const typeLabel = pettyTypeBadge(r, { margin: true, short: true });
         const expCount = r.expenseRefs?.length||0;
         return `
         <div class="status-row" style="flex-wrap:wrap;gap:6px">
@@ -11516,7 +11625,7 @@ async function renderPettyCash(){
               <span style="font-size:13px;font-weight:600">${r.purpose}</span>
             </div>
             <div class="status-row-sub">By: ${r.requestedBy||'—'} · ${fmtDate(r.createdAt)}</div>
-            ${isTopup&&expCount>0?`<div class="status-row-sub" style="color:var(--text3)">${expCount} expense(s) included</div>`:''}
+            ${isTopup&&expCount>0?`<div class="status-row-sub" style="color:var(--text3)">${expCount} item(s) included</div>`:''}
             ${r.notes?`<div class="status-row-sub" style="color:var(--text3)">"${r.notes}"</div>`:''}
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
@@ -11549,7 +11658,7 @@ async function renderPettyCash(){
             <td style="white-space:nowrap">${fmtDate(r.approvedAt||r.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(r.approvedAt||r.createdAt)}</div></td>
             <td>
               <div style="font-size:13px;font-weight:500">${r.purpose||'Wallet top-up'}</div>
-              ${r.expenseRefs?.length?`<div style="font-size:11px;color:var(--text3)">${r.expenseRefs.length} expense(s) included</div>`:''}
+              ${r.expenseRefs?.length?`<div style="font-size:11px;color:var(--text3)">${r.expenseRefs.length} item(s) included</div>`:''}
               ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--text3)">Paid so far: ${fmt(r.actualAmount||0)} · Remaining: ${fmt(_due)}</div>`:''}
             </td>
             <td class="td-muted">${r.requestedBy||'—'}</td>
@@ -11574,7 +11683,7 @@ async function renderPettyCash(){
               <div class="topup-card-left">
                 <div class="topup-card-date">${fmtDate(r.approvedAt||r.createdAt)}<span class="topup-card-time" style="margin-left:6px">${fmtTime(r.approvedAt||r.createdAt)}</span></div>
                 <div class="topup-card-title">${r.purpose||'Wallet top-up'}</div>
-                ${r.expenseRefs?.length?`<div class="topup-card-sub">${r.expenseRefs.length} expense(s) included</div>`:''}
+                ${r.expenseRefs?.length?`<div class="topup-card-sub">${r.expenseRefs.length} item(s) included</div>`:''}
               </div>
               <div class="topup-card-right">
                 <div class="topup-card-amount">${fmt(r._effectiveAmount)}</div>
@@ -11727,11 +11836,7 @@ async function renderPettyCash(){
             const isRefill=r.type==='refill';
             const isTopupReq=r.type==='topup_request';
             const overdue=isReceiptOverdue(r);
-            const typeTag=isRefill
-              ?`<span class="badge badge-success">↺ Top-Up Paid</span>`
-              :isTopupReq
-                ?`<span class="badge badge-info">↺ Top-Up Request</span>`
-                :`<span class="badge badge-warn">💳 Advance</span>`;
+            const typeTag=pettyTypeBadge(r);
             const statusColor=r.status==='settled'?'badge-success':r.status==='approved'?'badge-info':r.status==='rejected'||r.status==='cancelled'?'badge-danger':'badge-warn';
             const amtDisplay=isRefill
               ?`<span style="color:var(--success);font-weight:700">+${fmt(r.amount)}</span>`
@@ -11766,11 +11871,7 @@ async function renderPettyCash(){
             const isRefill=r.type==='refill';
             const isTopupReq=r.type==='topup_request';
             const overdue=isReceiptOverdue(r);
-            const typeTag=isRefill
-              ?`<span class="badge badge-success">↺ Top-Up Paid</span>`
-              :isTopupReq
-                ?`<span class="badge badge-info">↺ Top-Up Req</span>`
-                :`<span class="badge badge-warn">💳 Advance</span>`;
+            const typeTag=pettyTypeBadge(r, { short: true });
             const statusColor=r.status==='settled'?'badge-success':r.status==='approved'?'badge-info':r.status==='rejected'||r.status==='cancelled'?'badge-danger':'badge-warn';
             const mobileAmt=isRefill
               ?`<span style="color:var(--success);font-weight:700">+${fmt(r.amount)}</span>`
@@ -11803,11 +11904,7 @@ function showPettyDetail(id){
   const isRefill = r.type==='refill';
   const isTopupReq = r.type==='topup_request';
   const overdue = isReceiptOverdue(r);
-  const typeBadge = isRefill
-    ? `<span class="badge badge-success">↺ Top-Up Paid</span>`
-    : isTopupReq
-      ? `<span class="badge badge-info">↺ Top-Up Request</span>`
-      : `<span class="badge badge-warn">💳 Advance</span>`;
+  const typeBadge = pettyTypeBadge(r);
   const statusColor = r.status==='settled'?'badge-success':r.status==='approved'?'badge-info':r.status==='rejected'||r.status==='cancelled'?'badge-danger':'badge-warn';
   const amtFormatted = isRefill
     ? `<span style="color:var(--success);font-weight:700;font-size:16px">+${fmt(r.amount)}</span>`
@@ -11820,7 +11917,7 @@ function showPettyDetail(id){
       ? esc(r.reference)
       : '—';
   const extraRows = [
-    ...(r.expenseRefs?.length ? [['Expenses Included', `${r.expenseRefs.length} expense(s)`]] : []),
+    ...(r.expenseRefs?.length ? [['Items Included', `${r.expenseRefs.length} item(s)`]] : []),
     ...(r.rejectionReason ? [['Rejection Reason', esc(r.rejectionReason)]] : []),
     ...(r.notes ? [['Notes', esc(r.notes)]] : []),
   ];
@@ -11977,46 +12074,33 @@ async function submitPettyToBankDeposit(btn=null){
 async function showTopUpRequest(){
   if(!canAction('petty_request')){ showAlert('You do not have permission to request petty cash top-up.','danger'); return; }
   const [pettyConfig, allExpenses, allPettyRaw] = await Promise.all([DB.getPettyConfig(), DB.getExpenses(), DB.getPetty()]);
-  // All petty cash expenses not yet covered by any top-up request — no last-refill cutoff,
-  // so the request covers every unclaimed expense and restores the admin to their full float level.
-  const alreadyInRequest = new Set(
-    allPettyRaw
-      .filter(h=>h.type==='topup_request'&&(h.status==='pending_approval'||h.status==='approved'||h.status==='settled'))
-      .flatMap(h=>Array.isArray(h.expenseRefs)?h.expenseRefs:[])
-  );
-  const unrecovered = allExpenses.filter(e=>{
-    if(e.status!=='approved' && e.status!=='pending_approval') return false;
-    if(e.paymentMethod!=='petty_cash' && !(e.paymentMethod==='split' && (e.pettyAmount||0)>0)) return false;
-    return !alreadyInRequest.has(e.id);
-  }).sort((a,b)=>new Date(a.createdAt||a.date||0)-new Date(b.createdAt||b.date||0));
+  // Petty-cash expenses AND pool payouts paid from the wallet — see
+  // pettyUnclaimedOutflows. No last-refill cutoff, so the request covers every
+  // unclaimed outflow and restores the admin to their full float level.
+  const unrecovered = pettyUnclaimedOutflows(allExpenses, allPettyRaw);
 
-  const totalAmt = unrecovered.reduce((s,e)=>s+(e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)),0);
+  const totalAmt = unrecovered.reduce((s,c)=>s+(c.amount||0),0);
   const cashOnHand = pettyConfig.float;
 
-  const expRows = unrecovered.map(e=>{
-    const c=EXPENSE_CATS_ALL.find(x=>x.key===e.category)||{icon:'💸',label:e.category||'Other'};
-    const amt = e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0);
-    const detailBits = [e.subCategory, e.description&&e.description!==e.subCategory?e.description:'', e.notes?`Notes: ${e.notes}`:''].filter(Boolean);
-    return `<tr>
-      <td style="font-size:12px;white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.createdAt||e.date)}</div></td>
-      <td><span class="badge badge-gray" style="font-size:11px">${c.icon} ${c.label}</span></td>
+  const expRows = unrecovered.map(c=>`<tr>
+      <td style="font-size:12px;white-space:nowrap">${fmtDate(c.date)}<div class="td-muted" style="font-size:11px">${fmtTime(c.createdAt)}</div></td>
+      <td><span class="badge badge-gray" style="font-size:11px">${c.icon} ${esc(c.label)}</span></td>
       <td style="font-size:12px">
-        ${detailBits.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}
+        ${c.details.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}
       </td>
-      <td class="td-right td-bold" style="font-size:13px;color:var(--danger)">${fmt(amt)}</td>
-    </tr>`;
-  }).join('');
+      <td class="td-right td-bold" style="font-size:13px;color:var(--danger)">${fmt(c.amount)}</td>
+    </tr>`).join('');
 
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">↺ Request Wallet Top-Up</div>
-    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>This lists all petty cash expenses not yet covered by a previous top-up request. The Accountant will verify these, then a Signatory approves before the cash is sent to you.</span></div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>This lists everything paid from the wallet — petty cash expenses and Satellite/Zone pool payouts — that a previous top-up request has not already covered. The Accountant will verify these, then a Signatory approves before the cash is sent to you.</span></div>
     <div style="background:var(--surface);border-radius:var(--r);padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
       <span style="font-size:12px;color:var(--text2)">Current wallet balance</span>
       <span style="font-weight:700;color:${cashOnHand<0?'var(--danger)':cashOnHand<10000?'var(--amber)':'var(--primary)'}">${cashOnHand<0?'−'+fmt(Math.abs(cashOnHand)):fmt(cashOnHand)}</span>
     </div>
     ${unrecovered.length ? `
-    <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">Expenses to be recovered (${unrecovered.length}):</div>
+    <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">Payments to be recovered (${unrecovered.length}):</div>
     <div class="table-wrap" style="max-height:200px;overflow-y:auto;margin-bottom:12px">
       <table style="width:100%">
         <tr><th>Date</th><th>Category</th><th>Details (Sub-category / Description / Notes)</th><th class="td-right">Amount</th></tr>
@@ -12030,7 +12114,7 @@ async function showTopUpRequest(){
     <div class="form-group">
       <label class="form-label">Top-Up Amount (₦) *</label>
       <input type="number" id="topup_amt" class="form-input" value="${Math.round(totalAmt)}" readonly />
-      <div class="form-hint">Auto-calculated from the selected expenses (${unrecovered.length}).</div>
+      <div class="form-hint">Auto-calculated from the payments listed above (${unrecovered.length}).</div>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;margin-top:8px">
         <input type="checkbox" id="topup_override" onchange="App.onTopupOverrideToggle()" />
         Override amount (requires reason)
@@ -12038,7 +12122,7 @@ async function showTopUpRequest(){
       <div id="topup_override_reason_group" style="display:none;margin-top:8px">
         <input type="text" id="topup_override_reason" class="form-input" placeholder="Why this differs from the calculated total" />
       </div>
-    </div>` : `<div class="empty-table" style="margin-bottom:12px">No petty cash expenses found since the last top-up. If you paid for something and haven't logged it yet, go to the <strong>Expenses page</strong> first and record it there.</div>
+    </div>` : `<div class="empty-table" style="margin-bottom:12px">Nothing left to recover — every wallet payment is already covered by a top-up request. If you paid for something and haven't logged it yet, go to the <strong>Expenses page</strong> first and record it there.</div>
     <div class="form-group">
       <label class="form-label">Top-Up Amount (₦) *</label>
       <input type="number" id="topup_amt" class="form-input" placeholder="0" readonly />
@@ -12058,7 +12142,7 @@ async function showTopUpRequest(){
       <button class="btn btn-primary" onclick="App.submitTopUpRequest(this)">Submit Top-Up Request</button>
     </div>`);
   // Store IDs in state so submitTopUpRequest can read them without HTML attribute issues
-  state._topupExpenseIds = unrecovered.map(e=>e.id);
+  state._topupExpenseIds = unrecovered.map(c=>c.id);
 }
 
 async function submitTopUpRequest(btn=null){
@@ -12073,7 +12157,7 @@ async function submitTopUpRequest(btn=null){
   const pettyConfig = await DB.getPettyConfig();
   const req = {
     id:'PC-'+Date.now(), type:'topup_request',
-    purpose: `Wallet top-up — ${expenseIds.length} expense(s)`,
+    purpose: `Wallet top-up — ${expenseIds.length} item(s)`,
     amount, notes: override ? `${notes}${notes?'\n':''}Override reason: ${overrideReason}` : notes,
     expenseRefs: expenseIds,
     requestedBy: state.user?.name,
@@ -12221,28 +12305,25 @@ async function approvePetty(id, btn=null){
     restore(); // modal takes over; restore the button immediately
     // Show full expense detail modal for review before approving
     const allExpenses = await DB.getExpenses();
-    const requestedExpIds = new Set(Array.isArray(req.expenseRefs) ? req.expenseRefs : []);
-    const includedExpenses = requestedExpIds.size > 0
-      ? allExpenses.filter(e=>requestedExpIds.has(e.id))
-      : [];
+    // Resolve both claim kinds — a request covering a pool payout would
+    // otherwise show the reviewer a table that does not add up to the total.
+    const includedExpenses = pettyClaimsFromRefs(
+      Array.isArray(req.expenseRefs) ? req.expenseRefs : [], allExpenses, pettyHistory);
     const settingsRow = await DB.getSettings();
     const churchName = settingsRow?.churchName || 'RCCG Kingdom Parish, Aguleri';
 
-    const expRows = includedExpenses.map(e=>{
-      const c = EXPENSE_CATS_ALL.find(x=>x.key===e.category)||{icon:'💸',label:e.category||'Other'};
-      const amt = e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0);
-      const detailBits = [e.subCategory, e.description&&e.description!==e.subCategory?e.description:'', e.notes?`Notes: ${e.notes}`:''].filter(Boolean);
-      const receiptCell = e.receiptNo
-        ? `<span style="color:var(--success)">✓ ${e.receiptNo}</span>`
-        : e.notes&&e.notes.includes('NO-RECEIPT')
+    const expRows = includedExpenses.map(c=>{
+      const receiptCell = c.receiptNo
+        ? `<span style="color:var(--success)">✓ ${esc(c.receiptNo)}</span>`
+        : c.noReceipt
           ? `<span style="color:var(--amber)">No receipt</span>`
           : '<span style="color:var(--text3)">—</span>';
       return `<tr>
-        <td style="font-size:12px;padding:5px 8px;white-space:nowrap">${fmtDate(e.date||e.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(e.createdAt||e.date)}</div></td>
-        <td style="padding:5px 8px;font-size:12px">${c.icon} ${c.label}</td>
-        <td style="padding:5px 8px;font-size:12px">${detailBits.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}</td>
+        <td style="font-size:12px;padding:5px 8px;white-space:nowrap">${fmtDate(c.date)}<div class="td-muted" style="font-size:11px">${fmtTime(c.createdAt)}</div></td>
+        <td style="padding:5px 8px;font-size:12px">${c.icon} ${esc(c.label)}</td>
+        <td style="padding:5px 8px;font-size:12px">${c.details.map(d=>`<div>${esc(d)}</div>`).join('')||'—'}</td>
         <td style="padding:5px 8px;font-size:11px">${receiptCell}</td>
-        <td style="padding:5px 8px;font-size:13px;font-weight:700;color:var(--danger);text-align:right">${fmt(amt)}</td>
+        <td style="padding:5px 8px;font-size:13px;font-weight:700;color:var(--danger);text-align:right">${fmt(c.amount)}</td>
       </tr>`;
     }).join('');
 
@@ -12267,7 +12348,7 @@ async function approvePetty(id, btn=null){
         </div>
 
         <div style="font-size:13px;font-weight:600;margin-bottom:8px">
-          Expenses included (${includedExpenses.length}) — Total: ${fmt(req.amount)}
+          Items included (${includedExpenses.length}) — Total: ${fmt(req.amount)}
         </div>
 
         ${includedExpenses.length ? `<div class="table-wrap" style="max-height:240px;overflow-y:auto;margin-bottom:4px">
@@ -12285,7 +12366,7 @@ async function approvePetty(id, btn=null){
               <td style="font-weight:800;font-size:15px;color:var(--primary);text-align:right;padding:8px">${fmt(req.amount)}</td>
             </tr>
           </table>
-        </div>` : `<div class="empty-table" style="margin-bottom:12px">No linked expenses found. The Admin Officer submitted this without selecting specific expenses.</div>`}
+        </div>` : `<div class="empty-table" style="margin-bottom:12px">No linked items found. The Admin Officer submitted this without selecting specific expenses.</div>`}
       </div>
 
       <div class="alert alert-info" style="margin-top:10px"><span class="alert-icon">ℹ</span><span>Approving authorises the payment. The wallet balance updates when the Accountant records the payment.</span></div>
@@ -12525,16 +12606,11 @@ async function showPettyRefill(prefillAmount, topupRequestId=''){
   // from live expenseRefs (mirrors renderPettyCash) so deleted expenses don't strand
   // a request. The recorded payment can be attributed to one of these so its status
   // advances to "settled" instead of lingering in "Awaiting Payment".
-  const _expenseMap = new Map(allExpenses.map(e => [e.id, e]));
   const outstandingTopups = pettyHistory
     .filter(h => h.type === 'topup_request' && h.status === 'approved')
     .map(h => {
       const refs = Array.isArray(h.expenseRefs) ? h.expenseRefs : [];
-      const liveTotal = refs.reduce((s, id) => {
-        const e = _expenseMap.get(id);
-        if (!e) return s;
-        return s + (e.paymentMethod === 'split' ? (e.pettyAmount || 0) : (e.amount || 0));
-      }, 0);
+      const liveTotal = pettyClaimsTotal(refs, allExpenses, pettyHistory);
       const effectiveAmount = refs.length > 0 ? liveTotal : (h.amount || 0);
       const remaining = Math.max(0, effectiveAmount - (h.actualAmount || 0));
       return { id: h.id, purpose: h.purpose || 'Wallet top-up', approvedAt: h.approvedAt || h.createdAt, remaining };
@@ -12816,8 +12892,7 @@ async function submitRefill(btn=null){
     // deleted expense doesn't leave the request impossible to settle.
     const refs = Array.isArray(linkedTopup.expenseRefs) ? linkedTopup.expenseRefs : [];
     if(refs.length > 0){
-      const expMap = new Map(allExpenses.map(e=>[e.id, e]));
-      linkedEffectiveAmount = refs.reduce((s,id)=>{ const e=expMap.get(id); if(!e) return s; return s + (e.paymentMethod==='split'?(e.pettyAmount||0):(e.amount||0)); }, 0);
+      linkedEffectiveAmount = pettyClaimsTotal(refs, allExpenses, pettyHistory);
     } else {
       linkedEffectiveAmount = linkedTopup.amount || 0;
     }
@@ -14993,6 +15068,9 @@ return {
   _buildExpenseCoveringMap: buildExpenseCoveringMap,
   _findIncomeRefForCashExpense: findIncomeRefForCashExpense,
   _calcPettyFloatFromLedger: calcPettyFloatFromLedger,
+  _pettyUnclaimedOutflows: pettyUnclaimedOutflows,
+  _pettyClaimsTotal: pettyClaimsTotal,
+  _pettyTypeBadge: pettyTypeBadge,
   _totalRemittanceDue: totalRemittanceDue,
   _splitRemittancePaid: splitRemittancePaid,
   _calcUnsettledPeriodsSettledAmount: calcUnsettledPeriodsSettledAmount,
