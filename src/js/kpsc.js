@@ -10061,6 +10061,25 @@ async function renderSmsLogs(main) {
   const apiWarn = sch.apiKeyConfigured ? '' :
     `<div class="k-error-box" style="margin-top:10px"><strong>No Termii API key configured.</strong> Reminders cannot be sent until a key is added in Settings → SMS.</div>`;
 
+  // A stale heartbeat means nothing is reaching the app — no reminder, no Happy
+  // New Month, no anniversary SMS will go out until it is fixed. Say so loudly:
+  // this went unnoticed for two months when the page only showed a "last ran"
+  // date and left the reader to work out that it had stopped moving.
+  const hbAge = sch.heartbeatAgeMins;
+  const hbAgeText = hbAge == null ? '' :
+    hbAge < 120 ? `${hbAge} minute(s) ago` :
+    hbAge < 60 * 48 ? `${Math.round(hbAge / 60)} hour(s) ago` : `${Math.round(hbAge / 1440)} day(s) ago`;
+  const hbWarn = !sch.heartbeatStale ? '' :
+    `<div class="k-error-box" style="margin-top:10px">
+       <strong>⚠️ The SMS scheduler is not running.</strong>
+       ${hb?.at
+         ? `It last checked in <strong>${esc(hbAgeText)}</strong> (${esc(fmtDateTime(hb.at))}); it should check in every 30 minutes.`
+         : 'It has never checked in.'}
+       No automated SMS — payment reminders, Happy New Month, anniversaries — is being sent while this is the case.
+       <div style="margin-top:8px">Check the <strong>Cron — Follow-ups &amp; Pre-briefs</strong> workflow in GitHub Actions, and that the
+       <code>CRON_SECRET</code> repository secret matches the <code>CRON_SECRET</code> environment variable in Cloudflare Pages.</div>
+     </div>`;
+
   // Wallet / credits
   const w = res.wallet || {};
   const cost = res.cost || {};
@@ -10110,13 +10129,14 @@ async function renderSmsLogs(main) {
           </div>
           <div class="k-sms-sched-row">
             <span class="k-label" style="margin:0">Scheduler heartbeat</span>
-            <span class="k-hint">${esc(hbText)}</span>
+            <span>${sch.heartbeatStale ? '<span class="kbadge badge-red">not running</span>' : '<span class="kbadge badge-green">alive</span>'} <span class="k-hint" style="margin-left:6px">${esc(hbText)}</span></span>
           </div>
           <div class="k-sms-sched-row">
             <span class="k-label" style="margin:0">Delivery reports</span>
             <span>${wh.lastSeen ? '<span class="kbadge badge-green">connected</span>' : '<span class="kbadge badge-amber">not set up</span>'} <span class="k-hint" style="margin-left:6px">${esc(whSeen)}</span></span>
           </div>
         </div>
+        ${hbWarn}
         ${apiWarn}
         ${whWarn}
 

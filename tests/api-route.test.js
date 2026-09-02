@@ -3042,43 +3042,45 @@ test('POST /api/kpsc-sms-send: returns 400 when no Termii key configured', async
   assert.match(body.error, /Termii API key not configured/i);
 });
 
-test('POST /api/internal/run-monthly-sms: skips when not 1st of month', async () => {
-  // Simulate a date that is NOT the 1st by checking the logic path via a cron secret
-  // We cannot easily mock Date, so we rely on the fact that in non-1st days it returns skipped.
-  // We use a real Date check: only passes if today IS the 1st.
-  const today = new Date().getUTCDate();
-  if (today !== 1) {
-    // Not the 1st — the endpoint should report skipped (no DB calls needed except cron auth)
-    const DB = createDBMock({
-      onPrepare: () => { throw new Error('DB should not be called when skipping'); },
-    });
-    const req = new Request('https://example.com/api/internal/run-monthly-sms', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer test-secret' },
-    });
-    const res = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-secret' } });
-    const body = await readJson(res);
-    assert.equal(res.status, 200);
-    assert.equal(body.skipped, true);
-  } else {
-    // On the 1st — still passes with skipped=true when no Termii key
-    const DB = createDBMock({
-      onPrepare: (sql) => {
-        if (/SELECT key, value FROM settings/.test(sql)) {
-          return { bind(...a) { return this; }, async all() { return { results: [] }; } };
-        }
-        throw new Error(`Unexpected SQL: ${sql}`);
-      },
-    });
-    const req = new Request('https://example.com/api/internal/run-monthly-sms', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer test-secret' },
-    });
-    const res = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-secret' } });
-    const body = await readJson(res);
-    assert.equal(res.status, 200);
-    assert.equal(body.skipped, true);
-  }
+test('POST /api/internal/run-monthly-sms: never re-sends a month it has already sent', async () => {
+  // The scheduler polls this endpoint on every tick, so the only thing standing
+  // between one Happy New Month blast and twenty is the period marker. Date
+  // independent on purpose: the marker names the current month whatever today is.
+  const now = new Date();
+  const thisPeriod = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  const DB = createDBMock({
+    onPrepare: (sql) => {
+      if (/SELECT value FROM settings WHERE key=\?/.test(sql)) {
+        return { bind(...a) { return this; }, async first() { return { value: thisPeriod }; } };
+      }
+      // The heartbeat upsert is best-effort and swallows its own errors.
+      if (/INSERT INTO settings/.test(sql)) {
+        return { bind(...a) { return this; }, async run() { return {}; } };
+      }
+      throw new Error(`Unexpected SQL once the month is already sent: ${sql}`);
+    },
+  });
+  const req = new Request('https://example.com/api/internal/run-monthly-sms', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-secret' },
+  });
+  const res = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-secret' } });
+  const body = await readJson(res);
+  assert.equal(res.status, 200);
+  assert.equal(body.skipped, true);
+  assert.match(body.reason, /already been sent/i);
+});
+
+test('POST /api/internal/run-monthly-sms: requires the cron secret', async () => {
+  const DB = createDBMock({
+    onPrepare: () => { throw new Error('DB must not be touched before authorization'); },
+  });
+  const req = new Request('https://example.com/api/internal/run-monthly-sms', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer wrong-secret' },
+  });
+  const res = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-secret' } });
+  assert.equal(res.status, 401);
 });
 
 test('POST /api/internal/run-reminder-sms: skips on wrong day', async () => {

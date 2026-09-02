@@ -268,6 +268,120 @@ function reminderSendDayInfo(year, month, dayOfMonth, mode, freq, reminderDay) {
   return { isSendDay: dayOfMonth === d, sendDays: [d], label: `Day ${d} of each month` };
 }
 
+// ── SCHEDULED-JOB DUE-NESS (catch-up aware) ────────────────────────────────
+// The GitHub Actions scheduler is best-effort: GitHub drops most `*/30` ticks
+// under load, so on some days the app is only polled two or three times, and
+// occasionally never inside the 08:00-18:00 WAT send window. A job that fires
+// only when `today === the exact send day` therefore loses that month's send
+// outright whenever the ticks miss. These helpers make the jobs *due-based*
+// instead: a job stays due until it has actually run, so any later tick within
+// a bounded grace period recovers the missed send, and a persisted marker makes
+// repeat ticks a no-op instead of a second blast.
+const REMINDER_CATCHUP_GRACE_DAYS = 7;  // a reminder more than a week late is stale
+const NEWMONTH_CATCHUP_GRACE_DAYS = 5;  // "Happy New Month" past the 5th reads wrong
+
+/** Zero-padded `YYYY-MM` key naming one calendar month. */
+function periodKey(year, month) {
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+/** Zero-padded `YYYY-MM-DD` key naming one specific scheduled send day. */
+function sendDayKey(year, month, day) {
+  return `${periodKey(year, month)}-${String(day).padStart(2, '0')}`;
+}
+
+/**
+ * Decide whether the payment-reminder job should send *now*.
+ *
+ * Anchors on the most recent scheduled send day that has already arrived this
+ * month (works for monthly, biweekly and weekly alike), then compares it with
+ * `lastSendKey` — the day key of the last completed run. Pure function.
+ *
+ * @param {object}  o
+ * @param {number}  o.year
+ * @param {number}  o.month        1-12
+ * @param {number}  o.dayOfMonth   today
+ * @param {string}  o.mode         'day_of_month' | 'sat_before_last_sun'
+ * @param {string}  o.freq         'monthly' | 'biweekly' | 'weekly'
+ * @param {number}  o.reminderDay  configured day-of-month trigger
+ * @param {string}  o.lastSendKey  `YYYY-MM-DD` of the last completed run ('' if never)
+ * @param {number}  o.graceDays    how many days late a catch-up may still send
+ * @returns {{due:boolean, key:string, targetDay:number|null, isSendDay:boolean,
+ *            sendDays:number[], label:string, catchUp:boolean, daysLate:number,
+ *            alreadyRun:boolean, missed:boolean, reason:string}}
+ */
+function reminderDueInfo({ year, month, dayOfMonth, mode, freq, reminderDay,
+                           lastSendKey = '', graceDays = REMINDER_CATCHUP_GRACE_DAYS }) {
+  const info = reminderSendDayInfo(year, month, dayOfMonth, mode, freq, reminderDay);
+  // Day 0 is not a real calendar day — it falls out of a `reminderDay` of 0 in
+  // settings, and must never anchor a send day (it would read as "infinitely
+  // overdue" and fire immediately).
+  const sendDays = (info.sendDays || []).filter(d => Number.isInteger(d) && d >= 1);
+  // Latest scheduled send day that is today or already past.
+  const targetDay = sendDays.filter(d => d <= dayOfMonth).sort((a, b) => b - a)[0] ?? null;
+  const base = {
+    isSendDay: info.isSendDay, sendDays, label: info.label, targetDay,
+    key: targetDay ? sendDayKey(year, month, targetDay) : '',
+    catchUp: false, daysLate: 0, alreadyRun: false, missed: false,
+  };
+
+  if (targetDay == null) {
+    const next = sendDays[0];
+    return { ...base, due: false, reason: `Not a reminder send day (today=${dayOfMonth}; next=${next ?? '—'}; schedule: ${info.label})` };
+  }
+  if (lastSendKey && lastSendKey === base.key) {
+    return { ...base, due: false, alreadyRun: true, reason: `Reminder for ${base.key} has already been sent` };
+  }
+
+  const daysLate = dayOfMonth - targetDay;
+  if (daysLate > graceDays) {
+    return { ...base, due: false, missed: true, daysLate, reason: `Send day ${base.key} was missed by ${daysLate} days (grace ${graceDays}) — too late to send a useful reminder` };
+  }
+  return {
+    ...base, due: true, catchUp: daysLate > 0, daysLate,
+    reason: daysLate > 0 ? `Catch-up run — send day ${base.key} was ${daysLate} day(s) ago and never ran` : '',
+  };
+}
+
+/**
+ * Decide whether the Happy New Month SMS should send *now*. Due from the 1st
+ * until `graceDays` into the month, and only once per month (`lastPeriod` is
+ * the `YYYY-MM` of the last completed send). Pure function.
+ */
+function newMonthDueInfo({ year, month, dayOfMonth, lastPeriod = '', graceDays = NEWMONTH_CATCHUP_GRACE_DAYS }) {
+  const key = periodKey(year, month);
+  if (lastPeriod && lastPeriod === key) {
+    return { due: false, key, catchUp: false, daysLate: 0, alreadyRun: true, missed: false, reason: `Happy New Month SMS for ${key} has already been sent` };
+  }
+  if (dayOfMonth > graceDays) {
+    return { due: false, key, catchUp: false, daysLate: dayOfMonth - 1, alreadyRun: false, missed: true, reason: `Day ${dayOfMonth} is past the ${graceDays}-day Happy New Month window for ${key}` };
+  }
+  return {
+    due: true, key, catchUp: dayOfMonth > 1, daysLate: dayOfMonth - 1, alreadyRun: false, missed: false,
+    reason: dayOfMonth > 1 ? `Catch-up run — the day-1 send for ${key} never happened` : '',
+  };
+}
+
+/**
+ * Read one settings row as a trimmed string ('' when absent).
+ * Best-effort: a read that blows up must not take the whole cron run with it —
+ * an unreadable marker degrades to "not run yet", which is the safe direction.
+ */
+async function getSettingValue(DB, key) {
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key=?`).bind(key).first();
+    return String(row?.value ?? '').trim();
+  } catch { return ''; }
+}
+
+/** Upsert one settings row. Best-effort — never throws into a send loop. */
+async function putSettingValue(DB, key, value) {
+  try {
+    await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
+      .bind(key, String(value ?? '')).run();
+  } catch { /* marker write is best-effort */ }
+}
+
 /**
  * Build the list of unpaid month names for a partner, looking back up to 12
  * months and EXCLUDING any month before the partner joined the portal.
@@ -9102,16 +9216,23 @@ Keep the total brief under 400 words. Cite specifics (names, dates, amounts) —
   return ok({ ok: true, generated });
 }
 
-// ── TERMII CRON: HAPPY NEW MONTH SMS (1st of every month) ─────────────────
+// ── TERMII CRON: HAPPY NEW MONTH SMS (once per month, from the 1st) ───────
 async function runMonthlySms(DB, env, request) {
   const authErr = requireCronSecret(env, request);
   if (authErr) return authErr;
 
   const now = new Date();
   const dayOfMonth = now.getUTCDate();
-  if (dayOfMonth !== 1) {
-    return ok({ ok: true, skipped: true, reason: 'Not the 1st of the month' });
-  }
+  const year = now.getUTCFullYear();
+  const nmMonth = now.getUTCMonth() + 1;
+
+  // Due-based rather than "is today the 1st?": the scheduler drops most ticks,
+  // so a day-1-only test loses the whole month whenever no tick lands. The
+  // period marker below makes every later tick in the month a cheap no-op.
+  const lastPeriod = await getSettingValue(DB, 'kpsc_newmonth_last_sent_period');
+  const due = newMonthDueInfo({ year, month: nmMonth, dayOfMonth, lastPeriod });
+  await recordCronHeartbeat(DB, 'newmonth', due.due ? 'due' : (due.reason || 'not due'));
+  if (!due.due) return ok({ ok: true, skipped: true, reason: due.reason });
 
   const t = await getTermiiSettings(DB);
   if (!t.apiKey || !t.newMonthSms) return ok({ ok: true, skipped: true, reason: 'New-month SMS disabled or no Termii key' });
@@ -9122,21 +9243,27 @@ async function runMonthlySms(DB, env, request) {
   }
 
   const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const monthName = MONTH_NAMES[now.getUTCMonth()];
-  const year = now.getUTCFullYear();
+  const monthName = MONTH_NAMES[nmMonth - 1];
 
   const { results: partners } = await DB.prepare(
     `SELECT id, full_name, phone FROM kpsc_partners WHERE COALESCE(deleted_at,'')='' AND status='active' AND phone != '' AND COALESCE(opted_out,0)=0 AND COALESCE(dnd_flagged,0)=0`
   ).all();
 
-  // Use pending auto-draft if available, otherwise fall back to saved template
-  const draftRow = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_newmonth_sms_pending_draft'`).first();
-  const newmonthText = (draftRow?.value && draftRow.value.trim()) ? draftRow.value.trim() : t.newmonthText;
+  // Second line of defence behind the period marker: never message a partner
+  // who already has this month's Happy New Month row (covers a partly-completed
+  // earlier run and any tick that raced the marker write).
+  const { results: alreadyRows } = await DB.prepare(
+    `SELECT DISTINCT partner_id FROM kpsc_reminders WHERE reminder_type='new_month' AND year=? AND month=? AND status='sent'`
+  ).bind(year, nmMonth).all().catch(() => ({ results: [] }));
+  const alreadySent = new Set((alreadyRows || []).map(r => r.partner_id));
 
-  const nmMonth = now.getUTCMonth() + 1;
+  const newmonthText = await resolveNewMonthText(DB, env, t, year, nmMonth);
+
   let sent = 0;
   let failed = 0;
+  let skipped = 0;
   for (const p of (partners || [])) {
+    if (alreadySent.has(p.id)) { skipped++; continue; }
     const msg = newmonthText
       .replace(/\{\{name\}\}/g, p.full_name)
       .replace(/\{\{month\}\}/g, `${monthName} ${year}`);
@@ -9154,16 +9281,68 @@ async function runMonthlySms(DB, env, request) {
       ).bind(newId('krm'), p.id, 'sms', msg, 'failed', '', '', 'new_month', year, nmMonth, 'cron', now.toISOString(), p.phone || '', String(result.error || 'Termii send failed')).run().catch(() => {});
     }
   }
-  // Clear draft after successful send
-  if (draftRow?.value) {
-    await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
-      .bind('kpsc_newmonth_sms_pending_draft', '').run().catch(() => {});
+
+  // Mark the month done so later ticks no-op, and retire the consumed draft.
+  // A run where every single send failed (Termii down, wallet empty) is NOT a
+  // completed month: leaving the marker unset lets a later tick inside the
+  // grace window retry, while the `alreadySent` guard above keeps anyone who
+  // did get the message from getting it twice.
+  const wholeBatchFailed = failed > 0 && sent === 0;
+  if (!wholeBatchFailed) {
+    await putSettingValue(DB, 'kpsc_newmonth_last_sent_period', due.key);
+    await clearNewMonthDraft(DB);
   }
-  // Draft next month's message right after this month's send.
-  // skipIfGeneratedToday guards against the GitHub Actions cron polling this
-  // endpoint every 30 min all day — only the first call actually drafts.
-  await autoGenerateNewMonthDraft(DB, env, { skipIfGeneratedToday: true });
-  return ok({ ok: true, sent, failed, total: (partners || []).length });
+  await logCronRun(DB, 'newmonth-sms', {
+    isSendDay: true, windowOk: true, trigger: 'cron',
+    sent, failed, skipped, total: (partners || []).length, reason: due.reason,
+  });
+
+  // Draft next month's message right after this month's send. Guarded on the
+  // target month rather than the calendar date, so a catch-up run still drafts.
+  await autoGenerateNewMonthDraft(DB, env, { skipIfExists: true });
+  return ok({ ok: true, sent, failed, skipped, total: (partners || []).length, catchUp: due.catchUp, retryPending: wholeBatchFailed });
+}
+
+/**
+ * Pick the Happy New Month text for (year, month).
+ *
+ * The auto-draft names its month in prose and carries no {{month}} placeholder,
+ * so a draft written for a different month must never be sent — that is exactly
+ * how an "as we step into August" message went out on 1 September, after the
+ * scheduler outage meant the August draft was never consumed. Order of
+ * preference: a draft stamped for THIS month, a freshly generated one, then the
+ * saved template (whose {{month}} the caller substitutes).
+ */
+async function resolveNewMonthText(DB, env, t, year, month) {
+  const draft = await readNewMonthDraft(DB);
+  if (draft.text && draft.year === year && draft.month === month) return draft.text;
+  if (draft.text) await clearNewMonthDraft(DB); // stale — belongs to another month
+  await autoGenerateNewMonthDraft(DB, env, { targetYear: year, targetMonth: month });
+  const fresh = await readNewMonthDraft(DB);
+  if (fresh.text && fresh.year === year && fresh.month === month) return fresh.text;
+  return t.newmonthText;
+}
+
+/** Read the pending auto-draft together with the month it was written for. */
+async function readNewMonthDraft(DB) {
+  const keys = ['kpsc_newmonth_sms_pending_draft', 'kpsc_newmonth_sms_draft_month', 'kpsc_newmonth_sms_draft_year'];
+  const { results } = await DB.prepare(
+    `SELECT key, value FROM settings WHERE key IN (?,?,?)`
+  ).bind(...keys).all().catch(() => ({ results: [] }));
+  const m = {};
+  for (const r of (results || [])) m[r.key] = r.value;
+  return {
+    text:  String(m.kpsc_newmonth_sms_pending_draft || '').trim(),
+    month: parseInt(m.kpsc_newmonth_sms_draft_month || '0', 10) || 0,
+    year:  parseInt(m.kpsc_newmonth_sms_draft_year  || '0', 10) || 0,
+  };
+}
+
+/** Drop the pending draft and its month stamp together, so neither can go stale. */
+async function clearNewMonthDraft(DB) {
+  await putSettingValue(DB, 'kpsc_newmonth_sms_pending_draft', '');
+  await putSettingValue(DB, 'kpsc_newmonth_sms_draft_month', '');
+  await putSettingValue(DB, 'kpsc_newmonth_sms_draft_year', '');
 }
 
 // ── TERMII CRON: PAYMENT REMINDER SMS ─────────────────────────────────────
@@ -9239,9 +9418,19 @@ async function executeReminderRun(DB, opts = {}) {
   const dayOfMonth = now.getUTCDate();
   const month = now.getUTCMonth() + 1;
   const year = now.getUTCFullYear();
-  const dayInfo = reminderSendDayInfo(year, month, dayOfMonth, t.reminderMode || 'day_of_month', t.reminderFreq, t.reminderDay);
+  // Due-based rather than "is today the send day?": GitHub drops most of the
+  // scheduler's `*/30` ticks, so on some days nothing polls the app inside the
+  // send window at all and the month's reminder used to be lost outright. The
+  // job now stays due until it has actually run, so a later tick within the
+  // grace period recovers it, while `kpsc_reminder_last_send_key` keeps every
+  // repeat tick a no-op.
+  const lastSendKey = await getSettingValue(DB, 'kpsc_reminder_last_send_key');
+  const dayInfo = reminderDueInfo({
+    year, month, dayOfMonth, lastSendKey,
+    mode: t.reminderMode || 'day_of_month', freq: t.reminderFreq, reminderDay: t.reminderDay,
+  });
 
-  await recordCronHeartbeat(DB, 'reminder', dayInfo.isSendDay ? 'send day' : 'not a send day');
+  await recordCronHeartbeat(DB, 'reminder', dayInfo.due ? 'send due' : (dayInfo.reason || 'not a send day'));
 
   if (!t.apiKey) {
     const reason = 'No Termii API key configured';
@@ -9253,14 +9442,21 @@ async function executeReminderRun(DB, opts = {}) {
   const windowOk = isWithinSendWindow(t);
   if (!windowOk && !ignoreWindow) {
     const reason = `Outside send window (${t.sendWindowStart}–${t.sendWindowEnd} WAT)`;
-    // Only worth a run-log entry on a day we would otherwise have sent.
-    if (dayInfo.isSendDay) await logCronRun(DB, 'reminder-sms', { isSendDay: true, windowOk: false, trigger, reason });
+    // Only worth a run-log entry on a tick that would otherwise have sent.
+    if (dayInfo.due) await logCronRun(DB, 'reminder-sms', { isSendDay: dayInfo.isSendDay, windowOk: false, trigger, reason });
     return { ok: true, skipped: true, reason, sent: 0, failed: 0, skippedCount: 0, total: 0 };
   }
 
-  if (!dayInfo.isSendDay && !force) {
-    const reason = `Not a reminder send day (today=${dayOfMonth}; schedule: ${dayInfo.label})`;
-    return { ok: true, skipped: true, reason, sent: 0, failed: 0, skippedCount: 0, total: 0, isSendDay: false };
+  if (!dayInfo.due && !force) {
+    // A send day that slipped past its grace period is worth one run-log line —
+    // silently dropping a month is what hid the last outage for eight weeks.
+    // Consuming the key at the same time keeps it to exactly one line, and
+    // stops the rest of the month re-deciding a question already settled.
+    if (dayInfo.missed && dayInfo.key) {
+      await putSettingValue(DB, 'kpsc_reminder_last_send_key', dayInfo.key);
+      await logCronRun(DB, 'reminder-sms', { isSendDay: false, windowOk: true, trigger, reason: dayInfo.reason });
+    }
+    return { ok: true, skipped: true, reason: dayInfo.reason, sent: 0, failed: 0, skippedCount: 0, total: 0, isSendDay: dayInfo.isSendDay };
   }
 
   const template = t.reminderText;
@@ -9392,10 +9588,19 @@ async function executeReminderRun(DB, opts = {}) {
     }
   }
 
+  // Only a scheduled run consumes the send day; a forced manual run outside the
+  // schedule must not tick off a send day that has not arrived yet. Nor does a
+  // run in which every send failed — that is an outage, not a delivered month,
+  // and a later tick should retry it (the cooloff check keeps the partners who
+  // did receive it from being messaged again).
+  if (dayInfo.due && dayInfo.key && !(failed > 0 && sent === 0)) {
+    await putSettingValue(DB, 'kpsc_reminder_last_send_key', dayInfo.key);
+  }
+
   await logCronRun(DB, 'reminder-sms', {
     isSendDay: dayInfo.isSendDay, windowOk: true, trigger,
     sent, failed, skipped: skippedCount, total: (unpaid || []).length,
-    reason: force && !dayInfo.isSendDay ? 'Manual run (forced, not a scheduled send day)' : '',
+    reason: (force && !dayInfo.due) ? 'Manual run (forced, not a scheduled send day)' : dayInfo.reason,
   });
 
   return { ok: true, sent, failed, skippedCount, total: (unpaid || []).length, isSendDay: dayInfo.isSendDay, trigger };
@@ -10920,6 +11125,17 @@ async function getSmsLogs(DB, url) {
     if (hb?.value) heartbeat = JSON.parse(hb.value);
   } catch { /* ignore */ }
 
+  // Staleness is the alarm that was missing: the scheduler stopped reaching the
+  // app on 3 Jul 2026 and nothing said so, so two months of reminders were lost
+  // while the page still cheerfully showed a "last ran" date. The scheduler is
+  // meant to poll every 30 min and GitHub drops a good share of those ticks, so
+  // only a gap of several hours is treated as broken.
+  const HEARTBEAT_STALE_HOURS = 6;
+  const hbAgeMins = heartbeat?.at && !isNaN(new Date(heartbeat.at))
+    ? Math.round((now.getTime() - new Date(heartbeat.at).getTime()) / 60000)
+    : null;
+  const heartbeatStale = hbAgeMins == null || hbAgeMins > HEARTBEAT_STALE_HOURS * 60;
+
   const { results: runRows } = await DB.prepare(`
     SELECT * FROM kpsc_cron_runs WHERE job='reminder-sms' ORDER BY ran_at DESC LIMIT 15
   `).all();
@@ -10961,6 +11177,9 @@ async function getSmsLogs(DB, url) {
       sendWindow: `${t.sendWindowStart}–${t.sendWindowEnd} WAT`,
       withinWindowNow: isWithinSendWindow(t),
       heartbeat,
+      heartbeatStale,
+      heartbeatAgeMins: hbAgeMins,
+      heartbeatStaleAfterHours: HEARTBEAT_STALE_HOURS,
     },
     runs,
   });
@@ -11351,35 +11570,38 @@ async function runScheduledSms(DB, env, request) {
 }
 
 // ── AUTO-DRAFT: HAPPY NEW MONTH SMS ──────────────────────────────────────────
-// Called from runMonthlySms() right after a successful day-1 send, and again
-// (as a fallback) from runNewMonthDraftFallback() on day 3.
-// opts.skipIfExists=true          — skip quietly if a draft is already saved (day-3 backup).
-// opts.skipIfGeneratedToday=true  — skip quietly if we already generated today (the day-1
-//                                    endpoint is polled every 30 min by the GitHub Actions
-//                                    cron, so this stops it firing 48 times in one day).
+// Called from runMonthlySms() right after a send (to draft the month ahead) and
+// from resolveNewMonthText() when the month being sent has no valid draft, plus
+// runNewMonthDraftFallback() as a day-3 backup.
+//
+// opts.targetYear / opts.targetMonth — month to write for (default: next month).
+// opts.skipIfExists=true             — skip quietly if a draft for that exact month
+//                                      is already saved. The month has to match: a
+//                                      leftover draft for a *different* month is
+//                                      what put an "August" message in September's
+//                                      outbox, so it must never satisfy the check.
 async function autoGenerateNewMonthDraft(DB, env, opts = {}) {
   try {
-    const { skipIfExists = false, skipIfGeneratedToday = false } = opts;
-    if (skipIfExists) {
-      const existing = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_newmonth_sms_pending_draft'`).first().catch(() => null);
-      if (existing?.value?.trim()) return; // day-1 draft already in place
-    }
-
+    const { skipIfExists = false } = opts;
     const now = new Date();
-    if (skipIfGeneratedToday) {
-      const dateRow = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_newmonth_sms_draft_date'`).first().catch(() => null);
-      const last = dateRow?.value ? new Date(dateRow.value) : null;
-      if (last && !isNaN(last) && last.getUTCFullYear() === now.getUTCFullYear() && last.getUTCMonth() === now.getUTCMonth() && last.getUTCDate() === now.getUTCDate()) {
-        return; // already generated earlier today
-      }
-    }
 
-    // Determine next month
-    const rawNext = now.getUTCMonth() + 2; // +1 for 0-index, +1 for next month
-    const nextYear = rawNext > 12 ? now.getUTCFullYear() + 1 : now.getUTCFullYear();
-    const nextMonth = rawNext > 12 ? 1 : rawNext;
+    // Target month — the month after this one unless the caller names one.
+    let nextYear, nextMonth;
+    if (opts.targetMonth) {
+      nextMonth = Number(opts.targetMonth);
+      nextYear  = Number(opts.targetYear) || now.getUTCFullYear();
+    } else {
+      const rawNext = now.getUTCMonth() + 2; // +1 for 0-index, +1 for next month
+      nextYear  = rawNext > 12 ? now.getUTCFullYear() + 1 : now.getUTCFullYear();
+      nextMonth = rawNext > 12 ? 1 : rawNext;
+    }
     const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     const monthLabel = MONTH_NAMES[nextMonth - 1];
+
+    if (skipIfExists) {
+      const existing = await readNewMonthDraft(DB);
+      if (existing.text && existing.year === nextYear && existing.month === nextMonth) return;
+    }
 
     const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
     if (!deepseekKey) return;
@@ -11415,6 +11637,8 @@ Requirements:
     const upsert = (key, val) =>
       DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
         .bind(key, val).run();
+    // The month stamp is written with the text, never separately — a draft whose
+    // month cannot be trusted is worse than no draft at all.
     await upsert('kpsc_newmonth_sms_pending_draft', draftText);
     await upsert('kpsc_newmonth_sms_draft_date', now.toISOString());
     await upsert('kpsc_newmonth_sms_draft_month', String(nextMonth));
@@ -11431,18 +11655,39 @@ Requirements:
 // invoked in production, which is what caused the new-month auto-draft
 // feature to never actually run.
 
-// ── INTERNAL CRON: HAPPY NEW MONTH DRAFT FALLBACK (day 3 backup) ──────────
-// Safety net in case the day-1 draft (generated inline at the end of
-// runMonthlySms) failed for any reason — e.g. DeepSeek was down that day.
+// ── INTERNAL CRON: HAPPY NEW MONTH DRAFT BACKSTOP ─────────────────────────
+// Safety net in case the draft written at the end of runMonthlySms failed —
+// DeepSeek down that day, or the send itself never ran. This used to fire only
+// on the 3rd, which needed a scheduler tick to land on that one day; it now
+// runs on any day and is idempotent, so next month's draft gets written as soon
+// as any tick gets through. Work is done at most once a day: `skipIfExists`
+// short-circuits once a draft for the target month exists, and the attempt
+// stamp stops a DeepSeek outage being retried every 30 minutes all day.
 async function runNewMonthDraftFallback(DB, env, request) {
   const authErr = requireCronSecret(env, request);
   if (authErr) return authErr;
+
   const now = new Date();
-  if (now.getUTCDate() !== 3) {
-    return ok({ ok: true, skipped: true, reason: 'Not the 3rd of the month' });
+  const today = now.toISOString().slice(0, 10);
+
+  const draft = await readNewMonthDraft(DB);
+  const rawNext = now.getUTCMonth() + 2;
+  const nextYear  = rawNext > 12 ? now.getUTCFullYear() + 1 : now.getUTCFullYear();
+  const nextMonth = rawNext > 12 ? 1 : rawNext;
+  if (draft.text && draft.year === nextYear && draft.month === nextMonth) {
+    return ok({ ok: true, skipped: true, reason: `Draft for ${periodKey(nextYear, nextMonth)} already saved` });
   }
+
+  const lastAttempt = await getSettingValue(DB, 'kpsc_newmonth_draft_attempt_date');
+  if (lastAttempt === today) {
+    return ok({ ok: true, skipped: true, reason: 'Draft already attempted today' });
+  }
+  await putSettingValue(DB, 'kpsc_newmonth_draft_attempt_date', today);
+
   await autoGenerateNewMonthDraft(DB, env, { skipIfExists: true });
-  return ok({ ok: true });
+  const after = await readNewMonthDraft(DB);
+  const generated = !!(after.text && after.year === nextYear && after.month === nextMonth);
+  return ok({ ok: true, generated, target: periodKey(nextYear, nextMonth) });
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -11794,4 +12039,4 @@ async function getSharedReport(DB, token) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes };
+export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes };
