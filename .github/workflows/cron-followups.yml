@@ -1,207 +1,148 @@
 name: Cron — Follow-ups & Pre-briefs
 
-# Runs every 30 minutes and hits several internal Pages endpoints (each one
-# internally checks the day of month / send window and no-ops when it's not
-# time to run):
+# Polls several internal Pages endpoints on a timer. Each endpoint checks for
+# itself whether there is anything to do (day of month, send window, whether the
+# job has already run this period) and no-ops otherwise, so hitting them all on
+# every tick is cheap and safe.
+#
 #   POST /api/internal/run-followups                 — overdue nudge drafts (B5)
-#   POST /api/internal/run-prebriefs                  — pre-meeting briefs (B6)
-#   POST /api/internal/run-monthly-sms                — Happy New Month SMS (1st); also
-#                                                        drafts next month's message right
-#                                                        after a successful send
-#   POST /api/internal/run-newmonth-draft-fallback    — retries the next-month draft on the
-#                                                        3rd if the day-1 draft failed
-#   POST /api/internal/run-reminder-sms               — payment reminder SMS
-#   POST /api/internal/run-anniversary-sms            — partner anniversary SMS
-#   POST /api/internal/run-premeeting-sms             — pre-meeting member SMS
-#   POST /api/internal/run-actionitem-sms             — action item deadline SMS
-#   POST /api/internal/run-scheduled-sms              — scheduled SMS blasts
+#   POST /api/internal/run-prebriefs                 — pre-meeting briefs (B6)
+#   POST /api/internal/run-monthly-sms               — Happy New Month SMS (due from
+#                                                       the 1st, once per month); also
+#                                                       drafts next month's message
+#   POST /api/internal/run-newmonth-draft-fallback   — backstop that makes sure next
+#                                                       month's draft exists
+#   POST /api/internal/run-reminder-sms              — payment reminder SMS
+#   POST /api/internal/run-anniversary-sms           — partner anniversary SMS
+#   POST /api/internal/run-premeeting-sms            — pre-meeting member SMS
+#   POST /api/internal/run-actionitem-sms            — action item deadline SMS
+#   POST /api/internal/run-scheduled-sms             — scheduled SMS blasts
 #
-# Required GitHub repo secrets:
-#   KPSC_APP_URL    — production Pages URL, e.g. https://kpsc.example.com
-#   CRON_SECRET     — random token (same value set in Cloudflare Pages env vars)
+# There is also POST /api/internal/run-all, which runs every one of the jobs
+# above in a single request. This workflow deliberately keeps calling them
+# individually so that one hung endpoint cannot eat the others' time budget
+# (see the timing notes on the poll step). run-all exists for any OTHER
+# scheduler pointed at this app — an external cron service, say — where
+# configuring nine URLs correctly is itself a failure mode: a scheduler that
+# knows about only some of them runs only some of the jobs, silently. That is
+# precisely how the Happy New Month SMS kept going out every month while the
+# payment reminder had not run since July.
 #
-# To set up:
-#   gh secret set KPSC_APP_URL  --body "https://your-site.pages.dev"
-#   gh secret set CRON_SECRET   --body "$(openssl rand -hex 32)"
+# ── Required configuration ────────────────────────────────────────────────────
+#   CRON_SECRET   (repo secret)  — random token; the SAME value must be set as an
+#                                  environment variable in Cloudflare Pages
+#                                  (Pages dashboard → Settings → Environment Variables).
+#   KPSC_APP_URL  (repo variable or secret, OPTIONAL) — overrides the production URL
+#                                  below; only needed to point at a preview deployment.
 #
-# Then add the SAME CRON_SECRET value to Cloudflare Pages:
-#   Pages dashboard → Settings → Environment Variables → CRON_SECRET
-
-# Each step uses `continue-on-error: true` so that one failing endpoint (e.g. a
-# transient error in run-monthly-sms) never prevents the later steps — most
-# importantly the payment-reminder send — from running. Failures still surface
-# as ::error:: annotations on the run.
+#   gh secret set CRON_SECRET --body "$(openssl rand -hex 32)"
+#
+# ── Why the preflight step exists ─────────────────────────────────────────────
+# Every step used to be `continue-on-error: true` and to build its URL by
+# interpolating `${{ secrets.KPSC_APP_URL }}` directly. When those secrets went
+# missing the curls became `curl ""` — "URL rejected: No host part in the URL",
+# exit 3 — and `continue-on-error` turned every one of those failures green. The
+# workflow reported success on ~2,000 consecutive runs while doing nothing at
+# all, and two months of payment reminders and one Happy New Month send were
+# lost before anyone noticed. So now:
+#   * the app URL has a real default and can no longer be empty;
+#   * a preflight step fails the job outright if CRON_SECRET is missing;
+#   * the endpoints still all run even when an earlier one fails (a transient
+#     error in one job must never block the payment reminder), but any failure
+#     now fails the job, so a broken scheduler shows up as a red X.
 
 on:
   schedule:
+    # Best effort only. GitHub throttles `schedule` heavily and in practice
+    # delivers a handful of these ticks per day at unpredictable times, so the
+    # endpoints must never depend on being polled at a particular moment — they
+    # stay "due" until they have actually run and catch up on a later tick.
     - cron: "*/30 * * * *"
   workflow_dispatch:   # allow manual trigger for testing
+
+concurrency:
+  # Two overlapping runs would send the same SMS batch twice.
+  group: kpsc-cron
+  cancel-in-progress: false
 
 jobs:
   run-cron:
     name: Trigger follow-ups and pre-briefs
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
+
+    env:
+      # A missing KPSC_APP_URL must not be able to break the scheduler, so the
+      # production URL is the default. It is public (it is in docs/ already);
+      # only CRON_SECRET is sensitive.
+      APP_URL: ${{ vars.KPSC_APP_URL || secrets.KPSC_APP_URL || 'https://rccg-kingdom-parish-app.pages.dev' }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
 
     steps:
-      - name: Run follow-up nudge generation (B5)
-        continue-on-error: true
+      - name: Preflight — configuration is present
         run: |
-          echo "Hitting /api/internal/run-followups …"
-          RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json" \
-            "${{ secrets.KPSC_APP_URL }}/api/internal/run-followups")
-          HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
-          BODY=$(echo "$RESPONSE" | grep -v "HTTP_STATUS:")
-          echo "Status: $HTTP_STATUS"
-          echo "Body: $BODY"
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::run-followups returned HTTP $HTTP_STATUS"
-            exit 1
+          FAIL=0
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET repository secret is not set. Every internal cron endpoint will reject with 401 and no automated SMS will be sent. Set it with: gh secret set CRON_SECRET --body \"\$(openssl rand -hex 32)\" and add the SAME value as a CRON_SECRET environment variable in Cloudflare Pages."
+            FAIL=1
           fi
+          case "$APP_URL" in
+            https://*) ;;
+            *) echo "::error::APP_URL is not an https URL (got '$APP_URL')."; FAIL=1 ;;
+          esac
+          echo "App URL: $APP_URL"
+          exit $FAIL
 
-      - name: Run pre-meeting brief generation (B6)
-        continue-on-error: true
+      - name: Poll internal cron endpoints
         run: |
-          echo "Hitting /api/internal/run-prebriefs …"
-          RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json" \
-            "${{ secrets.KPSC_APP_URL }}/api/internal/run-prebriefs")
-          HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
-          BODY=$(echo "$RESPONSE" | grep -v "HTTP_STATUS:")
-          echo "Status: $HTTP_STATUS"
-          echo "Body: $BODY"
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::run-prebriefs returned HTTP $HTTP_STATUS"
+          set -uo pipefail
+          # Money-sending jobs first. curl's --max-time is per attempt and resets
+          # on every retry, so retries alone could burn the whole job budget on
+          # one hung endpoint and starve the rest; `timeout` puts a hard ceiling
+          # on each endpoint, and DEADLINE caps the loop as a whole. Ordering
+          # means that if anything does get starved it is the cheap stuff, and
+          # every endpoint is idempotent so the next tick picks it up anyway.
+          ENDPOINTS="
+          run-monthly-sms
+          run-reminder-sms
+          run-anniversary-sms
+          run-premeeting-sms
+          run-actionitem-sms
+          run-scheduled-sms
+          run-newmonth-draft-fallback
+          run-followups
+          run-prebriefs
+          "
+          PER_ENDPOINT_CAP=110   # hard wall-clock ceiling per endpoint, retries included
+          DEADLINE=$(( SECONDS + 900 ))   # stop starting new endpoints after 15 min
+          FAILED=""
+          for ep in $ENDPOINTS; do
+            URL="${APP_URL%/}/api/internal/$ep"
+            echo "──────── $ep ────────"
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "::error::$ep not attempted — the job ran out of its time budget"
+              FAILED="$FAILED $ep(skipped)"
+              continue
+            fi
+            # --retry rides out a cold Pages isolate or a blip; --retry-max-time
+            # bounds when a new attempt may start, and `timeout` bounds the lot.
+            BODY=$(timeout "$PER_ENDPOINT_CAP" curl -sS \
+              --retry 2 --retry-delay 5 --retry-connrefused \
+              --max-time 45 --retry-max-time 60 \
+              -o /tmp/cron-body.txt -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer $CRON_SECRET" \
+              -H "Content-Type: application/json" \
+              "$URL") || BODY="${BODY:-000}"
+            echo "Status: ${BODY:-000}"
+            echo "Body: $(head -c 2000 /tmp/cron-body.txt 2>/dev/null)"
+            if [ "${BODY:-000}" != "200" ]; then
+              echo "::error::$ep returned HTTP ${BODY:-000}"
+              FAILED="$FAILED $ep"
+            fi
+          done
+          if [ -n "$FAILED" ]; then
+            echo "::error::Cron endpoints failed:$FAILED"
             exit 1
           fi
-
-      - name: Run Happy New Month SMS (1st of each month)
-        continue-on-error: true
-        run: |
-          echo "Hitting /api/internal/run-monthly-sms …"
-          RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json" \
-            "${{ secrets.KPSC_APP_URL }}/api/internal/run-monthly-sms")
-          HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
-          BODY=$(echo "$RESPONSE" | grep -v "HTTP_STATUS:")
-          echo "Status: $HTTP_STATUS"
-          echo "Body: $BODY"
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::run-monthly-sms returned HTTP $HTTP_STATUS"
-            exit 1
-          fi
-
-      - name: Run new-month draft fallback (day 3 backup)
-        continue-on-error: true
-        run: |
-          echo "Hitting /api/internal/run-newmonth-draft-fallback …"
-          RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json" \
-            "${{ secrets.KPSC_APP_URL }}/api/internal/run-newmonth-draft-fallback")
-          HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
-          BODY=$(echo "$RESPONSE" | grep -v "HTTP_STATUS:")
-          echo "Status: $HTTP_STATUS"
-          echo "Body: $BODY"
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::run-newmonth-draft-fallback returned HTTP $HTTP_STATUS"
-            exit 1
-          fi
-
-      - name: Run partner payment reminder SMS
-        continue-on-error: true
-        run: |
-          echo "Hitting /api/internal/run-reminder-sms …"
-          RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json" \
-            "${{ secrets.KPSC_APP_URL }}/api/internal/run-reminder-sms")
-          HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
-          BODY=$(echo "$RESPONSE" | grep -v "HTTP_STATUS:")
-          echo "Status: $HTTP_STATUS"
-          echo "Body: $BODY"
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::run-reminder-sms returned HTTP $HTTP_STATUS"
-            exit 1
-          fi
-
-      - name: Run partner anniversary SMS (Feature 4)
-        continue-on-error: true
-        run: |
-          echo "Hitting /api/internal/run-anniversary-sms …"
-          RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json" \
-            "${{ secrets.KPSC_APP_URL }}/api/internal/run-anniversary-sms")
-          HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
-          BODY=$(echo "$RESPONSE" | grep -v "HTTP_STATUS:")
-          echo "Status: $HTTP_STATUS"
-          echo "Body: $BODY"
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::run-anniversary-sms returned HTTP $HTTP_STATUS"
-            exit 1
-          fi
-
-      - name: Run pre-meeting member SMS (Feature 7)
-        continue-on-error: true
-        run: |
-          echo "Hitting /api/internal/run-premeeting-sms …"
-          RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json" \
-            "${{ secrets.KPSC_APP_URL }}/api/internal/run-premeeting-sms")
-          HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
-          BODY=$(echo "$RESPONSE" | grep -v "HTTP_STATUS:")
-          echo "Status: $HTTP_STATUS"
-          echo "Body: $BODY"
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::run-premeeting-sms returned HTTP $HTTP_STATUS"
-            exit 1
-          fi
-
-      - name: Run action item deadline SMS (Feature 9)
-        continue-on-error: true
-        run: |
-          echo "Hitting /api/internal/run-actionitem-sms …"
-          RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json" \
-            "${{ secrets.KPSC_APP_URL }}/api/internal/run-actionitem-sms")
-          HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
-          BODY=$(echo "$RESPONSE" | grep -v "HTTP_STATUS:")
-          echo "Status: $HTTP_STATUS"
-          echo "Body: $BODY"
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::run-actionitem-sms returned HTTP $HTTP_STATUS"
-            exit 1
-          fi
-
-      - name: Run scheduled SMS blast (Feature 10)
-        continue-on-error: true
-        run: |
-          echo "Hitting /api/internal/run-scheduled-sms …"
-          RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json" \
-            "${{ secrets.KPSC_APP_URL }}/api/internal/run-scheduled-sms")
-          HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
-          BODY=$(echo "$RESPONSE" | grep -v "HTTP_STATUS:")
-          echo "Status: $HTTP_STATUS"
-          echo "Body: $BODY"
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::run-scheduled-sms returned HTTP $HTTP_STATUS"
-            exit 1
-          fi
+          echo "All endpoints returned 200."

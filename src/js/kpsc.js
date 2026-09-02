@@ -3098,8 +3098,27 @@ function dashCardMeetingFrequencyAlert(ctx) {
 
 function newMonthDraftBanner() {
   const d = S.newmonthDraft;
-  if (!d?.draft) return '';
   const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  // No draft, and the last attempt to write one failed — say so. A missing AI
+  // draft is otherwise indistinguishable from one that was never attempted,
+  // and the month would quietly go out on the plain saved template instead.
+  if (!d?.draft) {
+    const st = d?.draftStatus;
+    if (!st || st.ok) return '';
+    return `
+    <div id="nm-draft-banner" class="k-meeting-card" style="background:linear-gradient(135deg,#fff4e5,#fdf1e0);border-left:4px solid #ef6c00;margin-bottom:12px">
+      <div class="k-mc-top">
+        <div style="flex:1">
+          <div class="k-mc-title" style="color:#c65100">⚠️ Happy New Month SMS could not be AI-drafted</div>
+          <div style="font-size:12px;color:#555;margin:4px 0">${esc(st.reason || 'The AI draft could not be written.')}</div>
+          <div style="font-size:12px;color:#777">Last tried ${esc(fmtDateTime(st.at))}. You can write the message yourself in Settings → SMS, or fix the AI key and it will retry.</div>
+        </div>
+        <button class="kbtn kbtn-sm kbtn-ghost" style="margin-left:4px" onclick="Kpsc.dismissNewMonthDraft()" title="Dismiss">✕</button>
+      </div>
+    </div>`;
+  }
+
   const monthLabel = d.draftMonth ? (MONTH_NAMES[d.draftMonth - 1] || '') : '';
   const yearLabel  = d.draftYear || '';
   return `
@@ -3107,7 +3126,7 @@ function newMonthDraftBanner() {
       <div class="k-mc-top">
         <div style="flex:1">
           <div class="k-mc-title" style="color:#2e7d32">📝 Happy New Month SMS Drafted — ${monthLabel} ${yearLabel}</div>
-          <div style="font-size:12px;color:#555;margin:4px 0">An AI draft has been prepared for the 1st. Review and edit before it auto-sends.</div>
+          <div style="font-size:12px;color:#555;margin:4px 0">An AI draft is ready for ${monthLabel}. Review and edit it before it sends.</div>
         </div>
         <button class="kbtn kbtn-sm" style="margin-left:8px" onclick="Kpsc.showNewMonthDraftModal()" title="Review draft">Review</button>
         <button class="kbtn kbtn-sm kbtn-ghost" style="margin-left:4px" onclick="Kpsc.dismissNewMonthDraft()" title="Dismiss">✕</button>
@@ -10061,6 +10080,33 @@ async function renderSmsLogs(main) {
   const apiWarn = sch.apiKeyConfigured ? '' :
     `<div class="k-error-box" style="margin-top:10px"><strong>No Termii API key configured.</strong> Reminders cannot be sent until a key is added in Settings → SMS.</div>`;
 
+  // A stale heartbeat means nothing is reaching the app — no reminder, no Happy
+  // New Month, no anniversary SMS will go out until it is fixed. Say so loudly:
+  // this went unnoticed for two months when the page only showed a "last ran"
+  // date and left the reader to work out that it had stopped moving.
+  const runAllUrl = `${location.origin}/api/internal/run-all`;
+  const hbAge = sch.heartbeatAgeMins;
+  const hbAgeText = hbAge == null ? '' :
+    hbAge < 120 ? `${hbAge} minute(s) ago` :
+    hbAge < 60 * 48 ? `${Math.round(hbAge / 60)} hour(s) ago` : `${Math.round(hbAge / 1440)} day(s) ago`;
+  const hbWarn = !sch.heartbeatStale ? '' :
+    `<div class="k-error-box" style="margin-top:10px">
+       <strong>⚠️ The SMS scheduler is not running.</strong>
+       ${hb?.at
+         ? `It last checked in <strong>${esc(hbAgeText)}</strong> (${esc(fmtDateTime(hb.at))}); it should check in every 30 minutes.`
+         : 'It has never checked in.'}
+       No automated SMS — payment reminders, Happy New Month, anniversaries — is being sent while this is the case.
+       <div style="margin-top:8px">Check the <strong>Cron — Follow-ups &amp; Pre-briefs</strong> workflow in GitHub Actions, and that the
+       <code>CRON_SECRET</code> repository secret matches the <code>CRON_SECRET</code> environment variable in Cloudflare Pages.</div>
+       <div style="margin-top:8px">Any scheduler can drive everything by POSTing to this one URL every 30 minutes, with
+       <code>Authorization: Bearer &lt;CRON_SECRET&gt;</code>:
+         <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+           <code style="background:#fff;padding:4px 8px;border-radius:6px;border:1px solid var(--border);word-break:break-all">${esc(runAllUrl)}</code>
+           <button class="kbtn kbtn-sm" onclick="Kpsc.copyText('${esc(runAllUrl)}', this)">📋 Copy</button>
+         </div>
+       </div>
+     </div>`;
+
   // Wallet / credits
   const w = res.wallet || {};
   const cost = res.cost || {};
@@ -10110,13 +10156,14 @@ async function renderSmsLogs(main) {
           </div>
           <div class="k-sms-sched-row">
             <span class="k-label" style="margin:0">Scheduler heartbeat</span>
-            <span class="k-hint">${esc(hbText)}</span>
+            <span>${sch.heartbeatStale ? '<span class="kbadge badge-red">not running</span>' : '<span class="kbadge badge-green">alive</span>'} <span class="k-hint" style="margin-left:6px">${esc(hbText)}</span></span>
           </div>
           <div class="k-sms-sched-row">
             <span class="k-label" style="margin:0">Delivery reports</span>
             <span>${wh.lastSeen ? '<span class="kbadge badge-green">connected</span>' : '<span class="kbadge badge-amber">not set up</span>'} <span class="k-hint" style="margin-left:6px">${esc(whSeen)}</span></span>
           </div>
         </div>
+        ${hbWarn}
         ${apiWarn}
         ${whWarn}
 
@@ -17720,7 +17767,7 @@ function showNewMonthDraftModal() {
         <button class="kbtn kbtn-ghost kbtn-sm" onclick="Kpsc.dismissNewMonthDraft()">✕</button>
       </div>
       <div class="k-modal-body">
-        <p class="k-hint" style="margin-bottom:12px">AI-drafted on the 3rd. This will auto-send on the 1st of ${monthLabel}. Edit if needed, then save.</p>
+        <p class="k-hint" style="margin-bottom:12px">AI-drafted automatically. This sends on the 1st of ${monthLabel} — or on the first day after that the scheduler gets through, up to the 5th. Edit if needed, then save.</p>
         <textarea id="nm-draft-text" class="k-textarea" style="width:100%;min-height:120px;font-size:14px;padding:10px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;resize:vertical">${esc(d.draft || '')}</textarea>
         <div id="nm-draft-charcount" style="font-size:12px;color:var(--text3);margin:4px 0 0">
           ${charCount} chars — ${pages} SMS page${pages !== 1 ? 's' : ''} (GSM-7)
