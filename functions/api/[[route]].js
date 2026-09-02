@@ -1794,16 +1794,13 @@ export async function onRequest(context) {
 
     // ── B5+B6: internal cron endpoints (Bearer CRON_SECRET) ────
     if (route === 'internal') {
-      if (method === 'POST' && param === 'run-followups')       return await runFollowups(DB, env, request);
-      if (method === 'POST' && param === 'run-prebriefs')       return await runPrebriefs(DB, env, request);
+      // run-followups / run-prebriefs are handled by the cronJobRunners() branch below.
       if (method === 'POST' && param === 'run-all')             return await runAllCronJobs(DB, env, request);
-      if (method === 'POST' && param === 'run-monthly-sms')     return await runMonthlySms(DB, env, request);
-      if (method === 'POST' && param === 'run-reminder-sms')    return await runReminderSms(DB, env, request);
-      if (method === 'POST' && param === 'run-anniversary-sms') return await runAnniversarySms(DB, env, request);
-      if (method === 'POST' && param === 'run-premeeting-sms')  return await runPremeetingSms(DB, env, request);
-      if (method === 'POST' && param === 'run-actionitem-sms')  return await runActionItemDeadlineSms(DB, env, request);
-      if (method === 'POST' && param === 'run-scheduled-sms')   return await runScheduledSms(DB, env, request);
-      if (method === 'POST' && param === 'run-newmonth-draft-fallback') return await runNewMonthDraftFallback(DB, env, request);
+      // Every other run-* endpoint does its own job and then sweeps whatever
+      // else has fallen overdue — see runSingleCronJob.
+      if (method === 'POST' && cronJobRunners().some(([, ep]) => ep === param)) {
+        return await runSingleCronJob(DB, env, request, param);
+      }
       if (method === 'POST' && param === 'ingest-bank-charge-email') return await ingestBankChargeEmail(DB, env, request, body);
       if (method === 'POST' && param === 'ingest-church-bank-charge-email') return await ingestChurchBankChargeEmail(DB, env, request, body);
     }
@@ -9264,58 +9261,128 @@ Keep the total brief under 400 words. Cite specifics (names, dates, amounts) —
   return ok({ ok: true, generated });
 }
 
-// ── INTERNAL CRON: RUN EVERY DUE JOB IN ONE CALL ──────────────────────────
+// ── INTERNAL CRON: THE JOB TABLE, run-all, AND THE OVERDUE SWEEP ──────────
+/**
+ * Every scheduled job, as [name, endpoint, runner], ordered money-first so that
+ * if the platform cuts a request short the sends that matter already happened.
+ * Declared as a function because the runners are function declarations further
+ * down the file.
+ */
+function cronJobRunners() {
+  return [
+    ['monthly-sms',     'run-monthly-sms',              runMonthlySms],
+    ['reminder-sms',    'run-reminder-sms',             runReminderSms],
+    ['anniversary-sms', 'run-anniversary-sms',          runAnniversarySms],
+    ['premeeting-sms',  'run-premeeting-sms',           runPremeetingSms],
+    ['actionitem-sms',  'run-actionitem-sms',           runActionItemDeadlineSms],
+    ['scheduled-sms',   'run-scheduled-sms',            runScheduledSms],
+    ['newmonth-draft',  'run-newmonth-draft-fallback',  runNewMonthDraftFallback],
+    ['followups',       'run-followups',                runFollowups],
+    ['prebriefs',       'run-prebriefs',                runPrebriefs],
+  ];
+}
+
+/** Run one job and summarise its Response without consuming it. */
+async function invokeCronJob(run, DB, env, request) {
+  try {
+    const res = await run(DB, env, request);
+    let body = null;
+    try { body = await res.clone().json(); } catch { /* non-JSON body */ }
+    return { ok: res.status === 200, summary: { status: res.status, ...(body || {}) } };
+  } catch (e) {
+    return { ok: false, summary: { status: 500, error: String(e?.message || e) } };
+  }
+}
+
 /**
  * POST /api/internal/run-all — one URL that drives every scheduled job.
  *
  * Each job already decides for itself whether it is due and no-ops otherwise,
- * so calling them all on every tick is cheap. The reason this exists is that
- * needing nine separate URLs configured correctly is itself a failure mode: if
- * a scheduler is only pointed at some of them, the jobs it does not know about
- * never run and nothing says so. That is exactly what happened here — the
- * Happy New Month SMS kept going out every month while the payment reminder
- * had not run since July, because whatever was calling the app was reaching
- * run-monthly-sms and not run-reminder-sms.
+ * so calling them all on every tick is cheap. This exists because needing nine
+ * separate URLs configured correctly is itself a failure mode: a scheduler
+ * pointed at only some of them runs only some of the jobs, and nothing says so.
+ * That is exactly what happened here — the Happy New Month SMS went out every
+ * month while the payment reminder had not run since July, because whatever was
+ * calling the app reached run-monthly-sms and never run-reminder-sms.
  *
  * One failing job must never stop the others, so each is caught individually
- * and reported in `results`; the response is 200 with `ok:false` when any job
+ * and reported in `results`. The response is 200 with `ok:false` when any job
  * failed, so a caller that only checks the status code still gets its work done
- * while one that checks the body can alert.
+ * while one that reads the body can alert.
  */
 async function runAllCronJobs(DB, env, request) {
   const authErr = requireCronSecret(env, request);
   if (authErr) return authErr;
 
-  // Money-sending jobs first: if the platform cuts the request short, the sends
-  // that matter have already happened.
-  const jobs = [
-    ['monthly-sms',      () => runMonthlySms(DB, env, request)],
-    ['reminder-sms',     () => runReminderSms(DB, env, request)],
-    ['anniversary-sms',  () => runAnniversarySms(DB, env, request)],
-    ['premeeting-sms',   () => runPremeetingSms(DB, env, request)],
-    ['actionitem-sms',   () => runActionItemDeadlineSms(DB, env, request)],
-    ['scheduled-sms',    () => runScheduledSms(DB, env, request)],
-    ['newmonth-draft',   () => runNewMonthDraftFallback(DB, env, request)],
-    ['followups',        () => runFollowups(DB, env, request)],
-    ['prebriefs',        () => runPrebriefs(DB, env, request)],
-  ];
-
   const results = {};
   let failed = 0;
-  for (const [name, run] of jobs) {
-    try {
-      const res = await run();
-      let body = null;
-      try { body = await res.clone().json(); } catch { /* non-JSON body */ }
-      results[name] = { status: res.status, ...(body || {}) };
-      if (res.status !== 200) failed++;
-    } catch (e) {
-      results[name] = { status: 500, error: String(e?.message || e) };
-      failed++;
-    }
+  for (const [name, , run] of cronJobRunners()) {
+    const r = await invokeCronJob(run, DB, env, request);
+    results[name] = r.summary;
+    if (!r.ok) failed++;
   }
+  await putSettingValue(DB, 'kpsc_cron_last_sweep', new Date().toISOString());
   await recordCronHeartbeat(DB, 'all', failed ? `${failed} job(s) failed` : 'all jobs ok');
   return ok({ ok: failed === 0, failed, results });
+}
+
+// How long a single-endpoint call waits before it takes responsibility for the
+// jobs nobody else is driving. Long enough that a healthy scheduler hitting all
+// nine endpoints every 30 min sweeps at most once an hour.
+const CRON_SWEEP_INTERVAL_MINUTES = 60;
+
+/**
+ * Run one named job, then sweep up any other job that is overdue.
+ *
+ * The sweep is a safety net for the failure this app actually suffered: the
+ * scheduler lives outside this repository (Pages Functions cannot run crons, so
+ * it is a separate Worker configured in the Cloudflare dashboard), and it was
+ * pointed at run-monthly-sms alone. The Happy New Month SMS therefore kept
+ * sending while payment reminders silently stopped for two months. Rather than
+ * depend on every caller knowing all nine URLs, any authenticated cron call now
+ * also drives whatever else has fallen behind.
+ *
+ * Sweeping is safe because every job re-checks for itself whether it is due,
+ * refuses to send twice for the same period, and honours the send window — so
+ * the worst case is a handful of cheap no-op reads. It is rate-limited to once
+ * an hour so that a scheduler hitting all nine endpoints does not re-evaluate
+ * every job nine times per tick.
+ *
+ * It sweeps even when the primary job sent messages. Two blasts in one request
+ * is possible in principle (a reminder catch-up landing in the first days of a
+ * month, alongside the Happy New Month send) and costs subrequests, but the
+ * alternative — skipping the sweep whenever the primary sent — would reinstate
+ * the exact bug this guards against for a scheduler that only fires monthly.
+ */
+async function runSingleCronJob(DB, env, request, endpoint) {
+  const authErr = requireCronSecret(env, request);
+  if (authErr) return authErr;
+
+  const jobs = cronJobRunners();
+  const primary = jobs.find(([, ep]) => ep === endpoint);
+  if (!primary) return err('Unknown cron job', 404);
+
+  const res = await primary[2](DB, env, request);
+
+  // Only a successful primary run earns a sweep; if this job is erroring, the
+  // useful signal is that error, not nine more of them.
+  if (res.status !== 200) return res;
+
+  const last = await getSettingValue(DB, 'kpsc_cron_last_sweep');
+  const lastMs = last ? Date.parse(last) : NaN;
+  const dueForSweep = isNaN(lastMs) || (Date.now() - lastMs) >= CRON_SWEEP_INTERVAL_MINUTES * 60 * 1000;
+  if (!dueForSweep) return res;
+
+  await putSettingValue(DB, 'kpsc_cron_last_sweep', new Date().toISOString());
+  const swept = {};
+  for (const [name, ep, run] of jobs) {
+    if (ep === endpoint) continue;
+    swept[name] = (await invokeCronJob(run, DB, env, request)).summary;
+  }
+
+  let body = null;
+  try { body = await res.clone().json(); } catch { /* non-JSON body */ }
+  return ok({ ...(body || {}), swept });
 }
 
 // ── TERMII CRON: HAPPY NEW MONTH SMS (once per month, from the 1st) ───────

@@ -200,3 +200,83 @@ test('run-all reports every job, and one failure never stops the rest', async ()
   assert.ok(body.results['reminder-sms']);
   assert.ok(body.results['monthly-sms']);
 });
+
+// ── the overdue sweep ──────────────────────────────────────────────────────
+// The scheduler that actually drives this app lives in the Cloudflare
+// dashboard, outside this repo, and was pointed at run-monthly-sms alone —
+// which is why the Happy New Month SMS kept sending while payment reminders
+// stopped for two months. Any authenticated cron call now also drives whatever
+// else has fallen behind, so a caller that knows one URL still runs every job.
+
+/** DB mock that records which cron jobs asked about their period marker. */
+function sweepDBMock({ lastSweep = null } = {}) {
+  const seen = [];
+  return {
+    seen,
+    prepare(sql) {
+      if (/SELECT value FROM settings WHERE key=\?/.test(sql)) {
+        return {
+          bind(key) { seen.push(key); this._k = key; return this; },
+          async first() {
+            return this._k === 'kpsc_cron_last_sweep' && lastSweep ? { value: lastSweep } : null;
+          },
+        };
+      }
+      if (/INSERT INTO settings/.test(sql)) {
+        return { bind() { return this; }, async run() { return {}; } };
+      }
+      return {
+        bind() { return this; },
+        async all() { return { results: [] }; },
+        async first() { return null; },
+        async run() { return {}; },
+      };
+    },
+  };
+}
+
+const cronReq = (ep) => new Request(`https://example.com/api/internal/${ep}`, {
+  method: 'POST',
+  headers: { Authorization: 'Bearer test-secret' },
+});
+
+test('a monthly-sms call also drives the payment reminder', async () => {
+  const DB = sweepDBMock();                        // never swept before
+  const res = await onRequest({ request: cronReq('run-monthly-sms'), env: { DB, CRON_SECRET: 'test-secret' } });
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.ok(body.swept, 'expected a sweep of the other jobs');
+  assert.ok(body.swept['reminder-sms'], 'the payment reminder must be swept in');
+  // The job that was called is not swept a second time.
+  assert.equal(body.swept['monthly-sms'], undefined);
+  // And the reminder really did consult its own marker.
+  assert.ok(DB.seen.includes('kpsc_reminder_last_send_key'));
+});
+
+test('the sweep is rate-limited so nine endpoints do not re-run every job', async () => {
+  const DB = sweepDBMock({ lastSweep: new Date().toISOString() });   // swept just now
+  const res = await onRequest({ request: cronReq('run-monthly-sms'), env: { DB, CRON_SECRET: 'test-secret' } });
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(body.swept, undefined, 'should not sweep again within the interval');
+});
+
+test('a stale sweep marker lets the safety net fire again', async () => {
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const DB = sweepDBMock({ lastSweep: twoHoursAgo });
+  const res = await onRequest({ request: cronReq('run-monthly-sms'), env: { DB, CRON_SECRET: 'test-secret' } });
+  const body = await res.json();
+  assert.ok(body.swept?.['reminder-sms']);
+});
+
+test('every cron endpoint still requires the secret', async () => {
+  for (const ep of ['run-monthly-sms', 'run-reminder-sms', 'run-followups', 'run-all']) {
+    const req = new Request(`https://example.com/api/internal/${ep}`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer wrong' },
+    });
+    const DB = { prepare() { throw new Error('DB must not be touched before authorization'); } };
+    const res = await onRequest({ request: req, env: { DB, CRON_SECRET: 'test-secret' } });
+    assert.equal(res.status, 401, `${ep} should reject a bad secret`);
+  }
+});
