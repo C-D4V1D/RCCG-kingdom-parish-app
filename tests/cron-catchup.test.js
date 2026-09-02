@@ -24,11 +24,49 @@ test('reminder: fires on the scheduled day itself', () => {
   assert.equal(d.key, '2026-09-26');
 });
 
-test('reminder: not due before the send day arrives', () => {
-  const d = reminderDueInfo({ year: 2026, month: 9, dayOfMonth: 2, ...SAT, lastSendKey: '' });
+test('reminder: not due before the send day arrives, once the previous one is done', () => {
+  // Sept's send day (26th) has not arrived and August's (29th) was already sent.
+  const d = reminderDueInfo({ year: 2026, month: 9, dayOfMonth: 2, ...SAT, lastSendKey: '2026-08-29' });
   assert.equal(d.due, false);
-  assert.equal(d.targetDay, null);
-  assert.match(d.reason, /Not a reminder send day/);
+  assert.equal(d.alreadyRun, true);
+});
+
+test('reminder: catch-up carries across the month boundary', () => {
+  // The parish's own case: the 29 Aug send day was missed and the first poll
+  // that got through was 2 Sep. This schedule always lands in the last days of
+  // the month, so most of the grace period falls in the following month —
+  // scoping the search to September alone would silently drop August.
+  const d = reminderDueInfo({ year: 2026, month: 9, dayOfMonth: 2, ...SAT, lastSendKey: '' });
+  assert.equal(d.due, true);
+  assert.equal(d.catchUp, true);
+  assert.equal(d.daysLate, 4);          // 29, 30, 31 Aug + 2 days of Sep
+  assert.equal(d.key, '2026-08-29');
+  // And it must remind for AUGUST, not for barely-started September.
+  assert.equal(d.targetYear, 2026);
+  assert.equal(d.targetMonth, 8);
+});
+
+test('reminder: cross-month catch-up still respects the grace period', () => {
+  const d = reminderDueInfo({ year: 2026, month: 9, dayOfMonth: 10, ...SAT, lastSendKey: '' });
+  assert.equal(d.due, false);
+  assert.equal(d.missed, true);
+  assert.equal(d.key, '2026-08-29');
+});
+
+test('reminder: catch-up carries across a year boundary', () => {
+  // Dec 2026: last Sunday is the 27th, so the send day is Sat the 26th.
+  const d = reminderDueInfo({ year: 2027, month: 1, dayOfMonth: 2, ...SAT, lastSendKey: '' });
+  assert.equal(d.due, true);
+  assert.equal(d.key, '2026-12-26');
+  assert.equal(d.targetYear, 2026);
+  assert.equal(d.targetMonth, 12);
+});
+
+test('reminder: this month\'s arrived send day supersedes last month\'s', () => {
+  const d = reminderDueInfo({ year: 2026, month: 9, dayOfMonth: 27, ...SAT, lastSendKey: '' });
+  assert.equal(d.key, '2026-09-26');
+  assert.equal(d.targetMonth, 9);
+  assert.equal(d.daysLate, 1);
 });
 
 test('reminder: catches up when no tick reached the app on the send day', () => {

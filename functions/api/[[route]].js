@@ -316,16 +316,42 @@ function reminderDueInfo({ year, month, dayOfMonth, mode, freq, reminderDay,
   // Day 0 is not a real calendar day — it falls out of a `reminderDay` of 0 in
   // settings, and must never anchor a send day (it would read as "infinitely
   // overdue" and fire immediately).
-  const sendDays = (info.sendDays || []).filter(d => Number.isInteger(d) && d >= 1);
-  // Latest scheduled send day that is today or already past.
-  const targetDay = sendDays.filter(d => d <= dayOfMonth).sort((a, b) => b - a)[0] ?? null;
+  const clean = (days) => (days || []).filter(d => Number.isInteger(d) && d >= 1);
+  const sendDays = clean(info.sendDays);
+
+  // Candidate send days that have already arrived, newest first. This schedule
+  // puts its send day in the last days of the month ("Saturday before the last
+  // Sunday"), so most of the grace period falls in the *following* month —
+  // looking only at the current month would shrink a 7-day grace to two or
+  // three days and lose exactly the case this is here to catch (29 Aug missed,
+  // first successful poll 2 Sep).
+  const candidates = sendDays.filter(d => d <= dayOfMonth)
+    .map(d => ({ y: year, m: month, d, daysLate: dayOfMonth - d }));
+
+  const prevY = month === 1 ? year - 1 : year;
+  const prevM = month === 1 ? 12 : month - 1;
+  const prevLastDom = new Date(Date.UTC(prevY, prevM, 0)).getUTCDate();
+  const prevDays = clean(reminderSendDayInfo(prevY, prevM, prevLastDom, mode, freq, reminderDay).sendDays);
+  const prevLast = prevDays.sort((a, b) => b - a)[0];
+  if (prevLast) {
+    candidates.push({ y: prevY, m: prevM, d: prevLast, daysLate: dayOfMonth + (prevLastDom - prevLast) });
+  }
+
+  // The most recent send day is the only one that matters — an older one is
+  // superseded, not queued up behind it.
+  candidates.sort((a, b) => a.daysLate - b.daysLate);
+  const target = candidates[0] || null;
+
   const base = {
-    isSendDay: info.isSendDay, sendDays, label: info.label, targetDay,
-    key: targetDay ? sendDayKey(year, month, targetDay) : '',
+    isSendDay: info.isSendDay, sendDays, label: info.label,
+    targetDay: target ? target.d : null,
+    targetYear: target ? target.y : year,
+    targetMonth: target ? target.m : month,
+    key: target ? sendDayKey(target.y, target.m, target.d) : '',
     catchUp: false, daysLate: 0, alreadyRun: false, missed: false,
   };
 
-  if (targetDay == null) {
+  if (!target) {
     const next = sendDays[0];
     return { ...base, due: false, reason: `Not a reminder send day (today=${dayOfMonth}; next=${next ?? '—'}; schedule: ${info.label})` };
   }
@@ -333,7 +359,7 @@ function reminderDueInfo({ year, month, dayOfMonth, mode, freq, reminderDay,
     return { ...base, due: false, alreadyRun: true, reason: `Reminder for ${base.key} has already been sent` };
   }
 
-  const daysLate = dayOfMonth - targetDay;
+  const daysLate = target.daysLate;
   if (daysLate > graceDays) {
     return { ...base, due: false, missed: true, daysLate, reason: `Send day ${base.key} was missed by ${daysLate} days (grace ${graceDays}) — too late to send a useful reminder` };
   }
@@ -1668,8 +1694,22 @@ export async function onRequest(context) {
       if (method === 'POST') {
         const text = String(body?.draft || '').trim();
         if (!text) return err('draft text is required', 400);
-        await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind('kpsc_newmonth_sms_pending_draft', text).run();
-        return ok({ ok: true });
+        // Stamp the month this draft is meant for, so it can never be sent in
+        // the wrong one. An edit to an existing draft keeps that draft's month;
+        // a brand new one targets the next month still awaiting its send.
+        const existing = await readNewMonthDraft(DB);
+        let ty = existing.year, tm = existing.month;
+        if (!ty || !tm) {
+          const now = new Date();
+          const y = now.getUTCFullYear(), m = now.getUTCMonth() + 1;
+          const lastPeriod = await getSettingValue(DB, 'kpsc_newmonth_last_sent_period');
+          if (lastPeriod === periodKey(y, m)) { tm = m === 12 ? 1 : m + 1; ty = m === 12 ? y + 1 : y; }
+          else { tm = m; ty = y; }
+        }
+        await putSettingValue(DB, 'kpsc_newmonth_sms_pending_draft', text);
+        await putSettingValue(DB, 'kpsc_newmonth_sms_draft_month', String(tm));
+        await putSettingValue(DB, 'kpsc_newmonth_sms_draft_year', String(ty));
+        return ok({ ok: true, draftMonth: tm, draftYear: ty });
       }
       if (method === 'DELETE') {
         await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind('kpsc_newmonth_sms_pending_draft', '').run();
@@ -9315,12 +9355,21 @@ async function runMonthlySms(DB, env, request) {
  */
 async function resolveNewMonthText(DB, env, t, year, month) {
   const draft = await readNewMonthDraft(DB);
-  if (draft.text && draft.year === year && draft.month === month) return draft.text;
-  if (draft.text) await clearNewMonthDraft(DB); // stale — belongs to another month
+  // An unstamped draft is one a person typed by hand (or one saved before the
+  // stamp existed). Only a stamp that actively DISAGREES marks a draft stale —
+  // never discard someone's own words just because they carry no stamp.
+  if (draft.text && draftMatchesMonth(draft, year, month)) return draft.text;
+  if (draft.text) await clearNewMonthDraft(DB); // stale — stamped for another month
   await autoGenerateNewMonthDraft(DB, env, { targetYear: year, targetMonth: month });
   const fresh = await readNewMonthDraft(DB);
-  if (fresh.text && fresh.year === year && fresh.month === month) return fresh.text;
+  if (fresh.text && draftMatchesMonth(fresh, year, month)) return fresh.text;
   return t.newmonthText;
+}
+
+/** A draft is usable for (year, month) when it is stamped for it, or unstamped. */
+function draftMatchesMonth(draft, year, month) {
+  if (!draft.month && !draft.year) return true;   // hand-written, no stamp
+  return draft.year === year && draft.month === month;
 }
 
 /** Read the pending auto-draft together with the month it was written for. */
@@ -9416,8 +9465,8 @@ async function executeReminderRun(DB, opts = {}) {
 
   const now = new Date();
   const dayOfMonth = now.getUTCDate();
-  const month = now.getUTCMonth() + 1;
-  const year = now.getUTCFullYear();
+  const nowMonth = now.getUTCMonth() + 1;
+  const nowYear = now.getUTCFullYear();
   // Due-based rather than "is today the send day?": GitHub drops most of the
   // scheduler's `*/30` ticks, so on some days nothing polls the app inside the
   // send window at all and the month's reminder used to be lost outright. The
@@ -9426,11 +9475,18 @@ async function executeReminderRun(DB, opts = {}) {
   // repeat tick a no-op.
   const lastSendKey = await getSettingValue(DB, 'kpsc_reminder_last_send_key');
   const dayInfo = reminderDueInfo({
-    year, month, dayOfMonth, lastSendKey,
+    year: nowYear, month: nowMonth, dayOfMonth, lastSendKey,
     mode: t.reminderMode || 'day_of_month', freq: t.reminderFreq, reminderDay: t.reminderDay,
   });
 
   await recordCronHeartbeat(DB, 'reminder', dayInfo.due ? 'send due' : (dayInfo.reason || 'not a send day'));
+
+  // A catch-up can land in the month AFTER the send day it is satisfying (a
+  // 29 Aug send day recovered on 2 Sep). The reminder must then be about
+  // August's outstanding pledge, not September's — which on the 2nd is barely
+  // due and would turn a targeted nudge into a blast at the whole register.
+  const month = dayInfo.due ? dayInfo.targetMonth : nowMonth;
+  const year  = dayInfo.due ? dayInfo.targetYear  : nowYear;
 
   if (!t.apiKey) {
     const reason = 'No Termii API key configured';

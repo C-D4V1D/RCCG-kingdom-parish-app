@@ -86,34 +86,48 @@ jobs:
       - name: Poll internal cron endpoints
         run: |
           set -uo pipefail
+          # Money-sending jobs first. curl's --max-time is per attempt and resets
+          # on every retry, so retries alone could burn the whole job budget on
+          # one hung endpoint and starve the rest; `timeout` puts a hard ceiling
+          # on each endpoint, and DEADLINE caps the loop as a whole. Ordering
+          # means that if anything does get starved it is the cheap stuff, and
+          # every endpoint is idempotent so the next tick picks it up anyway.
           ENDPOINTS="
-          run-followups
-          run-prebriefs
           run-monthly-sms
-          run-newmonth-draft-fallback
           run-reminder-sms
           run-anniversary-sms
           run-premeeting-sms
           run-actionitem-sms
           run-scheduled-sms
+          run-newmonth-draft-fallback
+          run-followups
+          run-prebriefs
           "
+          PER_ENDPOINT_CAP=110   # hard wall-clock ceiling per endpoint, retries included
+          DEADLINE=$(( SECONDS + 900 ))   # stop starting new endpoints after 15 min
           FAILED=""
           for ep in $ENDPOINTS; do
             URL="${APP_URL%/}/api/internal/$ep"
             echo "──────── $ep ────────"
-            # --retry rides out a cold Pages isolate or a blip; --max-time keeps
-            # one slow endpoint from eating the whole job's budget.
-            BODY=$(curl -sS \
-              --retry 3 --retry-delay 5 --retry-connrefused --max-time 240 \
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "::error::$ep not attempted — the job ran out of its time budget"
+              FAILED="$FAILED $ep(skipped)"
+              continue
+            fi
+            # --retry rides out a cold Pages isolate or a blip; --retry-max-time
+            # bounds when a new attempt may start, and `timeout` bounds the lot.
+            BODY=$(timeout "$PER_ENDPOINT_CAP" curl -sS \
+              --retry 2 --retry-delay 5 --retry-connrefused \
+              --max-time 45 --retry-max-time 60 \
               -o /tmp/cron-body.txt -w '%{http_code}' \
               -X POST \
               -H "Authorization: Bearer $CRON_SECRET" \
               -H "Content-Type: application/json" \
-              "$URL") || BODY="000"
-            echo "Status: $BODY"
-            echo "Body: $(head -c 2000 /tmp/cron-body.txt)"
-            if [ "$BODY" != "200" ]; then
-              echo "::error::$ep returned HTTP $BODY"
+              "$URL") || BODY="${BODY:-000}"
+            echo "Status: ${BODY:-000}"
+            echo "Body: $(head -c 2000 /tmp/cron-body.txt 2>/dev/null)"
+            if [ "${BODY:-000}" != "200" ]; then
+              echo "::error::$ep returned HTTP ${BODY:-000}"
               FAILED="$FAILED $ep"
             fi
           done
