@@ -32,6 +32,65 @@ Honest-math reminders that apply to every bullet below:
 
 ---
 
+## 0. Authorship — say this first, not when you are asked
+
+State the method up front, on the CV and in the cover letter. Volunteering it reads as
+confidence; having it drawn out of you at interview reads as something you hoped nobody
+would check. The commit history shows it either way.
+
+**The line to use (CV, project footer, LinkedIn):**
+
+> The business requirements, operating model, financial rules, risk and governance policy,
+> data model and product design are original work; implementation was carried out with AI
+> pair-programming assistance (Claude Code, GitHub Copilot and OpenAI Codex), reviewed and
+> integrated across 290 pull requests against a 481-test regression suite.
+
+**Shorter, if space is tight:**
+
+> Original analysis, financial rules and product design; built with AI pair-programming
+> assistance and integrated across 290 reviewed pull requests.
+
+### Why this is a strength, not a caveat
+
+The market in 2026 is not asking whether you used AI. It is asking whether you can direct
+it — scope the problem, judge the output, and own what ships. This project is evidence of
+exactly that, and the evidence is specific:
+
+- **The decisions AI did not make.** That the province rebate applies to *already-split*
+  local tithes. That money held for three satellite parishes is custodial and must be
+  visible in the bank balance but excluded from every income, expense and remittance total.
+  That a failed deposit verification must fail closed and never auto-approve. That rates
+  must be snapshotted onto a paid remittance so a later settings edit cannot rewrite
+  history. That governance checks are re-applied *after* the model runs, so no model
+  output — and no prompt injection inside a meeting transcript — can suppress a compliance
+  flag. None of those come from a prompt. They come from understanding the domain and the
+  risk.
+- **You reviewed rather than accepted.** Codex opened a path-traversal finding against the
+  demo harness in this repository; it was reproduced, fixed, and two further issues the
+  review had not raised were found and fixed in the same pass. The exchange is in the PR
+  history.
+- **The verification is real.** 481 tests, CI on every push, production and preview on
+  separate databases. An AI can write a test; deciding that the money-critical rules are
+  where the coverage must concentrate is an analyst's judgement.
+
+### If an interviewer pushes
+
+> *"So how much of this did you actually write?"*
+>
+> I wrote the requirements, the financial rules, the data model and the controls, and I
+> reviewed and integrated every change. The code was largely produced with AI assistance —
+> that is how I work, and it is why five months of evenings produced a system this size.
+> What I'd point you to is not the syntax, it's the decisions: why custodial funds live in
+> their own table, why the province rebate is calculated where it is, why a failed AI
+> verification never auto-approves. Those were mine, and if any of them were wrong the
+> parish would have paid the wrong amount to its headquarters.
+
+Do not oversell the other way either. If you cannot explain a piece of the system, say so
+and say how you would find out — an analyst who knows the boundary of their own knowledge
+is more employable than one who bluffs.
+
+---
+
 ## 1. The headline (CV project entry)
 
 Pick the version that matches the job you are applying for.
@@ -60,6 +119,12 @@ Pick the version that matches the job you are applying for.
 > Owned discovery through delivery for 3 products on a shared platform — an internal finance
 > portal, a mobile governance PWA and a public fundraising site — shipping 290 pull requests
 > across 5 months with CI-gated releases and separated production/preview data environments.
+
+**Append this line to whichever framing you use** (see §0 for why it belongs there):
+
+> *Original analysis, financial rules, governance policy and product design; implementation
+> with AI pair-programming assistance (Claude Code, GitHub Copilot, OpenAI Codex), reviewed
+> and integrated across 290 pull requests against a 481-test suite.*
 
 ---
 
@@ -492,6 +557,17 @@ Pick the version that matches the job you are applying for.
 
 ---
 
+**Closing line for any of the three (adapt to the role)**
+
+> I should say plainly how it was built: the analysis, the financial rules, the governance
+> policy and the product design are mine; the implementation was done with AI
+> pair-programming assistance and integrated across 290 reviewed pull requests against a
+> 481-test suite. I mention it because directing that tooling well — scoping the problem,
+> judging the output, owning what ships — is itself a large part of what I would bring to
+> the role.
+
+---
+
 ## 16. Interview stories (STAR)
 
 **1. The scheduler that was green and doing nothing**
@@ -540,7 +616,20 @@ the model runs. Added detection for prompt-injection attempts inside the transcr
 *Result:* A model response — or a participant trying to manipulate one — cannot suppress a
 compliance flag.
 
-**5. Designing for the phone people actually own**
+**5. Catching a security bug in my own tooling**
+*Situation:* I added a local harness to the repository so the documentation screenshots
+could be regenerated from synthetic data rather than being a one-off.
+*Task:* Get it reviewed properly rather than trusting that scaffolding doesn't matter.
+*Action:* An automated reviewer flagged a path traversal in the file-serving path. I
+reproduced it — the server would stream `/etc/passwd` — and fixed it by resolving and
+checking containment before touching the filesystem. Verifying the fix surfaced two things
+the review had not raised: staying inside the repository root still allowed `.git/config`
+to be served, and the server was binding all interfaces when it only ever needed loopback.
+Fixed both, then re-ran the full capture end to end to prove nothing legitimate had broken.
+*Result:* A finding I could have waved away as "it's only a dev script" instead closed
+three issues, and the reasoning is recorded in the pull request.
+
+**6. Designing for the phone people actually own**
 *Situation:* The governance committee are volunteers using mid-range Android phones on
 mobile data.
 *Task:* Achieve adoption without an app store or a training budget.
@@ -577,6 +666,7 @@ Facts you can state without qualification, drawn from this repository:
 | Committee size governed | 12 (3 men, 3 women, 3 youth, 2 ministers, 1 pastor) |
 | Satellite parishes handled as custodian | 3 |
 | Reviewers in the change process | 3 (human + 2 automated) |
+| AI pair-programming tools used | 3 (Claude Code, GitHub Copilot, OpenAI Codex) — all visible in the commit history |
 
 Numbers to source from your own records before use: partner counts, naira amounts raised or
 saved, hours saved per process, adoption and delivery rates, incident counts, welfare cases
@@ -603,6 +693,11 @@ segregation of duties · audit trail design · month-end statement production an
 enforcement · fail-closed control design · AI safety constraints and prompt-injection
 handling · consent-based data publication
 
+**Working method:** AI-assisted delivery (Claude Code, GitHub Copilot, OpenAI Codex) with
+human review and integration · specification-first working · reviewing and verifying
+generated code rather than accepting it · risk-based test design over generated
+implementations
+
 **Technical:** JavaScript · SQL / SQLite · Python (FastAPI) · Cloudflare Pages, Functions,
 D1 and R2 · Google Cloud Run · REST API design · serverless and edge architecture ·
 PWA and service workers · Git and GitHub · CI/CD with GitHub Actions · automated testing ·
@@ -621,7 +716,8 @@ SMS gateway integration · email-to-API automation
 4. Lead each CV bullet with the strongest verb available: *designed, rebuilt, root-caused,
    eliminated, encoded, automated, reduced, recovered* — not *responsible for* or
    *involved in*.
-5. Link the repository and this document. A hiring manager who opens it can verify every
+5. **Keep the authorship line on.** §0 explains why. Removing it does not make the work
+   look more impressive — it makes the commit history look like something you were hiding.
+6. Link the repository and this document. A hiring manager who opens it can verify every
    ✅ number in about two minutes, and that verifiability is itself the strongest signal
    on the page.
-</content>

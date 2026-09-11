@@ -83,9 +83,26 @@ thing a recruiter sees, and the README's screenshots section does the rest of th
 
 ---
 
+## Authorship statement
+
+The About panel caps at 350 characters, so the full statement lives at the bottom of the
+README under **Authorship and method** — that is where anyone who reads the About box will
+land next. Keep it there.
+
+If you want the About box itself to carry the signal, use this variant of the description
+(328 characters):
+
+```
+Production church finance, governance and fundraising platform for RCCG Kingdom Parish, Aguleri — automated RCCG remittance engine, cash control, AI meeting secretary and partnership fundraising. Original analysis, financial rules and product design; built with AI pair-programming assistance across 290 reviewed PRs. 481 tests.
+```
+
+Use the same sentence in your LinkedIn project entry and on the CV — see
+`docs/PORTFOLIO.md` §0 for the wording and for how to handle it at interview.
+
+---
+
 ## Social preview image
 
 Settings → General → **Social preview** → upload an image. `docs/screenshots/02-finance-dashboard.png`
 works well — it shows a real, populated product rather than a logo, which is what makes a
 shared link stop a recruiter mid-scroll. GitHub recommends 1280×640px.
-</content>

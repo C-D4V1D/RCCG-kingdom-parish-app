@@ -36,6 +36,7 @@ recurring cost is the AI, SMS and voice-service usage the parish actually consum
 - [Project scale](#project-scale)
 - [Running it locally](#running-it-locally)
 - [Repository layout](#repository-layout)
+- [Authorship and method](#authorship-and-method)
 
 ---
 
@@ -612,10 +613,31 @@ rccg-kingdom-parish-app/
 
 ---
 
+## Authorship and method
+
+The business requirements, operating model, financial rules, risk and governance policy,
+data model and product design are original work. The problem definition came from the
+parish itself, and the decisions that shape this system — how cash custody should be
+proven, which money is custodial and must never be counted as income, what the software
+must refuse to let a user do, where an AI model is allowed to have an opinion and where it
+is not — were made by a person, not a model.
+
+Implementation was carried out with AI pair-programming assistance: **Claude Code**,
+**GitHub Copilot** and **OpenAI Codex**, each contributing commits and reviews that are
+visible in the history. Every change was reviewed and integrated by the author across
+**290 pull requests (264 merged)**, gated by a **481-test regression suite** that encodes
+the financial rules, with production and preview environments backed by separate databases.
+
+The tooling is stated plainly because it is part of how the work was done and because the
+history shows it either way. What it does not change: a model can write a function, but it
+cannot decide that the province rebate applies to already-split tithes, that a failed
+deposit verification must never auto-approve, or that funds held for three satellite
+parishes belong in their own table. Those are the decisions this project is actually made of.
+
+---
+
 ## Licence and data
 
 Private project, built for and operated by RCCG Kingdom Parish, Aguleri. No real member,
 partner, financial or bank data is committed to this repository; all figures in the
 screenshots above are synthetic demonstration data generated for documentation.
-</content>
-</invoke>
