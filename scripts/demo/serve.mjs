@@ -24,11 +24,37 @@ import { onRequest } from '../../functions/api/[[route]].js';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '../..');
 const PORT = Number(process.env.PORT || 8788);
+// Loopback only by default. This serves files off the developer's disk and needs
+// no network reachability; set HOST explicitly to widen it.
+const HOST = process.env.HOST || '127.0.0.1';
 const DB = createD1(process.env.DEMO_DB || path.join(HERE, 'demo.sqlite'));
 const env = { DB };
 
 const MIME = { '.html':'text/html', '.js':'text/javascript', '.css':'text/css', '.json':'application/json',
   '.png':'image/png', '.svg':'image/svg+xml', '.ico':'image/x-icon', '.webmanifest':'application/manifest+json' };
+
+/**
+ * Resolves a request path to a servable file inside ROOT, or null if it is not one.
+ *
+ * Two things to get right:
+ *
+ *  - `new URL()` collapses literal `../` segments but leaves percent-encoded ones
+ *    (`..%2f`) alone, so decoding first and joining second would walk out of the
+ *    repository — `/..%2f..%2fetc%2fpasswd` resolves to `/etc/passwd`. Resolve, then
+ *    check containment against ROOT before touching the filesystem.
+ *  - Staying inside ROOT is not on its own enough: `.git/config` is inside it and
+ *    should never be served. Cloudflare Pages does not publish dot-directories
+ *    either, so refusing them here also keeps the harness faithful to production.
+ */
+function safeResolve(urlPath) {
+  let decoded;
+  try { decoded = decodeURIComponent(urlPath); } catch { return null; }   // malformed %-escape
+  if (decoded.includes('\0')) return null;
+  const normalised = path.posix.normalize(decoded);
+  if (normalised.split('/').some(seg => seg.startsWith('.') && seg !== '.' && seg !== '..')) return null;
+  const resolved = path.resolve(ROOT, '.' + normalised);
+  return resolved === ROOT || resolved.startsWith(ROOT + path.sep) ? resolved : null;
+}
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -49,16 +75,21 @@ const server = http.createServer(async (req, res) => {
     }
     return;
   }
-  let p = decodeURIComponent(url.pathname);
-  if (p.endsWith('/')) p += 'index.html';
-  let file = path.join(ROOT, p);
-  if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) {
-    const alt = path.join(ROOT, p, 'index.html');
-    if (fs.existsSync(alt)) file = alt;
-    else file = path.join(ROOT, 'index.html');
+  const target = safeResolve(url.pathname);
+  if (!target) {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('Bad request');
+    return;
+  }
+  // Fall back to the SPA shell, exactly as the Pages _redirects rule does.
+  let file = path.join(ROOT, 'index.html');
+  if (fs.existsSync(target) && !fs.statSync(target).isDirectory()) {
+    file = target;
+  } else if (fs.existsSync(path.join(target, 'index.html'))) {
+    file = path.join(target, 'index.html');
   }
   const ext = path.extname(file);
   res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-store' });
   fs.createReadStream(file).pipe(res);
 });
-server.listen(PORT, () => console.log(`Demo server on http://localhost:${PORT}`));
+server.listen(PORT, HOST, () => console.log(`Demo server on http://${HOST}:${PORT}`));

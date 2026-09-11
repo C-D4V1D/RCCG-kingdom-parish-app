@@ -11,8 +11,12 @@ so what you see locally is what the parish sees in production.
 
 ```bash
 node scripts/demo/seed.mjs        # creates scripts/demo/demo.sqlite (deletes any existing one)
-node scripts/demo/serve.mjs       # http://localhost:8788
+node scripts/demo/serve.mjs       # http://127.0.0.1:8788
 ```
+
+The server binds loopback only and serves nothing outside the repository root (and
+nothing from dot-directories such as `.git/`). Override with `PORT` and `HOST` if you
+need to reach it from another device.
 
 Sign in with:
 
