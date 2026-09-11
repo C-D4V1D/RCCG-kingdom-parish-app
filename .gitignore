@@ -30,3 +30,7 @@ build/
 
 # Logs
 *.log
+
+# Local demo harness artefacts
+scripts/demo/demo.sqlite*
+scripts/demo/.shots/
