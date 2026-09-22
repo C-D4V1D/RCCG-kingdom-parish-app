@@ -47,7 +47,7 @@ test('calculateRemittances computes all categories with correct totals', () => {
   assertClose(result.breakdown.thanksgiving.pastor, 2000);
   assertClose(result.breakdown.thanksgiving.ministers, 1800);
   assertClose(result.breakdown.thanksgiving.pastorsSeed, 200);
-  assert.equal(result.breakdown.thanksgiving.local, 0);
+  assertClose(result.breakdown.thanksgiving.local, 0);
   assert.equal(result.breakdown.sundaySchool.national, 10000);
   assertClose(result.breakdown.childrenOffering.childrensDept, 2600);
 
