@@ -20,7 +20,7 @@ const REMITTANCE_RATES = {
     pastor: 0.10,
     ministers: 0.09,
     pastorsSeed: 0.01,   // 1% Seed — remitted to National HQ
-    local: 0,
+    local: 0,            // parish retained — 0% under default RCCG split
     label: "Thanksgiving (TG)"
   },
   sundaySchool: {
@@ -122,12 +122,13 @@ function calculateRemittances(income) {
       pastor: amt * REMITTANCE_RATES.thanksgiving.pastor,
       ministers: amt * REMITTANCE_RATES.thanksgiving.ministers,
       pastorsSeed: amt * REMITTANCE_RATES.thanksgiving.pastorsSeed,
-      local: 0
+      local: amt * REMITTANCE_RATES.thanksgiving.local
     };
     result.totals.totalToNational += result.breakdown.thanksgiving.national;
     result.totals.totalToArea += result.breakdown.thanksgiving.area;
     result.totals.totalToPastor += result.breakdown.thanksgiving.pastor;
     result.totals.totalToMinisters += result.breakdown.thanksgiving.ministers;
+    result.totals.localRetainedBeforeRebate += result.breakdown.thanksgiving.local;
   }
 
   // Sunday School (100% to National)
