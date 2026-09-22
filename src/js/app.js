@@ -8491,7 +8491,7 @@ async function printRemittanceReport(fromOverride, toOverride){
 
   const tgDistNote=tgDistributed>0
     ?`<tr style="background:#fff8e1"><td colspan="6" style="font-size:11px;color:#7a5200;padding:5px 10px">
-        <sup style="color:#c0392b">†</sup> TG balance ${fmt(tgDistributed)} (${Math.round(((rr.tgArea||0)+(rr.tgPastor||0)+(rr.tgMinisters||0))*100)}%) distributed locally — Area/Zonal: ${fmt(rem.totalArea)} · Pastor: ${fmt(rem.totalPastor)} · Ministers: ${fmt(rem.totalMinisters)}${(tgLine?.local||0)>0?` · Parish Retained: ${fmt(tgLine.local)}`:''} — shown in Part B
+        <sup style="color:#c0392b">†</sup> TG balance ${fmt(tgDistributed)} (${Math.round(((rr.tgArea||0)+(rr.tgPastor||0)+(rr.tgMinisters||0))*100)}%) distributed locally — Area/Zonal: ${fmt(rem.totalArea)} · Pastor: ${fmt(rem.totalPastor)} · Ministers: ${fmt(rem.totalMinisters)} — shown in Part B${(tgLine?.local||0)>0?`. Parish-retained TG ${fmt(tgLine.local)} is shown separately in the Local Retained column and parish-local totals`:''}
       </td></tr>`:'';
 
   const childrenDistNote=childrenDeptTotal>0

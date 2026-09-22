@@ -264,8 +264,8 @@ function renderReport(d){
         <td class="td-r">${N(l.total)}</td>
         <td class="td-c">${l.natlPct}%</td>
         <td class="td-r">${N(l.national)}</td>
-        <td class="td-c ${l.locPct>0?'grn':'muted'}">${l.locPct||0}%</td>
-        <td class="td-r ${l.local>0?'grn':'muted'}"${l.local>0?'':' style="font-style:italic"'}>${l.local>0?N(l.local):'—'}</td>
+        <td class="td-c">${l.locPct||0}%</td>
+        <td class="td-r"${l.local>0?'':' style="font-style:italic"'}>${l.local>0?N(l.local):'—'}</td>
       </tr>`;
       if(l.seed>0) summaryTableHTML += `<tr style="background:#fff8e1">
         <td style="padding-left:22px;color:#7a5200;font-style:italic;font-size:11px">↳ TG Seed → National HQ</td>

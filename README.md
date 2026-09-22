@@ -358,7 +358,8 @@ deducted from the parish's own share. It applies to tithes only.
 
 IT Admin can lower one or more other Thanksgiving lines so the split still totals 100%
 when a parish-retained TG share is needed. That parish TG share is **not** remittance due,
-does **not** appear as a Part B payment row, and does **not** enter the province rebate base.
+does **not** appear as a Part B payment row (though it is still shown in summary/local-total
+views), and does **not** enter the province rebate base.
 
 ### Offerings
 
