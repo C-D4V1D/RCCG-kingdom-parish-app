@@ -479,7 +479,7 @@ const DEFAULT_REMITTANCE_RATES = {
   childrenOffering: { natl:0.35, local:0.65 },
   weekendOffering:  { natl:1.00, local:0.00 },
   holyCommunionOffering: { natl:1.00, local:0.00 },
-  tgNational:0.75, tgArea:0.05, tgPastor:0.10, tgMinisters:0.09, tgSeed:0.01,
+  tgNational:0.75, tgArea:0.05, tgPastor:0.10, tgMinisters:0.09, tgSeed:0.01, tgLocal:0,
   provinceRebate:0.20,
   crmAddon:0.25, coastline:0.01, insuranceGenTithe:0.0125, insuranceMinTithe:0.0125
 };
@@ -1578,6 +1578,7 @@ async function getRemRates(){
     tgPastor:         r.tgPastor          ?? DEFAULT_REMITTANCE_RATES.tgPastor,
     tgMinisters:      r.tgMinisters       ?? DEFAULT_REMITTANCE_RATES.tgMinisters,
     tgSeed:           r.tgSeed            ?? DEFAULT_REMITTANCE_RATES.tgSeed,
+    tgLocal:          r.tgLocal           ?? DEFAULT_REMITTANCE_RATES.tgLocal,
     provinceRebate:   r.provinceRebate    ?? DEFAULT_REMITTANCE_RATES.provinceRebate,
     crmAddon:         r.crmAddon          ?? DEFAULT_REMITTANCE_RATES.crmAddon,
     coastline:        r.coastline         ?? DEFAULT_REMITTANCE_RATES.coastline,
@@ -2225,10 +2226,11 @@ async function calcRemittances(income, preRates){
     if(!amt) return;
     if(t.special==='tg'){
       const line = { key:t.key, label:t.label, isTg:true, total:amt, national: amt*rr.tgNational, area: amt*rr.tgArea,
-        pastor: amt*rr.tgPastor, ministers: amt*rr.tgMinisters, seed: amt*(rr.tgSeed||0), local:0 };
+        pastor: amt*rr.tgPastor, ministers: amt*rr.tgMinisters, seed: amt*(rr.tgSeed||0), local: amt*(rr.tgLocal||0) };
       res.lines.push(line);
       res.totalNatl+=line.national; res.totalArea+=line.area;
       res.totalPastor+=line.pastor; res.totalMinisters+=line.ministers; res.totalSeed+=line.seed;
+      res.localBefore+=line.local;
     } else {
       const rateEntry = (rr.rates[t.key]) || { natl: t.natl||0, local: t.local||0 };
       const local = amt*(rateEntry.local);
@@ -8429,9 +8431,9 @@ async function printRemittanceReport(fromOverride, toOverride){
   const tgLine=rem.lines.find(l=>l.isTg);
   const tgTotal=tgLine?.total||0;
   const tgNatlAmt=tgLine?.national||0;
-  const tgDistributed=tgTotal-tgNatlAmt-(tgLine?.seed||0); // area+pastor+ministers only
+  const tgDistributed=tgTotal-tgNatlAmt-(tgLine?.seed||0)-(tgLine?.local||0); // area+pastor+ministers only
   const totalToHQ=rem.lines.reduce((s,l)=>s+(l.national||0),0); // incl. TG national
-  const totalParishLocal=rem.lines.filter(l=>!l.isTg).reduce((s,l)=>s+(l.local||0),0);
+  const totalParishLocal=rem.lines.reduce((s,l)=>s+(l.local||0),0);
   const childrenDeptTotal=rem.childrenDept||0;
 
   // Explicit canonical order for the collection summary rows (form field order is unchanged)
@@ -8442,14 +8444,14 @@ async function printRemittanceReport(fromOverride, toOverride){
     if(!l||!l.total) return '';
     if(l.isTg){
       const natlPct=Math.round(rr.tgNational*100);
-      const distPct=100-natlPct;
+      const locPct=Math.round((rr.tgLocal||0)*100);
       const tgRow=`<tr>
         <td>Thanksgiving (TG) <sup style="color:#c0392b">†</sup></td>
         <td class="td-r">${fmt(l.total)}</td>
         <td class="td-c">${natlPct}%</td>
         <td class="td-r">${fmt(l.national)}</td>
-        <td class="td-c" style="color:#888">${distPct}%</td>
-        <td class="td-r" style="color:#888;font-style:italic">0</td>
+        <td class="td-c">${locPct}%</td>
+        <td class="td-r ${l.local>0?'grn':'muted'}"${l.local>0?'':' style="font-style:italic"'}>${l.local>0?fmt(l.local):'—'}</td>
       </tr>`;
       const seedAmt=l.seed||0;
       const seedRow=seedAmt>0?`<tr style="background:#fff8e1">
@@ -8489,7 +8491,7 @@ async function printRemittanceReport(fromOverride, toOverride){
 
   const tgDistNote=tgDistributed>0
     ?`<tr style="background:#fff8e1"><td colspan="6" style="font-size:11px;color:#7a5200;padding:5px 10px">
-        <sup style="color:#c0392b">†</sup> TG balance ${fmt(tgDistributed)} (${100-Math.round((rr.tgNational+(rr.tgSeed||0))*100)}%) distributed locally — Area/Zonal: ${fmt(rem.totalArea)} · Pastor: ${fmt(rem.totalPastor)} · Ministers: ${fmt(rem.totalMinisters)} — shown in Part B
+        <sup style="color:#c0392b">†</sup> TG balance ${fmt(tgDistributed)} (${Math.round(((rr.tgArea||0)+(rr.tgPastor||0)+(rr.tgMinisters||0))*100)}%) distributed locally — Area/Zonal: ${fmt(rem.totalArea)} · Pastor: ${fmt(rem.totalPastor)} · Ministers: ${fmt(rem.totalMinisters)} — shown in Part B${(tgLine?.local||0)>0?`. Parish-retained TG ${fmt(tgLine.local)} is shown separately in the Local Retained column and parish-local totals`:''}
       </td></tr>`:'';
 
   const childrenDistNote=childrenDeptTotal>0
@@ -8723,9 +8725,9 @@ async function shareRemittanceReport(fromOverride, toOverride){
     const tgLine=rem.lines.find(l=>l.isTg);
     const tgTotal=tgLine?.total||0;
     const tgNatlAmt=tgLine?.national||0;
-    const tgDistributed=tgTotal-tgNatlAmt-(tgLine?.seed||0);
+    const tgDistributed=tgTotal-tgNatlAmt-(tgLine?.seed||0)-(tgLine?.local||0);
     const totalToHQ=rem.lines.reduce((s,l)=>s+(l.national||0),0);
-    const totalParishLocal=rem.lines.filter(l=>!l.isTg).reduce((s,l)=>s+(l.local||0),0);
+    const totalParishLocal=rem.lines.reduce((s,l)=>s+(l.local||0),0);
     const quotasTotal=sumQuotaLines(quotaLines);
     const trueNetLocal=rem.netLocal-quotasTotal;
     const additionalLevies=(rem.crmAddon||0)+(rem.coastline||0)+(rem.insuranceGen||0)+(rem.insuranceMin||0);
@@ -8766,7 +8768,7 @@ async function shareRemittanceReport(fromOverride, toOverride){
     const totalDue=subTotalA+subTotalB;
     const summaryLines=SUMMARY_ORDER.map(key=>{
       const l=getLine(key); if(!l||!l.total) return null;
-      if(l.isTg) return { key, label:l.label, total:l.total, national:l.national, local:0, isTg:true, seed:l.seed||0, natlPct:Math.round(rr.tgNational*100), locPct:0 };
+      if(l.isTg) return { key, label:l.label, total:l.total, national:l.national, local:l.local||0, isTg:true, seed:l.seed||0, natlPct:Math.round(rr.tgNational*100), locPct:Math.round((rr.tgLocal||0)*100) };
       const natlPct=Math.round((l.national/l.total)*100);
       const locPct=Math.round((l.local/l.total)*100);
       // childrensDept is carried separately: report.html shows it in the local column but
@@ -13900,6 +13902,7 @@ function renderAdminRates(s){
       <tr><td>TG → Parish Pastor's Share</td><td>${rateInput('rate_tgPastor', r.tgPastor ?? DEFAULT_REMITTANCE_RATES.tgPastor)}</td></tr>
       <tr><td>TG → Ministers' Share</td><td>${rateInput('rate_tgMinisters', r.tgMinisters ?? DEFAULT_REMITTANCE_RATES.tgMinisters)}</td></tr>
       <tr><td>TG → Seed (Remitted to National HQ)</td><td>${rateInput('rate_tgSeed', r.tgSeed ?? DEFAULT_REMITTANCE_RATES.tgSeed)}</td></tr>
+      <tr><td>TG → Local Retained (Parish)</td><td>${rateInput('rate_tgLocal', r.tgLocal ?? DEFAULT_REMITTANCE_RATES.tgLocal)}</td></tr>
     </table></div>
     <hr class="divider">
     <div class="form-row" style="align-items:center;gap:12px">
@@ -13940,12 +13943,12 @@ async function saveRates(btn=null){
     showAlert(`National HQ % out of range for: ${badRows.join(', ')}. Please correct before saving.`,'danger');
     return;
   }
-  ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed','provinceRebate','crmAddon','coastline','insuranceGenTithe','insuranceMinTithe'].forEach(k=>{
+  ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed','tgLocal','provinceRebate','crmAddon','coastline','insuranceGenTithe','insuranceMinTithe'].forEach(k=>{
     const v = pct2dec(`rate_${k}`);
     if(v!==null) r[k] = v;
   });
   // Validate TG split sums to 100%
-  const tgKeys = ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed'];
+  const tgKeys = ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed','tgLocal'];
   const tgSum = tgKeys.reduce((sum,k)=>sum+(r[k]??0),0);
   if(Math.abs(tgSum-1) > TG_SUM_TOLERANCE){
     showAlert(`Thanksgiving (TG) split percentages must sum to 100% (currently ${Math.round(tgSum*1000)/10}%). Please correct before saving.`,'danger');

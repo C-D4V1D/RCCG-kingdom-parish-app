@@ -354,6 +354,12 @@ deducted from the parish's own share. It applies to tithes only.
 | Parish Pastor | 10% |
 | Ministers | 9% |
 | Pastors' Seed | 1% |
+| Local Retained (Parish) | 0% (configurable) |
+
+IT Admin can lower one or more other Thanksgiving lines so the split still totals 100%
+when a parish-retained TG share is needed. That parish TG share is **not** remittance due,
+does **not** appear as a Part B payment row (though it is still shown in summary/local-total
+views), and does **not** enter the province rebate base.
 
 ### Offerings
 

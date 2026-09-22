@@ -264,8 +264,8 @@ function renderReport(d){
         <td class="td-r">${N(l.total)}</td>
         <td class="td-c">${l.natlPct}%</td>
         <td class="td-r">${N(l.national)}</td>
-        <td class="td-c muted">${100-l.natlPct}%</td>
-        <td class="td-r muted" style="font-style:italic">—</td>
+        <td class="td-c">${l.locPct||0}%</td>
+        <td class="td-r"${l.local>0?'':' style="font-style:italic"'}>${l.local>0?N(l.local):'—'}</td>
       </tr>`;
       if(l.seed>0) summaryTableHTML += `<tr style="background:#fff8e1">
         <td style="padding-left:22px;color:#7a5200;font-style:italic;font-size:11px">↳ TG Seed → National HQ</td>
@@ -281,6 +281,7 @@ function renderReport(d){
           <div class="sum-card-item">Total Collected<span class="val">${N(l.total)}</span></div>
           <div class="sum-card-item">To RCCG HQ (${l.natlPct}%)<span class="val red">${N(l.national)}</span></div>
           <div class="sum-card-item">Distributed Locally<span class="val grn">${N(D.tgDistributed||0)}</span></div>
+          ${l.local>0?`<div class="sum-card-item">Parish Retained (${l.locPct||0}%)<span class="val grn">${N(l.local)}</span></div>`:''}
           ${l.seed>0?`<div class="sum-card-item">Seed → HQ<span class="val red">${N(l.seed)}</span></div>`:''}
         </div>
       </div>`;
