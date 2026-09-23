@@ -1,3 +1,5 @@
+import { coercePlan as coerceBudgetPlan, safeToSpend as budgetSafeToSpend, sumExpensesByCategory as budgetSumExpensesByCategory } from '../../src/js/budget-engine.js';
+
 // ================================================================
 // RCCG Kingdom Parish — Cloudflare Pages Functions API
 // Single catch-all handler for /api/* routes
@@ -1330,6 +1332,14 @@ export async function onRequest(context) {
       if (method === 'POST' && !param) return await createExpense(DB, body);
       if (method === 'PUT'  &&  param) return await updateExpense(DB, param, body);
       if (method === 'DELETE' && param) return await deleteExpense(DB, param);
+    }
+
+    // ── /api/budget ────────────────────────────────────────────
+    if (route === 'budget') {
+      if (method === 'GET' && !param) return await getMonthlyBudget(DB, url.searchParams.get('month'));
+      if (method === 'POST' && param === 'generate') return await generateMonthlyBudget(DB, env, body);
+      if (method === 'POST' && param === 'accept') return await acceptMonthlyBudget(DB, body);
+      if (method === 'POST' && param === 'afford') return await askBudgetAfford(DB, env, body);
     }
 
     // ── /api/expense-receipt/:id — single receipt image, fetched on demand ──
@@ -4475,6 +4485,356 @@ async function saveSettings(DB, data) {
     await DB.prepare(`INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)`).bind(key, stored).run();
   }
   return ok({ saved: true });
+}
+
+function isValidMonthKey(value) {
+  return /^\d{4}-\d{2}$/.test(String(value || ''));
+}
+
+function budgetStatusFromNumbers(expectedParishIncome, recommendedBudget) {
+  if (expectedParishIncome <= 0 || recommendedBudget > expectedParishIncome) return 'short';
+  if (recommendedBudget > expectedParishIncome * 0.9) return 'tight';
+  return 'enough';
+}
+
+function monthFromIsoDate(value) {
+  const match = String(value || '').match(/^(\d{4}-\d{2})/);
+  return match ? match[1] : '';
+}
+
+function averageNaira(values) {
+  const nums = (values || []).map(v => Number(v || 0)).filter(v => Number.isFinite(v));
+  if (!nums.length) return 0;
+  return Math.round(nums.reduce((sum, value) => sum + value, 0) / nums.length);
+}
+
+async function loadMonthlyBudgets(DB) {
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='monthlyBudgets'`).first();
+    const parsed = safeJsonParse(row?.value || '{}', {});
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeMonthlyBudgets(DB, budgets) {
+  const stored = JSON.stringify(budgets && typeof budgets === 'object' ? budgets : {});
+  await DB.prepare(`INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)`).bind('monthlyBudgets', stored).run();
+}
+
+async function writeAuditLog(DB, type, detail, by = 'System') {
+  await DB.prepare(`INSERT INTO audit_log (id,type,detail,by_user,ts) VALUES (?,?,?,?,?)`)
+    .bind(newId('A'), type, detail, by, new Date().toISOString()).run();
+}
+
+async function listExpensesForMonth(DB, monthKey) {
+  const start = `${monthKey}-01`;
+  const end = `${monthKey}-31`;
+  const { results } = await DB.prepare(
+    `SELECT id, category, amount, description, sub_category, date, created_at, remittance_ref
+     FROM expenses
+     WHERE COALESCE(date, substr(created_at, 1, 10)) >= ?
+       AND COALESCE(date, substr(created_at, 1, 10)) <= ?`
+  ).bind(start, end).all();
+  return (results || [])
+    .filter(row => monthFromIsoDate(row.date || row.created_at) === monthKey)
+    .map(row => ({
+      id: row.id,
+      category: row.category || '',
+      amount: Number(row.amount || 0),
+      description: row.description || '',
+      subCategory: row.sub_category || '',
+      date: row.date || row.created_at || '',
+      remittanceRef: row.remittance_ref || '',
+    }));
+}
+
+function normalizeBudgetPack(pack, monthKeyValue) {
+  const months = Array.isArray(pack?.months)
+    ? pack.months
+      .filter(item => item && isValidMonthKey(item.monthKey))
+      .map(item => ({
+        monthKey: item.monthKey,
+        grossIncome: Math.max(0, Math.round(Number(item.grossIncome || 0))),
+        remittanceDue: Math.max(0, Math.round(Number(item.remittanceDue || 0))),
+        parishIncomeAfterRemittance: Math.max(0, Math.round(Number(item.parishIncomeAfterRemittance || 0))),
+        expensesByCategory: item.expensesByCategory && typeof item.expensesByCategory === 'object' ? item.expensesByCategory : {},
+        notes: Array.isArray(item.notes) ? item.notes.map(n => String(n)).slice(0, 6) : [],
+      }))
+      .sort((a, b) => a.monthKey.localeCompare(b.monthKey))
+    : [];
+  const historyMonthsUsed = Math.max(1, Math.min(12, Math.round(Number(pack?.historyMonthsUsed || months.length || 6))));
+  return {
+    monthKey: monthKeyValue,
+    historyMonthsUsed,
+    months,
+    expectedGrossIncome: averageNaira(months.map(item => item.grossIncome)),
+    expectedRemittance: averageNaira(months.map(item => item.remittanceDue)),
+    expectedParishIncome: averageNaira(months.map(item => item.parishIncomeAfterRemittance)),
+    categoryHints: Array.isArray(pack?.categoryHints) ? pack.categoryHints.slice(0, 20) : [],
+    noteSnippets: Array.isArray(pack?.noteSnippets) ? pack.noteSnippets.map(String).slice(0, 20) : [],
+  };
+}
+
+function normalizeBudgetAdvisorResult(raw, pack, existingPlan = null, meta = {}) {
+  const coerced = coerceBudgetPlan(raw, {
+    monthKey: pack.monthKey,
+    expectedGrossIncome: pack.expectedGrossIncome,
+    expectedRemittance: pack.expectedRemittance,
+    expectedParishIncome: pack.expectedParishIncome,
+    historyMonthsUsed: pack.historyMonthsUsed,
+  });
+  const now = new Date().toISOString();
+  const affordLog = Array.isArray(existingPlan?.affordLog) ? existingPlan.affordLog.slice(-10) : [];
+  const lines = Array.isArray(coerced.lines) ? coerced.lines : [];
+  const lineSum = lines.reduce((sum, line) => sum + Math.max(0, Math.round(Number(line.amount || 0))), 0);
+  const cushion = Math.max(0, Math.round(Number(coerced.cushion || 0)));
+  const expectedParishIncome = Math.max(0, Math.round(Number(pack.expectedParishIncome || 0)));
+  const recommendedBudget = lineSum + cushion;
+  const statusLabel = budgetStatusFromNumbers(expectedParishIncome, recommendedBudget);
+  return {
+    monthKey: pack.monthKey,
+    status: 'draft',
+    createdAt: existingPlan?.createdAt || now,
+    acceptedAt: existingPlan?.acceptedAt || '',
+    acceptedBy: existingPlan?.acceptedBy || '',
+    expectedGrossIncome: Math.max(0, Math.round(Number(pack.expectedGrossIncome || 0))),
+    expectedRemittance: Math.max(0, Math.round(Number(pack.expectedRemittance || 0))),
+    expectedParishIncome,
+    recommendedBudget,
+    statusLabel,
+    summary: String(coerced.summary || '').trim(),
+    ignored: Array.isArray(coerced.ignored) ? coerced.ignored.map(item => String(item)).slice(0, 12) : [],
+    remittanceStrip: {
+      label: 'Already spoken for (RCCG remittance)',
+      amount: Math.max(0, Math.round(Number(pack.expectedRemittance || 0))),
+    },
+    lines,
+    cushion,
+    model: String(meta.model || coerced.model || ''),
+    historyMonthsUsed: pack.historyMonthsUsed,
+    affordLog,
+  };
+}
+
+function budgetGeneratePrompt(pack, churchName) {
+  return `You are advising ${churchName || 'this parish'} on next month's OPERATING budget.
+
+Return STRICT JSON only with this shape:
+{
+  "recommendedBudget": 0,
+  "cushion": 0,
+  "statusLabel": "enough|tight|short",
+  "summary": "one plain-English paragraph",
+  "ignored": ["..."],
+  "lines": [
+    { "key": "power", "label": "Power & Energy", "amount": 0, "cadence": "usual|occasional|annual|once", "why": "...", "expenseCategory": "power" }
+  ]
+}
+
+Rules you must obey:
+- Remittance is NOT a budget expense line. Never include HQ, TG shares, quotas, or seed as budget lines.
+- Children's department cash and satellite pass-through are not parish spendable income.
+- expected parish income after remittance is EXACTLY ₦${pack.expectedParishIncome.toLocaleString('en-NG')}.
+- expected remittance is EXACTLY ₦${pack.expectedRemittance.toLocaleString('en-NG')}.
+- recommendedBudget MUST be a single exact integer naira amount.
+- recommendedBudget MUST equal sum(lines.amount) + cushion.
+- Keep lines to operating spend only.
+- Use the parish history below; do not invent income beyond the supplied pack.
+
+History months:
+${JSON.stringify(pack.months)}
+
+Category hints:
+${JSON.stringify(pack.categoryHints || [])}
+
+Notes:
+${JSON.stringify(pack.noteSnippets || [])}`;
+}
+
+function budgetAffordPrompt(plan, idea, amount, safe) {
+  return `You are an advisor, not a decision-maker. Reply with STRICT JSON only:
+{
+  "verdict": "yes|stretch|no",
+  "safeAmount": 0,
+  "explanation": "two or three sentences"
+}
+
+Monthly budget plan:
+${JSON.stringify({
+    monthKey: plan.monthKey,
+    statusLabel: plan.statusLabel,
+    expectedParishIncome: plan.expectedParishIncome,
+    recommendedBudget: plan.recommendedBudget,
+    cushion: plan.cushion,
+    lines: plan.lines,
+  })}
+
+Question:
+- idea: ${String(idea || '').trim()}
+- requested extra amount: ₦${Math.max(0, Math.round(Number(amount || 0))).toLocaleString('en-NG')}
+
+Server-calculated guardrails you must respect:
+- safeExtraRightNow: ₦${Math.max(0, Math.round(Number(safe.safeExtra || 0))).toLocaleString('en-NG')}
+- leftoverAfterBudget: ₦${Math.round(Number(safe.leftoverAfterBudget || 0)).toLocaleString('en-NG')}
+- leftoverAfterExtra: ₦${Math.round(Number(safe.leftoverAfterExtra || 0)).toLocaleString('en-NG')}
+
+You may advise cut/postpone/reduce, but do not invent extra money.`;
+}
+
+async function callBudgetAdvisorJson(DB, env, prompt, fallbackValue) {
+  const errors = [];
+  const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
+  if (deepseekKey) {
+    try {
+      const resp = await fetch('https://api.deepseek.com/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + deepseekKey },
+        body: JSON.stringify({
+          model: deepseekModel,
+          messages: [{ role: 'user', content: prompt }],
+          response_format: { type: 'json_object' },
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error?.message || `DeepSeek API error ${resp.status}`);
+      const raw = String(data?.choices?.[0]?.message?.content || '').replace(/```json|```/gi, '').trim();
+      return { provider: 'deepseek', model: deepseekModel, data: safeJsonParse(raw, fallbackValue) || fallbackValue };
+    } catch (error) {
+      errors.push(`DeepSeek: ${error.message}`);
+    }
+  } else {
+    errors.push('DeepSeek: no API key configured');
+  }
+  const openaiKey = await resolveOpenAiKey(env, DB);
+  if (openaiKey) {
+    try {
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + openaiKey },
+        body: JSON.stringify({
+          model: 'gpt-5-mini',
+          response_format: { type: 'json_object' },
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error?.message || `OpenAI API error ${resp.status}`);
+      const raw = String(data?.choices?.[0]?.message?.content || '').replace(/```json|```/gi, '').trim();
+      return { provider: 'openai', model: 'gpt-5-mini', data: safeJsonParse(raw, fallbackValue) || fallbackValue };
+    } catch (error) {
+      errors.push(`OpenAI: ${error.message}`);
+    }
+  } else {
+    errors.push('OpenAI: no API key configured');
+  }
+  return { provider: 'deterministic', model: '', data: fallbackValue, error: errors.join(' | ') };
+}
+
+async function getMonthlyBudget(DB, requestedMonthKey) {
+  if (!isValidMonthKey(requestedMonthKey)) return err('month query parameter must be YYYY-MM', 400);
+  const budgets = await loadMonthlyBudgets(DB);
+  return ok({ plan: budgets[requestedMonthKey] || null });
+}
+
+async function generateMonthlyBudget(DB, env, data) {
+  const targetMonthKey = String(data?.monthKey || '').trim();
+  if (!isValidMonthKey(targetMonthKey)) return err('monthKey must be YYYY-MM', 400);
+  const pack = normalizeBudgetPack(data?.pack || {}, targetMonthKey);
+  if (!pack.months.length) return err('Budget history pack is required', 400);
+  const budgets = await loadMonthlyBudgets(DB);
+  const existingPlan = budgets[targetMonthKey] || null;
+  const ai = await callBudgetAdvisorJson(DB, env, budgetGeneratePrompt(pack, data?.churchName), {
+    recommendedBudget: Math.max(0, Math.round(pack.expectedParishIncome * 0.9)),
+    cushion: Math.max(0, Math.round(pack.expectedParishIncome * 0.05)),
+    statusLabel: budgetStatusFromNumbers(pack.expectedParishIncome, Math.max(0, Math.round(pack.expectedParishIncome * 0.9))),
+    summary: `This draft uses the last ${pack.historyMonthsUsed} month(s) as a guide, keeps remittance outside the spending lines, and treats parish operating income after remittance as the ceiling for next month.`,
+    ignored: ['remittance is already spoken for', 'children and satellite pass-through are excluded'],
+    lines: (pack.categoryHints || []).slice(0, 6).map(item => ({
+      key: String(item.key || 'other'),
+      label: String(item.label || item.key || 'Budget line'),
+      amount: Math.max(0, Math.round(Number(item.avgAmount || item.averageAmount || 0))),
+      cadence: ['usual', 'occasional', 'annual', 'once'].includes(item.cadence) ? item.cadence : 'usual',
+      why: String(item.why || 'Built from recent operating history'),
+      expenseCategory: String(item.expenseCategory || item.key || 'other'),
+    })).filter(item => item.amount > 0),
+  });
+  const plan = normalizeBudgetAdvisorResult(ai.data, pack, existingPlan, { model: ai.model });
+  budgets[targetMonthKey] = plan;
+  await writeMonthlyBudgets(DB, budgets);
+  await writeAuditLog(DB, 'budget_generated', `Monthly budget draft generated for ${targetMonthKey} (${plan.statusLabel}, ${plan.recommendedBudget})`, 'System');
+  return ok({ plan, provider: ai.provider, providerError: ai.error || '' });
+}
+
+async function acceptMonthlyBudget(DB, data) {
+  const targetMonthKey = String(data?.monthKey || '').trim();
+  if (!isValidMonthKey(targetMonthKey)) return err('monthKey must be YYYY-MM', 400);
+  const budgets = await loadMonthlyBudgets(DB);
+  const plan = budgets[targetMonthKey];
+  if (!plan) return err('No budget plan found for that month', 404);
+  if (plan.status === 'accepted') return ok({ plan });
+  const acceptedBy = String(data?.acceptedBy || '').trim() || 'Finance Portal';
+  budgets[targetMonthKey] = {
+    ...plan,
+    status: 'accepted',
+    acceptedAt: new Date().toISOString(),
+    acceptedBy,
+  };
+  await writeMonthlyBudgets(DB, budgets);
+  await writeAuditLog(DB, 'budget_accepted', `Monthly budget accepted for ${targetMonthKey}`, acceptedBy);
+  return ok({ plan: budgets[targetMonthKey] });
+}
+
+async function askBudgetAfford(DB, env, data) {
+  const targetMonthKey = String(data?.monthKey || '').trim();
+  const idea = String(data?.idea || '').trim();
+  if (!isValidMonthKey(targetMonthKey)) return err('monthKey must be YYYY-MM', 400);
+  if (!idea) return err('idea is required', 400);
+  const budgets = await loadMonthlyBudgets(DB);
+  const plan = budgets[targetMonthKey];
+  if (!plan) return err('No budget plan found for that month', 404);
+  const amount = Math.max(0, Math.round(Number(data?.amount || 0)));
+  const monthExpenses = await listExpensesForMonth(DB, targetMonthKey);
+  const spentTotal = budgetSumExpensesByCategory(monthExpenses).total;
+  const safe = budgetSafeToSpend(plan, spentTotal, amount);
+  const ai = await callBudgetAdvisorJson(DB, env, budgetAffordPrompt(plan, idea, amount, safe), {
+    verdict: safe.verdict,
+    safeAmount: safe.safeExtra,
+    explanation: safe.verdict === 'no'
+      ? 'This request is above the safe extra room left in the plan right now, so it should be postponed, reduced, or matched with cuts elsewhere.'
+      : safe.verdict === 'stretch'
+        ? 'This request may be possible, but the month is already tight. Proceed only if it is urgent and lower-priority lines can absorb the pressure.'
+        : 'This request still fits inside the remaining operating budget for the month, so it appears affordable if no new pressure emerges.',
+  });
+  const affordEntry = {
+    at: new Date().toISOString(),
+    idea,
+    requestedAmount: amount,
+    spentTotal,
+    verdict: safe.verdict,
+    safeAmount: safe.safeExtra,
+  };
+  budgets[targetMonthKey] = {
+    ...plan,
+    affordLog: [...(Array.isArray(plan.affordLog) ? plan.affordLog : []), affordEntry].slice(-10),
+  };
+  await writeMonthlyBudgets(DB, budgets);
+  await writeAuditLog(DB, 'budget_afford_asked', `Afford check asked for ${targetMonthKey}: ${idea}${amount ? ` (${amount})` : ''}`, 'System');
+  return ok({
+    verdict: safe.verdict,
+    safeAmount: safe.safeExtra,
+    explanation: String(ai.data?.explanation || '').trim(),
+    aiVerdict: String(ai.data?.verdict || ''),
+    aiSafeAmount: Math.max(0, Math.round(Number(ai.data?.safeAmount || 0))),
+    server: {
+      spentTotal,
+      leftoverAfterBudget: safe.leftoverAfterBudget,
+      leftoverAfterExtra: safe.leftoverAfterExtra,
+    },
+    provider: ai.provider,
+    providerError: ai.error || '',
+  });
 }
 
 async function getKpscPartners(DB) {

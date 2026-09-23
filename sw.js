@@ -1,10 +1,11 @@
-// build:adbd4df1cf
+// build:1205edc533
 const CACHE = 'kpadmin-v34';
 const SHELL = [
   '/',
   '/index.html',
   '/manifest.json',
   '/dist/css/styles.css',
+  '/dist/js/budget-engine.js',
   '/dist/js/app.js',
 ];
 
@@ -13,6 +14,7 @@ function isAppShellAsset(pathname) {
     || pathname === '/index.html'
     || pathname === '/manifest.json'
     || pathname === '/dist/css/styles.css'
+    || pathname === '/dist/js/budget-engine.js'
     || pathname === '/dist/js/app.js';
 }
 
