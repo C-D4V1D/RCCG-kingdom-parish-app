@@ -12,6 +12,9 @@ import BudgetEngine, {
   matchActuals,
   safeToSpend,
   coercePlan,
+  robustMonthlySeries,
+  suggestCategoryAmount,
+  applyAffordability,
 } from '../src/js/budget-engine.js';
 
 test('monthKey formats calendar months', () => {
@@ -211,4 +214,78 @@ test('matchActuals derives display note subs when plan has none', () => {
   assert.equal(subs.length, 2);
   assert.equal(subs.reduce((sum, item) => sum + item.budgeted, 0), 40000);
   assert.equal(subs.reduce((sum, item) => sum + item.spent, 0), 15000);
+});
+
+test('robustMonthlySeries excludes one-off spike months from the typical value', () => {
+  const months = [
+    { monthKey: '2026-04', amount: 30000 },
+    { monthKey: '2026-05', amount: 32000 },
+    { monthKey: '2026-06', amount: 28000 },
+    { monthKey: '2026-07', amount: 150000 },
+    { monthKey: '2026-08', amount: 31000 },
+    { monthKey: '2026-09', amount: 29000 },
+  ];
+  const stats = robustMonthlySeries(months, item => item.amount);
+  assert.deepEqual(stats.outliers, ['2026-07']);
+  assert.equal(stats.typical, 30000);
+  assert.equal(stats.activeMonths, 6);
+});
+
+test('robustMonthlySeries handles empty and short histories', () => {
+  assert.equal(robustMonthlySeries([], item => item?.amount).typical, 0);
+  const single = robustMonthlySeries([{ monthKey: '2026-09', amount: 40000 }], item => item.amount);
+  assert.equal(single.typical, 40000);
+  assert.deepEqual(single.outliers, []);
+  assert.equal(single.confidence, 'low');
+});
+
+test('suggestCategoryAmount zeroes one-off spends and budgets usual lines at the typical month', () => {
+  const months = [
+    { monthKey: '2026-04', expensesByCategory: { power: 30000 }, notes: [] },
+    { monthKey: '2026-05', expensesByCategory: { power: 32000 }, notes: [] },
+    { monthKey: '2026-06', expensesByCategory: { power: 28000 }, notes: [] },
+    { monthKey: '2026-07', expensesByCategory: { power: 31000, property: 150000 }, notes: ['Emergency roof repair'] },
+    { monthKey: '2026-08', expensesByCategory: { power: 29000 }, notes: [] },
+    { monthKey: '2026-09', expensesByCategory: { power: 30000 }, notes: [] },
+  ];
+  const power = suggestCategoryAmount(months, 'power');
+  assert.equal(power.cadence, 'usual');
+  assert.equal(power.amount, 30000);
+  const property = suggestCategoryAmount(months, 'property');
+  assert.equal(property.amount, 0);
+});
+
+test('suggestCategoryAmount scales occasional lines by frequency', () => {
+  const months = [
+    { monthKey: '2026-04', expensesByCategory: { repairs: 40000 }, notes: [] },
+    { monthKey: '2026-05', expensesByCategory: {}, notes: [] },
+    { monthKey: '2026-06', expensesByCategory: { repairs: 42000 }, notes: [] },
+    { monthKey: '2026-07', expensesByCategory: {}, notes: [] },
+    { monthKey: '2026-08', expensesByCategory: { repairs: 38000 }, notes: [] },
+    { monthKey: '2026-09', expensesByCategory: {}, notes: [] },
+  ];
+  const repairs = suggestCategoryAmount(months, 'repairs');
+  assert.equal(repairs.cadence, 'occasional');
+  assert.equal(repairs.typical, 40000);
+  assert.equal(repairs.amount, 20000);
+});
+
+test('applyAffordability keeps lean plans untouched', () => {
+  const fit = applyAffordability([
+    { key: 'power', amount: 30000, cadence: 'usual' },
+    { key: 'welfare', amount: 20000, cadence: 'usual' },
+  ], 5000, 200000);
+  assert.equal(fit.capped, false);
+  assert.equal(fit.lines.reduce((sum, line) => sum + line.amount, 0) + fit.cushion, 55000);
+});
+
+test('applyAffordability caps bloated plans at 90% of expected income', () => {
+  const fit = applyAffordability([
+    { key: 'power', amount: 120000, cadence: 'usual' },
+    { key: 'property', amount: 80000, cadence: 'occasional' },
+  ], 60000, 200000);
+  assert.equal(fit.capped, true);
+  assert.ok(fit.lines.reduce((sum, line) => sum + line.amount, 0) + fit.cushion <= 180000);
+  assert.ok(fit.cushion <= Math.round(180000 * 0.25));
+  assert.ok(fit.lines.every(line => line.amount > 0));
 });
