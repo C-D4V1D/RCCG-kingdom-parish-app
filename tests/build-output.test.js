@@ -23,6 +23,14 @@ for (const [src, dest] of JS_FILES) {
   test(`${dest} is up-to-date with ${src}`, async () => {
     const sourceCode = await readFile(new URL('../' + src, import.meta.url), 'utf8');
     const committed = await readFile(new URL('../' + dest, import.meta.url), 'utf8');
+    // Browser bundle is a classic script: ESM `export` is stripped so index.html
+    // can load it with a normal <script> tag. Tests still import the ESM source.
+    if (src.endsWith('budget-engine.js')) {
+      assert.equal(committed.includes('export '), false, `${dest} must not contain ESM export`);
+      assert.match(committed, /BudgetEngine/);
+      assert.match(sourceCode, /export function monthKey/);
+      return;
+    }
     const expected = await minifyJS(sourceCode);
     assert.equal(
       committed,
