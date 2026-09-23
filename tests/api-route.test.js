@@ -4410,3 +4410,154 @@ test('POST /api/budget/afford overrides AI with server-side leftover math', asyn
   assert.equal(body.verdict, 'stretch', 'tight plans stay stretch even if AI says yes');
   assert.equal(body.aiSafeAmount, 999999, 'raw AI answer is still returned for comparison');
 });
+
+test('POST /api/budget/afford uses the 3-month rolling outlook as the authoritative verdict when supplied', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          verdict: 'yes',
+          safeAmount: 999999,
+          explanation: 'The AI thinks there is plenty of room.',
+        }),
+      },
+    }],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  const monthlyBudgetsJson = JSON.stringify({
+    '2026-09': {
+      monthKey: '2026-09',
+      status: 'accepted',
+      expectedGrossIncome: 150000,
+      expectedRemittance: 40000,
+      expectedParishIncome: 110000,
+      recommendedBudget: 20000,
+      statusLabel: 'enough',
+      summary: 'Accepted plan.',
+      ignored: [],
+      remittanceStrip: { label: 'Already spoken for (RCCG remittance)', amount: 40000 },
+      lines: [
+        { key: 'power', label: 'Power & Energy', amount: 20000, cadence: 'usual', why: 'Generator', expenseCategory: 'power' },
+      ],
+      cushion: 0,
+      affordLog: [],
+    },
+  });
+
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/afford', 'POST', {
+      monthKey: '2026-09',
+      idea: 'New sound equipment',
+      amount: 50000,
+      rolling: { expectedIncome3mo: 300000, committedSpend3mo: 280000 },
+    }),
+    env: { DB: createDBMock({
+      onPrepare(sql) {
+        const statement = {
+          bind() { return statement; },
+          async first() {
+            if (/SELECT value FROM settings WHERE key='monthlyBudgets'/.test(sql)) return { value: monthlyBudgetsJson };
+            return null;
+          },
+          async all() {
+            if (/FROM expenses/.test(sql)) return { results: [] };
+            if (/SELECT key,value FROM settings WHERE key IN \('ai_deepseek_key','ai_deepseek_model'\)/.test(sql)) {
+              return { results: [
+                { key: 'ai_deepseek_key', value: 'ds-key' },
+                { key: 'ai_deepseek_model', value: 'deepseek-v4-flash' },
+              ] };
+            }
+            return { results: [] };
+          },
+          async run() { return { success: true }; },
+        };
+        return statement;
+      },
+    }) },
+  });
+  globalThis.fetch = originalFetch;
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  // 3-month headroom before the request is 300000-280000=20000; the 50000 idea pushes it to -30000,
+  // so the rolling outlook must say "no" even though this single month alone looks "enough" and the AI said "yes".
+  assert.equal(body.verdict, 'no', 'the 3-month outlook overrides both the single-month math and the AI verdict');
+  assert.equal(body.safeAmount, 20000, 'safe amount reflects 3-month headroom, not this month alone');
+  assert.ok(body.rolling, 'rolling breakdown is echoed back');
+  assert.equal(body.rolling.expectedIncome3mo, 300000);
+  assert.equal(body.rolling.committedSpend3mo, 280000);
+});
+
+test('POST /api/budget/outlook returns a deterministic verdict and caption, ignoring an AI-invented number', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{
+      message: {
+        content: JSON.stringify({ caption: 'You have plenty of money, go wild!' }),
+      },
+    }],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/outlook', 'POST', {
+      monthKeys: ['2026-09', '2026-10', '2026-11'],
+      expectedIncome3mo: 300000,
+      committedSpend3mo: 350000,
+      topDriver: 'Power & Energy',
+    }),
+    env: { DB: createDBMock({
+      onPrepare(sql) {
+        const statement = {
+          bind() { return statement; },
+          async first() { return null; },
+          async all() {
+            if (/SELECT key,value FROM settings WHERE key IN \('ai_deepseek_key','ai_deepseek_model'\)/.test(sql)) {
+              return { results: [
+                { key: 'ai_deepseek_key', value: 'ds-key' },
+                { key: 'ai_deepseek_model', value: 'deepseek-v4-flash' },
+              ] };
+            }
+            return { results: [] };
+          },
+          async run() { return { success: true }; },
+        };
+        return statement;
+      },
+    }) },
+  });
+  globalThis.fetch = originalFetch;
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.statusLabel, 'short', 'committed spend exceeds expected income, so status is short regardless of the AI caption');
+  assert.equal(body.verdict, 'no');
+  assert.equal(body.headroom, -50000);
+  assert.equal(body.caption, 'You have plenty of money, go wild!', 'AI caption text is used since it is still just phrasing, not a number');
+});
+
+test('POST /api/budget/outlook falls back to a deterministic caption when no AI provider is configured', async () => {
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/outlook', 'POST', {
+      monthKeys: ['2026-09', '2026-10', '2026-11'],
+      expectedIncome3mo: 360000,
+      committedSpend3mo: 240000,
+    }),
+    env: { DB: createDBMock({
+      onPrepare() {
+        const statement = {
+          bind() { return statement; },
+          async first() { return null; },
+          async all() { return { results: [] }; },
+          async run() { return { success: true }; },
+        };
+        return statement;
+      },
+    }) },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.verdict, 'yes');
+  assert.match(body.caption, /120,000/, 'deterministic fallback caption still states the correct spare amount');
+});

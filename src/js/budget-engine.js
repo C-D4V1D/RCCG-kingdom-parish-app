@@ -205,6 +205,83 @@ export function suggestCategoryAmount(months = [], categoryKey) {
   return { amount, cadence, typical: stats.typical, outliers: stats.outliers, confidence: stats.confidence };
 }
 
+export function budgetStatus(expectedParishIncome, recommendedBudget) {
+  const expected = Math.max(0, roundNaira(expectedParishIncome));
+  const recommended = Math.max(0, roundNaira(recommendedBudget));
+  if (expected <= 0 || recommended > expected) return 'short';
+  if (recommended > expected * 0.9) return 'tight';
+  return 'enough';
+}
+
+export function computeAffordVerdict(expectedIncome, committedSpend, extraAmount = 0) {
+  const income = Math.max(0, roundNaira(expectedIncome));
+  const committed = Math.max(0, roundNaira(committedSpend));
+  const extra = Math.max(0, roundNaira(extraAmount));
+  const headroom = income - committed;
+  const headroomAfterExtra = headroom - extra;
+  const statusLabel = budgetStatus(income, committed);
+  let verdict = 'no';
+  if (statusLabel === 'short') verdict = 'no';
+  else if (headroomAfterExtra < 0) verdict = 'no';
+  else if (statusLabel === 'tight') verdict = 'stretch';
+  else verdict = 'yes';
+  return { income, committed, extra, headroom, headroomAfterExtra, statusLabel, verdict };
+}
+
+export function estimateTypicalBudget(categoryHints = [], expectedParishIncome = 0) {
+  const expected = Math.max(0, roundNaira(expectedParishIncome));
+  const lines = (Array.isArray(categoryHints) ? categoryHints : [])
+    .map(hint => ({
+      key: String(hint?.key || hint?.expenseCategory || 'other'),
+      amount: Math.max(0, roundNaira(hint?.avgAmount ?? hint?.averageAmount ?? 0)),
+      cadence: normalizeCadence(hint?.cadence),
+    }))
+    .filter(line => line.amount > 0)
+    .sort((a, b) => b.amount - a.amount)
+    .slice(0, 8);
+  if (!lines.length) return 0;
+  const cushion = Math.max(5000, Math.round(expected * 0.08));
+  const fit = applyAffordability(lines, cushion, expected);
+  return fit.lines.reduce((sum, line) => sum + line.amount, 0) + fit.cushion;
+}
+
+export function rollingAfford({
+  monthKeys = [],
+  plans = {},
+  categoryHints = [],
+  expectedParishIncome = 0,
+  extraAmount = 0,
+} = {}) {
+  const keys = (Array.isArray(monthKeys) ? monthKeys : []).filter(Boolean).map(String);
+  const perMonth = keys.map(key => {
+    const plan = plans && typeof plans === 'object' ? plans[key] : null;
+    const hasPlan = !!plan && Number.isFinite(Number(plan.recommendedBudget));
+    const committed = hasPlan
+      ? roundNaira(plan.recommendedBudget)
+      : estimateTypicalBudget(categoryHints, expectedParishIncome);
+    return {
+      monthKey: key,
+      income: roundNaira(expectedParishIncome),
+      committed,
+      hasPlan,
+    };
+  });
+  const expectedIncome3mo = perMonth.reduce((sum, m) => sum + m.income, 0);
+  const committedSpend3mo = perMonth.reduce((sum, m) => sum + m.committed, 0);
+  const verdict = computeAffordVerdict(expectedIncome3mo, committedSpend3mo, extraAmount);
+  return {
+    monthKeys: keys,
+    perMonth,
+    expectedIncome3mo,
+    committedSpend3mo,
+    headroom: verdict.headroom,
+    headroomAfterExtra: verdict.headroomAfterExtra,
+    extraAmount: verdict.extra,
+    statusLabel: verdict.statusLabel,
+    verdict: verdict.verdict,
+  };
+}
+
 export function applyAffordability(lines = [], cushion = 0, expectedParishIncome = 0) {
   const expected = Math.max(0, roundNaira(expectedParishIncome));
   const cap = expected > 0 ? Math.round(expected * 0.9) : 0;
@@ -553,9 +630,7 @@ export function coercePlan(raw, pack) {
   const expectedParishIncome = roundNaira(pack?.expectedParishIncome ?? raw?.expectedParishIncome ?? 0);
   let statusLabel = String(raw?.statusLabel || '').trim();
   if (!['enough', 'tight', 'short'].includes(statusLabel)) {
-    if (expectedParishIncome <= 0 || recommendedBudget > expectedParishIncome) statusLabel = 'short';
-    else if (recommendedBudget > expectedParishIncome * 0.9) statusLabel = 'tight';
-    else statusLabel = 'enough';
+    statusLabel = budgetStatus(expectedParishIncome, recommendedBudget);
   }
   return {
     monthKey: String(raw?.monthKey || pack?.monthKey || ''),
@@ -600,6 +675,10 @@ const api = {
   robustMonthlySeries,
   suggestCategoryAmount,
   applyAffordability,
+  budgetStatus,
+  computeAffordVerdict,
+  estimateTypicalBudget,
+  rollingAfford,
 };
 
 if (typeof window !== 'undefined') window.BudgetEngine = api;
