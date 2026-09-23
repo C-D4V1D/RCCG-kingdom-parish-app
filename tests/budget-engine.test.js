@@ -80,6 +80,19 @@ test('suggestSubsForCategory sub amounts sum to category budget', () => {
   assert.equal(subs.reduce((sum, item) => sum + item.amount, 0), 60000);
 });
 
+test('suggestSubsForCategory caps at four with other-notes rollup', () => {
+  const subs = suggestSubsForCategory('power', [
+    { category: 'power', amount: 1000, description: 'Diesel refill' },
+    { category: 'power', amount: 900, description: 'NEPA token' },
+    { category: 'power', amount: 800, description: 'Inverter service' },
+    { category: 'power', amount: 700, description: 'Solar cleaner' },
+    { category: 'power', amount: 600, description: 'Cable replacement' },
+  ], 10000);
+  assert.equal(subs.length, 4);
+  assert.equal(subs[3].fingerprint, 'other_notes');
+  assert.equal(subs.reduce((sum, item) => sum + item.amount, 0), 10000);
+});
+
 test('packHistory excludes children offering from parish gross and parish income', () => {
   const packed = packHistory({
     incomeRecords: [

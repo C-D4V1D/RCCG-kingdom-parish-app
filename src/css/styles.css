@@ -318,7 +318,7 @@ tr:hover td{background:var(--surface)}
 .budget-line-sub{font-size:12px;color:var(--text2);margin-top:2px}
 .budget-line-pct{font-size:12px;font-weight:700;color:var(--text2);margin-top:6px}
 .budget-line-bar{margin:10px 0 0}
-.budget-subline-wrap{margin-top:8px}
+.budget-subline-wrap{margin-top:8px;list-style:none;padding:0}
 .budget-subline{display:flex;justify-content:space-between;gap:10px;font-size:13px;padding-left:12px;margin-top:4px}
 .budget-subline span{color:var(--text3)}
 .budget-line-expenses{margin-top:10px;border-top:1px solid var(--border);padding-top:10px}

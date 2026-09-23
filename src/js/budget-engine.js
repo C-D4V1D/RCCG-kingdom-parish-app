@@ -250,7 +250,17 @@ export function suggestSubsForCategory(category, expenses = [], categoryBudget =
     .filter(expense => String(expense?.category || 'other').trim() === categoryKey);
   const grouped = groupExpensesByNote(categoryExpenses);
   if (grouped.length <= 1) return [];
-  const top = grouped.slice(0, 4);
+  const top = grouped.length > 4
+    ? [
+        ...grouped.slice(0, 3),
+        {
+          fingerprint: 'other_notes',
+          label: 'Other Notes',
+          amount: grouped.slice(3).reduce((sum, item) => sum + amountOf(item.amount), 0),
+          cadence: 'occasional',
+        },
+      ]
+    : grouped.slice(0, 4);
   const split = splitBudgetAcrossSubs(categoryBudget, top.map(item => item.amount));
   return top.map((item, index) => ({
     fingerprint: item.fingerprint,
