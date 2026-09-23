@@ -119,6 +119,137 @@ function normalizeSeriesItem(entry) {
   return { amount: amountOf(entry?.amount), notes: extractNotes(entry).toLowerCase() };
 }
 
+function percentile(sortedValues, p) {
+  const nums = (Array.isArray(sortedValues) ? sortedValues : [])
+    .map(amountOf)
+    .filter(value => Number.isFinite(value))
+    .sort((a, b) => a - b);
+  if (!nums.length) return 0;
+  const rank = (nums.length - 1) * Math.max(0, Math.min(1, p));
+  const lower = Math.floor(rank);
+  const upper = Math.ceil(rank);
+  if (lower === upper) return nums[lower];
+  const frac = rank - lower;
+  return nums[lower] + (nums[upper] - nums[lower]) * frac;
+}
+
+function monthOfSeriesItem(item) {
+  return monthKey(item?.date || item?.createdAt || '');
+}
+
+export function robustMonthlySeries(months = [], pick) {
+  const selector = typeof pick === 'function' ? pick : () => 0;
+  const values = (Array.isArray(months) ? months : []).map((month, index) => {
+    const value = amountOf(selector(month, index));
+    return {
+      key: String(month?.monthKey || ''),
+      value: Number.isFinite(value) ? value : 0,
+    };
+  });
+  const positives = values.filter(item => item.value > 0).map(item => item.value);
+  const n = positives.length;
+  if (!n) {
+    return { typical: 0, median: 0, outliers: [], activeMonths: 0, spread: 0, confidence: 'none', months: values };
+  }
+  const sorted = [...positives].sort((a, b) => a - b);
+  const median = percentile(sorted, 0.5);
+  const q1 = percentile(sorted, 0.25);
+  const q3 = percentile(sorted, 0.75);
+  const iqr = Math.max(0, q3 - q1);
+  const outlierKeys = new Set();
+  if (n >= 3 && iqr > 0) {
+    const fence = q3 + (1.5 * iqr);
+    for (const item of values) {
+      if (item.value > 0 && item.value > fence) outlierKeys.add(item.key);
+    }
+  }
+  const inliers = values.filter(item => item.value > 0 && !outlierKeys.has(item.key)).map(item => item.value);
+  const base = inliers.length ? inliers : positives;
+  const typical = roundNaira(base.reduce((sum, value) => sum + value, 0) / base.length);
+  const spread = median > 0 ? iqr / median : 0;
+  const confidence = n >= 4 ? 'high' : n >= 2 ? 'medium' : 'low';
+  return {
+    typical,
+    median: roundNaira(median),
+    outliers: values.filter(item => outlierKeys.has(item.key)).map(item => item.key),
+    activeMonths: n,
+    spread: Math.round(spread * 100) / 100,
+    confidence,
+    months: values,
+  };
+}
+
+export function suggestCategoryAmount(months = [], categoryKey) {
+  const key = String(categoryKey || 'other').trim() || 'other';
+  const list = Array.isArray(months) ? months : [];
+  const stats = robustMonthlySeries(list, month => month?.expensesByCategory?.[key] || 0);
+  const cadence = classifyCadence(list.map(month => ({
+    amount: amountOf(month?.expensesByCategory?.[key] || 0),
+    notes: Array.isArray(month?.notes) ? month.notes.join(' ') : '',
+  })));
+  if (!stats.activeMonths || !stats.typical) {
+    return { amount: 0, cadence, typical: 0, outliers: stats.outliers, confidence: stats.confidence };
+  }
+  const span = list.length || 1;
+  let amount;
+  if (cadence === 'once') {
+    amount = 0;
+  } else if (cadence === 'annual') {
+    amount = Math.round(stats.typical / 12);
+  } else if (cadence === 'occasional') {
+    const frequency = stats.activeMonths / span;
+    amount = Math.round(stats.typical * Math.max(0.25, Math.min(1, frequency)));
+  } else {
+    amount = stats.typical;
+  }
+  return { amount, cadence, typical: stats.typical, outliers: stats.outliers, confidence: stats.confidence };
+}
+
+export function applyAffordability(lines = [], cushion = 0, expectedParishIncome = 0) {
+  const expected = Math.max(0, roundNaira(expectedParishIncome));
+  const cap = expected > 0 ? Math.round(expected * 0.9) : 0;
+  let nextCushion = Math.max(0, roundNaira(cushion));
+  let capped = false;
+  if (cap > 0 && nextCushion > Math.round(cap * 0.25)) {
+    nextCushion = Math.round(cap * 0.25);
+    capped = true;
+  }
+  const adjusted = (Array.isArray(lines) ? lines : [])
+    .map(line => ({ ...line, amount: Math.max(0, roundNaira(line?.amount)) }));
+  const totalLines = () => adjusted.reduce((total, line) => total + line.amount, 0);
+  if (cap > 0 && totalLines() + nextCushion > cap) {
+    capped = true;
+    for (const line of adjusted) {
+      if (line.cadence === 'usual') continue;
+      const excess = (totalLines() + nextCushion) - cap;
+      if (excess <= 0) break;
+      const cut = Math.min(excess, line.amount - Math.round(line.amount * 0.75));
+      if (cut > 0) line.amount -= cut;
+    }
+    if (totalLines() + nextCushion > cap) {
+      const available = Math.max(0, cap - nextCushion);
+      const total = totalLines();
+      if (total > 0) {
+        let allocated = 0;
+        adjusted.forEach((line, index) => {
+          if (index === adjusted.length - 1) {
+            line.amount = Math.max(0, available - allocated);
+          } else {
+            line.amount = Math.max(0, Math.floor((line.amount / total) * available));
+            allocated += line.amount;
+          }
+        });
+      }
+    }
+  }
+  return {
+    lines: adjusted.filter(line => line.amount > 0),
+    cushion: nextCushion,
+    capped,
+    cap,
+  };
+}
+
 export function monthKey(date) {
   const parts = toMonthParts(date);
   if (!parts) return '';
@@ -466,6 +597,9 @@ const api = {
   matchActuals,
   safeToSpend,
   coercePlan,
+  robustMonthlySeries,
+  suggestCategoryAmount,
+  applyAffordability,
 };
 
 if (typeof window !== 'undefined') window.BudgetEngine = api;

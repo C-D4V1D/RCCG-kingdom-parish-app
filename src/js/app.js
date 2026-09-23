@@ -5397,14 +5397,20 @@ async function buildBudgetPack(targetMonthKey, historyMonthsUsed=6){
   const categoryHints = EXPENSE_CATS
     .filter(c=>c.key!=='reconciliation')
     .map(cat=>{
+      const suggestion = engine.suggestCategoryAmount(history.months, cat.key);
       const series = history.months.map(m=>({ amount:m.expensesByCategory?.[cat.key]||0, notes:(m.notes||[]).join(' ') }));
       const avgAmount = Math.round(series.reduce((sum,item)=>sum+(item.amount||0),0) / Math.max(1, series.length));
       return {
         key:cat.key,
         label:cat.label,
-        avgAmount,
-        cadence: engine.classifyCadence(series),
-        why: avgAmount>0 ? `Based on ${historyMonthsUsed}-month operating history` : '',
+        avgAmount: suggestion.amount,
+        typicalAmount: suggestion.typical,
+        rawAverage: avgAmount,
+        cadence: suggestion.cadence,
+        outliers: suggestion.outliers,
+        why: suggestion.amount>0
+          ? `Typical ${fmt(suggestion.typical)} when active (${suggestion.cadence}; ${historyMonthsUsed}-month history${suggestion.outliers.length?`, ${suggestion.outliers.length} outlier month(s) excluded`:''})`
+          : (suggestion.typical>0 ? 'One-off spend — not budgeted as recurring' : ''),
         expenseCategory:cat.key,
       };
     })

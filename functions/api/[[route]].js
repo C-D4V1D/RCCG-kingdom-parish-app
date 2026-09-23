@@ -1,4 +1,11 @@
-import { coercePlan as coerceBudgetPlan, safeToSpend as budgetSafeToSpend, sumExpensesByCategory as budgetSumExpensesByCategory } from '../../src/js/budget-engine.js';
+import {
+  coercePlan as coerceBudgetPlan,
+  safeToSpend as budgetSafeToSpend,
+  sumExpensesByCategory as budgetSumExpensesByCategory,
+  robustMonthlySeries as budgetRobustSeries,
+  suggestCategoryAmount as budgetSuggestCategoryAmount,
+  applyAffordability as budgetApplyAffordability,
+} from '../../src/js/budget-engine.js';
 
 // ================================================================
 // RCCG Kingdom Parish — Cloudflare Pages Functions API
@@ -4502,12 +4509,6 @@ function monthFromIsoDate(value) {
   return match ? match[1] : '';
 }
 
-function averageNaira(values) {
-  const nums = (values || []).map(v => Number(v || 0)).filter(v => Number.isFinite(v));
-  if (!nums.length) return 0;
-  return Math.round(nums.reduce((sum, value) => sum + value, 0) / nums.length);
-}
-
 async function loadMonthlyBudgets(DB) {
   try {
     const row = await DB.prepare(`SELECT value FROM settings WHERE key='monthlyBudgets'`).first();
@@ -4565,13 +4566,18 @@ function normalizeBudgetPack(pack, monthKeyValue) {
       .sort((a, b) => a.monthKey.localeCompare(b.monthKey))
     : [];
   const historyMonthsUsed = Math.max(1, Math.min(12, Math.round(Number(pack?.historyMonthsUsed || months.length || 6))));
+  const incomeStats = budgetRobustSeries(months, item => item?.parishIncomeAfterRemittance || 0);
+  const remittanceStats = budgetRobustSeries(months, item => item?.remittanceDue || 0);
+  const grossStats = budgetRobustSeries(months, item => item?.grossIncome || 0);
   return {
     monthKey: monthKeyValue,
     historyMonthsUsed,
     months,
-    expectedGrossIncome: averageNaira(months.map(item => item.grossIncome)),
-    expectedRemittance: averageNaira(months.map(item => item.remittanceDue)),
-    expectedParishIncome: averageNaira(months.map(item => item.parishIncomeAfterRemittance)),
+    expectedGrossIncome: grossStats.typical,
+    expectedRemittance: remittanceStats.typical,
+    expectedParishIncome: incomeStats.typical,
+    incomeOutlierMonths: incomeStats.outliers,
+    incomeConfidence: incomeStats.confidence,
     categoryHints: Array.isArray(pack?.categoryHints) ? pack.categoryHints.slice(0, 20) : [],
     noteSnippets: Array.isArray(pack?.noteSnippets) ? pack.noteSnippets.map(String).slice(0, 20) : [],
   };
@@ -4587,11 +4593,13 @@ function normalizeBudgetAdvisorResult(raw, pack, existingPlan = null, meta = {})
   });
   const now = new Date().toISOString();
   const affordLog = Array.isArray(existingPlan?.affordLog) ? existingPlan.affordLog.slice(-10) : [];
-  const lines = Array.isArray(coerced.lines) ? coerced.lines : [];
-  const lineSum = lines.reduce((sum, line) => sum + Math.max(0, Math.round(Number(line.amount || 0))), 0);
-  const cushion = Math.max(0, Math.round(Number(coerced.cushion || 0)));
   const expectedParishIncome = Math.max(0, Math.round(Number(pack.expectedParishIncome || 0)));
-  const recommendedBudget = lineSum + cushion;
+  const rawLines = Array.isArray(coerced.lines) ? coerced.lines : [];
+  const rawCushion = Math.max(0, Math.round(Number(coerced.cushion || 0)));
+  const fit = budgetApplyAffordability(rawLines, rawCushion, expectedParishIncome);
+  const lines = fit.lines;
+  const cushion = fit.cushion;
+  const recommendedBudget = lines.reduce((sum, line) => sum + Math.max(0, Math.round(Number(line.amount || 0))), 0) + cushion;
   const statusLabel = budgetStatusFromNumbers(expectedParishIncome, recommendedBudget);
   return {
     monthKey: pack.monthKey,
@@ -4636,12 +4644,26 @@ Return STRICT JSON only with this shape:
 Rules you must obey:
 - Remittance is NOT a budget expense line. Never include HQ, TG shares, quotas, or seed as budget lines.
 - Children's department cash and satellite pass-through are not parish spendable income.
-- expected parish income after remittance is EXACTLY ₦${pack.expectedParishIncome.toLocaleString('en-NG')}.
+- expected parish income after remittance is EXACTLY ₦${pack.expectedParishIncome.toLocaleString('en-NG')} (typical month, outlier months already removed).
 - expected remittance is EXACTLY ₦${pack.expectedRemittance.toLocaleString('en-NG')}.
 - recommendedBudget MUST be a single exact integer naira amount.
 - recommendedBudget MUST equal sum(lines.amount) + cushion.
 - Keep lines to operating spend only.
 - Use the parish history below; do not invent income beyond the supplied pack.
+
+How to be smart about patterns, outliers and change:
+- Each category hint already gives a cadence and an outlier-filtered typical amount (avgAmount). Trust it as the baseline.
+- "usual" lines: budget close to the typical month.
+- "occasional" lines: budget the typical amount scaled by how often the spend occurs (e.g. 3 of 6 months ≈ half the typical month), not the full spike.
+- "annual" lines: budget roughly one-twelfth of the typical amount so the parish saves toward it monthly.
+- "once" lines (emergencies, one-off projects): exclude them from recurring lines entirely — mention them in "ignored" instead.
+- Ignore single-month spikes when setting recurring lines; never let one big month inflate a usual line.
+- If recent months clearly trend up or down versus older months, weight the recent pattern more, but stay within the affordability cap.
+
+Lean but sufficient:
+- Aim for the leanest budget that still realistically covers recurring operations. Do NOT pad lines toward the income figure.
+- Keep cushion small (about 5-10% of expected parish income) for genuinely unexpected needs.
+- The server will still cap recommendedBudget at 90% of expected parish income — staying below that is good, not a missed target.
 
 History months:
 ${JSON.stringify(pack.months)}
@@ -4732,6 +4754,65 @@ async function callBudgetAdvisorJson(DB, env, prompt, fallbackValue) {
   return { provider: 'deterministic', model: '', data: fallbackValue, error: errors.join(' | ') };
 }
 
+function buildFallbackBudgetPlan(pack) {
+  const expected = Math.max(0, Math.round(Number(pack?.expectedParishIncome || 0)));
+  const hintByKey = new Map(
+    (Array.isArray(pack?.categoryHints) ? pack.categoryHints : [])
+      .map(item => [String(item?.key || item?.expenseCategory || ''), item])
+  );
+  const categoryKeys = [];
+  const seen = new Set();
+  const pushKey = (key, label) => {
+    const k = String(key || '').trim();
+    if (!k || k === 'reconciliation' || seen.has(k)) return;
+    seen.add(k);
+    categoryKeys.push({ key: k, label: String(label || hintByKey.get(k)?.label || k) });
+  };
+  for (const hint of pack?.categoryHints || []) pushKey(hint?.key || hint?.expenseCategory, hint?.label);
+  for (const month of pack?.months || []) {
+    for (const key of Object.keys(month?.expensesByCategory || {})) pushKey(key, key);
+  }
+  const lines = [];
+  let anyOutliers = false;
+  for (const { key, label } of categoryKeys) {
+    const suggestion = budgetSuggestCategoryAmount(pack?.months || [], key);
+    const hint = hintByKey.get(key);
+    const amount = Math.max(0, Math.round(Number(suggestion?.amount || hint?.avgAmount || hint?.averageAmount || 0)));
+    if (!amount) continue;
+    if ((suggestion?.outliers || []).length) anyOutliers = true;
+    const cadence = ['usual', 'occasional', 'annual', 'once'].includes(suggestion?.cadence) ? suggestion.cadence : 'usual';
+    lines.push({
+      key,
+      label: String(label || key),
+      amount,
+      cadence,
+      why: cadence === 'usual'
+        ? `Typical month from the last ${pack?.historyMonthsUsed || 6} months${suggestion.outliers.length ? ' (spike months excluded)' : ''}`
+        : cadence === 'annual'
+          ? 'Annual cost spread across the year'
+          : 'Occasional spend, scaled by how often it occurs',
+      expenseCategory: key,
+    });
+  }
+  lines.sort((a, b) => b.amount - a.amount);
+  const trimmed = lines.slice(0, 8);
+  const baseCushion = Math.max(5000, Math.round(expected * 0.08));
+  const fit = budgetApplyAffordability(trimmed, baseCushion, expected);
+  const recommended = fit.lines.reduce((sum, line) => sum + line.amount, 0) + fit.cushion;
+  return {
+    recommendedBudget: recommended,
+    cushion: fit.cushion,
+    statusLabel: budgetStatusFromNumbers(expected, recommended),
+    summary: `Lean draft built from the last ${pack?.historyMonthsUsed || 6} month(s): recurring lines use typical (median-based) monthly spend, occasional lines are scaled by how often they occur, and one-off spike months are excluded. A contingency cushion of about 8% is kept inside a 90% affordability cap so the plan stays realistic but not bloated.`,
+    ignored: [
+      'remittance is already spoken for',
+      'children and satellite pass-through are excluded',
+      ...(anyOutliers ? ['one-off spike months excluded from category amounts'] : []),
+    ],
+    lines: fit.lines,
+  };
+}
+
 async function getMonthlyBudget(DB, requestedMonthKey) {
   if (!isValidMonthKey(requestedMonthKey)) return err('month query parameter must be YYYY-MM', 400);
   const budgets = await loadMonthlyBudgets(DB);
@@ -4745,21 +4826,7 @@ async function generateMonthlyBudget(DB, env, data) {
   if (!pack.months.length) return err('Budget history pack is required', 400);
   const budgets = await loadMonthlyBudgets(DB);
   const existingPlan = budgets[targetMonthKey] || null;
-  const ai = await callBudgetAdvisorJson(DB, env, budgetGeneratePrompt(pack, data?.churchName), {
-    recommendedBudget: Math.max(0, Math.round(pack.expectedParishIncome * 0.9)),
-    cushion: Math.max(0, Math.round(pack.expectedParishIncome * 0.05)),
-    statusLabel: budgetStatusFromNumbers(pack.expectedParishIncome, Math.max(0, Math.round(pack.expectedParishIncome * 0.9))),
-    summary: `This draft uses the last ${pack.historyMonthsUsed} month(s) as a guide, keeps remittance outside the spending lines, and treats parish operating income after remittance as the ceiling for next month.`,
-    ignored: ['remittance is already spoken for', 'children and satellite pass-through are excluded'],
-    lines: (pack.categoryHints || []).slice(0, 6).map(item => ({
-      key: String(item.key || 'other'),
-      label: String(item.label || item.key || 'Budget line'),
-      amount: Math.max(0, Math.round(Number(item.avgAmount || item.averageAmount || 0))),
-      cadence: ['usual', 'occasional', 'annual', 'once'].includes(item.cadence) ? item.cadence : 'usual',
-      why: String(item.why || 'Built from recent operating history'),
-      expenseCategory: String(item.expenseCategory || item.key || 'other'),
-    })).filter(item => item.amount > 0),
-  });
+  const ai = await callBudgetAdvisorJson(DB, env, budgetGeneratePrompt(pack, data?.churchName), buildFallbackBudgetPlan(pack));
   const plan = normalizeBudgetAdvisorResult(ai.data, pack, existingPlan, { model: ai.model });
   budgets[targetMonthKey] = plan;
   await writeMonthlyBudgets(DB, budgets);
