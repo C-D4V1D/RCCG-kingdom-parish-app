@@ -5416,6 +5416,7 @@ async function buildBudgetPack(targetMonthKey, historyMonthsUsed=6){
     months: history.months,
     categoryHints,
     noteSnippets,
+    allExpenses,
   };
 }
 
@@ -5507,6 +5508,7 @@ async function renderBudget(){
                   </div>
                 </div>
                 <div class="budget-bar budget-line-bar"><div class="budget-bar-fill" style="width:${Math.min(100,Math.max(0,line.pct))}%"></div></div>
+                ${(line.subs||[]).length ? `<div class="budget-subline-wrap">${line.subs.map(sub=>`<div class="budget-subline"><span>${esc(sub.label||'General')}</span><strong>${fmt(sub.spent||0)} of ${fmt(sub.budgeted||0)}</strong></div>`).join('')}</div>` : ''}
                 ${expanded ? `<div class="budget-line-expenses">
                   ${expRows.length ? expRows.map(exp=>`<div class="budget-expense-row"><span>${fmtDate(exp.date||exp.createdAt)} · ${esc(exp.description||exp.subCategory||'Expense')}</span><strong>${fmt(exp.amount)}</strong></div>`).join('') : '<div class="td-muted">No matched expenses yet this month.</div>'}
                 </div>` : ''}
@@ -5561,6 +5563,7 @@ async function renderBudget(){
                   <div class="budget-line-pct">${fmt(line.amount||0)}</div>
                 </div>
               </div>
+              ${(line.subs||[]).length ? `<div class="budget-subline-wrap">${line.subs.map(sub=>`<div class="budget-subline"><span>${esc(sub.label||'General')}</span><strong>${fmt(sub.amount||0)}</strong></div>`).join('')}</div>` : ''}
             </div>`).join('')}
           </div>
         `:''}

@@ -50,6 +50,18 @@ function extractNotes(entry) {
   ].filter(Boolean).join(' ').trim();
 }
 
+function cleanWords(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function normalizeCadence(value) {
+  return ['usual', 'occasional', 'annual', 'once'].includes(value) ? value : 'usual';
+}
+
 const ONCE_NOTE_RE = /\b(one[-\s]?off|emergency|urgent|roof|harvest|medical|burial|funeral|crusade special)\b/i;
 
 function isRemittanceExpenseLike(expense) {
@@ -156,6 +168,98 @@ export function sumExpensesByCategory(expenses = []) {
   return { byCategory, total: roundNaira(total) };
 }
 
+export function noteFingerprint(text) {
+  const cleaned = cleanWords(text);
+  if (!cleaned) return 'general';
+  if (/\b(diesel|ago|generator fuel|gen fuel)\b/.test(cleaned)) return 'diesel';
+  if (/\b(nepa|electric|electricity|token|disco|ikeja|ekedc|aedc|light bill)\b/.test(cleaned)) return 'nepa';
+  return cleaned;
+}
+
+export function prettyNoteLabel(text) {
+  const cleaned = cleanWords(text);
+  if (!cleaned) return 'General';
+  const titled = cleaned
+    .split(' ')
+    .slice(0, 6)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+  return titled || 'General';
+}
+
+export function groupExpensesByNote(expenses = []) {
+  const grouped = new Map();
+  for (const expense of (Array.isArray(expenses) ? expenses : [])) {
+    if (isRemittanceExpenseLike(expense)) continue;
+    const amount = roundNaira(expense?.amount);
+    if (!amount) continue;
+    const rawNote = extractNotes(expense);
+    const fingerprint = noteFingerprint(rawNote);
+    if (!grouped.has(fingerprint)) {
+      grouped.set(fingerprint, {
+        fingerprint,
+        label: prettyNoteLabel(rawNote),
+        amount: 0,
+        series: [],
+      });
+    }
+    const bucket = grouped.get(fingerprint);
+    if (bucket.label === 'General' && rawNote) bucket.label = prettyNoteLabel(rawNote);
+    bucket.amount += amount;
+    bucket.series.push({ amount, notes: rawNote });
+  }
+  return [...grouped.values()]
+    .map(item => ({
+      fingerprint: item.fingerprint,
+      label: item.label,
+      amount: roundNaira(item.amount),
+      cadence: classifyCadence(item.series),
+    }))
+    .sort((a, b) => (b.amount - a.amount) || a.label.localeCompare(b.label));
+}
+
+function splitBudgetAcrossSubs(totalBudget, weights) {
+  const total = Math.max(0, roundNaira(totalBudget));
+  if (!weights.length) return [];
+  const positiveWeights = weights.map(weight => Math.max(0, amountOf(weight)));
+  const denom = positiveWeights.reduce((sum, value) => sum + value, 0);
+  if (!denom) {
+    const equal = Math.floor(total / weights.length);
+    let leftover = total - (equal * weights.length);
+    return weights.map(() => {
+      const plus = leftover > 0 ? 1 : 0;
+      if (leftover > 0) leftover -= 1;
+      return equal + plus;
+    });
+  }
+  const draft = positiveWeights.map(weight => (total * weight) / denom);
+  const base = draft.map(Math.floor);
+  let remainder = total - base.reduce((sum, value) => sum + value, 0);
+  const order = draft
+    .map((value, index) => ({ index, frac: value - base[index] }))
+    .sort((a, b) => b.frac - a.frac);
+  for (let i = 0; i < order.length && remainder > 0; i++, remainder--) {
+    base[order[i].index] += 1;
+  }
+  return base;
+}
+
+export function suggestSubsForCategory(category, expenses = [], categoryBudget = 0) {
+  const categoryKey = String(category?.expenseCategory || category?.key || category || 'other').trim() || 'other';
+  const categoryExpenses = (Array.isArray(expenses) ? expenses : [])
+    .filter(expense => String(expense?.category || 'other').trim() === categoryKey);
+  const grouped = groupExpensesByNote(categoryExpenses);
+  if (grouped.length <= 1) return [];
+  const top = grouped.slice(0, 4);
+  const split = splitBudgetAcrossSubs(categoryBudget, top.map(item => item.amount));
+  return top.map((item, index) => ({
+    fingerprint: item.fingerprint,
+    label: item.label,
+    amount: roundNaira(split[index] ?? 0),
+    cadence: normalizeCadence(item.cadence),
+  }));
+}
+
 export function packHistory({ incomeRecords = [], expenses = [], remittanceCalcsByMonth = {}, months = 6 } = {}) {
   const keys = new Set(Object.keys(remittanceCalcsByMonth || {}).filter(key => /^\d{4}-\d{2}$/.test(key)));
   for (const record of incomeRecords) {
@@ -188,6 +292,7 @@ export function packHistory({ incomeRecords = [], expenses = [], remittanceCalcs
       remittanceDue,
       parishIncomeAfterRemittance,
       expensesByCategory,
+      expensesByNote: groupExpensesByNote(monthExpenses),
       notes,
     };
   }
@@ -202,7 +307,8 @@ export function matchActuals(plan, expenses = [], now = new Date()) {
   const elapsed = elapsedPctForMonth(now, plan?.monthKey || monthKey(now));
   const lines = (plan?.lines || []).map(line => {
     const budgeted = roundNaira(line?.amount);
-    const spent = roundNaira(byCategory[String(line?.expenseCategory || line?.key || 'other')] || 0);
+    const categoryKey = String(line?.expenseCategory || line?.key || 'other');
+    const spent = roundNaira(byCategory[categoryKey] || 0);
     const leftover = budgeted - spent;
     const pctRatio = budgeted > 0 ? (spent / budgeted) : (spent > 0 ? 1 : 0);
     const pct = Math.round(pctRatio * 100);
@@ -210,7 +316,32 @@ export function matchActuals(plan, expenses = [], now = new Date()) {
     if (spent > budgeted) pace = 'over';
     else if (pctRatio > elapsed + 0.15) pace = 'hot';
     else if (pctRatio > elapsed + 0.05) pace = 'watch';
-    return { ...line, budgeted, spent, leftover, pct, pace };
+    const lineExpenses = (Array.isArray(expenses) ? expenses : [])
+      .filter(expense => String(expense?.category || 'other') === categoryKey);
+    const baseSubs = Array.isArray(line?.subs) && line.subs.length
+      ? line.subs.map(sub => ({
+          fingerprint: noteFingerprint(sub?.fingerprint || sub?.label || ''),
+          label: String(sub?.label || prettyNoteLabel(sub?.fingerprint || 'General')),
+          amount: Math.max(0, roundNaira(sub?.amount)),
+          cadence: normalizeCadence(sub?.cadence),
+        })).filter(sub => sub.amount > 0)
+      : suggestSubsForCategory(line, lineExpenses, budgeted);
+    const spentByFingerprint = Object.fromEntries(
+      groupExpensesByNote(lineExpenses).map(item => [item.fingerprint, item.amount])
+    );
+    const subs = baseSubs.map(sub => {
+      const budgetedSub = Math.max(0, roundNaira(sub.amount));
+      const spentSub = roundNaira(spentByFingerprint[sub.fingerprint] || 0);
+      return {
+        fingerprint: sub.fingerprint,
+        label: sub.label,
+        cadence: sub.cadence,
+        budgeted: budgetedSub,
+        spent: spentSub,
+        leftover: budgetedSub - spentSub,
+      };
+    });
+    return { ...line, budgeted, spent, leftover, pct, pace, subs };
   });
   const budgetedTotal = roundNaira((plan?.lines || []).reduce((sum, line) => sum + amountOf(line?.amount), 0) + amountOf(plan?.cushion));
   const leftTotal = budgetedTotal - total;
@@ -256,11 +387,24 @@ export function coercePlan(raw, pack) {
         key: String(line?.key || line?.expenseCategory || 'other'),
         label: String(line?.label || line?.key || 'Item'),
         amount: Math.max(0, roundNaira(line?.amount)),
-        cadence: ['usual', 'occasional', 'annual', 'once'].includes(line?.cadence) ? line.cadence : 'usual',
+        cadence: normalizeCadence(line?.cadence),
         why: String(line?.why || ''),
         expenseCategory: String(line?.expenseCategory || line?.key || 'other'),
+        subs: Array.isArray(line?.subs)
+          ? line.subs.map(sub => ({
+              fingerprint: noteFingerprint(sub?.fingerprint || sub?.label || ''),
+              label: String(sub?.label || prettyNoteLabel(sub?.fingerprint || 'General')),
+              amount: Math.max(0, roundNaira(sub?.amount)),
+              cadence: normalizeCadence(sub?.cadence),
+            })).filter(sub => sub.amount > 0)
+          : [],
       })).filter(line => line.amount > 0)
     : [];
+  for (const line of lines) {
+    if (!line.subs.length) {
+      line.subs = suggestSubsForCategory(line, pack?.allExpenses || [], line.amount);
+    }
+  }
   const cushion = Math.max(0, roundNaira(raw?.cushion));
   const recommendedBudget = lines.reduce((sum, line) => sum + line.amount, 0) + cushion;
   const expectedGrossIncome = roundNaira(pack?.expectedGrossIncome ?? raw?.expectedGrossIncome ?? 0);
@@ -305,6 +449,10 @@ const api = {
   parishIncomeFromRemittance,
   sumExpensesByCategory,
   packHistory,
+  noteFingerprint,
+  prettyNoteLabel,
+  groupExpensesByNote,
+  suggestSubsForCategory,
   matchActuals,
   safeToSpend,
   coercePlan,
