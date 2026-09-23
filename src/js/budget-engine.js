@@ -97,9 +97,9 @@ function elapsedPctForMonth(now, key) {
   const monthStart = new Date(parts.year, parts.month - 1, 1);
   const nextMonth = new Date(parts.year, parts.month, 1);
   if (date <= monthStart) return 0;
-  if (date >= nextMonth) return 100;
+  if (date >= nextMonth) return 1;
   const daysInMonth = new Date(parts.year, parts.month, 0).getDate();
-  return Math.max(0, Math.min(100, (date.getDate() / Math.max(1, daysInMonth)) * 100));
+  return Math.max(0, Math.min(1, date.getDate() / Math.max(1, daysInMonth)));
 }
 
 function normalizeSeriesItem(entry) {
@@ -118,7 +118,7 @@ export function nextMonthKey(fromKey) {
 }
 
 export function monthElapsedPct(now, key) {
-  return elapsedPctForMonth(now || new Date(), key) / 100;
+  return elapsedPctForMonth(now || new Date(), key);
 }
 
 export function classifyCadence(series = []) {
@@ -199,16 +199,17 @@ export function packHistory({ incomeRecords = [], expenses = [], remittanceCalcs
 
 export function matchActuals(plan, expenses = [], now = new Date()) {
   const { byCategory, total } = sumExpensesByCategory(expenses);
-  const elapsedPct = elapsedPctForMonth(now, plan?.monthKey || monthKey(now));
+  const elapsed = elapsedPctForMonth(now, plan?.monthKey || monthKey(now));
   const lines = (plan?.lines || []).map(line => {
     const budgeted = roundNaira(line?.amount);
     const spent = roundNaira(byCategory[String(line?.expenseCategory || line?.key || 'other')] || 0);
     const leftover = budgeted - spent;
-    const pct = budgeted > 0 ? Math.round((spent / budgeted) * 100) : (spent > 0 ? 100 : 0);
+    const pctRatio = budgeted > 0 ? (spent / budgeted) : (spent > 0 ? 1 : 0);
+    const pct = Math.round(pctRatio * 100);
     let pace = 'on_track';
     if (spent > budgeted) pace = 'over';
-    else if (pct > elapsedPct + 15) pace = 'hot';
-    else if (pct > elapsedPct + 5) pace = 'watch';
+    else if (pctRatio > elapsed + 0.15) pace = 'hot';
+    else if (pctRatio > elapsed + 0.05) pace = 'watch';
     return { ...line, budgeted, spent, leftover, pct, pace };
   });
   const budgetedTotal = roundNaira((plan?.lines || []).reduce((sum, line) => sum + amountOf(line?.amount), 0) + amountOf(plan?.cushion));
@@ -218,8 +219,8 @@ export function matchActuals(plan, expenses = [], now = new Date()) {
     spentTotal: total,
     budgetedTotal,
     leftTotal,
-    elapsed: Math.round(elapsedPct) / 100,
-    elapsedPct: Math.round(elapsedPct),
+    elapsed,
+    elapsedPct: Math.round(elapsed * 100),
     totals: {
       spent: total,
       budgeted: budgetedTotal,

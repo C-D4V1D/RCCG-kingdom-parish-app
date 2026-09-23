@@ -4529,7 +4529,14 @@ async function writeAuditLog(DB, type, detail, by = 'System') {
 }
 
 async function listExpensesForMonth(DB, monthKey) {
-  const { results } = await DB.prepare(`SELECT id, category, amount, description, sub_category, date, created_at, remittance_ref FROM expenses`).all();
+  const start = `${monthKey}-01`;
+  const end = `${monthKey}-31`;
+  const { results } = await DB.prepare(
+    `SELECT id, category, amount, description, sub_category, date, created_at, remittance_ref
+     FROM expenses
+     WHERE COALESCE(date, substr(created_at, 1, 10)) >= ?
+       AND COALESCE(date, substr(created_at, 1, 10)) <= ?`
+  ).bind(start, end).all();
   return (results || [])
     .filter(row => monthFromIsoDate(row.date || row.created_at) === monthKey)
     .map(row => ({
@@ -4766,6 +4773,7 @@ async function acceptMonthlyBudget(DB, data) {
   const budgets = await loadMonthlyBudgets(DB);
   const plan = budgets[targetMonthKey];
   if (!plan) return err('No budget plan found for that month', 404);
+  if (plan.status === 'accepted') return ok({ plan });
   const acceptedBy = String(data?.acceptedBy || '').trim() || 'Finance Portal';
   budgets[targetMonthKey] = {
     ...plan,

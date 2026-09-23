@@ -258,7 +258,8 @@ details, and a pledge form that hands off to WhatsApp.
 - **Monthly budget tab** — a finance-planning view with "This month" and "Next month"
   tabs, AI-assisted draft generation, accepted-plan tracking against live expenses, and
   afford checks that keep remittance as COGS / already-spoken-for rather than a parish
-  budget expense. Admin Officer, Pastor, Accountant, IT Admin and Signatory can access it.
+  budget expense. Admin Officer, Pastor, Accountant, IT Admin and Signatory can access it;
+  a Viewer can see it only when that role still has expense-view access.
 - **Bank module** — balance tracking, deposits (single and bulk), withdrawals with a
   direct-expense path, bank charges, balance snapshots captured from alert emails, and
   monthly reconciliation against the ledger.

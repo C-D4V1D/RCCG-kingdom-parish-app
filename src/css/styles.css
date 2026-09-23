@@ -312,6 +312,7 @@ tr:hover td{background:var(--surface)}
 .budget-lines{display:flex;flex-direction:column;gap:10px}
 .budget-line{all:unset;display:block;background:var(--surface);border:1px solid var(--border);border-radius:var(--rl);padding:12px;cursor:pointer}
 .budget-line.static{cursor:default}
+.budget-line:focus-visible{outline:2px solid var(--primary);outline-offset:2px;box-shadow:0 0 0 4px rgba(15,110,86,0.12)}
 .budget-line-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
 .budget-line-label{font-size:14px;font-weight:700;color:var(--text)}
 .budget-line-sub{font-size:12px;color:var(--text2);margin-top:2px}

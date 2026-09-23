@@ -5495,14 +5495,14 @@ async function renderBudget(){
               const expRows = thisMonthExpenses.filter(exp=>(exp.category||'') === (line.expenseCategory||line.key));
               const expanded = state.budgetExpandedLine === line.key;
               const paceClass = line.pace === 'over' ? 'badge-danger' : line.pace === 'hot' || line.pace === 'watch' ? 'badge-warn' : 'badge-success';
-              return `<button class="budget-line" onclick="App.toggleBudgetLine('${line.key}')" aria-expanded="${expanded?'true':'false'}">
+              return `<button class="budget-line" onclick='App.toggleBudgetLine(${JSON.stringify(String(line.key||''))})' aria-expanded="${expanded?'true':'false'}">
                 <div class="budget-line-top">
                   <div>
                     <div class="budget-line-label">${esc(line.label||line.key)}</div>
                     <div class="budget-line-sub">${fmt(line.budgeted)} budgeted · ${fmt(line.spent)} spent · ${fmt(line.leftover)} left</div>
                   </div>
                   <div style="text-align:right">
-                    <span class="badge ${paceClass}">${line.pace==='over'?'Over':line.pace==='hot'?'Watch':line.pace==='watch'?'Watch':'On track'}</span>
+                    <span class="badge ${paceClass}">${line.pace==='over'?'Over':line.pace==='hot'?'Hot':line.pace==='watch'?'Watch':'On track'}</span>
                     <div class="budget-line-pct">${line.pct}%</div>
                   </div>
                 </div>
