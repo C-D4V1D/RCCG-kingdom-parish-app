@@ -720,6 +720,7 @@ const DB = {
   generateBudget(d)            { return apiFetch('budget/generate','POST',d); },
   acceptBudget(d)              { return apiFetch('budget/accept','POST',d); },
   askBudgetAfford(d)           { return apiFetch('budget/afford','POST',d); },
+  askBudgetOutlook(d)          { return apiFetch('budget/outlook','POST',d); },
   getExpenseReceipt(id)        { return apiFetch(`expense-receipt/${id}`); },
   addExpense(d)                { return apiFetch('expenses','POST',d); },
   updateExpense(id,d)          { return apiFetch(`expenses/${id}`,'PUT',d); },
@@ -5416,6 +5417,7 @@ async function buildBudgetPack(targetMonthKey, historyMonthsUsed=6){
     })
     .filter(item=>item.avgAmount>0)
     .sort((a,b)=>b.avgAmount-a.avgAmount);
+  const expectedParishIncome = engine.robustMonthlySeries(history.months, m=>m.parishIncomeAfterRemittance||0).typical;
   return {
     monthKey: targetMonthKey,
     historyMonthsUsed,
@@ -5423,6 +5425,7 @@ async function buildBudgetPack(targetMonthKey, historyMonthsUsed=6){
     categoryHints,
     noteSnippets,
     allExpenses,
+    expectedParishIncome,
   };
 }
 
@@ -5430,6 +5433,61 @@ function budgetStatusBadge(label){
   if(label==='enough') return 'badge badge-success';
   if(label==='tight') return 'badge badge-warn';
   return 'badge badge-danger';
+}
+
+function budgetOutlookMonthKeys(){
+  return [state.budgetThisMonthKey, state.budgetNextMonthKey, budgetMonthOffset(state.budgetNextMonthKey, 1)];
+}
+
+function describeBudgetOutlook(outlook){
+  const amt = fmt(Math.abs(outlook.headroom));
+  if(outlook.verdict==='no') return `You are about ${amt} short over the next 3 months — hold off on new spending.`;
+  if(outlook.verdict==='stretch') return `You have about ${amt} spare over the next 3 months, but it's tight, so spend carefully.`;
+  return `You have about ${amt} spare over the next 3 months, so new spending looks safe.`;
+}
+
+// Computes the deterministic 3-month afford outlook (income vs. already-committed
+// spend) instantly from real fetched history, caching by monthKey+plan signature so
+// re-renders triggered by tab switches or line toggles don't refetch income/expense
+// history or recompute remittance each time — only a new/accepted plan invalidates it.
+async function ensureBudgetOutlook(thisPlan, nextPlan){
+  const monthKeys = budgetOutlookMonthKeys();
+  const cacheKey = `${monthKeys.join('|')}|${thisPlan?.recommendedBudget||0}|${nextPlan?.recommendedBudget||0}`;
+  if(state.budgetOutlook && state.budgetOutlook.key === cacheKey) return state.budgetOutlook;
+  const engine = getBudgetEngine();
+  const pack = await buildBudgetPack(state.budgetNextMonthKey, 6);
+  const plans = {};
+  plans[state.budgetThisMonthKey] = thisPlan;
+  plans[state.budgetNextMonthKey] = nextPlan;
+  const outlook = engine.rollingAfford({
+    monthKeys,
+    plans,
+    categoryHints: pack.categoryHints,
+    expectedParishIncome: pack.expectedParishIncome,
+  });
+  const entry = { key: cacheKey, outlook, pack };
+  state.budgetOutlook = entry;
+  return entry;
+}
+
+// Lazily fetches the one-sentence AI caption for the current outlook, caching by the
+// same signature so it is only requested once per outlook change, not on every render.
+async function ensureBudgetOutlookCaption(outlook){
+  const cacheKey = outlook.monthKeys.join('|') + '|' + outlook.expectedIncome3mo + '|' + outlook.committedSpend3mo;
+  if(state.budgetOutlookCaption && state.budgetOutlookCaption.key === cacheKey) return state.budgetOutlookCaption;
+  const topDriver = (state.budgetOutlook?.pack?.categoryHints||[])[0]?.label || '';
+  try{
+    const res = await DB.askBudgetOutlook({
+      monthKeys: outlook.monthKeys,
+      expectedIncome3mo: outlook.expectedIncome3mo,
+      committedSpend3mo: outlook.committedSpend3mo,
+      topDriver,
+    });
+    state.budgetOutlookCaption = { key:cacheKey, caption:res?.caption||'', provider:res?.provider||'' };
+  }catch(e){
+    state.budgetOutlookCaption = { key:cacheKey, caption:'', provider:'' };
+  }
+  return state.budgetOutlookCaption;
 }
 
 async function renderBudget(){
@@ -5457,12 +5515,30 @@ async function renderBudget(){
   const canUseAi = !!(settings?.ai_deepseek_key_set || settings?.ai_openai_key_set);
   const noDeepseek = !settings?.ai_deepseek_key_set;
   const thisPct = actuals?.totals?.budgeted ? Math.min(100, Math.max(0, actuals.totals.pct)) : 0;
+  const { outlook } = await ensureBudgetOutlook(thisPlan, nextPlan);
+  const outlookCaption = canUseAi ? await ensureBudgetOutlookCaption(outlook) : null;
   document.getElementById('pageContent').innerHTML = `
     <div class="page-header">
       <div>
         <div class="page-title">Monthly Budget</div>
         <div class="page-sub">Build parish operating spend after remittance — never the remittance itself.</div>
       </div>
+    </div>
+    <div class="card budget-card budget-outlook-card">
+      <div class="budget-hero">
+        <div class="budget-hero-main">
+          <div class="budget-hero-amount">${outlook.verdict==='no'?'−':''}${fmt(Math.abs(outlook.headroom))}</div>
+          <div class="budget-hero-sub">${outlook.verdict==='no'?'Short':'Spare'} over the next 3 months (${budgetMonthLabelForKey(outlook.monthKeys[0])} – ${budgetMonthLabelForKey(outlook.monthKeys[2])})</div>
+        </div>
+        <span class="${budgetStatusBadge(outlook.statusLabel)}">${outlook.verdict==='no'?'No':outlook.verdict==='stretch'?'Tight':'Yes'}</span>
+      </div>
+      <p class="budget-summary">${esc((outlookCaption?.caption) || describeBudgetOutlook(outlook))}</p>
+      <div class="budget-summary-grid">
+        <div><div class="card-title">Expected income</div><div class="budget-mini-val">${fmt(outlook.expectedIncome3mo)}</div></div>
+        <div><div class="card-title">Already committed</div><div class="budget-mini-val">${fmt(outlook.committedSpend3mo)}</div></div>
+        <div><div class="card-title">Spare room</div><div class="budget-mini-val">${fmt(Math.max(0,outlook.headroom))}</div></div>
+      </div>
+      ${!canUseAi ? `<div class="td-muted" style="margin-top:6px">Configure an AI provider in Settings for a plain-language explanation.</div>` : ''}
     </div>
     <div class="budget-tabs">
       <button class="tab ${state.budgetTab==='this_month'?'active':''}" onclick="App.setBudgetTab('this_month')">This month</button>
@@ -5522,7 +5598,7 @@ async function renderBudget(){
             }).join('')}
           </div>
           <div class="card" style="margin-top:16px;margin-bottom:0;padding:14px">
-            <div class="card-title" style="margin-bottom:10px">Ask AI if something extra can fit this month</div>
+            <div class="card-title" style="margin-bottom:10px">Ask AI if something extra fits the next 3 months</div>
             <div class="form-group"><label class="form-label">Idea</label><input id="budget_idea" class="form-input" placeholder="e.g. extra generator servicing, welfare support" /></div>
             <div class="form-group"><label class="form-label">Optional amount (₦)</label><input id="budget_amount" type="number" class="form-input" placeholder="0" /></div>
             <button class="btn btn-primary btn-full" ${canUseAi?'':'disabled'} onclick="App.askBudgetAfford(this)">Ask AI</button>
@@ -5621,7 +5697,9 @@ async function askBudgetAfford(btn=null){
   if(!idea){ showAlert('Please describe the idea first.','danger'); return; }
   const restore = setBtnLoading(btn, 'Asking…');
   try{
-    state.budgetAffordResult = await DB.askBudgetAfford({ monthKey:state.budgetThisMonthKey, idea, amount });
+    const outlook = state.budgetOutlook?.outlook || null;
+    const rolling = outlook ? { expectedIncome3mo: outlook.expectedIncome3mo, committedSpend3mo: outlook.committedSpend3mo } : null;
+    state.budgetAffordResult = await DB.askBudgetAfford({ monthKey:state.budgetThisMonthKey, idea, amount, rolling });
     await renderBudget();
   }catch(e){
     showAlert(e.message || 'Failed to ask the budget advisor.','danger');

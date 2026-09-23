@@ -15,6 +15,10 @@ import BudgetEngine, {
   robustMonthlySeries,
   suggestCategoryAmount,
   applyAffordability,
+  budgetStatus,
+  computeAffordVerdict,
+  estimateTypicalBudget,
+  rollingAfford,
 } from '../src/js/budget-engine.js';
 
 test('monthKey formats calendar months', () => {
@@ -288,4 +292,104 @@ test('applyAffordability caps bloated plans at 90% of expected income', () => {
   assert.ok(fit.lines.reduce((sum, line) => sum + line.amount, 0) + fit.cushion <= 180000);
   assert.ok(fit.cushion <= Math.round(180000 * 0.25));
   assert.ok(fit.lines.every(line => line.amount > 0));
+});
+
+test('budgetStatus classifies enough, tight and short bands', () => {
+  assert.equal(budgetStatus(200000, 100000), 'enough');
+  assert.equal(budgetStatus(200000, 190000), 'tight');
+  assert.equal(budgetStatus(200000, 210000), 'short');
+  assert.equal(budgetStatus(0, 0), 'short');
+});
+
+test('computeAffordVerdict says yes when headroom covers the extra request', () => {
+  const result = computeAffordVerdict(300000, 150000, 50000);
+  assert.equal(result.headroom, 150000);
+  assert.equal(result.headroomAfterExtra, 100000);
+  assert.equal(result.statusLabel, 'enough');
+  assert.equal(result.verdict, 'yes');
+});
+
+test('computeAffordVerdict says stretch when tight but the extra still fits', () => {
+  const result = computeAffordVerdict(200000, 190000, 5000);
+  assert.equal(result.statusLabel, 'tight');
+  assert.equal(result.verdict, 'stretch');
+});
+
+test('computeAffordVerdict says no when already short, even with zero extra', () => {
+  const result = computeAffordVerdict(100000, 120000, 0);
+  assert.equal(result.statusLabel, 'short');
+  assert.equal(result.verdict, 'no');
+});
+
+test('computeAffordVerdict says no when the extra amount would push headroom negative', () => {
+  const result = computeAffordVerdict(200000, 100000, 150000);
+  assert.equal(result.statusLabel, 'enough');
+  assert.equal(result.headroomAfterExtra, -50000);
+  assert.equal(result.verdict, 'no');
+});
+
+test('estimateTypicalBudget sums typical category amounts under the affordability cap', () => {
+  const hints = [
+    { key: 'power', avgAmount: 30000, cadence: 'usual' },
+    { key: 'welfare', avgAmount: 20000, cadence: 'usual' },
+  ];
+  const estimate = estimateTypicalBudget(hints, 200000);
+  assert.ok(estimate >= 50000, 'includes both category lines plus a cushion');
+  assert.ok(estimate <= Math.round(200000 * 0.9), 'stays within the affordability cap');
+});
+
+test('estimateTypicalBudget returns 0 when there are no category hints', () => {
+  assert.equal(estimateTypicalBudget([], 200000), 0);
+});
+
+test('rollingAfford sums income and committed spend across 3 months, showing surplus', () => {
+  const outlook = rollingAfford({
+    monthKeys: ['2026-09', '2026-10', '2026-11'],
+    plans: {
+      '2026-09': { recommendedBudget: 80000 },
+      '2026-10': { recommendedBudget: 85000 },
+    },
+    categoryHints: [{ key: 'power', avgAmount: 20000, cadence: 'usual' }],
+    expectedParishIncome: 120000,
+  });
+  assert.equal(outlook.expectedIncome3mo, 360000);
+  assert.equal(outlook.perMonth[0].committed, 80000);
+  assert.equal(outlook.perMonth[1].committed, 85000);
+  assert.equal(outlook.perMonth[2].hasPlan, false, 'month without a saved plan falls back to a typical estimate');
+  assert.ok(outlook.headroom > 0);
+  assert.equal(outlook.verdict, 'yes');
+});
+
+test('rollingAfford reports a shortfall when committed spend outpaces income', () => {
+  const outlook = rollingAfford({
+    monthKeys: ['2026-09', '2026-10', '2026-11'],
+    plans: {
+      '2026-09': { recommendedBudget: 150000 },
+      '2026-10': { recommendedBudget: 160000 },
+      '2026-11': { recommendedBudget: 170000 },
+    },
+    categoryHints: [],
+    expectedParishIncome: 100000,
+  });
+  assert.equal(outlook.committedSpend3mo, 480000);
+  assert.equal(outlook.statusLabel, 'short');
+  assert.equal(outlook.verdict, 'no');
+  assert.ok(outlook.headroom < 0);
+});
+
+test('rollingAfford factors in a requested extra amount for the idea-affordability check', () => {
+  const outlook = rollingAfford({
+    monthKeys: ['2026-09', '2026-10', '2026-11'],
+    plans: {
+      '2026-09': { recommendedBudget: 90000 },
+      '2026-10': { recommendedBudget: 90000 },
+      '2026-11': { recommendedBudget: 90000 },
+    },
+    categoryHints: [],
+    expectedParishIncome: 100000,
+    extraAmount: 40000,
+  });
+  assert.equal(outlook.headroom, 30000);
+  assert.equal(outlook.headroomAfterExtra, -10000);
+  assert.equal(outlook.verdict, 'no');
 });

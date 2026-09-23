@@ -5,6 +5,8 @@ import {
   robustMonthlySeries as budgetRobustSeries,
   suggestCategoryAmount as budgetSuggestCategoryAmount,
   applyAffordability as budgetApplyAffordability,
+  budgetStatus as budgetStatusFromEngine,
+  computeAffordVerdict as budgetComputeAffordVerdict,
 } from '../../src/js/budget-engine.js';
 
 // ================================================================
@@ -1347,6 +1349,7 @@ export async function onRequest(context) {
       if (method === 'POST' && param === 'generate') return await generateMonthlyBudget(DB, env, body);
       if (method === 'POST' && param === 'accept') return await acceptMonthlyBudget(DB, body);
       if (method === 'POST' && param === 'afford') return await askBudgetAfford(DB, env, body);
+      if (method === 'POST' && param === 'outlook') return await budgetOutlook(DB, env, body);
     }
 
     // ── /api/expense-receipt/:id — single receipt image, fetched on demand ──
@@ -4499,9 +4502,7 @@ function isValidMonthKey(value) {
 }
 
 function budgetStatusFromNumbers(expectedParishIncome, recommendedBudget) {
-  if (expectedParishIncome <= 0 || recommendedBudget > expectedParishIncome) return 'short';
-  if (recommendedBudget > expectedParishIncome * 0.9) return 'tight';
-  return 'enough';
+  return budgetStatusFromEngine(expectedParishIncome, recommendedBudget);
 }
 
 function monthFromIsoDate(value) {
@@ -4675,12 +4676,21 @@ Notes:
 ${JSON.stringify(pack.noteSnippets || [])}`;
 }
 
-function budgetAffordPrompt(plan, idea, amount, safe) {
+function budgetAffordPrompt(plan, idea, amount, safe, rolling) {
+  const rollingBlock = rolling ? `
+
+3-month outlook (this month + next 2 months, remittance already excluded — this is the authoritative affordability answer):
+- expected income over 3 months: ₦${rolling.income.toLocaleString('en-NG')}
+- already-committed operating spend over 3 months: ₦${rolling.committed.toLocaleString('en-NG')}
+- spare room before this request: ₦${Math.round(rolling.headroom).toLocaleString('en-NG')}
+- spare room after this request: ₦${Math.round(rolling.headroomAfterExtra).toLocaleString('en-NG')}
+- 3-month status: ${rolling.statusLabel}
+` : '';
   return `You are an advisor, not a decision-maker. Reply with STRICT JSON only:
 {
   "verdict": "yes|stretch|no",
   "safeAmount": 0,
-  "explanation": "two or three sentences"
+  "explanation": "one short plain-language sentence, max 25 words"
 }
 
 Monthly budget plan:
@@ -4692,17 +4702,38 @@ ${JSON.stringify({
     cushion: plan.cushion,
     lines: plan.lines,
   })}
-
+${rollingBlock}
 Question:
 - idea: ${String(idea || '').trim()}
 - requested extra amount: ₦${Math.max(0, Math.round(Number(amount || 0))).toLocaleString('en-NG')}
 
-Server-calculated guardrails you must respect:
-- safeExtraRightNow: ₦${Math.max(0, Math.round(Number(safe.safeExtra || 0))).toLocaleString('en-NG')}
-- leftoverAfterBudget: ₦${Math.round(Number(safe.leftoverAfterBudget || 0)).toLocaleString('en-NG')}
-- leftoverAfterExtra: ₦${Math.round(Number(safe.leftoverAfterExtra || 0)).toLocaleString('en-NG')}
+Server-calculated guardrails you must respect (never invent your own numbers):
+- safeExtraRightNow (this month only): ₦${Math.max(0, Math.round(Number(safe.safeExtra || 0))).toLocaleString('en-NG')}
+- leftoverAfterBudget (this month only): ₦${Math.round(Number(safe.leftoverAfterBudget || 0)).toLocaleString('en-NG')}
+- leftoverAfterExtra (this month only): ₦${Math.round(Number(safe.leftoverAfterExtra || 0)).toLocaleString('en-NG')}
+${rolling ? '- Base your verdict primarily on the 3-month outlook above, not just this single month.' : ''}
 
-You may advise cut/postpone/reduce, but do not invent extra money.`;
+You may advise cut/postpone/reduce, but do not invent extra money. Keep the explanation to ONE short sentence.`;
+}
+
+function budgetOutlookPrompt({ expectedIncome3mo, committedSpend3mo, headroom, statusLabel, verdict, topDriver }) {
+  return `You explain a church's 3-month operating budget outlook in ONE short, plain sentence (max 22 words) for a busy admin who does not want to read numbers or jargon.
+
+Reply with STRICT JSON only:
+{ "caption": "one short sentence" }
+
+Numbers (already correct — never recalculate or change them):
+- expected parish income over the next 3 months (after remittance): ₦${Math.max(0, Math.round(Number(expectedIncome3mo || 0))).toLocaleString('en-NG')}
+- already-committed operating spend over the next 3 months: ₦${Math.max(0, Math.round(Number(committedSpend3mo || 0))).toLocaleString('en-NG')}
+- spare room (headroom): ₦${Math.round(Number(headroom || 0)).toLocaleString('en-NG')}
+- status: ${statusLabel} (verdict: ${verdict})
+${topDriver ? `- biggest committed item: ${topDriver}` : ''}
+
+Rules:
+- If headroom is negative, clearly say there is a shortfall, never a surplus.
+- Do not use jargon like "COGS", "cadence", or "remittance strip".
+- ONE sentence only, no bullet points, no multiple clauses joined by many commas.
+- Do not invent a different number than the ones given.`;
 }
 
 async function callBudgetAdvisorJson(DB, env, prompt, fallbackValue) {
@@ -4865,22 +4896,36 @@ async function askBudgetAfford(DB, env, data) {
   const monthExpenses = await listExpensesForMonth(DB, targetMonthKey);
   const spentTotal = budgetSumExpensesByCategory(monthExpenses).total;
   const safe = budgetSafeToSpend(plan, spentTotal, amount);
-  const ai = await callBudgetAdvisorJson(DB, env, budgetAffordPrompt(plan, idea, amount, safe), {
-    verdict: safe.verdict,
-    safeAmount: safe.safeExtra,
-    explanation: safe.verdict === 'no'
-      ? 'This request is above the safe extra room left in the plan right now, so it should be postponed, reduced, or matched with cuts elsewhere.'
-      : safe.verdict === 'stretch'
-        ? 'This request may be possible, but the month is already tight. Proceed only if it is urgent and lower-priority lines can absorb the pressure.'
-        : 'This request still fits inside the remaining operating budget for the month, so it appears affordable if no new pressure emerges.',
+
+  // Optional 3-month rolling numbers computed client-side from real income/expense
+  // history (same trust boundary as the pack sent to /budget/generate). When present,
+  // they are the authoritative affordability signal — this single month's leftover is
+  // no longer the whole picture, since a fine "this month" can still break next month.
+  const rollingInput = data?.rolling && typeof data.rolling === 'object' ? data.rolling : null;
+  const rolling = rollingInput
+    ? budgetComputeAffordVerdict(rollingInput.expectedIncome3mo, rollingInput.committedSpend3mo, amount)
+    : null;
+  const effectiveVerdict = rolling ? rolling.verdict : safe.verdict;
+  const effectiveSafeAmount = rolling ? Math.max(0, Math.round(rolling.headroom)) : safe.safeExtra;
+
+  const ai = await callBudgetAdvisorJson(DB, env, budgetAffordPrompt(plan, idea, amount, safe, rolling), {
+    verdict: effectiveVerdict,
+    safeAmount: effectiveSafeAmount,
+    explanation: effectiveVerdict === 'no'
+      ? (rolling
+        ? `This would put the parish about ₦${Math.abs(Math.round(rolling.headroomAfterExtra)).toLocaleString('en-NG')} short over the next 3 months, so it should be postponed or reduced.`
+        : 'This request is above the safe extra room left in the plan right now, so it should be postponed, reduced, or matched with cuts elsewhere.')
+      : effectiveVerdict === 'stretch'
+        ? 'This may be possible, but the outlook is already tight — proceed only if it is urgent.'
+        : 'This still fits inside the expected spare room, so it appears affordable if no new pressure emerges.',
   });
   const affordEntry = {
     at: new Date().toISOString(),
     idea,
     requestedAmount: amount,
     spentTotal,
-    verdict: safe.verdict,
-    safeAmount: safe.safeExtra,
+    verdict: effectiveVerdict,
+    safeAmount: effectiveSafeAmount,
   };
   budgets[targetMonthKey] = {
     ...plan,
@@ -4889,16 +4934,58 @@ async function askBudgetAfford(DB, env, data) {
   await writeMonthlyBudgets(DB, budgets);
   await writeAuditLog(DB, 'budget_afford_asked', `Afford check asked for ${targetMonthKey}: ${idea}${amount ? ` (${amount})` : ''}`, 'System');
   return ok({
-    verdict: safe.verdict,
-    safeAmount: safe.safeExtra,
+    verdict: effectiveVerdict,
+    safeAmount: effectiveSafeAmount,
     explanation: String(ai.data?.explanation || '').trim(),
     aiVerdict: String(ai.data?.verdict || ''),
     aiSafeAmount: Math.max(0, Math.round(Number(ai.data?.safeAmount || 0))),
+    rolling: rolling ? {
+      expectedIncome3mo: rolling.income,
+      committedSpend3mo: rolling.committed,
+      headroom: rolling.headroom,
+      headroomAfterExtra: rolling.headroomAfterExtra,
+      statusLabel: rolling.statusLabel,
+    } : null,
     server: {
       spentTotal,
       leftoverAfterBudget: safe.leftoverAfterBudget,
       leftoverAfterExtra: safe.leftoverAfterExtra,
     },
+    provider: ai.provider,
+    providerError: ai.error || '',
+  });
+}
+
+async function budgetOutlook(DB, env, data) {
+  const monthKeys = Array.isArray(data?.monthKeys) ? data.monthKeys.filter(isValidMonthKey) : [];
+  if (!monthKeys.length) return err('monthKeys must be an array of YYYY-MM values', 400);
+  const expectedIncome3mo = Math.max(0, Math.round(Number(data?.expectedIncome3mo || 0)));
+  const committedSpend3mo = Math.max(0, Math.round(Number(data?.committedSpend3mo || 0)));
+  const topDriver = String(data?.topDriver || '').trim().slice(0, 80);
+  // Never trust an AI (or a stale client) with the final verdict — recompute it
+  // deterministically from the two numbers, exactly like /budget/generate clamps
+  // AI-invented income back to the packed figures.
+  const verdictInfo = budgetComputeAffordVerdict(expectedIncome3mo, committedSpend3mo, 0);
+  const fallbackCaption = verdictInfo.verdict === 'no'
+    ? `You are about ₦${Math.abs(Math.round(verdictInfo.headroom)).toLocaleString('en-NG')} short over the next 3 months — hold off on new spending.`
+    : verdictInfo.statusLabel === 'tight'
+      ? `You have about ₦${Math.max(0, Math.round(verdictInfo.headroom)).toLocaleString('en-NG')} spare over the next 3 months, but it's tight, so spend carefully.`
+      : `You have about ₦${Math.max(0, Math.round(verdictInfo.headroom)).toLocaleString('en-NG')} spare over the next 3 months, so new spending looks safe.`;
+  const ai = await callBudgetAdvisorJson(DB, env, budgetOutlookPrompt({
+    expectedIncome3mo,
+    committedSpend3mo,
+    headroom: verdictInfo.headroom,
+    statusLabel: verdictInfo.statusLabel,
+    verdict: verdictInfo.verdict,
+    topDriver,
+  }), { caption: fallbackCaption });
+  return ok({
+    verdict: verdictInfo.verdict,
+    statusLabel: verdictInfo.statusLabel,
+    headroom: verdictInfo.headroom,
+    expectedIncome3mo,
+    committedSpend3mo,
+    caption: String(ai.data?.caption || '').trim() || fallbackCaption,
     provider: ai.provider,
     providerError: ai.error || '',
   });
