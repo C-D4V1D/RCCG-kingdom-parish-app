@@ -6,6 +6,9 @@ import BudgetEngine, {
   packHistory,
   classifyCadence,
   parishIncomeFromRemittance,
+  noteFingerprint,
+  groupExpensesByNote,
+  suggestSubsForCategory,
   matchActuals,
   safeToSpend,
   coercePlan,
@@ -54,6 +57,40 @@ test('packHistory excludes remittance-style expenses from operating totals', () 
   });
   assert.deepEqual(packed.byMonth['2026-08'].expensesByCategory, { power: 20000 });
   assert.equal(packed.byMonth['2026-08'].parishIncomeAfterRemittance, 130000);
+});
+
+test('groupExpensesByNote groups diesel vs nepa under power', () => {
+  const grouped = groupExpensesByNote([
+    { category: 'power', amount: 15000, description: 'Generator diesel purchase' },
+    { category: 'power', amount: 7000, description: 'NEPA prepaid token' },
+    { category: 'power', amount: 5000, description: 'Diesel top up' },
+  ]);
+  assert.equal(grouped.length, 2);
+  assert.equal(grouped.find(item => item.fingerprint === noteFingerprint('generator diesel purchase')).amount, 20000);
+  assert.equal(grouped.find(item => item.fingerprint === noteFingerprint('NEPA prepaid token')).amount, 7000);
+});
+
+test('suggestSubsForCategory sub amounts sum to category budget', () => {
+  const subs = suggestSubsForCategory('power', [
+    { category: 'power', amount: 15000, description: 'Generator diesel purchase' },
+    { category: 'power', amount: 7000, description: 'NEPA prepaid token' },
+    { category: 'power', amount: 5000, description: 'Diesel top up' },
+  ], 60000);
+  assert.equal(subs.length, 2);
+  assert.equal(subs.reduce((sum, item) => sum + item.amount, 0), 60000);
+});
+
+test('suggestSubsForCategory caps at four with other-notes rollup', () => {
+  const subs = suggestSubsForCategory('power', [
+    { category: 'power', amount: 1000, description: 'Diesel refill' },
+    { category: 'power', amount: 900, description: 'NEPA token' },
+    { category: 'power', amount: 800, description: 'Inverter service' },
+    { category: 'power', amount: 700, description: 'Solar cleaner' },
+    { category: 'power', amount: 600, description: 'Cable replacement' },
+  ], 10000);
+  assert.equal(subs.length, 4);
+  assert.equal(subs[3].fingerprint, 'other_notes');
+  assert.equal(subs.reduce((sum, item) => sum + item.amount, 0), 10000);
 });
 
 test('packHistory excludes children offering from parish gross and parish income', () => {
@@ -157,4 +194,21 @@ test('matchActuals returns line and total comparison math for accepted plans', (
   assert.equal(comparison.totals.budgeted, 125000);
   assert.equal(comparison.totals.spent, 35000);
   assert.equal(comparison.totals.leftover, 90000);
+});
+
+test('matchActuals derives display note subs when plan has none', () => {
+  const comparison = matchActuals({
+    monthKey: '2026-09',
+    recommendedBudget: 50000,
+    lines: [
+      { key: 'power', label: 'Power', amount: 40000, expenseCategory: 'power' },
+    ],
+  }, [
+    { category: 'power', amount: 10000, description: 'Generator diesel purchase' },
+    { category: 'power', amount: 5000, description: 'NEPA prepaid token' },
+  ], new Date('2026-09-10T12:00:00Z'));
+  const subs = comparison.lines[0].subs;
+  assert.equal(subs.length, 2);
+  assert.equal(subs.reduce((sum, item) => sum + item.budgeted, 0), 40000);
+  assert.equal(subs.reduce((sum, item) => sum + item.spent, 0), 15000);
 });
