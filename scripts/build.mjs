@@ -24,6 +24,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
 const JS_FILES = [
+  'src/js/budget-engine.js',
   'src/js/app.js',
   'src/js/kpsc.js',
   'src/js/kpsc-public-minutes.js',
@@ -81,13 +82,16 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const pct = ((1 - out / src) * 100).toFixed(1);
     console.log(`  ${dest.padEnd(34)}  ${(src / 1024).toFixed(1).padStart(6)} KB  →  ${(out / 1024).toFixed(1).padStart(6)} KB  (${pct}% smaller)`);
   }
-  // Cache-busting hash for the app.js script tag in index.html
+  // Cache-busting hash for the finance shell scripts in index.html
+  const budgetJsBuilt = await readFile(join(ROOT, 'dist/js/budget-engine.js'), 'utf8');
   const appJsBuilt = await readFile(join(ROOT, 'dist/js/app.js'), 'utf8');
-  const versionHash = createHash('md5').update(appJsBuilt).digest('hex').slice(0, 10);
+  const versionHash = createHash('md5').update(budgetJsBuilt + appJsBuilt).digest('hex').slice(0, 10);
 
   // Update cache-busting param in index.html
   const indexHtml = await readFile(join(ROOT, 'index.html'), 'utf8');
-  const updatedHtml = indexHtml.replace(/app\.js\?v=[a-z0-9]+/i, `app.js?v=${versionHash}`);
+  const updatedHtml = indexHtml
+    .replace(/budget-engine\.js\?v=[a-z0-9]+/i, `budget-engine.js?v=${versionHash}`)
+    .replace(/app\.js\?v=[a-z0-9]+/i, `app.js?v=${versionHash}`);
   if (updatedHtml !== indexHtml) {
     await writeFile(join(ROOT, 'index.html'), updatedHtml);
     console.log(`  index.html                          cache-bust: ?v=${versionHash}`);

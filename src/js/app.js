@@ -19,11 +19,11 @@ const ROLES = {
 };
 
 const PERMISSIONS = {
-  pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','petty_view','reports','audit','signoff','rem_cutoff_edit'],
-  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','bank','petty_view','reports','audit','rem_cutoff_edit','expense_delete_approved'],
-  admin_officer: ['dashboard','transactions','expenses','petty_request','petty_view','income_view','petty_to_bank'],
-  signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','bank','petty_approve','signoff','petty_to_bank'],
-  viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','petty_view']
+  pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','budget','petty_view','reports','audit','signoff','rem_cutoff_edit'],
+  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','expenses_view','budget','bank','petty_view','reports','audit','rem_cutoff_edit','expense_delete_approved'],
+  admin_officer: ['dashboard','transactions','expenses','expenses_view','budget','petty_request','petty_view','income_view','petty_to_bank'],
+  signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','budget','bank','petty_approve','signoff','petty_to_bank'],
+  viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','budget','petty_view']
 };
 
 // All available permission keys with human-readable labels, grouped for the UI
@@ -39,6 +39,7 @@ const PERMISSION_DEFS = [
   { key:'rem_cutoff_edit',  label:'Edit Remittance Cut-Off Dates', group:'Finance' },
   { key:'expenses',               label:'Log Expenses',                group:'Finance' },
   { key:'expenses_view',          label:'View Expenses',               group:'Finance' },
+  { key:'budget',                 label:'View Monthly Budget',         group:'Finance' },
   { key:'expense_delete_approved',label:'Delete Approved Expenses',    group:'Finance' },
   { key:'bank',             label:'Bank',                   group:'Finance'    },
   { key:'petty_request',    label:'Request Petty Cash',     group:'Petty Cash' },
@@ -56,6 +57,7 @@ const NAV = [
   { id:'income',       label:'Record Income', icon:'📥', section:'Finance',  minRole:['it_admin','accountant'] },
   { id:'remittances',  label:'Remittances',   icon:'📤', section:'Finance',  minRole:['it_admin','pastor','accountant','signatory'] },
   { id:'expenses',     label:'Expenses',      icon:'💸', section:'Finance',  minRole:['it_admin','accountant','admin_officer'] },
+  { id:'budget',       label:'Budget',        icon:'💰', section:'Finance',  minRole:['it_admin','pastor','accountant','admin_officer','signatory','viewer'] },
   { id:'bank',         label:'Bank',          icon:'🏦', section:'Finance',  minRole:['it_admin','accountant','signatory'] },
   { id:'petty_cash',   label:'Petty Cash',    icon:'💳', section:'Finance',  minRole:['it_admin','accountant','admin_officer','signatory'] },
   { id:'reports',      label:'Reports',       icon:'📊', section:'Reports',  minRole:['it_admin','pastor','accountant'] },
@@ -714,6 +716,10 @@ const DB = {
   deleteIncome(id)             { return apiFetch(`income/${id}`,'DELETE'); },
 
   getExpenses(full=false)      { return apiFetch('expenses'+(full?'?full=1':'')); },
+  getBudget(month)             { return apiFetch(`budget?month=${encodeURIComponent(month)}`); },
+  generateBudget(d)            { return apiFetch('budget/generate','POST',d); },
+  acceptBudget(d)              { return apiFetch('budget/accept','POST',d); },
+  askBudgetAfford(d)           { return apiFetch('budget/afford','POST',d); },
   getExpenseReceipt(id)        { return apiFetch(`expense-receipt/${id}`); },
   addExpense(d)                { return apiFetch('expenses','POST',d); },
   updateExpense(id,d)          { return apiFetch(`expenses/${id}`,'PUT',d); },
@@ -868,6 +874,11 @@ const state = {
   page: 'dashboard',
   month: new Date().getMonth(),
   year: new Date().getFullYear(),
+  budgetTab: 'this_month',
+  budgetThisMonthKey: '',
+  budgetNextMonthKey: '',
+  budgetAffordResult: null,
+  budgetExpandedLine: '',
   loginBusy: false,
   aiSecretaryActiveId: null,
   // App-wide period mode shared by Dashboard, Bank, Income, Expenses.
@@ -1009,6 +1020,7 @@ const ACCESS_RULES = {
     income:       { permissionsAny:['income','income_view'] },
     remittances:  { permissionsAny:['remittances','remittances_view'] },
     expenses:     { permissionsAny:['expenses','expenses_view'] },
+    budget:       () => hasPermission('budget') && (state.user?.role !== 'viewer' || hasPermission('expenses_view')),
     bank:         { permissionsAny:['bank'] },
     petty_cash:   { permissionsAny:['petty_request','petty_approve','petty_view'] },
     reports:      { permissionsAny:['reports'] },
@@ -2401,7 +2413,7 @@ async function submitChangePin(btn=null){
 // ──────────────────────────────────────────
 // 6. NAVIGATION & ROUTER
 // ──────────────────────────────────────────
-const VALID_PAGES = ['dashboard','transactions','income','remittances','expenses','bank','petty_cash','reports','audit','admin'];
+const VALID_PAGES = ['dashboard','transactions','income','remittances','expenses','budget','bank','petty_cash','reports','audit','admin'];
 
 function pageFromPath(){
   const seg = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
@@ -2543,7 +2555,7 @@ async function navigate(page, fromHistory){
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   const titles={dashboard:'Dashboard',transactions:'Transactions',income:'Record Income',remittances:'Remittances',
-    expenses:'Expenses',bank:'Bank',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel'};
+    expenses:'Expenses',budget:'Budget',bank:'Bank',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel'};
   document.getElementById('topBarTitle').textContent=titles[page]||page;
   // Paint the page skeleton immediately from synchronous state — no network — so a
   // slow connection sees the page's structure (and the loading progress bar) within
@@ -2573,6 +2585,7 @@ function paintSkeleton(page, title){
   if(page === 'dashboard') return renderDashboardSkeleton();
   if(page === 'income')    return renderPageSkeleton({ pageTitle: 'Income Recording', pageSub: monthLabel(), kpiCount: 3, hint: 'Loading income…' });
   if(page === 'expenses')  return renderPageSkeleton({ pageTitle: 'Expenses', pageSub: monthLabel(), kpiCount: 3, hint: 'Loading expenses…' });
+  if(page === 'budget')    return renderPageSkeleton({ pageTitle: 'Budget', pageSub: 'This month · Next month', kpiCount: 2, hint: 'Loading budget…' });
   if(page === 'bank')      return renderPageSkeleton({ pageTitle: 'Bank Account', pageSub: monthLabel(), kpiCount: 4, hint: 'Loading bank activity…' });
   return renderPageSkeleton({ pageTitle: title || 'Loading', pageSub: monthLabel(), kpiCount: 3, hasTabs: true, hint: 'Loading…' });
 }
@@ -2606,7 +2619,7 @@ async function getPettyCashPendingCount(){
 // ──────────────────────────────────────────
 async function renderPage(page){
   const pages={dashboard:renderDashboard,transactions:renderTransactions,income:renderIncome,remittances:renderRemittances,
-    expenses:renderExpenses,bank:renderBank,petty_cash:renderPettyCash,reports:renderReports,
+    expenses:renderExpenses,budget:renderBudget,bank:renderBank,petty_cash:renderPettyCash,reports:renderReports,
     audit:renderAudit,admin:renderAdmin};
   try{
     if(pages[page]) await pages[page]();
@@ -5326,6 +5339,288 @@ function renderSatelliteFundsInSection(records){
 }
 
 function setIncomeTab(t){ state.incomeTab=t; renderIncome() }
+
+function getBudgetEngine(){
+  const engine = window.BudgetEngine;
+  if(!engine) throw new Error('Budget engine failed to load.');
+  return engine;
+}
+function budgetTodayKey(){ return getBudgetEngine().monthKey(new Date()); }
+function budgetMonthOffset(key, offset){
+  const [y,m] = String(key||budgetTodayKey()).split('-').map(Number);
+  const d = new Date(y, (m||1)-1 + offset, 1);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+}
+function budgetMonthLabelForKey(key){
+  const [y,m] = String(key||'').split('-').map(Number);
+  return y && m ? `${MONTHS[m-1]} ${y}` : '—';
+}
+function ensureBudgetState(){
+  if(!state.budgetThisMonthKey) state.budgetThisMonthKey = budgetTodayKey();
+  if(!state.budgetNextMonthKey) state.budgetNextMonthKey = budgetMonthOffset(budgetTodayKey(), 1);
+  if(!state.budgetTab) state.budgetTab = 'this_month';
+}
+function setBudgetTab(tab){
+  state.budgetTab = tab === 'next_month' ? 'next_month' : 'this_month';
+  state.budgetAffordResult = null;
+  state.budgetExpandedLine = '';
+  if(state.page === 'budget') renderBudget();
+}
+function setBudgetMonth(which, value){
+  if(!/^\d{4}-\d{2}$/.test(String(value||''))) return;
+  if(which === 'next') state.budgetNextMonthKey = value;
+  else state.budgetThisMonthKey = value;
+  state.budgetAffordResult = null;
+  state.budgetExpandedLine = '';
+  if(state.page === 'budget') renderBudget();
+}
+function toggleBudgetLine(key){
+  state.budgetExpandedLine = state.budgetExpandedLine === key ? '' : key;
+  if(state.page === 'budget') renderBudget();
+}
+
+async function buildBudgetPack(targetMonthKey, historyMonthsUsed=6){
+  const engine = getBudgetEngine();
+  const [allIncome, allExpenses] = await Promise.all([DB.getIncome(), DB.getExpenses()]);
+  const historyKeys = [];
+  for(let i=historyMonthsUsed; i>=1; i--) historyKeys.push(budgetMonthOffset(targetMonthKey, -i));
+  const keys = new Set(historyKeys);
+  const income = allIncome.filter(r=>keys.has(engine.monthKey(r.date||r.createdAt||'')));
+  const expenses = allExpenses.filter(r=>keys.has(engine.monthKey(r.date||r.createdAt||'')));
+  const remittanceCalcsByMonth = {};
+  for(const key of historyKeys){
+    const monthIncome = income.filter(r=>engine.monthKey(r.date||r.createdAt||'')===key);
+    remittanceCalcsByMonth[key] = totalRemittanceDue(await calcRemittancesFromRecords(monthIncome));
+  }
+  const history = engine.packHistory({ incomeRecords:income, expenses, remittanceCalcsByMonth, months:historyMonthsUsed });
+  const noteSnippets = history.months.flatMap(m=>m.notes||[]).slice(0, 20);
+  const categoryHints = EXPENSE_CATS
+    .filter(c=>c.key!=='reconciliation')
+    .map(cat=>{
+      const series = history.months.map(m=>({ amount:m.expensesByCategory?.[cat.key]||0, notes:(m.notes||[]).join(' ') }));
+      const avgAmount = Math.round(series.reduce((sum,item)=>sum+(item.amount||0),0) / Math.max(1, series.length));
+      return {
+        key:cat.key,
+        label:cat.label,
+        avgAmount,
+        cadence: engine.classifyCadence(series),
+        why: avgAmount>0 ? `Based on ${historyMonthsUsed}-month operating history` : '',
+        expenseCategory:cat.key,
+      };
+    })
+    .filter(item=>item.avgAmount>0)
+    .sort((a,b)=>b.avgAmount-a.avgAmount);
+  return {
+    monthKey: targetMonthKey,
+    historyMonthsUsed,
+    months: history.months,
+    categoryHints,
+    noteSnippets,
+  };
+}
+
+function budgetStatusBadge(label){
+  if(label==='enough') return 'badge badge-success';
+  if(label==='tight') return 'badge badge-warn';
+  return 'badge badge-danger';
+}
+
+async function renderBudget(){
+  ensureBudgetState();
+  renderPageSkeleton({ pageTitle: 'Budget', pageSub: 'This month · Next month', kpiCount: 2, hint: 'Loading budget…' });
+  const sources = [
+    ['Settings', () => DB.getSettings()],
+    ['This month budget', () => DB.getBudget(state.budgetThisMonthKey)],
+    ['Next month budget', () => DB.getBudget(state.budgetNextMonthKey)],
+    ['Expenses', () => DB.getExpenses()],
+  ];
+  const settled = await Promise.allSettled(sources.map(([,fn])=>fn()));
+  const failed = settled.map((r,i)=>r.status==='rejected'?{ label:sources[i][0], err:r.reason }:null).filter(Boolean);
+  if(failed.length){
+    renderPageErrorState({ pageId:'budget', pageTitle:'Budget', pageSub:'Monthly planning', failed });
+    return;
+  }
+  const engine = getBudgetEngine();
+  const [settings, thisBudgetResp, nextBudgetResp, allExpenses] = settled.map(r=>r.value);
+  const thisPlan = thisBudgetResp?.plan || null;
+  const nextPlan = nextBudgetResp?.plan || null;
+  const thisMonthExpenses = allExpenses.filter(exp=>engine.monthKey(exp.date||exp.createdAt||'')===state.budgetThisMonthKey);
+  const actuals = thisPlan ? engine.matchActuals(thisPlan, thisMonthExpenses, new Date()) : null;
+  const safe = thisPlan ? engine.safeToSpend(thisPlan, actuals?.spentTotal||0) : null;
+  const canUseAi = !!(settings?.ai_deepseek_key_set || settings?.ai_openai_key_set);
+  const noDeepseek = !settings?.ai_deepseek_key_set;
+  const thisPct = actuals?.totals?.budgeted ? Math.min(100, Math.max(0, actuals.totals.pct)) : 0;
+  document.getElementById('pageContent').innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Monthly Budget</div>
+        <div class="page-sub">Build parish operating spend after remittance — never the remittance itself.</div>
+      </div>
+    </div>
+    <div class="budget-tabs">
+      <button class="tab ${state.budgetTab==='this_month'?'active':''}" onclick="App.setBudgetTab('this_month')">This month</button>
+      <button class="tab ${state.budgetTab==='next_month'?'active':''}" onclick="App.setBudgetTab('next_month')">Next month</button>
+    </div>
+    ${state.budgetTab==='this_month' ? `
+      <div class="card budget-card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">This month</div>
+            <div class="page-sub" style="margin-top:4px">${budgetMonthLabelForKey(state.budgetThisMonthKey)}</div>
+          </div>
+          <input type="month" class="form-input budget-month-picker" value="${state.budgetThisMonthKey}" onchange="App.setBudgetMonth('this', this.value)" />
+        </div>
+        ${!thisPlan ? `
+          <div class="empty-table" style="padding:24px 8px">
+            No plan for ${budgetMonthLabelForKey(state.budgetThisMonthKey)} yet — open Next month and generate one.
+            <div style="margin-top:12px"><button class="btn btn-primary" onclick="App.setBudgetTab('next_month')">Open Next month</button></div>
+          </div>
+        ` : `
+          <div class="budget-hero">
+            <div class="budget-hero-main">
+              <div class="budget-hero-amount">${fmt(thisPlan.recommendedBudget)}</div>
+              <div class="budget-hero-sub">Budget · Used ${fmt(actuals?.spentTotal||0)} · Left ${fmt((actuals?.totals?.leftover)||0)}</div>
+            </div>
+            <span class="${budgetStatusBadge(thisPlan.statusLabel)}">${esc((thisPlan.statusLabel||'').replace(/^\w/, c=>c.toUpperCase()))}</span>
+          </div>
+          <div class="budget-strip">Not ours to budget · ${fmt(thisPlan.remittanceStrip?.amount||thisPlan.expectedRemittance||0)} already spoken for (RCCG)</div>
+          <div class="budget-bar"><div class="budget-bar-fill" style="width:${thisPct}%"></div></div>
+          <div class="budget-summary-grid">
+            <div><div class="card-title">Budget</div><div class="budget-mini-val">${fmt(actuals?.totals?.budgeted||thisPlan.recommendedBudget||0)}</div></div>
+            <div><div class="card-title">Used</div><div class="budget-mini-val">${fmt(actuals?.totals?.spent||0)}</div></div>
+            <div><div class="card-title">Safe extra</div><div class="budget-mini-val">${fmt(safe?.safeExtra||0)}</div></div>
+          </div>
+          <div class="budget-lines">
+            ${(actuals?.lines||[]).map(line=>{
+              const expRows = thisMonthExpenses.filter(exp=>(exp.category||'') === (line.expenseCategory||line.key));
+              const expanded = state.budgetExpandedLine === line.key;
+              const paceClass = line.pace === 'over' ? 'badge-danger' : line.pace === 'hot' || line.pace === 'watch' ? 'badge-warn' : 'badge-success';
+              return `<button class="budget-line" onclick="App.toggleBudgetLine('${line.key}')" aria-expanded="${expanded?'true':'false'}">
+                <div class="budget-line-top">
+                  <div>
+                    <div class="budget-line-label">${esc(line.label||line.key)}</div>
+                    <div class="budget-line-sub">${fmt(line.budgeted)} budgeted · ${fmt(line.spent)} spent · ${fmt(line.leftover)} left</div>
+                  </div>
+                  <div style="text-align:right">
+                    <span class="badge ${paceClass}">${line.pace==='over'?'Over':line.pace==='hot'?'Watch':line.pace==='watch'?'Watch':'On track'}</span>
+                    <div class="budget-line-pct">${line.pct}%</div>
+                  </div>
+                </div>
+                <div class="budget-bar budget-line-bar"><div class="budget-bar-fill" style="width:${Math.min(100,Math.max(0,line.pct))}%"></div></div>
+                ${expanded ? `<div class="budget-line-expenses">
+                  ${expRows.length ? expRows.map(exp=>`<div class="budget-expense-row"><span>${fmtDate(exp.date||exp.createdAt)} · ${esc(exp.description||exp.subCategory||'Expense')}</span><strong>${fmt(exp.amount)}</strong></div>`).join('') : '<div class="td-muted">No matched expenses yet this month.</div>'}
+                </div>` : ''}
+              </button>`;
+            }).join('')}
+          </div>
+          <div class="card" style="margin-top:16px;margin-bottom:0;padding:14px">
+            <div class="card-title" style="margin-bottom:10px">Ask AI if something extra can fit this month</div>
+            <div class="form-group"><label class="form-label">Idea</label><input id="budget_idea" class="form-input" placeholder="e.g. extra generator servicing, welfare support" /></div>
+            <div class="form-group"><label class="form-label">Optional amount (₦)</label><input id="budget_amount" type="number" class="form-input" placeholder="0" /></div>
+            <button class="btn btn-primary btn-full" ${canUseAi?'':'disabled'} onclick="App.askBudgetAfford(this)">Ask AI</button>
+            ${state.budgetAffordResult ? `<div class="alert alert-${state.budgetAffordResult.verdict==='no'?'danger':state.budgetAffordResult.verdict==='stretch'?'warn':'info'}" style="margin-top:12px">
+              <span class="alert-icon">${state.budgetAffordResult.verdict==='no'?'✕':state.budgetAffordResult.verdict==='stretch'?'⚠':'ℹ'}</span>
+              <span><strong>${state.budgetAffordResult.verdict.toUpperCase()}</strong> · Safe extra ${fmt(state.budgetAffordResult.safeAmount||0)}. ${esc(state.budgetAffordResult.explanation||'')}</span>
+            </div>`:''}
+          </div>
+        `}
+      </div>
+    ` : `
+      <div class="card budget-card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Next month plan</div>
+            <div class="page-sub" style="margin-top:4px">${budgetMonthLabelForKey(state.budgetNextMonthKey)}</div>
+          </div>
+          <input type="month" class="form-input budget-month-picker" value="${state.budgetNextMonthKey}" onchange="App.setBudgetMonth('next', this.value)" />
+        </div>
+        ${noDeepseek ? `<div class="alert alert-warn" style="margin-bottom:14px"><span class="alert-icon">⚠</span><span>DeepSeek is the primary budget advisor. Configure it in Settings → AI Provider Keys.${settings?.ai_openai_key_set?' OpenAI fallback is available.':' No OpenAI fallback key is set yet.'}</span></div>`:''}
+        ${!nextPlan ? `<div class="empty-table" style="padding:20px 8px">No budget plan saved for ${budgetMonthLabelForKey(state.budgetNextMonthKey)} yet.</div>`:''}
+        ${nextPlan ? `
+          <div class="budget-hero">
+            <div><div class="card-title">Expected parish income after remittance</div><div class="budget-hero-amount">${fmt(nextPlan.expectedParishIncome)}</div></div>
+            <div><div class="card-title">Recommended budget</div><div class="budget-hero-amount">${fmt(nextPlan.recommendedBudget)}</div></div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0 14px">
+            <span class="${budgetStatusBadge(nextPlan.statusLabel)}">${esc((nextPlan.statusLabel||'').replace(/^\w/, c=>c.toUpperCase()))}</span>
+            <span class="badge badge-gray">${nextPlan.status==='accepted'?'Accepted':'Draft'}</span>
+            ${nextPlan.acceptedAt?`<span class="td-muted">Accepted ${fmtDate(nextPlan.acceptedAt)}${nextPlan.acceptedBy?' by '+esc(nextPlan.acceptedBy):''}</span>`:''}
+          </div>
+          <div class="budget-strip">Not ours to budget · ${fmt(nextPlan.remittanceStrip?.amount||nextPlan.expectedRemittance||0)} already spoken for (RCCG)</div>
+          <p class="budget-summary">${esc(nextPlan.summary||'')}</p>
+          ${(nextPlan.ignored||[]).length?`<div class="budget-chip-row">${nextPlan.ignored.map(item=>`<span class="badge badge-gray">${esc(item)}</span>`).join('')}</div>`:''}
+          <div class="budget-lines" style="margin-top:14px">
+            ${(nextPlan.lines||[]).map(line=>`<div class="budget-line static">
+              <div class="budget-line-top">
+                <div>
+                  <div class="budget-line-label">${esc(line.label||line.key)}</div>
+                  <div class="budget-line-sub">${esc(line.why||'')}</div>
+                </div>
+                <div style="text-align:right">
+                  <span class="badge badge-purple">${esc(line.cadence||'usual')}</span>
+                  <div class="budget-line-pct">${fmt(line.amount||0)}</div>
+                </div>
+              </div>
+            </div>`).join('')}
+          </div>
+        `:''}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
+          <button class="btn btn-primary" ${canUseAi?'':'disabled'} onclick="App.generateBudget(this)">${nextPlan?'Regenerate':'Generate with AI'}</button>
+          ${nextPlan && nextPlan.status!=='accepted' ? `<button class="btn btn-amber" onclick="App.acceptBudgetPlan(this)">Accept plan</button>` : ''}
+        </div>
+      </div>
+    `}
+  `;
+}
+
+async function generateBudget(btn=null){
+  ensureBudgetState();
+  const restore = setBtnLoading(btn, 'Generating…');
+  try{
+    const settings = await DB.getSettings();
+    const pack = await buildBudgetPack(state.budgetNextMonthKey, 6);
+    const res = await DB.generateBudget({ monthKey:state.budgetNextMonthKey, pack, churchName:settings?.churchName||'RCCG Kingdom Parish' });
+    if(res?.providerError) console.warn('Budget generate fallback:', res.providerError);
+    showAlert(`Budget draft ready for ${budgetMonthLabelForKey(state.budgetNextMonthKey)}.`,'success');
+    state.budgetAffordResult = null;
+    await renderBudget();
+  }catch(e){
+    showAlert(e.message || 'Failed to generate budget.','danger');
+    restore();
+    return;
+  }
+  restore();
+}
+
+async function acceptBudgetPlan(btn=null){
+  const restore = setBtnLoading(btn, 'Accepting…');
+  try{
+    await DB.acceptBudget({ monthKey:state.budgetNextMonthKey, acceptedBy:state.user?.name||'Finance Portal' });
+    showAlert('Budget plan accepted.','success');
+    await renderBudget();
+  }catch(e){
+    showAlert(e.message || 'Failed to accept budget.','danger');
+    restore();
+    return;
+  }
+  restore();
+}
+
+async function askBudgetAfford(btn=null){
+  const idea = (document.getElementById('budget_idea')?.value||'').trim();
+  const amount = parseFloat(document.getElementById('budget_amount')?.value||'')||0;
+  if(!idea){ showAlert('Please describe the idea first.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Asking…');
+  try{
+    state.budgetAffordResult = await DB.askBudgetAfford({ monthKey:state.budgetThisMonthKey, idea, amount });
+    await renderBudget();
+  }catch(e){
+    showAlert(e.message || 'Failed to ask the budget advisor.','danger');
+    restore();
+    return;
+  }
+  restore();
+}
 
 async function renderIncomeList(records, cashTxOverride, remRatesOverride, expMapOverride, sundayCycleMapOverride){
   if(!records.length) return '<div class="card"><div class="empty-table">No Sunday collection records found for this month. Click "📥 Sunday Collections" above to add one.</div></div>';
@@ -15035,7 +15330,7 @@ async function setPeriodMode(mode){
 // ──────────────────────────────────────────
 return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
-  onMonthChange, setIncomeTab, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
+  onMonthChange, setIncomeTab, setBudgetTab, setBudgetMonth, toggleBudgetLine, generateBudget, acceptBudgetPlan, askBudgetAfford, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry, isRemittanceLinkedPayout,
@@ -15089,6 +15384,7 @@ return {
   _summarizeSatelliteFunds: summarizeSatelliteFunds,
   // Test-only hooks: exercise the real permission map without a login round-trip.
   _canAction: canAction,
+  _canAccessPage: canAccessPage,
   _ACCESS_RULES: ACCESS_RULES,
   _setTestUserRole: (role) => { state.user = { name:'Test User', role }; },
   _satelliteHeldDisplay: satelliteHeldDisplay,

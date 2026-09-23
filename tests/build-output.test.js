@@ -8,6 +8,7 @@ import { readFile } from 'node:fs/promises';
 import { minifyJS, minifyCSS } from '../scripts/build.mjs';
 
 const JS_FILES = [
+  ['src/js/budget-engine.js',        'dist/js/budget-engine.js'],
   ['src/js/app.js',                  'dist/js/app.js'],
   ['src/js/kpsc.js',                 'dist/js/kpsc.js'],
   ['src/js/kpsc-public-minutes.js',  'dist/js/kpsc-public-minutes.js'],

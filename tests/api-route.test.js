@@ -4255,3 +4255,158 @@ test('POST /api/petty-recalc subtracts petty_to_bank deposits (server recalc mat
   assert.equal(body.correctedFloat, 30000, '50k refill − 20k deposited to bank — the deposit must not be resurrected');
   assert.equal(updatedFloat, 30000, 'the stored float is corrected to the same figure');
 });
+
+test('POST /api/budget/generate clamps invented income back to the packed numbers', async () => {
+  let monthlyBudgetsJson = '{}';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          expectedGrossIncome: 999999,
+          expectedRemittance: 888888,
+          expectedParishIncome: 777777,
+          recommendedBudget: 123456,
+          cushion: 10000,
+          statusLabel: 'enough',
+          summary: 'Draft budget from AI.',
+          ignored: ['harvest Sunday inflated income'],
+          lines: [
+            { key: 'power', label: 'Power & Energy', amount: 25000, cadence: 'usual', why: 'Generator and light', expenseCategory: 'power' },
+            { key: 'facility', label: 'Facility & Cleaning', amount: 15000, cadence: 'usual', why: 'Cleaning and minor supplies', expenseCategory: 'facility' },
+          ],
+        }),
+      },
+    }],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: '2026-10',
+      churchName: 'RCCG Kingdom Parish',
+      pack: {
+        historyMonthsUsed: 6,
+        months: [
+          { monthKey: '2026-04', grossIncome: 100000, remittanceDue: 30000, parishIncomeAfterRemittance: 70000, expensesByCategory: { power: 20000 }, notes: ['normal month'] },
+          { monthKey: '2026-05', grossIncome: 140000, remittanceDue: 40000, parishIncomeAfterRemittance: 100000, expensesByCategory: { power: 25000 }, notes: ['normal month'] },
+        ],
+        categoryHints: [
+          { key: 'power', label: 'Power & Energy', avgAmount: 22000, cadence: 'usual', expenseCategory: 'power' },
+        ],
+      },
+    }),
+    env: { DB: createDBMock({
+      onPrepare(sql) {
+        const statement = {
+          _bound: [],
+          bind(...args) { statement._bound = args; return statement; },
+          async first() {
+            if (/SELECT value FROM settings WHERE key='monthlyBudgets'/.test(sql)) return { value: monthlyBudgetsJson };
+            return null;
+          },
+          async all() {
+            if (/SELECT key,value FROM settings WHERE key IN \('ai_deepseek_key','ai_deepseek_model'\)/.test(sql)) {
+              return { results: [
+                { key: 'ai_deepseek_key', value: 'ds-key' },
+                { key: 'ai_deepseek_model', value: 'deepseek-v4-flash' },
+              ] };
+            }
+            return { results: [] };
+          },
+          async run() {
+            if (/INSERT OR REPLACE INTO settings/.test(sql) && statement._bound[0] === 'monthlyBudgets') monthlyBudgetsJson = statement._bound[1];
+            return { success: true };
+          },
+        };
+        return statement;
+      },
+    }) },
+  });
+  globalThis.fetch = originalFetch;
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.plan.expectedGrossIncome, 120000, 'uses averaged pack gross, not invented AI income');
+  assert.equal(body.plan.expectedRemittance, 35000, 'uses averaged pack remittance, not invented AI remittance');
+  assert.equal(body.plan.expectedParishIncome, 85000, 'uses averaged pack parish income, not invented AI parish income');
+  assert.equal(body.plan.recommendedBudget, 50000, 'recommended total is recomputed from lines + cushion');
+});
+
+test('POST /api/budget/afford overrides AI with server-side leftover math', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          verdict: 'yes',
+          safeAmount: 999999,
+          explanation: 'The AI thinks there is plenty of room.',
+        }),
+      },
+    }],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  const monthlyBudgetsJson = JSON.stringify({
+    '2026-09': {
+      monthKey: '2026-09',
+      status: 'accepted',
+      expectedGrossIncome: 150000,
+      expectedRemittance: 40000,
+      expectedParishIncome: 110000,
+      recommendedBudget: 100000,
+      statusLabel: 'tight',
+      summary: 'Accepted plan.',
+      ignored: [],
+      remittanceStrip: { label: 'Already spoken for (RCCG remittance)', amount: 40000 },
+      lines: [
+        { key: 'power', label: 'Power & Energy', amount: 50000, cadence: 'usual', why: 'Generator', expenseCategory: 'power' },
+        { key: 'facility', label: 'Facility & Cleaning', amount: 50000, cadence: 'usual', why: 'Cleaning', expenseCategory: 'facility' },
+      ],
+      cushion: 0,
+      affordLog: [],
+    },
+  });
+
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/afford', 'POST', {
+      monthKey: '2026-09',
+      idea: 'Extra diesel purchase',
+      amount: 5000,
+    }),
+    env: { DB: createDBMock({
+      onPrepare(sql) {
+        const statement = {
+          bind() { return statement; },
+          async first() {
+            if (/SELECT value FROM settings WHERE key='monthlyBudgets'/.test(sql)) return { value: monthlyBudgetsJson };
+            return null;
+          },
+          async all() {
+            if (/FROM expenses/.test(sql)) {
+              return { results: [
+                { id: 'EXP-1', category: 'power', amount: 45000, description: 'Fuel', sub_category: 'Fuel', date: '2026-09-05', created_at: '2026-09-05T10:00:00Z', remittance_ref: '' },
+                { id: 'EXP-2', category: 'facility', amount: 25000, description: 'Cleaning', sub_category: 'Cleaning', date: '2026-09-06', created_at: '2026-09-06T10:00:00Z', remittance_ref: '' },
+              ] };
+            }
+            if (/SELECT key,value FROM settings WHERE key IN \('ai_deepseek_key','ai_deepseek_model'\)/.test(sql)) {
+              return { results: [
+                { key: 'ai_deepseek_key', value: 'ds-key' },
+                { key: 'ai_deepseek_model', value: 'deepseek-v4-flash' },
+              ] };
+            }
+            return { results: [] };
+          },
+          async run() { return { success: true }; },
+        };
+        return statement;
+      },
+    }) },
+  });
+  globalThis.fetch = originalFetch;
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.safeAmount, 30000, 'server returns remaining budget room, not AI-invented number');
+  assert.equal(body.verdict, 'stretch', 'tight plans stay stretch even if AI says yes');
+  assert.equal(body.aiSafeAmount, 999999, 'raw AI answer is still returned for comparison');
+});

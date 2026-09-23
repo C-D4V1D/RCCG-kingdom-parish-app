@@ -255,6 +255,10 @@ details, and a pledge form that hands off to WhatsApp.
 - **Expenses** — fifteen categories with subcategory suggestions, quick-log chips,
   receipt image capture, split payment across bank/cash/petty cash, spendable-balance
   guard, and drill-through from the dashboard breakdown into the filtered ledger.
+- **Monthly budget tab** — a finance-planning view with "This month" and "Next month"
+  tabs, AI-assisted draft generation, accepted-plan tracking against live expenses, and
+  afford checks that keep remittance as COGS / already-spoken-for rather than a parish
+  budget expense. Admin Officer, Pastor, Accountant, IT Admin and Signatory can access it.
 - **Bank module** — balance tracking, deposits (single and bulk), withdrawals with a
   direct-expense path, bank charges, balance snapshots captured from alert emails, and
   monthly reconciliation against the ledger.

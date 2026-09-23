@@ -61,6 +61,13 @@ test('the quota waiver is available to the roles that handle remittances, and no
   }
 });
 
+test('admin_officer and signatory can access the budget page', () => {
+  App._setTestUserRole('admin_officer');
+  assert.equal(App._canAccessPage('budget'), true);
+  App._setTestUserRole('signatory');
+  assert.equal(App._canAccessPage('budget'), true);
+});
+
 test('an action name that is not declared denies every role, including IT Admin', () => {
   for (const role of ['it_admin', 'accountant', 'viewer']) {
     App._setTestUserRole(role);

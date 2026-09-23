@@ -53,6 +53,7 @@ test('admin service worker serves the real built bundles network-first', async (
   // requests), silently leaving the real /dist/ bundle on the cache-first path —
   // stale forever, so deployments never reached users.
   assert.match(sw, /'\/dist\/css\/styles\.css'/);
+  assert.match(sw, /'\/dist\/js\/budget-engine\.js'/);
   assert.match(sw, /'\/dist\/js\/app\.js'/);
   assert.doesNotMatch(sw, /'\/src\/js\/app\.js'/);
   assert.doesNotMatch(sw, /'\/src\/css\/styles\.css'/);
@@ -66,6 +67,7 @@ test('admin service worker serves the real built bundles network-first', async (
 
   // Root-cause guard: the JS/CSS index.html actually loads must be exactly what the
   // SW treats as a network-first shell asset, or it falls through to cache-first.
+  assert.match(html, /<script src="dist\/js\/budget-engine\.js(\?v=[a-z0-9]+)?"><\/script>/);
   assert.match(html, /<script src="dist\/js\/app\.js(\?v=[a-z0-9]+)?"><\/script>/);
   assert.match(html, /<link rel="stylesheet" href="dist\/css\/styles\.css" \/>/);
 });
