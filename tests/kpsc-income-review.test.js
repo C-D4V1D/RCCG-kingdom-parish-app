@@ -84,6 +84,9 @@ function createDBMock({ financeEntries = [], partners = [], role = 'treasurer' }
           throw new Error(`Unhandled .all() SQL: ${sql}`);
         },
         async run() {
+          if (sql.includes('ALTER TABLE')) {
+            return { meta: { changes: 0 } }; // ensureKpscConfirmColumns self-heal — no-op in this in-memory mock
+          }
           if (sql.includes('SET confirmed_by=?')) {
             const [confirmedBy, ...ids] = st._bound;
             let changes = 0;

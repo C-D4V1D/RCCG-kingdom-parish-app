@@ -5628,7 +5628,29 @@ async function deleteKpscFinanceEntry(DB, id, auth) {
   return ok({ deleted: id });
 }
 
+// Only /api/init runs the full migration list, and only a fresh sign-in calls that
+// route — a browser/PWA session restored from localStorage never did (see
+// saveCustomCollections above for the same gotcha on the older income table). A
+// parish already signed in when this feature deployed would otherwise hit "no such
+// column" on confirmed_by/deposited_by forever. Self-heal here instead, once per
+// warm isolate.
+let _kpscConfirmColumnsEnsured = false;
+async function ensureKpscConfirmColumns(DB) {
+  if (_kpscConfirmColumnsEnsured) return;
+  const stmts = [
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN confirmed_by TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN confirmed_at TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN deposited_by TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN deposited_at TEXT DEFAULT ''`,
+  ];
+  for (const sql of stmts) {
+    try { await DB.prepare(sql).run(); } catch { /* column already exists */ }
+  }
+  _kpscConfirmColumnsEnsured = true;
+}
+
 async function getKpscIncomeReview(DB) {
+  await ensureKpscConfirmColumns(DB);
   const todayStr = new Date().toISOString().slice(0, 10);
 
   // Every income entry, any payment method, that neither the Acting Chairman nor the
@@ -5728,6 +5750,7 @@ async function getKpscIncomeReview(DB) {
 }
 
 async function confirmKpscFinanceEntries(DB, data, auth) {
+  await ensureKpscConfirmColumns(DB);
   const ids = Array.isArray(data?.ids) ? [...new Set(data.ids.filter(id => typeof id === 'string' && id.trim()))] : [];
   if (!ids.length) return err('No entries selected', 400);
   const ph = ids.map(() => '?').join(',');
@@ -5746,6 +5769,7 @@ async function confirmKpscFinanceEntries(DB, data, auth) {
 }
 
 async function depositKpscCashForHolder(DB, data, auth) {
+  await ensureKpscConfirmColumns(DB);
   // holder omitted/empty sweeps every holder's undeposited cash at once ("Deposit All").
   const holder = String(data?.holder || '').trim();
   const holderClause = holder ? `AND (COALESCE(cash_holder,'')=? OR (COALESCE(cash_holder,'')='' AND recorded_by=?))` : '';
@@ -5970,6 +5994,7 @@ async function createKpscFinanceEntry(DB, data, auth) {
 }
 
 async function updateKpscFinanceEntry(DB, id, data, auth) {
+  await ensureKpscConfirmColumns(DB);
   const row = await DB.prepare(`SELECT * FROM kpsc_finance_entries WHERE id=?`).bind(id).first();
   if (!row) return err('KPSC finance entry not found', 404);
   // Editing an entry invalidates any prior sign-off on it — whoever confirmed it (or
