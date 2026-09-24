@@ -5503,6 +5503,7 @@ async function buildBudgetPack(targetMonthKey){
   const today = new Date();
   const historyKeys = budgetHistoryMonthKeys(targetMonthKey, today, 12);
   const parishIncomeByMonth = {};
+  const remittanceByMonth = {};
   for(const key of historyKeys){
     const [y,m] = key.split('-').map(Number);
     const monthStart = `${key}-01`;
@@ -5511,11 +5512,13 @@ async function buildBudgetPack(targetMonthKey){
     const rem = await calcRemittancesFromRecords(monthIncome);
     const quotaAmt = sumQuotaLines(getQuotaLinesForPeriod(quotaList, monthStart, monthEnd));
     parishIncomeByMonth[key] = Math.max(0, Math.round((rem.netLocal||0) - quotaAmt));
+    remittanceByMonth[key] = Math.round(totalRemittanceDue(rem, quotaAmt));
   }
   const history = engine.packHistory({
     incomeRecords: allIncome, expenses: allExpenses,
     months: 12, targetMonthKey, today, parishIncomeByMonth,
   });
+  history.months.forEach(m=>{ m.remittanceDue = remittanceByMonth[m.monthKey]||0; });
   const noteSnippets = history.months.flatMap(m=>m.notes||[]).slice(0, 20);
   const baselineLines = EXPENSE_CATS
     .filter(c=>c.key!=='reconciliation')
@@ -5554,6 +5557,12 @@ async function buildBudgetPack(targetMonthKey){
 
 // Part G — "Free for new things", computed the same way for the top card and for the
 // server's afford check (both call freeForNewThings() with the same pieces).
+// Settings store values as text; only the three offered choices are honoured.
+function budgetSafetyFractionFrom(settings){
+  const f = Number(settings?.budgetSafetyFraction);
+  return [0.25, 0.5, 1].includes(f) ? f : 0.5;
+}
+
 async function computeBudgetFreeParts(monthKey, prefetched){
   const engine = getBudgetEngine();
   const pf = prefetched || {};
@@ -5608,7 +5617,7 @@ async function computeBudgetFreeParts(monthKey, prefetched){
 
   const irregular = engine.irregularReserve(planLinesForReserve, allExpenses, today);
   const futureShort = engine.futureShortfall(normal, expectedParishIncome, 3);
-  const cushionAmt = engine.safetyCushion(normal, settings?.budgetSafetyFraction ?? 0.5);
+  const cushionAmt = engine.safetyCushion(normal, budgetSafetyFractionFrom(settings));
 
   const result = engine.freeForNewThings({
     availableNow, remainingThisMonth, expectedRestOfMonth, pendingUnpaid,
@@ -5812,7 +5821,8 @@ function renderBudgetThisMonth({ thisKey, thisPlan, actuals, progress, canManage
       <div class="budget-month-title">${esc(budgetMonthLabelForKey(thisKey))} · Day ${progress.day} of ${progress.daysInMonth}</div>
       <span class="${budgetStatusBadge(thisPlan.statusLabel)}">${esc(budgetStatusLabelText(thisPlan.statusLabel, thisPlan.shortBy))}</span>
     </div>
-    <div class="budget-summary-row"><span>Expected parish money this month (after RCCG)</span><strong>${fmt(thisPlan.expectedParishIncome)}</strong></div>
+    ${thisPlan.expectedRemittance>0?`<div class="budget-summary-row td-muted"><span>RCCG remittance (set rules — taken off first, not part of this budget)</span><strong>${fmt(thisPlan.expectedRemittance)}</strong></div>`:''}
+    <div class="budget-summary-row"><span>Expected parish money this month (after RCCG remittance)</span><strong>${fmt(thisPlan.expectedParishIncome)}</strong></div>
     <div class="budget-summary-row"><span>Normal spending budget</span><strong>${fmt(thisPlan.recommendedBudget)}</strong></div>
     <div class="budget-spend-line">Spent so far ${fmt(spent)} of ${fmt(budgeted)} · ${pctSpent}%</div>
     ${renderBudgetBar(pctSpent, progress.pct, overallPace)}
@@ -5846,6 +5856,7 @@ function renderBudgetNextMonth({ nextKey, nextPlan, canManage, canUseAi, allExpe
       <div class="budget-month-title">${esc(budgetMonthLabelForKey(nextKey))}</div>
       <span class="${budgetStatusBadge(nextPlan.statusLabel)}">${esc(budgetStatusLabelText(nextPlan.statusLabel, nextPlan.shortBy))}</span>
     </div>
+    ${nextPlan.expectedRemittance>0?`<div class="budget-summary-row td-muted"><span>RCCG remittance (set rules — taken off first, not part of this budget)</span><strong>${fmt(nextPlan.expectedRemittance)}</strong></div>`:''}
     <div class="budget-summary-row"><span>Expected parish income after remittance</span><strong>${fmt(nextPlan.expectedParishIncome)}</strong></div>
     <div class="budget-summary-row"><span>Recommended budget</span><strong>${fmt(total)}</strong></div>
     <div class="budget-chip-row">
@@ -5872,7 +5883,7 @@ function renderBudgetNextMonth({ nextKey, nextPlan, canManage, canUseAi, allExpe
             <div class="budget-line-top">
               <div>
                 <div class="budget-line-label">${esc(line.label||key)}</div>
-                <div class="budget-line-sub">${esc(line.why||'')}</div>
+                <div class="budget-line-sub budget-line-why" title="Tap to read more" onclick="this.classList.toggle('open')">${esc(line.why||'')}</div>
                 <div class="td-muted" style="margin-top:2px">last month: ${fmt(lastSpent)}</div>
               </div>
               <div style="text-align:right">
@@ -5932,7 +5943,7 @@ async function renderBudget(){
     <div class="page-header">
       <div>
         <div class="page-title">Monthly Budget</div>
-        <div class="page-sub">Plan parish operating spend after remittance — never the remittance itself.</div>
+        <div class="page-sub">Plan normal monthly spending after RCCG remittance, and see what is free for new things.</div>
       </div>
       <button class="btn btn-ghost no-print" onclick="window.print()">🖨 Print / Save PDF</button>
     </div>
@@ -14485,6 +14496,8 @@ function renderAdminSettings(s){
     <div class="form-group"><label class="form-label">Target Float (₦)</label><input type="number" id="set_petty_target_float" class="form-input" value="${s.pettyTargetFloat||90000}" /><div class="form-hint">Ideal petty cash balance for next period. Default: ₦90,000.</div></div>
     <div class="form-group"><label class="form-label">Manageable Float (₦)</label><input type="number" id="set_petty_manageable_float" class="form-input" value="${s.pettyManageableFloat||60000}" /><div class="form-hint">Acceptable minimum if target isn't possible. Default: ₦60,000.</div></div>
     <div class="form-group"><label class="form-label">Minimum Float (₦)</label><input type="number" id="set_petty_minimum_float" class="form-input" value="${s.pettyMinimumFloat||40000}" /><div class="form-hint">Absolute floor — below this is Critical. Default: ₦40,000.</div></div>
+    <div style="margin-top:18px;margin-bottom:8px;font-size:13px;font-weight:700;color:var(--text2);border-top:1px solid var(--border);padding-top:14px">Budget — Safety Cushion</div>
+    <div class="form-group"><label class="form-label">Keep back before counting money as "free for new things"</label><select id="set_budget_safety_fraction" class="form-input">${[[0.25,'A quarter of a month\'s normal spending'],[0.5,'Half a month\'s normal spending (recommended)'],[1,'One full month\'s normal spending']].map(([v,l])=>`<option value="${v}" ${budgetSafetyFractionFrom(s)===v?'selected':''}>${l}</option>`).join('')}</select><div class="form-hint">Money never counted as free, in case collections drop or a surprise comes. Example: normal spending ₦400,000 a month → half keeps ₦200,000 back.</div></div>
     <div class="form-group"><label class="form-label">Buffer Above Target (₦)</label><input type="number" id="set_petty_buffer_amount" class="form-input" value="${s.pettyBufferAmount||30000}" /><div class="form-hint">Cushion above target to stay "Healthy" instead of "Adequate". Default: ₦30,000.</div></div>
     </div>
     <button class="btn btn-primary" onclick="App.saveSettings(this)">Save Settings</button>
@@ -15063,6 +15076,8 @@ async function saveSettings(btn=null){
   s.pettyManageableFloat=parseFloat(document.getElementById('set_petty_manageable_float')?.value)||60000;
   s.pettyMinimumFloat=parseFloat(document.getElementById('set_petty_minimum_float')?.value)||40000;
   s.pettyBufferAmount=parseFloat(document.getElementById('set_petty_buffer_amount')?.value)||30000;
+  const safetyFraction = parseFloat(document.getElementById('set_budget_safety_fraction')?.value);
+  s.budgetSafetyFraction = [0.25,0.5,1].includes(safetyFraction) ? safetyFraction : 0.5;
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.saveSettings(s);
