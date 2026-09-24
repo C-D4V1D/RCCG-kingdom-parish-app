@@ -2730,9 +2730,9 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_cash_handovers ADD COLUMN holder TEXT DEFAULT ''`,
     `ALTER TABLE kpsc_cash_handovers ADD COLUMN collected_total REAL DEFAULT 0`,
     `ALTER TABLE kpsc_cash_handovers ADD COLUMN expense_total REAL DEFAULT 0`,
-    // Income review: bank-signatory sign-off (Acting Chairman / Treasurer) on every
-    // recorded income entry, and a separate "money actually reached the bank" flag
-    // for cash income + the cash-box expenses that were spent out of it.
+    // Income review: bank-signatory sign-off (Acting Chairman / Treasurer) that bank
+    // transfer / POS / cheque income arrived (confirmed_*), and that cash income —
+    // plus the cash-box expenses spent out of it — was deposited (deposited_*).
     `ALTER TABLE kpsc_finance_entries ADD COLUMN confirmed_by TEXT DEFAULT ''`,
     `ALTER TABLE kpsc_finance_entries ADD COLUMN confirmed_at TEXT DEFAULT ''`,
     `ALTER TABLE kpsc_finance_entries ADD COLUMN deposited_by TEXT DEFAULT ''`,
@@ -5648,6 +5648,10 @@ const KPSC_SYSTEM_SIGNOFF = 'System (auto)';
 // Income dated before this counts as settled history; anything on or after it goes
 // through Acting Chairman / Treasurer confirmation.
 const KPSC_REVIEW_START_DATE = '2026-09-01';
+// Income paid straight into the bank. The Acting Chairman / Treasurer confirm it
+// against the bank alerts. Cash is never "confirmed" — instead they confirm its
+// deposit once someone has paid it in (deposited_by).
+const KPSC_BANK_CONFIRM_METHODS_SQL = `('bank_transfer','pos','cheque')`;
 
 // One-time settling of rows that predate the income-review feature. Replaces an
 // earlier backfill that stamped EVERY row as confirmed and deposited — including
@@ -5682,14 +5686,15 @@ async function getKpscIncomeReview(DB) {
   await ensureKpscConfirmColumns(DB);
   const todayStr = new Date().toISOString().slice(0, 10);
 
-  // Every income entry, any payment method, that neither the Acting Chairman nor the
-  // Treasurer has confirmed yet.
+  // Bank transfer / POS / cheque income that neither the Acting Chairman nor the
+  // Treasurer has yet confirmed arrived in the bank.
   const { results: pending } = await DB.prepare(`
     SELECT f.id, f.date, f.amount, f.category, f.sub_category, f.narration, f.reference,
            f.payment_method, f.partner_id, f.recorded_by, p.full_name AS partner_name
     FROM kpsc_finance_entries f
     LEFT JOIN kpsc_partners p ON p.id = f.partner_id
     WHERE f.entry_type = 'income'
+      AND f.payment_method IN ${KPSC_BANK_CONFIRM_METHODS_SQL}
       AND COALESCE(f.confirmed_by, '') = ''
       AND COALESCE(f.deleted_at, '') = ''
     ORDER BY f.date DESC, f.created_at DESC
@@ -5786,7 +5791,7 @@ async function confirmKpscFinanceEntries(DB, data, auth) {
   if (!ids.length) return err('No entries selected', 400);
   const ph = ids.map(() => '?').join(',');
   const { results: rows } = await DB.prepare(
-    `SELECT id FROM kpsc_finance_entries WHERE id IN (${ph}) AND entry_type='income' AND COALESCE(confirmed_by,'')='' AND COALESCE(deleted_at,'')=''`
+    `SELECT id FROM kpsc_finance_entries WHERE id IN (${ph}) AND entry_type='income' AND payment_method IN ${KPSC_BANK_CONFIRM_METHODS_SQL} AND COALESCE(confirmed_by,'')='' AND COALESCE(deleted_at,'')=''`
   ).bind(...ids).all();
   const validIds = (rows || []).map(r => r.id);
   if (!validIds.length) return err('None of the selected entries are still awaiting confirmation', 400);

@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { onRequest } from '../functions/api/[[route]].js';
 import { createSqliteD1, seedKpscSession, kpscRequest } from './sqlite-d1.mjs';
 
-// Income review: every income entry (any payment method) needs sign-off from the
-// Acting Chairman or Treasurer, and cash additionally needs one of them to mark it
-// deposited. Runs against a real SQLite database built by /api/init, so the SQL
+// Income review: bank transfer / POS / cheque income needs the Acting Chairman or
+// Treasurer to confirm it arrived in the bank; cash instead needs one of them to
+// confirm its deposit. Runs against a real SQLite database built by /api/init, so the SQL
 // itself — WHERE clauses, UPDATE effects, the one-time history settle — is what's
 // being tested.
 
@@ -43,13 +43,16 @@ function seedTypicalMonth(DB) {
   addEntry(DB, { id: 'kfe3', category: 'one_time_donation', amount: 20000, payment_method: 'bank_transfer', recorded_by: 'Financial Secretary' });
 }
 
-test('every income entry, cash or bank, awaits confirmation; cash of any category counts as in hand', async () => {
+test('bank, POS and cheque income awaits confirmation, cash does not; cash of any category counts as in hand', async () => {
   const DB = await initDb();
   seedTypicalMonth(DB);
+  addEntry(DB, { id: 'kfe4', amount: 1500, payment_method: 'pos' });
+  addEntry(DB, { id: 'kfe5', amount: 2500, payment_method: 'cheque' });
+  addEntry(DB, { id: 'kfe6', amount: 900, payment_method: 'other' });
   const { json } = await call(DB, 'kpsc-income-review');
 
-  assert.equal(json.awaitingConfirmationTotal, 5000 + 5800 + 20000);
-  assert.equal(json.pendingConfirmation.length, 3);
+  assert.deepEqual(json.pendingConfirmation.map(e => e.id).sort(), ['kfe3', 'kfe4', 'kfe5']);
+  assert.equal(json.awaitingConfirmationTotal, 20000 + 1500 + 2500);
   assert.equal(json.cashInHandTotal, 5000 + 5800);
   const samuel = json.holders.find(h => h.name === 'Bro Samuel Onuorah');
   assert.equal(samuel.inHand, 5800);
@@ -65,7 +68,7 @@ test('cash banked through the old Transfer to Bank flow never counts as cash in 
   assert.equal(json.cashInHandTotal, 1000);
 });
 
-test('Confirm marks entries confirmed; other roles are refused', async () => {
+test('Confirm marks bank-side entries confirmed, never cash; other roles are refused', async () => {
   const DB = await initDb();
   seedTypicalMonth(DB);
 
@@ -76,11 +79,12 @@ test('Confirm marks entries confirmed; other roles are refused', async () => {
 
   seedKpscSession(DB, { role: 'treasurer', name: 'Treasurer' });
   const ok = await call(DB, 'kpsc-finance-confirm', 'POST', { ids: ['kfe1', 'kfe3'] });
-  assert.equal(ok.json.confirmed, 2);
-  assert.equal(entry(DB, 'kfe1').confirmed_by, 'Treasurer');
+  assert.equal(ok.json.confirmed, 1);
+  assert.equal(entry(DB, 'kfe3').confirmed_by, 'Treasurer');
+  assert.equal(entry(DB, 'kfe1').confirmed_by, '', 'cash is never confirmed — only its deposit is');
 
   const { json } = await call(DB, 'kpsc-income-review');
-  assert.deepEqual(json.pendingConfirmation.map(e => e.id), ['kfe2']);
+  assert.deepEqual(json.pendingConfirmation.map(e => e.id), []);
 });
 
 test('Deposited for one holder clears only their cash; Deposit All clears everyone', async () => {
@@ -190,7 +194,7 @@ test('settling history undoes system stamps on September income and unbanked cas
 
   const { json } = await call(DB, 'kpsc-income-review');
   assert.equal(json.cashInHandTotal, 8000 - 300);
-  assert.deepEqual(json.pendingConfirmation.map(e => e.id).sort(), ['sep-bank', 'sep-cash']);
+  assert.deepEqual(json.pendingConfirmation.map(e => e.id), ['sep-bank']);
 
   // Runs once: a later person-free edit to the flag-protected rows isn't re-touched.
   DB.sqlite.prepare(`UPDATE kpsc_finance_entries SET confirmed_by=? WHERE id='sep-bank'`).run(SYS);
