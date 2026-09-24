@@ -19,8 +19,8 @@ const ROLES = {
 };
 
 const PERMISSIONS = {
-  pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','budget','petty_view','reports','audit','signoff','rem_cutoff_edit'],
-  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','expenses_view','budget','bank','petty_view','reports','audit','rem_cutoff_edit','expense_delete_approved'],
+  pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','budget','budget_manage','petty_view','reports','audit','signoff','rem_cutoff_edit'],
+  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','expenses_view','budget','budget_manage','bank','petty_view','reports','audit','rem_cutoff_edit','expense_delete_approved'],
   admin_officer: ['dashboard','transactions','expenses','expenses_view','budget','petty_request','petty_view','income_view','petty_to_bank'],
   signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','budget','bank','petty_approve','signoff','petty_to_bank'],
   viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','budget','petty_view']
@@ -40,6 +40,7 @@ const PERMISSION_DEFS = [
   { key:'expenses',               label:'Log Expenses',                group:'Finance' },
   { key:'expenses_view',          label:'View Expenses',               group:'Finance' },
   { key:'budget',                 label:'View Monthly Budget',         group:'Finance' },
+  { key:'budget_manage',          label:'Generate / Edit / Accept Budget', group:'Finance' },
   { key:'expense_delete_approved',label:'Delete Approved Expenses',    group:'Finance' },
   { key:'bank',             label:'Bank',                   group:'Finance'    },
   { key:'petty_request',    label:'Request Petty Cash',     group:'Petty Cash' },
@@ -719,8 +720,9 @@ const DB = {
   getBudget(month)             { return apiFetch(`budget?month=${encodeURIComponent(month)}`); },
   generateBudget(d)            { return apiFetch('budget/generate','POST',d); },
   acceptBudget(d)              { return apiFetch('budget/accept','POST',d); },
+  saveBudget(d)                { return apiFetch('budget/save','POST',d); },
+  reopenBudget(d)              { return apiFetch('budget/reopen','POST',d); },
   askBudgetAfford(d)           { return apiFetch('budget/afford','POST',d); },
-  askBudgetOutlook(d)          { return apiFetch('budget/outlook','POST',d); },
   getExpenseReceipt(id)        { return apiFetch(`expense-receipt/${id}`); },
   addExpense(d)                { return apiFetch('expenses','POST',d); },
   updateExpense(id,d)          { return apiFetch(`expenses/${id}`,'PUT',d); },
@@ -876,10 +878,8 @@ const state = {
   month: new Date().getMonth(),
   year: new Date().getFullYear(),
   budgetTab: 'this_month',
-  budgetThisMonthKey: '',
-  budgetNextMonthKey: '',
-  budgetAffordResult: null,
-  budgetExpandedLine: '',
+  budgetMonthKey: '',
+  budgetEditingMonth: null,
   loginBusy: false,
   aiSecretaryActiveId: null,
   // App-wide period mode shared by Dashboard, Bank, Income, Expenses.
@@ -1060,7 +1060,11 @@ const ACCESS_RULES = {
     expense_edit_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_pending: { roles:['admin_officer','it_admin'] },
     expense_delete_approved: ['expense_delete_approved'],
-    topup_cancel: ({ request }) => canCancelTopupRequest(request)
+    topup_cancel: ({ request }) => canCancelTopupRequest(request),
+    // Generate / edit / accept / reopen a monthly budget plan. Accountant, Pastor, IT
+    // Admin only — everyone else with 'budget' can view the plan but not change it.
+    // "Can we afford…?" is deliberately NOT gated by this — it's read-only advice.
+    budget_manage: ['budget_manage']
   }
 };
 function evaluateAccessRule(rule, ctx={}){
@@ -3617,6 +3621,69 @@ async function calcChurchBalance(asOfDate, prefetched){
   };
 }
 
+// "Available now after remittance" — all church money minus RCCG remittance
+// still owed (including fixed quotas), the same figure the Dashboard's
+// "Available Fund After All Deductions" shows. Extracted from the Expenses
+// page (formerly inlined there) so the Expenses page and the Budget page
+// (Part G "Free for new things") can never drift apart — both call this one
+// function. `prefetched` lets a caller that already has income/remittances/
+// settings/churchBal avoid refetching them.
+async function calcSpendableNow(prefetched){
+  const pf = prefetched || {};
+  const [allIncome, allRems, settings] = await Promise.all([
+    pf.income || DB.getIncome(),
+    pf.remittances || DB.getRemittances(),
+    pf.settings || DB.getSettings(),
+  ]);
+  const churchBal = pf.churchBal || await calcChurchBalance();
+  const quotaList = getQuotaList(settings);
+  const firstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
+  const firstDateStr = (firstIncRec ? (firstIncRec.date||firstIncRec.createdAt||'') : '').slice(0,10);
+  const accumQuotas = firstIncRec
+    ? accumQuotasAcrossPeriods(quotaList, settings, allRems, firstDateStr, ymdLocal(new Date()))
+    : 0;
+
+  // Identify fully settled periods (both Part A + B paid, or legacy)
+  const settledKeys = [...new Set(
+    allRems.filter(r=>r.status==='paid'&&r.periodFrom&&r.periodTo).map(r=>`${r.periodFrom}|${r.periodTo}`)
+  )].filter(key=>{
+    const [pF,pT]=key.split('|');
+    const pp=allRems.filter(r=>r.status==='paid'&&r.periodFrom===pF&&r.periodTo===pT);
+    return pp.some(r=>!r.part)||(pp.some(r=>r.part==='a')&&pp.some(r=>r.part==='b'));
+  });
+  const settledRanges=settledKeys.map(k=>{const [f,t]=k.split('|');return{from:f,to:t};});
+
+  // Shortfall from settled periods (snapshot - paid, or 0 if no snapshot)
+  let settledShortfall=0;
+  settledKeys.forEach(key=>{
+    const [pF,pT]=key.split('|');
+    const pp=allRems.filter(r=>r.status==='paid'&&r.periodFrom===pF&&r.periodTo===pT);
+    const ppPaid=pp.reduce((s,r)=>s+(r.amount||0),0);
+    const ppSnap=pp.reduce((max,r)=>Math.max(max,r.dueAtTimeOfPayment||0),0);
+    settledShortfall+=Math.max(0,(ppSnap>0?ppSnap:ppPaid)-ppPaid);
+  });
+
+  // Only recalculate remittance for unsettled-period income
+  const unsettledIncome=allIncome.filter(r=>{
+    const d=r.date||r.createdAt||'';
+    return !d||!settledRanges.some(p=>d>=p.from&&d<=p.to);
+  });
+  const unsettledRem=await calcRemittancesFromRecords(unsettledIncome);
+  const unsettledDue=totalRemittanceDue(unsettledRem);
+  const settledQuotas=settledRanges.reduce((s,pp)=>s+sumQuotaLines(getQuotaLinesForPeriod(quotaList,pp.from,pp.to)),0);
+  const unsettledQuotas=accumQuotas-settledQuotas;
+
+  // Net out payments already made toward still-unsettled periods (e.g. Part A paid in
+  // cash, Part B not yet due) — calcChurchBalance already reflects that payment leaving
+  // the real balance, so counting the full unsettled due here too would double-subtract
+  // it from Spendable. Mirrors the Dashboard's dashTotalRemDueKpi calc.
+  const unsettledPaidOrWrittenOff = calcUnsettledPeriodsSettledAmount(allRems, settledKeys);
+  const outstandingRems=Math.max(0, unsettledDue+unsettledQuotas+settledShortfall-unsettledPaidOrWrittenOff);
+  const totalChurch = churchBal.total;
+  const spendable = totalChurch - outstandingRems;
+  return { spendable, totalChurch, outstandingRems, churchBal, quotaList, settings, allIncome, allRems };
+}
+
 // Skeleton-first paint. Renders the page header + period selector + skeleton
 // cards using only synchronous state (user name, month, period mode) — no API
 // needed — so the user sees dashboard structure within ~50ms instead of
@@ -5356,148 +5423,484 @@ function budgetMonthLabelForKey(key){
   const [y,m] = String(key||'').split('-').map(Number);
   return y && m ? `${MONTHS[m-1]} ${y}` : '—';
 }
+// One month picker drives both tabs (Part U #7): "This month" is the picked month,
+// "Next month" is always that month + 1 — they can never disagree.
 function ensureBudgetState(){
-  if(!state.budgetThisMonthKey) state.budgetThisMonthKey = budgetTodayKey();
-  if(!state.budgetNextMonthKey) state.budgetNextMonthKey = budgetMonthOffset(budgetTodayKey(), 1);
+  if(!state.budgetMonthKey) state.budgetMonthKey = budgetTodayKey();
   if(!state.budgetTab) state.budgetTab = 'this_month';
 }
 function setBudgetTab(tab){
   state.budgetTab = tab === 'next_month' ? 'next_month' : 'this_month';
-  state.budgetAffordResult = null;
-  state.budgetExpandedLine = '';
+  state.budgetEditingMonth = null;
   if(state.page === 'budget') renderBudget();
 }
-function setBudgetMonth(which, value){
+function setBudgetMonth(value){
   if(!/^\d{4}-\d{2}$/.test(String(value||''))) return;
-  if(which === 'next') state.budgetNextMonthKey = value;
-  else state.budgetThisMonthKey = value;
-  state.budgetAffordResult = null;
-  state.budgetExpandedLine = '';
+  state.budgetMonthKey = value;
+  state.budgetEditingMonth = null;
   if(state.page === 'budget') renderBudget();
 }
-function toggleBudgetLine(key){
-  state.budgetExpandedLine = state.budgetExpandedLine === key ? '' : key;
-  if(state.page === 'budget') renderBudget();
+// Opens/closes a line's "Show expenses" panel purely in the DOM — no state change, no
+// re-render, no refetch (Part U #1: tapping a line used to reload the whole page and
+// wipe anything typed in "Ask AI"; this keeps everything else on the page untouched).
+function toggleLineExpenses(btn){
+  const panel = btn && btn.nextElementSibling;
+  if(!panel) return;
+  const hidden = panel.hasAttribute('hidden');
+  if(hidden){ panel.removeAttribute('hidden'); btn.textContent = 'Hide expenses ▲'; }
+  else { panel.setAttribute('hidden',''); btn.textContent = 'Show expenses ▾'; }
+}
+function toggleBudgetBreakdown(btn){
+  const panel = btn && btn.nextElementSibling;
+  if(!panel) return;
+  const hidden = panel.hasAttribute('hidden');
+  if(hidden){ panel.removeAttribute('hidden'); btn.textContent = 'How is this worked out? ▴'; }
+  else { panel.setAttribute('hidden',''); btn.textContent = 'How is this worked out? ▾'; }
+}
+function cadenceWord(cadence){
+  if(cadence==='occasional') return 'Some months';
+  if(cadence==='annual') return 'Once a year';
+  if(cadence==='once') return 'One-off';
+  return 'Every month';
+}
+function budgetStatusBadge(label){
+  if(label==='enough') return 'badge badge-success';
+  if(label==='tight') return 'badge badge-warn';
+  return 'badge badge-danger';
+}
+function budgetStatusLabelText(label, shortBy){
+  if(label==='short') return shortBy ? `Short by ${fmt(shortBy)}` : 'Short';
+  if(label==='tight') return 'Tight';
+  return 'Enough';
+}
+function expenseCatLabel(key){
+  return (EXPENSE_CATS_ALL.find(c=>c.key===key)?.label) || key;
 }
 
-async function buildBudgetPack(targetMonthKey, historyMonthsUsed=6){
+// The 12 complete history months packHistory() will use for `targetMonthKey` — mirrors
+// packHistory's own "never use an unfinished month" rule (0.2) so buildBudgetPack only
+// computes real parish income (0.1) for the months that will actually be used.
+function budgetHistoryMonthKeys(targetMonthKey, today, months){
   const engine = getBudgetEngine();
-  const [allIncome, allExpenses] = await Promise.all([DB.getIncome(), DB.getExpenses()]);
-  const historyKeys = [];
-  for(let i=historyMonthsUsed; i>=1; i--) historyKeys.push(budgetMonthOffset(targetMonthKey, -i));
-  const keys = new Set(historyKeys);
-  const income = allIncome.filter(r=>keys.has(engine.monthKey(r.date||r.createdAt||'')));
-  const expenses = allExpenses.filter(r=>keys.has(engine.monthKey(r.date||r.createdAt||'')));
-  const remittanceCalcsByMonth = {};
+  const todayKey = engine.monthKey(today || new Date());
+  const beforeToday = budgetMonthOffset(todayKey, -1);
+  const beforeTarget = budgetMonthOffset(targetMonthKey, -1);
+  const lastMonth = (beforeToday && beforeToday < beforeTarget) ? beforeToday : beforeTarget;
+  const keys = [];
+  for(let i=months-1;i>=0;i--) keys.push(budgetMonthOffset(lastMonth, -i));
+  return keys;
+}
+
+// Builds the generate-plan pack the server contract expects (see api-contract.md).
+// Income per history month is the parish's real retained income — the remittance
+// calculator's own netLocal minus that month's fixed quotas, exactly like the
+// Dashboard/quarterly report (0.1) — never the RCCG percentage/quota-blind figure the
+// old 6-month pack used.
+async function buildBudgetPack(targetMonthKey){
+  const engine = getBudgetEngine();
+  const [allIncome, allExpenses, settings] = await Promise.all([DB.getIncome(), DB.getExpenses(), DB.getSettings()]);
+  const quotaList = getQuotaList(settings);
+  const today = new Date();
+  const historyKeys = budgetHistoryMonthKeys(targetMonthKey, today, 12);
+  const parishIncomeByMonth = {};
   for(const key of historyKeys){
-    const monthIncome = income.filter(r=>engine.monthKey(r.date||r.createdAt||'')===key);
-    remittanceCalcsByMonth[key] = totalRemittanceDue(await calcRemittancesFromRecords(monthIncome));
+    const [y,m] = key.split('-').map(Number);
+    const monthStart = `${key}-01`;
+    const monthEnd = ymdLocal(new Date(y, m, 0));
+    const monthIncome = allIncome.filter(r=>engine.monthKey(r.date||r.createdAt||'')===key);
+    const rem = await calcRemittancesFromRecords(monthIncome);
+    const quotaAmt = sumQuotaLines(getQuotaLinesForPeriod(quotaList, monthStart, monthEnd));
+    parishIncomeByMonth[key] = Math.max(0, Math.round((rem.netLocal||0) - quotaAmt));
   }
-  const history = engine.packHistory({ incomeRecords:income, expenses, remittanceCalcsByMonth, months:historyMonthsUsed });
+  const history = engine.packHistory({
+    incomeRecords: allIncome, expenses: allExpenses,
+    months: 12, targetMonthKey, today, parishIncomeByMonth,
+  });
   const noteSnippets = history.months.flatMap(m=>m.notes||[]).slice(0, 20);
-  const categoryHints = EXPENSE_CATS
+  const baselineLines = EXPENSE_CATS
     .filter(c=>c.key!=='reconciliation')
     .map(cat=>{
-      const suggestion = engine.suggestCategoryAmount(history.months, cat.key);
-      const series = history.months.map(m=>({ amount:m.expensesByCategory?.[cat.key]||0, notes:(m.notes||[]).join(' ') }));
-      const avgAmount = Math.round(series.reduce((sum,item)=>sum+(item.amount||0),0) / Math.max(1, series.length));
-      return {
-        key:cat.key,
-        label:cat.label,
-        avgAmount: suggestion.amount,
-        typicalAmount: suggestion.typical,
-        rawAverage: avgAmount,
-        cadence: suggestion.cadence,
-        outliers: suggestion.outliers,
-        why: suggestion.amount>0
-          ? `Typical ${fmt(suggestion.typical)} when active (${suggestion.cadence}; ${historyMonthsUsed}-month history${suggestion.outliers.length?`, ${suggestion.outliers.length} outlier month(s) excluded`:''})`
-          : (suggestion.typical>0 ? 'One-off spend — not budgeted as recurring' : ''),
-        expenseCategory:cat.key,
-      };
+      const s = engine.suggestCategoryAmount(history.months, cat.key);
+      const why = s.amount>0
+        ? (cat.key===engine.RCCG_DEMANDS_KEY
+            ? `${fmt(s.total12)} over 12 months — set aside ${fmt(s.amount)} a month`
+            : `Typical ${fmt(s.typical)} when active (${cadenceWord(s.cadence).toLowerCase()}; 12-month history${s.outliers.length?`, ${s.outliers.length} outlier month(s) excluded`:''})`)
+        : '';
+      return { key:cat.key, label:cat.label, amount:s.amount, cadence:s.cadence, why, total12:s.total12 };
     })
-    .filter(item=>item.avgAmount>0)
-    .sort((a,b)=>b.avgAmount-a.avgAmount);
+    // Kept even at ₦0 for rccg_proj as long as it has ever been paid in the last 12
+    // months (0.12) — RCCG demands must never silently drop out of the pack.
+    .filter(item=>item.amount>0 || (item.key===engine.RCCG_DEMANDS_KEY && item.total12>0))
+    .sort((a,b)=>b.amount-a.amount);
+  const maxByKey = {};
+  EXPENSE_CATS.forEach(cat=>{
+    if(cat.key==='reconciliation') return;
+    maxByKey[cat.key] = history.months.reduce((max,m)=>Math.max(max, m.expensesByCategory?.[cat.key]||0), 0);
+  });
+  const validKeys = EXPENSE_CATS.filter(c=>c.key!=='reconciliation').map(c=>c.key);
   const expectedParishIncome = engine.robustMonthlySeries(history.months, m=>m.parishIncomeAfterRemittance||0).typical;
   return {
     monthKey: targetMonthKey,
-    historyMonthsUsed,
+    historyMonthsUsed: 12,
     months: history.months,
-    categoryHints,
+    baselineLines,
+    maxByKey,
+    validKeys,
     noteSnippets,
     allExpenses,
     expectedParishIncome,
   };
 }
 
-function budgetStatusBadge(label){
-  if(label==='enough') return 'badge badge-success';
-  if(label==='tight') return 'badge badge-warn';
-  return 'badge badge-danger';
-}
-
-function budgetOutlookMonthKeys(){
-  return [state.budgetThisMonthKey, state.budgetNextMonthKey, budgetMonthOffset(state.budgetNextMonthKey, 1)];
-}
-
-function describeBudgetOutlook(outlook){
-  const amt = fmt(Math.abs(outlook.headroom));
-  if(outlook.verdict==='no') return `You are about ${amt} short over the next 3 months — hold off on new spending.`;
-  if(outlook.verdict==='stretch') return `You have about ${amt} spare over the next 3 months, but it's tight, so spend carefully.`;
-  return `You have about ${amt} spare over the next 3 months, so new spending looks safe.`;
-}
-
-// Computes the deterministic 3-month afford outlook (income vs. already-committed
-// spend) instantly from real fetched history, caching by monthKey+plan signature so
-// re-renders triggered by tab switches or line toggles don't refetch income/expense
-// history or recompute remittance each time — only a new/accepted plan invalidates it.
-async function ensureBudgetOutlook(thisPlan, nextPlan){
-  const monthKeys = budgetOutlookMonthKeys();
-  const cacheKey = `${monthKeys.join('|')}|${thisPlan?.recommendedBudget||0}|${nextPlan?.recommendedBudget||0}`;
-  if(state.budgetOutlook && state.budgetOutlook.key === cacheKey) return state.budgetOutlook;
+// Part G — "Free for new things", computed the same way for the top card and for the
+// server's afford check (both call freeForNewThings() with the same pieces).
+async function computeBudgetFreeParts(monthKey, prefetched){
   const engine = getBudgetEngine();
-  const pack = await buildBudgetPack(state.budgetNextMonthKey, 6);
-  const plans = {};
-  plans[state.budgetThisMonthKey] = thisPlan;
-  plans[state.budgetNextMonthKey] = nextPlan;
-  const outlook = engine.rollingAfford({
-    monthKeys,
-    plans,
-    categoryHints: pack.categoryHints,
-    expectedParishIncome: pack.expectedParishIncome,
+  const pf = prefetched || {};
+  const settings = pf.settings || await DB.getSettings();
+  const allExpenses = pf.allExpenses || await DB.getExpenses();
+  let thisPlan = pf.thisPlan;
+  if(thisPlan === undefined) thisPlan = (await DB.getBudget(monthKey))?.plan || null;
+  const spendableInfo = pf.spendableInfo || await calcSpendableNow();
+  const availableNow = spendableInfo.spendable;
+  const today = pf.today || new Date();
+  const thisMonthExpenses = allExpenses.filter(e=>engine.monthKey(e.date||e.createdAt||'')===monthKey);
+
+  let pack = null;
+  let expectedParishIncome = thisPlan?.expectedParishIncome;
+  if(!(expectedParishIncome>0)){
+    pack = await buildBudgetPack(monthKey);
+    expectedParishIncome = pack.expectedParishIncome;
+  }
+
+  let normal, planLinesForReserve;
+  if(thisPlan){
+    normal = thisPlan.recommendedBudget;
+    planLinesForReserve = thisPlan.lines || [];
+  } else {
+    pack = pack || await buildBudgetPack(monthKey);
+    const cushion = Math.max(5000, Math.round((pack.expectedParishIncome||0) * 0.08));
+    normal = (pack.baselineLines||[]).reduce((s,l)=>s+(l.amount||0),0) + cushion;
+    planLinesForReserve = pack.baselineLines || [];
+  }
+
+  // Only lines paid every month ('usual' cadence) count toward "still to spend this
+  // month" — irregular/occasional lines are already covered by irregularReserve below,
+  // so counting them here too would double them up.
+  // With no plan yet, the calculator's baseline lines stand in for this month's normal
+  // spending — otherwise nothing would be held back for the rest of the month.
+  const trackingPlan = thisPlan || { monthKey, lines: planLinesForReserve, cushion: 0 };
+  const actuals = engine.matchActuals(trackingPlan, thisMonthExpenses, today);
+  const remainingThisMonth = (actuals.lines||[])
+    .filter(l=>l.cadence==='usual')
+    .reduce((s,l)=>s+Math.max(0,(l.budgeted||0)-(l.spent||0)),0);
+
+  const progress = engine.monthProgress(today, monthKey);
+  const expectedRestOfMonth = progress.sundaysInMonth>0
+    ? Math.round(expectedParishIncome * (progress.sundaysLeft/progress.sundaysInMonth))
+    : 0;
+
+  // calcSpendableNow() (→ calcChurchBalance()) already deducts pending/pending_approval
+  // expenses from the real balance — isLoggedExpense treats "pending" as "already paid,
+  // awaiting approval", not "awaiting payment". Counting them again here would
+  // double-subtract them from Free for new things, so this is deliberately 0.
+  const pendingUnpaid = 0;
+
+  const irregular = engine.irregularReserve(planLinesForReserve, allExpenses, today);
+  const futureShort = engine.futureShortfall(normal, expectedParishIncome, 3);
+  const cushionAmt = engine.safetyCushion(normal, settings?.budgetSafetyFraction ?? 0.5);
+
+  const result = engine.freeForNewThings({
+    availableNow, remainingThisMonth, expectedRestOfMonth, pendingUnpaid,
+    irregularReserve: irregular.total, futureShortfall: futureShort, safetyCushion: cushionAmt,
   });
-  const entry = { key: cacheKey, outlook, pack };
-  state.budgetOutlook = entry;
-  return entry;
+  const growth = engine.growthPerMonth(expectedParishIncome, normal);
+  return { ...result, growth, expectedParishIncome, normal, remainingThisMonth, expectedRestOfMonth, irregularItems: irregular.items, monthKey, today };
 }
 
-// Lazily fetches the one-sentence AI caption for the current outlook, caching by the
-// same signature so it is only requested once per outlook change, not on every render.
-async function ensureBudgetOutlookCaption(outlook){
-  const cacheKey = outlook.monthKeys.join('|') + '|' + outlook.expectedIncome3mo + '|' + outlook.committedSpend3mo;
-  if(state.budgetOutlookCaption && state.budgetOutlookCaption.key === cacheKey) return state.budgetOutlookCaption;
-  const topDriver = (state.budgetOutlook?.pack?.categoryHints||[])[0]?.label || '';
-  try{
-    const res = await DB.askBudgetOutlook({
-      monthKeys: outlook.monthKeys,
-      expectedIncome3mo: outlook.expectedIncome3mo,
-      committedSpend3mo: outlook.committedSpend3mo,
-      topDriver,
-    });
-    state.budgetOutlookCaption = { key:cacheKey, caption:res?.caption||'', provider:res?.provider||'' };
-  }catch(e){
-    state.budgetOutlookCaption = { key:cacheKey, caption:'', provider:'' };
+function renderBudgetBar(pct, markerPct, paceClass='ontrack'){
+  const clamped = Math.max(0, Math.min(100, Math.round(pct||0)));
+  const marker = Math.max(0, Math.min(100, Math.round(markerPct||0)));
+  return `<div class="budget-bar budget-bar-${paceClass}"><div class="budget-bar-fill" style="width:${clamped}%"></div><div class="budget-bar-marker" style="left:${marker}%" title="Today"></div></div>`;
+}
+
+function renderBudgetFreeCard(free){
+  const growthLine = free.growth > 0
+    ? `grows by about ${fmt(free.growth)} a month`
+    : `Normal spending is ${fmt(Math.abs(free.growth))} a month more than income — free money is shrinking.`;
+  const rows = [
+    ['Available now after remittance (same as Dashboard)', free.parts.availableNow, ''],
+    ["− Gap to finish this month's normal spending", -free.parts.monthGap, `Still to spend ${fmt(free.remainingThisMonth)} − expected from remaining Sundays ${fmt(free.expectedRestOfMonth)}`],
+    ['− Recorded expenses not yet approved/paid', -free.parts.pendingUnpaid, ''],
+    ['− Saved up for irregular bills', -free.parts.irregularReserve, ''],
+    ["− Next 3 months' shortfall", -free.parts.futureShortfall, ''],
+    ['− Safety cushion', -free.parts.safetyCushion, ''],
+  ];
+  const irregularList = (free.irregularItems||[]).filter(it=>it.reserved>0);
+  return `<div class="card budget-card budget-free-card">
+    <div class="budget-free-label">Free for new things</div>
+    <div class="budget-free-amount">${fmt(free.free)}</div>
+    <div class="budget-hero-sub">${esc(growthLine)}</div>
+    <div class="budget-afford-box">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Can we afford…?</label><input id="budget_idea" class="form-input" placeholder="e.g. a new canopy" /></div>
+        <div class="form-group"><label class="form-label">Amount (₦)</label><input id="budget_amount" type="number" class="form-input" placeholder="0" /></div>
+      </div>
+      <button class="btn btn-primary" onclick="App.askBudgetAfford(this)">Check</button>
+      <div id="budgetAffordResultBox"></div>
+    </div>
+    <button type="button" class="budget-breakdown-toggle no-print" onclick="App.toggleBudgetBreakdown(this)">How is this worked out? ▾</button>
+    <div class="budget-breakdown-panel" hidden>
+      ${rows.map(([label,val,detail])=>`<div class="budget-breakdown-row"><span>${esc(label)}${detail?`<div class="td-muted" style="font-size:11px">${esc(detail)}</div>`:''}</span><strong>${val<0?'−':''}${fmt(Math.abs(val))}</strong></div>`).join('')}
+      ${irregularList.length?`<div class="budget-breakdown-sub">${irregularList.map(it=>`<div class="budget-breakdown-row small"><span>${esc(it.label)}</span><strong>${fmt(it.reserved)}</strong></div>`).join('')}</div>`:''}
+      <div class="budget-breakdown-row total"><span>= FREE FOR NEW THINGS</span><strong>${fmt(free.free)}</strong></div>
+    </div>
+  </div>`;
+}
+
+function renderBudgetLine(line, expenses, progress){
+  const paceClass = line.pace==='over'?'over':line.pace==='watch'?'watch':'ontrack';
+  const paceLabel = line.pace==='over'?'Over':line.pace==='watch'?'Watch':'On track';
+  const leftText = line.leftover<0 ? `${fmt(Math.abs(line.leftover))} over` : `${fmt(line.leftover)} left`;
+  const key = line.expenseCategory||line.key;
+  const expRows = (expenses||[]).filter(exp=>(exp.category||'')===key);
+  const pct = line.budgeted ? Math.round((line.spent/line.budgeted)*100) : (line.spent>0?100:0);
+  return `<div class="budget-line-card">
+    <div class="budget-line-top">
+      <div>
+        <div class="budget-line-label">${esc(line.label||key)}</div>
+        <div class="budget-line-sub">${fmt(line.spent)} of ${fmt(line.budgeted)} · ${leftText} · ${esc(cadenceWord(line.cadence))}</div>
+      </div>
+      <span class="badge budget-pace-${paceClass}">${paceLabel}</span>
+    </div>
+    ${renderBudgetBar(pct, progress?.pct||0, paceClass)}
+    ${(line.subs||[]).length?`<ul class="budget-subline-wrap">${line.subs.map(sub=>`<li class="budget-subline"><span>${esc(sub.label||'Other')}</span><strong>${fmt(sub.spent||0)} of ${fmt(sub.budgeted||0)}</strong></li>`).join('')}</ul>`:''}
+    <button type="button" class="budget-line-toggle no-print" onclick="App.toggleLineExpenses(this)">Show expenses ▾</button>
+    <div class="budget-line-expenses" hidden>
+      ${expRows.length?expRows.map(exp=>`<div class="budget-expense-row"><span>${fmtDate(exp.date||exp.createdAt)} · ${esc(exp.subCategory||exp.description||'Expense')}</span><strong>${fmt(exp.amount)}</strong></div>`).join(''):'<div class="td-muted">No matched expenses yet this month.</div>'}
+    </div>
+  </div>`;
+}
+
+function renderBudgetSections(plan, actuals, expenses, progress){
+  const engine = getBudgetEngine();
+  const lines = actuals?.lines || [];
+  const rccgLine = lines.find(l=>(l.expenseCategory||l.key)===engine.RCCG_DEMANDS_KEY);
+  const otherLines = lines.filter(l=>(l.expenseCategory||l.key)!==engine.RCCG_DEMANDS_KEY);
+  const cushion = actuals?.cushionLine || { budgeted: plan.cushion||0, spent:0 };
+  const unplanned = actuals?.unplanned || [];
+  return `
+    ${rccgLine ? `<div class="budget-section-title">RCCG demands (besides remittance)</div>
+      <div class="budget-lines">${renderBudgetLine(rccgLine, expenses, progress)}</div>` : ''}
+    <div class="budget-section-title">Parish running costs</div>
+    <div class="budget-lines">
+      ${otherLines.map(l=>renderBudgetLine(l, expenses, progress)).join('')}
+      <div class="budget-cushion-row"><span>Cushion for surprises</span><strong>${fmt(cushion.spent||0)} of ${fmt(cushion.budgeted||0)}</strong></div>
+    </div>
+    ${unplanned.length ? `<div class="budget-section-title">Not in the plan</div>
+      <div class="budget-unplanned-list">
+        ${unplanned.map(u=>`<div class="budget-unplanned-row"><span>${esc(expenseCatLabel(u.key))}</span><strong>${fmt(u.spent)} spent, not budgeted</strong></div>`).join('')}
+      </div>` : ''}
+  `;
+}
+
+function renderBudgetEditForm(plan, monthKey){
+  const usedKeys = new Set((plan.lines||[]).map(l=>l.key||l.expenseCategory));
+  const available = EXPENSE_CATS.filter(c=>c.key!=='reconciliation' && !usedKeys.has(c.key));
+  const rows = (plan.lines||[]).map(line=>{
+    const key = line.key||line.expenseCategory;
+    return `<div class="budget-edit-row" data-key="${esc(key)}" data-cadence="${esc(line.cadence||'usual')}" data-label="${esc(line.label||key)}" data-why="${esc(line.why||'')}">
+      <div class="budget-edit-row-label">${esc(line.label||key)}<span class="td-muted"> · ${esc(cadenceWord(line.cadence))}</span></div>
+      <input type="number" min="0" class="form-input budget-edit-amt" value="${Math.round(line.amount||0)}" oninput="App.budgetEditRecalc()" />
+      <button type="button" class="btn btn-icon budget-edit-remove" title="Remove line" onclick="App.budgetEditRemoveLine(this)">🗑</button>
+    </div>`;
+  }).join('');
+  return `<div class="budget-edit-form" id="budgetEditForm" data-expected="${plan.expectedParishIncome||0}">
+    <div class="budget-edit-lines" id="budgetEditLines">${rows}</div>
+    <div class="budget-edit-row budget-edit-cushion-row">
+      <div class="budget-edit-row-label">Cushion for surprises</div>
+      <input type="number" min="0" class="form-input budget-edit-amt" id="budgetEditCushion" value="${Math.round(plan.cushion||0)}" oninput="App.budgetEditRecalc()" />
+      <span></span>
+    </div>
+    <div class="budget-edit-add-row">
+      <select id="budgetEditAddSelect" class="form-input">
+        <option value="">Add a category from the plan…</option>
+        ${available.map(c=>`<option value="${c.key}">${esc(c.label)}</option>`).join('')}
+      </select>
+      <button type="button" class="btn" onclick="App.budgetEditAddLine()">+ Add</button>
+    </div>
+    <div id="budgetEditTotals" class="budget-edit-totals"></div>
+    <div class="budget-action-row">
+      <button class="btn btn-primary" onclick="App.saveBudgetPlan('${esc(monthKey)}', this)">Save</button>
+      <button class="btn btn-ghost" onclick="App.cancelBudgetEdit()">Cancel</button>
+    </div>
+  </div>`;
+}
+
+function budgetEditRecalc(){
+  const form = document.getElementById('budgetEditForm');
+  if(!form) return;
+  const expected = parseFloat(form.getAttribute('data-expected')||'0')||0;
+  let total = 0;
+  form.querySelectorAll('.budget-edit-row').forEach(row=>{
+    if(row.style.display==='none') return;
+    const input = row.querySelector('.budget-edit-amt');
+    if(input) total += parseFloat(input.value||'0')||0;
+  });
+  const engine = getBudgetEngine();
+  const status = engine.budgetStatus(expected, total);
+  const box = document.getElementById('budgetEditTotals');
+  if(!box) return;
+  const over90 = expected>0 && total > expected*0.9;
+  box.innerHTML = `<div>Total: <strong>${fmt(total)}</strong> · Expected income ${fmt(expected)} · <span class="${budgetStatusBadge(status)}">${esc(budgetStatusLabelText(status, Math.max(0,total-expected)))}</span></div>${over90?'<div class="td-muted" style="margin-top:4px;color:var(--amber)">This is more than 90% of expected income.</div>':''}`;
+}
+
+function budgetEditRemoveLine(btn){
+  const row = btn.closest('.budget-edit-row');
+  if(row) row.style.display = 'none';
+  budgetEditRecalc();
+}
+
+function budgetEditAddLine(){
+  const select = document.getElementById('budgetEditAddSelect');
+  const key = select?.value;
+  if(!key) return;
+  const cat = EXPENSE_CATS.find(c=>c.key===key);
+  const container = document.getElementById('budgetEditLines');
+  if(!cat || !container) return;
+  const row = document.createElement('div');
+  row.className = 'budget-edit-row';
+  row.setAttribute('data-key', key);
+  row.setAttribute('data-cadence', 'occasional');
+  row.setAttribute('data-label', cat.label);
+  row.setAttribute('data-why', 'Added by hand');
+  row.innerHTML = `<div class="budget-edit-row-label">${esc(cat.label)}<span class="td-muted"> · Some months</span></div>
+    <input type="number" min="0" class="form-input budget-edit-amt" value="0" oninput="App.budgetEditRecalc()" />
+    <button type="button" class="btn btn-icon budget-edit-remove" title="Remove line" onclick="App.budgetEditRemoveLine(this)">🗑</button>`;
+  container.appendChild(row);
+  const opt = select.querySelector(`option[value="${key}"]`);
+  if(opt) opt.remove();
+  select.value = '';
+  budgetEditRecalc();
+}
+
+function editBudgetPlan(monthKey){
+  state.budgetEditingMonth = monthKey;
+  if(state.page === 'budget') renderBudget();
+}
+function cancelBudgetEdit(){
+  state.budgetEditingMonth = null;
+  if(state.page === 'budget') renderBudget();
+}
+
+function renderBudgetThisMonth({ thisKey, thisPlan, actuals, progress, canManage, canUseAi }){
+  if(!thisPlan){
+    return `<div class="card budget-card">
+      <div class="empty-table" style="padding:24px 8px">
+        No plan for ${esc(budgetMonthLabelForKey(thisKey))} yet.
+        ${canManage ? `<div style="margin-top:12px"><button class="btn btn-primary" onclick="App.generateBudget('${esc(thisKey)}', this)">Generate plan for ${esc(budgetMonthLabelForKey(thisKey))}</button></div>${!canUseAi?`<div class="td-muted" style="margin-top:8px">No AI key set — the plan will be built from simple averages instead.</div>`:''}` : '<div class="td-muted" style="margin-top:8px">Ask an Accountant, Pastor or IT Admin to generate one.</div>'}
+      </div>
+    </div>`;
   }
-  return state.budgetOutlookCaption;
+  const editing = state.budgetEditingMonth === thisKey;
+  const spent = actuals?.totals?.spent||0;
+  const budgeted = actuals?.totals?.budgeted||thisPlan.recommendedBudget||0;
+  const pctSpent = budgeted ? Math.round((spent/budgeted)*100) : 0;
+  const overallPace = pctSpent>100 ? 'over' : (pctSpent > progress.pct+5 ? 'watch' : 'ontrack');
+  return `<div class="card budget-card">
+    <div class="budget-month-header">
+      <div class="budget-month-title">${esc(budgetMonthLabelForKey(thisKey))} · Day ${progress.day} of ${progress.daysInMonth}</div>
+      <span class="${budgetStatusBadge(thisPlan.statusLabel)}">${esc(budgetStatusLabelText(thisPlan.statusLabel, thisPlan.shortBy))}</span>
+    </div>
+    <div class="budget-summary-row"><span>Expected parish money this month (after RCCG)</span><strong>${fmt(thisPlan.expectedParishIncome)}</strong></div>
+    <div class="budget-summary-row"><span>Normal spending budget</span><strong>${fmt(thisPlan.recommendedBudget)}</strong></div>
+    <div class="budget-spend-line">Spent so far ${fmt(spent)} of ${fmt(budgeted)} · ${pctSpent}%</div>
+    ${renderBudgetBar(pctSpent, progress.pct, overallPace)}
+    ${thisPlan.status==='accepted' ? `<div class="budget-lock-badge">🔒 Accepted by ${esc(thisPlan.acceptedBy||'—')} · ${fmtDate(thisPlan.acceptedAt)}${canManage?` <button class="btn btn-sm no-print" onclick="App.reopenBudgetPlan('${esc(thisKey)}', this)">Reopen</button>`:''}</div>` : ''}
+    ${canManage && thisPlan.status!=='accepted' && !editing ? `<div class="budget-action-row no-print">
+      <button class="btn" onclick="App.editBudgetPlan('${esc(thisKey)}')">Edit</button>
+      <button class="btn btn-amber" onclick="App.acceptBudgetPlan('${esc(thisKey)}', this)">Accept plan</button>
+      <button class="btn btn-ghost" onclick="App.generateBudget('${esc(thisKey)}', this)">Regenerate</button>
+    </div>${!canUseAi?`<div class="td-muted no-print">No AI key set — the plan will be built from simple averages instead.</div>`:''}` : ''}
+    ${editing ? renderBudgetEditForm(thisPlan, thisKey) : renderBudgetSections(thisPlan, actuals, actuals?._expenses||[], progress)}
+  </div>`;
+}
+
+function renderBudgetNextMonth({ nextKey, nextPlan, canManage, canUseAi, allExpenses, thisKey }){
+  const engine = getBudgetEngine();
+  const editing = state.budgetEditingMonth === nextKey;
+  const lastMonthExpenses = (allExpenses||[]).filter(e=>engine.monthKey(e.date||e.createdAt||'')===thisKey && engine.isCountableExpense(e,{mode:'tracking'}));
+  const lastMonthByCat = engine.sumExpensesByCategory(lastMonthExpenses).byCategory;
+  if(!nextPlan){
+    return `<div class="card budget-card">
+      <div class="empty-table" style="padding:24px 8px">
+        No budget plan saved for ${esc(budgetMonthLabelForKey(nextKey))} yet.
+        ${canManage ? `<div style="margin-top:12px"><button class="btn btn-primary" onclick="App.generateBudget('${esc(nextKey)}', this)">Generate with AI</button></div>${!canUseAi?`<div class="td-muted" style="margin-top:8px">No AI key set — the plan will be built from simple averages instead.</div>`:''}` : '<div class="td-muted" style="margin-top:8px">Ask an Accountant, Pastor or IT Admin to generate one.</div>'}
+      </div>
+    </div>`;
+  }
+  const total = (nextPlan.lines||[]).reduce((s,l)=>s+(l.amount||0),0) + (nextPlan.cushion||0);
+  const cuts = nextPlan.suggestedCuts||[];
+  return `<div class="card budget-card">
+    <div class="budget-month-header">
+      <div class="budget-month-title">${esc(budgetMonthLabelForKey(nextKey))}</div>
+      <span class="${budgetStatusBadge(nextPlan.statusLabel)}">${esc(budgetStatusLabelText(nextPlan.statusLabel, nextPlan.shortBy))}</span>
+    </div>
+    <div class="budget-summary-row"><span>Expected parish income after remittance</span><strong>${fmt(nextPlan.expectedParishIncome)}</strong></div>
+    <div class="budget-summary-row"><span>Recommended budget</span><strong>${fmt(total)}</strong></div>
+    <div class="budget-chip-row">
+      <span class="badge badge-gray">${nextPlan.status==='accepted'?'Accepted':'Draft'}</span>
+      <span class="badge badge-gray">${nextPlan.source==='ai'?'Built by AI':'Built by calculator (AI unavailable)'}</span>
+      ${nextPlan.acceptedAt?`<span class="td-muted">Accepted ${fmtDate(nextPlan.acceptedAt)}${nextPlan.acceptedBy?' by '+esc(nextPlan.acceptedBy):''}</span>`:''}
+    </div>
+    <p class="budget-summary">${esc(nextPlan.summary||'')}</p>
+    ${(nextPlan.clampNotes||[]).length ? `<div class="budget-chip-row">${nextPlan.clampNotes.map(n=>`<span class="badge badge-gray">${esc(n)}</span>`).join('')}</div>` : ''}
+    ${nextPlan.statusLabel==='short' ? `<div class="alert alert-warn" style="margin-top:10px"><span class="alert-icon">⚠</span><span>Short by ${fmt(nextPlan.shortBy||0)}.${cuts.length?' Suggested cuts: '+cuts.map(c=>`${esc(c.label)} −${fmt(c.amount)}`).join(', ')+'.':''}</span></div>` : ''}
+    ${nextPlan.status==='accepted' ? `<div class="budget-lock-badge">🔒 Accepted by ${esc(nextPlan.acceptedBy||'—')} · ${fmtDate(nextPlan.acceptedAt)}${canManage?` <button class="btn btn-sm no-print" onclick="App.reopenBudgetPlan('${esc(nextKey)}', this)">Reopen</button>`:''}</div>` : ''}
+    ${canManage && nextPlan.status!=='accepted' && !editing ? `<div class="budget-action-row no-print">
+      <button class="btn" onclick="App.editBudgetPlan('${esc(nextKey)}')">Edit</button>
+      <button class="btn btn-amber" onclick="App.acceptBudgetPlan('${esc(nextKey)}', this)">Accept plan</button>
+      <button class="btn btn-ghost" onclick="App.generateBudget('${esc(nextKey)}', this)">Regenerate</button>
+    </div>${!canUseAi?`<div class="td-muted no-print">No AI key set — the plan will be built from simple averages instead.</div>`:''}` : ''}
+    ${editing ? renderBudgetEditForm(nextPlan, nextKey) : `
+      <div class="budget-lines" style="margin-top:14px">
+        <div class="budget-lines-total-row"><span>Total</span><strong>${fmt(total)}</strong></div>
+        ${(nextPlan.lines||[]).map(line=>{
+          const key = line.key||line.expenseCategory;
+          const lastSpent = lastMonthByCat[key]||0;
+          return `<div class="budget-line-card static">
+            <div class="budget-line-top">
+              <div>
+                <div class="budget-line-label">${esc(line.label||key)}</div>
+                <div class="budget-line-sub">${esc(line.why||'')}</div>
+                <div class="td-muted" style="margin-top:2px">last month: ${fmt(lastSpent)}</div>
+              </div>
+              <div style="text-align:right">
+                <span class="badge badge-purple">${esc(cadenceWord(line.cadence))}</span>
+                <div class="budget-line-pct">${fmt(line.amount||0)}</div>
+              </div>
+            </div>
+            ${(line.subs||[]).length ? `<ul class="budget-subline-wrap">${line.subs.map(sub=>`<li class="budget-subline"><span>${esc(sub.label||'General')}</span><strong>${fmt(sub.amount||0)}</strong></li>`).join('')}</ul>` : ''}
+          </div>`;
+        }).join('')}
+        <div class="budget-cushion-row"><span>Cushion for surprises</span><strong>${fmt(nextPlan.cushion||0)}</strong></div>
+      </div>
+    `}
+  </div>`;
 }
 
 async function renderBudget(){
   ensureBudgetState();
   renderPageSkeleton({ pageTitle: 'Budget', pageSub: 'This month · Next month', kpiCount: 2, hint: 'Loading budget…' });
+  const thisKey = state.budgetMonthKey;
+  const nextKey = budgetMonthOffset(thisKey, 1);
   const sources = [
     ['Settings', () => DB.getSettings()],
-    ['This month budget', () => DB.getBudget(state.budgetThisMonthKey)],
-    ['Next month budget', () => DB.getBudget(state.budgetNextMonthKey)],
+    ['This month budget', () => DB.getBudget(thisKey)],
+    ['Next month budget', () => DB.getBudget(nextKey)],
     ['Expenses', () => DB.getExpenses()],
+    ['Income', () => DB.getIncome()],
+    ['Remittances', () => DB.getRemittances()],
   ];
   const settled = await Promise.allSettled(sources.map(([,fn])=>fn()));
   const failed = settled.map((r,i)=>r.status==='rejected'?{ label:sources[i][0], err:r.reason }:null).filter(Boolean);
@@ -5506,168 +5909,54 @@ async function renderBudget(){
     return;
   }
   const engine = getBudgetEngine();
-  const [settings, thisBudgetResp, nextBudgetResp, allExpenses] = settled.map(r=>r.value);
+  const [settings, thisBudgetResp, nextBudgetResp, allExpenses, allIncome, allRems] = settled.map(r=>r.value);
   const thisPlan = thisBudgetResp?.plan || null;
   const nextPlan = nextBudgetResp?.plan || null;
-  const thisMonthExpenses = allExpenses.filter(exp=>engine.monthKey(exp.date||exp.createdAt||'')===state.budgetThisMonthKey);
-  const actuals = thisPlan ? engine.matchActuals(thisPlan, thisMonthExpenses, new Date()) : null;
-  const safe = thisPlan ? engine.safeToSpend(thisPlan, actuals?.spentTotal||0) : null;
+  const canManage = can('budget_manage');
   const canUseAi = !!(settings?.ai_deepseek_key_set || settings?.ai_openai_key_set);
-  const noDeepseek = !settings?.ai_deepseek_key_set;
-  const thisPct = actuals?.totals?.budgeted ? Math.min(100, Math.max(0, actuals.totals.pct)) : 0;
-  const { outlook } = await ensureBudgetOutlook(thisPlan, nextPlan);
-  const outlookCaption = canUseAi ? await ensureBudgetOutlookCaption(outlook) : null;
+  const today = new Date();
+
+  // Rendering itself never awaits the AI (Part U #2) — the plan text already saved on
+  // the plan (from generate) is shown immediately; there is no separate outlook caption
+  // fetch to wait on any more.
+  const spendableInfo = await calcSpendableNow({ income:allIncome, remittances:allRems, settings });
+  const free = await computeBudgetFreeParts(thisKey, { settings, allExpenses, thisPlan, spendableInfo, today });
+  state._budgetFreeParts = free;
+
+  const thisMonthExpenses = allExpenses.filter(exp=>engine.monthKey(exp.date||exp.createdAt||'')===thisKey);
+  const actuals = thisPlan ? engine.matchActuals(thisPlan, thisMonthExpenses, today) : null;
+  if(actuals) actuals._expenses = thisMonthExpenses;
+  const progress = engine.monthProgress(today, thisKey);
+
   document.getElementById('pageContent').innerHTML = `
     <div class="page-header">
       <div>
         <div class="page-title">Monthly Budget</div>
-        <div class="page-sub">Build parish operating spend after remittance — never the remittance itself.</div>
+        <div class="page-sub">Plan parish operating spend after remittance — never the remittance itself.</div>
       </div>
+      <button class="btn btn-ghost no-print" onclick="window.print()">🖨 Print / Save PDF</button>
     </div>
-    <div class="card budget-card budget-outlook-card">
-      <div class="budget-hero">
-        <div class="budget-hero-main">
-          <div class="budget-hero-amount">${outlook.verdict==='no'?'−':''}${fmt(Math.abs(outlook.headroom))}</div>
-          <div class="budget-hero-sub">${outlook.verdict==='no'?'Short':'Spare'} over the next 3 months (${budgetMonthLabelForKey(outlook.monthKeys[0])} – ${budgetMonthLabelForKey(outlook.monthKeys[2])})</div>
-        </div>
-        <span class="${budgetStatusBadge(outlook.statusLabel)}">${outlook.verdict==='no'?'No':outlook.verdict==='stretch'?'Tight':'Yes'}</span>
-      </div>
-      <p class="budget-summary">${esc((outlookCaption?.caption) || describeBudgetOutlook(outlook))}</p>
-      <div class="budget-summary-grid">
-        <div><div class="card-title">Expected income</div><div class="budget-mini-val">${fmt(outlook.expectedIncome3mo)}</div></div>
-        <div><div class="card-title">Already committed</div><div class="budget-mini-val">${fmt(outlook.committedSpend3mo)}</div></div>
-        <div><div class="card-title">Spare room</div><div class="budget-mini-val">${fmt(Math.max(0,outlook.headroom))}</div></div>
-      </div>
-      ${!canUseAi ? `<div class="td-muted" style="margin-top:6px">Configure an AI provider in Settings for a plain-language explanation.</div>` : ''}
-    </div>
-    <div class="budget-tabs">
+    ${renderBudgetFreeCard(free)}
+    <div class="budget-tabs no-print">
       <button class="tab ${state.budgetTab==='this_month'?'active':''}" onclick="App.setBudgetTab('this_month')">This month</button>
       <button class="tab ${state.budgetTab==='next_month'?'active':''}" onclick="App.setBudgetTab('next_month')">Next month</button>
+      <input type="month" class="form-input budget-month-picker" value="${thisKey}" onchange="App.setBudgetMonth(this.value)" />
     </div>
-    ${state.budgetTab==='this_month' ? `
-      <div class="card budget-card">
-        <div class="card-header">
-          <div>
-            <div class="card-title">This month</div>
-            <div class="page-sub" style="margin-top:4px">${budgetMonthLabelForKey(state.budgetThisMonthKey)}</div>
-          </div>
-          <input type="month" class="form-input budget-month-picker" value="${state.budgetThisMonthKey}" onchange="App.setBudgetMonth('this', this.value)" />
-        </div>
-        ${!thisPlan ? `
-          <div class="empty-table" style="padding:24px 8px">
-            No plan for ${budgetMonthLabelForKey(state.budgetThisMonthKey)} yet — open Next month and generate one.
-            <div style="margin-top:12px"><button class="btn btn-primary" onclick="App.setBudgetTab('next_month')">Open Next month</button></div>
-          </div>
-        ` : `
-          <div class="budget-hero">
-            <div class="budget-hero-main">
-              <div class="budget-hero-amount">${fmt(thisPlan.recommendedBudget)}</div>
-              <div class="budget-hero-sub">Budget · Used ${fmt(actuals?.spentTotal||0)} · Left ${fmt((actuals?.totals?.leftover)||0)}</div>
-            </div>
-            <span class="${budgetStatusBadge(thisPlan.statusLabel)}">${esc((thisPlan.statusLabel||'').replace(/^\w/, c=>c.toUpperCase()))}</span>
-          </div>
-          <div class="budget-strip">Not ours to budget · ${fmt(thisPlan.remittanceStrip?.amount||thisPlan.expectedRemittance||0)} already spoken for (RCCG)</div>
-          <div class="budget-bar"><div class="budget-bar-fill" style="width:${thisPct}%"></div></div>
-          <div class="budget-summary-grid">
-            <div><div class="card-title">Budget</div><div class="budget-mini-val">${fmt(actuals?.totals?.budgeted||thisPlan.recommendedBudget||0)}</div></div>
-            <div><div class="card-title">Used</div><div class="budget-mini-val">${fmt(actuals?.totals?.spent||0)}</div></div>
-            <div><div class="card-title">Safe extra</div><div class="budget-mini-val">${fmt(safe?.safeExtra||0)}</div></div>
-          </div>
-          <div class="budget-lines">
-            ${(actuals?.lines||[]).map(line=>{
-              const expRows = thisMonthExpenses.filter(exp=>(exp.category||'') === (line.expenseCategory||line.key));
-              const expanded = state.budgetExpandedLine === line.key;
-              const paceClass = line.pace === 'over' ? 'badge-danger' : line.pace === 'hot' || line.pace === 'watch' ? 'badge-warn' : 'badge-success';
-              return `<button class="budget-line" onclick='App.toggleBudgetLine(${JSON.stringify(String(line.key||''))})' aria-expanded="${expanded?'true':'false'}">
-                <div class="budget-line-top">
-                  <div>
-                    <div class="budget-line-label">${esc(line.label||line.key)}</div>
-                    <div class="budget-line-sub">${fmt(line.budgeted)} budgeted · ${fmt(line.spent)} spent · ${fmt(line.leftover)} left</div>
-                  </div>
-                  <div style="text-align:right">
-                    <span class="badge ${paceClass}">${line.pace==='over'?'Over':line.pace==='hot'?'Hot':line.pace==='watch'?'Watch':'On track'}</span>
-                    <div class="budget-line-pct">${line.pct}%</div>
-                  </div>
-                </div>
-                <div class="budget-bar budget-line-bar"><div class="budget-bar-fill" style="width:${Math.min(100,Math.max(0,line.pct))}%"></div></div>
-                ${(line.subs||[]).length ? `<ul class="budget-subline-wrap">${line.subs.map(sub=>`<li class="budget-subline"><span>${esc(sub.label||'General')}</span><strong>${fmt(sub.spent||0)} of ${fmt(sub.budgeted||0)}</strong></li>`).join('')}</ul>` : ''}
-                ${expanded ? `<div class="budget-line-expenses">
-                  ${expRows.length ? expRows.map(exp=>`<div class="budget-expense-row"><span>${fmtDate(exp.date||exp.createdAt)} · ${esc(exp.description||exp.subCategory||'Expense')}</span><strong>${fmt(exp.amount)}</strong></div>`).join('') : '<div class="td-muted">No matched expenses yet this month.</div>'}
-                </div>` : ''}
-              </button>`;
-            }).join('')}
-          </div>
-          <div class="card" style="margin-top:16px;margin-bottom:0;padding:14px">
-            <div class="card-title" style="margin-bottom:10px">Ask AI if something extra fits the next 3 months</div>
-            <div class="form-group"><label class="form-label">Idea</label><input id="budget_idea" class="form-input" placeholder="e.g. extra generator servicing, welfare support" /></div>
-            <div class="form-group"><label class="form-label">Optional amount (₦)</label><input id="budget_amount" type="number" class="form-input" placeholder="0" /></div>
-            <button class="btn btn-primary btn-full" ${canUseAi?'':'disabled'} onclick="App.askBudgetAfford(this)">Ask AI</button>
-            ${state.budgetAffordResult ? `<div class="alert alert-${state.budgetAffordResult.verdict==='no'?'danger':state.budgetAffordResult.verdict==='stretch'?'warn':'info'}" style="margin-top:12px">
-              <span class="alert-icon">${state.budgetAffordResult.verdict==='no'?'✕':state.budgetAffordResult.verdict==='stretch'?'⚠':'ℹ'}</span>
-              <span><strong>${state.budgetAffordResult.verdict.toUpperCase()}</strong> · Safe extra ${fmt(state.budgetAffordResult.safeAmount||0)}. ${esc(state.budgetAffordResult.explanation||'')}</span>
-            </div>`:''}
-          </div>
-        `}
-      </div>
-    ` : `
-      <div class="card budget-card">
-        <div class="card-header">
-          <div>
-            <div class="card-title">Next month plan</div>
-            <div class="page-sub" style="margin-top:4px">${budgetMonthLabelForKey(state.budgetNextMonthKey)}</div>
-          </div>
-          <input type="month" class="form-input budget-month-picker" value="${state.budgetNextMonthKey}" onchange="App.setBudgetMonth('next', this.value)" />
-        </div>
-        ${noDeepseek ? `<div class="alert alert-warn" style="margin-bottom:14px"><span class="alert-icon">⚠</span><span>DeepSeek is the primary budget advisor. Configure it in Settings → AI Provider Keys.${settings?.ai_openai_key_set?' OpenAI fallback is available.':' No OpenAI fallback key is set yet.'}</span></div>`:''}
-        ${!nextPlan ? `<div class="empty-table" style="padding:20px 8px">No budget plan saved for ${budgetMonthLabelForKey(state.budgetNextMonthKey)} yet.</div>`:''}
-        ${nextPlan ? `
-          <div class="budget-hero">
-            <div><div class="card-title">Expected parish income after remittance</div><div class="budget-hero-amount">${fmt(nextPlan.expectedParishIncome)}</div></div>
-            <div><div class="card-title">Recommended budget</div><div class="budget-hero-amount">${fmt(nextPlan.recommendedBudget)}</div></div>
-          </div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0 14px">
-            <span class="${budgetStatusBadge(nextPlan.statusLabel)}">${esc((nextPlan.statusLabel||'').replace(/^\w/, c=>c.toUpperCase()))}</span>
-            <span class="badge badge-gray">${nextPlan.status==='accepted'?'Accepted':'Draft'}</span>
-            ${nextPlan.acceptedAt?`<span class="td-muted">Accepted ${fmtDate(nextPlan.acceptedAt)}${nextPlan.acceptedBy?' by '+esc(nextPlan.acceptedBy):''}</span>`:''}
-          </div>
-          <div class="budget-strip">Not ours to budget · ${fmt(nextPlan.remittanceStrip?.amount||nextPlan.expectedRemittance||0)} already spoken for (RCCG)</div>
-          <p class="budget-summary">${esc(nextPlan.summary||'')}</p>
-          ${(nextPlan.ignored||[]).length?`<div class="budget-chip-row">${nextPlan.ignored.map(item=>`<span class="badge badge-gray">${esc(item)}</span>`).join('')}</div>`:''}
-          <div class="budget-lines" style="margin-top:14px">
-            ${(nextPlan.lines||[]).map(line=>`<div class="budget-line static">
-              <div class="budget-line-top">
-                <div>
-                  <div class="budget-line-label">${esc(line.label||line.key)}</div>
-                  <div class="budget-line-sub">${esc(line.why||'')}</div>
-                </div>
-                <div style="text-align:right">
-                  <span class="badge badge-purple">${esc(line.cadence||'usual')}</span>
-                  <div class="budget-line-pct">${fmt(line.amount||0)}</div>
-                </div>
-              </div>
-              ${(line.subs||[]).length ? `<ul class="budget-subline-wrap">${line.subs.map(sub=>`<li class="budget-subline"><span>${esc(sub.label||'General')}</span><strong>${fmt(sub.amount||0)}</strong></li>`).join('')}</ul>` : ''}
-            </div>`).join('')}
-          </div>
-        `:''}
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
-          <button class="btn btn-primary" ${canUseAi?'':'disabled'} onclick="App.generateBudget(this)">${nextPlan?'Regenerate':'Generate with AI'}</button>
-          ${nextPlan && nextPlan.status!=='accepted' ? `<button class="btn btn-amber" onclick="App.acceptBudgetPlan(this)">Accept plan</button>` : ''}
-        </div>
-      </div>
-    `}
+    ${state.budgetTab==='this_month'
+      ? renderBudgetThisMonth({ thisKey, thisPlan, actuals, progress, canManage, canUseAi })
+      : renderBudgetNextMonth({ nextKey, nextPlan, canManage, canUseAi, allExpenses, thisKey })}
   `;
 }
 
-async function generateBudget(btn=null){
-  ensureBudgetState();
+async function generateBudget(monthKey, btn=null){
   const restore = setBtnLoading(btn, 'Generating…');
   try{
     const settings = await DB.getSettings();
-    const pack = await buildBudgetPack(state.budgetNextMonthKey, 6);
-    const res = await DB.generateBudget({ monthKey:state.budgetNextMonthKey, pack, churchName:settings?.churchName||'RCCG Kingdom Parish' });
+    const pack = await buildBudgetPack(monthKey);
+    const res = await DB.generateBudget({ monthKey, pack, churchName:settings?.churchName||'RCCG Kingdom Parish', by:state.user?.name||'', role:state.user?.role||'' });
     if(res?.providerError) console.warn('Budget generate fallback:', res.providerError);
-    showAlert(`Budget draft ready for ${budgetMonthLabelForKey(state.budgetNextMonthKey)}.`,'success');
-    state.budgetAffordResult = null;
+    showAlert(`Budget draft ready for ${budgetMonthLabelForKey(monthKey)}.`,'success');
+    state.budgetEditingMonth = null;
     await renderBudget();
   }catch(e){
     showAlert(e.message || 'Failed to generate budget.','danger');
@@ -5677,10 +5966,42 @@ async function generateBudget(btn=null){
   restore();
 }
 
-async function acceptBudgetPlan(btn=null){
+async function saveBudgetPlan(monthKey, btn=null){
+  const form = document.getElementById('budgetEditForm');
+  if(!form) return;
+  const lines = [];
+  form.querySelectorAll('#budgetEditLines .budget-edit-row').forEach(row=>{
+    if(row.style.display==='none') return;
+    const key = row.getAttribute('data-key');
+    const input = row.querySelector('.budget-edit-amt');
+    const amount = Math.max(0, Math.round(parseFloat(input?.value||'0')||0));
+    if(!key || amount<=0) return;
+    lines.push({
+      key, label: row.getAttribute('data-label')||key,
+      amount, cadence: row.getAttribute('data-cadence')||'occasional',
+      why: row.getAttribute('data-why')||'',
+    });
+  });
+  const cushion = Math.max(0, Math.round(parseFloat(document.getElementById('budgetEditCushion')?.value||'0')||0));
+  const restore = setBtnLoading(btn, 'Saving…');
+  try{
+    const res = await DB.saveBudget({ monthKey, lines, cushion, by:state.user?.name||'', role:state.user?.role||'' });
+    if(res?.warning) showAlert(res.warning, 'warn');
+    else showAlert('Budget plan saved.', 'success');
+    state.budgetEditingMonth = null;
+    await renderBudget();
+  }catch(e){
+    showAlert(e.message || 'Failed to save budget.', 'danger');
+    restore();
+    return;
+  }
+  restore();
+}
+
+async function acceptBudgetPlan(monthKey, btn=null){
   const restore = setBtnLoading(btn, 'Accepting…');
   try{
-    await DB.acceptBudget({ monthKey:state.budgetNextMonthKey, acceptedBy:state.user?.name||'Finance Portal' });
+    await DB.acceptBudget({ monthKey, by:state.user?.name||'', role:state.user?.role||'' });
     showAlert('Budget plan accepted.','success');
     await renderBudget();
   }catch(e){
@@ -5691,18 +6012,52 @@ async function acceptBudgetPlan(btn=null){
   restore();
 }
 
+async function reopenBudgetPlan(monthKey, btn=null){
+  const reason = (window.prompt('Why are you reopening this plan? (shown in the audit log)')||'').trim();
+  if(!reason) return;
+  const restore = setBtnLoading(btn, 'Reopening…');
+  try{
+    await DB.reopenBudget({ monthKey, by:state.user?.name||'', role:state.user?.role||'', reason });
+    showAlert('Budget plan reopened.','success');
+    state.budgetEditingMonth = null;
+    await renderBudget();
+  }catch(e){
+    showAlert(e.message || 'Failed to reopen budget.','danger');
+    restore();
+    return;
+  }
+  restore();
+}
+
+// Never calls renderBudget() — only updates its own result box — so the idea/amount
+// inputs the person just typed are never cleared (Part U #1/#9).
 async function askBudgetAfford(btn=null){
   const idea = (document.getElementById('budget_idea')?.value||'').trim();
   const amount = parseFloat(document.getElementById('budget_amount')?.value||'')||0;
+  const box = document.getElementById('budgetAffordResultBox');
   if(!idea){ showAlert('Please describe the idea first.','danger'); return; }
-  const restore = setBtnLoading(btn, 'Asking…');
+  const restore = setBtnLoading(btn, 'Checking…');
   try{
-    const outlook = state.budgetOutlook?.outlook || null;
-    const rolling = outlook ? { expectedIncome3mo: outlook.expectedIncome3mo, committedSpend3mo: outlook.committedSpend3mo } : null;
-    state.budgetAffordResult = await DB.askBudgetAfford({ monthKey:state.budgetThisMonthKey, idea, amount, rolling });
-    await renderBudget();
+    const thisKey = state.budgetMonthKey;
+    const free = (state._budgetFreeParts && state._budgetFreeParts.monthKey===thisKey)
+      ? state._budgetFreeParts
+      : await computeBudgetFreeParts(thisKey, {});
+    const res = await DB.askBudgetAfford({
+      monthKey: thisKey, idea, amount,
+      today: ymdLocal(new Date()),
+      growth: free.growth,
+      parts: free.parts,
+      by: state.user?.name||'', role: state.user?.role||'',
+    });
+    if(box){
+      const verdict = res?.verdict||'no';
+      const cls = verdict==='yes'?'alert-info':verdict==='not_yet'?'alert-warn':'alert-danger';
+      const icon = verdict==='yes'?'✓':verdict==='not_yet'?'⏳':'✕';
+      const label = verdict==='yes'?'YES':verdict==='not_yet'?'NOT YET':'NO';
+      box.innerHTML = `<div class="alert ${cls}" style="margin-top:12px"><span class="alert-icon">${icon}</span><span><strong>${label}</strong> — ${esc(res?.explanation||'')}</span></div>`;
+    }
   }catch(e){
-    showAlert(e.message || 'Failed to ask the budget advisor.','danger');
+    showAlert(e.message || 'Failed to check affordability.','danger');
     restore();
     return;
   }
@@ -9530,51 +9885,9 @@ async function renderExpenses(){
   const total = expenses.reduce((s,r)=>s+(r.amount||0),0);
   // Outstanding remittances — uses the same settled-period-aware logic as the Dashboard
   // to prevent rate changes from retroactively inflating past periods' due amounts.
-  const quotaList = getQuotaList(settings);
-  const firstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
-  const firstDateStr = (firstIncRec ? (firstIncRec.date||firstIncRec.createdAt||'') : '').slice(0,10);
-  const accumQuotas = firstIncRec
-    ? accumQuotasAcrossPeriods(quotaList, settings, allRems, firstDateStr, ymdLocal(new Date()))
-    : 0;
-
-  // Identify fully settled periods (both Part A + B paid, or legacy)
-  const _expSettledKeys = [...new Set(
-    allRems.filter(r=>r.status==='paid'&&r.periodFrom&&r.periodTo).map(r=>`${r.periodFrom}|${r.periodTo}`)
-  )].filter(key=>{
-    const [pF,pT]=key.split('|');
-    const pp=allRems.filter(r=>r.status==='paid'&&r.periodFrom===pF&&r.periodTo===pT);
-    return pp.some(r=>!r.part)||(pp.some(r=>r.part==='a')&&pp.some(r=>r.part==='b'));
-  });
-  const _expSettledRanges=_expSettledKeys.map(k=>{const [f,t]=k.split('|');return{from:f,to:t};});
-
-  // Shortfall from settled periods (snapshot - paid, or 0 if no snapshot)
-  let _expSettledShortfall=0;
-  _expSettledKeys.forEach(key=>{
-    const [pF,pT]=key.split('|');
-    const pp=allRems.filter(r=>r.status==='paid'&&r.periodFrom===pF&&r.periodTo===pT);
-    const ppPaid=pp.reduce((s,r)=>s+(r.amount||0),0);
-    const ppSnap=pp.reduce((max,r)=>Math.max(max,r.dueAtTimeOfPayment||0),0);
-    _expSettledShortfall+=Math.max(0,(ppSnap>0?ppSnap:ppPaid)-ppPaid);
-  });
-
-  // Only recalculate remittance for unsettled-period income
-  const _expUnsettledIncome=allIncome.filter(r=>{
-    const d=r.date||r.createdAt||'';
-    return !d||!_expSettledRanges.some(p=>d>=p.from&&d<=p.to);
-  });
-  const _expUnsettledRem=await calcRemittancesFromRecords(_expUnsettledIncome);
-  const _expUnsettledDue=totalRemittanceDue(_expUnsettledRem);
-  const _expSettledQuotas=_expSettledRanges.reduce((s,pp)=>s+sumQuotaLines(getQuotaLinesForPeriod(quotaList,pp.from,pp.to)),0);
-  const _expUnsettledQuotas=accumQuotas-_expSettledQuotas;
-
-  // Net out payments already made toward still-unsettled periods (e.g. Part A paid in
-  // cash, Part B not yet due) — calcChurchBalance already reflects that payment leaving
-  // the real balance, so counting the full unsettled due here too would double-subtract
-  // it from Spendable. Mirrors the Dashboard's dashTotalRemDueKpi calc.
-  const _expUnsettledPaidOrWrittenOff = calcUnsettledPeriodsSettledAmount(allRems, _expSettledKeys);
-  const outstandingRems=Math.max(0, _expUnsettledDue+_expUnsettledQuotas+_expSettledShortfall-_expUnsettledPaidOrWrittenOff);
-  const totalChurch = churchBal.total;
-  const spendable = totalChurch - outstandingRems;
+  // Shared with the Budget page's "Free for new things" via calcSpendableNow() so the
+  // two screens can never disagree on the figure.
+  const { spendable, totalChurch, outstandingRems } = await calcSpendableNow({ income:allIncome, remittances:allRems, settings, churchBal });
   const _expPettyTarget = parseFloat(settings?.pettyTargetFloat||0)||90000;
   const _expPettyManageable = parseFloat(settings?.pettyManageableFloat||0)||60000;
   const _expPettyMinimum = parseFloat(settings?.pettyMinimumFloat||0)||40000;
@@ -15417,7 +15730,7 @@ async function setPeriodMode(mode){
 // ──────────────────────────────────────────
 return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
-  onMonthChange, setIncomeTab, setBudgetTab, setBudgetMonth, toggleBudgetLine, generateBudget, acceptBudgetPlan, askBudgetAfford, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
+  onMonthChange, setIncomeTab, setBudgetTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, generateBudget, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, askBudgetAfford, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry, isRemittanceLinkedPayout,

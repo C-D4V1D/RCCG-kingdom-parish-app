@@ -70,6 +70,19 @@ test('admin_officer, signatory, and viewer can access the budget page when allow
   assert.equal(App._canAccessPage('budget'), true, 'viewer inherits budget visibility only through expenses_view');
 });
 
+test('only accountant, pastor and it_admin can generate/edit/accept/reopen a budget plan', () => {
+  const allowed = ['it_admin', 'accountant', 'pastor'];
+  const denied  = ['admin_officer', 'signatory', 'viewer'];
+  for (const role of allowed) {
+    App._setTestUserRole(role);
+    assert.equal(App._canAction('budget_manage'), true, `${role} should have budget_manage`);
+  }
+  for (const role of denied) {
+    App._setTestUserRole(role);
+    assert.equal(App._canAction('budget_manage'), false, `${role} should not have budget_manage`);
+  }
+});
+
 test('an action name that is not declared denies every role, including IT Admin', () => {
   for (const role of ['it_admin', 'accountant', 'viewer']) {
     App._setTestUserRole(role);

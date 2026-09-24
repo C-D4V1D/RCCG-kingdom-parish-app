@@ -295,35 +295,79 @@ tr:hover td{background:var(--surface)}
 .tab.active{color:var(--primary);border-bottom-color:var(--primary)}
 
 /* BUDGET */
-.budget-tabs{display:flex;gap:8px;margin-bottom:1rem;flex-wrap:wrap}
+.budget-tabs{display:flex;gap:8px;margin-bottom:1rem;flex-wrap:wrap;align-items:center}
 .budget-tabs .tab{border:1px solid var(--border2);border-radius:999px;padding:10px 16px;background:var(--card);min-height:44px}
 .budget-tabs .tab.active{background:var(--primary-light);border-color:var(--primary);border-bottom-color:var(--primary)}
 .budget-card{padding:1rem 1.1rem}
-.budget-month-picker{width:auto;min-width:160px;min-height:44px}
+.budget-month-picker{width:auto;min-width:160px;min-height:44px;margin-left:auto}
 .budget-hero{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start;margin-bottom:12px}
 .budget-hero-main{display:flex;flex-direction:column;gap:4px}
 .budget-hero-amount{font-size:28px;font-weight:700;color:var(--primary);line-height:1.1}
 .budget-hero-sub,.budget-summary{font-size:13px;color:var(--text2)}
 .budget-strip{background:var(--amber-light);color:var(--amber);border:1px solid rgba(186,117,23,0.25);border-radius:var(--r);padding:10px 12px;font-size:12px;font-weight:600;margin-bottom:12px}
-.budget-bar{height:10px;background:var(--border);border-radius:999px;overflow:hidden;margin-bottom:12px}
-.budget-bar-fill{height:10px;background:linear-gradient(90deg,var(--primary),var(--primary-mid));border-radius:999px}
+.budget-bar{position:relative;height:10px;background:var(--border);border-radius:999px;overflow:visible;margin-bottom:12px}
+.budget-bar-fill{height:10px;background:linear-gradient(90deg,var(--primary),var(--primary-mid));border-radius:999px;transition:width .2s ease}
+.budget-bar-watch .budget-bar-fill{background:linear-gradient(90deg,#D97706,#F5A623)}
+.budget-bar-over .budget-bar-fill{background:linear-gradient(90deg,var(--danger),#c62828)}
+.budget-bar-marker{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--text);opacity:0.55;border-radius:1px}
 .budget-summary-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:12px}
 .budget-mini-val{font-size:16px;font-weight:700;color:var(--text);margin-top:2px}
-.budget-lines{display:flex;flex-direction:column;gap:10px}
-.budget-line{all:unset;display:block;background:var(--surface);border:1px solid var(--border);border-radius:var(--rl);padding:12px;cursor:pointer}
-.budget-line.static{cursor:default}
-.budget-line:focus-visible{outline:2px solid var(--primary);outline-offset:2px;box-shadow:0 0 0 4px rgba(15,110,86,0.12)}
+.budget-lines{display:flex;flex-direction:column;gap:10px;margin-bottom:10px}
+.budget-line-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--rl);padding:12px}
 .budget-line-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
 .budget-line-label{font-size:14px;font-weight:700;color:var(--text)}
 .budget-line-sub{font-size:12px;color:var(--text2);margin-top:2px}
 .budget-line-pct{font-size:12px;font-weight:700;color:var(--text2);margin-top:6px}
 .budget-line-bar{margin:10px 0 0}
+.budget-pace-ontrack{background:var(--success-light,rgba(15,110,86,0.12));color:var(--success,#0F6E56)}
+.budget-pace-watch{background:var(--amber-light);color:var(--amber)}
+.budget-pace-over{background:rgba(211,47,47,0.12);color:var(--danger)}
 .budget-subline-wrap{margin-top:8px;list-style:none;padding:0}
 .budget-subline{display:flex;justify-content:space-between;gap:10px;font-size:13px;padding-left:12px;margin-top:4px}
 .budget-subline span{color:var(--text3)}
-.budget-line-expenses{margin-top:10px;border-top:1px solid var(--border);padding-top:10px}
+.budget-line-toggle{all:unset;display:inline-block;margin-top:10px;font-size:12px;font-weight:600;color:var(--primary);cursor:pointer;min-height:32px;line-height:32px}
+.budget-line-toggle:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.budget-line-expenses{margin-top:6px;border-top:1px solid var(--border);padding-top:10px}
 .budget-expense-row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;font-size:12px;color:var(--text2)}
 .budget-chip-row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 0}
+
+/* Free for new things — top card (Part G) */
+.budget-free-card{border:1.5px solid var(--primary);background:linear-gradient(180deg,var(--primary-light,rgba(15,110,86,0.06)),var(--card) 60%)}
+.budget-free-label{font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:var(--text2)}
+.budget-free-amount{font-size:32px;font-weight:800;color:var(--primary);line-height:1.15;margin:2px 0 4px}
+.budget-afford-box{margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+.budget-breakdown-toggle{all:unset;display:inline-block;margin-top:12px;font-size:13px;font-weight:600;color:var(--primary);cursor:pointer;min-height:36px;line-height:36px}
+.budget-breakdown-panel{margin-top:6px;border-top:1px solid var(--border);padding-top:10px}
+.budget-breakdown-row{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;font-size:13px;padding:5px 0;color:var(--text2)}
+.budget-breakdown-row.small{font-size:12px;padding-left:14px;color:var(--text3)}
+.budget-breakdown-row.total{border-top:1px solid var(--border);margin-top:4px;padding-top:8px;font-weight:700;color:var(--text)}
+.budget-breakdown-sub{margin:2px 0}
+
+/* This month / Next month plan cards */
+.budget-month-header{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.budget-month-title{font-size:13px;font-weight:700;letter-spacing:0.3px;color:var(--text2);text-transform:uppercase}
+.budget-summary-row{display:flex;justify-content:space-between;gap:10px;font-size:13px;color:var(--text2);padding:3px 0}
+.budget-summary-row strong{color:var(--text);font-weight:700}
+.budget-spend-line{font-size:12px;color:var(--text2);margin:6px 0 4px}
+.budget-section-title{font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:var(--text3);margin:16px 0 8px}
+.budget-cushion-row,.budget-lines-total-row{display:flex;justify-content:space-between;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--rl);padding:10px 12px;font-size:13px}
+.budget-lines-total-row{font-weight:700;margin-bottom:8px}
+.budget-unplanned-list{display:flex;flex-direction:column;gap:6px}
+.budget-unplanned-row{display:flex;justify-content:space-between;gap:10px;background:var(--amber-light);color:var(--amber);border:1px solid rgba(186,117,23,0.25);border-radius:var(--r);padding:8px 12px;font-size:12px;font-weight:600}
+.budget-lock-badge{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:8px 12px;font-size:12px;font-weight:600;color:var(--text2);margin:10px 0}
+.budget-action-row{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 0}
+
+/* Edit mode */
+.budget-edit-form{margin-top:10px}
+.budget-edit-lines{display:flex;flex-direction:column;gap:8px}
+.budget-edit-row{display:grid;grid-template-columns:1fr 120px 44px;gap:8px;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:8px 10px}
+.budget-edit-row-label{font-size:13px;font-weight:600;color:var(--text)}
+.budget-edit-amt{min-height:40px}
+.budget-edit-remove{min-width:40px;min-height:40px;padding:0}
+.budget-edit-cushion-row{margin-top:8px}
+.budget-edit-add-row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.budget-edit-add-row select{flex:1;min-width:180px}
+.budget-edit-totals{margin-top:10px;font-size:13px;color:var(--text2)}
 
 /* ADMIN GRID */
 .admin-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:1rem}
@@ -346,6 +390,8 @@ tr:hover td{background:var(--surface)}
   .form-row,.form-row-3{grid-template-columns:1fr}
   .admin-grid{grid-template-columns:repeat(2,1fr)}
   .budget-hero,.budget-summary-grid{grid-template-columns:1fr}
+  .budget-edit-row{grid-template-columns:1fr}
+  .budget-edit-remove{justify-self:end}
   .page-content{padding:1rem}
   .notif-panel{right:0;left:0;width:auto;border-radius:0}
   .modal{margin:0;border-radius:var(--rl) var(--rl) 0 0;max-height:85vh}
@@ -372,6 +418,13 @@ tr:hover td{background:var(--surface)}
   .sat-kpi-grid .kpi-label{font-size:11px}
   .sat-kpi-grid .kpi-val{font-size:16px}
 }
+@media(max-width:480px){
+  /* Part U #13: the month picker squeezed the tab row on phones — give it its own
+     row instead of sharing the tab bar's flex line. */
+  .budget-tabs{flex-direction:column;align-items:stretch}
+  .budget-month-picker{margin-left:0;width:100%}
+  .budget-summary-grid{grid-template-columns:1fr}
+}
 
 /* PRINT */
 @media print{
@@ -385,6 +438,11 @@ tr:hover td{background:var(--surface)}
   .print-signature,.print-sig-box{page-break-inside:avoid}
   body{font-size:12px;background:#fff}
   table{page-break-inside:auto}
+  /* Budget "Print / Save PDF" (Part U #14) — reveal every collapsed panel so the
+     printed page shows the full breakdown and expense lists, not just the toggles
+     (which are hidden above via .no-print on the toggle buttons themselves). */
+  .budget-breakdown-panel[hidden],.budget-line-expenses[hidden]{display:block!important}
+  .budget-bar-marker{background:#000}
   tr{page-break-inside:avoid}
 }
 
