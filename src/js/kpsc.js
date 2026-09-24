@@ -7468,11 +7468,11 @@ async function loadPartnerData(year = currentYear()) {
 }
 
 // ── INCOME REVIEW: confirmation + cash-in-hand tracker ─────────────────────
-// Bank-signatory oversight (Acting Chairman / Treasurer). Every income entry, any
-// payment method, needs one of them to confirm it actually happened; cash income
-// additionally needs one of them to mark it deposited once they see it hit the
-// account (replacing the old "tick specific payments + type an amount" transfer
-// flow, which in practice nobody came back to the app to use after the fact).
+// Bank-signatory oversight (Acting Chairman / Treasurer). Bank transfer, POS and
+// cheque income needs one of them to confirm it arrived in the bank; cash needs one
+// of them to confirm its deposit once someone has paid it in (replacing the old
+// "tick specific payments + type an amount" transfer flow, which in practice nobody
+// came back to the app to use after the fact).
 
 async function loadIncomeReview() {
   if (!canManageFinance()) return;
@@ -7540,7 +7540,7 @@ async function confirmIncomeEntries(ids) {
 async function depositHolderCash(holderName) {
   const res = await apiPost('kpsc-cash-deposit', holderName ? { holder: holderName } : {});
   if (res?.error) { showToast('Deposit failed: ' + res.error, 'error'); return; }
-  showToast(holderName ? `${holderName}'s cash marked as deposited.` : 'All pending cash marked as deposited.', 'success');
+  showToast(holderName ? `Deposit of ${holderName}'s cash confirmed.` : 'All cash deposits confirmed.', 'success');
   await loadIncomeReview();
   await _refreshFinanceEntryListIfShown();
 }
@@ -7590,7 +7590,7 @@ function renderIncomeReviewCard() {
       </div>
       <div style="display:flex;align-items:center;gap:8px">
         <span class="k-cash-holder-amount">${fmtN(h.inHand)}</span>
-        ${canConfirm ? `<button class="kbtn kbtn-sm kbtn-ghost" style="padding:4px 10px" onclick="Kpsc.depositHolderCash('${escJsAttr(h.name)}')">Deposited</button>` : ''}
+        ${canConfirm ? `<button class="kbtn kbtn-sm kbtn-ghost" style="padding:4px 10px" onclick="Kpsc.depositHolderCash('${escJsAttr(h.name)}')">Confirm Deposit</button>` : ''}
       </div>
     </div>`).join('');
 
@@ -7627,7 +7627,7 @@ function renderIncomeReviewCard() {
       <div class="k-cash-section-title" style="margin-top:16px">Cash in Hand — by holder</div>
       <div class="k-cash-holders">${holderRows}</div>
       <div class="k-cash-card-actions">
-        ${canConfirm ? `<button class="kbtn kbtn-primary kbtn-sm" onclick="Kpsc.depositHolderCash()">Deposit All</button>` : ''}
+        ${canConfirm ? `<button class="kbtn kbtn-primary kbtn-sm" onclick="Kpsc.depositHolderCash()">Confirm All Deposits</button>` : ''}
         <button class="kbtn kbtn-sm" style="background:#f0faf5;color:var(--green);border:1px solid #b7dfc9" onclick="Kpsc.openSpendModal()">Spend from Cash</button>
         <button class="kbtn kbtn-ghost kbtn-sm" onclick="Kpsc.openCashDetailsModal()">Details</button>
       </div>
@@ -7749,7 +7749,7 @@ function openCashDetailsModal() {
     return `
       <div class="k-cash-section-title" style="margin-top:16px;display:flex;align-items:center;justify-content:space-between">
         <span>${esc(h.name)} — in hand ${fmtN(h.inHand)}</span>
-        ${canConfirm ? `<button class="kbtn kbtn-sm kbtn-ghost" style="font-size:11px;padding:2px 8px" onclick="Kpsc.depositHolderCash('${escJsAttr(h.name)}')">Deposited</button>` : ''}
+        ${canConfirm ? `<button class="kbtn kbtn-sm kbtn-ghost" style="font-size:11px;padding:2px 8px" onclick="Kpsc.depositHolderCash('${escJsAttr(h.name)}')">Confirm Deposit</button>` : ''}
       </div>
       ${lotRows}
       ${expRows || ''}
@@ -9008,9 +9008,10 @@ async function renderFinance(main) {
     ).join('');
   // Who confirmed what — lets Acting Chairman / Treasurer check their own vs each
   // other's confirmations, or see everything still awaiting sign-off.
-  const confirmerNames = [...new Set(incomeEntries.map(e => e.confirmedBy).filter(Boolean))].sort();
+  const confirmerNames = [...new Set(incomeEntries.map(e => _signoffStatus(e)?.by).filter(Boolean))].sort();
   const confirmFilterOpts = `<option value="">All Income (confirmed or not)</option>` +
-    `<option value="__pending__">Awaiting confirmation</option>` +
+    `<option value="__pending__">Awaiting confirmation (bank, POS, cheque)</option>` +
+    `<option value="__undeposited__">Cash not yet deposited</option>` +
     confirmerNames.map(n => `<option value="${esc(n)}">Confirmed by ${esc(n)}</option>`).join('');
   const periodLabel = month ? `${monthName(month)} ${year}` : `Year ${year}`;
 
@@ -9418,9 +9419,11 @@ function getFilteredFinanceEntries() {
     entries = entries.filter(e => e.paymentMethod === S.financeMethodFilter);
   }
   if (S.financeConfirmFilter === '__pending__') {
-    entries = entries.filter(e => e.entryType === 'income' && !e.confirmedBy);
+    entries = entries.filter(e => e.paymentMethod !== 'cash' && _signoffStatus(e)?.pending);
+  } else if (S.financeConfirmFilter === '__undeposited__') {
+    entries = entries.filter(e => e.paymentMethod === 'cash' && _signoffStatus(e)?.pending);
   } else if (S.financeConfirmFilter) {
-    entries = entries.filter(e => e.confirmedBy === S.financeConfirmFilter);
+    entries = entries.filter(e => _signoffStatus(e)?.by === S.financeConfirmFilter);
   }
   const q = (S.financeSearch || '').trim().toLowerCase();
   if (q) {
@@ -9449,14 +9452,55 @@ function getFilteredFinanceEntries() {
   return entries;
 }
 
-// Small "✅ Confirmed by X" / "⏳ Awaiting confirmation" tag — income entries only.
-// Lets Acting Chairman / Treasurer check who (of the two of them) confirmed what,
-// right in the ledger, without a separate history screen.
-function _confirmBadgeHtml(e) {
-  if (e.entryType !== 'income') return '';
-  return e.confirmedBy
-    ? `<span class="kbadge badge-green" title="${esc(fmtDateTime(e.confirmedAt))}">✅ ${esc(e.confirmedBy)}</span>`
-    : `<span class="kbadge badge-amber">⏳ Awaiting confirmation</span>`;
+// Stamped by the one-time settling of pre-feature history, not by a person. It only
+// marks old rows as settled, so it's never shown or offered as a filter.
+const KPSC_SYSTEM_SIGNOFF = 'System (auto)';
+const _isPersonSignoff = name => !!name && name !== KPSC_SYSTEM_SIGNOFF;
+
+// "24 Sep" — with the year only when it isn't this year.
+function _signoffDay(ts) {
+  const d = String(ts || '').slice(0, 10);
+  if (!d) return '';
+  const [day, mon, yr] = fmtDate(d).split(' ');
+  return yr === String(currentYear()) ? `${day} ${mon}` : `${day} ${mon} ${yr}`;
+}
+
+// Income paid straight into the bank — confirmed against the bank alerts. Cash is
+// never "confirmed"; its deposit is, once someone has paid it in.
+const KPSC_BANK_CONFIRM_METHODS = ['bank_transfer', 'pos', 'cheque'];
+const KF_CONFIRMED_LABEL = { bank_transfer: 'Transfer confirmed', pos: 'POS payment confirmed', cheque: 'Cheque confirmed' };
+
+// The one sign-off an income entry needs, with display text already escaped. null
+// when nothing applies: expenses, the "other" method, or history the system settled.
+function _signoffStatus(e) {
+  if (e.entryType !== 'income') return null;
+  const done = (by, at, label, icon) => ({
+    pending: false, by,
+    text: `${icon} ${label} by ${esc(by)} · ${esc(_signoffDay(at))}`,
+    short: `${icon} ${esc(by)}`, title: fmtDateTime(at),
+  });
+  if (KPSC_BANK_CONFIRM_METHODS.includes(e.paymentMethod)) {
+    if (!e.confirmedBy) return { pending: true, text: '⏳ Awaiting confirmation', short: '⏳ Pending' };
+    return _isPersonSignoff(e.confirmedBy) ? done(e.confirmedBy, e.confirmedAt, KF_CONFIRMED_LABEL[e.paymentMethod], '✓') : null;
+  }
+  if (e.paymentMethod === 'cash') {
+    if (!e.depositedBy) return { pending: true, text: '💵 Not yet deposited', short: '💵 In hand' };
+    return _isPersonSignoff(e.depositedBy) ? done(e.depositedBy, e.depositedAt, 'Deposit confirmed', '🏦') : null;
+  }
+  return null;
+}
+
+// Status line shown under "Recorded by" on an income entry.
+function _signoffLinesHtml(e) {
+  const s = _signoffStatus(e);
+  if (!s) return '';
+  return `<div style="font-size:12px;color:${s.pending ? 'var(--amber)' : 'var(--green)'};margin-top:3px">${s.text}</div>`;
+}
+
+function _signoffCellHtml(e) {
+  const s = _signoffStatus(e);
+  if (!s) return '';
+  return `<span style="font-size:12px;color:${s.pending ? 'var(--amber)' : 'var(--green)'};white-space:nowrap"${s.title ? ` title="${esc(s.title)}"` : ''}>${s.short}</span>`;
 }
 
 function renderFinanceEntryList(canManage, canDelete) {
@@ -9481,7 +9525,7 @@ function renderFinanceEntryList(canManage, canDelete) {
         <td style="color:var(--text3)">${esc(e.partnerName || '—')}</td>
         <td class="kf-td-amount" style="color:${amtColor}">₦${Number(e.amount||0).toLocaleString('en-NG')}</td>
         <td>${esc((e.paymentMethod||'—').replace(/_/g,' '))}</td>
-        <td>${_confirmBadgeHtml(e)}</td>
+        <td>${_signoffCellHtml(e)}</td>
         <td style="color:var(--text3);font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.reference||'—')}</td>
         ${actionCells}
       </tr>`;
@@ -9517,13 +9561,12 @@ function renderFinanceEntryList(canManage, canDelete) {
             <span>${esc(fmtDate(e.date))}</span>
             <span class="kbadge ${e.entryType==='income'?'badge-green':'badge-red'}">${esc(e.entryType)}</span>
             ${e.paymentMethod ? `<span class="kbadge badge-gray">${esc(e.paymentMethod.replace(/_/g,' '))}</span>` : ''}
-            ${_confirmBadgeHtml(e)}
-            ${e.paymentMethod === 'cash' && e.entryType === 'income' && e.depositedBy ? `<span class="kbadge badge-green" title="${esc(fmtDateTime(e.depositedAt))}">🏦 Deposited by ${esc(e.depositedBy)}</span>` : ''}
           </div>
           ${e.narration ? `<div class="k-page-hint" style="margin-top:6px">${esc(e.narration)}</div>` : ''}
           ${e.reference ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Ref: ${esc(e.reference)}</div>` : ''}
-          ${e.partnerName ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Partner: ${esc(e.partnerName)}</div>` : ''}
+          ${e.partnerName && !String(e.narration || '').includes(e.partnerName) ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Partner: ${esc(e.partnerName)}</div>` : ''}
           ${e.recordedBy ? `<div style="font-size:11px;color:var(--text3)">Recorded by: ${esc(e.recordedBy)}</div>` : ''}
+          ${_signoffLinesHtml(e)}
         </div>
       </div>
     </div>`).join('');
