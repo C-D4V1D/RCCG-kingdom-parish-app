@@ -33,6 +33,10 @@ const CORS_HEADERS = {
 const KPSC_WRITE_ROLES    = ['acting_chairman', 'general_secretary', 'financial_secretary', 'treasurer', 'it_admin'];
 const KPSC_FINANCE_ROLES  = ['acting_chairman', 'financial_secretary', 'treasurer', 'it_admin'];
 const KPSC_FINANCE_DELETE_ROLES = ['acting_chairman', 'it_admin'];
+// Bank-signatory oversight: only these two roles may confirm that a recorded income
+// entry actually happened, or mark a holder's cash as deposited/banked. They're the
+// ones who actually see bank alerts and are signatories on the account.
+const KPSC_INCOME_REVIEW_ROLES = ['acting_chairman', 'treasurer'];
 // Account management: it_admin can create/update/delete accounts without operational permissions.
 const KPSC_ADMIN_ROLES    = ['acting_chairman', 'general_secretary', 'it_admin'];
 // All roles that can log in to the portal (including read-only viewer and IT admin).
@@ -1988,18 +1992,25 @@ export async function onRequest(context) {
     // ── B6: scheduled_for field on ai-secretary-meetings ───────
     // (handled inline in updateAiSecretaryMeeting via body.scheduledFor)
 
-    // ── /api/kpsc-cash-collection  (GET — pending cash + recent handovers) ──
-    if (route === 'kpsc-cash-collection' && method === 'GET') {
+    // ── /api/kpsc-income-review  (GET — income awaiting confirmation + cash in hand) ──
+    if (route === 'kpsc-income-review' && method === 'GET') {
       const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
       if (auth instanceof Response) return auth;
-      return await getKpscCashCollection(DB);
+      return await getKpscIncomeReview(DB);
     }
 
-    // ── /api/kpsc-cash-handovers  (POST — record a cash transfer to bank) ──
-    if (route === 'kpsc-cash-handovers' && method === 'POST') {
-      const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
+    // ── /api/kpsc-finance-confirm  (POST — Acting Chairman / Treasurer sign off on income entries) ──
+    if (route === 'kpsc-finance-confirm' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_INCOME_REVIEW_ROLES);
       if (auth instanceof Response) return auth;
-      return await createKpscCashHandover(DB, body, auth);
+      return await confirmKpscFinanceEntries(DB, body, auth);
+    }
+
+    // ── /api/kpsc-cash-deposit  (POST — Acting Chairman / Treasurer mark a holder's cash as banked) ──
+    if (route === 'kpsc-cash-deposit' && method === 'POST') {
+      const auth = await requireKpscRole(DB, request, KPSC_INCOME_REVIEW_ROLES);
+      if (auth instanceof Response) return auth;
+      return await depositKpscCashForHolder(DB, body, auth);
     }
 
     // ── /api/kpsc-cash-reassign  (POST — reassign a lot to a different holder) ──
@@ -2540,6 +2551,8 @@ async function handleInit(DB) {
       ai_confidence     TEXT DEFAULT 'manual',
       created_at        TEXT NOT NULL
     )`,
+    // Retired (see the handover_id migration note below) — kept only so any
+    // historical rows from before the income-review feature still read back cleanly.
     `CREATE TABLE IF NOT EXISTS kpsc_cash_handovers (
       id              TEXT PRIMARY KEY,
       amount          REAL    DEFAULT 0,
@@ -2706,7 +2719,10 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_partners ADD COLUMN location TEXT DEFAULT ''`,
     // Projects: track funds raised toward active projects
     `ALTER TABLE kpsc_projects ADD COLUMN raised_amount REAL DEFAULT 0`,
-    // Cash handover: link settled finance entries to the handover record
+    // Cash handover (retired — superseded by deposited_by/deposited_at below, which
+    // replaced the tick-specific-payments-and-type-an-amount transfer flow with a
+    // one-tap "mark this holder's cash as deposited"). Columns/table kept only so any
+    // historical handover rows already in a live database still read back cleanly.
     `ALTER TABLE kpsc_finance_entries ADD COLUMN handover_id TEXT DEFAULT ''`,
     // Cash collection v2: per-holder custody and cash-box expenses
     `ALTER TABLE kpsc_finance_entries ADD COLUMN cash_holder TEXT DEFAULT ''`,
@@ -2714,6 +2730,13 @@ async function handleInit(DB) {
     `ALTER TABLE kpsc_cash_handovers ADD COLUMN holder TEXT DEFAULT ''`,
     `ALTER TABLE kpsc_cash_handovers ADD COLUMN collected_total REAL DEFAULT 0`,
     `ALTER TABLE kpsc_cash_handovers ADD COLUMN expense_total REAL DEFAULT 0`,
+    // Income review: bank-signatory sign-off (Acting Chairman / Treasurer) on every
+    // recorded income entry, and a separate "money actually reached the bank" flag
+    // for cash income + the cash-box expenses that were spent out of it.
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN confirmed_by TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN confirmed_at TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN deposited_by TEXT DEFAULT ''`,
+    `ALTER TABLE kpsc_finance_entries ADD COLUMN deposited_at TEXT DEFAULT ''`,
     // Group ID to link split records from the same bulk deposit action for consolidated display
     `ALTER TABLE cash_transactions ADD COLUMN group_id TEXT DEFAULT ''`,
     `ALTER TABLE cash_transactions ADD COLUMN verification_status TEXT DEFAULT ''`,
@@ -2781,6 +2804,27 @@ async function handleInit(DB) {
   // than one submission before auto-merge existed) into a single record each. Safe to
   // re-run — once a date is consolidated there is nothing left to merge next time.
   try { await mergeDuplicateSundayCollections(DB); } catch { /* best-effort cleanup */ }
+
+  // Grandfather in every KPSC finance entry recorded before the income-review feature
+  // shipped, so Acting Chairman / Treasurer aren't handed a backlog of old entries to
+  // confirm/deposit — only entries recorded from here on need their sign-off. Guarded
+  // by a settings flag (not just "confirmed_by is empty") because that would also be
+  // true of a brand-new entry nobody has reviewed yet — this must run exactly once.
+  try {
+    const backfillDone = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_income_review_backfill_done'`).first();
+    if (!backfillDone) {
+      await DB.prepare(`
+        UPDATE kpsc_finance_entries SET confirmed_by='System (auto)', confirmed_at=datetime('now')
+        WHERE entry_type='income' AND COALESCE(confirmed_by,'')=''
+      `).run();
+      await DB.prepare(`
+        UPDATE kpsc_finance_entries SET deposited_by='System (auto)', deposited_at=datetime('now')
+        WHERE payment_method='cash' AND COALESCE(deposited_by,'')=''
+          AND (entry_type='income' OR (entry_type='expense' AND cash_box_expense=1))
+      `).run();
+      await DB.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES ('kpsc_income_review_backfill_done', '1')`).run();
+    }
+  } catch { /* best-effort — a failed backfill just means older rows stay unconfirmed */ }
 
   // Seed petty config (once)
   await DB.prepare(
@@ -5584,14 +5628,33 @@ async function deleteKpscFinanceEntry(DB, id, auth) {
   return ok({ deleted: id });
 }
 
-async function getKpscCashCollection(DB) {
+async function getKpscIncomeReview(DB) {
   const todayStr = new Date().toISOString().slice(0, 10);
 
-  // Unsettled cash income lots — every cash income entry, not just partner pledge
-  // payments. Previously this filtered on category='partnership_pledge', which
-  // silently excluded cash recorded under any other income category (e.g. Welfare &
-  // Development Offering, one-time donations, other custom categories) from ever
-  // appearing as Cash in Hand.
+  // Every income entry, any payment method, that neither the Acting Chairman nor the
+  // Treasurer has confirmed yet.
+  const { results: pending } = await DB.prepare(`
+    SELECT f.id, f.date, f.amount, f.category, f.sub_category, f.narration, f.reference,
+           f.payment_method, f.partner_id, f.recorded_by, p.full_name AS partner_name
+    FROM kpsc_finance_entries f
+    LEFT JOIN kpsc_partners p ON p.id = f.partner_id
+    WHERE f.entry_type = 'income'
+      AND COALESCE(f.confirmed_by, '') = ''
+      AND COALESCE(f.deleted_at, '') = ''
+    ORDER BY f.date DESC, f.created_at DESC
+  `).all();
+
+  const pendingConfirmation = (pending || []).map(r => ({
+    id: r.id, date: r.date, amount: Number(r.amount || 0), category: r.category || '',
+    subCategory: r.sub_category || '', narration: r.narration || '', reference: r.reference || '',
+    paymentMethod: r.payment_method || '', partnerId: r.partner_id || '', partnerName: r.partner_name || '',
+    recordedBy: r.recorded_by || 'Unknown', isToday: r.date === todayStr,
+  }));
+  const awaitingConfirmationTotal = pendingConfirmation.reduce((s, e) => s + e.amount, 0);
+
+  // Cash not yet marked as deposited — every cash income entry, not just partner
+  // pledge payments (that used to be a bug: category='partnership_pledge' silently
+  // excluded any other cash income category from ever appearing here).
   const { results: lots } = await DB.prepare(`
     SELECT f.id, f.date, f.amount, f.partner_id, f.recorded_by,
            f.category, f.sub_category, f.narration,
@@ -5601,19 +5664,19 @@ async function getKpscCashCollection(DB) {
     LEFT JOIN kpsc_partners p ON p.id = f.partner_id
     WHERE f.payment_method = 'cash'
       AND f.entry_type = 'income'
-      AND COALESCE(f.handover_id, '') = ''
+      AND COALESCE(f.deposited_by, '') = ''
       AND COALESCE(f.deleted_at, '') = ''
     ORDER BY f.date DESC, f.created_at DESC
   `).all();
 
-  // Unreconciled cash-box expenses
+  // Cash-box expenses paid out of that same undeposited pool.
   const { results: boxExpenses } = await DB.prepare(`
     SELECT f.id, f.date, f.amount, f.narration, f.category, f.recorded_by,
            COALESCE(f.cash_holder,'') AS cash_holder
     FROM kpsc_finance_entries f
     WHERE f.cash_box_expense = 1
       AND f.entry_type = 'expense'
-      AND COALESCE(f.handover_id, '') = ''
+      AND COALESCE(f.deposited_by, '') = ''
       AND COALESCE(f.deleted_at, '') = ''
     ORDER BY f.date DESC, f.created_at DESC
   `).all();
@@ -5630,14 +5693,11 @@ async function getKpscCashCollection(DB) {
   for (const lot of allLots) {
     const h = getHolder(lot.cash_holder || lot.recorded_by || 'Unknown');
     h.collected += Number(lot.amount || 0);
-    // Label priority: linked partner name > the synthetic "change retained" entry
-    // created when a handover transfers less than the full ticked amount > the
-    // entry's own narration > a humanized version of its category key.
+    // Label priority: linked partner name > the entry's own narration > a humanized
+    // version of its category key.
     let lotName;
     if (lot.partner_id) {
       lotName = lot.partner_name || 'Unknown';
-    } else if (lot.sub_category === 'retained_change') {
-      lotName = 'Cash retained (change)';
     } else if (lot.narration) {
       lotName = lot.narration;
     } else {
@@ -5651,91 +5711,61 @@ async function getKpscCashCollection(DB) {
     h.expenses.push({ id: exp.id, date: exp.date, amount: Number(exp.amount || 0), narration: exp.narration || '', category: exp.category || '' });
   }
 
-  const holders = Object.values(holderMap).map(h => ({ ...h, inHand: h.collected - h.spent })).sort((a, b) => b.inHand - a.inHand);
-  const collectedTotal = holders.reduce((s, h) => s + h.collected, 0);
-  const spentTotal = holders.reduce((s, h) => s + h.spent, 0);
-  const pendingTotal = holders.reduce((s, h) => s + h.inHand, 0);
+  // A holder can show 0 or less in hand if their expenses currently outrun their
+  // still-undeposited income (e.g. most of what they collected was already deposited
+  // earlier, but a cash-box expense against the same pool was recorded after) — floor
+  // at 0 rather than show a confusing negative "cash in hand".
+  const holders = Object.values(holderMap)
+    .map(h => ({ ...h, inHand: Math.max(0, h.collected - h.spent) }))
+    .filter(h => h.inHand > 0 || h.lots.length > 0)
+    .sort((a, b) => b.inHand - a.inHand);
+  const cashInHandTotal = holders.reduce((s, h) => s + h.inHand, 0);
 
-  const { results: recentHandovers } = await DB.prepare(`
-    SELECT id, amount, payment_count, transferred_by, holder, transferred_at, notes,
-           COALESCE(collected_total,0) AS collected_total, COALESCE(expense_total,0) AS expense_total, created_at
-    FROM kpsc_cash_handovers ORDER BY created_at DESC LIMIT 10
-  `).all();
-
-  return ok({ pendingTotal, collectedTotal, spentTotal, holderCount: holders.length, holders, recentHandovers: recentHandovers || [] });
+  return ok({
+    awaitingConfirmationTotal, pendingConfirmation,
+    cashInHandTotal, holders,
+  });
 }
 
-async function createKpscCashHandover(DB, data, auth) {
-  const amount = Number(data?.amount || 0);
-  const notes = String(data?.notes || '').trim().slice(0, 500);
-  const holder = String(data?.holder || auth.name || '').trim();
-  const paymentIds = Array.isArray(data?.paymentIds) ? data.paymentIds.filter(id => typeof id === 'string' && id.trim()) : [];
-  const transferredAt = String(data?.date || '').trim() || new Date().toISOString();
-
-  if (amount <= 0) return err('amount must be greater than 0', 400);
-  if (!paymentIds.length) return err('Select at least one payment to transfer', 400);
-
-  // Validate that each paymentId is an unsettled income lot
-  const phLots = paymentIds.map(() => '?').join(',');
-  const { results: validLots } = await DB.prepare(
-    `SELECT id, amount FROM kpsc_finance_entries WHERE id IN (${phLots}) AND payment_method='cash' AND entry_type='income' AND COALESCE(handover_id,'')='' AND COALESCE(deleted_at,'')=''`
-  ).bind(...paymentIds).all();
-  const validIds = (validLots || []).map(r => r.id);
-  if (!validIds.length) return err('No valid pending payments found', 400);
-
-  const collectedTotal = (validLots || []).reduce((s, r) => s + Number(r.amount || 0), 0);
-
-  // Find this holder's unreconciled cash-box expenses to reconcile together
-  const { results: pendingExpenses } = await DB.prepare(
-    `SELECT id, amount FROM kpsc_finance_entries WHERE cash_box_expense=1 AND entry_type='expense' AND COALESCE(handover_id,'')='' AND COALESCE(deleted_at,'')='' AND (COALESCE(cash_holder,'')=? OR (COALESCE(cash_holder,'')='' AND recorded_by=?))`
-  ).bind(holder, holder).all();
-  const expenseTotal = (pendingExpenses || []).reduce((s, r) => s + Number(r.amount || 0), 0);
-
-  // The ticked lots (minus this holder's pending cash-box expenses) is the most cash
-  // that can leave "in hand" right now. If the admin transfers less than that — keeping
-  // some physical cash/change back — the shortfall must stay visible as cash in hand
-  // instead of silently vanishing once the ticked lots are marked settled below.
-  const netAvailable = collectedTotal - expenseTotal;
-  if (amount > netAvailable + 0.5) {
-    return err(`Amount cannot exceed the ticked payments total minus pending expenses (₦${netAvailable.toLocaleString('en-NG')})`, 400);
-  }
-  const changeRetained = Math.max(0, netAvailable - amount);
-
-  const handoverId = newId('kch');
-  await DB.prepare(
-    `INSERT INTO kpsc_cash_handovers (id,amount,payment_count,transferred_by,holder,transferred_at,notes,collected_total,expense_total,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
-  ).bind(handoverId, amount, validIds.length, auth.name, holder, transferredAt, notes, collectedTotal, expenseTotal, auth.name).run();
-
-  // Link selected income lots in batches of 50
+async function confirmKpscFinanceEntries(DB, data, auth) {
+  const ids = Array.isArray(data?.ids) ? [...new Set(data.ids.filter(id => typeof id === 'string' && id.trim()))] : [];
+  if (!ids.length) return err('No entries selected', 400);
+  const ph = ids.map(() => '?').join(',');
+  const { results: rows } = await DB.prepare(
+    `SELECT id FROM kpsc_finance_entries WHERE id IN (${ph}) AND entry_type='income' AND COALESCE(confirmed_by,'')='' AND COALESCE(deleted_at,'')=''`
+  ).bind(...ids).all();
+  const validIds = (rows || []).map(r => r.id);
+  if (!validIds.length) return err('None of the selected entries are still awaiting confirmation', 400);
   for (let i = 0; i < validIds.length; i += 50) {
     const chunk = validIds.slice(i, i + 50);
     const p = chunk.map(() => '?').join(',');
-    await DB.prepare(`UPDATE kpsc_finance_entries SET handover_id=? WHERE id IN (${p})`).bind(handoverId, ...chunk).run();
+    await DB.prepare(`UPDATE kpsc_finance_entries SET confirmed_by=?, confirmed_at=datetime('now') WHERE id IN (${p})`)
+      .bind(auth.name, ...chunk).run();
   }
-  // Reconcile this holder's pending cash-box expenses
-  const expenseIds = (pendingExpenses || []).map(r => r.id);
-  for (let i = 0; i < expenseIds.length; i += 50) {
-    const chunk = expenseIds.slice(i, i + 50);
-    const p = chunk.map(() => '?').join(',');
-    await DB.prepare(`UPDATE kpsc_finance_entries SET handover_id=? WHERE id IN (${p})`).bind(handoverId, ...chunk).run();
-  }
+  return ok({ confirmed: validIds.length, confirmedBy: auth.name });
+}
 
-  // Re-create the untransferred remainder as a new unsettled cash lot for this holder,
-  // so the Cash in Hand card keeps showing it instead of disappearing.
-  if (changeRetained > 0.5) {
-    await DB.prepare(`
-      INSERT INTO kpsc_finance_entries
-      (id,date,entry_type,category,sub_category,amount,payment_method,reference,narration,partner_id,recorded_by,approved_by,approval_status,attachment_name,cash_holder)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).bind(
-      newId('kfe'), transferredAt.slice(0, 10), 'income', 'partnership_pledge', 'retained_change',
-      changeRetained, 'cash', '', `Cash retained (change from handover to bank)`, '',
-      auth.name, '', 'recorded', '', holder
-    ).run();
-  }
+async function depositKpscCashForHolder(DB, data, auth) {
+  // holder omitted/empty sweeps every holder's undeposited cash at once ("Deposit All").
+  const holder = String(data?.holder || '').trim();
+  const holderClause = holder ? `AND (COALESCE(cash_holder,'')=? OR (COALESCE(cash_holder,'')='' AND recorded_by=?))` : '';
+  const holderBinds = holder ? [holder, holder] : [];
 
-  const row = await DB.prepare(`SELECT * FROM kpsc_cash_handovers WHERE id=?`).bind(handoverId).first();
-  return ok({ id: row.id, amount: Number(row.amount), paymentCount: Number(row.payment_count), transferredBy: row.transferred_by, holder: row.holder, transferredAt: row.transferred_at, notes: row.notes, collectedTotal: Number(row.collected_total || 0), expenseTotal: Number(row.expense_total || 0), changeRetained });
+  const incomeRes = await DB.prepare(`
+    UPDATE kpsc_finance_entries SET deposited_by=?, deposited_at=datetime('now')
+    WHERE payment_method='cash' AND entry_type='income' AND COALESCE(deposited_by,'')='' AND COALESCE(deleted_at,'')=''
+    ${holderClause}
+  `).bind(auth.name, ...holderBinds).run();
+
+  const expenseRes = await DB.prepare(`
+    UPDATE kpsc_finance_entries SET deposited_by=?, deposited_at=datetime('now')
+    WHERE cash_box_expense=1 AND entry_type='expense' AND COALESCE(deposited_by,'')='' AND COALESCE(deleted_at,'')=''
+    ${holderClause}
+  `).bind(auth.name, ...holderBinds).run();
+
+  const changes = (incomeRes?.meta?.changes ?? incomeRes?.changes ?? 0) + (expenseRes?.meta?.changes ?? expenseRes?.changes ?? 0);
+  if (!changes) return err(holder ? `No pending cash found for ${holder}` : 'No pending cash to deposit', 400);
+  return ok({ depositedBy: auth.name, holder: holder || 'all holders' });
 }
 
 async function reassignCashHolder(DB, data, auth) {
@@ -5743,9 +5773,9 @@ async function reassignCashHolder(DB, data, auth) {
   const newHolder = String(data?.holder || '').trim();
   if (!paymentId || !newHolder) return err('paymentId and holder are required', 400);
   const existing = await DB.prepare(
-    `SELECT id FROM kpsc_finance_entries WHERE id=? AND payment_method='cash' AND COALESCE(handover_id,'')='' AND COALESCE(deleted_at,'')=''`
+    `SELECT id FROM kpsc_finance_entries WHERE id=? AND payment_method='cash' AND COALESCE(deposited_by,'')='' AND COALESCE(deleted_at,'')=''`
   ).bind(paymentId).first();
-  if (!existing) return err('Payment not found or already settled', 404);
+  if (!existing) return err('Payment not found or already deposited', 404);
   await DB.prepare(`UPDATE kpsc_finance_entries SET cash_holder=? WHERE id=?`).bind(newHolder, paymentId).run();
   return ok({ id: paymentId, holder: newHolder });
 }
@@ -5797,6 +5827,10 @@ async function getKpscFinanceEntries(DB, url) {
     approvalStatus: row.approval_status || 'recorded',
     attachmentName: row.attachment_name || '',
     createdAt: row.created_at || '',
+    confirmedBy: row.confirmed_by || '',
+    confirmedAt: row.confirmed_at || '',
+    depositedBy: row.deposited_by || '',
+    depositedAt: row.deposited_at || '',
   })));
 }
 
@@ -5938,9 +5972,15 @@ async function createKpscFinanceEntry(DB, data, auth) {
 async function updateKpscFinanceEntry(DB, id, data, auth) {
   const row = await DB.prepare(`SELECT * FROM kpsc_finance_entries WHERE id=?`).bind(id).first();
   if (!row) return err('KPSC finance entry not found', 404);
+  // Editing an entry invalidates any prior sign-off on it — whoever confirmed it (or
+  // marked cash as deposited) verified the OLD figures, not whatever this edit changes
+  // them to. Reset both so it gets a fresh look. confirmed_by/deposited_by are never
+  // settable from the client here — only the dedicated confirm/deposit endpoints
+  // (restricted to Acting Chairman / Treasurer) may set them.
   await DB.prepare(`
     UPDATE kpsc_finance_entries
-    SET date=?, entry_type=?, category=?, sub_category=?, amount=?, payment_method=?, reference=?, narration=?, partner_id=?, recorded_by=?, approved_by=?, approval_status=?, attachment_name=?, partner_payment_id=COALESCE(partner_payment_id,'')
+    SET date=?, entry_type=?, category=?, sub_category=?, amount=?, payment_method=?, reference=?, narration=?, partner_id=?, recorded_by=?, approved_by=?, approval_status=?, attachment_name=?, partner_payment_id=COALESCE(partner_payment_id,''),
+        confirmed_by='', confirmed_at='', deposited_by='', deposited_at=''
     WHERE id=?
   `).bind(
     data?.date !== undefined ? String(data.date || '').trim() : row.date,
@@ -5980,6 +6020,10 @@ async function getKpscFinanceEntryById(DB, id) {
     approvalStatus: row.approval_status || 'recorded',
     attachmentName: row.attachment_name || '',
     createdAt: row.created_at || '',
+    confirmedBy: row.confirmed_by || '',
+    confirmedAt: row.confirmed_at || '',
+    depositedBy: row.deposited_by || '',
+    depositedAt: row.deposited_at || '',
   });
 }
 
