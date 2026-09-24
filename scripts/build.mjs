@@ -51,6 +51,7 @@ export function minifyCSS(src) {
 function classicBudgetEngine(src) {
   return src
     .replace(/^export function /gm, 'function ')
+    .replace(/^export const /gm, 'const ')
     .replace(/^export default api;\n?/m, '');
 }
 

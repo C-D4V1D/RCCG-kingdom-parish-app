@@ -4,6 +4,13 @@
  * Children's department cash and satellite pass-through are not parish spendable income.
  */
 
+export const BUDGET_HISTORY_MONTHS = 12;
+export const RCCG_DEMANDS_KEY = 'rccg_proj';
+export const LEGACY_REMITTANCE_CATEGORY = 'zonal_area_joint';
+export const ONE_OFF_PROJECT_SUBCATS = /building construction|renovation|buying major equipment/i;
+export const PROTECTED_FROM_CUTS = ['rccg_proj', 'power', 'security'];
+export const CUT_ORDER = ['hospitality', 'events', 'office', 'cushion'];
+
 function pad2(value) {
   return String(value).padStart(2, '0');
 }
@@ -38,6 +45,13 @@ function addMonths(key, offset) {
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
 }
 
+function diffMonths(fromKey, toKey) {
+  const a = toMonthParts(fromKey);
+  const b = toMonthParts(toKey);
+  if (!a || !b) return 0;
+  return (b.year - a.year) * 12 + (b.month - a.month);
+}
+
 function extractNotes(entry) {
   if (!entry || typeof entry !== 'object') return '';
   return [
@@ -62,13 +76,18 @@ function normalizeCadence(value) {
   return ['usual', 'occasional', 'annual', 'once'].includes(value) ? value : 'usual';
 }
 
-const ONCE_NOTE_RE = /\b(one[-\s]?off|emergency|urgent|roof|harvest|medical|burial|funeral|crusade special)\b/i;
-
-function isRemittanceExpenseLike(expense) {
+export function isRemittanceExpenseLike(expense) {
   if (!expense || typeof expense !== 'object') return false;
   if (expense.remittanceId || expense.remittanceRef) return true;
-  const text = extractNotes(expense);
-  return /\b(remittance|hq share|headquarters|thanksgiving share|quota|seed offering|province remittance)\b/i.test(text);
+  return String(expense.category || '') === LEGACY_REMITTANCE_CATEGORY;
+}
+
+export function isCountableExpense(expense, { mode = 'history' } = {}) {
+  if (!expense || typeof expense !== 'object') return false;
+  if (isRemittanceExpenseLike(expense)) return false;
+  const status = String(expense.status || '').trim().toLowerCase();
+  if (mode === 'tracking') return status !== 'rejected';
+  return status === '' || status === 'approved';
 }
 
 function totalRemittanceDue(remCalc) {
@@ -116,7 +135,7 @@ function elapsedPctForMonth(now, key) {
 
 function normalizeSeriesItem(entry) {
   if (typeof entry === 'number') return { amount: amountOf(entry), notes: '' };
-  return { amount: amountOf(entry?.amount), notes: extractNotes(entry).toLowerCase() };
+  return { amount: amountOf(entry?.amount), notes: extractNotes(entry).toLowerCase() || String(entry?.notes || '').toLowerCase() };
 }
 
 function percentile(sortedValues, p) {
@@ -131,10 +150,6 @@ function percentile(sortedValues, p) {
   if (lower === upper) return nums[lower];
   const frac = rank - lower;
   return nums[lower] + (nums[upper] - nums[lower]) * frac;
-}
-
-function monthOfSeriesItem(item) {
-  return monthKey(item?.date || item?.createdAt || '');
 }
 
 export function robustMonthlySeries(months = [], pick) {
@@ -179,30 +194,62 @@ export function robustMonthlySeries(months = [], pick) {
   };
 }
 
+export function classifyCadence(series = [], { categoryKey, subCategories } = {}) {
+  const normalized = Array.isArray(series) ? series.map(normalizeSeriesItem) : [];
+  const active = normalized.filter(item => item.amount > 0);
+  if (!active.length) return 'occasional';
+  const len = normalized.length || 1;
+  const usualThreshold = len >= 12 ? 8 : Math.ceil((len * 2) / 3);
+  if (active.length >= usualThreshold) return 'usual';
+  if (categoryKey === 'property') {
+    const extraText = Array.isArray(subCategories) ? subCategories.join(' ').toLowerCase() : '';
+    const allMatchOnce = active.every(item => ONE_OFF_PROJECT_SUBCATS.test(item.notes) || ONE_OFF_PROJECT_SUBCATS.test(extraText));
+    if (allMatchOnce) return 'once';
+  }
+  if (active.length <= 2) return 'annual';
+  return 'occasional';
+}
+
+function categorySeriesFor(months, key) {
+  const list = Array.isArray(months) ? months : [];
+  return list.map(month => {
+    const amount = amountOf(month?.expensesByCategory?.[key] || 0);
+    let notes = '';
+    if (month?.notesByCategory && Array.isArray(month.notesByCategory[key])) {
+      notes = month.notesByCategory[key].join(' ');
+    } else if (month?.notesByCategory && typeof month.notesByCategory[key] === 'string') {
+      notes = month.notesByCategory[key];
+    } else if (Array.isArray(month?.notes)) {
+      notes = month.notes.join(' ');
+    } else if (typeof month?.notes === 'string') {
+      notes = month.notes;
+    }
+    return { amount, notes };
+  });
+}
+
 export function suggestCategoryAmount(months = [], categoryKey) {
   const key = String(categoryKey || 'other').trim() || 'other';
   const list = Array.isArray(months) ? months : [];
+  const series = categorySeriesFor(list, key);
   const stats = robustMonthlySeries(list, month => month?.expensesByCategory?.[key] || 0);
-  const cadence = classifyCadence(list.map(month => ({
-    amount: amountOf(month?.expensesByCategory?.[key] || 0),
-    notes: Array.isArray(month?.notes) ? month.notes.join(' ') : '',
-  })));
-  if (!stats.activeMonths || !stats.typical) {
-    return { amount: 0, cadence, typical: 0, outliers: stats.outliers, confidence: stats.confidence };
-  }
+  const cadence = classifyCadence(series, { categoryKey: key });
+  const total12 = roundNaira(series.reduce((sum, item) => sum + amountOf(item.amount), 0));
   const span = list.length || 1;
+  if (!stats.activeMonths) {
+    return { amount: 0, cadence, typical: 0, total12, outliers: stats.outliers, confidence: stats.confidence };
+  }
   let amount;
-  if (cadence === 'once') {
+  if (key === RCCG_DEMANDS_KEY) {
+    amount = Math.round(total12 / span);
+  } else if (cadence === 'once') {
     amount = 0;
-  } else if (cadence === 'annual') {
-    amount = Math.round(stats.typical / 12);
-  } else if (cadence === 'occasional') {
-    const frequency = stats.activeMonths / span;
-    amount = Math.round(stats.typical * Math.max(0.25, Math.min(1, frequency)));
+  } else if (cadence === 'annual' || cadence === 'occasional') {
+    amount = Math.round(total12 / span);
   } else {
     amount = stats.typical;
   }
-  return { amount, cadence, typical: stats.typical, outliers: stats.outliers, confidence: stats.confidence };
+  return { amount, cadence, typical: stats.typical, total12, outliers: stats.outliers, confidence: stats.confidence };
 }
 
 export function budgetStatus(expectedParishIncome, recommendedBudget) {
@@ -341,18 +388,6 @@ export function monthElapsedPct(now, key) {
   return elapsedPctForMonth(now || new Date(), key);
 }
 
-export function classifyCadence(series = []) {
-  const normalized = Array.isArray(series) ? series.map(normalizeSeriesItem) : [];
-  const active = normalized.filter(item => item.amount > 0);
-  const hasOnceNote = active.some(item => ONCE_NOTE_RE.test(item.notes));
-  if (!active.length) return 'occasional';
-  if (hasOnceNote && active.length <= 2) return 'once';
-  if (normalized.length >= 11 && active.length <= 2) return active.length === 1 ? 'annual' : 'occasional';
-  if (active.length >= Math.max(4, Math.ceil(normalized.length * 0.66))) return 'usual';
-  if (active.length === 1) return 'once';
-  return 'occasional';
-}
-
 export function parishIncomeFromRemittance(remCalc, grossIncome, childrenDept = 0) {
   const remittance = totalRemittanceDue(remCalc);
   const parishIncome = roundNaira(amountOf(grossIncome) - remittance - amountOf(childrenDept));
@@ -478,42 +513,125 @@ export function suggestSubsForCategory(category, expenses = [], categoryBudget =
   }));
 }
 
-export function packHistory({ incomeRecords = [], expenses = [], remittanceCalcsByMonth = {}, months = 6 } = {}) {
-  const keys = new Set(Object.keys(remittanceCalcsByMonth || {}).filter(key => /^\d{4}-\d{2}$/.test(key)));
-  for (const record of incomeRecords) {
-    const key = monthKey(record?.date || record?.createdAt || '');
-    if (key) keys.add(key);
+function groupExpensesBySubCategory(expenses = []) {
+  const grouped = new Map();
+  for (const expense of (Array.isArray(expenses) ? expenses : [])) {
+    const amount = roundNaira(expense?.amount);
+    if (!amount) continue;
+    const key = String(expense?.subCategory || '').trim() || 'Other';
+    if (!grouped.has(key)) grouped.set(key, { key, label: key, amount: 0 });
+    grouped.get(key).amount += amount;
   }
-  for (const expense of expenses) {
-    const key = monthKey(expense?.date || expense?.createdAt || '');
-    if (key) keys.add(key);
+  return [...grouped.values()].sort((a, b) => (b.amount - a.amount) || a.label.localeCompare(b.label));
+}
+
+function subsFromSubCategory(lineExpenses, categoryBudget) {
+  const grouped = groupExpensesBySubCategory(lineExpenses);
+  if (!grouped.length) return [];
+  const top = grouped.length > 4
+    ? [
+        ...grouped.slice(0, 3),
+        {
+          key: 'Other',
+          label: 'Other',
+          amount: grouped.slice(3).reduce((sum, item) => sum + amountOf(item.amount), 0),
+        },
+      ]
+    : grouped;
+  const split = splitBudgetAcrossSubs(categoryBudget, top.map(item => item.amount));
+  return top.map((item, index) => ({
+    fingerprint: item.key,
+    label: item.label,
+    amount: roundNaira(split[index] ?? 0),
+    cadence: 'occasional',
+  }));
+}
+
+export function packHistory({
+  incomeRecords = [],
+  expenses = [],
+  parishIncomeByMonth = null,
+  months = BUDGET_HISTORY_MONTHS,
+  targetMonthKey = '',
+  today = null,
+  remittanceCalcsByMonth = null,
+} = {}) {
+  const monthCount = Math.max(1, Number(months || BUDGET_HISTORY_MONTHS));
+
+  let lastMonth;
+  if (targetMonthKey || today) {
+    const todayKey = today ? monthKey(today) : '';
+    const beforeToday = todayKey ? addMonths(todayKey, -1) : '';
+    if (targetMonthKey) {
+      const beforeTarget = addMonths(targetMonthKey, -1);
+      lastMonth = (beforeToday && beforeToday < beforeTarget) ? beforeToday : beforeTarget;
+    } else {
+      lastMonth = beforeToday;
+    }
+  } else {
+    const keys = new Set(Object.keys(remittanceCalcsByMonth || {}).filter(key => /^\d{4}-\d{2}$/.test(key)));
+    for (const record of incomeRecords) {
+      const key = monthKey(record?.date || record?.createdAt || '');
+      if (key) keys.add(key);
+    }
+    for (const expense of expenses) {
+      const key = monthKey(expense?.date || expense?.createdAt || '');
+      if (key) keys.add(key);
+    }
+    lastMonth = [...keys].sort().slice(-1)[0] || monthKey(new Date());
   }
-  const latest = [...keys].sort().slice(-1)[0] || monthKey(new Date());
-  const monthCount = Math.max(1, Number(months || 6));
+
   const orderedKeys = [];
-  for (let index = monthCount - 1; index >= 0; index--) orderedKeys.push(addMonths(latest, -index));
+  for (let index = monthCount - 1; index >= 0; index--) orderedKeys.push(addMonths(lastMonth, -index));
+
   const byMonth = {};
   for (const key of orderedKeys) {
     const monthIncome = incomeRecords.filter(record => monthKey(record?.date || record?.createdAt || key) === key);
-    const monthExpenses = expenses.filter(expense => monthKey(expense?.date || expense?.createdAt || key) === key);
+    const monthExpensesAll = expenses.filter(expense => monthKey(expense?.date || expense?.createdAt || key) === key);
+    const monthExpenses = monthExpensesAll.filter(expense => isCountableExpense(expense, { mode: 'history' }));
+
     const grossIncome = roundNaira(monthIncome.reduce((sum, record) => sum + ownIncomeAmount(record), 0));
-    const remittanceDue = totalRemittanceDue(remittanceCalcsByMonth?.[key]);
-    const parishIncomeAfterRemittance = Math.max(0, grossIncome - remittanceDue);
-    const { byCategory: expensesByCategory } = sumExpensesByCategory(monthExpenses);
+    const remittanceDue = remittanceCalcsByMonth ? totalRemittanceDue(remittanceCalcsByMonth[key]) : 0;
+
+    const expensesByCategory = {};
+    const notesByCategory = {};
+    for (const expense of monthExpenses) {
+      const amount = roundNaira(expense?.amount);
+      if (!amount) continue;
+      const cat = String(expense?.category || 'other').trim() || 'other';
+      expensesByCategory[cat] = (expensesByCategory[cat] || 0) + amount;
+      const noteText = extractNotes(expense);
+      if (noteText) {
+        if (!notesByCategory[cat]) notesByCategory[cat] = [];
+        notesByCategory[cat].push(noteText);
+      }
+    }
+
+    let parishIncome;
+    if (parishIncomeByMonth && Number.isFinite(Number(parishIncomeByMonth[key]))) {
+      parishIncome = roundNaira(parishIncomeByMonth[key]);
+    } else {
+      parishIncome = Math.max(0, grossIncome - remittanceDue);
+    }
+
     const notes = [
       ...monthIncome.map(extractNotes),
-      ...monthExpenses.map(extractNotes),
+      ...monthExpensesAll.map(extractNotes),
     ].map(text => text.trim()).filter(Boolean).slice(0, 6);
+
     byMonth[key] = {
       monthKey: key,
       grossIncome,
       remittanceDue,
-      parishIncomeAfterRemittance,
+      parishIncome,
+      parishIncomeAfterRemittance: parishIncome,
       expensesByCategory,
+      notesByCategory,
       expensesByNote: groupExpensesByNote(monthExpenses),
       notes,
     };
   }
+
   return {
     months: orderedKeys.map(key => byMonth[key]),
     byMonth,
@@ -521,35 +639,42 @@ export function packHistory({ incomeRecords = [], expenses = [], remittanceCalcs
 }
 
 export function matchActuals(plan, expenses = [], now = new Date()) {
-  const { byCategory, total } = sumExpensesByCategory(expenses);
+  const countable = (Array.isArray(expenses) ? expenses : []).filter(expense => isCountableExpense(expense, { mode: 'tracking' }));
+  const { byCategory, total } = sumExpensesByCategory(countable);
   const elapsed = elapsedPctForMonth(now, plan?.monthKey || monthKey(now));
+  // A merged line (e.g. "Other small costs") tracks every category it absorbed via `includes`.
+  const lineCategories = line => {
+    const own = String(line?.expenseCategory || line?.key || 'other');
+    return Array.isArray(line?.includes) && line.includes.length ? line.includes.map(String) : [own];
+  };
+  const planCategories = new Set((plan?.lines || []).flatMap(lineCategories));
   const lines = (plan?.lines || []).map(line => {
     const budgeted = roundNaira(line?.amount);
-    const categoryKey = String(line?.expenseCategory || line?.key || 'other');
-    const spent = roundNaira(byCategory[categoryKey] || 0);
+    const cats = new Set(lineCategories(line));
+    const spent = roundNaira([...cats].reduce((sum, cat) => sum + (byCategory[cat] || 0), 0));
     const leftover = budgeted - spent;
     const pctRatio = budgeted > 0 ? (spent / budgeted) : (spent > 0 ? 1 : 0);
     const pct = Math.round(pctRatio * 100);
     let pace = 'on_track';
     if (spent > budgeted) pace = 'over';
-    else if (pctRatio > elapsed + 0.15) pace = 'hot';
     else if (pctRatio > elapsed + 0.05) pace = 'watch';
-    const lineExpenses = (Array.isArray(expenses) ? expenses : [])
-      .filter(expense => String(expense?.category || 'other') === categoryKey);
+    const lineExpenses = countable.filter(expense => cats.has(String(expense?.category || 'other')));
     const baseSubs = Array.isArray(line?.subs) && line.subs.length
       ? line.subs.map(sub => ({
-          fingerprint: noteFingerprint(sub?.fingerprint || sub?.label || ''),
-          label: String(sub?.label || prettyNoteLabel(sub?.fingerprint || 'General')),
+          fingerprint: String(sub?.fingerprint || sub?.label || 'Other'),
+          label: String(sub?.label || sub?.fingerprint || 'Other'),
           amount: Math.max(0, roundNaira(sub?.amount)),
           cadence: normalizeCadence(sub?.cadence),
         })).filter(sub => sub.amount > 0)
-      : suggestSubsForCategory(line, lineExpenses, budgeted);
-    const spentByFingerprint = Object.fromEntries(
-      groupExpensesByNote(lineExpenses).map(item => [item.fingerprint, item.amount])
-    );
+      : subsFromSubCategory(lineExpenses, budgeted);
+    const spentBySubCat = {};
+    for (const expense of lineExpenses) {
+      const subKey = String(expense?.subCategory || '').trim() || 'Other';
+      spentBySubCat[subKey] = (spentBySubCat[subKey] || 0) + roundNaira(expense?.amount);
+    }
     const subs = baseSubs.map(sub => {
       const budgetedSub = Math.max(0, roundNaira(sub.amount));
-      const spentSub = roundNaira(spentByFingerprint[sub.fingerprint] || 0);
+      const spentSub = roundNaira(spentBySubCat[sub.fingerprint] ?? spentBySubCat[sub.label] ?? 0);
       return {
         fingerprint: sub.fingerprint,
         label: sub.label,
@@ -561,8 +686,13 @@ export function matchActuals(plan, expenses = [], now = new Date()) {
     });
     return { ...line, budgeted, spent, leftover, pct, pace, subs };
   });
-  const budgetedTotal = roundNaira((plan?.lines || []).reduce((sum, line) => sum + amountOf(line?.amount), 0) + amountOf(plan?.cushion));
+  const cushion = Math.max(0, roundNaira(plan?.cushion));
+  const budgetedTotal = roundNaira((plan?.lines || []).reduce((sum, line) => sum + amountOf(line?.amount), 0) + cushion);
   const leftTotal = budgetedTotal - total;
+  const unplanned = Object.keys(byCategory)
+    .filter(cat => !planCategories.has(cat))
+    .map(cat => ({ key: cat, spent: roundNaira(byCategory[cat]) }))
+    .sort((a, b) => b.spent - a.spent);
   return {
     lines,
     spentTotal: total,
@@ -570,6 +700,8 @@ export function matchActuals(plan, expenses = [], now = new Date()) {
     leftTotal,
     elapsed,
     elapsedPct: Math.round(elapsed * 100),
+    unplanned,
+    cushionLine: { budgeted: cushion, spent: 0 },
     totals: {
       spent: total,
       budgeted: budgetedTotal,
@@ -577,6 +709,28 @@ export function matchActuals(plan, expenses = [], now = new Date()) {
       pct: budgetedTotal > 0 ? Math.round((total / budgetedTotal) * 100) : 0,
     },
   };
+}
+
+export function monthProgress(now = new Date(), monthKeyValue = '') {
+  const parts = toMonthParts(monthKeyValue || now);
+  if (!parts) return { day: 0, daysInMonth: 0, pct: 0, sundaysLeft: 0, sundaysInMonth: 0 };
+  const daysInMonth = new Date(parts.year, parts.month, 0).getDate();
+  const nowDate = now instanceof Date ? now : toDate(now);
+  const monthStart = new Date(parts.year, parts.month - 1, 1);
+  const nextMonth = new Date(parts.year, parts.month, 1);
+  let day = 0;
+  if (nowDate >= monthStart && nowDate < nextMonth) day = nowDate.getDate();
+  else if (nowDate >= nextMonth) day = daysInMonth;
+  let sundaysInMonth = 0;
+  let sundaysLeft = 0;
+  for (let d = 1; d <= daysInMonth; d++) {
+    if (new Date(parts.year, parts.month - 1, d).getDay() === 0) {
+      sundaysInMonth++;
+      if (d > day) sundaysLeft++;
+    }
+  }
+  const pct = daysInMonth > 0 ? Math.round((day / daysInMonth) * 100) : 0;
+  return { day, daysInMonth, pct, sundaysLeft, sundaysInMonth };
 }
 
 export function safeToSpend(plan, spentOperating, extraAmount = 0) {
@@ -597,6 +751,204 @@ export function safeToSpend(plan, spentOperating, extraAmount = 0) {
     safeExtra,
     verdict,
   };
+}
+
+export function clampAiLines(aiLines = [], baselineLines = [], { validKeys = null, band = 0.2, maxByKey = {} } = {}) {
+  const baseByKey = {};
+  for (const line of (Array.isArray(baselineLines) ? baselineLines : [])) {
+    baseByKey[String(line?.key)] = line;
+  }
+  const validSet = validKeys ? new Set(validKeys) : null;
+  const notes = [];
+  const outByKey = {};
+  for (const raw of (Array.isArray(aiLines) ? aiLines : [])) {
+    const key = String(raw?.key || raw?.expenseCategory || '').trim();
+    if (!key || key === LEGACY_REMITTANCE_CATEGORY) {
+      notes.push(`Dropped unknown category "${key || '(blank)'}"`);
+      continue;
+    }
+    if (validSet && !validSet.has(key)) {
+      notes.push(`Dropped unknown category "${key}"`);
+      continue;
+    }
+    const rawAmount = Math.max(0, roundNaira(raw?.amount));
+    const base = baseByKey[key];
+    if (base) {
+      const baseAmount = Math.max(0, roundNaira(base.amount));
+      const lo = Math.round(baseAmount * (1 - band));
+      const hi = Math.round(baseAmount * (1 + band));
+      let amount = rawAmount;
+      let clamped = false;
+      if (amount < lo) { amount = lo; clamped = true; }
+      if (amount > hi) { amount = hi; clamped = true; }
+      const line = {
+        key,
+        label: String(raw?.label || base.label || key),
+        amount,
+        cadence: normalizeCadence(raw?.cadence || base.cadence),
+        why: String(raw?.why || base.why || ''),
+      };
+      if (clamped) {
+        line.aiSuggested = rawAmount;
+        notes.push(`AI suggested ₦${rawAmount.toLocaleString('en-NG')} — limited to ₦${amount.toLocaleString('en-NG')}`);
+      }
+      outByKey[key] = line;
+    } else {
+      const cap = Math.max(0, roundNaira(maxByKey?.[key] ?? 0));
+      if (!cap) {
+        notes.push(`Dropped "${key}" — no baseline history`);
+        continue;
+      }
+      const amount = Math.min(rawAmount, cap);
+      outByKey[key] = {
+        key,
+        label: String(raw?.label || key),
+        amount,
+        cadence: normalizeCadence(raw?.cadence),
+        why: String(raw?.why || ''),
+      };
+    }
+  }
+  for (const [key, base] of Object.entries(baseByKey)) {
+    if (outByKey[key]) continue;
+    if (base.cadence === 'usual' || key === RCCG_DEMANDS_KEY) {
+      outByKey[key] = { ...base, why: 'Restored — paid regularly' };
+      notes.push(`Restored missing usual category: ${base.label || key}`);
+    }
+  }
+  return { lines: Object.values(outByKey), notes };
+}
+
+export function suggestCuts(lines = [], cushion = 0, expectedParishIncome = 0) {
+  const safeLines = Array.isArray(lines) ? lines : [];
+  const linesTotal = safeLines.reduce((sum, line) => sum + Math.max(0, roundNaira(line?.amount)), 0);
+  const cushionAmt = Math.max(0, roundNaira(cushion));
+  const total = linesTotal + cushionAmt;
+  const income = Math.max(0, roundNaira(expectedParishIncome));
+  const status = budgetStatus(income, total);
+  const shortBy = Math.max(0, roundNaira(total - income));
+  const cuts = [];
+  if (shortBy > 0) {
+    const candidates = [];
+    const usedKeys = new Set();
+    for (const key of CUT_ORDER) {
+      if (key === 'cushion') {
+        candidates.push({ key: 'cushion', label: 'Cushion for surprises', amount: cushionAmt, isCushion: true });
+        usedKeys.add('cushion');
+        continue;
+      }
+      const line = safeLines.find(l => String(l?.key || l?.expenseCategory) === key);
+      if (line && !PROTECTED_FROM_CUTS.includes(key)) {
+        candidates.push({ key, label: String(line.label || key), amount: Math.max(0, roundNaira(line.amount)) });
+        usedKeys.add(key);
+      }
+    }
+    for (const line of safeLines) {
+      const key = String(line?.key || line?.expenseCategory);
+      if (usedKeys.has(key) || PROTECTED_FROM_CUTS.includes(key)) continue;
+      if (line.cadence === 'occasional' || line.cadence === 'annual') {
+        candidates.push({ key, label: String(line.label || key), amount: Math.max(0, roundNaira(line.amount)) });
+        usedKeys.add(key);
+      }
+    }
+    for (const line of safeLines) {
+      const key = String(line?.key || line?.expenseCategory);
+      if (usedKeys.has(key) || PROTECTED_FROM_CUTS.includes(key)) continue;
+      candidates.push({ key, label: String(line.label || key), amount: Math.max(0, roundNaira(line.amount)) });
+      usedKeys.add(key);
+    }
+    let remaining = shortBy;
+    for (const cand of candidates) {
+      if (remaining <= 0) break;
+      const cap = cand.isCushion ? cand.amount : Math.floor(cand.amount * 0.5);
+      const cut = Math.min(remaining, cap);
+      if (cut > 0) {
+        cuts.push({ key: cand.key, label: cand.label, amount: cut });
+        remaining -= cut;
+      }
+    }
+  }
+  return { status, shortBy, cuts };
+}
+
+export function irregularReserve(lines = [], expenses = [], today = new Date()) {
+  const todayKey = monthKey(today);
+  const countable = (Array.isArray(expenses) ? expenses : []).filter(expense => isCountableExpense(expense, { mode: 'history' }));
+  const items = [];
+  let total = 0;
+  for (const line of (Array.isArray(lines) ? lines : [])) {
+    const key = String(line?.key || line?.expenseCategory || '');
+    if (!(line?.cadence === 'occasional' || line?.cadence === 'annual' || key === RCCG_DEMANDS_KEY)) continue;
+    const monthlySetAside = Math.max(0, roundNaira(line?.amount));
+    const categoryExpenses = countable.filter(expense => String(expense?.category || 'other') === key);
+    let monthsSinceLastPaid;
+    if (categoryExpenses.length) {
+      const lastKey = categoryExpenses
+        .map(expense => monthKey(expense?.date || expense?.createdAt || ''))
+        .filter(Boolean)
+        .sort()
+        .slice(-1)[0];
+      monthsSinceLastPaid = Math.max(0, diffMonths(lastKey, todayKey));
+    } else {
+      monthsSinceLastPaid = 12;
+    }
+    monthsSinceLastPaid = Math.min(monthsSinceLastPaid, 12);
+    const reserved = Math.min(monthlySetAside * monthsSinceLastPaid, monthlySetAside * 12);
+    items.push({ key, label: String(line?.label || key), monthlySetAside, monthsSinceLastPaid, reserved });
+    total += reserved;
+  }
+  return { total: roundNaira(total), items };
+}
+
+export function futureShortfall(normalMonthlySpend = 0, expectedParishIncome = 0, months = 3) {
+  const gap = Math.max(0, roundNaira(normalMonthlySpend) - roundNaira(expectedParishIncome));
+  return roundNaira(gap * months);
+}
+
+export function safetyCushion(normalMonthlySpend = 0, fraction = 0.5) {
+  return roundNaira(amountOf(normalMonthlySpend) * fraction);
+}
+
+export function freeForNewThings({
+  availableNow = 0,
+  remainingThisMonth = 0,
+  expectedRestOfMonth = 0,
+  pendingUnpaid = 0,
+  irregularReserve: irregularReserveAmt = 0,
+  futureShortfall: futureShortfallAmt = 0,
+  safetyCushion: safetyCushionAmt = 0,
+} = {}) {
+  const monthGap = Math.max(0, roundNaira(remainingThisMonth) - roundNaira(expectedRestOfMonth));
+  const parts = {
+    availableNow: roundNaira(availableNow),
+    monthGap,
+    pendingUnpaid: roundNaira(pendingUnpaid),
+    irregularReserve: roundNaira(irregularReserveAmt),
+    futureShortfall: roundNaira(futureShortfallAmt),
+    safetyCushion: roundNaira(safetyCushionAmt),
+  };
+  const free = roundNaira(
+    parts.availableNow - parts.monthGap - parts.pendingUnpaid - parts.irregularReserve - parts.futureShortfall - parts.safetyCushion
+  );
+  return { free, monthGap, parts };
+}
+
+export function growthPerMonth(expectedParishIncome = 0, normalMonthlySpend = 0) {
+  return roundNaira(amountOf(expectedParishIncome) - amountOf(normalMonthlySpend));
+}
+
+export function affordAnswer(amount = 0, free = 0, growth = 0, today = new Date()) {
+  const amt = roundNaira(amount);
+  const freeNum = roundNaira(free);
+  const g = roundNaira(growth);
+  if (amt <= freeNum) {
+    return { verdict: 'yes', freeAfter: freeNum - amt, monthsNeeded: 0, affordableMonthKey: monthKey(today) };
+  }
+  if (g > 0) {
+    const monthsNeeded = Math.ceil((amt - freeNum) / g);
+    return { verdict: 'not_yet', freeAfter: freeNum, monthsNeeded, affordableMonthKey: addMonths(monthKey(today), monthsNeeded) };
+  }
+  return { verdict: 'no', freeAfter: freeNum, monthsNeeded: null, affordableMonthKey: null };
 }
 
 export function coercePlan(raw, pack) {
@@ -658,10 +1010,18 @@ export function coercePlan(raw, pack) {
 }
 
 const api = {
+  BUDGET_HISTORY_MONTHS,
+  RCCG_DEMANDS_KEY,
+  LEGACY_REMITTANCE_CATEGORY,
+  ONE_OFF_PROJECT_SUBCATS,
+  PROTECTED_FROM_CUTS,
+  CUT_ORDER,
   monthKey,
   nextMonthKey,
   monthElapsedPct,
   classifyCadence,
+  isRemittanceExpenseLike,
+  isCountableExpense,
   parishIncomeFromRemittance,
   sumExpensesByCategory,
   packHistory,
@@ -670,11 +1030,20 @@ const api = {
   groupExpensesByNote,
   suggestSubsForCategory,
   matchActuals,
+  monthProgress,
   safeToSpend,
   coercePlan,
   robustMonthlySeries,
   suggestCategoryAmount,
   applyAffordability,
+  clampAiLines,
+  suggestCuts,
+  irregularReserve,
+  futureShortfall,
+  safetyCushion,
+  freeForNewThings,
+  growthPerMonth,
+  affordAnswer,
   budgetStatus,
   computeAffordVerdict,
   estimateTypicalBudget,
