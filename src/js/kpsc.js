@@ -173,10 +173,12 @@ const S = {
   _meetingTab: 'record',
   _reviewEditMode: false, // true = show inline review editor; false = show reviewed summary
   _isNewMeeting: false,   // true when the room is hosting a fresh, never-saved draft
-  cashCollection: {
-    loaded: false, pendingTotal: 0, collectedTotal: 0, spentTotal: 0,
-    holderCount: 0, holders: [], recentHandovers: [],
+  incomeReview: {
+    loaded: false, awaitingConfirmationTotal: 0, cashInHandTotal: 0,
+    pendingConfirmation: [], holders: [],
   },
+  incomeReviewGroupBy: 'person', // 'person' | 'day'
+  incomeReviewExpanded: {}, // groupKey -> true when expanded
   pendingCardPayments: [], // partners whose paid record isn't yet updated in the physical card
   kpscMeetingCadence: 'none',
   rolePermissions: null, // loaded from DB; null means use KPSC_PERMISSIONS defaults
@@ -1829,6 +1831,12 @@ function canDeleteFinanceEntries() {
   return ['acting_chairman', 'it_admin'].includes(String(S.user?.role || '').toLowerCase());
 }
 
+// Bank signatories only — the two people who actually see bank alerts and can verify
+// a recorded income entry really happened, or that a holder's cash has been banked.
+function canConfirmIncome() {
+  return ['acting_chairman', 'treasurer'].includes(String(S.user?.role || '').toLowerCase());
+}
+
 function applyNavPermissions() {
   // All 4 top-level groups are visible to every role.
   // Individual sub-tabs are hidden per-role when the group page renders.
@@ -2067,6 +2075,15 @@ function minutesHtml(md) {
 
 function esc(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// For embedding a dynamic value (e.g. a person's name) as a single-quoted JS string
+// literal inside an onclick="..." HTML attribute — esc() alone isn't enough there
+// since it doesn't escape "'", so a name like "O'Brien" would break out of the JS
+// string and throw. Escapes for the JS-string context first, then HTML-escapes the
+// result for the surrounding double-quoted attribute.
+function escJsAttr(s) {
+  return esc(String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
 }
 
 // ── PCM AUDIO HELPERS ────────────────────────────────────────────
@@ -7373,7 +7390,7 @@ async function saveRecordedPayments(partnerId, btn) {
   } else {
     showToast(`Payment recorded for ${selectedMonths.length} month${selectedMonths.length > 1 ? 's' : ''}.`, 'success');
   }
-  if (!errorCount && method === 'cash') loadCashCollection(); // fire-and-forget — updates cash widget
+  if (!errorCount) loadIncomeReview(); // fire-and-forget — updates income review widget (cash or bank, both need confirming)
   await Promise.all([loadPartnerData(year), loadPendingCardPayments()]);
   const main = document.getElementById('kpsc-main');
   if (S.page === 'partnerDetail' && S._partnerDetailId === partnerId) {
@@ -7450,189 +7467,177 @@ async function loadPartnerData(year = currentYear()) {
   S.partnerPayments = Array.isArray(paymentsRes) ? paymentsRes : [];
 }
 
-// ── CASH COLLECTION TRACKER v2 ───────────────────────────────────────────────
+// ── INCOME REVIEW: confirmation + cash-in-hand tracker ─────────────────────
+// Bank-signatory oversight (Acting Chairman / Treasurer). Every income entry, any
+// payment method, needs one of them to confirm it actually happened; cash income
+// additionally needs one of them to mark it deposited once they see it hit the
+// account (replacing the old "tick specific payments + type an amount" transfer
+// flow, which in practice nobody came back to the app to use after the fact).
 
-async function loadCashCollection() {
+async function loadIncomeReview() {
   if (!canManageFinance()) return;
   try {
-    const res = await apiGet('kpsc-cash-collection');
+    const res = await apiGet('kpsc-income-review');
     if (res?.error) return;
-    S.cashCollection = { ...res, loaded: true };
-  } catch { /* silent — cards stay hidden on network failure */ }
-  refreshCashCards();
+    S.incomeReview = { ...res, loaded: true };
+  } catch { /* silent — card stays hidden on network failure */ }
+  refreshIncomeReviewCard();
 }
 
-function refreshCashCards() {
-  document.querySelectorAll('#k-cash-card-mount').forEach(mount => {
-    mount.innerHTML = renderCashCard();
+function refreshIncomeReviewCard() {
+  document.querySelectorAll('#k-income-review-mount').forEach(mount => {
+    mount.innerHTML = renderIncomeReviewCard();
   });
 }
 
-function renderCashCard() {
-  if (!canManageFinance()) return '';
-  const { loaded, pendingTotal, collectedTotal, spentTotal, holders } = S.cashCollection;
-  if (!loaded || pendingTotal <= 0) return '';
-  const fmtN = n => '₦' + Number(n || 0).toLocaleString('en-NG');
-  const showBreakdown = collectedTotal !== pendingTotal && spentTotal > 0;
+async function _refreshFinanceEntryListIfShown() {
+  const finList = document.getElementById('kf-entry-list');
+  if (!finList) return;
+  const finRes = await apiGet(`kpsc-finance?year=${S.financeYear}${S.financeMonth ? `&month=${S.financeMonth}` : ''}`);
+  if (!finRes?.error) {
+    S.financeEntries = Array.isArray(finRes) ? finRes : [];
+    finList.innerHTML = renderFinanceEntryList(canManageFinance(), canDeleteFinanceEntries());
+  }
+}
 
-  const holderRows = holders.map(h => {
-    const spentLine = h.spent > 0 ? ` · spent ${fmtN(h.spent)}` : '';
-    const todayCount = h.lots.filter(l => l.isToday).length;
-    const todayLine = todayCount > 0 ? ` · ${todayCount} today` : '';
-    return `<div class="k-cash-holder-row">
-      <div>
-        <div class="k-cash-holder-name">${esc(h.name)}</div>
-        <div class="k-cash-holder-meta">Collected ${fmtN(h.collected)}${spentLine} · ${h.lots.length} payment${h.lots.length !== 1 ? 's' : ''}${todayLine}</div>
+// Groups the flat pendingConfirmation list client-side — by who recorded it, or by
+// the date it was recorded — for the card's toggle view.
+function _groupPendingConfirmation() {
+  const { pendingConfirmation } = S.incomeReview;
+  const byDay = S.incomeReviewGroupBy === 'day';
+  const groups = {};
+  for (const e of pendingConfirmation) {
+    const key = byDay ? e.date : (e.recordedBy || 'Unknown');
+    if (!groups[key]) groups[key] = { key, label: byDay ? fmtDate(e.date) : (e.recordedBy || 'Unknown'), total: 0, entries: [] };
+    groups[key].total += e.amount;
+    groups[key].entries.push(e);
+  }
+  return Object.values(groups).sort((a, b) => byDay ? b.key.localeCompare(a.key) : b.total - a.total);
+}
+
+function setIncomeReviewGroupBy(mode) {
+  S.incomeReviewGroupBy = mode === 'day' ? 'day' : 'person';
+  S.incomeReviewExpanded = {};
+  refreshIncomeReviewCard();
+}
+
+function toggleIncomeReviewGroup(key) {
+  S.incomeReviewExpanded[key] = !S.incomeReviewExpanded[key];
+  refreshIncomeReviewCard();
+}
+
+const KF_METHOD_ICON = { cash: '💵', bank_transfer: '🏦', pos: '💳', cheque: '🖊️' };
+
+async function confirmIncomeEntries(ids) {
+  if (!Array.isArray(ids) || !ids.length) return;
+  const res = await apiPost('kpsc-finance-confirm', { ids });
+  if (res?.error) { showToast('Confirm failed: ' + res.error, 'error'); return; }
+  showToast(`${res.confirmed} entr${res.confirmed !== 1 ? 'ies' : 'y'} confirmed.`, 'success');
+  await loadIncomeReview();
+  await _refreshFinanceEntryListIfShown();
+}
+
+async function depositHolderCash(holderName) {
+  const res = await apiPost('kpsc-cash-deposit', holderName ? { holder: holderName } : {});
+  if (res?.error) { showToast('Deposit failed: ' + res.error, 'error'); return; }
+  showToast(holderName ? `${holderName}'s cash marked as deposited.` : 'All pending cash marked as deposited.', 'success');
+  await loadIncomeReview();
+  await _refreshFinanceEntryListIfShown();
+}
+
+function renderIncomeReviewCard() {
+  if (!canManageFinance()) return '';
+  const { loaded, awaitingConfirmationTotal, cashInHandTotal, pendingConfirmation, holders } = S.incomeReview;
+  if (!loaded || (awaitingConfirmationTotal <= 0 && cashInHandTotal <= 0)) return '';
+  const fmtN = n => '₦' + Number(n || 0).toLocaleString('en-NG');
+  const canConfirm = canConfirmIncome();
+  const groups = _groupPendingConfirmation();
+  const idsArr = ids => `[${ids.map(id => `'${id}'`).join(',')}]`;
+
+  const groupRows = groups.map(g => {
+    const expanded = !!S.incomeReviewExpanded[g.key];
+    const entryRows = expanded ? g.entries.map(e => `
+      <div class="k-cash-detail-row">
+        <div>
+          <div class="k-cash-detail-name">${KF_METHOD_ICON[e.paymentMethod] || '🔹'} ${esc(e.partnerName || e.narration || catLabel(e.category))}</div>
+          <div class="k-cash-detail-meta">${esc(fmtDate(e.date))}${e.isToday ? ' · today' : ''} · ${esc((e.paymentMethod || '').replace(/_/g, ' '))}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="k-cash-detail-amount">${fmtN(e.amount)}</span>
+          ${canConfirm ? `<button class="kbtn kbtn-sm kbtn-ghost" style="font-size:11px;padding:2px 8px" onclick="Kpsc.confirmIncomeEntries(${idsArr([e.id])})">Confirm</button>` : ''}
+        </div>
+      </div>`).join('') : '';
+    return `<div class="k-cash-holder-row" style="flex-direction:column;align-items:stretch">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;cursor:pointer" onclick="Kpsc.toggleIncomeReviewGroup('${escJsAttr(g.key)}')">
+        <div>
+          <div class="k-cash-holder-name">${expanded ? '▾' : '▸'} ${esc(g.label)}</div>
+          <div class="k-cash-holder-meta">${g.entries.length} entr${g.entries.length !== 1 ? 'ies' : 'y'} pending</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="k-cash-holder-amount">${fmtN(g.total)}</span>
+          ${canConfirm ? `<button class="kbtn kbtn-sm kbtn-primary" style="padding:4px 10px" onclick="event.stopPropagation();Kpsc.confirmIncomeEntries(${idsArr(g.entries.map(e => e.id))})">Confirm</button>` : ''}
+        </div>
       </div>
-      <div class="k-cash-holder-amount">${fmtN(h.inHand)}</div>
+      ${entryRows ? `<div style="margin-top:6px;padding-left:4px">${entryRows}</div>` : ''}
     </div>`;
   }).join('');
 
+  const holderRows = holders.map(h => `
+    <div class="k-cash-holder-row">
+      <div>
+        <div class="k-cash-holder-name">${esc(h.name)}</div>
+        <div class="k-cash-holder-meta">${h.spent > 0 ? `Collected ${fmtN(h.collected)} · spent ${fmtN(h.spent)}` : `${h.lots.length} payment${h.lots.length !== 1 ? 's' : ''}`}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="k-cash-holder-amount">${fmtN(h.inHand)}</span>
+        ${canConfirm ? `<button class="kbtn kbtn-sm kbtn-ghost" style="padding:4px 10px" onclick="Kpsc.depositHolderCash('${escJsAttr(h.name)}')">Deposited</button>` : ''}
+      </div>
+    </div>`).join('');
+
   return `<div class="k-cash-card">
-    <div class="k-cash-card-hdr">
-      <div class="k-cash-card-title">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="flex-shrink:0"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-4 0v2"/><circle cx="12" cy="14" r="2"/></svg>
-        Cash in Hand
+    <div class="k-cash-card-hdr" style="align-items:flex-start">
+      <div>
+        <div class="k-cash-card-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="flex-shrink:0"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          Awaiting Confirmation
+        </div>
+        <div class="k-cash-card-total">${fmtN(awaitingConfirmationTotal)}</div>
       </div>
-      <div class="k-cash-card-total">${fmtN(pendingTotal)}</div>
+      <div style="text-align:right">
+        <div class="k-cash-card-title" style="justify-content:flex-end">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="flex-shrink:0"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-4 0v2"/><circle cx="12" cy="14" r="2"/></svg>
+          Cash in Hand
+        </div>
+        <div class="k-cash-card-total">${fmtN(cashInHandTotal)}</div>
+      </div>
     </div>
-    ${showBreakdown ? `<div class="k-cash-card-summary">Collected ${fmtN(collectedTotal)} · Spent ${fmtN(spentTotal)} · In hand ${fmtN(pendingTotal)}</div>` : ''}
-    ${holders.length > 0 ? `<div class="k-cash-holders">${holderRows}</div>` : ''}
-    <div class="k-cash-card-actions">
-      <button class="kbtn kbtn-primary kbtn-sm" onclick="Kpsc.openTransferModal()">Transfer to Bank</button>
-      <button class="kbtn kbtn-sm" style="background:#f0faf5;color:var(--green);border:1px solid #b7dfc9" onclick="Kpsc.openSpendModal()">Spend from Cash</button>
-      <button class="kbtn kbtn-ghost kbtn-sm" onclick="Kpsc.openCashDetailsModal()">Details</button>
-    </div>
+
+    ${pendingConfirmation.length ? `
+      <div class="k-cash-card-actions" style="margin:12px 0 6px;justify-content:space-between">
+        <div style="display:flex;gap:6px">
+          <button class="kbtn kbtn-sm ${S.incomeReviewGroupBy === 'person' ? 'kbtn-primary' : 'kbtn-ghost'}" onclick="Kpsc.setIncomeReviewGroupBy('person')">By Person</button>
+          <button class="kbtn kbtn-sm ${S.incomeReviewGroupBy === 'day' ? 'kbtn-primary' : 'kbtn-ghost'}" onclick="Kpsc.setIncomeReviewGroupBy('day')">By Day</button>
+        </div>
+        ${canConfirm ? `<button class="kbtn kbtn-sm kbtn-primary" onclick="Kpsc.confirmIncomeEntries(${idsArr(pendingConfirmation.map(e => e.id))})">Confirm All</button>` : ''}
+      </div>
+      <div class="k-cash-holders">${groupRows}</div>
+    ` : ''}
+
+    ${holders.length ? `
+      <div class="k-cash-section-title" style="margin-top:16px">Cash in Hand — by holder</div>
+      <div class="k-cash-holders">${holderRows}</div>
+      <div class="k-cash-card-actions">
+        ${canConfirm ? `<button class="kbtn kbtn-primary kbtn-sm" onclick="Kpsc.depositHolderCash()">Deposit All</button>` : ''}
+        <button class="kbtn kbtn-sm" style="background:#f0faf5;color:var(--green);border:1px solid #b7dfc9" onclick="Kpsc.openSpendModal()">Spend from Cash</button>
+        <button class="kbtn kbtn-ghost kbtn-sm" onclick="Kpsc.openCashDetailsModal()">Details</button>
+      </div>
+    ` : ''}
   </div>`;
-}
-
-function openTransferModal(holderName) {
-  document.getElementById('k-transfer-modal')?.remove();
-  const { holders } = S.cashCollection;
-  if (!holders.length) { showToast('No pending cash to transfer.', 'error'); return; }
-  const defaultHolder = holderName || holders[0].name;
-  const fmtN = n => '₦' + Number(n || 0).toLocaleString('en-NG');
-  const fmtD = s => s ? new Date(s).toLocaleDateString('en-NG', { day: 'numeric', month: 'short' }) : '';
-
-  const holderOptions = holders.map(h => `<option value="${esc(h.name)}" ${h.name === defaultHolder ? 'selected' : ''}>${esc(h.name)} — in hand ${fmtN(h.inHand)}</option>`).join('');
-
-  const buildLotRows = h => h ? h.lots.map(lot => `
-    <label class="k-transfer-lot">
-      <input type="checkbox" name="k-transfer-lot" value="${esc(lot.id)}" data-amount="${lot.amount}" checked onchange="Kpsc._updateTransferAmount()"/>
-      <div class="k-transfer-lot-body">
-        <div class="k-transfer-lot-name">${esc(lot.partnerName)}</div>
-        <div class="k-transfer-lot-meta">${fmtD(lot.date)}${lot.isToday ? ' · today' : ''}</div>
-      </div>
-      <div class="k-transfer-lot-amount">${fmtN(lot.amount)}</div>
-    </label>`).join('') : '';
-
-  const currentHolder = holders.find(h => h.name === defaultHolder);
-  const spentNote = currentHolder?.spent > 0 ? `<div class="k-cash-spent-note">Spent from this cash: ${fmtN(currentHolder.spent)} (will be reconciled)</div>` : '';
-
-  const modal = document.createElement('div');
-  modal.id = 'k-transfer-modal';
-  modal.className = 'k-modal-overlay';
-  modal.innerHTML = `
-    <div class="k-modal">
-      <div class="k-modal-hdr">
-        <span class="k-modal-title">Transfer Cash to Bank</span>
-        <button class="kbtn kbtn-sm kbtn-ghost" onclick="document.getElementById('k-transfer-modal').remove()">✕</button>
-      </div>
-      <div class="k-modal-body">
-        ${holders.length > 1 ? `<div class="k-form-group"><label class="k-label">Holder</label><select id="k-transfer-holder" class="k-input" onchange="Kpsc._rebuildTransferLots(this.value)">${holderOptions}</select></div>` : `<input type="hidden" id="k-transfer-holder" value="${esc(defaultHolder)}"/>`}
-        <div class="k-form-group">
-          <label class="k-label">Select Payments to Include</label>
-          <div id="k-transfer-lot-list" class="k-transfer-lot-list">${buildLotRows(currentHolder)}</div>
-        </div>
-        ${spentNote}
-        <div class="k-form-group">
-          <label class="k-label">Amount to Transfer (₦)</label>
-          <input id="k-transfer-amount" class="k-input" type="number" min="1" step="100" inputmode="decimal"/>
-          <p class="k-hint" style="margin-top:4px">Auto-filled from ticked payments. Edit if keeping some change.</p>
-        </div>
-        <div class="k-form-group">
-          <label class="k-label">Date</label>
-          <input id="k-transfer-date" class="k-input" type="date" value="${new Date().toISOString().slice(0,10)}"/>
-        </div>
-        <div class="k-form-group">
-          <label class="k-label">Notes <span style="font-weight:400;color:var(--text3)">(optional)</span></label>
-          <textarea id="k-transfer-notes" class="k-input k-textarea" rows="2" placeholder="e.g. GTB Onitsha branch, teller receipt #12345" style="min-height:60px"></textarea>
-        </div>
-        <div id="k-transfer-err" style="display:none;color:var(--red);font-size:13px;margin-top:4px"></div>
-      </div>
-      <div class="k-modal-footer">
-        <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-transfer-modal').remove()">Cancel</button>
-        <button id="k-transfer-submit" class="kbtn kbtn-primary" onclick="Kpsc.submitCashHandover(this)">Confirm Transfer</button>
-      </div>
-    </div>`;
-  document.body.appendChild(modal);
-  _updateTransferAmount();
-}
-
-function _rebuildTransferLots(holderName) {
-  const holder = S.cashCollection.holders.find(h => h.name === holderName);
-  const fmtN = n => '₦' + Number(n || 0).toLocaleString('en-NG');
-  const fmtD = s => s ? new Date(s).toLocaleDateString('en-NG', { day: 'numeric', month: 'short' }) : '';
-  const list = document.getElementById('k-transfer-lot-list');
-  if (!list) return;
-  if (!holder) { list.innerHTML = ''; _updateTransferAmount(); return; }
-  list.innerHTML = holder.lots.map(lot => `
-    <label class="k-transfer-lot">
-      <input type="checkbox" name="k-transfer-lot" value="${esc(lot.id)}" data-amount="${lot.amount}" checked onchange="Kpsc._updateTransferAmount()"/>
-      <div class="k-transfer-lot-body">
-        <div class="k-transfer-lot-name">${esc(lot.partnerName)}</div>
-        <div class="k-transfer-lot-meta">${fmtD(lot.date)}${lot.isToday ? ' · today' : ''}</div>
-      </div>
-      <div class="k-transfer-lot-amount">${fmtN(lot.amount)}</div>
-    </label>`).join('');
-  const spentNote = document.querySelector('.k-cash-spent-note');
-  if (spentNote) spentNote.textContent = holder.spent > 0 ? `Spent from this cash: ${fmtN(holder.spent)} (will be reconciled)` : '';
-  _updateTransferAmount();
-}
-
-function _updateTransferAmount() {
-  const checks = [...document.querySelectorAll('input[name="k-transfer-lot"]:checked')];
-  const total = checks.reduce((s, c) => s + Number(c.dataset.amount || 0), 0);
-  const holderName = document.getElementById('k-transfer-holder')?.value || '';
-  const holder = S.cashCollection.holders.find(h => h.name === holderName);
-  const net = Math.max(0, total - (holder?.spent || 0));
-  const amtEl = document.getElementById('k-transfer-amount');
-  if (amtEl) amtEl.value = net.toFixed(0);
-}
-
-async function submitCashHandover(btn) {
-  const holder = document.getElementById('k-transfer-holder')?.value || '';
-  const paymentIds = [...document.querySelectorAll('input[name="k-transfer-lot"]:checked')].map(c => c.value);
-  const amount = Number(document.getElementById('k-transfer-amount')?.value || 0);
-  const notes = (document.getElementById('k-transfer-notes')?.value || '').trim();
-  const date = document.getElementById('k-transfer-date')?.value || '';
-  const errEl = document.getElementById('k-transfer-err');
-  if (!paymentIds.length) {
-    if (errEl) { errEl.textContent = 'Tick at least one payment.'; errEl.style.display = 'block'; }
-    return;
-  }
-  if (amount <= 0) {
-    if (errEl) { errEl.textContent = 'Please enter a valid amount.'; errEl.style.display = 'block'; }
-    return;
-  }
-  const orig = btn.textContent;
-  btn.disabled = true; btn.textContent = 'Saving…';
-  const res = await apiPost('kpsc-cash-handovers', { holder, paymentIds, amount, notes, date });
-  btn.disabled = false; btn.textContent = orig;
-  if (res?.error) {
-    if (errEl) { errEl.textContent = res.error; errEl.style.display = 'block'; }
-    showToast('Transfer failed: ' + res.error, 'error');
-    return;
-  }
-  const changeMsg = res?.changeRetained > 0 ? ` ₦${Number(res.changeRetained).toLocaleString('en-NG')} change kept in hand.` : '';
-  showToast(`₦${amount.toLocaleString('en-NG')} transfer recorded.${changeMsg}`, 'success');
-  document.getElementById('k-transfer-modal')?.remove();
-  await loadCashCollection();
 }
 
 function openSpendModal(holderName) {
   document.getElementById('k-spend-modal')?.remove();
-  const { holders } = S.cashCollection;
+  const { holders } = S.incomeReview;
   const defaultHolder = holderName || S.user?.name || (holders[0]?.name || '');
   const holderOptions = holders.map(h => `<option value="${esc(h.name)}" ${h.name === defaultHolder ? 'selected' : ''}>${esc(h.name)}</option>`).join('');
   const expCats = (S.settings?.kpsc_expense_categories || ['projects','welfare','committee_operations','church_support']).map(c =>
@@ -7710,23 +7715,16 @@ async function submitCashExpense(btn) {
   }
   showToast(`₦${amount.toLocaleString('en-NG')} expense recorded.`, 'success');
   document.getElementById('k-spend-modal')?.remove();
-  await loadCashCollection();
-  // Refresh finance entry list if the finance page is currently showing
-  const finList = document.getElementById('kf-entry-list');
-  if (finList) {
-    const finRes = await apiGet(`kpsc-finance?year=${S.financeYear}${S.financeMonth ? `&month=${S.financeMonth}` : ''}`);
-    if (!finRes?.error) {
-      S.financeEntries = Array.isArray(finRes) ? finRes : [];
-      finList.innerHTML = renderFinanceEntryList(canManageFinance(), canDeleteFinanceEntries());
-    }
-  }
+  await loadIncomeReview();
+  await _refreshFinanceEntryListIfShown();
 }
 
 function openCashDetailsModal() {
   document.getElementById('k-cash-details-modal')?.remove();
-  const { holders, recentHandovers } = S.cashCollection;
+  const { holders } = S.incomeReview;
   const fmtN = n => '₦' + Number(n || 0).toLocaleString('en-NG');
   const fmtD = s => s ? new Date(s).toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: '2-digit' }) : '';
+  const canConfirm = canConfirmIncome();
 
   const holderSections = holders.map(h => {
     const lotRows = h.lots.map(lot => `
@@ -7749,7 +7747,10 @@ function openCashDetailsModal() {
         <span class="k-cash-detail-amount" style="color:var(--red)">−${fmtN(exp.amount)}</span>
       </div>`).join('');
     return `
-      <div class="k-cash-section-title" style="margin-top:16px">${esc(h.name)} — in hand ${fmtN(h.inHand)}</div>
+      <div class="k-cash-section-title" style="margin-top:16px;display:flex;align-items:center;justify-content:space-between">
+        <span>${esc(h.name)} — in hand ${fmtN(h.inHand)}</span>
+        ${canConfirm ? `<button class="kbtn kbtn-sm kbtn-ghost" style="font-size:11px;padding:2px 8px" onclick="Kpsc.depositHolderCash('${escJsAttr(h.name)}')">Deposited</button>` : ''}
+      </div>
       ${lotRows}
       ${expRows || ''}
       <div class="k-cash-holder-subtotal">
@@ -7757,15 +7758,6 @@ function openCashDetailsModal() {
         <span style="font-weight:700">In hand: ${fmtN(h.inHand)}</span>
       </div>`;
   }).join('');
-
-  const handoverRows = recentHandovers.map(h => `
-    <div class="k-handover-item">
-      <div class="k-handover-item-top">
-        <span class="k-handover-item-amount">${fmtN(h.amount)}</span>
-        <span class="k-handover-item-count">${h.payment_count} payment${Number(h.payment_count) !== 1 ? 's' : ''}${h.holder ? ' · ' + esc(h.holder) : ''}</span>
-      </div>
-      <div class="k-handover-item-meta">${fmtD(h.transferred_at)} · by ${esc(h.transferred_by || '')}${h.notes ? ' · ' + esc(h.notes) : ''}${Number(h.expense_total) > 0 ? ` · spent ${fmtN(h.expense_total)}` : ''}</div>
-    </div>`).join('');
 
   const modal = document.createElement('div');
   modal.id = 'k-cash-details-modal';
@@ -7778,7 +7770,6 @@ function openCashDetailsModal() {
       </div>
       <div class="k-modal-body" style="max-height:70vh;overflow-y:auto">
         ${holderSections || '<div class="k-empty">No pending cash.</div>'}
-        ${recentHandovers.length ? `<div class="k-cash-section-title" style="margin-top:20px">Recent Transfers</div>${handoverRows}` : ''}
       </div>
       <div class="k-modal-footer">
         <button class="kbtn kbtn-ghost" onclick="document.getElementById('k-cash-details-modal').remove()">Close</button>
@@ -7794,7 +7785,7 @@ function _promptReassign(paymentId) {
     if (res?.error) { showToast('Reassign failed: ' + res.error, 'error'); return; }
     showToast('Reassigned.', 'success');
     document.getElementById('k-cash-details-modal')?.remove();
-    loadCashCollection();
+    loadIncomeReview();
   });
 }
 
@@ -8175,7 +8166,7 @@ async function renderPartners(main) {
       </div>
       <p class="k-page-hint">Track God's Kingdom Partners and Covenant Partners, monthly pledges, and payment progress.</p>
       ${renderPendingCardBanner()}
-      <div id="k-cash-card-mount"></div>
+      <div id="k-income-review-mount"></div>
       <input class="k-input k-partners-search" type="search" placeholder="🔍 Search by name…"
         value="${esc(S.partnersSearch)}" oninput="Kpsc.setPartnersSearch(this.value)" />
       <div class="k-partners-controls">
@@ -8205,7 +8196,7 @@ async function renderPartners(main) {
       </div>
       <div id="kpsc-partners-list">${renderPartnersList(canManage)}</div>
     </div>`;
-  loadCashCollection(); // refresh embedded card after partners page loads
+  loadIncomeReview(); // refresh embedded card after partners page loads
 }
 
 function setPartnersSearch(val) {
@@ -8967,6 +8958,7 @@ async function renderFinance(main) {
   S.financeTypeFilter = 'all';
   S.financeCatFilter = '';
   S.financeMethodFilter = '';
+  S.financeConfirmFilter = '';
   S.financeSortCol = 'date';
   S.financeSortAsc = false;
 
@@ -9014,6 +9006,12 @@ async function renderFinance(main) {
     ['cash','bank_transfer','pos','cheque','other'].map(m =>
       `<option value="${m}">${m.replace(/_/g,' ').replace(/\b\w/g, l => l.toUpperCase())}</option>`
     ).join('');
+  // Who confirmed what — lets Acting Chairman / Treasurer check their own vs each
+  // other's confirmations, or see everything still awaiting sign-off.
+  const confirmerNames = [...new Set(incomeEntries.map(e => e.confirmedBy).filter(Boolean))].sort();
+  const confirmFilterOpts = `<option value="">All Income (confirmed or not)</option>` +
+    `<option value="__pending__">Awaiting confirmation</option>` +
+    confirmerNames.map(n => `<option value="${esc(n)}">Confirmed by ${esc(n)}</option>`).join('');
   const periodLabel = month ? `${monthName(month)} ${year}` : `Year ${year}`;
 
   main.innerHTML = `
@@ -9052,7 +9050,7 @@ async function renderFinance(main) {
 
       ${renderEmailIngestStatusCard(ingestLogRes)}
 
-      ${canManage ? '<div id="k-cash-card-mount"></div>' : ''}
+      ${canManage ? '<div id="k-income-review-mount"></div>' : ''}
 
       <div class="k-section-hdr">
         <h2>Finance Entries</h2>
@@ -9074,6 +9072,7 @@ async function renderFinance(main) {
         </div>
         ${allCategories.length > 1 ? `<select class="k-input k-input-sm" style="width:auto;flex-shrink:0" onchange="Kpsc.setFinanceCatFilter(this.value)">${catFilterOpts}</select>` : ''}
         <select class="k-input k-input-sm" style="width:auto;flex-shrink:0" onchange="Kpsc.setFinanceMethodFilter(this.value)">${methodFilterOpts}</select>
+        <select class="k-input k-input-sm" style="width:auto;flex-shrink:0" onchange="Kpsc.setFinanceConfirmFilter(this.value)">${confirmFilterOpts}</select>
       </div>
 
       ${S.financeEntries.length > 0 ? `
@@ -9120,7 +9119,7 @@ async function renderFinance(main) {
       </details>` : ''}
 
     </div>`;
-  if (canManage) loadCashCollection(); // refresh embedded card after finance page loads
+  if (canManage) loadIncomeReview(); // refresh embedded card after finance page loads
 }
 
 async function openFinanceModal(entryToEdit = null) {
@@ -9418,6 +9417,11 @@ function getFilteredFinanceEntries() {
   if (S.financeMethodFilter) {
     entries = entries.filter(e => e.paymentMethod === S.financeMethodFilter);
   }
+  if (S.financeConfirmFilter === '__pending__') {
+    entries = entries.filter(e => e.entryType === 'income' && !e.confirmedBy);
+  } else if (S.financeConfirmFilter) {
+    entries = entries.filter(e => e.confirmedBy === S.financeConfirmFilter);
+  }
   const q = (S.financeSearch || '').trim().toLowerCase();
   if (q) {
     entries = entries.filter(e =>
@@ -9445,6 +9449,16 @@ function getFilteredFinanceEntries() {
   return entries;
 }
 
+// Small "✅ Confirmed by X" / "⏳ Awaiting confirmation" tag — income entries only.
+// Lets Acting Chairman / Treasurer check who (of the two of them) confirmed what,
+// right in the ledger, without a separate history screen.
+function _confirmBadgeHtml(e) {
+  if (e.entryType !== 'income') return '';
+  return e.confirmedBy
+    ? `<span class="kbadge badge-green" title="${esc(fmtDateTime(e.confirmedAt))}">✅ ${esc(e.confirmedBy)}</span>`
+    : `<span class="kbadge badge-amber">⏳ Awaiting confirmation</span>`;
+}
+
 function renderFinanceEntryList(canManage, canDelete) {
   const entries = getFilteredFinanceEntries();
   if (!entries.length) {
@@ -9467,6 +9481,7 @@ function renderFinanceEntryList(canManage, canDelete) {
         <td style="color:var(--text3)">${esc(e.partnerName || '—')}</td>
         <td class="kf-td-amount" style="color:${amtColor}">₦${Number(e.amount||0).toLocaleString('en-NG')}</td>
         <td>${esc((e.paymentMethod||'—').replace(/_/g,' '))}</td>
+        <td>${_confirmBadgeHtml(e)}</td>
         <td style="color:var(--text3);font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.reference||'—')}</td>
         ${actionCells}
       </tr>`;
@@ -9482,6 +9497,7 @@ function renderFinanceEntryList(canManage, canDelete) {
           <th>Partner</th>
           <th class="${thCls('amount')}" onclick="Kpsc.sortFinanceBy('amount')">Amount</th>
           <th class="${thCls('paymentMethod')}" onclick="Kpsc.sortFinanceBy('paymentMethod')">Method</th>
+          <th>Confirmation</th>
           <th class="${thCls('reference')}" onclick="Kpsc.sortFinanceBy('reference')">Reference</th>
           ${actionHead}
         </tr></thead>
@@ -9501,6 +9517,8 @@ function renderFinanceEntryList(canManage, canDelete) {
             <span>${esc(fmtDate(e.date))}</span>
             <span class="kbadge ${e.entryType==='income'?'badge-green':'badge-red'}">${esc(e.entryType)}</span>
             ${e.paymentMethod ? `<span class="kbadge badge-gray">${esc(e.paymentMethod.replace(/_/g,' '))}</span>` : ''}
+            ${_confirmBadgeHtml(e)}
+            ${e.paymentMethod === 'cash' && e.entryType === 'income' && e.depositedBy ? `<span class="kbadge badge-green" title="${esc(fmtDateTime(e.depositedAt))}">🏦 Deposited by ${esc(e.depositedBy)}</span>` : ''}
           </div>
           ${e.narration ? `<div class="k-page-hint" style="margin-top:6px">${esc(e.narration)}</div>` : ''}
           ${e.reference ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Ref: ${esc(e.reference)}</div>` : ''}
@@ -9567,6 +9585,11 @@ function setFinanceCatFilter(val) {
 
 function setFinanceMethodFilter(val) {
   S.financeMethodFilter = val || '';
+  rerenderFinanceEntryList();
+}
+
+function setFinanceConfirmFilter(val) {
+  S.financeConfirmFilter = val || '';
   rerenderFinanceEntryList();
 }
 
@@ -18741,15 +18764,16 @@ window.Kpsc = {
   showNewMonthDraftModal,
   saveNewMonthDraft,
   dismissNewMonthDraft,
-  // Cash Collection Tracker v2
-  openTransferModal,
-  submitCashHandover,
+  // Income Review: confirmation + cash-in-hand tracker
+  setIncomeReviewGroupBy,
+  toggleIncomeReviewGroup,
+  confirmIncomeEntries,
+  depositHolderCash,
   openSpendModal,
   submitCashExpense,
   openCashDetailsModal,
-  _rebuildTransferLots,
-  _updateTransferAmount,
   _promptReassign,
+  setFinanceConfirmFilter,
 };
 
 document.addEventListener('DOMContentLoaded', init);
