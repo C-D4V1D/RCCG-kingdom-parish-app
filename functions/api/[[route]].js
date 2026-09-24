@@ -1,12 +1,12 @@
 import {
-  coercePlan as coerceBudgetPlan,
-  safeToSpend as budgetSafeToSpend,
-  sumExpensesByCategory as budgetSumExpensesByCategory,
   robustMonthlySeries as budgetRobustSeries,
-  suggestCategoryAmount as budgetSuggestCategoryAmount,
-  applyAffordability as budgetApplyAffordability,
-  budgetStatus as budgetStatusFromEngine,
-  computeAffordVerdict as budgetComputeAffordVerdict,
+  isCountableExpense as budgetIsCountableExpense,
+  clampAiLines as budgetClampAiLines,
+  suggestCuts as budgetSuggestCuts,
+  freeForNewThings as budgetFreeForNewThings,
+  affordAnswer as budgetAffordAnswer,
+  RCCG_DEMANDS_KEY as BUDGET_RCCG_DEMANDS_KEY,
+  LEGACY_REMITTANCE_CATEGORY as BUDGET_LEGACY_REMITTANCE_CATEGORY,
 } from '../../src/js/budget-engine.js';
 
 // ================================================================
@@ -1351,9 +1351,10 @@ export async function onRequest(context) {
     if (route === 'budget') {
       if (method === 'GET' && !param) return await getMonthlyBudget(DB, url.searchParams.get('month'));
       if (method === 'POST' && param === 'generate') return await generateMonthlyBudget(DB, env, body);
+      if (method === 'POST' && param === 'save') return await saveMonthlyBudget(DB, body);
       if (method === 'POST' && param === 'accept') return await acceptMonthlyBudget(DB, body);
+      if (method === 'POST' && param === 'reopen') return await reopenMonthlyBudget(DB, body);
       if (method === 'POST' && param === 'afford') return await askBudgetAfford(DB, env, body);
-      if (method === 'POST' && param === 'outlook') return await budgetOutlook(DB, env, body);
     }
 
     // ── /api/expense-receipt/:id — single receipt image, fetched on demand ──
@@ -4526,10 +4527,6 @@ function isValidMonthKey(value) {
   return /^\d{4}-\d{2}$/.test(String(value || ''));
 }
 
-function budgetStatusFromNumbers(expectedParishIncome, recommendedBudget) {
-  return budgetStatusFromEngine(expectedParishIncome, recommendedBudget);
-}
-
 function monthFromIsoDate(value) {
   const match = String(value || '').match(/^(\d{4}-\d{2})/);
   return match ? match[1] : '';
@@ -4559,7 +4556,7 @@ async function listExpensesForMonth(DB, monthKey) {
   const start = `${monthKey}-01`;
   const end = `${monthKey}-31`;
   const { results } = await DB.prepare(
-    `SELECT id, category, amount, description, sub_category, date, created_at, remittance_ref
+    `SELECT id, category, amount, description, sub_category, date, created_at, remittance_ref, status
      FROM expenses
      WHERE COALESCE(date, substr(created_at, 1, 10)) >= ?
        AND COALESCE(date, substr(created_at, 1, 10)) <= ?`
@@ -4574,191 +4571,151 @@ async function listExpensesForMonth(DB, monthKey) {
       subCategory: row.sub_category || '',
       date: row.date || row.created_at || '',
       remittanceRef: row.remittance_ref || '',
-    }));
+      status: row.status || '',
+    }))
+    // A1 / 0.3: rejected expenses never count as real spending. Approved and
+    // pending still count here ("tracking" mode), only rejected is dropped.
+    .filter(expense => budgetIsCountableExpense(expense, { mode: 'tracking' }));
 }
 
+// Who to credit in the audit log for a budget write. Every write request body
+// carries `by` (user name) and `role` (user role); the server writes
+// "${by} (${role})", never "System", falling back to "Finance Portal" only
+// when no name was sent at all (B3).
+function budgetAuditActor(data) {
+  const by = String(data?.by || '').trim();
+  const role = String(data?.role || '').trim();
+  if (!by) return 'Finance Portal';
+  return role ? `${by} (${role})` : by;
+}
+
+function budgetActorName(data) {
+  return String(data?.by || '').trim() || 'Finance Portal';
+}
+
+const BUDGET_MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+function budgetFormatMonthLabel(key) {
+  const match = String(key || '').match(/^(\d{4})-(\d{2})$/);
+  if (!match) return '';
+  const idx = parseInt(match[2], 10) - 1;
+  return `${BUDGET_MONTH_NAMES[idx] || ''} ${match[1]}`.trim();
+}
+
+function budgetStatusPhrase(statusLabel, shortBy) {
+  if (statusLabel === 'short') return `Short by ₦${Math.max(0, Math.round(Number(shortBy || 0))).toLocaleString('en-NG')}`;
+  if (statusLabel === 'tight') return 'Tight';
+  return 'Enough';
+}
+
+// New pack shape (contract): { monthKey, historyMonthsUsed, months:[{monthKey, parishIncome,
+// expensesByCategory, notesByCategory}], baselineLines, maxByKey, validKeys, noteSnippets }.
+// Server recomputes expectedParishIncome from months[].parishIncome itself (0.1) and never
+// trusts a client-supplied total.
 function normalizeBudgetPack(pack, monthKeyValue) {
   const months = Array.isArray(pack?.months)
     ? pack.months
       .filter(item => item && isValidMonthKey(item.monthKey))
       .map(item => ({
         monthKey: item.monthKey,
-        grossIncome: Math.max(0, Math.round(Number(item.grossIncome || 0))),
-        remittanceDue: Math.max(0, Math.round(Number(item.remittanceDue || 0))),
-        parishIncomeAfterRemittance: Math.max(0, Math.round(Number(item.parishIncomeAfterRemittance || 0))),
+        parishIncome: Math.max(0, Math.round(Number(item.parishIncome || 0))),
         expensesByCategory: item.expensesByCategory && typeof item.expensesByCategory === 'object' ? item.expensesByCategory : {},
-        notes: Array.isArray(item.notes) ? item.notes.map(n => String(n)).slice(0, 6) : [],
+        notesByCategory: item.notesByCategory && typeof item.notesByCategory === 'object' ? item.notesByCategory : {},
       }))
       .sort((a, b) => a.monthKey.localeCompare(b.monthKey))
     : [];
-  const historyMonthsUsed = Math.max(1, Math.min(12, Math.round(Number(pack?.historyMonthsUsed || months.length || 6))));
-  const incomeStats = budgetRobustSeries(months, item => item?.parishIncomeAfterRemittance || 0);
-  const remittanceStats = budgetRobustSeries(months, item => item?.remittanceDue || 0);
-  const grossStats = budgetRobustSeries(months, item => item?.grossIncome || 0);
-  return {
-    monthKey: monthKeyValue,
-    historyMonthsUsed,
-    months,
-    expectedGrossIncome: grossStats.typical,
-    expectedRemittance: remittanceStats.typical,
-    expectedParishIncome: incomeStats.typical,
-    incomeOutlierMonths: incomeStats.outliers,
-    incomeConfidence: incomeStats.confidence,
-    categoryHints: Array.isArray(pack?.categoryHints) ? pack.categoryHints.slice(0, 20) : [],
-    noteSnippets: Array.isArray(pack?.noteSnippets) ? pack.noteSnippets.map(String).slice(0, 20) : [],
-  };
+  const baselineLines = Array.isArray(pack?.baselineLines)
+    ? pack.baselineLines
+      .map(line => ({
+        key: String(line?.key || '').trim(),
+        label: String(line?.label || line?.key || '').trim(),
+        amount: Math.max(0, Math.round(Number(line?.amount || 0))),
+        cadence: ['usual', 'occasional', 'annual', 'once'].includes(line?.cadence) ? line.cadence : 'usual',
+        why: String(line?.why || ''),
+        total12: Math.max(0, Math.round(Number(line?.total12 || 0))),
+      }))
+      .filter(line => line.key)
+    : [];
+  const maxByKey = pack?.maxByKey && typeof pack.maxByKey === 'object' ? pack.maxByKey : {};
+  const validKeys = Array.isArray(pack?.validKeys) ? pack.validKeys.map(key => String(key)) : [];
+  const noteSnippets = Array.isArray(pack?.noteSnippets) ? pack.noteSnippets.map(String).slice(0, 20) : [];
+  const historyMonthsUsed = Math.max(1, Math.min(12, Math.round(Number(pack?.historyMonthsUsed || months.length || 12))));
+  return { monthKey: monthKeyValue, historyMonthsUsed, months, baselineLines, maxByKey, validKeys, noteSnippets };
 }
 
-function normalizeBudgetAdvisorResult(raw, pack, existingPlan = null, meta = {}) {
-  const coerced = coerceBudgetPlan(raw, {
-    monthKey: pack.monthKey,
-    expectedGrossIncome: pack.expectedGrossIncome,
-    expectedRemittance: pack.expectedRemittance,
-    expectedParishIncome: pack.expectedParishIncome,
-    historyMonthsUsed: pack.historyMonthsUsed,
-  });
-  const now = new Date().toISOString();
-  const affordLog = Array.isArray(existingPlan?.affordLog) ? existingPlan.affordLog.slice(-10) : [];
-  const expectedParishIncome = Math.max(0, Math.round(Number(pack.expectedParishIncome || 0)));
-  const rawLines = Array.isArray(coerced.lines) ? coerced.lines : [];
-  const rawCushion = Math.max(0, Math.round(Number(coerced.cushion || 0)));
-  const fit = budgetApplyAffordability(rawLines, rawCushion, expectedParishIncome);
-  const lines = fit.lines;
-  const cushion = fit.cushion;
-  const recommendedBudget = lines.reduce((sum, line) => sum + Math.max(0, Math.round(Number(line.amount || 0))), 0) + cushion;
-  const statusLabel = budgetStatusFromNumbers(expectedParishIncome, recommendedBudget);
-  return {
-    monthKey: pack.monthKey,
-    status: 'draft',
-    createdAt: existingPlan?.createdAt || now,
-    acceptedAt: existingPlan?.acceptedAt || '',
-    acceptedBy: existingPlan?.acceptedBy || '',
-    expectedGrossIncome: Math.max(0, Math.round(Number(pack.expectedGrossIncome || 0))),
-    expectedRemittance: Math.max(0, Math.round(Number(pack.expectedRemittance || 0))),
-    expectedParishIncome,
-    recommendedBudget,
-    statusLabel,
-    summary: String(coerced.summary || '').trim(),
-    ignored: Array.isArray(coerced.ignored) ? coerced.ignored.map(item => String(item)).slice(0, 12) : [],
-    remittanceStrip: {
-      label: 'Already spoken for (RCCG remittance)',
-      amount: Math.max(0, Math.round(Number(pack.expectedRemittance || 0))),
-    },
-    lines,
-    cushion,
-    model: String(meta.model || coerced.model || ''),
-    historyMonthsUsed: pack.historyMonthsUsed,
-    affordLog,
-  };
+// The calculator plan (0.11, 0.12): baselineLines sorted by amount, top 8 kept,
+// the rest merged into one "Other small costs" line. RCCG demands (rccg_proj)
+// are always their own line and are never folded into the merged line, even if
+// they would not otherwise make the top 8.
+function buildCalculatorLines(baselineLines, expectedParishIncome) {
+  const rccgLine = baselineLines.find(line => line.key === BUDGET_RCCG_DEMANDS_KEY) || null;
+  const others = baselineLines
+    .filter(line => line.key !== BUDGET_RCCG_DEMANDS_KEY)
+    .sort((a, b) => b.amount - a.amount);
+  const kept = others.slice(0, 8);
+  const rest = others.slice(8);
+  const lines = kept.map(line => ({ key: line.key, label: line.label, amount: line.amount, cadence: line.cadence, why: line.why }));
+  if (rccgLine) {
+    lines.push({ key: rccgLine.key, label: rccgLine.label || 'RCCG demands (besides remittance)', amount: rccgLine.amount, cadence: rccgLine.cadence || 'annual', why: rccgLine.why || 'Monthly set-aside for RCCG programmes, levies and special requests' });
+  }
+  const restTotal = rest.reduce((sum, line) => sum + line.amount, 0);
+  if (restTotal > 0) {
+    lines.push({ key: 'other_small', label: 'Other small costs', amount: restTotal, cadence: 'occasional', why: `Combined: ${rest.map(line => line.label || line.key).join(', ')}`, includes: rest.map(line => line.key) });
+  }
+  const cushion = Math.max(5000, Math.round(expectedParishIncome * 0.08));
+  return { lines, cushion };
 }
 
-function budgetGeneratePrompt(pack, churchName) {
-  return `You are advising ${churchName || 'this parish'} on next month's OPERATING budget.
+function budgetGeneratePrompt(pack, calculatorLines, cushion, churchName) {
+  return `You are advising ${churchName || 'this parish'} on next month's OPERATING budget for ${pack.monthKey}.
 
-Return STRICT JSON only with this shape:
+A calculator has already worked out a starting figure for each category from ${pack.historyMonthsUsed} months of real history. Return STRICT JSON only with this shape:
 {
-  "recommendedBudget": 0,
-  "cushion": 0,
-  "statusLabel": "enough|tight|short",
-  "summary": "one plain-English paragraph",
-  "ignored": ["..."],
   "lines": [
-    { "key": "power", "label": "Power & Energy", "amount": 0, "cadence": "usual|occasional|annual|once", "why": "...", "expenseCategory": "power" }
-  ]
+    { "key": "power", "label": "Power & Energy", "amount": 0, "cadence": "usual|occasional|annual|once", "why": "..." }
+  ],
+  "summary": "one short plain-English paragraph"
 }
 
 Rules you must obey:
-- Remittance is NOT a budget expense line. Never include HQ, TG shares, quotas, or seed as budget lines.
-- Children's department cash and satellite pass-through are not parish spendable income.
-- expected parish income after remittance is EXACTLY ₦${pack.expectedParishIncome.toLocaleString('en-NG')} (typical month, outlier months already removed).
-- expected remittance is EXACTLY ₦${pack.expectedRemittance.toLocaleString('en-NG')}.
-- recommendedBudget MUST be a single exact integer naira amount.
-- recommendedBudget MUST equal sum(lines.amount) + cushion.
-- Keep lines to operating spend only.
-- Use the parish history below; do not invent income beyond the supplied pack.
+- The calculator line for each category is the starting point. You may move a line's amount up or down by AT MOST 20% of that starting figure, and you MUST give a short "why" whenever you change it. People will see this reason on screen.
+- RCCG Payments (key "rccg_proj": Province/Regional/National programmes, project levies, special or emergency requests, Let's Go A-Fishing and similar) ARE real parish costs and MUST always be budgeted as a monthly set-aside — never drop it and never set it to ₦0. Only the percentage remittance and fixed quotas are excluded, because they are worked out separately and deducted before this budget.
+- A category that is paid every month ("usual" cadence) must stay in the plan; do not leave it out.
+- Only use category keys that appear in the calculator lines below — do not invent new category keys.
+- Do not change the cushion figure; it is fixed by the server.
 
-How to be smart about patterns, outliers and change:
-- Each category hint already gives a cadence and an outlier-filtered typical amount (avgAmount). Trust it as the baseline.
-- "usual" lines: budget close to the typical month.
-- "occasional" lines: budget the typical amount scaled by how often the spend occurs (e.g. 3 of 6 months ≈ half the typical month), not the full spike.
-- "annual" lines: budget roughly one-twelfth of the typical amount so the parish saves toward it monthly.
-- "once" lines (emergencies, one-off projects): exclude them from recurring lines entirely — mention them in "ignored" instead.
-- Ignore single-month spikes when setting recurring lines; never let one big month inflate a usual line.
-- If recent months clearly trend up or down versus older months, weight the recent pattern more, but stay within the affordability cap.
+Calculator starting lines (the baseline for every category):
+${JSON.stringify(calculatorLines)}
 
-Lean but sufficient:
-- Aim for the leanest budget that still realistically covers recurring operations. Do NOT pad lines toward the income figure.
-- Keep cushion small (about 5-10% of expected parish income) for genuinely unexpected needs.
-- The server will still cap recommendedBudget at 90% of expected parish income — staying below that is good, not a missed target.
+Cushion (fixed, for information only): ₦${Math.max(0, Math.round(Number(cushion || 0))).toLocaleString('en-NG')}
 
-History months:
+History (last ${pack.historyMonthsUsed} complete months):
 ${JSON.stringify(pack.months)}
-
-Category hints:
-${JSON.stringify(pack.categoryHints || [])}
 
 Notes:
 ${JSON.stringify(pack.noteSnippets || [])}`;
 }
 
-function budgetAffordPrompt(plan, idea, amount, safe, rolling) {
-  const rollingBlock = rolling ? `
+function budgetAffordPrompt(idea, amount, free, answer, today, growth) {
+  return `You are an advisor, not a decision-maker. The verdict and every number below are already final and correct — you only word ONE plain sentence for a busy admin (max 25 words). Reply with STRICT JSON only:
+{ "explanation": "one short plain-language sentence, max 25 words" }
 
-3-month outlook (this month + next 2 months, remittance already excluded — this is the authoritative affordability answer):
-- expected income over 3 months: ₦${rolling.income.toLocaleString('en-NG')}
-- already-committed operating spend over 3 months: ₦${rolling.committed.toLocaleString('en-NG')}
-- spare room before this request: ₦${Math.round(rolling.headroom).toLocaleString('en-NG')}
-- spare room after this request: ₦${Math.round(rolling.headroomAfterExtra).toLocaleString('en-NG')}
-- 3-month status: ${rolling.statusLabel}
-` : '';
-  return `You are an advisor, not a decision-maker. Reply with STRICT JSON only:
-{
-  "verdict": "yes|stretch|no",
-  "safeAmount": 0,
-  "explanation": "one short plain-language sentence, max 25 words"
-}
-
-Monthly budget plan:
-${JSON.stringify({
-    monthKey: plan.monthKey,
-    statusLabel: plan.statusLabel,
-    expectedParishIncome: plan.expectedParishIncome,
-    recommendedBudget: plan.recommendedBudget,
-    cushion: plan.cushion,
-    lines: plan.lines,
-  })}
-${rollingBlock}
 Question:
 - idea: ${String(idea || '').trim()}
-- requested extra amount: ₦${Math.max(0, Math.round(Number(amount || 0))).toLocaleString('en-NG')}
+- requested amount: ₦${Math.max(0, Math.round(Number(amount || 0))).toLocaleString('en-NG')}
+- today: ${today}
 
-Server-calculated guardrails you must respect (never invent your own numbers):
-- safeExtraRightNow (this month only): ₦${Math.max(0, Math.round(Number(safe.safeExtra || 0))).toLocaleString('en-NG')}
-- leftoverAfterBudget (this month only): ₦${Math.round(Number(safe.leftoverAfterBudget || 0)).toLocaleString('en-NG')}
-- leftoverAfterExtra (this month only): ₦${Math.round(Number(safe.leftoverAfterExtra || 0)).toLocaleString('en-NG')}
-${rolling ? '- Base your verdict primarily on the 3-month outlook above, not just this single month.' : ''}
-
-You may advise cut/postpone/reduce, but do not invent extra money. Keep the explanation to ONE short sentence.`;
-}
-
-function budgetOutlookPrompt({ expectedIncome3mo, committedSpend3mo, headroom, statusLabel, verdict, topDriver }) {
-  return `You explain a church's 3-month operating budget outlook in ONE short, plain sentence (max 22 words) for a busy admin who does not want to read numbers or jargon.
-
-Reply with STRICT JSON only:
-{ "caption": "one short sentence" }
-
-Numbers (already correct — never recalculate or change them):
-- expected parish income over the next 3 months (after remittance): ₦${Math.max(0, Math.round(Number(expectedIncome3mo || 0))).toLocaleString('en-NG')}
-- already-committed operating spend over the next 3 months: ₦${Math.max(0, Math.round(Number(committedSpend3mo || 0))).toLocaleString('en-NG')}
-- spare room (headroom): ₦${Math.round(Number(headroom || 0)).toLocaleString('en-NG')}
-- status: ${statusLabel} (verdict: ${verdict})
-${topDriver ? `- biggest committed item: ${topDriver}` : ''}
+Server-calculated numbers you must respect (never invent your own numbers or change the verdict):
+- free for new things right now: ₦${Math.max(0, Math.round(Number(free?.free || 0))).toLocaleString('en-NG')}
+- grows by about ₦${Math.round(Number(growth || 0)).toLocaleString('en-NG')} a month
+- verdict: ${answer.verdict} (yes | not_yet | no)
+- free left after this request (if affordable): ₦${Math.max(0, Math.round(Number(answer.freeAfter || 0))).toLocaleString('en-NG')}
+${answer.verdict === 'not_yet' ? `- affordable around: ${budgetFormatMonthLabel(answer.affordableMonthKey)}` : ''}
 
 Rules:
-- If headroom is negative, clearly say there is a shortfall, never a surplus.
-- Do not use jargon like "COGS", "cadence", or "remittance strip".
-- ONE sentence only, no bullet points, no multiple clauses joined by many commas.
-- Do not invent a different number than the ones given.`;
+- "yes" — say it leaves the stated amount free and normal spending is untouched.
+- "not_yet" — say how much is free now, and roughly when it becomes affordable.
+- "no" — say it would eat into normal monthly spending or the safety cushion.
+- ONE sentence only. Do not invent a different verdict or number than the ones given.`;
 }
 
 async function callBudgetAdvisorJson(DB, env, prompt, fallbackValue) {
@@ -4773,6 +4730,10 @@ async function callBudgetAdvisorJson(DB, env, prompt, fallbackValue) {
           model: deepseekModel,
           messages: [{ role: 'user', content: prompt }],
           response_format: { type: 'json_object' },
+          // 0.6: keep the advisor's most consistent mode so pressing Regenerate
+          // doesn't swing the numbers each time. DeepSeek only — OpenAI's
+          // gpt-5-mini fallback rejects custom temperatures.
+          temperature: 0.2,
         }),
       });
       const data = await resp.json().catch(() => ({}));
@@ -4810,65 +4771,6 @@ async function callBudgetAdvisorJson(DB, env, prompt, fallbackValue) {
   return { provider: 'deterministic', model: '', data: fallbackValue, error: errors.join(' | ') };
 }
 
-function buildFallbackBudgetPlan(pack) {
-  const expected = Math.max(0, Math.round(Number(pack?.expectedParishIncome || 0)));
-  const hintByKey = new Map(
-    (Array.isArray(pack?.categoryHints) ? pack.categoryHints : [])
-      .map(item => [String(item?.key || item?.expenseCategory || ''), item])
-  );
-  const categoryKeys = [];
-  const seen = new Set();
-  const pushKey = (key, label) => {
-    const k = String(key || '').trim();
-    if (!k || k === 'reconciliation' || seen.has(k)) return;
-    seen.add(k);
-    categoryKeys.push({ key: k, label: String(label || hintByKey.get(k)?.label || k) });
-  };
-  for (const hint of pack?.categoryHints || []) pushKey(hint?.key || hint?.expenseCategory, hint?.label);
-  for (const month of pack?.months || []) {
-    for (const key of Object.keys(month?.expensesByCategory || {})) pushKey(key, key);
-  }
-  const lines = [];
-  let anyOutliers = false;
-  for (const { key, label } of categoryKeys) {
-    const suggestion = budgetSuggestCategoryAmount(pack?.months || [], key);
-    const hint = hintByKey.get(key);
-    const amount = Math.max(0, Math.round(Number(suggestion?.amount || hint?.avgAmount || hint?.averageAmount || 0)));
-    if (!amount) continue;
-    if ((suggestion?.outliers || []).length) anyOutliers = true;
-    const cadence = ['usual', 'occasional', 'annual', 'once'].includes(suggestion?.cadence) ? suggestion.cadence : 'usual';
-    lines.push({
-      key,
-      label: String(label || key),
-      amount,
-      cadence,
-      why: cadence === 'usual'
-        ? `Typical month from the last ${pack?.historyMonthsUsed || 6} months${suggestion.outliers.length ? ' (spike months excluded)' : ''}`
-        : cadence === 'annual'
-          ? 'Annual cost spread across the year'
-          : 'Occasional spend, scaled by how often it occurs',
-      expenseCategory: key,
-    });
-  }
-  lines.sort((a, b) => b.amount - a.amount);
-  const trimmed = lines.slice(0, 8);
-  const baseCushion = Math.max(5000, Math.round(expected * 0.08));
-  const fit = budgetApplyAffordability(trimmed, baseCushion, expected);
-  const recommended = fit.lines.reduce((sum, line) => sum + line.amount, 0) + fit.cushion;
-  return {
-    recommendedBudget: recommended,
-    cushion: fit.cushion,
-    statusLabel: budgetStatusFromNumbers(expected, recommended),
-    summary: `Lean draft built from the last ${pack?.historyMonthsUsed || 6} month(s): recurring lines use typical (median-based) monthly spend, occasional lines are scaled by how often they occur, and one-off spike months are excluded. A contingency cushion of about 8% is kept inside a 90% affordability cap so the plan stays realistic but not bloated.`,
-    ignored: [
-      'remittance is already spoken for',
-      'children and satellite pass-through are excluded',
-      ...(anyOutliers ? ['one-off spike months excluded from category amounts'] : []),
-    ],
-    lines: fit.lines,
-  };
-}
-
 async function getMonthlyBudget(DB, requestedMonthKey) {
   if (!isValidMonthKey(requestedMonthKey)) return err('month query parameter must be YYYY-MM', 400);
   const budgets = await loadMonthlyBudgets(DB);
@@ -4878,16 +4780,153 @@ async function getMonthlyBudget(DB, requestedMonthKey) {
 async function generateMonthlyBudget(DB, env, data) {
   const targetMonthKey = String(data?.monthKey || '').trim();
   if (!isValidMonthKey(targetMonthKey)) return err('monthKey must be YYYY-MM', 400);
-  const pack = normalizeBudgetPack(data?.pack || {}, targetMonthKey);
-  if (!pack.months.length) return err('Budget history pack is required', 400);
   const budgets = await loadMonthlyBudgets(DB);
   const existingPlan = budgets[targetMonthKey] || null;
-  const ai = await callBudgetAdvisorJson(DB, env, budgetGeneratePrompt(pack, data?.churchName), buildFallbackBudgetPlan(pack));
-  const plan = normalizeBudgetAdvisorResult(ai.data, pack, existingPlan, { model: ai.model });
+  // B2: an accepted plan is locked. Reopen it first.
+  if (existingPlan?.status === 'accepted') return err('This plan is accepted. Reopen it first.', 409);
+
+  const pack = normalizeBudgetPack(data?.pack || {}, targetMonthKey);
+  const hasHistory = pack.months.some(month =>
+    Number(month.parishIncome || 0) > 0 || Object.values(month.expensesByCategory || {}).some(amount => Number(amount || 0) > 0)
+  );
+  if (!pack.months.length || !hasHistory) {
+    return err('Not enough past records yet — record at least one month of income and expenses first.', 400);
+  }
+
+  // 0.1/0.2: recompute expected parish income server-side from the history pack's
+  // own monthly figures — never trust a client-supplied total.
+  const incomeStats = budgetRobustSeries(pack.months, month => month?.parishIncome || 0);
+  const expectedParishIncome = Math.max(0, Math.round(Number(incomeStats.typical || 0)));
+
+  const { lines: calculatorLines, cushion } = buildCalculatorLines(pack.baselineLines, expectedParishIncome);
+
+  const ai = await callBudgetAdvisorJson(
+    DB, env,
+    budgetGeneratePrompt(pack, calculatorLines, cushion, data?.churchName),
+    // Deliberately NOT the calculator lines: an empty/unusable fallback here lets
+    // generateMonthlyBudget tell "the AI returned nothing usable" apart from "the
+    // AI genuinely echoed the calculator plan" (0.10 — junk AI still labels source
+    // as 'calculator', it never fakes an 'ai' source).
+    { lines: [], summary: '' }
+  );
+
+  const validKeys = [...pack.validKeys, 'other_small'];
+  let lines = null;
+  let clampNotes = [];
+  let source = 'calculator';
+  if (ai.provider !== 'deterministic' && Array.isArray(ai.data?.lines) && ai.data.lines.length) {
+    const clamp = budgetClampAiLines(ai.data.lines, calculatorLines, { validKeys, band: 0.2, maxByKey: pack.maxByKey });
+    if (clamp.lines.length) {
+      // clampAiLines rebuilds each line, so carry the merged-category list back on.
+      const includesByKey = Object.fromEntries(calculatorLines.filter(l => l.includes).map(l => [l.key, l.includes]));
+      lines = clamp.lines.map(line => (includesByKey[line.key] ? { ...line, includes: includesByKey[line.key] } : line));
+      clampNotes = clamp.notes;
+      source = 'ai';
+    }
+  }
+  if (!lines) lines = calculatorLines;
+
+  const recommendedBudget = lines.reduce((sum, line) => sum + Math.max(0, Math.round(Number(line.amount || 0))), 0) + cushion;
+  // 0.7: lines are never shrunk to fit income — a shortfall is shown honestly,
+  // with suggested cuts, instead of quietly trimming every line.
+  const cuts = budgetSuggestCuts(lines, cushion, expectedParishIncome);
+
+  const now = new Date().toISOString();
+  const aiSummaryText = source === 'ai'
+    ? String(ai.data?.summary || '').trim()
+    : 'Built by calculator (AI unavailable).';
+  // 0.9: the final figures are always stated by the system first, so the AI's
+  // words can never disagree with the numbers the plan actually saved.
+  const summary = `Final budget ₦${recommendedBudget.toLocaleString('en-NG')} · Expected parish income ₦${expectedParishIncome.toLocaleString('en-NG')} · ${budgetStatusPhrase(cuts.status, cuts.shortBy)}. ${aiSummaryText}`.trim();
+
+  const plan = {
+    monthKey: targetMonthKey,
+    status: 'draft',
+    createdAt: existingPlan?.createdAt || now,
+    acceptedAt: '',
+    acceptedBy: '',
+    lines,
+    cushion,
+    recommendedBudget,
+    expectedParishIncome,
+    statusLabel: cuts.status,
+    shortBy: cuts.shortBy,
+    suggestedCuts: cuts.cuts,
+    clampNotes,
+    source,
+    model: source === 'ai' ? (ai.model || '') : '',
+    summary,
+    history: Array.isArray(existingPlan?.history) ? existingPlan.history : [],
+    affordLog: Array.isArray(existingPlan?.affordLog) ? existingPlan.affordLog : [],
+  };
   budgets[targetMonthKey] = plan;
   await writeMonthlyBudgets(DB, budgets);
-  await writeAuditLog(DB, 'budget_generated', `Monthly budget draft generated for ${targetMonthKey} (${plan.statusLabel}, ${plan.recommendedBudget})`, 'System');
+  const actor = budgetAuditActor(data);
+  await writeAuditLog(DB, 'budget_generated', `Monthly budget draft generated for ${targetMonthKey} (${plan.statusLabel}, ₦${plan.recommendedBudget.toLocaleString('en-NG')})`, actor);
   return ok({ plan, provider: ai.provider, providerError: ai.error || '' });
+}
+
+async function saveMonthlyBudget(DB, data) {
+  const targetMonthKey = String(data?.monthKey || '').trim();
+  if (!isValidMonthKey(targetMonthKey)) return err('monthKey must be YYYY-MM', 400);
+  const budgets = await loadMonthlyBudgets(DB);
+  const plan = budgets[targetMonthKey];
+  if (!plan) return err('No budget plan found for that month', 404);
+  if (plan.status === 'accepted') return err('This plan is accepted. Reopen it first.', 409);
+
+  const rawLines = Array.isArray(data?.lines) ? data.lines : [];
+  // C1: percentage remittance / fixed quotas are already deducted at the top and
+  // can never be entered here again. RCCG Payments (rccg_proj) is exempt — it is
+  // the right place for levies, programmes and upcoming demands.
+  for (const line of rawLines) {
+    const key = String(line?.key || '').trim();
+    const label = String(line?.label || '').trim();
+    if (key === BUDGET_LEGACY_REMITTANCE_CATEGORY) {
+      return err('Zonal / Area Joint is a remittance line and cannot be entered here.', 400);
+    }
+    if (key !== BUDGET_RCCG_DEMANDS_KEY && /\b(remittance|quota)\b/i.test(label)) {
+      return err('Remittance and quota lines are worked out separately and cannot be entered here.', 400);
+    }
+  }
+
+  // `includes` (categories merged into e.g. "Other small costs") is server-owned: carry it
+  // over from the stored line so tracking keeps working after a hand edit.
+  const includesByKey = Object.fromEntries((plan.lines || []).filter(l => Array.isArray(l.includes)).map(l => [l.key, l.includes]));
+  const lines = rawLines
+    .map(line => ({
+      ...(includesByKey[String(line?.key || '').trim()] ? { includes: includesByKey[String(line?.key || '').trim()] } : {}),
+      key: String(line?.key || '').trim() || 'other',
+      label: String(line?.label || line?.key || 'Item').trim(),
+      amount: Math.max(0, Math.round(Number(line?.amount || 0))),
+      cadence: ['usual', 'occasional', 'annual', 'once'].includes(line?.cadence) ? line.cadence : 'usual',
+      why: String(line?.why || ''),
+    }))
+    .filter(line => line.amount > 0);
+  const cushion = Math.max(0, Math.round(Number(data?.cushion || 0)));
+  const recommendedBudget = lines.reduce((sum, line) => sum + line.amount, 0) + cushion;
+  const cuts = budgetSuggestCuts(lines, cushion, plan.expectedParishIncome);
+
+  const actor = budgetAuditActor(data);
+  const nowIso = new Date().toISOString();
+  budgets[targetMonthKey] = {
+    ...plan,
+    lines,
+    cushion,
+    recommendedBudget,
+    statusLabel: cuts.status,
+    shortBy: cuts.shortBy,
+    suggestedCuts: cuts.cuts,
+    editedBy: budgetActorName(data),
+    editedAt: nowIso,
+  };
+  await writeMonthlyBudgets(DB, budgets);
+  await writeAuditLog(DB, 'budget_edited', `Monthly budget edited for ${targetMonthKey}`, actor);
+
+  // No 90% cap here (people can overrule the calculator/AI) — just a warning.
+  const warning = recommendedBudget > Math.round(Number(plan.expectedParishIncome || 0) * 0.9)
+    ? 'This is more than 90% of expected income'
+    : undefined;
+  return ok({ plan: budgets[targetMonthKey], ...(warning ? { warning } : {}) });
 }
 
 async function acceptMonthlyBudget(DB, data) {
@@ -4897,7 +4936,7 @@ async function acceptMonthlyBudget(DB, data) {
   const plan = budgets[targetMonthKey];
   if (!plan) return err('No budget plan found for that month', 404);
   if (plan.status === 'accepted') return ok({ plan });
-  const acceptedBy = String(data?.acceptedBy || '').trim() || 'Finance Portal';
+  const acceptedBy = budgetActorName(data);
   budgets[targetMonthKey] = {
     ...plan,
     status: 'accepted',
@@ -4905,114 +4944,102 @@ async function acceptMonthlyBudget(DB, data) {
     acceptedBy,
   };
   await writeMonthlyBudgets(DB, budgets);
-  await writeAuditLog(DB, 'budget_accepted', `Monthly budget accepted for ${targetMonthKey}`, acceptedBy);
+  await writeAuditLog(DB, 'budget_accepted', `Monthly budget accepted for ${targetMonthKey}`, budgetAuditActor(data));
+  return ok({ plan: budgets[targetMonthKey] });
+}
+
+async function reopenMonthlyBudget(DB, data) {
+  const targetMonthKey = String(data?.monthKey || '').trim();
+  if (!isValidMonthKey(targetMonthKey)) return err('monthKey must be YYYY-MM', 400);
+  const budgets = await loadMonthlyBudgets(DB);
+  const plan = budgets[targetMonthKey];
+  if (!plan) return err('No budget plan found for that month', 404);
+  if (plan.status !== 'accepted') return err('Only an accepted plan can be reopened', 400);
+  const reason = String(data?.reason || '').trim();
+  if (!reason) return err('A reason is required to reopen an accepted plan', 400);
+
+  const by = budgetActorName(data);
+  const role = String(data?.role || '').trim();
+  const nowIso = new Date().toISOString();
+  const historyEntry = {
+    at: nowIso,
+    action: 'reopened',
+    by,
+    role,
+    reason,
+    previouslyAcceptedBy: plan.acceptedBy || '',
+    previouslyAcceptedAt: plan.acceptedAt || '',
+  };
+  budgets[targetMonthKey] = {
+    ...plan,
+    status: 'draft',
+    acceptedAt: '',
+    acceptedBy: '',
+    history: [...(Array.isArray(plan.history) ? plan.history : []), historyEntry],
+  };
+  await writeMonthlyBudgets(DB, budgets);
+  await writeAuditLog(DB, 'budget_reopened', `Monthly budget reopened for ${targetMonthKey}: ${reason}`, budgetAuditActor(data));
   return ok({ plan: budgets[targetMonthKey] });
 }
 
 async function askBudgetAfford(DB, env, data) {
-  const targetMonthKey = String(data?.monthKey || '').trim();
   const idea = String(data?.idea || '').trim();
-  if (!isValidMonthKey(targetMonthKey)) return err('monthKey must be YYYY-MM', 400);
   if (!idea) return err('idea is required', 400);
-  const budgets = await loadMonthlyBudgets(DB);
-  const plan = budgets[targetMonthKey];
-  if (!plan) return err('No budget plan found for that month', 404);
+  const targetMonthKey = String(data?.monthKey || '').trim();
+
   const amount = Math.max(0, Math.round(Number(data?.amount || 0)));
-  const monthExpenses = await listExpensesForMonth(DB, targetMonthKey);
-  const spentTotal = budgetSumExpensesByCategory(monthExpenses).total;
-  const safe = budgetSafeToSpend(plan, spentTotal, amount);
+  const growth = Math.round(Number(data?.growth || 0));
+  const today = String(data?.today || '').trim() || new Date().toISOString().slice(0, 10);
+  const partsIn = data?.parts && typeof data.parts === 'object' ? data.parts : {};
 
-  // Optional 3-month rolling numbers computed client-side from real income/expense
-  // history (same trust boundary as the pack sent to /budget/generate). When present,
-  // they are the authoritative affordability signal — this single month's leftover is
-  // no longer the whole picture, since a fine "this month" can still break next month.
-  const rollingInput = data?.rolling && typeof data.rolling === 'object' ? data.rolling : null;
-  const rolling = rollingInput
-    ? budgetComputeAffordVerdict(rollingInput.expectedIncome3mo, rollingInput.committedSpend3mo, amount)
-    : null;
-  const effectiveVerdict = rolling ? rolling.verdict : safe.verdict;
-  const effectiveSafeAmount = rolling ? Math.max(0, Math.round(rolling.headroom)) : safe.safeExtra;
+  // Main goal (Part G): one figure, worked out the same way everywhere. The
+  // server recomputes it from the pieces — the AI never gets to invent the
+  // verdict or the numbers, only word the sentence.
+  const free = budgetFreeForNewThings(partsIn);
+  const answer = budgetAffordAnswer(amount, free.free, growth, today);
 
-  const ai = await callBudgetAdvisorJson(DB, env, budgetAffordPrompt(plan, idea, amount, safe, rolling), {
-    verdict: effectiveVerdict,
-    safeAmount: effectiveSafeAmount,
-    explanation: effectiveVerdict === 'no'
-      ? (rolling
-        ? `This would put the parish about ₦${Math.abs(Math.round(rolling.headroomAfterExtra)).toLocaleString('en-NG')} short over the next 3 months, so it should be postponed or reduced.`
-        : 'This request is above the safe extra room left in the plan right now, so it should be postponed, reduced, or matched with cuts elsewhere.')
-      : effectiveVerdict === 'stretch'
-        ? 'This may be possible, but the outlook is already tight — proceed only if it is urgent.'
-        : 'This still fits inside the expected spare room, so it appears affordable if no new pressure emerges.',
-  });
-  const affordEntry = {
-    at: new Date().toISOString(),
-    idea,
-    requestedAmount: amount,
-    spentTotal,
-    verdict: effectiveVerdict,
-    safeAmount: effectiveSafeAmount,
-  };
-  budgets[targetMonthKey] = {
-    ...plan,
-    affordLog: [...(Array.isArray(plan.affordLog) ? plan.affordLog : []), affordEntry].slice(-10),
-  };
-  await writeMonthlyBudgets(DB, budgets);
-  await writeAuditLog(DB, 'budget_afford_asked', `Afford check asked for ${targetMonthKey}: ${idea}${amount ? ` (${amount})` : ''}`, 'System');
+  const fallbackExplanation = answer.verdict === 'yes'
+    ? `Yes — ₦${amount.toLocaleString('en-NG')} leaves ₦${Math.max(0, Math.round(answer.freeAfter)).toLocaleString('en-NG')} free, and normal monthly spending is untouched.`
+    : answer.verdict === 'not_yet'
+      ? `Not yet — ₦${Math.max(0, Math.round(free.free)).toLocaleString('en-NG')} is free now. At about ₦${growth.toLocaleString('en-NG')} a month, ₦${amount.toLocaleString('en-NG')} is affordable around ${budgetFormatMonthLabel(answer.affordableMonthKey)}.`
+      : 'No — this would eat into normal monthly spending or the safety cushion.';
+
+  const ai = await callBudgetAdvisorJson(
+    DB, env,
+    budgetAffordPrompt(idea, amount, free, answer, today, growth),
+    { explanation: fallbackExplanation }
+  );
+
+  if (isValidMonthKey(targetMonthKey)) {
+    const budgets = await loadMonthlyBudgets(DB);
+    const plan = budgets[targetMonthKey];
+    if (plan) {
+      const affordEntry = {
+        at: new Date().toISOString(),
+        idea,
+        requestedAmount: amount,
+        verdict: answer.verdict,
+        free: free.free,
+        freeAfter: answer.freeAfter,
+      };
+      budgets[targetMonthKey] = {
+        ...plan,
+        affordLog: [...(Array.isArray(plan.affordLog) ? plan.affordLog : []), affordEntry].slice(-10),
+      };
+      await writeMonthlyBudgets(DB, budgets);
+    }
+  }
+  await writeAuditLog(DB, 'budget_afford_asked', `Afford check asked for ${targetMonthKey || 'general'}: ${idea}${amount ? ` (₦${amount.toLocaleString('en-NG')})` : ''}`, budgetAuditActor(data));
+
   return ok({
-    verdict: effectiveVerdict,
-    safeAmount: effectiveSafeAmount,
-    explanation: String(ai.data?.explanation || '').trim(),
-    aiVerdict: String(ai.data?.verdict || ''),
-    aiSafeAmount: Math.max(0, Math.round(Number(ai.data?.safeAmount || 0))),
-    rolling: rolling ? {
-      expectedIncome3mo: rolling.income,
-      committedSpend3mo: rolling.committed,
-      headroom: rolling.headroom,
-      headroomAfterExtra: rolling.headroomAfterExtra,
-      statusLabel: rolling.statusLabel,
-    } : null,
-    server: {
-      spentTotal,
-      leftoverAfterBudget: safe.leftoverAfterBudget,
-      leftoverAfterExtra: safe.leftoverAfterExtra,
-    },
+    verdict: answer.verdict,
+    free: free.free,
+    freeAfter: answer.freeAfter,
+    monthsNeeded: answer.monthsNeeded,
+    affordableMonthKey: answer.affordableMonthKey,
+    explanation: String(ai.data?.explanation || '').trim() || fallbackExplanation,
+    parts: free.parts,
     provider: ai.provider,
-    providerError: ai.error || '',
-  });
-}
-
-async function budgetOutlook(DB, env, data) {
-  const monthKeys = Array.isArray(data?.monthKeys) ? data.monthKeys.filter(isValidMonthKey) : [];
-  if (!monthKeys.length) return err('monthKeys must be an array of YYYY-MM values', 400);
-  const expectedIncome3mo = Math.max(0, Math.round(Number(data?.expectedIncome3mo || 0)));
-  const committedSpend3mo = Math.max(0, Math.round(Number(data?.committedSpend3mo || 0)));
-  const topDriver = String(data?.topDriver || '').trim().slice(0, 80);
-  // Never trust an AI (or a stale client) with the final verdict — recompute it
-  // deterministically from the two numbers, exactly like /budget/generate clamps
-  // AI-invented income back to the packed figures.
-  const verdictInfo = budgetComputeAffordVerdict(expectedIncome3mo, committedSpend3mo, 0);
-  const fallbackCaption = verdictInfo.verdict === 'no'
-    ? `You are about ₦${Math.abs(Math.round(verdictInfo.headroom)).toLocaleString('en-NG')} short over the next 3 months — hold off on new spending.`
-    : verdictInfo.statusLabel === 'tight'
-      ? `You have about ₦${Math.max(0, Math.round(verdictInfo.headroom)).toLocaleString('en-NG')} spare over the next 3 months, but it's tight, so spend carefully.`
-      : `You have about ₦${Math.max(0, Math.round(verdictInfo.headroom)).toLocaleString('en-NG')} spare over the next 3 months, so new spending looks safe.`;
-  const ai = await callBudgetAdvisorJson(DB, env, budgetOutlookPrompt({
-    expectedIncome3mo,
-    committedSpend3mo,
-    headroom: verdictInfo.headroom,
-    statusLabel: verdictInfo.statusLabel,
-    verdict: verdictInfo.verdict,
-    topDriver,
-  }), { caption: fallbackCaption });
-  return ok({
-    verdict: verdictInfo.verdict,
-    statusLabel: verdictInfo.statusLabel,
-    headroom: verdictInfo.headroom,
-    expectedIncome3mo,
-    committedSpend3mo,
-    caption: String(ai.data?.caption || '').trim() || fallbackCaption,
-    provider: ai.provider,
-    providerError: ai.error || '',
   });
 }
 

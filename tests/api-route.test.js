@@ -4256,308 +4256,438 @@ test('POST /api/petty-recalc subtracts petty_to_bank deposits (server recalc mat
   assert.equal(updatedFloat, 30000, 'the stored float is corrected to the same figure');
 });
 
-test('POST /api/budget/generate clamps invented income back to the packed numbers', async () => {
-  let monthlyBudgetsJson = '{}';
+// ── Budget tab tests (see scratchpad/api-contract.md) ──────────────────────
+
+// Shared DB mock for the budget endpoints: stores monthlyBudgets JSON in memory,
+// answers the DeepSeek-key lookup, and records every audit_log insert so tests
+// can assert on the "Name (role)" attribution.
+function createBudgetDBMock({ initialBudgets = {}, deepseekKey = null, deepseekModel = 'deepseek-v4-flash' } = {}) {
+  let monthlyBudgetsJson = JSON.stringify(initialBudgets);
+  const auditRows = [];
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT value FROM settings WHERE key='monthlyBudgets'/.test(sql)) return { value: monthlyBudgetsJson };
+          return null;
+        },
+        async all() {
+          if (/SELECT key,value FROM settings WHERE key IN \('ai_deepseek_key','ai_deepseek_model'\)/.test(sql)) {
+            if (!deepseekKey) return { results: [] };
+            return { results: [
+              { key: 'ai_deepseek_key', value: deepseekKey },
+              { key: 'ai_deepseek_model', value: deepseekModel },
+            ] };
+          }
+          return { results: [] };
+        },
+        async run() {
+          if (/INSERT OR REPLACE INTO settings/.test(sql) && statement._bound[0] === 'monthlyBudgets') {
+            monthlyBudgetsJson = statement._bound[1];
+          }
+          if (/INSERT INTO audit_log/.test(sql)) {
+            const [, type, detail, by_user] = statement._bound;
+            auditRows.push({ type, detail, by_user });
+          }
+          return { success: true };
+        },
+      };
+      return statement;
+    },
+  });
+  return { DB, auditRows, getBudgets: () => JSON.parse(monthlyBudgetsJson) };
+}
+
+function makeFlatMonths(monthKeys, parishIncome, expensesByCategory = {}) {
+  return monthKeys.map(monthKey => ({ monthKey, parishIncome, expensesByCategory, notesByCategory: {} }));
+}
+
+function historyMonthKeys(targetMonthKey, count = 12) {
+  const [y, m] = targetMonthKey.split('-').map(Number);
+  const keys = [];
+  for (let i = count; i >= 1; i--) {
+    const d = new Date(y, m - 1 - i, 1);
+    keys.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+  }
+  return keys;
+}
+
+test('POST /api/budget/generate refuses to overwrite an accepted plan (409)', async () => {
+  const { DB } = createBudgetDBMock({
+    initialBudgets: {
+      '2026-10': { monthKey: '2026-10', status: 'accepted', lines: [], cushion: 0, recommendedBudget: 0, acceptedBy: 'Pastor Ade', acceptedAt: '2026-09-01T00:00:00Z' },
+    },
+  });
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: '2026-10',
+      by: 'Jane Doe',
+      role: 'accountant',
+      pack: { months: makeFlatMonths(historyMonthKeys('2026-10'), 400000) },
+    }),
+    env: { DB },
+  });
+  const body = await readJson(response);
+  assert.equal(response.status, 409);
+  assert.equal(body.error, 'This plan is accepted. Reopen it first.');
+});
+
+test('POST /api/budget/generate returns a friendly error when there is no history yet', async () => {
+  const { DB } = createBudgetDBMock({});
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: '2026-10',
+      by: 'Jane Doe',
+      role: 'accountant',
+      pack: { months: makeFlatMonths(historyMonthKeys('2026-10'), 0) },
+    }),
+    env: { DB },
+  });
+  const body = await readJson(response);
+  assert.equal(response.status, 400);
+  assert.equal(body.error, 'Not enough past records yet — record at least one month of income and expenses first.');
+});
+
+test('reopen then generate works, and the plan history records the reopen', async () => {
+  const { DB, getBudgets, auditRows } = createBudgetDBMock({
+    initialBudgets: {
+      '2026-10': {
+        monthKey: '2026-10', status: 'accepted', lines: [{ key: 'power', label: 'Power & Energy', amount: 100000, cadence: 'usual', why: '' }],
+        cushion: 20000, recommendedBudget: 120000, expectedParishIncome: 400000, statusLabel: 'enough', shortBy: 0, suggestedCuts: [],
+        acceptedBy: 'Pastor Ade', acceptedAt: '2026-09-01T00:00:00Z', history: [], affordLog: [],
+      },
+    },
+  });
+
+  const reopenResponse = await onRequest({
+    request: createRequest('https://example.com/api/budget/reopen', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant', reason: 'NEPA tariff went up',
+    }),
+    env: { DB },
+  });
+  const reopenBody = await readJson(reopenResponse);
+  assert.equal(reopenResponse.status, 200);
+  assert.equal(reopenBody.plan.status, 'draft');
+  assert.equal(reopenBody.plan.acceptedBy, '');
+  assert.equal(reopenBody.plan.acceptedAt, '');
+  assert.equal(reopenBody.plan.history.length, 1);
+  assert.equal(reopenBody.plan.history[0].action, 'reopened');
+  assert.equal(reopenBody.plan.history[0].by, 'Jane Doe');
+  assert.equal(reopenBody.plan.history[0].reason, 'NEPA tariff went up');
+  assert.equal(reopenBody.plan.history[0].previouslyAcceptedBy, 'Pastor Ade');
+
+  const generateResponse = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant',
+      pack: { months: makeFlatMonths(historyMonthKeys('2026-10'), 400000, { power: 100000 }) },
+    }),
+    env: { DB },
+  });
+  const generateBody = await readJson(generateResponse);
+  assert.equal(generateResponse.status, 200);
+  assert.equal(generateBody.plan.status, 'draft');
+  assert.equal(generateBody.plan.history.length, 1, 'the reopen history entry survives a regenerate');
+  assert.equal(generateBody.plan.history[0].action, 'reopened');
+  assert.deepEqual(getBudgets()['2026-10'].history.map(h => h.action), ['reopened']);
+
+  assert.ok(auditRows.some(row => row.type === 'budget_reopened' && row.by_user === 'Jane Doe (accountant)'));
+  assert.ok(auditRows.some(row => row.type === 'budget_generated' && row.by_user === 'Jane Doe (accountant)'));
+});
+
+test('POST /api/budget/generate: AI line clamped to +/-20%, a missing usual line is restored, and RCCG demands are never merged', async () => {
+  const targetMonthKey = '2026-10';
+  const baselineLines = [
+    { key: 'power', label: 'Power & Energy', amount: 120000, cadence: 'usual', why: '', total12: 1440000 },
+    { key: 'facility', label: 'Facility & Cleaning', amount: 90000, cadence: 'usual', why: '', total12: 1080000 },
+    { key: 'transport', label: 'Transport', amount: 80000, cadence: 'usual', why: '', total12: 960000 },
+    { key: 'office', label: 'Office', amount: 70000, cadence: 'usual', why: '', total12: 840000 },
+    { key: 'hospitality', label: 'Hospitality', amount: 60000, cadence: 'occasional', why: '', total12: 720000 },
+    { key: 'events', label: 'Events', amount: 50000, cadence: 'occasional', why: '', total12: 600000 },
+    { key: 'security', label: 'Security', amount: 40000, cadence: 'usual', why: '', total12: 480000 },
+    { key: 'welfare', label: 'Church Welfare', amount: 30000, cadence: 'occasional', why: '', total12: 360000 },
+    { key: 'repairs', label: 'Repairs', amount: 20000, cadence: 'occasional', why: '', total12: 240000 },
+    { key: 'rccg_proj', label: 'RCCG demands (besides remittance)', amount: 45000, cadence: 'annual', why: '', total12: 540000 },
+  ];
+  const validKeys = baselineLines.map(l => l.key).filter(k => k !== 'rccg_proj');
+
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({
     choices: [{
       message: {
         content: JSON.stringify({
-          expectedGrossIncome: 999999,
-          expectedRemittance: 888888,
-          expectedParishIncome: 777777,
-          recommendedBudget: 123456,
-          cushion: 10000,
-          statusLabel: 'enough',
-          summary: 'Draft budget from AI.',
-          ignored: ['harvest Sunday inflated income'],
+          summary: 'AI drafted plan.',
           lines: [
-            { key: 'power', label: 'Power & Energy', amount: 25000, cadence: 'usual', why: 'Generator and light', expenseCategory: 'power' },
-            { key: 'facility', label: 'Facility & Cleaning', amount: 15000, cadence: 'usual', why: 'Cleaning and minor supplies', expenseCategory: 'facility' },
+            { key: 'power', label: 'Power & Energy', amount: 300000, cadence: 'usual', why: 'Diesel price rose sharply' },
+            { key: 'facility', label: 'Facility & Cleaning', amount: 90000, cadence: 'usual', why: '' },
+            { key: 'transport', label: 'Transport', amount: 80000, cadence: 'usual', why: '' },
+            { key: 'office', label: 'Office', amount: 70000, cadence: 'usual', why: '' },
+            { key: 'hospitality', label: 'Hospitality', amount: 60000, cadence: 'occasional', why: '' },
+            { key: 'events', label: 'Events', amount: 50000, cadence: 'occasional', why: '' },
+            { key: 'welfare', label: 'Church Welfare', amount: 30000, cadence: 'occasional', why: '' },
+            { key: 'other_small', label: 'Other small costs', amount: 20000, cadence: 'occasional', why: '' },
+            // security (a "usual" line) and rccg_proj are both deliberately left out.
           ],
         }),
       },
     }],
   }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
+  const { DB, auditRows } = createBudgetDBMock({ deepseekKey: 'ds-key' });
   const response = await onRequest({
     request: createRequest('https://example.com/api/budget/generate', 'POST', {
-      monthKey: '2026-10',
-      churchName: 'RCCG Kingdom Parish',
+      monthKey: targetMonthKey, churchName: 'RCCG Kingdom Parish', by: 'Jane Doe', role: 'accountant',
       pack: {
-        historyMonthsUsed: 6,
-        months: [
-          { monthKey: '2026-04', grossIncome: 100000, remittanceDue: 30000, parishIncomeAfterRemittance: 70000, expensesByCategory: { power: 20000 }, notes: ['normal month'] },
-          { monthKey: '2026-05', grossIncome: 140000, remittanceDue: 40000, parishIncomeAfterRemittance: 100000, expensesByCategory: { power: 25000 }, notes: ['normal month'] },
-        ],
-        categoryHints: [
-          { key: 'power', label: 'Power & Energy', avgAmount: 22000, cadence: 'usual', expenseCategory: 'power' },
-        ],
+        months: makeFlatMonths(historyMonthKeys(targetMonthKey), 1000000),
+        baselineLines,
+        maxByKey: { power: 200000 },
+        validKeys,
       },
     }),
-    env: { DB: createDBMock({
-      onPrepare(sql) {
-        const statement = {
-          _bound: [],
-          bind(...args) { statement._bound = args; return statement; },
-          async first() {
-            if (/SELECT value FROM settings WHERE key='monthlyBudgets'/.test(sql)) return { value: monthlyBudgetsJson };
-            return null;
-          },
-          async all() {
-            if (/SELECT key,value FROM settings WHERE key IN \('ai_deepseek_key','ai_deepseek_model'\)/.test(sql)) {
-              return { results: [
-                { key: 'ai_deepseek_key', value: 'ds-key' },
-                { key: 'ai_deepseek_model', value: 'deepseek-v4-flash' },
-              ] };
-            }
-            return { results: [] };
-          },
-          async run() {
-            if (/INSERT OR REPLACE INTO settings/.test(sql) && statement._bound[0] === 'monthlyBudgets') monthlyBudgetsJson = statement._bound[1];
-            return { success: true };
-          },
-        };
-        return statement;
-      },
-    }) },
+    env: { DB },
   });
   globalThis.fetch = originalFetch;
   const body = await readJson(response);
 
   assert.equal(response.status, 200);
-  assert.equal(body.plan.expectedGrossIncome, 120000, 'uses averaged pack gross, not invented AI income');
-  assert.equal(body.plan.expectedRemittance, 35000, 'uses averaged pack remittance, not invented AI remittance');
-  assert.equal(body.plan.expectedParishIncome, 85000, 'uses averaged pack parish income, not invented AI parish income');
-  assert.equal(body.plan.recommendedBudget, 50000, 'recommended total is recomputed from lines + cushion');
+  assert.equal(body.provider, 'deepseek');
+  assert.equal(body.plan.source, 'ai');
+
+  const byKey = key => body.plan.lines.find(l => l.key === key);
+  const power = byKey('power');
+  assert.ok(power, 'power line present');
+  assert.equal(power.amount, 144000, 'AI suggested 300000, limited to +20% of the 120000 baseline');
+  assert.equal(power.aiSuggested, 300000);
+
+  const security = byKey('security');
+  assert.ok(security, 'a missing "usual" line the AI left out is put back automatically');
+  assert.equal(security.amount, 40000);
+
+  const rccg = byKey('rccg_proj');
+  assert.ok(rccg, 'RCCG demands are always present, even when the AI drops them');
+  assert.equal(rccg.amount, 45000);
+
+  const otherSmall = byKey('other_small');
+  assert.ok(otherSmall, '"Other small costs" (the 9th+ categories) is its own line');
+  assert.equal(otherSmall.amount, 20000, 'RCCG demands are never folded into Other small costs');
+
+  assert.ok(auditRows.some(row => row.type === 'budget_generated' && row.by_user === 'Jane Doe (accountant)'));
 });
 
-test('POST /api/budget/afford overrides AI with server-side leftover math', async () => {
+test('POST /api/budget/generate falls back to the calculator when the AI returns junk', async () => {
+  const targetMonthKey = '2026-10';
+  const baselineLines = [
+    { key: 'power', label: 'Power & Energy', amount: 120000, cadence: 'usual', why: '', total12: 1440000 },
+    { key: 'rccg_proj', label: 'RCCG demands (besides remittance)', amount: 45000, cadence: 'annual', why: '', total12: 540000 },
+  ];
+
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({
-    choices: [{
-      message: {
-        content: JSON.stringify({
-          verdict: 'yes',
-          safeAmount: 999999,
-          explanation: 'The AI thinks there is plenty of room.',
-        }),
-      },
-    }],
+    choices: [{ message: { content: 'not even json {{{' } }],
   }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
-  const monthlyBudgetsJson = JSON.stringify({
-    '2026-09': {
-      monthKey: '2026-09',
-      status: 'accepted',
-      expectedGrossIncome: 150000,
-      expectedRemittance: 40000,
-      expectedParishIncome: 110000,
-      recommendedBudget: 100000,
-      statusLabel: 'tight',
-      summary: 'Accepted plan.',
-      ignored: [],
-      remittanceStrip: { label: 'Already spoken for (RCCG remittance)', amount: 40000 },
-      lines: [
-        { key: 'power', label: 'Power & Energy', amount: 50000, cadence: 'usual', why: 'Generator', expenseCategory: 'power' },
-        { key: 'facility', label: 'Facility & Cleaning', amount: 50000, cadence: 'usual', why: 'Cleaning', expenseCategory: 'facility' },
-      ],
-      cushion: 0,
-      affordLog: [],
+  const { DB } = createBudgetDBMock({ deepseekKey: 'ds-key' });
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: targetMonthKey, by: 'Jane Doe', role: 'accountant',
+      pack: {
+        months: makeFlatMonths(historyMonthKeys(targetMonthKey), 1000000),
+        baselineLines,
+        validKeys: ['power'],
+      },
+    }),
+    env: { DB },
+  });
+  globalThis.fetch = originalFetch;
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.plan.source, 'calculator');
+  assert.match(body.plan.summary, /Built by calculator \(AI unavailable\)/);
+  const power = body.plan.lines.find(l => l.key === 'power');
+  assert.equal(power.amount, 120000);
+});
+
+test('POST /api/budget/generate: spending above income is shown as Short honestly, with cuts that spare RCCG/power/security', async () => {
+  const targetMonthKey = '2026-10';
+  const baselineLines = [
+    { key: 'power', label: 'Power & Energy', amount: 150000, cadence: 'usual', why: '', total12: 1800000 },
+    { key: 'security', label: 'Security', amount: 100000, cadence: 'usual', why: '', total12: 1200000 },
+    { key: 'rccg_proj', label: 'RCCG demands (besides remittance)', amount: 50000, cadence: 'annual', why: '', total12: 600000 },
+    { key: 'hospitality', label: 'Hospitality', amount: 80000, cadence: 'occasional', why: '', total12: 960000 },
+    { key: 'events', label: 'Events', amount: 88000, cadence: 'occasional', why: '', total12: 1056000 },
+  ];
+  // No DeepSeek key configured — callBudgetAdvisorJson falls straight to the deterministic
+  // fallback, so the calculator plan is used and lines are guaranteed unshrunk.
+  const { DB } = createBudgetDBMock({});
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: targetMonthKey, by: 'Jane Doe', role: 'accountant',
+      pack: {
+        months: makeFlatMonths(historyMonthKeys(targetMonthKey), 400000),
+        baselineLines,
+        validKeys: baselineLines.map(l => l.key),
+      },
+    }),
+    env: { DB },
+  });
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.plan.expectedParishIncome, 400000);
+  assert.equal(body.plan.cushion, 32000, 'cushion is max(5000, 8% of expected income)');
+  assert.equal(body.plan.recommendedBudget, 500000, '150k+100k+50k+80k+88k lines + 32k cushion');
+  assert.equal(body.plan.statusLabel, 'short');
+  assert.equal(body.plan.shortBy, 100000);
+
+  const lineAmount = key => body.plan.lines.find(l => l.key === key)?.amount;
+  assert.equal(lineAmount('power'), 150000, 'lines keep their realistic amounts — never shrunk');
+  assert.equal(lineAmount('security'), 100000);
+  assert.equal(lineAmount('rccg_proj'), 50000);
+
+  const cutKeys = body.plan.suggestedCuts.map(c => c.key);
+  assert.ok(!cutKeys.includes('rccg_proj'), 'RCCG demands are never suggested as a cut');
+  assert.ok(!cutKeys.includes('power'), 'Power is never suggested as a cut');
+  assert.ok(!cutKeys.includes('security'), 'Security is never suggested as a cut');
+  const totalCut = body.plan.suggestedCuts.reduce((sum, c) => sum + c.amount, 0);
+  assert.equal(totalCut, 100000, 'suggested cuts add up to exactly the shortfall');
+});
+
+test('POST /api/budget/save recomputes totals/status, refuses an accepted plan, and blocks remittance-like lines except rccg_proj', async () => {
+  const { DB, auditRows } = createBudgetDBMock({
+    initialBudgets: {
+      '2026-10': {
+        monthKey: '2026-10', status: 'draft',
+        lines: [{ key: 'power', label: 'Power & Energy', amount: 120000, cadence: 'usual', why: '' }],
+        cushion: 30000, recommendedBudget: 150000, expectedParishIncome: 400000, statusLabel: 'enough', shortBy: 0, suggestedCuts: [],
+        history: [], affordLog: [],
+      },
+      '2026-11': {
+        monthKey: '2026-11', status: 'accepted',
+        lines: [], cushion: 0, recommendedBudget: 0, expectedParishIncome: 400000, statusLabel: 'enough', shortBy: 0, suggestedCuts: [],
+      },
     },
   });
 
-  const response = await onRequest({
-    request: createRequest('https://example.com/api/budget/afford', 'POST', {
-      monthKey: '2026-09',
-      idea: 'Extra diesel purchase',
-      amount: 5000,
-    }),
-    env: { DB: createDBMock({
-      onPrepare(sql) {
-        const statement = {
-          bind() { return statement; },
-          async first() {
-            if (/SELECT value FROM settings WHERE key='monthlyBudgets'/.test(sql)) return { value: monthlyBudgetsJson };
-            return null;
-          },
-          async all() {
-            if (/FROM expenses/.test(sql)) {
-              return { results: [
-                { id: 'EXP-1', category: 'power', amount: 45000, description: 'Fuel', sub_category: 'Fuel', date: '2026-09-05', created_at: '2026-09-05T10:00:00Z', remittance_ref: '' },
-                { id: 'EXP-2', category: 'facility', amount: 25000, description: 'Cleaning', sub_category: 'Cleaning', date: '2026-09-06', created_at: '2026-09-06T10:00:00Z', remittance_ref: '' },
-              ] };
-            }
-            if (/SELECT key,value FROM settings WHERE key IN \('ai_deepseek_key','ai_deepseek_model'\)/.test(sql)) {
-              return { results: [
-                { key: 'ai_deepseek_key', value: 'ds-key' },
-                { key: 'ai_deepseek_model', value: 'deepseek-v4-flash' },
-              ] };
-            }
-            return { results: [] };
-          },
-          async run() { return { success: true }; },
-        };
-        return statement;
-      },
-    }) },
-  });
-  globalThis.fetch = originalFetch;
-  const body = await readJson(response);
-
-  assert.equal(response.status, 200);
-  assert.equal(body.safeAmount, 30000, 'server returns remaining budget room, not AI-invented number');
-  assert.equal(body.verdict, 'stretch', 'tight plans stay stretch even if AI says yes');
-  assert.equal(body.aiSafeAmount, 999999, 'raw AI answer is still returned for comparison');
-});
-
-test('POST /api/budget/afford uses the 3-month rolling outlook as the authoritative verdict when supplied', async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    choices: [{
-      message: {
-        content: JSON.stringify({
-          verdict: 'yes',
-          safeAmount: 999999,
-          explanation: 'The AI thinks there is plenty of room.',
-        }),
-      },
-    }],
-  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-
-  const monthlyBudgetsJson = JSON.stringify({
-    '2026-09': {
-      monthKey: '2026-09',
-      status: 'accepted',
-      expectedGrossIncome: 150000,
-      expectedRemittance: 40000,
-      expectedParishIncome: 110000,
-      recommendedBudget: 20000,
-      statusLabel: 'enough',
-      summary: 'Accepted plan.',
-      ignored: [],
-      remittanceStrip: { label: 'Already spoken for (RCCG remittance)', amount: 40000 },
+  // Save on a draft: amounts and status are recomputed, editedBy/editedAt are set.
+  const saveResponse = await onRequest({
+    request: createRequest('https://example.com/api/budget/save', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant', cushion: 30000,
       lines: [
-        { key: 'power', label: 'Power & Energy', amount: 20000, cadence: 'usual', why: 'Generator', expenseCategory: 'power' },
+        { key: 'power', label: 'Power & Energy', amount: 100000, cadence: 'usual', why: 'trimmed' },
+        { key: 'welfare', label: 'Church Welfare', amount: 40000, cadence: 'occasional', why: 'new line' },
       ],
-      cushion: 0,
-      affordLog: [],
-    },
-  });
-
-  const response = await onRequest({
-    request: createRequest('https://example.com/api/budget/afford', 'POST', {
-      monthKey: '2026-09',
-      idea: 'New sound equipment',
-      amount: 50000,
-      rolling: { expectedIncome3mo: 300000, committedSpend3mo: 280000 },
     }),
-    env: { DB: createDBMock({
-      onPrepare(sql) {
-        const statement = {
-          bind() { return statement; },
-          async first() {
-            if (/SELECT value FROM settings WHERE key='monthlyBudgets'/.test(sql)) return { value: monthlyBudgetsJson };
-            return null;
-          },
-          async all() {
-            if (/FROM expenses/.test(sql)) return { results: [] };
-            if (/SELECT key,value FROM settings WHERE key IN \('ai_deepseek_key','ai_deepseek_model'\)/.test(sql)) {
-              return { results: [
-                { key: 'ai_deepseek_key', value: 'ds-key' },
-                { key: 'ai_deepseek_model', value: 'deepseek-v4-flash' },
-              ] };
-            }
-            return { results: [] };
-          },
-          async run() { return { success: true }; },
-        };
-        return statement;
-      },
-    }) },
+    env: { DB },
   });
-  globalThis.fetch = originalFetch;
-  const body = await readJson(response);
+  const saveBody = await readJson(saveResponse);
+  assert.equal(saveResponse.status, 200);
+  assert.equal(saveBody.plan.recommendedBudget, 170000, '100000 + 40000 + 30000 cushion');
+  assert.equal(saveBody.plan.editedBy, 'Jane Doe');
+  assert.ok(saveBody.plan.editedAt);
+  assert.equal(saveBody.plan.statusLabel, 'enough');
+  assert.ok(auditRows.some(row => row.type === 'budget_edited' && row.by_user === 'Jane Doe (accountant)'));
 
-  assert.equal(response.status, 200);
-  // 3-month headroom before the request is 300000-280000=20000; the 50000 idea pushes it to -30000,
-  // so the rolling outlook must say "no" even though this single month alone looks "enough" and the AI said "yes".
-  assert.equal(body.verdict, 'no', 'the 3-month outlook overrides both the single-month math and the AI verdict');
-  assert.equal(body.safeAmount, 20000, 'safe amount reflects 3-month headroom, not this month alone');
-  assert.ok(body.rolling, 'rolling breakdown is echoed back');
-  assert.equal(body.rolling.expectedIncome3mo, 300000);
-  assert.equal(body.rolling.committedSpend3mo, 280000);
+  // Save on an accepted plan is refused.
+  const acceptedResponse = await onRequest({
+    request: createRequest('https://example.com/api/budget/save', 'POST', {
+      monthKey: '2026-11', by: 'Jane Doe', role: 'accountant', cushion: 0, lines: [],
+    }),
+    env: { DB },
+  });
+  assert.equal(acceptedResponse.status, 409);
+
+  // A "Zonal / Area Joint" (legacy remittance) line is refused outright.
+  const zonalResponse = await onRequest({
+    request: createRequest('https://example.com/api/budget/save', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant', cushion: 30000,
+      lines: [{ key: 'zonal_area_joint', label: 'Zonal / Area Joint', amount: 20000, cadence: 'usual', why: '' }],
+    }),
+    env: { DB },
+  });
+  assert.equal(zonalResponse.status, 400);
+
+  // A line labelled like an HQ remittance/quota is refused unless its key is rccg_proj.
+  const hqResponse = await onRequest({
+    request: createRequest('https://example.com/api/budget/save', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant', cushion: 30000,
+      lines: [{ key: 'other', label: 'HQ remittance', amount: 20000, cadence: 'usual', why: '' }],
+    }),
+    env: { DB },
+  });
+  assert.equal(hqResponse.status, 400);
+
+  // RCCG Payments (rccg_proj) is always allowed, even with remittance-ish wording.
+  const rccgResponse = await onRequest({
+    request: createRequest('https://example.com/api/budget/save', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant', cushion: 30000,
+      lines: [{ key: 'rccg_proj', label: 'RCCG demands (besides remittance)', amount: 50000, cadence: 'annual', why: 'Convention levy due' }],
+    }),
+    env: { DB },
+  });
+  assert.equal(rccgResponse.status, 200);
+  const rccgBody = await readJson(rccgResponse);
+  assert.equal(rccgBody.plan.lines.find(l => l.key === 'rccg_proj')?.amount, 50000);
 });
 
-test('POST /api/budget/outlook returns a deterministic verdict and caption, ignoring an AI-invented number', async () => {
+test('POST /api/budget/afford: the worked example, "not yet" with growth, "no" without growth, and an AI-invented verdict is ignored', async () => {
+  const partsIn = {
+    availableNow: 1200000,
+    remainingThisMonth: 230000,
+    expectedRestOfMonth: 200000,
+    pendingUnpaid: 40000,
+    irregularReserve: 210000,
+    futureShortfall: 0,
+    safetyCushion: 200000,
+  };
+
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({
     choices: [{
       message: {
-        content: JSON.stringify({ caption: 'You have plenty of money, go wild!' }),
+        content: JSON.stringify({ verdict: 'no', explanation: 'The AI made this up and should be ignored.' }),
       },
     }],
   }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
-  const response = await onRequest({
-    request: createRequest('https://example.com/api/budget/outlook', 'POST', {
-      monthKeys: ['2026-09', '2026-10', '2026-11'],
-      expectedIncome3mo: 300000,
-      committedSpend3mo: 350000,
-      topDriver: 'Power & Energy',
+  const { DB, auditRows } = createBudgetDBMock({ deepseekKey: 'ds-key' });
+
+  // Yes — 300,000 fits inside the 720,000 free.
+  const yesResponse = await onRequest({
+    request: createRequest('https://example.com/api/budget/afford', 'POST', {
+      idea: 'New canopy', amount: 300000, today: '2026-09-24', growth: 70000, parts: partsIn, by: 'Jane Doe', role: 'accountant',
     }),
-    env: { DB: createDBMock({
-      onPrepare(sql) {
-        const statement = {
-          bind() { return statement; },
-          async first() { return null; },
-          async all() {
-            if (/SELECT key,value FROM settings WHERE key IN \('ai_deepseek_key','ai_deepseek_model'\)/.test(sql)) {
-              return { results: [
-                { key: 'ai_deepseek_key', value: 'ds-key' },
-                { key: 'ai_deepseek_model', value: 'deepseek-v4-flash' },
-              ] };
-            }
-            return { results: [] };
-          },
-          async run() { return { success: true }; },
-        };
-        return statement;
-      },
-    }) },
+    env: { DB },
   });
+  const yesBody = await readJson(yesResponse);
   globalThis.fetch = originalFetch;
-  const body = await readJson(response);
+  assert.equal(yesResponse.status, 200);
+  assert.equal(yesBody.free, 720000);
+  assert.equal(yesBody.verdict, 'yes', 'the AI invented "no" is ignored — the server computes the verdict itself');
+  assert.equal(yesBody.freeAfter, 420000);
+  assert.ok(auditRows.some(row => row.type === 'budget_afford_asked' && row.by_user === 'Jane Doe (accountant)'));
 
-  assert.equal(response.status, 200);
-  assert.equal(body.statusLabel, 'short', 'committed spend exceeds expected income, so status is short regardless of the AI caption');
-  assert.equal(body.verdict, 'no');
-  assert.equal(body.headroom, -50000);
-  assert.equal(body.caption, 'You have plenty of money, go wild!', 'AI caption text is used since it is still just phrasing, not a number');
-});
-
-test('POST /api/budget/outlook falls back to a deterministic caption when no AI provider is configured', async () => {
-  const response = await onRequest({
-    request: createRequest('https://example.com/api/budget/outlook', 'POST', {
-      monthKeys: ['2026-09', '2026-10', '2026-11'],
-      expectedIncome3mo: 360000,
-      committedSpend3mo: 240000,
+  // Not yet — 900,000 needs 3 more months of ~70,000/month growth from Sept 2026.
+  const notYetResponse = await onRequest({
+    request: createRequest('https://example.com/api/budget/afford', 'POST', {
+      idea: 'New bus', amount: 900000, today: '2026-09-24', growth: 70000, parts: partsIn, by: 'Jane Doe', role: 'accountant',
     }),
-    env: { DB: createDBMock({
-      onPrepare() {
-        const statement = {
-          bind() { return statement; },
-          async first() { return null; },
-          async all() { return { results: [] }; },
-          async run() { return { success: true }; },
-        };
-        return statement;
-      },
-    }) },
+    env: { DB: createBudgetDBMock({}).DB },
   });
-  const body = await readJson(response);
+  const notYetBody = await readJson(notYetResponse);
+  assert.equal(notYetResponse.status, 200);
+  assert.equal(notYetBody.verdict, 'not_yet');
+  assert.equal(notYetBody.affordableMonthKey, '2026-12');
 
-  assert.equal(response.status, 200);
-  assert.equal(body.verdict, 'yes');
-  assert.match(body.caption, /120,000/, 'deterministic fallback caption still states the correct spare amount');
+  // No — 900,000 with no growth (free money shrinking) is a flat no.
+  const noResponse = await onRequest({
+    request: createRequest('https://example.com/api/budget/afford', 'POST', {
+      idea: 'New bus', amount: 900000, today: '2026-09-24', growth: -30000, parts: partsIn, by: 'Jane Doe', role: 'accountant',
+    }),
+    env: { DB: createBudgetDBMock({}).DB },
+  });
+  const noBody = await readJson(noResponse);
+  assert.equal(noResponse.status, 200);
+  assert.equal(noBody.verdict, 'no');
 });

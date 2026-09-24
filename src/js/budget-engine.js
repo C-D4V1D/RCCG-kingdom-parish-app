@@ -642,18 +642,23 @@ export function matchActuals(plan, expenses = [], now = new Date()) {
   const countable = (Array.isArray(expenses) ? expenses : []).filter(expense => isCountableExpense(expense, { mode: 'tracking' }));
   const { byCategory, total } = sumExpensesByCategory(countable);
   const elapsed = elapsedPctForMonth(now, plan?.monthKey || monthKey(now));
-  const planCategories = new Set((plan?.lines || []).map(line => String(line?.expenseCategory || line?.key || 'other')));
+  // A merged line (e.g. "Other small costs") tracks every category it absorbed via `includes`.
+  const lineCategories = line => {
+    const own = String(line?.expenseCategory || line?.key || 'other');
+    return Array.isArray(line?.includes) && line.includes.length ? line.includes.map(String) : [own];
+  };
+  const planCategories = new Set((plan?.lines || []).flatMap(lineCategories));
   const lines = (plan?.lines || []).map(line => {
     const budgeted = roundNaira(line?.amount);
-    const categoryKey = String(line?.expenseCategory || line?.key || 'other');
-    const spent = roundNaira(byCategory[categoryKey] || 0);
+    const cats = new Set(lineCategories(line));
+    const spent = roundNaira([...cats].reduce((sum, cat) => sum + (byCategory[cat] || 0), 0));
     const leftover = budgeted - spent;
     const pctRatio = budgeted > 0 ? (spent / budgeted) : (spent > 0 ? 1 : 0);
     const pct = Math.round(pctRatio * 100);
     let pace = 'on_track';
     if (spent > budgeted) pace = 'over';
     else if (pctRatio > elapsed + 0.05) pace = 'watch';
-    const lineExpenses = countable.filter(expense => String(expense?.category || 'other') === categoryKey);
+    const lineExpenses = countable.filter(expense => cats.has(String(expense?.category || 'other')));
     const baseSubs = Array.isArray(line?.subs) && line.subs.length
       ? line.subs.map(sub => ({
           fingerprint: String(sub?.fingerprint || sub?.label || 'Other'),

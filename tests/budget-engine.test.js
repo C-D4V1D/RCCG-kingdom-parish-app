@@ -676,3 +676,23 @@ test('Free for new things — worked example from the contract', () => {
   const no = affordAnswer(900000, free.free, -30000, '2026-09-24');
   assert.equal(no.verdict, 'no');
 });
+
+test('matchActuals: a merged "Other small costs" line tracks every category it includes', () => {
+  const plan = {
+    monthKey: '2026-09',
+    lines: [
+      { key: 'power', label: 'Power', amount: 100000 },
+      { key: 'other_small', label: 'Other small costs', amount: 20000, includes: ['bank', 'comms'] },
+    ],
+    cushion: 0,
+  };
+  const expenses = [
+    { category: 'bank', amount: 3000, date: '2026-09-02', status: 'approved' },
+    { category: 'comms', amount: 5000, date: '2026-09-03', status: 'approved' },
+    { category: 'welfare', amount: 7000, date: '2026-09-04', status: 'approved' },
+  ];
+  const result = matchActuals(plan, expenses, new Date('2026-09-10T12:00:00'));
+  const other = result.lines.find(line => line.key === 'other_small');
+  assert.equal(other.spent, 8000);
+  assert.deepEqual(result.unplanned.map(item => item.key), ['welfare']);
+});
