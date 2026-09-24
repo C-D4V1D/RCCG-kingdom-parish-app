@@ -5587,15 +5587,19 @@ async function deleteKpscFinanceEntry(DB, id, auth) {
 async function getKpscCashCollection(DB) {
   const todayStr = new Date().toISOString().slice(0, 10);
 
-  // Unsettled partnership cash income lots
+  // Unsettled cash income lots — every cash income entry, not just partner pledge
+  // payments. Previously this filtered on category='partnership_pledge', which
+  // silently excluded cash recorded under any other income category (e.g. Welfare &
+  // Development Offering, one-time donations, other custom categories) from ever
+  // appearing as Cash in Hand.
   const { results: lots } = await DB.prepare(`
     SELECT f.id, f.date, f.amount, f.partner_id, f.recorded_by,
+           f.category, f.sub_category, f.narration,
            COALESCE(f.cash_holder,'') AS cash_holder,
            p.full_name AS partner_name
     FROM kpsc_finance_entries f
     LEFT JOIN kpsc_partners p ON p.id = f.partner_id
     WHERE f.payment_method = 'cash'
-      AND f.category = 'partnership_pledge'
       AND f.entry_type = 'income'
       AND COALESCE(f.handover_id, '') = ''
       AND COALESCE(f.deleted_at, '') = ''
@@ -5626,9 +5630,19 @@ async function getKpscCashCollection(DB) {
   for (const lot of allLots) {
     const h = getHolder(lot.cash_holder || lot.recorded_by || 'Unknown');
     h.collected += Number(lot.amount || 0);
-    // Lots without a partner_id are synthetic "change retained" entries created when a
-    // handover transfers less than the full ticked amount — label them accordingly.
-    const lotName = lot.partner_id ? (lot.partner_name || 'Unknown') : 'Cash retained (change)';
+    // Label priority: linked partner name > the synthetic "change retained" entry
+    // created when a handover transfers less than the full ticked amount > the
+    // entry's own narration > a humanized version of its category key.
+    let lotName;
+    if (lot.partner_id) {
+      lotName = lot.partner_name || 'Unknown';
+    } else if (lot.sub_category === 'retained_change') {
+      lotName = 'Cash retained (change)';
+    } else if (lot.narration) {
+      lotName = lot.narration;
+    } else {
+      lotName = String(lot.category || 'Cash income').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    }
     h.lots.push({ id: lot.id, date: lot.date, amount: Number(lot.amount || 0), partnerId: lot.partner_id, partnerName: lotName, isToday: lot.date === todayStr });
   }
   for (const exp of allExpenses) {
