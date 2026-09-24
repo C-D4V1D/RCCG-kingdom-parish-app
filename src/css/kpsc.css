@@ -1145,6 +1145,19 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-cash-holder-meta{font-size:11px;color:var(--text3);margin-top:2px;}
 .k-cash-holder-amount{font-size:14px;font-weight:700;color:var(--amber);font-variant-numeric:tabular-nums;flex-shrink:0;}
 .k-cash-card-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;}
+/* By Person / By Day — a view switch, deliberately not styled like an action button */
+.k-seg{display:inline-flex;background:rgba(0,0,0,.07);border-radius:999px;padding:3px;gap:2px;}
+.k-seg-btn{border:0;background:transparent;padding:6px 14px;border-radius:999px;font:inherit;font-size:12.5px;font-weight:600;color:var(--text2);cursor:pointer;}
+.k-seg-btn.active{background:#fff;color:var(--navy);box-shadow:0 1px 3px rgba(0,0,0,.18);}
+/* Confirm actions (transfers, deposits) share one green look, distinct from navy navigation */
+.kbtn-confirm{background:var(--green);color:#fff;border-color:var(--green);}
+.kbtn-confirm:hover{background:#14624b;border-color:#14624b;}
+.kbtn-confirm-outline{background:#fff;color:var(--green);border:1.5px solid var(--green);}
+.kbtn-confirm-outline:hover{background:#f0faf5;}
+/* Holder name + payments on the card open that holder's cash details */
+.k-cash-holder-link{flex:1;min-width:0;cursor:pointer;border-radius:6px;}
+.k-cash-holder-link .k-cash-holder-name::after{content:'\00a0›';color:var(--text3);font-weight:700;}
+.k-cash-holder-link:hover .k-cash-holder-name{text-decoration:underline;}
 
 /* Details modal — per-holder item rows */
 .k-cash-section-title{
