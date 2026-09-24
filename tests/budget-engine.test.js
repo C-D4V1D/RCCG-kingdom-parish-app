@@ -19,6 +19,19 @@ import BudgetEngine, {
   computeAffordVerdict,
   estimateTypicalBudget,
   rollingAfford,
+  isRemittanceExpenseLike,
+  isCountableExpense,
+  clampAiLines,
+  suggestCuts,
+  irregularReserve,
+  futureShortfall,
+  safetyCushion,
+  freeForNewThings,
+  growthPerMonth,
+  affordAnswer,
+  monthProgress,
+  RCCG_DEMANDS_KEY,
+  PROTECTED_FROM_CUTS,
 } from '../src/js/budget-engine.js';
 
 test('monthKey formats calendar months', () => {
@@ -27,9 +40,25 @@ test('monthKey formats calendar months', () => {
   assert.equal(BudgetEngine.nextMonthKey('2026-12'), '2027-01');
 });
 
-test('one-off spike is not usual', () => {
-  assert.equal(classifyCadence([{ amount: 0 }, { amount: 0 }, { amount: 180000, notes: 'Emergency roof repair' }, { amount: 0 }, { amount: 0 }, { amount: 0 }]), 'once');
+test('a single active month with no property context is an annual set-aside, not a one-off', () => {
+  // Contract 0.5/0.13: keyword-based "once" guessing from notes is gone. A single active
+  // month is only ever 'once' when categoryKey is 'property' and the note/subCategory is a
+  // clear single project (0.13). Otherwise it becomes 'annual' so the cost still gets budgeted.
+  assert.equal(classifyCadence([{ amount: 0 }, { amount: 0 }, { amount: 180000, notes: 'Emergency roof repair' }, { amount: 0 }, { amount: 0 }, { amount: 0 }]), 'annual');
   assert.equal(classifyCadence([12000, 11000, 13000, 12500, 14000, 12000]), 'usual');
+});
+
+test('classifyCadence only marks "once" for property with a clear single-project subCategory', () => {
+  const propertySeries = Array.from({ length: 12 }, () => ({ amount: 0 }));
+  propertySeries[6] = { amount: 900000, notes: 'Building construction and renovations' };
+  assert.equal(classifyCadence(propertySeries, { categoryKey: 'property' }), 'once');
+  // The same shape without categoryKey: 'property' must NOT be treated as once.
+  assert.equal(classifyCadence(propertySeries), 'annual');
+  // A welfare "funeral" note must never trigger once (0.5) — even under categoryKey 'welfare'.
+  const welfareSeries = Array.from({ length: 12 }, () => ({ amount: 0 }));
+  welfareSeries[2] = { amount: 80000, notes: 'Burial support - funeral' };
+  welfareSeries[6] = { amount: 100000, notes: 'Hospital bill' };
+  assert.equal(classifyCadence(welfareSeries, { categoryKey: 'welfare' }), 'annual');
 });
 
 test('remittance is peeled off parish income like COGS', () => {
@@ -48,14 +77,16 @@ test('children dept cash is not parish income', () => {
   assert.equal(r.parishIncome, 0);
 });
 
-test('packHistory excludes remittance-style expenses from operating totals', () => {
+test('packHistory only excludes expenses actually linked to a remittance payment (contract 0.12)', () => {
+  // Keyword-guessing on notes ("headquarters", "HQ share" etc.) is gone: only remittanceId/
+  // remittanceRef or the legacy zonal_area_joint category are excluded.
   const packed = packHistory({
     incomeRecords: [
       { date: '2026-08-03', totalCollection: 180000, childrenOffering: 0 },
     ],
     expenses: [
       { date: '2026-08-05', category: 'power', amount: 20000, description: 'Generator fuel' },
-      { date: '2026-08-10', category: 'rccg_proj', amount: 60000, description: 'RCCG remittance HQ share' },
+      { date: '2026-08-10', category: 'rccg_proj', amount: 60000, description: 'RCCG remittance HQ share', remittanceRef: 'rem_1' },
     ],
     remittanceCalcsByMonth: {
       '2026-08': { totalNatl: 50000 },
@@ -203,7 +234,7 @@ test('matchActuals returns line and total comparison math for accepted plans', (
   assert.equal(comparison.totals.leftover, 90000);
 });
 
-test('matchActuals derives display note subs when plan has none', () => {
+test('matchActuals derives display subs from expense subCategory when plan has none (contract: Tracking)', () => {
   const comparison = matchActuals({
     monthKey: '2026-09',
     recommendedBudget: 50000,
@@ -211,13 +242,17 @@ test('matchActuals derives display note subs when plan has none', () => {
       { key: 'power', label: 'Power', amount: 40000, expenseCategory: 'power' },
     ],
   }, [
-    { category: 'power', amount: 10000, description: 'Generator diesel purchase' },
-    { category: 'power', amount: 5000, description: 'NEPA prepaid token' },
+    { category: 'power', amount: 10000, subCategory: 'Diesel', description: 'Generator diesel purchase' },
+    { category: 'power', amount: 5000, subCategory: 'NEPA Token', description: 'NEPA prepaid token' },
+    { category: 'power', amount: 2000, description: 'Miscellaneous power cost' },
   ], new Date('2026-09-10T12:00:00Z'));
   const subs = comparison.lines[0].subs;
-  assert.equal(subs.length, 2);
+  assert.equal(subs.length, 3);
+  assert.ok(subs.some(item => item.label === 'Diesel'));
+  assert.ok(subs.some(item => item.label === 'NEPA Token'));
+  assert.ok(subs.some(item => item.label === 'Other'), 'expense with no subCategory falls back to Other');
   assert.equal(subs.reduce((sum, item) => sum + item.budgeted, 0), 40000);
-  assert.equal(subs.reduce((sum, item) => sum + item.spent, 0), 15000);
+  assert.equal(subs.reduce((sum, item) => sum + item.spent, 0), 17000);
 });
 
 test('robustMonthlySeries excludes one-off spike months from the typical value', () => {
@@ -243,19 +278,20 @@ test('robustMonthlySeries handles empty and short histories', () => {
   assert.equal(single.confidence, 'low');
 });
 
-test('suggestCategoryAmount zeroes one-off spends and budgets usual lines at the typical month', () => {
+test('suggestCategoryAmount keeps usual lines at the typical month, and zeroes only clear one-off property projects', () => {
   const months = [
-    { monthKey: '2026-04', expensesByCategory: { power: 30000 }, notes: [] },
-    { monthKey: '2026-05', expensesByCategory: { power: 32000 }, notes: [] },
-    { monthKey: '2026-06', expensesByCategory: { power: 28000 }, notes: [] },
-    { monthKey: '2026-07', expensesByCategory: { power: 31000, property: 150000 }, notes: ['Emergency roof repair'] },
-    { monthKey: '2026-08', expensesByCategory: { power: 29000 }, notes: [] },
-    { monthKey: '2026-09', expensesByCategory: { power: 30000 }, notes: [] },
+    { monthKey: '2026-04', expensesByCategory: { power: 30000 }, notesByCategory: {} },
+    { monthKey: '2026-05', expensesByCategory: { power: 32000 }, notesByCategory: {} },
+    { monthKey: '2026-06', expensesByCategory: { power: 28000 }, notesByCategory: {} },
+    { monthKey: '2026-07', expensesByCategory: { power: 31000, property: 150000 }, notesByCategory: { property: ['Building construction and renovations'] } },
+    { monthKey: '2026-08', expensesByCategory: { power: 29000 }, notesByCategory: {} },
+    { monthKey: '2026-09', expensesByCategory: { power: 30000 }, notesByCategory: {} },
   ];
   const power = suggestCategoryAmount(months, 'power');
   assert.equal(power.cadence, 'usual');
   assert.equal(power.amount, 30000);
   const property = suggestCategoryAmount(months, 'property');
+  assert.equal(property.cadence, 'once');
   assert.equal(property.amount, 0);
 });
 
@@ -392,4 +428,251 @@ test('rollingAfford factors in a requested extra amount for the idea-affordabili
   assert.equal(outlook.headroom, 30000);
   assert.equal(outlook.headroomAfterExtra, -10000);
   assert.equal(outlook.verdict, 'no');
+});
+
+// ---------------------------------------------------------------------------
+// Contract: expense filters
+// ---------------------------------------------------------------------------
+
+test('isRemittanceExpenseLike only matches remittance-linked or legacy zonal_area_joint expenses (0.12)', () => {
+  assert.equal(isRemittanceExpenseLike({ remittanceRef: 'r1' }), true);
+  assert.equal(isRemittanceExpenseLike({ remittanceId: 'r2' }), true);
+  assert.equal(isRemittanceExpenseLike({ category: 'zonal_area_joint' }), true);
+  assert.equal(isRemittanceExpenseLike({ category: 'rccg_proj', notes: 'headquarters quota seed offering' }), false);
+});
+
+test('isCountableExpense: history mode wants approved (or legacy blank status) only, tracking mode excludes only rejected (A1)', () => {
+  assert.equal(isCountableExpense({ status: 'approved', amount: 100 }, { mode: 'history' }), true);
+  assert.equal(isCountableExpense({ amount: 100 }, { mode: 'history' }), true, 'legacy rows with no status are treated as approved');
+  assert.equal(isCountableExpense({ status: 'pending', amount: 100 }, { mode: 'history' }), false);
+  assert.equal(isCountableExpense({ status: 'rejected', amount: 100 }, { mode: 'history' }), false);
+  assert.equal(isCountableExpense({ status: 'pending', amount: 100 }, { mode: 'tracking' }), true);
+  assert.equal(isCountableExpense({ status: 'rejected', amount: 100 }, { mode: 'tracking' }), false);
+  assert.equal(isCountableExpense({ status: 'approved', amount: 100, remittanceRef: 'r1' }, { mode: 'tracking' }), false);
+});
+
+// ---------------------------------------------------------------------------
+// Contract: cadence & amounts (12-month history)
+// ---------------------------------------------------------------------------
+
+test('a ₦240,000 bill paid once in 12 months becomes a ₦20,000/month annual set-aside (0.4)', () => {
+  const months = Array.from({ length: 12 }, () => ({ expensesByCategory: {}, notesByCategory: {} }));
+  months[3].expensesByCategory = { insurance: 240000 };
+  const result = suggestCategoryAmount(months, 'insurance');
+  assert.equal(result.cadence, 'annual');
+  assert.equal(result.amount, 20000);
+});
+
+test('RCCG demands (rccg_proj) are always a 12-month set-aside, even with an "Emergency" subCategory (0.12)', () => {
+  const months = Array.from({ length: 12 }, () => ({ expensesByCategory: {}, notesByCategory: {} }));
+  months[1].expensesByCategory = { rccg_proj: 150000 };
+  months[1].notesByCategory = { rccg_proj: ['Province programme'] };
+  months[4].expensesByCategory = { rccg_proj: 200000 };
+  months[4].notesByCategory = { rccg_proj: ['Project levy'] };
+  months[7].expensesByCategory = { rccg_proj: 100000 };
+  months[7].notesByCategory = { rccg_proj: ['Special / Emergency Request from RCCG Authorities'] };
+  const result = suggestCategoryAmount(months, RCCG_DEMANDS_KEY);
+  assert.equal(result.amount, 37500);
+  assert.notEqual(result.cadence, 'once');
+});
+
+// ---------------------------------------------------------------------------
+// Contract: packHistory (0.1, 0.2, 0.3, 0.5, 0.12)
+// ---------------------------------------------------------------------------
+
+test('packHistory excludes the current unfinished month using the target-relative cutoff (0.2)', () => {
+  const packed = packHistory({
+    incomeRecords: [],
+    expenses: [],
+    months: 12,
+    targetMonthKey: '2026-10',
+    today: '2026-09-24',
+  });
+  assert.equal(packed.months.length, 12);
+  assert.equal(packed.months[0].monthKey, '2025-09');
+  assert.equal(packed.months[packed.months.length - 1].monthKey, '2026-08');
+  assert.ok(!packed.byMonth['2026-09'], 'the unfinished current month must not appear in history');
+});
+
+test('packHistory passes through the caller-supplied net-local-minus-quotas parish income (0.1)', () => {
+  const packed = packHistory({
+    incomeRecords: [{ date: '2026-08-03', totalCollection: 900000, childrenOffering: 0 }],
+    expenses: [],
+    parishIncomeByMonth: { '2026-08': 460000 },
+    months: 1,
+    today: '2026-09-01',
+  });
+  assert.equal(packed.byMonth['2026-08'].parishIncome, 460000);
+  assert.equal(packed.byMonth['2026-08'].parishIncomeAfterRemittance, 460000);
+});
+
+test('packHistory: a "funeral" note on Welfare never affects Security\'s cadence (0.5)', () => {
+  const monthKeys = ['2025-09', '2025-10', '2025-11', '2025-12', '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-08'];
+  const expenses = [];
+  for (const key of monthKeys) {
+    expenses.push({ date: `${key}-05`, category: 'security', amount: 40000, status: 'approved', subCategory: 'Guard salary' });
+  }
+  expenses.push({ date: '2026-03-10', category: 'welfare', amount: 80000, status: 'approved', notes: 'Burial support - funeral' });
+
+  const packed = packHistory({ incomeRecords: [], expenses, months: 12, today: '2026-09-24' });
+  const security = suggestCategoryAmount(packed.months, 'security');
+  const welfare = suggestCategoryAmount(packed.months, 'welfare');
+  assert.equal(security.cadence, 'usual');
+  assert.equal(security.amount, 40000);
+  assert.notEqual(welfare.cadence, 'once');
+  assert.equal(welfare.amount, Math.round(80000 / 12));
+});
+
+// ---------------------------------------------------------------------------
+// Contract: AI guardrails
+// ---------------------------------------------------------------------------
+
+test('clampAiLines clamps AI amounts to ±20% of the baseline, restores missing usual lines, and drops unknown keys (0.6)', () => {
+  const baseline = [
+    { key: 'power', label: 'Power', amount: 120000, cadence: 'usual', why: 'Typical month' },
+    { key: 'security', label: 'Security', amount: 80000, cadence: 'usual', why: 'Typical month' },
+  ];
+  const aiLines = [
+    { key: 'power', amount: 300000, why: 'Diesel price rose' },
+    { key: 'made_up_category', amount: 50000, why: 'Guessed' },
+  ];
+  const { lines, notes } = clampAiLines(aiLines, baseline, { validKeys: ['power', 'security'] });
+  const power = lines.find(l => l.key === 'power');
+  assert.equal(power.amount, 144000);
+  assert.equal(power.aiSuggested, 300000);
+  const security = lines.find(l => l.key === 'security');
+  assert.ok(security, 'a category paid every month that the AI leaves out is put back automatically');
+  assert.equal(security.amount, 80000);
+  assert.equal(security.why, 'Restored — paid regularly');
+  assert.ok(!lines.some(l => l.key === 'made_up_category'), 'a category name that does not match a real expense category is dropped');
+  assert.ok(notes.some(n => /made_up_category/.test(n)));
+});
+
+test('suggestCuts marks the plan Short honestly and suggests cuts without touching protected lines or amounts (0.7)', () => {
+  const lines = [
+    { key: 'rccg_proj', label: 'RCCG Demands', amount: 100000, cadence: 'annual' },
+    { key: 'power', label: 'Power', amount: 150000, cadence: 'usual' },
+    { key: 'security', label: 'Security', amount: 100000, cadence: 'usual' },
+    { key: 'hospitality', label: 'Hospitality', amount: 80000, cadence: 'usual' },
+    { key: 'events', label: 'Events', amount: 70000, cadence: 'usual' },
+  ];
+  const linesSnapshot = JSON.parse(JSON.stringify(lines));
+  const result = suggestCuts(lines, 0, 400000);
+  assert.equal(result.status, 'short');
+  assert.equal(result.shortBy, 100000);
+  assert.ok(result.cuts.every(cut => !PROTECTED_FROM_CUTS.includes(cut.key)), 'RCCG demands, Power and Security are never suggested as cuts');
+  assert.deepEqual(lines, linesSnapshot, 'suggestCuts never changes the line amounts it was given');
+});
+
+// ---------------------------------------------------------------------------
+// Contract: tracking (matchActuals, monthProgress)
+// ---------------------------------------------------------------------------
+
+test('matchActuals merges "hot" into "watch" — pace is only on_track/watch/over (Part U)', () => {
+  const plan = { monthKey: '2026-09', lines: [{ key: 'power', amount: 100000, expenseCategory: 'power' }] };
+  const actuals = matchActuals(plan, [{ category: 'power', amount: 90000, status: 'approved' }], new Date('2026-09-05T12:00:00Z'));
+  const power = actuals.lines[0];
+  assert.ok(['on_track', 'watch', 'over'].includes(power.pace));
+  assert.equal(power.pace, 'watch');
+});
+
+test('matchActuals lists unplanned category spending and ignores rejected expenses (A1, A2)', () => {
+  const plan = {
+    monthKey: '2026-09',
+    cushion: 5000,
+    lines: [
+      { key: 'power', label: 'Power', amount: 40000, expenseCategory: 'power' },
+    ],
+  };
+  const actuals = matchActuals(plan, [
+    { category: 'power', amount: 20000, status: 'approved' },
+    { category: 'welfare', amount: 30000, status: 'approved' },
+    { category: 'repairs', amount: 50000, status: 'rejected' },
+  ], new Date('2026-09-10T12:00:00Z'));
+  assert.equal(actuals.spentTotal, 50000);
+  assert.deepEqual(actuals.unplanned, [{ key: 'welfare', spent: 30000 }]);
+  assert.equal(actuals.cushionLine.budgeted, 5000);
+  assert.equal(actuals.cushionLine.spent, 0);
+});
+
+test('monthProgress reports day-of-month, days in month, and Sundays remaining', () => {
+  const progress = monthProgress(new Date('2026-09-24T12:00:00Z'), '2026-09');
+  assert.equal(progress.day, 24);
+  assert.equal(progress.daysInMonth, 30);
+  assert.ok(progress.sundaysInMonth >= 4);
+  assert.ok(progress.sundaysLeft >= 0);
+});
+
+// ---------------------------------------------------------------------------
+// Contract: Main goal — Free for new things (Part G)
+// ---------------------------------------------------------------------------
+
+test('irregularReserve holds monthly set-aside × months since last paid, resets when paid this month, caps at 12 months', () => {
+  const lines = [{ key: 'insurance', label: 'Insurance', amount: 20000, cadence: 'annual' }];
+
+  const eightMonthsAgo = irregularReserve(lines, [
+    { category: 'insurance', amount: 240000, date: '2026-01-15', status: 'approved' },
+  ], '2026-09-24');
+  assert.equal(eightMonthsAgo.total, 160000);
+  assert.equal(eightMonthsAgo.items[0].monthsSinceLastPaid, 8);
+
+  const paidThisMonth = irregularReserve(lines, [
+    { category: 'insurance', amount: 20000, date: '2026-09-10', status: 'approved' },
+  ], '2026-09-24');
+  assert.equal(paidThisMonth.total, 0);
+
+  const cappedAtAYear = irregularReserve(lines, [
+    { category: 'insurance', amount: 240000, date: '2020-01-15', status: 'approved' },
+  ], '2026-09-24');
+  assert.equal(cappedAtAYear.total, 240000);
+  assert.equal(cappedAtAYear.items[0].monthsSinceLastPaid, 12);
+});
+
+test('futureShortfall, safetyCushion and growthPerMonth match the plan\'s worked formulas', () => {
+  assert.equal(futureShortfall(430000, 400000, 3), 90000);
+  assert.equal(futureShortfall(400000, 430000, 3), 0);
+  assert.equal(safetyCushion(400000), 200000);
+  assert.equal(safetyCushion(400000, 0.25), 100000);
+  assert.equal(growthPerMonth(460000, 390000), 70000);
+  assert.equal(growthPerMonth(390000, 460000), -70000);
+});
+
+test('freeForNewThings never lets the month gap go negative when Sundays cover the rest of the month', () => {
+  const free = freeForNewThings({
+    availableNow: 500000,
+    remainingThisMonth: 100000,
+    expectedRestOfMonth: 150000,
+    pendingUnpaid: 0,
+    irregularReserve: 0,
+    futureShortfall: 0,
+    safetyCushion: 0,
+  });
+  assert.equal(free.monthGap, 0);
+  assert.equal(free.free, 500000);
+});
+
+test('Free for new things — worked example from the contract', () => {
+  const free = freeForNewThings({
+    availableNow: 1200000,
+    remainingThisMonth: 230000,
+    expectedRestOfMonth: 200000,
+    pendingUnpaid: 40000,
+    irregularReserve: 210000,
+    futureShortfall: 0,
+    safetyCushion: 200000,
+  });
+  assert.equal(free.monthGap, 30000);
+  assert.equal(free.free, 720000);
+
+  const yes = affordAnswer(300000, free.free, 70000, '2026-09-24');
+  assert.equal(yes.verdict, 'yes');
+  assert.equal(yes.freeAfter, 420000);
+
+  const notYet = affordAnswer(900000, free.free, 70000, '2026-09-24');
+  assert.equal(notYet.verdict, 'not_yet');
+  assert.equal(notYet.monthsNeeded, 3);
+  assert.equal(notYet.affordableMonthKey, '2026-12');
+
+  const no = affordAnswer(900000, free.free, -30000, '2026-09-24');
+  assert.equal(no.verdict, 'no');
 });
