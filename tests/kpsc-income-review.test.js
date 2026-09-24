@@ -1,245 +1,199 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { onRequest } from '../functions/api/[[route]].js';
+import { createSqliteD1, seedKpscSession, kpscRequest } from './sqlite-d1.mjs';
 
-// Covers the income-review feature: every income entry (any payment method) needs
-// sign-off from the Acting Chairman or Treasurer before it's "confirmed", and cash
-// income additionally needs one of them to mark it "deposited" once it's seen to hit
-// the bank. Both actions are restricted server-side to those two roles regardless of
-// who is otherwise allowed to record or edit finance entries.
+// Income review: every income entry (any payment method) needs sign-off from the
+// Acting Chairman or Treasurer, and cash additionally needs one of them to mark it
+// deposited. Runs against a real SQLite database built by /api/init, so the SQL
+// itself — WHERE clauses, UPDATE effects, the one-time history settle — is what's
+// being tested.
 
-const SESSION_HEADER = JSON.stringify({ accountId: 'ka-test', token: 'ks-test-token' });
-
-function createKpscRequest(url, method = 'GET', body) {
-  const init = { method, headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': SESSION_HEADER } };
-  if (body !== undefined) init.body = JSON.stringify(body);
-  return new Request(url, init);
+async function initDb() {
+  const DB = createSqliteD1();
+  const res = await onRequest({ request: new Request('https://x/api/init'), env: { DB } });
+  assert.equal(res.status, 200);
+  seedKpscSession(DB, { role: 'treasurer', name: 'Treasurer' });
+  return DB;
 }
 
-async function readJson(response) {
-  return JSON.parse(await response.text());
-}
-
-function matchesHolder(e, holder) {
-  if (!holder) return true;
-  const cashHolder = e.cash_holder || '';
-  return cashHolder === holder || (cashHolder === '' && e.recorded_by === holder);
-}
-
-// A small in-memory stand-in for the D1 binding that mutates a shared
-// `financeEntries` array, so confirm/deposit calls can be verified by their actual
-// effect on the rows, the same way the real UPDATE statements do.
-function createDBMock({ financeEntries = [], partners = [], role = 'treasurer' }) {
-  return {
-    financeEntries,
-    prepare(sql) {
-      const st = {
-        _bound: [],
-        bind(...a) { st._bound = a; return st; },
-        async first() {
-          if (/SELECT account_id, expires_at FROM kpsc_sessions/.test(sql)) {
-            return { account_id: 'ka-test', expires_at: Date.now() + 3600_000 };
-          }
-          if (/SELECT id, name, role, status FROM kpsc_accounts/.test(sql)) {
-            return { id: 'ka-test', name: role === 'treasurer' ? 'Treasurer' : (role === 'acting_chairman' ? 'Bro. David' : 'Financial Secretary'), role, status: 'active' };
-          }
-          throw new Error(`Unhandled .first() SQL: ${sql}`);
-        },
-        async all() {
-          if (sql.includes('SELECT id FROM kpsc_finance_entries WHERE id IN')) {
-            const ids = st._bound;
-            const results = financeEntries
-              .filter(e => ids.includes(e.id) && e.entry_type === 'income' && !e.confirmed_by && !e.deleted_at)
-              .map(e => ({ id: e.id }));
-            return { results };
-          }
-          if (sql.includes('COALESCE(f.confirmed_by')) {
-            const results = financeEntries
-              .filter(e => e.entry_type === 'income' && !e.confirmed_by && !e.deleted_at)
-              .map(e => ({
-                id: e.id, date: e.date, amount: e.amount, category: e.category, sub_category: e.sub_category || '',
-                narration: e.narration || '', reference: e.reference || '', payment_method: e.payment_method,
-                partner_id: e.partner_id || '', recorded_by: e.recorded_by,
-                partner_name: (partners.find(p => p.id === e.partner_id) || {}).full_name || null,
-              }));
-            return { results };
-          }
-          if (sql.includes("f.payment_method = 'cash'") && sql.includes("f.entry_type = 'income'")) {
-            const results = financeEntries
-              .filter(e => e.payment_method === 'cash' && e.entry_type === 'income' && !e.deposited_by && !e.deleted_at)
-              .map(e => ({
-                id: e.id, date: e.date, amount: e.amount, partner_id: e.partner_id || '', recorded_by: e.recorded_by,
-                category: e.category, sub_category: e.sub_category || '', narration: e.narration || '',
-                cash_holder: e.cash_holder || '',
-                partner_name: (partners.find(p => p.id === e.partner_id) || {}).full_name || null,
-              }));
-            return { results };
-          }
-          if (sql.includes('f.cash_box_expense = 1')) {
-            const results = financeEntries
-              .filter(e => e.cash_box_expense === 1 && e.entry_type === 'expense' && !e.deposited_by && !e.deleted_at)
-              .map(e => ({ id: e.id, date: e.date, amount: e.amount, narration: e.narration || '', category: e.category, recorded_by: e.recorded_by, cash_holder: e.cash_holder || '' }));
-            return { results };
-          }
-          throw new Error(`Unhandled .all() SQL: ${sql}`);
-        },
-        async run() {
-          if (sql.includes('ALTER TABLE')) {
-            return { meta: { changes: 0 } }; // ensureKpscConfirmColumns self-heal — no-op in this in-memory mock
-          }
-          if (sql.includes('SET confirmed_by=?')) {
-            const [confirmedBy, ...ids] = st._bound;
-            let changes = 0;
-            for (const e of financeEntries) {
-              if (ids.includes(e.id)) { e.confirmed_by = confirmedBy; e.confirmed_at = 'now'; changes++; }
-            }
-            return { meta: { changes } };
-          }
-          if (sql.includes('SET deposited_by=?') && sql.includes("entry_type='income'")) {
-            const [depositedBy, ...holderBinds] = st._bound;
-            const holder = holderBinds[0];
-            let changes = 0;
-            for (const e of financeEntries) {
-              if (e.payment_method === 'cash' && e.entry_type === 'income' && !e.deposited_by && !e.deleted_at && matchesHolder(e, holder)) {
-                e.deposited_by = depositedBy; e.deposited_at = 'now'; changes++;
-              }
-            }
-            return { meta: { changes } };
-          }
-          if (sql.includes('SET deposited_by=?') && sql.includes("entry_type='expense'")) {
-            const [depositedBy, ...holderBinds] = st._bound;
-            const holder = holderBinds[0];
-            let changes = 0;
-            for (const e of financeEntries) {
-              if (e.cash_box_expense === 1 && e.entry_type === 'expense' && !e.deposited_by && !e.deleted_at && matchesHolder(e, holder)) {
-                e.deposited_by = depositedBy; e.deposited_at = 'now'; changes++;
-              }
-            }
-            return { meta: { changes } };
-          }
-          throw new Error(`Unhandled .run() SQL: ${sql}`);
-        },
-      };
-      return st;
-    },
+function addEntry(DB, e) {
+  const row = {
+    date: '2026-09-20', entry_type: 'income', category: 'other_income', amount: 0,
+    payment_method: 'cash', narration: '', partner_id: '', recorded_by: 'Bro Samuel Onuorah',
+    cash_holder: '', cash_box_expense: 0, handover_id: '', confirmed_by: '', confirmed_at: '',
+    deposited_by: '', deposited_at: '', deleted_at: '', ...e,
   };
+  const cols = Object.keys(row);
+  DB.sqlite.prepare(`INSERT INTO kpsc_finance_entries (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`)
+    .run(...cols.map(c => row[c]));
 }
 
-function baseEntries() {
-  return [
-    {
-      id: 'kfe1', date: '2026-09-01', entry_type: 'income', category: 'partnership_payment',
-      amount: 5000, payment_method: 'cash', partner_id: 'p1', recorded_by: 'Alice', cash_holder: '',
-      confirmed_by: '', deposited_by: '', deleted_at: '',
-    },
-    {
-      id: 'kfe2', date: '2026-09-20', entry_type: 'income', category: 'welfare_&_development_offering',
-      narration: 'Welfare & Development Offering', amount: 5800, payment_method: 'cash',
-      partner_id: '', recorded_by: 'Bro Samuel Onuorah', cash_holder: '',
-      confirmed_by: '', deposited_by: '', deleted_at: '',
-    },
-    {
-      id: 'kfe3', date: '2026-09-22', entry_type: 'income', category: 'one_time_donation',
-      narration: 'Building fund transfer', amount: 20000, payment_method: 'bank_transfer',
-      partner_id: '', recorded_by: 'Financial Secretary', cash_holder: '',
-      confirmed_by: '', deposited_by: '', deleted_at: '',
-    },
-  ];
+const entry = (DB, id) => DB.sqlite.prepare(`SELECT * FROM kpsc_finance_entries WHERE id=?`).get(id);
+
+async function call(DB, path, method = 'GET', body) {
+  const res = await onRequest({ request: kpscRequest(path, method, body), env: { DB } });
+  return { status: res.status, json: JSON.parse(await res.text()) };
 }
 
-test('every income entry, cash or bank, shows up awaiting confirmation regardless of category', async () => {
-  const financeEntries = baseEntries();
-  const partners = [{ id: 'p1', full_name: 'Partner One' }];
-  const DB = createDBMock({ financeEntries, partners });
-  const res = await onRequest({ request: createKpscRequest('https://x/api/kpsc-income-review', 'GET'), env: { DB } });
-  const json = await readJson(res);
+function seedTypicalMonth(DB) {
+  DB.sqlite.prepare(`INSERT INTO kpsc_partners (id, full_name, partnership_type, status) VALUES ('p1', 'Partner One', 'covenant_partner', 'active')`).run();
+  addEntry(DB, { id: 'kfe1', category: 'partnership_pledge', amount: 5000, partner_id: 'p1', recorded_by: 'Alice' });
+  addEntry(DB, { id: 'kfe2', category: 'welfare_&_development_offering', narration: 'Welfare & Development Offering', amount: 5800 });
+  addEntry(DB, { id: 'kfe3', category: 'one_time_donation', amount: 20000, payment_method: 'bank_transfer', recorded_by: 'Financial Secretary' });
+}
+
+test('every income entry, cash or bank, awaits confirmation; cash of any category counts as in hand', async () => {
+  const DB = await initDb();
+  seedTypicalMonth(DB);
+  const { json } = await call(DB, 'kpsc-income-review');
 
   assert.equal(json.awaitingConfirmationTotal, 5000 + 5800 + 20000);
   assert.equal(json.pendingConfirmation.length, 3);
   assert.equal(json.cashInHandTotal, 5000 + 5800);
-
   const samuel = json.holders.find(h => h.name === 'Bro Samuel Onuorah');
-  assert.ok(samuel, 'cash income under a non-partner category should still count as cash in hand');
   assert.equal(samuel.inHand, 5800);
   assert.equal(samuel.lots[0].partnerName, 'Welfare & Development Offering');
-
-  const alice = json.holders.find(h => h.name === 'Alice');
-  assert.equal(alice.lots[0].partnerName, 'Partner One');
+  assert.equal(json.holders.find(h => h.name === 'Alice').lots[0].partnerName, 'Partner One');
 });
 
-test('Confirm marks entries confirmed and removes them from the awaiting list', async () => {
-  const financeEntries = baseEntries();
-  const DB = createDBMock({ financeEntries, role: 'treasurer' });
-  const res = await onRequest({
-    request: createKpscRequest('https://x/api/kpsc-finance-confirm', 'POST', { ids: ['kfe1', 'kfe3'] }),
-    env: { DB },
-  });
-  const json = await readJson(res);
-  assert.equal(json.confirmed, 2);
-  assert.equal(json.confirmedBy, 'Treasurer');
-
-  const reviewRes = await onRequest({ request: createKpscRequest('https://x/api/kpsc-income-review', 'GET'), env: { DB } });
-  const review = await readJson(reviewRes);
-  assert.equal(review.pendingConfirmation.length, 1);
-  assert.equal(review.pendingConfirmation[0].id, 'kfe2');
+test('cash banked through the old Transfer to Bank flow never counts as cash in hand', async () => {
+  const DB = await initDb();
+  addEntry(DB, { id: 'kfe-old', amount: 3000, handover_id: 'kch1', confirmed_by: 'Treasurer' });
+  addEntry(DB, { id: 'kfe-new', amount: 1000 });
+  const { json } = await call(DB, 'kpsc-income-review');
+  assert.equal(json.cashInHandTotal, 1000);
 });
 
-test('Confirm is refused for a role other than Acting Chairman or Treasurer', async () => {
-  const financeEntries = baseEntries();
-  const DB = createDBMock({ financeEntries, role: 'financial_secretary' });
-  const res = await onRequest({
-    request: createKpscRequest('https://x/api/kpsc-finance-confirm', 'POST', { ids: ['kfe1'] }),
-    env: { DB },
-  });
-  assert.equal(res.status, 403);
-  assert.equal(financeEntries.find(e => e.id === 'kfe1').confirmed_by, '');
+test('Confirm marks entries confirmed; other roles are refused', async () => {
+  const DB = await initDb();
+  seedTypicalMonth(DB);
+
+  seedKpscSession(DB, { role: 'financial_secretary', name: 'Financial Secretary' });
+  const refused = await call(DB, 'kpsc-finance-confirm', 'POST', { ids: ['kfe1'] });
+  assert.equal(refused.status, 403);
+  assert.equal(entry(DB, 'kfe1').confirmed_by, '');
+
+  seedKpscSession(DB, { role: 'treasurer', name: 'Treasurer' });
+  const ok = await call(DB, 'kpsc-finance-confirm', 'POST', { ids: ['kfe1', 'kfe3'] });
+  assert.equal(ok.json.confirmed, 2);
+  assert.equal(entry(DB, 'kfe1').confirmed_by, 'Treasurer');
+
+  const { json } = await call(DB, 'kpsc-income-review');
+  assert.deepEqual(json.pendingConfirmation.map(e => e.id), ['kfe2']);
 });
 
-test('Deposit for one holder clears only their cash, leaving other holders and bank transfers untouched', async () => {
-  const financeEntries = baseEntries();
-  const DB = createDBMock({ financeEntries, role: 'acting_chairman' });
-  const res = await onRequest({
-    request: createKpscRequest('https://x/api/kpsc-cash-deposit', 'POST', { holder: 'Bro Samuel Onuorah' }),
-    env: { DB },
-  });
-  const json = await readJson(res);
-  assert.equal(json.depositedBy, 'Bro. David');
+test('Deposited for one holder clears only their cash; Deposit All clears everyone', async () => {
+  const DB = await initDb();
+  seedTypicalMonth(DB);
+  seedKpscSession(DB, { role: 'acting_chairman', name: 'Bro. David' });
 
-  const samuel = financeEntries.find(e => e.id === 'kfe2');
-  assert.equal(samuel.deposited_by, 'Bro. David');
-  const alice = financeEntries.find(e => e.id === 'kfe1');
-  assert.equal(alice.deposited_by, '', 'a different holder\'s cash must not be swept by someone else\'s deposit');
-  const bankEntry = financeEntries.find(e => e.id === 'kfe3');
-  assert.equal(bankEntry.deposited_by, '', 'bank transfers have nothing to deposit — deposit only ever touches cash');
+  await call(DB, 'kpsc-cash-deposit', 'POST', { holder: 'Bro Samuel Onuorah' });
+  assert.equal(entry(DB, 'kfe2').deposited_by, 'Bro. David');
+  assert.equal(entry(DB, 'kfe1').deposited_by, '', "another holder's cash must be untouched");
+  assert.equal(entry(DB, 'kfe3').deposited_by, '', 'bank transfers have nothing to deposit');
+  assert.equal((await call(DB, 'kpsc-income-review')).json.cashInHandTotal, 5000);
 
-  const reviewRes = await onRequest({ request: createKpscRequest('https://x/api/kpsc-income-review', 'GET'), env: { DB } });
-  const review = await readJson(reviewRes);
-  assert.equal(review.cashInHandTotal, 5000); // only Alice's undeposited cash remains
+  await call(DB, 'kpsc-cash-deposit', 'POST', {});
+  assert.equal((await call(DB, 'kpsc-income-review')).json.cashInHandTotal, 0);
 });
 
-test('Deposit All with no holder sweeps every pending holder\'s cash at once', async () => {
-  const financeEntries = baseEntries();
-  const DB = createDBMock({ financeEntries, role: 'treasurer' });
-  const res = await onRequest({
-    request: createKpscRequest('https://x/api/kpsc-cash-deposit', 'POST', {}),
-    env: { DB },
-  });
-  const json = await readJson(res);
-  assert.equal(json.holder, 'all holders');
-  assert.ok(financeEntries.find(e => e.id === 'kfe1').deposited_by);
-  assert.ok(financeEntries.find(e => e.id === 'kfe2').deposited_by);
+test('a cash-box expense reduces its holder\'s cash in hand', async () => {
+  const DB = await initDb();
+  seedTypicalMonth(DB);
+  addEntry(DB, { id: 'kfx1', entry_type: 'expense', category: 'transport', amount: 500, cash_box_expense: 1 });
+  const { json } = await call(DB, 'kpsc-income-review');
+  assert.equal(json.holders.find(h => h.name === 'Bro Samuel Onuorah').inHand, 5300);
 });
 
-test('a cash-box expense reduces cash in hand for its holder until deposited', async () => {
-  const financeEntries = baseEntries();
-  financeEntries.push({
-    id: 'kfx1', date: '2026-09-21', entry_type: 'expense', category: 'transport',
-    narration: 'Fuel', amount: 500, payment_method: 'cash', cash_box_expense: 1,
-    recorded_by: 'Bro Samuel Onuorah', cash_holder: '', deposited_by: '', deleted_at: '',
+test('editing the wording keeps the sign-off; changing the money voids it; the recorder is never overwritten', async () => {
+  const DB = await initDb();
+  addEntry(DB, {
+    id: 'kfe1', amount: 5800, narration: 'Welfare offfering',
+    confirmed_by: 'Treasurer', confirmed_at: '2026-09-24 10:00:00',
+    deposited_by: 'Treasurer', deposited_at: '2026-09-25 10:00:00',
   });
-  const DB = createDBMock({ financeEntries });
-  const res = await onRequest({ request: createKpscRequest('https://x/api/kpsc-income-review', 'GET'), env: { DB } });
-  const json = await readJson(res);
-  const samuel = json.holders.find(h => h.name === 'Bro Samuel Onuorah');
-  assert.equal(samuel.inHand, 5800 - 500);
+
+  seedKpscSession(DB, { role: 'acting_chairman', name: 'Bro. David' });
+  await call(DB, 'kpsc-finance/kfe1', 'PUT', { narration: 'Welfare offering', recordedBy: 'Bro. David' });
+  let row = entry(DB, 'kfe1');
+  assert.equal(row.narration, 'Welfare offering');
+  assert.equal(row.confirmed_by, 'Treasurer');
+  assert.equal(row.deposited_by, 'Treasurer');
+  assert.equal(row.recorded_by, 'Bro Samuel Onuorah');
+
+  await call(DB, 'kpsc-finance/kfe1', 'PUT', { amount: 6000, recordedBy: 'Bro. David' });
+  row = entry(DB, 'kfe1');
+  assert.equal(row.amount, 6000);
+  assert.equal(row.confirmed_by, '');
+  assert.equal(row.deposited_by, '');
+  assert.equal(row.recorded_by, 'Bro Samuel Onuorah');
+});
+
+test('correcting a partner payment updates its Finance entry, and only a real change voids the sign-off', async () => {
+  const DB = await initDb();
+  DB.sqlite.prepare(`INSERT INTO kpsc_partners (id, full_name, partnership_type, status, monthly_pledge) VALUES ('p1', 'Peter M', 'covenant_partner', 'active', 1000)`).run();
+
+  seedKpscSession(DB, { role: 'financial_secretary', name: 'Bro Samuel Onuorah' });
+  const recorded = await call(DB, 'kpsc-partner-payments', 'POST', {
+    partnerId: 'p1', year: 2026, month: 9, amount: 500, paid: true, reference: 'cash',
+    recordedBy: 'Bro Samuel Onuorah', skipSms: true,
+  });
+  const paymentId = recorded.json.id;
+  const finId = () => DB.sqlite.prepare(`SELECT id FROM kpsc_finance_entries WHERE partner_payment_id=?`).get(paymentId).id;
+  DB.sqlite.prepare(`UPDATE kpsc_finance_entries SET confirmed_by='Treasurer', confirmed_at='2026-09-24 10:00:00' WHERE id=?`).run(finId());
+
+  // Re-sending the same values (e.g. ticking "recorded in physical card") keeps the sign-off.
+  await call(DB, 'kpsc-partner-payments', 'POST', {
+    id: paymentId, partnerId: 'p1', year: 2026, month: 9, amount: 500, paid: true, reference: 'cash',
+    recordedBy: 'Treasurer', skipSms: true,
+  });
+  assert.equal(entry(DB, finId()).confirmed_by, 'Treasurer');
+
+  // A corrected amount reaches Finance and goes back for confirmation; the recorder stays.
+  seedKpscSession(DB, { role: 'treasurer', name: 'Treasurer' });
+  await call(DB, 'kpsc-partner-payments', 'POST', {
+    id: paymentId, partnerId: 'p1', year: 2026, month: 9, amount: 1000, paid: true, reference: 'cash',
+    recordedBy: 'Treasurer', skipSms: true,
+  });
+  const row = entry(DB, finId());
+  assert.equal(row.amount, 1000);
+  assert.equal(row.confirmed_by, '');
+  assert.equal(row.recorded_by, 'Bro Samuel Onuorah');
+});
+
+test('settling history undoes system stamps on September income and unbanked cash, never a person\'s sign-off', async () => {
+  const DB = await initDb();
+  const SYS = 'System (auto)';
+  // What the live database looked like after the first (too broad) backfill ran.
+  addEntry(DB, { id: 'aug', date: '2026-08-15', amount: 1000, confirmed_by: SYS, deposited_by: SYS, handover_id: 'kch0' });
+  addEntry(DB, { id: 'sep-cash', amount: 8000, confirmed_by: SYS, deposited_by: SYS });
+  addEntry(DB, { id: 'sep-bank', amount: 2000, payment_method: 'bank_transfer', confirmed_by: SYS });
+  addEntry(DB, { id: 'sep-person', amount: 700, confirmed_by: 'Treasurer', deposited_by: 'Treasurer' });
+  addEntry(DB, { id: 'sep-spend', entry_type: 'expense', amount: 300, cash_box_expense: 1, deposited_by: SYS });
+  // Banked through the old Transfer to Bank flow, but never stamped.
+  addEntry(DB, { id: 'jul-banked', date: '2026-07-10', amount: 400, handover_id: 'kch1' });
+
+  DB.sqlite.prepare(`DELETE FROM settings WHERE key='kpsc_income_review_history_v2'`).run();
+  await onRequest({ request: new Request('https://x/api/init'), env: { DB } });
+
+  assert.equal(entry(DB, 'aug').confirmed_by, SYS, 'older months stay settled');
+  assert.equal(entry(DB, 'aug').deposited_by, SYS, 'banked via old flow stays deposited');
+  assert.equal(entry(DB, 'sep-cash').confirmed_by, '');
+  assert.equal(entry(DB, 'sep-cash').deposited_by, '', 'cash never banked comes back in hand');
+  assert.equal(entry(DB, 'sep-bank').confirmed_by, '');
+  assert.equal(entry(DB, 'sep-person').confirmed_by, 'Treasurer');
+  assert.equal(entry(DB, 'sep-person').deposited_by, 'Treasurer');
+  assert.equal(entry(DB, 'sep-spend').deposited_by, '');
+  assert.equal(entry(DB, 'jul-banked').confirmed_by, SYS);
+  assert.equal(entry(DB, 'jul-banked').deposited_by, SYS);
+
+  const { json } = await call(DB, 'kpsc-income-review');
+  assert.equal(json.cashInHandTotal, 8000 - 300);
+  assert.deepEqual(json.pendingConfirmation.map(e => e.id).sort(), ['sep-bank', 'sep-cash']);
+
+  // Runs once: a later person-free edit to the flag-protected rows isn't re-touched.
+  DB.sqlite.prepare(`UPDATE kpsc_finance_entries SET confirmed_by=? WHERE id='sep-bank'`).run(SYS);
+  await onRequest({ request: new Request('https://x/api/init'), env: { DB } });
+  assert.equal(entry(DB, 'sep-bank').confirmed_by, SYS);
 });

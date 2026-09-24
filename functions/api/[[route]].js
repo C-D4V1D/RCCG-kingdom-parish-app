@@ -2805,26 +2805,7 @@ async function handleInit(DB) {
   // re-run — once a date is consolidated there is nothing left to merge next time.
   try { await mergeDuplicateSundayCollections(DB); } catch { /* best-effort cleanup */ }
 
-  // Grandfather in every KPSC finance entry recorded before the income-review feature
-  // shipped, so Acting Chairman / Treasurer aren't handed a backlog of old entries to
-  // confirm/deposit — only entries recorded from here on need their sign-off. Guarded
-  // by a settings flag (not just "confirmed_by is empty") because that would also be
-  // true of a brand-new entry nobody has reviewed yet — this must run exactly once.
-  try {
-    const backfillDone = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_income_review_backfill_done'`).first();
-    if (!backfillDone) {
-      await DB.prepare(`
-        UPDATE kpsc_finance_entries SET confirmed_by='System (auto)', confirmed_at=datetime('now')
-        WHERE entry_type='income' AND COALESCE(confirmed_by,'')=''
-      `).run();
-      await DB.prepare(`
-        UPDATE kpsc_finance_entries SET deposited_by='System (auto)', deposited_at=datetime('now')
-        WHERE payment_method='cash' AND COALESCE(deposited_by,'')=''
-          AND (entry_type='income' OR (entry_type='expense' AND cash_box_expense=1))
-      `).run();
-      await DB.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES ('kpsc_income_review_backfill_done', '1')`).run();
-    }
-  } catch { /* best-effort — a failed backfill just means older rows stay unconfirmed */ }
+  try { await settleKpscIncomeReviewHistory(DB); } catch { /* best-effort — also retried on first income-review call */ }
 
   // Seed petty config (once)
   await DB.prepare(
@@ -5415,13 +5396,20 @@ async function upsertKpscPartnerPayment(DB, data) {
       const isPartPayment = expectedAmount > 0 && amount > 0 && amount < expectedAmount - PLEDGE_EPSILON;
       const narration = `${monthLabel} ${year} partnership pledge${isPartPayment ? ' (part payment)' : ''}${partnerName ? ' — ' + partnerName : ''}`;
       const paymentMethod = String(data?.reference || '').trim() === 'transfer' ? 'bank_transfer' : (String(data?.reference || '').trim() || 'cash');
+      await ensureKpscConfirmColumns(DB);
       const existingFin = await DB.prepare(
-        `SELECT id FROM kpsc_finance_entries WHERE partner_payment_id=? AND COALESCE(deleted_at,'')=''`
+        `SELECT id, amount, payment_method FROM kpsc_finance_entries WHERE partner_payment_id=? AND COALESCE(deleted_at,'')=''`
       ).bind(id).first();
       if (existingFin) {
+        // A corrected amount or method voids any sign-off on the old figures; re-sending
+        // the same values (e.g. ticking "recorded in physical card") must not. The
+        // original recorder is kept.
+        const moneyChanged = Math.abs(Number(existingFin.amount || 0) - amount) > 0.005
+          || (existingFin.payment_method || '') !== paymentMethod;
+        const signoffReset = moneyChanged ? `, confirmed_by='', confirmed_at='', deposited_by='', deposited_at=''` : '';
         await DB.prepare(`
-          UPDATE kpsc_finance_entries SET amount=?,payment_method=?,narration=?,recorded_by=?,updated_at=datetime('now') WHERE id=?
-        `).bind(amount, paymentMethod, narration, String(data?.recordedBy || '').trim(), existingFin.id).run();
+          UPDATE kpsc_finance_entries SET amount=?, payment_method=?, narration=?${signoffReset} WHERE id=?
+        `).bind(amount, paymentMethod, narration, existingFin.id).run();
       } else {
         const finId = newId('kfe');
         const dateStr = paidAt ? paidAt.slice(0, 10) : new Date().toISOString().slice(0, 10);
@@ -5436,7 +5424,11 @@ async function upsertKpscPartnerPayment(DB, data) {
           String(data?.recordedBy || '').trim(), '', 'recorded', '', id, cashHolder
         ).run();
       }
-    } catch { /* finance sync failure must not break payment recording */ }
+    } catch (e) {
+      // Must not break payment recording — but log it, since a silent failure here
+      // leaves the Finance ledger disagreeing with the Partners page.
+      console.error(`[kpsc] finance sync failed for partner payment ${id}:`, e?.message);
+    }
   }
 
   const row = await DB.prepare(`SELECT * FROM kpsc_partner_payments WHERE id=?`).bind(id).first();
@@ -5646,7 +5638,44 @@ async function ensureKpscConfirmColumns(DB) {
   for (const sql of stmts) {
     try { await DB.prepare(sql).run(); } catch { /* column already exists */ }
   }
+  try { await settleKpscIncomeReviewHistory(DB); } catch { /* retried by /api/init */ }
   _kpscConfirmColumnsEnsured = true;
+}
+
+// Sign-offs stamped by the system rather than by the Acting Chairman / Treasurer.
+// The UI hides them — they only mark history as settled.
+const KPSC_SYSTEM_SIGNOFF = 'System (auto)';
+// Income dated before this counts as settled history; anything on or after it goes
+// through Acting Chairman / Treasurer confirmation.
+const KPSC_REVIEW_START_DATE = '2026-09-01';
+
+// One-time settling of rows that predate the income-review feature. Replaces an
+// earlier backfill that stamped EVERY row as confirmed and deposited — including
+// September income nobody had reviewed, and cash still physically with its holder
+// (never banked through the old Transfer to Bank flow, so handover_id is empty).
+// Written so it's correct both on a database where that earlier backfill already
+// ran and on one where it never did, and it only ever touches system stamps —
+// never a confirmation or deposit made by a person.
+async function settleKpscIncomeReviewHistory(DB) {
+  const done = await DB.prepare(`SELECT value FROM settings WHERE key='kpsc_income_review_history_v2'`).first();
+  if (done) return;
+  await DB.prepare(`
+    UPDATE kpsc_finance_entries SET confirmed_by=?, confirmed_at=datetime('now')
+    WHERE entry_type='income' AND COALESCE(confirmed_by,'')='' AND date < ?
+  `).bind(KPSC_SYSTEM_SIGNOFF, KPSC_REVIEW_START_DATE).run();
+  await DB.prepare(`
+    UPDATE kpsc_finance_entries SET confirmed_by='', confirmed_at=''
+    WHERE confirmed_by=? AND date >= ?
+  `).bind(KPSC_SYSTEM_SIGNOFF, KPSC_REVIEW_START_DATE).run();
+  await DB.prepare(`
+    UPDATE kpsc_finance_entries SET deposited_by='', deposited_at=''
+    WHERE deposited_by=? AND COALESCE(handover_id,'')=''
+  `).bind(KPSC_SYSTEM_SIGNOFF).run();
+  await DB.prepare(`
+    UPDATE kpsc_finance_entries SET deposited_by=?, deposited_at=datetime('now')
+    WHERE COALESCE(deposited_by,'')='' AND COALESCE(handover_id,'')<>''
+  `).bind(KPSC_SYSTEM_SIGNOFF).run();
+  await DB.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES ('kpsc_income_review_history_v2', '1')`).run();
 }
 
 async function getKpscIncomeReview(DB) {
@@ -5687,6 +5716,7 @@ async function getKpscIncomeReview(DB) {
     WHERE f.payment_method = 'cash'
       AND f.entry_type = 'income'
       AND COALESCE(f.deposited_by, '') = ''
+      AND COALESCE(f.handover_id, '') = ''
       AND COALESCE(f.deleted_at, '') = ''
     ORDER BY f.date DESC, f.created_at DESC
   `).all();
@@ -5699,6 +5729,7 @@ async function getKpscIncomeReview(DB) {
     WHERE f.cash_box_expense = 1
       AND f.entry_type = 'expense'
       AND COALESCE(f.deposited_by, '') = ''
+      AND COALESCE(f.handover_id, '') = ''
       AND COALESCE(f.deleted_at, '') = ''
     ORDER BY f.date DESC, f.created_at DESC
   `).all();
@@ -5797,7 +5828,7 @@ async function reassignCashHolder(DB, data, auth) {
   const newHolder = String(data?.holder || '').trim();
   if (!paymentId || !newHolder) return err('paymentId and holder are required', 400);
   const existing = await DB.prepare(
-    `SELECT id FROM kpsc_finance_entries WHERE id=? AND payment_method='cash' AND COALESCE(deposited_by,'')='' AND COALESCE(deleted_at,'')=''`
+    `SELECT id FROM kpsc_finance_entries WHERE id=? AND payment_method='cash' AND COALESCE(deposited_by,'')='' AND COALESCE(handover_id,'')='' AND COALESCE(deleted_at,'')=''`
   ).bind(paymentId).first();
   if (!existing) return err('Payment not found or already deposited', 404);
   await DB.prepare(`UPDATE kpsc_finance_entries SET cash_holder=? WHERE id=?`).bind(newHolder, paymentId).run();
@@ -5997,27 +6028,32 @@ async function updateKpscFinanceEntry(DB, id, data, auth) {
   await ensureKpscConfirmColumns(DB);
   const row = await DB.prepare(`SELECT * FROM kpsc_finance_entries WHERE id=?`).bind(id).first();
   if (!row) return err('KPSC finance entry not found', 404);
-  // Editing an entry invalidates any prior sign-off on it — whoever confirmed it (or
-  // marked cash as deposited) verified the OLD figures, not whatever this edit changes
-  // them to. Reset both so it gets a fresh look. confirmed_by/deposited_by are never
-  // settable from the client here — only the dedicated confirm/deposit endpoints
-  // (restricted to Acting Chairman / Treasurer) may set them.
+  const date = data?.date !== undefined ? String(data.date || '').trim() : row.date;
+  const entryType = data?.entryType !== undefined ? String(data.entryType || row.entry_type).trim().toLowerCase() : row.entry_type;
+  const amount = data?.amount !== undefined ? Number(data.amount || 0) : Number(row.amount || 0);
+  const paymentMethod = data?.paymentMethod !== undefined ? String(data.paymentMethod || '').trim() : row.payment_method;
+  // A sign-off verified the money, not the wording: only a change to what was
+  // received, how, or when voids it. A typo fix in the narration keeps it.
+  // confirmed_by/deposited_by are never settable from the client here — only the
+  // confirm/deposit endpoints (Acting Chairman / Treasurer) set them.
+  const moneyChanged = date !== row.date || entryType !== row.entry_type
+    || Math.abs(amount - Number(row.amount || 0)) > 0.005 || paymentMethod !== (row.payment_method || '');
+  const signoffReset = moneyChanged ? `, confirmed_by='', confirmed_at='', deposited_by='', deposited_at=''` : '';
+  // recorded_by is left alone: an edit must not overwrite who originally recorded it.
   await DB.prepare(`
     UPDATE kpsc_finance_entries
-    SET date=?, entry_type=?, category=?, sub_category=?, amount=?, payment_method=?, reference=?, narration=?, partner_id=?, recorded_by=?, approved_by=?, approval_status=?, attachment_name=?, partner_payment_id=COALESCE(partner_payment_id,''),
-        confirmed_by='', confirmed_at='', deposited_by='', deposited_at=''
+    SET date=?, entry_type=?, category=?, sub_category=?, amount=?, payment_method=?, reference=?, narration=?, partner_id=?, approved_by=?, approval_status=?, attachment_name=?, partner_payment_id=COALESCE(partner_payment_id,'')${signoffReset}
     WHERE id=?
   `).bind(
-    data?.date !== undefined ? String(data.date || '').trim() : row.date,
-    data?.entryType !== undefined ? String(data.entryType || row.entry_type).trim().toLowerCase() : row.entry_type,
+    date,
+    entryType,
     data?.category !== undefined ? String(data.category || '').trim() : row.category,
     data?.subCategory !== undefined ? String(data.subCategory || '').trim() : row.sub_category,
-    data?.amount !== undefined ? Number(data.amount || 0) : Number(row.amount || 0),
-    data?.paymentMethod !== undefined ? String(data.paymentMethod || '').trim() : row.payment_method,
+    amount,
+    paymentMethod,
     data?.reference !== undefined ? String(data.reference || '').trim() : row.reference,
     data?.narration !== undefined ? String(data.narration || '').trim() : row.narration,
     data?.partnerId !== undefined ? String(data.partnerId || '').trim() : row.partner_id,
-    data?.recordedBy !== undefined ? String(auth?.name || data.recordedBy || '').trim() : row.recorded_by,
     data?.approvedBy !== undefined ? String(data.approvedBy || '').trim() : row.approved_by,
     data?.approvalStatus !== undefined ? String(data.approvalStatus || 'recorded').trim() : row.approval_status,
     data?.attachmentName !== undefined ? String(data.attachmentName || '').trim() : row.attachment_name,

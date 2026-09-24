@@ -9008,7 +9008,7 @@ async function renderFinance(main) {
     ).join('');
   // Who confirmed what — lets Acting Chairman / Treasurer check their own vs each
   // other's confirmations, or see everything still awaiting sign-off.
-  const confirmerNames = [...new Set(incomeEntries.map(e => e.confirmedBy).filter(Boolean))].sort();
+  const confirmerNames = [...new Set(incomeEntries.map(e => e.confirmedBy).filter(_isPersonSignoff))].sort();
   const confirmFilterOpts = `<option value="">All Income (confirmed or not)</option>` +
     `<option value="__pending__">Awaiting confirmation</option>` +
     confirmerNames.map(n => `<option value="${esc(n)}">Confirmed by ${esc(n)}</option>`).join('');
@@ -9449,14 +9449,38 @@ function getFilteredFinanceEntries() {
   return entries;
 }
 
-// Small "✅ Confirmed by X" / "⏳ Awaiting confirmation" tag — income entries only.
-// Lets Acting Chairman / Treasurer check who (of the two of them) confirmed what,
-// right in the ledger, without a separate history screen.
-function _confirmBadgeHtml(e) {
+// Stamped by the one-time settling of pre-feature history, not by a person. It only
+// marks old rows as settled, so it's never shown or offered as a filter.
+const KPSC_SYSTEM_SIGNOFF = 'System (auto)';
+const _isPersonSignoff = name => !!name && name !== KPSC_SYSTEM_SIGNOFF;
+
+// "24 Sep" — with the year only when it isn't this year.
+function _signoffDay(ts) {
+  const d = String(ts || '').slice(0, 10);
+  if (!d) return '';
+  const [day, mon, yr] = fmtDate(d).split(' ');
+  return yr === String(currentYear()) ? `${day} ${mon}` : `${day} ${mon} ${yr}`;
+}
+
+// Status lines shown under "Recorded by" on an income entry: awaiting, or who
+// confirmed it (and, for cash, who marked it deposited) and when.
+function _signoffLinesHtml(e) {
   if (e.entryType !== 'income') return '';
-  return e.confirmedBy
-    ? `<span class="kbadge badge-green" title="${esc(fmtDateTime(e.confirmedAt))}">✅ ${esc(e.confirmedBy)}</span>`
-    : `<span class="kbadge badge-amber">⏳ Awaiting confirmation</span>`;
+  const line = (color, text) => `<div style="font-size:12px;font-weight:600;color:${color};margin-top:3px">${text}</div>`;
+  let out = '';
+  if (!e.confirmedBy) out += line('var(--amber)', '⏳ Awaiting confirmation');
+  else if (_isPersonSignoff(e.confirmedBy)) out += line('var(--green)', `✓ Confirmed by ${esc(e.confirmedBy)} · ${esc(_signoffDay(e.confirmedAt))}`);
+  if (e.paymentMethod === 'cash' && _isPersonSignoff(e.depositedBy)) {
+    out += line('var(--green)', `🏦 Deposited by ${esc(e.depositedBy)} · ${esc(_signoffDay(e.depositedAt))}`);
+  }
+  return out;
+}
+
+function _signoffCellHtml(e) {
+  if (e.entryType !== 'income') return '';
+  if (!e.confirmedBy) return '<span class="kbadge badge-amber">⏳ Pending</span>';
+  if (!_isPersonSignoff(e.confirmedBy)) return '';
+  return `<span style="font-size:12px;font-weight:600;color:var(--green);white-space:nowrap" title="${esc(fmtDateTime(e.confirmedAt))}">✓ ${esc(e.confirmedBy)}</span>`;
 }
 
 function renderFinanceEntryList(canManage, canDelete) {
@@ -9481,7 +9505,7 @@ function renderFinanceEntryList(canManage, canDelete) {
         <td style="color:var(--text3)">${esc(e.partnerName || '—')}</td>
         <td class="kf-td-amount" style="color:${amtColor}">₦${Number(e.amount||0).toLocaleString('en-NG')}</td>
         <td>${esc((e.paymentMethod||'—').replace(/_/g,' '))}</td>
-        <td>${_confirmBadgeHtml(e)}</td>
+        <td>${_signoffCellHtml(e)}</td>
         <td style="color:var(--text3);font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.reference||'—')}</td>
         ${actionCells}
       </tr>`;
@@ -9517,13 +9541,12 @@ function renderFinanceEntryList(canManage, canDelete) {
             <span>${esc(fmtDate(e.date))}</span>
             <span class="kbadge ${e.entryType==='income'?'badge-green':'badge-red'}">${esc(e.entryType)}</span>
             ${e.paymentMethod ? `<span class="kbadge badge-gray">${esc(e.paymentMethod.replace(/_/g,' '))}</span>` : ''}
-            ${_confirmBadgeHtml(e)}
-            ${e.paymentMethod === 'cash' && e.entryType === 'income' && e.depositedBy ? `<span class="kbadge badge-green" title="${esc(fmtDateTime(e.depositedAt))}">🏦 Deposited by ${esc(e.depositedBy)}</span>` : ''}
           </div>
           ${e.narration ? `<div class="k-page-hint" style="margin-top:6px">${esc(e.narration)}</div>` : ''}
           ${e.reference ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Ref: ${esc(e.reference)}</div>` : ''}
-          ${e.partnerName ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Partner: ${esc(e.partnerName)}</div>` : ''}
+          ${e.partnerName && !String(e.narration || '').includes(e.partnerName) ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">Partner: ${esc(e.partnerName)}</div>` : ''}
           ${e.recordedBy ? `<div style="font-size:11px;color:var(--text3)">Recorded by: ${esc(e.recordedBy)}</div>` : ''}
+          ${_signoffLinesHtml(e)}
         </div>
       </div>
     </div>`).join('');
