@@ -317,6 +317,8 @@ tr:hover td{background:var(--surface)}
 .budget-line-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
 .budget-line-label{font-size:14px;font-weight:700;color:var(--text)}
 .budget-line-sub{font-size:12px;color:var(--text2);margin-top:2px}
+.budget-line-why{display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
+.budget-line-why.open{display:block;-webkit-line-clamp:unset}
 .budget-line-pct{font-size:12px;font-weight:700;color:var(--text2);margin-top:6px}
 .budget-line-bar{margin:10px 0 0}
 .budget-pace-ontrack{background:var(--success-light,rgba(15,110,86,0.12));color:var(--success,#0F6E56)}
@@ -443,6 +445,7 @@ tr:hover td{background:var(--surface)}
      (which are hidden above via .no-print on the toggle buttons themselves). */
   .budget-breakdown-panel[hidden],.budget-line-expenses[hidden]{display:block!important}
   .budget-bar-marker{background:#000}
+  .budget-line-why{display:block;-webkit-line-clamp:unset}
   tr{page-break-inside:avoid}
 }
 

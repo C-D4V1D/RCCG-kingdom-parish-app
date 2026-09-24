@@ -696,3 +696,25 @@ test('matchActuals: a merged "Other small costs" line tracks every category it i
   assert.equal(other.spent, 8000);
   assert.deepEqual(result.unplanned.map(item => item.key), ['welfare']);
 });
+
+test('packHistory: months before the first record are not counted as ₦0 months', () => {
+  // Records only exist from April 2026; planning October on 24 Sept.
+  const expenses = [];
+  for (const m of ['04', '05', '06', '07', '08']) {
+    expenses.push({ category: 'power', amount: 25000, date: `2026-${m}-10`, status: 'approved' });
+  }
+  const history = packHistory({ expenses, incomeRecords: [], months: 12, targetMonthKey: '2026-10', today: '2026-09-24' });
+  assert.deepEqual(history.months.map(m => m.monthKey), ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08']);
+  const power = suggestCategoryAmount(history.months, 'power');
+  assert.equal(power.cadence, 'usual');
+  assert.equal(power.amount, 25000);
+});
+
+test('periodProgress follows a remittance period that crosses a month end', () => {
+  // Period 25 Aug – 24 Sep 2026 (31 days); Sundays: 30 Aug, 6/13/20 Sep — 13 and 20 are still ahead on the 12th.
+  const p = BudgetEngine.periodProgress(new Date('2026-09-12T12:00:00'), '2026-08-25', '2026-09-24');
+  assert.equal(p.daysInMonth, 31);
+  assert.equal(p.day, 19);
+  assert.equal(p.sundaysInMonth, 4);
+  assert.equal(p.sundaysLeft, 2);
+});

@@ -632,16 +632,25 @@ export function packHistory({
     };
   }
 
+  // Months before the parish started recording anything are "no data", not "₦0 spent".
+  // Counting them as empty months would make a bill paid every month look occasional
+  // and halve its set-aside, so history starts at the first month with any record.
+  const isActive = month => month.grossIncome > 0 || month.parishIncome > 0
+    || Object.keys(month.expensesByCategory).length > 0;
+  const firstActive = orderedKeys.findIndex(key => isActive(byMonth[key]));
+  const usedKeys = firstActive > 0 ? orderedKeys.slice(firstActive) : orderedKeys;
   return {
-    months: orderedKeys.map(key => byMonth[key]),
+    months: usedKeys.map(key => byMonth[key]),
     byMonth,
   };
 }
 
-export function matchActuals(plan, expenses = [], now = new Date()) {
+export function matchActuals(plan, expenses = [], now = new Date(), period = null) {
   const countable = (Array.isArray(expenses) ? expenses : []).filter(expense => isCountableExpense(expense, { mode: 'tracking' }));
   const { byCategory, total } = sumExpensesByCategory(countable);
-  const elapsed = elapsedPctForMonth(now, plan?.monthKey || monthKey(now));
+  const elapsed = period?.from && period?.to
+    ? periodProgress(now, period.from, period.to).pct / 100
+    : elapsedPctForMonth(now, plan?.monthKey || monthKey(now));
   // A merged line (e.g. "Other small costs") tracks every category it absorbed via `includes`.
   const lineCategories = line => {
     const own = String(line?.expenseCategory || line?.key || 'other');
@@ -709,6 +718,35 @@ export function matchActuals(plan, expenses = [], now = new Date()) {
       pct: budgetedTotal > 0 ? Math.round((total / budgetedTotal) * 100) : 0,
     },
   };
+}
+
+// Progress through an arbitrary date range (a calendar month or a remittance period).
+export function periodProgress(now = new Date(), from = '', to = '') {
+  const start = toDate(from);
+  const end = toDate(to);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) {
+    return { day: 0, daysInMonth: 0, pct: 0, sundaysLeft: 0, sundaysInMonth: 0 };
+  }
+  const nowDate = now instanceof Date ? now : toDate(now);
+  const dayMs = 24 * 60 * 60 * 1000;
+  const startDay = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const endDay = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+  const nowDay = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
+  const daysInMonth = Math.round((endDay - startDay) / dayMs) + 1;
+  let day = 0;
+  if (nowDay > endDay) day = daysInMonth;
+  else if (nowDay >= startDay) day = Math.round((nowDay - startDay) / dayMs) + 1;
+  let sundaysInMonth = 0;
+  let sundaysLeft = 0;
+  for (let i = 0; i < daysInMonth; i++) {
+    const d = new Date(startDay.getFullYear(), startDay.getMonth(), startDay.getDate() + i);
+    if (d.getDay() === 0) {
+      sundaysInMonth++;
+      if (i + 1 > day) sundaysLeft++;
+    }
+  }
+  const pct = daysInMonth > 0 ? Math.round((day / daysInMonth) * 100) : 0;
+  return { day, daysInMonth, pct, sundaysLeft, sundaysInMonth };
 }
 
 export function monthProgress(now = new Date(), monthKeyValue = '') {
@@ -1031,6 +1069,7 @@ const api = {
   suggestSubsForCategory,
   matchActuals,
   monthProgress,
+  periodProgress,
   safeToSpend,
   coercePlan,
   robustMonthlySeries,

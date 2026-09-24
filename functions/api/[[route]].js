@@ -4618,6 +4618,7 @@ function normalizeBudgetPack(pack, monthKeyValue) {
       .map(item => ({
         monthKey: item.monthKey,
         parishIncome: Math.max(0, Math.round(Number(item.parishIncome || 0))),
+        remittanceDue: Math.max(0, Math.round(Number(item.remittanceDue || 0))),
         expensesByCategory: item.expensesByCategory && typeof item.expensesByCategory === 'object' ? item.expensesByCategory : {},
         notesByCategory: item.notesByCategory && typeof item.notesByCategory === 'object' ? item.notesByCategory : {},
       }))
@@ -4797,6 +4798,8 @@ async function generateMonthlyBudget(DB, env, data) {
   // own monthly figures — never trust a client-supplied total.
   const incomeStats = budgetRobustSeries(pack.months, month => month?.parishIncome || 0);
   const expectedParishIncome = Math.max(0, Math.round(Number(incomeStats.typical || 0)));
+  // Shown on screen only (remittance is deducted before this budget, never a line).
+  const expectedRemittance = Math.max(0, Math.round(Number(budgetRobustSeries(pack.months, month => month?.remittanceDue || 0).typical || 0)));
 
   const { lines: calculatorLines, cushion } = buildCalculatorLines(pack.baselineLines, expectedParishIncome);
 
@@ -4849,6 +4852,7 @@ async function generateMonthlyBudget(DB, env, data) {
     cushion,
     recommendedBudget,
     expectedParishIncome,
+    expectedRemittance,
     statusLabel: cuts.status,
     shortBy: cuts.shortBy,
     suggestedCuts: cuts.cuts,

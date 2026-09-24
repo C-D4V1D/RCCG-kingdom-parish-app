@@ -4691,3 +4691,27 @@ test('POST /api/budget/afford: the worked example, "not yet" with growth, "no" w
   assert.equal(noResponse.status, 200);
   assert.equal(noBody.verdict, 'no');
 });
+
+test('POST /api/budget/generate stores the typical RCCG remittance for display only (never as a line)', async () => {
+  const { DB, getBudgets } = createBudgetDBMock({});
+  const months = makeFlatMonths(historyMonthKeys('2026-10'), 460000, { power: 120000 })
+    .map(month => ({ ...month, remittanceDue: 440000 }));
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: '2026-10',
+      by: 'Jane Doe',
+      role: 'accountant',
+      pack: {
+        months,
+        baselineLines: [{ key: 'power', label: 'Power & Energy', amount: 120000, cadence: 'usual', why: '', total12: 1440000 }],
+        validKeys: ['power'],
+      },
+    }),
+    env: { DB },
+  });
+  assert.equal(response.status, 200);
+  const plan = getBudgets()['2026-10'];
+  assert.equal(plan.expectedRemittance, 440000);
+  assert.equal(plan.expectedParishIncome, 460000);
+  assert.equal(plan.lines.some(line => /remittance/i.test(line.label || '')), false);
+});
