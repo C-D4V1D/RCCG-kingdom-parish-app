@@ -5568,10 +5568,18 @@ async function buildBudgetPack(targetMonthKey){
 // build the current pack, capped at RCCG_POT_CAP_PERIODS × the current period's RCCG
 // budget. Missing/non-v2 plans contribute {budget:0, paid:0}, which simply doesn't move
 // the pot — the chain never breaks, it just doesn't grow that period.
+function budgetPeriodEndDate(range, today){
+  const end = parseYmdDate(range?.to);
+  return end && end > today ? end : today;
+}
+
 async function computeHeldBackRccg({ settings, allExpenses, allRems, plan, monthKey, range }){
   const engine = getBudgetEngine();
   const currentKey = budgetCurrentKey(settings, allRems);
   const historyKeys = budgetHistoryMonthKeys(monthKey, currentKey, RCCG_HELD_BACK_LOOKBACK);
+  // Only COMPLETED periods carry leftovers forward. This period's unspent RCCG budget is
+  // already held back as "normal spending still to come"; counting it here too would
+  // hold the same money twice. This period is used only to draw down an overspend.
   const keys = [...historyKeys, monthKey];
   const ranges = keys.map(k=>k===monthKey ? range : budgetPeriodRange(k, settings, allRems));
   const plansSettled = await Promise.allSettled(keys.map(k=>k===monthKey ? Promise.resolve({ plan }) : DB.getBudget(k)));
@@ -5589,7 +5597,10 @@ async function computeHeldBackRccg({ settings, allExpenses, allRems, plan, month
   });
   const rccgLineNow = (plan?.lines||[]).find(l=>(l.key||l.expenseCategory)===engine.RCCG_KEY);
   const cap = (rccgLineNow?.amount||0) * (engine.RCCG_POT_CAP_PERIODS||3);
-  return engine.carryForwardPot(entries, { cap }).pot;
+  const completed = entries.slice(0, -1);
+  const current = entries[entries.length-1] || { budget:0, paid:0 };
+  const pot = engine.carryForwardPot(completed, { cap }).pot;
+  return Math.max(0, pot - Math.max(0, current.paid - current.budget));
 }
 const RCCG_HELD_BACK_LOOKBACK = 11; // + the target period itself = 12
 
@@ -5646,7 +5657,8 @@ async function computeBudgetFreeParts(monthKey, prefetched){
   const actuals = engine.matchActuals(trackingPlan, periodExpenses, today, range);
   const spendingStillToCome = (actuals.lines||[]).reduce((s,l)=>s+Math.max(0,(l.budgeted||0)-(l.spent||0)),0);
 
-  const knownBillsSaved = engine.knownBillSchedule(budgetKnownBillsFrom(settings), today).totals.saved;
+  // Measured at the period's end — the same horizon as the float rule.
+  const knownBillsSaved = engine.knownBillSchedule(budgetKnownBillsFrom(settings), budgetPeriodEndDate(range, today)).totals.saved;
   const heldBack = await computeHeldBackRccg({ settings, allExpenses, allRems, plan: usedPlan, monthKey, range });
   const cushion = engine.safetyCushion({
     mode: settings?.budgetSafetyMode || 'auto',
@@ -6062,7 +6074,7 @@ async function renderBudget(){
     const spendableInfo = await calcSpendableNow({ income:allIncome, remittances:allRems, settings });
     free = await computeBudgetFreeParts(thisKey, { settings, allExpenses, allRems, plan, spendableInfo, today, range });
     state._budgetFreeParts = free;
-    billsSchedule = engine.knownBillSchedule(budgetKnownBillsFrom(settings), today);
+    billsSchedule = engine.knownBillSchedule(budgetKnownBillsFrom(settings), budgetPeriodEndDate(range, today));
   }
 
   document.getElementById('pageContent').innerHTML = `
