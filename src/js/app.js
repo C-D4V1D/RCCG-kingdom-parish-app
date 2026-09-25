@@ -722,6 +722,9 @@ const DB = {
   acceptBudget(d)              { return apiFetch('budget/accept','POST',d); },
   saveBudget(d)                { return apiFetch('budget/save','POST',d); },
   reopenBudget(d)              { return apiFetch('budget/reopen','POST',d); },
+  shareBudget(d)                { return apiFetch('budget/share','POST',d); },
+  unshareBudget(d)              { return apiFetch('budget/unshare','POST',d); },
+  getBudgetShare(monthKey)      { return apiFetch(`budget/share?month=${encodeURIComponent(monthKey)}`); },
   getExpenseReceipt(id)        { return apiFetch(`expense-receipt/${id}`); },
   addExpense(d)                { return apiFetch('expenses','POST',d); },
   updateExpense(id,d)          { return apiFetch(`expenses/${id}`,'PUT',d); },
@@ -5476,6 +5479,13 @@ function budgetMonthOffset(key, offset){
   const d = new Date(y, (m||1)-1 + offset, 1);
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 }
+// Budget share link slug: '2026-10' -> 'october-2026'. Mirrors the server-side helper
+// of the same name in functions/api/[[route]].js — keep both in sync.
+function budgetShareSlug(monthKey){
+  const [y,m] = String(monthKey||'').split('-').map(Number);
+  if(!y || !m || m<1 || m>12) return '';
+  return `${MONTHS[m-1].toLowerCase()}-${y}`;
+}
 function budgetMonthLabelForKey(key){
   const [y,m] = String(key||'').split('-').map(Number);
   return y && m ? `${MONTHS[m-1]} ${y}` : '—';
@@ -6275,9 +6285,10 @@ if(typeof window!=='undefined' && window.addEventListener){
   window.addEventListener('beforeprint', ()=>document.querySelectorAll('details.budget-details').forEach(d=>{ d.open = true; }));
 }
 
-// The safety cushion as the last running-cost card. "Used" = spending no line covers:
-// categories without a budget line, plus anything a line spent beyond its budget + savings.
-function renderBudgetCushionCard(cushion, actuals, settings, progress){
+// The safety cushion's "used" figure = spending no line covers: categories without a
+// budget line, plus anything a line spent beyond its budget + savings. Shared by the
+// on-page cushion card and the share snapshot so both agree.
+function budgetCushionStats(cushion, actuals){
   const unplanned = (actuals?.unplanned||[]).reduce((s,u)=>s+(u.spent||0), 0);
   const overLines = (actuals?.lines||[]).reduce((s,l)=>{
     const usable = Number.isFinite(Number(l.usable)) ? Number(l.usable) : (l.budgeted||0);
@@ -6287,6 +6298,12 @@ function renderBudgetCushionCard(cushion, actuals, settings, progress){
   const left = cushion - used;
   const pct = cushion>0 ? Math.round((used/cushion)*100) : (used>0?100:0);
   const pace = used>cushion ? 'over' : (pct>80 ? 'watch' : 'ontrack');
+  return { used, left, pct, pace };
+}
+
+// The safety cushion as the last running-cost card.
+function renderBudgetCushionCard(cushion, actuals, settings, progress){
+  const { used, left, pct, pace } = budgetCushionStats(cushion, actuals);
   const paceLabel = pace==='over'?'Over':pace==='watch'?'Watch':'On track';
   const leftText = left<0 ? `${fmt(Math.abs(left))} over` : `${fmt(left)} left`;
   return `<div class="budget-line-card budget-cushion-card">
@@ -6300,6 +6317,301 @@ function renderBudgetCushionCard(cushion, actuals, settings, progress){
     </div>
     ${renderBudgetBar(pct, progress?.pct||0, pace)}
   </div>`;
+}
+
+// ── Budget WhatsApp share ────────────────────────────────────────────────────
+// Builds the public snapshot per share-contract.md: plain numbers/strings only,
+// no expense descriptions, balances, settings or AI summary. Pure — every input
+// is a value already computed by renderBudget, so this is easy to unit-test.
+function buildBudgetShareSnapshot({ monthKey, range, progress, plan, actuals, cushion, free, billsSchedule, isCurrent, churchName, sharedBy, cushionLabel }){
+  const normal = plan?.normalMonthly || Math.max(0, (actuals?.totals?.budgeted||0) - (plan?.cushion||0));
+  const cushionAmt = Math.max(0, Math.round(cushion||0));
+  const totalBudget = normal + cushionAmt;
+  const spent = actuals?.totals?.spent || 0;
+  const pctSpent = totalBudget ? Math.round((spent/totalBudget)*100) : 0;
+  const status = plan?.statusLabel || 'enough';
+  const statusText = budgetStatusLabelText(plan?.statusLabel, plan?.shortBy);
+
+  const actualLines = actuals?.lines || [];
+  const rccgLine = actualLines.find(l=>l.kind==='rccg' || (l.key||l.expenseCategory)==='rccg_proj');
+  const runningLines = actualLines.filter(l=>l!==rccgLine);
+  const orderedLines = [rccgLine, ...runningLines].filter(Boolean);
+  const lines = orderedLines.map(l=>({
+    label: String(l.label || l.key || l.expenseCategory || ''),
+    kind: l.kind==='rccg' || (l.key||l.expenseCategory)==='rccg_proj' ? 'rccg' : 'running',
+    budgeted: Math.round(l.budgeted||0),
+    saved: Math.round(l.saved||0),
+    usable: Math.round(l.usable||l.budgeted||0),
+    spent: Math.round(l.spent||0),
+    left: Math.round(l.leftover||0),
+    pace: l.pace || 'on_track',
+    saves: !!l.saves,
+  }));
+
+  const { used: cushionUsed, left: cushionLeft, pace: cushionPace } = budgetCushionStats(cushionAmt, actuals);
+
+  const knownBills = (billsSchedule?.items||[]).map(b=>({
+    name: String(b.name||''),
+    amount: Math.round(b.amount||0),
+    dueLabel: budgetBillDueLabel(b.dueDate),
+    saved: Math.round(b.saved||0),
+    monthly: Math.round(b.monthly||0),
+  }));
+
+  const available = (isCurrent && free) ? {
+    free: Math.round(free.free||0),
+    freeEnd: Math.round(free.freeEnd||0),
+    riseBy: fmtDateShort(range?.to||''),
+    status: free.status || (free.free>0 ? 'yes' : 'none'),
+  } : null;
+
+  return {
+    v: 1,
+    monthKey, monthLabel: budgetMonthLabelForKey(monthKey),
+    periodFrom: range?.from||'', periodTo: range?.to||'',
+    periodLabel: `${fmtDateShort(range?.from||'')} – ${fmtDateShort(range?.to||'')}`,
+    dayOf: `Day ${progress?.day||0} of ${progress?.daysInMonth||0}`,
+    churchName: String(churchName||''),
+    asOf: new Date().toISOString(),
+    status, statusText,
+    isCurrent: !!isCurrent,
+    available,
+    totalBudget: Math.round(totalBudget), spent: Math.round(spent), pctSpent,
+    periodPct: Math.round(progress?.pct||0),
+    normal: Math.round(normal), cushion: cushionAmt, cushionLabel: String(cushionLabel||''),
+    expectedIncome: Math.round(plan?.expectedIncome?.total||0),
+    knownBillsMonthly: Math.round(plan?.knownBillsMonthly||0),
+    lines,
+    cushionCard: { used: cushionUsed, amount: cushionAmt, left: cushionLeft, pace: cushionPace },
+    knownBills,
+    sharedBy: String(sharedBy||''),
+  };
+}
+
+// Draws the 1200×630 WhatsApp preview card on a canvas and returns a PNG data URL.
+// Flat colours, system font, no gradients/noise — keeps the PNG well under 300KB.
+function renderBudgetShareImage(snapshot){
+  // 1200×630 Open Graph card (WhatsApp shows it above the link). Flat colours keep the PNG
+  // small; shapes instead of emoji so it looks the same on every phone.
+  const W = 1200, H = 630;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  const GREEN = '#0F6E56', GREEN_DARK = '#0B5241', MINT = '#E6F2EE', BG = '#F6F4EF', WHITE = '#FFFFFF',
+        TEXT = '#1A2E27', MUTED = '#6B7A75', LINE = '#E7E2D8', TRACK = '#EDE9DF', AMBER = '#B7791F', DANGER = '#C0392B';
+  const FONT = 'system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif';
+  const money = n => (n < 0 ? '−' : '') + fmt(Math.abs(Math.round(n||0)));
+  const statusColor = snapshot.status==='short' ? DANGER : snapshot.status==='tight' ? AMBER : GREEN;
+  ctx.textBaseline = 'alphabetic';
+
+  // Canvas + header band
+  ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = GREEN; ctx.fillRect(0, 0, W, 118);
+  ctx.fillStyle = GREEN_DARK; ctx.fillRect(0, 118, W, 4);
+  ctx.fillStyle = WHITE;
+  ctx.font = `800 30px ${FONT}`;
+  ctx.fillText(truncateToWidth(ctx, (snapshot.churchName||'').toUpperCase(), 760), 56, 54);
+  ctx.font = `500 22px ${FONT}`;
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillText(`${snapshot.monthLabel||''} budget · ${snapshot.periodLabel||''}`, 56, 90);
+
+  // Status chip (dot + word)
+  const chipText = String(snapshot.statusText||'').toUpperCase();
+  ctx.font = `800 20px ${FONT}`;
+  const chipW = ctx.measureText(chipText).width + 64, chipH = 44, chipX = W - 56 - chipW, chipY = 38;
+  ctx.fillStyle = WHITE; roundRectPath(ctx, chipX, chipY, chipW, chipH, 22); ctx.fill();
+  ctx.fillStyle = statusColor; ctx.beginPath(); ctx.arc(chipX + 26, chipY + chipH/2, 7, 0, Math.PI*2); ctx.fill();
+  ctx.fillText(chipText, chipX + 42, chipY + 29);
+
+  // Main card
+  const cardX = 56, cardY = 150, cardW = W - 112, cardH = 400;
+  ctx.fillStyle = WHITE; roundRectPath(ctx, cardX, cardY, cardW, cardH, 22); ctx.fill();
+  const padX = cardX + 44;
+
+  // Left: hero figure
+  const a = snapshot.available;
+  const hasAvail = a && Number.isFinite(a.free);
+  ctx.fillStyle = MUTED; ctx.font = `800 18px ${FONT}`;
+  ctx.fillText(hasAvail ? 'AVAILABLE FOR NEW SPENDING' : 'TOTAL PERIOD BUDGET', padX, cardY + 60);
+  let heroText, heroColor, heroSub = '';
+  if(hasAvail){
+    if(a.free > 0){ heroText = money(a.free); heroColor = GREEN; }
+    else { heroText = a.free < 0 ? `${fmt(Math.abs(a.free))} short` : 'Nothing spare'; heroColor = a.free < 0 ? DANGER : AMBER; }
+    if(a.freeEnd > a.free && a.freeEnd > 0) heroSub = `Could rise to ${money(a.freeEnd)} by ${a.riseBy}`;
+  } else {
+    heroText = money(snapshot.totalBudget); heroColor = GREEN;
+  }
+  // Shrink the hero to fit rather than cutting it off (e.g. "₦130,600 short").
+  let heroSize = 76;
+  ctx.font = `800 ${heroSize}px ${FONT}`;
+  while(heroSize > 40 && ctx.measureText(heroText).width > 640){ heroSize -= 4; ctx.font = `800 ${heroSize}px ${FONT}`; }
+  ctx.fillStyle = heroColor;
+  ctx.fillText(heroText, padX, cardY + 142);
+  if(heroSub){ ctx.fillStyle = MUTED; ctx.font = `500 22px ${FONT}`; ctx.fillText(heroSub, padX, cardY + 184); }
+
+  // Right: stat tiles
+  const tileX = cardX + cardW - 44 - 300, tileW = 300, tileH = 70;
+  const tiles = [
+    ['Total budget', money(snapshot.totalBudget)],
+    ['Spent so far', `${money(snapshot.spent)} · ${snapshot.pctSpent||0}%`],
+  ];
+  tiles.forEach(([label, value], i) => {
+    const ty = cardY + 34 + i * (tileH + 14);
+    ctx.fillStyle = MINT; roundRectPath(ctx, tileX, ty, tileW, tileH, 14); ctx.fill();
+    ctx.fillStyle = MUTED; ctx.font = `700 15px ${FONT}`; ctx.fillText(label.toUpperCase(), tileX + 18, ty + 26);
+    ctx.fillStyle = TEXT; ctx.font = `800 24px ${FONT}`; ctx.fillText(truncateToWidth(ctx, value, tileW - 36), tileX + 18, ty + 56);
+  });
+
+  // Progress bar with a "today" marker
+  const barY = cardY + 232, barX = padX, barW = cardW - 88, barH = 18;
+  ctx.fillStyle = TRACK; roundRectPath(ctx, barX, barY, barW, barH, 9); ctx.fill();
+  const pct = Math.max(0, snapshot.pctSpent||0);
+  const fillW = Math.min(barW, barW * Math.min(100, pct) / 100);
+  if(fillW > 0){ ctx.fillStyle = pct > 100 ? DANGER : GREEN; roundRectPath(ctx, barX, barY, Math.max(fillW, barH), barH, 9); ctx.fill(); }
+  if(Number.isFinite(snapshot.periodPct) && snapshot.isCurrent){
+    const mx = barX + barW * Math.max(0, Math.min(100, snapshot.periodPct)) / 100;
+    ctx.fillStyle = TEXT; ctx.fillRect(mx - 1.5, barY - 7, 3, barH + 14);
+  }
+  ctx.fillStyle = MUTED; ctx.font = `500 18px ${FONT}`;
+  ctx.fillText(snapshot.isCurrent ? `${snapshot.dayOf||''} — the line marks today` : 'Spending for the whole period', barX, barY + 48);
+
+  // Biggest budget lines as chips
+  ctx.fillStyle = LINE; ctx.fillRect(padX, cardY + 300, cardW - 88, 1);
+  const topLines = [...(snapshot.lines||[])].sort((x,y)=>(y.budgeted||0)-(x.budgeted||0)).slice(0,3);
+  let cx = padX; const cy = cardY + 322;
+  ctx.font = `700 18px ${FONT}`;
+  for(const l of topLines){
+    const t = `${l.label} ${money(l.budgeted)}`;
+    const tw = Math.min(ctx.measureText(t).width + 32, cardX + cardW - 44 - cx);
+    if(tw < 120) break;
+    ctx.fillStyle = BG; roundRectPath(ctx, cx, cy, tw, 44, 22); ctx.fill();
+    ctx.fillStyle = TEXT; ctx.fillText(truncateToWidth(ctx, t, tw - 32), cx + 16, cy + 29);
+    cx += tw + 12;
+  }
+
+  // Footer call to action
+  ctx.fillStyle = GREEN; ctx.font = `700 20px ${FONT}`;
+  const cta = 'Tap to see the full budget  →';
+  ctx.fillText(cta, W - 56 - ctx.measureText(cta).width, H - 28);
+  ctx.fillStyle = MUTED; ctx.font = `500 18px ${FONT}`;
+  ctx.fillText('Monthly budget · shared from the parish finance portal', 56, H - 28);
+
+  return Promise.resolve(canvas.toDataURL('image/png'));
+}
+function roundRectPath(ctx, x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+function truncateToWidth(ctx, text, maxWidth){
+  if(ctx.measureText(text).width <= maxWidth) return text;
+  let t = text;
+  while(t.length > 1 && ctx.measureText(t + '…').width > maxWidth) t = t.slice(0, -1);
+  return t + '…';
+}
+
+async function copyBudgetShareLink(url, btn){
+  try{
+    await navigator.clipboard.writeText(url);
+    if(btn){ const orig = btn.textContent; btn.textContent = '✓ Copied!'; setTimeout(()=>{ btn.textContent = orig; }, 2000); }
+    else showAlert('Link copied.', 'success');
+  }catch(e){
+    showAlert('Copy failed — please copy the link manually.', 'danger');
+  }
+}
+
+/** Build & publish the WhatsApp share snapshot + preview image for a budget period. */
+async function shareBudget(monthKey, btn){
+  const restore = setBtnLoading(btn, 'Sharing…');
+  try{
+    const settings = state._budgetSettingsCache || await DB.getSettings();
+    const allRems = await DB.getRemittances();
+    const allExpenses = state._budgetAllExpensesCache || await DB.getExpenses();
+    const currentKey = budgetCurrentKey(settings, allRems);
+    const isCurrent = monthKey === currentKey;
+    const range = budgetPeriodRange(monthKey, settings, allRems);
+    const engine = getBudgetEngine();
+    const cfg = getBudgetConfig(settings);
+    const today = new Date();
+    const plan = (await DB.getBudget(monthKey).catch(()=>null))?.plan || null;
+    if(!plan){ throw new Error('No plan to share for this period yet.'); }
+    const progress = engine.periodProgress(today, range.from, range.to);
+    const periodExpenses = allExpenses.filter(e=>budgetInRange(e, range));
+
+    let free = null, billsSchedule = null, savedByKey = {};
+    if(isCurrent){
+      const spendableInfo = await calcSpendableNow({ income: await DB.getIncome(), remittances: allRems, settings });
+      free = await computeAvailableForNewSpending(monthKey, { settings, cfg, allExpenses, allRems, plan, spendableInfo, today, range });
+      billsSchedule = engine.knownBillSchedule(budgetKnownBillsFrom(settings), budgetPeriodEndDate(range, today));
+      savedByKey = free.savedByKey || {};
+    }
+    const actuals = engine.matchActuals(plan, periodExpenses, today, range, { savedByKey });
+    const cushion = (isCurrent && free) ? (free.parts?.cushion||0)
+      : engine.safetyCushion({
+          mode: cfg.safetyMode, percent: cfg.safetyPercent,
+          periodTotals: plan.periodTotals||[], normal: plan.normalMonthly||0,
+          floorPercent: cfg.cushionFloorPercent, minPeriods: cfg.cushionMinPeriods,
+        });
+
+    const snapshot = buildBudgetShareSnapshot({
+      monthKey, range, progress, plan, actuals, cushion, free, billsSchedule, isCurrent,
+      churchName: settings.churchName||'', sharedBy: state.user?.name||'',
+      cushionLabel: budgetSafetyCushionLabel(settings),
+    });
+    const imagePng = await renderBudgetShareImage(snapshot);
+    const res = await DB.shareBudget({ monthKey, snapshot, imagePng, by: state.user?.name||'', role: state.user?.role||'' });
+    const shareUrl = `${location.origin}${res.url}`;
+    const parts = [
+      `📊 ${snapshot.churchName} — ${snapshot.monthLabel} budget`,
+      `Total budget ${fmt(snapshot.totalBudget)} · Spent ${fmt(snapshot.spent)} (${snapshot.pctSpent}%)`,
+    ];
+    if(snapshot.available){
+      const f = snapshot.available.free;
+      parts.push(f > 0 ? `Available for new spending: ${fmt(f)} ✅` : (f < 0 ? `Available for new spending: none — ${fmt(Math.abs(f))} short` : 'Available for new spending: nothing spare right now'));
+    }
+    parts.push(shareUrl);
+    const shareText = parts.join('\n');
+
+    let shared = false;
+    if(navigator.share && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent||'')){
+      // The link is already in the text; passing `url` too makes WhatsApp show it twice.
+      // A dismissed share sheet (AbortError) counts as handled — don't pop WhatsApp open after it.
+      try{ await navigator.share({ text: shareText }); shared = true; }
+      catch(e){ shared = e?.name === 'AbortError'; }
+    }
+    if(!shared){
+      const waWin = window.open(`https://wa.me/?text=${encodeURIComponent(shareText)}`, '_blank');
+      if(!waWin){
+        await copyBudgetShareLink(shareUrl);
+        showAlert('Could not open WhatsApp — link copied instead.', 'info');
+      }
+    }
+    showAlert('Link ready.', 'success');
+    if(state.page === 'budget') await renderBudget();
+  }catch(e){
+    showAlert(e.message || 'Failed to share budget.', 'danger');
+  }
+  restore();
+}
+
+/** Stop sharing a budget period's public link. */
+async function unshareBudget(monthKey, btn){
+  if(!confirm('Stop sharing this budget publicly? The public link will stop working.')) return;
+  const restore = setBtnLoading(btn, 'Stopping…');
+  try{
+    await DB.unshareBudget({ monthKey, by: state.user?.name||'', role: state.user?.role||'' });
+    showAlert('Sharing stopped.', 'success');
+    if(state.page === 'budget') await renderBudget();
+  }catch(e){
+    showAlert(e.message || 'Failed to stop sharing.', 'danger');
+    restore();
+    return;
+  }
+  restore();
 }
 
 async function renderBudget(){
@@ -6364,14 +6676,19 @@ async function renderBudget(){
         floorPercent: cfg.cushionFloorPercent, minPeriods: cfg.cushionMinPeriods,
       }) : 0);
 
+  const canShare = canManage && !!plan;
   document.getElementById('pageContent').innerHTML = `
     <div class="page-header">
       <div>
         <div class="page-title">Monthly Budget</div>
         <div class="page-sub">Plan normal monthly spending after RCCG remittance, and see what's available for new spending.</div>
       </div>
-      <button class="btn btn-ghost no-print" onclick="window.print()">🖨 Print / Save PDF</button>
+      <div class="no-print" style="display:flex;gap:8px;flex-wrap:wrap">
+        ${canShare?`<button class="btn no-print" style="background:#25D366;color:#fff" onclick="App.shareBudget('${esc(thisKey)}', this)">📲 Share</button>`:''}
+        <button class="btn btn-ghost no-print" onclick="window.print()">🖨 Print / Save PDF</button>
+      </div>
     </div>
+    ${canShare?`<div class="td-muted no-print" id="budgetShareStatusLine" style="margin:-6px 0 10px;font-size:12px">Checking public link…</div>`:''}
     ${isCurrent && free ? renderBudgetFreeCard(free, settings, billsSchedule) : ''}
     <div class="budget-tabs no-print">
       <input type="month" class="form-input budget-month-picker" value="${thisKey}" max="${currentKey}" onchange="App.setBudgetMonth(this.value)" />
@@ -6379,6 +6696,27 @@ async function renderBudget(){
     </div>
     ${renderBudgetPeriodCard({ thisKey, plan, actuals, progress, canManage, range, isCurrent, preparing, readyDate, periodExpenses, settings, billsSchedule, cushion })}
   `;
+  if(canShare) loadBudgetShareStatus(thisKey);
+}
+
+// Loaded without blocking renderBudget's paint — fills in the status line once the
+// existing-share lookup returns (or leaves it blank when nothing is shared).
+async function loadBudgetShareStatus(monthKey){
+  try{
+    const res = await DB.getBudgetShare(monthKey);
+    const line = document.getElementById('budgetShareStatusLine');
+    if(!line || state.page !== 'budget' || state.budgetMonthKey !== monthKey) return;
+    const share = res?.share;
+    if(!share){ line.textContent = ''; return; }
+    const updated = share.updatedAt ? `${fmtDate(share.updatedAt)}, ${fmtTime(share.updatedAt)}` : '';
+    line.innerHTML = `Public link: <a href="${esc(share.url||'')}" target="_blank" rel="noopener">${esc(share.url||'')}</a>${updated?` · updated ${esc(updated)}`:''} ·
+      <button type="button" class="btn btn-sm" onclick="App._copyBudgetShareLink('${esc(location.origin + (share.url||''))}', this)">Copy</button>
+      <button type="button" class="btn btn-sm" onclick="App.unshareBudget('${esc(monthKey)}', this)">Stop sharing</button>`;
+  }catch(e){
+    // Silent — the status line is a convenience, not core functionality.
+    const line = document.getElementById('budgetShareStatusLine');
+    if(line) line.textContent = '';
+  }
 }
 
 async function generateBudget(monthKey, btn=null){
@@ -16384,7 +16722,13 @@ return {
   _budgetSavingInfoText: budgetSavingInfoText,
   _budgetSavingReasonText: budgetSavingReasonText,
   _computeHeldBack: computeHeldBack,
-  _computeAvailableForNewSpending: computeAvailableForNewSpending
+  _computeAvailableForNewSpending: computeAvailableForNewSpending,
+  // Budget WhatsApp share (share-contract.md).
+  shareBudget, unshareBudget,
+  _copyBudgetShareLink: copyBudgetShareLink,
+  _buildBudgetShareSnapshot: buildBudgetShareSnapshot,
+  _renderBudgetShareImage: renderBudgetShareImage,
+  _budgetShareSlug: budgetShareSlug
   };
 
 })();
