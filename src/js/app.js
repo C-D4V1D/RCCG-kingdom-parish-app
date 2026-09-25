@@ -3624,7 +3624,7 @@ async function calcChurchBalance(asOfDate, prefetched){
 // still owed (including fixed quotas), the same figure the Dashboard's
 // "Available Fund After All Deductions" shows. Extracted from the Expenses
 // page (formerly inlined there) so the Expenses page and the Budget page
-// (Part G "Free for new things") can never drift apart — both call this one
+// (Part G "Available for new spending") can never drift apart — both call this one
 // function. `prefetched` lets a caller that already has income/remittances/
 // settings/churchBal avoid refetching them.
 async function calcSpendableNow(prefetched){
@@ -3763,6 +3763,39 @@ function renderDashboardErrorState(failed){
     failed,
     extraButtons: `<button class="btn" onclick="App.navigate('transactions')">View Transactions instead</button>`,
   });
+}
+
+// Contract v3 — Dashboard's tappable "Available for new spending" panel. `avail` is
+// a computeAvailableForNewSpending() result; rangeTo is that period's end date, for
+// the "Could rise to…" line. Whole panel is one keyboard-reachable control (role,
+// tabindex, Enter/Space) that jumps to the Budget page's full breakdown.
+function renderDashAvailablePanel(avail, rangeTo){
+  const statusMap = {
+    yes:   { icon:'✅', label:'Yes',           color:'var(--success)' },
+    none:  { icon:'🟡', label:'Nothing spare', color:'#B8860B' },
+    short: { icon:'🔴', label:'Short',          color:'var(--danger)' },
+  };
+  const st = statusMap[avail.status] || statusMap.short;
+  const negative = avail.free < 0;
+  const amountText = negative ? `−${fmt(Math.abs(avail.free))}` : fmt(avail.free);
+  const riseLine = (avail.freeEnd > avail.free && avail.freeEnd > 0)
+    ? `<div style="font-size:11.5px;color:var(--text3);margin-top:2px">Could rise to ${fmt(avail.freeEnd)} by ${esc(fmtDateShort(rangeTo))} if Sundays come in as usual.</div>`
+    : '';
+  const nextPeriodRow = Math.max(avail.parts.currentFloat||0, avail.parts.nextPeriodFloat + avail.parts.cushion);
+  return `<div role="button" tabindex="0" onclick="App.openBudgetBreakdown()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.openBudgetBreakdown();}" style="cursor:pointer;margin-bottom:10px;padding:10px 12px;border-radius:10px;border:1px solid var(--border);border-left:4px solid ${st.color};background:var(--surface2, rgba(0,0,0,0.02))">
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3)">Available for new spending</div>
+    <div style="display:flex;align-items:baseline;gap:8px;margin-top:4px;flex-wrap:wrap">
+      <span style="font-size:14px">${st.icon} ${esc(st.label)}</span>
+      <span style="font-size:20px;font-weight:800;color:${st.color};letter-spacing:-0.5px">${amountText}</span>
+    </div>
+    ${riseLine}
+    <div style="margin-top:8px;font-size:11.5px;color:var(--text2);line-height:1.7">
+      <div style="display:flex;justify-content:space-between;gap:8px"><span>Next period's money + cushion</span><strong>${fmt(nextPeriodRow)}</strong></div>
+      <div style="display:flex;justify-content:space-between;gap:8px"><span>Known bills saved</span><strong>${fmt(avail.parts.knownBillsSaved)}</strong></div>
+      <div style="display:flex;justify-content:space-between;gap:8px"><span>Held back for savings</span><strong>${fmt(avail.parts.heldBack)}</strong></div>
+    </div>
+    <div style="margin-top:6px;font-size:12px;font-weight:600;color:var(--primary)">See full breakdown ›</div>
+  </div>`;
 }
 
 async function renderDashboard(){
@@ -4548,6 +4581,29 @@ async function renderDashboard(){
   const remBtnRange = computeRemPeriodDates(settings, allRemsDash, remBtnY, remBtnM);
   const calBtnLastDay = new Date(calBtnY, calBtnM + 1, 0).getDate();
 
+  // Contract v3 — Dashboard mirror of the Budget page's "Available for new spending"
+  // headline. Only meaningful for the period that's still open (a past period's real
+  // spending is already settled, so the old Petty-cash rows stay as-is there). Wrapped
+  // in try/catch so a budget-engine hiccup falls back to the pre-v3 rows instead of
+  // breaking the Dashboard.
+  let dashAvailable = null;
+  let dashAvailableRangeTo = '';
+  if(!dashIsPastPeriod){
+    try{
+      const dashBudgetKey = budgetCurrentKey(settings, allRemsDash);
+      const dashBudgetRange = budgetPeriodRange(dashBudgetKey, settings, allRemsDash);
+      dashAvailableRangeTo = dashBudgetRange.to;
+      dashAvailable = await computeAvailableForNewSpending(dashBudgetKey, {
+        settings, allExpenses: allExpensesDash, allRems: allRemsDash,
+        spendableInfo: { spendable: dashSpendable, churchBal },
+        today: new Date(), range: dashBudgetRange,
+      });
+    }catch(e){
+      console.warn('Available-for-new-spending calc failed:', e);
+      dashAvailable = null;
+    }
+  }
+
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header">
       <div>
@@ -4747,18 +4803,20 @@ async function renderDashboard(){
         </div>
         <div style="margin-top:14px;padding-top:12px;border-top:1px dashed ${dashSpendColor}33">
           <!-- Petty Cash Sustainability -->
+          ${(!dashIsPastPeriod && dashAvailable) ? renderDashAvailablePanel(dashAvailable, dashAvailableRangeTo) : `
           <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:4px">
             <span style="color:var(--text3)">Petty cash (committed)</span>
             <span style="font-weight:600;color:var(--text)">${fmt(_pettyCurrentFloat)}</span>
-          </div>
+          </div>`}
           <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:6px">
             <span style="color:var(--text3)">Petty top-up for next period</span>
             <span style="font-weight:600;color:var(--text)">${fmt(_pettyTopUpNeeded)}</span>
           </div>
+          ${(!dashIsPastPeriod && dashAvailable) ? '' : `
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
             <span style="font-size:12px;color:var(--text3)">After all obligations</span>
             <span style="font-size:18px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.5px">${fmt(_pettyAfterObligs)}</span>
-          </div>
+          </div>`}
           <div style="font-size:11.5px;color:var(--text2);line-height:1.5;padding:8px 10px;background:${dashSpendColor}0D;border-radius:8px;border-left:3px solid ${dashSpendColor}">${_pettyMsg}</div>
         </div>
       </div>
@@ -5401,6 +5459,13 @@ function getBudgetEngine(){
   if(!engine) throw new Error('Budget engine failed to load.');
   return engine;
 }
+// Contract v3 — the single source of truth for every budget setting (safety cushion
+// mode/percent, cushion floor/min periods, hold-for-next-period %, look-back periods,
+// one-off min/mult, "enough" %, never-cut keys, auto-create/day-delay, AI summary,
+// per-category saving overrides). Reads settings.budgetRules (+ legacy budgetSafetyMode/
+// budgetSafetyPercent keys), clamps every number, and fills in defaults — used
+// everywhere instead of a hardcoded 12 / 3 / safety-key constant.
+function getBudgetConfig(settings){ return getBudgetEngine().budgetConfig(settings); }
 function budgetTodayKey(){ return getBudgetEngine().monthKey(new Date()); }
 function budgetMonthOffset(key, offset){
   const [y,m] = String(key||budgetTodayKey()).split('-').map(Number);
@@ -5458,6 +5523,29 @@ function toggleBudgetBreakdown(btn){
   if(hidden){ panel.removeAttribute('hidden'); btn.textContent = 'How is this worked out? ▴'; }
   else { panel.setAttribute('hidden',''); btn.textContent = 'How is this worked out? ▾'; }
 }
+// Contract v3 — the Dashboard's "Available for new spending" panel links here.
+// Forces the Budget page onto the current period (in case a past period was being
+// viewed), navigates there, then polls briefly for the breakdown panel to appear
+// in the DOM (the page renders asynchronously) before opening and scrolling to it.
+async function openBudgetBreakdown(){
+  state.budgetMonthKey = null;
+  state.budgetEditingMonth = null;
+  await navigate('budget');
+  const tryOpen = (attemptsLeft) => {
+    const panel = document.getElementById('budgetBreakdown');
+    if(panel){
+      if(panel.hasAttribute('hidden')){
+        const btn = panel.previousElementSibling;
+        if(btn && btn.classList && btn.classList.contains('budget-breakdown-toggle')) toggleBudgetBreakdown(btn);
+        else panel.removeAttribute('hidden');
+      }
+      if(typeof panel.scrollIntoView === 'function') panel.scrollIntoView({ behavior:'smooth', block:'start' });
+      return;
+    }
+    if(attemptsLeft > 0) setTimeout(()=>tryOpen(attemptsLeft-1), 100);
+  };
+  setTimeout(()=>tryOpen(20), 60);
+}
 function budgetStatusBadge(label){
   if(label==='enough') return 'badge badge-success';
   if(label==='tight') return 'badge badge-warn';
@@ -5511,10 +5599,11 @@ function budgetKnownBillsFrom(settings){
 async function buildBudgetPack(targetMonthKey){
   const engine = getBudgetEngine();
   const [allExpenses, settings, allRems] = await Promise.all([DB.getExpenses(), DB.getSettings(), DB.getRemittances()]);
+  const cfg = getBudgetConfig(settings);
   const allIncome = await DB.getIncome();
   const quotaList = getQuotaList(settings);
   const currentKey = budgetCurrentKey(settings, allRems);
-  const historyKeys = budgetHistoryMonthKeys(targetMonthKey, currentKey, 12);
+  const historyKeys = budgetHistoryMonthKeys(targetMonthKey, currentKey, cfg.lookbackPeriods);
   const ranges = historyKeys.map(k=>budgetPeriodRange(k, settings, allRems));
   const periods = [];
   for(const range of ranges){
@@ -5539,7 +5628,7 @@ async function buildBudgetPack(targetMonthKey){
   }
   // Leading periods with no items and no income are dropped — records not started yet.
   const firstActive = periods.findIndex(p=>p.items.length>0 || p.sundayIncome>0 || p.otherIncome>0);
-  const usedPeriods = (firstActive > 0 ? periods.slice(firstActive) : periods).slice(-12);
+  const usedPeriods = (firstActive > 0 ? periods.slice(firstActive) : periods).slice(-cfg.lookbackPeriods);
   const labels = Object.fromEntries(EXPENSE_CATS.filter(c=>c.key!=='reconciliation').map(c=>[c.key, c.label]));
   return { periods: usedPeriods, labels, knownBills: budgetKnownBillsFrom(settings) };
 }
@@ -5552,7 +5641,7 @@ async function buildBudgetPack(targetMonthKey){
 // ── Petty-cash float policy (Dashboard + Expenses health label) ──────────────
 // Once the current period has a Budget plan, the target float IS the Budget's
 // next-period spending plus its safety cushion, so the health label and the
-// Budget's "Free for new things" use one yardstick. The cushion takes over the
+// Budget's "Available for new spending" use one yardstick. The cushion takes over the
 // old "buffer above target"; the manual Target Float / Buffer settings apply
 // only until a plan exists.
 async function pettyFloatPolicy(settings, allRems){
@@ -5562,15 +5651,18 @@ async function pettyFloatPolicy(settings, allRems){
   const manualBuffer = parseFloat(settings?.pettyBufferAmount||0)||30000;
   try{
     const engine = getBudgetEngine();
+    const cfg = getBudgetConfig(settings);
     const plan = (await DB.getBudget(budgetCurrentKey(settings, allRems)))?.plan;
     if(plan && plan.version===2 && plan.normalMonthly>0){
       const cushion = engine.safetyCushion({
-        mode: settings?.budgetSafetyMode||'auto',
-        percent: Number(settings?.budgetSafetyPercent)||0,
+        mode: cfg.safetyMode,
+        percent: cfg.safetyPercent,
         periodTotals: plan.periodTotals||[],
         normal: plan.normalMonthly,
+        floorPercent: cfg.cushionFloorPercent,
+        minPeriods: cfg.cushionMinPeriods,
       });
-      const spending = Math.round(plan.normalMonthly);
+      const spending = Math.round(plan.normalMonthly * (cfg.floatPercent/100));
       return { fromBudget:true, spending, cushion, target: spending + cushion, manageable, minimum };
     }
   }catch(e){ /* no plan yet or engine unavailable — fall back to the manual settings */ }
@@ -5598,43 +5690,86 @@ function budgetPeriodEndDate(range, today){
   return end && end > today ? end : today;
 }
 
-async function computeHeldBackRccg({ settings, allExpenses, allRems, plan, monthKey, range }){
+// Contract v3 backward compat: a version-2 plan line saved before "saves"/"saveCap"
+// existed carries neither field. Treat that as: rccg_proj → always saves (cap = 3×
+// its budget, matching the old RCCG_POT_CAP_PERIODS rule), every other category →
+// doesn't save. A v3 line always carries an explicit `saves` boolean, so this only
+// ever applies to old data.
+function budgetLineSaves(line, key){
+  if(line && line.saves !== undefined) return !!line.saves;
+  return key === 'rccg_proj';
+}
+function budgetLineCap(line, key){
+  const capField = Number(line?.saveCap);
+  if(capField > 0) return capField;
+  const amount = Number(line?.amount) || 0;
+  if(line && line.saves === undefined && key === 'rccg_proj') return amount * 3;
+  return amount;
+}
+
+// Contract v3 — how much of each saving category's unspent budget is being carried
+// forward for later (generalises the old RCCG-only "held back" pot to every category
+// the current plan marks saves:true). For each such line: walk the completed history
+// periods, using {budget:0,paid:0} wherever that period's own plan doesn't also save
+// this category (or has no v2 plan at all) — so the pot only ever grows from periods
+// that were themselves saving. The current period only draws the pot down by any
+// overspend, never grows it (its own unspent budget is already counted as "normal
+// spending still to come").
+async function computeHeldBack({ settings, allExpenses, allRems, plan, monthKey, range, cfg }){
   const engine = getBudgetEngine();
+  const cfgUsed = cfg || getBudgetConfig(settings);
   const currentKey = budgetCurrentKey(settings, allRems);
   const historyKeys = budgetHistoryMonthKeys(monthKey, currentKey, RCCG_HELD_BACK_LOOKBACK);
-  // Only COMPLETED periods carry leftovers forward. This period's unspent RCCG budget is
-  // already held back as "normal spending still to come"; counting it here too would
-  // hold the same money twice. This period is used only to draw down an overspend.
   const keys = [...historyKeys, monthKey];
   const ranges = keys.map(k=>k===monthKey ? range : budgetPeriodRange(k, settings, allRems));
   const plansSettled = await Promise.allSettled(keys.map(k=>k===monthKey ? Promise.resolve({ plan }) : DB.getBudget(k)));
-  const entries = keys.map((k,i)=>{
-    const p = plansSettled[i].status==='fulfilled' ? plansSettled[i].value?.plan : null;
-    if(!p || p.version!==2) return { budget:0, paid:0 };
-    const rccgLine = (p.lines||[]).find(l=>(l.key||l.expenseCategory)===engine.RCCG_KEY);
-    const budget = rccgLine?.amount || 0;
-    const r = ranges[i];
-    const paid = (allExpenses||[])
-      .filter(e=>budgetInRange(e, r) && String(e.category||'')===engine.RCCG_KEY && engine.isCountableExpense(e,{mode:'tracking'})
-        && !engine.REMITTANCE_WORD_RE.test(`${e.description||''} ${e.subCategory||''}`))
-      .reduce((s,e)=>s+(e.amount||0), 0);
-    return { budget, paid };
-  });
-  const rccgLineNow = (plan?.lines||[]).find(l=>(l.key||l.expenseCategory)===engine.RCCG_KEY);
-  const cap = (rccgLineNow?.amount||0) * (engine.RCCG_POT_CAP_PERIODS||3);
-  const completed = entries.slice(0, -1);
-  const current = entries[entries.length-1] || { budget:0, paid:0 };
-  const pot = engine.carryForwardPot(completed, { cap }).pot;
-  return Math.max(0, pot - Math.max(0, current.paid - current.budget));
+
+  const rows = [];
+  const savedByKey = {};
+  let total = 0;
+  for(const line of (plan?.lines || [])){
+    const key = String(line?.key || line?.expenseCategory || '');
+    if(!key) continue;
+    if(cfgUsed.savingOverrides[key] === 'never') continue;
+    if(!budgetLineSaves(line, key)) continue;
+    const cap = budgetLineCap(line, key);
+    const isRccg = key === engine.RCCG_KEY;
+    const entries = keys.map((k,i)=>{
+      const p = plansSettled[i].status==='fulfilled' ? plansSettled[i].value?.plan : null;
+      if(!p || p.version!==2) return { budget:0, paid:0 };
+      const l = (p.lines||[]).find(x=>String(x.key||x.expenseCategory)===key);
+      if(!l || !budgetLineSaves(l, key)) return { budget:0, paid:0 };
+      const budget = l.amount || 0;
+      const r = ranges[i];
+      const paid = (allExpenses||[])
+        .filter(e=>budgetInRange(e, r) && String(e.category||'')===key && engine.isCountableExpense(e,{mode:'tracking'})
+          && (!isRccg || !engine.REMITTANCE_WORD_RE.test(`${e.description||''} ${e.subCategory||''}`)))
+        .reduce((s,e)=>s+(e.amount||0), 0);
+      return { budget, paid };
+    });
+    const completed = entries.slice(0, -1);
+    const current = entries[entries.length-1] || { budget:0, paid:0 };
+    const { pot } = engine.carryForwardPot(completed, { cap });
+    savedByKey[key] = pot;
+    const held = Math.max(0, pot - Math.max(0, current.paid - current.budget));
+    if(held > 0){
+      rows.push({ key, label: String(line.label || expenseCatLabel(key)), held: Math.round(held) });
+      total += held;
+    }
+  }
+  rows.sort((a,b)=>b.held - a.held);
+  return { rows, total: Math.round(total), savedByKey };
 }
 const RCCG_HELD_BACK_LOOKBACK = 11; // + the target period itself = 12
 
-// Part G — "Free for new things" (contract-v2.md section 3/5). Computed the same way for
-// the top card and for the client-only instant amount check — both build on this.
-async function computeBudgetFreeParts(monthKey, prefetched){
+// Contract v3 — "Available for new spending" (was "Free for new things", contract-v2.md
+// section 3/5). Computed the same way for the Dashboard panel, the Budget page's top
+// card, and the client-only instant amount check — all three build on this.
+async function computeAvailableForNewSpending(monthKey, prefetched){
   const engine = getBudgetEngine();
   const pf = prefetched || {};
   const settings = pf.settings || await DB.getSettings();
+  const cfg = pf.cfg || getBudgetConfig(settings);
   const allExpenses = pf.allExpenses || await DB.getExpenses();
   const allRems = pf.allRems || await DB.getRemittances();
   let plan = pf.plan;
@@ -5656,7 +5791,10 @@ async function computeBudgetFreeParts(monthKey, prefetched){
       usedPlan = prevPlan;
     } else {
       const pack = pf.pack || await buildBudgetPack(monthKey);
-      const avg = engine.categoryAverages(pack.periods, { knownBillItemIds: (pack.knownBills||[]).map(b=>b.itemId).filter(Boolean) });
+      const avg = engine.categoryAverages(pack.periods, {
+        knownBillItemIds: (pack.knownBills||[]).map(b=>b.itemId).filter(Boolean),
+        oneOffMin: cfg.oneOffMin, oneOffMult: cfg.oneOffMult,
+      });
       const inc = engine.expectedIncome(pack.periods);
       const bills = engine.knownBillSchedule(pack.knownBills, today);
       usedPlan = {
@@ -5677,27 +5815,42 @@ async function computeBudgetFreeParts(monthKey, prefetched){
     + (income.other||0) * (progress.daysInMonth ? (daysLeft/progress.daysInMonth) : 0)
   );
 
+  const heldBackInfo = await computeHeldBack({ settings, allExpenses, allRems, plan: usedPlan, monthKey, range, cfg });
+
   const periodExpenses = allExpenses.filter(e=>budgetInRange(e, range));
   const trackingPlan = plan || { monthKey, lines:[] };
-  const actuals = engine.matchActuals(trackingPlan, periodExpenses, today, range);
+  const actuals = engine.matchActuals(trackingPlan, periodExpenses, today, range, { savedByKey: heldBackInfo.savedByKey });
   const spendingStillToCome = (actuals.lines||[]).reduce((s,l)=>s+Math.max(0,(l.budgeted||0)-(l.spent||0)),0);
 
   // Measured at the period's end — the same horizon as the float rule.
   const knownBillsSaved = engine.knownBillSchedule(budgetKnownBillsFrom(settings), budgetPeriodEndDate(range, today)).totals.saved;
-  const heldBack = await computeHeldBackRccg({ settings, allExpenses, allRems, plan: usedPlan, monthKey, range });
+  const nextPeriodFloat = Math.round(normalMonthly * (cfg.floatPercent/100));
   const cushion = engine.safetyCushion({
-    mode: settings?.budgetSafetyMode || 'auto',
-    percent: Number(settings?.budgetSafetyPercent)||0,
+    mode: cfg.safetyMode,
+    percent: cfg.safetyPercent,
     periodTotals, normal: normalMonthly,
+    floorPercent: cfg.cushionFloorPercent,
+    minPeriods: cfg.cushionMinPeriods,
   });
+  const currentFloat = spendableInfo?.churchBal?.pettyFloat || 0;
 
   const result = engine.freeForNewThings({
     availableNow, expectedRestOfPeriod, spendingStillToCome,
-    nextPeriodFloat: normalMonthly, knownBillsSaved, heldBack, cushion,
+    nextPeriodFloat, knownBillsSaved, heldBack: heldBackInfo.total, cushion, currentFloat,
   });
   const growth = engine.growthPerMonth(income.total||0, normalMonthly, knownBillsMonthly);
   const runway = engine.runwayMonths(result.free, growth);
-  return { ...result, growth, runway, income, normalMonthly, knownBillsMonthly, spendingStillToCome, expectedRestOfPeriod, monthKey, today };
+  const status = result.free > 0 ? 'yes'
+    : ((availableNow - Math.max(currentFloat, nextPeriodFloat)) >= 0 ? 'none' : 'short');
+  return {
+    ...result, growth, runway, income, normalMonthly, knownBillsMonthly,
+    spendingStillToCome, expectedRestOfPeriod, monthKey, today, range,
+    heldBackRows: heldBackInfo.rows, savedByKey: heldBackInfo.savedByKey, status, cfg,
+  };
+}
+// Back-compat alias — kept in case anything else still calls the pre-v3 name.
+async function computeBudgetFreeParts(monthKey, prefetched){
+  return computeAvailableForNewSpending(monthKey, prefetched);
 }
 
 // Builds the current period's plan the first time anyone opens the Budget or Dashboard
@@ -5708,6 +5861,8 @@ async function ensureCurrentBudgetPlan(prefetched){
   const pf = prefetched || {};
   const engine = getBudgetEngine();
   const settings = pf.settings || await DB.getSettings();
+  const cfg = pf.cfg || getBudgetConfig(settings);
+  if(!cfg.autoCreate) return null;
   const allRems = pf.allRems || await DB.getRemittances();
   const currentKey = budgetCurrentKey(settings, allRems);
   const existing = pf.existingPlan !== undefined ? pf.existingPlan : (await DB.getBudget(currentKey))?.plan || null;
@@ -5715,7 +5870,7 @@ async function ensureCurrentBudgetPlan(prefetched){
   if(existing && (existing.version===2 || existing.status==='accepted')) return existing;
   const prevKey = budgetMonthOffset(currentKey, -1);
   const prevRange = budgetPeriodRange(prevKey, settings, allRems);
-  if(!engine.planReady(ymdLocal(new Date()), prevRange.to, 3)) return null;
+  if(!engine.planReady(ymdLocal(new Date()), prevRange.to, cfg.autoDelayDays)) return null;
   if(state._budgetAutoPromiseKey !== currentKey){
     state._budgetAutoPromiseKey = currentKey;
     state._budgetAutoPromise = (async()=>{
@@ -5740,11 +5895,9 @@ function renderBudgetBar(pct, markerPct, paceClass='ontrack'){
 }
 
 function budgetSafetyCushionLabel(settings){
-  if((settings?.budgetSafetyMode||'auto')==='percent'){
-    const pct = Number(settings?.budgetSafetyPercent)||0; // settings are stored as text
-    return `Fixed ${Math.round(pct)}%`;
-  }
-  return 'Automatic — spending swing, 10% minimum while fewer than 6 periods of records';
+  const cfg = getBudgetConfig(settings);
+  if(cfg.safetyMode==='percent') return `Fixed ${Math.round(cfg.safetyPercent)}%`;
+  return `Automatic — spending swing, ${Math.round(cfg.cushionFloorPercent)}% minimum while fewer than ${cfg.cushionMinPeriods} periods of records`;
 }
 
 // The instant amount check (contract-v2.md section 3) — no server call, no AI. Reads the
@@ -5763,51 +5916,94 @@ function checkBudgetAfford(){
   box.innerHTML = `<div class="alert ${cls}" style="margin-top:12px"><span class="alert-icon">${icon}</span><span><strong>${label}</strong> — ${esc(text)}</span></div>`;
 }
 
+// Contract v3 — "Available for new spending" (was "Free for new things"). The
+// breakdown has two sections: "Now" (what's free to spend today, using the current
+// petty float / next-period float rule) and "By end of period" (the projected
+// end-of-period figure) — the headline is whichever is lower (engine's `free`).
 function renderBudgetFreeCard(free, settings, billsSchedule){
   const negative = free.free < 0;
   const growthLine = free.growth > 0
     ? `Grows by about ${fmt(free.growth)} a period.`
     : `Normal spending is ${fmt(Math.abs(free.growth))} a period more than income — free money is shrinking.${free.runway!=null?` At this rate it runs out in ${free.runway} period${free.runway===1?'':'s'}.`:''}`;
   const bills = (billsSchedule?.items||[]).filter(b=>b.saved>0);
-  const rows = [
+  const billRowsHtml = bills.length
+    ? `<div class="budget-breakdown-sub">${bills.map(b=>`<div class="budget-breakdown-row small"><span>${esc(b.name)} due ${esc(budgetBillDueLabel(b.dueDate))}</span><strong>${fmt(b.saved)} saved · ${fmt(b.monthly)}/period</strong></div>`).join('')}</div>`
+    : '';
+  const endRows = [
     ['Available now after remittance (same as Dashboard)', free.parts.availableNow],
     ['+ Parish money still expected this period', free.parts.expectedRestOfPeriod],
     ["− Normal spending still to come this period", -free.parts.spendingStillToCome],
   ];
+  const heldRows = free.heldBackRows || [];
+  const nowFloatRow = Math.max(free.parts.currentFloat||0, free.parts.nextPeriodFloat + free.parts.cushion);
+  const riseLine = (free.freeEnd > free.free && free.freeEnd > 0)
+    ? `<div class="budget-hero-sub">Could rise to ${fmt(free.freeEnd)} by ${esc(fmtDateShort(free.range?.to||''))} if Sundays come in as usual.</div>`
+    : '';
+  const finalText = negative
+    ? `${fmt(Math.abs(free.free))} short — nothing is available right now`
+    : fmt(free.free);
   return `<div class="card budget-card budget-free-card">
-    <div class="budget-free-label">Free for new things</div>
-    <div class="budget-free-amount" ${negative?'style="color:var(--danger);font-size:20px"':''}>${negative?`${fmt(Math.abs(free.free))} short — nothing is free right now`:fmt(free.free)}</div>
+    <div class="budget-free-label">Available for new spending</div>
+    <div class="budget-free-amount" ${negative?'style="color:var(--danger);font-size:20px"':''}>${finalText}</div>
+    ${riseLine}
     <div class="budget-hero-sub">${esc(growthLine)}</div>
     <div class="budget-afford-box">
       <div class="form-group"><label class="form-label">Can we afford…? Amount (₦)</label><input id="budget_amount" type="number" class="form-input" placeholder="0" oninput="App.checkBudgetAfford()" /></div>
       <div id="budgetAffordResultBox"></div>
     </div>
     <button type="button" class="budget-breakdown-toggle no-print" onclick="App.toggleBudgetBreakdown(this)">How is this worked out? ▾</button>
-    <div class="budget-breakdown-panel" hidden>
-      ${rows.map(([label,val])=>`<div class="budget-breakdown-row"><span>${esc(label)}</span><strong>${val<0?'−':''}${fmt(Math.abs(val))}</strong></div>`).join('')}
+    <div class="budget-breakdown-panel" id="budgetBreakdown" hidden>
+      <div class="budget-section-title">Now</div>
+      <div class="budget-breakdown-row"><span>Available fund after all deductions</span><strong>${fmt(free.parts.availableNow)}</strong></div>
+      <div class="budget-breakdown-row"><span>− Next period's spending + safety cushion (or current petty float if larger)</span><strong>−${fmt(nowFloatRow)}</strong></div>
+      <div class="budget-breakdown-row"><span>− Known bills saved</span><strong>−${fmt(free.parts.knownBillsSaved)}</strong></div>
+      ${billRowsHtml}
+      ${heldRows.map(r=>`<div class="budget-breakdown-row"><span>− Held back — ${esc(r.label||expenseCatLabel(r.key))}</span><strong>−${fmt(r.held)}</strong></div>`).join('')}
+      <div class="budget-breakdown-row total"><span>= Now</span><strong>${free.freeNow<0?`−${fmt(Math.abs(free.freeNow))}`:fmt(free.freeNow)}</strong></div>
+
+      <div class="budget-section-title">By end of period</div>
+      ${endRows.map(([label,val])=>`<div class="budget-breakdown-row"><span>${esc(label)}</span><strong>${val<0?'−':''}${fmt(Math.abs(val))}</strong></div>`).join('')}
       <div class="budget-breakdown-row total"><span>= Expected balance at end of period</span><strong>${fmt(free.expectedEndBalance)}</strong></div>
       <div class="budget-breakdown-row"><span>− Next period's spending, held in hand</span><strong>−${fmt(free.parts.nextPeriodFloat)}</strong></div>
       <div class="budget-breakdown-row"><span>− Known bills saved so far</span><strong>−${fmt(free.parts.knownBillsSaved)}</strong></div>
-      ${bills.length?`<div class="budget-breakdown-sub">${bills.map(b=>`<div class="budget-breakdown-row small"><span>${esc(b.name)} due ${esc(budgetBillDueLabel(b.dueDate))}</span><strong>${fmt(b.saved)} saved · ${fmt(b.monthly)}/period</strong></div>`).join('')}</div>`:''}
-      <div class="budget-breakdown-row"><span>− Held back for RCCG demands</span><strong>−${fmt(free.parts.heldBack)}</strong></div>
+      ${billRowsHtml}
+      <div class="budget-breakdown-row"><span>− Held back (unspent savings)</span><strong>−${fmt(free.parts.heldBack)}</strong></div>
       <div class="budget-breakdown-row"><span>− Safety cushion (${esc(budgetSafetyCushionLabel(settings))})</span><strong>−${fmt(free.parts.cushion)}</strong></div>
-      <div class="budget-breakdown-row total"><span>= FREE FOR NEW THINGS</span><strong>${negative?`−${fmt(Math.abs(free.free))}`:fmt(free.free)}</strong></div>
+      <div class="budget-breakdown-row total"><span>= By end of period</span><strong>${free.freeEnd<0?`−${fmt(Math.abs(free.freeEnd))}`:fmt(free.freeEnd)}</strong></div>
+
+      <div class="budget-breakdown-row total"><span>= Available for new spending (the lower)</span><strong>${finalText}</strong></div>
     </div>
   </div>`;
 }
 
+// Reason text behind the "Saves unspent" tag (contract v3) — shown as the tag's
+// title/tooltip, matching engine.savingCategories' reasons plus the manual overrides.
+function budgetSavingReasonText(reason){
+  if(reason==='lumpy') return 'Spending on this varies a lot period to period, so unspent budget is kept for it';
+  if(reason==='always') return 'Set to always keep unspent budget for this category';
+  if(reason==='never') return 'Set to never keep unspent budget for this category';
+  return 'Spending on this is steady, so unspent budget is not kept';
+}
 function renderBudgetLine(line, expenses, progress){
   const paceClass = line.pace==='over'?'over':line.pace==='watch'?'watch':'ontrack';
   const paceLabel = line.pace==='over'?'Over':line.pace==='watch'?'Watch':'On track';
   const leftText = line.leftover<0 ? `${fmt(Math.abs(line.leftover))} over` : `${fmt(line.leftover)} left`;
   const key = line.expenseCategory||line.key;
   const expRows = (expenses||[]).filter(exp=>(exp.category||'')===key);
-  const pct = line.budgeted ? Math.round((line.spent/line.budgeted)*100) : (line.spent>0?100:0);
+  const usable = Number.isFinite(Number(line.usable)) ? Number(line.usable) : (line.budgeted||0);
+  const saved = Math.max(0, Number(line.saved)||0);
+  const pct = Number.isFinite(line.pct) ? line.pct : (usable ? Math.round((line.spent/usable)*100) : (line.spent>0?100:0));
+  const savesTag = line.saves
+    ? `<span class="badge" title="${esc(budgetSavingReasonText(line.saveReason))}" style="margin-left:6px;background:rgba(15,110,86,0.12);color:var(--primary)">Saves unspent</span>`
+    : '';
+  const amountLine = saved > 0
+    ? `${fmt(line.spent)} of ${fmt(usable)} (Budget ${fmt(line.budgeted)} · + ${fmt(saved)} saved = ${fmt(usable)} you can use) · ${leftText}`
+    : `${fmt(line.spent)} of ${fmt(line.budgeted)} · ${leftText}`;
   return `<div class="budget-line-card">
     <div class="budget-line-top">
       <div>
-        <div class="budget-line-label">${esc(line.label||key)}</div>
-        <div class="budget-line-sub">${fmt(line.spent)} of ${fmt(line.budgeted)} · ${leftText}${line.why?` · ${esc(line.why)}`:''}</div>
+        <div class="budget-line-label">${esc(line.label||key)}${savesTag}</div>
+        <div class="budget-line-sub">${amountLine}${line.why?` · ${esc(line.why)}`:''}</div>
       </div>
       <span class="badge budget-pace-${paceClass}">${paceLabel}</span>
     </div>
@@ -6070,6 +6266,7 @@ async function renderBudget(){
   state._budgetSettingsCache = settings;
   state._budgetAllExpensesCache = allExpenses;
   const engine = getBudgetEngine();
+  const cfg = getBudgetConfig(settings);
   const currentKey = budgetCurrentKey(settings, allRems);
   if(!state.budgetMonthKey) state.budgetMonthKey = currentKey;
   const thisKey = state.budgetMonthKey;
@@ -6080,12 +6277,12 @@ async function renderBudget(){
 
   let plan = (await DB.getBudget(thisKey).catch(()=>null))?.plan || null;
   let preparing = false, readyDate = '';
-  if(isCurrent && !plan){
+  if(isCurrent && !plan && cfg.autoCreate){
     const prevKey = budgetMonthOffset(currentKey, -1);
     const prevRange = budgetPeriodRange(prevKey, settings, allRems);
-    readyDate = engine.planDueDate(prevRange.to, 3);
-    if(engine.planReady(ymdLocal(today), prevRange.to, 3)){
-      plan = await ensureCurrentBudgetPlan({ settings, allRems, existingPlan: plan });
+    readyDate = engine.planDueDate(prevRange.to, cfg.autoDelayDays);
+    if(engine.planReady(ymdLocal(today), prevRange.to, cfg.autoDelayDays)){
+      plan = await ensureCurrentBudgetPlan({ settings, allRems, existingPlan: plan, cfg });
     } else {
       preparing = true;
     }
@@ -6093,21 +6290,22 @@ async function renderBudget(){
 
   const progress = engine.periodProgress(today, range.from, range.to);
   const periodExpenses = allExpenses.filter(e=>budgetInRange(e, range));
-  const actuals = plan ? engine.matchActuals(plan, periodExpenses, today, range) : null;
 
-  let free = null, billsSchedule = null;
+  let free = null, billsSchedule = null, savedByKey = {};
   if(isCurrent){
     const spendableInfo = await calcSpendableNow({ income:allIncome, remittances:allRems, settings });
-    free = await computeBudgetFreeParts(thisKey, { settings, allExpenses, allRems, plan, spendableInfo, today, range });
+    free = await computeAvailableForNewSpending(thisKey, { settings, cfg, allExpenses, allRems, plan, spendableInfo, today, range });
     state._budgetFreeParts = free;
     billsSchedule = engine.knownBillSchedule(budgetKnownBillsFrom(settings), budgetPeriodEndDate(range, today));
+    savedByKey = free.savedByKey || {};
   }
+  const actuals = plan ? engine.matchActuals(plan, periodExpenses, today, range, { savedByKey }) : null;
 
   document.getElementById('pageContent').innerHTML = `
     <div class="page-header">
       <div>
         <div class="page-title">Monthly Budget</div>
-        <div class="page-sub">Plan normal monthly spending after RCCG remittance, and see what is free for new things.</div>
+        <div class="page-sub">Plan normal monthly spending after RCCG remittance, and see what's available for new spending.</div>
       </div>
       <button class="btn btn-ghost no-print" onclick="window.print()">🖨 Print / Save PDF</button>
     </div>
@@ -10035,7 +10233,7 @@ async function renderExpenses(){
   const total = expenses.reduce((s,r)=>s+(r.amount||0),0);
   // Outstanding remittances — uses the same settled-period-aware logic as the Dashboard
   // to prevent rate changes from retroactively inflating past periods' due amounts.
-  // Shared with the Budget page's "Free for new things" via calcSpendableNow() so the
+  // Shared with the Budget page's "Available for new spending" via calcSpendableNow() so the
   // two screens can never disagree on the figure.
   const { spendable, totalChurch, outstandingRems } = await calcSpendableNow({ income:allIncome, remittances:allRems, settings, churchBal });
   const _expPettyPolicy = await pettyFloatPolicy(settings, allRems);
@@ -14561,6 +14759,17 @@ async function renderAdmin(){
   const settingsForView = { ...settings, pettyMax: pettyConfig?.max ?? settings.pettyMax, pettyFloat: pettyConfig?.float ?? 0 };
   const tab=state.adminTab||'users';
 
+  // Only fetched for the Settings tab — "for info" column of the "keep unspent money"
+  // table (contract v3 section 3, admin panel 1).
+  let currentBudgetPlanForSettings = null;
+  if(tab === 'settings'){
+    try{
+      const allRems = await DB.getRemittances();
+      const currentKey = budgetCurrentKey(settings, allRems);
+      currentBudgetPlanForSettings = (await DB.getBudget(currentKey))?.plan || null;
+    }catch(e){ currentBudgetPlanForSettings = null; }
+  }
+
   document.getElementById('pageContent').innerHTML=`
     <div class="page-header"><div class="page-title">IT Admin Panel</div><div class="page-sub">System management — full access</div></div>
     <div class="admin-grid" style="margin-bottom:1rem">
@@ -14577,7 +14786,7 @@ async function renderAdmin(){
       <button class="tab ${tab==='perms'?'active':''}" onclick="App.setAdminTab('perms')">Role Permissions</button>
       <button class="tab ${tab==='backup'?'active':''}" onclick="App.setAdminTab('backup')">Backup & Restore</button>
     </div>
-    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settingsForView):tab==='quotas'?renderAdminQuotas(settings):tab==='types'?renderAdminIncomeTypes(settings,income):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
+    ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settingsForView, currentBudgetPlanForSettings):tab==='quotas'?renderAdminQuotas(settings):tab==='types'?renderAdminIncomeTypes(settings,income):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
   if(tab==='quotas') initQuotaDnd();
 }
 
@@ -14616,7 +14825,97 @@ function renderAdminUsers(users){
     </table></div></div>`;
 }
 
-function renderAdminSettings(s){
+// Contract v3 — for-info column of the "Keep unspent money" table: what the current
+// plan's decision looks like for a given category, if that plan exists at all.
+function budgetSavingInfoText(line){
+  if(!line) return '—';
+  if(line.saves) return `Saving — ${esc(line.saveReason||'lumpy')}, up to ${fmt(line.saveCap||line.amount||0)}`;
+  return 'Not saving — steady';
+}
+
+function renderBudgetRulesSettings(s, currentPlan){
+  const engine = getBudgetEngine();
+  const cfg = getBudgetConfig(s);
+  const cats = EXPENSE_CATS.filter(c=>c.key!=='reconciliation');
+  const catRows = cats.map(c=>{
+    const isRccg = c.key === 'rccg_proj';
+    const overrideVal = isRccg ? 'auto' : (cfg.savingOverrides[c.key]||'auto');
+    const line = (currentPlan?.lines||[]).find(l=>(l.key||l.expenseCategory)===c.key);
+    return `<tr>
+      <td>${esc(c.label)}</td>
+      <td><select class="form-input budget-rule-saving" data-key="${esc(c.key)}" ${isRccg?'disabled':''} style="min-width:130px">
+        <option value="auto" ${overrideVal==='auto'?'selected':''}>Automatic</option>
+        <option value="always" ${overrideVal==='always'?'selected':''}>Always save</option>
+        <option value="never" ${overrideVal==='never'?'selected':''}>Never save</option>
+      </select></td>
+      <td class="td-muted" style="font-size:12px">${budgetSavingInfoText(line)}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="card" style="margin-top:16px">
+    <div class="modal-title" style="font-size:15px;margin-bottom:4px">Budget rules</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:14px">Controls how the Budget page plans spending, decides what counts as "available for new spending", and when it keeps unspent budget for lumpy categories like RCCG demands or Sound & Media.</p>
+
+    <div style="font-size:13px;font-weight:700;color:var(--text2);margin-bottom:4px">1. Keep unspent money</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:8px">Example: Sound & Media spends ₦5,000 most periods but ₦45,000 when cables are bought — "Automatic" notices this and keeps the difference back instead of counting it as free.</p>
+    <div class="table-wrap" style="margin-bottom:16px"><table>
+      <tr><th>Category</th><th>Rule</th><th>Current plan</th></tr>
+      ${catRows}
+    </table></div>
+
+    <div style="font-size:13px;font-weight:700;color:var(--text2);margin-bottom:4px;border-top:1px solid var(--border);padding-top:14px">2. Safety cushion</div>
+    <div class="form-group">
+      <label class="form-label">Safety cushion, before counting money as "available for new spending"</label>
+      <select id="set_budget_safety_mode" class="form-input" onchange="document.getElementById('set_budget_safety_percent_row').style.display=this.value==='percent'?'':'none'">
+        <option value="auto" ${cfg.safetyMode==='auto'?'selected':''}>Automatic — based on how much spending varies (recommended)</option>
+        <option value="percent" ${cfg.safetyMode==='percent'?'selected':''}>Fixed percentage</option>
+      </select>
+      <div class="form-hint">Example: normal spending ₦400,000 a period; Automatic sizes the cushion to how much spending actually swings period to period.</div>
+    </div>
+    <div class="form-group" id="set_budget_safety_percent_row" style="${cfg.safetyMode==='percent'?'':'display:none'}">
+      <label class="form-label">Fixed percentage of normal monthly spending</label>
+      <input type="number" min="0" max="100" id="set_budget_safety_percent" class="form-input" value="${cfg.safetyPercent}" />
+      <div class="form-hint">Example: normal spending ₦400,000 a period, 10% keeps ₦40,000 back.</div>
+    </div>
+    <div class="form-group"><label class="form-label">Safety cushion floor %</label><input type="number" min="0" max="100" id="set_budget_cushion_floor" class="form-input" value="${cfg.cushionFloorPercent}" /><div class="form-hint">Used automatically while there are fewer than the periods below on record.</div></div>
+    <div class="form-group"><label class="form-label">…while fewer than this many periods of records</label><input type="number" min="0" max="24" id="set_budget_cushion_min_periods" class="form-input" value="${cfg.cushionMinPeriods}" /></div>
+
+    <div style="font-size:13px;font-weight:700;color:var(--text2);margin-bottom:4px;border-top:1px solid var(--border);padding-top:14px">3. Hold for next period</div>
+    <div class="form-group"><label class="form-label">% of normal spending held for next period, before anything counts as free</label><input type="number" min="0" max="200" id="set_budget_float_percent" class="form-input" value="${cfg.floatPercent}" /><div class="form-hint">Example: normal spending ₦400,000, 100% holds the full ₦400,000 for next period.</div></div>
+
+    <div style="font-size:13px;font-weight:700;color:var(--text2);margin-bottom:4px;border-top:1px solid var(--border);padding-top:14px">4. History & one-off detection</div>
+    <div class="form-group"><label class="form-label">Look-back periods</label><input type="number" min="3" max="24" id="set_budget_lookback" class="form-input" value="${cfg.lookbackPeriods}" /><div class="form-hint">How many past periods of records the plan is built from.</div></div>
+    <div class="form-group"><label class="form-label">One-off minimum (₦)</label><input type="number" min="0" id="set_budget_oneoff_min" class="form-input" value="${cfg.oneOffMin}" /><div class="form-hint">An expense below this is never treated as a one-off.</div></div>
+    <div class="form-group"><label class="form-label">One-off × typical spend</label><input type="number" min="1" max="50" id="set_budget_oneoff_mult" class="form-input" value="${cfg.oneOffMult}" /><div class="form-hint">Example: 5× means an expense at least 5 times the category's usual amount is treated as a one-off, not the new normal.</div></div>
+
+    <div style="font-size:13px;font-weight:700;color:var(--text2);margin-bottom:4px;border-top:1px solid var(--border);padding-top:14px">5. "Enough" income & never-cut categories</div>
+    <div class="form-group"><label class="form-label">Call it "enough" when normal spending + known bills is at most this % of expected income</label><input type="number" min="50" max="100" id="set_budget_enough_percent" class="form-input" value="${cfg.enoughPercent}" /></div>
+    <div class="form-group">
+      <label class="form-label">Never suggest cutting</label>
+      <div style="display:flex;flex-wrap:wrap;gap:10px">
+        ${cats.map(c=>`<label style="font-size:12.5px;display:flex;align-items:center;gap:4px"><input type="checkbox" class="budget-rule-protected" value="${esc(c.key)}" ${cfg.protectedKeys.includes(c.key)?'checked':''}/> ${esc(c.label)}</label>`).join('')}
+      </div>
+    </div>
+
+    <div style="font-size:13px;font-weight:700;color:var(--text2);margin-bottom:4px;border-top:1px solid var(--border);padding-top:14px">6. Auto-create & AI summary</div>
+    <div class="form-group"><label class="form-label" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="set_budget_autocreate" ${cfg.autoCreate?'checked':''}/> Automatically create the next period's plan</label></div>
+    <div class="form-group"><label class="form-label">Days after cut-off before auto-creating</label><input type="number" min="0" max="7" id="set_budget_autodelay" class="form-input" value="${cfg.autoDelayDays}" /></div>
+    <div class="form-group"><label class="form-label" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="set_budget_aisummary" ${cfg.aiSummary?'checked':''}/> Use AI to write the plan's short summary</label></div>
+
+    <div style="font-size:13px;font-weight:700;color:var(--text2);margin-bottom:4px;border-top:1px solid var(--border);padding-top:14px">7. Petty cash thresholds</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:8px">Sets the petty cash sustainability thresholds shown on the Dashboard's health indicator.</p>
+    <div class="form-group"><label class="form-label">Target Float (₦)</label><input type="number" id="set_petty_target_float" class="form-input" value="${s.pettyTargetFloat||90000}" /><div class="form-hint">Used only until the current period has a Budget plan. After that the target is set automatically to the Budget's next-period spending + safety cushion. Default: ₦90,000.</div></div>
+    <div class="form-group"><label class="form-label">Manageable Float (₦)</label><input type="number" id="set_petty_manageable_float" class="form-input" value="${s.pettyManageableFloat||60000}" /><div class="form-hint">Acceptable minimum if target isn't possible. Default: ₦60,000.</div></div>
+    <div class="form-group"><label class="form-label">Minimum Float (₦)</label><input type="number" id="set_petty_minimum_float" class="form-input" value="${s.pettyMinimumFloat||40000}" /><div class="form-hint">Absolute floor — below this is Critical. Default: ₦40,000.</div></div>
+    <div class="form-group"><label class="form-label">Buffer Above Target (₦)</label><input type="number" id="set_petty_buffer_amount" class="form-input" value="${s.pettyBufferAmount||30000}" /><div class="form-hint">Used only until the current period has a Budget plan. After that the Budget's safety cushion plays this role. Default: ₦30,000.</div></div>
+
+    <div class="budget-action-row" style="margin-top:8px">
+      <button class="btn btn-primary" onclick="App.saveSettings(this)">Save Settings</button>
+      <button type="button" class="btn btn-ghost" onclick="App.resetBudgetRules(this)">Reset budget rules to defaults</button>
+    </div>
+  </div>`;
+}
+
+function renderAdminSettings(s, currentPlan){
   const floatColor = s.pettyFloat < 0 ? 'var(--danger)' : 'var(--success)';
   return `<div class="card">
     <div class="modal-title" style="font-size:15px;margin-bottom:1rem">Church Information</div>
@@ -14625,29 +14924,9 @@ function renderAdminSettings(s){
     <div class="form-group"><label class="form-label">Bank Name</label><input type="text" id="set_bank" class="form-input" value="${s.bankName||''}" /></div>
     <div class="form-group"><label class="form-label">Account Number</label><input type="text" id="set_acct" class="form-input" value="${s.accountNo||''}" /></div>
     <div class="form-group"><label class="form-label">Petty Cash Max Float (₦)</label><input type="number" id="set_petty" class="form-input" value="${s.pettyMax||50000}" /></div>
-    <div style="margin-top:18px;margin-bottom:8px;font-size:13px;font-weight:700;color:var(--text2);border-top:1px solid var(--border);padding-top:14px">Available Balance Status Thresholds</div>
-    <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Set the petty cash sustainability thresholds shown on the Dashboard. These control the health indicator on the "Available Fund After All Deductions" card.</p>
-    <div class="form-group"><label class="form-label">Target Float (₦)</label><input type="number" id="set_petty_target_float" class="form-input" value="${s.pettyTargetFloat||90000}" /><div class="form-hint">Used only until the current period has a Budget plan. After that the target is set automatically to the Budget's next-period spending + safety cushion. Default: ₦90,000.</div></div>
-    <div class="form-group"><label class="form-label">Manageable Float (₦)</label><input type="number" id="set_petty_manageable_float" class="form-input" value="${s.pettyManageableFloat||60000}" /><div class="form-hint">Acceptable minimum if target isn't possible. Default: ₦60,000.</div></div>
-    <div class="form-group"><label class="form-label">Minimum Float (₦)</label><input type="number" id="set_petty_minimum_float" class="form-input" value="${s.pettyMinimumFloat||40000}" /><div class="form-hint">Absolute floor — below this is Critical. Default: ₦40,000.</div></div>
-    <div style="margin-top:18px;margin-bottom:8px;font-size:13px;font-weight:700;color:var(--text2);border-top:1px solid var(--border);padding-top:14px">Budget — Safety Cushion</div>
-    <div class="form-group">
-      <label class="form-label">Safety cushion, before counting money as "free for new things"</label>
-      <select id="set_budget_safety_mode" class="form-input" onchange="document.getElementById('set_budget_safety_percent_row').style.display=this.value==='percent'?'':'none'">
-        <option value="auto" ${(s.budgetSafetyMode||'auto')==='auto'?'selected':''}>Automatic — based on how much spending varies (recommended)</option>
-        <option value="percent" ${(s.budgetSafetyMode||'auto')==='percent'?'selected':''}>Fixed percentage</option>
-      </select>
-      <div class="form-hint">Automatic uses an outlier-proof spread of past spending, with a 10% floor while there are fewer than 6 periods of records.</div>
-    </div>
-    <div class="form-group" id="set_budget_safety_percent_row" style="${(s.budgetSafetyMode||'auto')==='percent'?'':'display:none'}">
-      <label class="form-label">Fixed percentage of normal monthly spending</label>
-      <input type="number" min="0" max="100" id="set_budget_safety_percent" class="form-input" value="${Number.isFinite(Number(s.budgetSafetyPercent))&&s.budgetSafetyPercent!==''&&s.budgetSafetyPercent!=null?Number(s.budgetSafetyPercent):10}" />
-      <div class="form-hint">Example: normal spending ₦400,000 a period, 10% keeps ₦40,000 back.</div>
-    </div>
-    <div class="form-group"><label class="form-label">Buffer Above Target (₦)</label><input type="number" id="set_petty_buffer_amount" class="form-input" value="${s.pettyBufferAmount||30000}" /><div class="form-hint">Used only until the current period has a Budget plan. After that the Budget's safety cushion plays this role. Default: ₦30,000.</div></div>
-    </div>
     <button class="btn btn-primary" onclick="App.saveSettings(this)">Save Settings</button>
   </div>
+  ${renderBudgetRulesSettings(s, currentPlan)}
   ${renderBankEmailAutomationSettings(s)}
   <div class="card" style="margin-top:16px;border:1.5px solid var(--border)">
     <div class="modal-title" style="font-size:15px;margin-bottom:4px">🔧 Petty Float Override</div>
@@ -15227,6 +15506,40 @@ async function saveSettings(btn=null){
   const safetyPercent = parseFloat(document.getElementById('set_budget_safety_percent')?.value);
   s.budgetSafetyPercent = Number.isFinite(safetyPercent) ? Math.max(0, Math.min(100, safetyPercent)) : (s.budgetSafetyPercent ?? 10);
   delete s.budgetSafetyFraction; // migrated to budgetSafetyMode/budgetSafetyPercent
+
+  // Contract v3 — Budget rules. Only touched when the panel is actually on the page
+  // (the Church Settings tab), so this never silently wipes stored rules from a page
+  // that doesn't render them.
+  if(document.getElementById('set_budget_lookback')){
+    const engine = getBudgetEngine();
+    const savingOverrides = {};
+    document.querySelectorAll('.budget-rule-saving').forEach(sel=>{
+      const key = sel.getAttribute('data-key');
+      const val = sel.value;
+      if(key && (val==='always' || val==='never')) savingOverrides[key] = val;
+    });
+    const protectedKeys = [...document.querySelectorAll('.budget-rule-protected:checked')].map(cb=>cb.value);
+    const rawRules = {
+      cushionFloorPercent: parseFloat(document.getElementById('set_budget_cushion_floor')?.value),
+      cushionMinPeriods: parseFloat(document.getElementById('set_budget_cushion_min_periods')?.value),
+      floatPercent: parseFloat(document.getElementById('set_budget_float_percent')?.value),
+      lookbackPeriods: parseFloat(document.getElementById('set_budget_lookback')?.value),
+      oneOffMin: parseFloat(document.getElementById('set_budget_oneoff_min')?.value),
+      oneOffMult: parseFloat(document.getElementById('set_budget_oneoff_mult')?.value),
+      enoughPercent: parseFloat(document.getElementById('set_budget_enough_percent')?.value),
+      protectedKeys,
+      autoCreate: !!document.getElementById('set_budget_autocreate')?.checked,
+      autoDelayDays: parseFloat(document.getElementById('set_budget_autodelay')?.value),
+      aiSummary: !!document.getElementById('set_budget_aisummary')?.checked,
+      savingOverrides,
+    };
+    // budgetConfig() clamps every number to its valid range; strip safetyMode/
+    // safetyPercent back out since those live as their own top-level settings keys,
+    // not nested under budgetRules (matching BUDGET_RULE_DEFAULTS' shape).
+    const { safetyMode: _sm, safetyPercent: _sp, ...clampedRules } = engine.budgetConfig({ budgetRules: rawRules });
+    s.budgetRules = clampedRules;
+  }
+
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.saveSettings(s);
@@ -15241,6 +15554,29 @@ async function saveSettings(btn=null){
     restore();
     showAlert(`Failed to save settings: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
+}
+
+// Contract v3 — "Reset budget rules to defaults" (admin panel 1-6). Restores
+// BUDGET_RULE_DEFAULTS and the safety mode/percent legacy keys; leaves petty cash
+// thresholds, church info, and everything else untouched.
+async function resetBudgetRules(btn=null){
+  if(!requireAdmin()) return;
+  if(typeof window!=='undefined' && window.confirm && !window.confirm('Reset all budget rules to their defaults?')) return;
+  const engine = getBudgetEngine();
+  const restore = setBtnLoading(btn, 'Resetting…');
+  try{
+    const s = await DB.getSettings();
+    s.budgetRules = JSON.parse(JSON.stringify(engine.BUDGET_RULE_DEFAULTS));
+    s.budgetSafetyMode = 'auto';
+    s.budgetSafetyPercent = 10;
+    await DB.saveSettings(s);
+    DB.addAudit('settings_updated','Budget rules reset to defaults',state.user?.name);
+    showAlert('Budget rules reset to defaults.','success');
+    await renderAdmin();
+  }catch(e){
+    showAlert(e.message || 'Failed to reset budget rules.','danger');
+  }
+  restore();
 }
 
 function confirmPettyFloatOverride(){
@@ -15894,7 +16230,7 @@ async function setPeriodMode(mode){
 // ──────────────────────────────────────────
 return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
-  onMonthChange, setIncomeTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, generateBudget, rebuildBudgetPlan, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, checkBudgetAfford, toggleBudgetKnownBillsEditor, budgetKnownBillAdd, budgetKnownBillRemove, budgetKnownBillsUseSuggestion, saveBudgetKnownBills, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
+  onMonthChange, setIncomeTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, openBudgetBreakdown, generateBudget, rebuildBudgetPlan, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, checkBudgetAfford, toggleBudgetKnownBillsEditor, budgetKnownBillAdd, budgetKnownBillRemove, budgetKnownBillsUseSuggestion, saveBudgetKnownBills, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry, isRemittanceLinkedPayout,
@@ -15909,7 +16245,7 @@ return {
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, showPettyToBankDeposit, submitPettyToBankDeposit, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange, onRefillEntryModeChange, onRefillTargetChange, onRefillAmountChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
-  setAdminTab, setAdminUserSearch, saveSettings, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, confirmQuotaPeriodWaiver, applyQuotaPeriodWaiver, saveRates, addIncomeType, saveIncomeTypes, toggleIncomeTypeActive, confirmDeleteIncomeType, deleteIncomeType, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
+  setAdminTab, setAdminUserSearch, saveSettings, resetBudgetRules, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, confirmQuotaPeriodWaiver, applyQuotaPeriodWaiver, saveRates, addIncomeType, saveIncomeTypes, toggleIncomeTypeActive, confirmDeleteIncomeType, deleteIncomeType, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   setPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
@@ -15976,7 +16312,15 @@ return {
   _EXPENSE_SUBCATS: EXPENSE_SUBCATS,
   _getExpenseMethodOptionsForRole: getExpenseMethodOptionsForRole,
   _getPoolPaidViaOptionsForRole: getPoolPaidViaOptionsForRole,
-  _applyCategoryFundSourceDefault: applyCategoryFundSourceDefault
+  _applyCategoryFundSourceDefault: applyCategoryFundSourceDefault,
+  // Contract v3 budget-rules test hooks.
+  _getBudgetConfig: getBudgetConfig,
+  _budgetLineSaves: budgetLineSaves,
+  _budgetLineCap: budgetLineCap,
+  _budgetSavingInfoText: budgetSavingInfoText,
+  _budgetSavingReasonText: budgetSavingReasonText,
+  _computeHeldBack: computeHeldBack,
+  _computeAvailableForNewSpending: computeAvailableForNewSpending
   };
 
 })();

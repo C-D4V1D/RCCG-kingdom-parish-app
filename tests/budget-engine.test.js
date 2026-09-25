@@ -47,6 +47,10 @@ import BudgetEngine, {
   planDueDate,
   planReady,
   ONE_OFF_MIN,
+  budgetConfig,
+  BUDGET_RULE_DEFAULTS,
+  savingCategories,
+  heldBackByCategory,
 } from '../src/js/budget-engine.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -669,7 +673,12 @@ test('freeForNewThings never lets spending-still-to-come go negative (contract v
     cushion: 0,
   });
   assert.equal(free.parts.spendingStillToCome, 0);
-  assert.equal(free.free, 650000);
+  // The stillToCome floor of 0 shows up in freeEnd (contract v2's original formula).
+  assert.equal(free.freeEnd, 650000);
+  // Contract v3: free = min(freeNow, freeEnd). With no currentFloat given (defaults to 0),
+  // freeNow can never exceed availableNow, so it becomes the binding constraint here.
+  assert.equal(free.freeNow, 500000);
+  assert.equal(free.free, 500000);
 });
 
 test('Free for new things — contract v2 float-rule worked example', () => {
@@ -942,7 +951,7 @@ test('carryForwardPot: never goes below 0 and is capped at the given ceiling (3 
   assert.equal(result.pot, 99660, 'pot is capped');
 });
 
-test('freeForNewThings: real-data October free figure ≈ ₦74,851 (float rule)', () => {
+test('freeForNewThings: real-data October freeEnd figure ≈ ₦74,851 (contract v2 float rule)', () => {
   const ca = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id] });
   const income = expectedIncome(livePeriods);
   const normal = ca.normalMonthly;
@@ -955,7 +964,41 @@ test('freeForNewThings: real-data October free figure ≈ ₦74,851 (float rule)
     heldBack: 0,
     cushion: 10620,
   });
-  assert.ok(Math.abs(free.free - 74851) <= 5, `expected ~74851, got ${free.free}`);
+  // contract v2's original formula (no currentFloat) — kept as freeEnd.
+  assert.ok(Math.abs(free.freeEnd - 74851) <= 5, `expected ~74851, got ${free.freeEnd}`);
+  // Contract v3: with no currentFloat given (defaults to 0), freeNow can never exceed
+  // availableNow minus the next period's float+cushion, so it becomes the binding constraint.
+  assert.ok(Math.abs(free.freeNow - 36689) <= 5, `expected ~36689, got ${free.freeNow}`);
+  assert.equal(free.free, free.freeNow);
+});
+
+// Contract v3 — freeForNewThings gains currentFloat, freeNow and freeEnd (free = min(freeNow, freeEnd))
+test('freeForNewThings: contract v3 real-data example — freeEnd 72,835 / freeNow 38,291 / free 38,291', () => {
+  const result = freeForNewThings({
+    availableNow: 185560,
+    expectedRestOfPeriod: 135643,
+    spendingStillToCome: 101099,
+    nextPeriodFloat: 106199,
+    knownBillsSaved: 30450,
+    heldBack: 0,
+    cushion: 10620,
+    currentFloat: 3400,
+  });
+  assert.equal(result.freeEnd, 72835);
+  assert.equal(result.freeNow, 38291);
+  assert.equal(result.free, 38291);
+  assert.equal(result.parts.currentFloat, 3400);
+});
+
+test('freeForNewThings: freeNow is limited by a currentFloat bigger than nextPeriodFloat+cushion', () => {
+  const result = freeForNewThings({
+    availableNow: 100000,
+    nextPeriodFloat: 10000,
+    cushion: 5000,
+    currentFloat: 50000, // bigger than nextPeriodFloat + cushion (15000)
+  });
+  // freeNow = 100000 - max(50000, 15000) - 0 - 0 = 50000
+  assert.equal(result.freeNow, 50000);
 });
 
 test('growthPerMonth: real-data growth ≈ ₦22,379/period (income − normal − known-bill monthly saving)', () => {
@@ -1013,4 +1056,234 @@ test('BudgetEngine default export carries every contract v2 function', () => {
   ]) {
     assert.equal(typeof BudgetEngine[name], 'function', `BudgetEngine.${name} must be exported`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Contract v3 — settings, automatic savings, "Available for new spending"
+// ---------------------------------------------------------------------------
+
+test('BudgetEngine default export carries every contract v3 function/constant', () => {
+  for (const name of ['budgetConfig', 'BUDGET_RULE_DEFAULTS', 'savingCategories', 'heldBackByCategory']) {
+    assert.ok(name in BudgetEngine, `BudgetEngine.${name} must be exported`);
+  }
+  assert.equal(typeof BudgetEngine.budgetConfig, 'function');
+  assert.equal(typeof BudgetEngine.savingCategories, 'function');
+  assert.equal(typeof BudgetEngine.heldBackByCategory, 'function');
+});
+
+test('budgetConfig: defaults when settings is empty/missing', () => {
+  const cfg = budgetConfig({});
+  assert.equal(cfg.safetyMode, 'auto');
+  assert.equal(cfg.safetyPercent, 10);
+  assert.equal(cfg.cushionFloorPercent, BUDGET_RULE_DEFAULTS.cushionFloorPercent);
+  assert.equal(cfg.cushionMinPeriods, BUDGET_RULE_DEFAULTS.cushionMinPeriods);
+  assert.equal(cfg.floatPercent, BUDGET_RULE_DEFAULTS.floatPercent);
+  assert.equal(cfg.lookbackPeriods, BUDGET_RULE_DEFAULTS.lookbackPeriods);
+  assert.equal(cfg.oneOffMin, BUDGET_RULE_DEFAULTS.oneOffMin);
+  assert.equal(cfg.oneOffMult, BUDGET_RULE_DEFAULTS.oneOffMult);
+  assert.equal(cfg.enoughPercent, BUDGET_RULE_DEFAULTS.enoughPercent);
+  assert.deepEqual(cfg.protectedKeys, BUDGET_RULE_DEFAULTS.protectedKeys);
+  assert.equal(cfg.autoCreate, true);
+  assert.equal(cfg.autoDelayDays, BUDGET_RULE_DEFAULTS.autoDelayDays);
+  assert.equal(cfg.aiSummary, true);
+  assert.deepEqual(cfg.savingOverrides, {});
+  assert.equal(budgetConfig(undefined).safetyMode, 'auto', 'budgetConfig() must not throw with no argument');
+});
+
+test('budgetConfig: reads budgetRules as a JSON string and legacy safety keys', () => {
+  const cfg = budgetConfig({
+    budgetRules: JSON.stringify({ lookbackPeriods: 6, oneOffMin: 20000, autoCreate: false }),
+    budgetSafetyMode: 'percent',
+    budgetSafetyPercent: '25',
+  });
+  assert.equal(cfg.lookbackPeriods, 6);
+  assert.equal(cfg.oneOffMin, 20000);
+  assert.equal(cfg.autoCreate, false);
+  assert.equal(cfg.safetyMode, 'percent');
+  assert.equal(cfg.safetyPercent, 25);
+});
+
+test('budgetConfig: invalid numbers fall back to defaults, out-of-range numbers are clamped', () => {
+  const cfg = budgetConfig({
+    budgetRules: {
+      lookbackPeriods: 'not-a-number', // invalid -> default
+      cushionFloorPercent: 500, // out of range -> clamp to 100
+      oneOffMult: 0, // out of range (min 1) -> clamp to 1
+      enoughPercent: 10, // out of range (min 50) -> clamp to 50
+      autoDelayDays: -5, // out of range -> clamp to 0
+    },
+  });
+  assert.equal(cfg.lookbackPeriods, BUDGET_RULE_DEFAULTS.lookbackPeriods);
+  assert.equal(cfg.cushionFloorPercent, 100);
+  assert.equal(cfg.oneOffMult, 1);
+  assert.equal(cfg.enoughPercent, 50);
+  assert.equal(cfg.autoDelayDays, 0);
+});
+
+test('budgetConfig: savingOverrides drops invalid values and always forces rccg_proj to auto', () => {
+  const cfg = budgetConfig({
+    budgetRules: {
+      savingOverrides: {
+        power: 'always',
+        office: 'not-a-real-value',
+        rccg_proj: 'always',
+      },
+    },
+  });
+  assert.deepEqual(cfg.savingOverrides, { power: 'always' });
+});
+
+test('categoryAverages: perPeriodAll/activePeriods (sound) and rccgActivePeriods match the live fixture', () => {
+  const result = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id] });
+  assert.deepEqual(result.byCategory.sound.perPeriodAll, [10400, 4000, 6400, 10400, 45000]);
+  assert.equal(result.byCategory.sound.activePeriods, 5);
+  assert.deepEqual(result.rccgPerPeriod, [2000, 36000, 80000, 3100, 45000]);
+  assert.equal(result.rccgActivePeriods, 5);
+});
+
+test('categoryAverages: oneOffMin 50000 keeps the ₦45,000 cables in the sound average (it rises)', () => {
+  const withDefault = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id] });
+  const withHigherMin = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id], oneOffMin: 50000 });
+  assert.equal(withDefault.byCategory.sound.average, 6240);
+  assert.equal(withHigherMin.byCategory.sound.average, 15240);
+  assert.ok(withHigherMin.byCategory.sound.average > withDefault.byCategory.sound.average);
+  assert.equal(withHigherMin.byCategory.sound.oneOffs.length, 0, 'the cables no longer count as a one-off');
+});
+
+test('categoryAverages: auto-matches a known bill by amount (±5%) and date (±31 days) even without an item id', () => {
+  const withoutAutoMatch = categoryAverages(livePeriods, {});
+  assert.ok(withoutAutoMatch.byCategory.property.oneOffs.some(o => o.amount === 203000), 'without knownBills the rent is still flagged as a one-off');
+
+  const withAutoMatch = categoryAverages(livePeriods, {
+    knownBills: [{ amount: 203000, lastPaid: '2026-07-01' }],
+  });
+  assert.ok(!withAutoMatch.byCategory.property.oneOffs.some(o => o.amount === 203000), 'auto-matched bill is excluded like a knownBillItemIds match');
+  assert.equal(withAutoMatch.byCategory.property.average, 4970);
+
+  // Too far off on amount or date: no auto-match, rent stays in as a one-off.
+  const noMatchOnDate = categoryAverages(livePeriods, {
+    knownBills: [{ amount: 203000, lastPaid: '2026-01-01' }],
+  });
+  assert.ok(noMatchOnDate.byCategory.property.oneOffs.some(o => o.amount === 203000));
+  const noMatchOnAmount = categoryAverages(livePeriods, {
+    knownBills: [{ amount: 100000, lastPaid: '2026-07-01' }],
+  });
+  assert.ok(noMatchOnAmount.byCategory.property.oneOffs.some(o => o.amount === 203000));
+});
+
+test('isOneOffItem: custom min/mult options override the module defaults', () => {
+  const soundItems = livePeriods.flatMap(p => p.items).filter(i => i.category === 'sound');
+  const cables = soundItems.find(i => i.amount === 45000);
+  assert.equal(isOneOffItem(cables, soundItems, { min: 50000 }), false, 'raising min above the amount stops it counting as a one-off');
+  assert.equal(isOneOffItem(cables, soundItems, { mult: 100 }), false, 'raising mult far above the actual ratio stops it counting as a one-off');
+  assert.equal(isOneOffItem(cables, soundItems), true, 'defaults are unaffected');
+});
+
+test('savingCategories: real-data per-category saves/cap/reason match the reviewed May–Sep 2026 table', () => {
+  const avg = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id] });
+  const savings = savingCategories(avg, {});
+  assert.deepEqual(savings.rccg_proj, { saves: true, reason: 'lumpy', cap: 80000 });
+  assert.deepEqual(savings.property, { saves: true, reason: 'lumpy', cap: 21850 });
+  assert.deepEqual(savings.security, { saves: true, reason: 'lumpy', cap: 14000 });
+  assert.deepEqual(savings.office, { saves: true, reason: 'lumpy', cap: 10600 });
+  assert.deepEqual(savings.sound, { saves: true, reason: 'lumpy', cap: 45000 });
+  assert.deepEqual(savings.transport, { saves: true, reason: 'lumpy', cap: 25000 });
+  assert.equal(savings.power.saves, false);
+  assert.equal(savings.power.reason, 'steady');
+  assert.equal(savings.hospitality.saves, false);
+  assert.equal(savings.hospitality.reason, 'steady');
+  assert.equal(savings.comms.saves, false);
+  assert.equal(savings.comms.reason, 'steady');
+  assert.equal(savings.bank.saves, false);
+  assert.equal(savings.bank.reason, 'steady');
+});
+
+test('savingCategories: overrides force always/never, and rccg_proj can never be overridden', () => {
+  const avg = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id] });
+  const savings = savingCategories(avg, { overrides: { power: 'always', sound: 'never', rccg_proj: 'never' } });
+  assert.equal(savings.power.saves, true);
+  assert.equal(savings.power.reason, 'always');
+  assert.equal(savings.sound.saves, false);
+  assert.equal(savings.sound.reason, 'never');
+  assert.equal(savings.rccg_proj.saves, true, 'rccg_proj cannot be overridden to never');
+  assert.equal(savings.rccg_proj.reason, 'lumpy');
+});
+
+test('savingCategories: cap also considers the matching plan line amount, not just the historical max', () => {
+  const avg = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id] });
+  const savings = savingCategories(avg, { lines: [{ key: 'office', amount: 50000 }] });
+  assert.equal(savings.office.cap, 50000, 'the plan line amount (₦50,000) beats the historical max (₦10,600)');
+});
+
+test('heldBackByCategory: a Power-style ₦30,000 budget / ₦15,000 paid line holds back ₦15,000', () => {
+  const result = heldBackByCategory({ power: [{ budget: 30000, paid: 15000 }] }, {});
+  assert.deepEqual(result.rows, [{ key: 'power', held: 15000 }]);
+  assert.equal(result.total, 15000);
+});
+
+test('heldBackByCategory: caps limit the pot, zero-held categories are left out, rows sort desc', () => {
+  const result = heldBackByCategory({
+    power: [{ budget: 30000, paid: 0 }], // uncapped pot would be 30000
+    office: [{ budget: 5000, paid: 5000 }], // held 0 -> excluded
+    sound: [{ budget: 45000, paid: 0 }],
+  }, { power: 10000 });
+  assert.equal(result.rows.find(r => r.key === 'power').held, 10000, 'capped at 10,000');
+  assert.equal(result.rows.find(r => r.key === 'sound').held, 45000, 'uncapped (Infinity) keeps the full pot');
+  assert.ok(!result.rows.some(r => r.key === 'office'), 'a fully-spent category is never listed');
+  assert.equal(result.rows[0].key, 'sound', 'rows sort by held amount, descending');
+  assert.equal(result.total, 55000);
+});
+
+test('safetyCushion: cushionFloorPercent and cushionMinPeriods are configurable', () => {
+  const totals = [87088, 86011, 169413, 86831, 101655];
+  // Fewer than minPeriods (5 < 8): use the 20% floor instead of the default 10%.
+  const withCustomFloor = safetyCushion({ mode: 'auto', periodTotals: totals, normal: 106200, floorPercent: 20, minPeriods: 8 });
+  assert.equal(withCustomFloor, Math.round(0.20 * 106200));
+  // With minPeriods lowered to 5, the 5 periods are "enough" and the robust spread is used instead of the floor.
+  const withLowerMinPeriods = safetyCushion({ mode: 'auto', periodTotals: totals, normal: 106200, minPeriods: 5 });
+  assert.equal(withLowerMinPeriods, robustSpread(totals));
+});
+
+test('planStatus: enoughRatio 0.8 turns the real-data 116,884/139,263 case from "enough" into "tight"', () => {
+  const defaultRatio = planStatus({ normalMonthly: 106200, knownBillsMonthly: 10684, expectedIncome: 139263 });
+  assert.equal(defaultRatio.status, 'enough');
+  const tighter = planStatus({ normalMonthly: 106200, knownBillsMonthly: 10684, expectedIncome: 139263, enoughRatio: 0.8 });
+  assert.equal(tighter.status, 'tight');
+});
+
+test('suggestCuts: a custom protectedKeys list is respected instead of the module default', () => {
+  const lines = [
+    { key: 'power', label: 'Power', amount: 40000, cadence: 'usual' },
+    { key: 'hospitality', label: 'Hospitality', amount: 30000, cadence: 'usual' },
+  ];
+  // Default PROTECTED_FROM_CUTS keeps 'power' safe; income is short by 20000.
+  const defaultCuts = suggestCuts(lines, 0, 50000);
+  assert.ok(!defaultCuts.cuts.some(c => c.key === 'power'), 'power is protected by default');
+
+  // With a custom protectedKeys that protects hospitality instead, power can be cut.
+  const customCuts = suggestCuts(lines, 0, 50000, { protectedKeys: ['hospitality'] });
+  assert.ok(customCuts.cuts.some(c => c.key === 'power'), 'power is cuttable once it is no longer in protectedKeys');
+  assert.ok(!customCuts.cuts.some(c => c.key === 'hospitality'), 'hospitality is protected by the custom list');
+});
+
+test('matchActuals: savedByKey adds to usable, only overspending past usable is "over", and fromSavings is tracked', () => {
+  const plan = {
+    monthKey: '2026-09',
+    lines: [{ key: 'power', label: 'Power', amount: 40000, expenseCategory: 'power' }],
+  };
+  const withinSavings = matchActuals(plan, [{ category: 'power', amount: 45000, status: 'approved' }], new Date('2026-09-29T12:00:00'), null, { savedByKey: { power: 15000 } });
+  const line = withinSavings.lines[0];
+  assert.equal(line.saved, 15000);
+  assert.equal(line.usable, 55000);
+  assert.equal(line.leftover, 10000);
+  assert.equal(line.pace, 'on_track', 'spending 45,000 against a 55,000 usable amount is not "over"');
+  assert.equal(line.fromSavings, 5000, 'the 5,000 spent beyond the plain budget came from savings');
+
+  const beyondSavings = matchActuals(plan, [{ category: 'power', amount: 60000, status: 'approved' }], new Date('2026-09-10T12:00:00'), null, { savedByKey: { power: 15000 } });
+  assert.equal(beyondSavings.lines[0].pace, 'over', 'spending past the usable (55,000) amount is "over"');
+
+  const noSavings = matchActuals(plan, [{ category: 'power', amount: 45000, status: 'approved' }], new Date('2026-09-10T12:00:00'));
+  assert.equal(noSavings.lines[0].saved, 0);
+  assert.equal(noSavings.lines[0].usable, 40000);
+  assert.equal(noSavings.lines[0].pace, 'over', 'old behaviour is unchanged when savedByKey is empty');
 });
