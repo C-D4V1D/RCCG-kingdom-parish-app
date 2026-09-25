@@ -367,6 +367,8 @@ tr:hover td{background:var(--surface)}
 .budget-edit-amt{min-height:40px}
 .budget-edit-remove{min-width:40px;min-height:40px;padding:0}
 .budget-edit-cushion-row{margin-top:8px}
+.known-bill-row{grid-template-columns:1.4fr 100px 130px 130px 44px}
+@media(max-width:640px){.known-bill-row{grid-template-columns:1fr}}
 .budget-edit-add-row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
 .budget-edit-add-row select{flex:1;min-width:180px}
 .budget-edit-totals{margin-top:10px;font-size:13px;color:var(--text2)}
