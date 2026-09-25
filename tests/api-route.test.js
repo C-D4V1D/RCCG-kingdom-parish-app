@@ -4262,7 +4262,7 @@ test('POST /api/petty-recalc subtracts petty_to_bank deposits (server recalc mat
 // Shared DB mock for the budget endpoints: stores monthlyBudgets JSON in memory,
 // answers the DeepSeek-key lookup, and records every audit_log insert so tests
 // can assert on the "Name (role)" attribution.
-function createBudgetDBMock({ initialBudgets = {}, deepseekKey = null, deepseekModel = 'deepseek-v4-flash' } = {}) {
+function createBudgetDBMock({ initialBudgets = {}, deepseekKey = null, deepseekModel = 'deepseek-v4-flash', budgetRules = null, budgetSafetyMode = null, budgetSafetyPercent = null } = {}) {
   let monthlyBudgetsJson = JSON.stringify(initialBudgets);
   const auditRows = [];
   const DB = createDBMock({
@@ -4281,6 +4281,13 @@ function createBudgetDBMock({ initialBudgets = {}, deepseekKey = null, deepseekM
               { key: 'ai_deepseek_key', value: deepseekKey },
               { key: 'ai_deepseek_model', value: deepseekModel },
             ] };
+          }
+          if (/SELECT key,value FROM settings WHERE key IN \('budgetRules','budgetSafetyMode','budgetSafetyPercent'\)/.test(sql)) {
+            const rows = [];
+            if (budgetRules !== null) rows.push({ key: 'budgetRules', value: typeof budgetRules === 'string' ? budgetRules : JSON.stringify(budgetRules) });
+            if (budgetSafetyMode !== null) rows.push({ key: 'budgetSafetyMode', value: budgetSafetyMode });
+            if (budgetSafetyPercent !== null) rows.push({ key: 'budgetSafetyPercent', value: String(budgetSafetyPercent) });
+            return { results: rows };
           }
           return { results: [] };
         },
@@ -4398,8 +4405,9 @@ test('POST /api/budget/generate: the AI can only write the summary — it cannot
   assert.equal(response.status, 200);
   const plan = body.plan;
   assert.equal(plan.lines.find(l => l.key === 'power').amount, 23900, 'the calculator amount, never the AI one');
-  assert.match(plan.summary, /^Normal spending ₦106,199 · Known bills ₦10,684 · Expected income ₦139,263 · Enough\./);
-  assert.match(plan.summary, /A short honest note from the AI\./);
+  // The figures prefix ("Normal spending... Enough.") is gone — the summary is
+  // just the AI's own words, since the page already shows those figures.
+  assert.equal(plan.summary, 'A short honest note from the AI.');
 });
 
 test('POST /api/budget/generate: junk AI output still yields a deterministic summary and keeps the requested source', async () => {
@@ -4420,7 +4428,10 @@ test('POST /api/budget/generate: junk AI output still yields a deterministic sum
   const body = await readJson(response);
   assert.equal(response.status, 200);
   assert.equal(body.plan.source, 'manual');
-  assert.match(body.plan.summary, /Spending is comfortably covered by expected income\.$/);
+  // Junk AI JSON is unusable, so the deterministic fallback runs — but there is
+  // no previous plan to compare against and status is "enough", so it has
+  // nothing to say.
+  assert.equal(body.plan.summary, '');
 });
 
 test('POST /api/budget/generate returns a friendly 400 when no period has items or income', async () => {
@@ -4700,4 +4711,192 @@ test('POST /api/budget/generate: source "auto" replaces an old-format (pre-v2) d
   const plan = getBudgets()['2026-10'];
   assert.equal(plan.version, 2);
   assert.equal(plan.lines.find(line => line.key === 'property').amount, 4970);
+});
+
+// ── Budget v3 contract (settings, automatic savings, config) ──────────────
+
+test('POST /api/budget/generate: config comes only from DB settings — any rules in the request body are ignored', async () => {
+  const { DB } = createBudgetDBMock({
+    budgetRules: { lookbackPeriods: 3, enoughPercent: 55, protectedKeys: ['power'] },
+  });
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant', source: 'manual',
+      // A client trying to smuggle in its own, friendlier rules — must be ignored.
+      budgetRules: { lookbackPeriods: 99, enoughPercent: 100, protectedKeys: [] },
+      pack: livePackWithRentKnown(),
+    }),
+    env: { DB },
+  });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  const plan = body.plan;
+  // lookbackPeriods:3 keeps only the last 3 of the fixture's 5 periods.
+  assert.equal(plan.periodsUsed, 3, 'only the DB-configured 3 periods were used, not the body-supplied 99');
+  assert.deepEqual(plan.config.protectedKeys, ['power'], 'the DB rule, not the body-supplied empty list');
+  assert.equal(plan.config.enoughPercent, 55, 'the DB rule, not the body-supplied 100');
+});
+
+test('POST /api/budget/generate: aiSummary=false in Budget rules skips the AI entirely — no fetch, deterministic summary', async () => {
+  let fetchCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (...args) => { fetchCalls++; return originalFetch(...args); };
+  const { DB } = createBudgetDBMock({
+    deepseekKey: 'ds-key',
+    budgetRules: { aiSummary: false },
+  });
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant', source: 'manual',
+      pack: livePackWithRentKnown(),
+    }),
+    env: { DB },
+  });
+  globalThis.fetch = originalFetch;
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  assert.equal(fetchCalls, 0, 'no provider was called when aiSummary is off');
+  assert.equal(body.provider, 'deterministic');
+  assert.equal(body.plan.model, '');
+  // No previous plan and status is "enough" — deterministic fallback has nothing to say.
+  assert.equal(body.plan.summary, '');
+});
+
+test('POST /api/budget/generate: budget AI calls are pinned to deepseek-v4-flash, ignoring the global ai_deepseek_model setting', async () => {
+  let sentBody = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (requestUrl, init) => {
+    sentBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ summary: '' }) } }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  const { DB } = createBudgetDBMock({ deepseekKey: 'ds-key', deepseekModel: 'some-other-global-model' });
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant', source: 'manual',
+      pack: livePackWithRentKnown(),
+    }),
+    env: { DB },
+  });
+  globalThis.fetch = originalFetch;
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  assert.equal(sentBody.model, 'deepseek-v4-flash', 'the budget advisor call ignores ai_deepseek_model');
+  assert.equal(body.plan.model, 'deepseek-v4-flash');
+});
+
+test('POST /api/budget/generate: budget lines carry saves/saveCap/saveReason from savingCategories', async () => {
+  const { DB } = createBudgetDBMock({});
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant', source: 'manual',
+      pack: livePackWithRentKnown(),
+    }),
+    env: { DB },
+  });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  const byKey = key => body.plan.lines.find(l => l.key === key);
+
+  const rccg = byKey('rccg_proj');
+  assert.equal(rccg.saves, true);
+  assert.equal(rccg.saveCap, 80000);
+
+  const property = byKey('property');
+  assert.equal(property.saves, true);
+  assert.equal(property.saveCap, 21850, 'rent is excluded from the cap since it is a known bill');
+
+  assert.equal(byKey('security').saves, true);
+  assert.equal(byKey('security').saveCap, 14000);
+  assert.equal(byKey('office').saves, true);
+  assert.equal(byKey('office').saveCap, 10600);
+  assert.equal(byKey('sound').saves, true);
+  assert.equal(byKey('sound').saveCap, 45000, 'perPeriodAll includes the ₦45k cables one-off');
+  assert.equal(byKey('transport').saves, true);
+  assert.equal(byKey('transport').saveCap, 25000);
+
+  for (const key of ['power', 'hospitality', 'comms', 'bank']) {
+    assert.equal(byKey(key).saves, false, `${key} is steady, not saving`);
+    assert.equal(byKey(key).saveReason, 'steady');
+  }
+});
+
+test('POST /api/budget/generate: the summary has no "Normal spending... Known bills... Enough." figures prefix', async () => {
+  const { DB } = createBudgetDBMock({});
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant', source: 'manual',
+      pack: livePackWithRentKnown(),
+    }),
+    env: { DB },
+  });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  assert.doesNotMatch(body.plan.summary, /Normal spending/);
+  assert.doesNotMatch(body.plan.summary, /Known bills/);
+  assert.doesNotMatch(body.plan.summary, /Expected income/);
+});
+
+test('POST /api/budget/generate: deterministic fallback names the biggest line change vs the previous period\'s plan', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{ message: { content: 'not json at all {{{' } }],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  const { DB } = createBudgetDBMock({
+    deepseekKey: 'ds-key',
+    initialBudgets: {
+      '2026-09': {
+        version: 2, monthKey: '2026-09', status: 'accepted', source: 'manual',
+        lines: [{ key: 'power', label: 'Power & Energy', amount: 10000, kind: 'running', why: '' }],
+        history: [], affordLog: [],
+      },
+    },
+  });
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant', source: 'manual',
+      pack: livePackWithRentKnown(),
+    }),
+    env: { DB },
+  });
+  globalThis.fetch = originalFetch;
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  // Power went from ₦10,000 last period to ₦23,900 now: +₦13,900, well over
+  // both the ₦5,000 floor and the 20% band.
+  assert.equal(body.plan.summary, 'Power & Energy is up ₦13,900 on last period.');
+});
+
+test('POST /api/budget/save: a key that already had a saving decision keeps saves/saveCap; a brand-new key gets saves:false', async () => {
+  const { DB } = createBudgetDBMock({
+    initialBudgets: {
+      '2026-10': {
+        version: 2, monthKey: '2026-10', status: 'draft', source: 'manual',
+        lines: [{ key: 'power', label: 'Power & Energy', amount: 100000, kind: 'running', why: '', saves: true, saveCap: 99999, saveReason: 'lumpy' }],
+        knownBillsMonthly: 0, expectedIncome: { total: 400000 }, statusLabel: 'enough', shortBy: 0, suggestedCuts: [],
+        history: [], affordLog: [],
+      },
+    },
+  });
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/save', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant',
+      lines: [
+        { key: 'power', label: 'Power & Energy', amount: 90000, kind: 'running', why: 'trimmed' },
+        { key: 'newcat', label: 'Brand New Category', amount: 5000, kind: 'running', why: '' },
+      ],
+    }),
+    env: { DB },
+  });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  const power = body.plan.lines.find(l => l.key === 'power');
+  assert.equal(power.saves, true);
+  assert.equal(power.saveCap, 99999);
+  assert.equal(power.saveReason, 'lumpy');
+  const newcat = body.plan.lines.find(l => l.key === 'newcat');
+  assert.equal(newcat.saves, false);
+  assert.equal(newcat.saveCap, 0);
 });

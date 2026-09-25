@@ -4,6 +4,8 @@ import {
   expectedIncome as budgetExpectedIncome,
   knownBillSchedule as budgetKnownBillSchedule,
   planStatus as budgetPlanStatus,
+  budgetConfig,
+  savingCategories as budgetSavingCategories,
   RCCG_DEMANDS_KEY as BUDGET_RCCG_DEMANDS_KEY,
   LEGACY_REMITTANCE_CATEGORY as BUDGET_LEGACY_REMITTANCE_CATEGORY,
 } from '../../src/js/budget-engine.js';
@@ -4579,7 +4581,7 @@ function budgetStatusPhrase(statusLabel, shortBy) {
 // labels:{...}, knownBills:[{name,amount,lastPaid,dueDate,itemId?}] }.
 // The server recomputes everything from periods[] itself and never trusts a
 // client-supplied total.
-function normalizeBudgetPack(pack, monthKeyValue) {
+function normalizeBudgetPack(pack, monthKeyValue, lookbackPeriods = 12) {
   const periods = (Array.isArray(pack?.periods) ? pack.periods : [])
     .filter(period => period && isValidMonthKey(period.key))
     .map(period => ({
@@ -4600,7 +4602,7 @@ function normalizeBudgetPack(pack, monthKeyValue) {
       })),
     }))
     .sort((a, b) => a.key.localeCompare(b.key))
-    .slice(-12);
+    .slice(-Math.max(1, Math.round(Number(lookbackPeriods) || 12)));
   const labels = pack?.labels && typeof pack.labels === 'object' ? pack.labels : {};
   const knownBills = (Array.isArray(pack?.knownBills) ? pack.knownBills : [])
     .map(bill => ({
@@ -4612,6 +4614,34 @@ function normalizeBudgetPack(pack, monthKeyValue) {
     }))
     .filter(bill => bill.name && bill.amount > 0);
   return { monthKey: monthKeyValue, periods, labels, knownBills };
+}
+
+// Budget rules are always read fresh from the settings table — a request body
+// is never trusted to carry its own config (a stale client or a bad actor
+// could otherwise smuggle in a friendlier safety cushion or protected list).
+async function loadBudgetConfig(DB) {
+  try {
+    const { results } = await DB.prepare(
+      `SELECT key,value FROM settings WHERE key IN ('budgetRules','budgetSafetyMode','budgetSafetyPercent')`
+    ).all();
+    const s = {};
+    for (const row of (results || [])) {
+      let value = row?.value;
+      try { value = JSON.parse(value); } catch { /* not JSON — keep the raw string */ }
+      s[row.key] = value;
+    }
+    return budgetConfig(s);
+  } catch {
+    return budgetConfig({});
+  }
+}
+
+function budgetPreviousMonthKey(key) {
+  const match = String(key || '').match(/^(\d{4})-(\d{2})$/);
+  if (!match) return '';
+  const d = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, 1));
+  d.setUTCMonth(d.getUTCMonth() - 1);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
 // Plain median (no outlier handling — that's only used for income, per contract).
@@ -4626,51 +4656,65 @@ function budgetMedian(values) {
 }
 
 // AI writes the plain-English summary ONLY — it never sees or touches amounts.
-// The figures are already final by the time this prompt is built.
+// The figures are already final by the time this prompt is built, and the page
+// itself already shows the totals, status, income and every line's amount, so
+// the AI must add something the page does not already say, or say nothing.
 function budgetGeneratePrompt(figures, churchName) {
-  return `You are writing a short plain-English summary of the ${figures.monthKey} budget for ${churchName || 'this parish'}.
+  return `You are writing a very short note about the ${figures.monthKey} budget for ${churchName || 'this parish'}.
 
-These figures are FINAL and already calculated by a calculator — you must not change any of them, invent new ones, or do your own maths. Reply with STRICT JSON only, in this shape:
-{ "summary": "at most 3 short plain sentences" }
+This note appears ABOVE a budget page that already shows, in full: the total normal spending, known bills, expected income, the status (enough/tight/short), and every budget line's amount. Do NOT repeat any of that — the reader already sees it.
 
-Final figures:
-- Normal monthly spending (running costs + RCCG demands): ₦${figures.normalMonthly.toLocaleString('en-NG')}
-- Known bills set aside monthly: ₦${figures.knownBillsMonthly.toLocaleString('en-NG')}
-- Expected parish income per period: ₦${figures.expectedIncome.toLocaleString('en-NG')}
-- Status: ${budgetStatusPhrase(figures.statusLabel, figures.shortBy)}
-- Based on ${figures.periodsUsed} period(s) of records
+Reply with STRICT JSON only, in this shape:
+{ "summary": "at most 2 short plain sentences" }
 
-Budget lines (already final, do not restate every number):
-${JSON.stringify(figures.lines.map(line => ({ label: line.label, amount: line.amount })))}
+Only mention something if it is genuinely useful on top of what the page shows:
+- a budget line that changed meaningfully compared with last period, or
+- a notable one-off item excluded from the regular plan.
 
-One-off items excluded from the plan (spikes, not the regular monthly pattern):
-${JSON.stringify(figures.oneOffs.map(item => ({ label: item.label, amount: item.amount, description: item.description })))}
+If nothing is worth flagging, reply exactly { "summary": "" }. Never invent numbers, never restate totals/status/income/line amounts, and never write more than 2 sentences.
 
-Write a short, plain note for a busy volunteer admin: how things look this period, and mention anything notable about the one-offs if there are any. Do not invent numbers or change the verdict.`;
+This period's budget lines (for reference only — already shown on the page):
+${JSON.stringify(figures.lines.map(line => ({ key: line.key, label: line.label, amount: line.amount })))}
+
+Previous period's budget lines (empty if there was no previous plan):
+${JSON.stringify((figures.previousLines || []).map(line => ({ key: line.key, label: line.label, amount: line.amount })))}
+
+One-off items excluded from this period's plan (spikes, not the regular monthly pattern):
+${JSON.stringify(figures.oneOffs.map(item => ({ label: item.label, amount: item.amount, description: item.description })))}`;
 }
+
+// Budget advisor calls are pinned to a fixed DeepSeek model — the global
+// ai_deepseek_model setting (used everywhere else) is deliberately ignored
+// here, though the API key is still read the normal way.
+const BUDGET_ADVISOR_DEEPSEEK_MODEL = 'deepseek-v4-flash';
 
 async function callBudgetAdvisorJson(DB, env, prompt, fallbackValue) {
   const errors = [];
-  const { key: deepseekKey, model: deepseekModel } = await loadDeepseekSettings(DB);
+  const { key: deepseekKey } = await loadDeepseekSettings(DB);
   if (deepseekKey) {
     try {
       const resp = await fetch('https://api.deepseek.com/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + deepseekKey },
         body: JSON.stringify({
-          model: deepseekModel,
+          model: BUDGET_ADVISOR_DEEPSEEK_MODEL,
           messages: [{ role: 'user', content: prompt }],
           response_format: { type: 'json_object' },
-          // 0.6: keep the advisor's most consistent mode so pressing Regenerate
-          // doesn't swing the wording each time. DeepSeek only — OpenAI's
-          // gpt-5-mini fallback rejects custom temperatures.
+          // temperature 0.2: keep the advisor's most consistent mode so pressing
+          // Regenerate doesn't swing the wording each time. DeepSeek only —
+          // OpenAI's gpt-5-mini fallback rejects custom temperatures.
           temperature: 0.2,
         }),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data?.error?.message || `DeepSeek API error ${resp.status}`);
       const raw = String(data?.choices?.[0]?.message?.content || '').replace(/```json|```/gi, '').trim();
-      return { provider: 'deepseek', model: deepseekModel, data: safeJsonParse(raw, fallbackValue) || fallbackValue };
+      let parsed = null;
+      try { parsed = JSON.parse(raw); } catch { parsed = null; }
+      if (parsed && typeof parsed === 'object') {
+        return { provider: 'deepseek', model: BUDGET_ADVISOR_DEEPSEEK_MODEL, data: parsed, usable: true };
+      }
+      errors.push('DeepSeek: reply was not valid JSON');
     } catch (error) {
       errors.push(`DeepSeek: ${error.message}`);
     }
@@ -4692,20 +4736,43 @@ async function callBudgetAdvisorJson(DB, env, prompt, fallbackValue) {
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data?.error?.message || `OpenAI API error ${resp.status}`);
       const raw = String(data?.choices?.[0]?.message?.content || '').replace(/```json|```/gi, '').trim();
-      return { provider: 'openai', model: 'gpt-5-mini', data: safeJsonParse(raw, fallbackValue) || fallbackValue };
+      let parsed = null;
+      try { parsed = JSON.parse(raw); } catch { parsed = null; }
+      if (parsed && typeof parsed === 'object') {
+        return { provider: 'openai', model: 'gpt-5-mini', data: parsed, usable: true };
+      }
+      errors.push('OpenAI: reply was not valid JSON');
     } catch (error) {
       errors.push(`OpenAI: ${error.message}`);
     }
   } else {
     errors.push('OpenAI: no API key configured');
   }
-  return { provider: 'deterministic', model: '', data: fallbackValue, error: errors.join(' | ') };
+  return { provider: 'deterministic', model: '', data: fallbackValue, error: errors.join(' | '), usable: false };
 }
 
-function budgetFallbackSummary(statusLabel, shortBy) {
-  if (statusLabel === 'short') return `Spending is ₦${Math.max(0, Math.round(Number(shortBy || 0))).toLocaleString('en-NG')} more than expected income each period — see the suggested cuts.`;
-  if (statusLabel === 'tight') return 'Spending is close to expected income — keep an eye on it.';
-  return 'Spending is comfortably covered by expected income.';
+// Used only when there is no AI (aiSummary off / no key configured) or the AI's
+// reply was unusable. Biggest line change vs the previous period's plan wins
+// when it's both meaningful (≥20%) and material (≥₦5,000); otherwise, when
+// spending is short, point at the cuts; otherwise nothing is worth saying.
+function budgetFallbackSummary(statusLabel, lines, previousLines) {
+  const prevByKey = new Map((Array.isArray(previousLines) ? previousLines : []).map(line => [line.key, line]));
+  let biggest = null;
+  for (const line of (Array.isArray(lines) ? lines : [])) {
+    const prev = prevByKey.get(line.key);
+    if (!prev) continue;
+    const change = Math.round(Number(line.amount || 0)) - Math.round(Number(prev.amount || 0));
+    if (Math.abs(change) < 5000) continue;
+    const pct = prev.amount > 0 ? Math.abs(change) / prev.amount : Infinity;
+    if (pct < 0.2) continue;
+    if (!biggest || Math.abs(change) > Math.abs(biggest.change)) biggest = { line, change };
+  }
+  if (biggest) {
+    const direction = biggest.change > 0 ? 'up' : 'down';
+    return `${biggest.line.label} is ${direction} ₦${Math.abs(biggest.change).toLocaleString('en-NG')} on last period.`;
+  }
+  if (statusLabel === 'short') return 'Spending is more than expected income — see the suggested cuts.';
+  return '';
 }
 
 async function getMonthlyBudget(DB, requestedMonthKey) {
@@ -4740,7 +4807,11 @@ async function generateMonthlyBudget(DB, env, data) {
     }
   }
 
-  const pack = normalizeBudgetPack(data?.pack || {}, targetMonthKey);
+  // Config is always read fresh from settings — never trust rules the request
+  // body might carry.
+  const cfg = await loadBudgetConfig(DB);
+
+  const pack = normalizeBudgetPack(data?.pack || {}, targetMonthKey, cfg.lookbackPeriods);
   const hasHistory = pack.periods.some(period =>
     (Array.isArray(period.items) && period.items.length > 0) || period.sundayIncome > 0 || period.otherIncome > 0
   );
@@ -4749,7 +4820,12 @@ async function generateMonthlyBudget(DB, env, data) {
   }
 
   const knownBillItemIds = pack.knownBills.map(bill => bill.itemId).filter(Boolean);
-  const avg = budgetCategoryAverages(pack.periods, { knownBillItemIds });
+  const avg = budgetCategoryAverages(pack.periods, {
+    knownBillItemIds,
+    knownBills: pack.knownBills,
+    oneOffMin: cfg.oneOffMin,
+    oneOffMult: cfg.oneOffMult,
+  });
   const inc = budgetExpectedIncome(pack.periods);
   const bills = budgetKnownBillSchedule(pack.knownBills, new Date());
 
@@ -4775,6 +4851,16 @@ async function generateMonthlyBudget(DB, env, data) {
     });
   }
 
+  // Automatic savings: which lines carry over unspent money into future
+  // periods, and how much (contract v3 §1 savingCategories / §2 server rule).
+  const savings = budgetSavingCategories(avg, { overrides: cfg.savingOverrides, lines });
+  for (const line of lines) {
+    const decision = savings[line.key];
+    line.saves = decision ? decision.saves : false;
+    line.saveCap = decision ? decision.cap : 0;
+    line.saveReason = decision ? decision.reason : '';
+  }
+
   // One-off items, flattened across categories, for the "not in the monthly budget" list.
   const oneOffs = Object.entries(avg.byCategory)
     .flatMap(([key, entry]) => entry.oneOffs.map(item => ({
@@ -4797,11 +4883,16 @@ async function generateMonthlyBudget(DB, env, data) {
 
   const normalMonthly = avg.normalMonthly;
   const knownBillsMonthly = bills.totals.monthly;
-  const status = budgetPlanStatus({ normalMonthly, knownBillsMonthly, expectedIncome: inc.total });
+  const status = budgetPlanStatus({ normalMonthly, knownBillsMonthly, expectedIncome: inc.total, enoughRatio: cfg.enoughPercent / 100 });
   const suggestedCuts = status.status === 'short'
-    ? budgetSuggestCuts(lines, 0, inc.total - knownBillsMonthly).cuts
+    ? budgetSuggestCuts(lines, 0, inc.total - knownBillsMonthly, { protectedKeys: cfg.protectedKeys }).cuts
     : [];
   const expectedRemittance = budgetMedian(pack.periods.map(period => period.remittanceDue));
+
+  // The previous period's plan (if any) is what the fallback/AI compare against
+  // for "what changed" — never the current request body.
+  const previousPlan = budgets[budgetPreviousMonthKey(targetMonthKey)] || null;
+  const previousLines = Array.isArray(previousPlan?.lines) ? previousPlan.lines : [];
 
   const figures = {
     monthKey: targetMonthKey,
@@ -4812,18 +4903,27 @@ async function generateMonthlyBudget(DB, env, data) {
     shortBy: status.shortBy,
     periodsUsed: avg.periodsUsed,
     lines,
+    previousLines,
     oneOffs,
   };
-  const ai = await callBudgetAdvisorJson(
-    DB, env,
-    budgetGeneratePrompt(figures, data?.churchName),
-    { summary: '' }
-  );
-  const aiSummaryText = ai.provider !== 'deterministic' ? String(ai.data?.summary || '').trim() : '';
-  // 0.9: the final figures are always stated by the system first, so the AI's
-  // words can never disagree with the numbers the plan actually saved, and a
-  // junk/empty AI reply falls back to a deterministic sentence.
-  const summary = `Normal spending ₦${normalMonthly.toLocaleString('en-NG')} · Known bills ₦${knownBillsMonthly.toLocaleString('en-NG')} · Expected income ₦${inc.total.toLocaleString('en-NG')} · ${budgetStatusPhrase(status.status, status.shortBy)}. ${aiSummaryText || budgetFallbackSummary(status.status, status.shortBy)}`.trim();
+  let ai;
+  if (cfg.aiSummary === false) {
+    // AI summary is switched off in Budget rules — skip the call entirely,
+    // no fetch to any provider.
+    ai = { provider: 'deterministic', model: '', data: { summary: '' }, error: '', usable: false };
+  } else {
+    ai = await callBudgetAdvisorJson(
+      DB, env,
+      budgetGeneratePrompt(figures, data?.churchName),
+      { summary: '' }
+    );
+  }
+  // A valid-but-empty AI summary ("nothing notable") is kept as empty — the
+  // deterministic fallback only steps in when there was no AI at all
+  // (aiSummary off / no key configured) or the AI's reply was unusable.
+  const summary = (ai.provider === 'deterministic' || !ai.usable)
+    ? budgetFallbackSummary(status.status, lines, previousLines)
+    : String(ai.data?.summary ?? '').trim();
 
   const now = new Date().toISOString();
   const by = budgetActorName(data);
@@ -4853,6 +4953,7 @@ async function generateMonthlyBudget(DB, env, data) {
     periodTotals,
     summary,
     model: ai.provider !== 'deterministic' ? (ai.model || '') : '',
+    config: cfg,
     createdAt: existingPlan?.createdAt || now,
     createdBy: by,
     acceptedAt: '',
@@ -4896,22 +4997,36 @@ async function saveMonthlyBudget(DB, data) {
     }
   }
 
+  // Config is always read fresh from settings — never trust rules the request
+  // body might carry.
+  const cfg = await loadBudgetConfig(DB);
+  const existingLinesByKey = new Map((Array.isArray(plan.lines) ? plan.lines : []).map(line => [line.key, line]));
+
   const lines = rawLines
-    .map(line => ({
-      key: String(line?.key || '').trim() || 'other',
-      label: String(line?.label || line?.key || 'Item').trim(),
-      amount: Math.max(0, Math.round(Number(line?.amount || 0))),
-      kind: line?.key === BUDGET_RCCG_DEMANDS_KEY ? 'rccg' : 'running',
-      why: String(line?.why || ''),
-    }))
+    .map(line => {
+      const key = String(line?.key || '').trim() || 'other';
+      const existingLine = existingLinesByKey.get(key);
+      return {
+        key,
+        label: String(line?.label || line?.key || 'Item').trim(),
+        amount: Math.max(0, Math.round(Number(line?.amount || 0))),
+        kind: line?.key === BUDGET_RCCG_DEMANDS_KEY ? 'rccg' : 'running',
+        why: String(line?.why || ''),
+        // A key that already existed keeps its saves/saveCap decision; a brand
+        // new line has no saving decision computed for it yet.
+        saves: existingLine ? !!existingLine.saves : false,
+        saveCap: existingLine ? Math.max(0, Math.round(Number(existingLine.saveCap || 0))) : 0,
+        saveReason: existingLine?.saveReason || '',
+      };
+    })
     .filter(line => line.amount > 0);
   // save recomputes status with planStatus (normalMonthly = Σ line amounts);
   // knownBills / knownBillsMonthly are untouched — they are server-owned.
   const normalMonthly = lines.reduce((sum, line) => sum + line.amount, 0);
   const knownBillsMonthly = Math.round(Number(plan.knownBillsMonthly || 0));
-  const status = budgetPlanStatus({ normalMonthly, knownBillsMonthly, expectedIncome: Number(plan.expectedIncome?.total || 0) });
+  const status = budgetPlanStatus({ normalMonthly, knownBillsMonthly, expectedIncome: Number(plan.expectedIncome?.total || 0), enoughRatio: cfg.enoughPercent / 100 });
   const suggestedCuts = status.status === 'short'
-    ? budgetSuggestCuts(lines, 0, Number(plan.expectedIncome?.total || 0) - knownBillsMonthly).cuts
+    ? budgetSuggestCuts(lines, 0, Number(plan.expectedIncome?.total || 0) - knownBillsMonthly, { protectedKeys: cfg.protectedKeys }).cuts
     : [];
 
   const actor = budgetAuditActor(data);
@@ -4924,6 +5039,7 @@ async function saveMonthlyBudget(DB, data) {
     ratio: status.ratio,
     shortBy: status.shortBy,
     suggestedCuts,
+    config: cfg,
     editedBy: budgetActorName(data),
     editedAt: nowIso,
   };
