@@ -20,6 +20,22 @@ export const ENOUGH_RATIO = 0.9;
 export const KNOWN_BILL_RE = /annual|yearly|\brent\b/i;
 export const REMITTANCE_WORD_RE = /remittance/i;
 
+// --- Contract v3 (settings, automatic savings, "Available for new spending") ---
+export const BUDGET_RULE_DEFAULTS = {
+  cushionFloorPercent: 10,
+  cushionMinPeriods: 6,
+  floatPercent: 100,
+  lookbackPeriods: 12,
+  oneOffMin: 10000,
+  oneOffMult: 5,
+  enoughPercent: 90,
+  protectedKeys: ['rccg_proj', 'power', 'security'],
+  autoCreate: true,
+  autoDelayDays: 3,
+  aiSummary: true,
+  savingOverrides: {},
+};
+
 function pad2(value) {
   return String(value).padStart(2, '0');
 }
@@ -45,6 +61,14 @@ function amountOf(value) {
 
 function roundNaira(value) {
   return Math.round(amountOf(value));
+}
+
+function numOrDefault(value, def, lo, hi) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return def;
+  if (lo != null && n < lo) return lo;
+  if (hi != null && n > hi) return hi;
+  return n;
 }
 
 function addMonths(key, offset) {
@@ -272,17 +296,85 @@ export function suggestCategoryAmount(months = [], categoryKey) {
 }
 
 // ---------------------------------------------------------------------------
+// Contract v3 — settings, automatic savings, "Available for new spending"
+// ---------------------------------------------------------------------------
+
+export function budgetConfig(settings = {}) {
+  const s = (settings && typeof settings === 'object') ? settings : {};
+  let rules = s.budgetRules;
+  if (typeof rules === 'string') {
+    try { rules = JSON.parse(rules); } catch { rules = {}; }
+  }
+  if (!rules || typeof rules !== 'object') rules = {};
+
+  const safetyMode = s.budgetSafetyMode === 'percent' ? 'percent' : 'auto';
+  const safetyPercent = numOrDefault(s.budgetSafetyPercent, 10, 0, 100);
+
+  const protectedKeys = Array.isArray(rules.protectedKeys) && rules.protectedKeys.length
+    ? rules.protectedKeys.map(String).filter(Boolean)
+    : [...BUDGET_RULE_DEFAULTS.protectedKeys];
+
+  const autoCreate = typeof rules.autoCreate === 'boolean' ? rules.autoCreate : BUDGET_RULE_DEFAULTS.autoCreate;
+  const aiSummary = typeof rules.aiSummary === 'boolean' ? rules.aiSummary : BUDGET_RULE_DEFAULTS.aiSummary;
+
+  const savingOverrides = {};
+  if (rules.savingOverrides && typeof rules.savingOverrides === 'object') {
+    for (const [key, value] of Object.entries(rules.savingOverrides)) {
+      if (key === RCCG_DEMANDS_KEY) continue; // rccg_proj override ignored -> always 'auto'
+      if (value === 'auto' || value === 'always' || value === 'never') savingOverrides[key] = value;
+    }
+  }
+
+  return {
+    safetyMode,
+    safetyPercent,
+    cushionFloorPercent: numOrDefault(rules.cushionFloorPercent, BUDGET_RULE_DEFAULTS.cushionFloorPercent, 0, 100),
+    cushionMinPeriods: numOrDefault(rules.cushionMinPeriods, BUDGET_RULE_DEFAULTS.cushionMinPeriods, 0, 24),
+    floatPercent: numOrDefault(rules.floatPercent, BUDGET_RULE_DEFAULTS.floatPercent, 0, 200),
+    lookbackPeriods: numOrDefault(rules.lookbackPeriods, BUDGET_RULE_DEFAULTS.lookbackPeriods, 3, 24),
+    oneOffMin: numOrDefault(rules.oneOffMin, BUDGET_RULE_DEFAULTS.oneOffMin, 0, 10000000),
+    oneOffMult: numOrDefault(rules.oneOffMult, BUDGET_RULE_DEFAULTS.oneOffMult, 1, 50),
+    enoughPercent: numOrDefault(rules.enoughPercent, BUDGET_RULE_DEFAULTS.enoughPercent, 50, 100),
+    protectedKeys,
+    autoCreate,
+    autoDelayDays: numOrDefault(rules.autoDelayDays, BUDGET_RULE_DEFAULTS.autoDelayDays, 0, 7),
+    aiSummary,
+    savingOverrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Contract v2 — real-data budget engine (periods = remittance periods)
 // ---------------------------------------------------------------------------
 
-export function isOneOffItem(item, categoryItems = []) {
+export function isOneOffItem(item, categoryItems = [], { min = ONE_OFF_MIN, mult = ONE_OFF_MULT } = {}) {
   const amount = amountOf(item?.amount);
-  if (amount < ONE_OFF_MIN) return false;
+  if (amount < min) return false;
   const amounts = (Array.isArray(categoryItems) ? categoryItems : [])
     .map(entry => amountOf(entry?.amount))
     .filter(value => value > 0);
   const med = median(amounts);
-  return amount >= ONE_OFF_MULT * med;
+  return amount >= mult * med;
+}
+
+function daysBetween(a, b) {
+  const da = toDate(a);
+  const db = toDate(b);
+  if (Number.isNaN(da.getTime()) || Number.isNaN(db.getTime())) return Infinity;
+  return Math.abs(da.getTime() - db.getTime()) / (24 * 60 * 60 * 1000);
+}
+
+function isAutoMatchedBill(item, knownBills) {
+  const amount = amountOf(item?.amount);
+  for (const bill of (Array.isArray(knownBills) ? knownBills : [])) {
+    const billAmount = amountOf(bill?.amount);
+    if (!billAmount) continue;
+    const tolerance = billAmount * 0.05;
+    if (Math.abs(amount - billAmount) > tolerance) continue;
+    if (daysBetween(item?.date, bill?.lastPaid) > 31) continue;
+    return true;
+  }
+  return false;
 }
 
 function periodItemStatusOk(item) {
@@ -290,8 +382,15 @@ function periodItemStatusOk(item) {
   return status === '' || status === 'approved';
 }
 
-export function categoryAverages(periods = [], { excludeCategories = [], knownBillItemIds = [] } = {}) {
+export function categoryAverages(periods = [], {
+  excludeCategories = [],
+  knownBillItemIds = [],
+  knownBills = [],
+  oneOffMin = ONE_OFF_MIN,
+  oneOffMult = ONE_OFF_MULT,
+} = {}) {
   const billIds = new Set((Array.isArray(knownBillItemIds) ? knownBillItemIds : []).map(String));
+  const bills = Array.isArray(knownBills) ? knownBills : [];
   const excludeCats = new Set(['reconciliation', LEGACY_REMITTANCE_CATEGORY, ...(Array.isArray(excludeCategories) ? excludeCategories : [])]);
   const allPeriods = Array.isArray(periods) ? periods : [];
 
@@ -302,9 +401,11 @@ export function categoryAverages(periods = [], { excludeCategories = [], knownBi
   const firstActive = allPeriods.findIndex(isActive);
   const used = firstActive > 0 ? allPeriods.slice(firstActive) : allPeriods;
 
+  const isKnownBillItem = item => billIds.has(String(item.id)) || (bills.length > 0 && isAutoMatchedBill(item, bills));
+
   const countableItem = item => item && typeof item === 'object'
     && periodItemStatusOk(item)
-    && !billIds.has(String(item.id));
+    && !isKnownBillItem(item);
 
   const itemsByCategory = {};
   for (const period of used) {
@@ -319,19 +420,22 @@ export function categoryAverages(periods = [], { excludeCategories = [], knownBi
 
   const byCategory = {};
   for (const [cat, catItems] of Object.entries(itemsByCategory)) {
-    const perPeriod = used.map(period => {
-      const periodItems = (Array.isArray(period?.items) ? period.items : [])
-        .filter(item => countableItem(item) && String(item?.category || 'other').trim() === cat);
-      const total = periodItems.reduce((sum, item) => (
-        isOneOffItem(item, catItems) ? sum : sum + amountOf(item.amount)
-      ), 0);
-      return roundNaira(total);
-    });
+    const periodItemsByPeriod = used.map(period => (Array.isArray(period?.items) ? period.items : [])
+      .filter(item => countableItem(item) && String(item?.category || 'other').trim() === cat));
+    const perPeriod = periodItemsByPeriod.map(periodItems => roundNaira(
+      periodItems.reduce((sum, item) => (
+        isOneOffItem(item, catItems, { min: oneOffMin, mult: oneOffMult }) ? sum : sum + amountOf(item.amount)
+      ), 0)
+    ));
+    const perPeriodAll = periodItemsByPeriod.map(periodItems => roundNaira(
+      periodItems.reduce((sum, item) => sum + amountOf(item.amount), 0)
+    ));
+    const activePeriods = perPeriodAll.filter(value => value > 0).length;
     const oneOffs = catItems
-      .filter(item => isOneOffItem(item, catItems))
+      .filter(item => isOneOffItem(item, catItems, { min: oneOffMin, mult: oneOffMult }))
       .map(item => ({ date: item.date || '', amount: roundNaira(item.amount), description: String(item.description || item.subcategory || item.subCategory || '') }));
     const average = perPeriod.length ? roundNaira(perPeriod.reduce((sum, value) => sum + value, 0) / perPeriod.length) : 0;
-    byCategory[cat] = { average, perPeriod, oneOffs };
+    byCategory[cat] = { average, perPeriod, perPeriodAll, activePeriods, oneOffs };
   }
 
   const rccgPerPeriod = used.map(period => {
@@ -344,11 +448,62 @@ export function categoryAverages(periods = [], { excludeCategories = [], knownBi
     return roundNaira(items.reduce((sum, item) => sum + amountOf(item.amount), 0));
   });
   const rccgAverage = rccgPerPeriod.length ? roundNaira(rccgPerPeriod.reduce((sum, value) => sum + value, 0) / rccgPerPeriod.length) : 0;
+  const rccgActivePeriods = rccgPerPeriod.filter(value => value > 0).length;
 
   const runningTotal = roundNaira(Object.values(byCategory).reduce((sum, entry) => sum + entry.average, 0));
   const normalMonthly = roundNaira(runningTotal + rccgAverage);
 
-  return { byCategory, runningTotal, rccgAverage, rccgPerPeriod, normalMonthly, periodsUsed: used.length };
+  return { byCategory, runningTotal, rccgAverage, rccgPerPeriod, rccgActivePeriods, normalMonthly, periodsUsed: used.length };
+}
+
+export function savingCategories(avg = {}, { overrides = {}, lines = [] } = {}) {
+  const byCategory = (avg && typeof avg === 'object' && avg.byCategory) || {};
+  const keys = Object.keys(byCategory);
+  const rccgPerPeriod = Array.isArray(avg?.rccgPerPeriod) ? avg.rccgPerPeriod : [];
+  if (rccgPerPeriod.some(value => amountOf(value) > 0)) keys.push(RCCG_DEMANDS_KEY);
+
+  const linesList = Array.isArray(lines) ? lines : [];
+  const overridesObj = (overrides && typeof overrides === 'object') ? overrides : {};
+
+  const result = {};
+  for (const key of keys) {
+    const series = key === RCCG_DEMANDS_KEY
+      ? rccgPerPeriod
+      : (Array.isArray(byCategory[key]?.perPeriodAll) ? byCategory[key].perPeriodAll : []);
+    const n = series.length;
+    const sum = series.reduce((total, value) => total + amountOf(value), 0);
+    const mean = n ? sum / n : 0;
+    const max = n ? Math.max(...series.map(amountOf)) : 0;
+    const active = series.filter(value => amountOf(value) > 0).length;
+    const lumpy = n > 0 && (active < 0.6 * n || (mean > 0 && max >= 2 * mean));
+
+    const override = key === RCCG_DEMANDS_KEY ? 'auto' : (overridesObj[key] || 'auto');
+    const saves = override === 'always' ? true : override === 'never' ? false : lumpy;
+    const reason = override !== 'auto' ? override : (lumpy ? 'lumpy' : 'steady');
+
+    const matchingLine = linesList.find(line => String(line?.key || line?.expenseCategory || '') === key);
+    const cap = roundNaira(Math.max(max, amountOf(matchingLine?.amount), 0));
+
+    result[key] = { saves, reason, cap };
+  }
+  return result;
+}
+
+export function heldBackByCategory(entriesByKey = {}, capsByKey = {}) {
+  const rows = [];
+  let total = 0;
+  const entries = (entriesByKey && typeof entriesByKey === 'object') ? entriesByKey : {};
+  const caps = (capsByKey && typeof capsByKey === 'object') ? capsByKey : {};
+  for (const [key, list] of Object.entries(entries)) {
+    const cap = Number.isFinite(Number(caps[key])) ? Number(caps[key]) : Infinity;
+    const { pot } = carryForwardPot(list, { cap });
+    if (pot > 0) {
+      rows.push({ key, held: pot });
+      total += pot;
+    }
+  }
+  rows.sort((a, b) => b.held - a.held);
+  return { rows, total: roundNaira(total) };
 }
 
 export function expectedIncome(periods = []) {
@@ -446,7 +601,7 @@ export function robustSpread(values = []) {
   return roundNaira(median(deviations) * 1.4826);
 }
 
-export function safetyCushion({ mode = 'auto', percent = 0, periodTotals = [], normal = 0 } = {}) {
+export function safetyCushion({ mode = 'auto', percent = 0, periodTotals = [], normal = 0, floorPercent = 10, minPeriods = 6 } = {}) {
   const normalAmt = amountOf(normal);
   if (mode === 'percent') {
     const pct = Math.max(0, Math.min(100, amountOf(percent)));
@@ -454,7 +609,7 @@ export function safetyCushion({ mode = 'auto', percent = 0, periodTotals = [], n
   }
   const totals = Array.isArray(periodTotals) ? periodTotals : [];
   const spread = robustSpread(totals);
-  const floor = totals.length < 6 ? 0.10 * normalAmt : 0;
+  const floor = totals.length < minPeriods ? (amountOf(floorPercent) / 100) * normalAmt : 0;
   return roundNaira(Math.max(spread, floor));
 }
 
@@ -466,14 +621,24 @@ export function freeForNewThings({
   knownBillsSaved = 0,
   heldBack = 0,
   cushion = 0,
+  currentFloat = 0,
 } = {}) {
   const stillToCome = Math.max(0, amountOf(spendingStillToCome));
   const expectedEndBalance = roundNaira(amountOf(availableNow) + amountOf(expectedRestOfPeriod) - stillToCome);
-  const free = roundNaira(
+  const freeEnd = roundNaira(
     expectedEndBalance - amountOf(nextPeriodFloat) - amountOf(knownBillsSaved) - amountOf(heldBack) - amountOf(cushion)
   );
+  const freeNow = roundNaira(
+    amountOf(availableNow)
+    - Math.max(amountOf(currentFloat), amountOf(nextPeriodFloat) + amountOf(cushion))
+    - amountOf(knownBillsSaved)
+    - amountOf(heldBack)
+  );
+  const free = Math.min(freeNow, freeEnd);
   return {
     free,
+    freeNow,
+    freeEnd,
     expectedEndBalance,
     parts: {
       availableNow: roundNaira(availableNow),
@@ -483,6 +648,7 @@ export function freeForNewThings({
       knownBillsSaved: roundNaira(knownBillsSaved),
       heldBack: roundNaira(heldBack),
       cushion: roundNaira(cushion),
+      currentFloat: roundNaira(currentFloat),
     },
   };
 }
@@ -497,12 +663,12 @@ export function runwayMonths(free = 0, growth = 0) {
   return Math.max(0, Math.floor(amountOf(free) / -g));
 }
 
-export function planStatus({ normalMonthly = 0, knownBillsMonthly = 0, expectedIncome: income = 0 } = {}) {
+export function planStatus({ normalMonthly = 0, knownBillsMonthly = 0, expectedIncome: income = 0, enoughRatio = ENOUGH_RATIO } = {}) {
   const need = roundNaira(amountOf(normalMonthly) + amountOf(knownBillsMonthly));
   const incomeAmt = amountOf(income);
   const ratio = incomeAmt > 0 ? need / incomeAmt : Infinity;
   let status;
-  if (ratio <= ENOUGH_RATIO) status = 'enough';
+  if (ratio <= enoughRatio) status = 'enough';
   else if (ratio <= 1) status = 'tight';
   else status = 'short';
   const shortBy = status === 'short' ? roundNaira(need - incomeAmt) : 0;
@@ -917,7 +1083,7 @@ export function packHistory({
   };
 }
 
-export function matchActuals(plan, expenses = [], now = new Date(), period = null) {
+export function matchActuals(plan, expenses = [], now = new Date(), period = null, { savedByKey = {} } = {}) {
   const countable = (Array.isArray(expenses) ? expenses : []).filter(expense => isCountableExpense(expense, { mode: 'tracking' }));
   const { byCategory, total } = sumExpensesByCategory(countable);
   const elapsed = period?.from && period?.to
@@ -928,16 +1094,21 @@ export function matchActuals(plan, expenses = [], now = new Date(), period = nul
     const own = String(line?.expenseCategory || line?.key || 'other');
     return Array.isArray(line?.includes) && line.includes.length ? line.includes.map(String) : [own];
   };
+  const savedByKeySafe = (savedByKey && typeof savedByKey === 'object') ? savedByKey : {};
   const planCategories = new Set((plan?.lines || []).flatMap(lineCategories));
   const lines = (plan?.lines || []).map(line => {
     const budgeted = roundNaira(line?.amount);
+    const lineKey = String(line?.key || line?.expenseCategory || 'other');
+    const saved = Math.max(0, roundNaira(savedByKeySafe[lineKey] || 0));
+    const usable = budgeted + saved;
     const cats = new Set(lineCategories(line));
     const spent = roundNaira([...cats].reduce((sum, cat) => sum + (byCategory[cat] || 0), 0));
-    const leftover = budgeted - spent;
-    const pctRatio = budgeted > 0 ? (spent / budgeted) : (spent > 0 ? 1 : 0);
+    const leftover = usable - spent;
+    const fromSavings = Math.max(0, Math.min(saved, spent - budgeted));
+    const pctRatio = usable > 0 ? (spent / usable) : (spent > 0 ? 1 : 0);
     const pct = Math.round(pctRatio * 100);
     let pace = 'on_track';
-    if (spent > budgeted) pace = 'over';
+    if (spent > usable) pace = 'over';
     else if (pctRatio > elapsed + 0.05) pace = 'watch';
     const lineExpenses = countable.filter(expense => cats.has(String(expense?.category || 'other')));
     const baseSubs = Array.isArray(line?.subs) && line.subs.length
@@ -965,7 +1136,7 @@ export function matchActuals(plan, expenses = [], now = new Date(), period = nul
         leftover: budgetedSub - spentSub,
       };
     });
-    return { ...line, budgeted, spent, leftover, pct, pace, subs };
+    return { ...line, budgeted, spent, leftover, pct, pace, subs, saved, usable, fromSavings };
   });
   const cushion = Math.max(0, roundNaira(plan?.cushion));
   const budgetedTotal = roundNaira((plan?.lines || []).reduce((sum, line) => sum + amountOf(line?.amount), 0) + cushion);
@@ -1131,7 +1302,7 @@ export function clampAiLines(aiLines = [], baselineLines = [], { validKeys = nul
   return { lines: Object.values(outByKey), notes };
 }
 
-export function suggestCuts(lines = [], cushion = 0, expectedParishIncome = 0) {
+export function suggestCuts(lines = [], cushion = 0, expectedParishIncome = 0, { protectedKeys = PROTECTED_FROM_CUTS } = {}) {
   const safeLines = Array.isArray(lines) ? lines : [];
   const linesTotal = safeLines.reduce((sum, line) => sum + Math.max(0, roundNaira(line?.amount)), 0);
   const cushionAmt = Math.max(0, roundNaira(cushion));
@@ -1150,14 +1321,14 @@ export function suggestCuts(lines = [], cushion = 0, expectedParishIncome = 0) {
         continue;
       }
       const line = safeLines.find(l => String(l?.key || l?.expenseCategory) === key);
-      if (line && !PROTECTED_FROM_CUTS.includes(key)) {
+      if (line && !protectedKeys.includes(key)) {
         candidates.push({ key, label: String(line.label || key), amount: Math.max(0, roundNaira(line.amount)) });
         usedKeys.add(key);
       }
     }
     for (const line of safeLines) {
       const key = String(line?.key || line?.expenseCategory);
-      if (usedKeys.has(key) || PROTECTED_FROM_CUTS.includes(key)) continue;
+      if (usedKeys.has(key) || protectedKeys.includes(key)) continue;
       if (line.cadence === 'occasional' || line.cadence === 'annual') {
         candidates.push({ key, label: String(line.label || key), amount: Math.max(0, roundNaira(line.amount)) });
         usedKeys.add(key);
@@ -1165,7 +1336,7 @@ export function suggestCuts(lines = [], cushion = 0, expectedParishIncome = 0) {
     }
     for (const line of safeLines) {
       const key = String(line?.key || line?.expenseCategory);
-      if (usedKeys.has(key) || PROTECTED_FROM_CUTS.includes(key)) continue;
+      if (usedKeys.has(key) || protectedKeys.includes(key)) continue;
       candidates.push({ key, label: String(line.label || key), amount: Math.max(0, roundNaira(line.amount)) });
       usedKeys.add(key);
     }
@@ -1297,6 +1468,10 @@ const api = {
   LEGACY_REMITTANCE_CATEGORY,
   ONE_OFF_PROJECT_SUBCATS,
   PROTECTED_FROM_CUTS,
+  BUDGET_RULE_DEFAULTS,
+  budgetConfig,
+  savingCategories,
+  heldBackByCategory,
   CUT_ORDER,
   ONE_OFF_MIN,
   ONE_OFF_MULT,
