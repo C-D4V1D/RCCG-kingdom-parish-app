@@ -38,7 +38,7 @@ const CONTRACT_KEYS = [
   'v', 'monthKey', 'monthLabel', 'periodFrom', 'periodTo', 'periodLabel', 'dayOf',
   'churchName', 'asOf', 'status', 'statusText', 'isCurrent', 'available',
   'totalBudget', 'spent', 'pctSpent', 'periodPct', 'normal', 'cushion', 'cushionLabel',
-  'expectedIncome', 'knownBillsMonthly', 'lines', 'cushionCard', 'knownBills', 'sharedBy',
+  'expectedIncome', 'knownBillsMonthly', 'lines', 'cushionCard', 'workings', 'knownBills', 'sharedBy',
 ].sort();
 
 function baseInputs(overrides = {}) {
@@ -73,6 +73,12 @@ function baseInputs(overrides = {}) {
     churchName: 'RCCG Kingdom Parish',
     sharedBy: 'Jane Doe',
     cushionLabel: 'Fixed 10%',
+    periodExpenses: [
+      { id: 'EXP-1', date: '2026-09-22', category: 'power', subCategory: 'Fuel for generator', description: 'Diesel 20L', amount: 2100, status: 'approved', paymentMethod: 'cash', receiptUrl: 'x' },
+      { id: 'EXP-2', date: '2026-09-23', category: 'rccg_proj', subCategory: '', description: 'Harvest levy', amount: 3000, status: 'approved' },
+      { id: 'EXP-3', date: '2026-09-24', category: 'welfare', subCategory: 'Hospital visit', amount: 1500, status: 'approved' },
+      { id: 'EXP-4', date: '2026-09-24', category: 'power', subCategory: 'Rejected fuel', amount: 9999, status: 'rejected' },
+    ],
     ...overrides,
   };
 }
@@ -84,7 +90,7 @@ test('buildBudgetShareSnapshot has exactly the contract fields', () => {
 
 test('buildBudgetShareSnapshot fills header/period/status fields correctly', () => {
   const snapshot = App._buildBudgetShareSnapshot(baseInputs());
-  assert.equal(snapshot.v, 1);
+  assert.equal(snapshot.v, 2);
   assert.equal(snapshot.monthKey, '2026-10');
   assert.equal(snapshot.monthLabel, 'October 2026');
   assert.equal(snapshot.periodFrom, '2026-09-21');
@@ -127,7 +133,7 @@ test('buildBudgetShareSnapshot computes totals, lines and cushion card', () => {
   assert.equal(snapshot.lines[0].saves, true);
   assert.ok(snapshot.lines.slice(1).every(l => l.kind === 'running'));
 
-  assert.deepEqual(Object.keys(snapshot.cushionCard).sort(), ['amount', 'left', 'pace', 'used'].sort());
+  assert.deepEqual(Object.keys(snapshot.cushionCard).sort(), ['amount', 'expenses', 'left', 'pace', 'used'].sort());
   assert.equal(snapshot.cushionCard.amount, 5000);
 
   assert.equal(snapshot.knownBills.length, 1);
@@ -150,16 +156,41 @@ test('buildBudgetShareSnapshot builds `available` for the current period, null o
   assert.equal(noFree.available, null);
 });
 
-test('buildBudgetShareSnapshot leaks no private fields (expense descriptions, balances, settings, AI summary)', () => {
+test('buildBudgetShareSnapshot lists each card\'s expenses (date, label, amount only)', () => {
+  const snapshot = App._buildBudgetShareSnapshot(baseInputs());
+  const power = snapshot.lines.find(l => l.label === 'Power');
+  assert.deepEqual(power.expenses, [{ date: '2026-09-22', label: 'Fuel for generator', amount: 2100 }]);
+  const rccg = snapshot.lines.find(l => l.kind === 'rccg');
+  assert.deepEqual(rccg.expenses, [{ date: '2026-09-23', label: 'Harvest levy', amount: 3000 }]);
+  // A category with no budget line lands on the safety cushion card.
+  assert.deepEqual(snapshot.cushionCard.expenses, [{ date: '2026-09-24', label: 'Hospital visit', amount: 1500 }]);
+  const json = JSON.stringify(snapshot);
+  assert.doesNotMatch(json, /EXP-|receiptUrl|paymentMethod|Rejected fuel/, 'no ids, receipts, payment details or rejected items');
+});
+
+test('buildBudgetShareSnapshot workings: end of period = now + still expected − still to come', () => {
+  const inputs = baseInputs({ free: {
+    free: 38291, freeNow: 38291, freeEnd: 72835, status: 'yes',
+    parts: { availableNow: 185560, expectedRestOfPeriod: 135643, spendingStillToCome: 101099, currentFloat: 3400, nextPeriodFloat: 106199, cushion: 10620, knownBillsSaved: 30450 },
+    heldBackRows: [],
+  } });
+  const w = App._buildBudgetShareSnapshot(inputs).workings;
+  assert.equal(w.holdForNext, 116819);
+  assert.equal(w.now, 38291);
+  assert.equal(w.floatAboveTarget, 0);
+  assert.equal(w.now + w.stillExpected - w.stillToCome, w.endOfPeriod);
+  assert.equal(App._buildBudgetShareSnapshot(baseInputs({ isCurrent: false })).workings, null);
+});
+
+test('buildBudgetShareSnapshot leaks no private fields (settings, AI summary)', () => {
   const snapshot = App._buildBudgetShareSnapshot(baseInputs());
   const json = JSON.stringify(snapshot);
   assert.doesNotMatch(json, /summary/i, 'no AI summary');
-  assert.doesNotMatch(json, /availableNow/, 'no raw balance breakdown');
-  assert.doesNotMatch(json, /churchBal/i, 'no church balance figures');
+  assert.doesNotMatch(json, /churchBal/i, 'no church balance object');
   // Every line only carries the contract's plain fields — no raw plan/actuals keys
   // like `key`, `expenseCategory`, `subs`, `fromSavings`, `why`.
   for (const line of snapshot.lines) {
-    assert.deepEqual(Object.keys(line).sort(), ['budgeted', 'kind', 'label', 'left', 'pace', 'saved', 'saves', 'spent', 'usable'].sort());
+    assert.deepEqual(Object.keys(line).sort(), ['budgeted', 'expenses', 'kind', 'label', 'left', 'pace', 'saved', 'saves', 'spent', 'usable'].sort());
   }
 });
 
