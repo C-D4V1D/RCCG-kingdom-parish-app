@@ -404,6 +404,10 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-key-status{font-size:13px;font-weight:500;line-height:1.4;}
 .k-key-ok{color:#065f46;}
 .k-key-fail{color:#b91c1c;}
+.k-key-warn{color:#92400e;}
+.k-remit-hook-row{flex-wrap:wrap;}
+.k-remit-hook-row .k-key-status{flex:1 1 180px;min-width:0;overflow-wrap:anywhere;}
+#ks-remit-hook-detail{overflow-wrap:anywhere;}
 .k-status-rule{background:var(--surface2);color:var(--text2);border-left:3px solid var(--border);}
 .k-status-warn{background:#fef3c7;color:#92400e;border-left:3px solid var(--amber);}
 

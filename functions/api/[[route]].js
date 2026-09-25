@@ -1510,6 +1510,13 @@ export async function onRequest(context) {
       }
     }
 
+    // ── /api/remit-webhook-test — admin-only ping to REMIT_WEBHOOK_URL ──
+    if (route === 'remit-webhook-test' && method === 'POST' && !param) {
+      const auth = await requireKpscRole(DB, request, KPSC_ADMIN_ROLES);
+      if (auth instanceof Response) return auth;
+      return await sendRemitWebhookTest(env, auth);
+    }
+
     // ── /api/notifications ─────────────────────────────────────
     if (route === 'notifications') {
       if (method === 'GET'  && !param)           return await getNotifications(DB);
@@ -3333,6 +3340,17 @@ function remCutoffPeriodForDate(settings, date) {
   return { periodStart, periodEnd: `${m[1]}-${m[2]}-${m[3]}` };
 }
 
+/** Request headers for REMIT_WEBHOOK_URL: JSON, plus the shared key when one is set. */
+function remitWebhookHeaders(env) {
+  const headers = { 'Content-Type': 'application/json' };
+  const key = String(env?.REMIT_WEBHOOK_KEY || '').trim();
+  if (key) {
+    const headerName = String(env.REMIT_WEBHOOK_KEY_HEADER || '').trim() || 'Authorization';
+    headers[headerName] = headerName.toLowerCase() === 'authorization' ? `Bearer ${key}` : key;
+  }
+  return headers;
+}
+
 async function sendCutoffCollectionWebhook(DB, env, data, result) {
   if (!result || !result.ok) return;
   const saved = await result.clone().json().catch(() => null);
@@ -3355,14 +3373,8 @@ async function sendCutoffCollectionWebhook(DB, env, data, result) {
     recordId: saved.id,
     savedAt: new Date().toISOString(),
   };
-  const headers = { 'Content-Type': 'application/json' };
-  const key = String(env.REMIT_WEBHOOK_KEY || '').trim();
-  if (key) {
-    const headerName = String(env.REMIT_WEBHOOK_KEY_HEADER || '').trim() || 'Authorization';
-    headers[headerName] = headerName.toLowerCase() === 'authorization' ? `Bearer ${key}` : key;
-  }
   const res = await fetch(env.REMIT_WEBHOOK_URL, {
-    method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(15000),
+    method: 'POST', headers: remitWebhookHeaders(env), body: JSON.stringify(payload), signal: AbortSignal.timeout(15000),
   });
   if (!res.ok) {
     console.error(`[remit-webhook] ${res.status} from webhook for ${collectionDate} (${payload.action} ${saved.id})`);
@@ -3378,6 +3390,74 @@ function queueCutoffCollectionWebhook(context, DB, env, data, result) {
     if (typeof context?.waitUntil === 'function') context.waitUntil(job);
   } catch (e) {
     console.error('[remit-webhook] could not queue notification:', e?.message || e);
+  }
+}
+
+// ── REMITTANCE WEBHOOK TEST ───────────────────────────────────────────
+// POST /api/remit-webhook-test (KPSC admin session). Sends ONE harmless ping to
+// REMIT_WEBHOOK_URL with the same key header as the cut-off webhook, so an admin can
+// confirm the secrets and the receiving routine work without saving a collection.
+// The event is 'webhook_test' (never 'cutoff_collection_saved'), so the routine treats
+// it as a ping and does not touch the RCCG portal. The URL and key never leave the
+// server: the response carries only a masked host.
+const REMIT_WEBHOOK_TEST_TIMEOUT_MS = 10000;
+const REMIT_WEBHOOK_NOT_CONFIGURED = 'Webhook secrets REMIT_WEBHOOK_URL / REMIT_WEBHOOK_KEY are not set for this deployment';
+
+/** 'hooks.example.com' -> 'hoo…e.com' (enough to recognise, never the full URL). */
+function maskWebhookHost(rawUrl) {
+  let host = '';
+  try { host = new URL(rawUrl).hostname; } catch { return ''; }
+  if (host.length <= 8) return `${host.slice(0, 2)}…`;
+  return `${host.slice(0, 3)}…${host.slice(-5)}`;
+}
+
+/** Remove the webhook URL and key from any text that is about to be shown or logged. */
+function scrubRemitWebhookSecrets(text, env) {
+  let out = String(text ?? '');
+  for (const secret of [env?.REMIT_WEBHOOK_URL, env?.REMIT_WEBHOOK_KEY]) {
+    const s = String(secret || '').trim();
+    if (s.length >= 4) out = out.split(s).join('***');
+  }
+  return out;
+}
+
+async function sendRemitWebhookTest(env, account) {
+  const url = String(env?.REMIT_WEBHOOK_URL || '').trim();
+  const key = String(env?.REMIT_WEBHOOK_KEY || '').trim();
+  const sentAt = new Date().toISOString();
+  if (!url || !key) {
+    return ok({ configured: false, ok: false, httpStatus: null, responseSnippet: '', elapsedMs: 0, sentAt, error: REMIT_WEBHOOK_NOT_CONFIGURED });
+  }
+  const payload = {
+    event: 'webhook_test',
+    test: true,
+    requestedBy: String(account?.name || '').trim() || 'admin',
+    sentAt,
+    app: 'rccg-kingdom-parish-app',
+  };
+  const target = maskWebhookHost(url);
+  const started = Date.now();
+  try {
+    const res = await fetch(url, {
+      method: 'POST', headers: remitWebhookHeaders(env), body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(REMIT_WEBHOOK_TEST_TIMEOUT_MS),
+    });
+    const text = await res.text().catch(() => '');
+    const elapsedMs = Date.now() - started;
+    const snippet = scrubRemitWebhookSecrets(text, env).replace(/\s+/g, ' ').trim().slice(0, 300);
+    console.log(`[remit-webhook-test] HTTP ${res.status} in ${elapsedMs} ms (requested by ${payload.requestedBy})`);
+    return ok({
+      configured: true, ok: res.ok, httpStatus: res.status, responseSnippet: snippet, elapsedMs, sentAt, target,
+      error: res.ok ? null : `The webhook answered HTTP ${res.status}`,
+    });
+  } catch (e) {
+    const elapsedMs = Date.now() - started;
+    const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+    const error = timedOut
+      ? `No answer within ${REMIT_WEBHOOK_TEST_TIMEOUT_MS / 1000} seconds`
+      : `Could not reach the webhook: ${scrubRemitWebhookSecrets(e?.message || e, env).slice(0, 200)}`;
+    console.error(`[remit-webhook-test] failed after ${elapsedMs} ms: ${error}`);
+    return ok({ configured: true, ok: false, httpStatus: null, responseSnippet: '', elapsedMs, sentAt, target, error });
   }
 }
 
@@ -13183,4 +13263,4 @@ async function getSharedReport(DB, token) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { remCutoffPeriodForDate, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes };
+export { remCutoffPeriodForDate, maskWebhookHost, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes };

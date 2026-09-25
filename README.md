@@ -619,6 +619,15 @@ Payload:
 `action` is `created` for a new Sunday record and `updated` when amounts are merged into
 the existing record for that date. Backup restores and other-income entries never notify.
 
+**Test button.** KPSC → Settings → **Remittance webhook** → **Send test** (acting chairman,
+general secretary and IT admin only; the API enforces the same roles through the KPSC
+session) calls `POST /api/remit-webhook-test`. That sends one ping with the same key header
+and the body `{"event":"webhook_test","test":true,"requestedBy":"<name>","sentAt":"…","app":"rccg-kingdom-parish-app"}`
+(10 s timeout) and shows whether it was received, the HTTP status and the time taken. It
+needs both `REMIT_WEBHOOK_URL` and `REMIT_WEBHOOK_KEY`; if either is missing it sends nothing
+and shows *Not configured*. The URL and key are never returned or logged. Secrets set only for
+Production mean preview deploys show *Not configured*.
+
 DeepSeek, Deepgram and Termii credentials are configured in-app under KPSC → Settings.
 The system degrades gracefully: with no AI keys configured, meeting processing falls back
 to deterministic extraction and the governance checks still run.
