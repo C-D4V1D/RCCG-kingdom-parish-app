@@ -5686,7 +5686,8 @@ async function ensureCurrentBudgetPlan(prefetched){
   const allRems = pf.allRems || await DB.getRemittances();
   const currentKey = budgetCurrentKey(settings, allRems);
   const existing = pf.existingPlan !== undefined ? pf.existingPlan : (await DB.getBudget(currentKey))?.plan || null;
-  if(existing) return existing;
+  // Old-style (pre-v2) drafts are replaced automatically; accepted plans are never touched.
+  if(existing && (existing.version===2 || existing.status==='accepted')) return existing;
   const prevKey = budgetMonthOffset(currentKey, -1);
   const prevRange = budgetPeriodRange(prevKey, settings, allRems);
   if(!engine.planReady(ymdLocal(new Date()), prevRange.to, 3)) return null;

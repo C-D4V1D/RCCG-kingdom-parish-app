@@ -4680,3 +4680,24 @@ test('POST /api/budget/afford no longer exists — 404, the same as any other un
   });
   assert.equal(otherUnknownResponse.status, 404);
 });
+
+test('POST /api/budget/generate: source "auto" replaces an old-format (pre-v2) draft with the v2 calculation', async () => {
+  const { DB, getBudgets } = createBudgetDBMock({
+    initialBudgets: {
+      '2026-10': { monthKey: '2026-10', status: 'draft', lines: [{ key: 'property', label: 'Property & Projects', amount: 45570 }], history: [], affordLog: [] },
+    },
+  });
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/generate', 'POST', {
+      monthKey: '2026-10', by: 'Jane Doe', role: 'accountant', source: 'auto',
+      pack: livePackWithRentKnown(),
+    }),
+    env: { DB },
+  });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  assert.notEqual(body.skipped, true);
+  const plan = getBudgets()['2026-10'];
+  assert.equal(plan.version, 2);
+  assert.equal(plan.lines.find(line => line.key === 'property').amount, 4970);
+});

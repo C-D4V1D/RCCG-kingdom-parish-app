@@ -4725,14 +4725,18 @@ async function generateMonthlyBudget(DB, env, data) {
   if (existingPlan?.status === 'accepted') return err('This plan is accepted. Reopen it first.', 409);
 
   if (existingPlan) {
-    if (requestedSource === 'auto') {
-      // Automatic generation never overwrites an existing draft — it only
-      // fills in when nothing exists yet.
+    if (requestedSource === 'auto' && existingPlan.version === 2) {
+      // Automatic generation never overwrites a current-format draft — it only
+      // fills in when nothing exists yet. Old-format (pre-v2) drafts are replaced.
       return ok({ plan: existingPlan, skipped: true });
     }
+    if (requestedSource === 'auto') {
+      // fall through: upgrade an old-format draft to the v2 calculation
+    } else {
     const reason = String(data?.reason || '').trim();
     if (!data?.rebuild || reason.length < 3) {
       return err('A plan already exists — use Rebuild with a reason.', 409);
+    }
     }
   }
 
