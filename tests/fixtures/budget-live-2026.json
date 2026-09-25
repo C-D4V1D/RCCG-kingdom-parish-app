@@ -1,0 +1,1111 @@
+{
+  "periods": [
+    {
+      "key": "2026-05",
+      "from": "2026-04-20",
+      "to": "2026-05-24",
+      "sundayIncome": 149121,
+      "otherIncome": 10107,
+      "items": [
+        {
+          "id": "EXP-moeem92f26yo",
+          "category": "transport",
+          "subcategory": "Transport fares for workers running official church errands",
+          "description": "To pastor  Henry to collect  letter  at the  provincef for c",
+          "amount": 4000,
+          "date": "2026-04-25",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mofmryyrfi7g",
+          "category": "sound",
+          "subcategory": "Microphone batteries",
+          "description": "For battery",
+          "amount": 2500,
+          "date": "2026-04-26",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mofpfv4s6rtf",
+          "category": "transport",
+          "subcategory": "Transport fares for workers running official church errands",
+          "description": "Additional 2500 for pastor to collect letter from  the provi",
+          "amount": 2500,
+          "date": "2026-04-26",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mofpjxgyygj2",
+          "category": "hospitality",
+          "subcategory": "Drinking water for altar & workers",
+          "description": "Water for ministers",
+          "amount": 1750,
+          "date": "2026-04-26",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mofq6zn15amd",
+          "category": "sound",
+          "subcategory": "Cable TV subscriptions",
+          "description": "Gotv",
+          "amount": 3900,
+          "date": "2026-04-26",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-moj5bliuruw4",
+          "category": "transport",
+          "subcategory": "Transport fares for workers running official church errands",
+          "description": "1800 for pastor and 6300 for the other 3 members who  follow",
+          "amount": 8100,
+          "date": "2026-04-28",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mophxkkncn6h",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel",
+          "amount": 7000,
+          "date": "2026-05-03",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mor4yp1zaczq",
+          "category": "transport",
+          "subcategory": "Transport fares for workers running official church errands",
+          "description": "To pastor  for change of signatories on Tuesday 5/5/2026",
+          "amount": 3000,
+          "date": "2026-05-04",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mor52wqj3523",
+          "category": "hospitality",
+          "subcategory": "Drinking water for altar & workers",
+          "description": "Drinking water for altar & workers",
+          "amount": 3500,
+          "date": "2026-05-04",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mosk5aosg6dm",
+          "category": "office",
+          "subcategory": "Printing and photocopying",
+          "description": "For NEPA bill needed by bank",
+          "amount": 2000,
+          "date": "2026-05-05",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mp00ekzrovsz",
+          "category": "sound",
+          "subcategory": "Microphone batteries",
+          "description": "Alkaline battery.",
+          "amount": 1500,
+          "date": "2026-05-10",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mp00vjco4hnt",
+          "category": "transport",
+          "subcategory": "Transport fares for workers running official church errands",
+          "description": "To pastor  and his wife  for pastors and their wife's  progr",
+          "amount": 5400,
+          "date": "2026-05-10",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mp01107syw3z",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Water for ministers",
+          "amount": 1500,
+          "date": "2026-05-10",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mp04gjgqf0xy",
+          "category": "bank",
+          "subcategory": "SMS alert fees from the bank",
+          "description": "Bank charges",
+          "amount": 38.05,
+          "date": "2026-05-10",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mp9qi729xvhs",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel",
+          "amount": 7000,
+          "date": "2026-05-17",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mp9qrfp52ggs",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Water for ministers and drink for first time members",
+          "amount": 3100,
+          "date": "2026-05-17",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mp9sihun4xev",
+          "category": "sound",
+          "subcategory": "Microphone batteries",
+          "description": "Microphone batteries",
+          "amount": 2500,
+          "date": "2026-05-17",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mph5ryfkq3wi",
+          "category": "rccg_proj",
+          "subcategory": "Financial demands for ongoing Provincial, Regional, or National building projects",
+          "description": "For the naming of redemption way at province",
+          "amount": 2000,
+          "date": "2026-05-22",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mpjeusxcwvk3",
+          "category": "property",
+          "subcategory": "Buying major equipment",
+          "description": "Olive oil for anointing service",
+          "amount": 3000,
+          "date": "2026-05-24",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mpjmt0bf4ar5",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel for church service",
+          "amount": 7000,
+          "date": "2026-05-24",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mpjsw8nnb6ra",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "drinks water and gala for ministers during remittances",
+          "amount": 9200,
+          "date": "2026-05-24",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mpjt188duhng",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "For drinks",
+          "amount": 600,
+          "date": "2026-05-24",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mpjt3qzb9fof",
+          "category": "power",
+          "subcategory": "Generator engine oil",
+          "description": "Generator engine oil",
+          "amount": 4000,
+          "date": "2026-05-24",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mpjubay25tuz",
+          "category": "comms",
+          "subcategory": "Airtime for making official church calls",
+          "description": "For pastor",
+          "amount": 2000,
+          "date": "2026-05-24",
+          "status": "approved"
+        }
+      ]
+    },
+    {
+      "key": "2026-06",
+      "from": "2026-05-25",
+      "to": "2026-06-21",
+      "sundayIncome": 512328,
+      "otherIncome": 1250,
+      "items": [
+        {
+          "id": "EXP-mqgq3fq2m47u",
+          "category": "bank",
+          "subcategory": "Money transfer charges",
+          "description": "FGN stamp duty",
+          "amount": 200,
+          "date": "2026-05-30",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mpuwb2tgf119",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Bottle water for ministers",
+          "amount": 1500,
+          "date": "2026-05-31",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqgq14t2y6xm",
+          "category": "bank",
+          "subcategory": "Monthly account maintenance fees",
+          "description": "Account maintenance fee",
+          "amount": 510.6,
+          "date": "2026-05-31",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mpvoe4map1v2",
+          "category": "rccg_proj",
+          "subcategory": "Others...",
+          "description": "Rccg remittance debt repayment",
+          "amount": 21000,
+          "date": "2026-06-01",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mpvol5j1g266",
+          "category": "rccg_proj",
+          "subcategory": "Special emergency offerings or project support requested by RCCG higher authorities",
+          "description": "Naming of redemption way",
+          "amount": 6000,
+          "date": "2026-06-01",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mpwh4o201qpm",
+          "category": "rccg_proj",
+          "subcategory": "Special emergency offerings or project support requested by RCCG higher authorities",
+          "description": "From the provincial headquarters",
+          "amount": 15000,
+          "date": "2026-06-02",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mpwvu1jvv8xm",
+          "category": "rccg_proj",
+          "subcategory": "Financial demands for ongoing Provincial, Regional, or National building projects",
+          "description": "Donation for men's convention",
+          "amount": 10000,
+          "date": "2026-06-02",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mpx6hphsnrdx",
+          "category": "rccg_proj",
+          "subcategory": "Special emergency offerings or project support requested by RCCG higher authorities",
+          "description": "National Convention POT",
+          "amount": 5000,
+          "date": "2026-06-02",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mq3yg7w4uusi",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Soft drinks",
+          "amount": 2000,
+          "date": "2026-06-07",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqdl5oj9e41n",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel",
+          "amount": 7000,
+          "date": "2026-06-14",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqdl6zmmpolu",
+          "category": "sound",
+          "subcategory": "Microphone batteries",
+          "description": "Battery",
+          "amount": 4000,
+          "date": "2026-06-14",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqdm7wiv7x95",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Water for ministers",
+          "amount": 2400,
+          "date": "2026-06-14",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqg9yf5uzp0p",
+          "category": "transport",
+          "subcategory": "Transport and accommodation for the Pastor or Ministers attending Provincial, Regional, or National church programs",
+          "description": "Transport and accommodation for the Pastor or Ministers atte",
+          "amount": 6100,
+          "date": "2026-06-14",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqnp0vqlstmk",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Water",
+          "amount": 2900,
+          "date": "2026-06-21",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqnp1wtjfb5u",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel",
+          "amount": 7000,
+          "date": "2026-06-21",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqnqqa2g4chh",
+          "category": "comms",
+          "subcategory": "Airtime for making official church calls",
+          "description": "Recharge cards",
+          "amount": 2000,
+          "date": "2026-06-21",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqnqs8e8fp9e",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Refreshment for pastors on remittance Sunday",
+          "amount": 8200,
+          "date": "2026-06-21",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqns2opis6d6",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Sunday refreshments (snacks and drinks for workers, minister",
+          "amount": 3200,
+          "date": "2026-06-21",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqnuhg26btrr",
+          "category": "transport",
+          "subcategory": "Transport and accommodation for the Pastor or Ministers attending Provincial, Regional, or National church programs",
+          "description": "Transport and accommodation for the Pastor or Ministers atte",
+          "amount": 3000,
+          "date": "2026-06-21",
+          "status": "approved"
+        }
+      ]
+    },
+    {
+      "key": "2026-07",
+      "from": "2026-06-22",
+      "to": "2026-07-19",
+      "sundayIncome": 88857,
+      "otherIncome": 92942,
+      "items": [
+        {
+          "id": "EXP-mqp615pzyvxe",
+          "category": "rccg_proj",
+          "subcategory": "Financial demands for ongoing Provincial, Regional, or National building projects",
+          "description": "Women's Budget Demand from Province",
+          "amount": 30000,
+          "date": "2026-06-22",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqp692rzqn2q",
+          "category": "rccg_proj",
+          "subcategory": "Financial demands for ongoing Provincial, Regional, or National building projects",
+          "description": "Convention Support (To Province)",
+          "amount": 30000,
+          "date": "2026-06-22",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqqnia7qt8p2",
+          "category": "security",
+          "subcategory": "Security supplies",
+          "description": "3 Padlocks",
+          "amount": 12000,
+          "date": "2026-06-22",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqvizxcxnnbb",
+          "category": "bank",
+          "subcategory": "Money transfer charges",
+          "description": "Commission for Cheque withdrawal",
+          "amount": 50,
+          "date": "2026-06-22",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mstor6by2hwl",
+          "category": "bank",
+          "subcategory": "Money transfer charges",
+          "description": "VAT",
+          "amount": 3.75,
+          "date": "2026-06-22",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqtd2adhbnw8",
+          "category": "security",
+          "subcategory": "Security supplies",
+          "description": "Oil Paint",
+          "amount": 2000,
+          "date": "2026-06-25",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mquz846p4l3r",
+          "category": "rccg_proj",
+          "subcategory": "Financial demands for ongoing Provincial, Regional, or National building projects",
+          "description": "National Men Convention Support",
+          "amount": 20000,
+          "date": "2026-06-26",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqvj2q2v6dd1",
+          "category": "bank",
+          "subcategory": "Money transfer charges",
+          "description": "Commission for Cheque withdrawal",
+          "amount": 25,
+          "date": "2026-06-26",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mstooh56ipj2",
+          "category": "bank",
+          "subcategory": "Money transfer charges",
+          "description": "VAT",
+          "amount": 1.88,
+          "date": "2026-06-26",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqwng6xq58zw",
+          "category": "office",
+          "subcategory": "Stationery",
+          "description": "Thumb pins, exercise Books, pens, rubber band, celotape, Rul",
+          "amount": 7600,
+          "date": "2026-06-27",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqyabj2g8sxd",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel",
+          "amount": 7000,
+          "date": "2026-06-28",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mqyaqshzkb4u",
+          "category": "hospitality",
+          "subcategory": "Hosting expenses (feeding & accommodating visiting senior pastors)",
+          "description": "Bottle water and, honorarium to a visiting pastor",
+          "amount": 12700,
+          "date": "2026-06-28",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mstolz675eqo",
+          "category": "bank",
+          "subcategory": "SMS alert fees from the bank",
+          "description": "SMS alert fees from the bank",
+          "amount": 335.4,
+          "date": "2026-06-29",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mstoinyrhurq",
+          "category": "bank",
+          "subcategory": "Monthly account maintenance fees",
+          "description": "Monthly account maintenance fees",
+          "amount": 1017.22,
+          "date": "2026-06-30",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mstok6q3idmz",
+          "category": "bank",
+          "subcategory": "Money transfer charges",
+          "description": "VAT",
+          "amount": 76.3,
+          "date": "2026-06-30",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mr24z3h231c3",
+          "category": "property",
+          "subcategory": "Annual land or building rent",
+          "description": "Church Rent for 2027",
+          "amount": 203000,
+          "date": "2026-07-01",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mstndulz3y14",
+          "category": "bank",
+          "subcategory": "Money transfer charges",
+          "description": "VAT",
+          "amount": 3.75,
+          "date": "2026-07-01",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mstnf0ijfigf",
+          "category": "bank",
+          "subcategory": "Money transfer charges",
+          "description": "Commission",
+          "amount": 50,
+          "date": "2026-07-01",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mr7dykxzfqr2",
+          "category": "sound",
+          "subcategory": "Cable TV subscriptions",
+          "description": "Go tv",
+          "amount": 3900,
+          "date": "2026-07-05",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mr7ro8pfkocz",
+          "category": "hospitality",
+          "subcategory": "Drinking water for altar & workers",
+          "description": "Bottle water and items for Holy communion",
+          "amount": 3900,
+          "date": "2026-07-05",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mr7tz8h5u88c",
+          "category": "comms",
+          "subcategory": "Bulk SMS for announcements or reminders to members",
+          "description": "Stamp duty",
+          "amount": 50,
+          "date": "2026-07-05",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mr899oprbk8k",
+          "category": "bank",
+          "subcategory": "Money transfer charges",
+          "description": "FGN STAMP DUTY",
+          "amount": 200,
+          "date": "2026-07-05",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mr8cgufscmnc",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel",
+          "amount": 7000,
+          "date": "2026-07-05",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mrbwn3fk5rwb",
+          "category": "hospitality",
+          "subcategory": "Hosting expenses (feeding & accommodating visiting senior pastors)",
+          "description": "Visit of a regional evangelist at the province",
+          "amount": 18000,
+          "date": "2026-07-08",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mrhp9mbtbk7o",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel for church service",
+          "amount": 7000,
+          "date": "2026-07-12",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mrhpd5wzrw0x",
+          "category": "sound",
+          "subcategory": "Microphone batteries",
+          "description": "Two different types of microphone batteries",
+          "amount": 2500,
+          "date": "2026-07-12",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mrhuz5sulidc",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Bottle water and cabin biscuit",
+          "amount": 3500,
+          "date": "2026-07-12",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mrhv89rebews",
+          "category": "office",
+          "subcategory": "Others...",
+          "description": "Olive oil for anointing service",
+          "amount": 2000,
+          "date": "2026-07-12",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mri5nua8k2pv",
+          "category": "office",
+          "subcategory": "Printing and photocopying",
+          "description": "Printing of June financial report",
+          "amount": 1000,
+          "date": "2026-07-12",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mrrtk2avo4ne",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel for church service",
+          "amount": 7000,
+          "date": "2026-07-19",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mrrvjbb53tu6",
+          "category": "transport",
+          "subcategory": "Transport and accommodation for the Pastor or Ministers attending Provincial, Regional, or National church programs",
+          "description": "Transport for pastor/wife for the regional evangelist",
+          "amount": 4500,
+          "date": "2026-07-19",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mrrvkf08z1lk",
+          "category": "comms",
+          "subcategory": "Airtime for making official church calls",
+          "description": "Recharge cards pastor",
+          "amount": 2000,
+          "date": "2026-07-19",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mrrwphg7p15w",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Refreshments for workers",
+          "amount": 2000,
+          "date": "2026-07-19",
+          "status": "approved"
+        }
+      ]
+    },
+    {
+      "key": "2026-08",
+      "from": "2026-07-20",
+      "to": "2026-08-23",
+      "sundayIncome": 85652,
+      "otherIncome": 20274,
+      "items": [
+        {
+          "id": "EXP-mrt60y2nbd95",
+          "category": "bank",
+          "subcategory": "POS terminal charges",
+          "description": "POS terminal charges",
+          "amount": 200,
+          "date": "2026-07-20",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mrv72s4kiqxo",
+          "category": "bank",
+          "subcategory": "Money transfer charges",
+          "description": "FGN STAMP DUTY",
+          "amount": 50,
+          "date": "2026-07-21",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mstmt9ld1xan",
+          "category": "bank",
+          "subcategory": "Money transfer charges",
+          "description": "VAT",
+          "amount": 3.75,
+          "date": "2026-07-21",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-ms1hnnoxvukk",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel for Sunday service",
+          "amount": 7000,
+          "date": "2026-07-26",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-ms1hr5bzuixs",
+          "category": "sound",
+          "subcategory": "Microphone batteries",
+          "description": "Battery",
+          "amount": 3000,
+          "date": "2026-07-26",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-ms1ht66nckeq",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "1 package of bottle water",
+          "amount": 2400,
+          "date": "2026-07-26",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-ms1pdvd2y0ly",
+          "category": "bank",
+          "subcategory": "SMS alert fees from the bank",
+          "description": "FGN STAMP DUTY",
+          "amount": 100,
+          "date": "2026-07-26",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-msbulexrsutk",
+          "category": "bank",
+          "subcategory": "POS terminal charges",
+          "description": "POS terminal charges",
+          "amount": 50,
+          "date": "2026-07-26",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mstm1t804nqv",
+          "category": "bank",
+          "subcategory": "SMS alert fees from the bank",
+          "description": "SMS alert fees from the bank",
+          "amount": 335.4,
+          "date": "2026-07-29",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mstm32xuhorz",
+          "category": "bank",
+          "subcategory": "Monthly account maintenance fees",
+          "description": "Monthly account maintenance fees",
+          "amount": 535.4,
+          "date": "2026-07-31",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mstm6uex7g59",
+          "category": "bank",
+          "subcategory": "Other bank charges",
+          "description": "VAT",
+          "amount": 40.15,
+          "date": "2026-07-31",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-msay0ugavcwe",
+          "category": "sound",
+          "subcategory": "Cable TV subscriptions",
+          "description": "Gotv",
+          "amount": 3900,
+          "date": "2026-08-01",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-msayetsqkwvd",
+          "category": "office",
+          "subcategory": "Printing and photocopying",
+          "description": "Printing of remittance report",
+          "amount": 1500,
+          "date": "2026-08-01",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-msaygen1xrw8",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel for church service   2nd August 2026",
+          "amount": 7000,
+          "date": "2026-08-01",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mslo7xhjxqrv",
+          "category": "rccg_proj",
+          "subcategory": "Others...",
+          "description": "Condolence support",
+          "amount": 3100,
+          "date": "2026-08-06",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mslo8nogcdop",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel for the church generator",
+          "amount": 7000,
+          "date": "2026-08-09",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mslob1esjq9f",
+          "category": "hospitality",
+          "subcategory": "Drinking water for altar & workers",
+          "description": "Drinking water for altar & workers",
+          "amount": 2400,
+          "date": "2026-08-09",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mslocd3olxc6",
+          "category": "bank",
+          "subcategory": "POS terminal charges",
+          "description": "POS terminal charges",
+          "amount": 200,
+          "date": "2026-08-09",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-msowomnwzze8",
+          "category": "property",
+          "subcategory": "Buying major equipment",
+          "description": "Sunday school manuals, attendance register, house fellowship",
+          "amount": 21850,
+          "date": "2026-08-11",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mst2s4ddf81p",
+          "category": "bank",
+          "subcategory": "POS terminal charges",
+          "description": "POS terminal charges",
+          "amount": 250,
+          "date": "2026-08-14",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mt5t8be1i0gs",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel for the church generator",
+          "amount": 7000,
+          "date": "2026-08-16",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-msx2pj8djw1y",
+          "category": "bank",
+          "subcategory": "POS terminal charges",
+          "description": "POS terminal charges",
+          "amount": 50,
+          "date": "2026-08-17",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mt5ji72b83do",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Fuel",
+          "amount": 7000,
+          "date": "2026-08-23",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mt5jrxxfa1un",
+          "category": "sound",
+          "subcategory": "Microphone batteries",
+          "description": "Microphone battery on 16th August",
+          "amount": 3500,
+          "date": "2026-08-23",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mt5m8hw7tmtx",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Water for ministers and members",
+          "amount": 2500,
+          "date": "2026-08-23",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mt5qlmaalqoa",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Sunday refreshments (snacks and drinks for workers, minister",
+          "amount": 3900,
+          "date": "2026-08-23",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mt61ckxnadjy",
+          "category": "comms",
+          "subcategory": "Airtime for making official church calls",
+          "description": "Recharge card for pastor",
+          "amount": 1966,
+          "date": "2026-08-23",
+          "status": "approved"
+        }
+      ]
+    },
+    {
+      "key": "2026-09",
+      "from": "2026-08-24",
+      "to": "2026-09-20",
+      "sundayIncome": 195158,
+      "otherIncome": 61144,
+      "items": [
+        {
+          "id": "EXP-mte6kt8c1sq3",
+          "category": "bank",
+          "subcategory": "Money transfer charges",
+          "description": "Money transfer charges",
+          "amount": 50,
+          "date": "2026-08-28",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mtfj2zv0eovv",
+          "category": "power",
+          "subcategory": "Fuel for the church generator",
+          "description": "Refilling of gas",
+          "amount": 17500,
+          "date": "2026-08-30",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mtfj86ed00tl",
+          "category": "transport",
+          "subcategory": "Transport and accommodation for the Pastor or Ministers attending Provincial, Regional, or National church programs",
+          "description": "For pastor to the province",
+          "amount": 7000,
+          "date": "2026-08-30",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mtvqagzrzjex",
+          "category": "bank",
+          "subcategory": "Monthly account maintenance fees",
+          "description": "Monthly account maintenance fees",
+          "amount": 305.12,
+          "date": "2026-08-31",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mtk3uwdyo55s",
+          "category": "rccg_proj",
+          "subcategory": "Programme or Event from Provincial / Regional / National",
+          "description": "For welcome service and accommodation of new picp",
+          "amount": 10000,
+          "date": "2026-09-02",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mtmw7wbdu53t",
+          "category": "rccg_proj",
+          "subcategory": "Special / Emergency Request from RCCG Authorities",
+          "description": "Picp accommodation support",
+          "amount": 35000,
+          "date": "2026-09-04",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mtn0c14vuj4l",
+          "category": "sound",
+          "subcategory": "Sound cables, extension boxes, and connectors",
+          "description": "1. 20m AV wire — ₦10,000 2. Chemical vellon — ₦4,500 3. Tige",
+          "amount": 45000,
+          "date": "2026-09-04",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mtpqcvbahacp",
+          "category": "hospitality",
+          "subcategory": "Drinking water for altar & workers",
+          "description": "Battle water and pure water",
+          "amount": 3000,
+          "date": "2026-09-06",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mttv56ztsmj4",
+          "category": "hospitality",
+          "subcategory": "Others...",
+          "description": "Items for Holy communion",
+          "amount": 3700,
+          "date": "2026-09-06",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mtzna6yegio8",
+          "category": "hospitality",
+          "subcategory": "Drinking water for altar & workers",
+          "description": "Table water for ministers and members",
+          "amount": 3000,
+          "date": "2026-09-13",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mu2fluqd1b7q",
+          "category": "transport",
+          "subcategory": "Transport and accommodation for the Pastor or Ministers attending Provincial, Regional, or National church programs",
+          "description": "Transport fare for Pastor and wife meeting at province",
+          "amount": 7000,
+          "date": "2026-09-13",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mu2fn1ofs7la",
+          "category": "hospitality",
+          "subcategory": "Sunday refreshments (snacks and drinks for workers, ministers, or first-timers)",
+          "description": "Sunday refreshments (snacks and drinks for workers, minister",
+          "amount": 600,
+          "date": "2026-09-13",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mu9tpcwpl7t7",
+          "category": "hospitality",
+          "subcategory": "Drinking water for altar & workers",
+          "description": "Water",
+          "amount": 2500,
+          "date": "2026-09-20",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mub9g3o2peo0",
+          "category": "hospitality",
+          "subcategory": "Drinking water for altar & workers",
+          "description": "Satchet water for members",
+          "amount": 1000,
+          "date": "2026-09-20",
+          "status": "approved"
+        },
+        {
+          "id": "EXP-mub9i9qx24c3",
+          "category": "transport",
+          "subcategory": "Transport and accommodation for the Pastor or Ministers attending Provincial, Regional, or National church programs",
+          "description": "Transport fare to pastor for burial/provincial program",
+          "amount": 11000,
+          "date": "2026-09-20",
+          "status": "approved"
+        }
+      ]
+    }
+  ]
+}
