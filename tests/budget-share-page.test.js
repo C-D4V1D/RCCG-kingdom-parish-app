@@ -212,3 +212,54 @@ test('onRequest: PNG route 404s for an unknown slug', async () => {
   });
   assert.equal(response.status, 404);
 });
+
+const V2_SNAPSHOT = {
+  ...OCTOBER_SNAPSHOT,
+  v: 2,
+  lines: [
+    { label: 'Power & Energy', kind: 'running', budgeted: 23900, saved: 0, usable: 23900, spent: 2100, left: 21800, pace: 'on_track', saves: false,
+      expenses: [{ date: '2026-09-22', label: 'Fuel <generator>', amount: 2100 }] },
+    { label: 'Hospitality & Guests', kind: 'running', budgeted: 17390, saved: 0, usable: 17390, spent: 0, left: 17390, pace: 'on_track', saves: false, expenses: [] },
+  ],
+  cushionCard: { used: 0, amount: 10620, left: 10620, pace: 'ontrack', expenses: [] },
+  cushionLabel: 'Covers unplanned costs and any line that runs over. Set automatically – spending swing.',
+  workings: {
+    availableNow: 185560, holdForNext: 116819, knownBillsSaved: 30450,
+    bills: [{ name: 'Church rent', saved: 30450 }], heldBack: [{ label: 'RCCG Payments', held: 0 }],
+    now: 38291, stillExpected: 135643, stillToCome: 101099, floatAboveTarget: 0, endOfPeriod: 72835,
+  },
+};
+
+test('renderBudgetSharePage: each card has an escaped "Show expenses" list', () => {
+  const html = renderBudgetSharePage(V2_SNAPSHOT, RENDER_OPTS);
+  assert.match(html, /<details class="exp"><summary>Show expenses<\/summary>/);
+  assert.match(html, /Fuel &lt;generator&gt;/);
+  assert.match(html, /No expenses yet this period\./);
+  assert.match(html, /No unplanned spending this period\./);
+});
+
+test('renderBudgetSharePage: "How is this worked out?" shows Now and the three-line end-of-period block', () => {
+  const html = renderBudgetSharePage(V2_SNAPSHOT, RENDER_OPTS);
+  assert.match(html, /How is this worked out\?/);
+  assert.match(html, /Available fund after all deductions<\/span><strong>₦185,560/);
+  assert.match(html, /= Now<\/span><strong>₦38,291/);
+  assert.match(html, /\+ Parish money still expected this period<\/span><strong>₦135,643/);
+  assert.match(html, /− Normal spending still to come this period<\/span><strong>−₦101,099/);
+  assert.match(html, /= Expected by end of period<\/span><strong>₦72,835/);
+  assert.doesNotMatch(html, /Petty float above target/);
+  const withFloat = renderBudgetSharePage({ ...V2_SNAPSHOT, workings: { ...V2_SNAPSHOT.workings, floatAboveTarget: 5000 } }, RENDER_OPTS);
+  assert.match(withFloat, /\+ Petty float above target<\/span><strong>₦5,000/);
+});
+
+test('renderBudgetSharePage: the cushion card uses the plain wording', () => {
+  const html = renderBudgetSharePage(V2_SNAPSHOT, RENDER_OPTS);
+  assert.match(html, /Covers unplanned costs and any line that runs over\. Set automatically – spending swing\./);
+  assert.doesNotMatch(html, /10% minimum/);
+});
+
+test('renderBudgetSharePage: a v1 snapshot (no expenses, no workings) still renders', () => {
+  const html = renderBudgetSharePage(OCTOBER_SNAPSHOT, RENDER_OPTS);
+  assert.doesNotMatch(html, /Show expenses/);
+  assert.doesNotMatch(html, /How is this worked out/);
+  assert.match(html, /Available for new spending/);
+});

@@ -163,6 +163,46 @@ function lineBarClass(pace) {
   return '';
 }
 
+function fmtDay(ymd) {
+  const d = new Date(`${String(ymd || '').slice(0, 10)}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+}
+
+// "Show expenses" — native <details>, so it works with no JavaScript.
+function renderExpenses(list, emptyText = 'No expenses yet this period.') {
+  if (!Array.isArray(list)) return ''; // v1 snapshots carry no expense rows
+  const rows = list.length
+    ? list.map(e => `<div class="exp-row"><span>${esc(fmtDay(e?.date))}${e?.date ? ' · ' : ''}${esc(e?.label || 'Expense')}</span><strong>${money(e?.amount)}</strong></div>`).join('')
+    : `<div class="exp-empty">${esc(emptyText)}</div>`;
+  return `<details class="exp"><summary>Show expenses</summary><div class="exp-list">${rows}</div></details>`;
+}
+
+// "How is this worked out?" — the same two blocks as the Budget page.
+function renderWorkings(w) {
+  if (!w || typeof w !== 'object') return '';
+  const row = (label, value, cls = '') => `<div class="w-row${cls}"><span>${esc(label)}</span><strong>${value}</strong></div>`;
+  const minus = n => `−${money(Math.abs(Number(n || 0)))}`;
+  const bills = (Array.isArray(w.bills) ? w.bills : [])
+    .map(b => row(`${b?.name || 'Bill'} — saved`, money(b?.saved), ' w-small')).join('');
+  const held = (Array.isArray(w.heldBack) ? w.heldBack : [])
+    .map(h => row(`− Held back — ${h?.label || ''}`, minus(h?.held))).join('');
+  return `<details class="workings"><summary>How is this worked out?</summary>
+      <div class="w-title">Now</div>
+      ${row('Available fund after all deductions', money(w.availableNow))}
+      ${row("− Next period's spending + safety cushion", minus(w.holdForNext))}
+      ${row('− Known bills saved', minus(w.knownBillsSaved))}
+      ${bills}
+      ${held}
+      ${row('= Now', money(w.now), ' w-total')}
+      <div class="w-title">By end of period</div>
+      ${row('+ Parish money still expected this period', money(w.stillExpected))}
+      ${row('− Normal spending still to come this period', minus(w.stillToCome))}
+      ${Number(w.floatAboveTarget) > 0 ? row('+ Petty float above target', money(w.floatAboveTarget)) : ''}
+      ${row('= Expected by end of period', money(w.endOfPeriod), ' w-total')}
+    </details>`;
+}
+
 function renderLine(line) {
   const budgeted = Number(line?.budgeted || 0);
   const usable = Number(line?.usable ?? budgeted);
@@ -185,6 +225,7 @@ function renderLine(line) {
       </div>
       ${savedLine}
       <div class="bar${lineBarClass(line?.pace)}"><div class="bar-fill" style="width:${spentPct}%"></div></div>
+      ${renderExpenses(line?.expenses)}
     </div>`;
 }
 
@@ -201,13 +242,14 @@ function renderCushionCard(cushionCard, cushionLabel, cushionAmount) {
         <div class="line-label">Safety cushion</div>
         ${paceChip(cushionCard.pace)}
       </div>
-      <div class="line-sub">For surprises — covers unplanned costs and any line that runs over.${cushionLabel ? ` ${esc(cushionLabel)}.` : ''}</div>
+      <div class="line-sub">${esc(/^Covers /.test(cushionLabel || '') ? cushionLabel : 'Covers unplanned costs and any line that runs over.')}</div>
       <div class="line-figs">
         <span>Set aside ${money(amount)}</span>
         <span>Used ${money(used)}</span>
         <span>Left ${money(left)}</span>
       </div>
       <div class="bar${lineBarClass(cushionCard.pace)}"><div class="bar-fill" style="width:${usedPct}%"></div></div>
+      ${renderExpenses(cushionCard.expenses, 'No unplanned spending this period.')}
     </div>`;
 }
 
@@ -267,10 +309,11 @@ export function renderBudgetSharePage(snapshot, { origin = '', slug = '', versio
   const availableSection = available ? `
     <section class="card hero-card">
       <div class="eyebrow">Available for new spending</div>
-      <div class="hero-amount">${money(available.free)}</div>
-      ${available.freeEnd && available.riseBy
+      <div class="hero-amount${Number(available.free) < 0 ? ' hero-short' : ''}">${Number(available.free) < 0 ? `${money(Math.abs(available.free))} short` : money(available.free)}</div>
+      ${Number(available.freeEnd) > Number(available.free) && Number(available.freeEnd) > 0 && available.riseBy
         ? `<div class="hero-sub">Could rise to ${money(available.freeEnd)} by ${esc(available.riseBy)}</div>`
         : ''}
+      ${renderWorkings(s.workings)}
     </section>` : '';
 
   const asOfLine = fmtAsOf(s.asOf);
@@ -398,6 +441,22 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,
 .line-top{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px}
 .line-label{font-size:14px;font-weight:700}
 .line-figs{display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:#555;margin-bottom:8px}
+.exp{margin-top:10px;border-top:1px dashed #E3DED3;padding-top:8px}
+.exp>summary,.workings>summary{cursor:pointer;font-size:13px;font-weight:600;color:#0F6E56;list-style:none;min-height:32px;display:flex;align-items:center}
+.exp>summary::-webkit-details-marker,.workings>summary::-webkit-details-marker{display:none}
+.exp>summary::after,.workings>summary::after{content:'▾';margin-left:6px;transition:transform .2s}
+.exp[open]>summary::after,.workings[open]>summary::after{transform:rotate(180deg)}
+.exp-list{display:flex;flex-direction:column;gap:4px;margin-top:4px}
+.exp-row{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;color:#444;padding:4px 0;border-bottom:1px solid #F0ECE3}
+.exp-row strong{white-space:nowrap;color:#1A2E27}
+.exp-empty{font-size:12px;color:#888;padding:4px 0}
+.workings{margin-top:14px;border-top:1px solid rgba(15,110,86,.18);padding-top:8px}
+.w-title{font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#6B7A75;margin:12px 0 4px}
+.w-row{display:flex;justify-content:space-between;gap:10px;font-size:13px;color:#3A4A45;padding:4px 0}
+.w-row strong{white-space:nowrap}
+.w-small{font-size:12px;color:#888;padding-left:12px}
+.w-total{border-top:1px solid #E3DED3;margin-top:4px;padding-top:8px;font-weight:700;color:#1A2E27}
+.hero-short{color:#C0392B}
 .line-sub{font-size:12px;color:#888;margin:-4px 0 8px}
 .cushion-card{border-style:dashed}
 .chip{font-size:11px;font-weight:700;padding:4px 9px;border-radius:999px;white-space:nowrap}

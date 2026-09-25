@@ -5908,6 +5908,14 @@ function renderBudgetBar(pct, markerPct, paceClass='ontrack'){
   return `<div class="budget-bar budget-bar-${paceClass}"><div class="budget-bar-fill" style="width:${clamped}%"></div><div class="budget-bar-marker" style="left:${marker}%" title="Today"></div></div>`;
 }
 
+// Plain one-liner for the Safety cushion card (Budget page + public share page).
+function budgetCushionShortText(settings){
+  const cfg = getBudgetConfig(settings);
+  const how = cfg.safetyMode==='percent'
+    ? `Set at ${Math.round(cfg.safetyPercent)}% of normal spending`
+    : 'Set automatically – spending swing';
+  return `Covers unplanned costs and any line that runs over. ${how}.`;
+}
 function budgetSafetyCushionLabel(settings){
   const cfg = getBudgetConfig(settings);
   if(cfg.safetyMode==='percent') return `Fixed ${Math.round(cfg.safetyPercent)}%`;
@@ -5943,13 +5951,11 @@ function renderBudgetFreeCard(free, settings, billsSchedule){
   const billRowsHtml = bills.length
     ? `<div class="budget-breakdown-sub">${bills.map(b=>`<div class="budget-breakdown-row small"><span>${esc(b.name)} due ${esc(budgetBillDueLabel(b.dueDate))}</span><strong>${fmt(b.saved)} saved · ${fmt(b.monthly)}/period</strong></div>`).join('')}</div>`
     : '';
-  const endRows = [
-    ['Available now after remittance (same as Dashboard)', free.parts.availableNow],
-    ['+ Parish money still expected this period', free.parts.expectedRestOfPeriod],
-    ["− Normal spending still to come this period", -free.parts.spendingStillToCome],
-  ];
   const heldRows = free.heldBackRows || [];
   const nowFloatRow = Math.max(free.parts.currentFloat||0, free.parts.nextPeriodFloat + free.parts.cushion);
+  // Expected by end of period = Now + still expected − still to come (+ any petty float the
+  // church already holds above the target, which the "Now" line had to set aside).
+  const floatAboveTarget = Math.max(0, (free.parts.currentFloat||0) - (free.parts.nextPeriodFloat + free.parts.cushion));
   const riseLine = (free.freeEnd > free.free && free.freeEnd > 0)
     ? `<div class="budget-hero-sub">Could rise to ${fmt(free.freeEnd)} by ${esc(fmtDateShort(free.range?.to||''))} if Sundays come in as usual.</div>`
     : '';
@@ -5976,14 +5982,10 @@ function renderBudgetFreeCard(free, settings, billsSchedule){
       <div class="budget-breakdown-row total"><span>= Now</span><strong>${free.freeNow<0?`−${fmt(Math.abs(free.freeNow))}`:fmt(free.freeNow)}</strong></div>
 
       <div class="budget-section-title">By end of period</div>
-      ${endRows.map(([label,val])=>`<div class="budget-breakdown-row"><span>${esc(label)}</span><strong>${val<0?'−':''}${fmt(Math.abs(val))}</strong></div>`).join('')}
-      <div class="budget-breakdown-row total"><span>= Expected balance at end of period</span><strong>${fmt(free.expectedEndBalance)}</strong></div>
-      <div class="budget-breakdown-row"><span>− Next period's spending, held in hand</span><strong>−${fmt(free.parts.nextPeriodFloat)}</strong></div>
-      <div class="budget-breakdown-row"><span>− Known bills saved so far</span><strong>−${fmt(free.parts.knownBillsSaved)}</strong></div>
-      ${billRowsHtml}
-      <div class="budget-breakdown-row"><span>− Held back (unspent savings)</span><strong>−${fmt(free.parts.heldBack)}</strong></div>
-      <div class="budget-breakdown-row"><span>− Safety cushion (${esc(budgetSafetyCushionLabel(settings))})</span><strong>−${fmt(free.parts.cushion)}</strong></div>
-      <div class="budget-breakdown-row total"><span>= By end of period</span><strong>${free.freeEnd<0?`−${fmt(Math.abs(free.freeEnd))}`:fmt(free.freeEnd)}</strong></div>
+      <div class="budget-breakdown-row"><span>+ Parish money still expected this period</span><strong>${fmt(free.parts.expectedRestOfPeriod)}</strong></div>
+      <div class="budget-breakdown-row"><span>− Normal spending still to come this period</span><strong>−${fmt(free.parts.spendingStillToCome)}</strong></div>
+      ${floatAboveTarget>0?`<div class="budget-breakdown-row"><span>+ Petty float above target</span><strong>${fmt(floatAboveTarget)}</strong></div>`:''}
+      <div class="budget-breakdown-row total"><span>= Expected by end of period</span><strong>${free.freeEnd<0?`−${fmt(Math.abs(free.freeEnd))}`:fmt(free.freeEnd)}</strong></div>
 
       <div class="budget-breakdown-row total"><span>= Available for new spending (the lower)</span><strong>${finalText}</strong></div>
     </div>
@@ -6235,7 +6237,7 @@ function renderBudgetPeriodCard({ thisKey, plan, actuals, progress, canManage, r
   const detailRows = [
     ['Expected parish income this period', plan.expectedIncome?.total||0],
     ['Normal spending (running costs + RCCG demands)', normal],
-    [`Safety cushion (${budgetSafetyCushionLabel(settings)})`, cushionAmt],
+    ['Safety cushion', cushionAmt],
     ...(plan.knownBillsMonthly>0 ? [['Known bills set aside, a period', plan.knownBillsMonthly]] : []),
   ];
   return `<div class="card budget-card">
@@ -6310,8 +6312,8 @@ function renderBudgetCushionCard(cushion, actuals, settings, progress){
     <div class="budget-line-top">
       <div>
         <div class="budget-line-label">Safety cushion<span class="badge budget-cushion-tag">For surprises</span></div>
-        <div class="budget-line-sub">${fmt(used)} used of ${fmt(cushion)} · ${leftText} · ${esc(budgetSafetyCushionLabel(settings))}</div>
-        <div class="budget-line-sub td-muted">Covers unplanned costs and any line that runs over. Set in IT Admin → Budget rules.</div>
+        <div class="budget-line-sub">${fmt(used)} used of ${fmt(cushion)} · ${leftText}</div>
+        <div class="budget-line-sub td-muted">${esc(budgetCushionShortText(settings))}</div>
       </div>
       <span class="badge budget-pace-${pace}">${paceLabel}</span>
     </div>
@@ -6323,7 +6325,7 @@ function renderBudgetCushionCard(cushion, actuals, settings, progress){
 // Builds the public snapshot per share-contract.md: plain numbers/strings only,
 // no expense descriptions, balances, settings or AI summary. Pure — every input
 // is a value already computed by renderBudget, so this is easy to unit-test.
-function buildBudgetShareSnapshot({ monthKey, range, progress, plan, actuals, cushion, free, billsSchedule, isCurrent, churchName, sharedBy, cushionLabel }){
+function buildBudgetShareSnapshot({ monthKey, range, progress, plan, actuals, cushion, free, billsSchedule, isCurrent, churchName, sharedBy, cushionLabel, periodExpenses = [] }){
   const normal = plan?.normalMonthly || Math.max(0, (actuals?.totals?.budgeted||0) - (plan?.cushion||0));
   const cushionAmt = Math.max(0, Math.round(cushion||0));
   const totalBudget = normal + cushionAmt;
@@ -6336,7 +6338,19 @@ function buildBudgetShareSnapshot({ monthKey, range, progress, plan, actuals, cu
   const rccgLine = actualLines.find(l=>l.kind==='rccg' || (l.key||l.expenseCategory)==='rccg_proj');
   const runningLines = actualLines.filter(l=>l!==rccgLine);
   const orderedLines = [rccgLine, ...runningLines].filter(Boolean);
+  // "Show expenses" on the public page: the same rows the Budget page lists under each card
+  // (date · sub-category or description · amount), nothing else from the expense record.
+  const countable = (periodExpenses||[]).filter(e=>{
+    try { return getBudgetEngine().isCountableExpense(e, { mode:'tracking' }); } catch { return String(e?.status||'')!=='rejected'; }
+  });
+  const expenseRows = list => list
+    .slice().sort((a,b)=>String(a.date||a.createdAt||'').localeCompare(String(b.date||b.createdAt||'')))
+    .slice(0, 50)
+    .map(e=>({ date: String(e.date||e.createdAt||'').slice(0,10), label: String(e.subCategory||e.description||'Expense'), amount: Math.round(e.amount||0) }));
+  const lineCats = l => (Array.isArray(l.includes) && l.includes.length) ? l.includes.map(String) : [String(l.key||l.expenseCategory||'')];
+  const plannedCats = new Set(actualLines.flatMap(lineCats));
   const lines = orderedLines.map(l=>({
+    expenses: expenseRows(countable.filter(e=>lineCats(l).includes(String(e.category||'')))),
     label: String(l.label || l.key || l.expenseCategory || ''),
     kind: l.kind==='rccg' || (l.key||l.expenseCategory)==='rccg_proj' ? 'rccg' : 'running',
     budgeted: Math.round(l.budgeted||0),
@@ -6358,6 +6372,21 @@ function buildBudgetShareSnapshot({ monthKey, range, progress, plan, actuals, cu
     monthly: Math.round(b.monthly||0),
   }));
 
+  const p = free?.parts || {};
+  const holdForNext = Math.max(p.currentFloat||0, (p.nextPeriodFloat||0) + (p.cushion||0));
+  const workings = (isCurrent && free) ? {
+    availableNow: Math.round(p.availableNow||0),
+    holdForNext: Math.round(holdForNext),
+    knownBillsSaved: Math.round(p.knownBillsSaved||0),
+    bills: (billsSchedule?.items||[]).filter(b=>b.saved>0).map(b=>({ name: String(b.name||''), saved: Math.round(b.saved||0) })),
+    heldBack: (free.heldBackRows||[]).map(r=>({ label: String(r.label||''), held: Math.round(r.held||0) })),
+    now: Math.round(free.freeNow||0),
+    stillExpected: Math.round(p.expectedRestOfPeriod||0),
+    stillToCome: Math.round(p.spendingStillToCome||0),
+    floatAboveTarget: Math.round(Math.max(0, (p.currentFloat||0) - ((p.nextPeriodFloat||0) + (p.cushion||0)))),
+    endOfPeriod: Math.round(free.freeEnd||0),
+  } : null;
+
   const available = (isCurrent && free) ? {
     free: Math.round(free.free||0),
     freeEnd: Math.round(free.freeEnd||0),
@@ -6366,7 +6395,7 @@ function buildBudgetShareSnapshot({ monthKey, range, progress, plan, actuals, cu
   } : null;
 
   return {
-    v: 1,
+    v: 2,
     monthKey, monthLabel: budgetMonthLabelForKey(monthKey),
     periodFrom: range?.from||'', periodTo: range?.to||'',
     periodLabel: `${fmtDateShort(range?.from||'')} – ${fmtDateShort(range?.to||'')}`,
@@ -6382,7 +6411,9 @@ function buildBudgetShareSnapshot({ monthKey, range, progress, plan, actuals, cu
     expectedIncome: Math.round(plan?.expectedIncome?.total||0),
     knownBillsMonthly: Math.round(plan?.knownBillsMonthly||0),
     lines,
-    cushionCard: { used: cushionUsed, amount: cushionAmt, left: cushionLeft, pace: cushionPace },
+    cushionCard: { used: cushionUsed, amount: cushionAmt, left: cushionLeft, pace: cushionPace,
+      expenses: expenseRows(countable.filter(e=>!plannedCats.has(String(e.category||'')))) },
+    workings,
     knownBills,
     sharedBy: String(sharedBy||''),
   };
@@ -6560,7 +6591,7 @@ async function shareBudget(monthKey, btn){
     const snapshot = buildBudgetShareSnapshot({
       monthKey, range, progress, plan, actuals, cushion, free, billsSchedule, isCurrent,
       churchName: settings.churchName||'', sharedBy: state.user?.name||'',
-      cushionLabel: budgetSafetyCushionLabel(settings),
+      cushionLabel: budgetCushionShortText(settings), periodExpenses,
     });
     const imagePng = await renderBudgetShareImage(snapshot);
     const res = await DB.shareBudget({ monthKey, snapshot, imagePng, by: state.user?.name||'', role: state.user?.role||'' });
