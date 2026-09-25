@@ -12921,6 +12921,68 @@ function renderApiStatusCard(apiStatus) {
     </div>`;
 }
 
+// Same three roles as the other admin-only Settings cards (Policies & Byelaw) and as
+// the server's KPSC_ADMIN_ROLES check on /api/remit-webhook-test.
+function isKpscSettingsAdmin() {
+  return ['it_admin', 'general_secretary', 'acting_chairman'].includes(String(S.user?.role || ''));
+}
+
+function renderRemitWebhookCard() {
+  return `
+      <div class="k-card" style="margin-bottom:16px" id="ks-remit-webhook-card">
+        <h2 class="k-card-title">Remittance webhook</h2>
+        <p class="k-card-sub">Sends a test notification to Church Clerk. It does not touch the RCCG portal or email anyone.</p>
+        <div class="k-key-test-row k-remit-hook-row">
+          <button class="kbtn kbtn-primary kbtn-sm k-key-test-btn" id="ks-remit-hook-btn" onclick="Kpsc.sendRemitWebhookTest(this)">Send test</button>
+          <span class="k-key-status" id="ks-remit-hook-status" role="status" aria-live="polite"></span>
+        </div>
+        <p class="k-hint" id="ks-remit-hook-detail" style="display:none"></p>
+      </div>`;
+}
+
+const REMIT_HOOK_COOLDOWN_MS = 10000;
+
+/** One line for the result of POST /api/remit-webhook-test: { cls, text }. */
+function remitWebhookResultLine(res) {
+  const at = res?.sentAt ? new Date(res.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+  if (res && res.configured === false) {
+    return { cls: 'k-key-warn', text: `⚠ Not configured. ${res.error || ''}`.trim() };
+  }
+  if (res?.ok) {
+    return { cls: 'k-key-ok', text: `✓ Received (HTTP ${res.httpStatus}) in ${res.elapsedMs} ms at ${at}` };
+  }
+  const status = res?.httpStatus ? `HTTP ${res.httpStatus}` : (res?.error || 'No response');
+  const extra = res?.httpStatus && res?.error && !res.error.includes(String(res.httpStatus)) ? ` (${res.error})` : '';
+  const timing = res?.elapsedMs != null && at ? ` after ${res.elapsedMs} ms at ${at}` : '';
+  return { cls: 'k-key-fail', text: `✗ Not received: ${status}${extra}${timing}` };
+}
+
+async function sendRemitWebhookTest(btn) {
+  const statusEl = document.getElementById('ks-remit-hook-status');
+  const detailEl = document.getElementById('ks-remit-hook-detail');
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  if (statusEl) { statusEl.textContent = ''; statusEl.className = 'k-key-status'; }
+  if (detailEl) { detailEl.textContent = ''; detailEl.style.display = 'none'; }
+  let res;
+  try {
+    res = await apiPost('remit-webhook-test', {});
+  } catch (e) {
+    res = { configured: true, ok: false, error: `Request failed: ${e.message}` };
+  }
+  // 401/403 from the server arrive as { error } with no `configured` field.
+  if (res && res.error && res.configured === undefined) res = { configured: true, ok: false, error: res.error };
+  const line = remitWebhookResultLine(res);
+  if (statusEl) { statusEl.textContent = line.text; statusEl.className = `k-key-status ${line.cls}`; }
+  if (detailEl && res?.responseSnippet) {
+    detailEl.textContent = `Reply: ${res.responseSnippet}`;
+    detailEl.style.display = 'block';
+  }
+  btn.textContent = 'Sent';
+  setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, REMIT_HOOK_COOLDOWN_MS);
+}
+
 async function refreshApiStatus(btn) {
   const orig = btn.textContent;
   btn.disabled = true;
@@ -13189,6 +13251,8 @@ async function renderSettings(main) {
       ${renderKpscAccountsCard(S.accounts)}
 
       ${renderRolePermissionsCard()}
+
+      ${isKpscSettingsAdmin() ? renderRemitWebhookCard() : ''}
 
       <div class="k-card" style="margin-bottom:16px">
         <h2 class="k-card-title">AI Models</h2>
@@ -18705,6 +18769,7 @@ window.Kpsc = {
   renderScheduledSmsList,
   testDeepseekKey,
   testOpenaiKey,
+  sendRemitWebhookTest,
   refreshApiStatus,
   updateAttGroup,
   recStart,
