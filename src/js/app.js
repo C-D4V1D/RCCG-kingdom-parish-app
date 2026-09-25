@@ -4069,32 +4069,33 @@ async function renderDashboard(){
   const dashSpendable = dashTotalFunds - dashOutstandingRems;
 
   // ── Petty Cash Sustainability Indicator ──
-  const _pettyTarget     = parseFloat(settingsDash?.pettyTargetFloat||0)||90000;
-  const _pettyManageable = parseFloat(settingsDash?.pettyManageableFloat||0)||60000;
-  const _pettyMinimum    = parseFloat(settingsDash?.pettyMinimumFloat||0)||40000;
-  const _pettyBuffer     = parseFloat(settingsDash?.pettyBufferAmount||0)||30000;
+  const _pettyPolicy = await pettyFloatPolicy(settingsDash, allRemsDash);
+  const _pettyTarget     = _pettyPolicy.target;
+  const _pettyManageable = _pettyPolicy.manageable;
+  const _pettyMinimum    = _pettyPolicy.minimum;
   const _pettyCurrentFloat = churchBal.pettyFloat || 0;
-  const _pettyTopUpNeeded  = Math.max(0, _pettyTarget - _pettyCurrentFloat);
-  const _pettyAfterObligs  = dashSpendable - _pettyCurrentFloat - _pettyTopUpNeeded;
   // Max achievable petty float = all available funds (dashSpendable already includes
   // pettyCurrentFloat, so adding it again would double-count the deficit).
-  const _pettyMaxFloat     = Math.max(dashSpendable, _pettyCurrentFloat);
+  const _pettyH = pettyHealth(dashSpendable, _pettyCurrentFloat, _pettyPolicy);
+  const _pettyTopUpNeeded  = _pettyH.topUpNeeded;
+  const _pettyAfterObligs  = _pettyH.afterTarget;
+  const _pettyMaxFloat     = _pettyH.maxFloat;
+  const _pettyTargetWhy = _pettyPolicy.fromBudget
+    ? ` (next period's budgeted spending ${fmt(_pettyPolicy.spending)} + safety cushion ${fmt(_pettyPolicy.cushion)})`
+    : '';
 
-  let dashSpendLabel, dashSpendColor, _pettyIcon, _pettyMsg;
-  if (_pettyAfterObligs >= _pettyBuffer) {
-    dashSpendLabel = 'Healthy'; dashSpendColor = 'var(--success)'; _pettyIcon = '🟢';
-    _pettyMsg = `✅ Petty cash is sustainable. You can comfortably top up to ${fmt(_pettyTarget)} petty cash for next period.`;
-  } else if (_pettyAfterObligs >= 0) {
-    dashSpendLabel = 'Adequate'; dashSpendColor = '#1976D2'; _pettyIcon = '🔵';
-    _pettyMsg = `👍 Can reach ${fmt(_pettyTarget)} petty cash target for next period but only ${fmt(_pettyAfterObligs)} will remain.`;
-  } else if (_pettyMaxFloat >= _pettyManageable) {
-    dashSpendLabel = 'Caution'; dashSpendColor = '#B8860B'; _pettyIcon = '🟡';
+  let dashSpendLabel = _pettyH.label, dashSpendColor = _pettyH.color, _pettyIcon = _pettyH.icon, _pettyMsg;
+  if (dashSpendLabel === 'Healthy') {
+    _pettyMsg = `✅ Petty cash is sustainable. You can top up to ${fmt(_pettyTarget)}${_pettyTargetWhy} for next period.`;
+  } else if (dashSpendLabel === 'Adequate') {
+    _pettyMsg = _pettyPolicy.fromBudget
+      ? `👍 Can cover next period's budgeted spending (${fmt(_pettyPolicy.spending)}) but only ${fmt(Math.max(0,_pettyH.afterSpending))} of the ${fmt(_pettyPolicy.cushion)} safety cushion.`
+      : `👍 Can reach ${fmt(_pettyPolicy.spending)} petty cash target for next period but only ${fmt(Math.max(0,_pettyH.afterSpending))} will remain.`;
+  } else if (dashSpendLabel === 'Caution') {
     _pettyMsg = `⚠️ Cannot reach ${fmt(_pettyTarget)} petty cash target for next period but can top up to ${fmt(_pettyMaxFloat)} which is above ${fmt(_pettyManageable)} manageable. Watch your spending.`;
-  } else if (_pettyMaxFloat >= _pettyMinimum) {
-    dashSpendLabel = 'Tight'; dashSpendColor = '#D97706'; _pettyIcon = '🟠';
+  } else if (dashSpendLabel === 'Tight') {
     _pettyMsg = `⚠️ Can only top up to ${fmt(_pettyMaxFloat)} petty cash for next period — below ${fmt(_pettyManageable)} manageable. Consider reducing non-essential expenses.`;
   } else {
-    dashSpendLabel = 'Critical'; dashSpendColor = 'var(--danger)'; _pettyIcon = '🔴';
     _pettyMsg = `🚨 Can only top up to ${fmt(_pettyMaxFloat)} petty cash for next period — below ${fmt(_pettyMinimum)} minimum. Please review expenses and income this period.`;
   }
 
@@ -5568,6 +5569,50 @@ async function buildBudgetPack(targetMonthKey){
 // build the current pack, capped at RCCG_POT_CAP_PERIODS × the current period's RCCG
 // budget. Missing/non-v2 plans contribute {budget:0, paid:0}, which simply doesn't move
 // the pot — the chain never breaks, it just doesn't grow that period.
+// ── Petty-cash float policy (Dashboard + Expenses health label) ──────────────
+// Once the current period has a Budget plan, the target float IS the Budget's
+// next-period spending plus its safety cushion, so the health label and the
+// Budget's "Free for new things" use one yardstick. The cushion takes over the
+// old "buffer above target"; the manual Target Float / Buffer settings apply
+// only until a plan exists.
+async function pettyFloatPolicy(settings, allRems){
+  const manageable = parseFloat(settings?.pettyManageableFloat||0)||60000;
+  const minimum = parseFloat(settings?.pettyMinimumFloat||0)||40000;
+  const manualTarget = parseFloat(settings?.pettyTargetFloat||0)||90000;
+  const manualBuffer = parseFloat(settings?.pettyBufferAmount||0)||30000;
+  try{
+    const engine = getBudgetEngine();
+    const plan = (await DB.getBudget(budgetCurrentKey(settings, allRems)))?.plan;
+    if(plan && plan.version===2 && plan.normalMonthly>0){
+      const cushion = engine.safetyCushion({
+        mode: settings?.budgetSafetyMode||'auto',
+        percent: Number(settings?.budgetSafetyPercent)||0,
+        periodTotals: plan.periodTotals||[],
+        normal: plan.normalMonthly,
+      });
+      const spending = Math.round(plan.normalMonthly);
+      return { fromBudget:true, spending, cushion, target: spending + cushion, manageable, minimum };
+    }
+  }catch(e){ /* no plan yet or engine unavailable — fall back to the manual settings */ }
+  return { fromBudget:false, spending: manualTarget, cushion: manualBuffer, target: manualTarget + manualBuffer, manageable, minimum };
+}
+
+// Healthy: can hold the full target (spending + cushion). Adequate: can hold next
+// period's spending but only part of the cushion. Below that the Manageable /
+// Minimum floats decide, as before.
+function pettyHealth(spendable, currentFloat, policy){
+  const afterTarget = spendable - Math.max(currentFloat, policy.target);
+  const afterSpending = spendable - Math.max(currentFloat, policy.spending);
+  const maxFloat = Math.max(spendable, currentFloat);
+  let label, color, icon;
+  if(afterTarget >= 0){ label='Healthy'; color='var(--success)'; icon='🟢'; }
+  else if(afterSpending >= 0){ label='Adequate'; color='#1976D2'; icon='🔵'; }
+  else if(maxFloat >= policy.manageable){ label='Caution'; color='#B8860B'; icon='🟡'; }
+  else if(maxFloat >= policy.minimum){ label='Tight'; color='#D97706'; icon='🟠'; }
+  else { label='Critical'; color='var(--danger)'; icon='🔴'; }
+  return { label, color, icon, afterTarget, afterSpending, maxFloat, topUpNeeded: Math.max(0, policy.target - currentFloat) };
+}
+
 function budgetPeriodEndDate(range, today){
   const end = parseYmdDate(range?.to);
   return end && end > today ? end : today;
@@ -10019,20 +10064,14 @@ async function renderExpenses(){
   // Shared with the Budget page's "Free for new things" via calcSpendableNow() so the
   // two screens can never disagree on the figure.
   const { spendable, totalChurch, outstandingRems } = await calcSpendableNow({ income:allIncome, remittances:allRems, settings, churchBal });
-  const _expPettyTarget = parseFloat(settings?.pettyTargetFloat||0)||90000;
-  const _expPettyManageable = parseFloat(settings?.pettyManageableFloat||0)||60000;
-  const _expPettyMinimum = parseFloat(settings?.pettyMinimumFloat||0)||40000;
-  const _expPettyBuffer = parseFloat(settings?.pettyBufferAmount||0)||30000;
+  const _expPettyPolicy = await pettyFloatPolicy(settings, allRems);
+  const _expPettyTarget = _expPettyPolicy.target;
   const _expPettyFloat = churchBal.pettyFloat||0;
-  const _expTopUpNeeded = Math.max(0, _expPettyTarget - _expPettyFloat);
-  const _expAfterObligs = spendable - _expPettyFloat - _expTopUpNeeded;
-  const _expMaxFloat = Math.max(spendable, _expPettyFloat);
-  let spendLabel, spendColor;
-  if (_expAfterObligs >= _expPettyBuffer) { spendLabel='Healthy'; spendColor='var(--success)'; }
-  else if (_expAfterObligs >= 0) { spendLabel='Adequate'; spendColor='#1976D2'; }
-  else if (_expMaxFloat >= _expPettyManageable) { spendLabel='Caution'; spendColor='#B8860B'; }
-  else if (_expMaxFloat >= _expPettyMinimum) { spendLabel='Tight'; spendColor='#D97706'; }
-  else { spendLabel='Critical'; spendColor='var(--danger)'; }
+  const _expH = pettyHealth(spendable, _expPettyFloat, _expPettyPolicy);
+  const _expTopUpNeeded = _expH.topUpNeeded;
+  const _expAfterObligs = _expH.afterTarget;
+  const _expMaxFloat = _expH.maxFloat;
+  const spendLabel = _expH.label, spendColor = _expH.color;
 
   // Store spendable in state so the expense form modal can access it without re-fetching
   state._spendable = spendable;
@@ -14613,7 +14652,7 @@ function renderAdminSettings(s){
     <div class="form-group"><label class="form-label">Petty Cash Max Float (₦)</label><input type="number" id="set_petty" class="form-input" value="${s.pettyMax||50000}" /></div>
     <div style="margin-top:18px;margin-bottom:8px;font-size:13px;font-weight:700;color:var(--text2);border-top:1px solid var(--border);padding-top:14px">Available Balance Status Thresholds</div>
     <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Set the petty cash sustainability thresholds shown on the Dashboard. These control the health indicator on the "Available Fund After All Deductions" card.</p>
-    <div class="form-group"><label class="form-label">Target Float (₦)</label><input type="number" id="set_petty_target_float" class="form-input" value="${s.pettyTargetFloat||90000}" /><div class="form-hint">Ideal petty cash balance for next period. Default: ₦90,000.</div></div>
+    <div class="form-group"><label class="form-label">Target Float (₦)</label><input type="number" id="set_petty_target_float" class="form-input" value="${s.pettyTargetFloat||90000}" /><div class="form-hint">Used only until the current period has a Budget plan. After that the target is set automatically to the Budget's next-period spending + safety cushion. Default: ₦90,000.</div></div>
     <div class="form-group"><label class="form-label">Manageable Float (₦)</label><input type="number" id="set_petty_manageable_float" class="form-input" value="${s.pettyManageableFloat||60000}" /><div class="form-hint">Acceptable minimum if target isn't possible. Default: ₦60,000.</div></div>
     <div class="form-group"><label class="form-label">Minimum Float (₦)</label><input type="number" id="set_petty_minimum_float" class="form-input" value="${s.pettyMinimumFloat||40000}" /><div class="form-hint">Absolute floor — below this is Critical. Default: ₦40,000.</div></div>
     <div style="margin-top:18px;margin-bottom:8px;font-size:13px;font-weight:700;color:var(--text2);border-top:1px solid var(--border);padding-top:14px">Budget — Safety Cushion</div>
@@ -14630,7 +14669,7 @@ function renderAdminSettings(s){
       <input type="number" min="0" max="100" id="set_budget_safety_percent" class="form-input" value="${Number.isFinite(Number(s.budgetSafetyPercent))&&s.budgetSafetyPercent!==''&&s.budgetSafetyPercent!=null?Number(s.budgetSafetyPercent):10}" />
       <div class="form-hint">Example: normal spending ₦400,000 a period, 10% keeps ₦40,000 back.</div>
     </div>
-    <div class="form-group"><label class="form-label">Buffer Above Target (₦)</label><input type="number" id="set_petty_buffer_amount" class="form-input" value="${s.pettyBufferAmount||30000}" /><div class="form-hint">Cushion above target to stay "Healthy" instead of "Adequate". Default: ₦30,000.</div></div>
+    <div class="form-group"><label class="form-label">Buffer Above Target (₦)</label><input type="number" id="set_petty_buffer_amount" class="form-input" value="${s.pettyBufferAmount||30000}" /><div class="form-hint">Used only until the current period has a Budget plan. After that the Budget's safety cushion plays this role. Default: ₦30,000.</div></div>
     </div>
     <button class="btn btn-primary" onclick="App.saveSettings(this)">Save Settings</button>
   </div>
@@ -15935,6 +15974,7 @@ return {
   // Test-only hooks: exercise the real permission map without a login round-trip.
   _canAction: canAction,
   _canAccessPage: canAccessPage,
+  _pettyHealth: pettyHealth,
   _ACCESS_RULES: ACCESS_RULES,
   _setTestUserRole: (role) => { state.user = { name:'Test User', role }; },
   _satelliteHeldDisplay: satelliteHeldDisplay,
