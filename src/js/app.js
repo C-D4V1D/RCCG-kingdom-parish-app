@@ -6391,106 +6391,110 @@ function buildBudgetShareSnapshot({ monthKey, range, progress, plan, actuals, cu
 // Draws the 1200×630 WhatsApp preview card on a canvas and returns a PNG data URL.
 // Flat colours, system font, no gradients/noise — keeps the PNG well under 300KB.
 function renderBudgetShareImage(snapshot){
+  // 1200×630 Open Graph card (WhatsApp shows it above the link). Flat colours keep the PNG
+  // small; shapes instead of emoji so it looks the same on every phone.
   const W = 1200, H = 630;
   const canvas = document.createElement('canvas');
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
-  const GREEN = '#0F6E56', BG = '#F6F4EF', WHITE = '#FFFFFF', TEXT = '#1A2E27', MUTED = '#6B7A75', DANGER = '#C0392B';
-  const FONT = 'system-ui,-apple-system,"Segoe UI",Roboto,sans-serif';
-
-  // Background
-  ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
-  // Header band
-  ctx.fillStyle = GREEN; ctx.fillRect(0, 0, W, 108);
-
-  ctx.fillStyle = WHITE;
-  ctx.font = `700 26px ${FONT}`;
+  const GREEN = '#0F6E56', GREEN_DARK = '#0B5241', MINT = '#E6F2EE', BG = '#F6F4EF', WHITE = '#FFFFFF',
+        TEXT = '#1A2E27', MUTED = '#6B7A75', LINE = '#E7E2D8', TRACK = '#EDE9DF', AMBER = '#B7791F', DANGER = '#C0392B';
+  const FONT = 'system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif';
+  const money = n => (n < 0 ? '−' : '') + fmt(Math.abs(Math.round(n||0)));
+  const statusColor = snapshot.status==='short' ? DANGER : snapshot.status==='tight' ? AMBER : GREEN;
   ctx.textBaseline = 'alphabetic';
-  ctx.fillText((snapshot.churchName||'').toUpperCase(), 48, 48);
-  ctx.font = `400 20px ${FONT}`;
-  ctx.fillText(`${snapshot.monthLabel||''} budget · ${snapshot.periodLabel||''}`, 48, 82);
 
-  // Status chip, top right
-  const chipText = (snapshot.statusText||'').toUpperCase() + (snapshot.status==='enough' ? ' ✅' : snapshot.status==='tight' ? ' ⚠' : ' ⛔');
-  ctx.font = `700 20px ${FONT}`;
-  const chipW = ctx.measureText(chipText).width + 40;
-  const chipX = W - 48 - chipW, chipY = 32, chipH = 40;
+  // Canvas + header band
+  ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = GREEN; ctx.fillRect(0, 0, W, 118);
+  ctx.fillStyle = GREEN_DARK; ctx.fillRect(0, 118, W, 4);
   ctx.fillStyle = WHITE;
-  roundRectPath(ctx, chipX, chipY, chipW, chipH, 20);
-  ctx.fill();
-  ctx.fillStyle = GREEN;
-  ctx.fillText(chipText, chipX + 20, chipY + 27);
+  ctx.font = `800 30px ${FONT}`;
+  ctx.fillText(truncateToWidth(ctx, (snapshot.churchName||'').toUpperCase(), 760), 56, 54);
+  ctx.font = `500 22px ${FONT}`;
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillText(`${snapshot.monthLabel||''} budget · ${snapshot.periodLabel||''}`, 56, 90);
+
+  // Status chip (dot + word)
+  const chipText = String(snapshot.statusText||'').toUpperCase();
+  ctx.font = `800 20px ${FONT}`;
+  const chipW = ctx.measureText(chipText).width + 64, chipH = 44, chipX = W - 56 - chipW, chipY = 38;
+  ctx.fillStyle = WHITE; roundRectPath(ctx, chipX, chipY, chipW, chipH, 22); ctx.fill();
+  ctx.fillStyle = statusColor; ctx.beginPath(); ctx.arc(chipX + 26, chipY + chipH/2, 7, 0, Math.PI*2); ctx.fill();
+  ctx.fillText(chipText, chipX + 42, chipY + 29);
 
   // Main card
-  const cardX = 48, cardY = 148, cardW = W - 96, cardH = H - 148 - 40;
-  ctx.fillStyle = WHITE;
-  roundRectPath(ctx, cardX, cardY, cardW, cardH, 18);
-  ctx.fill();
+  const cardX = 56, cardY = 150, cardW = W - 112, cardH = 400;
+  ctx.fillStyle = WHITE; roundRectPath(ctx, cardX, cardY, cardW, cardH, 22); ctx.fill();
+  const padX = cardX + 44;
 
-  let y = cardY + 56;
-  const leadWithAvailable = snapshot.available && Number.isFinite(snapshot.available.free);
-  if(leadWithAvailable){
-    const a = snapshot.available;
-    ctx.fillStyle = MUTED;
-    ctx.font = `700 20px ${FONT}`;
-    ctx.fillText('AVAILABLE FOR NEW SPENDING', cardX + 48, y);
-    y += 56;
-    const negative = a.free < 0;
-    ctx.fillStyle = negative ? DANGER : GREEN;
-    ctx.font = `800 64px ${FONT}`;
-    ctx.fillText(negative ? `−${fmt(Math.abs(a.free))}` : fmt(a.free), cardX + 48, y);
-    y += 30;
-    if(a.freeEnd > a.free && a.freeEnd > 0){
-      ctx.fillStyle = MUTED;
-      ctx.font = `400 20px ${FONT}`;
-      ctx.fillText(`Could rise to ${fmt(a.freeEnd)} by ${a.riseBy}`, cardX + 48, y);
-      y += 40;
-    } else {
-      y += 12;
-    }
+  // Left: hero figure
+  const a = snapshot.available;
+  const hasAvail = a && Number.isFinite(a.free);
+  ctx.fillStyle = MUTED; ctx.font = `800 18px ${FONT}`;
+  ctx.fillText(hasAvail ? 'AVAILABLE FOR NEW SPENDING' : 'TOTAL PERIOD BUDGET', padX, cardY + 60);
+  let heroText, heroColor, heroSub = '';
+  if(hasAvail){
+    if(a.free > 0){ heroText = money(a.free); heroColor = GREEN; }
+    else { heroText = a.free < 0 ? `${fmt(Math.abs(a.free))} short` : 'Nothing spare'; heroColor = a.free < 0 ? DANGER : AMBER; }
+    if(a.freeEnd > a.free && a.freeEnd > 0) heroSub = `Could rise to ${money(a.freeEnd)} by ${a.riseBy}`;
   } else {
-    ctx.fillStyle = MUTED;
-    ctx.font = `700 20px ${FONT}`;
-    ctx.fillText('TOTAL BUDGET', cardX + 48, y);
-    y += 56;
-    ctx.fillStyle = GREEN;
-    ctx.font = `800 58px ${FONT}`;
-    ctx.fillText(fmt(snapshot.totalBudget), cardX + 48, y);
-    y += 46;
+    heroText = money(snapshot.totalBudget); heroColor = GREEN;
+  }
+  // Shrink the hero to fit rather than cutting it off (e.g. "₦130,600 short").
+  let heroSize = 76;
+  ctx.font = `800 ${heroSize}px ${FONT}`;
+  while(heroSize > 40 && ctx.measureText(heroText).width > 640){ heroSize -= 4; ctx.font = `800 ${heroSize}px ${FONT}`; }
+  ctx.fillStyle = heroColor;
+  ctx.fillText(heroText, padX, cardY + 142);
+  if(heroSub){ ctx.fillStyle = MUTED; ctx.font = `500 22px ${FONT}`; ctx.fillText(heroSub, padX, cardY + 184); }
+
+  // Right: stat tiles
+  const tileX = cardX + cardW - 44 - 300, tileW = 300, tileH = 70;
+  const tiles = [
+    ['Total budget', money(snapshot.totalBudget)],
+    ['Spent so far', `${money(snapshot.spent)} · ${snapshot.pctSpent||0}%`],
+  ];
+  tiles.forEach(([label, value], i) => {
+    const ty = cardY + 34 + i * (tileH + 14);
+    ctx.fillStyle = MINT; roundRectPath(ctx, tileX, ty, tileW, tileH, 14); ctx.fill();
+    ctx.fillStyle = MUTED; ctx.font = `700 15px ${FONT}`; ctx.fillText(label.toUpperCase(), tileX + 18, ty + 26);
+    ctx.fillStyle = TEXT; ctx.font = `800 24px ${FONT}`; ctx.fillText(truncateToWidth(ctx, value, tileW - 36), tileX + 18, ty + 56);
+  });
+
+  // Progress bar with a "today" marker
+  const barY = cardY + 232, barX = padX, barW = cardW - 88, barH = 18;
+  ctx.fillStyle = TRACK; roundRectPath(ctx, barX, barY, barW, barH, 9); ctx.fill();
+  const pct = Math.max(0, snapshot.pctSpent||0);
+  const fillW = Math.min(barW, barW * Math.min(100, pct) / 100);
+  if(fillW > 0){ ctx.fillStyle = pct > 100 ? DANGER : GREEN; roundRectPath(ctx, barX, barY, Math.max(fillW, barH), barH, 9); ctx.fill(); }
+  if(Number.isFinite(snapshot.periodPct) && snapshot.isCurrent){
+    const mx = barX + barW * Math.max(0, Math.min(100, snapshot.periodPct)) / 100;
+    ctx.fillStyle = TEXT; ctx.fillRect(mx - 1.5, barY - 7, 3, barH + 14);
+  }
+  ctx.fillStyle = MUTED; ctx.font = `500 18px ${FONT}`;
+  ctx.fillText(snapshot.isCurrent ? `${snapshot.dayOf||''} — the line marks today` : 'Spending for the whole period', barX, barY + 48);
+
+  // Biggest budget lines as chips
+  ctx.fillStyle = LINE; ctx.fillRect(padX, cardY + 300, cardW - 88, 1);
+  const topLines = [...(snapshot.lines||[])].sort((x,y)=>(y.budgeted||0)-(x.budgeted||0)).slice(0,3);
+  let cx = padX; const cy = cardY + 322;
+  ctx.font = `700 18px ${FONT}`;
+  for(const l of topLines){
+    const t = `${l.label} ${money(l.budgeted)}`;
+    const tw = Math.min(ctx.measureText(t).width + 32, cardX + cardW - 44 - cx);
+    if(tw < 120) break;
+    ctx.fillStyle = BG; roundRectPath(ctx, cx, cy, tw, 44, 22); ctx.fill();
+    ctx.fillStyle = TEXT; ctx.fillText(truncateToWidth(ctx, t, tw - 32), cx + 16, cy + 29);
+    cx += tw + 12;
   }
 
-  // Divider
-  y += 12;
-  ctx.strokeStyle = '#E7E2D8'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(cardX + 48, y); ctx.lineTo(cardX + cardW - 48, y); ctx.stroke();
-  y += 44;
-
-  // Total / spent row + progress bar
-  ctx.fillStyle = TEXT;
-  ctx.font = `600 24px ${FONT}`;
-  ctx.fillText(`Total budget ${fmt(snapshot.totalBudget)}`, cardX + 48, y);
-  const spentText = `Spent ${fmt(snapshot.spent)} (${snapshot.pctSpent}%)`;
-  const spentW = ctx.measureText(spentText).width;
-  ctx.fillText(spentText, cardX + cardW - 48 - spentW, y);
-  y += 26;
-  const barX = cardX + 48, barW = cardW - 96, barH = 16;
-  ctx.fillStyle = '#EDE9DF';
-  roundRectPath(ctx, barX, y, barW, barH, 8); ctx.fill();
-  const fillW = Math.max(0, Math.min(barW, barW * Math.min(100, snapshot.pctSpent) / 100));
-  if(fillW > 0){
-    ctx.fillStyle = snapshot.pctSpent > 100 ? DANGER : GREEN;
-    roundRectPath(ctx, barX, y, fillW, barH, 8); ctx.fill();
-  }
-  y += 56;
-
-  // Top 3 lines
-  const topLines = [...(snapshot.lines||[])].sort((a,b)=>(b.spent||0)-(a.spent||0)).slice(0,3);
-  if(topLines.length){
-    ctx.fillStyle = MUTED;
-    ctx.font = `600 18px ${FONT}`;
-    const summary = 'Top lines: ' + topLines.map(l=>`${l.label} ${fmt(l.spent)}`).join(' · ');
-    ctx.fillText(truncateToWidth(ctx, summary, cardW - 96), cardX + 48, y);
-  }
+  // Footer call to action
+  ctx.fillStyle = GREEN; ctx.font = `700 20px ${FONT}`;
+  const cta = 'Tap to see the full budget  →';
+  ctx.fillText(cta, W - 56 - ctx.measureText(cta).width, H - 28);
+  ctx.fillStyle = MUTED; ctx.font = `500 18px ${FONT}`;
+  ctx.fillText('Monthly budget · shared from the parish finance portal', 56, H - 28);
 
   return Promise.resolve(canvas.toDataURL('image/png'));
 }
@@ -6566,15 +6570,18 @@ async function shareBudget(monthKey, btn){
       `Total budget ${fmt(snapshot.totalBudget)} · Spent ${fmt(snapshot.spent)} (${snapshot.pctSpent}%)`,
     ];
     if(snapshot.available){
-      parts.push(`Available for new spending: ${fmt(snapshot.available.free)}${snapshot.available.free>=0?' ✅':''}`);
+      const f = snapshot.available.free;
+      parts.push(f > 0 ? `Available for new spending: ${fmt(f)} ✅` : (f < 0 ? `Available for new spending: none — ${fmt(Math.abs(f))} short` : 'Available for new spending: nothing spare right now'));
     }
     parts.push(shareUrl);
     const shareText = parts.join('\n');
 
     let shared = false;
     if(navigator.share && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent||'')){
-      try{ await navigator.share({ text: shareText, url: shareUrl }); shared = true; }
-      catch(e){ shared = false; }
+      // The link is already in the text; passing `url` too makes WhatsApp show it twice.
+      // A dismissed share sheet (AbortError) counts as handled — don't pop WhatsApp open after it.
+      try{ await navigator.share({ text: shareText }); shared = true; }
+      catch(e){ shared = e?.name === 'AbortError'; }
     }
     if(!shared){
       const waWin = window.open(`https://wa.me/?text=${encodeURIComponent(shareText)}`, '_blank');
@@ -6584,7 +6591,6 @@ async function shareBudget(monthKey, btn){
       }
     }
     showAlert('Link ready.', 'success');
-    DB.addAudit('budget_shared', `Shared ${res.slug||budgetShareSlug(monthKey)} publicly`, state.user?.name);
     if(state.page === 'budget') await renderBudget();
   }catch(e){
     showAlert(e.message || 'Failed to share budget.', 'danger');

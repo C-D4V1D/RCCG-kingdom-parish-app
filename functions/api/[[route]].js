@@ -1362,6 +1362,9 @@ export async function onRequest(context) {
       if (method === 'POST' && param === 'save') return await saveMonthlyBudget(DB, body);
       if (method === 'POST' && param === 'accept') return await acceptMonthlyBudget(DB, body);
       if (method === 'POST' && param === 'reopen') return await reopenMonthlyBudget(DB, body);
+      if (method === 'GET' && param === 'share') return await getBudgetShareStatus(DB, url.searchParams.get('month'));
+      if (method === 'POST' && param === 'share') return await shareBudget(DB, body);
+      if (method === 'POST' && param === 'unshare') return await unshareBudget(DB, body);
     }
 
     // ── /api/expense-receipt/:id — single receipt image, fetched on demand ──
@@ -2579,6 +2582,18 @@ async function handleInit(DB) {
       data_json   TEXT NOT NULL,
       created_by  TEXT DEFAULT '',
       created_at  TEXT DEFAULT (datetime('now'))
+    )`,
+    // Public "Share to WhatsApp" links for the Budget page — one row per month,
+    // keyed by a readable slug (e.g. 'october-2026'). data_json is the plain
+    // snapshot the browser built (see functions/budget/[slug].js); image_png is
+    // the base64 preview image drawn on a <canvas> when Share is pressed.
+    `CREATE TABLE IF NOT EXISTS budget_shares (
+      slug        TEXT PRIMARY KEY,
+      month_key   TEXT NOT NULL,
+      data_json   TEXT NOT NULL,
+      image_png   TEXT DEFAULT '',
+      created_by  TEXT DEFAULT '',
+      updated_at  TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS email_ingest_log (
       id               TEXT PRIMARY KEY,
@@ -5208,6 +5223,82 @@ async function reopenMonthlyBudget(DB, data) {
   return ok({ plan: budgets[targetMonthKey] });
 }
 
+// ── Budget "Share to WhatsApp" public links (functions/budget/[slug].js serves them) ──
+
+const BUDGET_SHARE_MAX_SNAPSHOT_BYTES = 100 * 1024;
+const BUDGET_SHARE_MAX_IMAGE_BASE64_BYTES = 400 * 1024;
+const BUDGET_SHARE_PNG_SIGNATURE = 'iVBORw0KGgo'; // base64 of the PNG magic bytes
+
+/** 'YYYY-MM' → 'october-2026' — mirrors the client-side slug builder verbatim. */
+export function budgetShareSlug(monthKey) {
+  const match = String(monthKey || '').match(/^(\d{4})-(\d{2})$/);
+  if (!match) return '';
+  const idx = parseInt(match[2], 10) - 1;
+  const name = (BUDGET_MONTH_NAMES[idx] || '').toLowerCase();
+  if (!name) return '';
+  return `${name}-${match[1]}`;
+}
+
+/** Strips an optional `data:image/png;base64,` prefix and validates a PNG payload. */
+function decodeBudgetShareImage(imagePng) {
+  let b64 = String(imagePng || '').trim();
+  const commaIdx = b64.indexOf(',');
+  if (b64.startsWith('data:') && commaIdx !== -1) b64 = b64.slice(commaIdx + 1);
+  if (!b64 || !b64.startsWith(BUDGET_SHARE_PNG_SIGNATURE)) return null;
+  if (b64.length > BUDGET_SHARE_MAX_IMAGE_BASE64_BYTES) return null;
+  return b64;
+}
+
+async function shareBudget(DB, data) {
+  const monthKey = String(data?.monthKey || '').trim();
+  if (!isValidMonthKey(monthKey)) return err('monthKey must be YYYY-MM', 400);
+  const slug = budgetShareSlug(monthKey);
+  if (!slug) return err('monthKey must be YYYY-MM', 400);
+
+  const snapshotJson = JSON.stringify(data?.snapshot && typeof data.snapshot === 'object' ? data.snapshot : {});
+  if (snapshotJson === '{}') return err('snapshot is required', 400);
+  if (snapshotJson.length > BUDGET_SHARE_MAX_SNAPSHOT_BYTES) return err('snapshot is too large', 400);
+
+  const imageB64 = decodeBudgetShareImage(data?.imagePng);
+  if (!imageB64) return err('imagePng must be a base64 PNG under 400KB', 400);
+
+  const nowIso = new Date().toISOString();
+  const by = budgetActorName(data);
+  await DB.prepare(
+    `INSERT OR REPLACE INTO budget_shares (slug, month_key, data_json, image_png, created_by, updated_at) VALUES (?, ?, ?, ?, ?, ?)`
+  ).bind(slug, monthKey, snapshotJson, imageB64, by, nowIso).run();
+
+  await writeAuditLog(DB, 'budget_shared', `Shared ${slug} publicly`, budgetAuditActor(data));
+
+  const version = nowIso.replace(/\D/g, '');
+  return ok({ slug, url: `/budget/${slug}`, version });
+}
+
+async function unshareBudget(DB, data) {
+  const monthKey = String(data?.monthKey || '').trim();
+  if (!isValidMonthKey(monthKey)) return err('monthKey must be YYYY-MM', 400);
+  const slug = budgetShareSlug(monthKey);
+  if (!slug) return err('monthKey must be YYYY-MM', 400);
+
+  const existing = await DB.prepare(`SELECT slug FROM budget_shares WHERE slug=?`).bind(slug).first();
+  await DB.prepare(`DELETE FROM budget_shares WHERE slug=?`).bind(slug).run();
+  if (existing) {
+    await writeAuditLog(DB, 'budget_unshared', `Stopped sharing ${slug}`, budgetAuditActor(data));
+  }
+  return ok({ removed: !!existing });
+}
+
+// Never selects data_json/image_png — this is the status line the Budget page
+// polls, not the public payload itself.
+async function getBudgetShareStatus(DB, monthKey) {
+  if (!isValidMonthKey(monthKey)) return err('month query parameter must be YYYY-MM', 400);
+  const slug = budgetShareSlug(monthKey);
+  const row = await DB.prepare(
+    `SELECT slug, updated_at, created_by FROM budget_shares WHERE slug=?`
+  ).bind(slug).first();
+  if (!row) return ok({ share: null });
+  return ok({ share: { slug: row.slug, url: `/budget/${row.slug}`, updatedAt: row.updated_at, sharedBy: row.created_by } });
+}
 
 async function getKpscPartners(DB) {
   const { results } = await DB.prepare(`

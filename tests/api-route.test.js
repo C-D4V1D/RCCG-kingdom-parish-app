@@ -4308,6 +4308,203 @@ function createBudgetDBMock({ initialBudgets = {}, deepseekKey = null, deepseekM
   return { DB, auditRows, getBudgets: () => JSON.parse(monthlyBudgetsJson) };
 }
 
+// DB mock for the budget_shares table (POST /api/budget/share, /unshare, GET share status).
+function createBudgetShareDBMock({ existingShares = {} } = {}) {
+  const shares = new Map(Object.entries(existingShares));
+  const auditRows = [];
+  const DB = createDBMock({
+    onPrepare(sql) {
+      const statement = {
+        _bound: [],
+        bind(...args) { statement._bound = args; return statement; },
+        async first() {
+          if (/SELECT slug FROM budget_shares WHERE slug=\?/.test(sql)) {
+            const row = shares.get(statement._bound[0]);
+            return row ? { slug: row.slug } : null;
+          }
+          if (/SELECT slug, updated_at, created_by FROM budget_shares WHERE slug=\?/.test(sql)) {
+            const row = shares.get(statement._bound[0]);
+            return row ? { slug: row.slug, updated_at: row.updated_at, created_by: row.created_by } : null;
+          }
+          if (/SELECT image_png FROM budget_shares WHERE slug=\?/.test(sql)) {
+            const row = shares.get(statement._bound[0]);
+            return row ? { image_png: row.image_png } : null;
+          }
+          if (/SELECT data_json, updated_at, created_by FROM budget_shares WHERE slug=\?/.test(sql)) {
+            const row = shares.get(statement._bound[0]);
+            return row ? { data_json: row.data_json, updated_at: row.updated_at, created_by: row.created_by } : null;
+          }
+          return null;
+        },
+        async run() {
+          if (/INSERT OR REPLACE INTO budget_shares/.test(sql)) {
+            const [slug, month_key, data_json, image_png, created_by, updated_at] = statement._bound;
+            shares.set(slug, { slug, month_key, data_json, image_png, created_by, updated_at });
+          }
+          if (/DELETE FROM budget_shares WHERE slug=\?/.test(sql)) {
+            shares.delete(statement._bound[0]);
+          }
+          if (/INSERT INTO audit_log/.test(sql)) {
+            const [, type, detail, by_user] = statement._bound;
+            auditRows.push({ type, detail, by_user });
+          }
+          return { success: true };
+        },
+      };
+      return statement;
+    },
+  });
+  return { DB, auditRows, shares };
+}
+
+const VALID_PNG_BASE64_PREFIX = 'iVBORw0KGgo'; // real base64 PNG signature, no decoded bytes needed for validation
+function fakePngBase64(suffix = 'AAAA') {
+  return VALID_PNG_BASE64_PREFIX + suffix;
+}
+
+test('POST /api/budget/share creates a public link and writes an audit entry', async () => {
+  const { DB, auditRows, shares } = createBudgetShareDBMock({});
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/share', 'POST', {
+      monthKey: '2026-10',
+      snapshot: { monthKey: '2026-10', totalBudget: 116819, spent: 5100, available: { free: 41836 } },
+      imagePng: fakePngBase64(),
+      by: 'Jane Doe', role: 'accountant',
+    }),
+    env: { DB },
+  });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  assert.equal(body.slug, 'october-2026');
+  assert.equal(body.url, '/budget/october-2026');
+  assert.ok(body.version);
+  assert.ok(shares.has('october-2026'));
+  assert.ok(auditRows.some(row => row.type === 'budget_shared' && row.by_user === 'Jane Doe (accountant)' && /october-2026/.test(row.detail)));
+});
+
+test('POST /api/budget/share upserts (re-sharing the same month updates the same slug/row)', async () => {
+  const { DB, shares } = createBudgetShareDBMock({});
+  await onRequest({
+    request: createRequest('https://example.com/api/budget/share', 'POST', {
+      monthKey: '2026-10', snapshot: { totalBudget: 100 }, imagePng: fakePngBase64('AAAA'), by: 'Jane Doe', role: 'accountant',
+    }),
+    env: { DB },
+  });
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/share', 'POST', {
+      monthKey: '2026-10', snapshot: { totalBudget: 200 }, imagePng: fakePngBase64('BBBB'), by: 'Jane Doe', role: 'accountant',
+    }),
+    env: { DB },
+  });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  assert.equal(body.slug, 'october-2026');
+  assert.equal(shares.size, 1);
+  assert.match(JSON.parse(shares.get('october-2026').data_json).totalBudget + '', /200/);
+});
+
+test('POST /api/budget/share validation: bad monthKey, oversized snapshot, and a bad/oversized image are all 400', async () => {
+  const { DB } = createBudgetShareDBMock({});
+
+  const badMonth = await onRequest({
+    request: createRequest('https://example.com/api/budget/share', 'POST', {
+      monthKey: 'not-a-month', snapshot: { totalBudget: 1 }, imagePng: fakePngBase64(), by: 'Jane', role: 'accountant',
+    }),
+    env: { DB },
+  });
+  assert.equal(badMonth.status, 400);
+
+  const hugeSnapshot = { totalBudget: 1, filler: 'x'.repeat(120 * 1024) };
+  const bigSnapshot = await onRequest({
+    request: createRequest('https://example.com/api/budget/share', 'POST', {
+      monthKey: '2026-10', snapshot: hugeSnapshot, imagePng: fakePngBase64(), by: 'Jane', role: 'accountant',
+    }),
+    env: { DB },
+  });
+  assert.equal(bigSnapshot.status, 400);
+
+  const notPng = await onRequest({
+    request: createRequest('https://example.com/api/budget/share', 'POST', {
+      monthKey: '2026-10', snapshot: { totalBudget: 1 }, imagePng: 'not-a-real-png-payload', by: 'Jane', role: 'accountant',
+    }),
+    env: { DB },
+  });
+  assert.equal(notPng.status, 400);
+
+  const hugeImage = await onRequest({
+    request: createRequest('https://example.com/api/budget/share', 'POST', {
+      monthKey: '2026-10', snapshot: { totalBudget: 1 }, imagePng: VALID_PNG_BASE64_PREFIX + 'A'.repeat(410 * 1024), by: 'Jane', role: 'accountant',
+    }),
+    env: { DB },
+  });
+  assert.equal(hugeImage.status, 400);
+
+  const missingImage = await onRequest({
+    request: createRequest('https://example.com/api/budget/share', 'POST', {
+      monthKey: '2026-10', snapshot: { totalBudget: 1 }, by: 'Jane', role: 'accountant',
+    }),
+    env: { DB },
+  });
+  assert.equal(missingImage.status, 400);
+});
+
+test('POST /api/budget/unshare deletes the row, writes an audit entry, and reports removed:false when nothing was shared', async () => {
+  const { DB, auditRows, shares } = createBudgetShareDBMock({
+    existingShares: {
+      'october-2026': { slug: 'october-2026', month_key: '2026-10', data_json: '{}', image_png: fakePngBase64(), created_by: 'Jane Doe', updated_at: '2026-09-25T10:00:00.000Z' },
+    },
+  });
+  const response = await onRequest({
+    request: createRequest('https://example.com/api/budget/unshare', 'POST', { monthKey: '2026-10', by: 'Jane Doe', role: 'accountant' }),
+    env: { DB },
+  });
+  const body = await readJson(response);
+  assert.equal(response.status, 200);
+  assert.equal(body.removed, true);
+  assert.equal(shares.has('october-2026'), false);
+  assert.ok(auditRows.some(row => row.type === 'budget_unshared'));
+
+  const secondResponse = await onRequest({
+    request: createRequest('https://example.com/api/budget/unshare', 'POST', { monthKey: '2026-10', by: 'Jane Doe', role: 'accountant' }),
+    env: { DB },
+  });
+  const secondBody = await readJson(secondResponse);
+  assert.equal(secondResponse.status, 200);
+  assert.equal(secondBody.removed, false);
+});
+
+test('GET /api/budget/share?month= returns the status line only, never data_json/image_png', async () => {
+  const { DB } = createBudgetShareDBMock({
+    existingShares: {
+      'october-2026': { slug: 'october-2026', month_key: '2026-10', data_json: '{"secret":"internal balances"}', image_png: fakePngBase64(), created_by: 'Jane Doe', updated_at: '2026-09-25T10:00:00.000Z' },
+    },
+  });
+
+  const found = await onRequest({
+    request: createRequest('https://example.com/api/budget/share?month=2026-10', 'GET'),
+    env: { DB },
+  });
+  const foundBody = await readJson(found);
+  assert.equal(found.status, 200);
+  assert.deepEqual(foundBody.share, { slug: 'october-2026', url: '/budget/october-2026', updatedAt: '2026-09-25T10:00:00.000Z', sharedBy: 'Jane Doe' });
+  assert.equal(JSON.stringify(foundBody).includes('secret'), false);
+  assert.equal(JSON.stringify(foundBody).includes('image_png'), false);
+
+  const notFound = await onRequest({
+    request: createRequest('https://example.com/api/budget/share?month=2026-11', 'GET'),
+    env: { DB },
+  });
+  const notFoundBody = await readJson(notFound);
+  assert.equal(notFound.status, 200);
+  assert.equal(notFoundBody.share, null);
+
+  const badMonth = await onRequest({
+    request: createRequest('https://example.com/api/budget/share?month=nope', 'GET'),
+    env: { DB },
+  });
+  assert.equal(badMonth.status, 400);
+});
+
 function loadLiveBudgetFixture() {
   const raw = fs.readFileSync(new URL('./fixtures/budget-live-2026.json', import.meta.url), 'utf8');
   return JSON.parse(raw);
