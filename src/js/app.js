@@ -3629,55 +3629,23 @@ async function calcChurchBalance(asOfDate, prefetched){
 // settings/churchBal avoid refetching them.
 async function calcSpendableNow(prefetched){
   const pf = prefetched || {};
-  const [allIncome, allRems, settings] = await Promise.all([
+  const [allIncome, allRems, settings, remRates] = await Promise.all([
     pf.income || DB.getIncome(),
     pf.remittances || DB.getRemittances(),
     pf.settings || DB.getSettings(),
+    pf.remRates || getRemRates(),
   ]);
   const churchBal = pf.churchBal || await calcChurchBalance();
   const quotaList = getQuotaList(settings);
-  const firstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
-  const firstDateStr = (firstIncRec ? (firstIncRec.date||firstIncRec.createdAt||'') : '').slice(0,10);
-  const accumQuotas = firstIncRec
-    ? accumQuotasAcrossPeriods(quotaList, settings, allRems, firstDateStr, ymdLocal(new Date()))
-    : 0;
-
-  // Identify fully settled periods (both Part A + B paid, or legacy)
-  const settledKeys = [...new Set(
-    allRems.filter(r=>r.status==='paid'&&r.periodFrom&&r.periodTo).map(r=>`${r.periodFrom}|${r.periodTo}`)
-  )].filter(key=>{
-    const [pF,pT]=key.split('|');
-    const pp=allRems.filter(r=>r.status==='paid'&&r.periodFrom===pF&&r.periodTo===pT);
-    return pp.some(r=>!r.part)||(pp.some(r=>r.part==='a')&&pp.some(r=>r.part==='b'));
+  // Delegates to the shared calcOutstandingRemittancesAsOf helper (see its definition,
+  // above calcRemittancesFromRecords) so Expenses/Budget's "available" can never drift
+  // from the Dashboard's — this used to be a third, hand-rolled copy of the same logic
+  // that ignored written-off shortfalls and assumed 0 when a paid period had no saved
+  // due-at-time-of-payment snapshot.
+  const outstandingAsOf = await calcOutstandingRemittancesAsOf(ymdLocal(new Date()), {
+    income: allIncome, remittances: allRems, quotas: quotaList, settings, remRates
   });
-  const settledRanges=settledKeys.map(k=>{const [f,t]=k.split('|');return{from:f,to:t};});
-
-  // Shortfall from settled periods (snapshot - paid, or 0 if no snapshot)
-  let settledShortfall=0;
-  settledKeys.forEach(key=>{
-    const [pF,pT]=key.split('|');
-    const pp=allRems.filter(r=>r.status==='paid'&&r.periodFrom===pF&&r.periodTo===pT);
-    const ppPaid=pp.reduce((s,r)=>s+(r.amount||0),0);
-    const ppSnap=pp.reduce((max,r)=>Math.max(max,r.dueAtTimeOfPayment||0),0);
-    settledShortfall+=Math.max(0,(ppSnap>0?ppSnap:ppPaid)-ppPaid);
-  });
-
-  // Only recalculate remittance for unsettled-period income
-  const unsettledIncome=allIncome.filter(r=>{
-    const d=r.date||r.createdAt||'';
-    return !d||!settledRanges.some(p=>d>=p.from&&d<=p.to);
-  });
-  const unsettledRem=await calcRemittancesFromRecords(unsettledIncome);
-  const unsettledDue=totalRemittanceDue(unsettledRem);
-  const settledQuotas=settledRanges.reduce((s,pp)=>s+sumQuotaLines(getQuotaLinesForPeriod(quotaList,pp.from,pp.to)),0);
-  const unsettledQuotas=accumQuotas-settledQuotas;
-
-  // Net out payments already made toward still-unsettled periods (e.g. Part A paid in
-  // cash, Part B not yet due) — calcChurchBalance already reflects that payment leaving
-  // the real balance, so counting the full unsettled due here too would double-subtract
-  // it from Spendable. Mirrors the Dashboard's dashTotalRemDueKpi calc.
-  const unsettledPaidOrWrittenOff = calcUnsettledPeriodsSettledAmount(allRems, settledKeys);
-  const outstandingRems=Math.max(0, unsettledDue+unsettledQuotas+settledShortfall-unsettledPaidOrWrittenOff);
+  const outstandingRems = outstandingAsOf.total;
   const totalChurch = churchBal.total;
   const spendable = totalChurch - outstandingRems;
   return { spendable, totalChurch, outstandingRems, churchBal, quotaList, settings, allIncome, allRems };
@@ -3949,94 +3917,18 @@ async function renderDashboard(){
   const dashDueLabel = getRemittanceDueLabel(settings, state.year, state.month,
     { isPaid: dashKpiIsPaid, isPartial: dashKpiIsPartial, paidAmount: dashMonthPaidAmt });
   // ── Outstanding remittance KPI ──────────────────────────────────────────────────────────────
-  // Strategy: only recalculate income-based remittances for UNSETTLED periods (periods that
-  // have no paid remittance record). For SETTLED periods, use the due_at_time_of_payment
-  // snapshot stored when the payment was submitted — this is rate-change-proof because it
-  // captures the rates in effect at the time, not today's rates.
-  // Old records without a snapshot fall back to amountPaid (treating the recorded payment
-  // as a full settlement, which is the correct assumption for any approved past payment).
-  //
-  // This prevents the classic bug: changing remittance percentages retroactively inflates the
-  // "due" on already-paid periods and manufactures phantom prior-period debt.
-  const dashFirstIncRec = allIncome.length > 0 ? allIncome[allIncome.length-1] : null;
-  const dashFirstDateStr = (dashFirstIncRec ? (dashFirstIncRec.date||dashFirstIncRec.createdAt||'') : '').slice(0,10);
-  // Sunday-prorate accumulated quotas so the all-time KPI uses the same basis as the
-  // current-period split shown in the income card and on the Remittances page.
-  // Anchor the upper bound at the as-of date — TODAY for current periods (so only
-  // elapsed Sundays accrue), or the period cut-off for historical snapshots.
-  const dashAccumQuotas = dashFirstIncRec
-    ? accumQuotasAcrossPeriods(dashQuotas, settingsDash, allRemsForKpi, dashFirstDateStr, dashAsOfDate)
-    : 0;
-  // Identify settled periods (have at least one paid or written-off remittance with period dates).
-  const _dashSettledPeriodKeys = [...new Set(
-    allRemsForKpi
-      .filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom && r.periodTo)
-      .map(r => `${r.periodFrom}|${r.periodTo}`)
-  )].filter(key => {
-    // A period is only "settled" when BOTH Part A and Part B are paid (or a legacy payment covers all)
-    const [pFrom, pTo] = key.split('|');
-    const ppRems = allRemsForKpi.filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom === pFrom && r.periodTo === pTo);
-    const hasLegacy = ppRems.some(r => !r.part);
-    const hasPartA = ppRems.some(r => r.part === 'a');
-    const hasPartB = ppRems.some(r => r.part === 'b');
-    return hasLegacy || (hasPartA && hasPartB);
+  // Delegates to the shared calcOutstandingRemittancesAsOf helper (see its definition, above
+  // calcRemittancesFromRecords) so the dashboard, the Monthly Statement, the printed Monthly
+  // Report, and calcSpendableNow can never drift apart on "how much is still owed to RCCG".
+  // It re-filters income/remittances to dashAsOfDate itself, so allIncomeDash/allRemsDash
+  // (unfiltered) are passed rather than the dashIsPastPeriod-filtered allIncome/allRemsForKpi.
+  const dashOutstandingAsOf = await calcOutstandingRemittancesAsOf(dashAsOfDate, {
+    income: allIncomeDash, remittances: allRemsDash, quotas: dashQuotas,
+    settings: settingsDash, remRates: remRatesDash
   });
-  const _dashSettledPeriodRanges = _dashSettledPeriodKeys.map(k => {
-    const [from, to] = k.split('|'); return { from, to };
-  });
-  // Genuine shortfall from settled periods: true_due − amount_paid − amount_written_off.
-  // If no snapshot (old record): recalculate fresh so late-added Sunday collections or
-  // quota changes surface as a reconcilable shortfall instead of silently vanishing.
-  let dashSettledShortfall = 0;
-  const dashShortfallPeriods = [];
-  for(const key of _dashSettledPeriodKeys){
-    const [pFrom, pTo] = key.split('|');
-    const ppRems = allRemsForKpi.filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom === pFrom && r.periodTo === pTo);
-    const ppPaid = ppRems.filter(r => r.status === 'paid').reduce((s, r) => s + (r.amount || 0), 0);
-    const ppWrittenOff = ppRems.filter(r => r.status === 'written_off').reduce((s, r) => s + (r.amount || 0), 0);
-    const ppSnapshot = ppRems.filter(r => r.status === 'paid').reduce((max, r) => Math.max(max, r.dueAtTimeOfPayment || 0), 0);
-    let ppTrueDue;
-    if(ppSnapshot > 0){
-      ppTrueDue = ppSnapshot;
-    } else {
-      // Fresh calc: surface late-added Sunday collections or quota changes so the
-      // user can reconcile the shortfall (pay balance or write off with justification).
-      const ppIncome = allIncome.filter(r => {
-        const d = String(r?.date || r?.dateNeeded || r?.createdAt || '').slice(0,10);
-        return d && d >= pFrom && d <= pTo;
-      });
-      const ppRemCalc = await calcRemittancesFromRecords(ppIncome, remRatesDash);
-      const ppQuotaTotal = sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, pFrom, pTo));
-      ppTrueDue = totalRemittanceDue(ppRemCalc, ppQuotaTotal);
-    }
-    const shortfall = Math.max(0, ppTrueDue - ppPaid - ppWrittenOff);
-    dashSettledShortfall += shortfall;
-    if(shortfall >= 0.5){ // 50 kobo threshold — ignore floating-point noise
-      dashShortfallPeriods.push({ from: pFrom, to: pTo, due: ppTrueDue, paid: ppPaid, writtenOff: ppWrittenOff, shortfall });
-    }
-  }
+  const dashShortfallPeriods = dashOutstandingAsOf.shortfallPeriods;
   state.reconcileShortfalls = dashShortfallPeriods;
-  // Income from UNSETTLED periods only — rate changes don't affect settled periods.
-  const dashUnsettledIncome = allIncome.filter(r => {
-    const d = r.date || r.createdAt || '';
-    return !d || !_dashSettledPeriodRanges.some(p => d >= p.from && d <= p.to);
-  });
-  const dashUnsettledRemCalc = await calcRemittancesFromRecords(dashUnsettledIncome, remRatesDash);
-  const dashUnsettledIncomeRemDue = totalRemittanceDue(dashUnsettledRemCalc);
-  // Quotas: subtract settled-period quotas — only unsettled-period quotas contribute to KPI.
-  const dashSettledPeriodQuotas = _dashSettledPeriodRanges.reduce((sum, pp) =>
-    sum + sumQuotaLines(getQuotaLinesForPeriod(dashQuotas, pp.from, pp.to)), 0);
-  const dashUnsettledQuotas = dashAccumQuotas - dashSettledPeriodQuotas;
-  // A partial payment toward a still-open period (e.g. Part A paid in cash, Part B not
-  // yet due) already reduced the real church balance the moment it was recorded (see
-  // calcChurchBalance) — it must be netted out of the unsettled-period due here too, or
-  // the same payment gets subtracted from Available Fund twice: once via the reduced
-  // actual balance, once via this still-full "amount due". Without this, the leftover
-  // also wrongly surfaces below as "unpaid from previous period(s)".
-  const dashUnsettledPaidOrWrittenOff = calcUnsettledPeriodsSettledAmount(allRemsForKpi, _dashSettledPeriodKeys);
-  // KPI = unsettled-period income due + unsettled-period quotas + genuine shortfall from
-  // settled periods − payments already made toward still-unsettled periods.
-  const dashTotalRemDueKpi = Math.max(0, dashUnsettledIncomeRemDue + dashUnsettledQuotas + dashSettledShortfall - dashUnsettledPaidOrWrittenOff);
+  const dashTotalRemDueKpi = dashOutstandingAsOf.total;
   // Split the all-time outstanding into "this period" vs "prior periods" so the dashboard
   // can show the selected period in the headline and surface any carryover as a sub-line.
   // The sum of the two always equals dashTotalRemDueKpi, so the Available Fund math is unchanged.
@@ -4155,25 +4047,12 @@ async function renderDashboard(){
   const dashCarriedFwdLabel = useRemPeriod
     ? `Opening balance (as of ${dashCarriedFwdDateStr})`
     : `Opening balance (as of ${dashCarriedFwdDateStr})`;
-  const dashOpeningIncome = allIncomeDash.filter(r => {
-    const d = String(r?.date || r?.dateNeeded || r?.createdAt || '').slice(0,10);
-    return !d || d <= dashPriorCloseDate;
+  // Same shared helper as the headline KPI above, as of the day before this period began.
+  const dashOpeningOutstandingAsOf = await calcOutstandingRemittancesAsOf(dashPriorCloseDate, {
+    income: allIncomeDash, remittances: allRemsDash, quotas: dashQuotas,
+    settings: settingsDash, remRates: remRatesDash
   });
-  const dashOpeningAllTimeRemittances = await calcRemittancesFromRecords(dashOpeningIncome, remRatesDash);
-  const dashOpeningIncomeRemDue = totalRemittanceDue(dashOpeningAllTimeRemittances);
-  const dashOpeningFirstIncRec = dashOpeningIncome.length > 0 ? dashOpeningIncome[dashOpeningIncome.length-1] : null;
-  const dashOpeningFirstDateStr = (dashOpeningFirstIncRec ? (dashOpeningFirstIncRec.date||dashOpeningFirstIncRec.createdAt||'') : '').slice(0,10);
-  const dashOpeningAccumQuotas = dashOpeningFirstIncRec
-    ? accumQuotasAcrossPeriods(dashQuotas, settingsDash, allRemsDash, dashOpeningFirstDateStr, dashPriorCloseDate)
-    : 0;
-  const dashOpeningPaidRems = allRemsDash
-    .filter(r => r.status === 'paid' || r.status === 'written_off')
-    .filter(r => {
-      const d = remittanceSettledDate(r);
-      return !d || d <= dashPriorCloseDate;
-    })
-    .reduce((s,r)=>s+(r.amount||0),0);
-  const dashOpeningOutstandingRems = Math.max(0, dashOpeningIncomeRemDue + dashOpeningAccumQuotas - dashOpeningPaidRems);
+  const dashOpeningOutstandingRems = dashOpeningOutstandingAsOf.total;
   const dashPeriodRemittancesPaid = allRemsDash
     .filter(r => r.status === 'paid')
     .filter(r => {
@@ -5262,6 +5141,107 @@ async function calcRemittancesFromRecords(records, preRates){
   INCOME_TYPES.forEach(t=>{ combined[t.key]=0 });
   records.forEach(r=>{ INCOME_TYPES.forEach(t=>{ combined[t.key]+=(r[t.key]||0) }) });
   return await calcRemittances(combined, preRates);
+}
+
+/**
+ * Single source of truth for "how much is still owed to RCCG as of a given date".
+ * Extracted from the dashboard's outstanding-remittance KPI (previously duplicated,
+ * with drift, in the Monthly Statement, the printed Monthly Report, the Dashboard's
+ * "Second Check" opening figure, and calcSpendableNow).
+ *
+ * Works period by period: for a SETTLED period (both parts paid, or a legacy payment,
+ * or written off) it uses the due-at-time-of-payment snapshot (or a fresh recalculation
+ * when there is none) so retroactive rate changes never manufacture phantom debt. For
+ * UNSETTLED periods it recalculates from income at today's rates. Everything is first
+ * filtered to `asOfDate` — income by date||dateNeeded||createdAt, remittances by
+ * remittanceSettledDate() for paid/written_off records and by date otherwise — so a
+ * caller can ask "what was owed as of this past date" for opening-balance figures.
+ *
+ * @param {string} asOfDate - YMD cutoff; only records on/before this date count.
+ * @param {{income:Array, remittances:Array, quotas:Array, settings:Object, remRates:Object}} data
+ * @returns {Promise<{total:number, settledShortfall:number, shortfallPeriods:Array}>}
+ */
+async function calcOutstandingRemittancesAsOf(asOfDate, { income, remittances, quotas, settings, remRates }){
+  const _onOrBefore = r => {
+    const d = String(r?.date || r?.dateNeeded || r?.createdAt || '').slice(0,10);
+    return !d || d <= asOfDate;
+  };
+  const _paidOnOrBefore = r => {
+    const d = remittanceSettledDate(r);
+    return !d || d <= asOfDate;
+  };
+  const allIncome = (income || []).filter(_onOrBefore);
+  const allRems = (remittances || []).filter(r =>
+    (r.status === 'paid' || r.status === 'written_off') ? _paidOnOrBefore(r) : _onOrBefore(r));
+
+  const firstIncRec = allIncome.length > 0 ? allIncome[allIncome.length - 1] : null;
+  const firstDateStr = (firstIncRec ? (firstIncRec.date || firstIncRec.createdAt || '') : '').slice(0, 10);
+  const accumQuotas = firstIncRec
+    ? accumQuotasAcrossPeriods(quotas, settings, allRems, firstDateStr, asOfDate)
+    : 0;
+
+  // A period is "settled" when it has at least one paid or written-off remittance with
+  // period dates, AND both Part A + Part B are covered (or a legacy payment covers all).
+  const settledPeriodKeys = [...new Set(
+    allRems
+      .filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom && r.periodTo)
+      .map(r => `${r.periodFrom}|${r.periodTo}`)
+  )].filter(key => {
+    const [pFrom, pTo] = key.split('|');
+    const ppRems = allRems.filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom === pFrom && r.periodTo === pTo);
+    const hasLegacy = ppRems.some(r => !r.part);
+    const hasPartA = ppRems.some(r => r.part === 'a');
+    const hasPartB = ppRems.some(r => r.part === 'b');
+    return hasLegacy || (hasPartA && hasPartB);
+  });
+  const settledPeriodRanges = settledPeriodKeys.map(k => {
+    const [from, to] = k.split('|'); return { from, to };
+  });
+
+  // Genuine shortfall from settled periods: true_due − amount_paid − amount_written_off.
+  let settledShortfall = 0;
+  const shortfallPeriods = [];
+  for(const key of settledPeriodKeys){
+    const [pFrom, pTo] = key.split('|');
+    const ppRems = allRems.filter(r => (r.status === 'paid' || r.status === 'written_off') && r.periodFrom === pFrom && r.periodTo === pTo);
+    const ppPaid = ppRems.filter(r => r.status === 'paid').reduce((s, r) => s + (r.amount || 0), 0);
+    const ppWrittenOff = ppRems.filter(r => r.status === 'written_off').reduce((s, r) => s + (r.amount || 0), 0);
+    const ppSnapshot = ppRems.filter(r => r.status === 'paid').reduce((max, r) => Math.max(max, r.dueAtTimeOfPayment || 0), 0);
+    let ppTrueDue;
+    if(ppSnapshot > 0){
+      ppTrueDue = ppSnapshot;
+    } else {
+      const ppIncome = allIncome.filter(r => {
+        const d = String(r?.date || r?.dateNeeded || r?.createdAt || '').slice(0, 10);
+        return d && d >= pFrom && d <= pTo;
+      });
+      const ppRemCalc = await calcRemittancesFromRecords(ppIncome, remRates);
+      const ppQuotaTotal = sumQuotaLines(getQuotaLinesForPeriod(quotas, pFrom, pTo));
+      ppTrueDue = totalRemittanceDue(ppRemCalc, ppQuotaTotal);
+    }
+    const shortfall = Math.max(0, ppTrueDue - ppPaid - ppWrittenOff);
+    settledShortfall += shortfall;
+    if(shortfall >= 0.5){ // 50 kobo threshold — ignore floating-point noise
+      shortfallPeriods.push({ from: pFrom, to: pTo, due: ppTrueDue, paid: ppPaid, writtenOff: ppWrittenOff, shortfall });
+    }
+  }
+
+  // Income from UNSETTLED periods only — rate changes don't affect settled periods.
+  const unsettledIncome = allIncome.filter(r => {
+    const d = r.date || r.createdAt || '';
+    return !d || !settledPeriodRanges.some(p => d >= p.from && d <= p.to);
+  });
+  const unsettledRemCalc = await calcRemittancesFromRecords(unsettledIncome, remRates);
+  const unsettledIncomeRemDue = totalRemittanceDue(unsettledRemCalc);
+  const settledPeriodQuotas = settledPeriodRanges.reduce((sum, pp) =>
+    sum + sumQuotaLines(getQuotaLinesForPeriod(quotas, pp.from, pp.to)), 0);
+  const unsettledQuotas = accumQuotas - settledPeriodQuotas;
+  // Net out payments already made toward still-unsettled periods (e.g. Part A paid in
+  // cash, Part B not yet due) — see calcUnsettledPeriodsSettledAmount for the rationale.
+  const unsettledPaidOrWrittenOff = calcUnsettledPeriodsSettledAmount(allRems, settledPeriodKeys);
+  const total = Math.max(0, unsettledIncomeRemDue + unsettledQuotas + settledShortfall - unsettledPaidOrWrittenOff);
+
+  return { total, settledShortfall, shortfallPeriods };
 }
 
 // ── INCOME ────────────────────────────────
@@ -9858,23 +9838,17 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const closingReconstructed=openingBalance+totalIncome-totalExpenses-totalRemPaid-childrenTeacherHold;
   const closingReconcileDiff=Math.round(closingBalance-closingReconstructed);
 
-  // Total outstanding remittances (this period's due + any prior period unpaid).
-  // Mirrors the dashboard's calcOutstandingRemittancesFromFlow logic so the two
-  // views show the same "Available Fund" figure.
-  const priorIncome=allIncome.filter(r=>{
-    const d=String(r?.date||r?.createdAt||'').slice(0,10);
-    return d && d<=openingBalDate;
-  });
-  const priorRemCalc=await calcRemittancesFromRecords(priorIncome, remRatesData);
-  const priorFirstIncRec=priorIncome.length>0?priorIncome[priorIncome.length-1]:null;
-  const priorFirstDate=priorFirstIncRec?String(priorFirstIncRec.date||priorFirstIncRec.createdAt||'').slice(0,10):'';
-  const priorAccumQuotas=priorFirstIncRec?accumQuotasAcrossPeriods(quotaList, settings, allRemittances, priorFirstDate, openingBalDate):0;
-  const priorPaidRems=allRemittances.filter(r=>r.status==='paid'||r.status==='written_off').filter(r=>{
-    const d=remittanceSettledDate(r);
-    return !d || d<=openingBalDate;
-  }).reduce((s,r)=>s+(r.amount||0),0);
-  const openingOutstandingRems=Math.max(0, totalRemittanceDue(priorRemCalc)+priorAccumQuotas-priorPaidRems);
-  const totalOutstandingRems=calcOutstandingRemittancesFromFlow(openingOutstandingRems, totalRemDue, totalRemPaid);
+  // Total outstanding remittances, computed the same way the dashboard computes its
+  // headline KPI (period by period, using due-at-time-of-payment snapshots for settled
+  // periods) via the shared calcOutstandingRemittancesAsOf helper — NOT by recalculating
+  // "all past income at today's rates minus every payment ever made", which is what
+  // previously let a payment for a PRIOR period wrongly cancel out THIS period's debt.
+  const openingOutstandingRems=(await calcOutstandingRemittancesAsOf(openingBalDate, {
+    income:allIncome, remittances:allRemittances, quotas:quotaList, settings, remRates:remRatesData
+  })).total;
+  const totalOutstandingRems=(await calcOutstandingRemittancesAsOf(toDate, {
+    income:allIncome, remittances:allRemittances, quotas:quotaList, settings, remRates:remRatesData
+  })).total;
   const availableParishFund=closingBalance-totalOutstandingRems;
 
   const sundayCount=new Set(sundayIncomeRecords.map(r=>r.date)).size;
@@ -14131,20 +14105,16 @@ async function generateMonthlyReport(){
   const closingReconstructed=openingBalance+totalIncome-totalExpenses-totalRemPaid-childrenTeacherHold;
   const closingReconcileDiff=Math.round(closingBalance-closingReconstructed);
 
-  const priorIncome=allIncome.filter(r=>{
-    const d=String(r?.date||r?.createdAt||'').slice(0,10);
-    return d && d<=openingBalDate;
-  });
-  const priorRemCalc=await calcRemittancesFromRecords(priorIncome, remRatesData);
-  const priorFirstIncRec=priorIncome.length>0?priorIncome[priorIncome.length-1]:null;
-  const priorFirstDate=priorFirstIncRec?String(priorFirstIncRec.date||priorFirstIncRec.createdAt||'').slice(0,10):'';
-  const priorAccumQuotas=priorFirstIncRec?accumQuotasAcrossPeriods(quotaList, settings, allRemittances, priorFirstDate, openingBalDate):0;
-  const priorPaidRems=allRemittances.filter(r=>r.status==='paid'||r.status==='written_off').filter(r=>{
-    const d=remittanceSettledDate(r);
-    return !d || d<=openingBalDate;
-  }).reduce((s,r)=>s+(r.amount||0),0);
-  const openingOutstandingRems=Math.max(0, totalRemittanceDue(priorRemCalc)+priorAccumQuotas-priorPaidRems);
-  const totalOutstandingRems=calcOutstandingRemittancesFromFlow(openingOutstandingRems, totalRemDue, totalRemPaid);
+  // Total outstanding remittances, computed the same way the dashboard computes its
+  // headline KPI (period by period, using due-at-time-of-payment snapshots for settled
+  // periods) via the shared calcOutstandingRemittancesAsOf helper — see the matching
+  // comment in buildMonthlyStatementData for the full rationale.
+  const openingOutstandingRems=(await calcOutstandingRemittancesAsOf(openingBalDate, {
+    income:allIncome, remittances:allRemittances, quotas:quotaList, settings, remRates:remRatesData
+  })).total;
+  const totalOutstandingRems=(await calcOutstandingRemittancesAsOf(toDate, {
+    income:allIncome, remittances:allRemittances, quotas:quotaList, settings, remRates:remRatesData
+  })).total;
   const availableParishFund=closingBalance-totalOutstandingRems;
 
   const sundayCount=new Set(sundayIncomeRecords.map(r=>r.date)).size;
@@ -14363,7 +14333,6 @@ async function generateQuarterlyReport(){
   const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
   const accountantName=(users||[]).find(u=>u.role==='accountant')?.name||'';
   const quotaList=getQuotaList(settings);
-  const quotasTotal=quotaList.reduce((s,q)=>s+(q.amount||0),0);
   const quarterData=[];
   let grandIncome=0, grandExp=0, grandRem=0, grandNet=0;
 
@@ -14374,8 +14343,14 @@ async function generateQuarterlyReport(){
     const total=recs.reduce((s,r)=>s+(r.totalCollection||0),0);
     const exp=exps.reduce((s,e)=>s+(e.amount||0),0);
     const rem=await calcRemittancesFromRecords(recs);
-    const totalRemDue=totalRemittanceDue(rem, quotasTotal);
-    const trueNetLocal=rem.netLocal-quotasTotal;
+    // Use the same period-bounded quota basis as everywhere else (getQuotaLinesForPeriod)
+    // instead of every quota's full amount on every month, which double/triple-counted
+    // multi-month or prorated quotas relative to the Monthly Statement.
+    const monthStartYmd=ymdLocal(new Date(y,m,1));
+    const monthEndYmd=ymdLocal(new Date(y,m+1,0));
+    const monthQuotasTotal=sumQuotaLines(getQuotaLinesForPeriod(quotaList, monthStartYmd, monthEndYmd));
+    const totalRemDue=totalRemittanceDue(rem, monthQuotasTotal);
+    const trueNetLocal=rem.netLocal-monthQuotasTotal;
     const netSurplus=total-totalRemDue-exp;
     quarterData.push({month:MONTHS[m],year:y,income:total,expenses:exp,remittances:totalRemDue,netLocal:trueNetLocal,surplus:netSurplus,sundays:recs.length});
     grandIncome+=total; grandExp+=exp; grandRem+=totalRemDue; grandNet+=netSurplus;
@@ -15966,10 +15941,14 @@ return {
   _computeSundayCashCycle: computeSundayCashCycle,
   _calcChurchBalanceFromOpening: calcChurchBalanceFromOpening,
   _calcOutstandingRemittancesFromFlow: calcOutstandingRemittancesFromFlow,
+  _calcOutstandingRemittancesAsOf: calcOutstandingRemittancesAsOf,
   _calcCurrentPeriodOutstandingRemittance: calcCurrentPeriodOutstandingRemittance,
   _calcAvailableFundFromOpening: calcAvailableFundFromOpening,
   _remittanceSettledDate: remittanceSettledDate,
   _calcChurchBalance: calcChurchBalance,
+  _calcRemittancesFromRecords: calcRemittancesFromRecords,
+  _getQuotaList: getQuotaList,
+  _accumQuotasAcrossPeriods: accumQuotasAcrossPeriods,
   _summarizeSatelliteFunds: summarizeSatelliteFunds,
   // Test-only hooks: exercise the real permission map without a login round-trip.
   _canAction: canAction,
