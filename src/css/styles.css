@@ -352,6 +352,19 @@ tr:hover td{background:var(--surface)}
 .budget-summary-row strong{color:var(--text);font-weight:700}
 .budget-spend-line{font-size:12px;color:var(--text2);margin:6px 0 4px}
 .budget-section-title{font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:var(--text3);margin:16px 0 8px}
+.budget-total-label{font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:var(--text3);margin-top:4px}
+.budget-total-amount{font-size:30px;font-weight:800;letter-spacing:-0.8px;color:var(--text);line-height:1.15;margin:2px 0 6px;font-variant-numeric:tabular-nums}
+.budget-spend-line strong{color:var(--text)}
+.budget-details{margin-top:14px;border:1px solid var(--border);border-radius:var(--r);background:var(--surface)}
+.budget-details>summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:44px;padding:0 12px;font-size:13px;font-weight:600;color:var(--text2);border-radius:var(--r)}
+.budget-details>summary::-webkit-details-marker{display:none}
+.budget-details>summary::after{content:'';width:8px;height:8px;border-right:2px solid var(--text3);border-bottom:2px solid var(--text3);transform:rotate(45deg);transition:transform .2s ease;margin-top:-4px}
+.budget-details[open]>summary::after{transform:rotate(-135deg);margin-top:4px}
+.budget-details>summary:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.budget-details-body{padding:4px 12px 12px;border-top:1px solid var(--border)}
+.budget-breakdown-heading{font-size:15px;font-weight:800;color:var(--text);margin:22px 0 2px;padding-top:14px;border-top:1px solid var(--border)}
+.budget-cushion-card{border-style:dashed}
+.budget-cushion-tag{margin-left:6px;background:var(--amber-light);color:var(--amber)}
 .budget-cushion-row,.budget-lines-total-row{display:flex;justify-content:space-between;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--rl);padding:10px 12px;font-size:13px}
 .budget-lines-total-row{font-weight:700;margin-bottom:8px}
 .budget-unplanned-list{display:flex;flex-direction:column;gap:6px}
@@ -431,6 +444,7 @@ tr:hover td{background:var(--surface)}
 }
 
 /* PRINT */
+@media print{.budget-details>summary::after{display:none}}
 @media print{
   .sidebar,.top-bar,.bottom-nav,.no-print,.btn,.tabs,.page-header,.grid-3,.qa-btn,.qa-grid,.kpi-grid,.kpi{display:none!important}
   .main-wrap{margin-left:0}

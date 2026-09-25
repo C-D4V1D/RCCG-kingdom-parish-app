@@ -6192,7 +6192,7 @@ function cancelBudgetEdit(){
   if(state.page === 'budget') renderBudget();
 }
 
-function renderBudgetPeriodCard({ thisKey, plan, actuals, progress, canManage, range, isCurrent, preparing, readyDate, periodExpenses, settings, billsSchedule }){
+function renderBudgetPeriodCard({ thisKey, plan, actuals, progress, canManage, range, isCurrent, preparing, readyDate, periodExpenses, settings, billsSchedule, cushion = 0 }){
   const engine = getBudgetEngine();
   const header = budgetPeriodHeader(thisKey, range, progress);
   if(!plan){
@@ -6215,40 +6215,90 @@ function renderBudgetPeriodCard({ thisKey, plan, actuals, progress, canManage, r
   const rccgLine = actualLines.find(l=>(l.kind==='rccg') || (l.key||l.expenseCategory)===engine.RCCG_KEY);
   const runningLines = actualLines.filter(l=>l!==rccgLine);
   const spent = actuals?.totals?.spent||0;
-  const budgeted = actuals?.totals?.budgeted||plan.normalMonthly||0;
-  const pctSpent = budgeted ? Math.round((spent/budgeted)*100) : 0;
+  const normal = plan.normalMonthly || Math.max(0, (actuals?.totals?.budgeted||0) - (plan.cushion||0));
+  const cushionAmt = Math.max(0, Math.round(cushion||0));
+  const totalBudget = normal + cushionAmt;
+  const pctSpent = totalBudget ? Math.round((spent/totalBudget)*100) : 0;
   const overallPace = pctSpent>100 ? 'over' : (pctSpent > (progress.pct||0)+5 ? 'watch' : 'ontrack');
   const oneOffs = plan.oneOffs || [];
   const cuts = plan.suggestedCuts || [];
+  const detailRows = [
+    ['Expected parish income this period', plan.expectedIncome?.total||0],
+    ['Normal spending (running costs + RCCG demands)', normal],
+    [`Safety cushion (${budgetSafetyCushionLabel(settings)})`, cushionAmt],
+    ...(plan.knownBillsMonthly>0 ? [['Known bills set aside, a period', plan.knownBillsMonthly]] : []),
+  ];
   return `<div class="card budget-card">
     <div class="budget-month-header">
       <div class="budget-month-title">${esc(header)}</div>
       <span class="${budgetStatusBadge(plan.statusLabel)}">${esc(budgetStatusLabelText(plan.statusLabel, plan.shortBy))}</span>
     </div>
-    ${plan.expectedRemittance>0?`<div class="budget-summary-row td-muted"><span>RCCG remittance (set rules — taken off first, not part of this budget)</span><strong>${fmt(plan.expectedRemittance)}</strong></div>`:''}
-    <div class="budget-summary-row"><span>Expected parish income this period</span><strong>${fmt(plan.expectedIncome?.total||0)}</strong></div>
-    <div class="budget-summary-row"><span>Normal spending (running costs + RCCG demands)</span><strong>${fmt(plan.normalMonthly||0)}</strong></div>
-    ${plan.knownBillsMonthly>0?`<div class="budget-summary-row"><span>Known bills, a period</span><strong>${fmt(plan.knownBillsMonthly)}</strong></div>`:''}
-    <div class="budget-spend-line">Spent so far ${fmt(spent)} of ${fmt(budgeted)} · ${pctSpent}%</div>
+    <div class="budget-total-label">Total period budget</div>
+    <div class="budget-total-amount">${fmt(totalBudget)}</div>
+    <div class="budget-spend-line">Spent so far <strong>${fmt(spent)}</strong> of ${fmt(totalBudget)} · ${pctSpent}%</div>
     ${renderBudgetBar(pctSpent, progress.pct, overallPace)}
-    ${plan.status==='accepted' ? `<div class="budget-lock-badge">🔒 Accepted by ${esc(plan.acceptedBy||'—')} · ${fmtDate(plan.acceptedAt)}${canManage?` <button class="btn btn-sm no-print" onclick="App.reopenBudgetPlan('${esc(thisKey)}', this)">Reopen</button>`:''}</div>` : ''}
-    ${plan.summary?`<p class="budget-summary">${esc(plan.summary)}</p>`:''}
     ${plan.statusLabel==='short' ? `<div class="alert alert-warn" style="margin-top:10px"><span class="alert-icon">⚠</span><span>Short by ${fmt(plan.shortBy||0)}.${cuts.length?' Suggested cuts: '+cuts.map(c=>`${esc(c.label)} −${fmt(c.amount)}`).join(', ')+'.':''}</span></div>` : ''}
+    ${plan.status==='accepted' ? `<div class="budget-lock-badge">🔒 Accepted by ${esc(plan.acceptedBy||'—')} · ${fmtDate(plan.acceptedAt)}${canManage?` <button class="btn btn-sm no-print" onclick="App.reopenBudgetPlan('${esc(thisKey)}', this)">Reopen</button>`:''}</div>` : ''}
     ${canManage && isCurrent && plan.status!=='accepted' && !editing ? `<div class="budget-action-row no-print">
       <button class="btn" onclick="App.editBudgetPlan('${esc(thisKey)}')">Edit</button>
       <button class="btn btn-amber" onclick="App.acceptBudgetPlan('${esc(thisKey)}', this)">Accept plan</button>
       <button class="btn btn-ghost" onclick="App.rebuildBudgetPlan('${esc(thisKey)}', this)">Rebuild now</button>
     </div>` : ''}
     ${editing ? renderBudgetEditForm(plan, thisKey) : `
+      <details class="budget-details">
+        <summary>Plan details</summary>
+        <div class="budget-details-body">
+          ${detailRows.map(([label,val])=>`<div class="budget-summary-row"><span>${esc(label)}</span><strong>${fmt(val)}</strong></div>`).join('')}
+          ${plan.expectedRemittance>0?`<div class="budget-summary-row td-muted"><span>RCCG remittance (taken off first, not part of this budget)</span><strong>${fmt(plan.expectedRemittance)}</strong></div>`:''}
+          ${plan.summary?`<p class="budget-summary">${esc(plan.summary)}</p>`:''}
+          ${oneOffs.length ? `<div class="budget-section-title">One-off items last period (not in the monthly budget)</div>
+            <div class="budget-unplanned-list">${oneOffs.map(o=>`<div class="budget-unplanned-row"><span>${esc(expenseCatLabel(o.category))}${o.description?` — ${esc(o.description)}`:''}</span><strong>${fmt(o.amount)}</strong></div>`).join('')}</div>` : ''}
+          ${plan.periodsUsed && plan.periodsUsed<12 ? `<div class="td-muted" style="margin-top:10px;font-size:12px">Based on ${plan.periodsUsed} period${plan.periodsUsed===1?'':'s'} of records.</div>` : ''}
+        </div>
+      </details>
+
+      <div class="budget-breakdown-heading">Budget breakdown</div>
       ${rccgLine ? `<div class="budget-section-title">RCCG demands (besides remittance)</div>
         <div class="budget-lines">${renderBudgetLine(rccgLine, periodExpenses, progress)}</div>` : ''}
       <div class="budget-section-title">Parish running costs</div>
-      <div class="budget-lines">${runningLines.length ? runningLines.map(l=>renderBudgetLine(l, periodExpenses, progress)).join('') : '<div class="td-muted">No running-cost lines in this plan.</div>'}</div>
+      <div class="budget-lines">
+        ${runningLines.map(l=>renderBudgetLine(l, periodExpenses, progress)).join('')}
+        ${renderBudgetCushionCard(cushionAmt, actuals, settings, progress)}
+      </div>
       ${isCurrent ? renderKnownBillsSection(settings, billsSchedule, canManage) : ''}
-      ${oneOffs.length ? `<div class="budget-section-title">One-off items last period (not in the monthly budget)</div>
-        <div class="budget-unplanned-list">${oneOffs.map(o=>`<div class="budget-unplanned-row"><span>${esc(expenseCatLabel(o.category))}${o.description?` — ${esc(o.description)}`:''}</span><strong>${fmt(o.amount)}</strong></div>`).join('')}</div>` : ''}
-      ${plan.periodsUsed && plan.periodsUsed<12 ? `<div class="td-muted" style="margin-top:10px">Based on ${plan.periodsUsed} period${plan.periodsUsed===1?'':'s'} of records.</div>` : ''}
     `}
+  </div>`;
+}
+
+// A printed plan should show everything, including the collapsed "Plan details".
+if(typeof window!=='undefined' && window.addEventListener){
+  window.addEventListener('beforeprint', ()=>document.querySelectorAll('details.budget-details').forEach(d=>{ d.open = true; }));
+}
+
+// The safety cushion as the last running-cost card. "Used" = spending no line covers:
+// categories without a budget line, plus anything a line spent beyond its budget + savings.
+function renderBudgetCushionCard(cushion, actuals, settings, progress){
+  const unplanned = (actuals?.unplanned||[]).reduce((s,u)=>s+(u.spent||0), 0);
+  const overLines = (actuals?.lines||[]).reduce((s,l)=>{
+    const usable = Number.isFinite(Number(l.usable)) ? Number(l.usable) : (l.budgeted||0);
+    return s + Math.max(0, (l.spent||0) - usable);
+  }, 0);
+  const used = Math.round(unplanned + overLines);
+  const left = cushion - used;
+  const pct = cushion>0 ? Math.round((used/cushion)*100) : (used>0?100:0);
+  const pace = used>cushion ? 'over' : (pct>80 ? 'watch' : 'ontrack');
+  const paceLabel = pace==='over'?'Over':pace==='watch'?'Watch':'On track';
+  const leftText = left<0 ? `${fmt(Math.abs(left))} over` : `${fmt(left)} left`;
+  return `<div class="budget-line-card budget-cushion-card">
+    <div class="budget-line-top">
+      <div>
+        <div class="budget-line-label">Safety cushion<span class="badge budget-cushion-tag">For surprises</span></div>
+        <div class="budget-line-sub">${fmt(used)} used of ${fmt(cushion)} · ${leftText} · ${esc(budgetSafetyCushionLabel(settings))}</div>
+        <div class="budget-line-sub td-muted">Covers unplanned costs and any line that runs over. Set in IT Admin → Budget rules.</div>
+      </div>
+      <span class="badge budget-pace-${pace}">${paceLabel}</span>
+    </div>
+    ${renderBudgetBar(pct, progress?.pct||0, pace)}
   </div>`;
 }
 
@@ -6304,6 +6354,15 @@ async function renderBudget(){
     savedByKey = free.savedByKey || {};
   }
   const actuals = plan ? engine.matchActuals(plan, periodExpenses, today, range, { savedByKey }) : null;
+  // The cushion is part of the period's total budget. Current period: the same figure the
+  // "Available for new spending" card and the Dashboard petty target use; past periods:
+  // recomputed from the plan's own history with today's rules.
+  const cushion = (isCurrent && free) ? (free.parts?.cushion||0)
+    : (plan ? engine.safetyCushion({
+        mode: cfg.safetyMode, percent: cfg.safetyPercent,
+        periodTotals: plan.periodTotals||[], normal: plan.normalMonthly||0,
+        floorPercent: cfg.cushionFloorPercent, minPeriods: cfg.cushionMinPeriods,
+      }) : 0);
 
   document.getElementById('pageContent').innerHTML = `
     <div class="page-header">
@@ -6318,7 +6377,7 @@ async function renderBudget(){
       <input type="month" class="form-input budget-month-picker" value="${thisKey}" max="${currentKey}" onchange="App.setBudgetMonth(this.value)" />
       ${!isCurrent?'<span class="td-muted" style="margin-left:8px">Past period — read only</span>':''}
     </div>
-    ${renderBudgetPeriodCard({ thisKey, plan, actuals, progress, canManage, range, isCurrent, preparing, readyDate, periodExpenses, settings, billsSchedule })}
+    ${renderBudgetPeriodCard({ thisKey, plan, actuals, progress, canManage, range, isCurrent, preparing, readyDate, periodExpenses, settings, billsSchedule, cushion })}
   `;
 }
 
