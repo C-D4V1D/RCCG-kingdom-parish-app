@@ -170,7 +170,7 @@ async function submitDepositCorrection(txId, maxAmount, btn=null){
       const photoData = await compressPhoto(photoFile, 1200, 0.75);
       updateData.photoData = photoData;
     }
-    await fetch('/api/cash-transactions/'+txId, {
+    await authFetch('/api/cash-transactions/'+txId, {
       method:'PUT', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(updateData),
     });
@@ -188,7 +188,7 @@ async function deleteDepositRecord(txId, btn=null){
   if(!confirm('Delete this deposit record? This will return the cash to "Cash with Accountant."')) return;
   const restore = setBtnLoading(btn, 'Deleting…');
   try {
-    await fetch('/api/cash-transactions/'+txId, {
+    await authFetch('/api/cash-transactions/'+txId, {
       method:'DELETE', headers:{'Content-Type':'application/json'},
     });
     DB.addAudit('deposit_deleted',`Deposit ${txId} fully deleted by ${state.user?.name}. Cash returned to accountant.`,state.user?.name);
@@ -209,7 +209,7 @@ async function retryDepositVerification(txId){
     const allTx = await DB.getCashTransactions(true); // full=true to include photo
     const tx = allTx.find(t=>t.id===txId);
     if(!tx?.photoData){ showAlert('No photo found for this deposit. Cannot retry verification.','danger'); return; }
-    const resp = await fetch('/api/verify-deposit', {
+    const resp = await authFetch('/api/verify-deposit', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ transactionId:txId, photoData:tx.photoData, recordedAmount:tx.amount, depositDate:tx.date||'' }),
     });
@@ -232,7 +232,7 @@ async function manuallyApproveDeposit(txId){
   if(!confirm('Manually approve this deposit? Cash will be moved from accountant to bank.')) return;
   const btn = event?.target; if(btn) setBtnLoading(btn, 'Approving…');
   try {
-    await fetch('/api/cash-transactions/'+txId, {
+    await authFetch('/api/cash-transactions/'+txId, {
       method:'PUT', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ verificationStatus:'manual_approved', aiNotes:`Manually approved by ${state.user?.name||'IT Admin'} on ${new Date().toISOString().split('T')[0]}` }),
     });
@@ -512,12 +512,122 @@ const _CACHE_TTL = {
 // enough that a legitimately slow download on a weak link still completes.
 const _REQUEST_TIMEOUT_MS = 45000;
 
+// ── Server sign-in token ────────────────────────────────────────────────────
+// POST /api/auth/login returns a signed token, kept with the saved session in
+// localStorage (rccgSession.token) and sent on every /api call. Checking it
+// costs the server no database read. Every 12 h the server quietly re-checks
+// the account and hands back a renewed token in the X-Finance-Token response
+// header (no extra request). If the session has really ended (30 days unused,
+// PIN changed, user removed), a PIN prompt opens ON TOP of the current page so
+// nothing typed is lost, and the request that hit it is retried exactly once.
+const Auth = {
+  _prompt: null,
+  token(){ return (state.user && state.user.token) || ''; },
+  headers(extra){
+    const h = Object.assign({}, extra || {});
+    const t = Auth.token();
+    if(t) h.Authorization = 'Bearer ' + t;
+    return h;
+  },
+  setToken(token){
+    if(!token || !state.user) return;
+    state.user.token = token;
+    try { localStorage.setItem('rccgSession', JSON.stringify(state.user)); } catch(e) {}
+  },
+  capture(res){
+    try { const t = res && res.headers && res.headers.get('X-Finance-Token'); if(t) Auth.setToken(t); } catch(e) {}
+  },
+  // True when a 401 body means "sign in again" (vs. a wrong PIN on a login form).
+  isSessionEnd(status, data){
+    return status === 401 && !!data && (data.code === 'reauth' || data.code === 'auth_required');
+  },
+  // One shared prompt for all requests that hit an ended session at once.
+  reauth(){
+    if(Auth._prompt) return Auth._prompt;
+    Auth._prompt = new Promise(resolve => showReauthPrompt(resolve))
+      .finally(() => { Auth._prompt = null; });
+    return Auth._prompt;
+  },
+};
+
+// fetch() for the few call sites that don't go through apiFetch: adds the
+// token, and on an ended session asks for the PIN and retries once.
+async function authFetch(url, opts = {}){
+  const send = () => fetch(url, { ...opts, headers: Auth.headers(opts.headers) });
+  let res = await send();
+  Auth.capture(res);
+  if(res.status === 401){
+    const data = await res.clone().json().catch(() => null);
+    if(Auth.isSessionEnd(res.status, data) && await Auth.reauth()){
+      res = await send();
+      Auth.capture(res);
+    }
+  }
+  return res;
+}
+
+function showReauthPrompt(resolve){
+  const user = state.user;
+  if(!user || !user.id){ resolve(false); return; }
+  const prev = document.getElementById('reauthOverlay'); if(prev) prev.remove();
+  const o = document.createElement('div');
+  o.className = 'modal-overlay reauth-overlay';
+  o.id = 'reauthOverlay';
+  o.innerHTML = `<div class="modal reauth-modal" role="dialog" aria-modal="true" aria-labelledby="reauthTitle">
+    <div class="modal-title" id="reauthTitle">Please enter your PIN</div>
+    <p class="reauth-text">Your sign-in has expired. Enter your PIN to carry on — anything you were typing is still here.</p>
+    <p class="reauth-who"></p>
+    <div class="form-group"><input type="password" id="reauthPin" class="form-input" maxlength="6" inputmode="numeric" autocomplete="current-password" placeholder="PIN" /></div>
+    <div class="reauth-error" id="reauthError" style="display:none"></div>
+    <div class="modal-footer"><button class="btn" id="reauthCancel" type="button">Cancel</button><button class="btn btn-primary" id="reauthGo" type="button">Continue</button></div>
+  </div>`;
+  document.body.appendChild(o);
+  const who = o.querySelector('.reauth-who'); if(who) who.textContent = `Signed in as ${user.name || ''}`;
+  const pinEl = o.querySelector('#reauthPin');
+  const errEl = o.querySelector('#reauthError');
+  const goBtn = o.querySelector('#reauthGo');
+  let busy = false;
+  const finish = (ok) => { o.remove(); resolve(ok); };
+  const submit = async () => {
+    if(busy) return;
+    const pin = (pinEl.value || '').trim();
+    if(!pin){ errEl.textContent = 'Please enter your PIN.'; errEl.style.display = 'block'; return; }
+    busy = true; goBtn.disabled = true; goBtn.textContent = 'Checking…';
+    try {
+      const res = await fetch('/api/auth/login', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ role: user.role, userId: user.id, pin }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if(res.ok && data && data.token && data.id === user.id){
+        Auth.setToken(data.token);
+        finish(true);
+        return;
+      }
+      errEl.textContent = res.status === 401 ? 'Incorrect PIN. Please try again.' : (data.error || `Sign-in failed (${res.status}).`);
+      errEl.style.display = 'block';
+      pinEl.value = '';
+    } catch(e){
+      errEl.textContent = 'No connection. Check your internet and try again.';
+      errEl.style.display = 'block';
+    } finally {
+      busy = false; goBtn.disabled = false; goBtn.textContent = 'Continue';
+    }
+  };
+  goBtn.addEventListener('click', submit);
+  pinEl.addEventListener('keydown', e => { if(e.key === 'Enter') submit(); });
+  o.querySelector('#reauthCancel').addEventListener('click', () => finish(false));
+  setTimeout(() => { try { pinEl.focus(); } catch(e) {} }, 50);
+}
+
 // One network attempt, wrapped in a timeout so a dead connection fails fast.
 async function _apiFetchOnce(path, opts){
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), _REQUEST_TIMEOUT_MS);
   try {
-    return await fetch('/api/'+path, { ...opts, signal: ctrl.signal });
+    const res = await fetch('/api/'+path, { ...opts, headers: Auth.headers(opts.headers), signal: ctrl.signal });
+    Auth.capture(res);
+    return res;
   } finally {
     clearTimeout(timer);
   }
@@ -672,6 +782,10 @@ async function apiFetch(path, method='GET', body=null){
   // user. Mutations (POST/PUT/DELETE) are NEVER retried — a successful write whose
   // response was lost in transit would duplicate the record. The retry loop lives
   // inside the in-flight promise so de-duped callers share the whole sequence.
+  // A 401 "session ended" (never a wrong PIN on the login form itself) opens the
+  // PIN prompt and then retries this request exactly once — safe for writes too,
+  // because the server rejected the first attempt before doing anything.
+  let reauthed = false;
   const run = (async () => {
     for(let attempt = 0; ; attempt++){
       try {
@@ -681,7 +795,15 @@ async function apiFetch(path, method='GET', body=null){
           continue;
         }
         const data = await _readJson(res);
-        if(!res.ok) throw new Error(data.error || `API error ${res.status}`);
+        if(Auth.isSessionEnd(res.status, data) && !path.startsWith('auth/')){
+          if(!reauthed && await Auth.reauth()){ reauthed = true; attempt--; continue; }
+          const e = new Error(method === 'GET'
+            ? 'Please sign in again to load this.'
+            : 'Not saved — please sign in again, then press Save once more. Your entries are still on the form.');
+          e.code = 'reauth';
+          throw e;
+        }
+        if(!res.ok) throw new Error((data && data.error) || `API error ${res.status}`);
         if(method === 'GET' && _CACHE_TTL[endpoint]) _apiCache.set(endpoint, { data, ts: Date.now() });
         return data;
       } catch(err){
@@ -705,6 +827,7 @@ async function apiFetch(path, method='GET', body=null){
 
 const DB = {
   login(d)                     { return apiFetch('auth/login','POST',d); },
+  getLoginOptions()            { return apiFetch('auth/options'); },
   getUsers()                   { return apiFetch('users'); },
   addUser(d)                   { return apiFetch('users','POST',d); },
   updateUser(id,d)             { return apiFetch(`users/${id}`,'PUT',d); },
@@ -2314,7 +2437,8 @@ async function onRoleChange(){
   const multiRoles = ['signatory'];
   if(!multiRoles.includes(role)){ wrap.style.display='none'; return }
   try {
-    const allUsers = await DB.getUsers();
+    // Public name list (id, name, role only) — the full user list needs sign-in.
+    const allUsers = await DB.getLoginOptions();
     const users = allUsers.filter(u=>u.role===role);
     if(users.length>1){
       wrap.style.display='block';
@@ -2342,13 +2466,15 @@ async function login(btn=null){
   setFormDisabled(true);
   const restore = setBtnLoading(loginBtn, 'Signing in…');
   try {
-    // Ensure tables exist — silently ignore if this fails (may already be initialised)
-    try { await apiFetch('init'); } catch(initErr) { console.warn('init skipped:', initErr.message); }
     const uid = role==='signatory' ? (document.getElementById('userSelect')?.value || '') : '';
     const user = await DB.login({ role, pin, userId: uid || undefined });
     errEl.style.display='none';
+    errEl.classList.remove('hp-login-notice');
     state.user = user;
     try { localStorage.setItem('rccgSession', JSON.stringify(user)); } catch(e) {}
+    // Schema migrations now run after sign-in (the server requires the token).
+    // Fire-and-forget, exactly as for a restored session — never delays the app.
+    apiFetch('init').catch(initErr => console.warn('init skipped:', initErr.message));
     DB.addAudit('login','User logged in',user.name);
     document.getElementById('loginScreen').style.display='none';
     document.getElementById('appShell').style.display='flex';
@@ -2360,6 +2486,9 @@ async function login(btn=null){
       document.getElementById('pinInput').value='';
     } else if(msg.toLowerCase().includes('please select your name')){
       errEl.textContent='Please select your name before signing in.';
+    } else if(msg.toLowerCase().includes('too many incorrect pin')){
+      errEl.textContent=msg;
+      document.getElementById('pinInput').value='';
     } else {
       errEl.textContent='Cannot connect to database: '+msg;
     }
@@ -2371,6 +2500,7 @@ async function login(btn=null){
   }
 }
 function logout(){
+  // Audit first: it still needs the token, which goes with the session below.
   DB.addAudit('logout','User logged out', state.user?.name);
   try { localStorage.removeItem('rccgSession'); } catch(e) {}
   state.user=null; state.page='dashboard';
@@ -2407,6 +2537,7 @@ async function submitChangePin(btn=null){
     const res = await DB.changePin({ userId: state.user.id, currentPin, newPin });
     // res is { success: true, id: '...' } on success — check either field
     if(!res?.success && !res?.id) throw new Error('PIN update returned unexpected response.');
+    if(res.token) Auth.setToken(res.token);   // this device stays signed in with the new PIN
     DB.addAudit('pin_changed','User changed own PIN',state.user?.name);
     closeModal();
     showAlert('PIN updated successfully! Use your new PIN next time you sign in.','success');
@@ -7496,7 +7627,7 @@ function compressPhoto(file, maxDim=1200, quality=0.75){
 async function verifyDepositInBackground(txId, photoData, recordedAmount, attempt=1){
   const MAX_ATTEMPTS = 3;
   try {
-    const resp = await fetch('/api/verify-deposit', {
+    const resp = await authFetch('/api/verify-deposit', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ transactionId:txId, photoData, recordedAmount }),
@@ -8000,7 +8131,7 @@ async function submitBulkDeposit(btn=null){
     if(state.page==='bank') renderBank(); else renderIncome();
     // Trigger ONE group verification for the entire bulk deposit
     if(photoData && groupId){
-      fetch('/api/verify-deposit', {
+      authFetch('/api/verify-deposit', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ groupId, photoData, recordedAmount:cashToDeposit, depositDate:date }),
       }).then(r=>r.json()).then(result=>{
@@ -16621,6 +16752,29 @@ function submitKPSCAlert(){
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem('rccgSession') || 'null'); } catch(e) {}
   if (!saved || !saved.id || !saved.role || !saved.name) return;
+  if (!saved.token) {
+    // Saved before the sign-in security update: there is no server token yet, so
+    // ask for the PIN once (role pre-selected). Nothing else is lost.
+    const showNotice = () => {
+      const roleEl = document.getElementById('roleSelect');
+      if (roleEl) {
+        roleEl.value = saved.role;
+        Promise.resolve(onRoleChange()).then(() => {
+          const userEl = document.getElementById('userSelect');
+          if (userEl && saved.id) userEl.value = saved.id;
+        }).catch(() => {});
+      }
+      const errEl = document.getElementById('loginError');
+      if (errEl) {
+        errEl.textContent = 'Security update: please enter your PIN once more to continue.';
+        errEl.classList.add('hp-login-notice');
+        errEl.style.display = 'block';
+      }
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', showNotice);
+    else showNotice();
+    return;
+  }
   state.user = saved;
   function doRestore(){
     const loginEl = document.getElementById('loginScreen');
@@ -16725,6 +16879,12 @@ return {
   _pettyHealth: pettyHealth,
   _ACCESS_RULES: ACCESS_RULES,
   _setTestUserRole: (role) => { state.user = { name:'Test User', role }; },
+  // Sign-in token test hooks (tests/finance-auth-client.test.js).
+  _Auth: Auth,
+  _apiFetch: apiFetch,
+  _authFetch: authFetch,
+  _setTestUser: (u) => { state.user = u; },
+  _getTestUser: () => state.user,
   _satelliteHeldDisplay: satelliteHeldDisplay,
   _SATELLITE_FUND_PURPOSES: SATELLITE_FUND_PURPOSES,
   _BUILTIN_INCOME_TYPES: BUILTIN_INCOME_TYPES,

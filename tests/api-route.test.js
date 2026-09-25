@@ -2,15 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { onRequest, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems } from '../functions/api/[[route]].js';
+import { FINANCE_AUTH_HEADER } from './finance-auth-helper.mjs';
 
 async function readJson(response) {
   return JSON.parse(await response.text());
 }
 
+// Every test request carries a signed Finance (IT admin) token, as the app does
+// after sign-in. Public/KPSC routes ignore it; see finance-auth.test.js for the
+// unauthenticated cases.
 function createRequest(url, method = 'GET', body) {
-  const init = { method };
+  const init = { method, headers: { ...FINANCE_AUTH_HEADER } };
   if (body !== undefined) {
-    init.headers = { 'Content-Type': 'application/json' };
+    init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
   return new Request(url, init);
@@ -22,7 +26,7 @@ const TEST_KPSC_SESSION_HEADER = JSON.stringify({ accountId: 'ka-test', token: '
 function createKpscRequest(url, method = 'POST', body) {
   const init = {
     method,
-    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': TEST_KPSC_SESSION_HEADER },
+    headers: { 'Content-Type': 'application/json', 'X-KPSC-Session': TEST_KPSC_SESSION_HEADER, ...FINANCE_AUTH_HEADER },
   };
   if (body !== undefined) {
     init.body = JSON.stringify(body);
@@ -209,7 +213,7 @@ test('login upgrades plaintext PIN to hashed PIN after successful auth', async (
           throw new Error(`Unexpected SQL in first(): ${sql}`);
         },
         async run() {
-          runs.push({ sql, bound: statement._bound });
+          if (!/auth_throttle/.test(sql)) runs.push({ sql, bound: statement._bound }); /* throttle rows: see finance-auth.test.js */
           return { success: true, meta: { changes: 1 } };
         }
       };
@@ -230,6 +234,8 @@ test('login upgrades plaintext PIN to hashed PIN after successful auth', async (
   assert.equal(response.status, 200);
   assert.equal(body.id, 'u7');
   assert.equal(body.role, 'viewer');
+  assert.match(body.token, /^fin1\./, 'login now returns a signed session token');
+  assert.equal(body.pin, undefined);
   assert.equal(runs.length, 1);
   assert.match(runs[0].sql, /UPDATE users SET pin=\? WHERE id=\?/);
   assert.equal(runs[0].bound[1], 'u7');
@@ -257,7 +263,7 @@ test('login with hashed PIN does not run upgrade update', async () => {
           throw new Error(`Unexpected SQL in first(): ${sql}`);
         },
         async run() {
-          runs.push({ sql, bound: statement._bound });
+          if (!/auth_throttle/.test(sql)) runs.push({ sql, bound: statement._bound }); /* throttle rows: see finance-auth.test.js */
           return { success: true, meta: { changes: 1 } };
         }
       };
@@ -309,7 +315,7 @@ test('kpsc login authenticates against dedicated kpsc_accounts table', async () 
           throw new Error(`Unexpected SQL in first(): ${sql}`);
         },
         async run() {
-          runs.push({ sql, bound: statement._bound });
+          if (!/auth_throttle/.test(sql)) runs.push({ sql, bound: statement._bound }); /* throttle rows: see finance-auth.test.js */
           return { success: true, meta: { changes: 1 } };
         }
       };
@@ -357,7 +363,7 @@ test('kpsc change pin enforces current pin and clears must_change_pin', async ()
           throw new Error(`Unexpected SQL in first(): ${sql}`);
         },
         async run() {
-          runs.push({ sql, bound: statement._bound });
+          if (!/auth_throttle/.test(sql)) runs.push({ sql, bound: statement._bound }); /* throttle rows: see finance-auth.test.js */
           return { success: true, meta: { changes: 1 } };
         }
       };
@@ -438,7 +444,7 @@ test('AI secretary processing returns draft minutes and policy flags', async () 
               summary_short: statement._bound[0] || '', resolutions_json: statement._bound[3] || '[]',
               action_items_json: statement._bound[4] || '[]', policy_flags_json: statement._bound[5] || '[]' };
           }
-          runs.push({ sql, bound: statement._bound });
+          if (!/auth_throttle/.test(sql)) runs.push({ sql, bound: statement._bound }); /* throttle rows: see finance-auth.test.js */
           return { success: true, meta: { changes: 1 } };
         }
       };
@@ -2283,7 +2289,7 @@ test('voice-member-sync: inserts new member into D1', async () => {
       const statement = {
         _bound: [],
         bind(...args) { statement._bound = args; return statement; },
-        async run() { runs.push({ sql, bound: statement._bound }); return { success: true, meta: { changes: 1 } }; },
+        async run() { if (!/auth_throttle/.test(sql)) runs.push({ sql, bound: statement._bound }); /* throttle rows: see finance-auth.test.js */ return { success: true, meta: { changes: 1 } }; },
         async first() { return null; }
       };
       return statement;
@@ -2316,7 +2322,7 @@ test('voice-member-sync: update-existing updates name via ON CONFLICT', async ()
       const statement = {
         _bound: [],
         bind(...args) { statement._bound = args; return statement; },
-        async run() { runs.push({ sql, bound: statement._bound }); return { success: true, meta: { changes: 1 } }; },
+        async run() { if (!/auth_throttle/.test(sql)) runs.push({ sql, bound: statement._bound }); /* throttle rows: see finance-auth.test.js */ return { success: true, meta: { changes: 1 } }; },
         async first() { return null; }
       };
       return statement;
@@ -4118,8 +4124,8 @@ test('GET /api/kpsc-email-ingest-log returns entries with needsAttention=false w
   };
 
   const res = await onRequest({
-    request: createRequest('https://example.com/api/kpsc-email-ingest-log', 'GET'),
-    env: { DB: createDBMock({ onPrepare }) },
+    request: createKpscRequest('https://example.com/api/kpsc-email-ingest-log', 'GET'),
+    env: { DB: createDBMock({ onPrepare: withKpscSessionMock(onPrepare) }) },
   });
   const body = await readJson(res);
   assert.equal(res.status, 200);
@@ -4148,8 +4154,8 @@ test('GET /api/kpsc-email-ingest-log sets needsAttention=true when an error or w
   };
 
   const res = await onRequest({
-    request: createRequest('https://example.com/api/kpsc-email-ingest-log', 'GET'),
-    env: { DB: createDBMock({ onPrepare }) },
+    request: createKpscRequest('https://example.com/api/kpsc-email-ingest-log', 'GET'),
+    env: { DB: createDBMock({ onPrepare: withKpscSessionMock(onPrepare) }) },
   });
   const body = await readJson(res);
   assert.equal(res.status, 200);
@@ -4179,8 +4185,8 @@ test('GET /api/kpsc-email-ingest-log respects the ack timestamp — old flagged 
   };
 
   const res = await onRequest({
-    request: createRequest('https://example.com/api/kpsc-email-ingest-log', 'GET'),
-    env: { DB: createDBMock({ onPrepare }) },
+    request: createKpscRequest('https://example.com/api/kpsc-email-ingest-log', 'GET'),
+    env: { DB: createDBMock({ onPrepare: withKpscSessionMock(onPrepare) }) },
   });
   const body = await readJson(res);
   assert.equal(res.status, 200);
@@ -4211,8 +4217,8 @@ test('GET /api/kpsc-email-ingest-log clears needsAttention once every flagged ro
   };
 
   const res = await onRequest({
-    request: createRequest('https://example.com/api/kpsc-email-ingest-log', 'GET'),
-    env: { DB: createDBMock({ onPrepare }) },
+    request: createKpscRequest('https://example.com/api/kpsc-email-ingest-log', 'GET'),
+    env: { DB: createDBMock({ onPrepare: withKpscSessionMock(onPrepare) }) },
   });
   const body = await readJson(res);
   assert.equal(res.status, 200);

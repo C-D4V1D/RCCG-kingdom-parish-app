@@ -2,15 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { onRequest, createIncome, mergeDuplicateSundayCollections } from '../functions/api/[[route]].js';
 import { createFinanceDBMock } from './finance-db-mock.mjs';
+import { FINANCE_AUTH_HEADER } from './finance-auth-helper.mjs';
 
 async function readJson(response) {
   return JSON.parse(await response.text());
 }
 
 function createRequest(url, method = 'GET', body) {
-  const init = { method };
+  const init = { method, headers: { ...FINANCE_AUTH_HEADER } };
   if (body !== undefined) {
-    init.headers = { 'Content-Type': 'application/json' };
+    init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
   return new Request(url, init);

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { onRequest } from '../functions/api/[[route]].js';
 import { createSqliteD1, seedKpscSession, kpscRequest } from './sqlite-d1.mjs';
+import { FINANCE_AUTH_HEADER } from './finance-auth-helper.mjs';
 
 // Income review: bank transfer / POS / cheque income needs the Acting Chairman or
 // Treasurer to confirm it arrived in the bank; cash instead needs one of them to
@@ -11,7 +12,7 @@ import { createSqliteD1, seedKpscSession, kpscRequest } from './sqlite-d1.mjs';
 
 async function initDb() {
   const DB = createSqliteD1();
-  const res = await onRequest({ request: new Request('https://x/api/init'), env: { DB } });
+  const res = await onRequest({ request: new Request('https://x/api/init', { headers: FINANCE_AUTH_HEADER }), env: { DB } });
   assert.equal(res.status, 200);
   seedKpscSession(DB, { role: 'treasurer', name: 'Treasurer' });
   return DB;
@@ -179,7 +180,7 @@ test('settling history undoes system stamps on September income and unbanked cas
   addEntry(DB, { id: 'jul-banked', date: '2026-07-10', amount: 400, handover_id: 'kch1' });
 
   DB.sqlite.prepare(`DELETE FROM settings WHERE key='kpsc_income_review_history_v2'`).run();
-  await onRequest({ request: new Request('https://x/api/init'), env: { DB } });
+  await onRequest({ request: new Request('https://x/api/init', { headers: FINANCE_AUTH_HEADER }), env: { DB } });
 
   assert.equal(entry(DB, 'aug').confirmed_by, SYS, 'older months stay settled');
   assert.equal(entry(DB, 'aug').deposited_by, SYS, 'banked via old flow stays deposited');
@@ -198,6 +199,6 @@ test('settling history undoes system stamps on September income and unbanked cas
 
   // Runs once: a later person-free edit to the flag-protected rows isn't re-touched.
   DB.sqlite.prepare(`UPDATE kpsc_finance_entries SET confirmed_by=? WHERE id='sep-bank'`).run(SYS);
-  await onRequest({ request: new Request('https://x/api/init'), env: { DB } });
+  await onRequest({ request: new Request('https://x/api/init', { headers: FINANCE_AUTH_HEADER }), env: { DB } });
   assert.equal(entry(DB, 'sep-bank').confirmed_by, SYS);
 });
