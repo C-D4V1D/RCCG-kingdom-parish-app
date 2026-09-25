@@ -347,8 +347,12 @@ snapshot of the rates in force when they were paid.
 | Members' Tithe | 58% | 42% |
 | Ministers' Tithe | 62% | 38% |
 
-**Province Rebate** — 20% of the combined *local retained* tithes (the 42% and the 38%),
-deducted from the parish's own share. It applies to tithes only.
+**Province Rebate** — the configured rebate rate (default 20%) of the combined *local
+retained* tithes, deducted from the parish's own share. It applies to tithes only. As on
+the RCCG portal (where it is the "Province Joint Church Planting" line), the Coastline
+Worship Centre levy is taken out of the Ministers' Tithe first: the base is Members' Tithe
+× (100% − national) plus Ministers' Tithe × (100% − national − coastline), i.e. 42% and
+38% − 1% = 37% at these defaults.
 
 ### Thanksgiving
 
@@ -581,6 +585,39 @@ Required environment variables in Cloudflare Pages for the full feature set:
 | `OPENAI_API_KEY` | Realtime transcription session tokens, OCR, drafting |
 | `EMAIL_INGEST_SECRET` | Authorises bank-alert email ingestion |
 | `VOICE_FP_TOKEN` | Bearer token for the voice fingerprint service |
+
+### Remittance cut-off webhook (optional)
+
+When a Sunday collection dated on a remittance cut-off Sunday (Settings → remittance
+cut-off dates, stored as `remCutoffDatesByYear`) is saved through `POST /api/income` —
+either a new record or more amounts merged into that Sunday's existing record — the API
+POSTs a JSON notice to an external webhook. It is sent server-side after the response
+(`waitUntil`), so it never slows or fails the save; errors are only logged. Set these in
+Cloudflare Pages → the project → **Settings → Variables and Secrets** (Production), as
+type *Secret*, then redeploy:
+
+| Variable | Used for |
+|---|---|
+| `REMIT_WEBHOOK_URL` | Webhook to notify (e.g. a Grok Bot routine's "POST to" URL). Unset = feature off |
+| `REMIT_WEBHOOK_KEY` | Optional shared secret (e.g. the routine's sender key) |
+| `REMIT_WEBHOOK_KEY_HEADER` | Optional header name for the key. Default `Authorization`, sent as `Bearer <key>`; any other header name gets the raw key |
+
+Payload:
+
+```json
+{
+  "event": "cutoff_collection_saved",
+  "collectionDate": "2026-09-20",
+  "periodStart": "2026-08-24",
+  "periodEnd": "2026-09-20",
+  "action": "created",
+  "recordId": "INC-…",
+  "savedAt": "2026-09-20T13:05:12.345Z"
+}
+```
+
+`action` is `created` for a new Sunday record and `updated` when amounts are merged into
+the existing record for that date. Backup restores and other-income entries never notify.
 
 DeepSeek, Deepgram and Termii credentials are configured in-app under KPSC → Settings.
 The system degrades gracefully: with no AI keys configured, meeting processing falls back

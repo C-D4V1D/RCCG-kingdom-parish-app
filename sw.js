@@ -1,4 +1,4 @@
-// build:decd44e33b
+// build:ec088f063e
 const CACHE = 'kpadmin-v34';
 const SHELL = [
   '/',
