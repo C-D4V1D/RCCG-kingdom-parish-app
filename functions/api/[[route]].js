@@ -1335,7 +1335,14 @@ export async function onRequest(context) {
     // ── /api/income ────────────────────────────────────────────
     if (route === 'income') {
       if (method === 'GET'  && !param) return await getIncome(DB);
-      if (method === 'POST' && !param) return await createIncome(DB, body);
+      if (method === 'POST' && !param) {
+        const result = await createIncome(DB, body);
+        // Tell the remittance webhook (if configured) when the cut-off Sunday's
+        // collection is saved. Runs after the response via waitUntil and can never
+        // fail or slow the save — see queueCutoffCollectionWebhook.
+        queueCutoffCollectionWebhook(context, DB, env, body, result);
+        return result;
+      }
       if (method === 'PUT'  &&  param) return await updateIncome(DB, param, body);
       if (method === 'DELETE' && param) return await deleteIncome(DB, param);
     }
@@ -3261,6 +3268,102 @@ async function getIncome(DB) {
     paymentMethod:       inferIncomePaymentMethod(row),
     donorName:           row.donor_name || '',
   })));
+}
+
+// ── REMITTANCE CUT-OFF WEBHOOK ────────────────────────────────────────
+// When a Sunday collection dated on a remittance cut-off Sunday is saved (a new
+// record, or more amounts merged into that Sunday's existing record), POST a small
+// JSON notice to REMIT_WEBHOOK_URL so an external routine can start preparing the
+// month's remittance. Server-side only: the URL and key are Pages secrets and never
+// reach the browser. Nothing happens when REMIT_WEBHOOK_URL is unset.
+//   REMIT_WEBHOOK_KEY         optional shared secret
+//   REMIT_WEBHOOK_KEY_HEADER  header that carries it (default 'Authorization', sent as
+//                             'Bearer <key>'; any other header gets the raw key)
+
+/** Add days to a 'YYYY-MM-DD' string (UTC arithmetic, no time-zone drift). */
+function addDaysYmd(ymd, days) {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/** The 12 cut-off day numbers for `year`, from remCutoffDatesByYear (or the legacy remCutoffDates). */
+function cutoffDaysForYear(settings, year) {
+  const byYear = settings?.remCutoffDatesByYear;
+  const fromYear = byYear && typeof byYear === 'object' ? byYear[year] : null;
+  if (Array.isArray(fromYear) && fromYear.length === 12) return fromYear;
+  const legacy = settings?.remCutoffDates;
+  if (legacy && Array.isArray(legacy.dates) && legacy.dates.length === 12 && Number(legacy.year) === Number(year)) return legacy.dates;
+  return null;
+}
+
+/**
+ * If `date` (YYYY-MM-DD) is a configured cut-off date, return its remittance period
+ * { periodStart, periodEnd } using the same rule as the app's computeRemPeriodDates:
+ * the day after the previous month's cut-off (or the 1st of the month when that isn't
+ * set) through the cut-off itself. Returns null when `date` is not a cut-off date.
+ */
+function remCutoffPeriodForDate(settings, date) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(date || ''));
+  if (!m) return null;
+  const year = Number(m[1]), month = Number(m[2]) - 1, day = Number(m[3]);
+  const days = cutoffDaysForYear(settings, year);
+  if (!days || Number(days[month]) !== day) return null;
+  const prevMonth = month === 0 ? 11 : month - 1;
+  const prevYear  = month === 0 ? year - 1 : year;
+  const prevDay   = Number((cutoffDaysForYear(settings, prevYear) || [])[prevMonth]);
+  const periodStart = Number.isInteger(prevDay) && prevDay > 0
+    ? addDaysYmd(`${prevYear}-${String(prevMonth + 1).padStart(2, '0')}-${String(prevDay).padStart(2, '0')}`, 1)
+    : `${m[1]}-${m[2]}-01`;
+  return { periodStart, periodEnd: `${m[1]}-${m[2]}-${m[3]}` };
+}
+
+async function sendCutoffCollectionWebhook(DB, env, data, result) {
+  if (!result || !result.ok) return;
+  const saved = await result.clone().json().catch(() => null);
+  if (!saved || !saved.id) return;
+  const collectionDate = String(saved.date || data?.date || new Date().toISOString().split('T')[0]).slice(0, 10);
+  const { results } = await DB.prepare(
+    `SELECT key, value FROM settings WHERE key IN ('remCutoffDatesByYear','remCutoffDates')`
+  ).all();
+  const settings = {};
+  for (const row of (results || [])) settings[row.key] = safeJsonParse(row.value, null);
+  const period = remCutoffPeriodForDate(settings, collectionDate);
+  if (!period) return;
+
+  const payload = {
+    event: 'cutoff_collection_saved',
+    collectionDate,
+    periodStart: period.periodStart,
+    periodEnd: period.periodEnd,
+    action: saved.merged ? 'updated' : 'created',
+    recordId: saved.id,
+    savedAt: new Date().toISOString(),
+  };
+  const headers = { 'Content-Type': 'application/json' };
+  const key = String(env.REMIT_WEBHOOK_KEY || '').trim();
+  if (key) {
+    const headerName = String(env.REMIT_WEBHOOK_KEY_HEADER || '').trim() || 'Authorization';
+    headers[headerName] = headerName.toLowerCase() === 'authorization' ? `Bearer ${key}` : key;
+  }
+  const res = await fetch(env.REMIT_WEBHOOK_URL, {
+    method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) {
+    console.error(`[remit-webhook] ${res.status} from webhook for ${collectionDate} (${payload.action} ${saved.id})`);
+  }
+}
+
+/** Fire-and-forget wrapper: never throws, never delays the response to the user. */
+function queueCutoffCollectionWebhook(context, DB, env, data, result) {
+  try {
+    if (!env?.REMIT_WEBHOOK_URL || !isSundayCollectionSource(data?.source)) return;
+    const job = sendCutoffCollectionWebhook(DB, env, data, result)
+      .catch(e => console.error('[remit-webhook] notify failed:', e?.message || e));
+    if (typeof context?.waitUntil === 'function') context.waitUntil(job);
+  } catch (e) {
+    console.error('[remit-webhook] could not queue notification:', e?.message || e);
+  }
 }
 
 async function createIncome(DB, data) {
@@ -12989,4 +13092,4 @@ async function getSharedReport(DB, token) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes };
+export { remCutoffPeriodForDate, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes };

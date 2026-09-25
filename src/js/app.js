@@ -2266,11 +2266,15 @@ async function calcRemittances(income, preRates){
       res.lines.push({ key:t.key, label:t.label, total:amt, national:natl, local });
       res.totalNatl+=natl; res.localBefore+=local;
       if(t.key==='membersTithe'){ res.localTithe+=local; rawMembersTithe=amt; }
-      if(t.key==='ministersTithe'){ res.localTithe+=local; rawMinisTithe=amt; }
+      // The RCCG portal takes the Coastline Worship Centre levy out of the Ministers'
+      // Tithe before the rebate: local share for the rebate = local (100% − national)
+      // − coastline, e.g. 100 − 47 − 1 = 52%, not the full 53% local share.
+      if(t.key==='ministersTithe'){ res.localTithe+=amt*Math.max(0, rateEntry.local - (rr.coastline||0)); rawMinisTithe=amt; }
       if(t.key==='crm') rawCrm=amt;
     }
   });
-  // Province Rebate = 20% of local retained tithes (Members' Tithe + Ministers' Tithe)
+  // Province Rebate ("Province Joint Church Planting" on the portal) = provinceRebate rate
+  // × local retained tithes (Members' local share + Ministers' local share after coastline)
   res.provinceRebate = res.localTithe * rr.provinceRebate;
   // Additional RCCG levies computed from raw collection totals
   res.crmAddon    = rawCrm          * (rr.crmAddon          || 0);
@@ -6610,7 +6614,8 @@ async function renderIncomeSummary(records){
   const sundayGrand = Object.values(totals).reduce((a,b)=>a+b,0);
   const otherTotal  = otherRecs.reduce((s,r)=>s+(r.totalCollection||0),0);
   const grand = sundayGrand + otherTotal;
-  const rem = await calcRemittances(totals);
+  const rr = await getRemRates();
+  const rem = await calcRemittances(totals, rr);
   const settings = await DB.getSettings();
   const quotas = getQuotaList(settings);
   const monthEnd=(state.year===new Date().getFullYear() && state.month===new Date().getMonth())
@@ -6654,7 +6659,7 @@ async function renderIncomeSummary(records){
         }).join(''):'<div class="empty-table">No Sunday collections recorded yet.</div>'}
         ${rem.lines.length?`
         <div class="status-row" style="background:var(--amber-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
-          <div class="status-row-label">Province Rebate (20%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div>
+          <div class="status-row-label">Province Rebate (${Math.round(rr.provinceRebate*100)}%)</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div>
         </div>
         ${payableQuotaLines(quotaLines).map(q=>`
         <div class="status-row" style="background:var(--info-light);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
@@ -8253,7 +8258,7 @@ async function renderRemittances(){
         <div class="table-wrap"><table style="width:100%">
           <tr><th>Description</th><th style="width:100px">Type</th><th class="td-right" style="width:130px">Amount Due (₦)</th></tr>
           ${renderSection(incomeLines,'Part A — Income-Based Remittances → National HQ (% of collections)')}
-          ${renderSection(provinceLines,'Part A — Province Rebate (20% of Local Retained Tithes)')}
+          ${renderSection(provinceLines,`Part A — Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`)}
           ${renderSection(levyLines,'Part A — Additional RCCG Levies → National HQ')}
           ${renderSection(rccgQuotaLines,'Part A — Fixed Quotas Due for This Period')}
           <tr style="border-top:2px solid var(--border);background:var(--surface)">
@@ -8350,7 +8355,7 @@ async function renderRemittances(){
             </div>`).join('')}
           ${rem.provinceRebate>0?`
           <div class="status-row" style="border-top:1px dashed var(--border)">
-            <div class="status-row-label" style="color:var(--amber)">Province Rebate — 20% of Local Retained Tithes (deducted)</div>
+            <div class="status-row-label" style="color:var(--amber)">Province Rebate — ${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes (deducted)</div>
             <div class="status-row-amt" style="color:var(--amber)">− ${fmt(rem.provinceRebate)}</div>
           </div>`:''}
           ${quotasTotal>0?`
