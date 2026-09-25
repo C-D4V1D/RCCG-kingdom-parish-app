@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 import BudgetEngine, {
   monthKey,
@@ -32,7 +35,25 @@ import BudgetEngine, {
   monthProgress,
   RCCG_DEMANDS_KEY,
   PROTECTED_FROM_CUTS,
+  isOneOffItem,
+  categoryAverages,
+  expectedIncome,
+  knownBillSchedule,
+  suggestKnownBills,
+  carryForwardPot,
+  robustSpread,
+  runwayMonths,
+  planStatus,
+  planDueDate,
+  planReady,
+  ONE_OFF_MIN,
 } from '../src/js/budget-engine.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const liveFixture = JSON.parse(readFileSync(path.join(__dirname, 'fixtures/budget-live-2026.json'), 'utf8'));
+const livePeriods = liveFixture.periods;
+const liveRentItem = livePeriods.flatMap(p => p.items).find(item => /annual land or building rent/i.test(item.subcategory || ''));
 
 test('monthKey formats calendar months', () => {
   assert.equal(monthKey('2026-10-03'), '2026-10');
@@ -628,50 +649,49 @@ test('irregularReserve holds monthly set-aside × months since last paid, resets
   assert.equal(cappedAtAYear.items[0].monthsSinceLastPaid, 12);
 });
 
-test('futureShortfall, safetyCushion and growthPerMonth match the plan\'s worked formulas', () => {
+test('futureShortfall (deprecated) and growthPerMonth\'s backward-compatible 2-arg form still compute', () => {
+  // futureShortfall itself is unchanged (contract v2 just stops using it for the free figure).
   assert.equal(futureShortfall(430000, 400000, 3), 90000);
   assert.equal(futureShortfall(400000, 430000, 3), 0);
-  assert.equal(safetyCushion(400000), 200000);
-  assert.equal(safetyCushion(400000, 0.25), 100000);
+  // growthPerMonth gained a 3rd arg (knownBillsMonthly) in contract v2; omitting it defaults to 0,
+  // so the old 2-arg call shape still gives the old answer.
   assert.equal(growthPerMonth(460000, 390000), 70000);
   assert.equal(growthPerMonth(390000, 460000), -70000);
 });
 
-test('freeForNewThings never lets the month gap go negative when Sundays cover the rest of the month', () => {
+test('freeForNewThings never lets spending-still-to-come go negative (contract v2 float rule)', () => {
   const free = freeForNewThings({
     availableNow: 500000,
-    remainingThisMonth: 100000,
-    expectedRestOfMonth: 150000,
-    pendingUnpaid: 0,
-    irregularReserve: 0,
-    futureShortfall: 0,
-    safetyCushion: 0,
+    expectedRestOfPeriod: 150000,
+    spendingStillToCome: -50000,
+    nextPeriodFloat: 0,
+    knownBillsSaved: 0,
+    cushion: 0,
   });
-  assert.equal(free.monthGap, 0);
-  assert.equal(free.free, 500000);
+  assert.equal(free.parts.spendingStillToCome, 0);
+  assert.equal(free.free, 650000);
 });
 
-test('Free for new things — worked example from the contract', () => {
+test('Free for new things — contract v2 float-rule worked example', () => {
   const free = freeForNewThings({
     availableNow: 1200000,
-    remainingThisMonth: 230000,
-    expectedRestOfMonth: 200000,
-    pendingUnpaid: 40000,
-    irregularReserve: 210000,
-    futureShortfall: 0,
-    safetyCushion: 200000,
+    expectedRestOfPeriod: 200000,
+    spendingStillToCome: 230000,
+    nextPeriodFloat: 150000,
+    knownBillsSaved: 210000,
+    heldBack: 0,
+    cushion: 200000,
   });
-  assert.equal(free.monthGap, 30000);
-  assert.equal(free.free, 720000);
+  assert.equal(free.expectedEndBalance, 1170000);
+  assert.equal(free.free, 610000);
 
   const yes = affordAnswer(300000, free.free, 70000, '2026-09-24');
   assert.equal(yes.verdict, 'yes');
-  assert.equal(yes.freeAfter, 420000);
+  assert.equal(yes.freeAfter, 310000);
 
   const notYet = affordAnswer(900000, free.free, 70000, '2026-09-24');
   assert.equal(notYet.verdict, 'not_yet');
-  assert.equal(notYet.monthsNeeded, 3);
-  assert.equal(notYet.affordableMonthKey, '2026-12');
+  assert.equal(notYet.monthsNeeded, Math.ceil((900000 - free.free) / 70000));
 
   const no = affordAnswer(900000, free.free, -30000, '2026-09-24');
   assert.equal(no.verdict, 'no');
@@ -717,4 +737,280 @@ test('periodProgress follows a remittance period that crosses a month end', () =
   assert.equal(p.day, 19);
   assert.equal(p.sundaysInMonth, 4);
   assert.equal(p.sundaysLeft, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Contract v2 — real-data budget engine (tests/fixtures/budget-live-2026.json)
+// ---------------------------------------------------------------------------
+
+test('isOneOffItem: a ₦45,000 item flags one-off against a low-median category, a ₦17,500 item does not', () => {
+  const soundItems = livePeriods.flatMap(p => p.items).filter(i => i.category === 'sound');
+  const cables = soundItems.find(i => i.amount === 45000);
+  assert.ok(cables, 'fixture must contain the ₦45,000 cables item');
+  assert.equal(isOneOffItem(cables, soundItems), true);
+
+  const powerItems = livePeriods.flatMap(p => p.items).filter(i => i.category === 'power');
+  const gasRefill = powerItems.find(i => i.amount === 17500);
+  assert.ok(gasRefill, 'fixture must contain the ₦17,500 gas refill item');
+  assert.equal(isOneOffItem(gasRefill, powerItems), false, 'gas refill is not 5x the power category median so it is not a one-off');
+
+  const hospItems = livePeriods.flatMap(p => p.items).filter(i => i.category === 'hospitality');
+  const evangelistVisit = hospItems.find(i => i.amount === 18000);
+  assert.ok(evangelistVisit, 'fixture must contain the ₦18,000 evangelist visit item');
+  assert.equal(isOneOffItem(evangelistVisit, hospItems), true);
+
+  assert.equal(isOneOffItem({ amount: 9999 }, [{ amount: 100 }]), false, 'below ONE_OFF_MIN never counts as one-off');
+  assert.equal(ONE_OFF_MIN, 10000);
+});
+
+test('categoryAverages: real-data per-category averages match the reviewed May–Sep 2026 table (±1)', () => {
+  const result = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id] });
+  const expectedAverages = {
+    power: 23900,
+    hospitality: 17390,
+    transport: 12320,
+    sound: 6240,
+    property: 4970,
+    office: 2820,
+    security: 2800,
+    comms: 1603,
+    bank: 936,
+  };
+  for (const [cat, avg] of Object.entries(expectedAverages)) {
+    assert.ok(
+      Math.abs(result.byCategory[cat].average - avg) <= 1,
+      `${cat}: expected ~${avg}, got ${result.byCategory[cat].average}`
+    );
+  }
+  assert.ok(Math.abs(result.runningTotal - 72980) <= 5, `runningTotal expected ~72980, got ${result.runningTotal}`);
+  assert.equal(result.rccgAverage, 33220);
+  assert.equal(result.periodsUsed, 5);
+});
+
+test('categoryAverages: the ₦45k cables and ₦18k evangelist visit are excluded as one-offs from their category totals', () => {
+  const result = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id] });
+  const soundOneOffs = result.byCategory.sound.oneOffs.map(o => o.amount);
+  const hospOneOffs = result.byCategory.hospitality.oneOffs.map(o => o.amount);
+  assert.ok(soundOneOffs.includes(45000), 'the ₦45,000 sound cables must be flagged as a one-off');
+  assert.ok(hospOneOffs.includes(18000), 'the ₦18,000 evangelist visit must be flagged as a one-off');
+  // The ₦17,500 gas refill (power) must never appear as a one-off anywhere.
+  for (const cat of Object.values(result.byCategory)) {
+    assert.ok(!cat.oneOffs.some(o => o.amount === 17500), 'the ₦17,500 gas refill must not be treated as a one-off');
+  }
+});
+
+test('categoryAverages: rccg_proj is a plain average (no one-off exclusion) and drops items worded "remittance"', () => {
+  const result = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id] });
+  assert.equal(result.rccgAverage, 33220);
+  assert.deepEqual(result.rccgPerPeriod, [2000, 36000, 80000, 3100, 45000]);
+  // The ₦21,000 "Rccg remittance debt repayment" (June period) is excluded because it is remittance,
+  // not an RCCG demand — without the exclusion June would be ₦57,000, not ₦36,000.
+});
+
+test('categoryAverages: known-bill item ids (rent), reconciliation and zonal_area_joint are excluded from every category', () => {
+  assert.ok(liveRentItem, 'fixture must contain the church rent item');
+  const withoutRentAsBill = categoryAverages(livePeriods, { knownBillItemIds: [] });
+  const withRentAsBill = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id] });
+  // Excluded via knownBillItemIds, the rent never appears as a property one-off at all.
+  assert.ok(!withRentAsBill.byCategory.property.oneOffs.some(o => o.amount === 203000));
+  // Left in (not passed as a bill id), the ₦203,000 rent is so far above the property median that
+  // isOneOffItem still catches it as a one-off — belt-and-braces, but knownBillItemIds is the
+  // explicit, intentional way to keep it out of the "property" line entirely.
+  assert.ok(withoutRentAsBill.byCategory.property.oneOffs.some(o => o.amount === 203000));
+  assert.equal(withRentAsBill.byCategory.property.average, 4970);
+
+  const withReconciliation = categoryAverages([
+    ...livePeriods,
+  ].map((p, i) => i === 0 ? { ...p, items: [...p.items, { category: 'reconciliation', amount: 999999, date: p.from, status: 'approved' }] } : p),
+  { knownBillItemIds: [liveRentItem.id] });
+  assert.ok(!withReconciliation.byCategory.reconciliation, 'reconciliation category must never appear in byCategory');
+
+  const withZonal = categoryAverages([
+    ...livePeriods,
+  ].map((p, i) => i === 0 ? { ...p, items: [...p.items, { category: 'zonal_area_joint', amount: 999999, date: p.from, status: 'approved' }] } : p),
+  { knownBillItemIds: [liveRentItem.id] });
+  assert.ok(!withZonal.byCategory.zonal_area_joint, 'zonal_area_joint category must never appear in byCategory');
+});
+
+test('categoryAverages: leading periods with no items and no income are dropped as not-yet-started', () => {
+  const withBlankLead = categoryAverages([
+    { key: '2026-01', items: [], sundayIncome: 0, otherIncome: 0 },
+    { key: '2026-02', items: [], sundayIncome: 0, otherIncome: 0 },
+    ...livePeriods,
+  ], { knownBillItemIds: [liveRentItem.id] });
+  assert.equal(withBlankLead.periodsUsed, 5);
+  assert.equal(withBlankLead.rccgAverage, 33220);
+});
+
+test('categoryAverages: only approved (or blank-status) items are counted, and other categories are unaffected', () => {
+  const withPending = categoryAverages([
+    { key: '2026-05', items: [{ category: 'power', amount: 999999, date: '2026-05-01', status: 'pending' }], sundayIncome: 100, otherIncome: 0 },
+  ], {});
+  assert.ok(!withPending.byCategory.power, 'a pending-only category never appears in byCategory');
+
+  const withApprovedAndPending = categoryAverages([
+    { key: '2026-05', items: [
+      { category: 'power', amount: 5000, date: '2026-05-01', status: 'approved' },
+      { category: 'power', amount: 999999, date: '2026-05-02', status: 'pending' },
+    ], sundayIncome: 100, otherIncome: 0 },
+  ], {});
+  assert.equal(withApprovedAndPending.byCategory.power.average, 5000, 'the pending item must not be counted');
+});
+
+test('expectedIncome: real-data median-with-outlier-drop matches the contract (sunday 118,989 / other 20,274 / total 139,263)', () => {
+  const income = expectedIncome(livePeriods);
+  assert.equal(income.sunday, 118989);
+  assert.equal(income.other, 20274);
+  assert.equal(income.total, 139263);
+});
+
+test('expectedIncome: with fewer than 4 periods, no outlier is dropped (median of all values)', () => {
+  const income = expectedIncome([
+    { sundayIncome: 100000, otherIncome: 5000 },
+    { sundayIncome: 900000, otherIncome: 6000 },
+    { sundayIncome: 110000, otherIncome: 7000 },
+  ]);
+  assert.equal(income.sunday, 110000);
+});
+
+test('robustSpread: real-data period totals give a spread of about ₦1,597', () => {
+  const spread = robustSpread([87088, 86011, 169413, 86831, 101655]);
+  assert.ok(Math.abs(spread - 1597) <= 2, `expected ~1597, got ${spread}`);
+});
+
+test('safetyCushion: real-data auto mode falls back to the 10% floor (₦10,620) because there are fewer than 6 periods', () => {
+  const cushion = safetyCushion({
+    mode: 'auto',
+    periodTotals: [87088, 86011, 169413, 86831, 101655],
+    normal: 106200,
+  });
+  assert.equal(cushion, 10620);
+});
+
+test('safetyCushion: auto mode uses the robust spread once there are 6+ periods (no floor)', () => {
+  const totals = [87088, 86011, 169413, 86831, 101655, 90000];
+  const cushion = safetyCushion({ mode: 'auto', periodTotals: totals, normal: 106200 });
+  assert.equal(cushion, robustSpread(totals));
+  assert.notEqual(cushion, Math.round(0.10 * 106200));
+});
+
+test('safetyCushion: percent mode is a clamped 0–100% of normal monthly spending', () => {
+  assert.equal(safetyCushion({ mode: 'percent', percent: 10, normal: 106200 }), 10620);
+  assert.equal(safetyCushion({ mode: 'percent', percent: 150, normal: 106200 }), 106200, 'percent is clamped at 100');
+  assert.equal(safetyCushion({ mode: 'percent', percent: -20, normal: 106200 }), 0, 'percent is clamped at 0');
+});
+
+test('knownBillSchedule: real-data rent (₦203,000, paid Jul 2026, due Feb 2028) gives ₦10,684/month and ₦32,052 saved by Oct 2026', () => {
+  const schedule = knownBillSchedule([
+    { name: 'Church Rent', amount: 203000, lastPaid: '2026-07-01', dueDate: '2028-02-01' },
+  ], '2026-10-10');
+  const rent = schedule.items[0];
+  assert.equal(rent.monthsCycle, 19);
+  assert.equal(rent.monthly, 10684);
+  assert.equal(rent.saved, 32052);
+  assert.equal(rent.remaining, 203000 - 32052);
+  assert.equal(schedule.totals.monthly, 10684);
+  assert.equal(schedule.totals.saved, 32052);
+});
+
+test('suggestKnownBills: matches the real rent item by its "Annual land or building rent" subcategory', () => {
+  const suggestions = suggestKnownBills(livePeriods.flatMap(p => p.items));
+  const rentSuggestion = suggestions.find(s => s.itemId === liveRentItem.id);
+  assert.ok(rentSuggestion, 'the rent item should be suggested as a known bill');
+  assert.equal(rentSuggestion.amount, 203000);
+  assert.equal(rentSuggestion.lastPaid, '2026-07-01');
+  assert.equal(rentSuggestion.dueDate, '2027-07-01');
+});
+
+test('carryForwardPot: held-back RCCG money — ₦30k budgeted/₦0 paid, then ₦30k budgeted/₦50k paid, leaves ₦10k held', () => {
+  const result = carryForwardPot([
+    { budget: 30000, paid: 0 },
+    { budget: 30000, paid: 50000 },
+  ], { cap: 99660 });
+  assert.deepEqual(result.history, [30000, 10000]);
+  assert.equal(result.pot, 10000);
+});
+
+test('carryForwardPot: never goes below 0 and is capped at the given ceiling (3 periods\' worth)', () => {
+  const result = carryForwardPot([
+    { budget: 0, paid: 50000 },
+    { budget: 100000, paid: 0 },
+    { budget: 100000, paid: 0 },
+    { budget: 100000, paid: 0 },
+  ], { cap: 99660 });
+  assert.equal(result.history[0], 0, 'pot never goes negative');
+  assert.equal(result.pot, 99660, 'pot is capped');
+});
+
+test('freeForNewThings: real-data October free figure ≈ ₦74,851 (float rule)', () => {
+  const ca = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id] });
+  const income = expectedIncome(livePeriods);
+  const normal = ca.normalMonthly;
+  const free = freeForNewThings({
+    availableNow: 185560,
+    expectedRestOfPeriod: income.total,
+    spendingStillToCome: normal - 5100,
+    nextPeriodFloat: normal,
+    knownBillsSaved: 32052,
+    heldBack: 0,
+    cushion: 10620,
+  });
+  assert.ok(Math.abs(free.free - 74851) <= 5, `expected ~74851, got ${free.free}`);
+});
+
+test('growthPerMonth: real-data growth ≈ ₦22,379/period (income − normal − known-bill monthly saving)', () => {
+  const ca = categoryAverages(livePeriods, { knownBillItemIds: [liveRentItem.id] });
+  const income = expectedIncome(livePeriods);
+  const growth = growthPerMonth(income.total, ca.normalMonthly, 10684);
+  assert.ok(Math.abs(growth - 22379) <= 5, `expected ~22379, got ${growth}`);
+});
+
+test('runwayMonths: null when free money is growing, a floored count when it is shrinking', () => {
+  assert.equal(runwayMonths(50000, 22379), null);
+  assert.equal(runwayMonths(50000, -20000), 2);
+  assert.equal(runwayMonths(9000, -20000), 0);
+});
+
+test('affordAnswer: real-data ₦300,000 canopy is "not yet" — about 11 periods away, around Aug 2027', () => {
+  const answer = affordAnswer(300000, 74851, 22379, '2026-09-25');
+  assert.equal(answer.verdict, 'not_yet');
+  assert.equal(answer.monthsNeeded, 11);
+  assert.equal(answer.affordableMonthKey, '2027-08');
+});
+
+test('planStatus: real-data ratio ≈0.84 (₦116,884 need ÷ ₦139,263 income) is "enough"', () => {
+  const status = planStatus({ normalMonthly: 106200, knownBillsMonthly: 10684, expectedIncome: 139263 });
+  assert.equal(status.status, 'enough');
+  assert.ok(Math.abs(status.ratio - 0.84) <= 0.01, `expected ratio ~0.84, got ${status.ratio}`);
+  assert.equal(status.shortBy, 0);
+});
+
+test('planStatus: tight at up to 100% of income, short (with shortBy) above it', () => {
+  const tight = planStatus({ normalMonthly: 90000, knownBillsMonthly: 9000, expectedIncome: 100000 });
+  assert.equal(tight.status, 'tight');
+  const short = planStatus({ normalMonthly: 90000, knownBillsMonthly: 20000, expectedIncome: 100000 });
+  assert.equal(short.status, 'short');
+  assert.equal(short.shortBy, 10000);
+});
+
+test('planDueDate: a cutoff of 18 Oct becomes due 21 Oct (3-day delay)', () => {
+  assert.equal(planDueDate('2026-10-18'), '2026-10-21');
+  assert.equal(planDueDate('2026-10-18', 5), '2026-10-23');
+});
+
+test('planReady: false before the due date, true on and after it', () => {
+  assert.equal(planReady('2026-10-19', '2026-10-18'), false);
+  assert.equal(planReady('2026-10-20', '2026-10-18'), false);
+  assert.equal(planReady('2026-10-21', '2026-10-18'), true);
+  assert.equal(planReady('2026-10-25', '2026-10-18'), true);
+});
+
+test('BudgetEngine default export carries every contract v2 function', () => {
+  for (const name of [
+    'isOneOffItem', 'categoryAverages', 'expectedIncome', 'knownBillSchedule', 'suggestKnownBills',
+    'carryForwardPot', 'robustSpread', 'safetyCushion', 'freeForNewThings', 'growthPerMonth',
+    'runwayMonths', 'affordAnswer', 'planStatus', 'planDueDate', 'planReady',
+  ]) {
+    assert.equal(typeof BudgetEngine[name], 'function', `BudgetEngine.${name} must be exported`);
+  }
 });

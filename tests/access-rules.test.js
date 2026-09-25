@@ -91,3 +91,21 @@ test('an action name that is not declared denies every role, including IT Admin'
     assert.equal(App._canAction('remittances'), false);
   }
 });
+
+test('petty-cash health uses the Budget float: spending + safety cushion is the target', () => {
+  // Budget-derived policy: next-period spending ₦106,200 + cushion ₦10,620.
+  const policy = { fromBudget: true, spending: 106200, cushion: 10620, target: 116820, manageable: 60000, minimum: 40000 };
+  const float = 20000;
+  assert.equal(App._pettyHealth(185560, float, policy).label, 'Healthy');   // can hold spending + full cushion
+  assert.equal(App._pettyHealth(110000, float, policy).label, 'Adequate');  // spending covered, cushion only partly
+  assert.equal(App._pettyHealth(80000, float, policy).label, 'Caution');    // below spending, above manageable
+  assert.equal(App._pettyHealth(50000, float, policy).label, 'Tight');
+  assert.equal(App._pettyHealth(30000, float, policy).label, 'Critical');
+  assert.equal(App._pettyHealth(185560, float, policy).afterTarget, 185560 - 116820);
+});
+
+test('petty-cash health falls back to the manual target + buffer before a Budget plan exists', () => {
+  const policy = { fromBudget: false, spending: 90000, cushion: 30000, target: 120000, manageable: 60000, minimum: 40000 };
+  assert.equal(App._pettyHealth(125000, 20000, policy).label, 'Healthy');  // same as the old rule: after target ≥ buffer
+  assert.equal(App._pettyHealth(100000, 20000, policy).label, 'Adequate');
+});
