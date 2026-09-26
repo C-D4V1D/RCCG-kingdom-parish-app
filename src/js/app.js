@@ -17158,7 +17158,7 @@ function attServiceCardHtml(w, s, i){
     <div class="att-sum" ${s.noService?'hidden':''} id="${id}_sumrow"><span>Total</span><b id="${id}_sum">${attServiceTotal(s)}</b></div>
     ${s.key==='sunday_school' || s.noService ? '' : `
     <div class="att-extra" id="${id}_extra">
-      <input class="form-input att-txt att-full" data-w="${w.weekEnd}" data-i="${i}" data-f="preacher" placeholder="Preacher (e.g. Bro. Odili)" value="${esc(s.preacher||'')}" maxlength="80" />
+      <input class="form-input att-txt att-full" data-w="${w.weekEnd}" data-i="${i}" data-f="preacher" placeholder="Preacher (e.g. Pst. Henry)" value="${esc(s.preacher||'')}" maxlength="80" />
       <label>New converts<input class="form-input att-small" type="text" inputmode="numeric" pattern="[0-9]*" data-w="${w.weekEnd}" data-i="${i}" data-f="newConverts" value="${attCount(s.newConverts)||''}" placeholder="0" /></label>
       <label>First timers / guests<input class="form-input att-small" type="text" inputmode="numeric" pattern="[0-9]*" data-w="${w.weekEnd}" data-i="${i}" data-f="firstTimers" value="${attCount(s.firstTimers)||''}" placeholder="0" /></label>
     </div>`}

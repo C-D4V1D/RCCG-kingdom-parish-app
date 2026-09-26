@@ -16,7 +16,7 @@ function call(DB, path, method = 'GET', body) {
 const WEEK = '2026-01-11';            // a Sunday; its week is Mon 5 – Sun 11 Jan 2026
 const full = {
   services: [
-    { key: 'digging_deep', men: 2, women: 3, children: 7, preacher: 'Bro. Odili' },
+    { key: 'digging_deep', men: 2, women: 3, children: 7, preacher: 'Pst. Henry' },
     { key: 'faith_clinic', noService: true, reason: 'Public holiday' },
     { key: 'sunday_service', men: 3, women: 6, children: 14, firstTimers: 2 },
     { key: 'sunday_school', men: 2, women: 4, children: 10 },
