@@ -87,6 +87,10 @@ test('creating then merging into the cut-off Sunday posts created/updated with t
   assert.equal(p1.action, 'created');
   assert.equal(p1.recordId, saved.id);
   assert.ok(!Number.isNaN(Date.parse(p1.savedAt)));
+  assert.equal(p1.parish, '602757');
+  assert.equal(p1.month, '2026-09');
+  assert.equal(p1.linksExpireAt, '2026-10-11T23:59:59.000Z');
+  assert.match(p1.links.divine.refresh, /^https:\/\/example\.com\/remit-action\?t=/);
 
   const second = await save(sunday('2026-09-20', { membersTithe: 0, holyCommunionOffering: 500, totalCollection: 500 }), env);
   const p2 = JSON.parse(second.calls[0].init.body);
@@ -103,6 +107,7 @@ test('custom key header carries the raw key; no key means no auth header', async
 
   const noKey = await save(sunday('2026-09-20'), { DB: dbWithCutoffs(), REMIT_WEBHOOK_URL: 'https://hooks.example/remit' });
   assert.equal(noKey.calls[0].init.headers.Authorization, undefined);
+  assert.equal(JSON.parse(noKey.calls[0].init.body).links, null);
 });
 
 test('non-cut-off Sundays and other income never notify', async () => {
