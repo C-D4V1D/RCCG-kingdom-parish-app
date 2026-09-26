@@ -35,7 +35,19 @@ const ACTIONS = {
     title: 'Refresh the check',
     what: 'Church Clerk will re-read the parish app and the RCCG portal and send a new check email. The report already submitted on the portal is not changed.',
   },
+  refresh_attendance: {
+    button: 'Confirm Refresh',
+    title: 'Refresh attendance',
+    what: 'Church Clerk will re-read this month\'s attendance and Monthly report from the parish app and send a new check email. Nothing already submitted on the portal is changed.',
+  },
 };
+
+// Title for the page heading and the "Action" row. refresh_attendance includes the month
+// (e.g. "Refresh attendance for October 2026"); the others use their fixed ACTIONS title.
+function actionTitle(p) {
+  if (p.action === 'refresh_attendance') return `Refresh attendance for ${monthLabel(p.month)}`;
+  return ACTIONS[p.action].title;
+}
 
 export async function onRequest(context) {
   const { request, env } = context;
@@ -79,7 +91,7 @@ ${details(p)}
     window.addEventListener('pageshow', function (e) { if (e.persisted) location.reload(); });
   })();
 </script>`;
-  return page(200, a.title, body, {}, nonce);
+  return page(200, actionTitle(p), body, {}, nonce);
 }
 
 async function handlePost(request, env) {
@@ -147,7 +159,7 @@ function details(p) {
   <tr><th>Parish</th><td>${esc(PARISH_NAME)}</td></tr>
   <tr><th>Remittance</th><td>${esc(monthLabel(p.month))}</td></tr>
   <tr><th>Confirming as</th><td>${esc(REMIT_ACTION_PEOPLE[p.person] || p.person)}</td></tr>
-  <tr><th>Action</th><td>${esc(ACTIONS[p.action].title)}</td></tr>
+  <tr><th>Action</th><td>${esc(actionTitle(p))}</td></tr>
 </table>`;
 }
 

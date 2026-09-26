@@ -61,7 +61,7 @@ test('admin roles send one webhook_test ping with the Bearer key', async () => {
     assert.deepEqual(Object.keys(p).sort(), ['app', 'event', 'links', 'linksExpireAt', 'month', 'parish', 'requestedBy', 'sentAt', 'test']);
     assert.equal(p.parish, '602757');
     assert.match(p.links.david.generate_rrr, /^https:\/\/example\.com\/remit-action\?t=[\w-]+\.[\w-]+$/);
-    assert.deepEqual(Object.keys(p.links.divine), ['generate_rrr', 'refresh']);
+    assert.deepEqual(Object.keys(p.links.divine), ['generate_rrr', 'refresh', 'refresh_attendance']);
     assert.equal(p.event, 'webhook_test');
     assert.equal(p.test, true);
     assert.equal(p.app, 'rccg-kingdom-parish-app');

@@ -234,3 +234,16 @@ test('further reports: notEntered counts only the 15 typed fields, ignoring the 
     5, '10 of the 15 typed fields filled in leaves 5 not entered',
   );
 });
+
+test('attendance: the last week of a period matches the server rule (last Sunday on/before the cut-off)', () => {
+  const byYear = cutoffJan => ({ remCutoffDatesByYear: {
+    2025: [26, 23, 30, 27, 25, 29, 27, 31, 28, 26, 30, 28],
+    2026: [cutoffJan, 22, 29, 26, 31, 28, 26, 30, 27, 25, 29, 27],
+  } });
+  assert.deepEqual(App._attCutoffInfoForWeek(byYear(25), '2026-01-25'), { periodEnd: '2026-01-25', weekNo: 4 });
+  assert.equal(App._attCutoffInfoForWeek(byYear(25), '2026-01-18'), null);
+  // Saturday cut-off: the week ending the Sunday before it is the last week.
+  assert.deepEqual(App._attCutoffInfoForWeek(byYear(24), '2026-01-18'), { periodEnd: '2026-01-24', weekNo: 3 });
+  assert.equal(App._attCutoffInfoForWeek(byYear(24), '2026-01-25'), null);
+  assert.equal(App._attCutoffInfoForWeek({}, '2026-01-25'), null, 'no cut-off dates configured → no last week');
+});
