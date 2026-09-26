@@ -58,7 +58,10 @@ test('admin roles send one webhook_test ping with the Bearer key', async () => {
     assert.equal(calls[0].init.headers['Content-Type'], 'application/json');
     assert.ok(calls[0].init.signal, 'request must carry a timeout signal');
     const p = JSON.parse(calls[0].init.body);
-    assert.deepEqual(Object.keys(p).sort(), ['app', 'event', 'requestedBy', 'sentAt', 'test']);
+    assert.deepEqual(Object.keys(p).sort(), ['app', 'event', 'links', 'linksExpireAt', 'month', 'parish', 'requestedBy', 'sentAt', 'test']);
+    assert.equal(p.parish, '602757');
+    assert.match(p.links.david.generate_rrr, /^https:\/\/example\.com\/remit-action\?t=[\w-]+\.[\w-]+$/);
+    assert.deepEqual(Object.keys(p.links.divine), ['generate_rrr', 'refresh']);
     assert.equal(p.event, 'webhook_test');
     assert.equal(p.test, true);
     assert.equal(p.app, 'rccg-kingdom-parish-app');

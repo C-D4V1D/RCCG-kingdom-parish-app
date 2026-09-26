@@ -9,6 +9,13 @@ import {
   RCCG_DEMANDS_KEY as BUDGET_RCCG_DEMANDS_KEY,
   LEGACY_REMITTANCE_CATEGORY as BUDGET_LEGACY_REMITTANCE_CATEGORY,
 } from '../../src/js/budget-engine.js';
+import {
+  remitWebhookHeaders,
+  buildRemitActionLinks,
+  remitActionExpForCutoff,
+  REMIT_ACTION_PARISH,
+  REMIT_ACTION_TEST_TTL_S,
+} from '../_lib/remit-action-token.js';
 
 // ================================================================
 // RCCG Kingdom Parish — Cloudflare Pages Functions API
@@ -1514,7 +1521,7 @@ export async function onRequest(context) {
     if (route === 'remit-webhook-test' && method === 'POST' && !param) {
       const auth = await requireKpscRole(DB, request, KPSC_ADMIN_ROLES);
       if (auth instanceof Response) return auth;
-      return await sendRemitWebhookTest(env, auth);
+      return await sendRemitWebhookTest(env, auth, requestOrigin(request));
     }
 
     // ── /api/notifications ─────────────────────────────────────
@@ -3340,18 +3347,19 @@ function remCutoffPeriodForDate(settings, date) {
   return { periodStart, periodEnd: `${m[1]}-${m[2]}-${m[3]}` };
 }
 
-/** Request headers for REMIT_WEBHOOK_URL: JSON, plus the shared key when one is set. */
-function remitWebhookHeaders(env) {
-  const headers = { 'Content-Type': 'application/json' };
-  const key = String(env?.REMIT_WEBHOOK_KEY || '').trim();
-  if (key) {
-    const headerName = String(env.REMIT_WEBHOOK_KEY_HEADER || '').trim() || 'Authorization';
-    headers[headerName] = headerName.toLowerCase() === 'authorization' ? `Bearer ${key}` : key;
-  }
-  return headers;
+// remitWebhookHeaders(env) (JSON + the shared key header) lives in ../_lib/remit-action-token.js,
+// shared with the /remit-action confirm page so both authenticate the same way.
+//
+// Each payload also carries signed one-tap links (see ../_lib/remit-action-token.js and
+// functions/remit-action.js): links.{david,divine}.{generate_rrr,refresh}. They are null
+// when REMIT_WEBHOOK_KEY is unset (nothing to sign with).
+
+/** Origin of the incoming request (e.g. https://app.example), or '' if it can't be read. */
+function requestOrigin(request) {
+  try { return new URL(request.url).origin; } catch { return ''; }
 }
 
-async function sendCutoffCollectionWebhook(DB, env, data, result) {
+async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '') {
   if (!result || !result.ok) return;
   const saved = await result.clone().json().catch(() => null);
   if (!saved || !saved.id) return;
@@ -3364,6 +3372,9 @@ async function sendCutoffCollectionWebhook(DB, env, data, result) {
   const period = remCutoffPeriodForDate(settings, collectionDate);
   if (!period) return;
 
+  const month = period.periodEnd.slice(0, 7);          // remittance month = month of the cut-off Sunday
+  const exp = remitActionExpForCutoff(period.periodEnd);
+  const links = await buildRemitActionLinks(env, origin, { month, exp });
   const payload = {
     event: 'cutoff_collection_saved',
     collectionDate,
@@ -3372,6 +3383,10 @@ async function sendCutoffCollectionWebhook(DB, env, data, result) {
     action: saved.merged ? 'updated' : 'created',
     recordId: saved.id,
     savedAt: new Date().toISOString(),
+    parish: REMIT_ACTION_PARISH,
+    month,
+    links,
+    linksExpireAt: links ? new Date(exp * 1000).toISOString() : null,
   };
   const res = await fetch(env.REMIT_WEBHOOK_URL, {
     method: 'POST', headers: remitWebhookHeaders(env), body: JSON.stringify(payload), signal: AbortSignal.timeout(15000),
@@ -3385,7 +3400,7 @@ async function sendCutoffCollectionWebhook(DB, env, data, result) {
 function queueCutoffCollectionWebhook(context, DB, env, data, result) {
   try {
     if (!env?.REMIT_WEBHOOK_URL || !isSundayCollectionSource(data?.source)) return;
-    const job = sendCutoffCollectionWebhook(DB, env, data, result)
+    const job = sendCutoffCollectionWebhook(DB, env, data, result, requestOrigin(context?.request))
       .catch(e => console.error('[remit-webhook] notify failed:', e?.message || e));
     if (typeof context?.waitUntil === 'function') context.waitUntil(job);
   } catch (e) {
@@ -3421,19 +3436,28 @@ function scrubRemitWebhookSecrets(text, env) {
   return out;
 }
 
-async function sendRemitWebhookTest(env, account) {
+async function sendRemitWebhookTest(env, account, origin = '') {
   const url = String(env?.REMIT_WEBHOOK_URL || '').trim();
   const key = String(env?.REMIT_WEBHOOK_KEY || '').trim();
   const sentAt = new Date().toISOString();
   if (!url || !key) {
     return ok({ configured: false, ok: false, httpStatus: null, responseSnippet: '', elapsedMs: 0, sentAt, error: REMIT_WEBHOOK_NOT_CONFIGURED });
   }
+  // Test links: marked test:true (Church Clerk only answers them with a chat ping to David)
+  // and valid for 24 hours. The month is the current month; nothing is done for it.
+  const month = sentAt.slice(0, 7);
+  const exp = Math.floor(Date.now() / 1000) + REMIT_ACTION_TEST_TTL_S;
+  const links = await buildRemitActionLinks(env, origin, { month, exp, test: true });
   const payload = {
     event: 'webhook_test',
     test: true,
     requestedBy: String(account?.name || '').trim() || 'admin',
     sentAt,
     app: 'rccg-kingdom-parish-app',
+    parish: REMIT_ACTION_PARISH,
+    month,
+    links,
+    linksExpireAt: links ? new Date(exp * 1000).toISOString() : null,
   };
   const target = maskWebhookHost(url);
   const started = Date.now();
