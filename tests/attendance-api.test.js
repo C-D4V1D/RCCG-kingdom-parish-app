@@ -5,10 +5,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { onRequest } from '../functions/api/[[route]].js';
 import { createD1 } from '../scripts/demo/d1-sqlite-adapter.mjs';
+import { FINANCE_AUTH_HEADER } from './finance-auth-helper.mjs';
 
-function call(DB, path, method = 'GET', body) {
-  const init = { method };
-  if (body !== undefined) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(body); }
+// Finance routes need a signed token (#313); the default is the IT-admin test token.
+function call(DB, path, method = 'GET', body, headers = FINANCE_AUTH_HEADER) {
+  const init = { method, headers: { ...headers } };
+  if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
   return onRequest({ request: new Request(`https://example.com/api/${path}`, init), env: { DB } })
     .then(async r => ({ status: r.status, body: JSON.parse(await r.text()) }));
 }
@@ -128,11 +130,14 @@ test('new users with a default PIN must change it at first sign-in', async () =>
   const first = await call(DB, 'auth/login', 'POST', { role: 'usher', pin: '1234', userId: created.body.id });
   assert.equal(first.status, 200);
   assert.equal(first.body.mustChangePin, true);
+  assert.ok(first.body.token, 'the forced-PIN-change login still gets a session token');
+  const usherAuth = { Authorization: `Bearer ${first.body.token}` };
 
-  const same = await call(DB, 'change-pin', 'POST', { userId: created.body.id, currentPin: '1234', newPin: '1234' });
+  const same = await call(DB, 'change-pin', 'POST', { userId: created.body.id, currentPin: '1234', newPin: '1234' }, usherAuth);
   assert.equal(same.status, 400);
-  const changed = await call(DB, 'change-pin', 'POST', { userId: created.body.id, currentPin: '1234', newPin: '5678' });
+  const changed = await call(DB, 'change-pin', 'POST', { userId: created.body.id, currentPin: '1234', newPin: '5678' }, usherAuth);
   assert.equal(changed.status, 200);
+  assert.ok(changed.body.token, 'this device keeps a fresh token after the PIN change');
   const again = await call(DB, 'auth/login', 'POST', { role: 'usher', pin: '5678', userId: created.body.id });
   assert.equal(again.body.mustChangePin, undefined);
 
@@ -195,4 +200,31 @@ test('further reports: bad dates are rejected with 400', async () => {
   assert.equal(badPut.status, 400);
   const badGet = await call(DB, 'attendance-further?end=not-a-date');
   assert.equal(badGet.status, 400);
+});
+
+// ── Sign-in (#313) ───────────────────────────────────────────────
+
+test('attendance and further-reports routes need a Finance sign-in', async () => {
+  const DB = await freshDB();
+  for (const [path, method, body] of [
+    [`attendance?from=${WEEK}&to=${WEEK}`, 'GET'], [`attendance/${WEEK}`, 'PUT', { data: full }],
+    [`attendance/${WEEK}/submit`, 'POST', { by: 'Usher', data: full }], [`attendance/${WEEK}/unlock`, 'POST', { userId: 'u1', pin: '0000' }],
+    ['attendance-further?end=2026-01-31', 'GET'], ['attendance-further/2026-01-31', 'PUT', { data: { births: 1 } }],
+  ]) {
+    const r = await call(DB, path, method, body, {});
+    assert.equal(r.status, 401, `${method} ${path}`);
+    assert.equal(r.body.code, 'auth_required');
+  }
+  const rows = await DB.prepare(`SELECT COUNT(*) AS n FROM attendance_weeks`).first();
+  assert.equal(rows.n, 0, 'nothing was written without a sign-in');
+});
+
+test('the unlock PIN check is throttled like sign-in (5 wrong PINs, then a pause)', async () => {
+  const DB = await freshDB();
+  for (let i = 0; i < 5; i++) {
+    assert.equal((await call(DB, `attendance/${WEEK}/unlock`, 'POST', { userId: 'u1', pin: '9999' })).status, 403, `try ${i + 1}`);
+  }
+  const locked = await call(DB, `attendance/${WEEK}/unlock`, 'POST', { userId: 'u1', pin: '0000' });
+  assert.equal(locked.status, 429);
+  assert.match(locked.body.error, /Too many incorrect PIN attempts/);
 });

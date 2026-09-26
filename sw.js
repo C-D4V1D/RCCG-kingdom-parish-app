@@ -1,5 +1,5 @@
-// build:2d7ab78af4
-const CACHE = 'kpadmin-v34';
+// build:6614f262dd
+const CACHE = 'kpadmin-v35';
 const SHELL = [
   '/',
   '/index.html',

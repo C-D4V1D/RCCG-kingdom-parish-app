@@ -13164,7 +13164,9 @@ async function renderSettings(main) {
   S.kpscMeetingCadence = meetingCadence;
   const minimumBalance = Number(res?.kpsc_minimum_balance || 0);
   // Termii SMS settings
-  const termiiApiKey         = res?.kpsc_termii_api_key             || '';
+  // The server never sends the Termii key back (only a "_set" flag), same as the
+  // AI keys: the field stays blank and is only sent when someone types a new key.
+  const hasTermiiKey         = !!res?.kpsc_termii_api_key_set;
   const termiiSenderId       = res?.kpsc_termii_sender_id           || 'RCCG-KP';
   const termiiPartnerSenderId = res?.kpsc_termii_partner_sender_id  || '';
   const termiiChannel      = res?.kpsc_termii_channel             || 'generic';
@@ -13174,7 +13176,7 @@ async function renderSettings(main) {
   const termiiRemDay       = res?.kpsc_termii_reminder_day  || '10';
   const termiiRemFreq      = res?.kpsc_termii_reminder_freq || 'monthly';
   const termiiRemMode      = res?.kpsc_termii_reminder_mode || 'day_of_month';
-  const hasTermii          = !!termiiApiKey;
+  const hasTermii          = hasTermiiKey;
   // Advanced SMS settings
   const smsSendWindowStart = res?.kpsc_sms_send_window_start || '08:00';
   const smsSendWindowEnd   = res?.kpsc_sms_send_window_end   || '18:00';
@@ -13366,8 +13368,8 @@ async function renderSettings(main) {
           <label class="k-label">Termii API Key</label>
           <input type="password" id="ks-termii-key" class="k-input"
             placeholder="${hasTermii ? '••••••••••••••••' : 'TL_xxxxxxxxxxxxxxxxx'}"
-            autocomplete="off" value="${esc(termiiApiKey)}" />
-          <p class="k-hint">Your Termii secret API key. Never share this. <a href="https://app.termii.com" target="_blank" rel="noopener">Get a key →</a></p>
+            autocomplete="off" value="" />
+          <p class="k-hint">Your Termii secret API key. Never share this.${hasTermii ? ' A key is saved — leave blank to keep it.' : ''} <a href="https://app.termii.com" target="_blank" rel="noopener">Get a key →</a></p>
         </div>
 
         <div class="k-form-group">
@@ -13923,8 +13925,7 @@ async function saveSmsSettings() {
   const remFreq  = document.getElementById('ks-termii-rem-freq')?.value || 'monthly';
   const nairaPerPageRaw = parseFloat(document.getElementById('ks-sms-naira-per-page')?.value);
   const nairaPerPage = String(nairaPerPageRaw > 0 ? nairaPerPageRaw : 5);
-  const res = await apiPost('settings', {
-    kpsc_termii_api_key:              apiKey,
+  const payload = {
     kpsc_termii_sender_id:            senderId,
     kpsc_termii_partner_sender_id:    partnerSenderId,
     kpsc_termii_channel:              channel,
@@ -13935,7 +13936,10 @@ async function saveSmsSettings() {
     kpsc_termii_reminder_day:         remDay,
     kpsc_termii_reminder_freq:        remFreq,
     kpsc_sms_naira_per_page:          nairaPerPage,
-  });
+  };
+  // Only send the key when a new one was typed — blank means "keep the saved key".
+  if (apiKey) payload.kpsc_termii_api_key = apiKey;
+  const res = await apiPost('settings', payload);
   if (msg) {
     if (res?.error) {
       msg.className = 'k-settings-msg k-msg-error';

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { onRequest, remCutoffPeriodForDate } from '../functions/api/[[route]].js';
 import { createFinanceDBMock } from './finance-db-mock.mjs';
+import { FINANCE_AUTH_HEADER } from './finance-auth-helper.mjs';
 
 const CUTOFFS_2026 = [18, 22, 22, 19, 24, 21, 19, 23, 20, 18, 22, 13];
 
@@ -23,7 +24,7 @@ function dbWithCutoffs(settings = { remCutoffDatesByYear: { 2026: CUTOFFS_2026 }
 
 function postIncome(body) {
   return new Request('https://example.com/api/income', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...FINANCE_AUTH_HEADER }, body: JSON.stringify(body),
   });
 }
 

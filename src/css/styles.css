@@ -229,6 +229,12 @@ tr:hover td{background:var(--surface)}
 
 /* MODALS */
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:500;display:flex;align-items:center;justify-content:center;padding:1rem}
+/* Sign-in-expired PIN prompt: sits above any open form modal so the form underneath is kept */
+.modal-overlay.reauth-overlay{z-index:1000}
+.reauth-modal{max-width:360px}
+.reauth-text{font-size:13px;color:var(--text2,#555);margin:0 0 6px}
+.reauth-who{font-size:12px;color:var(--text3,#777);margin:0 0 10px}
+.reauth-error{background:#FCEBEB;color:#A32D2D;font-size:12px;padding:8px 10px;border-radius:8px;margin-bottom:10px}
 .modal{background:var(--card);border-radius:var(--rl);padding:1.5rem;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;position:relative}
 .modal-title{font-size:17px;font-weight:700;margin-bottom:1rem;color:var(--text)}
 .modal-footer{display:flex;gap:10px;justify-content:flex-end;margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--border)}
