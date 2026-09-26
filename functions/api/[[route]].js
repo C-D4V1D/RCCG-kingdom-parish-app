@@ -1667,17 +1667,23 @@ function auditStatement(DB, type, detail, by) {
  * The Sunday collection already saved for this week, if the attendance gate covers it
  * (collections dated on/after `attendanceGateFrom`). A week re-submitted after an IT
  * Admin unlock locks straight away against it — locking otherwise only happens when the
- * collection is saved, which has already happened. Best-effort: null on any error.
+ * collection is saved, which has already happened.
+ * Returns { collection, error }: a failed lookup is logged and reported (error: true) so
+ * the submit still succeeds but the missed re-lock is visible in the response.
  */
 async function attendanceWeekCollection(DB, weekEnd) {
   try {
     const gateFrom = (await getSettingValue(DB, 'attendanceGateFrom')).replace(/^"|"$/g, '');
-    if (!isYmd(gateFrom) || weekEnd < gateFrom) return null;
+    if (!isYmd(gateFrom) || weekEnd < gateFrom) return { collection: null, error: false };
     const from = ymdAddDays(weekEnd, -6) > gateFrom ? ymdAddDays(weekEnd, -6) : gateFrom;
-    return await DB.prepare(
+    const collection = await DB.prepare(
       `SELECT id, recorded_by FROM income WHERE date>=? AND date<=? AND (source='sunday_collection' OR source IS NULL OR source='') ORDER BY created_at ASC LIMIT 1`
     ).bind(from, weekEnd).first();
-  } catch { return null; }
+    return { collection: collection || null, error: false };
+  } catch (e) {
+    console.error(`[attendance] re-lock lookup failed for week ending ${weekEnd} (parish ${REMIT_ACTION_PARISH}):`, e?.message || e);
+    return { collection: null, error: true };
+  }
 }
 
 async function submitAttendanceWeek(DB, weekEnd, body) {
@@ -1705,7 +1711,7 @@ async function submitAttendanceWeek(DB, weekEnd, body) {
   if (missing.length) return err(`Please fill in: ${missing.join(', ')}`, 400);
 
   const now = new Date().toISOString();
-  const collection = await attendanceWeekCollection(DB, weekEnd);
+  const { collection, error: relockError } = await attendanceWeekCollection(DB, weekEnd);
   // Week, Monthly report and audit rows are written in one batch so they can't get out of step.
   const statements = [
     DB.prepare(
@@ -1739,6 +1745,10 @@ async function submitAttendanceWeek(DB, weekEnd, body) {
   await DB.batch(statements);
 
   const out = publicAttendanceWeek(await getAttendanceRow(DB, weekEnd));
+  // Whether this submit re-locked the week against an already-saved collection; when the
+  // lookup itself failed the submit still stands, but the missed re-lock is flagged.
+  out.relocked = !!collection;
+  out.relock_error = relockError;
   if (last) {
     out.further = publicFurther(await DB.prepare(`SELECT * FROM attendance_further WHERE period_end=?`).bind(last.periodEnd).first());
   }
@@ -1787,9 +1797,19 @@ async function attendanceGateWeek(DB, data) {
 
 async function checkAttendanceGate(DB, weekEnd) {
   const row = await getAttendanceRow(DB, weekEnd);
-  if (row && (row.status === 'submitted' || row.status === 'locked')) return null;
+  // Locked = a collection for this Sunday is already saved (e.g. a second sitting adding
+  // Holy Communion offering), so the gate has already been passed.
+  if (row?.status === 'locked') return null;
+  const weekIn = row?.status === 'submitted';
   // The cut-off Sunday's week also carries the Monthly report — say so plainly.
   const last = attendanceLastWeekPeriod(await readRemCutoffSettings(DB).catch(() => ({})), weekEnd);
+  if (weekIn && !last) return null;
+  if (weekIn && last) {
+    // The last week also needs its Monthly report confirmed for the same period.
+    const further = await DB.prepare(`SELECT further_submitted_at FROM attendance_further WHERE period_end=?`)
+      .bind(last.periodEnd).first().catch(() => null);
+    if (further?.further_submitted_at) return null;
+  }
   return attendanceConflict(last
     ? `Week ${last.weekNo}'s attendance and the Monthly report must be submitted first. Fill in the Monthly report on the Attendance page and submit week ${last.weekNo} from there.`
     : `Attendance for the week ending ${weekEnd} has not been submitted. Record and submit it on the Attendance page first.`,
@@ -1866,10 +1886,12 @@ async function saveFurtherReport(DB, periodEnd, body) {
   // Merge: keys present in the incoming payload overwrite the stored value; keys left out keep it.
   const merged = { ...(existing ? parseAttendanceJson(existing.data) : {}), ...sanitizeFurtherData(body?.data) };
   const data = JSON.stringify(merged);
-  if (last) {
+  if (last && lastWeek.status === 'submitted') {
     await DB.prepare(
       `UPDATE attendance_weeks SET status='draft', submitted_by='', submitted_at='' WHERE week_end=? AND status='submitted'`
     ).bind(lastWeek.week_end).run();
+    await createAuditEntry(DB, { type: 'attendance_week_reopened',
+      detail: `Week ${last.weekNo} (ending ${lastWeek.week_end}) sent back to draft at ${now}: reason further_edited (Monthly report changed)`, by });
   }
   if (existing) {
     // Any edit clears the submitted confirmation; it is set again when week N is submitted.

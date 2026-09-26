@@ -190,3 +190,18 @@ test('a readable message reaches an old cached app: the 401 text says to reload 
   mockFetch(() => jsonResponse(401, { error: 'Please sign in again: the app was updated for security. Reload the page and enter your PIN.', code: 'auth_required' }));
   await assert.rejects(App._apiFetch('income'), /sign in again/i);
 });
+
+test('an API error keeps the server\'s code and status, so callers need not match on the message text', async () => {
+  signIn('fin1.tok.sig');
+  mockFetch(() => jsonResponse(409, { error: 'The Monthly report is locked because week 5\'s Sunday collection has been saved.', code: 'further_locked' }));
+  await assert.rejects(App._apiFetch('attendance-further/2026-09-27', 'PUT', { data: {} }), e => {
+    assert.equal(e.code, 'further_locked');
+    assert.equal(e.status, 409);
+    assert.match(e.message, /Monthly report is locked/);
+    return true;
+  });
+  const src = await readFile(new URL('../src/js/app.js', import.meta.url), 'utf8');
+  const flush = src.slice(src.indexOf('async function attFurtherFlush'), src.indexOf('// ── Editor events ──'));
+  assert.match(flush, /e\?\.code==='further_locked'/);
+  assert.doesNotMatch(flush, /\/locked\/i/, 'no longer detects the lock by matching the message');
+});

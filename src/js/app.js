@@ -811,7 +811,13 @@ async function apiFetch(path, method='GET', body=null){
           e.code = 'reauth';
           throw e;
         }
-        if(!res.ok) throw new Error((data && data.error) || `API error ${res.status}`);
+        if(!res.ok){
+          // Keep the server's machine-readable code (e.g. 409 'further_locked') alongside the message.
+          const apiErr = new Error((data && data.error) || `API error ${res.status}`);
+          apiErr.status = res.status;
+          apiErr.code = (data && data.code) || '';
+          throw apiErr;
+        }
         if(method === 'GET' && _CACHE_TTL[endpoint]) _apiCache.set(endpoint, { data, ts: Date.now() });
         return data;
       } catch(err){
@@ -17599,8 +17605,7 @@ async function attFurtherFlush(){
     st.further.current = { ...saved, data: st.further.current?.data || saved.data };
     attFurtherSetSave('saved');
   } catch(e){
-    const msg = String(e?.message||'');
-    if(/locked/i.test(msg)){ attFurtherClearLocal(periodEnd); showAlert(msg,'danger'); renderAttendance(); return; }
+    if(e?.code==='further_locked'){ attFurtherClearLocal(periodEnd); showAlert(String(e.message||''),'danger'); renderAttendance(); return; }
     attFurtherSetSave(navigator.onLine===false ? 'offline' : 'error');
     if(navigator.onLine!==false) attFurtherScheduleSave(15000);
   }

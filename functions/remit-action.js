@@ -157,7 +157,7 @@ function monthLabel(ym) {
 function details(p) {
   return `<table class="kv" role="presentation">
   <tr><th>Parish</th><td>${esc(PARISH_NAME)}</td></tr>
-  <tr><th>Remittance</th><td>${esc(monthLabel(p.month))}</td></tr>
+  <tr><th>${p.action === 'refresh_attendance' ? 'Attendance' : 'Remittance'}</th><td>${esc(monthLabel(p.month))}</td></tr>
   <tr><th>Confirming as</th><td>${esc(REMIT_ACTION_PEOPLE[p.person] || p.person)}</td></tr>
   <tr><th>Action</th><td>${esc(actionTitle(p))}</td></tr>
 </table>`;
