@@ -15,15 +15,20 @@ const ROLES = {
   accountant:    { label:'Church Accountant', color:'#185FA5', bg:'#E6F1FB' },
   admin_officer: { label:'Admin Officer',     color:'#BA7517', bg:'#FAEEDA' },
   signatory:     { label:'Bank Signatory',    color:'#3B6D11', bg:'#EAF3DE' },
-  viewer:        { label:'Read-Only Viewer',  color:'#555',    bg:'#f0f0f0'  }
+  viewer:        { label:'Read-Only Viewer',  color:'#555',    bg:'#f0f0f0'  },
+  usher:           { label:'Usher',             color:'#A32D2D', bg:'#FCEBEB' },
+  admin_assistant: { label:'Admin Assistant',   color:'#185FA5', bg:'#E6F1FB' }
 };
 
 const PERMISSIONS = {
-  pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','budget','budget_manage','petty_view','reports','audit','signoff','rem_cutoff_edit'],
-  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','expenses_view','budget','budget_manage','bank','petty_view','reports','audit','rem_cutoff_edit','expense_delete_approved'],
-  admin_officer: ['dashboard','transactions','expenses','expenses_view','budget','petty_request','petty_view','income_view','petty_to_bank'],
-  signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','budget','bank','petty_approve','signoff','petty_to_bank'],
-  viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','budget','petty_view']
+  pastor:        ['dashboard','transactions','income_view','remittances','expenses_view','budget','budget_manage','petty_view','reports','audit','signoff','rem_cutoff_edit','attendance_view'],
+  accountant:    ['dashboard','transactions','income','income_view','remittances','expenses','expenses_view','budget','budget_manage','bank','petty_view','reports','audit','rem_cutoff_edit','expense_delete_approved','attendance'],
+  admin_officer: ['dashboard','transactions','expenses','expenses_view','budget','petty_request','petty_view','income_view','petty_to_bank','attendance'],
+  signatory:     ['dashboard','transactions','income_view','remittances_view','expenses_view','budget','bank','petty_approve','signoff','petty_to_bank','attendance_view'],
+  viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','budget','petty_view','attendance_view'],
+  // Ushers and Admin Assistants record weekly attendance and see nothing else.
+  usher:           ['attendance'],
+  admin_assistant: ['attendance']
 };
 
 // All available permission keys with human-readable labels, grouped for the UI
@@ -50,11 +55,14 @@ const PERMISSION_DEFS = [
   { key:'reports',          label:'Generate Reports',       group:'Reports'    },
   { key:'audit',            label:'View Audit Log',         group:'Reports'    },
   { key:'signoff',          label:'Sign Off Remittances',   group:'Reports'    },
+  { key:'attendance',       label:'Record Attendance',      group:'Attendance' },
+  { key:'attendance_view',  label:'View Attendance',        group:'Attendance' },
 ];
 
 const NAV = [
   { id:'dashboard',    label:'Dashboard',     icon:'🏠', section:'Main',     minRole:['all'] },
   { id:'transactions', label:'Transactions',  icon:'🧾', section:'Main',     minRole:['all'] },
+  { id:'attendance',   label:'Attendance',    icon:'🙋', section:'Main',     minRole:['it_admin','pastor','accountant','admin_officer','signatory','viewer','usher','admin_assistant'] },
   { id:'income',       label:'Record Income', icon:'📥', section:'Finance',  minRole:['it_admin','accountant'] },
   { id:'remittances',  label:'Remittances',   icon:'📤', section:'Finance',  minRole:['it_admin','pastor','accountant','signatory'] },
   { id:'expenses',     label:'Expenses',      icon:'💸', section:'Finance',  minRole:['it_admin','accountant','admin_officer'] },
@@ -834,6 +842,13 @@ const DB = {
   deleteUser(id)               { return apiFetch(`users/${id}`,'DELETE'); },
   changePin(d)                 { return apiFetch('change-pin','POST',d); },
 
+  getAttendance(from,to)       { return apiFetch(`attendance?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`); },
+  saveAttendance(weekEnd,d)    { return apiFetch(`attendance/${weekEnd}`,'PUT',d); },
+  submitAttendance(weekEnd,d)  { return apiFetch(`attendance/${weekEnd}/submit`,'POST',d); },
+  unlockAttendance(weekEnd,d)  { return apiFetch(`attendance/${weekEnd}/unlock`,'POST',d); },
+  getAttendanceFurther(end)    { return apiFetch(`attendance-further?end=${encodeURIComponent(end)}`); },
+  saveAttendanceFurther(end,d) { return apiFetch(`attendance-further/${end}`,'PUT',d); },
+
   getIncome()                  { return apiFetch('income'); },
   addIncome(d)                 { return apiFetch('income','POST',d); },
   updateIncome(id,d)           { return apiFetch(`income/${id}`,'PUT',d); },
@@ -1151,6 +1166,7 @@ const ACCESS_RULES = {
     petty_cash:   { permissionsAny:['petty_request','petty_approve','petty_view'] },
     reports:      { permissionsAny:['reports'] },
     audit:        { permissionsAny:['audit'] },
+    attendance:   { permissionsAny:['attendance','attendance_view'] },
     admin:        { roles:['it_admin'] }  // IT Admin only — never permission-gated
   },
   actions: {
@@ -1189,7 +1205,11 @@ const ACCESS_RULES = {
     // Generate / edit / accept / reopen a monthly budget plan. Accountant, Pastor, IT
     // Admin only — everyone else with 'budget' can view the plan but not change it.
     // "Can we afford…?" is deliberately NOT gated by this — it's read-only advice.
-    budget_manage: ['budget_manage']
+    budget_manage: ['budget_manage'],
+    // Record / submit weekly attendance (ushers, admin assistant, admin officer, accountant).
+    attendance_record: ['attendance'],
+    // A week locks when its Sunday collection is saved; only the IT Admin may reopen it.
+    attendance_unlock: { roles:['it_admin'] }
   }
 };
 function evaluateAccessRule(rule, ctx={}){
@@ -2433,16 +2453,15 @@ async function onRoleChange(){
   const wrap = document.getElementById('userSelectWrap');
   const sel = document.getElementById('userSelect');
   if(!role){ wrap.style.display='none'; return }
-  // Only show name selector for roles known to have multiple users
-  const multiRoles = ['signatory'];
-  if(!multiRoles.includes(role)){ wrap.style.display='none'; return }
+  // Show the name selector whenever more than one person shares the role
+  // (e.g. two Bank Signatories, several Ushers).
   try {
     // Public name list (id, name, role only) — the full user list needs sign-in.
     const allUsers = await DB.getLoginOptions();
     const users = allUsers.filter(u=>u.role===role);
     if(users.length>1){
       wrap.style.display='block';
-      sel.innerHTML = users.map(u=>`<option value="${u.id}">${u.name}</option>`).join('');
+      sel.innerHTML = `<option value="">— Select your name —</option>` + users.map(u=>`<option value="${esc(u.id)}">${esc(u.name)}</option>`).join('');
     } else { wrap.style.display='none'; }
   } catch(e){
     wrap.style.display='none'; // fail silently — login() will handle the real auth
@@ -2466,7 +2485,7 @@ async function login(btn=null){
   setFormDisabled(true);
   const restore = setBtnLoading(loginBtn, 'Signing in…');
   try {
-    const uid = role==='signatory' ? (document.getElementById('userSelect')?.value || '') : '';
+    const uid = document.getElementById('userSelectWrap')?.style.display==='block' ? (document.getElementById('userSelect')?.value || '') : '';
     const user = await DB.login({ role, pin, userId: uid || undefined });
     errEl.style.display='none';
     errEl.classList.remove('hp-login-notice');
@@ -2478,7 +2497,7 @@ async function login(btn=null){
     DB.addAudit('login','User logged in',user.name);
     document.getElementById('loginScreen').style.display='none';
     document.getElementById('appShell').style.display='flex';
-    DB.getSettings().then(s=>{ state.rolePermissions = s.rolePermissions||null; initApp(); });
+    DB.getSettings().then(s=>{ state.rolePermissions = s.rolePermissions||null; startAppAfterPinCheck(); });
   } catch(e) {
     const msg = String(e?.message || '');
     if(msg.toLowerCase().includes('invalid credentials')){
@@ -2500,16 +2519,39 @@ async function login(btn=null){
   }
 }
 function logout(){
-  // Audit first: it still needs the token, which goes with the session below.
+  closeModal();
+  // Attendance flush and audit first: both still need the token, which goes with the
+  // session below (each request reads the token synchronously when it is sent).
+  attFlushAll(); // send any attendance typed in the last second before the session ends
   DB.addAudit('logout','User logged out', state.user?.name);
   try { localStorage.removeItem('rccgSession'); } catch(e) {}
-  state.user=null; state.page='dashboard';
+  state.user=null; state.page='dashboard'; state.att=null;
   history.replaceState(null,'','/');
   document.getElementById('appShell').style.display='none';
   document.getElementById('loginScreen').style.display='flex';
   document.getElementById('roleSelect').value='';
   document.getElementById('pinInput').value='';
   document.getElementById('userSelectWrap').style.display='none';
+}
+
+// A user created (or reset) with a default PIN must pick their own before anything else
+// loads. The modal has no close button — the only ways out are a new PIN or signing out.
+function startAppAfterPinCheck(){
+  if(state.user?.mustChangePin){ showForcedPinChange(); return; }
+  initApp();
+}
+function showForcedPinChange(){
+  closeModal();
+  const first = esc(String(state.user?.name||'').split(' ').slice(0,2).join(' '));
+  showModal(`
+    <div style="text-align:center;font-size:32px;line-height:1">🔑</div>
+    <div class="modal-title" style="text-align:center;margin-top:6px">Welcome, ${first}</div>
+    <p style="font-size:13px;color:var(--text2);text-align:center;margin-bottom:14px">You signed in with a default PIN. Choose your own 4–6 digit PIN to continue. Keep it secret.</p>
+    <div class="form-group"><label class="form-label" for="cp_current">Default PIN you just used</label><input type="password" id="cp_current" class="form-input pin-big" maxlength="6" inputmode="numeric" autocomplete="current-password" /></div>
+    <div class="form-group"><label class="form-label" for="cp_new">New PIN (4–6 digits)</label><input type="password" id="cp_new" class="form-input pin-big" maxlength="6" inputmode="numeric" autocomplete="new-password" /></div>
+    <div class="form-group"><label class="form-label" for="cp_confirm">Type the new PIN again</label><input type="password" id="cp_confirm" class="form-input pin-big" maxlength="6" inputmode="numeric" autocomplete="new-password" onkeydown="if(event.key==='Enter')App.submitChangePin(document.getElementById('cp_forced_btn'))" /></div>
+    <button class="btn btn-primary" id="cp_forced_btn" style="width:100%;padding:13px;font-size:15px" onclick="App.submitChangePin(this)">Save PIN &amp; continue</button>
+    <button class="btn" style="width:100%;margin-top:8px" onclick="App.logout()">Sign out</button>`);
 }
 
 function showChangePinModal(){
@@ -2540,6 +2582,13 @@ async function submitChangePin(btn=null){
     if(res.token) Auth.setToken(res.token);   // this device stays signed in with the new PIN
     DB.addAudit('pin_changed','User changed own PIN',state.user?.name);
     closeModal();
+    if(state.user.mustChangePin){
+      delete state.user.mustChangePin;
+      try { localStorage.setItem('rccgSession', JSON.stringify(state.user)); } catch(e) {}
+      initApp();
+      setTimeout(()=>showAlert('PIN saved. Use your new PIN next time you sign in.','success'), 300);
+      return;
+    }
     showAlert('PIN updated successfully! Use your new PIN next time you sign in.','success');
   }catch(e){
     restore();
@@ -2571,7 +2620,8 @@ function initApp(){
   navigate(pageFromPath(), true);
   // Fire-and-forget: link existing cash expenses to their income record.
   // Runs in the background; short-circuits once all records are already linked.
-  backfillExpenseIncomeRefs();
+  // Skipped for attendance-only roles (Ushers), who never see finance data.
+  if(canAccessPage('dashboard')) backfillExpenseIncomeRefs();
 }
 
 // Handle browser back / forward
@@ -2685,8 +2735,13 @@ function updateSidebarUser(){
 
 async function navigate(page, fromHistory){
   if(!canAccessPage(page)){
-    if(page!=='dashboard') showAlert('You do not have permission to access that page.','danger');
-    page='dashboard';
+    // Fall back to the first page this role can open (an Usher's only page is Attendance).
+    const home = canAccessPage('dashboard') ? 'dashboard' : (NAV.find(n=>canAccessPage(n.id))?.id || 'dashboard');
+    if(page!=='dashboard' && page!==home) showAlert('You do not have permission to access that page.','danger');
+    page=home;
+    // Keep the address bar honest when we redirected (e.g. an Usher opening '/').
+    const homePath = '/' + (page === 'dashboard' ? '' : page);
+    if(fromHistory && window.location.pathname !== homePath) history.replaceState({page}, '', homePath);
   }
   state.page=page;
   // Update URL — push new entry unless this was triggered by the browser's own back/forward
@@ -2697,8 +2752,12 @@ async function navigate(page, fromHistory){
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   const titles={dashboard:'Dashboard',transactions:'Transactions',income:'Record Income',remittances:'Remittances',
-    expenses:'Expenses',budget:'Budget',bank:'Bank',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel'};
+    expenses:'Expenses',budget:'Budget',bank:'Bank',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel',attendance:'Attendance'};
   document.getElementById('topBarTitle').textContent=titles[page]||page;
+  // The Attendance page picks its own remittance period, so the global month picker is
+  // hidden there (and for attendance-only roles it would be meaningless anyway).
+  const monthSel = document.getElementById('globalMonth');
+  if(monthSel) monthSel.style.display = page==='attendance' ? 'none' : '';
   // Paint the page skeleton immediately from synchronous state — no network — so a
   // slow connection sees the page's structure (and the loading progress bar) within
   // ~50ms instead of a bare "Loading…" string. Previously this was blocked behind the
@@ -2729,6 +2788,7 @@ function paintSkeleton(page, title){
   if(page === 'expenses')  return renderPageSkeleton({ pageTitle: 'Expenses', pageSub: monthLabel(), kpiCount: 3, hint: 'Loading expenses…' });
   if(page === 'budget')    return renderPageSkeleton({ pageTitle: 'Budget', pageSub: 'This month · Next month', kpiCount: 2, hint: 'Loading budget…' });
   if(page === 'bank')      return renderPageSkeleton({ pageTitle: 'Bank Account', pageSub: monthLabel(), kpiCount: 4, hint: 'Loading bank activity…' });
+  if(page === 'attendance') return renderPageSkeleton({ pageTitle: 'Attendance', pageSub: 'This remittance period', kpiCount: 0, hasTabs: false, hint: 'Loading attendance…' });
   return renderPageSkeleton({ pageTitle: title || 'Loading', pageSub: monthLabel(), kpiCount: 3, hasTabs: true, hint: 'Loading…' });
 }
 
@@ -2762,7 +2822,7 @@ async function getPettyCashPendingCount(){
 async function renderPage(page){
   const pages={dashboard:renderDashboard,transactions:renderTransactions,income:renderIncome,remittances:renderRemittances,
     expenses:renderExpenses,budget:renderBudget,bank:renderBank,petty_cash:renderPettyCash,reports:renderReports,
-    audit:renderAudit,admin:renderAdmin};
+    audit:renderAudit,admin:renderAdmin,attendance:renderAttendance};
   try{
     if(pages[page]) await pages[page]();
     else document.getElementById('pageContent').innerHTML='<div class="card"><p>Page not found.</p></div>';
@@ -7254,6 +7314,7 @@ function showIncomeForm(){
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">📥 Record Sunday Collections</div>
+    <div class="att-restored" id="inc_restored" hidden><span></span><button type="button" class="btn btn-sm" onclick="App.incDiscardDraft()">Discard</button></div>
     <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Count cash together with the Head Usher before entering figures. Both must sign off.</span></div>
     <div class="form-group"><label class="form-label">Collection Date *</label><input type="date" id="inc_date" class="form-input" value="${today}" max="${today}" /></div>
     <div class="form-group"><label class="form-label">Counted Together With (Head Usher Name) *</label><input type="text" id="inc_usher" class="form-input" placeholder="e.g. Bro. Emmanuel Okafor" /></div>
@@ -7293,10 +7354,16 @@ function showIncomeForm(){
       <div id="inc_overalloc_warn" style="display:none;color:var(--danger);font-size:12px;margin-top:4px;font-weight:600">⚠ Bank transfer + petty cash amount exceeds what is available after Children Teacher hold. Please check the figures.</div>
     </div>
     <div class="form-group mt-2"><label class="form-label">Notes (optional)</label><textarea id="inc_notes" class="form-textarea" placeholder="e.g. Special thanksgiving offering, harvest Sunday, etc."></textarea></div>
+    <div id="inc_attendance"></div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="App.submitIncome(this)">Save & Calculate Remittances</button>
+      <button class="btn btn-primary" id="inc_save_btn" onclick="App.submitIncome(this)">Save & Calculate Remittances</button>
     </div>`);
+  // Everything typed here is kept on this phone until it is saved, so leaving to fill
+  // attendance (or the phone dying) never loses the counted figures.
+  incRestoreDraft();
+  bindIncomeFormAutosave();
+  refreshIncomeAttendance();
 }
 
 let _bankTransferRowCount = 0;
@@ -7398,9 +7465,20 @@ async function submitIncome(btn=null){
   rec.directPettyCash    = directPettyCash;
   rec.notes=document.getElementById('inc_notes')?.value||'';
 
+  // This week's attendance must be submitted before the collection can be saved.
+  if(await incAttendanceGateApplies(date)){
+    await refreshIncomeAttendance();
+    if(!state.incAttendanceOk){
+      showAlert('Submit this week\'s attendance first — use "Fill attendance now" below.','danger');
+      document.getElementById('inc_attendance')?.scrollIntoView({behavior:'smooth',block:'center'});
+      return;
+    }
+  }
+
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     const saved = await DB.addIncome(rec);
+    incClearDraft();
     // If this submission was folded into an already-recorded Sunday collection (e.g.
     // Holy Communion Offering counted separately from the main offering), reflect the
     // Sunday's cumulative totals — not just this entry — in the cash/audit figures.
@@ -7426,6 +7504,9 @@ async function submitIncome(btn=null){
       DB.addAudit('petty_refilled',`${fmt(directPettyCash)} from Sunday collection credited to Admin Officer petty cash`,state.user?.name);
     }
 
+    if(await incAttendanceGateApplies(date)){
+      DB.addAudit('attendance_locked',`Attendance for week ending ${attWeekEnd(date)} locked with the ${fmtDate(date)} Sunday collection`,state.user?.name);
+    }
     closeModal();
     if(saved?.merged){
       DB.addNotification('Added to Existing Collection',`${fmt(total)} added to the ${fmtDate(date)} Sunday collection — new total ${fmt(sundayTotal)}`,'success');
@@ -7438,6 +7519,12 @@ async function submitIncome(btn=null){
     buildSidebar();
   } catch(err) {
     restore();
+    if(/attendance for the week/i.test(err.message||'')){
+      // The server's own gate (e.g. attendance was unlocked in the meantime).
+      refreshIncomeAttendance();
+      showAlert(err.message,'danger');
+      return;
+    }
     showAlert(`Failed to save income: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
 }
@@ -16414,7 +16501,9 @@ function showAddUser(){
       <select id="nu_role" class="form-select">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
     </div>
     <div class="form-group"><label class="form-label">Email (optional)</label><input type="email" id="nu_email" class="form-input" placeholder="email@example.com" /></div>
-    <div class="form-group"><label class="form-label">PIN (4-6 digits)</label><input type="password" id="nu_pin" class="form-input" maxlength="6" placeholder="••••" inputmode="numeric" /></div>
+    <div class="form-group"><label class="form-label">Default PIN (4-6 digits)</label><input type="password" id="nu_pin" class="form-input" maxlength="6" placeholder="e.g. 1234" inputmode="numeric" />
+      <div class="form-hint">Give this PIN to the person. Ushers and Admin Assistants must replace it the first time they sign in.</div></div>
+    <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:10px"><input type="checkbox" id="nu_must_change" checked /> Require a new PIN at first sign-in</label>
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.addUser(this)">Add User</button></div>`);
 }
 
@@ -16433,7 +16522,9 @@ async function addUser(btn=null){
   }
   const restore = setBtnLoading(btn, 'Adding…');
   try {
-    await DB.addUser({ name, role, email, pin });
+    // Ushers / Admin Assistants always get a forced PIN change — they receive a shared default PIN.
+    const mustChangePin = ['usher','admin_assistant'].includes(role) || !!document.getElementById('nu_must_change')?.checked;
+    await DB.addUser({ name, role, email, pin, mustChangePin });
     DB.addAudit('user_added',`New user added: ${name} (${role})`,state.user?.name);
     closeModal();
     showAlert(`User ${name} added successfully!`,'success');
@@ -16457,7 +16548,8 @@ async function editUser(id){
       <select id="eu_role" class="form-select">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${k===u.role?'selected':''}>${v.label}</option>`).join('')}</select>
     </div>
     <div class="form-group"><label class="form-label">Email</label><input type="email" id="eu_email" class="form-input" value="${u.email||''}" /></div>
-    <div class="form-group"><label class="form-label">New PIN (leave blank to keep current)</label><input type="password" id="eu_pin" class="form-input" maxlength="6" placeholder="New PIN" inputmode="numeric" /></div>
+    <div class="form-group"><label class="form-label">New PIN (leave blank to keep current)</label><input type="password" id="eu_pin" class="form-input" maxlength="6" placeholder="New PIN" inputmode="numeric" />
+      <div class="form-hint">A new PIN set here is treated as a default: the user must change it at their next sign-in.</div></div>
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.updateUser('${id}', this)">Update</button></div>`);
 }
 
@@ -16746,6 +16838,1036 @@ function submitKPSCAlert(){
 }
 
 // ──────────────────────────────────────────
+// ATTENDANCE
+// Weekly service attendance (Mon–Sun, keyed by the Sunday), grouped by remittance
+// period. Recorded by Ushers / Admin Assistant / Admin Officer / Accountant; locked when
+// that Sunday's collection is saved. At period end a table laid out like the RCCG
+// "Monthly General Progress Report Sheet" is shown so the paper form can be copied.
+// ──────────────────────────────────────────
+const ATT_SERVICES = {
+  digging_deep:     { label:'Digging Deep',     icon:'📖', tint:'#E6F1FB', dayOffset:1,    required:true  },
+  faith_clinic:     { label:'Faith Clinic',     icon:'🙏', tint:'#EEEDFE', dayOffset:3,    required:true  },
+  sunday_service:   { label:'Sunday Service',   icon:'⛪', tint:'#E1F5EE', dayOffset:6,    required:true  },
+  sunday_school:    { label:'Sunday School',    icon:'✏️', tint:'#FAEEDA', dayOffset:6,    required:false },
+  house_fellowship: { label:'House Fellowship', icon:'🏠', tint:'#FCEBEB', dayOffset:null, required:false },
+  outreach:         { label:'Outreach',         icon:'📣', tint:'#f0f0f0', dayOffset:null, required:false },
+  other:            { label:'Other service',    icon:'➕', tint:'#f0f0f0', dayOffset:null, required:false },
+};
+const ATT_ORDER = Object.keys(ATT_SERVICES);
+const ATT_REQUIRED = ATT_ORDER.filter(k=>ATT_SERVICES[k].required);
+const ATT_DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const ATT_MAX = 100000;
+
+// "Further Reports (monthly)" — the RCCG portal's monthly figures, recorded once per
+// remittance period alongside the weekly attendance. Portal order (matches the portal's
+// Further Reports tab). firstTimers/converts are auto: totalled from the weeks, never typed.
+// Standing counts (people/centres that don't reset each period) carry forward from the
+// previous period until someone confirms or changes them.
+const ATT_FURTHER = [
+  { key:'births',                 label:'Births',                                   group:'family' },
+  { key:'deaths',                 label:'Deaths',                                   group:'family' },
+  { key:'marriages',              label:'Marriages',                                group:'family' },
+  { key:'firstTimers',            label:'First Timers',                             group:'auto', auto:true },
+  { key:'converts',               label:'Converts',                                 group:'auto', auto:true },
+  { key:'fullPastors',            label:'No of Full Pastors',                       group:'workers', standing:true },
+  { key:'asstPastors',            label:'Asst Pastors',                             group:'workers', standing:true },
+  { key:'deacons',                label:'Deacon / Deaconess',                       group:'workers', standing:true },
+  { key:'unordainedMinisters',    label:'Unordained Ministers',                     group:'workers', standing:true },
+  { key:'newWorkers',             label:'New Workers',                              group:'workers' },
+  { key:'baptisedWorkers',        label:'Baptised Workers',                         group:'workers' },
+  { key:'baptisedMembers',        label:'Baptised Members',                         group:'workers' },
+  { key:'fishingWorkers',         label:"Workers @ Monthly Let's Go A Fishing",     group:'fishing', formLabel:'Workers who went out' },
+  { key:'fishingSouls',           label:"Souls Won @ Monthly Let's Go A Fishing",   group:'fishing', formLabel:'Souls won' },
+  { key:'nightVigilAvg',          label:'Avg Att of Night Vigil',                   group:'special', formLabel:'Average attendance at Night Vigil' },
+  { key:'specialProgramsAvg',     label:'Avg Att of Other Special Programs',        group:'special', formLabel:'Average attendance at other special programmes' },
+  { key:'houseFellowshipCentres', label:'No of House Fellowship Centres',           group:'house', standing:true, formLabel:'Number of House Fellowship centres' },
+];
+const ATT_FURTHER_GROUPS = {
+  family:  'Family events',
+  workers: 'Ministers & workers',
+  fishing: "Let's Go A-Fishing (monthly)",
+  special: 'Special programmes',
+  house:   'House fellowship',
+  auto:    'From the weekly records (automatic)',
+};
+const ATT_FURTHER_TYPED = ATT_FURTHER.filter(f=>!f.auto);
+const ATT_FURTHER_STANDING = ATT_FURTHER.filter(f=>f.standing).map(f=>f.key);
+/** Portal-order rows for the report/table: {key, label, value, auto}. Pure — no DOM, no state. */
+function attFurtherRows(data, report){
+  const d = data || {};
+  return ATT_FURTHER.map(f=>{
+    let value;
+    if(f.auto){
+      value = (f.key==='firstTimers' ? report?.firstTimers : report?.newConverts);
+      value = value==null ? 0 : Number(value);
+    } else {
+      value = (d[f.key]===undefined || d[f.key]===null) ? null : Number(d[f.key]);
+    }
+    return { key:f.key, label:f.label, value, auto: !!f.auto };
+  });
+}
+/** How many of the 15 typed (non-auto) fields are still blank. */
+function attFurtherNotEntered(data){
+  const d = data || {};
+  return ATT_FURTHER_TYPED.filter(f=>d[f.key]===undefined || d[f.key]===null).length;
+}
+
+function attYmdAdd(ymd, days){
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0,10);
+}
+function attDow(ymd){ return new Date(`${ymd}T00:00:00Z`).getUTCDay(); }
+/** Sunday that ends the Mon–Sun week containing ymd. */
+function attWeekEnd(ymd){ const dow = attDow(ymd); return attYmdAdd(ymd, dow===0 ? 0 : 7-dow); }
+/** 'Tue 22 Sep' */
+function attDayLabel(ymd, withDay=true){
+  const d = new Date(`${ymd}T00:00:00Z`);
+  const s = d.toLocaleDateString('en-GB',{day:'numeric',month:'short',timeZone:'UTC'});
+  return withDay ? `${ATT_DAY_NAMES[d.getUTCDay()].slice(0,3)} ${s}` : s;
+}
+/** Every Mon–Sun week whose Sunday falls inside [from, to], oldest first. */
+function attWeeksInPeriod(from, to){
+  if(!from || !to || from > to) return [];
+  const weeks = [];
+  for(let sun = attWeekEnd(from); sun <= to; sun = attYmdAdd(sun, 7)){
+    weeks.push({ index: weeks.length + 1, weekStart: attYmdAdd(sun, -6), weekEnd: sun });
+  }
+  return weeks;
+}
+function attCount(v){ return Math.min(ATT_MAX, Math.max(0, Math.floor(Number(v) || 0))); }
+function attServiceTotal(s){ return attCount(s?.men) + attCount(s?.women) + attCount(s?.children); }
+function attServiceLabel(s){ return s?.key==='other' && s.label ? s.label : (ATT_SERVICES[s?.key]?.label || 'Service'); }
+/** A required service counts as done when it has people, or is marked "not held" with a reason. */
+function attServiceDone(s){
+  if(!s) return false;
+  if(s.noService) return !!String(s.reason||'').trim();
+  return attServiceTotal(s) > 0;
+}
+function attMissingRequired(data){
+  const list = data?.services || [];
+  return ATT_REQUIRED.filter(k=>!attServiceDone(list.find(s=>s.key===k))).map(k=>ATT_SERVICES[k].label);
+}
+function attBlankService(key, weekEnd){
+  const off = ATT_SERVICES[key]?.dayOffset;
+  return { key, label:'', date: off==null ? '' : attYmdAdd(weekEnd, off-6), men:0, women:0, children:0,
+    preacher:'', newConverts:0, firstTimers:0, noService:false, reason:'' };
+}
+/** Always carry the three required services (and Sunday School) with their fixed dates. */
+function attNormalizeWeekData(data, weekEnd){
+  const services = (Array.isArray(data?.services) ? data.services : [])
+    .filter(s=>ATT_SERVICES[s?.key])
+    .map(s=>{
+      const off = ATT_SERVICES[s.key].dayOffset;
+      return { ...attBlankService(s.key, weekEnd), ...s, date: off==null ? (s.date||'') : attYmdAdd(weekEnd, off-6) };
+    });
+  for(const key of [...ATT_REQUIRED, 'sunday_school']){
+    if(!services.some(s=>s.key===key)) services.push(attBlankService(key, weekEnd));
+  }
+  return { services: services.sort((a,b)=>ATT_ORDER.indexOf(a.key)-ATT_ORDER.indexOf(b.key)) };
+}
+function attSumBy(services, key){
+  const out = { men:0, women:0, children:0, total:0 };
+  services.filter(s=>s.key===key && !s.noService).forEach(s=>{
+    out.men += attCount(s.men); out.women += attCount(s.women); out.children += attCount(s.children);
+  });
+  out.total = out.men + out.women + out.children;
+  return out;
+}
+function attWeekSummary(data){
+  const services = data?.services || [];
+  const by = {};
+  ATT_ORDER.forEach(k=>{ by[k] = attSumBy(services, k); });
+  return {
+    by,
+    total: services.filter(s=>!s.noService).reduce((a,s)=>a+attServiceTotal(s),0),
+    firstTimers: services.reduce((a,s)=>a+attCount(s.firstTimers),0),
+    newConverts: services.reduce((a,s)=>a+attCount(s.newConverts),0),
+  };
+}
+/**
+ * Build the paper-form layout for a period. `weeks` are attWeeksInPeriod() entries with
+ * an optional `record` ({status, data}). Each week becomes a Tue→Sun block of rows (the
+ * paper sheet's rows); Sunday School and House Fellowship go on the Sunday row.
+ */
+function attPeriodReport(weeks){
+  const rows = [];
+  let sundayTotal = 0, sundayCount = 0, firstTimers = 0, newConverts = 0;
+  const portal = [];
+  (weeks||[]).forEach(w=>{
+    const data = attNormalizeWeekData(w.record?.data, w.weekEnd);
+    const sum = attWeekSummary(data);
+    firstTimers += sum.firstTimers; newConverts += sum.newConverts;
+    portal.push({ index:w.index, weekEnd:w.weekEnd, by: sum.by });
+    const main = data.services.filter(s=>!['sunday_school','house_fellowship'].includes(s.key));
+    for(let off=1; off<=6; off++){
+      const date = attYmdAdd(w.weekEnd, off-6);
+      const isSunday = off===6;
+      const dayServices = main.filter(s=>s.date===date);
+      const base = { weekIndex:w.index, date, day:ATT_DAY_NAMES[attDow(date)], isSunday, isWeekEnd:isSunday };
+      if(!dayServices.length){
+        rows.push({ ...base, empty:true, service:'', men:'', women:'', children:'', total:'', preacher:'', newConverts:'', newGuests:'',
+          sundaySchool: isSunday ? (sum.by.sunday_school.total||'') : '', houseFellowship: isSunday ? (sum.by.house_fellowship.total||'') : '' });
+        continue;
+      }
+      dayServices.forEach((s, i)=>{
+        const last = i===dayServices.length-1;
+        const held = !s.noService;
+        const t = held ? attServiceTotal(s) : '';
+        if(s.key==='sunday_service' && held){ sundayTotal += t; sundayCount++; }
+        rows.push({ ...base, isWeekEnd: isSunday && last, empty:false, service: attServiceLabel(s), noService: !held, reason: s.reason||'',
+          men: held ? attCount(s.men) : '', women: held ? attCount(s.women) : '', children: held ? attCount(s.children) : '', total: t,
+          preacher: held ? (s.preacher||'') : '', newConverts: held ? (attCount(s.newConverts)||'') : '', newGuests: held ? (attCount(s.firstTimers)||'') : '',
+          sundaySchool: isSunday && last ? (sum.by.sunday_school.total||'') : '', houseFellowship: isSunday && last ? (sum.by.house_fellowship.total||'') : '' });
+      });
+    }
+  });
+  const complete = (weeks||[]).length>0 && weeks.every(w=>['submitted','locked'].includes(w.record?.status));
+  return { rows, portal, sundayTotal, sundayCount, average: sundayCount ? Math.round(sundayTotal/sundayCount*10)/10 : 0,
+    firstTimers, newConverts, complete };
+}
+
+// ── Page state ──
+function attState(){
+  if(!state.att) state.att = { year:null, month:null, from:'', to:'', weeks:[], records:{}, open:null, editing:{}, saveState:{}, timers:{},
+    further:{ current:null, previous:null }, furtherOpen:false, furtherSaveState:'', furtherTimer:null };
+  return state.att;
+}
+function attCanRecord(){ return canAction('attendance_record'); }
+function attToday(){ return ymdLocal(new Date()); }
+function attLocalKey(weekEnd){ return 'att_draft_'+weekEnd; }
+function attReadLocal(weekEnd){ try { return JSON.parse(localStorage.getItem(attLocalKey(weekEnd))||'null'); } catch(e){ return null; } }
+function attWriteLocal(weekEnd, data){ try { localStorage.setItem(attLocalKey(weekEnd), JSON.stringify({ data, ts:new Date().toISOString(), by:state.user?.name||'' })); } catch(e){} }
+function attClearLocal(weekEnd){ try { localStorage.removeItem(attLocalKey(weekEnd)); } catch(e){} }
+function attFurtherLocalKey(periodEnd){ return 'att_further_'+periodEnd; }
+function attFurtherReadLocal(periodEnd){ try { return JSON.parse(localStorage.getItem(attFurtherLocalKey(periodEnd))||'null'); } catch(e){ return null; } }
+function attFurtherWriteLocal(periodEnd, data){ try { localStorage.setItem(attFurtherLocalKey(periodEnd), JSON.stringify({ data, ts:new Date().toISOString(), by:state.user?.name||'' })); } catch(e){} }
+function attFurtherClearLocal(periodEnd){ try { localStorage.removeItem(attFurtherLocalKey(periodEnd)); } catch(e){} }
+
+async function attLoadPeriod(){
+  const st = attState();
+  const [settings, rems] = await Promise.all([DB.getSettings(), DB.getRemittances()]);
+  if(st.year==null){ st.year = state.year; st.month = state.month; }
+  // A "Fill attendance now" link from the Sunday collection form may point at a week in
+  // the neighbouring period — step there so the week is on screen.
+  const focus = st.focusWeek;
+  let range = computeRemPeriodDates(settings, rems, st.year, st.month);
+  if(focus && (focus < range.from || focus > range.to)){
+    for(const step of [1,-1]){
+      const y = st.month+step>11 ? st.year+1 : st.month+step<0 ? st.year-1 : st.year;
+      const m = (st.month+step+12)%12;
+      const r = computeRemPeriodDates(settings, rems, y, m);
+      if(focus >= r.from && focus <= r.to){ st.year=y; st.month=m; range=r; break; }
+    }
+  }
+  st.from = range.from; st.to = range.to;
+  st.weeks = attWeeksInPeriod(range.from, range.to);
+  const list = await DB.getAttendance(attYmdAdd(range.from,-6), attYmdAdd(range.to,6));
+  st.records = {};
+  (list||[]).forEach(r=>{ st.records[r.weekEnd] = r; });
+  try { st.further = await DB.getAttendanceFurther(st.to) || { current:null, previous:null }; }
+  catch(e){ st.further = { current:null, previous:null }; }
+  // Bring back any further-report figures typed on this phone that never reached the server.
+  {
+    const local = attFurtherReadLocal(st.to);
+    const cur = st.further.current;
+    if(local && attCanRecord()){
+      if(!cur || !cur.updatedAt || local.ts > cur.updatedAt){
+        st.further.current = { ...(cur||{ periodEnd:st.to, periodStart:st.from }), data: local.data, updatedBy:'', updatedAt:'', _unsynced:true };
+        attFurtherScheduleSave(400);
+      } else {
+        attFurtherClearLocal(st.to);
+      }
+    }
+  }
+  // Bring back anything typed on this phone that never reached the server.
+  const today = attToday();
+  st.weeks.forEach(w=>{
+    const local = attReadLocal(w.weekEnd);
+    const rec = st.records[w.weekEnd];
+    if(!local || !attCanRecord() || w.weekStart > today) return;
+    if(rec?.status==='locked'){ attClearLocal(w.weekEnd); return; }
+    if(rec?.updatedAt && local.ts <= rec.updatedAt){ attClearLocal(w.weekEnd); return; } // server copy is newer
+    if(!rec || !rec.updatedAt || local.ts > rec.updatedAt){
+      st.records[w.weekEnd] = { ...(rec||{ weekEnd:w.weekEnd, weekStart:w.weekStart }), status:'draft', data:local.data, submittedBy:'', submittedAt:'', _unsynced:true };
+      if(rec?.status==='submitted') st.editing[w.weekEnd] = true;
+      attScheduleSave(w.weekEnd, 400);
+    }
+  });
+  if(focus && st.weeks.some(w=>w.weekEnd===focus)) st.open = focus;
+  else if(!st.open || !st.weeks.some(w=>w.weekEnd===st.open)){
+    // Open the current week, else the first unfinished one.
+    const cur = st.weeks.find(w=>w.weekStart<=today && today<=w.weekEnd);
+    const unfinished = st.weeks.find(w=>w.weekStart<=today && !['submitted','locked'].includes(st.records[w.weekEnd]?.status));
+    st.open = (cur||unfinished)?.weekEnd || null;
+  }
+  st.focusWeek = null;
+}
+
+async function renderAttendance(){
+  const st = attState();
+  await attLoadPeriod();
+  const pc = document.getElementById('pageContent');
+  if(!pc) return;
+  pc.innerHTML = attPageHtml();
+  attBindEditor();
+}
+
+function attStatusOf(w){
+  const rec = attState().records[w.weekEnd];
+  if(w.weekStart > attToday()) return 'future';
+  return rec?.status || 'none';
+}
+function attStatusBadge(status){
+  return {
+    none:     '<span class="att-chip att-chip-none">Not started</span>',
+    draft:    '<span class="att-chip att-chip-draft">Draft saved</span>',
+    submitted:'<span class="att-chip att-chip-sub">✓ Submitted</span>',
+    locked:   '<span class="att-chip att-chip-lock">🔒 Locked</span>',
+    future:   '<span class="att-chip att-chip-none">Coming</span>',
+  }[status] || '';
+}
+function attStamp(rec){
+  if(!rec) return '';
+  const when = rec.submittedAt ? `${attDayLabel(ymdLocal(new Date(rec.submittedAt)))}, ${fmtTime(rec.submittedAt)}` : '';
+  if(rec.status==='locked'){
+    const lockedWhen = rec.lockedAt ? `${attDayLabel(ymdLocal(new Date(rec.lockedAt)))}, ${fmtTime(rec.lockedAt)}` : '';
+    return `<div class="att-stamp att-stamp-lock">🔒 Locked with the Sunday collection${lockedWhen?` · ${esc(lockedWhen)}`:''}${rec.submittedBy?`<br>Recorded by <b>${esc(rec.submittedBy)}</b>${when?` · ${esc(when)}`:''}`:''}</div>`;
+  }
+  if(rec.status==='submitted') return `<div class="att-stamp">✓ Submitted by <b>${esc(rec.submittedBy||'—')}</b>${when?` · ${esc(when)}`:''}</div>`;
+  return '';
+}
+function attWeekSubline(w){
+  const rec = attState().records[w.weekEnd];
+  if(!rec) return w.weekStart > attToday() ? 'Not started yet' : 'Nothing recorded yet';
+  const data = attNormalizeWeekData(rec.data, w.weekEnd);
+  return ATT_REQUIRED.map(k=>{
+    const s = data.services.find(x=>x.key===k);
+    const short = { digging_deep:'Tue', faith_clinic:'Thu', sunday_service:'Sun' }[k];
+    return `${short} ${s?.noService ? '—' : attServiceTotal(s)||0}`;
+  }).join(' · ');
+}
+
+function attPageHtml(){
+  const st = attState();
+  const done = st.weeks.filter(w=>['submitted','locked'].includes(attStatusOf(w))).length;
+  const pct = st.weeks.length ? Math.round(done/st.weeks.length*100) : 0;
+  const periodName = `${MONTHS[st.month]} ${st.year} remittance`;
+  const returnWeek = (()=>{ try { return sessionStorage.getItem('att_return_income')||''; } catch(e){ return ''; } })();
+  const returnRec = returnWeek ? st.records[returnWeek] : null;
+  const returnBanner = returnWeek && canAction('income_record') ? `
+    <div class="att-return ${['submitted','locked'].includes(returnRec?.status)?'ready':''}">
+      <span>${['submitted','locked'].includes(returnRec?.status) ? '✓ Attendance submitted. Your Sunday collection entry is saved and waiting.' : 'Fill and submit this week, then go back to finish the Sunday collection. Your figures there are saved.'}</span>
+      <button class="btn btn-sm ${['submitted','locked'].includes(returnRec?.status)?'btn-primary':''}" onclick="App.attBackToCollection()">← Back to Sunday collection</button>
+    </div>` : '';
+  const report = attPeriodReport(st.weeks.map(w=>({ ...w, record: st.records[w.weekEnd] })));
+  const left = st.weeks.length - done;
+  return `
+  <div class="att-page">
+    ${returnBanner}
+    <div class="att-period">
+      <div class="att-period-row">
+        <button class="att-nav" onclick="App.attShiftPeriod(-1)" aria-label="Previous period">‹</button>
+        <div class="att-period-title"><h2>${esc(periodName)}</h2>
+          <div class="att-period-sub">${esc(attDayLabel(st.from))} – ${esc(attDayLabel(st.to))} · ${st.weeks.length} week${st.weeks.length===1?'':'s'}</div></div>
+        <button class="att-nav" onclick="App.attShiftPeriod(1)" aria-label="Next period">›</button>
+      </div>
+      <div class="att-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct}%"></i></div>
+      <div class="att-dots">${st.weeks.map(w=>{
+        const s = attStatusOf(w);
+        const cls = s==='locked'?'lk':s==='submitted'?'ok':w.weekEnd===st.open?'cur':'';
+        return `<button class="${cls}" onclick="App.attOpenWeek('${w.weekEnd}')" aria-label="Week ${w.index}">${w.index}</button>`;
+      }).join('')}</div>
+      <div class="att-period-sub">${done} of ${st.weeks.length} weeks submitted</div>
+    </div>
+    ${st.weeks.length ? '' : '<div class="card"><p>No Sundays fall in this period.</p></div>'}
+    ${[...st.weeks].reverse().map(w=>attWeekCardHtml(w)).join('')}
+    ${attFurtherCardHtml()}
+    <div id="attReportWrap">
+      ${report.complete ? attReportHtml(report) : st.weeks.length ? `<div class="att-report-wait">📋 The report for the paper form appears here once all ${st.weeks.length} weeks are submitted. <b>${left} week${left===1?'':'s'} left.</b></div>` : ''}
+    </div>
+  </div>`;
+}
+
+function attWeekCardHtml(w){
+  const st = attState();
+  const status = attStatusOf(w);
+  const rec = st.records[w.weekEnd];
+  const open = st.open===w.weekEnd && status!=='future';
+  const today = attToday();
+  const isCurrent = w.weekStart<=today && today<=w.weekEnd;
+  const total = rec ? attWeekSummary(attNormalizeWeekData(rec.data, w.weekEnd)).total : 0;
+  return `
+  <div class="att-week ${open?'open':''} ${status==='future'?'future':''}" id="attw_${w.weekEnd}">
+    <button class="att-week-h" ${status==='future'?'disabled':''} onclick="App.attOpenWeek('${w.weekEnd}')" aria-expanded="${open}">
+      <span class="att-week-n">${w.index}</span>
+      <span class="att-week-d"><strong>Week ${w.index} · ${esc(attDayLabel(w.weekStart,false))} – ${esc(attDayLabel(w.weekEnd,false))}</strong>
+        <small>${isCurrent?'This week · ':''}${esc(attWeekSubline(w))}</small></span>
+      ${status==='submitted'||status==='locked' ? `<span class="att-week-tot">${total}</span>` : ''}
+      ${attStatusBadge(status)}
+    </button>
+    ${open ? `<div class="att-week-b">${attWeekBodyHtml(w)}</div>` : ''}
+  </div>`;
+}
+
+function attEditable(w){
+  const st = attState();
+  const rec = st.records[w.weekEnd];
+  if(!attCanRecord() || w.weekStart > attToday()) return false;
+  if(rec?.status==='locked') return false;
+  if(rec?.status==='submitted') return !!st.editing[w.weekEnd];
+  return true;
+}
+
+function attWeekBodyHtml(w){
+  const st = attState();
+  const rec = st.records[w.weekEnd];
+  const data = attNormalizeWeekData(rec?.data, w.weekEnd);
+  if(!rec) st.records[w.weekEnd] = { weekEnd:w.weekEnd, weekStart:w.weekStart, status:'none', data };
+  else rec.data = data;
+  if(!attEditable(w)) return attReadOnlyHtml(w, data, rec);
+  const present = new Set(data.services.map(s=>s.key));
+  // Sunday School is once a week; the others can be added more than once.
+  const addable = ['sunday_school','house_fellowship','outreach','other'].filter(k=>k!=='sunday_school' || !present.has(k));
+  const missing = attMissingRequired(data);
+  const saveState = st.saveState[w.weekEnd] || (rec?._unsynced ? 'offline' : rec?.updatedAt ? 'saved' : '');
+  return `
+    ${rec?.status==='submitted' ? `<div class="att-note">You are changing a submitted week. It goes back to draft until you submit it again.</div>` : ''}
+    ${data.services.map((s,i)=>attServiceCardHtml(w, s, i)).join('')}
+    ${addable.length ? `<div class="att-add"><div class="att-add-l">Add another service (optional)</div><div class="att-chips">${
+      addable.map(k=>`<button type="button" class="att-add-chip" onclick="App.attAddService('${w.weekEnd}','${k}')">+ ${esc(ATT_SERVICES[k].label)}</button>`).join('')}</div></div>` : ''}
+    <div class="att-foot">
+      <div class="att-checks" id="attchecks_${w.weekEnd}">${attChecksHtml(data)}</div>
+      <div class="att-foot-r"><span>Week total: <b id="atttotal_${w.weekEnd}">${attWeekSummary(data).total}</b> people</span>
+        <span class="att-save" id="attsave_${w.weekEnd}" aria-live="polite">${attSaveLabel(saveState, rec)}</span></div>
+      <button class="btn btn-primary att-submit" id="attsubmit_${w.weekEnd}" ${missing.length?'disabled':''} onclick="App.attConfirmSubmit('${w.weekEnd}')">Submit week ${w.index}</button>
+    </div>`;
+}
+
+function attChecksHtml(data){
+  return ATT_REQUIRED.map(k=>{
+    const ok = attServiceDone(data.services.find(s=>s.key===k));
+    return `<span class="${ok?'y':'n'}">${ok?'✓':'○'} ${esc(ATT_SERVICES[k].label)}</span>`;
+  }).join('');
+}
+function attSaveLabel(s, rec){
+  if(s==='saving') return 'Saving…';
+  if(s==='offline') return '📱 Saved on this phone · will sync';
+  if(s==='error') return '⚠ Not saved to server · retrying';
+  if(s==='saved' || rec?.updatedAt) return `✓ Saved ${rec?.updatedAt ? fmtTime(rec.updatedAt) : ''}`;
+  return 'Changes save automatically';
+}
+
+function attServiceCardHtml(w, s, i){
+  const meta = ATT_SERVICES[s.key];
+  const done = attServiceDone(s);
+  const fixedDate = meta.dayOffset!=null;
+  const dayOpts = [0,1,2,3,4,5,6].map(o=>attYmdAdd(w.weekStart,o));
+  const id = `att_${w.weekEnd}_${i}`;
+  const tag = meta.required
+    ? `<span class="att-tag ${done?'ok':'req'}" id="${id}_tag">${done?'✓ Filled':'Required'}</span>`
+    : `<button type="button" class="att-remove" onclick="App.attRemoveService('${w.weekEnd}',${i})" aria-label="Remove ${esc(attServiceLabel(s))}">Remove</button>`;
+  return `
+  <div class="att-svc ${meta.required&&!done?'missing':''} ${done?'done':''}" id="${id}_card">
+    <div class="att-svc-h">
+      <span class="att-svc-ic" style="background:${meta.tint}">${meta.icon}</span>
+      <span class="att-svc-nm"><strong>${esc(meta.label)}${meta.required?'':' <em>optional</em>'}</strong>
+        ${fixedDate ? `<small>${esc(ATT_DAY_NAMES[attDow(s.date)])} ${esc(attDayLabel(s.date,false))}</small>` :
+          `<select class="att-day" data-w="${w.weekEnd}" data-i="${i}" data-f="date" aria-label="Day">
+            <option value="">Pick the day…</option>${dayOpts.map(d=>`<option value="${d}" ${d===s.date?'selected':''}>${esc(attDayLabel(d))}</option>`).join('')}</select>`}
+      </span>
+      ${tag}
+    </div>
+    ${s.key==='other' ? `<input class="form-input att-txt" data-w="${w.weekEnd}" data-i="${i}" data-f="label" placeholder="Name of the service (e.g. Vigil)" value="${esc(s.label||'')}" maxlength="40" />` : ''}
+    <div class="att-counts" ${s.noService?'hidden':''} id="${id}_counts">
+      ${['men','women','children'].map(f=>`
+        <div class="att-cnt"><label class="att-cnt-l" for="${id}_${f}">${{men:'Men',women:'Women',children:'Children'}[f]}</label>
+          <div class="att-stp">
+            <input id="${id}_${f}" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="${attCount(s[f])||''}" placeholder="0" data-w="${w.weekEnd}" data-i="${i}" data-f="${f}" />
+            <div class="att-pm"><button type="button" onclick="App.attStep('${w.weekEnd}',${i},'${f}',-1)" aria-label="One less">−</button><button type="button" onclick="App.attStep('${w.weekEnd}',${i},'${f}',1)" aria-label="One more">+</button></div>
+          </div></div>`).join('')}
+    </div>
+    <div class="att-sum" ${s.noService?'hidden':''} id="${id}_sumrow"><span>Total</span><b id="${id}_sum">${attServiceTotal(s)}</b></div>
+    ${s.key==='sunday_school' || s.noService ? '' : `
+    <div class="att-extra" id="${id}_extra">
+      <input class="form-input att-txt att-full" data-w="${w.weekEnd}" data-i="${i}" data-f="preacher" placeholder="Preacher (e.g. Pst. Henry)" value="${esc(s.preacher||'')}" maxlength="80" />
+      <label>New converts<input class="form-input att-small" type="text" inputmode="numeric" pattern="[0-9]*" data-w="${w.weekEnd}" data-i="${i}" data-f="newConverts" value="${attCount(s.newConverts)||''}" placeholder="0" /></label>
+      <label>First timers / guests<input class="form-input att-small" type="text" inputmode="numeric" pattern="[0-9]*" data-w="${w.weekEnd}" data-i="${i}" data-f="firstTimers" value="${attCount(s.firstTimers)||''}" placeholder="0" /></label>
+    </div>`}
+    ${meta.required ? `
+    <label class="att-nosvc"><input type="checkbox" data-w="${w.weekEnd}" data-i="${i}" data-f="noService" ${s.noService?'checked':''} /> No service held this day</label>
+    ${s.noService ? `<input class="form-input att-txt" data-w="${w.weekEnd}" data-i="${i}" data-f="reason" placeholder="Why? (e.g. public holiday, convention)" value="${esc(s.reason||'')}" maxlength="120" />` : ''}` : ''}
+  </div>`;
+}
+
+function attReadOnlyHtml(w, data, rec){
+  const rows = data.services.filter(s=>s.noService || attServiceTotal(s)>0 || ATT_SERVICES[s.key].required);
+  const canEdit = attCanRecord() && rec?.status==='submitted';
+  return `
+    <div class="att-ro">
+      <div class="att-ro-grid">
+        <span class="h">Service</span><span class="h r">Men</span><span class="h r">Women</span><span class="h r">Children</span><span class="h r">Total</span>
+        ${rows.map(s=>s.noService
+          ? `<span>${esc(attServiceLabel(s))} <small>${esc(s.date?attDayLabel(s.date):'')}</small></span><span class="r att-ro-no" style="grid-column:span 4">No service${s.reason?` · ${esc(s.reason)}`:''}</span>`
+          : `<span>${esc(attServiceLabel(s))} <small>${esc(s.date?attDayLabel(s.date):'')}</small></span><span class="r">${attCount(s.men)}</span><span class="r">${attCount(s.women)}</span><span class="r">${attCount(s.children)}</span><b class="r">${attServiceTotal(s)}</b>`).join('')}
+      </div>
+      ${(()=>{ const sum = attWeekSummary(data); const pr = data.services.find(s=>s.key==='sunday_service')?.preacher;
+        return `<div class="att-ro-meta">${pr?`Preacher (Sun): ${esc(pr)} · `:''}First timers ${sum.firstTimers} · New converts ${sum.newConverts}</div>`; })()}
+      ${attStamp(rec)}
+      ${canEdit ? `<button class="btn btn-sm" onclick="App.attEditWeek('${w.weekEnd}')">✏️ Correct this week</button>` : ''}
+      ${rec?.status==='locked' && canAction('attendance_unlock') ? `<button class="btn btn-sm" onclick="App.attUnlockPrompt('${w.weekEnd}')">🔓 Unlock (IT Admin)</button>` : ''}
+    </div>`;
+}
+
+// ── Further reports (monthly) ──
+/** Standing keys carry forward from the previous period until confirmed/changed this period. */
+function attFurtherCarryValue(f, st){
+  const cur = st.further?.current?.data || {};
+  if(cur[f.key]!=null) return { value: cur[f.key], carried:false };
+  if(f.standing){
+    const prev = st.further?.previous?.data || {};
+    if(prev[f.key]!=null) return { value: prev[f.key], carried:true };
+  }
+  return { value: null, carried:false };
+}
+function attFurtherFilledCount(){
+  const data = attState().further?.current?.data || {};
+  return ATT_FURTHER_TYPED.filter(f=>data[f.key]!=null).length;
+}
+function attFurtherHasKeepable(st){
+  const cd = st.further?.current?.data || {};
+  const pd = st.further?.previous?.data || {};
+  return !!st.further?.previous && ATT_FURTHER_STANDING.some(k=>cd[k]==null && pd[k]!=null);
+}
+function attFurtherSublineText(){
+  const st = attState();
+  const cur = st.further?.current;
+  const filled = attFurtherFilledCount();
+  const saved = cur?.updatedBy ? ` · saved by ${cur.updatedBy}${cur.updatedAt ? `, ${fmtTime(cur.updatedAt)}` : ''}` : '';
+  return `${filled} of ${ATT_FURTHER_TYPED.length} filled${saved}`;
+}
+function attFurtherGroupHtml(group, canEdit){
+  const st = attState();
+  const fields = ATT_FURTHER_TYPED.filter(f=>f.group===group);
+  return `
+  <div class="att-fr-group">
+    <h5 class="att-fr-gh">${esc(ATT_FURTHER_GROUPS[group])}</h5>
+    <div class="att-fr-list">
+      ${fields.map(f=>{
+        const { value, carried } = attFurtherCarryValue(f, st);
+        const label = f.formLabel || f.label;
+        if(!canEdit) return `<div class="att-fr-row"><span>${esc(label)}</span><b>${value==null?'—':value}</b></div>`;
+        return `<label class="att-fr-row">
+          <span>${esc(label)}${carried?`<small class="att-fr-hint">from last month — change if different</small>`:''}</span>
+          <input class="form-input att-fr-in" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-fr="${f.key}" value="${value==null?'':value}" placeholder="—" />
+        </label>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+function attFurtherAutoGroupHtml(){
+  const st = attState();
+  const report = attPeriodReport(st.weeks.map(w=>({ ...w, record: st.records[w.weekEnd] })));
+  return `
+  <div class="att-fr-group att-fr-auto">
+    <h5 class="att-fr-gh">${esc(ATT_FURTHER_GROUPS.auto)}</h5>
+    <div class="att-fr-list">
+      <div class="att-fr-row"><span>First Timers</span><b>${report.firstTimers}</b></div>
+      <div class="att-fr-row"><span>Converts</span><b>${report.newConverts}</b></div>
+    </div>
+    <small class="att-fr-note">added up from the weeks</small>
+  </div>`;
+}
+function attFurtherCardHtml(){
+  const st = attState();
+  const open = !!st.furtherOpen;
+  const canEdit = attCanRecord();
+  const cur = st.further?.current;
+  const saveState = st.furtherSaveState || (cur?._unsynced ? 'offline' : cur?.updatedAt ? 'saved' : '');
+  const groups = [...new Set(ATT_FURTHER_TYPED.map(f=>f.group))];
+  const keepable = canEdit && attFurtherHasKeepable(st);
+  return `
+  <div class="att-fr ${open?'open':''}">
+    <button class="att-fr-h" onclick="App.attToggleFurther()" aria-expanded="${open}">
+      <span>📋 Further reports (monthly)</span>
+      <small>${esc(attFurtherSublineText())}</small>
+    </button>
+    ${open ? `<div class="att-fr-b">
+      ${canEdit ? '' : '<div class="att-note">Read-only — you don\'t have permission to record this.</div>'}
+      ${keepable ? `<button type="button" class="btn btn-sm" onclick="App.attKeepFurther()">Keep last month's numbers</button>` : ''}
+      ${groups.map(g=>attFurtherGroupHtml(g, canEdit)).join('')}
+      ${attFurtherAutoGroupHtml()}
+      ${canEdit ? `<div class="att-fr-save" id="attsave_further" aria-live="polite">${attSaveLabel(saveState, cur)}</div>` : ''}
+    </div>` : ''}
+  </div>`;
+}
+function attRerenderFurther(){
+  const el = document.querySelector('.att-fr');
+  if(!el) return;
+  el.outerHTML = attFurtherCardHtml();
+}
+function attToggleFurther(){
+  const st = attState();
+  st.furtherOpen = !st.furtherOpen;
+  attRerenderFurther();
+}
+async function attKeepFurther(){
+  const st = attState();
+  if(!attFurtherHasKeepable(st)) return;
+  const prevData = st.further.previous?.data || {};
+  if(!st.further.current) st.further.current = { periodEnd: st.to, periodStart: st.from, data:{} };
+  if(!st.further.current.data) st.further.current.data = {};
+  const data = st.further.current.data;
+  ATT_FURTHER_STANDING.forEach(k=>{ if(data[k]==null && prevData[k]!=null) data[k] = prevData[k]; });
+  attFurtherWriteLocal(st.to, data);
+  attFurtherSetSave('saving');
+  attRerenderFurther();
+  await attFurtherFlush();
+}
+function attFurtherOnField(el){
+  const key = el.getAttribute('data-fr');
+  if(!key) return;
+  const clean = el.value.replace(/\D/g,'').slice(0,7);
+  if(clean !== el.value) el.value = clean;
+  const st = attState();
+  if(!st.further) st.further = { current:null, previous:null };
+  if(!st.further.current) st.further.current = { periodEnd: st.to, periodStart: st.from, data:{} };
+  if(!st.further.current.data) st.further.current.data = {};
+  st.further.current.data[key] = clean==='' ? null : attCount(clean);
+  attFurtherChanged();
+}
+/** Refresh the "N of 15 filled" subline in place (no full re-render, so the keyboard stays open) and autosave. */
+function attFurtherChanged(){
+  const st = attState();
+  attFurtherWriteLocal(st.to, st.further.current.data);
+  attFurtherSetSave('saving');
+  attFurtherScheduleSave(1500);
+  const sub = document.querySelector('.att-fr-h small');
+  if(sub) sub.textContent = attFurtherSublineText();
+}
+function attFurtherSetSave(s){
+  attState().furtherSaveState = s;
+  const el = document.getElementById('attsave_further');
+  if(el) el.textContent = attSaveLabel(s, attState().further?.current);
+}
+function attFurtherScheduleSave(delay){
+  const st = attState();
+  clearTimeout(st.furtherTimer);
+  st.furtherTimer = setTimeout(()=>attFurtherFlush(), delay);
+}
+async function attFurtherFlush(){
+  const st = attState();
+  clearTimeout(st.furtherTimer); st.furtherTimer = null;
+  const periodEnd = st.to;
+  const local = attFurtherReadLocal(periodEnd);
+  if(!local) return;
+  try {
+    const saved = await DB.saveAttendanceFurther(periodEnd, { periodStart: st.from, data: local.data, by: state.user?.name||'' });
+    const still = attFurtherReadLocal(periodEnd);
+    if(still && still.ts === local.ts) attFurtherClearLocal(periodEnd);
+    st.further.current = { ...saved, data: st.further.current?.data || saved.data };
+    attFurtherSetSave('saved');
+  } catch(e){
+    attFurtherSetSave(navigator.onLine===false ? 'offline' : 'error');
+    if(navigator.onLine!==false) attFurtherScheduleSave(15000);
+  }
+}
+
+// ── Editor events ──
+function attRecord(weekEnd){ return attState().records[weekEnd]; }
+function attBindEditor(){
+  const root = document.querySelector('.att-page');
+  if(!root || root._attBound) return;
+  root._attBound = true;
+  root.addEventListener('focusin', e=>{ if(e.target.matches('.att-stp input, .att-small, .att-fr-in')) setTimeout(()=>{ try{ e.target.select(); }catch(_){} },0); });
+  root.addEventListener('input', e=>{ if(e.target.hasAttribute('data-fr')) attFurtherOnField(e.target); else attOnField(e.target); });
+  root.addEventListener('change', e=>{ if(e.target.matches('select[data-f], input[type=checkbox][data-f]')) attOnField(e.target); });
+}
+function attOnField(el){
+  const { w:weekEnd, i, f } = el.dataset || {};
+  if(!weekEnd || f==null) return;
+  const rec = attRecord(weekEnd);
+  const s = rec?.data?.services?.[Number(i)];
+  if(!s) return;
+  if(['men','women','children','newConverts','firstTimers'].includes(f)){
+    const clean = el.value.replace(/\D/g,'').slice(0,6);
+    if(clean !== el.value) el.value = clean;
+    s[f] = attCount(clean);
+  } else if(f==='noService'){
+    s.noService = el.checked;
+    attChanged(weekEnd);
+    attRerenderWeek(weekEnd);
+    return;
+  } else {
+    s[f] = el.value;
+  }
+  attChanged(weekEnd);
+}
+function attStep(weekEnd, i, f, delta){
+  const rec = attRecord(weekEnd);
+  const s = rec?.data?.services?.[i];
+  if(!s) return;
+  s[f] = attCount(attCount(s[f]) + delta);
+  const input = document.getElementById(`att_${weekEnd}_${i}_${f}`);
+  if(input) input.value = s[f] || '';
+  attChanged(weekEnd);
+}
+/** Refresh totals / ticks in place (no re-render, so the keyboard stays open) and autosave. */
+function attChanged(weekEnd){
+  const rec = attRecord(weekEnd);
+  if(!rec) return;
+  const data = rec.data;
+  data.services.forEach((s,i)=>{
+    const id = `att_${weekEnd}_${i}`;
+    const sum = document.getElementById(`${id}_sum`); if(sum) sum.textContent = attServiceTotal(s);
+    const done = attServiceDone(s);
+    const card = document.getElementById(`${id}_card`);
+    if(card){ card.classList.toggle('done', done); card.classList.toggle('missing', ATT_SERVICES[s.key].required && !done); }
+    const tag = document.getElementById(`${id}_tag`);
+    if(tag){ tag.className = `att-tag ${done?'ok':'req'}`; tag.textContent = done ? '✓ Filled' : 'Required'; }
+  });
+  const tot = document.getElementById(`atttotal_${weekEnd}`); if(tot) tot.textContent = attWeekSummary(data).total;
+  const checks = document.getElementById(`attchecks_${weekEnd}`); if(checks) checks.innerHTML = attChecksHtml(data);
+  const btn = document.getElementById(`attsubmit_${weekEnd}`); if(btn) btn.disabled = attMissingRequired(data).length>0;
+  if(rec.status==='none') rec.status = 'draft';
+  attWriteLocal(weekEnd, data);
+  attSetSave(weekEnd, 'saving');
+  attScheduleSave(weekEnd, 1500);
+}
+function attSetSave(weekEnd, s){
+  const st = attState();
+  st.saveState[weekEnd] = s;
+  const el = document.getElementById(`attsave_${weekEnd}`);
+  if(el) el.textContent = attSaveLabel(s, attRecord(weekEnd));
+}
+function attScheduleSave(weekEnd, delay){
+  const st = attState();
+  clearTimeout(st.timers[weekEnd]);
+  st.timers[weekEnd] = setTimeout(()=>attFlush(weekEnd), delay);
+}
+async function attFlush(weekEnd){
+  const st = attState();
+  clearTimeout(st.timers[weekEnd]); delete st.timers[weekEnd];
+  const local = attReadLocal(weekEnd);
+  if(!local) return;
+  try {
+    const saved = await DB.saveAttendance(weekEnd, { data: local.data, by: state.user?.name||'' });
+    const still = attReadLocal(weekEnd);
+    // Only drop the phone copy if nothing new was typed while the request was in flight.
+    if(still && still.ts === local.ts) attClearLocal(weekEnd);
+    const rec = st.records[weekEnd];
+    st.records[weekEnd] = { ...saved, data: rec?.data || saved.data };
+    attSetSave(weekEnd, 'saved');
+  } catch(e){
+    const msg = String(e?.message||'');
+    if(/locked/i.test(msg)){ attClearLocal(weekEnd); showAlert(msg,'danger'); renderAttendance(); return; }
+    attSetSave(weekEnd, navigator.onLine===false ? 'offline' : 'error');
+    if(navigator.onLine!==false) attScheduleSave(weekEnd, 15000);
+  }
+}
+function attFlushAll(){
+  const st = state.att; if(!st) return Promise.resolve();
+  return Promise.all([...Object.keys(st.timers||{}).map(k=>attFlush(k)), attFurtherFlush()]);
+}
+if(typeof window!=='undefined' && window.addEventListener){
+  window.addEventListener('online', ()=>{
+    const st = state.att; if(!st) return;
+    Object.keys(st.records||{}).forEach(k=>{ if(attReadLocal(k)) attFlush(k); });
+    if(st.to && attFurtherReadLocal(st.to)) attFurtherFlush();
+  });
+  window.addEventListener('pagehide', attFlushAll);
+  if(typeof document!=='undefined' && document.addEventListener){
+    document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='hidden') attFlushAll(); });
+  }
+}
+
+function attRerenderWeek(weekEnd){
+  const w = attState().weeks.find(x=>x.weekEnd===weekEnd);
+  const el = document.getElementById('attw_'+weekEnd);
+  if(!w || !el) return;
+  el.outerHTML = attWeekCardHtml(w);
+}
+function attOpenWeek(weekEnd){
+  const st = attState();
+  st.open = st.open===weekEnd ? null : weekEnd;
+  const pc = document.getElementById('pageContent');
+  const scroll = window.scrollY;
+  pc.innerHTML = attPageHtml();
+  attBindEditor();
+  const el = document.getElementById('attw_'+weekEnd);
+  if(el && st.open===weekEnd) el.scrollIntoView({ behavior:'smooth', block:'start' }); else window.scrollTo(0, scroll);
+}
+function attAddService(weekEnd, key){
+  const rec = attRecord(weekEnd);
+  if(!rec) return;
+  rec.data.services.push(attBlankService(key, weekEnd));
+  rec.data = attNormalizeWeekData(rec.data, weekEnd);
+  attRerenderWeek(weekEnd);
+  attChanged(weekEnd);
+}
+function attRemoveService(weekEnd, i){
+  const rec = attRecord(weekEnd);
+  const s = rec?.data?.services?.[i];
+  if(!s || ATT_SERVICES[s.key].required) return;
+  rec.data.services.splice(i,1);
+  attRerenderWeek(weekEnd);
+  attChanged(weekEnd);
+}
+function attEditWeek(weekEnd){
+  attState().editing[weekEnd] = true;
+  attRerenderWeek(weekEnd);
+}
+async function attShiftPeriod(step){
+  await attFlushAll();
+  const st = attState();
+  st.month += step;
+  if(st.month>11){ st.month=0; st.year++; }
+  if(st.month<0){ st.month=11; st.year--; }
+  st.open = null;
+  renderAttendance();
+}
+
+function attConfirmSubmit(weekEnd){
+  const st = attState();
+  const w = st.weeks.find(x=>x.weekEnd===weekEnd);
+  const rec = attRecord(weekEnd);
+  if(!w || !rec) return;
+  const missing = attMissingRequired(rec.data);
+  if(missing.length){ showAlert(`Please fill in: ${missing.join(', ')}`,'danger'); return; }
+  const lines = rec.data.services.filter(s=>s.noService || attServiceTotal(s)>0).map(s=>s.noService
+    ? `<li><b>${esc(attServiceLabel(s))}</b> (${esc(attDayLabel(s.date))}): no service held — ${esc(s.reason)}</li>`
+    : `<li><b>${esc(attServiceLabel(s))}</b>${s.date?` (${esc(attDayLabel(s.date))})`:''}: ${attServiceTotal(s)} people — ${attCount(s.men)} men, ${attCount(s.women)} women, ${attCount(s.children)} children</li>`).join('');
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">Submit Week ${w.index}?</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:8px">${esc(attDayLabel(w.weekStart))} – ${esc(attDayLabel(w.weekEnd))}. Please check the numbers:</p>
+    <ul class="att-confirm">${lines}</ul>
+    <p style="font-size:12px;color:var(--text3);margin-top:10px">It will be recorded as submitted by <b>${esc(state.user?.name||'')}</b>, with today's date and time.</p>
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Go back</button><button class="btn btn-primary" onclick="App.attSubmit('${weekEnd}', this)">Yes, submit</button></div>`);
+}
+async function attSubmit(weekEnd, btn=null){
+  const st = attState();
+  const rec = attRecord(weekEnd);
+  if(!rec) return;
+  clearTimeout(st.timers[weekEnd]);
+  const restore = setBtnLoading(btn, 'Submitting…');
+  try {
+    const saved = await DB.submitAttendance(weekEnd, { data: rec.data, by: state.user?.name||'' });
+    attClearLocal(weekEnd);
+    st.records[weekEnd] = saved;
+    delete st.editing[weekEnd];
+    st.saveState[weekEnd] = 'saved';
+    closeModal();
+    const next = st.weeks.find(w=>w.weekStart<=attToday() && !['submitted','locked'].includes(st.records[w.weekEnd]?.status) && w.weekEnd!==weekEnd);
+    st.open = next ? next.weekEnd : weekEnd;
+    await renderAttendance();
+    showAlert('Week submitted. Thank you!','success');
+  } catch(e){
+    restore();
+    showAlert(e?.message || 'Could not submit. Your figures are saved on this phone — try again when you have network.','danger');
+  }
+}
+function attUnlockPrompt(weekEnd){
+  if(!canAction('attendance_unlock')) return;
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🔓 Unlock attendance</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Week ending ${esc(attDayLabel(weekEnd))} is locked because its Sunday collection was saved. Unlocking lets it be corrected and re-submitted.</p>
+    <div class="form-group"><label class="form-label" for="att_unlock_pin">Your IT Admin PIN</label><input type="password" id="att_unlock_pin" class="form-input" maxlength="6" inputmode="numeric" /></div>
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.attUnlock('${weekEnd}', this)">Unlock</button></div>`);
+}
+async function attUnlock(weekEnd, btn=null){
+  const pin = document.getElementById('att_unlock_pin')?.value?.trim() || '';
+  if(!PIN_REGEX.test(pin)){ showAlert('Enter your 4–6 digit PIN.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Unlocking…');
+  try {
+    await DB.unlockAttendance(weekEnd, { userId: state.user?.id, pin });
+    DB.addAudit('attendance_unlocked', `Attendance unlocked for week ending ${weekEnd}`, state.user?.name);
+    closeModal();
+    await renderAttendance();
+    showAlert('Week unlocked.','success');
+  } catch(e){ restore(); showAlert(e?.message || 'Unlock failed.','danger'); }
+}
+async function attBackToCollection(){
+  try { sessionStorage.removeItem('att_return_income'); } catch(e){}
+  await attFlushAll();
+  await navigate('income');
+  setTimeout(()=>showIncomeForm(), 350);
+}
+
+// ── Period report (paper form + portal) ──
+function attReportHtml(report){
+  const st = attState();
+  const td = v => `<td>${v===''||v==null?'':esc(String(v))}</td>`;
+  const body = report.rows.map(r=>`
+    <tr class="${r.isSunday?'sun ':''}${r.isWeekEnd?'wkend':''}">
+      <td class="stk dt">${r.empty?'':esc(attDayLabel(r.date,false))}</td>
+      <td class="day">${esc(r.day)}${r.service && !['Sunday Service'].includes(r.service) ? `<small>${esc(r.service)}</small>`:''}</td>
+      ${r.noService ? `<td colspan="4" class="nosvc">No service${r.reason?` · ${esc(r.reason)}`:''}</td>` : `${td(r.men)}${td(r.women)}${td(r.children)}<td class="tot">${r.total===''?'':r.total}</td>`}
+      <td class="pr">${esc(r.preacher||'')}</td>${td(r.newConverts)}${td(r.newGuests)}${td(r.sundaySchool)}${td(r.houseFellowship)}
+    </tr>`).join('');
+  const portalRows = ['sunday_service','sunday_school','digging_deep','faith_clinic','outreach','house_fellowship'];
+  return `
+  <section class="att-report" id="attReport">
+    <div class="att-report-h">
+      <div><h3>Monthly General Progress Report · Attendance</h3>
+        <div class="att-period-sub" style="color:var(--text2)">${esc(MONTHS[st.month])} ${st.year} · ${esc(attDayLabel(st.from))} – ${esc(attDayLabel(st.to))} · copy row by row onto the paper sheet</div></div>
+      <button class="btn btn-sm att-noprint" onclick="App.attPrint()">🖨 Print / Save PDF</button>
+    </div>
+    <div class="att-paper-wrap"><table class="att-paper">
+      <thead><tr><th class="stk">DATE</th><th>DAY</th><th>MEN</th><th>WOMEN</th><th>CHILDREN</th><th>TOTAL</th><th>PREACHER</th><th>NEW CONVERTS</th><th>NEW GUEST</th><th>SUNDAY SCHOOL ATTEND</th><th>HOUSE FELLOWSHIP</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table></div>
+    <div class="att-foot-grid">
+      <div><small>Sunday attendance total</small><b>${report.sundayTotal}</b></div>
+      <div><small>No. of Sundays</small><b>${report.sundayCount}</b></div>
+      <div><small>Average attendance per month</small><b>${report.average}</b><span> (${report.sundayTotal} ÷ ${report.sundayCount||0})</span></div>
+    </div>
+    <h4 class="att-sub-h">For the RCCG portal (Input Weekly Attendance Report)</h4>
+    <div class="att-portal">${report.portal.map(p=>`
+      <div class="att-pw"><h5>WEEK ${p.index} · ending ${esc(attDayLabel(p.weekEnd,false))}</h5>
+        <table><thead><tr><th></th><th>M</th><th>W</th><th>C</th><th>Total</th></tr></thead><tbody>
+        ${portalRows.map(k=>{ const v=p.by[k]; return `<tr><td>${esc(ATT_SERVICES[k].label)}</td><td>${v.men}</td><td>${v.women}</td><td>${v.children}</td><td><b>${v.total}</b></td></tr>`; }).join('')}
+        </tbody></table></div>`).join('')}
+    </div>
+    ${attFurtherReportHtml(report)}
+  </section>`;
+}
+function attFurtherReportHtml(report){
+  const st = attState();
+  const data = st.further?.current?.data;
+  const rows = attFurtherRows(data, report);
+  const notEntered = attFurtherNotEntered(data);
+  return `
+    <h4 class="att-sub-h">Further reports (monthly)</h4>
+    ${notEntered>0 ? `<div class="att-fr-warn">${notEntered} not entered — fill ${notEntered===1?'it':'them'} in Further reports above</div>` : ''}
+    <table class="att-fr-table"><tbody>
+      ${rows.map(r=>`<tr><td>${esc(r.label)}</td><td class="${r.value==null?'att-fr-blank':''}">${r.value==null?'—':r.value}</td></tr>`).join('')}
+    </tbody></table>`;
+}
+
+function attPrint(){
+  document.body.classList.add('att-printing');
+  const done = ()=>{ document.body.classList.remove('att-printing'); window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  window.print();
+  setTimeout(done, 1000);
+}
+
+/** JSON of the current period's report — for the later portal-filling script. */
+function attendancePeriodReport(){
+  const st = state.att;
+  if(!st) return null;
+  const r = attPeriodReport(st.weeks.map(w=>({ ...w, record: st.records[w.weekEnd] })));
+  const further = {};
+  attFurtherRows(st.further?.current?.data, r).forEach(row=>{ further[row.key] = row.value; });
+  return { period:{ from:st.from, to:st.to, year:st.year, month:st.month+1 }, ...r, further };
+}
+
+// ── Sunday collection form: attendance panel + autosave ──
+function incDraftKey(){ return 'inc_form_draft_'+(state.user?.id||'anon'); }
+function incReadDraft(){ try { return JSON.parse(localStorage.getItem(incDraftKey())||'null'); } catch(e){ return null; } }
+function incClearDraft(){ try { localStorage.removeItem(incDraftKey()); } catch(e){} }
+function incSaveDraft(){
+  if(!document.getElementById('inc_date')) return;
+  const val = id => document.getElementById(id)?.value ?? '';
+  const amounts = {};
+  selectableIncomeTypes().forEach(t=>{ const v = val('inc_'+t.key); if(v!=='') amounts[t.key]=v; });
+  const transfers = [...document.querySelectorAll('#inc_bank_transfers_list > div')].map(row=>({
+    amt: row.querySelector('.bt-amt')?.value || '', date: row.querySelector('.bt-date')?.value || '' }));
+  const draft = { ts:new Date().toISOString(), date:val('inc_date'), usher:val('inc_usher'), amounts, transfers,
+    directPetty:val('inc_direct_petty'), notes:val('inc_notes') };
+  const empty = !draft.usher && !Object.keys(amounts).length && !transfers.some(t=>t.amt) && !draft.directPetty && !draft.notes;
+  try { if(empty) localStorage.removeItem(incDraftKey()); else localStorage.setItem(incDraftKey(), JSON.stringify(draft)); } catch(e){}
+}
+function incRestoreDraft(){
+  const d = incReadDraft();
+  if(!d) return;
+  const set = (id,v)=>{ const el=document.getElementById(id); if(el && v!=null) el.value=v; };
+  set('inc_date', d.date); set('inc_usher', d.usher); set('inc_direct_petty', d.directPetty); set('inc_notes', d.notes);
+  Object.entries(d.amounts||{}).forEach(([k,v])=>set('inc_'+k, v));
+  (d.transfers||[]).forEach(t=>{
+    addBankTransferRow();
+    const rows = document.querySelectorAll('#inc_bank_transfers_list > div');
+    const row = rows[rows.length-1];
+    if(row){ row.querySelector('.bt-amt').value = t.amt; if(t.date) row.querySelector('.bt-date').value = t.date; }
+  });
+  try { updateIncomeTotal(); updateBankTransferTotal(); updateIncomeCashBreakdown(); } catch(e){}
+  const banner = document.getElementById('inc_restored');
+  if(banner){
+    banner.hidden = false;
+    banner.querySelector('span').textContent = `↺ Restored your unsaved entry from ${fmtTime(d.ts)}`;
+  }
+}
+function incDiscardDraft(){
+  incClearDraft();
+  closeModal();
+  showIncomeForm();
+}
+/** Whether the Sunday collection for `date` needs attendance first (setting-driven, like the server). */
+async function incAttendanceGateApplies(date){
+  if(!date) return false;
+  const s = await DB.getSettings();
+  const from = String(s.attendanceGateFrom||'').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(from) && date >= from;
+}
+async function refreshIncomeAttendance(){
+  const box = document.getElementById('inc_attendance');
+  const btn = document.getElementById('inc_save_btn');
+  const date = document.getElementById('inc_date')?.value;
+  if(!box) return;
+  const setGate = ok => { state.incAttendanceOk = ok; if(btn) btn.disabled = !ok; };
+  if(!date || !(await incAttendanceGateApplies(date))){ box.innerHTML=''; setGate(true); return; }
+  const weekEnd = attWeekEnd(date);
+  box.innerHTML = '<div class="att-inc att-inc-wait">Checking this week\'s attendance…</div>';
+  let rec = null;
+  try { rec = (await DB.getAttendance(weekEnd, weekEnd)).find(r=>r.weekEnd===weekEnd) || null; }
+  catch(e){ box.innerHTML = `<div class="att-inc att-inc-no"><div class="t">Could not check attendance</div><small>${esc(e.message||'Network error')}. Your figures are saved on this phone.</small><button class="btn btn-sm" onclick="App.refreshIncomeAttendance()">Try again</button></div>`; setGate(false); return; }
+  if(document.getElementById('inc_date')?.value !== date) return; // date changed meanwhile
+  const weekLabel = `${attDayLabel(attYmdAdd(weekEnd,-6),false)} – ${attDayLabel(weekEnd,false)}`;
+  if(!rec || !['submitted','locked'].includes(rec.status)){
+    const data = attNormalizeWeekData(rec?.data, weekEnd);
+    box.innerHTML = `
+      <div class="att-inc att-inc-no">
+        <div class="t">⚠ Attendance for this week (${esc(weekLabel)}) hasn't been submitted</div>
+        <div class="att-checks">${attChecksHtml(data)}</div>
+        ${canAction('attendance_record') ? `<button class="btn btn-primary" type="button" onclick="App.incGoToAttendance('${weekEnd}')">Fill attendance now →</button>` : '<small>Ask an usher or the admin officer to submit it.</small>'}
+        <small>Your figures above are saved. They'll be here when you come back.</small>
+      </div>`;
+    setGate(false);
+    return;
+  }
+  const data = attNormalizeWeekData(rec.data, weekEnd);
+  const sum = attWeekSummary(data);
+  const sun = sum.by.sunday_service;
+  const tile = (lbl,key)=>{ const s=data.services.find(x=>x.key===key); return `<div><small>${lbl}</small><b>${s?.noService?'—':sum.by[key].total}</b></div>`; };
+  box.innerHTML = `
+    <div class="att-inc att-inc-ok">
+      <div class="t">✓ Attendance · week ${esc(weekLabel)}</div>
+      <div class="att-inc-grid">${tile('Tue DD','digging_deep')}${tile('Thu FC','faith_clinic')}${tile('Sunday','sunday_service')}</div>
+      <div class="att-inc-meta">Sunday: M ${sun.men} · W ${sun.women} · C ${sun.children}${sum.by.sunday_school.total?` · Sunday School ${sum.by.sunday_school.total}`:''}${sum.firstTimers?` · ${sum.firstTimers} first timer${sum.firstTimers===1?'':'s'}`:''}<br>Recorded by ${esc(rec.submittedBy||'—')}${rec.submittedAt?` · ${esc(attDayLabel(ymdLocal(new Date(rec.submittedAt))))} ${esc(fmtTime(rec.submittedAt))}`:''}</div>
+      ${rec.status==='locked' ? '<div class="att-inc-lock">🔒 Already locked with an earlier entry for this Sunday.</div>' : '<div class="att-inc-lock">🔒 Saving will lock this week\'s attendance.</div>'}
+    </div>`;
+  setGate(true);
+}
+async function incGoToAttendance(weekEnd){
+  incSaveDraft();
+  try { sessionStorage.setItem('att_return_income', weekEnd); } catch(e){}
+  closeModal();
+  attState().focusWeek = weekEnd;
+  await navigate('attendance');
+}
+function bindIncomeFormAutosave(){
+  const modal = document.querySelector('#modalOverlay .modal');
+  if(!modal) return;
+  let t;
+  const save = ()=>{ clearTimeout(t); t = setTimeout(incSaveDraft, 250); };
+  modal.addEventListener('input', save);
+  modal.addEventListener('change', e=>{ save(); if(e.target.id==='inc_date') refreshIncomeAttendance(); });
+  modal.addEventListener('click', e=>{ if(e.target.closest('button')) setTimeout(incSaveDraft, 50); });
+}
+
+// ──────────────────────────────────────────
 // 8. SESSION RESTORE
 // ──────────────────────────────────────────
 (function restoreSession(){
@@ -16790,8 +17912,8 @@ function submitKPSCAlert(){
     // Fire-and-forget: this must never delay or block first paint.
     apiFetch('init').catch(err => console.warn('init skipped:', err.message));
     DB.getSettings()
-      .then(s => { state.rolePermissions = s.rolePermissions || null; initApp(); })
-      .catch(() => initApp());
+      .then(s => { state.rolePermissions = s.rolePermissions || null; startAppAfterPinCheck(); })
+      .catch(() => startAppAfterPinCheck());
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', doRestore);
@@ -16817,6 +17939,10 @@ async function setPeriodMode(mode){
 // ──────────────────────────────────────────
 return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
+  attShiftPeriod, attOpenWeek, attAddService, attRemoveService, attStep, attConfirmSubmit, attSubmit, attEditWeek,
+  attUnlockPrompt, attUnlock, attBackToCollection, refreshIncomeAttendance, incGoToAttendance, incDiscardDraft,
+  attToggleFurther, attKeepFurther,
+  attendancePeriodReport, attPrint,
   onMonthChange, setIncomeTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, openBudgetBreakdown, generateBudget, rebuildBudgetPlan, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, checkBudgetAfford, toggleBudgetKnownBillsEditor, budgetKnownBillAdd, budgetKnownBillRemove, budgetKnownBillsUseSuggestion, saveBudgetKnownBills, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
@@ -16885,6 +18011,15 @@ return {
   _authFetch: authFetch,
   _setTestUser: (u) => { state.user = u; },
   _getTestUser: () => state.user,
+  _attWeeksInPeriod: attWeeksInPeriod,
+  _attWeekEnd: attWeekEnd,
+  _attPeriodReport: attPeriodReport,
+  _attMissingRequired: attMissingRequired,
+  _attNormalizeWeekData: attNormalizeWeekData,
+  _attWeekSummary: attWeekSummary,
+  _attFurtherRows: attFurtherRows,
+  _attFurtherNotEntered: attFurtherNotEntered,
+  _ATT_FURTHER: ATT_FURTHER,
   _satelliteHeldDisplay: satelliteHeldDisplay,
   _SATELLITE_FUND_PURPOSES: SATELLITE_FUND_PURPOSES,
   _BUILTIN_INCOME_TYPES: BUILTIN_INCOME_TYPES,

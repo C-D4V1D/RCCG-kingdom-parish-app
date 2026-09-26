@@ -59,6 +59,10 @@ const FINANCE_ROUTES = [
   ['PUT', 'users/u1'], ['PUT', 'income/i1'], ['PUT', 'expenses/e1'], ['PUT', 'petty/p1'], ['PUT', 'remittances/r1'], ['PUT', 'cash-transactions/c1'],
   ['DELETE', 'users/u1'], ['DELETE', 'income/i1'], ['DELETE', 'expenses/e1'], ['DELETE', 'petty/p1'],
   ['DELETE', 'remittances/r1'], ['DELETE', 'satellite-funds/s1'], ['DELETE', 'cash-transactions/c1'],
+  // Attendance (#316) and Further Reports (#317): Finance routes like the rest.
+  ['GET', 'attendance'], ['GET', 'attendance?from=2026-01-04&to=2026-01-31'], ['PUT', 'attendance/2026-01-11'],
+  ['POST', 'attendance/2026-01-11/submit'], ['POST', 'attendance/2026-01-11/unlock'],
+  ['GET', 'attendance-further?end=2026-01-31'], ['PUT', 'attendance-further/2026-01-31'],
   ['GET', 'some-future-route'], ['POST', 'some-future-route'],
 ];
 
@@ -117,7 +121,7 @@ test('route groups: public allowlist, KPSC, shared and Finance', () => {
   for (const r of ['kpsc-accounts', 'action-items', 'ai-secretary-meetings', 'voice-identify', 'admin', 'remit-webhook-test', 'partnership-pledges']) {
     assert.equal(c(r, null, 'GET'), 'kpsc', r);
   }
-  for (const r of ['income', 'users', 'init', 'dashboard', 'change-pin', 'brand-new-route']) assert.equal(c(r, null, 'GET'), 'finance', r);
+  for (const r of ['income', 'users', 'init', 'dashboard', 'change-pin', 'attendance', 'attendance-further', 'brand-new-route']) assert.equal(c(r, null, 'GET'), 'finance', r);
 });
 
 test('public routes still work with no sign-in (report-share POST+GET, login options, policy summary)', async () => {

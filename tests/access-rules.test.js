@@ -109,3 +109,128 @@ test('petty-cash health falls back to the manual target + buffer before a Budget
   assert.equal(App._pettyHealth(125000, 20000, policy).label, 'Healthy');  // same as the old rule: after target ≥ buffer
   assert.equal(App._pettyHealth(100000, 20000, policy).label, 'Adequate');
 });
+
+test('ushers and admin assistants can only open the Attendance page', () => {
+  const pages = Object.keys(App._ACCESS_RULES.pages);
+  for (const role of ['usher', 'admin_assistant']) {
+    App._setTestUserRole(role);
+    const reachable = pages.filter(p => App._canAccessPage(p));
+    assert.deepEqual(reachable, ['attendance'], `${role} should only reach attendance`);
+    assert.equal(App._canAction('attendance_record'), true);
+    assert.equal(App._canAction('income_record'), false);
+    assert.equal(App._canAction('attendance_unlock'), false);
+  }
+});
+
+test('attendance: accountant and admin officer record, pastor/signatory/viewer only view, IT Admin unlocks', () => {
+  for (const role of ['accountant', 'admin_officer', 'it_admin']) {
+    App._setTestUserRole(role);
+    assert.equal(App._canAction('attendance_record'), true, `${role} records attendance`);
+  }
+  for (const role of ['pastor', 'signatory', 'viewer']) {
+    App._setTestUserRole(role);
+    assert.equal(App._canAccessPage('attendance'), true, `${role} can view attendance`);
+    assert.equal(App._canAction('attendance_record'), false, `${role} cannot record attendance`);
+  }
+  for (const role of ['accountant', 'pastor', 'admin_officer']) {
+    App._setTestUserRole(role);
+    assert.equal(App._canAction('attendance_unlock'), false);
+  }
+  App._setTestUserRole('it_admin');
+  assert.equal(App._canAction('attendance_unlock'), true);
+});
+
+test('attendance weeks follow the remittance period: every Mon–Sun week whose Sunday is inside it', () => {
+  const weeks = App._attWeeksInPeriod('2026-08-30', '2026-09-27');
+  assert.deepEqual(weeks.map(w => w.weekEnd), ['2026-08-30', '2026-09-06', '2026-09-13', '2026-09-20', '2026-09-27']);
+  assert.equal(weeks[0].weekStart, '2026-08-24');
+  assert.equal(weeks[4].index, 5);
+  // Period starting mid-week: the first Sunday on/after the start.
+  assert.deepEqual(App._attWeeksInPeriod('2026-09-28', '2026-10-25').map(w => w.weekEnd),
+    ['2026-10-04', '2026-10-11', '2026-10-18', '2026-10-25']);
+  assert.equal(App._attWeekEnd('2026-09-22'), '2026-09-27');
+  assert.equal(App._attWeekEnd('2026-09-27'), '2026-09-27');
+});
+
+test('attendance: normalising a week always carries Tue Digging Deep, Thu Faith Clinic, Sunday Service and Sunday School', () => {
+  const data = App._attNormalizeWeekData({ services: [{ key: 'sunday_service', men: 2, date: '2020-01-01' }] }, '2026-09-27');
+  const byKey = Object.fromEntries(data.services.map(s => [s.key, s]));
+  assert.equal(byKey.digging_deep.date, '2026-09-22');
+  assert.equal(byKey.faith_clinic.date, '2026-09-24');
+  assert.equal(byKey.sunday_service.date, '2026-09-27', 'fixed dates are re-derived from the week');
+  assert.equal(byKey.sunday_school.date, '2026-09-27');
+  assert.deepEqual(App._attMissingRequired(data), ['Digging Deep', 'Faith Clinic']);
+});
+
+test('attendance period report lays weeks out like the paper form and averages Sunday attendance', () => {
+  const weeks = App._attWeeksInPeriod('2026-09-14', '2026-09-27').map((w, i) => ({
+    ...w,
+    record: {
+      status: i === 0 ? 'locked' : 'submitted',
+      data: { services: [
+        { key: 'digging_deep', men: 1, women: 0, children: 4, preacher: 'Bro. Agbu' },
+        { key: 'faith_clinic', noService: true, reason: 'Holiday' },
+        { key: 'sunday_service', men: 2, women: 4, children: i === 0 ? 7 : 11, firstTimers: 1 },
+        { key: 'sunday_school', men: 2, women: 3, children: 6 },
+        { key: 'house_fellowship', date: w.weekEnd, men: 3, women: 5, children: 2 },
+      ] },
+    },
+  }));
+  const r = App._attPeriodReport(weeks);
+  assert.equal(r.complete, true);
+  assert.equal(r.rows.length, 12, 'two weeks × Tue..Sun rows');
+  assert.deepEqual(r.rows.slice(0, 6).map(x => x.day), ['Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']);
+  const tue = r.rows[0];
+  assert.equal(tue.total, 5);
+  assert.equal(tue.preacher, 'Bro. Agbu');
+  assert.equal(r.rows[2].noService, true);
+  const sun = r.rows[5];
+  assert.equal(sun.total, 13);
+  assert.equal(sun.sundaySchool, 11);
+  assert.equal(sun.houseFellowship, 10);
+  assert.equal(sun.newGuests, 1);
+  assert.equal(r.sundayCount, 2);
+  assert.equal(r.sundayTotal, 13 + 17);
+  assert.equal(r.average, 15);
+  assert.equal(r.firstTimers, 2);
+  assert.deepEqual(r.portal[0].by.sunday_school, { men: 2, women: 3, children: 6, total: 11 });
+  assert.equal(r.portal[0].by.faith_clinic.total, 0);
+
+  weeks[1].record.status = 'draft';
+  assert.equal(App._attPeriodReport(weeks).complete, false);
+});
+
+test('further reports (monthly): rows come back in portal order, with first timers/converts auto-filled from the report', () => {
+  const report = { firstTimers: 4, newConverts: 2 };
+  const data = { births: 1, deaths: 0, marriages: null, fullPastors: 2 };
+  const rows = App._attFurtherRows(data, report);
+
+  assert.equal(rows.length, 17, 'all 17 portal-order rows are returned');
+  assert.deepEqual(rows.map(r => r.key), App._ATT_FURTHER.map(f => f.key), 'rows follow ATT_FURTHER portal order');
+
+  const byKey = Object.fromEntries(rows.map(r => [r.key, r]));
+  assert.equal(byKey.firstTimers.value, 4);
+  assert.equal(byKey.firstTimers.auto, true);
+  assert.equal(byKey.converts.value, 2);
+  assert.equal(byKey.converts.auto, true);
+  assert.equal(byKey.births.value, 1);
+  assert.equal(byKey.births.auto, false);
+  assert.equal(byKey.deaths.value, 0, 'a typed zero is kept as 0, not treated as blank');
+  assert.equal(byKey.marriages.value, null, 'an explicit null stays null');
+  assert.equal(byKey.baptisedMembers.value, null, 'a field never present in data is null');
+  assert.equal(byKey.fullPastors.value, 2);
+
+  // No data recorded yet at all: every typed field is null, auto fields still come from the report.
+  const empty = App._attFurtherRows(null, report);
+  assert.equal(empty.find(r => r.key === 'births').value, null);
+  assert.equal(empty.find(r => r.key === 'firstTimers').value, 4);
+});
+
+test('further reports: notEntered counts only the 15 typed fields, ignoring the auto ones', () => {
+  assert.equal(App._attFurtherNotEntered(null), 15, 'nothing typed yet: all 15 typed fields are missing');
+  assert.equal(
+    App._attFurtherNotEntered({ births: 1, deaths: 0, marriages: 2, fullPastors: 1, asstPastors: 1, deacons: 1,
+      unordainedMinisters: 1, newWorkers: 1, baptisedWorkers: 1, baptisedMembers: 1 }),
+    5, '10 of the 15 typed fields filled in leaves 5 not entered',
+  );
+});
