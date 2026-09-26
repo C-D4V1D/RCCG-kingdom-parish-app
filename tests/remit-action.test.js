@@ -76,6 +76,7 @@ test('confirm page: GET shows the button and never calls the webhook; POST sends
   assert.match(get.html, /Confirm Refresh/);
   assert.match(get.html, /Bro\. Divine/);
   assert.match(get.html, /October 2026/);
+  assert.match(get.html, /<th>Remittance<\/th><td>October 2026<\/td>/, 'other actions keep the Remittance label');
   assert.ok(!get.html.includes(KEY) && !get.html.includes('hooks.example'));
   assert.equal(get.res.headers.get('Cache-Control'), 'no-store');
 
@@ -104,6 +105,8 @@ test('confirm page: refresh_attendance renders "Refresh attendance for <Month YY
   assert.equal(get.res.status, 200);
   assert.equal(get.calls.length, 0);
   assert.match(get.html, /Refresh attendance for October 2026/);
+  assert.match(get.html, /<th>Attendance<\/th><td>October 2026<\/td>/, 'month row is labelled Attendance');
+  assert.ok(!get.html.includes('<th>Remittance</th>'));
 
   const post = await run(new Request('https://app.example/remit-action', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `t=${t}`,
@@ -112,5 +115,6 @@ test('confirm page: refresh_attendance renders "Refresh attendance for <Month YY
   assert.equal(post.calls.length, 1);
   const n = JSON.parse(post.calls[0].init.body);
   assert.deepEqual(Object.keys(n).sort(), ['action', 'clickedAt', 'event', 'month', 'parish', 'person', 'test']);
+  assert.match(post.html, /<th>Attendance<\/th><td>October 2026<\/td>/, 'result page uses the same label');
   assert.deepEqual({ ...n, clickedAt: 'x' }, { event: 'remit_action', action: 'refresh_attendance', parish: '602757', month: '2026-10', person: 'david', test: false, clickedAt: 'x' });
 });

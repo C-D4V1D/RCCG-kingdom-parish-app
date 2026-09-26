@@ -358,3 +358,69 @@ test('weeks before the gate date keep the old behaviour (no re-lock)', async () 
   assert.equal(r.body.status, 'submitted');
   assert.equal(r.body.incomeRef, '');
 });
+
+// ── Follow-ups to #318: reopen audit, visible re-lock failures, gate needs the report ──
+test('editing the Monthly report after week N is submitted writes an attendance_week_reopened audit entry', async () => {
+  const DB = await periodDB();
+  await call(DB, `attendance/${LAST}/submit`, 'POST', { by: 'Usher', data: full, further: { data: { births: 1 } } });
+  await call(DB, `attendance-further/${LAST}`, 'PUT', { periodStart: '2025-12-29', by: 'Sis. Ngozi', data: { births: 2 } });
+  const rows = (await DB.prepare(`SELECT type, detail, by_user, ts FROM audit_log WHERE type='attendance_week_reopened'`).all()).results;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].by_user, 'Sis. Ngozi');
+  assert.match(rows[0].detail, /Week 4 \(ending 2026-01-25\).*further_edited/);
+  assert.ok(rows[0].ts);
+  // A further edit while week N is still a draft is not a status change: no entry.
+  await call(DB, `attendance-further/${LAST}`, 'PUT', { by: 'Sis. Ngozi', data: { births: 3 } });
+  assert.equal((await DB.prepare(`SELECT COUNT(*) AS n FROM audit_log WHERE type='attendance_week_reopened'`).first()).n, 1);
+});
+
+test('submit reports relocked:true when it re-locks, and relock_error when the collection lookup fails', async () => {
+  const DB = await periodDB();
+  const first = await call(DB, `attendance/${WEEK}/submit`, 'POST', { by: 'Usher', data: full });
+  assert.equal(first.body.relocked, false);
+  assert.equal(first.body.relock_error, false);
+  await call(DB, 'income', 'POST', sunday(WEEK));
+  await call(DB, `attendance/${WEEK}/unlock`, 'POST', { userId: 'u1', pin: '0000' });
+  const again = await call(DB, `attendance/${WEEK}/submit`, 'POST', { by: 'Usher', data: full });
+  assert.equal(again.body.relocked, true);
+
+  // Make the income lookup fail: the submit still succeeds, the failure is logged and flagged.
+  await call(DB, `attendance/${WEEK}/unlock`, 'POST', { userId: 'u1', pin: '0000' });
+  const broken = { ...DB, prepare(sql) { if (/FROM income WHERE date>=\?/.test(sql)) throw new Error('D1_ERROR: boom'); return DB.prepare(sql); }, batch: s => DB.batch(s) };
+  const logged = [];
+  const realError = console.error;
+  console.error = (...a) => logged.push(a.join(' '));
+  try {
+    const r = await call(broken, `attendance/${WEEK}/submit`, 'POST', { by: 'Usher', data: full });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.status, 'submitted');
+    assert.equal(r.body.relocked, false);
+    assert.equal(r.body.relock_error, true);
+  } finally { console.error = realError; }
+  assert.ok(logged.some(l => l.includes(`week ending ${WEEK}`) && l.includes('parish 602757') && l.includes('boom')));
+});
+
+test('the cut-off Sunday collection also needs the Monthly report confirmed, not just week N submitted', async () => {
+  const DB = await periodDB();
+  await call(DB, `attendance/${LAST}/submit`, 'POST', { by: 'Usher', data: full, further: { data: {} } });
+  // e.g. a week submitted before the combined submit existed: the report was never confirmed.
+  await DB.prepare(`UPDATE attendance_further SET further_submitted_at='' WHERE period_end=?`).bind(LAST).run();
+  const blocked = await call(DB, 'income', 'POST', sunday(LAST));
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.body.code, 'attendance_not_submitted');
+  assert.match(blocked.body.error, /Week 4's attendance and the Monthly report must be submitted first/);
+
+  await call(DB, `attendance/${LAST}`, 'PUT', { by: 'Usher', data: full });
+  await call(DB, `attendance/${LAST}/submit`, 'POST', { by: 'Usher', data: full, further: { data: {} } });
+  assert.equal((await call(DB, 'income', 'POST', sunday(LAST))).status, 200);
+});
+
+test('a second sitting on an already-locked cut-off Sunday is not blocked by the Monthly report check', async () => {
+  const DB = await periodDB();
+  await call(DB, `attendance/${LAST}/submit`, 'POST', { by: 'Usher', data: full, further: { data: {} } });
+  assert.equal((await call(DB, 'income', 'POST', sunday(LAST))).status, 200);
+  await DB.prepare(`UPDATE attendance_further SET further_submitted_at='' WHERE period_end=?`).bind(LAST).run();
+  const second = await call(DB, 'income', 'POST', { ...sunday(LAST), membersTithe: 0, holyCommunionOffering: 300, totalCollection: 300 });
+  assert.equal(second.status, 200);
+  assert.equal(second.body.merged, true);
+});
