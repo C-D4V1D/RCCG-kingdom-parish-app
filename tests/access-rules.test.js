@@ -199,3 +199,38 @@ test('attendance period report lays weeks out like the paper form and averages S
   weeks[1].record.status = 'draft';
   assert.equal(App._attPeriodReport(weeks).complete, false);
 });
+
+test('further reports (monthly): rows come back in portal order, with first timers/converts auto-filled from the report', () => {
+  const report = { firstTimers: 4, newConverts: 2 };
+  const data = { births: 1, deaths: 0, marriages: null, fullPastors: 2 };
+  const rows = App._attFurtherRows(data, report);
+
+  assert.equal(rows.length, 17, 'all 17 portal-order rows are returned');
+  assert.deepEqual(rows.map(r => r.key), App._ATT_FURTHER.map(f => f.key), 'rows follow ATT_FURTHER portal order');
+
+  const byKey = Object.fromEntries(rows.map(r => [r.key, r]));
+  assert.equal(byKey.firstTimers.value, 4);
+  assert.equal(byKey.firstTimers.auto, true);
+  assert.equal(byKey.converts.value, 2);
+  assert.equal(byKey.converts.auto, true);
+  assert.equal(byKey.births.value, 1);
+  assert.equal(byKey.births.auto, false);
+  assert.equal(byKey.deaths.value, 0, 'a typed zero is kept as 0, not treated as blank');
+  assert.equal(byKey.marriages.value, null, 'an explicit null stays null');
+  assert.equal(byKey.baptisedMembers.value, null, 'a field never present in data is null');
+  assert.equal(byKey.fullPastors.value, 2);
+
+  // No data recorded yet at all: every typed field is null, auto fields still come from the report.
+  const empty = App._attFurtherRows(null, report);
+  assert.equal(empty.find(r => r.key === 'births').value, null);
+  assert.equal(empty.find(r => r.key === 'firstTimers').value, 4);
+});
+
+test('further reports: notEntered counts only the 15 typed fields, ignoring the auto ones', () => {
+  assert.equal(App._attFurtherNotEntered(null), 15, 'nothing typed yet: all 15 typed fields are missing');
+  assert.equal(
+    App._attFurtherNotEntered({ births: 1, deaths: 0, marriages: 2, fullPastors: 1, asstPastors: 1, deacons: 1,
+      unordainedMinisters: 1, newWorkers: 1, baptisedWorkers: 1, baptisedMembers: 1 }),
+    5, '10 of the 15 typed fields filled in leaves 5 not entered',
+  );
+});

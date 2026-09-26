@@ -238,6 +238,10 @@ details, and a pledge form that hands off to WhatsApp.
   Sunday collection cannot be saved until that week's attendance is submitted, and saving
   it locks the week (IT Admin can unlock). When every week is in, the page shows a table
   laid out like the RCCG Monthly General Progress Report sheet plus a portal summary.
+  The portal's monthly "Further Reports" (births, deaths, marriages, pastors, workers,
+  Let's Go A-Fishing, night vigil, house fellowship centres) are entered once per period on
+  the same page, with standing counts carried forward and first timers / converts added
+  up from the weeks.
 - **Dashboard** with dual period modes (RCCG remittance period / calendar month), opening
   and closing balances, income-split card, total church balance by location of funds,
   remittance due with countdown, available-fund-after-all-deductions with a health state,
@@ -527,7 +531,8 @@ Forty tables in Cloudflare D1. The main groups:
 - **Messaging** — `kpsc_reminders` (the SMS log), `kpsc_sms_templates`,
   `kpsc_scheduled_sms`, `kpsc_cron_runs`
 - **Attendance** — `attendance_weeks` (one row per Mon–Sun week, keyed by its Sunday;
-  draft → submitted → locked when that Sunday's collection is saved)
+  draft → submitted → locked when that Sunday's collection is saved) and
+  `attendance_further` (the monthly Further Reports figures, one row per period)
 - **System** — `users`, `settings`, `audit_log`, `notifications`, `email_ingest_log`,
   `church_bank_ingest_log`
 

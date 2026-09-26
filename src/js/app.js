@@ -723,6 +723,8 @@ const DB = {
   saveAttendance(weekEnd,d)    { return apiFetch(`attendance/${weekEnd}`,'PUT',d); },
   submitAttendance(weekEnd,d)  { return apiFetch(`attendance/${weekEnd}/submit`,'POST',d); },
   unlockAttendance(weekEnd,d)  { return apiFetch(`attendance/${weekEnd}/unlock`,'POST',d); },
+  getAttendanceFurther(end)    { return apiFetch(`attendance-further?end=${encodeURIComponent(end)}`); },
+  saveAttendanceFurther(end,d) { return apiFetch(`attendance-further/${end}`,'PUT',d); },
 
   getIncome()                  { return apiFetch('income'); },
   addIncome(d)                 { return apiFetch('income','POST',d); },
@@ -16724,6 +16726,60 @@ const ATT_REQUIRED = ATT_ORDER.filter(k=>ATT_SERVICES[k].required);
 const ATT_DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 const ATT_MAX = 100000;
 
+// "Further Reports (monthly)" — the RCCG portal's monthly figures, recorded once per
+// remittance period alongside the weekly attendance. Portal order (matches the portal's
+// Further Reports tab). firstTimers/converts are auto: totalled from the weeks, never typed.
+// Standing counts (people/centres that don't reset each period) carry forward from the
+// previous period until someone confirms or changes them.
+const ATT_FURTHER = [
+  { key:'births',                 label:'Births',                                   group:'family' },
+  { key:'deaths',                 label:'Deaths',                                   group:'family' },
+  { key:'marriages',              label:'Marriages',                                group:'family' },
+  { key:'firstTimers',            label:'First Timers',                             group:'auto', auto:true },
+  { key:'converts',               label:'Converts',                                 group:'auto', auto:true },
+  { key:'fullPastors',            label:'No of Full Pastors',                       group:'workers', standing:true },
+  { key:'asstPastors',            label:'Asst Pastors',                             group:'workers', standing:true },
+  { key:'deacons',                label:'Deacon / Deaconess',                       group:'workers', standing:true },
+  { key:'unordainedMinisters',    label:'Unordained Ministers',                     group:'workers', standing:true },
+  { key:'newWorkers',             label:'New Workers',                              group:'workers' },
+  { key:'baptisedWorkers',        label:'Baptised Workers',                         group:'workers' },
+  { key:'baptisedMembers',        label:'Baptised Members',                         group:'workers' },
+  { key:'fishingWorkers',         label:"Workers @ Monthly Let's Go A Fishing",     group:'fishing', formLabel:'Workers who went out' },
+  { key:'fishingSouls',           label:"Souls Won @ Monthly Let's Go A Fishing",   group:'fishing', formLabel:'Souls won' },
+  { key:'nightVigilAvg',          label:'Avg Att of Night Vigil',                   group:'special', formLabel:'Average attendance at Night Vigil' },
+  { key:'specialProgramsAvg',     label:'Avg Att of Other Special Programs',        group:'special', formLabel:'Average attendance at other special programmes' },
+  { key:'houseFellowshipCentres', label:'No of House Fellowship Centres',           group:'house', standing:true, formLabel:'Number of House Fellowship centres' },
+];
+const ATT_FURTHER_GROUPS = {
+  family:  'Family events',
+  workers: 'Ministers & workers',
+  fishing: "Let's Go A-Fishing (monthly)",
+  special: 'Special programmes',
+  house:   'House fellowship',
+  auto:    'From the weekly records (automatic)',
+};
+const ATT_FURTHER_TYPED = ATT_FURTHER.filter(f=>!f.auto);
+const ATT_FURTHER_STANDING = ATT_FURTHER.filter(f=>f.standing).map(f=>f.key);
+/** Portal-order rows for the report/table: {key, label, value, auto}. Pure — no DOM, no state. */
+function attFurtherRows(data, report){
+  const d = data || {};
+  return ATT_FURTHER.map(f=>{
+    let value;
+    if(f.auto){
+      value = (f.key==='firstTimers' ? report?.firstTimers : report?.newConverts);
+      value = value==null ? 0 : Number(value);
+    } else {
+      value = (d[f.key]===undefined || d[f.key]===null) ? null : Number(d[f.key]);
+    }
+    return { key:f.key, label:f.label, value, auto: !!f.auto };
+  });
+}
+/** How many of the 15 typed (non-auto) fields are still blank. */
+function attFurtherNotEntered(data){
+  const d = data || {};
+  return ATT_FURTHER_TYPED.filter(f=>d[f.key]===undefined || d[f.key]===null).length;
+}
+
 function attYmdAdd(ymd, days){
   const d = new Date(`${ymd}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
@@ -16841,7 +16897,8 @@ function attPeriodReport(weeks){
 
 // ── Page state ──
 function attState(){
-  if(!state.att) state.att = { year:null, month:null, from:'', to:'', weeks:[], records:{}, open:null, editing:{}, saveState:{}, timers:{} };
+  if(!state.att) state.att = { year:null, month:null, from:'', to:'', weeks:[], records:{}, open:null, editing:{}, saveState:{}, timers:{},
+    further:{ current:null, previous:null }, furtherOpen:false, furtherSaveState:'', furtherTimer:null };
   return state.att;
 }
 function attCanRecord(){ return canAction('attendance_record'); }
@@ -16850,6 +16907,10 @@ function attLocalKey(weekEnd){ return 'att_draft_'+weekEnd; }
 function attReadLocal(weekEnd){ try { return JSON.parse(localStorage.getItem(attLocalKey(weekEnd))||'null'); } catch(e){ return null; } }
 function attWriteLocal(weekEnd, data){ try { localStorage.setItem(attLocalKey(weekEnd), JSON.stringify({ data, ts:new Date().toISOString(), by:state.user?.name||'' })); } catch(e){} }
 function attClearLocal(weekEnd){ try { localStorage.removeItem(attLocalKey(weekEnd)); } catch(e){} }
+function attFurtherLocalKey(periodEnd){ return 'att_further_'+periodEnd; }
+function attFurtherReadLocal(periodEnd){ try { return JSON.parse(localStorage.getItem(attFurtherLocalKey(periodEnd))||'null'); } catch(e){ return null; } }
+function attFurtherWriteLocal(periodEnd, data){ try { localStorage.setItem(attFurtherLocalKey(periodEnd), JSON.stringify({ data, ts:new Date().toISOString(), by:state.user?.name||'' })); } catch(e){} }
+function attFurtherClearLocal(periodEnd){ try { localStorage.removeItem(attFurtherLocalKey(periodEnd)); } catch(e){} }
 
 async function attLoadPeriod(){
   const st = attState();
@@ -16872,6 +16933,21 @@ async function attLoadPeriod(){
   const list = await DB.getAttendance(attYmdAdd(range.from,-6), attYmdAdd(range.to,6));
   st.records = {};
   (list||[]).forEach(r=>{ st.records[r.weekEnd] = r; });
+  try { st.further = await DB.getAttendanceFurther(st.to) || { current:null, previous:null }; }
+  catch(e){ st.further = { current:null, previous:null }; }
+  // Bring back any further-report figures typed on this phone that never reached the server.
+  {
+    const local = attFurtherReadLocal(st.to);
+    const cur = st.further.current;
+    if(local && attCanRecord()){
+      if(!cur || !cur.updatedAt || local.ts > cur.updatedAt){
+        st.further.current = { ...(cur||{ periodEnd:st.to, periodStart:st.from }), data: local.data, updatedBy:'', updatedAt:'', _unsynced:true };
+        attFurtherScheduleSave(400);
+      } else {
+        attFurtherClearLocal(st.to);
+      }
+    }
+  }
   // Bring back anything typed on this phone that never reached the server.
   const today = attToday();
   st.weeks.forEach(w=>{
@@ -16974,6 +17050,7 @@ function attPageHtml(){
     </div>
     ${st.weeks.length ? '' : '<div class="card"><p>No Sundays fall in this period.</p></div>'}
     ${[...st.weeks].reverse().map(w=>attWeekCardHtml(w)).join('')}
+    ${attFurtherCardHtml()}
     <div id="attReportWrap">
       ${report.complete ? attReportHtml(report) : st.weeks.length ? `<div class="att-report-wait">📋 The report for the paper form appears here once all ${st.weeks.length} weeks are submitted. <b>${left} week${left===1?'':'s'} left.</b></div>` : ''}
     </div>
@@ -17081,7 +17158,7 @@ function attServiceCardHtml(w, s, i){
     <div class="att-sum" ${s.noService?'hidden':''} id="${id}_sumrow"><span>Total</span><b id="${id}_sum">${attServiceTotal(s)}</b></div>
     ${s.key==='sunday_school' || s.noService ? '' : `
     <div class="att-extra" id="${id}_extra">
-      <input class="form-input att-txt att-full" data-w="${w.weekEnd}" data-i="${i}" data-f="preacher" placeholder="Preacher (e.g. Bro. Odili)" value="${esc(s.preacher||'')}" maxlength="80" />
+      <input class="form-input att-txt att-full" data-w="${w.weekEnd}" data-i="${i}" data-f="preacher" placeholder="Preacher (e.g. Pst. Henry)" value="${esc(s.preacher||'')}" maxlength="80" />
       <label>New converts<input class="form-input att-small" type="text" inputmode="numeric" pattern="[0-9]*" data-w="${w.weekEnd}" data-i="${i}" data-f="newConverts" value="${attCount(s.newConverts)||''}" placeholder="0" /></label>
       <label>First timers / guests<input class="form-input att-small" type="text" inputmode="numeric" pattern="[0-9]*" data-w="${w.weekEnd}" data-i="${i}" data-f="firstTimers" value="${attCount(s.firstTimers)||''}" placeholder="0" /></label>
     </div>`}
@@ -17110,14 +17187,168 @@ function attReadOnlyHtml(w, data, rec){
     </div>`;
 }
 
+// ── Further reports (monthly) ──
+/** Standing keys carry forward from the previous period until confirmed/changed this period. */
+function attFurtherCarryValue(f, st){
+  const cur = st.further?.current?.data || {};
+  if(cur[f.key]!=null) return { value: cur[f.key], carried:false };
+  if(f.standing){
+    const prev = st.further?.previous?.data || {};
+    if(prev[f.key]!=null) return { value: prev[f.key], carried:true };
+  }
+  return { value: null, carried:false };
+}
+function attFurtherFilledCount(){
+  const data = attState().further?.current?.data || {};
+  return ATT_FURTHER_TYPED.filter(f=>data[f.key]!=null).length;
+}
+function attFurtherHasKeepable(st){
+  const cd = st.further?.current?.data || {};
+  const pd = st.further?.previous?.data || {};
+  return !!st.further?.previous && ATT_FURTHER_STANDING.some(k=>cd[k]==null && pd[k]!=null);
+}
+function attFurtherSublineText(){
+  const st = attState();
+  const cur = st.further?.current;
+  const filled = attFurtherFilledCount();
+  const saved = cur?.updatedBy ? ` · saved by ${cur.updatedBy}${cur.updatedAt ? `, ${fmtTime(cur.updatedAt)}` : ''}` : '';
+  return `${filled} of ${ATT_FURTHER_TYPED.length} filled${saved}`;
+}
+function attFurtherGroupHtml(group, canEdit){
+  const st = attState();
+  const fields = ATT_FURTHER_TYPED.filter(f=>f.group===group);
+  return `
+  <div class="att-fr-group">
+    <h5 class="att-fr-gh">${esc(ATT_FURTHER_GROUPS[group])}</h5>
+    <div class="att-fr-list">
+      ${fields.map(f=>{
+        const { value, carried } = attFurtherCarryValue(f, st);
+        const label = f.formLabel || f.label;
+        if(!canEdit) return `<div class="att-fr-row"><span>${esc(label)}</span><b>${value==null?'—':value}</b></div>`;
+        return `<label class="att-fr-row">
+          <span>${esc(label)}${carried?`<small class="att-fr-hint">from last month — change if different</small>`:''}</span>
+          <input class="form-input att-fr-in" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-fr="${f.key}" value="${value==null?'':value}" placeholder="—" />
+        </label>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+function attFurtherAutoGroupHtml(){
+  const st = attState();
+  const report = attPeriodReport(st.weeks.map(w=>({ ...w, record: st.records[w.weekEnd] })));
+  return `
+  <div class="att-fr-group att-fr-auto">
+    <h5 class="att-fr-gh">${esc(ATT_FURTHER_GROUPS.auto)}</h5>
+    <div class="att-fr-list">
+      <div class="att-fr-row"><span>First Timers</span><b>${report.firstTimers}</b></div>
+      <div class="att-fr-row"><span>Converts</span><b>${report.newConverts}</b></div>
+    </div>
+    <small class="att-fr-note">added up from the weeks</small>
+  </div>`;
+}
+function attFurtherCardHtml(){
+  const st = attState();
+  const open = !!st.furtherOpen;
+  const canEdit = attCanRecord();
+  const cur = st.further?.current;
+  const saveState = st.furtherSaveState || (cur?._unsynced ? 'offline' : cur?.updatedAt ? 'saved' : '');
+  const groups = [...new Set(ATT_FURTHER_TYPED.map(f=>f.group))];
+  const keepable = canEdit && attFurtherHasKeepable(st);
+  return `
+  <div class="att-fr ${open?'open':''}">
+    <button class="att-fr-h" onclick="App.attToggleFurther()" aria-expanded="${open}">
+      <span>📋 Further reports (monthly)</span>
+      <small>${esc(attFurtherSublineText())}</small>
+    </button>
+    ${open ? `<div class="att-fr-b">
+      ${canEdit ? '' : '<div class="att-note">Read-only — you don\'t have permission to record this.</div>'}
+      ${keepable ? `<button type="button" class="btn btn-sm" onclick="App.attKeepFurther()">Keep last month's numbers</button>` : ''}
+      ${groups.map(g=>attFurtherGroupHtml(g, canEdit)).join('')}
+      ${attFurtherAutoGroupHtml()}
+      ${canEdit ? `<div class="att-fr-save" id="attsave_further" aria-live="polite">${attSaveLabel(saveState, cur)}</div>` : ''}
+    </div>` : ''}
+  </div>`;
+}
+function attRerenderFurther(){
+  const el = document.querySelector('.att-fr');
+  if(!el) return;
+  el.outerHTML = attFurtherCardHtml();
+}
+function attToggleFurther(){
+  const st = attState();
+  st.furtherOpen = !st.furtherOpen;
+  attRerenderFurther();
+}
+async function attKeepFurther(){
+  const st = attState();
+  if(!attFurtherHasKeepable(st)) return;
+  const prevData = st.further.previous?.data || {};
+  if(!st.further.current) st.further.current = { periodEnd: st.to, periodStart: st.from, data:{} };
+  if(!st.further.current.data) st.further.current.data = {};
+  const data = st.further.current.data;
+  ATT_FURTHER_STANDING.forEach(k=>{ if(data[k]==null && prevData[k]!=null) data[k] = prevData[k]; });
+  attFurtherWriteLocal(st.to, data);
+  attFurtherSetSave('saving');
+  attRerenderFurther();
+  await attFurtherFlush();
+}
+function attFurtherOnField(el){
+  const key = el.getAttribute('data-fr');
+  if(!key) return;
+  const clean = el.value.replace(/\D/g,'').slice(0,7);
+  if(clean !== el.value) el.value = clean;
+  const st = attState();
+  if(!st.further) st.further = { current:null, previous:null };
+  if(!st.further.current) st.further.current = { periodEnd: st.to, periodStart: st.from, data:{} };
+  if(!st.further.current.data) st.further.current.data = {};
+  st.further.current.data[key] = clean==='' ? null : attCount(clean);
+  attFurtherChanged();
+}
+/** Refresh the "N of 15 filled" subline in place (no full re-render, so the keyboard stays open) and autosave. */
+function attFurtherChanged(){
+  const st = attState();
+  attFurtherWriteLocal(st.to, st.further.current.data);
+  attFurtherSetSave('saving');
+  attFurtherScheduleSave(1500);
+  const sub = document.querySelector('.att-fr-h small');
+  if(sub) sub.textContent = attFurtherSublineText();
+}
+function attFurtherSetSave(s){
+  attState().furtherSaveState = s;
+  const el = document.getElementById('attsave_further');
+  if(el) el.textContent = attSaveLabel(s, attState().further?.current);
+}
+function attFurtherScheduleSave(delay){
+  const st = attState();
+  clearTimeout(st.furtherTimer);
+  st.furtherTimer = setTimeout(()=>attFurtherFlush(), delay);
+}
+async function attFurtherFlush(){
+  const st = attState();
+  clearTimeout(st.furtherTimer); st.furtherTimer = null;
+  const periodEnd = st.to;
+  const local = attFurtherReadLocal(periodEnd);
+  if(!local) return;
+  try {
+    const saved = await DB.saveAttendanceFurther(periodEnd, { periodStart: st.from, data: local.data, by: state.user?.name||'' });
+    const still = attFurtherReadLocal(periodEnd);
+    if(still && still.ts === local.ts) attFurtherClearLocal(periodEnd);
+    st.further.current = { ...saved, data: st.further.current?.data || saved.data };
+    attFurtherSetSave('saved');
+  } catch(e){
+    attFurtherSetSave(navigator.onLine===false ? 'offline' : 'error');
+    if(navigator.onLine!==false) attFurtherScheduleSave(15000);
+  }
+}
+
 // ── Editor events ──
 function attRecord(weekEnd){ return attState().records[weekEnd]; }
 function attBindEditor(){
   const root = document.querySelector('.att-page');
   if(!root || root._attBound) return;
   root._attBound = true;
-  root.addEventListener('focusin', e=>{ if(e.target.matches('.att-stp input, .att-small')) setTimeout(()=>{ try{ e.target.select(); }catch(_){} },0); });
-  root.addEventListener('input', e=>attOnField(e.target));
+  root.addEventListener('focusin', e=>{ if(e.target.matches('.att-stp input, .att-small, .att-fr-in')) setTimeout(()=>{ try{ e.target.select(); }catch(_){} },0); });
+  root.addEventListener('input', e=>{ if(e.target.hasAttribute('data-fr')) attFurtherOnField(e.target); else attOnField(e.target); });
   root.addEventListener('change', e=>{ if(e.target.matches('select[data-f], input[type=checkbox][data-f]')) attOnField(e.target); });
 }
 function attOnField(el){
@@ -17204,12 +17435,13 @@ async function attFlush(weekEnd){
 }
 function attFlushAll(){
   const st = state.att; if(!st) return Promise.resolve();
-  return Promise.all(Object.keys(st.timers||{}).map(k=>attFlush(k)));
+  return Promise.all([...Object.keys(st.timers||{}).map(k=>attFlush(k)), attFurtherFlush()]);
 }
 if(typeof window!=='undefined' && window.addEventListener){
   window.addEventListener('online', ()=>{
     const st = state.att; if(!st) return;
     Object.keys(st.records||{}).forEach(k=>{ if(attReadLocal(k)) attFlush(k); });
+    if(st.to && attFurtherReadLocal(st.to)) attFurtherFlush();
   });
   window.addEventListener('pagehide', attFlushAll);
   if(typeof document!=='undefined' && document.addEventListener){
@@ -17366,11 +17598,20 @@ function attReportHtml(report){
         ${portalRows.map(k=>{ const v=p.by[k]; return `<tr><td>${esc(ATT_SERVICES[k].label)}</td><td>${v.men}</td><td>${v.women}</td><td>${v.children}</td><td><b>${v.total}</b></td></tr>`; }).join('')}
         </tbody></table></div>`).join('')}
     </div>
-    <div class="att-foot-grid">
-      <div><small>First timers (period)</small><b>${report.firstTimers}</b></div>
-      <div><small>Converts (period)</small><b>${report.newConverts}</b></div>
-    </div>
+    ${attFurtherReportHtml(report)}
   </section>`;
+}
+function attFurtherReportHtml(report){
+  const st = attState();
+  const data = st.further?.current?.data;
+  const rows = attFurtherRows(data, report);
+  const notEntered = attFurtherNotEntered(data);
+  return `
+    <h4 class="att-sub-h">Further reports (monthly)</h4>
+    ${notEntered>0 ? `<div class="att-fr-warn">${notEntered} not entered — fill ${notEntered===1?'it':'them'} in Further reports above</div>` : ''}
+    <table class="att-fr-table"><tbody>
+      ${rows.map(r=>`<tr><td>${esc(r.label)}</td><td class="${r.value==null?'att-fr-blank':''}">${r.value==null?'—':r.value}</td></tr>`).join('')}
+    </tbody></table>`;
 }
 
 function attPrint(){
@@ -17386,7 +17627,9 @@ function attendancePeriodReport(){
   const st = state.att;
   if(!st) return null;
   const r = attPeriodReport(st.weeks.map(w=>({ ...w, record: st.records[w.weekEnd] })));
-  return { period:{ from:st.from, to:st.to, year:st.year, month:st.month+1 }, ...r };
+  const further = {};
+  attFurtherRows(st.further?.current?.data, r).forEach(row=>{ further[row.key] = row.value; });
+  return { period:{ from:st.from, to:st.to, year:st.year, month:st.month+1 }, ...r, further };
 }
 
 // ── Sunday collection form: attendance panel + autosave ──
@@ -17543,6 +17786,7 @@ return {
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   attShiftPeriod, attOpenWeek, attAddService, attRemoveService, attStep, attConfirmSubmit, attSubmit, attEditWeek,
   attUnlockPrompt, attUnlock, attBackToCollection, refreshIncomeAttendance, incGoToAttendance, incDiscardDraft,
+  attToggleFurther, attKeepFurther,
   attendancePeriodReport, attPrint,
   onMonthChange, setIncomeTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, openBudgetBreakdown, generateBudget, rebuildBudgetPlan, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, checkBudgetAfford, toggleBudgetKnownBillsEditor, budgetKnownBillAdd, budgetKnownBillRemove, budgetKnownBillsUseSuggestion, saveBudgetKnownBills, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
@@ -17612,6 +17856,9 @@ return {
   _attMissingRequired: attMissingRequired,
   _attNormalizeWeekData: attNormalizeWeekData,
   _attWeekSummary: attWeekSummary,
+  _attFurtherRows: attFurtherRows,
+  _attFurtherNotEntered: attFurtherNotEntered,
+  _ATT_FURTHER: ATT_FURTHER,
   _satelliteHeldDisplay: satelliteHeldDisplay,
   _SATELLITE_FUND_PURPOSES: SATELLITE_FUND_PURPOSES,
   _BUILTIN_INCOME_TYPES: BUILTIN_INCOME_TYPES,
