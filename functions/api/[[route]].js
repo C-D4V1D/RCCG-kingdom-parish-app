@@ -1615,6 +1615,15 @@ async function saveAttendanceDraft(DB, weekEnd, body) {
     await DB.prepare(
       `UPDATE attendance_weeks SET data=?, status='draft', updated_by=?, updated_at=?, submitted_by='', submitted_at='' WHERE week_end=?`
     ).bind(data, by, now, weekEnd).run();
+    // The last week and the Monthly report are submitted together, so reopening one
+    // reopens the other. Only checked on the submitted → draft step, not every autosave.
+    if (existing.status === 'submitted') {
+      const last = attendanceLastWeekPeriod(await readRemCutoffSettings(DB), weekEnd);
+      if (last) {
+        await DB.prepare(`UPDATE attendance_further SET further_submitted_by='', further_submitted_at='' WHERE period_end=?`)
+          .bind(last.periodEnd).run();
+      }
+    }
   } else {
     await DB.prepare(
       `INSERT INTO attendance_weeks (id,week_end,week_start,status,data,updated_by,updated_at) VALUES (?,?,?,?,?,?,?)`
@@ -1623,27 +1632,117 @@ async function saveAttendanceDraft(DB, weekEnd, body) {
   return ok(publicAttendanceWeek(await getAttendanceRow(DB, weekEnd)));
 }
 
+/**
+ * The last week of a remittance period is the Mon–Sun week whose Sunday is the last one
+ * on/before the period's cut-off date (the cut-off is normally that Sunday itself). It is
+ * submitted together with the period's Monthly report. Returns the period plus the week's
+ * number in it ({ periodStart, periodEnd, weekNo }), or null for any other week.
+ */
+function attendanceLastWeekPeriod(settings, weekEnd) {
+  for (let off = 0; off < 7; off++) {
+    const period = remCutoffPeriodForDate(settings, ymdAddDays(weekEnd, off));
+    if (!period) continue;
+    const firstSunday = attendanceWeekEnd(period.periodStart);
+    const weekNo = Math.round((Date.parse(`${weekEnd}T00:00:00Z`) - Date.parse(`${firstSunday}T00:00:00Z`)) / (7 * 86400000)) + 1;
+    return { ...period, weekNo };
+  }
+  return null;
+}
+
+/** The Sunday on/before `ymd` — the last week of a period that ends on `ymd`. */
+function attendanceSundayOnOrBefore(ymd) {
+  return ymdAddDays(ymd, -new Date(`${ymd}T00:00:00Z`).getUTCDay());
+}
+
+function attendanceConflict(error, code, extra = {}) {
+  return new Response(JSON.stringify({ error, code, ...extra }), { status: 409, headers: CORS_HEADERS });
+}
+
+function auditStatement(DB, type, detail, by) {
+  return DB.prepare(`INSERT INTO audit_log (id,type,detail,by_user,ts) VALUES (?,?,?,?,?)`)
+    .bind(newId('A'), type, detail, by || 'System', new Date().toISOString());
+}
+
+/**
+ * The Sunday collection already saved for this week, if the attendance gate covers it
+ * (collections dated on/after `attendanceGateFrom`). A week re-submitted after an IT
+ * Admin unlock locks straight away against it — locking otherwise only happens when the
+ * collection is saved, which has already happened. Best-effort: null on any error.
+ */
+async function attendanceWeekCollection(DB, weekEnd) {
+  try {
+    const gateFrom = (await getSettingValue(DB, 'attendanceGateFrom')).replace(/^"|"$/g, '');
+    if (!isYmd(gateFrom) || weekEnd < gateFrom) return null;
+    const from = ymdAddDays(weekEnd, -6) > gateFrom ? ymdAddDays(weekEnd, -6) : gateFrom;
+    return await DB.prepare(
+      `SELECT id, recorded_by FROM income WHERE date>=? AND date<=? AND (source='sunday_collection' OR source IS NULL OR source='') ORDER BY created_at ASC LIMIT 1`
+    ).bind(from, weekEnd).first();
+  } catch { return null; }
+}
+
 async function submitAttendanceWeek(DB, weekEnd, body) {
   const bad = attendanceWeekGuard(weekEnd);
   if (bad) return bad;
   const by = attendanceText(body?.by, 80);
   if (!by) return err('Recorder name is required', 400);
-  // Save the latest figures first (the submit button may beat the autosave debounce).
-  if (body?.data) {
-    const saved = await saveAttendanceDraft(DB, weekEnd, body);
-    if (saved.status !== 200) return saved;
+  const existing = await getAttendanceRow(DB, weekEnd);
+  if (existing?.status === 'locked') return err('This week is already locked', 409);
+
+  // The last week of a period goes in with the Monthly report, in the same request —
+  // old app versions that submit it on its own are refused with a plain message.
+  const last = attendanceLastWeekPeriod(await readRemCutoffSettings(DB), weekEnd);
+  const further = body?.further && typeof body.further === 'object' ? body.further : null;
+  if (last && !further) {
+    return attendanceConflict(
+      `Week ${last.weekNo} is the last week of the month. Fill in the Monthly report on the Attendance page, then submit week ${last.weekNo} from there.`,
+      'further_not_submitted', { weekEnd, periodEnd: last.periodEnd, weekNo: last.weekNo });
   }
-  const row = await getAttendanceRow(DB, weekEnd);
-  if (!row) return err('Nothing has been recorded for this week yet', 400);
-  if (row.status === 'locked') return err('This week is already locked', 409);
-  const missing = attendanceMissingRequired(parseAttendanceJson(row.data));
+
+  // Use the figures sent with the submit (it may beat the autosave debounce), else the saved draft.
+  const data = body?.data ? sanitizeAttendanceData(body.data, weekEnd) : (existing ? parseAttendanceJson(existing.data) : null);
+  if (!data) return err('Nothing has been recorded for this week yet', 400);
+  const missing = attendanceMissingRequired(data);
   if (missing.length) return err(`Please fill in: ${missing.join(', ')}`, 400);
+
   const now = new Date().toISOString();
-  await DB.prepare(
-    `UPDATE attendance_weeks SET status='submitted', submitted_by=?, submitted_at=?, updated_by=?, updated_at=? WHERE week_end=?`
-  ).bind(by, now, by, now, weekEnd).run();
-  await createAuditEntry(DB, { type: 'attendance_submitted', detail: `Attendance submitted for week ending ${weekEnd}`, by });
-  return ok(publicAttendanceWeek(await getAttendanceRow(DB, weekEnd)));
+  const collection = await attendanceWeekCollection(DB, weekEnd);
+  // Week, Monthly report and audit rows are written in one batch so they can't get out of step.
+  const statements = [
+    DB.prepare(
+      `INSERT INTO attendance_weeks (id,week_end,week_start,status,data,updated_by,updated_at,submitted_by,submitted_at,locked_at,locked_by,income_ref)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(week_end) DO UPDATE SET status=excluded.status, data=excluded.data, updated_by=excluded.updated_by,
+         updated_at=excluded.updated_at, submitted_by=excluded.submitted_by, submitted_at=excluded.submitted_at,
+         locked_at=excluded.locked_at, locked_by=excluded.locked_by, income_ref=excluded.income_ref`
+    ).bind(existing?.id || newId('ATT-'), weekEnd, ymdAddDays(weekEnd, -6), collection ? 'locked' : 'submitted',
+      JSON.stringify(data), by, now, by, now,
+      collection ? now : '', collection ? attendanceText(collection.recorded_by || by, 80) : '', collection?.id || ''),
+    auditStatement(DB, 'attendance_submitted', `Attendance submitted for week ending ${weekEnd}`, by),
+  ];
+  if (last) {
+    const stored = await DB.prepare(`SELECT data FROM attendance_further WHERE period_end=?`).bind(last.periodEnd).first();
+    const merged = { ...(stored ? parseAttendanceJson(stored.data) : {}), ...sanitizeFurtherData(further.data) };
+    statements.push(
+      DB.prepare(
+        `INSERT INTO attendance_further (period_end,period_start,data,updated_by,updated_at,further_submitted_by,further_submitted_at)
+         VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT(period_end) DO UPDATE SET period_start=excluded.period_start, data=excluded.data, updated_by=excluded.updated_by,
+           updated_at=excluded.updated_at, further_submitted_by=excluded.further_submitted_by, further_submitted_at=excluded.further_submitted_at`
+      ).bind(last.periodEnd, last.periodStart, JSON.stringify(merged), by, now, by, now),
+      auditStatement(DB, 'attendance_further_submitted', `Monthly report submitted with week ${last.weekNo} for period ending ${last.periodEnd}`, by),
+    );
+  }
+  if (collection) {
+    statements.push(auditStatement(DB, 'attendance_relocked',
+      `Attendance for week ending ${weekEnd} locked again: its Sunday collection is already saved`, by));
+  }
+  await DB.batch(statements);
+
+  const out = publicAttendanceWeek(await getAttendanceRow(DB, weekEnd));
+  if (last) {
+    out.further = publicFurther(await DB.prepare(`SELECT * FROM attendance_further WHERE period_end=?`).bind(last.periodEnd).first());
+  }
+  return ok(out);
 }
 
 async function unlockAttendanceWeek(DB, weekEnd, body, request) {
@@ -1689,11 +1788,12 @@ async function attendanceGateWeek(DB, data) {
 async function checkAttendanceGate(DB, weekEnd) {
   const row = await getAttendanceRow(DB, weekEnd);
   if (row && (row.status === 'submitted' || row.status === 'locked')) return null;
-  return new Response(JSON.stringify({
-    error: `Attendance for the week ending ${weekEnd} has not been submitted. Record and submit it on the Attendance page first.`,
-    code: 'attendance_not_submitted',
-    weekEnd,
-  }), { status: 409, headers: CORS_HEADERS });
+  // The cut-off Sunday's week also carries the Monthly report — say so plainly.
+  const last = attendanceLastWeekPeriod(await readRemCutoffSettings(DB).catch(() => ({})), weekEnd);
+  return attendanceConflict(last
+    ? `Week ${last.weekNo}'s attendance and the Monthly report must be submitted first. Fill in the Monthly report on the Attendance page and submit week ${last.weekNo} from there.`
+    : `Attendance for the week ending ${weekEnd} has not been submitted. Record and submit it on the Attendance page first.`,
+    'attendance_not_submitted', last ? { weekEnd, periodEnd: last.periodEnd, weekNo: last.weekNo } : { weekEnd });
 }
 
 async function lockAttendanceWeek(DB, weekEnd, incomeId, by) {
@@ -1729,6 +1829,8 @@ function publicFurther(row) {
     data: parseAttendanceJson(row.data),
     updatedBy: row.updated_by || '',
     updatedAt: row.updated_at || '',
+    furtherSubmittedBy: row.further_submitted_by || '',
+    furtherSubmittedAt: row.further_submitted_at || '',
   };
 }
 
@@ -1746,13 +1848,33 @@ async function saveFurtherReport(DB, periodEnd, body) {
   const periodStart = isYmd(body?.periodStart) && body.periodStart <= periodEnd ? body.periodStart : '';
   const by = attendanceText(body?.by, 80);
   const now = new Date().toISOString();
+  // The Monthly report belongs with the period's last week: read-only once that week is
+  // locked, and editing it sends a submitted last week back to draft. The week row is
+  // one cheap lookup; the cut-off settings are only read when that week is submitted/locked.
+  const lastWeek = await getAttendanceRow(DB, attendanceSundayOnOrBefore(periodEnd));
+  let last = null;
+  if (lastWeek && (lastWeek.status === 'locked' || lastWeek.status === 'submitted')) {
+    last = attendanceLastWeekPeriod(await readRemCutoffSettings(DB), lastWeek.week_end);
+    if (last && last.periodEnd !== periodEnd) last = null;
+  }
+  if (last && lastWeek.status === 'locked') {
+    return attendanceConflict(
+      `The Monthly report is locked because week ${last.weekNo}'s Sunday collection has been saved. Ask the IT Administrator to unlock week ${last.weekNo} to change it.`,
+      'further_locked', { periodEnd, weekEnd: lastWeek.week_end, weekNo: last.weekNo });
+  }
   const existing = await DB.prepare(`SELECT * FROM attendance_further WHERE period_end=?`).bind(periodEnd).first();
   // Merge: keys present in the incoming payload overwrite the stored value; keys left out keep it.
   const merged = { ...(existing ? parseAttendanceJson(existing.data) : {}), ...sanitizeFurtherData(body?.data) };
   const data = JSON.stringify(merged);
-  if (existing) {
+  if (last) {
     await DB.prepare(
-      `UPDATE attendance_further SET period_start=?, data=?, updated_by=?, updated_at=? WHERE period_end=?`
+      `UPDATE attendance_weeks SET status='draft', submitted_by='', submitted_at='' WHERE week_end=? AND status='submitted'`
+    ).bind(lastWeek.week_end).run();
+  }
+  if (existing) {
+    // Any edit clears the submitted confirmation; it is set again when week N is submitted.
+    await DB.prepare(
+      `UPDATE attendance_further SET period_start=?, data=?, updated_by=?, updated_at=?, further_submitted_by='', further_submitted_at='' WHERE period_end=?`
     ).bind(periodStart, data, by, now, periodEnd).run();
   } else {
     await DB.prepare(
@@ -3386,6 +3508,9 @@ async function handleInit(DB) {
     `ALTER TABLE income ADD COLUMN custom_collections TEXT DEFAULT ''`,
     // Users: forced PIN change at first sign-in (new ushers / admin assistants get a default PIN)
     `ALTER TABLE users ADD COLUMN must_change_pin INTEGER DEFAULT 0`,
+    // Monthly report: who confirmed it (it is submitted together with the period's last week)
+    `ALTER TABLE attendance_further ADD COLUMN further_submitted_by TEXT DEFAULT ''`,
+    `ALTER TABLE attendance_further ADD COLUMN further_submitted_at TEXT DEFAULT ''`,
     // Expense columns
     `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
     `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
@@ -4150,6 +4275,16 @@ function cutoffDaysForYear(settings, year) {
  * the day after the previous month's cut-off (or the 1st of the month when that isn't
  * set) through the cut-off itself. Returns null when `date` is not a cut-off date.
  */
+/** The two settings rows that hold the remittance cut-off dates, parsed. */
+async function readRemCutoffSettings(DB) {
+  const { results } = await DB.prepare(
+    `SELECT key, value FROM settings WHERE key IN ('remCutoffDatesByYear','remCutoffDates')`
+  ).all();
+  const settings = {};
+  for (const row of (results || [])) settings[row.key] = safeJsonParse(row.value, null);
+  return settings;
+}
+
 function remCutoffPeriodForDate(settings, date) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(date || ''));
   if (!m) return null;
@@ -4169,7 +4304,7 @@ function remCutoffPeriodForDate(settings, date) {
 // shared with the /remit-action confirm page so both authenticate the same way.
 //
 // Each payload also carries signed one-tap links (see ../_lib/remit-action-token.js and
-// functions/remit-action.js): links.{david,divine}.{generate_rrr,refresh}. They are null
+// functions/remit-action.js): links.{david,divine}.{generate_rrr,refresh,refresh_attendance}. They are null
 // when REMIT_WEBHOOK_KEY is unset (nothing to sign with).
 
 /** Origin of the incoming request (e.g. https://app.example), or '' if it can't be read. */
@@ -4182,11 +4317,7 @@ async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '') {
   const saved = await result.clone().json().catch(() => null);
   if (!saved || !saved.id) return;
   const collectionDate = String(saved.date || data?.date || new Date().toISOString().split('T')[0]).slice(0, 10);
-  const { results } = await DB.prepare(
-    `SELECT key, value FROM settings WHERE key IN ('remCutoffDatesByYear','remCutoffDates')`
-  ).all();
-  const settings = {};
-  for (const row of (results || [])) settings[row.key] = safeJsonParse(row.value, null);
+  const settings = await readRemCutoffSettings(DB);
   const period = remCutoffPeriodForDate(settings, collectionDate);
   if (!period) return;
 

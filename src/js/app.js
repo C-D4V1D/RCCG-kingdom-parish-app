@@ -17044,6 +17044,29 @@ function attFurtherReadLocal(periodEnd){ try { return JSON.parse(localStorage.ge
 function attFurtherWriteLocal(periodEnd, data){ try { localStorage.setItem(attFurtherLocalKey(periodEnd), JSON.stringify({ data, ts:new Date().toISOString(), by:state.user?.name||'' })); } catch(e){} }
 function attFurtherClearLocal(periodEnd){ try { localStorage.removeItem(attFurtherLocalKey(periodEnd)); } catch(e){} }
 
+/**
+ * Mirrors the server's attendanceLastWeekPeriod(): the week whose Sunday is the last one
+ * on/before a configured cut-off date is the period's last week, submitted together with
+ * the Monthly report. Returns { periodEnd, weekNo } or null.
+ */
+function attCutoffInfoForWeek(settings, weekEnd){
+  for(let off=0; off<7; off++){
+    const d = attYmdAdd(weekEnd, off);
+    const y = Number(d.slice(0,4)), m = Number(d.slice(5,7))-1;
+    const cfg = getRemCutoffDates(settings, y);
+    if(!cfg || Number(cfg.year)!==y || Number(cfg.dates[m])!==Number(d.slice(8))) continue;
+    const from = computeRemPeriodDates(settings, [], y, m).from;
+    return { periodEnd: d, weekNo: attWeeksInPeriod(from, weekEnd).length };
+  }
+  return null;
+}
+function attIsLastWeek(weekEnd){ return !!weekEnd && attState().lastWeekEnd===weekEnd; }
+/** The Monthly report is read-only once the last week is locked by its Sunday collection. */
+function attFurtherLocked(){
+  const st = attState();
+  return !!st.lastWeekEnd && st.records[st.lastWeekEnd]?.status==='locked';
+}
+
 async function attLoadPeriod(){
   const st = attState();
   const [settings, rems] = await Promise.all([DB.getSettings(), DB.getRemittances()]);
@@ -17062,6 +17085,8 @@ async function attLoadPeriod(){
   }
   st.from = range.from; st.to = range.to;
   st.weeks = attWeeksInPeriod(range.from, range.to);
+  const lastW = st.weeks[st.weeks.length-1];
+  st.lastWeekEnd = lastW && attCutoffInfoForWeek(settings, lastW.weekEnd)?.periodEnd===range.to ? lastW.weekEnd : null;
   const list = await DB.getAttendance(attYmdAdd(range.from,-6), attYmdAdd(range.to,6));
   st.records = {};
   (list||[]).forEach(r=>{ st.records[r.weekEnd] = r; });
@@ -17240,7 +17265,9 @@ function attWeekBodyHtml(w){
       <div class="att-checks" id="attchecks_${w.weekEnd}">${attChecksHtml(data)}</div>
       <div class="att-foot-r"><span>Week total: <b id="atttotal_${w.weekEnd}">${attWeekSummary(data).total}</b> people</span>
         <span class="att-save" id="attsave_${w.weekEnd}" aria-live="polite">${attSaveLabel(saveState, rec)}</span></div>
-      <button class="btn btn-primary att-submit" id="attsubmit_${w.weekEnd}" ${missing.length?'disabled':''} onclick="App.attConfirmSubmit('${w.weekEnd}')">Submit week ${w.index}</button>
+      ${attIsLastWeek(w.weekEnd)
+        ? `<div class="att-note">This is the last week of the month. Fill in the Monthly report below, then submit week ${w.index} from there.</div>`
+        : `<button class="btn btn-primary att-submit" id="attsubmit_${w.weekEnd}" ${missing.length?'disabled':''} onclick="App.attConfirmSubmit('${w.weekEnd}')">Submit week ${w.index}</button>`}
     </div>`;
 }
 
@@ -17381,8 +17408,10 @@ function attFurtherAutoGroupHtml(){
 function attFurtherCardHtml(){
   const st = attState();
   const open = !!st.furtherOpen;
-  const canEdit = attCanRecord();
+  const locked = attFurtherLocked();
+  const canEdit = attCanRecord() && !locked;
   const cur = st.further?.current;
+  const lastW = st.weeks.find(w=>w.weekEnd===st.lastWeekEnd);
   const saveState = st.furtherSaveState || (cur?._unsynced ? 'offline' : cur?.updatedAt ? 'saved' : '');
   const groups = [...new Set(ATT_FURTHER_TYPED.map(f=>f.group))];
   const keepable = canEdit && attFurtherHasKeepable(st);
@@ -17393,13 +17422,97 @@ function attFurtherCardHtml(){
       <small>${esc(attFurtherSublineText())}</small>
     </button>
     ${open ? `<div class="att-fr-b">
-      ${canEdit ? '' : '<div class="att-note">Read-only — you don\'t have permission to record this.</div>'}
+      ${locked ? `<div class="att-note">Read-only — week ${lastW?.index||''}'s Sunday collection has been saved. Ask the IT Administrator to unlock week ${lastW?.index||''} to change it.</div>`
+        : canEdit ? '' : '<div class="att-note">Read-only — you don\'t have permission to record this.</div>'}
       ${keepable ? `<button type="button" class="btn btn-sm" onclick="App.attKeepFurther()">Keep last month's numbers</button>` : ''}
       ${groups.map(g=>attFurtherGroupHtml(g, canEdit)).join('')}
       ${attFurtherAutoGroupHtml()}
       ${canEdit ? `<div class="att-fr-save" id="attsave_further" aria-live="polite">${attSaveLabel(saveState, cur)}</div>` : ''}
+      <div id="att_fr_submit">${attFurtherSubmitHtml()}</div>
     </div>` : ''}
   </div>`;
+}
+/** Bottom of the Monthly report: "Submit week N and monthly report", or who submitted it. */
+function attFurtherSubmitHtml(){
+  const st = attState();
+  const w = st.weeks.find(x=>x.weekEnd===st.lastWeekEnd);
+  if(!w) return '';
+  const rec = st.records[w.weekEnd];
+  const cur = st.further?.current;
+  const stamp = cur?.furtherSubmittedBy && ['submitted','locked'].includes(rec?.status)
+    ? `<div class="att-stamp">✓ Submitted with week ${w.index} by <b>${esc(cur.furtherSubmittedBy)}</b>${cur.furtherSubmittedAt?` · ${esc(attDayLabel(ymdLocal(new Date(cur.furtherSubmittedAt))))}, ${esc(fmtTime(cur.furtherSubmittedAt))}`:''}</div>` : '';
+  if(stamp || !attCanRecord() || attFurtherLocked() || w.weekStart > attToday()) return stamp;
+  const data = attNormalizeWeekData(rec?.data, w.weekEnd);
+  const missing = attMissingRequired(data);
+  return `
+    <div class="att-fr-submit">
+      <div class="att-checks">${attChecksHtml(data)}</div>
+      ${missing.length ? `<small class="att-fr-note">Complete week ${w.index}'s required services first.</small>` : ''}
+      <button class="btn btn-primary att-submit" ${missing.length?'disabled':''} onclick="App.attConfirmSubmitFurther()">Submit week ${w.index} and monthly report</button>
+    </div>`;
+}
+function attRefreshFurtherSubmit(){
+  const el = document.getElementById('att_fr_submit');
+  if(el) el.innerHTML = attFurtherSubmitHtml();
+}
+/** Everything shown in the Monthly report, including standing counts carried from last month. */
+function attFurtherSubmitData(){
+  const st = attState();
+  const out = {};
+  ATT_FURTHER_TYPED.forEach(f=>{ out[f.key] = attFurtherCarryValue(f, st).value; });
+  return out;
+}
+function attConfirmSubmitFurther(){
+  const st = attState();
+  const w = st.weeks.find(x=>x.weekEnd===st.lastWeekEnd);
+  const rec = w && attRecord(w.weekEnd);
+  if(!w || !rec) return;
+  const missing = attMissingRequired(attNormalizeWeekData(rec.data, w.weekEnd));
+  if(missing.length){ showAlert(`Please fill in: ${missing.join(', ')}`,'danger'); return; }
+  const data = attFurtherSubmitData();
+  const lines = rec.data.services.filter(s=>s.noService || attServiceTotal(s)>0).map(s=>s.noService
+    ? `<li><b>${esc(attServiceLabel(s))}</b> (${esc(attDayLabel(s.date))}): no service held — ${esc(s.reason)}</li>`
+    : `<li><b>${esc(attServiceLabel(s))}</b>${s.date?` (${esc(attDayLabel(s.date))})`:''}: ${attServiceTotal(s)} people — ${attCount(s.men)} men, ${attCount(s.women)} women, ${attCount(s.children)} children</li>`).join('');
+  const filled = ATT_FURTHER_TYPED.filter(f=>data[f.key]!=null);
+  const blank = ATT_FURTHER_TYPED.length - filled.length;
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">Submit Week ${w.index} and the Monthly report?</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:8px">${esc(attDayLabel(w.weekStart))} – ${esc(attDayLabel(w.weekEnd))}. Please check the numbers:</p>
+    <ul class="att-confirm">${lines}</ul>
+    <p style="font-size:13px;font-weight:600;margin:10px 0 4px">Monthly report</p>
+    <ul class="att-confirm">${filled.map(f=>`<li>${esc(f.formLabel||f.label)}: <b>${data[f.key]}</b></li>`).join('') || '<li>No figures entered</li>'}</ul>
+    ${blank ? `<p style="font-size:12px;color:var(--text3)">${blank} left blank.</p>` : ''}
+    <p style="font-size:12px;color:var(--text3);margin-top:10px">It will be recorded as submitted by <b>${esc(state.user?.name||'')}</b>, with today's date and time.</p>
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Go back</button><button class="btn btn-primary" onclick="App.attSubmitFurther(this)">Yes, submit</button></div>`);
+}
+async function attSubmitFurther(btn=null){
+  const st = attState();
+  const weekEnd = st.lastWeekEnd;
+  const rec = weekEnd && attRecord(weekEnd);
+  if(!rec) return;
+  clearTimeout(st.timers[weekEnd]);
+  clearTimeout(st.furtherTimer); st.furtherTimer = null;
+  const restore = setBtnLoading(btn, 'Submitting…');
+  try {
+    const periodEnd = st.to;
+    const data = attFurtherSubmitData();
+    const saved = await DB.submitAttendance(weekEnd, { data: rec.data, by: state.user?.name||'', further: { data } });
+    attClearLocal(weekEnd);
+    attFurtherClearLocal(periodEnd);
+    const { further, ...week } = saved;
+    st.records[weekEnd] = week;
+    if(further) st.further.current = further;
+    delete st.editing[weekEnd];
+    st.saveState[weekEnd] = 'saved';
+    st.furtherSaveState = 'saved';
+    closeModal();
+    await renderAttendance();
+    showAlert('Week and monthly report submitted. Thank you!','success');
+  } catch(e){
+    restore();
+    showAlert(e?.message || 'Could not submit. Your figures are saved on this phone — try again when you have network.','danger');
+  }
 }
 function attRerenderFurther(){
   const el = document.querySelector('.att-fr');
@@ -17421,6 +17534,7 @@ async function attKeepFurther(){
   ATT_FURTHER_STANDING.forEach(k=>{ if(data[k]==null && prevData[k]!=null) data[k] = prevData[k]; });
   attFurtherWriteLocal(st.to, data);
   attFurtherSetSave('saving');
+  attReopenLastWeek();
   attRerenderFurther();
   await attFurtherFlush();
 }
@@ -17436,10 +17550,27 @@ function attFurtherOnField(el){
   st.further.current.data[key] = clean==='' ? null : attCount(clean);
   attFurtherChanged();
 }
+/**
+ * The last week and the Monthly report are submitted together, so editing either one
+ * sends a submitted last week back to draft (the server does the same on save).
+ */
+function attReopenLastWeek(rerenderWeek=true){
+  const st = attState();
+  const rec = st.lastWeekEnd && st.records[st.lastWeekEnd];
+  if(st.further?.current?.furtherSubmittedBy){ st.further.current.furtherSubmittedBy = ''; st.further.current.furtherSubmittedAt = ''; }
+  if(rec?.status==='submitted'){
+    rec.status = 'draft'; rec.submittedBy = ''; rec.submittedAt = '';
+    st.editing[st.lastWeekEnd] = true;
+    // Typing in the week itself must not re-render it (that would close the keyboard).
+    if(rerenderWeek) attRerenderWeek(st.lastWeekEnd);
+  }
+  attRefreshFurtherSubmit();
+}
 /** Refresh the "N of 15 filled" subline in place (no full re-render, so the keyboard stays open) and autosave. */
 function attFurtherChanged(){
   const st = attState();
   attFurtherWriteLocal(st.to, st.further.current.data);
+  attReopenLastWeek();
   attFurtherSetSave('saving');
   attFurtherScheduleSave(1500);
   const sub = document.querySelector('.att-fr-h small');
@@ -17468,6 +17599,8 @@ async function attFurtherFlush(){
     st.further.current = { ...saved, data: st.further.current?.data || saved.data };
     attFurtherSetSave('saved');
   } catch(e){
+    const msg = String(e?.message||'');
+    if(/locked/i.test(msg)){ attFurtherClearLocal(periodEnd); showAlert(msg,'danger'); renderAttendance(); return; }
     attFurtherSetSave(navigator.onLine===false ? 'offline' : 'error');
     if(navigator.onLine!==false) attFurtherScheduleSave(15000);
   }
@@ -17529,6 +17662,7 @@ function attChanged(weekEnd){
   const tot = document.getElementById(`atttotal_${weekEnd}`); if(tot) tot.textContent = attWeekSummary(data).total;
   const checks = document.getElementById(`attchecks_${weekEnd}`); if(checks) checks.innerHTML = attChecksHtml(data);
   const btn = document.getElementById(`attsubmit_${weekEnd}`); if(btn) btn.disabled = attMissingRequired(data).length>0;
+  if(attIsLastWeek(weekEnd)) attReopenLastWeek(false);
   if(rec.status==='none') rec.status = 'draft';
   attWriteLocal(weekEnd, data);
   attSetSave(weekEnd, 'saving');
@@ -17628,6 +17762,7 @@ async function attShiftPeriod(step){
 }
 
 function attConfirmSubmit(weekEnd){
+  if(attIsLastWeek(weekEnd)){ attState().furtherOpen = true; attRerenderFurther(); document.querySelector('.att-fr')?.scrollIntoView({behavior:'smooth',block:'start'}); return; }
   const st = attState();
   const w = st.weeks.find(x=>x.weekEnd===weekEnd);
   const rec = attRecord(weekEnd);
@@ -17826,10 +17961,11 @@ async function refreshIncomeAttendance(){
   if(document.getElementById('inc_date')?.value !== date) return; // date changed meanwhile
   const weekLabel = `${attDayLabel(attYmdAdd(weekEnd,-6),false)} – ${attDayLabel(weekEnd,false)}`;
   if(!rec || !['submitted','locked'].includes(rec.status)){
+    const lastInfo = attCutoffInfoForWeek(await DB.getSettings(), weekEnd);
     const data = attNormalizeWeekData(rec?.data, weekEnd);
     box.innerHTML = `
       <div class="att-inc att-inc-no">
-        <div class="t">⚠ Attendance for this week (${esc(weekLabel)}) hasn't been submitted</div>
+        <div class="t">⚠ ${lastInfo ? `Week ${lastInfo.weekNo}'s attendance and the Monthly report must be submitted first` : `Attendance for this week (${esc(weekLabel)}) hasn't been submitted`}</div>
         <div class="att-checks">${attChecksHtml(data)}</div>
         ${canAction('attendance_record') ? `<button class="btn btn-primary" type="button" onclick="App.incGoToAttendance('${weekEnd}')">Fill attendance now →</button>` : '<small>Ask an usher or the admin officer to submit it.</small>'}
         <small>Your figures above are saved. They'll be here when you come back.</small>
@@ -17942,7 +18078,7 @@ return {
   attShiftPeriod, attOpenWeek, attAddService, attRemoveService, attStep, attConfirmSubmit, attSubmit, attEditWeek,
   attUnlockPrompt, attUnlock, attBackToCollection, refreshIncomeAttendance, incGoToAttendance, incDiscardDraft,
   attToggleFurther, attKeepFurther,
-  attendancePeriodReport, attPrint,
+  attendancePeriodReport, attConfirmSubmitFurther, attSubmitFurther, attPrint,
   onMonthChange, setIncomeTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, openBudgetBreakdown, generateBudget, rebuildBudgetPlan, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, checkBudgetAfford, toggleBudgetKnownBillsEditor, budgetKnownBillAdd, budgetKnownBillRemove, budgetKnownBillsUseSuggestion, saveBudgetKnownBills, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
@@ -18013,6 +18149,7 @@ return {
   _getTestUser: () => state.user,
   _attWeeksInPeriod: attWeeksInPeriod,
   _attWeekEnd: attWeekEnd,
+  _attCutoffInfoForWeek: attCutoffInfoForWeek,
   _attPeriodReport: attPeriodReport,
   _attMissingRequired: attMissingRequired,
   _attNormalizeWeekData: attNormalizeWeekData,

@@ -31,13 +31,23 @@ test('token: sign/verify round trip; tamper, wrong key and expiry are rejected',
   assert.equal((await verifyRemitActionToken(KEY, bad)).reason, 'invalid');
 });
 
+test('token: refresh_attendance is a valid action; unknown actions are rejected', async () => {
+  const t = await signRemitActionToken(KEY, { ...base, action: 'refresh_attendance', exp: future() });
+  const ok = await verifyRemitActionToken(KEY, t);
+  assert.equal(ok.ok, true);
+  assert.equal(ok.payload.action, 'refresh_attendance');
+
+  const unknown = await signRemitActionToken(KEY, { ...base, action: 'delete_all', exp: future() });
+  assert.equal((await verifyRemitActionToken(KEY, unknown)).reason, 'invalid');
+});
+
 test('links: four personal links, exp 21 days after the cut-off, null without a key', async () => {
   const exp = remitActionExpForCutoff('2026-10-18');
   assert.equal(new Date(exp * 1000).toISOString(), '2026-11-08T23:59:59.000Z');
   const links = await buildRemitActionLinks({ REMIT_WEBHOOK_KEY: KEY }, 'https://app.example', { month: '2026-10', exp });
   assert.deepEqual(Object.keys(links), ['david', 'divine']);
   for (const person of ['david', 'divine']) {
-    for (const action of ['generate_rrr', 'refresh']) {
+    for (const action of ['generate_rrr', 'refresh', 'refresh_attendance']) {
       const u = new URL(links[person][action]);
       assert.equal(u.origin + u.pathname, 'https://app.example/remit-action');
       const v = await verifyRemitActionToken(KEY, u.searchParams.get('t'), Date.parse('2026-10-19T00:00:00Z'));
@@ -86,4 +96,21 @@ test('confirm page: GET shows the button and never calls the webhook; POST sends
   }), env);
   assert.equal(bad.res.status, 400);
   assert.equal(bad.calls.length, 0);
+});
+
+test('confirm page: refresh_attendance renders "Refresh attendance for <Month YYYY>" and forwards the right action', async () => {
+  const t = await signRemitActionToken(KEY, { ...base, person: 'david', action: 'refresh_attendance', exp: future() });
+  const get = await run(new Request(`https://app.example/remit-action?t=${t}`), env);
+  assert.equal(get.res.status, 200);
+  assert.equal(get.calls.length, 0);
+  assert.match(get.html, /Refresh attendance for October 2026/);
+
+  const post = await run(new Request('https://app.example/remit-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `t=${t}`,
+  }), env);
+  assert.equal(post.res.status, 200);
+  assert.equal(post.calls.length, 1);
+  const n = JSON.parse(post.calls[0].init.body);
+  assert.deepEqual(Object.keys(n).sort(), ['action', 'clickedAt', 'event', 'month', 'parish', 'person', 'test']);
+  assert.deepEqual({ ...n, clickedAt: 'x' }, { event: 'remit_action', action: 'refresh_attendance', parish: '602757', month: '2026-10', person: 'david', test: false, clickedAt: 'x' });
 });
