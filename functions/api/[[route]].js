@@ -1331,6 +1331,63 @@ async function lockAttendanceWeek(DB, weekEnd, incomeId, by) {
   }
 }
 
+// ── FURTHER REPORTS (monthly, one row per remittance period) ───────
+const ATTENDANCE_FURTHER_KEYS = ['births','deaths','marriages','fullPastors','asstPastors','deacons','unordainedMinisters','newWorkers','baptisedWorkers','baptisedMembers','fishingWorkers','fishingSouls','nightVigilAvg','specialProgramsAvg','houseFellowshipCentres'];
+
+/** Clean a client-supplied further-reports payload: known keys only, counts clamped, blanks -> null. */
+function sanitizeFurtherData(raw) {
+  const out = {};
+  for (const key of ATTENDANCE_FURTHER_KEYS) {
+    if (!raw || !(key in raw)) continue;
+    const v = raw[key];
+    out[key] = (v === null || v === '' || v === undefined) ? null : attendanceCount(v);
+  }
+  return out;
+}
+
+function publicFurther(row) {
+  if (!row) return null;
+  return {
+    periodEnd: row.period_end,
+    periodStart: row.period_start,
+    data: parseAttendanceJson(row.data),
+    updatedBy: row.updated_by || '',
+    updatedAt: row.updated_at || '',
+  };
+}
+
+async function getFurtherReport(DB, periodEnd) {
+  if (!isYmd(periodEnd)) return err('Period end must be a valid date (YYYY-MM-DD)', 400);
+  const current = await DB.prepare(`SELECT * FROM attendance_further WHERE period_end=?`).bind(periodEnd).first();
+  const previous = await DB.prepare(
+    `SELECT * FROM attendance_further WHERE period_end<? ORDER BY period_end DESC LIMIT 1`
+  ).bind(periodEnd).first();
+  return ok({ current: publicFurther(current), previous: publicFurther(previous) });
+}
+
+async function saveFurtherReport(DB, periodEnd, body) {
+  if (!isYmd(periodEnd)) return err('Period end must be a valid date (YYYY-MM-DD)', 400);
+  const periodStart = isYmd(body?.periodStart) && body.periodStart <= periodEnd ? body.periodStart : '';
+  const by = attendanceText(body?.by, 80);
+  const now = new Date().toISOString();
+  const existing = await DB.prepare(`SELECT * FROM attendance_further WHERE period_end=?`).bind(periodEnd).first();
+  // Merge: keys present in the incoming payload overwrite the stored value; keys left out keep it.
+  const merged = { ...(existing ? parseAttendanceJson(existing.data) : {}), ...sanitizeFurtherData(body?.data) };
+  const data = JSON.stringify(merged);
+  if (existing) {
+    await DB.prepare(
+      `UPDATE attendance_further SET period_start=?, data=?, updated_by=?, updated_at=? WHERE period_end=?`
+    ).bind(periodStart, data, by, now, periodEnd).run();
+  } else {
+    await DB.prepare(
+      `INSERT INTO attendance_further (period_end,period_start,data,updated_by,updated_at) VALUES (?,?,?,?,?)`
+    ).bind(periodEnd, periodStart, data, by, now).run();
+    await createAuditEntry(DB, { type: 'attendance_further_started', detail: `Further reports started for period ending ${periodEnd}`, by });
+  }
+  const row = await DB.prepare(`SELECT * FROM attendance_further WHERE period_end=?`).bind(periodEnd).first();
+  return ok(publicFurther(row));
+}
+
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
@@ -1591,6 +1648,12 @@ export async function onRequest(context) {
       if (method === 'PUT' && param && !action) return await saveAttendanceDraft(DB, param, body);
       if (method === 'POST' && param && action === 'submit') return await submitAttendanceWeek(DB, param, body);
       if (method === 'POST' && param && action === 'unlock') return await unlockAttendanceWeek(DB, param, body);
+    }
+
+    // ── /api/attendance-further ─────────────────────────────────
+    if (route === 'attendance-further') {
+      if (method === 'GET' && !param) return await getFurtherReport(DB, url.searchParams.get('end'));
+      if (method === 'PUT' && param) return await saveFurtherReport(DB, param, body);
     }
 
     // ── /api/expenses ──────────────────────────────────────────
@@ -2523,6 +2586,14 @@ async function handleInit(DB) {
       locked_by     TEXT DEFAULT '',
       income_ref    TEXT DEFAULT '',
       created_at    TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS attendance_further (
+      period_end   TEXT PRIMARY KEY,
+      period_start TEXT DEFAULT '',
+      data         TEXT DEFAULT '{}',
+      updated_by   TEXT DEFAULT '',
+      updated_at   TEXT DEFAULT '',
+      created_at   TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS settings (
       key   TEXT PRIMARY KEY,

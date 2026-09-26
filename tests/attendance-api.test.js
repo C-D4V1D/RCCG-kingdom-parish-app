@@ -141,3 +141,58 @@ test('new users with a default PIN must change it at first sign-in', async () =>
   const afterReset = await call(DB, 'auth/login', 'POST', { role: 'usher', pin: '4321', userId: created.body.id });
   assert.equal(afterReset.body.mustChangePin, true);
 });
+
+// ── Further reports (monthly) ─────────────────────────────────────
+
+test('further reports: PUT then GET, sanitization, and merge on partial update', async () => {
+  const DB = await freshDB();
+
+  const put1 = await call(DB, 'attendance-further/2026-01-31', 'PUT', {
+    by: 'Bro. Chidi',
+    periodStart: '2026-01-01',
+    data: { births: -5, deaths: 2.9, marriages: '', notAKey: 99 },
+  });
+  assert.equal(put1.status, 200);
+  assert.equal(put1.body.periodEnd, '2026-01-31');
+  assert.equal(put1.body.periodStart, '2026-01-01');
+  assert.equal(put1.body.data.births, 0);      // clamped, not negative
+  assert.equal(put1.body.data.deaths, 2);      // floored
+  assert.equal(put1.body.data.marriages, null); // blank -> null
+  assert.equal(put1.body.data.notAKey, undefined); // unknown key dropped
+  assert.equal(put1.body.updatedBy, 'Bro. Chidi');
+
+  const get1 = await call(DB, 'attendance-further?end=2026-01-31');
+  assert.equal(get1.status, 200);
+  assert.equal(get1.body.current.data.deaths, 2);
+  assert.equal(get1.body.previous, null); // nothing earlier yet
+
+  // Second PUT only touches births; deaths must survive from the earlier save.
+  const put2 = await call(DB, 'attendance-further/2026-01-31', 'PUT', { by: 'Sis. Ngozi', data: { births: 4 } });
+  assert.equal(put2.status, 200);
+  assert.equal(put2.body.data.births, 4);
+  assert.equal(put2.body.data.deaths, 2);
+
+  // The audit entry for "started" is written once, on first insert only.
+  const audit = await DB.prepare(`SELECT COUNT(*) AS n FROM audit_log WHERE type='attendance_further_started'`).first();
+  assert.equal(audit.n, 1);
+});
+
+test('further reports: GET returns the latest earlier period as "previous"', async () => {
+  const DB = await freshDB();
+  await call(DB, 'attendance-further/2025-12-31', 'PUT', { by: 'Usher', data: { births: 1 } });
+  await call(DB, 'attendance-further/2026-01-31', 'PUT', { by: 'Usher', data: { births: 2 } });
+
+  const get = await call(DB, 'attendance-further?end=2026-01-31');
+  assert.equal(get.status, 200);
+  assert.equal(get.body.current.data.births, 2);
+  assert.equal(get.body.previous.periodEnd, '2025-12-31');
+  assert.equal(get.body.previous.data.births, 1);
+});
+
+test('further reports: bad dates are rejected with 400', async () => {
+  const DB = await freshDB();
+  const badPut = await call(DB, 'attendance-further/not-a-date', 'PUT', { by: 'Usher', data: {} });
+  assert.equal(badPut.status, 400);
+  const badGet = await call(DB, 'attendance-further?end=not-a-date');
+  assert.equal(badGet.status, 400);
+});
