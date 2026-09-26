@@ -1110,6 +1110,227 @@ async function mergeDuplicateSundayCollections(DB) {
   }
 }
 
+// ── ATTENDANCE ───────────────────────────────────────────────────
+// One row per Mon–Sun week, keyed by its Sunday (week_end). The week's services live in a
+// JSON `data` column ({ services:[{ key, date, men, women, children, preacher, newConverts,
+// firstTimers, noService, reason }] }) so a new service type never needs an ALTER TABLE.
+// Totals are always derived, never stored. Lifecycle: draft → submitted → locked (locked
+// when that Sunday's collection is saved; only an IT Admin can unlock).
+const ATTENDANCE_SERVICE_KEYS = ['digging_deep', 'faith_clinic', 'sunday_service', 'sunday_school', 'house_fellowship', 'outreach', 'other'];
+// Tuesday Digging Deep, Thursday Faith Clinic and Sunday Service must be recorded (or
+// marked "no service held" with a reason) before a week can be submitted.
+const ATTENDANCE_REQUIRED = [
+  { key: 'digging_deep',   label: 'Digging Deep' },
+  { key: 'faith_clinic',   label: 'Faith Clinic' },
+  { key: 'sunday_service', label: 'Sunday Service' },
+];
+const ATTENDANCE_MAX_COUNT = 100000;
+
+function isYmd(s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')); }
+function ymdAddDays(ymd, days) {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+/** The Sunday that ends the Mon–Sun week containing `ymd`. */
+function attendanceWeekEnd(ymd) {
+  const dow = new Date(`${ymd}T00:00:00Z`).getUTCDay(); // 0 = Sunday
+  return ymdAddDays(ymd, dow === 0 ? 0 : 7 - dow);
+}
+function isSundayYmd(ymd) { return isYmd(ymd) && new Date(`${ymd}T00:00:00Z`).getUTCDay() === 0; }
+function todayWat() { return new Date(Date.now() + 3600_000).toISOString().slice(0, 10); }
+
+function attendanceCount(v) {
+  const n = Math.floor(Number(v) || 0);
+  return Math.min(ATTENDANCE_MAX_COUNT, Math.max(0, n));
+}
+function attendanceText(v, max = 80) { return String(v ?? '').trim().slice(0, max); }
+
+/** Clean a client-supplied week payload: known keys only, counts clamped, dates inside the week. */
+function sanitizeAttendanceData(raw, weekEnd) {
+  const weekStart = ymdAddDays(weekEnd, -6);
+  const list = Array.isArray(raw?.services) ? raw.services.slice(0, 20) : [];
+  const services = [];
+  for (const s of list) {
+    const key = ATTENDANCE_SERVICE_KEYS.includes(s?.key) ? s.key : null;
+    if (!key) continue;
+    const date = isYmd(s.date) && s.date >= weekStart && s.date <= weekEnd ? s.date : '';
+    services.push({
+      key,
+      label: key === 'other' ? attendanceText(s.label, 40) : '',
+      date,
+      men: attendanceCount(s.men),
+      women: attendanceCount(s.women),
+      children: attendanceCount(s.children),
+      preacher: attendanceText(s.preacher),
+      newConverts: attendanceCount(s.newConverts),
+      firstTimers: attendanceCount(s.firstTimers),
+      noService: !!s.noService,
+      reason: attendanceText(s.reason, 120),
+    });
+  }
+  return { services };
+}
+
+function attendanceServiceTotal(s) {
+  return attendanceCount(s?.men) + attendanceCount(s?.women) + attendanceCount(s?.children);
+}
+
+/** Labels of the required services not yet filled in (or marked not held with a reason). */
+function attendanceMissingRequired(data) {
+  const services = Array.isArray(data?.services) ? data.services : [];
+  return ATTENDANCE_REQUIRED.filter(req => {
+    const s = services.find(x => x.key === req.key);
+    if (!s) return true;
+    if (s.noService) return !String(s.reason || '').trim();
+    return attendanceServiceTotal(s) <= 0;
+  }).map(r => r.label);
+}
+
+function parseAttendanceJson(text) {
+  try { const v = JSON.parse(text || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; }
+}
+
+function publicAttendanceWeek(row) {
+  return {
+    id: row.id,
+    weekEnd: row.week_end,
+    weekStart: row.week_start,
+    status: row.status || 'draft',
+    data: parseAttendanceJson(row.data),
+    updatedBy: row.updated_by || '',
+    updatedAt: row.updated_at || '',
+    submittedBy: row.submitted_by || '',
+    submittedAt: row.submitted_at || '',
+    lockedAt: row.locked_at || '',
+    lockedBy: row.locked_by || '',
+    incomeRef: row.income_ref || '',
+  };
+}
+
+async function getAttendanceRow(DB, weekEnd) {
+  return DB.prepare(`SELECT * FROM attendance_weeks WHERE week_end=?`).bind(weekEnd).first();
+}
+
+async function getAttendanceWeeks(DB, from, to) {
+  let rows;
+  if (isYmd(from) && isYmd(to)) {
+    ({ results: rows } = await DB.prepare(
+      `SELECT * FROM attendance_weeks WHERE week_end>=? AND week_end<=? ORDER BY week_end`
+    ).bind(from, to).all());
+  } else {
+    ({ results: rows } = await DB.prepare(`SELECT * FROM attendance_weeks ORDER BY week_end DESC LIMIT 60`).all());
+  }
+  return ok((rows || []).map(publicAttendanceWeek));
+}
+
+function attendanceWeekGuard(weekEnd) {
+  if (!isSundayYmd(weekEnd)) return err('Week must be identified by its Sunday date (YYYY-MM-DD)', 400);
+  if (ymdAddDays(weekEnd, -6) > todayWat()) return err('This week has not started yet', 400);
+  return null;
+}
+
+async function saveAttendanceDraft(DB, weekEnd, body) {
+  const bad = attendanceWeekGuard(weekEnd);
+  if (bad) return bad;
+  const existing = await getAttendanceRow(DB, weekEnd);
+  if (existing?.status === 'locked') {
+    return err('This week is locked because its Sunday collection has been saved. Ask the IT Administrator to unlock it.', 409);
+  }
+  const data = JSON.stringify(sanitizeAttendanceData(body?.data, weekEnd));
+  const by = attendanceText(body?.by, 80);
+  const now = new Date().toISOString();
+  if (existing) {
+    // Any change to a submitted week sends it back to draft so it must be re-submitted
+    // (and re-stamped) before the Sunday collection can rely on it.
+    await DB.prepare(
+      `UPDATE attendance_weeks SET data=?, status='draft', updated_by=?, updated_at=?, submitted_by='', submitted_at='' WHERE week_end=?`
+    ).bind(data, by, now, weekEnd).run();
+  } else {
+    await DB.prepare(
+      `INSERT INTO attendance_weeks (id,week_end,week_start,status,data,updated_by,updated_at) VALUES (?,?,?,?,?,?,?)`
+    ).bind(newId('ATT-'), weekEnd, ymdAddDays(weekEnd, -6), 'draft', data, by, now).run();
+  }
+  return ok(publicAttendanceWeek(await getAttendanceRow(DB, weekEnd)));
+}
+
+async function submitAttendanceWeek(DB, weekEnd, body) {
+  const bad = attendanceWeekGuard(weekEnd);
+  if (bad) return bad;
+  const by = attendanceText(body?.by, 80);
+  if (!by) return err('Recorder name is required', 400);
+  // Save the latest figures first (the submit button may beat the autosave debounce).
+  if (body?.data) {
+    const saved = await saveAttendanceDraft(DB, weekEnd, body);
+    if (saved.status !== 200) return saved;
+  }
+  const row = await getAttendanceRow(DB, weekEnd);
+  if (!row) return err('Nothing has been recorded for this week yet', 400);
+  if (row.status === 'locked') return err('This week is already locked', 409);
+  const missing = attendanceMissingRequired(parseAttendanceJson(row.data));
+  if (missing.length) return err(`Please fill in: ${missing.join(', ')}`, 400);
+  const now = new Date().toISOString();
+  await DB.prepare(
+    `UPDATE attendance_weeks SET status='submitted', submitted_by=?, submitted_at=?, updated_by=?, updated_at=? WHERE week_end=?`
+  ).bind(by, now, by, now, weekEnd).run();
+  await createAuditEntry(DB, { type: 'attendance_submitted', detail: `Attendance submitted for week ending ${weekEnd}`, by });
+  return ok(publicAttendanceWeek(await getAttendanceRow(DB, weekEnd)));
+}
+
+async function unlockAttendanceWeek(DB, weekEnd, body) {
+  if (!isSundayYmd(weekEnd)) return err('Week must be identified by its Sunday date (YYYY-MM-DD)', 400);
+  const userId = String(body?.userId || '').trim();
+  const pin = String(body?.pin || '').trim();
+  if (!userId || !pin) return err('userId and pin are required', 400);
+  const user = await DB.prepare(`SELECT id,name,role,pin FROM users WHERE id=?`).bind(userId).first();
+  if (!user || user.role !== 'it_admin' || !(await verifyPin(user.pin, pin))) {
+    return err('Only the IT Administrator can unlock attendance (PIN check failed)', 403);
+  }
+  const row = await getAttendanceRow(DB, weekEnd);
+  if (!row) return err('Attendance week not found', 404);
+  if (row.status !== 'locked') return ok(publicAttendanceWeek(row));
+  await DB.prepare(
+    `UPDATE attendance_weeks SET status='submitted', locked_at='', locked_by='', income_ref='' WHERE week_end=?`
+  ).bind(weekEnd).run();
+  await createAuditEntry(DB, { type: 'attendance_unlocked', detail: `Attendance unlocked for week ending ${weekEnd}`, by: user.name });
+  return ok(publicAttendanceWeek(await getAttendanceRow(DB, weekEnd)));
+}
+
+/**
+ * Sunday collections dated on/after the `attendanceGateFrom` setting (seeded by /api/init
+ * to the Monday of the week the feature went live) need that week's attendance submitted
+ * first. Older collections — and databases without the setting — are never gated, so
+ * back-dated entries and restores keep working.
+ * Returns the week's Sunday when the gate applies, else null.
+ */
+async function attendanceGateWeek(DB, data) {
+  if (!isSundayCollectionSource(data?.source) || data?.id || !isYmd(data?.date)) return null;
+  const gateFrom = (await getSettingValue(DB, 'attendanceGateFrom')).replace(/^"|"$/g, '');
+  if (!isYmd(gateFrom) || data.date < gateFrom) return null;
+  return attendanceWeekEnd(data.date);
+}
+
+async function checkAttendanceGate(DB, weekEnd) {
+  const row = await getAttendanceRow(DB, weekEnd);
+  if (row && (row.status === 'submitted' || row.status === 'locked')) return null;
+  return new Response(JSON.stringify({
+    error: `Attendance for the week ending ${weekEnd} has not been submitted. Record and submit it on the Attendance page first.`,
+    code: 'attendance_not_submitted',
+    weekEnd,
+  }), { status: 409, headers: CORS_HEADERS });
+}
+
+async function lockAttendanceWeek(DB, weekEnd, incomeId, by) {
+  try {
+    await DB.prepare(
+      `UPDATE attendance_weeks SET status='locked', locked_at=?, locked_by=?, income_ref=? WHERE week_end=? AND status='submitted'`
+    ).bind(new Date().toISOString(), attendanceText(by, 80), incomeId || '', weekEnd).run();
+  } catch (e) {
+    // The collection is already saved; a failed lock must not turn that into an error.
+    console.error('[attendance] lock failed:', e?.message || e);
+  }
+}
+
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
@@ -1343,7 +1564,16 @@ export async function onRequest(context) {
     if (route === 'income') {
       if (method === 'GET'  && !param) return await getIncome(DB);
       if (method === 'POST' && !param) {
+        const gateWeek = await attendanceGateWeek(DB, body);
+        if (gateWeek) {
+          const blocked = await checkAttendanceGate(DB, gateWeek);
+          if (blocked) return blocked;
+        }
         const result = await createIncome(DB, body);
+        if (gateWeek && result.status === 200) {
+          const saved = await result.clone().json().catch(() => null);
+          await lockAttendanceWeek(DB, gateWeek, saved?.id, body?.recordedBy);
+        }
         // Tell the remittance webhook (if configured) when the cut-off Sunday's
         // collection is saved. Runs after the response via waitUntil and can never
         // fail or slow the save — see queueCutoffCollectionWebhook.
@@ -1352,6 +1582,15 @@ export async function onRequest(context) {
       }
       if (method === 'PUT'  &&  param) return await updateIncome(DB, param, body);
       if (method === 'DELETE' && param) return await deleteIncome(DB, param);
+    }
+
+    // ── /api/attendance ────────────────────────────────────────
+    if (route === 'attendance') {
+      if (method === 'GET' && !param) return await getAttendanceWeeks(DB, url.searchParams.get('from'), url.searchParams.get('to'));
+      const action = parts[2] || null;
+      if (method === 'PUT' && param && !action) return await saveAttendanceDraft(DB, param, body);
+      if (method === 'POST' && param && action === 'submit') return await submitAttendanceWeek(DB, param, body);
+      if (method === 'POST' && param && action === 'unlock') return await unlockAttendanceWeek(DB, param, body);
     }
 
     // ── /api/expenses ──────────────────────────────────────────
@@ -2270,6 +2509,21 @@ async function handleInit(DB) {
       by_user   TEXT DEFAULT '',
       ts        TEXT DEFAULT (datetime('now'))
     )`,
+    `CREATE TABLE IF NOT EXISTS attendance_weeks (
+      id            TEXT PRIMARY KEY,
+      week_end      TEXT NOT NULL UNIQUE,
+      week_start    TEXT NOT NULL,
+      status        TEXT DEFAULT 'draft',
+      data          TEXT DEFAULT '{}',
+      updated_by    TEXT DEFAULT '',
+      updated_at    TEXT DEFAULT '',
+      submitted_by  TEXT DEFAULT '',
+      submitted_at  TEXT DEFAULT '',
+      locked_at     TEXT DEFAULT '',
+      locked_by     TEXT DEFAULT '',
+      income_ref    TEXT DEFAULT '',
+      created_at    TEXT DEFAULT (datetime('now'))
+    )`,
     `CREATE TABLE IF NOT EXISTS settings (
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL DEFAULT ''
@@ -2665,6 +2919,8 @@ async function handleInit(DB) {
     // Amounts for admin-defined collection types (Admin → Collection Types), stored as
     // a {customKey: amount} JSON map so a new type never needs its own column.
     `ALTER TABLE income ADD COLUMN custom_collections TEXT DEFAULT ''`,
+    // Users: forced PIN change at first sign-in (new ushers / admin assistants get a default PIN)
+    `ALTER TABLE users ADD COLUMN must_change_pin INTEGER DEFAULT 0`,
     // Expense columns
     `ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT ''`,
     `ALTER TABLE expenses ADD COLUMN receipt_file_name TEXT DEFAULT ''`,
@@ -2812,6 +3068,16 @@ async function handleInit(DB) {
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
   }
+
+  // Attendance gate start: Sunday collections from this week on need the week's
+  // attendance submitted first. Seeded once, to the Monday of the week the feature went
+  // live, so collections recorded before it are never blocked.
+  try {
+    const today = todayWat();
+    const dow = new Date(`${today}T00:00:00Z`).getUTCDay();
+    const monday = ymdAddDays(today, dow === 0 ? -6 : 1 - dow);
+    await DB.prepare(`INSERT OR IGNORE INTO settings (key,value) VALUES ('attendanceGateFrom',?)`).bind(monday).run();
+  } catch { /* safe to skip — without the setting the gate is simply off */ }
 
   // A month can now hold several installments, so the old one-row-per-period unique
   // index has to go. The lookup pattern is unchanged, hence the same columns.
@@ -3010,6 +3276,8 @@ async function createUser(DB, data) {
   const hashedPin = await hashPin(pin);
   await DB.prepare(`INSERT INTO users (id,name,role,pin,email) VALUES (?,?,?,?,?)`)
     .bind(id, name, role, hashedPin, email).run();
+  // A default PIN handed out by the IT Admin must be replaced at first sign-in.
+  if (data.mustChangePin) await setUserMustChangePin(DB, id, true);
   return ok(publicUser({ id, name, role, email }));
 }
 
@@ -3019,10 +3287,26 @@ async function updateUser(DB, id, data) {
   const name  = data.name  || row.name;
   const role  = data.role  || row.role;
   const email = data.email ?? row.email;
-  const pin   = (data.pin && isValidPin(data.pin)) ? await hashPin(data.pin) : row.pin;
+  const pinReset = !!(data.pin && isValidPin(data.pin));
+  const pin   = pinReset ? await hashPin(data.pin) : row.pin;
   await DB.prepare(`UPDATE users SET name=?,role=?,email=?,pin=? WHERE id=?`)
     .bind(name, role, email, pin, id).run();
+  // A PIN reset by the IT Admin is a new default PIN — make the user choose their own.
+  if (pinReset && data.mustChangePin !== false) await setUserMustChangePin(DB, id, true);
   return ok(publicUser({ id, name, role, email }));
+}
+
+// must_change_pin is read/written with its own statements (and never fatally) so a
+// database that has not yet run the /api/init migration keeps signing people in.
+async function getUserMustChangePin(DB, id) {
+  try {
+    const r = await DB.prepare(`SELECT must_change_pin FROM users WHERE id=?`).bind(id).first();
+    return Number(r?.must_change_pin || 0) === 1;
+  } catch { return false; }
+}
+async function setUserMustChangePin(DB, id, on) {
+  try { await DB.prepare(`UPDATE users SET must_change_pin=? WHERE id=?`).bind(on ? 1 : 0, id).run(); }
+  catch (e) { console.error('[users] must_change_pin update failed:', e?.message || e); }
 }
 
 async function loginUser(DB, data) {
@@ -3047,7 +3331,8 @@ async function loginUser(DB, data) {
   if (!isHashedPin(row.pin)) {
     await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(pin), row.id).run();
   }
-  return ok(publicUser(row));
+  const mustChangePin = await getUserMustChangePin(DB, row.id);
+  return ok(mustChangePin ? { ...publicUser(row), mustChangePin: true } : publicUser(row));
 }
 
 async function deleteUser(DB, id) {
@@ -3069,7 +3354,9 @@ async function changeUserPin(DB, data) {
   if (!row) return err('User not found', 404);
   const validCurrentPin = await verifyPin(row.pin, currentPin);
   if (!validCurrentPin) return err('Current PIN is incorrect', 401);
+  if (newPin === currentPin) return err('Choose a new PIN that is different from your current PIN', 400);
   await DB.prepare(`UPDATE users SET pin=? WHERE id=?`).bind(await hashPin(newPin), userId).run();
+  await setUserMustChangePin(DB, userId, false);
   return ok({ success: true, id: userId });
 }
 

@@ -229,7 +229,15 @@ details, and a pledge form that hands off to WhatsApp.
 ### Finance & accounting
 
 - **PIN authentication** (4–6 digits, SHA-256 hashed) with role-based access control,
-  self-service PIN change, and a signatory name-selection step where two people share a role.
+  self-service PIN change, a forced PIN change for users given a default PIN, and a
+  name-selection step wherever several people share a role (signatories, ushers).
+- **Weekly attendance** by remittance period: Tuesday Digging Deep, Thursday Faith Clinic
+  and Sunday Service are required each week (or marked "no service held" with a reason);
+  Sunday School, House Fellowship and Outreach are optional. Big +/− counters with live
+  totals, autosave to the phone and the server, and a "submitted by / when" stamp. A
+  Sunday collection cannot be saved until that week's attendance is submitted, and saving
+  it locks the week (IT Admin can unlock). When every week is in, the page shows a table
+  laid out like the RCCG Monthly General Progress Report sheet plus a portal summary.
 - **Dashboard** with dual period modes (RCCG remittance period / calendar month), opening
   and closing balances, income-split card, total church balance by location of funds,
   remittance due with countdown, available-fund-after-all-deductions with a health state,
@@ -413,6 +421,7 @@ and never attracts the province rebate, which is tithe-only by rule.
 | **Admin Officer** | Log expenses, submit petty cash requests, view income and petty cash |
 | **Bank Signatory** | View income and remittances, approve petty cash, authorise bank transactions |
 | **Read-Only Viewer** | View-only access across dashboard, transactions, income, remittances, expenses and petty cash |
+| **Usher / Admin Assistant** | Attendance page only: record and submit each week's service attendance. Signs in with their own name and must replace the default PIN at first sign-in |
 
 ### KPSC portal
 
@@ -517,6 +526,8 @@ Forty tables in Cloudflare D1. The main groups:
   `kpsc_partnership_feedback`, `kpsc_finance_report_tokens`
 - **Messaging** — `kpsc_reminders` (the SMS log), `kpsc_sms_templates`,
   `kpsc_scheduled_sms`, `kpsc_cron_runs`
+- **Attendance** — `attendance_weeks` (one row per Mon–Sun week, keyed by its Sunday;
+  draft → submitted → locked when that Sunday's collection is saved)
 - **System** — `users`, `settings`, `audit_log`, `notifications`, `email_ingest_log`,
   `church_bank_ingest_log`
 
