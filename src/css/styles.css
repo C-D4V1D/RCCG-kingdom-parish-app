@@ -677,6 +677,30 @@ tr:hover td{background:var(--surface)}
 .att-inc-meta{color:var(--text2)}
 .att-inc-lock{color:var(--purple);background:var(--purple-light);padding:6px 10px;border-radius:8px}
 .pin-big{font-size:22px;letter-spacing:6px;text-align:center}
+
+/* Further reports (monthly) — RCCG portal figures recorded once per remittance period */
+.att-fr{background:var(--card);border:1px solid var(--border);border-radius:var(--rl);overflow:hidden}
+.att-fr-h{width:100%;display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:12px 14px;background:transparent;border:0;font-family:inherit;text-align:left;cursor:pointer}
+.att-fr-h span{font-size:14px;font-weight:700;color:var(--text)}
+.att-fr-h small{font-size:12px;color:var(--text2)}
+.att-fr-b{padding:0 14px 14px;display:flex;flex-direction:column;gap:14px}
+.att-fr-group{display:flex;flex-direction:column;gap:8px}
+.att-fr-gh{margin:0;font-size:11.5px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.4px}
+.att-fr-list{display:grid;grid-template-columns:1fr;gap:10px}
+@media(min-width:600px){.att-fr-list{grid-template-columns:1fr 1fr}}
+.att-fr-row{display:flex;flex-direction:column;gap:4px;font-size:13px}
+.att-fr-row span{color:var(--text2);display:flex;flex-direction:column;gap:2px}
+.att-fr-hint{color:var(--amber);font-weight:600;font-size:11px}
+.att-fr-in{padding:12px;font-size:16px;font-variant-numeric:tabular-nums}
+.att-fr-auto .att-fr-row{flex-direction:row;justify-content:space-between;align-items:center;background:var(--surface);border-radius:8px;padding:8px 10px;color:var(--text3)}
+.att-fr-auto .att-fr-row b{color:var(--text2);font-variant-numeric:tabular-nums}
+.att-fr-note{font-size:11px;color:var(--text3)}
+.att-fr-save{font-size:12.5px;color:var(--primary);font-weight:600}
+.att-fr-table{width:100%;border-collapse:collapse;font-size:13px}
+.att-fr-table td{padding:6px 8px;border-top:1px solid var(--border)}
+.att-fr-table td:last-child{text-align:right;font-variant-numeric:tabular-nums;font-weight:700}
+.att-fr-table td.att-fr-blank{color:var(--text3);font-weight:400;font-style:italic}
+.att-fr-warn{font-size:12.5px;color:#7a4a07;background:var(--amber-light);border-radius:8px;padding:8px 10px}
 @media print{
   body.att-printing *{visibility:hidden}
   body.att-printing #attReport,body.att-printing #attReport *{visibility:visible}
