@@ -26,7 +26,8 @@ build/
 .wrangler/
 
 # Claude Code harness local state (agent worktrees, session caches)
-.claude/
+.claude/*
+!.claude/skills/
 
 # Logs
 *.log
