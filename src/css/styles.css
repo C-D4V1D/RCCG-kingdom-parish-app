@@ -166,6 +166,10 @@ tr:hover td{background:var(--surface)}
 .td-green{color:var(--success);font-weight:600}
 .td-red{color:var(--danger);font-weight:600}
 .td-amber{color:var(--amber);font-weight:600}
+/* Remittances "Full Remittance Breakdown" — the Type badge moves under the description on
+   phones (see @media 768px) so the Amount column always fits on screen. */
+.rem-type-inline{display:none;margin-top:4px}
+.rem-amt-col{white-space:nowrap}
 .empty-table{padding:40px;text-align:center;color:var(--text3);font-size:13px}
 
 /* TRANSACTIONS — responsive dual table */
@@ -427,6 +431,13 @@ tr:hover td{background:var(--surface)}
   /* Top-up / Advance — show expandable cards, hide wide desktop table */
   .topup-desktop-table{display:none}
   .topup-mobile-list{display:block}
+  /* Remittance breakdown — collapse the Type column to zero width (not display:none,
+     which would shift the colspan'd subtotal rows) and show its badge inline instead */
+  .rem-breakdown-table .rem-type-col{width:0!important;padding:0!important;font-size:0}
+  .rem-breakdown-table .rem-type-col>*{display:none}
+  .rem-breakdown-table .rem-type-inline{display:block}
+  .rem-breakdown-table th.rem-amt-col{width:auto!important}
+  .rem-breakdown-table td,.rem-breakdown-table th{padding-left:8px!important;padding-right:8px!important}
 }
 @media(max-width:400px){
   .kpi-grid{grid-template-columns:1fr}
