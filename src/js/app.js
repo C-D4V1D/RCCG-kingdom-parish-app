@@ -71,7 +71,8 @@ const NAV = [
   { id:'petty_cash',   label:'Petty Cash',    icon:'💳', section:'Finance',  minRole:['it_admin','accountant','admin_officer','signatory'] },
   { id:'reports',      label:'Reports',       icon:'📊', section:'Reports',  minRole:['it_admin','pastor','accountant'] },
   { id:'audit',        label:'Audit Log',     icon:'📋', section:'Reports',  minRole:['it_admin','pastor','accountant'] },
-  { id:'admin',        label:'IT Admin',      icon:'⚙️',  section:'System',   minRole:['it_admin'] }
+  { id:'admin',        label:'IT Admin',      icon:'⚙️',  section:'System',   minRole:['it_admin'] },
+  { id:'automations',  label:'Automations',   icon:'🤖', section:'System',   minRole:['it_admin','accountant'] }
 ];
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -1039,6 +1040,8 @@ const state = {
   // the user toggles into remittance mode.
   upcomingPeriodAnchor: null,
   reportPeriodMode: 'remittance', // 'remittance' | 'calendar' — Reports page only
+  // Automations tab — the Clerk box's live dashboard + settings. See renderAutomations().
+  automations: null,
 };
 
 // ──────────────────────────────────────────
@@ -1173,7 +1176,10 @@ const ACCESS_RULES = {
     reports:      { permissionsAny:['reports'] },
     audit:        { permissionsAny:['audit'] },
     attendance:   { permissionsAny:['attendance','attendance_view'] },
-    admin:        { roles:['it_admin'] }  // IT Admin only — never permission-gated
+    admin:        { roles:['it_admin'] },  // IT Admin only — never permission-gated
+    // The box's dashboard + settings. IT Admin gets full settings; Accountant gets a
+    // read-only dashboard + summary of what affects them. Never permission-gated.
+    automations:  { roles:['it_admin','accountant'] }
   },
   actions: {
     income_record: ['income'],
@@ -2610,7 +2616,7 @@ async function submitChangePin(btn=null){
 // ──────────────────────────────────────────
 // 6. NAVIGATION & ROUTER
 // ──────────────────────────────────────────
-const VALID_PAGES = ['dashboard','transactions','income','remittances','expenses','budget','bank','petty_cash','reports','audit','admin'];
+const VALID_PAGES = ['dashboard','transactions','income','remittances','expenses','budget','bank','petty_cash','reports','audit','admin','automations'];
 
 function pageFromPath(){
   const seg = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
@@ -2740,6 +2746,9 @@ function updateSidebarUser(){
 }
 
 async function navigate(page, fromHistory){
+  // The Automations dashboard auto-refreshes on a 60s timer while it is on screen —
+  // stop it the moment we leave that page so it doesn't keep polling in the background.
+  if(state.page==='automations' && page!=='automations') stopAutomationsRefresh();
   if(!canAccessPage(page)){
     // Fall back to the first page this role can open (an Usher's only page is Attendance).
     const home = canAccessPage('dashboard') ? 'dashboard' : (NAV.find(n=>canAccessPage(n.id))?.id || 'dashboard');
@@ -2758,12 +2767,14 @@ async function navigate(page, fromHistory){
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   const titles={dashboard:'Dashboard',transactions:'Transactions',income:'Record Income',remittances:'Remittances',
-    expenses:'Expenses',budget:'Budget',bank:'Bank',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel',attendance:'Attendance'};
+    expenses:'Expenses',budget:'Budget',bank:'Bank',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel',attendance:'Attendance',automations:'Automations'};
   document.getElementById('topBarTitle').textContent=titles[page]||page;
   // The Attendance page picks its own remittance period, so the global month picker is
-  // hidden there (and for attendance-only roles it would be meaningless anyway).
+  // hidden there (and for attendance-only roles it would be meaningless anyway). The
+  // Automations page has no month-based content either, and on a narrow phone screen
+  // the selector pushes the top bar wide enough to cause horizontal scroll.
   const monthSel = document.getElementById('globalMonth');
-  if(monthSel) monthSel.style.display = page==='attendance' ? 'none' : '';
+  if(monthSel) monthSel.style.display = (page==='attendance' || page==='automations') ? 'none' : '';
   // Paint the page skeleton immediately from synchronous state — no network — so a
   // slow connection sees the page's structure (and the loading progress bar) within
   // ~50ms instead of a bare "Loading…" string. Previously this was blocked behind the
@@ -2795,6 +2806,7 @@ function paintSkeleton(page, title){
   if(page === 'budget')    return renderPageSkeleton({ pageTitle: 'Budget', pageSub: 'This month · Next month', kpiCount: 2, hint: 'Loading budget…' });
   if(page === 'bank')      return renderPageSkeleton({ pageTitle: 'Bank Account', pageSub: monthLabel(), kpiCount: 4, hint: 'Loading bank activity…' });
   if(page === 'attendance') return renderPageSkeleton({ pageTitle: 'Attendance', pageSub: 'This remittance period', kpiCount: 0, hasTabs: false, hint: 'Loading attendance…' });
+  if(page === 'automations') return renderPageSkeleton({ pageTitle: 'Automations', pageSub: 'The Clerk box', kpiCount: 0, hasTabs: false, hint: 'Loading the box’s status…' });
   return renderPageSkeleton({ pageTitle: title || 'Loading', pageSub: monthLabel(), kpiCount: 3, hasTabs: true, hint: 'Loading…' });
 }
 
@@ -2828,7 +2840,7 @@ async function getPettyCashPendingCount(){
 async function renderPage(page){
   const pages={dashboard:renderDashboard,transactions:renderTransactions,income:renderIncome,remittances:renderRemittances,
     expenses:renderExpenses,budget:renderBudget,bank:renderBank,petty_cash:renderPettyCash,reports:renderReports,
-    audit:renderAudit,admin:renderAdmin,attendance:renderAttendance};
+    audit:renderAudit,admin:renderAdmin,attendance:renderAttendance,automations:renderAutomations};
   try{
     if(pages[page]) await pages[page]();
     else document.getElementById('pageContent').innerHTML='<div class="card"><p>Page not found.</p></div>';
@@ -18077,6 +18089,593 @@ async function setPeriodMode(mode){
 }
 
 // ──────────────────────────────────────────
+// 8b. AUTOMATIONS (the Clerk box's dashboard + settings)
+// ──────────────────────────────────────────
+// Plain-English message-type labels, in the order the doc's "Notification routing"
+// table lists them. Keys must match the box's config.json `routing` keys exactly.
+const AUTOMATION_MESSAGE_TYPES = [
+  { key:'memo_forwarded',            label:'New memo forwarded' },
+  { key:'memo_error',                label:'Memo forwarding problem' },
+  { key:'remittance_check',          label:'Remittance check report' },
+  { key:'rrr_generated',             label:'RRR generated' },
+  { key:'parish_remittance_check',   label:'Parish remittance check' },
+  { key:'monthly_statement',         label:'Monthly statement' },
+  { key:'statement_error',           label:'Statement problem' },
+  { key:'attendance_filed',          label:'Attendance filed' },
+  { key:'attendance_nudge',          label:'Attendance reminder' },
+  { key:'attendance_nudge_fallback', label:'Attendance reminder (backup)' },
+  { key:'attendance_error',          label:'Attendance check problem' },
+  { key:'source_doc_reminder',       label:'Source-document reminder' },
+  { key:'weekly_attendance_reminder',label:'Weekly attendance reminder' },
+  { key:'weekly_health',             label:'Weekly box health note' },
+  { key:'upload_confirmation',       label:'Upload confirmation' },
+  { key:'upload_fyi',                label:'Upload notice (for others)' },
+  { key:'sunday_note',               label:'Sunday confirmation note' },
+  { key:'watchdog_down',             label:'Box-down alert' },
+  { key:'scheduler_fallback',        label:'Scheduler fallback alert' },
+];
+const AUTOMATION_DASHBOARD_CARDS = [
+  { key:'memo',                  icon:'📨', label:'Memo forwarding' },
+  { key:'statement',              icon:'🧾', label:'Monthly statement' },
+  { key:'attendance',             icon:'🙋', label:'Attendance filing' },
+  { key:'source_doc_reminders',   icon:'📎', label:'Source-doc reminders' },
+  { key:'upload_bot',             icon:'⬆️', label:'Upload bot' },
+  { key:'drive_sync',             icon:'☁️', label:'Drive sync' },
+];
+const AUTOMATION_DAYS = [
+  { key:'mon', label:'Mon' }, { key:'tue', label:'Tue' }, { key:'wed', label:'Wed' },
+  { key:'thu', label:'Thu' }, { key:'fri', label:'Fri' }, { key:'sat', label:'Sat' }, { key:'sun', label:'Sun' },
+];
+
+function stopAutomationsRefresh(){
+  if(state.automations?.refreshTimer){ clearInterval(state.automations.refreshTimer); state.automations.refreshTimer = null; }
+}
+
+// How long ago, in friendly words. Returns null-safe text for a missing timestamp.
+function automationsTimeAgo(iso){
+  if(!iso) return null;
+  const ms = Date.now() - new Date(iso).getTime();
+  if(isNaN(ms)) return null;
+  const min = Math.max(0, Math.round(ms/60000));
+  if(min < 1) return 'just now';
+  if(min === 1) return '1 minute ago';
+  if(min < 60) return `${min} minutes ago`;
+  const hrs = Math.round(min/60);
+  if(hrs === 1) return '1 hour ago';
+  if(hrs < 24) return `${hrs} hours ago`;
+  const days = Math.round(hrs/24);
+  return days === 1 ? '1 day ago' : `${days} days ago`;
+}
+function automationsPingAgeMinutes(iso){
+  if(!iso) return null;
+  const ms = Date.now() - new Date(iso).getTime();
+  if(isNaN(ms)) return null;
+  return Math.max(0, ms/60000);
+}
+function automationsBoxStatus(ageMin){
+  if(ageMin == null) return 'red';
+  if(ageMin < 15) return 'green';
+  if(ageMin < 30) return 'amber';
+  return 'red';
+}
+// Green = last run OK and the box pinged within 15 minutes.
+// Amber = last run warned, or the box hasn't pinged in 15–30 minutes.
+// Red   = last run failed, or the box hasn't pinged in 30+ minutes (or never).
+function automationsRunnerStatus(runner, ageMin){
+  if(ageMin == null || ageMin >= 30) return 'red';
+  if(!runner) return 'amber'; // box is pinging fine, but this automation hasn't reported yet
+  if(runner.status === 'error') return 'red';
+  if(runner.status === 'warn' || ageMin >= 15) return 'amber';
+  if(runner.status === 'ok' && ageMin < 15) return 'green';
+  return 'amber';
+}
+function automationsFmtNextRun(iso){
+  if(!iso) return 'Not scheduled';
+  const d = new Date(iso);
+  if(isNaN(d.getTime())) return 'Not scheduled';
+  return `${fmtDate(d)} ${fmtTime(d)}`;
+}
+
+async function renderAutomations(){
+  if(!canAccessPage('automations')){
+    document.getElementById('pageContent').innerHTML = '<div class="card"><p style="color:var(--danger)">Access denied.</p></div>';
+    return;
+  }
+  const isAdmin = state.user?.role === 'it_admin';
+  if(!state.automations) state.automations = { expandedCard:null, refreshTimer:null, saving:false };
+  document.getElementById('pageContent').innerHTML = `
+    <div class="page-header"><div class="page-title">Automations</div><div class="page-sub">What the Clerk box is doing for you, right now</div></div>
+    <div id="atDashboard"><div class="card"><p style="color:var(--text3)">Checking on the box…</p></div></div>
+    <div id="atSettings"></div>`;
+
+  let healthData = null;
+  try{
+    const res = await authFetch('/api/automations/health');
+    if(res.ok) healthData = await res.json();
+    else{
+      const err = await res.json().catch(()=>({}));
+      document.getElementById('atDashboard').innerHTML = `<div class="card"><p style="color:var(--danger)">${esc(err.error || 'Could not check on the box right now.')}</p></div>`;
+    }
+  }catch(e){
+    document.getElementById('atDashboard').innerHTML = `<div class="card"><p style="color:var(--danger)">Could not reach the server. Check your connection and try again.</p></div>`;
+  }
+  if(healthData) renderAutomationsDashboard(healthData);
+
+  // Auto-refresh the dashboard every 60s while this page stays open — only the
+  // dashboard block is touched so a settings form mid-edit is never disturbed.
+  stopAutomationsRefresh();
+  state.automations.refreshTimer = setInterval(async ()=>{
+    if(state.page !== 'automations'){ stopAutomationsRefresh(); return; }
+    try{
+      const res = await authFetch('/api/automations/health');
+      if(res.ok) renderAutomationsDashboard(await res.json());
+    }catch(e){ /* silent — keep showing the last known state */ }
+  }, 60000);
+
+  // Settings / summary section
+  let configData = null;
+  try{
+    const res = await authFetch('/api/automations/config');
+    if(res.ok) configData = await res.json();
+  }catch(e){ /* handled below */ }
+
+  const settingsEl = document.getElementById('atSettings');
+  if(!configData){
+    settingsEl.innerHTML = isAdmin ? `<div class="card"><p style="color:var(--danger)">Could not load settings right now. Try reloading the page.</p></div>` : '';
+    return;
+  }
+  if(isAdmin){
+    state.automations.config = configData.config;
+    state.automations.configVersion = configData.config_version;
+    state.automations.isDefault = !!configData.is_default;
+    settingsEl.innerHTML = renderAutomationsSettings(configData.config, configData.is_default);
+  } else {
+    settingsEl.innerHTML = renderAutomationsAccountantSummary(configData.config);
+  }
+}
+
+function renderAutomationsDashboard(data){
+  const lastPing = data?.last_ping || null;
+  const health = data?.health || null;
+  const ageMin = automationsPingAgeMinutes(lastPing);
+  const boxColor = automationsBoxStatus(ageMin);
+  const boxCard = `
+    <div class="at-card">
+      <div class="at-card-head"><span class="at-card-icon">📡</span><span class="at-card-name">Box connection</span><span class="at-dot at-dot-${boxColor}"></span></div>
+      <div class="at-card-summary">Last heard from the box: ${lastPing ? esc(automationsTimeAgo(lastPing)) : 'never'}</div>
+    </div>`;
+
+  if(!health){
+    document.getElementById('atDashboard').innerHTML = `
+      <div class="at-grid">${boxCard}</div>
+      <div class="at-empty-card" style="margin-top:6px">The box hasn't sent a status report yet. Once it checks in, you'll see how each automation is doing here.</div>`;
+    return;
+  }
+
+  const cards = AUTOMATION_DASHBOARD_CARDS.map(c=>{
+    const runner = health.runners?.[c.key] || null;
+    const activity = health.activity?.[c.key] || [];
+    const color = automationsRunnerStatus(runner, ageMin);
+    const expanded = state.automations?.expandedCard === c.key;
+    const summary = runner?.summary ? esc(runner.summary) : 'No report yet.';
+    const activityHtml = activity.length
+      ? activity.slice(0,5).map(a=>`<div class="at-activity-row">${a.at ? esc(fmtDate(a.at))+' '+esc(fmtTime(a.at))+': ' : ''}${esc(a.text||'')}</div>`).join('')
+      : `<div class="at-activity-empty">No recent activity yet.</div>`;
+    return `<div class="at-card${expanded?' expanded':''}" onclick="App.toggleAutomationCard('${c.key}')">
+      <div class="at-card-head"><span class="at-card-icon">${c.icon}</span><span class="at-card-name">${esc(c.label)}</span><span class="at-dot at-dot-${color}"></span></div>
+      <div class="at-card-summary">${summary}</div>
+      <div class="at-card-next">Next run: ${esc(automationsFmtNextRun(runner?.next_run))}</div>
+      <div class="at-card-expand">
+        <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Last 5 activity entries</div>
+        ${activityHtml}
+      </div>
+    </div>`;
+  }).join('');
+  document.getElementById('atDashboard').innerHTML = `<div class="at-grid">${boxCard}${cards}</div>`;
+}
+
+function toggleAutomationCard(key){
+  if(!state.automations) return;
+  state.automations.expandedCard = state.automations.expandedCard === key ? null : key;
+  // Toggle just the clicked card's class — the card carrying this key in its own
+  // onclick handler is the one to flip — so a 60s dashboard refresh re-renders with
+  // the right card already open, without a second network round trip here.
+  document.querySelectorAll('#atDashboard .at-card').forEach(el=>{
+    const onclick = el.getAttribute('onclick')||'';
+    if(onclick.includes(`'${key}'`)) el.classList.toggle('expanded');
+  });
+}
+
+function automationsBoolField(path, checked, label, subtitle){
+  return `<div class="at-toggle-row">
+    <div><div class="at-toggle-label">${esc(label)}</div>${subtitle?`<div class="at-subtitle">${esc(subtitle)}</div>`:''}</div>
+    <label class="at-switch"><input type="checkbox" class="at-field" data-path="${esc(path)}" data-kind="bool" ${checked?'checked':''}><span class="at-switch-track"></span></label>
+  </div>`;
+}
+function automationsTimeField(path, value, label){
+  return `<div class="form-group"><label class="form-label">${esc(label)}</label><input type="time" class="form-input at-field" data-path="${esc(path)}" data-kind="str" value="${esc(value||'')}"></div>`;
+}
+function automationsNumField(path, value, label, min=0, max=null, step=1){
+  return `<div class="form-group"><label class="form-label">${esc(label)}</label><input type="number" class="form-input at-field" data-path="${esc(path)}" data-kind="num" value="${esc(String(value ?? 0))}" min="${min}" ${max!=null?`max="${max}"`:''} step="${step}"></div>`;
+}
+
+function renderAutomationsSettings(config, isDefault){
+  const people = config.people || [];
+  const parishes = config.parishes || [];
+  const a = config.automations || {};
+  const memo = a.memo || {}, stmt = a.statement || {}, att = a.attendance || {};
+  const sdr = a.source_doc_reminders || {}, war = a.weekly_attendance_reminder || {};
+  const sun = a.sunday_note || {}, health = a.health_note || {}, upl = a.upload_bot || {};
+
+  const peopleRows = people.map((p, i)=>{
+    const key = esc(p.key || `person_${i}`);
+    return `<div class="at-subcard" data-person-key="${key}">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Name</label><input class="form-input at-p-name" value="${esc(p.name||'')}"></div>
+        <div class="form-group"><label class="form-label">Telegram chat ID</label><input class="form-input at-p-tg" value="${esc(p.telegram_chat_id||'')}" placeholder="Not connected"></div>
+        <div class="form-group"><label class="form-label">Email</label><input class="form-input at-p-email" value="${esc(p.email||'')}" placeholder="No email"></div>
+      </div>
+      <div class="table-wrap"><table class="at-routing-table">
+        <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
+        ${AUTOMATION_MESSAGE_TYPES.map(mt=>{
+          const r = config.routing?.[mt.key]?.[p.key] || {};
+          return `<tr><td>${esc(mt.label)}</td>
+            <td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" ${r.telegram?'checked':''} ${p.telegram_chat_id?'':'title="This person is not connected on Telegram yet"'}></td>
+            <td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" data-ch="email" ${r.email?'checked':''}></td>
+          </tr>`;
+        }).join('')}
+      </table></div>
+      <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationPerson(this)">Delete person</button>
+    </div>`;
+  }).join('');
+
+  const parishRows = parishes.map((p, i)=>`
+    <div class="at-subcard" data-parish-idx="${i}">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Parish code</label><input class="form-input at-par-code" value="${esc(p.code||'')}"></div>
+        <div class="form-group"><label class="form-label">Name</label><input class="form-input at-par-name" value="${esc(p.name||'')}"></div>
+      </div>
+      <div class="at-day-chips">
+        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="source_docs" ${p.source_docs?'checked':''}> Source documents</label>
+        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="attendance" ${p.attendance?'checked':''}> Attendance</label>
+        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="remittance" ${p.remittance?'checked':''}> Remittance</label>
+        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="statement" ${p.statement?'checked':''}> Statement</label>
+      </div>
+      <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationParish(this)">Delete parish</button>
+    </div>`).join('');
+
+  const saveBar = `<div class="at-save-bar">
+      <button class="btn btn-primary" onclick="App.saveAutomationsConfig(this)">Save changes</button>
+      <span class="at-save-hint">Changes take up to 5 minutes to reach the box</span>
+    </div>`;
+  const dayChips = (path, selected)=>`<div class="at-day-chips">${AUTOMATION_DAYS.map(d=>`<label class="at-day-chip"><input type="checkbox" class="at-field" data-path="${path}" data-kind="day" data-day="${d.key}" ${((selected||[]).includes(d.key))?'checked':''}> ${d.label}</label>`).join('')}</div>`;
+
+  return `
+    <div class="at-section-title">Settings</div>
+    <p class="at-note">Only IT admins can change these. ${isDefault?'':'These control what the box does and when.'}</p>
+    ${isDefault?`<div class="at-default-note">These are the starting values from the box — nothing has been saved here yet.</div>`:''}
+    <div id="atSaveErrors"></div>
+
+    <details class="at-details" open>
+      <summary>People (${people.length})</summary>
+      <div class="at-details-body" id="atPeopleRows">
+        ${peopleRows || '<p class="at-note">No one is set up yet.</p>'}
+        <button class="btn" onclick="App.addAutomationPerson()">+ Add person</button>
+        ${saveBar}
+      </div>
+    </details>
+
+    <details class="at-details">
+      <summary>Parishes (${parishes.length})</summary>
+      <div class="at-details-body" id="atParishRows">
+        ${parishRows || '<p class="at-note">No parishes are set up yet.</p>'}
+        <button class="btn" onclick="App.addAutomationParish()">+ Add parish</button>
+        ${saveBar}
+      </div>
+    </details>
+
+    <details class="at-details">
+      <summary>Memo forwarding</summary>
+      <div class="at-details-body">
+        ${automationsBoolField('automations.memo.enabled', memo.enabled, 'Check for new memos', 'When turned off, the box stops checking for new memos altogether.')}
+        ${automationsBoolField('automations.memo.auto_forward', memo.auto_forward, 'Auto-forward new memos', "When turned on, a new memo is downloaded and sent out immediately. When turned off, you'll get a notification that a new memo was found, and it won't be sent out until you confirm it.")}
+        <div class="form-row" style="margin-top:10px">${automationsTimeField('automations.memo.check_time', memo.check_time, 'Check from (time)')}</div>
+        <div style="margin-top:8px"><label class="form-label">Days to check</label>${dayChips('automations.memo.days', memo.days)}</div>
+        <div class="form-row" style="margin-top:10px"><div class="form-group"><label class="form-label">Stop checking after (date)</label><input type="date" class="form-input at-field" data-path="automations.memo.stop_after" data-kind="str" value="${esc(memo.stop_after||'')}"></div></div>
+        ${saveBar}
+      </div>
+    </details>
+
+    <details class="at-details">
+      <summary>Monthly statement</summary>
+      <div class="at-details-body">
+        ${automationsBoolField('automations.statement.enabled', stmt.enabled, 'Check for the monthly statement', 'When turned off, the box stops checking whether a statement is due.')}
+        ${automationsBoolField('automations.statement.auto_send', stmt.auto_send, 'Auto-send the statement', "When turned on, the monthly statement is emailed out automatically once it's due. When turned off, it's prepared but held for you to confirm before it's sent.")}
+        <div class="form-row" style="margin-top:10px">${automationsTimeField('automations.statement.check_time', stmt.check_time, 'Check from (time)')}</div>
+        <div class="form-group" style="margin-top:10px"><label class="form-label">Sign-off message</label><textarea class="form-textarea at-field" data-path="automations.statement.signature" data-kind="str">${esc(stmt.signature||'')}</textarea></div>
+        ${saveBar}
+      </div>
+    </details>
+
+    <details class="at-details">
+      <summary>Attendance</summary>
+      <div class="at-details-body">
+        ${automationsBoolField('automations.attendance.enabled', att.enabled, 'Check the portal for attendance', 'When turned off, the box stops checking the portal for attendance altogether.')}
+        ${automationsBoolField('automations.attendance.auto_file', att.auto_file, 'Auto-file attendance', "When turned on, attendance is filed on the portal automatically as soon as all weeks and the monthly report are submitted in the app. When turned off, you'll get a notification that it's ready, and you'll need to confirm before it's filed.")}
+        <div class="form-row" style="margin-top:10px">
+          ${automationsTimeField('automations.attendance.active_from', att.active_from, 'Check from')}
+          ${automationsTimeField('automations.attendance.active_until', att.active_until, 'Check until')}
+          ${automationsNumField('automations.attendance.check_interval_minutes', att.check_interval_minutes, 'Minutes between checks', 1)}
+        </div>
+        <div class="form-row" style="margin-top:10px"><div class="form-group"><label class="form-label">First month to check (YYYY-MM)</label><input type="month" class="form-input at-field" data-path="automations.attendance.first_month" data-kind="str" value="${esc(att.first_month||'')}"></div></div>
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">First reminder</div>
+        <div class="form-row">
+          ${automationsNumField('automations.attendance.reminder1.days_before_close', att.reminder1?.days_before_close, 'Days before portal closes', 0)}
+          ${automationsTimeField('automations.attendance.reminder1.time', att.reminder1?.time, 'Time')}
+        </div>
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Final reminder</div>
+        <div class="form-row">
+          ${automationsNumField('automations.attendance.reminder2.days_before_close', att.reminder2?.days_before_close, 'Days before portal closes', 0)}
+          ${automationsTimeField('automations.attendance.reminder2.time', att.reminder2?.time, 'Time')}
+        </div>
+        ${saveBar}
+      </div>
+    </details>
+
+    <details class="at-details">
+      <summary>Source-doc reminders</summary>
+      <div class="at-details-body">
+        ${automationsBoolField('automations.source_doc_reminders.enabled', sdr.enabled, 'Send source-document reminders', "When turned on, a reminder is sent before the portal closes for source documents that haven't come in yet.")}
+        <div class="form-row" style="margin-top:10px">
+          <div class="form-group"><label class="form-label">Days before portal closes (comma-separated)</label><input class="form-input at-field" data-path="automations.source_doc_reminders.days_before_close" data-kind="numlist" value="${esc((sdr.days_before_close||[]).join(', '))}"></div>
+          ${automationsTimeField('automations.source_doc_reminders.after_time', sdr.after_time, 'Send after (time)')}
+        </div>
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Weekly attendance reminder</div>
+        ${automationsBoolField('automations.weekly_attendance_reminder.enabled', war.enabled, 'Send the weekly attendance reminder', "When turned on, a reminder is sent once a week if a Sunday's attendance hasn't been confirmed yet.")}
+        <div class="form-row" style="margin-top:10px">
+          <div class="form-group"><label class="form-label">Day of week</label><select class="form-select at-field" data-path="automations.weekly_attendance_reminder.day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${war.day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
+          ${automationsTimeField('automations.weekly_attendance_reminder.after_time', war.after_time, 'Send after (time)')}
+        </div>
+        ${saveBar}
+      </div>
+    </details>
+
+    <details class="at-details">
+      <summary>Sunday note</summary>
+      <div class="at-details-body">
+        ${automationsBoolField('automations.sunday_note.enabled', sun.enabled, 'Send the Sunday confirmation note', 'When turned on, a note confirming the day’s Sunday attendance is sent every Sunday after the time below. When turned off, this weekly note is skipped.')}
+        <div class="form-row" style="margin-top:10px">${automationsTimeField('automations.sunday_note.after_time', sun.after_time, 'Send after (time)')}</div>
+        ${saveBar}
+      </div>
+    </details>
+
+    <details class="at-details">
+      <summary>Health note</summary>
+      <div class="at-details-body">
+        ${automationsBoolField('automations.health_note.enabled', health.enabled, 'Send the weekly health note', "When turned on, a weekly summary of how the box is doing is sent to you.")}
+        <div class="form-row" style="margin-top:10px">
+          <div class="form-group"><label class="form-label">Day of week</label><select class="form-select at-field" data-path="automations.health_note.day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${health.day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
+          ${automationsTimeField('automations.health_note.after_time', health.after_time, 'Send after (time)')}
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          ${automationsNumField('automations.health_note.log_trim_mb', health.log_trim_mb, 'Trim logs larger than (MB)', 0)}
+          ${automationsNumField('automations.health_note.log_trim_lines', health.log_trim_lines, 'Keep this many lines', 0)}
+        </div>
+        ${saveBar}
+      </div>
+    </details>
+
+    <details class="at-details">
+      <summary>Upload bot</summary>
+      <div class="at-details-body">
+        <div class="form-row">
+          ${automationsNumField('automations.upload_bot.admin_max_kb', upl.admin_max_kb, 'Max size for admins (KB)', 1)}
+          ${automationsNumField('automations.upload_bot.finance_max_kb', upl.finance_max_kb, 'Max size for finance (KB)', 1)}
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          ${automationsNumField('automations.upload_bot.jpeg_quality', upl.jpeg_quality, 'Image quality (1–100)', 1, 100)}
+          ${automationsNumField('automations.upload_bot.max_width_px', upl.max_width_px, 'Max image width (px)', 1)}
+        </div>
+        ${saveBar}
+      </div>
+    </details>
+  `;
+}
+
+function renderAutomationsAccountantSummary(config){
+  const me = (config.people || [])[0] || null;
+  const rows = AUTOMATION_MESSAGE_TYPES.map(mt=>{
+    const r = me ? (config.routing?.[mt.key]?.[me.key] || {}) : {};
+    if(!r.telegram && !r.email) return '';
+    return `<tr><td>${esc(mt.label)}</td><td>${r.telegram?'✓':'—'}</td><td>${r.email?'✓':'—'}</td></tr>`;
+  }).filter(Boolean).join('');
+  return `
+    <div class="at-section-title">Your notifications</div>
+    <p class="at-note">A read-only summary of what the box sends you, and how.</p>
+    <div class="card">
+      <p style="margin-bottom:10px"><strong>Can you upload source documents?</strong> ${me?.can_upload ? 'Yes' : 'No'}</p>
+      <div class="table-wrap"><table class="at-summary-table">
+        <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
+        ${rows || '<tr><td colspan="3" style="text-align:center;color:var(--text3)">No notifications are set up for you yet.</td></tr>'}
+      </table></div>
+    </div>`;
+}
+
+function addAutomationPerson(){
+  const container = document.getElementById('atPeopleRows');
+  if(!container) return;
+  const key = `person_${Date.now()}`;
+  const div = document.createElement('div');
+  div.className = 'at-subcard';
+  div.dataset.personKey = key;
+  div.innerHTML = `
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Name</label><input class="form-input at-p-name" value=""></div>
+      <div class="form-group"><label class="form-label">Telegram chat ID</label><input class="form-input at-p-tg" value="" placeholder="Not connected"></div>
+      <div class="form-group"><label class="form-label">Email</label><input class="form-input at-p-email" value="" placeholder="No email"></div>
+    </div>
+    <div class="table-wrap"><table class="at-routing-table">
+      <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
+      ${AUTOMATION_MESSAGE_TYPES.map(mt=>`<tr><td>${esc(mt.label)}</td><td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}"></td><td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" data-ch="email"></td></tr>`).join('')}
+    </table></div>
+    <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationPerson(this)">Delete person</button>`;
+  container.insertBefore(div, container.querySelector('button'));
+}
+function deleteAutomationPerson(btn){
+  const row = btn.closest('.at-subcard');
+  if(!row) return;
+  if(!confirm('Remove this person? They will stop receiving any notifications from the box.')) return;
+  row.remove();
+}
+function addAutomationParish(){
+  const container = document.getElementById('atParishRows');
+  if(!container) return;
+  const idx = container.querySelectorAll('.at-subcard').length;
+  const div = document.createElement('div');
+  div.className = 'at-subcard';
+  div.dataset.parishIdx = String(idx);
+  div.innerHTML = `
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Parish code</label><input class="form-input at-par-code" value=""></div>
+      <div class="form-group"><label class="form-label">Name</label><input class="form-input at-par-name" value=""></div>
+    </div>
+    <div class="at-day-chips">
+      <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="source_docs"> Source documents</label>
+      <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="attendance"> Attendance</label>
+      <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="remittance"> Remittance</label>
+      <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="statement"> Statement</label>
+    </div>
+    <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationParish(this)">Delete parish</button>`;
+  container.insertBefore(div, container.querySelector('button'));
+}
+function deleteAutomationParish(btn){
+  const row = btn.closest('.at-subcard');
+  if(!row) return;
+  if(!confirm('Remove this parish from tracking?')) return;
+  row.remove();
+}
+
+// Walk the whole settings DOM and rebuild the full config object — every section's
+// Save button calls this, since PUT /config always replaces the entire config.
+function collectAutomationsConfig(){
+  const base = state.automations?.config || {};
+  const config = JSON.parse(JSON.stringify(base));
+
+  // People + their routing
+  const people = [];
+  const routing = {};
+  AUTOMATION_MESSAGE_TYPES.forEach(mt=>{ routing[mt.key] = {}; });
+  document.querySelectorAll('#atPeopleRows .at-subcard').forEach(row=>{
+    const existingKey = row.dataset.personKey;
+    const name = row.querySelector('.at-p-name')?.value.trim() || '';
+    const existing = (base.people||[]).find(p=>p.key===existingKey);
+    let key = existing ? existing.key : slugifyAutomationKey(name || existingKey);
+    const tg = row.querySelector('.at-p-tg')?.value.trim() || '';
+    const email = row.querySelector('.at-p-email')?.value.trim() || '';
+    const person = {
+      key,
+      name,
+      app_role: existing?.app_role ?? null,
+      telegram_chat_id: tg || null,
+      email: email || null,
+      can_upload: existing?.can_upload ?? false,
+      full_status: existing?.full_status ?? false,
+      buttons: existing?.buttons ?? false,
+    };
+    people.push(person);
+    row.querySelectorAll('.at-route').forEach(cb=>{
+      const mtKey = cb.dataset.mt;
+      const ch = cb.dataset.ch === 'email' ? 'email' : 'telegram';
+      if(!routing[mtKey][key]) routing[mtKey][key] = { telegram:false, email:false };
+      routing[mtKey][key][ch] = cb.checked;
+    });
+  });
+  config.people = people;
+  config.routing = routing;
+
+  // Parishes
+  const parishes = [];
+  document.querySelectorAll('#atParishRows .at-subcard').forEach(row=>{
+    const code = row.querySelector('.at-par-code')?.value.trim() || '';
+    const name = row.querySelector('.at-par-name')?.value.trim() || '';
+    const flags = {};
+    row.querySelectorAll('.at-par-flag').forEach(cb=>{ flags[cb.dataset.flag] = cb.checked; });
+    parishes.push({ code, name, source_docs:!!flags.source_docs, attendance:!!flags.attendance, remittance:!!flags.remittance, statement:!!flags.statement });
+  });
+  config.parishes = parishes;
+
+  // Generic fields (booleans, numbers, strings, day-lists, number-lists)
+  config.automations = config.automations || {};
+  document.querySelectorAll('.at-field').forEach(el=>{
+    const path = el.dataset.path;
+    if(!path) return;
+    const kind = el.dataset.kind;
+    const parts = path.split('.');
+    let obj = config;
+    for(let i=0;i<parts.length-1;i++){
+      const k = parts[i];
+      if(obj[k] == null || typeof obj[k] !== 'object') obj[k] = {};
+      obj = obj[k];
+    }
+    const leaf = parts[parts.length-1];
+    if(kind === 'bool'){ obj[leaf] = el.checked; }
+    else if(kind === 'num'){ obj[leaf] = el.value === '' ? 0 : Number(el.value); }
+    else if(kind === 'numlist'){ obj[leaf] = el.value.split(',').map(s=>s.trim()).filter(s=>s!=='').map(Number).filter(n=>!isNaN(n)); }
+    else if(kind === 'day'){
+      if(!Array.isArray(obj[leaf])) obj[leaf] = [];
+      const day = el.dataset.day;
+      const has = obj[leaf].includes(day);
+      if(el.checked && !has) obj[leaf].push(day);
+      if(!el.checked && has) obj[leaf] = obj[leaf].filter(d=>d!==day);
+    }
+    else{ obj[leaf] = el.value; }
+  });
+  return config;
+}
+function slugifyAutomationKey(name){
+  let slug = String(name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,31);
+  if(!slug || !/^[a-z]/.test(slug)) slug = 'p_' + (slug || Date.now());
+  return slug.slice(0,32);
+}
+
+async function saveAutomationsConfig(btn){
+  if(state.automations?.saving) return;
+  state.automations.saving = true;
+  const origText = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
+  const errBox = document.getElementById('atSaveErrors');
+  if(errBox) errBox.innerHTML = '';
+  try{
+    const config = collectAutomationsConfig();
+    const res = await authFetch('/api/automations/config', {
+      method:'PUT',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ config, base_version: state.automations.configVersion })
+    });
+    const data = await res.json().catch(()=>({}));
+    if(res.ok && data.ok){
+      state.automations.configVersion = data.config_version;
+      state.automations.config = config;
+      state.automations.isDefault = false;
+      showAlert('Saved. The box will pick up the change within 5 minutes.', 'success');
+    } else if(res.status === 409){
+      showAlert('Someone else saved a change just before you did. Reloading the latest settings — please make your change again.', 'danger');
+      await renderAutomations();
+    } else if(res.status === 400 && Array.isArray(data.errors)){
+      if(errBox) errBox.innerHTML = `<div class="at-error-list">Please fix the following:<ul>${data.errors.map(e=>`<li>${esc(e)}</li>`).join('')}</ul></div>`;
+      errBox?.scrollIntoView({ behavior:'smooth', block:'center' });
+    } else {
+      showAlert(data.error || 'Could not save changes. Please try again.', 'danger');
+    }
+  }catch(e){
+    showAlert('Could not reach the server. Check your connection and try again.', 'danger');
+  } finally {
+    state.automations.saving = false;
+    if(btn){ btn.disabled = false; btn.textContent = origText || 'Save changes'; }
+  }
+}
+
+// ──────────────────────────────────────────
 // 9. PUBLIC API
 // ──────────────────────────────────────────
 return {
@@ -18104,6 +18703,8 @@ return {
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   setPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
+  renderAutomations, toggleAutomationCard, addAutomationPerson, deleteAutomationPerson,
+  addAutomationParish, deleteAutomationParish, saveAutomationsConfig,
   _countSundaysInRange: countSundaysInRange,
   _buildSundayWeekBounds: buildSundayWeekBounds, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
   _quotaPeriodKey: quotaPeriodKey,

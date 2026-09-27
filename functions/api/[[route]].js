@@ -2944,12 +2944,123 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       if (method === 'GET'  &&  param) return await getSharedReport(DB, param);
     }
 
+    // ── /api/automations/{health,config} ─────────────────────────
+    if (route === 'automations') return await handleAutomations(env, authz, method, param, body);
+
     return err(`Route not found: ${method} /api/${path}`, 404);
 
   } catch (e) {
     console.error(`[API Error] ${method} /api/${path}:`, e.message, e.stack);
     return err(`Server error: ${e.message}`);
   }
+}
+
+// ── AUTOMATIONS (server-side proxy to the Clerk Watchdog Worker) ──────
+// The box's watchdog token (env.CLERK_WATCHDOG_TOKEN, a secret) is attached
+// to every Worker call here and never returned to the browser. it_admin gets
+// full read/write; accountant gets read-only, with /config filtered down to
+// their own people/routing rows. Everyone else — including the automation
+// read-key and KPSC sessions, neither of which carries a Finance role — is
+// refused before any Worker call is made.
+const CLERK_WATCHDOG_DEFAULT_URL = 'https://clerk-watchdog.decan-inv.workers.dev';
+const CLERK_WATCHDOG_TIMEOUT_MS = 10000;
+
+async function callClerkWatchdog(env, path, { method = 'GET', body } = {}) {
+  const token = String(env?.CLERK_WATCHDOG_TOKEN || '').trim();
+  if (!token) return { errorResponse: err('The Clerk box service is not configured for this deployment.', 503) };
+  const base = String(env?.CLERK_WATCHDOG_URL || CLERK_WATCHDOG_DEFAULT_URL).replace(/\/$/, '');
+  const headers = { 'x-watchdog-token': token };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  try {
+    const res = await fetch(`${base}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(CLERK_WATCHDOG_TIMEOUT_MS) : undefined,
+    });
+    // A 401 here means the Worker rejected OUR token; passing it through would
+    // look like the user's own sign-in expired.
+    if (res.status === 401) {
+      return { errorResponse: err('The Clerk box service did not accept this app\'s key. Check CLERK_WATCHDOG_TOKEN.', 502) };
+    }
+    let data = null;
+    try { data = await res.json(); } catch { data = null; }
+    if (data === null) return { errorResponse: err('The Clerk box service sent an unreadable reply. Try again in a minute.', 502) };
+    return { status: res.status, data };
+  } catch (e) {
+    return { errorResponse: err('Could not reach the Clerk box service. Try again in a minute.', 502) };
+  }
+}
+
+function passThroughWorkerJson(result) {
+  return new Response(JSON.stringify(result.data), { status: result.status, headers: CORS_HEADERS });
+}
+
+// Accountant view of GET /config: only their own people/routing rows, the
+// automations block dropped entirely, parishes unchanged, marked read_only.
+function filterAutomationsConfigForRole(workerData, role) {
+  const cfg = (workerData && typeof workerData.config === 'object' && workerData.config) || {};
+  const people = Array.isArray(cfg.people) ? cfg.people.filter(p => p && p.app_role === role) : [];
+  const keys = new Set(people.map(p => p.key));
+  const srcRouting = (cfg.routing && typeof cfg.routing === 'object') ? cfg.routing : {};
+  const routing = {};
+  for (const [msgType, perPerson] of Object.entries(srcRouting)) {
+    const filtered = {};
+    if (perPerson && typeof perPerson === 'object') {
+      for (const [personKey, val] of Object.entries(perPerson)) {
+        if (keys.has(personKey)) filtered[personKey] = val;
+      }
+    }
+    routing[msgType] = filtered;
+  }
+  return {
+    ...workerData,
+    config: {
+      people,
+      parishes: Array.isArray(cfg.parishes) ? cfg.parishes : [],
+      routing,
+      read_only: true,
+    },
+  };
+}
+
+async function handleAutomations(env, authz, method, param, body) {
+  // The automation read-key and KPSC sessions never carry a Finance role.
+  if (!authz?.finance) {
+    return err('Automations are only available to signed-in Finance users.', 403);
+  }
+  if (param !== 'health' && param !== 'config') {
+    return err(`Route not found: ${method} /api/automations/${param || ''}`, 404);
+  }
+  const role = authz.finance.role;
+  if (role !== 'it_admin' && role !== 'accountant') {
+    return err('Your role is not permitted to view automations.', 403);
+  }
+
+  if (param === 'health') {
+    if (method !== 'GET') return err(`Route not found: ${method} /api/automations/health`, 404);
+    const r = await callClerkWatchdog(env, '/health');
+    if (r.errorResponse) return r.errorResponse;
+    return passThroughWorkerJson(r);
+  }
+
+  // param === 'config'
+  if (method === 'GET') {
+    const r = await callClerkWatchdog(env, '/config');
+    if (r.errorResponse) return r.errorResponse;
+    if (r.status !== 200 || role === 'it_admin') return passThroughWorkerJson(r);
+    return ok(filterAutomationsConfigForRole(r.data, role));
+  }
+  if (method === 'PUT') {
+    if (role !== 'it_admin') return err('Only the IT administrator can change automations settings.', 403);
+    const r = await callClerkWatchdog(env, '/config', {
+      method: 'PUT',
+      body: { config: body?.config, base_version: body?.base_version },
+    });
+    if (r.errorResponse) return r.errorResponse;
+    return passThroughWorkerJson(r);
+  }
+  return err(`Route not found: ${method} /api/automations/config`, 404);
 }
 
 // ── INIT ─────────────────────────────────────────────────────────

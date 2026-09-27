@@ -1,0 +1,9 @@
+# clerk-watchdog Worker (deployed separately from the Pages app: `npx wrangler deploy` from this folder).
+# No [triggers] block on purpose: wrangler leaves the Worker's existing cron schedule untouched.
+name = "clerk-watchdog"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "6a977aa2091048e18512cfdb5d3e1008"

@@ -621,6 +621,8 @@ Required environment variables in Cloudflare Pages for the full feature set:
 | `OPENAI_API_KEY` | Realtime transcription session tokens, OCR, drafting |
 | `EMAIL_INGEST_SECRET` | Authorises bank-alert email ingestion |
 | `VOICE_FP_TOKEN` | Bearer token for the voice fingerprint service |
+| `CLERK_WATCHDOG_TOKEN` | Secret. Sent as `x-watchdog-token` when `/api/automations/health` and `/api/automations/config` proxy the Clerk Watchdog Worker; the browser never sees it. Missing it disables those routes with a 503 |
+| `CLERK_WATCHDOG_URL` | Optional. Base URL of the Clerk Watchdog Worker. Defaults to `https://clerk-watchdog.decan-inv.workers.dev` |
 
 ### Remittance cut-off webhook (optional)
 
