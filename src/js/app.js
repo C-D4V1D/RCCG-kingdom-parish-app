@@ -8770,14 +8770,15 @@ async function renderRemittances(){
         <strong${l.isWaived?' style="text-decoration:line-through"':''}>${esc(l.label)}</strong>
         ${l.pct!=null?`<span style="margin-left:6px;font-size:11px;color:var(--text3);font-weight:400">(${l.pct}%)</span>`:''}
         ${l.basis?`<div style="font-size:11px;color:var(--text3);font-weight:400;margin-top:2px">${esc(l.basis)}</div>`:''}
+        <div class="rem-type-inline">${l.section==='quota'?quotaBadge:'<span class="badge badge-purple">% Based</span>'}</div>
         ${!l.isWaived&&l.isOverridden?`<div style="font-size:11px;color:var(--info);font-weight:600;margin-top:1px">Adjusted for this period (normally ${fmt(l.baseMonthlyAmount||0)})</div>`:''}
         ${!l.isWaived&&l.section==='quota'&&l.isProrated&&l.monthlyAmount>l.amount?`<div style="font-size:11px;color:var(--text3);font-weight:400;margin-top:1px">Full monthly quota: <strong style="color:var(--text2)">${fmt(l.monthlyAmount)}</strong></div>`:''}
         ${canWaive?`<div style="margin-top:4px"><button class="btn btn-sm" style="padding:3px 8px;font-size:11px" onclick="App.confirmQuotaPeriodWaiver(${l.quotaIndex}, '${l.periodKey}', ${l.isWaived?'true':'false'})">${l.isWaived?'↩ Mark as due again':'Not due this period'}</button></div>`:''}
       </td>
-      <td style="padding:7px 8px">
+      <td class="rem-type-col" style="padding:7px 8px">
         ${l.section==='quota'?quotaBadge:'<span class="badge badge-purple">% Based</span>'}
       </td>
-      <td class="td-right td-bold ${l.isWaived?'td-muted':'td-red'}" style="padding:7px 12px">${l.isWaived?'—':fmt(l.amount)}</td>
+      <td class="td-right td-bold rem-amt-col ${l.isWaived?'td-muted':'td-red'}" style="padding:7px 12px">${l.isWaived?'—':fmt(l.amount)}</td>
     </tr>`;}).join('')}`:'';
 
   document.getElementById('pageContent').innerHTML=`
@@ -8848,29 +8849,29 @@ async function renderRemittances(){
           <span class="card-title">Full Remittance Breakdown</span>
           <span style="font-size:11px;color:var(--text3)">${fmtDateShort(fromDate)} – ${fmtDateShort(toDate)}</span>
         </div>
-        <div class="table-wrap"><table style="width:100%">
-          <tr><th>Description</th><th style="width:100px">Type</th><th class="td-right" style="width:130px">Amount Due (₦)</th></tr>
+        <div class="table-wrap"><table class="rem-breakdown-table" style="width:100%">
+          <tr><th>Description</th><th class="rem-type-col" style="width:100px">Type</th><th class="td-right rem-amt-col" style="width:130px">Amount Due (₦)</th></tr>
           ${renderSection(incomeLines,'Part A — Income-Based Remittances → National HQ (% of collections)')}
           ${renderSection(provinceLines,`Part A — Province Rebate (${Math.round(rr.provinceRebate*100)}% of Local Retained Tithes)`)}
           ${renderSection(levyLines,'Part A — Additional RCCG Levies → National HQ')}
           ${renderSection(rccgQuotaLines,'Part A — Fixed Quotas Due for This Period')}
           <tr style="border-top:2px solid var(--border);background:var(--surface)">
             <td colspan="2" class="td-bold" style="font-size:13px;padding:8px 12px">PART A SUBTOTAL — RCCG Authorities</td>
-            <td class="td-right td-bold" style="font-size:14px;color:var(--danger);padding:8px 12px">${fmt(_dPartATotal)}</td>
+            <td class="td-right td-bold rem-amt-col" style="font-size:14px;color:var(--danger);padding:8px 12px">${fmt(_dPartATotal)}</td>
           </tr>
           ${renderSection(tgLines,'Part B — Thanksgiving — Pastoral & Local Distribution')}
           ${renderSection(mummyQuotaLines,'Part B — Pastoral Stipend')}
           <tr style="border-top:2px solid var(--border);background:var(--surface)">
             <td colspan="2" class="td-bold" style="font-size:13px;padding:8px 12px">PART B SUBTOTAL — TG & Pastoral</td>
-            <td class="td-right td-bold" style="font-size:14px;color:var(--danger);padding:8px 12px">${fmt(_dPartBTotal)}</td>
+            <td class="td-right td-bold rem-amt-col" style="font-size:14px;color:var(--danger);padding:8px 12px">${fmt(_dPartBTotal)}</td>
           </tr>
           <tr style="border-top:3px solid var(--text)">
             <td colspan="2" class="td-bold" style="font-size:14px;padding:10px 12px">TOTAL REMITTANCES DUE</td>
-            <td class="td-right td-bold" style="font-size:15px;color:var(--danger);padding:10px 12px">${fmt(_dTotalDue)}</td>
+            <td class="td-right td-bold rem-amt-col" style="font-size:15px;color:var(--danger);padding:10px 12px">${fmt(_dTotalDue)}</td>
           </tr>
           <tr>
             <td colspan="2" style="font-size:12px;color:var(--text2);padding:6px 12px">Net Local Retained (after Province Rebate &amp; Fixed Quotas)</td>
-            <td class="td-right" style="font-size:13px;color:var(--primary);font-weight:600;padding:6px 12px">${fmt(trueNetLocal)}</td>
+            <td class="td-right rem-amt-col" style="font-size:13px;color:var(--primary);font-weight:600;padding:6px 12px">${fmt(trueNetLocal)}</td>
           </tr>
         </table></div>
 
