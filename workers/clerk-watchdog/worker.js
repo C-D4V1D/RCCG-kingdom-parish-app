@@ -1,7 +1,11 @@
 // clerk-watchdog: Church Clerk's script pings this Worker every hour.
 // Once a day, if no ping has arrived for 3 hours, it wakes Church Clerk via its webhook (max once per 20h).
+// Also serves as the config + health API for the Automations tab: KV keys config, config_version, health.
+import { DEFAULT_CONFIG, validateConfig } from "./config.js";
+
 const MAX_SILENCE_MS = 3 * 60 * 60 * 1000;
 const MIN_WAKE_GAP_MS = 20 * 60 * 60 * 1000;
+const MAX_CONFIG_BYTES = 64 * 1024;
 
 const json = (o, status = 200) =>
   new Response(JSON.stringify(o, null, 2), { status, headers: { "content-type": "application/json" } });
@@ -33,7 +37,14 @@ export default {
 
     if (req.method === "POST" && url.pathname === "/ping") {
       await env.KV.put("last_ping", String(Date.now()));
-      return json({ ok: true });
+      let b = {};
+      try { b = await req.json(); } catch { b = {}; } // old box script sends no body
+      if (b && typeof b === "object" && b.health) {
+        await env.KV.put("health", JSON.stringify({ ...b.health, received_at: new Date().toISOString() }));
+      }
+      const configVersion = +((await env.KV.get("config_version")) || 0);
+      const bodyVersion = b && typeof b === "object" && Number.isFinite(b.config_version) ? b.config_version : 0;
+      return json({ ok: true, config_version: configVersion, config_update: configVersion > bodyVersion });
     }
 
     // Script tells the Worker exactly how to call the wake webhook. "{{reason}}" in body is replaced.
@@ -52,6 +63,41 @@ export default {
     }
 
     if (req.method === "POST" && url.pathname === "/test-wake") return json(await wake(env, "setup test", true));
+
+    if (req.method === "GET" && url.pathname === "/health") {
+      const [p, h] = await Promise.all(["last_ping", "health"].map((k) => env.KV.get(k)));
+      return json({ last_ping: p ? new Date(+p).toISOString() : null, health: h ? JSON.parse(h) : null });
+    }
+
+    if (req.method === "GET" && url.pathname === "/config") {
+      const [c, v] = await Promise.all(["config", "config_version"].map((k) => env.KV.get(k)));
+      return json({ config_version: +(v || 0), config: c ? JSON.parse(c) : DEFAULT_CONFIG, is_default: !c });
+    }
+
+    if (req.method === "PUT" && url.pathname === "/config") {
+      const raw = await req.text();
+      if (new TextEncoder().encode(raw).length > MAX_CONFIG_BYTES) {
+        return json({ error: "invalid config", errors: ["config body must be 64 KB or smaller"] }, 400);
+      }
+      let b;
+      try { b = JSON.parse(raw); } catch { return json({ error: "invalid JSON" }, 400); }
+      const errors = validateConfig(b && b.config);
+      if (errors.length) return json({ error: "invalid config", errors }, 400);
+
+      const currentVersion = +((await env.KV.get("config_version")) || 0);
+      if (Number.isFinite(b.base_version) && b.base_version !== currentVersion) {
+        return json({ error: "conflict", config_version: currentVersion }, 409);
+      }
+      const nextVersion = currentVersion + 1;
+      await env.KV.put("config", JSON.stringify(b.config));
+      await env.KV.put("config_version", String(nextVersion));
+      await env.KV.put("config_updated_at", new Date().toISOString());
+      return json({ ok: true, config_version: nextVersion });
+    }
+
+    if (req.method === "GET" && url.pathname === "/config/version") {
+      return json({ config_version: +((await env.KV.get("config_version")) || 0) });
+    }
 
     if (req.method === "GET" && url.pathname === "/status") {
       const [p, w, c, r] = await Promise.all(["last_ping", "last_wake", "wake_config", "last_result"].map(k => env.KV.get(k)));
