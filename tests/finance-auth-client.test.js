@@ -73,7 +73,9 @@ test('the direct fetch() call sites use authFetch, which sends the token too', a
   // '' is _apiFetchOnce's fetch('/api/'+path), which adds Auth.headers() (test above);
   // 'auth/login' is the PIN prompt itself. Nothing else calls /api directly.
   assert.deepEqual(direct, ['auth/login', '']);
-  assert.equal([...src.matchAll(/authFetch\('\/api\//g)].length, 6, 'the six former direct calls');
+  // 6 former direct calls, plus 4 for the Automations page (health x2 — initial load
+  // and its 60s auto-refresh — and config GET/PUT).
+  assert.equal([...src.matchAll(/authFetch\('\/api\//g)].length, 10, 'the six former direct calls plus the Automations page\'s four');
   signIn('fin1.direct.sig');
   const calls = mockFetch(() => jsonResponse(200, { ok: true }));
   await App._authFetch('/api/cash-transactions/c1', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' });
