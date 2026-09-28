@@ -18107,6 +18107,7 @@ const AUTOMATION_MESSAGE_TYPES = [
   { key:'attendance_error',          label:'Attendance check problem' },
   { key:'source_doc_reminder',       label:'Source-document reminder' },
   { key:'weekly_attendance_reminder',label:'Weekly attendance reminder' },
+  { key:'collection_reminder',       label:'Sunday collection reminder' },
   { key:'weekly_health',             label:'Weekly box health note' },
   { key:'upload_confirmation',       label:'Upload confirmation' },
   { key:'upload_fyi',                label:'Upload notice (for others)' },
@@ -18114,6 +18115,12 @@ const AUTOMATION_MESSAGE_TYPES = [
   { key:'watchdog_down',             label:'Box-down alert' },
   { key:'scheduler_fallback',        label:'Scheduler fallback alert' },
 ];
+// Who gets a message type the saved settings don't have yet (added after they were saved). Without this its
+// boxes would show unticked and the next Save would switch that message off for everyone.
+const AUTOMATION_ROUTING_DEFAULTS = {
+  collection_reminder: { david: { telegram: true, email: false }, divine: { telegram: true, email: false } },
+};
+const AUTOMATION_COLLECTION_REMINDER_DEFAULTS = { enabled: true, second_day: 'thu', time: '10:00', cutoff_evening: '20:00' };
 const AUTOMATION_DASHBOARD_CARDS = [
   { key:'memo',                  icon:'📨', label:'Memo forwarding' },
   { key:'statement',              icon:'🧾', label:'Monthly statement' },
@@ -18415,6 +18422,7 @@ function renderAutomationsSettings(config, isDefault, health){
   const a = config.automations || {};
   const memo = a.memo || {}, stmt = a.statement || {};
   const sdr = a.source_doc_reminders || {}, war = a.weekly_attendance_reminder || {};
+  const cr = { ...AUTOMATION_COLLECTION_REMINDER_DEFAULTS, ...(a.collection_reminders || {}) };
   const sun = a.sunday_note || {}, health_ = a.health_note || {}, upl = a.upload_bot || {};
 
   const peopleRows = people.map((p, i)=>{
@@ -18428,7 +18436,7 @@ function renderAutomationsSettings(config, isDefault, health){
       <div class="table-wrap"><table class="at-routing-table">
         <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
         ${AUTOMATION_MESSAGE_TYPES.map(mt=>{
-          const r = config.routing?.[mt.key]?.[p.key] || {};
+          const r = (config.routing?.[mt.key] || AUTOMATION_ROUTING_DEFAULTS[mt.key])?.[p.key] || {};
           return `<tr><td>${esc(mt.label)}</td>
             <td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" ${r.telegram?'checked':''} ${p.telegram_chat_id?'':'title="This person is not connected on Telegram yet"'}></td>
             <td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" data-ch="email" ${r.email?'checked':''}></td>
@@ -18523,10 +18531,17 @@ function renderAutomationsSettings(config, isDefault, health){
           ${automationsTimeField('automations.source_doc_reminders.after_time', sdr.after_time, 'Send after (time)')}
         </div>
         <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Weekly attendance reminder</div>
-        ${automationsBoolField('automations.weekly_attendance_reminder.enabled', war.enabled, 'Send the weekly attendance reminder', "When turned on, a reminder is sent once a week if a Sunday's attendance hasn't been confirmed yet.")}
+        ${automationsBoolField('automations.weekly_attendance_reminder.enabled', war.enabled, 'Send the weekly attendance reminder', "When turned on, Bro. Divine gets one message a week listing Sundays whose attendance isn't submitted yet, and any Sunday collection not yet recorded.")}
         <div class="form-row" style="margin-top:10px">
           <div class="form-group"><label class="form-label">Day of week</label><select class="form-select at-field" data-path="automations.weekly_attendance_reminder.day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${war.day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
           ${automationsTimeField('automations.weekly_attendance_reminder.after_time', war.after_time, 'Send after (time)')}
+        </div>
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Sunday collection reminders</div>
+        ${automationsBoolField('automations.collection_reminders.enabled', cr.enabled, 'Send Sunday collection reminders', "The month-end filing only starts once every Sunday's collection is in the app. Missing collections are listed in the Monday message above; if still missing, a 2nd reminder goes out, and on the cut-off Sunday evening (and the Monday after) you and Bro. Divine are told if the last collection isn't saved.")}
+        <div class="form-row" style="margin-top:10px">
+          <div class="form-group"><label class="form-label">2nd reminder on</label><select class="form-select at-field" data-path="automations.collection_reminders.second_day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${cr.second_day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
+          ${automationsTimeField('automations.collection_reminders.time', cr.time, 'Send after (time)')}
+          ${automationsTimeField('automations.collection_reminders.cutoff_evening', cr.cutoff_evening, 'Cut-off Sunday check at')}
         </div>
         ${saveBar}
       </div>
@@ -18579,7 +18594,7 @@ function renderAutomationsSettings(config, isDefault, health){
 function renderAutomationsAccountantSummary(config){
   const me = (config.people || [])[0] || null;
   const rows = AUTOMATION_MESSAGE_TYPES.map(mt=>{
-    const r = me ? (config.routing?.[mt.key]?.[me.key] || {}) : {};
+    const r = me ? ((config.routing?.[mt.key] || AUTOMATION_ROUTING_DEFAULTS[mt.key])?.[me.key] || {}) : {};
     if(!r.telegram && !r.email) return '';
     return `<tr><td>${esc(mt.label)}</td><td>${r.telegram?'✓':'—'}</td><td>${r.email?'✓':'—'}</td></tr>`;
   }).filter(Boolean).join('');

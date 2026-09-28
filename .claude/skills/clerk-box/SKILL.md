@@ -120,6 +120,11 @@ secret `CLERK_WATCHDOG_TOKEN` must equal the box's `/workspace/.secrets/watchdog
   dashboard's Month-end card. Tests: `tests/box-monthend.test.js` (real box files against a fake /workspace of stubs).
 - Newest clerkcfg.py: `box/cleanup-20260928/clerkcfg.py` (bundles are applied in order: automations-20260928 →
   monthend-20261001 → cleanup-20260928). Never re-run an older bundle's install.sh: it would put back an older clerkcfg.py.
+- reminders-20260929: `tools/monthinfo.py` (read-only app status) drives the Sunday collection reminders (in
+  reminders.py) and the bot's `/month`; `/status` and `/refresh` also understand months filed by the month-end run.
+  App settings: automations.collection_reminders; routing type `collection_reminder` (app-side default when not saved:
+  AUTOMATION_ROUTING_DEFAULTS). When adding a message type or settings block, give it an app-side default like these, or
+  the next Save stores it switched off.
 - cleanup-20260928 removed the hourly attendance polling: `att-watch.py` is no longer started and the scheduler's
   sched_config.json always has `"attendance": false`. Attendance is filed only by the month-end run (and Refresh attendance).
 
