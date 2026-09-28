@@ -91,6 +91,29 @@ a Cloudflare API credential for that host). Before deploying, note the cron sche
 and verify the live code with the Cloudflare connector (`workers_get_worker_code clerk-watchdog`). The app's Pages
 secret `CLERK_WATCHDOG_TOKEN` must equal the box's `/workspace/.secrets/watchdog-token` (only the owner can copy it).
 
+## Month-end (remittance) — who runs it
+
+- The app sends month-end signals (cut-off Sunday collection saved; Generate RRR / Refresh / Refresh attendance button
+  confirmed) through `functions/_lib/month-end-events.js`. Automations → Settings → Remittance (month-end) →
+  "Month-end run by" (`config.remittance.handler`):
+  - `clerk_ai` (default): the Clerk AI webhook as before, plus a copy to the Worker mailbox (`POST /events`) marked
+    `handler:'clerk_ai'` → the box does a **practice run** only (offline dry run after the AI finished; Telegram to David).
+  - `box`: the Worker mailbox only; the box does the real run. Falls back to the Clerk AI if the mailbox is unreachable
+    or the box hasn't pinged for 30 minutes (`fallback: 'box_unreachable' | 'box_silent'`).
+- The app also refuses the cut-off Sunday collection until every earlier Sunday of the period has one
+  (`checkEarlierCollectionsGate` in `functions/api/[[route]].js`).
+- Box side: bundle `box/monthend-20261001/`. `clerkcfg.py sync` copies new mailbox signals to
+  `/workspace/state/monthend/inbox/` and starts `/workspace/tools/monthend.py run` (WEBHOOK-RUN.md / REPLY-RUN.md as a
+  script: same scripts, `state/remit-runs.json`, logs). Emails go through `mailer.py` (SMTP), not Gmail.
+  The Clerk AI is woken (SCHED webhook, event `monthend_needs_ai`, runbook `/workspace/tools/MONTHEND-AI.md`) only when a
+  step fails after one retry, a result is unclear, or a signal is unknown.
+- Remittance lines (`config.remittance.lines`, app key → portal line or `__not_remitted__`) override remit_match.py's
+  `APP_KEY_TO_WEEKLY_LINE` / `UNMAPPED_APP_KEYS` on the box (patch). Money in a category with no line **holds** the month
+  (David + Bro. Divine told by email and Telegram; not the AI); saving the line in the app resumes it within 5 minutes.
+- Status: `/workspace/state/monthend/status.json` → `health.remittance` {handler, portal_lines, categories, hold} and the
+  dashboard's Month-end card. Tests: `tests/box-monthend.test.js` (real box files against a fake /workspace of stubs).
+- The `automations-20260928` bundle ships an older clerkcfg.py: never re-run its install.sh after the month-end bundle.
+
 ## Known open items
 
 - The repo is public and `workers/clerk-watchdog/config.js` contains people's emails and Telegram chat ids. The owner

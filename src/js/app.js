@@ -18121,6 +18121,7 @@ const AUTOMATION_DASHBOARD_CARDS = [
   { key:'source_doc_reminders',   icon:'📎', label:'Source-doc reminders' },
   { key:'upload_bot',             icon:'⬆️', label:'Upload bot' },
   { key:'drive_sync',             icon:'☁️', label:'Drive sync' },
+  { key:'month_end',              icon:'🏛️', label:'Month-end remittance' },
 ];
 const AUTOMATION_DAYS = [
   { key:'mon', label:'Mon' }, { key:'tue', label:'Tue' }, { key:'wed', label:'Wed' },
