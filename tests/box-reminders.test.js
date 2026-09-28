@@ -104,6 +104,22 @@ test('monthinfo: /month after the cut-off reads the month-end record (check sent
     assert.equal(r5.out.trim(), '2026-10 2026-11');
     const r6 = await py(url, `print(M.facts(today=D.date(2026, 10, 19), prefer_open=True)["month"])`, { [key]: { status: 'done' } });
     assert.equal(r6.out.trim(), '2026-11');
+    // a month done outside the automation (no record, cut-off collection saved): not "starting", and /month moves on
+    const saved = APP.income;
+    APP.income = [...saved, { date: '2026-10-11', source: 'sunday_collection' }, { date: '2026-10-18', source: 'sunday_collection' }];
+    try {
+      const r7 = await py(url, `f = M.facts(month="2026-10", today=D.date(2026, 10, 28)); print(json.dumps([M.month_end_line(f), M.next_step(f), M.attendance_line(f), M.facts(today=D.date(2026, 10, 28), prefer_open=True)["month"]]))`);
+      const [line, next, att, month] = JSON.parse(r7.out);
+      assert.match(line, /no automatic run recorded for this month/);
+      assert.equal(next, 'Nothing for this month.');
+      assert.equal(att, 'no record on the box');
+      assert.equal(month, '2026-11');
+      const r8 = await py(url, `f = M.facts(month="2026-10", today=D.date(2026, 10, 19)); print(json.dumps([M.month_end_line(f), M.next_step(f), M.facts(today=D.date(2026, 10, 19), prefer_open=True)["month"]]))`);
+      const [line8, next8, month8] = JSON.parse(r8.out);
+      assert.match(line8, /starting \(the cut-off collection was just saved\)/);
+      assert.match(next8, /starting the month-end/);
+      assert.equal(month8, '2026-10');
+    } finally { APP.income = saved; }
   });
 });
 

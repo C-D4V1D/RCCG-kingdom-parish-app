@@ -119,9 +119,12 @@ def facts(month=None, today=None, prefer_open=False):
     except Exception:
         runs = {}
     if prefer_open and not month:
+        # keep showing the period that just ended while its month-end is still going (or about to start); a period
+        # with no month-end record 2+ days after its cut-off was done outside the automation, so move on
         prev = period_for_month(settings, f"{p[0] - datetime.timedelta(days=1):%Y-%m}")
+        pe = ((runs or {}).get(f"{prev[0]}..{prev[1]}") or {}) if prev else {}
         if prev and prev[1] < today and (today - prev[1]).days <= 14 and \
-                ((runs or {}).get(f"{prev[0]}..{prev[1]}") or {}).get("status") != "done":
+                ((pe and pe.get("status") != "done") or (not pe and (today - prev[1]).days <= 1)):
             p = prev
     start, end = p
     try:
@@ -151,7 +154,9 @@ def month_end_line(f):
     cut = next((s for s in f["sundays"] if s["date"] == end), None)
     if not st:
         if cut and cut["collection"]:
-            return "starting (the cut-off collection was just saved)"
+            if (today - end).days <= 1:
+                return "starting (the cut-off collection was just saved)"
+            return "no automatic run recorded for this month (it was done outside the automation)"
         miss = missing_collections(f, before=end + datetime.timedelta(days=1)) if today > end else missing_collections(f)
         if today > end:
             return f"⚠️ not started: waiting for {', '.join(nice(d) for d in miss) or nice(end)}"
@@ -170,7 +175,8 @@ def month_end_line(f):
 def attendance_line(f):
     a = f["entry"].get("attendance")
     if not isinstance(a, dict):
-        return "filed with the month-end run"
+        return "filed with the month-end run" if f["today"] <= f["end"] or not f["entry"] and (f["today"] - f["end"]).days <= 1 \
+            else ("no record on the box" if not f["entry"] else "filed with the month-end run")
     return {0: "filed on the portal ✅", 12: "already on the portal ✅", 16: "filed, but the portal differs (see the check email)",
             10: "portal not open yet", 15: "not filed: something was missing in the app", 17: "not filed yet"}.get(a.get("exit"), f"problem (code {a.get('exit')})")
 
@@ -190,6 +196,9 @@ def next_step(f):
         return "David: see the message about the stopped run."
     if st:
         return "Nothing; the box is working on it."
+    cut = next((s for s in f["sundays"] if s["date"] == end), None)
+    if today > end and cut and cut["collection"]:
+        return "Nothing: the box is starting the month-end." if (today - end).days <= 1 else "Nothing for this month."
     if miss:
         return "Bro. Divine: record the collection for " + ", ".join(nice(d) for d in miss) + "."
     if att_missing:
