@@ -518,8 +518,14 @@ def health():
             try: age = (datetime.datetime.now() - datetime.datetime.fromisoformat(last[:16].replace(" ", "T"))).total_seconds() / 60
             except Exception: pass
         st = "ok" if age is not None and age < 30 else "warn" if age is not None and age < 120 else "error"
-        return {"status": st, "last_run": _ts(last) if last else None, "summary": f"Last sync {last}" if last else "No sync yet",
-                "next_run": None, "activity": []}
+        summary = f"Last sync {last}" if last else "No sync yet"
+        try:  # cleanup-20260928: drive-sync.sh records a pass that ended with an error ("<date> <time> <exit code>")
+            bad = open("/workspace/tools/.sync-error").read().split()
+            summary = f"Last pass {bad[0]} {bad[1]} ended with an error (code {bad[2]}); last clean sync {last or 'never'}"
+            st = "warn" if st == "ok" else st
+        except Exception:
+            pass
+        return {"status": st, "last_run": _ts(last) if last else None, "summary": summary, "next_run": None, "activity": []}
 
     def month_end():
         L = _lines(os.path.join(MONTHEND_DIR, "log.txt"), 5)

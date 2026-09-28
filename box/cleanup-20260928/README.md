@@ -12,12 +12,16 @@ every earlier Sunday collection are in, so the separate polling was a duplicate.
   - `health.remittance.portal_lines` falls back to the newest `rccg-remit/runs/portal-items-YYYY-MM.json`, so the app's
     Remittance lines list shows the lines actually on the portal;
   - `clerkcfg.py apply` rewrites sched_config.json from the saved settings.
+- `drive-sync.sh`: also skips `.venv` folders (a Python environment made one pass take hours) and links; every pass
+  is recorded (`.last-sync` when clean, `.sync-error` otherwise), shown on the Drive sync card.
+- `supervisor.sh`: the settings sync and status report run before the slower jobs (health note, reminders), which get a
+  4-minute limit; slow cycles are logged.
 - Kept: Bro. Divine's Monday "attendance not yet in the app" reminder (`reminders.py`, weekly_attendance_reminder).
 
 Install (never between 07:25 and 09:05):
 ```bash
 cd /tmp && rm -rf cu && mkdir cu && cd cu && B=https://raw.githubusercontent.com/C-D4V1D/RCCG-kingdom-parish-app/main/box/cleanup-20260928 && \
-for f in SHA256SUMS clerkcfg.py supervisor.sh install.sh undo.sh; do curl -fsSO "$B/$f" || echo "MISSING $f"; done && \
+for f in SHA256SUMS clerkcfg.py supervisor.sh drive-sync.sh install.sh undo.sh; do curl -fsSO "$B/$f" || echo "MISSING $f"; done && \
 sha256sum -c SHA256SUMS && bash install.sh --check
 ```
 then `bash install.sh`. Undo: `bash /workspace/backups/cleanup-20260928/undo.sh`.
