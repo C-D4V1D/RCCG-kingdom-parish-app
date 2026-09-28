@@ -38,10 +38,12 @@ export const DEFAULT_CONFIG = {
   routing: {
     // "Telegram + Email" rows: both true for each "Yes". Telegram-only / Email-only rows: the other channel false.
     // Pastor "Skipped (not in contacts)" on memo_forwarded/Telegram => telegram true (intent; box has no chat id for him).
+    // Defaults mirror what the box does today (memo-runner.sh, stmt-runner.py, make-att-*.py, tg_msgs.py),
+    // so the first save from the app changes nothing unless a switch is changed.
     memo_forwarded: route({
-      david: { telegram: true, email: true },
+      david: { telegram: true, email: false },
       divine: { telegram: true, email: true },
-      fabian: { telegram: true, email: false },
+      fabian: { telegram: true, email: true },
       pastor: { telegram: true, email: true },
     }),
     memo_error: route({ david: { telegram: true, email: false } }),
@@ -59,6 +61,7 @@ export const DEFAULT_CONFIG = {
     monthly_statement: route({
       david: { telegram: true, email: true },
       divine: { telegram: true, email: true },
+      fabian: { telegram: true, email: true },
       pastor: { telegram: true, email: true },
     }),
     statement_error: route({ david: { telegram: true, email: false } }),
@@ -67,11 +70,7 @@ export const DEFAULT_CONFIG = {
       divine: { telegram: true, email: true },
       pastor: { telegram: true, email: true },
     }),
-    attendance_nudge: route({
-      david: { telegram: true, email: true },
-      divine: { telegram: true, email: true },
-      pastor: { telegram: true, email: true },
-    }),
+    attendance_nudge: route({ david: { telegram: true, email: true } }),
     attendance_nudge_fallback: route({ david: { telegram: true, email: false } }),
     attendance_error: route({ david: { telegram: true, email: false } }),
     // David: all parishes. Divine: Kingdom Parish only (scope tracked outside this schema).
@@ -107,9 +106,9 @@ export const DEFAULT_CONFIG = {
     weekly_attendance_reminder: { enabled: true, day: "mon", after_time: "09:00" },
     sunday_note: { enabled: true, after_time: "09:00" },
     health_note: { enabled: true, day: "sat", after_time: "18:00", log_trim_mb: 1, log_trim_lines: 2000 },
-    upload_bot: { admin_max_kb: 500, finance_max_kb: 1024, jpeg_quality: 85, max_width_px: 960 },
+    upload_bot: { admin_max_kb: 500, finance_max_kb: 1000, jpeg_quality: 85, max_width_px: 1800 },
     drive_sync: { interval_minutes: 10 },
-    supervisor: { interval_seconds: 300, ping_every_cycles: 12 },
+    supervisor: { interval_seconds: 300, ping_every_cycles: 2 }, // ping every 10 min so the dashboard stays green
   },
 };
 
