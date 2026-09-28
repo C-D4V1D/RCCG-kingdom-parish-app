@@ -6,6 +6,8 @@ import { DEFAULT_CONFIG, validateConfig } from "./config.js";
 const MAX_SILENCE_MS = 3 * 60 * 60 * 1000;
 const MIN_WAKE_GAP_MS = 20 * 60 * 60 * 1000;
 const MAX_CONFIG_BYTES = 64 * 1024;
+const MAX_EVENT_BYTES = 16 * 1024;
+const EVENT_TTL_S = 60 * 24 * 60 * 60;
 
 const json = (o, status = 200) =>
   new Response(JSON.stringify(o, null, 2), { status, headers: { "content-type": "application/json" } });
@@ -95,8 +97,37 @@ export default {
       return json({ ok: true, config_version: nextVersion });
     }
 
+    // Month-end mailbox: the app drops signals here (cut-off collection saved, button pressed);
+    // the box reads them on its 5-minute config sync. Kept 60 days; ids sort by arrival time.
+    if (req.method === "POST" && url.pathname === "/events") {
+      const raw = await req.text();
+      if (new TextEncoder().encode(raw).length > MAX_EVENT_BYTES) return json({ error: "event too large" }, 413);
+      let ev;
+      try { ev = JSON.parse(raw); } catch { return json({ error: "invalid JSON" }, 400); }
+      if (!ev || typeof ev !== "object" || Array.isArray(ev) || typeof ev.event !== "string" || !ev.event) {
+        return json({ error: "event must be an object with an event name" }, 400);
+      }
+      const id = `${String(Date.now()).padStart(13, "0")}-${crypto.randomUUID().slice(0, 8)}`;
+      await env.KV.put(`ev:${id}`, JSON.stringify({ ...ev, id, received_at: new Date().toISOString() }), { expirationTtl: EVENT_TTL_S });
+      await env.KV.put("events_last", id);
+      return json({ ok: true, id });
+    }
+
+    if (req.method === "GET" && url.pathname === "/events") {
+      const after = url.searchParams.get("after") || "";
+      const listed = await env.KV.list({ prefix: "ev:" });
+      const ids = listed.keys.map((k) => k.name.slice(3)).filter((id) => id > after).sort().slice(0, 50);
+      const events = [];
+      for (const id of ids) {
+        const v = await env.KV.get(`ev:${id}`);
+        if (v) events.push(JSON.parse(v));
+      }
+      return json({ events, last: ids.length ? ids[ids.length - 1] : after });
+    }
+
     if (req.method === "GET" && url.pathname === "/config/version") {
-      return json({ config_version: +((await env.KV.get("config_version")) || 0) });
+      const [v, e] = await Promise.all(["config_version", "events_last"].map((k) => env.KV.get(k)));
+      return json({ config_version: +(v || 0), events_last: e || null });
     }
 
     if (req.method === "GET" && url.pathname === "/status") {

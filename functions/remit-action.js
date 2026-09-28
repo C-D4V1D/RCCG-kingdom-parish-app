@@ -15,11 +15,10 @@
 import {
   verifyRemitActionToken,
   remitActionSecret,
-  remitWebhookHeaders,
   REMIT_ACTION_PEOPLE,
 } from './_lib/remit-action-token.js';
+import { deliverMonthEndEvent, monthEndConfigured } from './_lib/month-end-events.js';
 
-const WEBHOOK_TIMEOUT_MS = 15000;
 const MAX_BODY_BYTES = 4096;
 const PARISH_NAME = 'RCCG Kingdom Parish, Aguleri';
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -96,8 +95,7 @@ ${details(p)}
 
 async function handlePost(request, env) {
   const secret = remitActionSecret(env);
-  const url = String(env?.REMIT_WEBHOOK_URL || '').trim();
-  if (!secret || !url) return notConfigured();
+  if (!secret || !monthEndConfigured(env)) return notConfigured();
 
   const len = Number(request.headers.get('Content-Length') || 0);
   if (len > MAX_BODY_BYTES) return page(413, 'Not sent', `<p>That request was too large. Please use the button in the email.</p>`);
@@ -121,19 +119,10 @@ async function handlePost(request, env) {
     test: p.test === true,
     clickedAt: new Date().toISOString(),
   };
-  let res;
-  try {
-    res = await fetch(url, {
-      method: 'POST', headers: remitWebhookHeaders(env), body: JSON.stringify(notice),
-      signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
-    });
-  } catch (e) {
-    const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
-    console.error(`[remit-action] ${timedOut ? 'timeout' : 'network error'} sending ${notice.action} for ${notice.month} (${notice.person})`);
-    return notSent(p, timedOut);
-  }
-  if (!res.ok) {
-    console.error(`[remit-action] webhook answered HTTP ${res.status} for ${notice.action} ${notice.month} (${notice.person})`);
+  // To the Clerk AI or the Clerk box, whichever runs the month-end (Automations → Month-end run by).
+  const sent = await deliverMonthEndEvent(env, notice);
+  if (!sent.ok) {
+    console.error(`[remit-action] ${notice.action} for ${notice.month} (${notice.person}) not accepted by ${sent.to || 'anyone'}`);
     return notSent(p, false);
   }
   console.log(`[remit-action] sent ${notice.action} ${notice.month} by ${notice.person}${notice.test ? ' (test)' : ''}`);

@@ -16,6 +16,7 @@ import {
   REMIT_ACTION_PARISH,
   REMIT_ACTION_TEST_TTL_S,
 } from '../_lib/remit-action-token.js';
+import { deliverMonthEndEvent, monthEndConfigured } from '../_lib/month-end-events.js';
 
 // ================================================================
 // RCCG Kingdom Parish — Cloudflare Pages Functions API
@@ -1816,6 +1817,49 @@ async function checkAttendanceGate(DB, weekEnd) {
     'attendance_not_submitted', last ? { weekEnd, periodEnd: last.periodEnd, weekNo: last.weekNo } : { weekEnd });
 }
 
+/**
+ * The cut-off Sunday's collection closes the remittance period, and saving it starts the
+ * month-end filing on the RCCG portal. Every earlier Sunday of the period must already have
+ * its collection, or that week would be filed as zero. Applies from `attendanceGateFrom` on
+ * (same start as the attendance gate); a second sitting on an already-saved cut-off Sunday
+ * (merged into the existing record) is never refused. Returns a 409 Response or null.
+ */
+async function checkEarlierCollectionsGate(DB, data) {
+  if (!isSundayCollectionSource(data?.source) || data?.id || !isYmd(data?.date)) return null;
+  const gateFrom = (await getSettingValue(DB, 'attendanceGateFrom')).replace(/^"|"$/g, '');
+  if (!isYmd(gateFrom) || data.date < gateFrom) return null;
+  const period = remCutoffPeriodForDate(await readRemCutoffSettings(DB).catch(() => ({})), data.date);
+  if (!period) return null;
+  const already = await DB.prepare(
+    `SELECT id FROM income WHERE date=? AND (source='sunday_collection' OR source IS NULL OR source='') LIMIT 1`
+  ).bind(data.date).first();
+  if (already) return null;
+  const sundays = sundaysBetween(period.periodStart, period.periodEnd).filter(d => d < data.date && d >= gateFrom);
+  if (!sundays.length) return null;
+  const { results } = await DB.prepare(
+    `SELECT DISTINCT date FROM income WHERE date>=? AND date<? AND (source='sunday_collection' OR source IS NULL OR source='')`
+  ).bind(sundays[0], data.date).all();
+  const have = new Set((results || []).map(r => String(r.date).slice(0, 10)));
+  const missing = sundays.filter(d => !have.has(d));
+  if (!missing.length) return null;
+  const nice = d => { const x = new Date(`${d}T00:00:00Z`); return `Sun ${x.getUTCDate()} ${x.toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' })}`; };
+  const list = missing.map(nice);
+  const names = list.length === 1 ? list[0] : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+  return attendanceConflict(
+    `Record the Sunday collection for ${names} first. ${nice(data.date)} is the last Sunday of the remittance period, and it can only be saved when every Sunday before it is in.`,
+    'earlier_collections_missing', { missing, periodStart: period.periodStart, periodEnd: period.periodEnd });
+}
+
+/** Every Sunday (YYYY-MM-DD) from `from` to `to`, both inclusive. */
+export function sundaysBetween(from, to) {
+  const out = [];
+  if (!isYmd(from) || !isYmd(to)) return out;
+  const d = new Date(`${from}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + ((7 - d.getUTCDay()) % 7));
+  for (; d.toISOString().slice(0, 10) <= to; d.setUTCDate(d.getUTCDate() + 7)) out.push(d.toISOString().slice(0, 10));
+  return out;
+}
+
 async function lockAttendanceWeek(DB, weekEnd, incomeId, by) {
   try {
     await DB.prepare(
@@ -2164,6 +2208,8 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
           const blocked = await checkAttendanceGate(DB, gateWeek);
           if (blocked) return blocked;
         }
+        const earlierMissing = await checkEarlierCollectionsGate(DB, body);
+        if (earlierMissing) return earlierMissing;
         const result = await createIncome(DB, body);
         if (gateWeek && result.status === 200) {
           const saved = await result.clone().json().catch(() => null);
@@ -4470,18 +4516,17 @@ async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '') {
     links,
     linksExpireAt: links ? new Date(exp * 1000).toISOString() : null,
   };
-  const res = await fetch(env.REMIT_WEBHOOK_URL, {
-    method: 'POST', headers: remitWebhookHeaders(env), body: JSON.stringify(payload), signal: AbortSignal.timeout(15000),
-  });
-  if (!res.ok) {
-    console.error(`[remit-webhook] ${res.status} from webhook for ${collectionDate} (${payload.action} ${saved.id})`);
+  // To the Clerk AI or the Clerk box, whichever runs the month-end (Automations → Month-end run by).
+  const sent = await deliverMonthEndEvent(env, payload);
+  if (!sent.ok) {
+    console.error(`[remit-webhook] cut-off notice for ${collectionDate} (${payload.action} ${saved.id}) not accepted by ${sent.to || 'anyone'}`);
   }
 }
 
 /** Fire-and-forget wrapper: never throws, never delays the response to the user. */
 function queueCutoffCollectionWebhook(context, DB, env, data, result) {
   try {
-    if (!env?.REMIT_WEBHOOK_URL || !isSundayCollectionSource(data?.source)) return;
+    if (!monthEndConfigured(env) || !isSundayCollectionSource(data?.source)) return;
     const job = sendCutoffCollectionWebhook(DB, env, data, result, requestOrigin(context?.request))
       .catch(e => console.error('[remit-webhook] notify failed:', e?.message || e));
     if (typeof context?.waitUntil === 'function') context.waitUntil(job);
