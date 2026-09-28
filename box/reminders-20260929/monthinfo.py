@@ -103,8 +103,9 @@ def sundays(start, end):
     return out
 
 
-def facts(month=None, today=None):
-    """Everything /month and the reminders need, or {'error': ...}."""
+def facts(month=None, today=None, prefer_open=False):
+    """Everything /month and the reminders need, or {'error': ...}. prefer_open (/month with no month given): for up to
+    14 days after a cut-off, show that period until its RRR is generated rather than the new, still empty one."""
     today = today or datetime.date.today()
     try:
         settings = app_get("settings")
@@ -113,6 +114,15 @@ def facts(month=None, today=None):
     p = period_for_month(settings, month) if month else period_for_day(settings, today)
     if not p:
         return {"error": "no cut-off date is set in the app for that month"}
+    try:
+        runs = json.load(open(REMIT_STATE))
+    except Exception:
+        runs = {}
+    if prefer_open and not month:
+        prev = period_for_month(settings, f"{p[0] - datetime.timedelta(days=1):%Y-%m}")
+        if prev and prev[1] < today and (today - prev[1]).days <= 14 and \
+                ((runs or {}).get(f"{prev[0]}..{prev[1]}") or {}).get("status") != "done":
+            p = prev
     start, end = p
     try:
         income = app_get("income") or []
@@ -122,10 +132,6 @@ def facts(month=None, today=None):
         return {"error": f"couldn't read the app ({type(e).__name__})"}
     have = {str(r.get("date"))[:10] for r in income if isinstance(r, dict) and r.get("source") in SUNDAY_SOURCES}
     att = {str(w.get("weekEnd"))[:10]: w.get("status") or "draft" for w in weeks if isinstance(w, dict)}
-    try:
-        runs = json.load(open(REMIT_STATE))
-    except Exception:
-        runs = {}
     entry = (runs or {}).get(f"{start}..{end}") or {}
     return {"month": f"{end:%Y-%m}", "start": start, "end": end, "today": today,
             "sundays": [{"date": s, "collection": s.isoformat() in have, "attendance": att.get(s.isoformat())} for s in sundays(start, end)],
@@ -215,11 +221,12 @@ def month_text(f):
 CACHE = os.environ.get("MONTHINFO_CACHE", "/workspace/tools/.monthinfo-cache.json")
 
 
-def cached_facts(today, max_age_min=30):
+def cached_facts(today, month=None, max_age_min=30):
     """facts() at most every 30 minutes (the reminders run every 5); a saved collection shows up within that time."""
+    ck = f"{today.isoformat()}|{month or ''}"
     try:
         c = json.load(open(CACHE))
-        if c.get("today") == today.isoformat() and (datetime.datetime.now().timestamp() - c["at"]) < max_age_min * 60:
+        if c.get("today") == ck and (datetime.datetime.now().timestamp() - c["at"]) < max_age_min * 60:
             f = c["facts"]
             for k in ("start", "end", "today"):
                 f[k] = _d(f[k])
@@ -228,10 +235,10 @@ def cached_facts(today, max_age_min=30):
             return f
     except Exception:
         pass
-    f = facts(today=today)
+    f = facts(month=month, today=today)
     if not f.get("error"):
         try:
-            json.dump({"today": today.isoformat(), "at": datetime.datetime.now().timestamp(), "facts": f}, open(CACHE, "w"), default=str)
+            json.dump({"today": ck, "at": datetime.datetime.now().timestamp(), "facts": f}, open(CACHE, "w"), default=str)
         except Exception:
             pass
     return f
@@ -302,6 +309,12 @@ def ladder(now, send, once, cfg, f=None, dry=False):
     if f.get("error"):
         return []
     sent = []
+    if f["start"] == today and today.weekday() == 0:
+        # the Monday after a cut-off: "today" already belongs to the next period; the reminder is about the one that ended
+        yday = today - datetime.timedelta(days=1)
+        g = cached_facts(today, month=f"{yday:%Y-%m}")
+        if not g.get("error") and g["end"] == yday:
+            f = g
     end = f["end"]
     miss = missing_collections(f)
 
@@ -341,7 +354,7 @@ def ladder(now, send, once, cfg, f=None, dry=False):
 if __name__ == "__main__":
     a = sys.argv[1:]
     if a[:1] == ["month"]:
-        print(month_text(facts(month=a[1] if len(a) > 1 else None)))
+        print(month_text(facts(month=a[1] if len(a) > 1 else None, prefer_open=True)))
     elif a[:1] == ["ladder"]:
         sys.path.insert(0, "/workspace/tools")
         import clerkcfg as C
