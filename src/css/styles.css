@@ -792,3 +792,5 @@ tr:hover td{background:var(--surface)}
 @media(max-width:480px){
   .at-grid{grid-template-columns:1fr}
 }
+
+.at-inline-check { display:inline-flex; align-items:center; gap:6px; margin-right:18px; font-size:13px; color:var(--text2); }

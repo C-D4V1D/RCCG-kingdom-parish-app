@@ -125,6 +125,11 @@ secret `CLERK_WATCHDOG_TOKEN` must equal the box's `/workspace/.secrets/watchdog
   App settings: automations.collection_reminders; routing type `collection_reminder` (app-side default when not saved:
   AUTOMATION_ROUTING_DEFAULTS). When adding a message type or settings block, give it an app-side default like these, or
   the next Save stores it switched off.
+- monthclose-20260930: `tools/monthclose.py` (supervisor runs `tick` each cycle) + `tools/remita-check.cjs` (read-only
+  remita.net pay-rrr lookup; status "23" = paid). Payers tap "✅ I've paid" under the RRR Telegram message (send_msg adds it
+  for `rrr:` keys) or send `/paid` to the bot; PAID + checklist to everyone once; warning N days before the portal closes;
+  "complete" once. App: People → title / called / pays_rrr / can_upload; settings automations.month_close; routing
+  `month_close`. Newest supervisor.sh is in this bundle. `/paid` is in the bot menu (setMyCommands in the installer).
 - cleanup-20260928 removed the hourly attendance polling: `att-watch.py` is no longer started and the scheduler's
   sched_config.json always has `"attendance": false`. Attendance is filed only by the month-end run (and Refresh attendance).
 
