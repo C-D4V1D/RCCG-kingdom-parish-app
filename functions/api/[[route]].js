@@ -1970,6 +1970,7 @@ const SATELLITE_ROUTES = {
   'attendance-further': ['GET', 'PUT'],
   settings: ['GET'],
   context: ['GET'],
+  remittances: ['GET'],   // compute-remit.js reads it (a parish records no remittances: an empty list)
 };
 // Kingdom settings copied into each parish database (same cut-offs and rates for the whole Area).
 const SAT_SHARED_SETTING_KEYS = ['remCutoffDatesByYear', 'remCutoffDates', 'remittanceRates'];
@@ -2116,6 +2117,14 @@ export async function onRequest(context) {
   // route is refused, reads included. Their parish's data lives in its own database, reached through /api/sat.
   if (authz.finance?.role === SATELLITE_ROLE && !SATELLITE_MAIN_ROUTES.has(route)) {
     return finAuthErr('forbidden', 403, 'Your sign-in is for your parish\'s Sunday records and attendance only.');
+  }
+  // The box's scripts (compute-remit.js, att-fill.js) read the app with the read-only key; X-Sat-Parish points the
+  // same unchanged requests (/api/income, /api/settings, …) at that parish's database.
+  const satHeader = authz.automation ? String(request.headers.get('X-Sat-Parish') || '').trim() : '';
+  if (satHeader && route !== 'sat') {
+    url.searchParams.set('parish', satHeader);
+    const satRes = await routeSatelliteRequest(context, { url, method, parts: ['sat', ...parts], authz });
+    return satRes;
   }
   if (route === 'sat') {
     const satRes = await routeSatelliteRequest(context, { url, method, parts, authz });

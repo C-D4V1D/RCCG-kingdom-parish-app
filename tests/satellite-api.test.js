@@ -118,3 +118,21 @@ test('saving the cut-off Sunday sends the month-end signal naming the parish', a
     assert.equal(cut[cut.length - 1].links, null);
   } finally { globalThis.fetch = real; }
 });
+
+test('the box reads a parish with its unchanged requests plus X-Sat-Parish (read-only key only)', async () => {
+  const { SAT, DB, call, pastor } = await setup();
+  await call('sat/context', { headers: pastor });
+  await SAT.prepare(`INSERT INTO income (id,date,members_tithe,total_collection,source) VALUES ('S1','2026-09-27',5000,5000,'sunday_collection')`).run();
+  await DB.prepare(`INSERT INTO income (id,date,members_tithe,total_collection,source) VALUES ('K1','2026-09-27',9000,9000,'sunday_collection')`).run();
+  const box = { 'X-Automation-Key': TEST_AUTOMATION_KEY };
+  const sat = await (await call('income', { headers: { ...box, 'X-Sat-Parish': '659840' } })).json();
+  assert.deepEqual(sat.map(r => r.id), ['S1']);
+  const kingdom = await (await call('income', { headers: box })).json();
+  assert.ok(kingdom.some(r => r.id === 'K1') && !kingdom.some(r => r.id === 'S1'));
+  const settings = await (await call('settings', { headers: { ...box, 'X-Sat-Parish': '659840' } })).json();
+  assert.equal(settings.churchName, 'Sanctuary of Favour Parish');
+  assert.equal((await call('remittances', { headers: { ...box, 'X-Sat-Parish': '659840' } })).status, 200);
+  // a signed-in Kingdom user's header is ignored: still Kingdom's data
+  const admin = await (await call('income', { headers: { ...FINANCE_AUTH_HEADER, 'X-Sat-Parish': '659840' } })).json();
+  assert.ok(admin.some(r => r.id === 'K1'));
+});
