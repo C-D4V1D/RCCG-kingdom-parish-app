@@ -263,3 +263,18 @@ test('remittance settings: optional, and checked when present', () => {
   assert.ok(errors.some(e => e.includes('"bad key"')));
   assert.ok(errors.some(e => e.includes('remittance.lines.slo')));
 });
+
+test('daily check: the silence allowed before waking Church Clerk comes from Automations > Box connection', async () => {
+  const run = async (hoursAgo, config) => {
+    const env = createEnv({ last_ping: String(Date.now() - hoursAgo * 3600000), ...(config ? { config: JSON.stringify(config) } : {}) });
+    const waits = [];
+    await worker.scheduled({}, env, { waitUntil: p => waits.push(p) });
+    await Promise.all(waits);
+    return env.KV._map.get('last_result');  // written only when it tried to wake (no webhook registered here)
+  };
+  assert.equal(await run(2, null), undefined);                                                        // default 3 h: still fine
+  assert.ok(await run(4, null));                                                                      // default 3 h: too long
+  assert.equal(await run(4, { automations: { supervisor: { alert_after_hours: 6 } } }), undefined);   // 6 h allowed
+  assert.ok(await run(2, { automations: { supervisor: { alert_after_hours: 1 } } }));                 // 1 h allowed
+  assert.ok(await run(4, { automations: { supervisor: { alert_after_hours: 'x' } } }));               // bad value: default
+});

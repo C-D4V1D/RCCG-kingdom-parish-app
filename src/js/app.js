@@ -18104,8 +18104,8 @@ const AUTOMATION_MESSAGE_TYPES = [
   { key:'attendance_filed',          label:'Attendance filed' },
   { key:'attendance_error',          label:'Attendance filing problem (month-end)' },
   { key:'source_doc_reminder',       label:'Source-document reminder' },
-  { key:'weekly_attendance_reminder',label:'Weekly attendance reminder' },
-  { key:'collection_reminder',       label:'Sunday collection reminder' },
+  { key:'weekly_attendance_reminder',label:'Sunday records: weekly message' },
+  { key:'collection_reminder',       label:'Sunday records: follow-up reminders' },
   { key:'month_close',               label:'Month-close checklist & payment' },
   { key:'weekly_health',             label:'Weekly box health note' },
   { key:'upload_confirmation',       label:'Upload confirmation' },
@@ -18153,7 +18153,7 @@ const AUTOMATION_MESSAGE_GUIDE = {
   },
   monthly_statement: {
     what: 'The monthly financial statement: emailed with the PDF to the Pastor, Bro. Divine, you and Bro. Fabian, and this Telegram card (with the PDF) to the people ticked here.',
-    when: 'The day after a cut-off Sunday, from the time set under Monthly statement.',
+    when: 'The set number of days after a cut-off Sunday (normally 1 = Monday), from the time set under Monthly statement; if the box misses that day it keeps trying for the set number of days.',
     sample: '📄 <b>Kingdom Parish monthly financial statement</b>\nPeriod 28 Sep – 25 Oct 2026\nOpen the statement (PDF attached). Same as the email.',
   },
   statement_error: {
@@ -18177,14 +18177,14 @@ const AUTOMATION_MESSAGE_GUIDE = {
     sample: '⏳ <b>Source-doc reminder</b>\nPortal closes Fri 7 Nov (3 days left)\n\nStill empty:\n• Kingdom Parish: Finance (October 2026)\n\nSend the page(s) to the bot and choose Admin, Finance or Both.',
   },
   weekly_attendance_reminder: {
-    what: 'Bro. Divine\'s weekly message: Sundays whose attendance isn\'t in the app yet, plus any Sunday collection not yet saved (one message). Nothing is sent if everything is in.',
-    when: 'Once a week, on the day and after the time set under Weekly attendance reminder (normally Monday 09:00).',
-    sample: 'Good morning Bro. Divine,\n\n⏳ <b>Attendance not yet in the app</b>\nKingdom Parish\n\nSundays not yet submitted in the parish app:\n• 12 Oct, plus the Monthly report\n\nOnce all weeks and the Monthly report are in, it is filed on the portal automatically.\n\n⏳ <b>Sunday collection not yet in the app</b>\nKingdom Parish\n\nPlease record the collection for:\n• Sun 19 Oct\n\nThe month-end filing can only start once every Sunday\'s collection is in.\n\nGod bless.',
+    what: 'Bro. Divine\'s weekly message: each past Sunday of the month that still needs its attendance and/or collection (a collection can only be saved once that week\'s attendance is in), and the Monthly report in the cut-off week. Nothing is sent when everything is in.',
+    when: 'Once a week, on the day and after the time set under Sunday records reminders (normally Monday).',
+    sample: 'Good morning Bro. Divine,\n\n⏳ <b>Sunday records not complete</b>\nKingdom Parish · October 2026 (cut-off Sun 25 Oct)\n\n• Sun 11 Oct: attendance, then collection\n• Sun 18 Oct: collection (attendance ✅)\n• Monthly report: not submitted (needed before the 25 Oct collection)\n\nThe month-end filing starts by itself once the 25 Oct collection is saved.\n\nGod bless.',
   },
   collection_reminder: {
-    what: 'Reminders that a Sunday collection is still missing from the app (the month-end filing only starts once all are saved): a 2nd reminder to Bro. Divine, then on the cut-off Sunday evening and the Monday after, to Bro. Divine and you.',
-    when: 'The 2nd reminder day (normally Thursday), the cut-off Sunday evening (normally 20:00) and the Monday after, only while something is missing.',
-    sample: '⏳ <b>Today (25 Oct) is the last Sunday of the October 2026 remittance</b>\nKingdom Parish\n\nIts collection is not saved in the app yet, so the month-end filing has not started.\n\nSave the collection(s) in the app; the filing then starts by itself.',
+    what: 'Follow-ups while a Sunday record is still missing: a 2nd reminder to Bro. Divine, then on the cut-off Sunday evening and every day after the cut-off, the same list to Bro. Divine and you, until the last collection is saved.',
+    when: 'The 2nd reminder day (normally Thursday), the cut-off Sunday evening (normally 20:00), then daily after the cut-off for the number of days set (normally 5), only while something is missing.',
+    sample: '⏳ <b>Today (25 Oct) is the last Sunday of the October 2026 remittance</b>\nKingdom Parish · October 2026 (cut-off Sun 25 Oct)\n\n• Sun 25 Oct: collection (attendance ✅)\n• Monthly report: not submitted (needed before the 25 Oct collection)\n\nThe month-end filing starts by itself once the 25 Oct collection is saved.',
   },
   month_close: {
     what: 'After the RRR: who paid it (confirmed on Remita), the month-close checklist, the warning before the portal closes, and the "month-close complete" note.',
@@ -18213,7 +18213,7 @@ const AUTOMATION_MESSAGE_GUIDE = {
   },
   watchdog_down: {
     what: 'An alert that the box has stopped reporting in. The watchdog wakes the Church Clerk AI, which checks and writes to you, so the wording varies.',
-    when: 'At the watchdog\'s daily check (early morning), only if the box hasn\'t reported for over 3 hours.',
+    when: 'At the watchdog\'s daily check (early morning), only if the box hasn\'t reported for longer than the hours set under Box connection (normally 3).',
     sample: '🔴 <b>Clerk box not reporting</b>\nNo report from the box for 7 hours.\nPlease check the VM.',
   },
   scheduler_fallback: {
@@ -18251,7 +18251,7 @@ const AUTOMATION_PEOPLE_DEFAULTS = {
 function automationsPersonField(p, f){
   return p?.[f] !== undefined ? p[f] : AUTOMATION_PEOPLE_DEFAULTS[p?.key]?.[f];
 }
-const AUTOMATION_COLLECTION_REMINDER_DEFAULTS = { enabled: true, second_day: 'thu', time: '10:00', cutoff_evening: '20:00' };
+const AUTOMATION_COLLECTION_REMINDER_DEFAULTS = { enabled: true, second_day: 'thu', time: '10:00', cutoff_evening: '20:00', after_days: 5 };
 const AUTOMATION_DASHBOARD_CARDS = [
   { key:'memo',                  icon:'📨', label:'Memo forwarding' },
   { key:'statement',              icon:'🧾', label:'Monthly statement' },
@@ -18673,6 +18673,10 @@ function renderAutomationsSettings(config, isDefault, health){
         ${automationsBoolField('automations.statement.enabled', stmt.enabled, 'Check for the monthly statement', 'When turned off, the box stops checking whether a statement is due.')}
         ${automationsBoolField('automations.statement.auto_send', stmt.auto_send, 'Auto-send the statement', "When turned on, the monthly statement is emailed out automatically once it's due. When turned off, it's prepared but held for you to confirm before it's sent.")}
         <div class="form-row" style="margin-top:10px">${automationsTimeField('automations.statement.check_time', stmt.check_time, 'Check from (time)')}</div>
+        <div class="form-row" style="margin-top:10px">
+          ${automationsNumField('automations.statement.days_after_cutoff', stmt.days_after_cutoff ?? 1, 'Send this many days after the cut-off Sunday (1 = Monday, 5 = Friday)', 1, 14)}
+          ${automationsNumField('automations.statement.catchup_days', stmt.catchup_days ?? 7, 'If the box misses that day, keep trying for (days)', 1, 14)}
+        </div>
         <div class="form-group" style="margin-top:10px"><label class="form-label">Sign-off message</label><textarea class="form-textarea at-field" data-path="automations.statement.signature" data-kind="str">${esc(stmt.signature||'')}</textarea></div>
         ${saveBar}
       </div>
@@ -18681,7 +18685,7 @@ function renderAutomationsSettings(config, isDefault, health){
     <details class="at-details">
       <summary>Attendance</summary>
       <div class="at-details-body">
-        <p class="at-note" style="margin:0">Attendance is filed on the RCCG portal with the month-end run, straight after the remittance. The app only lets the last Sunday collection of the period be saved once every week's attendance, the Monthly report and every earlier Sunday collection are in, so there is nothing to check in between. The result is in the check email and on the Attendance card above; <b>Refresh attendance</b> in the check email re-files it if the app changes. Bro. Divine's Monday reminder is under Weekly attendance reminder.</p>
+        <p class="at-note" style="margin:0">Attendance is filed on the RCCG portal with the month-end run, straight after the remittance. The app only lets the last Sunday collection of the period be saved once every week's attendance, the Monthly report and every earlier Sunday collection are in, so there is nothing to check in between. The result is in the check email and on the Attendance card above; <b>Refresh attendance</b> in the check email re-files it if the app changes. Bro. Divine's Monday reminder is under Sunday records reminders.</p>
       </div>
     </details>
 
@@ -18693,18 +18697,27 @@ function renderAutomationsSettings(config, isDefault, health){
           <div class="form-group"><label class="form-label">Days before portal closes (comma-separated)</label><input class="form-input at-field" data-path="automations.source_doc_reminders.days_before_close" data-kind="numlist" value="${esc((sdr.days_before_close||[]).join(', '))}"></div>
           ${automationsTimeField('automations.source_doc_reminders.after_time', sdr.after_time, 'Send after (time)')}
         </div>
-        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Weekly attendance reminder</div>
-        ${automationsBoolField('automations.weekly_attendance_reminder.enabled', war.enabled, 'Send the weekly attendance reminder', "When turned on, Bro. Divine gets one message a week listing Sundays whose attendance isn't submitted yet, and any Sunday collection not yet recorded.")}
+        ${saveBar}
+      </div>
+    </details>
+
+    <details class="at-details">
+      <summary>Sunday records reminders (attendance &amp; collection)</summary>
+      <div class="at-details-body">
+        <p class="at-note" style="margin-top:0">Bro. Divine enters each Sunday's attendance and collection. A collection can only be saved once that week's attendance is in, and the last Sunday's collection also needs the Monthly report and every earlier collection. These reminders list, for each past Sunday, exactly what is still needed. The month-end filing starts by itself once the last collection is saved.</p>
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Weekly message</div>
+        ${automationsBoolField('automations.weekly_attendance_reminder.enabled', war.enabled, 'Weekly message to Bro. Divine', "One message a week listing each past Sunday of the month that still needs its attendance and/or collection (and the Monthly report in the cut-off week). Nothing is sent when everything is in.")}
         <div class="form-row" style="margin-top:10px">
           <div class="form-group"><label class="form-label">Day of week</label><select class="form-select at-field" data-path="automations.weekly_attendance_reminder.day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${war.day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
           ${automationsTimeField('automations.weekly_attendance_reminder.after_time', war.after_time, 'Send after (time)')}
         </div>
-        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Sunday collection reminders</div>
-        ${automationsBoolField('automations.collection_reminders.enabled', cr.enabled, 'Send Sunday collection reminders', "The month-end filing only starts once every Sunday's collection is in the app. Missing collections are listed in the Monday message above; if still missing, a 2nd reminder goes out, and on the cut-off Sunday evening (and the Monday after) you and Bro. Divine are told if the last collection isn't saved.")}
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Follow-up reminders</div>
+        ${automationsBoolField('automations.collection_reminders.enabled', cr.enabled, 'Follow-up reminders', "If something is still missing: a 2nd reminder to Bro. Divine on the day below; then on the cut-off Sunday evening, and every day after the cut-off for the number of days below, Bro. Divine and you get the same list until the last collection is saved.")}
         <div class="form-row" style="margin-top:10px">
           <div class="form-group"><label class="form-label">2nd reminder on</label><select class="form-select at-field" data-path="automations.collection_reminders.second_day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${cr.second_day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
           ${automationsTimeField('automations.collection_reminders.time', cr.time, 'Send after (time)')}
           ${automationsTimeField('automations.collection_reminders.cutoff_evening', cr.cutoff_evening, 'Cut-off Sunday check at')}
+          ${automationsNumField('automations.collection_reminders.after_days', cr.after_days ?? 5, 'Keep reminding after the cut-off for (days)', 0, 14)}
         </div>
         ${saveBar}
       </div>
@@ -18776,6 +18789,10 @@ function renderAutomationsSettings(config, isDefault, health){
         <div class="form-row">
           ${automationsNumField('automations.supervisor.interval_seconds', sup.interval_seconds ?? 300, 'Seconds between checks', 60)}
           ${automationsNumField('automations.supervisor.ping_every_cycles', sup.ping_every_cycles ?? 2, 'Report to the app every … checks', 1, 12)}
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          ${automationsNumField('automations.supervisor.alert_after_hours', sup.alert_after_hours ?? 3, 'Box-down alert when the box is silent for (hours)', 1, 48)}
+          ${automationsNumField('automations.supervisor.ai_takeover_minutes', sup.ai_takeover_minutes ?? 30, 'Month-end goes to the Clerk AI when the box is silent for (minutes)', 10, 240)}
         </div>
         <p class="at-note">Now: a report about every ${esc(String(Math.round(automationsExpectedPingMinutes(config))))} minutes.</p>
         ${saveBar}

@@ -150,10 +150,20 @@ export default {
   },
 };
 
+// How long the box may be silent before the daily check wakes Church Clerk: Automations > Box connection
+// (automations.supervisor.alert_after_hours), else MAX_SILENCE_MS.
+async function maxSilenceMs(env) {
+  try {
+    const h = Number(JSON.parse((await env.KV.get("config")) || "null")?.automations?.supervisor?.alert_after_hours);
+    if (Number.isFinite(h) && h >= 1 && h <= 48) return h * 60 * 60 * 1000;
+  } catch { /* unreadable config: the default */ }
+  return MAX_SILENCE_MS;
+}
+
 async function check(env) {
   const p = +((await env.KV.get("last_ping")) || 0);
   const now = Date.now();
-  if (p && now - p < MAX_SILENCE_MS) return; // healthy: do nothing
+  if (p && now - p < await maxSilenceMs(env)) return; // healthy: do nothing
   const reason = p ? `no ping from the script for ${Math.round((now - p) / 3600000)} hours` : "no ping ever received from the script";
   await wake(env, reason, false);
 }
