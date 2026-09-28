@@ -18110,7 +18110,7 @@ const AUTOMATION_MESSAGE_TYPES = [
   { key:'weekly_health',             label:'Weekly box health note' },
   { key:'upload_confirmation',       label:'Upload confirmation' },
   { key:'upload_fyi',                label:'Upload notice (for others)' },
-  { key:'sunday_note',               label:'Sunday confirmation note' },
+  { key:'sunday_note',               label:'Sunday memo-check note' },
   { key:'watchdog_down',             label:'Box-down alert' },
   { key:'scheduler_fallback',        label:'Scheduler fallback alert' },
 ];
@@ -18127,99 +18127,99 @@ const AUTOMATION_ROUTING_DEFAULTS = {
 // guide). Examples only: the real message fills in the live figures and names, so the wording can differ a little.
 const AUTOMATION_MESSAGE_GUIDE = {
   memo_forwarded: {
-    what: 'A new memo from the RCCG memo page, sent out to the people ticked here (the PDF comes with it).',
-    when: 'On the days and from the time set under Memo forwarding, as soon as a new memo appears.',
-    sample: '📄 <b>New memo</b>\nRef: RCCG/REG/2026/114 – Special Thanksgiving Service\nDated 12 Oct 2026\n(memo PDF attached)',
+    what: 'A new memo from the RCCG memo portal. The box emails it (PDF attached) to the Pastor, Bro. Divine and Bro. Fabian, and sends this Telegram card with the PDF to the people ticked here.',
+    when: 'Monday to Saturday, from the time set under Memo forwarding, when the daily check finds a new memo.',
+    sample: '📨 <b>New RCCG memo</b>\nSpecial Thanksgiving Service\n\nFrom: RCCG Region 25\nDate: 12 Oct 2026\nRef: RCCG/REG/2026/114\n\nThe memo PDF is attached.',
   },
   memo_error: {
-    what: 'Something stopped a memo going out: it could not be downloaded or sent, or Auto-forward is off and a new memo is waiting for your OK.',
-    when: 'Straight away, when it happens.',
-    sample: '⚠️ <b>New memo found – not forwarded yet</b>\nRef: RCCG/REG/2026/114\nReply in the Church Clerk chat to send it out.',
+    what: 'Something stopped a memo going out: the portal check failed, the PDF or the email failed, or Auto-forward is off and a new memo is waiting.',
+    when: 'Straight away, when it happens (the daily memo check).',
+    sample: '❌ <b>Memo not forwarded</b>\nRef: RCCG/REG/2026/114\n\nTitle: Special Thanksgiving Service\nProblem: the PDF download failed\nStatus: not emailed\n\n<b>Next step:</b> tell Claude',
   },
   remittance_check: {
-    what: 'Kingdom Parish month-end report: the app\'s figures compared line by line with the RCCG portal, the attendance result and the buttons to approve or hold. Replies after someone presses a button are this type too.',
-    when: 'Once the last Sunday collection of the period is saved in the app (the month-end run), and again after each button press.',
-    sample: '✅ <b>Kingdom Parish remittance check</b>\nOctober 2026\n\nApp total: ₦1,245,300\nPortal total: <b>₦1,245,300</b>\n✅ Portal matches the app\nAttendance: filed ✅\n\n<b>Next step:</b> Approve in the email to generate the RRR.',
+    what: 'Kingdom Parish month-end check: the app\'s figures compared line by line with the RCCG portal, with Generate RRR and Refresh buttons (Bro. Divine and you get your own; the Pastor gets it for information). When someone presses a button, the "… confirmed Generate RRR" note is this type too.',
+    when: 'Once the last Sunday collection of the period is saved in the app (the month-end run), again after each Refresh, and when a button is pressed.',
+    sample: '✅ <b>Kingdom Parish remittance check</b>\nOctober 2026 · 28 Sep – 25 Oct 2026\n\nApp total: ₦1,245,300.00\nPortal total: ₦1,245,300.00\n✅ <b>Aligned</b> (14 lines; differences under ₦1 count as aligned)\n\nAmount to remit: <b>₦1,245,300.00</b>\nRemita fee ₦1,500.00 is added at payment.\n\n<b>Next step:</b> press Generate RRR only if the figures are right.\nYour buttons are personal. The first confirmation (you or Bro. Divine) is the one acted on.\nFull details in your email.\n[ ✅ Generate RRR ]  [ Refresh ]',
   },
   rrr_generated: {
-    what: 'The RRR (Remita payment number) and the amount to pay, once the remittance is approved. The people who pay the RRR also get the ✅ I\'ve paid button under it, so keep this ticked for them.',
+    what: 'The RRR (Remita payment number) and the amount to pay, after Generate RRR. People who pay the RRR also get the ✅ I\'ve paid button under it, so keep Telegram ticked for them.',
     when: 'Straight after the RRR is generated on the portal.',
-    sample: '🧾 <b>RRR generated – Kingdom Parish</b>\nOctober 2026\nRRR: <b>2515-1524-5138</b>\nAmount: ₦1,245,300\nPay on remita.net before the portal closes.\n[ ✅ I\'ve paid ]',
+    sample: '⏳ <b>Kingdom Parish remittance RRR</b>\nOctober 2026\n\nRRR: 2515-1524-5138\nStatus: Not paid yet\n\nAmount to remit: ₦1,245,300.00\nRemita fee: ₦1,500.00\nVAT: ₦112.50\nTotal payable: <b>₦1,246,912.50</b>\n\nPay through Remita with the RRR (long-press it to copy).\nFull details in your email.\n[ ✅ I\'ve paid ]',
   },
   parish_remittance_check: {
-    what: 'The same check as the "Remittance check report", but for another parish (not Kingdom Parish), for example God is Able Parish. It is done by the Church Clerk AI when you ask it to, not by the month-end run.',
+    what: 'The same kind of check as the Remittance check report, but for another parish (not Kingdom Parish), e.g. God Is Able. The Church Clerk AI does it when you ask; it compares the portal with the figures you gave it.',
     when: 'Only when you ask Church Clerk to check another parish.',
-    sample: '⚠️ <b>God is Able Parish remittance check</b>\nOctober 2026\n\nYour figures (total input): ₦412,000\nAmount to remit (portal): <b>₦409,500</b>\n❌ <b>1 difference(s)</b>\n• Week 2: portal ₦98,000 / yours ₦100,500\n\n<b>Next step:</b> tell Church Clerk in chat when to generate the RRR.',
+    sample: '⚠️ <b>God Is Able remittance check</b>\nOctober 2026\n\nYour figures (total input): ₦412,000.00\nAmount to remit (portal): <b>₦409,500.00</b>\n\n❌ <b>1 difference(s)</b>\n• Week 2: portal ₦98,000.00 / yours ₦100,500.00\n\n<b>Next step:</b> tell Church Clerk in chat when to generate the RRR.\nFull details in your email.',
   },
   monthly_statement: {
-    what: 'The parish\'s monthly financial statement, emailed out (or held for your OK if Auto-send is off).',
-    when: 'When the statement is due, from the time set under Monthly statement.',
-    sample: '📊 <b>Monthly statement sent</b>\n1 – 30 Sep 2026\nEmailed to the people ticked for it.',
+    what: 'The monthly financial statement: emailed with the PDF to the Pastor, Bro. Divine, you and Bro. Fabian, and this Telegram card (with the PDF) to the people ticked here.',
+    when: 'The day after a cut-off Sunday, from the time set under Monthly statement.',
+    sample: '📄 <b>Kingdom Parish monthly financial statement</b>\nPeriod 28 Sep – 25 Oct 2026\nOpen the statement (PDF attached). Same as the email.',
   },
   statement_error: {
-    what: 'The monthly statement could not be made or sent, or it is waiting for your OK.',
-    when: 'Straight away, when it happens.',
-    sample: '⚠️ <b>Monthly statement due, not sent yet</b>\n1 – 30 Sep 2026\nReply in the Church Clerk chat to send it.',
+    what: 'The statement could not be created or emailed, or it is due but Auto-send is off.',
+    when: 'Straight away, when it happens (the daily statement check).',
+    sample: '⏳ <b>Statement due, not sent</b>\n28 Sep – 25 Oct 2026\n\nAuto-send is off in Automations, so nothing was created or emailed.\n\nTurn Auto-send on and it goes out at the next daily check.',
   },
   attendance_filed: {
-    what: 'The month\'s attendance has been filed on the RCCG portal.',
-    when: 'During the month-end run (straight after the remittance), and again if Refresh attendance is pressed.',
-    sample: '✅ <b>Attendance filed</b>\nKingdom Parish – October 2026\n4 Sundays filed on the portal.',
+    what: 'The month\'s attendance, as filed on the RCCG portal: the result, each week\'s total and any difference from the app. You and Bro. Divine can get a Refresh attendance button under it.',
+    when: 'During the month-end run (straight after the remittance), and again if Refresh attendance re-files it.',
+    sample: '📋 <b>Kingdom Parish attendance (RCCG portal)</b>\nOctober 2026 · period 28 Sep – 25 Oct 2026\n\n✅ <b>Filed on the portal</b>\n\n<b>Weeks</b>\nW1 · 5 Oct: 212\nW2 · 12 Oct: 198\nW3 · 19 Oct: 205\nW4 · 25 Oct: 220\n\nFull details in your email.',
   },
   attendance_error: {
-    what: 'The month-end attendance filing hit a problem: a figure is missing, the portal differs from the app, or the portal refused it.',
-    when: 'During the month-end run, when it happens.',
-    sample: '⚠️ <b>Attendance not filed</b>\nOctober 2026\nThe portal shows 212 for 12 Oct; the app has 215.\nFix it in the app, then press Refresh attendance in the check email.',
+    what: 'A problem with the month-end attendance filing: the portal differs from the app, it isn\'t ready to file yet, or a Refresh attendance didn\'t go through.',
+    when: 'During the month-end run or after Refresh attendance, when it happens.',
+    sample: '⚠️ October 2026 attendance was filed but the portal differs from the app: W2 Sunday service. The check email shows it.',
   },
   source_doc_reminder: {
-    what: 'A reminder that source documents (Admin and Finance) for the month haven\'t been uploaded to the portal yet.',
-    when: 'On the days before the portal closes set under Source-doc reminders, after the time set there.',
-    sample: '📎 <b>Source documents not uploaded yet</b>\nKingdom Parish – October 2026\n• Admin: not uploaded\nThe portal closes on Fri 7 Nov. Send them to the bot.',
+    what: 'A reminder that source-document slots on the portal are still empty. You get all parishes; Bro. Divine gets Kingdom Parish only (starting "Good morning Bro. Divine").',
+    when: 'On the days before the portal closes set under Source-doc reminders (normally 3 days and 1 day before), after the time set there.',
+    sample: '⏳ <b>Source-doc reminder</b>\nPortal closes Fri 7 Nov (3 days left)\n\nStill empty:\n• Kingdom Parish: Finance (October 2026)\n\nSend the page(s) to the bot and choose Admin, Finance or Both.',
   },
   weekly_attendance_reminder: {
-    what: 'Bro. Divine\'s weekly list of Sundays whose attendance isn\'t in the app yet, together with any Sunday collection not yet saved.',
-    when: 'Once a week, on the day and after the time set under Weekly attendance reminder (normally Monday).',
-    sample: 'Good morning Bro. Divine,\n\nAttendance not submitted yet for: Sun 12 Oct\n\n⏳ <b>Sunday collection not yet in the app</b>\nPlease record the collection for:\n• Sun 19 Oct\n\nGod bless.',
+    what: 'Bro. Divine\'s weekly message: Sundays whose attendance isn\'t in the app yet, plus any Sunday collection not yet saved (one message). Nothing is sent if everything is in.',
+    when: 'Once a week, on the day and after the time set under Weekly attendance reminder (normally Monday 09:00).',
+    sample: 'Good morning Bro. Divine,\n\n⏳ <b>Attendance not yet in the app</b>\nKingdom Parish\n\nSundays not yet submitted in the parish app:\n• 12 Oct, plus the Monthly report\n\nOnce all weeks and the Monthly report are in, it is filed on the portal automatically.\n\n⏳ <b>Sunday collection not yet in the app</b>\nKingdom Parish\n\nPlease record the collection for:\n• Sun 19 Oct\n\nThe month-end filing can only start once every Sunday\'s collection is in.\n\nGod bless.',
   },
   collection_reminder: {
-    what: 'A reminder that a Sunday collection is still missing from the app. The month-end filing only starts once every Sunday collection of the period is saved.',
-    when: 'The 2nd reminder day (normally Thursday), the cut-off Sunday evening and the Monday after, only while something is missing.',
-    sample: '⏳ <b>Sunday collection not yet in the app (2nd reminder)</b>\nKingdom Parish\nPlease record the collection for:\n• Sun 19 Oct\n\nThe month-end filing can only start once every Sunday\'s collection is in.',
+    what: 'Reminders that a Sunday collection is still missing from the app (the month-end filing only starts once all are saved): a 2nd reminder to Bro. Divine, then on the cut-off Sunday evening and the Monday after, to Bro. Divine and you.',
+    when: 'The 2nd reminder day (normally Thursday), the cut-off Sunday evening (normally 20:00) and the Monday after, only while something is missing.',
+    sample: '⏳ <b>Today (25 Oct) is the last Sunday of the October 2026 remittance</b>\nKingdom Parish\n\nIts collection is not saved in the app yet, so the month-end filing has not started.\n\nSave the collection(s) in the app; the filing then starts by itself.',
   },
   month_close: {
-    what: 'After the RRR: who paid it (confirmed on Remita), the month-close checklist (filed, paid, attendance, source documents, app record, CSR), the warning before the portal closes and the "month complete" note.',
+    what: 'After the RRR: who paid it (confirmed on Remita), the month-close checklist, the warning before the portal closes, and the "month-close complete" note.',
     when: 'When the payer taps ✅ I\'ve paid or sends /paid (and at the Remita check times), the set number of days before the portal closes if something is still open, and once everything is done.',
-    sample: '✅ <b>October 2026 remittance PAID</b>\nRRR 2515-1524-5138 · ₦1,245,300\nPaid by Bro. Fabian (Admin Officer) (confirmed on Remita, Tue 4 Nov 14:02)\n\n<b>Month-close checklist</b> (portal closes Fri 7 Nov)\n✅ Remittance filed on the portal · RRR 2515-1524-5138\n✅ Paid (Bro. Fabian (Admin Officer))\n✅ Attendance filed\n✅ Source docs, Finance: uploaded\n⚠️ Source docs, Admin: NOT uploaded yet\n⚠️ Payment not yet recorded in the app (Bro. Divine (Accountant))\n\nBro. Divine (Accountant): please record the payment in the app (Remittances).',
+    sample: '✅ <b>October 2026 remittance PAID</b>\nRRR 2515-1524-5138 · ₦1,246,912.50\nPaid by Bro. Fabian (Admin Officer) (confirmed on Remita, Tue 4 Nov 14:02)\n\n<b>Month-close checklist</b> (portal closes Fri 7 Nov)\n✅ Remittance filed on the portal · RRR 2515-1524-5138\n✅ Paid (Bro. Fabian (Admin Officer))\n✅ Attendance filed\n✅ Source docs, Finance: uploaded\n⚠️ Source docs, Admin: NOT uploaded yet\n⚠️ Payment not yet recorded in the app (Bro. Divine (Accountant))\n\nBro. Divine (Accountant): please record the payment in the app (Remittances).',
   },
   weekly_health: {
-    what: 'A weekly summary of how the box is doing: jobs running, disk space, Drive backup and any errors.',
-    when: 'Once a week, on the day and after the time set under Health note.',
-    sample: '🩺 <b>Weekly box health</b>\nAll jobs running ✅\nDisk: 41% used\nDrive backup: 10 min ago\nNo errors this week.',
+    what: 'A weekly check of the box: are its programs running, when the last memo check and Drive backup happened, and how many restarts or sync errors there were this week.',
+    when: 'Once a week, on the day and after the time set under Health note (normally Saturday 18:00).',
+    sample: '🩺 <b>Weekly system check</b>\nSat 3 Oct\n\n✅ Upload bot + scheduler\n✅ Memo runner\n✅ Statement runner\n✅ Drive sync\n\nLast memo check: Sat 3 Oct, 08:51 · ok · 0 new\nLast Drive sync: Sat 3 Oct, 17:50\nThis week: 0 automatic restart(s), 0 sync error(s)\n\nAll good. No action needed.',
   },
   upload_confirmation: {
-    what: 'The reply to the person who sent a source document to the Telegram bot, saying it was saved.',
-    when: 'Straight after they send it.',
-    sample: '✅ Saved: Finance source document (Kingdom Parish, October 2026).',
+    what: 'The bot\'s reply to the person who uploaded a source document, once the portal confirms it. It always goes to the uploader (the ticks here don\'t change it).',
+    when: 'Straight after an upload through the Telegram bot.',
+    sample: '✅ Uploaded and confirmed on the portal\nKingdom Parish, Finance source doc, October 2026\n(link to the file on the portal)',
   },
   upload_fyi: {
-    what: 'A note to the others that someone has uploaded a source document through the bot.',
-    when: 'Straight after an upload.',
-    sample: 'ℹ️ Bro. Divine uploaded a Finance source document for Kingdom Parish, October 2026.',
+    what: 'A note to the other bot users that someone uploaded a source document. It goes to everyone who can use the bot (the ticks here don\'t change it).',
+    when: 'Straight after an upload through the Telegram bot.',
+    sample: 'ℹ️ Divine uploaded a source doc via the bot\nKingdom Parish, Finance source doc, October 2026',
   },
   sunday_note: {
-    what: 'A short Sunday note confirming the day\'s attendance and collection have reached the app.',
-    when: 'Every Sunday after the time set under Sunday note.',
-    sample: '✅ <b>Sunday 12 Oct</b>\nAttendance and collection are in the app. Thank you!',
+    what: 'Your weekly memo-check summary: whether the daily memo check ran each day Monday to Saturday, any new memos found and any problems, plus the result of Sunday\'s own check. It is about memos only, not attendance or collections.',
+    when: 'Every Sunday, after the time set under Sunday note (normally 09:01). It always goes out, whatever was recorded in the app.',
+    sample: '✅ <b>Weekly memo check: 28 Sep–3 Oct 2026</b>\n6 of 6 days checked OK\n\n✅ Mon 28 Sep: OK\n✅ Tue 29 Sep: OK\n✅ Wed 30 Sep: OK (1 new)\n✅ Thu 1 Oct: OK\n✅ Fri 2 Oct: OK\n✅ Sat 3 Oct: OK\n\n<b>New memos:</b>\n• Special Thanksgiving Service\n  RCCG/REG/2026/114\n\n<b>Problems:</b>\nNone\n\n✅ Today\'s check (Sun 4 Oct, 09:01): no new memos.',
   },
   watchdog_down: {
-    what: 'An alert that the box has gone quiet (it stopped reporting in), sent by the Church Clerk AI after the watchdog wakes it.',
-    when: 'At the daily watchdog check, only if the box hasn\'t reported for hours.',
-    sample: '🔴 <b>Clerk box is down</b>\nNo report from the box for 7 hours.\nPlease check the VM.',
+    what: 'An alert that the box has stopped reporting in. The watchdog wakes the Church Clerk AI, which checks and writes to you, so the wording varies.',
+    when: 'At the watchdog\'s daily check (early morning), only if the box hasn\'t reported for over 3 hours.',
+    sample: '🔴 <b>Clerk box not reporting</b>\nNo report from the box for 7 hours.\nPlease check the VM.',
   },
   scheduler_fallback: {
-    what: 'Something needed the Church Clerk AI (a new memo, a due statement, a scheduler problem) but the box couldn\'t wake it, so it tells you directly.',
+    what: 'The box needed the Church Clerk AI (a new memo, a due statement or a scheduler problem) but couldn\'t wake it, so it tells you directly.',
     when: 'Straight away, when a wake-up fails.',
-    sample: '⚠️ <b>Monthly statement due, not sent yet</b>\n1 – 30 Sep 2026\nChurch Clerk could not be woken. Please open the chat.',
+    sample: '⚠️ <b>Monthly statement due, not sent yet</b>\n28 Sep – 25 Oct 2026\n\nCut-off: 25 Oct 2026\nProblem: couldn\'t wake Church Clerk (webhook failed)\n\n<b>Next step:</b> ask Church Clerk in chat to send it.',
   },
 };
 function automationsMessageGuideHtml(keys){
@@ -18713,7 +18713,7 @@ function renderAutomationsSettings(config, isDefault, health){
     <details class="at-details">
       <summary>Sunday note</summary>
       <div class="at-details-body">
-        ${automationsBoolField('automations.sunday_note.enabled', sun.enabled, 'Send the Sunday confirmation note', 'When turned on, a note confirming the day’s Sunday attendance is sent every Sunday after the time below. When turned off, this weekly note is skipped.')}
+        ${automationsBoolField('automations.sunday_note.enabled', sun.enabled, 'Send the Sunday memo-check note', 'When turned on, you get a weekly summary every Sunday after the time below: did the daily memo check run each day Monday to Saturday, which new memos were found, and any problems. It is about memos only. When turned off, this weekly note is skipped.')}
         <div class="form-row" style="margin-top:10px">${automationsTimeField('automations.sunday_note.after_time', sun.after_time, 'Send after (time)')}</div>
         ${saveBar}
       </div>
