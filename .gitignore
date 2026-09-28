@@ -34,3 +34,5 @@ build/
 # Local demo harness artefacts
 scripts/demo/demo.sqlite*
 scripts/demo/.shots/
+
+.claude/settings.local.json
