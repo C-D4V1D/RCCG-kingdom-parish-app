@@ -37,6 +37,7 @@ test('a satellite user needs a parish code, and login options carry it', async (
   assert.equal(bad.status, 400);
   const opts = await (await call('auth/options')).json();
   assert.equal(opts.find(o => o.id === created.id).parishCode, '659840');
+  assert.equal(opts.find(o => o.id === created.id).parishName, 'Sanctuary of Favour Parish');
 });
 
 test('a pastor sign-in is refused everywhere outside /api/sat, reads included', async () => {

@@ -4303,7 +4303,11 @@ async function loginUser(DB, data, request, env) {
 async function getLoginOptions(DB) {
   await ensureUserParishColumn(DB);
   const { results } = await DB.prepare(`SELECT id,name,role,parish_code FROM users ORDER BY role, name`).all();
-  return ok((results || []).map(r => ({ id: r.id, name: r.name, role: r.role, parishCode: r.parish_code || '' })));
+  let parishes = [];
+  try { parishes = safeJsonParse((await DB.prepare(`SELECT value FROM settings WHERE key='satParishes'`).first())?.value, []) || []; } catch { parishes = []; }
+  const pname = code => (parishes.find(p => String(p?.code) === String(code)) || {}).name || '';
+  return ok((results || []).map(r => ({ id: r.id, name: r.name, role: r.role, parishCode: r.parish_code || '',
+    ...(r.parish_code ? { parishName: pname(r.parish_code) } : {}) })));
 }
 
 async function deleteUser(DB, id) {
