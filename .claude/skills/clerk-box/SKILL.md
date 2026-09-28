@@ -131,6 +131,8 @@ secret `CLERK_WATCHDOG_TOKEN` must equal the box's `/workspace/.secrets/watchdog
   for `rrr:` keys) or send `/paid` to the bot; PAID + checklist to everyone once; warning N days before the portal closes;
   "complete" once. App: People → title / called / pays_rrr / can_upload; settings automations.month_close; routing
   `month_close`. Newest supervisor.sh is in this bundle. `/paid` is in the bot menu (setMyCommands in the installer).
+- healthfix-20260928: `fix.py` removes the "Attendance watch" row from `tools/health.py` (att-watch.py was retired by
+  cleanup-20260928, so the weekly health note showed it DOWN). Backup + `--undo`; tests/box-healthfix.test.js.
 - cleanup-20260928 removed the hourly attendance polling: `att-watch.py` is no longer started and the scheduler's
   sched_config.json always has `"attendance": false`. Attendance is filed only by the month-end run (and Refresh attendance).
 
