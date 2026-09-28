@@ -110,7 +110,29 @@ export const DEFAULT_CONFIG = {
     drive_sync: { interval_minutes: 10 },
     supervisor: { interval_seconds: 300, ping_every_cycles: 2 }, // ping every 10 min so the dashboard stays green
   },
+  // Month-end filing (remittance + attendance on the RCCG portal, check email, Generate RRR).
+  // handler: who runs it — "clerk_ai" (the Clerk AI routine, as before) or "box" (the Clerk box scripts).
+  // lines: app income category -> RCCG portal weekly line (names exactly as the box's remit_match.py), or NOT_REMITTED for money that stays in the parish.
+  // A category with money in it but no line here makes the box hold the filing and ask for one.
+  remittance: {
+    handler: "clerk_ai",
+    lines: {
+      membersTithe: "General Tithe",
+      ministersTithe: "Ministers Tithe",
+      thanksgiving: "Thanksgiving",
+      slo: "Sunday Love Offering",
+      crm: "CRM",
+      workersOffering: "Gospel Fund",
+      sundaySchool: "Sunday School",
+      childrenOffering: "Children Offering",
+      holyCommunionOffering: "Holy Communion Offering",
+      firstFruit: "First Fruit",
+    },
+  },
 };
+
+export const NOT_REMITTED = "__not_remitted__";
+const LINE_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 
 const KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
 const CODE_RE = /^\d+$/;
@@ -302,6 +324,22 @@ export function validateConfig(cfg) {
     else {
       if (!isNonNegFinite(sup.interval_seconds)) errors.push("automations.supervisor.interval_seconds must be a number >= 0");
       if (!isNonNegFinite(sup.ping_every_cycles)) errors.push("automations.supervisor.ping_every_cycles must be a number >= 0");
+    }
+  }
+
+  // Optional (configs saved before month-end moved to the box don't have it).
+  const rem = cfg.remittance;
+  if (rem !== undefined) {
+    if (!rem || typeof rem !== "object" || Array.isArray(rem)) errors.push("remittance must be an object");
+    else {
+      if (rem.handler !== "clerk_ai" && rem.handler !== "box") errors.push('remittance.handler must be "clerk_ai" or "box"');
+      if (!rem.lines || typeof rem.lines !== "object" || Array.isArray(rem.lines)) errors.push("remittance.lines must be an object");
+      else {
+        for (const [k, v] of Object.entries(rem.lines)) {
+          if (!LINE_KEY_RE.test(k)) errors.push(`remittance.lines: "${k}" is not a valid category key`);
+          else if (typeof v !== "string" || !v.trim() || v.length > 80) errors.push(`remittance.lines.${k} must be a portal line name (or not remitted)`);
+        }
+      }
     }
   }
 

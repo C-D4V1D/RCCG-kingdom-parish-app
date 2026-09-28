@@ -20,6 +20,9 @@ function createKV(seed = {}) {
     async put(key, value) {
       map.set(key, value);
     },
+    async list({ prefix = '' } = {}) {
+      return { keys: [...map.keys()].filter(k => k.startsWith(prefix)).sort().map(name => ({ name })) };
+    },
     _map: map,
   };
 }
@@ -212,4 +215,51 @@ test('existing /status and /claim behaviour is unaffected', async () => {
   assert.equal(statusRes.status, 200);
   const statusBody = await readJson(statusRes);
   assert.equal(statusBody.wake_registered, false);
+});
+
+// ── month-end mailbox ─────────────────────────────────────────────
+test('POST /events stores a signal and GET /events returns it after the cursor', async () => {
+  const env = createEnv();
+  const first = await readJson(await worker.fetch(req('/events', { method: 'POST', body: { event: 'cutoff_collection_saved', month: '2026-10', handler: 'box' } }), env));
+  assert.equal(first.ok, true);
+  await new Promise(r => setTimeout(r, 2));
+  const second = await readJson(await worker.fetch(req('/events', { method: 'POST', body: { event: 'remit_action', action: 'generate_rrr' } }), env));
+  assert.ok(second.id > first.id);
+
+  const all = await readJson(await worker.fetch(req('/events'), env));
+  assert.deepEqual(all.events.map(e => e.event), ['cutoff_collection_saved', 'remit_action']);
+  assert.equal(all.events[0].handler, 'box');
+  assert.ok(all.events[0].received_at);
+  assert.equal(all.last, second.id);
+
+  const after = await readJson(await worker.fetch(req(`/events?after=${first.id}`), env));
+  assert.deepEqual(after.events.map(e => e.id), [second.id]);
+  const none = await readJson(await worker.fetch(req(`/events?after=${second.id}`), env));
+  assert.deepEqual(none, { events: [], last: second.id });
+
+  const ver = await readJson(await worker.fetch(req('/config/version'), env));
+  assert.equal(ver.events_last, second.id);
+});
+
+test('POST /events needs the token, JSON and an event name', async () => {
+  const env = createEnv();
+  assert.equal((await worker.fetch(req('/events', { method: 'POST', body: { event: 'x' }, token: 'wrong' }), env)).status, 401);
+  assert.equal((await worker.fetch(req('/events', { method: 'POST', rawBody: 'nope' }), env)).status, 400);
+  assert.equal((await worker.fetch(req('/events', { method: 'POST', body: { month: '2026-10' } }), env)).status, 400);
+  assert.equal((await worker.fetch(req('/events', { method: 'POST', rawBody: JSON.stringify({ event: 'x', pad: 'y'.repeat(17000) }) }), env)).status, 413);
+});
+
+test('remittance settings: optional, and checked when present', () => {
+  const { remittance, ...old } = DEFAULT_CONFIG;
+  assert.deepEqual(validateConfig(old), []);                      // configs saved before it existed
+  assert.deepEqual(validateConfig(DEFAULT_CONFIG), []);
+  assert.equal(DEFAULT_CONFIG.remittance.handler, 'clerk_ai');
+  const bad = structuredClone(DEFAULT_CONFIG);
+  bad.remittance.handler = 'someone';
+  bad.remittance.lines['bad key'] = 'X';
+  bad.remittance.lines.slo = '';
+  const errors = validateConfig(bad);
+  assert.ok(errors.some(e => e.includes('remittance.handler')));
+  assert.ok(errors.some(e => e.includes('"bad key"')));
+  assert.ok(errors.some(e => e.includes('remittance.lines.slo')));
 });

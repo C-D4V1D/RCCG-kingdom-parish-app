@@ -245,6 +245,15 @@ async function periodDB(jan = 25) {
 }
 const auditTypes = async DB => (await DB.prepare(`SELECT type FROM audit_log`).all()).results.map(r => r.type);
 const sunday = date => ({ date, source: 'sunday_collection', membersTithe: 100, totalCollection: 100, recordedBy: 'Accountant' });
+// The cut-off Sunday can only be saved once every earlier Sunday of the period has its collection
+// (see earlier-collections-gate.test.js): record 11 and 18 Jan (with their attendance) first.
+async function earlierSundaysIn(DB) {
+  for (const wk of ['2026-01-11', '2026-01-18']) {
+    if (await DB.prepare(`SELECT id FROM income WHERE date=?`).bind(wk).first()) continue;
+    await call(DB, `attendance/${wk}/submit`, 'POST', { by: 'Usher', data: full });
+    assert.equal((await call(DB, 'income', 'POST', sunday(wk))).status, 200);
+  }
+}
 
 test('the last week of a period cannot be submitted without the Monthly report (old clients get a plain 409)', async () => {
   const DB = await periodDB();
@@ -318,6 +327,7 @@ test('editing a submitted Monthly report sends week N back to draft; editing wee
 test('the Monthly report is read-only once week N is locked, and editable again after the IT Admin unlocks it', async () => {
   const DB = await periodDB();
   await call(DB, `attendance/${LAST}/submit`, 'POST', { by: 'Usher', data: full, further: { data: { births: 1 } } });
+  await earlierSundaysIn(DB);
   assert.equal((await call(DB, 'income', 'POST', sunday(LAST))).status, 200);
   const locked = await call(DB, `attendance-further/${LAST}`, 'PUT', { by: 'Usher', data: { births: 5 } });
   assert.equal(locked.status, 409);
@@ -343,6 +353,7 @@ test('a corrected week locks again on re-submit when its Sunday collection is al
 
   // The last week re-locks too, together with its Monthly report.
   await call(DB, `attendance/${LAST}/submit`, 'POST', { by: 'Usher', data: full, further: { data: {} } });
+  await earlierSundaysIn(DB);
   await call(DB, 'income', 'POST', sunday(LAST));
   await call(DB, `attendance/${LAST}/unlock`, 'POST', { userId: 'u1', pin: '0000' });
   const last = await call(DB, `attendance/${LAST}/submit`, 'POST', { by: 'Usher', data: full, further: { data: { births: 1 } } });
@@ -402,6 +413,7 @@ test('submit reports relocked:true when it re-locks, and relock_error when the c
 
 test('the cut-off Sunday collection also needs the Monthly report confirmed, not just week N submitted', async () => {
   const DB = await periodDB();
+  await earlierSundaysIn(DB);
   await call(DB, `attendance/${LAST}/submit`, 'POST', { by: 'Usher', data: full, further: { data: {} } });
   // e.g. a week submitted before the combined submit existed: the report was never confirmed.
   await DB.prepare(`UPDATE attendance_further SET further_submitted_at='' WHERE period_end=?`).bind(LAST).run();
@@ -417,6 +429,7 @@ test('the cut-off Sunday collection also needs the Monthly report confirmed, not
 
 test('a second sitting on an already-locked cut-off Sunday is not blocked by the Monthly report check', async () => {
   const DB = await periodDB();
+  await earlierSundaysIn(DB);
   await call(DB, `attendance/${LAST}/submit`, 'POST', { by: 'Usher', data: full, further: { data: {} } });
   assert.equal((await call(DB, 'income', 'POST', sunday(LAST))).status, 200);
   await DB.prepare(`UPDATE attendance_further SET further_submitted_at='' WHERE period_end=?`).bind(LAST).run();

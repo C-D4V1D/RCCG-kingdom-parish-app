@@ -18127,6 +18127,25 @@ const AUTOMATION_DAYS = [
   { key:'thu', label:'Thu' }, { key:'fri', label:'Fri' }, { key:'sat', label:'Sat' }, { key:'sun', label:'Sun' },
 ];
 
+// Mirrors workers/clerk-watchdog/config.js DEFAULT_CONFIG.remittance — used when a saved
+// config predates month-end moving to the box and has no `remittance` key yet.
+const AUTOMATION_REMITTANCE_DEFAULTS = {
+  handler: 'clerk_ai',
+  lines: {
+    membersTithe: 'General Tithe',
+    ministersTithe: 'Ministers Tithe',
+    thanksgiving: 'Thanksgiving',
+    slo: 'Sunday Love Offering',
+    crm: 'CRM',
+    workersOffering: 'Gospel Fund',
+    sundaySchool: 'Sunday School',
+    childrenOffering: 'Children Offering',
+    holyCommunionOffering: 'Holy Communion Offering',
+    firstFruit: 'First Fruit',
+  },
+};
+const AUTOMATION_NOT_REMITTED = '__not_remitted__';
+
 function stopAutomationsRefresh(){
   if(state.automations?.refreshTimer){ clearInterval(state.automations.refreshTimer); state.automations.refreshTimer = null; }
 }
@@ -18200,6 +18219,7 @@ async function renderAutomations(){
     document.getElementById('atDashboard').innerHTML = `<div class="card"><p style="color:var(--danger)">Could not reach the server. Check your connection and try again.</p></div>`;
   }
   if(healthData) renderAutomationsDashboard(healthData);
+  state.automations.health = healthData;
 
   // Auto-refresh the dashboard every 60s while this page stays open — only the
   // dashboard block is touched so a settings form mid-edit is never disturbed.
@@ -18208,7 +18228,7 @@ async function renderAutomations(){
     if(state.page !== 'automations'){ stopAutomationsRefresh(); return; }
     try{
       const res = await authFetch('/api/automations/health');
-      if(res.ok) renderAutomationsDashboard(await res.json());
+      if(res.ok){ const h = await res.json(); state.automations.health = h; renderAutomationsDashboard(h); }
     }catch(e){ /* silent — keep showing the last known state */ }
   }, 60000);
 
@@ -18228,7 +18248,7 @@ async function renderAutomations(){
     state.automations.config = configData.config;
     state.automations.configVersion = configData.config_version;
     state.automations.isDefault = !!configData.is_default;
-    settingsEl.innerHTML = renderAutomationsSettings(configData.config, configData.is_default);
+    settingsEl.innerHTML = renderAutomationsSettings(configData.config, configData.is_default, healthData);
   } else {
     settingsEl.innerHTML = renderAutomationsAccountantSummary(configData.config);
   }
@@ -18299,13 +18319,97 @@ function automationsNumField(path, value, label, min=0, max=null, step=1){
   return `<div class="form-group"><label class="form-label">${esc(label)}</label><input type="number" class="form-input at-field" data-path="${esc(path)}" data-kind="num" value="${esc(String(value ?? 0))}" min="${min}" ${max!=null?`max="${max}"`:''} step="${step}"></div>`;
 }
 
-function renderAutomationsSettings(config, isDefault){
+function renderAutomationsRemittanceSection(config, health){
+  const rem = config.remittance || AUTOMATION_REMITTANCE_DEFAULTS;
+  const rh = health?.remittance || null;
+  const portalLinesFromHealth = Array.isArray(rh?.portal_lines) ? rh.portal_lines : [];
+  const healthCategories = (rh && typeof rh.categories === 'object' && rh.categories) || {};
+  const hold = rh?.hold || null;
+
+  // Label for a category key: what the box calls it, else what the app calls it, else the key itself.
+  const appLabel = (key)=> INCOME_TYPES.find(t=>t.key===key)?.label || null;
+  const labelFor = (key)=> healthCategories[key] || appLabel(key) || key;
+
+  // Rows = union of the defaults, weekendOffering, whatever is already saved, whatever the box has
+  // reported seeing money in, and every income type (built-in + custom, including deactivated ones)
+  // the app itself knows about — so a category never silently disappears from this list.
+  const rowKeys = [];
+  const addKey = (k)=>{ if(k && !rowKeys.includes(k)) rowKeys.push(k); };
+  Object.keys(AUTOMATION_REMITTANCE_DEFAULTS.lines).forEach(addKey);
+  addKey('weekendOffering');
+  Object.keys(rem.lines || {}).forEach(addKey);
+  Object.keys(healthCategories).forEach(addKey);
+  INCOME_TYPES.forEach(t=>addKey(t.key));
+
+  // Portal line options = union of what the box has seen used, the defaults, and whatever is
+  // currently saved for each row (so an unusual saved value never vanishes from its own dropdown).
+  const portalLineSet = new Set([...portalLinesFromHealth, ...Object.values(AUTOMATION_REMITTANCE_DEFAULTS.lines)]);
+  rowKeys.forEach(k=>{ const v = (rem.lines||{})[k]; if(v && v !== AUTOMATION_NOT_REMITTED) portalLineSet.add(v); });
+  const portalLines = [...portalLineSet].sort((a,b)=>a.localeCompare(b));
+
+  const holdBanner = hold ? (()=>{
+    const [y,m] = String(hold.month||'').split('-');
+    const monthName = (y && m) ? new Date(Number(y), Number(m)-1, 1).toLocaleDateString('en-US',{month:'long',year:'numeric'}) : esc(hold.month||'');
+    const cats = (hold.categories||[]).map(c=>`${esc(c.label||c.key)} (${esc(fmt(c.amount||0))})`).join(', ');
+    return `<div class="at-hold-banner">⚠️ ${esc(monthName)} filing is on hold: ${cats} ${(hold.categories||[]).length>1?'have':'has'} no portal line. Choose one below and press Save.</div>`;
+  })() : '';
+
+  const rows = rowKeys.map(key=>{
+    const val = (rem.lines || {})[key] || '';
+    const unmapped = !val;
+    const options = [`<option value="">— choose a portal line —</option>`,
+      `<option value="${AUTOMATION_NOT_REMITTED}" ${val===AUTOMATION_NOT_REMITTED?'selected':''}>Not remitted (stays in the parish)</option>`,
+      ...portalLines.map(l=>`<option value="${esc(l)}" ${val===l?'selected':''}>${esc(l)}</option>`)
+    ].join('');
+    return `<tr data-key="${esc(key)}">
+      <td>${esc(labelFor(key))}${unmapped?' <span class="at-tag-amber">needs a line</span>':''}</td>
+      <td><select class="form-select at-rem-line" data-key="${esc(key)}">${options}</select></td>
+    </tr>`;
+  }).join('');
+
+  const handler = rem.handler === 'box' ? 'box' : 'clerk_ai';
+  return `
+    <details class="at-details" ${hold ? 'open' : ''}>
+      <summary>Remittance (month-end)</summary>
+      <div class="at-details-body">
+        ${holdBanner}
+        <div class="at-radio-group">
+          <label class="at-radio-card">
+            <input type="radio" name="atRemHandler" class="at-rem-handler" value="clerk_ai" ${handler==='clerk_ai'?'checked':''}>
+            <div><div class="at-toggle-label">Clerk AI (current)</div><div class="at-subtitle">The Clerk AI files the remittance and attendance on the RCCG portal when the last Sunday collection is saved. The box only does a practice run and tells David what it would have filed.</div></div>
+          </label>
+          <label class="at-radio-card">
+            <input type="radio" name="atRemHandler" class="at-rem-handler" value="box" ${handler==='box'?'checked':''} onclick="return App.onRemHandlerBoxClick(event)">
+            <div><div class="at-toggle-label">Clerk box</div><div class="at-subtitle">The box files the remittance and attendance itself (no AI), sends the check emails with the Generate RRR / Refresh buttons and generates the RRR when a button is pressed. The Clerk AI is only called if something breaks.</div></div>
+          </label>
+        </div>
+        <div class="at-section-title" style="font-size:13px;margin:16px 0 2px">Remittance lines</div>
+        <p class="at-note">Which RCCG portal line each kind of Sunday money goes on. If money appears in a category with no line, the box holds that month's filing and tells you; choose the line here and press Save — the filing continues within 5 minutes.</p>
+        <div class="table-wrap"><table class="at-rem-lines-table">
+          <tr><th>Category</th><th>Portal line</th></tr>
+          ${rows}
+        </table></div>
+        <div class="at-save-bar">
+          <button class="btn btn-primary" onclick="App.saveAutomationsConfig(this)">Save changes</button>
+          <span class="at-save-hint">Changes take up to 5 minutes to reach the box</span>
+        </div>
+      </div>
+    </details>`;
+}
+
+function onRemHandlerBoxClick(ev){
+  const ok = confirm('Switch the month-end filing to the Clerk box? Only do this after a practice run matched what the Clerk AI filed.');
+  if(!ok){ ev.preventDefault(); return false; }
+  return true;
+}
+
+function renderAutomationsSettings(config, isDefault, health){
   const people = config.people || [];
   const parishes = config.parishes || [];
   const a = config.automations || {};
   const memo = a.memo || {}, stmt = a.statement || {}, att = a.attendance || {};
   const sdr = a.source_doc_reminders || {}, war = a.weekly_attendance_reminder || {};
-  const sun = a.sunday_note || {}, health = a.health_note || {}, upl = a.upload_bot || {};
+  const sun = a.sunday_note || {}, health_ = a.health_note || {}, upl = a.upload_bot || {};
 
   const peopleRows = people.map((p, i)=>{
     const key = esc(p.key || `person_${i}`);
@@ -18452,14 +18556,14 @@ function renderAutomationsSettings(config, isDefault){
     <details class="at-details">
       <summary>Health note</summary>
       <div class="at-details-body">
-        ${automationsBoolField('automations.health_note.enabled', health.enabled, 'Send the weekly health note', "When turned on, a weekly summary of how the box is doing is sent to you.")}
+        ${automationsBoolField('automations.health_note.enabled', health_.enabled, 'Send the weekly health note', "When turned on, a weekly summary of how the box is doing is sent to you.")}
         <div class="form-row" style="margin-top:10px">
-          <div class="form-group"><label class="form-label">Day of week</label><select class="form-select at-field" data-path="automations.health_note.day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${health.day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
-          ${automationsTimeField('automations.health_note.after_time', health.after_time, 'Send after (time)')}
+          <div class="form-group"><label class="form-label">Day of week</label><select class="form-select at-field" data-path="automations.health_note.day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${health_.day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
+          ${automationsTimeField('automations.health_note.after_time', health_.after_time, 'Send after (time)')}
         </div>
         <div class="form-row" style="margin-top:10px">
-          ${automationsNumField('automations.health_note.log_trim_mb', health.log_trim_mb, 'Trim logs larger than (MB)', 0)}
-          ${automationsNumField('automations.health_note.log_trim_lines', health.log_trim_lines, 'Keep this many lines', 0)}
+          ${automationsNumField('automations.health_note.log_trim_mb', health_.log_trim_mb, 'Trim logs larger than (MB)', 0)}
+          ${automationsNumField('automations.health_note.log_trim_lines', health_.log_trim_lines, 'Keep this many lines', 0)}
         </div>
         ${saveBar}
       </div>
@@ -18479,6 +18583,8 @@ function renderAutomationsSettings(config, isDefault){
         ${saveBar}
       </div>
     </details>
+
+    ${renderAutomationsRemittanceSection(config, health)}
   `;
 }
 
@@ -18604,6 +18710,24 @@ function collectAutomationsConfig(){
   });
   config.parishes = parishes;
 
+  // Remittance (month-end) — always saved (even if this section wasn't touched or isn't on the
+  // page, e.g. the accountant view) so the Worker validator always sees a `remittance` key.
+  {
+    const handlerEl = document.querySelector('.at-rem-handler:checked');
+    const lines = {};
+    document.querySelectorAll('.at-rem-line').forEach(sel=>{
+      const key = sel.dataset.key;
+      if(!key) return;
+      const v = sel.value;
+      if(v) lines[key] = v; // empty value ("— choose a portal line —") means: not saved as a line
+    });
+    const hasRows = document.querySelectorAll('.at-rem-line').length > 0;
+    config.remittance = {
+      handler: handlerEl ? handlerEl.value : (config.remittance?.handler || AUTOMATION_REMITTANCE_DEFAULTS.handler),
+      lines: hasRows ? lines : (config.remittance?.lines || { ...AUTOMATION_REMITTANCE_DEFAULTS.lines }),
+    };
+  }
+
   // Generic fields (booleans, numbers, strings, day-lists, number-lists)
   config.automations = config.automations || {};
   document.querySelectorAll('.at-field').forEach(el=>{
@@ -18703,7 +18827,7 @@ return {
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   setPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
-  renderAutomations, toggleAutomationCard, addAutomationPerson, deleteAutomationPerson,
+  renderAutomations, toggleAutomationCard, addAutomationPerson, deleteAutomationPerson, onRemHandlerBoxClick,
   addAutomationParish, deleteAutomationParish, saveAutomationsConfig,
   _countSundaysInRange: countSundaysInRange,
   _buildSundayWeekBounds: buildSundayWeekBounds, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
