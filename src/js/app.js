@@ -18108,6 +18108,7 @@ const AUTOMATION_MESSAGE_TYPES = [
   { key:'source_doc_reminder',       label:'Source-document reminder' },
   { key:'weekly_attendance_reminder',label:'Weekly attendance reminder' },
   { key:'collection_reminder',       label:'Sunday collection reminder' },
+  { key:'month_close',               label:'Month-close checklist & payment' },
   { key:'weekly_health',             label:'Weekly box health note' },
   { key:'upload_confirmation',       label:'Upload confirmation' },
   { key:'upload_fyi',                label:'Upload notice (for others)' },
@@ -18119,7 +18120,25 @@ const AUTOMATION_MESSAGE_TYPES = [
 // boxes would show unticked and the next Save would switch that message off for everyone.
 const AUTOMATION_ROUTING_DEFAULTS = {
   collection_reminder: { david: { telegram: true, email: false }, divine: { telegram: true, email: false } },
+  month_close: {
+    david: { telegram: true, email: true }, divine: { telegram: true, email: true },
+    fabian: { telegram: true, email: true }, pastor: { telegram: true, email: true },
+  },
 };
+const AUTOMATION_MONTH_CLOSE_DEFAULTS = {
+  enabled: true, check_times: ['10:00', '14:00', '18:00'], warn_days: 2, complete_message: true,
+  items: { source_docs: true, app_record: true, csr: false },
+};
+// Titles used in messages ("Bro. Fabian (Admin Officer)") and who pays the RRR, for people saved before these existed.
+const AUTOMATION_PEOPLE_DEFAULTS = {
+  david:  { title: 'Finance Officer', called: 'Bro. David', pays_rrr: true },
+  divine: { title: 'Accountant', called: 'Bro. Divine', pays_rrr: false },
+  fabian: { title: 'Admin Officer', called: 'Bro. Fabian', pays_rrr: true },
+  pastor: { title: 'Pastor in Charge', called: 'Pastor', pays_rrr: false },
+};
+function automationsPersonField(p, f){
+  return p?.[f] !== undefined ? p[f] : AUTOMATION_PEOPLE_DEFAULTS[p?.key]?.[f];
+}
 const AUTOMATION_COLLECTION_REMINDER_DEFAULTS = { enabled: true, second_day: 'thu', time: '10:00', cutoff_evening: '20:00' };
 const AUTOMATION_DASHBOARD_CARDS = [
   { key:'memo',                  icon:'📨', label:'Memo forwarding' },
@@ -18437,6 +18456,7 @@ function renderAutomationsSettings(config, isDefault, health){
   const a = config.automations || {};
   const memo = a.memo || {}, stmt = a.statement || {};
   const sdr = a.source_doc_reminders || {}, war = a.weekly_attendance_reminder || {}, sup = a.supervisor || {};
+  const mc = { ...AUTOMATION_MONTH_CLOSE_DEFAULTS, ...(a.month_close || {}), items: { ...AUTOMATION_MONTH_CLOSE_DEFAULTS.items, ...((a.month_close || {}).items || {}) } };
   const cr = { ...AUTOMATION_COLLECTION_REMINDER_DEFAULTS, ...(a.collection_reminders || {}) };
   const sun = a.sunday_note || {}, health_ = a.health_note || {}, upl = a.upload_bot || {};
 
@@ -18447,6 +18467,14 @@ function renderAutomationsSettings(config, isDefault, health){
         <div class="form-group"><label class="form-label">Name</label><input class="form-input at-p-name" value="${esc(p.name||'')}"></div>
         <div class="form-group"><label class="form-label">Telegram chat ID</label><input class="form-input at-p-tg" value="${esc(p.telegram_chat_id||'')}" placeholder="Not connected"></div>
         <div class="form-group"><label class="form-label">Email</label><input class="form-input at-p-email" value="${esc(p.email||'')}" placeholder="No email"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Title (used in messages)</label><input class="form-input at-p-title" value="${esc(automationsPersonField(p,'title')||'')}" placeholder="e.g. Finance Officer"></div>
+        <div class="form-group"><label class="form-label">Called in messages</label><input class="form-input at-p-called" value="${esc(automationsPersonField(p,'called')||'')}" placeholder="e.g. Bro. David"></div>
+      </div>
+      <div class="form-row" style="margin:6px 0 10px">
+        <label class="at-inline-check"><input type="checkbox" class="at-p-pays" ${automationsPersonField(p,'pays_rrr')?'checked':''}> Pays the RRR ("I've paid" button, /paid)</label>
+        <label class="at-inline-check"><input type="checkbox" class="at-p-bot" ${p.can_upload?'checked':''}> Can use the Telegram bot</label>
       </div>
       <div class="table-wrap"><table class="at-routing-table">
         <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
@@ -18603,6 +18631,25 @@ function renderAutomationsSettings(config, isDefault, health){
     </details>
 
     <details class="at-details">
+      <summary>Month-close checklist &amp; payment</summary>
+      <div class="at-details-body">
+        <p class="at-note" style="margin-top:0">After the RRR is generated: whoever pays taps <b>✅ I've paid</b> under the RRR Telegram message (or sends /paid to the bot). The box checks Remita at once and at the times below, then tells everyone who paid, with the month-close checklist. It warns before the portal closes if something is still open, and says when the month is complete. Who pays: People → "Pays the RRR". Who gets the messages: People → "Month-close checklist &amp; payment".</p>
+        ${automationsBoolField('automations.month_close.enabled', mc.enabled, 'Month-close checklist and payment check', 'When turned off, the box does not check Remita and sends no checklist.')}
+        <div class="form-row" style="margin-top:10px">
+          <div class="form-group"><label class="form-label">Remita check times (comma-separated)</label><input class="form-input at-field" data-path="automations.month_close.check_times" data-kind="strlist" value="${esc((mc.check_times||[]).join(', '))}" placeholder="10:00, 14:00, 18:00"></div>
+          ${automationsNumField('automations.month_close.warn_days', mc.warn_days, 'Warn this many days before the portal closes', 0, 10)}
+        </div>
+        ${automationsBoolField('automations.month_close.complete_message', mc.complete_message, 'Send "month-close complete"', 'When everything on the checklist is done, everyone gets one message saying so.')}
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">On the checklist</div>
+        <p class="at-note" style="margin-top:0">Always: remittance filed, paid, attendance filed.</p>
+        ${automationsBoolField('automations.month_close.items.source_docs', mc.items?.source_docs, 'Source documents (Admin and Finance)', 'Checked on the portal once a day while the month is open.')}
+        ${automationsBoolField('automations.month_close.items.app_record', mc.items?.app_record, 'Payment recorded in the app (Remittances)', 'The Accountant records the payment in the app; the month is complete only once it is there.')}
+        ${automationsBoolField('automations.month_close.items.csr', mc.items?.csr, 'CSR report (not set up yet)', 'Shows a reminder line only; the CSR check itself comes later.')}
+        ${saveBar}
+      </div>
+    </details>
+
+    <details class="at-details">
       <summary>Box connection</summary>
       <div class="at-details-body">
         <p class="at-note" style="margin-top:0">How often the box checks its jobs and reports to this page. The dashboard dots turn amber only when a report is overdue. Recommended: every 300 seconds, report every 2 checks (about every 10 minutes).</p>
@@ -18650,6 +18697,14 @@ function addAutomationPerson(){
       <div class="form-group"><label class="form-label">Name</label><input class="form-input at-p-name" value=""></div>
       <div class="form-group"><label class="form-label">Telegram chat ID</label><input class="form-input at-p-tg" value="" placeholder="Not connected"></div>
       <div class="form-group"><label class="form-label">Email</label><input class="form-input at-p-email" value="" placeholder="No email"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Title (used in messages)</label><input class="form-input at-p-title" value="" placeholder="e.g. Finance Officer"></div>
+      <div class="form-group"><label class="form-label">Called in messages</label><input class="form-input at-p-called" value="" placeholder="e.g. Bro. David"></div>
+    </div>
+    <div class="form-row" style="margin:6px 0 10px">
+      <label class="at-inline-check"><input type="checkbox" class="at-p-pays"> Pays the RRR ("I've paid" button, /paid)</label>
+      <label class="at-inline-check"><input type="checkbox" class="at-p-bot"> Can use the Telegram bot</label>
     </div>
     <div class="table-wrap"><table class="at-routing-table">
       <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
@@ -18709,15 +18764,20 @@ function collectAutomationsConfig(){
     let key = existing ? existing.key : slugifyAutomationKey(name || existingKey);
     const tg = row.querySelector('.at-p-tg')?.value.trim() || '';
     const email = row.querySelector('.at-p-email')?.value.trim() || '';
+    const botBox = row.querySelector('.at-p-bot'), paysBox = row.querySelector('.at-p-pays');
     const person = {
+      ...(existing || {}),   // keep any field this page doesn't show
       key,
       name,
       app_role: existing?.app_role ?? null,
       telegram_chat_id: tg || null,
       email: email || null,
-      can_upload: existing?.can_upload ?? false,
+      can_upload: botBox ? botBox.checked : (existing?.can_upload ?? false),
       full_status: existing?.full_status ?? false,
       buttons: existing?.buttons ?? false,
+      title: row.querySelector('.at-p-title')?.value.trim() || '',
+      called: row.querySelector('.at-p-called')?.value.trim() || '',
+      pays_rrr: paysBox ? paysBox.checked : !!automationsPersonField(existing || { key }, 'pays_rrr'),
     };
     people.push(person);
     row.querySelectorAll('.at-route').forEach(cb=>{
@@ -18776,6 +18836,7 @@ function collectAutomationsConfig(){
     if(kind === 'bool'){ obj[leaf] = el.checked; }
     else if(kind === 'num'){ obj[leaf] = el.value === '' ? 0 : Number(el.value); }
     else if(kind === 'numlist'){ obj[leaf] = el.value.split(',').map(s=>s.trim()).filter(s=>s!=='').map(Number).filter(n=>!isNaN(n)); }
+    else if(kind === 'strlist'){ obj[leaf] = el.value.split(',').map(s=>s.trim()).filter(s=>/^([01]?\d|2[0-3]):[0-5]\d$/.test(s)).map(s=>s.padStart(5,'0')); }
     else if(kind === 'day'){
       if(!Array.isArray(obj[leaf])) obj[leaf] = [];
       const day = el.dataset.day;
