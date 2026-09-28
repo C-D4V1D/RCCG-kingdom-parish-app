@@ -2,6 +2,7 @@
 # No [triggers] block on purpose: wrangler leaves the Worker's existing cron schedule untouched.
 name = "clerk-watchdog"
 main = "worker.js"
+account_id = "63d7bbd4f912ddc7b6272dbda2881a82"
 compatibility_date = "2024-09-23"
 
 [[kv_namespaces]]

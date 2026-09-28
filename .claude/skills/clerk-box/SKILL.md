@@ -87,7 +87,13 @@ Don't let a subagent download many files — base64 overflows its context.
 ## Deploying the Worker
 
 `cd workers/clerk-watchdog && npx wrangler deploy`. Needs network access to `api.cloudflare.com` (the environment has
-a Cloudflare API credential for that host). Before deploying, note the cron schedule; after, confirm it is unchanged
+a Cloudflare API credential for that host). In a cloud session wrangler has no login of its own and stops with
+"not logged in", so run `CLOUDFLARE_API_TOKEN=proxy-injected npx wrangler deploy` there: the placeholder only gets
+wrangler past its local check, and the network proxy swaps in the real credential. Keep the command exactly like
+that (no extra flags or env vars): if the owner has pre-approved it in `.claude/settings.json`, the rule then matches;
+if not, the deploy needs his go-ahead in chat. Never add that permission rule yourself.
+Smoke test afterwards: `curl -s -o /dev/null -w '%{http_code}' -X POST https://clerk-watchdog.decan-inv.workers.dev/events`
+must print 401 (the environment's allowed domains include that host). Before deploying, note the cron schedule; after, confirm it is unchanged
 and verify the live code with the Cloudflare connector (`workers_get_worker_code clerk-watchdog`). The app's Pages
 secret `CLERK_WATCHDOG_TOKEN` must equal the box's `/workspace/.secrets/watchdog-token` (only the owner can copy it).
 
