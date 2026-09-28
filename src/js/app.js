@@ -18179,21 +18179,35 @@ function automationsPingAgeMinutes(iso){
   if(isNaN(ms)) return null;
   return Math.max(0, ms/60000);
 }
-function automationsBoxStatus(ageMin){
+// How often the box reports (Settings → Box connection): seconds between checks × report every N checks.
+function automationsExpectedPingMinutes(config){
+  const sup = config?.automations?.supervisor || {};
+  const secs = Number(sup.interval_seconds) > 0 ? Number(sup.interval_seconds) : 300;
+  const every = Number(sup.ping_every_cycles) > 0 ? Number(sup.ping_every_cycles) : 2;
+  return Math.max(1, (secs * every) / 60);
+}
+// Green while the next report is not overdue (5 minutes' grace); amber when one report was missed; red after that.
+function automationsPingLimits(expMin){
+  const e = Number(expMin) > 0 ? Number(expMin) : 10;
+  return { green: e + 5, amber: 2 * e + 10 };
+}
+function automationsBoxStatus(ageMin, expMin){
+  const L = automationsPingLimits(expMin);
   if(ageMin == null) return 'red';
-  if(ageMin < 15) return 'green';
-  if(ageMin < 30) return 'amber';
+  if(ageMin < L.green) return 'green';
+  if(ageMin < L.amber) return 'amber';
   return 'red';
 }
 // Green = last run OK and the box pinged within 15 minutes.
 // Amber = last run warned, or the box hasn't pinged in 15–30 minutes.
 // Red   = last run failed, or the box hasn't pinged in 30+ minutes (or never).
-function automationsRunnerStatus(runner, ageMin){
-  if(ageMin == null || ageMin >= 30) return 'red';
+function automationsRunnerStatus(runner, ageMin, expMin){
+  const L = automationsPingLimits(expMin);
+  if(ageMin == null || ageMin >= L.amber) return 'red';
   if(!runner) return 'amber'; // box is pinging fine, but this automation hasn't reported yet
   if(runner.status === 'error') return 'red';
-  if(runner.status === 'warn' || ageMin >= 15) return 'amber';
-  if(runner.status === 'ok' && ageMin < 15) return 'green';
+  if(runner.status === 'warn' || ageMin >= L.green) return 'amber';
+  if(runner.status === 'ok' && ageMin < L.green) return 'green';
   return 'amber';
 }
 function automationsFmtNextRun(iso){
@@ -18266,7 +18280,8 @@ function renderAutomationsDashboard(data){
   const lastPing = data?.last_ping || null;
   const health = data?.health || null;
   const ageMin = automationsPingAgeMinutes(lastPing);
-  const boxColor = automationsBoxStatus(ageMin);
+  const expMin = automationsExpectedPingMinutes(state.automations?.config);
+  const boxColor = automationsBoxStatus(ageMin, expMin);
   const boxCard = `
     <div class="at-card">
       <div class="at-card-head"><span class="at-card-icon">📡</span><span class="at-card-name">Box connection</span><span class="at-dot at-dot-${boxColor}"></span></div>
@@ -18283,7 +18298,7 @@ function renderAutomationsDashboard(data){
   const cards = AUTOMATION_DASHBOARD_CARDS.map(c=>{
     const runner = health.runners?.[c.key] || null;
     const activity = health.activity?.[c.key] || [];
-    const color = automationsRunnerStatus(runner, ageMin);
+    const color = automationsRunnerStatus(runner, ageMin, expMin);
     const expanded = state.automations?.expandedCard === c.key;
     const summary = runner?.summary ? esc(runner.summary) : 'No report yet.';
     const activityHtml = activity.length
@@ -18421,7 +18436,7 @@ function renderAutomationsSettings(config, isDefault, health){
   const parishes = config.parishes || [];
   const a = config.automations || {};
   const memo = a.memo || {}, stmt = a.statement || {};
-  const sdr = a.source_doc_reminders || {}, war = a.weekly_attendance_reminder || {};
+  const sdr = a.source_doc_reminders || {}, war = a.weekly_attendance_reminder || {}, sup = a.supervisor || {};
   const cr = { ...AUTOMATION_COLLECTION_REMINDER_DEFAULTS, ...(a.collection_reminders || {}) };
   const sun = a.sunday_note || {}, health_ = a.health_note || {}, upl = a.upload_bot || {};
 
@@ -18583,6 +18598,19 @@ function renderAutomationsSettings(config, isDefault, health){
           ${automationsNumField('automations.upload_bot.jpeg_quality', upl.jpeg_quality, 'Image quality (1–100)', 1, 100)}
           ${automationsNumField('automations.upload_bot.max_width_px', upl.max_width_px, 'Max image width (px)', 1)}
         </div>
+        ${saveBar}
+      </div>
+    </details>
+
+    <details class="at-details">
+      <summary>Box connection</summary>
+      <div class="at-details-body">
+        <p class="at-note" style="margin-top:0">How often the box checks its jobs and reports to this page. The dashboard dots turn amber only when a report is overdue. Recommended: every 300 seconds, report every 2 checks (about every 10 minutes).</p>
+        <div class="form-row">
+          ${automationsNumField('automations.supervisor.interval_seconds', sup.interval_seconds ?? 300, 'Seconds between checks', 60)}
+          ${automationsNumField('automations.supervisor.ping_every_cycles', sup.ping_every_cycles ?? 2, 'Report to the app every … checks', 1, 12)}
+        </div>
+        <p class="at-note">Now: a report about every ${esc(String(Math.round(automationsExpectedPingMinutes(config))))} minutes.</p>
         ${saveBar}
       </div>
     </details>
