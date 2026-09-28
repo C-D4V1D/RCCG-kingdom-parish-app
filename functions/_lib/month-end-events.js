@@ -31,7 +31,7 @@ export async function monthEndHandler(env) {
   return (await monthEndRoute(env)).handler;
 }
 
-/** { handler, silent } — silent: the settings say box, but the box hasn't reported in for 30 minutes. */
+/** { handler, silent } — silent: the settings say box, but the box hasn't reported in for 30 minutes (or the minutes set). */
 async function monthEndRoute(env) {
   const token = watchdogToken(env);
   if (!token) return { handler: 'clerk_ai' };
@@ -43,7 +43,9 @@ async function monthEndRoute(env) {
     if (!(data?.is_default === false && data?.config?.remittance?.handler === 'box')) return { handler: 'clerk_ai' };
     const h = await get('/health');
     const last = h.ok ? Date.parse((await h.json())?.last_ping || '') : NaN;
-    if (!(Date.now() - last < BOX_SILENT_MS)) return { handler: 'clerk_ai', silent: true };
+    const mins = Number(data.config.automations?.supervisor?.ai_takeover_minutes);  // Automations > Box connection
+    const silentMs = Number.isFinite(mins) && mins >= 10 && mins <= 240 ? mins * 60 * 1000 : BOX_SILENT_MS;
+    if (!(Date.now() - last < silentMs)) return { handler: 'clerk_ai', silent: true };
     return { handler: 'box' };
   } catch {
     return { handler: 'clerk_ai' };
@@ -91,7 +93,7 @@ export function monthEndConfigured(env) {
 export async function deliverMonthEndEvent(env, payload) {
   const { handler, silent } = await monthEndRoute(env);
   if (silent) {
-    console.error(`[month-end] Clerk box silent for 30+ minutes; ${payload.event} goes to the Clerk AI instead`);
+    console.error(`[month-end] Clerk box silent too long; ${payload.event} goes to the Clerk AI instead`);
     return { ok: await postToClerkAi(env, { ...payload, fallback: 'box_silent' }), to: 'clerk_ai' };
   }
   if (handler === 'box') {

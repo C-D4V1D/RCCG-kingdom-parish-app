@@ -7,14 +7,14 @@ const AI = 'https://hooks.example/clerk';
 const BOX = 'https://clerk-watchdog.decan-inv.workers.dev';
 const event = { event: 'cutoff_collection_saved', month: '2026-10' };
 
-function stub({ handler = 'clerk_ai', isDefault = false, box = 200, ai = 200, config = 200, pingAgoMin = 5 } = {}) {
+function stub({ handler = 'clerk_ai', isDefault = false, box = 200, ai = 200, config = 200, pingAgoMin = 5, takeover } = {}) {
   const calls = [];
   const real = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method || 'GET', headers: init.headers || {}, body: init.body ? JSON.parse(init.body) : null });
     if (String(url) === `${BOX}/config`) {
       if (config !== 200) return new Response('{}', { status: config });
-      return new Response(JSON.stringify({ is_default: isDefault, config: { remittance: { handler } } }), { status: 200 });
+      return new Response(JSON.stringify({ is_default: isDefault, config: { remittance: { handler }, automations: takeover == null ? {} : { supervisor: { ai_takeover_minutes: takeover } } } }), { status: 200 });
     }
     if (String(url) === `${BOX}/health`) {
       return new Response(JSON.stringify({ last_ping: pingAgoMin == null ? null : new Date(Date.now() - pingAgoMin * 60000).toISOString() }), { status: 200 });
@@ -101,6 +101,15 @@ test('Box mode but the box has been silent for 30+ minutes: the Clerk AI does it
       assert.deepEqual(r, { ok: true, to: 'clerk_ai' });
       assert.ok(!s.calls.some(c => c.url === `${BOX}/events`));
       assert.equal(s.calls.find(c => c.url === AI).body.fallback, 'box_silent');
+    } finally { s.restore(); }
+  }
+});
+
+test('the minutes before the Clerk AI takes over come from Automations > Box connection', async () => {
+  for (const [takeover, pingAgoMin, to] of [[60, 45, 'box'], [60, 75, 'clerk_ai'], [10, 15, 'clerk_ai'], [5, 20, 'box'], [5, 45, 'clerk_ai']]) {
+    const s = stub({ handler: 'box', pingAgoMin, takeover });
+    try {
+      assert.equal((await deliverMonthEndEvent(env(), event)).to, to, `takeover ${takeover}, silent ${pingAgoMin} min`);
     } finally { s.restore(); }
   }
 });

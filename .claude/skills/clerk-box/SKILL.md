@@ -131,6 +131,15 @@ secret `CLERK_WATCHDOG_TOKEN` must equal the box's `/workspace/.secrets/watchdog
   for `rrr:` keys) or send `/paid` to the bot; PAID + checklist to everyone once; warning N days before the portal closes;
   "complete" once. App: People → title / called / pays_rrr / can_upload; settings automations.month_close; routing
   `month_close`. Newest supervisor.sh is in this bundle. `/paid` is in the bot menu (setMyCommands in the installer).
+- records-20260928 (after monthclose): statement send day + Sunday records reminders. `stmt-runner.py` patched:
+  `due_check()` runs `make-statement.js --check-due --today <day>` for days_after_cutoff..+catchup_days-1 back, and
+  `--live --month <to[:7]>`; `boxsched.py` patched to use `sched_config.json` `statement_offset_days` (written by the new
+  `clerkcfg.py` apply) so the AI back-up waits for the same day. New `monthinfo.py`: one list per Sunday, collection first,
+  Monthly report from the cut-off week; weekly message (reminders.py `monday_msg`), 2nd reminder, cut-off evening, daily
+  for `collection_reminders.after_days` after the cut-off; app read once per slot a day (`.monthinfo-ladder.json`).
+  App: automations.statement.{days_after_cutoff,catchup_days}, collection_reminders.after_days,
+  supervisor.{alert_after_hours (Worker daily check), ai_takeover_minutes (functions/_lib/month-end-events.js)}.
+  Tests: tests/box-records.test.js.
 - healthfix-20260928: `fix.py` removes the "Attendance watch" row from `tools/health.py` (att-watch.py was retired by
   cleanup-20260928, so the weekly health note showed it DOWN). Backup + `--undo`; tests/box-healthfix.test.js.
 - cleanup-20260928 removed the hourly attendance polling: `att-watch.py` is no longer started and the scheduler's
