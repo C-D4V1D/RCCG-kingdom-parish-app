@@ -20,6 +20,9 @@ function createKV(seed = {}) {
     async put(key, value) {
       map.set(key, value);
     },
+    async delete(key) {
+      map.delete(key);
+    },
     async list({ prefix = '' } = {}) {
       return { keys: [...map.keys()].filter(k => k.startsWith(prefix)).sort().map(name => ({ name })) };
     },
@@ -277,4 +280,79 @@ test('daily check: the silence allowed before waking Church Clerk comes from Aut
   assert.equal(await run(4, { automations: { supervisor: { alert_after_hours: 6 } } }), undefined);   // 6 h allowed
   assert.ok(await run(2, { automations: { supervisor: { alert_after_hours: 1 } } }));                 // 1 h allowed
   assert.ok(await run(4, { automations: { supervisor: { alert_after_hours: 'x' } } }));               // bad value: default
+});
+
+// Direct Telegram box-down alerts (no AI): hourly check, once a day while silent, "reporting again" on the next ping.
+function tgStub() {
+  const sent = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.startsWith('https://api.telegram.org/bot')) { sent.push(JSON.parse(init.body)); return new Response('{"ok":true}'); }
+    return new Response('{}', { status: 200 });  // the AI wake webhook
+  };
+  return { sent, restore: () => { globalThis.fetch = real; } };
+}
+const alertConfig = { people: [{ key: 'david', telegram_chat_id: '111' }, { key: 'divine', telegram_chat_id: '222' }, { key: 'pastor', telegram_chat_id: null }],
+  routing: { watchdog_down: { david: { telegram: true, email: false }, divine: { telegram: false, email: false }, pastor: { telegram: true, email: false } } },
+  automations: { supervisor: { alert_after_hours: 2 } } };
+async function tick(env, cron) {
+  const waits = [];
+  await worker.scheduled({ cron }, env, { waitUntil: p => waits.push(p) });
+  await Promise.all(waits);
+}
+
+test('box-down alert: hourly Telegram to the people ticked, once a day, and no AI wake when it was sent', async () => {
+  const s = tgStub();
+  try {
+    const env = createEnv({ last_ping: String(Date.now() - 3 * 3600000), config: JSON.stringify(alertConfig),
+      wake_config: JSON.stringify({ url: 'https://hooks.example/wake', method: 'POST', headers: {}, body: null }) });
+    env.TELEGRAM_BOT_TOKEN = 'bot-key';
+    await tick(env, '17 * * * *');
+    assert.deepEqual(s.sent.map(m => m.chat_id), ['111']);          // david only: divine unticked, pastor has no chat id
+    assert.match(s.sent[0].text, /Clerk box not reporting[\s\S]*for 3 hours/);
+    await tick(env, '17 * * * *');
+    assert.equal(s.sent.length, 1);                                   // not again within the day
+    await tick(env, '30 6 * * *');
+    assert.equal(env.KV._map.get('last_result'), undefined);          // alert reached someone: the AI is not woken
+    // the box pings again: one "reporting again" message, and the alert state is cleared
+    const r = await worker.fetch(req('/ping', { method: 'POST', body: {} }), env);
+    assert.equal(r.status, 200);
+    assert.equal(s.sent.length, 2);
+    assert.match(s.sent[1].text, /reporting again[\s\S]*about 3 hours/);
+    assert.equal(env.KV._map.get('down_alert'), undefined);
+    await worker.fetch(req('/ping', { method: 'POST', body: {} }), env);
+    assert.equal(s.sent.length, 2);
+  } finally { s.restore(); }
+});
+
+test('box-down alert: under the hours set, nothing; without the bot key the daily AI wake still happens', async () => {
+  const s = tgStub();
+  try {
+    const quiet = createEnv({ last_ping: String(Date.now() - 1 * 3600000), config: JSON.stringify(alertConfig) });
+    quiet.TELEGRAM_BOT_TOKEN = 'bot-key';
+    await tick(quiet, '17 * * * *');
+    assert.equal(s.sent.length, 0);
+    const nokey = createEnv({ last_ping: String(Date.now() - 5 * 3600000), config: JSON.stringify(alertConfig) });
+    await tick(nokey, '17 * * * *');
+    assert.equal(nokey.KV._map.get('last_result'), undefined);        // hourly run never wakes the AI
+    await tick(nokey, '30 6 * * *');
+    assert.ok(nokey.KV._map.get('last_result'));                      // daily run: no alert could be sent -> AI wake path
+    assert.equal(s.sent.length, 0);
+  } finally { s.restore(); }
+});
+
+test('POST /test-alert sends one test message (and needs the token)', async () => {
+  const s = tgStub();
+  try {
+    const env = createEnv({ config: JSON.stringify(alertConfig) });
+    env.TELEGRAM_BOT_TOKEN = 'bot-key';
+    const r = await readJson(await worker.fetch(req('/test-alert', { method: 'POST' }), env));
+    assert.deepEqual(r, { ok: true, sent: 1, of: 1 });
+    assert.match(s.sent[0].text, /Test/);
+    assert.equal((await worker.fetch(req('/test-alert', { method: 'POST', token: null }), env)).status, 401);
+    const nokey = await readJson(await worker.fetch(req('/test-alert', { method: 'POST' }), createEnv({})));
+    assert.equal(nokey.ok, false);
+    assert.match(nokey.error, /no bot key/);
+  } finally { s.restore(); }
 });

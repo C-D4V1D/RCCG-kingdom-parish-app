@@ -1,5 +1,9 @@
-// clerk-watchdog: Church Clerk's script pings this Worker every hour.
-// Once a day, if no ping has arrived for 3 hours, it wakes Church Clerk via its webhook (max once per 20h).
+// clerk-watchdog: the Clerk box pings this Worker every ~10 minutes.
+// Every hour: if no ping has arrived for longer than Automations > Box connection "alert after (hours)" (default 3),
+// it sends the people ticked for "Box-down alert" a direct Telegram message (no AI; secret TELEGRAM_BOT_TOKEN), repeated
+// once a day while the box stays silent, and a "reporting again" message when the pings come back.
+// Once a day (cron 30 6 * * *): only if that Telegram alert couldn't be sent, it wakes Church Clerk via its webhook
+// (max once per 20h), as before.
 // Also serves as the config + health API for the Automations tab: KV keys config, config_version, health.
 import { DEFAULT_CONFIG, validateConfig } from "./config.js";
 
@@ -8,6 +12,8 @@ const MIN_WAKE_GAP_MS = 20 * 60 * 60 * 1000;
 const MAX_CONFIG_BYTES = 64 * 1024;
 const MAX_EVENT_BYTES = 16 * 1024;
 const EVENT_TTL_S = 60 * 24 * 60 * 60;
+const DAILY_CRON = "30 6 * * *";
+const ALERT_REPEAT_MS = 24 * 60 * 60 * 1000;
 
 const json = (o, status = 200) =>
   new Response(JSON.stringify(o, null, 2), { status, headers: { "content-type": "application/json" } });
@@ -39,6 +45,14 @@ export default {
 
     if (req.method === "POST" && url.pathname === "/ping") {
       await env.KV.put("last_ping", String(Date.now()));
+      const down = await env.KV.get("down_alert");
+      if (down) {  // the box is back after a box-down alert: say so once
+        await env.KV.delete("down_alert");
+        let since = 0;
+        try { since = JSON.parse(down).since || 0; } catch { /* old value */ }
+        const h = since ? Math.max(1, Math.round((Date.now() - since) / 3600000)) : null;
+        await telegram(env, "watchdog_down", `✅ <b>Clerk box is reporting again</b>${h ? `\nIt was silent for about ${h} hour${h === 1 ? "" : "s"}.` : ""}`);
+      }
       let b = {};
       try { b = await req.json(); } catch { b = {}; } // old box script sends no body
       if (b && typeof b === "object" && b.health) {
@@ -65,6 +79,11 @@ export default {
     }
 
     if (req.method === "POST" && url.pathname === "/test-wake") return json(await wake(env, "setup test", true));
+
+    // Sends one test message to the people ticked for "Box-down alert", to check the bot key and chat ids.
+    if (req.method === "POST" && url.pathname === "/test-alert") {
+      return json(await telegram(env, "watchdog_down", "🧪 <b>Test</b>: box-down alerts from the watchdog reach you here. No action needed."));
+    }
 
     if (req.method === "GET" && url.pathname === "/health") {
       const [p, h] = await Promise.all(["last_ping", "health"].map((k) => env.KV.get(k)));
@@ -146,7 +165,11 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(check(env));
+    ctx.waitUntil((async () => {
+      const alerted = await alertCheck(env);
+      // the daily AI wake only when the direct Telegram alert couldn't be sent (saves AI compute)
+      if ((!event || !event.cron || event.cron === DAILY_CRON) && !alerted) await check(env);
+    })());
   },
 };
 
@@ -190,4 +213,48 @@ async function wake(env, reason, force) {
   await env.KV.put("last_wake", String(Date.now()));
   await env.KV.put("last_result", JSON.stringify({ at: new Date().toISOString(), reason, ...outcome }));
   return { ok: !!outcome.status && outcome.status < 300, reason, ...outcome };
+}
+
+// ---- direct Telegram alerts (no AI) ----
+async function recipients(env, type) {
+  let cfg = null;
+  try { cfg = JSON.parse((await env.KV.get("config")) || "null"); } catch { /* unreadable: defaults */ }
+  cfg = cfg || DEFAULT_CONFIG;
+  const r = (cfg.routing && cfg.routing[type]) || {};
+  return (cfg.people || []).filter(p => p && r[p.key] && r[p.key].telegram && p.telegram_chat_id).map(p => p.telegram_chat_id);
+}
+
+async function telegram(env, type, text) {
+  const token = env.TELEGRAM_BOT_TOKEN;
+  if (!token) return { ok: false, error: "no bot key (TELEGRAM_BOT_TOKEN) set on the Worker" };
+  const ids = await recipients(env, type);
+  if (!ids.length) return { ok: false, error: `nobody is ticked for Telegram on ${type}` };
+  let sent = 0;
+  for (const chat_id of ids) {
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chat_id, text, parse_mode: "HTML", disable_web_page_preview: true }),
+      });
+      if (r.ok) sent++;
+    } catch { /* next person */ }
+  }
+  return { ok: sent > 0, sent, of: ids.length };
+}
+
+const ukTime = ms => new Date(ms).toLocaleString("en-GB", { timeZone: "Europe/London", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
+// true when the box is silent and a direct alert was sent (now, or within the last day).
+async function alertCheck(env) {
+  const p = +((await env.KV.get("last_ping")) || 0);
+  if (!p || Date.now() - p < await maxSilenceMs(env)) return false;
+  let st = null;
+  try { st = JSON.parse((await env.KV.get("down_alert")) || "null"); } catch { st = null; }
+  if (st && st.since === p && Date.now() - st.at < ALERT_REPEAT_MS) return !!(st.result && st.result.ok);
+  const h = Math.floor((Date.now() - p) / 3600000);
+  const result = await telegram(env, "watchdog_down",
+    `🔴 <b>Clerk box not reporting</b>\nNo report from the box for ${h} hour${h === 1 ? "" : "s"} (last: ${ukTime(p)}).\n\n` +
+    "<b>Next step:</b> check that the VM is switched on and running. You'll get a message when it reports again.");
+  await env.KV.put("down_alert", JSON.stringify({ at: Date.now(), since: p, result }));
+  return !!result.ok;
 }
