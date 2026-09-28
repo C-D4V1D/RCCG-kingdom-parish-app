@@ -37,7 +37,10 @@ NOT_REMITTED = "__not_remitted__"
 # message type for a send_msg.py --key prefix
 KEY_TYPES = {"memo": "memo_forwarded", "stmt": "monthly_statement", "att": "attendance_filed", "attnudge": "attendance_nudge",
              "check": "remittance_check", "action": "remittance_check", "rrr": "rrr_generated", "pcheck": "parish_remittance_check",
-             "sunday": "sunday_note", "nowake": "scheduler_fallback", "memohold": "memo_error"}
+             "sunday": "sunday_note", "nowake": "scheduler_fallback", "memohold": "memo_error",
+             "mendatt": "attendance_error", "mendatt-fail": "attendance_error", "mendatt-diff": "attendance_error",
+             "mendatt-nf": "attendance_error", "mendatt-nr": "attendance_error", "mendatt-same": "attendance_error",
+             "mendatt-mail": "attendance_error", "mendatt-ign": "attendance_error"}  # month-end attendance problems
 # message type for a tg_card / tgcard.py card, by the runner's CLERK_CONTEXT and the card icon
 CONTEXT_TYPES = {"attendance": {"ok": "attendance_filed", "wait": "attendance_nudge_fallback", "*": "attendance_error"},
                  "statement": {"*": "statement_error"},
