@@ -118,7 +118,10 @@ secret `CLERK_WATCHDOG_TOKEN` must equal the box's `/workspace/.secrets/watchdog
   (David + Bro. Divine told by email and Telegram; not the AI); saving the line in the app resumes it within 5 minutes.
 - Status: `/workspace/state/monthend/status.json` → `health.remittance` {handler, portal_lines, categories, hold} and the
   dashboard's Month-end card. Tests: `tests/box-monthend.test.js` (real box files against a fake /workspace of stubs).
-- The `automations-20260928` bundle ships an older clerkcfg.py: never re-run its install.sh after the month-end bundle.
+- Newest clerkcfg.py: `box/cleanup-20260928/clerkcfg.py` (bundles are applied in order: automations-20260928 →
+  monthend-20261001 → cleanup-20260928). Never re-run an older bundle's install.sh: it would put back an older clerkcfg.py.
+- cleanup-20260928 removed the hourly attendance polling: `att-watch.py` is no longer started and the scheduler's
+  sched_config.json always has `"attendance": false`. Attendance is filed only by the month-end run (and Refresh attendance).
 
 ## Known open items
 
