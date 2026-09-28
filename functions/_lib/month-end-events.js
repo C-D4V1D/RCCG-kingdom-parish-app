@@ -3,14 +3,16 @@
 //
 //   clerk_ai (default)  REMIT_WEBHOOK_URL (the Clerk AI routine), as before; a copy goes to the Clerk box
 //                       mailbox marked handler:'clerk_ai' so the box can do a read-only practice run.
-//   box                 the Clerk box mailbox only (the clerk-watchdog Worker's /events). If the mailbox
-//                       can't be reached, the signal falls back to the Clerk AI so a month is never dropped.
+//   box                 the Clerk box mailbox only (the clerk-watchdog Worker's /events). If the box has not
+//                       reported in for 30 minutes (switched off?) or the mailbox can't be reached, the signal
+//                       falls back to the Clerk AI so a month is never dropped.
 //
 // The box mailbox needs the CLERK_WATCHDOG_TOKEN secret (as /api/automations does). Nothing here throws.
 import { remitWebhookHeaders } from './remit-action-token.js';
 
 export const CLERK_WATCHDOG_DEFAULT_URL = 'https://clerk-watchdog.decan-inv.workers.dev';
 const TIMEOUT_MS = 15000;
+const BOX_SILENT_MS = 30 * 60 * 1000;
 
 function watchdogBase(env) {
   return String(env?.CLERK_WATCHDOG_URL || CLERK_WATCHDOG_DEFAULT_URL).replace(/\/$/, '');
@@ -26,15 +28,25 @@ function timeoutSignal() {
 
 /** 'box' or 'clerk_ai' (the default, also whenever the saved settings can't be read). */
 export async function monthEndHandler(env) {
+  return (await monthEndRoute(env)).handler;
+}
+
+/** { handler, silent } — silent: the settings say box, but the box hasn't reported in for 30 minutes. */
+async function monthEndRoute(env) {
   const token = watchdogToken(env);
-  if (!token) return 'clerk_ai';
+  if (!token) return { handler: 'clerk_ai' };
   try {
-    const res = await fetch(`${watchdogBase(env)}/config`, { headers: { 'x-watchdog-token': token }, signal: timeoutSignal() });
-    if (!res.ok) return 'clerk_ai';
+    const get = path => fetch(`${watchdogBase(env)}${path}`, { headers: { 'x-watchdog-token': token }, signal: timeoutSignal() });
+    const res = await get('/config');
+    if (!res.ok) return { handler: 'clerk_ai' };
     const data = await res.json();
-    return data?.is_default === false && data?.config?.remittance?.handler === 'box' ? 'box' : 'clerk_ai';
+    if (!(data?.is_default === false && data?.config?.remittance?.handler === 'box')) return { handler: 'clerk_ai' };
+    const h = await get('/health');
+    const last = h.ok ? Date.parse((await h.json())?.last_ping || '') : NaN;
+    if (!(Date.now() - last < BOX_SILENT_MS)) return { handler: 'clerk_ai', silent: true };
+    return { handler: 'box' };
   } catch {
-    return 'clerk_ai';
+    return { handler: 'clerk_ai' };
   }
 }
 
@@ -77,7 +89,11 @@ export function monthEndConfigured(env) {
  * and `ok` says whether that delivery was accepted.
  */
 export async function deliverMonthEndEvent(env, payload) {
-  const handler = await monthEndHandler(env);
+  const { handler, silent } = await monthEndRoute(env);
+  if (silent) {
+    console.error(`[month-end] Clerk box silent for 30+ minutes; ${payload.event} goes to the Clerk AI instead`);
+    return { ok: await postToClerkAi(env, { ...payload, fallback: 'box_silent' }), to: 'clerk_ai' };
+  }
   if (handler === 'box') {
     if (await postToBox(env, { ...payload, handler: 'box' })) return { ok: true, to: 'box' };
     console.error(`[month-end] Clerk box mailbox unreachable for ${payload.event}; falling back to the Clerk AI`);

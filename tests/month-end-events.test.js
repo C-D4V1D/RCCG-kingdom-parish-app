@@ -7,7 +7,7 @@ const AI = 'https://hooks.example/clerk';
 const BOX = 'https://clerk-watchdog.decan-inv.workers.dev';
 const event = { event: 'cutoff_collection_saved', month: '2026-10' };
 
-function stub({ handler = 'clerk_ai', isDefault = false, box = 200, ai = 200, config = 200 } = {}) {
+function stub({ handler = 'clerk_ai', isDefault = false, box = 200, ai = 200, config = 200, pingAgoMin = 5 } = {}) {
   const calls = [];
   const real = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
@@ -15,6 +15,9 @@ function stub({ handler = 'clerk_ai', isDefault = false, box = 200, ai = 200, co
     if (String(url) === `${BOX}/config`) {
       if (config !== 200) return new Response('{}', { status: config });
       return new Response(JSON.stringify({ is_default: isDefault, config: { remittance: { handler } } }), { status: 200 });
+    }
+    if (String(url) === `${BOX}/health`) {
+      return new Response(JSON.stringify({ last_ping: pingAgoMin == null ? null : new Date(Date.now() - pingAgoMin * 60000).toISOString() }), { status: 200 });
     }
     if (String(url) === `${BOX}/events`) {
       if (box === 'throw') throw new Error('mailbox down');
@@ -88,4 +91,16 @@ test('configured when either destination exists', () => {
   assert.equal(monthEndConfigured({}), false);
   assert.equal(monthEndConfigured({ REMIT_WEBHOOK_URL: AI }), true);
   assert.equal(monthEndConfigured({ CLERK_WATCHDOG_TOKEN: 't' }), true);
+});
+
+test('Box mode but the box has been silent for 30+ minutes: the Clerk AI does it', async () => {
+  for (const pingAgoMin of [45, null]) {
+    const s = stub({ handler: 'box', pingAgoMin });
+    try {
+      const r = await deliverMonthEndEvent(env(), event);
+      assert.deepEqual(r, { ok: true, to: 'clerk_ai' });
+      assert.ok(!s.calls.some(c => c.url === `${BOX}/events`));
+      assert.equal(s.calls.find(c => c.url === AI).body.fallback, 'box_silent');
+    } finally { s.restore(); }
+  }
 });
