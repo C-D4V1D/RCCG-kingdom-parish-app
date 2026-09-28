@@ -1,5 +1,6 @@
-# clerk-watchdog Worker (deployed separately from the Pages app: `npx wrangler deploy` from this folder).
-# No [triggers] block on purpose: wrangler leaves the Worker's existing cron schedule untouched.
+# clerk-watchdog Worker (deployed separately from the Pages app). Deployed automatically by
+# .github/workflows/deploy-watchdog.yml when a change to this folder reaches main (or by hand: `npx wrangler deploy`).
+# Secret (set in the Cloudflare dashboard, never in this file): TELEGRAM_BOT_TOKEN for the direct box-down alerts.
 name = "clerk-watchdog"
 main = "worker.js"
 account_id = "63d7bbd4f912ddc7b6272dbda2881a82"
@@ -8,3 +9,7 @@ compatibility_date = "2024-09-23"
 [[kv_namespaces]]
 binding = "KV"
 id = "6a977aa2091048e18512cfdb5d3e1008"
+
+# Daily (06:30 UTC): the old AI wake, only if the Telegram alert couldn't be sent. Hourly (:17): the box-down check.
+[triggers]
+crons = ["30 6 * * *", "17 * * * *"]

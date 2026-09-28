@@ -18212,9 +18212,9 @@ const AUTOMATION_MESSAGE_GUIDE = {
     sample: '✅ <b>Weekly memo check: 28 Sep–3 Oct 2026</b>\n6 of 6 days checked OK\n\n✅ Mon 28 Sep: OK\n✅ Tue 29 Sep: OK\n✅ Wed 30 Sep: OK (1 new)\n✅ Thu 1 Oct: OK\n✅ Fri 2 Oct: OK\n✅ Sat 3 Oct: OK\n\n<b>New memos:</b>\n• Special Thanksgiving Service\n  RCCG/REG/2026/114\n\n<b>Problems:</b>\nNone\n\n✅ Today\'s check (Sun 4 Oct, 09:01): no new memos.',
   },
   watchdog_down: {
-    what: 'An alert that the box has stopped reporting in. The watchdog wakes the Church Clerk AI, which checks and writes to you, so the wording varies.',
-    when: 'At the watchdog\'s daily check (early morning), only if the box hasn\'t reported for longer than the hours set under Box connection (normally 3).',
-    sample: '🔴 <b>Clerk box not reporting</b>\nNo report from the box for 7 hours.\nPlease check the VM.',
+    what: 'A direct Telegram alert (no AI) that the box has stopped reporting in, and a note when it reports again. Only if this alert can\'t be sent does the watchdog wake the Church Clerk AI instead.',
+    when: 'The watchdog checks every hour. Sent when the box has been silent longer than the hours set under Box connection (normally 3), repeated once a day while it stays silent.',
+    sample: '🔴 <b>Clerk box not reporting</b>\nNo report from the box for 3 hours (last: Mon 28 Sep, 14:05).\n\n<b>Next step:</b> check that the VM is switched on and running. You\'ll get a message when it reports again.',
   },
   scheduler_fallback: {
     what: 'The box needed the Church Clerk AI (a new memo, a due statement or a scheduler problem) but couldn\'t wake it, so it tells you directly.',
@@ -18791,7 +18791,7 @@ function renderAutomationsSettings(config, isDefault, health){
           ${automationsNumField('automations.supervisor.ping_every_cycles', sup.ping_every_cycles ?? 2, 'Report to the app every … checks', 1, 12)}
         </div>
         <div class="form-row" style="margin-top:10px">
-          ${automationsNumField('automations.supervisor.alert_after_hours', sup.alert_after_hours ?? 3, 'Box-down alert when the box is silent for (hours)', 1, 48)}
+          ${automationsNumField('automations.supervisor.alert_after_hours', sup.alert_after_hours ?? 3, 'Box-down Telegram alert when the box is silent for (hours, checked hourly)', 1, 48)}
           ${automationsNumField('automations.supervisor.ai_takeover_minutes', sup.ai_takeover_minutes ?? 30, 'Month-end goes to the Clerk AI when the box is silent for (minutes)', 10, 240)}
         </div>
         <p class="at-note">Now: a report about every ${esc(String(Math.round(automationsExpectedPingMinutes(config))))} minutes.</p>
