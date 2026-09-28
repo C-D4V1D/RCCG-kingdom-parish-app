@@ -12,6 +12,8 @@ import { createRequire } from 'node:module';
 const REPO = path.resolve(import.meta.dirname, '..');
 const BUNDLE = path.join(REPO, 'box/monthend-20261001');
 const FIX = path.join(REPO, 'tests/fixtures/box');
+// The newest clerkcfg.py (each box bundle ships the version current at the time; the latest one is installed).
+const CLERKCFG = path.join(REPO, 'box/cleanup-20260928/clerkcfg.py');
 const PY = process.env.PYTHON || 'python3';
 const hasPython = spawnSync(PY, ['--version']).status === 0;
 const KEY = '2026-09-21..2026-10-18';
@@ -76,7 +78,7 @@ function makeBox({ scenario = happy(), lines = LINES, handler = 'box', state = n
   }
   fs.copyFileSync(path.join(FIX, 'remit_match.py'), path.join(root, 'rccg-remit/remit_match.py'));
   fs.copyFileSync(path.join(FIX, 'api-fill.js'), path.join(root, 'rccg-remit/api-fill.js'));
-  fs.copyFileSync(path.join(BUNDLE, 'clerkcfg.py'), path.join(root, 'tools/clerkcfg.py'));
+  fs.copyFileSync(CLERKCFG, path.join(root, 'tools/clerkcfg.py'));
   fs.copyFileSync(path.join(BUNDLE, 'monthend.py'), path.join(root, 'tools/monthend.py'));
   write(path.join(root, 'app.js'), '// app\n'.repeat(3000));
   setConfig(root, { handler, lines });
@@ -375,7 +377,7 @@ test('clerkcfg sync: collects new mailbox signals once and starts the runner; ol
     CLERK_TOKEN_FILE: path.join(root, 'token'), CLERK_MONTHEND_DIR: path.join(root, 'monthend'), CLERK_MONTHEND: path.join(root, 'fake-monthend.py'),
     PYTHONDONTWRITEBYTECODE: '1' };
   const sync = () => new Promise((resolve) => {
-    const p = spawn(PY, [path.join(BUNDLE, 'clerkcfg.py'), 'sync'], { env });
+    const p = spawn(PY, [CLERKCFG, 'sync'], { env });
     let out = ''; p.stdout.on('data', d => { out += d; }); p.stderr.on('data', d => { out += d; });
     p.on('close', code => resolve({ code, out }));
   });
@@ -412,7 +414,7 @@ test('clerkcfg health: reports the month-end card and the remittance block the a
     write(path.join(root, 'monthend/status.json'), { state: 'held', summary: 'October 2026: on hold', portal_lines: ['General Tithe'],
       categories: { weekendOffering: 'Weekend Offering' }, hold: { month: '2026-10', reason: 'unmapped', categories: [{ key: 'weekendOffering', label: 'Weekend Offering', amount: 500 }] } });
     const env = { ...process.env, CLERK_CFG: path.join(root, 'config.json'), CLERK_MONTHEND_DIR: path.join(root, 'monthend'), PYTHONDONTWRITEBYTECODE: '1' };
-    const r = spawnSync(PY, [path.join(BUNDLE, 'clerkcfg.py'), 'health'], { env, encoding: 'utf8' });
+    const r = spawnSync(PY, [CLERKCFG, 'health'], { env, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     const h = JSON.parse(r.stdout);
     assert.equal(h.runners.month_end.status, 'warn');
@@ -448,4 +450,32 @@ test('box month-end: each Refresh re-reads app and portal and sends a new round 
     assert.equal(checks.length, 6, 'three new emails per Refresh, even with the same subject');
     assert.equal(box.entry().status, 'awaiting-reply');
   } finally { box.cleanup(); }
+});
+
+test('clerkcfg (cleanup): no attendance polling, the Attendance card shows the month-end result, portal lines come from the portal', { skip: !hasPython }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clerkcfg-'));
+  try {
+    const sched = path.join(root, 'sched_config.json');
+    write(sched, { memo: true, attendance: true });
+    write(path.join(root, 'config.json'), { config_version: 7, is_default: false, config: { automations: { attendance: { enabled: true } } } });
+    write(path.join(root, 'remit/state/remit-runs.json'), {
+      '2026-08-24..2026-09-20': { month: '2026-09', attendance: { exit: 0, posted: true, at: '2026-09-20T13:00:00' } },
+      '2026-09-21..2026-10-18': { month: '2026-10', attendance: { exit: 15, posted: false, at: '2026-10-18T13:00:00' } },
+    });
+    write(path.join(root, 'remit/runs/portal-items-2026-09.json'), { data: { paymentItems: [{ paymentItem: 'OLD LINE' }] } });
+    write(path.join(root, 'remit/runs/portal-items-2026-10.json'), { data: { paymentItems: [{ paymentItem: 'THANKSGIVING' }, { paymentItem: 'General Tithe' }] } });
+    // the tests point SCHED_CONFIG at a temp file by running apply() from a small wrapper
+    const code = `import sys; sys.path.insert(0, ${JSON.stringify(path.dirname(CLERKCFG))}); import clerkcfg as C; C.SCHED_CONFIG = ${JSON.stringify(sched)}; C.apply(C.config()); import json; print(json.dumps(C.health()))`;
+    const env = { ...process.env, CLERK_CFG: path.join(root, 'config.json'), CLERK_MONTHEND_DIR: path.join(root, 'monthend'),
+      CLERK_REMIT_DIR: path.join(root, 'remit'), PYTHONDONTWRITEBYTECODE: '1' };
+    const r = spawnSync(PY, ['-c', code], { env, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(read(sched).attendance, false, 'the scheduler never polls attendance, even with attendance enabled');
+    assert.equal(read(sched).memo, true);
+    const h = JSON.parse(r.stdout);
+    assert.match(h.runners.attendance.summary, /^October 2026: not filed: not everything was in the app/);
+    assert.equal(h.runners.attendance.status, 'warn');
+    assert.equal(h.activity.attendance.length, 2);
+    assert.deepEqual(h.remittance.portal_lines, ['General Tithe', 'THANKSGIVING'], 'from the newest portal item list');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

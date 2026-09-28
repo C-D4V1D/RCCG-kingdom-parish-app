@@ -18342,11 +18342,16 @@ function renderAutomationsRemittanceSection(config, health){
   Object.keys(healthCategories).forEach(addKey);
   INCOME_TYPES.forEach(t=>addKey(t.key));
 
-  // Portal line options = union of what the box has seen used, the defaults, and whatever is
-  // currently saved for each row (so an unusual saved value never vanishes from its own dropdown).
-  const portalLineSet = new Set([...portalLinesFromHealth, ...Object.values(AUTOMATION_REMITTANCE_DEFAULTS.lines)]);
-  rowKeys.forEach(k=>{ const v = (rem.lines||{})[k]; if(v && v !== AUTOMATION_NOT_REMITTED) portalLineSet.add(v); });
-  const portalLines = [...portalLineSet].sort((a,b)=>a.localeCompare(b));
+  // Portal line options: the lines actually on the RCCG portal (the box reports the newest list it read there);
+  // before the box has read one, the usual lines. A saved value always stays in its own dropdown. The portal
+  // matches names without regard to capitals, so "THANKSGIVING" and "Thanksgiving" are one line (saved spelling kept).
+  const onPortal = new Set(portalLinesFromHealth.map(l=>String(l).trim().toLowerCase()));
+  const byLower = new Map();
+  const addLine = l=>{ const t = String(l||'').trim(); if(t && !byLower.has(t.toLowerCase())) byLower.set(t.toLowerCase(), t); };
+  rowKeys.forEach(k=>{ const v = (rem.lines||{})[k]; if(v && v !== AUTOMATION_NOT_REMITTED) addLine(v); });
+  (portalLinesFromHealth.length ? portalLinesFromHealth : Object.values(AUTOMATION_REMITTANCE_DEFAULTS.lines)).forEach(addLine);
+  const portalLines = [...byLower.values()].sort((a,b)=>a.localeCompare(b));
+  const notOnPortal = v => onPortal.size > 0 && v && v !== AUTOMATION_NOT_REMITTED && !onPortal.has(String(v).trim().toLowerCase());
 
   const holdBanner = hold ? (()=>{
     const [y,m] = String(hold.month||'').split('-');
@@ -18363,7 +18368,7 @@ function renderAutomationsRemittanceSection(config, health){
       ...portalLines.map(l=>`<option value="${esc(l)}" ${val===l?'selected':''}>${esc(l)}</option>`)
     ].join('');
     return `<tr data-key="${esc(key)}">
-      <td>${esc(labelFor(key))}${unmapped?' <span class="at-tag-amber">needs a line</span>':''}</td>
+      <td>${esc(labelFor(key))}${unmapped?' <span class="at-tag-amber">needs a line</span>':''}${notOnPortal(val)?' <span class="at-tag-amber">not on the portal</span>':''}</td>
       <td><select class="form-select at-rem-line" data-key="${esc(key)}">${options}</select></td>
     </tr>`;
   }).join('');
@@ -18385,7 +18390,7 @@ function renderAutomationsRemittanceSection(config, health){
           </label>
         </div>
         <div class="at-section-title" style="font-size:13px;margin:16px 0 2px">Remittance lines</div>
-        <p class="at-note">Which RCCG portal line each kind of Sunday money goes on. If money appears in a category with no line, the box holds that month's filing and tells you; choose the line here and press Save — the filing continues within 5 minutes.</p>
+        <p class="at-note">Which RCCG portal line each kind of Sunday money goes on. ${portalLinesFromHealth.length ? 'The list shows the lines on the RCCG portal (as the box last read them).' : 'The box has not read the portal\'s list yet, so the usual lines are shown.'} If money appears in a category with no line, the box holds that month's filing and tells you; choose the line here and press Save — the filing continues within 5 minutes. A category that never has money in it can stay without a line.</p>
         <div class="table-wrap"><table class="at-rem-lines-table">
           <tr><th>Category</th><th>Portal line</th></tr>
           ${rows}
@@ -18408,7 +18413,7 @@ function renderAutomationsSettings(config, isDefault, health){
   const people = config.people || [];
   const parishes = config.parishes || [];
   const a = config.automations || {};
-  const memo = a.memo || {}, stmt = a.statement || {}, att = a.attendance || {};
+  const memo = a.memo || {}, stmt = a.statement || {};
   const sdr = a.source_doc_reminders || {}, war = a.weekly_attendance_reminder || {};
   const sun = a.sunday_note || {}, health_ = a.health_note || {}, upl = a.upload_bot || {};
 
@@ -18505,25 +18510,7 @@ function renderAutomationsSettings(config, isDefault, health){
     <details class="at-details">
       <summary>Attendance</summary>
       <div class="at-details-body">
-        ${automationsBoolField('automations.attendance.enabled', att.enabled, 'Check the portal for attendance', 'When turned off, the box stops checking the portal for attendance altogether.')}
-        ${automationsBoolField('automations.attendance.auto_file', att.auto_file, 'Auto-file attendance', "When turned on, attendance is filed on the portal automatically as soon as all weeks and the monthly report are submitted in the app. When turned off, you'll get a notification that it's ready, and you'll need to confirm before it's filed.")}
-        <div class="form-row" style="margin-top:10px">
-          ${automationsTimeField('automations.attendance.active_from', att.active_from, 'Check from')}
-          ${automationsTimeField('automations.attendance.active_until', att.active_until, 'Check until')}
-          ${automationsNumField('automations.attendance.check_interval_minutes', att.check_interval_minutes, 'Minutes between checks', 1)}
-        </div>
-        <div class="form-row" style="margin-top:10px"><div class="form-group"><label class="form-label">First month to check (YYYY-MM)</label><input type="month" class="form-input at-field" data-path="automations.attendance.first_month" data-kind="str" value="${esc(att.first_month||'')}"></div></div>
-        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">First reminder</div>
-        <div class="form-row">
-          ${automationsNumField('automations.attendance.reminder1.days_before_close', att.reminder1?.days_before_close, 'Days before portal closes', 0)}
-          ${automationsTimeField('automations.attendance.reminder1.time', att.reminder1?.time, 'Time')}
-        </div>
-        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Final reminder</div>
-        <div class="form-row">
-          ${automationsNumField('automations.attendance.reminder2.days_before_close', att.reminder2?.days_before_close, 'Days before portal closes', 0)}
-          ${automationsTimeField('automations.attendance.reminder2.time', att.reminder2?.time, 'Time')}
-        </div>
-        ${saveBar}
+        <p class="at-note" style="margin:0">Attendance is filed on the RCCG portal with the month-end run, straight after the remittance. The app only lets the last Sunday collection of the period be saved once every week's attendance, the Monthly report and every earlier Sunday collection are in, so there is nothing to check in between. The result is in the check email and on the Attendance card above; <b>Refresh attendance</b> in the check email re-files it if the app changes. Bro. Divine's Monday reminder is under Weekly attendance reminder.</p>
       </div>
     </details>
 
