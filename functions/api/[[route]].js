@@ -1994,6 +1994,30 @@ async function setUserParish(DB, id, parishCode) {
   await DB.prepare(`UPDATE users SET parish_code=? WHERE id=?`).bind(parishCode || '', id).run();
 }
 
+// A satellite pastor corrects a saved Sunday in place (Kingdom deletes and re-enters; a parish database has no
+// deposits, petty cash or bank records hanging off the row, so the amounts can simply be replaced).
+const SAT_INCOME_FIELDS = {
+  membersTithe: 'members_tithe', ministersTithe: 'ministers_tithe', thanksgiving: 'thanksgiving', sundaySchool: 'sunday_school',
+  slo: 'slo', crm: 'crm', workersOffering: 'workers_offering', firstFruit: 'first_fruit', childrenOffering: 'children_offering',
+  weekendOffering: 'weekend_offering', holyCommunionOffering: 'holy_communion_offering',
+};
+async function updateSatelliteIncome(DB, id, data) {
+  const row = await DB.prepare(`SELECT * FROM income WHERE id=?`).bind(id).first();
+  if (!row) return err('That Sunday record was not found.', 404);
+  const sets = [], vals = [];
+  let total = 0;
+  for (const [key, col] of Object.entries(SAT_INCOME_FIELDS)) {
+    if (!(col in row)) continue;
+    const v = data?.[key] === undefined ? Number(row[col] || 0) : Number(data[key]);
+    if (!Number.isFinite(v) || v < 0) return err(`${key} must be a number of 0 or more`, 400);
+    sets.push(`${col}=?`); vals.push(v); total += v;
+  }
+  sets.push('total_collection=?'); vals.push(Math.round(total * 100) / 100);
+  if ('recorded_by' in row && data?.recordedBy) { sets.push('recorded_by=?'); vals.push(String(data.recordedBy).slice(0, 80)); }
+  await DB.prepare(`UPDATE income SET ${sets.join(',')} WHERE id=?`).bind(...vals, id).run();
+  return ok({ id, updated: true, totalCollection: Math.round(total * 100) / 100 });
+}
+
 function satelliteDb(env, code) {
   return SAT_CODE_RE.test(String(code || '')) ? (env[`SAT_${code}`] || null) : null;
 }
@@ -2375,6 +2399,7 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
         queueCutoffCollectionWebhook(context, DB, env, body, result);
         return result;
       }
+      if (method === 'PUT'  &&  param && context.satParish) return await updateSatelliteIncome(DB, param, body);
       if (method === 'PUT'  &&  param) return await updateIncome(DB, param, body);
       if (method === 'DELETE' && param) return await deleteIncome(DB, param);
     }

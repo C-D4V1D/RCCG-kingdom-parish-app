@@ -800,3 +800,32 @@ tr:hover td{background:var(--surface)}
 }
 
 .at-inline-check { display:inline-flex; align-items:center; gap:6px; margin-right:18px; font-size:13px; color:var(--text2); }
+
+/* ── Satellite parish pastor: Sunday records + header ───────────────── */
+.sat-mode .notif-bell,.sat-mode #globalMonth{display:none!important}
+.sat-user-btn{background:var(--primary-light);color:var(--primary-dark);border:0;border-radius:999px;padding:7px 12px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sat-page{display:flex;flex-direction:column;gap:10px;max-width:640px;margin:0 auto}
+.sat-row{display:flex;align-items:center;gap:12px;width:100%;text-align:left;background:var(--card);border:1px solid var(--border);border-radius:var(--rl);padding:12px 14px;cursor:pointer;font-family:inherit;font-size:14px;color:var(--text)}
+.sat-row-saved{border-color:var(--primary-mid)}
+.sat-row-d{min-width:74px}.sat-row-d b{display:block}.sat-row-d small{color:var(--text3);font-size:11px}
+.sat-row-b{flex:1;min-width:0}
+.sat-row-ok{font-weight:700;color:var(--success);font-size:13px;margin-bottom:2px}
+.sat-row-fig{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;color:var(--text3)}
+.sat-row-fig span{display:flex;flex-direction:column}.sat-row-fig b{font-size:13px;color:var(--text)}
+.sat-row-hint{font-size:13px;color:var(--text2)}
+.sat-hint-att,.sat-hint-cutoff{color:var(--amber);font-weight:600}
+.sat-row-go{color:var(--text3);font-size:22px;line-height:1}
+.sat-summary{margin-bottom:0}
+.sat-form-title{font-size:18px;margin:2px 0}
+.sat-hint-box{align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:0}
+.sat-saved-by{font-size:12px;color:var(--text3)}
+.sat-line{padding:8px 0;border-bottom:1px solid var(--border)}
+.sat-line:last-child{border-bottom:0}
+.sat-line-l{display:block;font-size:13px;font-weight:600;margin-bottom:4px}
+.sat-line-in{display:flex;align-items:center;gap:10px}
+.sat-line-in .form-input{flex:1;min-width:0;font-size:16px}
+.sat-line-r{font-size:12px;color:var(--text3);white-space:nowrap;min-width:92px;text-align:right}
+.sat-line-r b{color:var(--text)}
+.sat-totals{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center;margin-bottom:0}
+.sat-totals small{display:block;font-size:11px;color:var(--text3)}.sat-totals b{font-size:16px}
+.sat-save{width:100%;padding:13px;font-size:15px}

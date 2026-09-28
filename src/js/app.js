@@ -17,7 +17,10 @@ const ROLES = {
   signatory:     { label:'Bank Signatory',    color:'#3B6D11', bg:'#EAF3DE' },
   viewer:        { label:'Read-Only Viewer',  color:'#555',    bg:'#f0f0f0'  },
   usher:           { label:'Usher',             color:'#A32D2D', bg:'#FCEBEB' },
-  admin_assistant: { label:'Admin Assistant',   color:'#185FA5', bg:'#E6F1FB' }
+  admin_assistant: { label:'Admin Assistant',   color:'#185FA5', bg:'#E6F1FB' },
+  // A satellite parish's pastor: signs in to the same app but only sees that parish's own
+  // Sunday records and attendance (the server serves them under /api/sat/...).
+  satellite:       { label:'Parish Pastor',     color:'#0F6E56', bg:'#E1F5EE' }
 };
 
 const PERMISSIONS = {
@@ -28,7 +31,8 @@ const PERMISSIONS = {
   viewer:        ['dashboard','transactions','income_view','remittances_view','expenses_view','budget','petty_view','attendance_view'],
   // Ushers and Admin Assistants record weekly attendance and see nothing else.
   usher:           ['attendance'],
-  admin_assistant: ['attendance']
+  admin_assistant: ['attendance'],
+  satellite:       ['attendance']
 };
 
 // All available permission keys with human-readable labels, grouped for the UI
@@ -62,7 +66,8 @@ const PERMISSION_DEFS = [
 const NAV = [
   { id:'dashboard',    label:'Dashboard',     icon:'🏠', section:'Main',     minRole:['all'] },
   { id:'transactions', label:'Transactions',  icon:'🧾', section:'Main',     minRole:['all'] },
-  { id:'attendance',   label:'Attendance',    icon:'🙋', section:'Main',     minRole:['it_admin','pastor','accountant','admin_officer','signatory','viewer','usher','admin_assistant'] },
+  { id:'sunday_records', label:'Sunday records', icon:'⛪', section:'Main',   minRole:['satellite'] },
+  { id:'attendance',   label:'Attendance',    icon:'🙋', section:'Main',     minRole:['it_admin','pastor','accountant','admin_officer','signatory','viewer','usher','admin_assistant','satellite'] },
   { id:'income',       label:'Record Income', icon:'📥', section:'Finance',  minRole:['it_admin','accountant'] },
   { id:'remittances',  label:'Remittances',   icon:'📤', section:'Finance',  minRole:['it_admin','pastor','accountant','signatory'] },
   { id:'expenses',     label:'Expenses',      icon:'💸', section:'Finance',  minRole:['it_admin','accountant','admin_officer'] },
@@ -768,17 +773,29 @@ async function _readJson(res){
   }
 }
 
+// A satellite parish's pastor is served from their own parish database under /api/sat/…
+// (the server refuses them everywhere else except sign-in and change-PIN).
+function isSatellite(){ return state.user?.role === 'satellite'; }
+function apiPath(path){
+  return isSatellite() && !/^(auth(\/|$)|change-pin)/.test(path) ? 'sat/' + path : path;
+}
+
 async function apiFetch(path, method='GET', body=null){
   const endpoint = path.split('/')[0];
+  // Worked out here, before any await: a request queued as the user signs out still
+  // goes to the route it was made for. The cache key carries the prefix so a
+  // satellite's data is never served to (or from) Kingdom's own.
+  const fullPath = apiPath(path);
+  const cacheKey = fullPath === path ? endpoint : 'sat:' + endpoint;
   if(method !== 'GET'){
     // Finance tables are interrelated — an expense touches petty cash and the bank,
     // a remittance touches cash, etc. Clear the whole cache on any write so the next
     // read of ANY page reflects the change immediately.
     _apiCache.clear();
   } else if(_CACHE_TTL[endpoint]){
-    const cached = _apiCache.get(endpoint);
+    const cached = _apiCache.get(cacheKey);
     if(cached && Date.now() - cached.ts < _CACHE_TTL[endpoint]) return cached.data;
-    const pending = _inflight.get(path);
+    const pending = _inflight.get(fullPath);
     if(pending) return pending;   // a concurrent caller is already loading this — reuse it
   }
   const opts = { method, headers:{'Content-Type':'application/json'} };
@@ -798,7 +815,7 @@ async function apiFetch(path, method='GET', body=null){
   const run = (async () => {
     for(let attempt = 0; ; attempt++){
       try {
-        const res = await _apiFetchOnce(path, opts);
+        const res = await _apiFetchOnce(fullPath, opts);
         if(!res.ok && method === 'GET' && res.status >= 500 && attempt < 2){
           await new Promise(r => setTimeout(r, 1000 * (2 * attempt + 1)));
           continue;
@@ -819,7 +836,7 @@ async function apiFetch(path, method='GET', body=null){
           apiErr.code = (data && data.code) || '';
           throw apiErr;
         }
-        if(method === 'GET' && _CACHE_TTL[endpoint]) _apiCache.set(endpoint, { data, ts: Date.now() });
+        if(method === 'GET' && _CACHE_TTL[endpoint]) _apiCache.set(cacheKey, { data, ts: Date.now() });
         return data;
       } catch(err){
         const retryable = (err instanceof TypeError) || (err && err.name === 'AbortError');
@@ -833,8 +850,8 @@ async function apiFetch(path, method='GET', body=null){
   })();
 
   if(method === 'GET' && _CACHE_TTL[endpoint]){
-    _inflight.set(path, run);
-    const cleanup = () => { if(_inflight.get(path) === run) _inflight.delete(path); };
+    _inflight.set(fullPath, run);
+    const cleanup = () => { if(_inflight.get(fullPath) === run) _inflight.delete(fullPath); };
     run.then(cleanup, cleanup);
   }
   return run;
@@ -906,6 +923,7 @@ const DB = {
   getAudit()                   { return apiFetch('audit'); },
   // addAudit is fire-and-forget — never blocks the UI
   addAudit(type,detail,by){
+    if(isSatellite()) return;   // no audit route for a satellite — the server records what matters
     apiFetch('audit','POST',{type,detail,by:by||'System'}).catch(()=>{});
   },
 
@@ -919,6 +937,7 @@ const DB = {
 
   getNotifications()           { return apiFetch('notifications'); },
   addNotification(title,body,type='info'){
+    if(isSatellite()) return;
     apiFetch('notifications','POST',{title,body,type}).catch(()=>{});
     updateNotifBadge();
   },
@@ -1179,7 +1198,9 @@ const ACCESS_RULES = {
     admin:        { roles:['it_admin'] },  // IT Admin only — never permission-gated
     // The box's dashboard + settings. IT Admin gets full settings; Accountant gets a
     // read-only dashboard + summary of what affects them. Never permission-gated.
-    automations:  { roles:['it_admin','accountant'] }
+    automations:  { roles:['it_admin','accountant'] },
+    // A satellite parish's own Sunday records (the only page besides Attendance they get).
+    sunday_records: { roles:['satellite'] }
   },
   actions: {
     income_record: ['income'],
@@ -1237,6 +1258,8 @@ function canAction(action, ctx={}){
   return evaluateAccessRule(ACCESS_RULES.actions[action], ctx);
 }
 function canAccessPage(page){
+  // A satellite pastor gets exactly these two pages, whatever the permission tables say.
+  if(state.user?.role === 'satellite') return page === 'sunday_records' || page === 'attendance';
   const rule = ACCESS_RULES.pages[page];
   return rule ? evaluateAccessRule(rule) : false;
 }
@@ -2455,7 +2478,7 @@ function showAlert(msg,type='success'){
   if(modal){ modal.insertBefore(a,modal.firstChild); a.scrollIntoView({behavior:'smooth',block:'nearest'}); setTimeout(()=>a.remove(),duration); return; }
   const pc=document.getElementById('pageContent'); if(pc){ pc.insertBefore(a,pc.firstChild); setTimeout(()=>a.remove(),duration) }
 }
-async function updateNotifBadge(){ try{ const notifs=await DB.getNotifications(); const unread=notifs.filter(n=>!n.read).length; const el=document.getElementById('notifCount'); if(el){ el.textContent=unread; el.style.display=unread?'flex':'none' } }catch(e){ console.warn('Failed to update notification badge:', e) } }
+async function updateNotifBadge(){ if(isSatellite()) return; try{ const notifs=await DB.getNotifications(); const unread=notifs.filter(n=>!n.read).length; const el=document.getElementById('notifCount'); if(el){ el.textContent=unread; el.style.display=unread?'flex':'none' } }catch(e){ console.warn('Failed to update notification badge:', e) } }
 
 // ──────────────────────────────────────────
 // 5. AUTH
@@ -2471,7 +2494,18 @@ async function onRoleChange(){
     // Public name list (id, name, role only) — the full user list needs sign-in.
     const allUsers = await DB.getLoginOptions();
     const users = allUsers.filter(u=>u.role===role);
-    if(users.length>1){
+    if(role==='satellite'){
+      // Satellite pastors are listed under their parish's name, always with a name list.
+      const byParish = new Map();
+      users.forEach(u=>{
+        const g = u.parishName || (u.parishCode ? `Parish ${u.parishCode}` : 'Satellite parish');
+        if(!byParish.has(g)) byParish.set(g, []);
+        byParish.get(g).push(u);
+      });
+      wrap.style.display='block';
+      sel.innerHTML = `<option value="">— Select your name —</option>` + [...byParish].map(([g,list])=>
+        `<optgroup label="${esc(g)}">${list.map(u=>`<option value="${esc(u.id)}">${esc(u.name)}</option>`).join('')}</optgroup>`).join('');
+    } else if(users.length>1){
       wrap.style.display='block';
       sel.innerHTML = `<option value="">— Select your name —</option>` + users.map(u=>`<option value="${esc(u.id)}">${esc(u.name)}</option>`).join('');
     } else { wrap.style.display='none'; }
@@ -2505,11 +2539,15 @@ async function login(btn=null){
     try { localStorage.setItem('rccgSession', JSON.stringify(user)); } catch(e) {}
     // Schema migrations now run after sign-in (the server requires the token).
     // Fire-and-forget, exactly as for a restored session — never delays the app.
-    apiFetch('init').catch(initErr => console.warn('init skipped:', initErr.message));
-    DB.addAudit('login','User logged in',user.name);
+    // A satellite pastor's sign-in may only reach /api/sat/…, so none of this applies to them.
+    if(!isSatellite()){
+      apiFetch('init').catch(initErr => console.warn('init skipped:', initErr.message));
+      DB.addAudit('login','User logged in',user.name);
+    }
     document.getElementById('loginScreen').style.display='none';
     document.getElementById('appShell').style.display='flex';
-    DB.getSettings().then(s=>{ state.rolePermissions = s.rolePermissions||null; startAppAfterPinCheck(); });
+    if(isSatellite()) startAppAfterPinCheck();
+    else DB.getSettings().then(s=>{ state.rolePermissions = s.rolePermissions||null; startAppAfterPinCheck(); });
   } catch(e) {
     const msg = String(e?.message || '');
     if(msg.toLowerCase().includes('invalid credentials')){
@@ -2537,8 +2575,11 @@ function logout(){
   attFlushAll(); // send any attendance typed in the last second before the session ends
   DB.addAudit('logout','User logged out', state.user?.name);
   try { localStorage.removeItem('rccgSession'); } catch(e) {}
-  state.user=null; state.page='dashboard'; state.att=null;
+  state.user=null; state.page='dashboard'; state.att=null; state.sat=null;
   history.replaceState(null,'','/');
+  const shellEl = document.getElementById('appShell');
+  if(shellEl) shellEl.classList.remove('sat-mode');
+  document.getElementById('satUserBtn')?.remove();
   document.getElementById('appShell').style.display='none';
   document.getElementById('loginScreen').style.display='flex';
   document.getElementById('roleSelect').value='';
@@ -2616,7 +2657,7 @@ async function submitChangePin(btn=null){
 // ──────────────────────────────────────────
 // 6. NAVIGATION & ROUTER
 // ──────────────────────────────────────────
-const VALID_PAGES = ['dashboard','transactions','income','remittances','expenses','budget','bank','petty_cash','reports','audit','admin','automations'];
+const VALID_PAGES = ['dashboard','transactions','income','remittances','expenses','budget','bank','petty_cash','reports','audit','admin','automations','sunday_records'];
 
 function pageFromPath(){
   const seg = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
@@ -2624,6 +2665,7 @@ function pageFromPath(){
 }
 
 function initApp(){
+  if(isSatellite()) return initSatelliteApp();
   buildMonthSelector();
   buildSidebar();
   buildBottomNav();
@@ -2701,7 +2743,7 @@ async function buildSidebar(){
     if(!sections[item.section]) sections[item.section]=[];
     sections[item.section].push(item);
   });
-  const pendingCount = await getPettyCashPendingCount();
+  const pendingCount = isSatellite() ? 0 : await getPettyCashPendingCount();
   const nav = document.getElementById('sidebarNav');
   let html='';
   Object.entries(sections).forEach(([sec,items])=>{
@@ -2727,7 +2769,7 @@ function buildBottomNav(){
   inner.style.gridTemplateColumns=`repeat(${items.length},1fr)`;
   inner.innerHTML = items.map(item=>`
     <button class="bn-item${state.page===item.id?' active':''}" onclick="App.navigate('${item.id}')" data-page="${item.id}">
-      <span style="font-size:20px">${item.icon}</span>${item.label.split(' ')[0]}
+      <span style="font-size:20px">${item.icon}</span>${isSatellite() ? item.label : item.label.split(' ')[0]}
     </button>`).join('');
   bn.innerHTML='';
   bn.appendChild(inner);
@@ -2767,14 +2809,15 @@ async function navigate(page, fromHistory){
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   const titles={dashboard:'Dashboard',transactions:'Transactions',income:'Record Income',remittances:'Remittances',
-    expenses:'Expenses',budget:'Budget',bank:'Bank',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel',attendance:'Attendance',automations:'Automations'};
-  document.getElementById('topBarTitle').textContent=titles[page]||page;
+    expenses:'Expenses',budget:'Budget',bank:'Bank',petty_cash:'Petty Cash',reports:'Reports',audit:'Audit Log',admin:'IT Admin Panel',attendance:'Attendance',automations:'Automations',sunday_records:'Sunday records'};
+  // A satellite pastor's header carries their parish's name; the tabs say which page this is.
+  document.getElementById('topBarTitle').textContent=(isSatellite() && state.sat?.parishName) || titles[page]||page;
   // The Attendance page picks its own remittance period, so the global month picker is
   // hidden there (and for attendance-only roles it would be meaningless anyway). The
   // Automations page has no month-based content either, and on a narrow phone screen
   // the selector pushes the top bar wide enough to cause horizontal scroll.
   const monthSel = document.getElementById('globalMonth');
-  if(monthSel) monthSel.style.display = (page==='attendance' || page==='automations') ? 'none' : '';
+  if(monthSel) monthSel.style.display = (page==='attendance' || page==='automations' || page==='sunday_records') ? 'none' : '';
   // Paint the page skeleton immediately from synchronous state — no network — so a
   // slow connection sees the page's structure (and the loading progress bar) within
   // ~50ms instead of a bare "Loading…" string. Previously this was blocked behind the
@@ -2791,8 +2834,11 @@ async function navigate(page, fromHistory){
   buildSidebar(); updateNotifBadge();
   // The smart default month decides which period the content is fetched for, so it
   // must settle before we render the real content (the skeleton is already visible).
-  await applySmartDefaultMonth();
-  buildMonthSelector();
+  // (A satellite has no remittances or month picker; its start-up already chose the period.)
+  if(!isSatellite()){
+    await applySmartDefaultMonth();
+    buildMonthSelector();
+  }
   setTimeout(()=>{ renderPage(page).catch(e=>console.error(e)); },50);
 }
 
@@ -2805,6 +2851,7 @@ function paintSkeleton(page, title){
   if(page === 'expenses')  return renderPageSkeleton({ pageTitle: 'Expenses', pageSub: monthLabel(), kpiCount: 3, hint: 'Loading expenses…' });
   if(page === 'budget')    return renderPageSkeleton({ pageTitle: 'Budget', pageSub: 'This month · Next month', kpiCount: 2, hint: 'Loading budget…' });
   if(page === 'bank')      return renderPageSkeleton({ pageTitle: 'Bank Account', pageSub: monthLabel(), kpiCount: 4, hint: 'Loading bank activity…' });
+  if(page === 'sunday_records') return renderPageSkeleton({ pageTitle: 'Sunday records', pageSub: 'This remittance period', kpiCount: 0, hasTabs: false, hint: 'Loading Sunday records…' });
   if(page === 'attendance') return renderPageSkeleton({ pageTitle: 'Attendance', pageSub: 'This remittance period', kpiCount: 0, hasTabs: false, hint: 'Loading attendance…' });
   if(page === 'automations') return renderPageSkeleton({ pageTitle: 'Automations', pageSub: 'The Clerk box', kpiCount: 0, hasTabs: false, hint: 'Loading the box’s status…' });
   return renderPageSkeleton({ pageTitle: title || 'Loading', pageSub: monthLabel(), kpiCount: 3, hasTabs: true, hint: 'Loading…' });
@@ -2840,7 +2887,8 @@ async function getPettyCashPendingCount(){
 async function renderPage(page){
   const pages={dashboard:renderDashboard,transactions:renderTransactions,income:renderIncome,remittances:renderRemittances,
     expenses:renderExpenses,budget:renderBudget,bank:renderBank,petty_cash:renderPettyCash,reports:renderReports,
-    audit:renderAudit,admin:renderAdmin,attendance:renderAttendance,automations:renderAutomations};
+    audit:renderAudit,admin:renderAdmin,attendance:renderAttendance,automations:renderAutomations,
+    sunday_records:renderSundayRecords};
   try{
     if(pages[page]) await pages[page]();
     else document.getElementById('pageContent').innerHTML='<div class="card"><p>Page not found.</p></div>';
@@ -17088,7 +17136,8 @@ function attFurtherLocked(){
 
 async function attLoadPeriod(){
   const st = attState();
-  const [settings, rems] = await Promise.all([DB.getSettings(), DB.getRemittances()]);
+  // A satellite has no remittances table to read; the cut-off dates alone give its periods.
+  const [settings, rems] = await Promise.all([DB.getSettings(), isSatellite() ? [] : DB.getRemittances()]);
   if(st.year==null){ st.year = state.year; st.month = state.month; }
   // A "Fill attendance now" link from the Sunday collection form may point at a week in
   // the neighbouring period — step there so the week is on screen.
@@ -18022,6 +18071,282 @@ function bindIncomeFormAutosave(){
 }
 
 // ──────────────────────────────────────────
+// 7c. SATELLITE PARISH — SUNDAY RECORDS
+// ──────────────────────────────────────────
+// A satellite parish's pastor sees two tabs only: Sunday records (this page) and the
+// ordinary Attendance page. Everything here reads and writes through apiFetch, which
+// sends it to /api/sat/… (the pastor's own parish database). The Kingdom rules — a
+// Sunday needs that week's attendance, the cut-off Sunday needs the Monthly report and
+// every earlier Sunday — run on the server; the row hints below only explain them.
+const SAT_LINES = [
+  { key:'membersTithe',          label:'General Tithe' },
+  { key:'ministersTithe',        label:'Ministers Tithe' },
+  { key:'thanksgiving',          label:'Thanksgiving' },
+  { key:'slo',                   label:'Sunday Love Offering' },
+  { key:'crm',                   label:'CRM' },
+  { key:'workersOffering',       label:'Gospel Fund' },
+  { key:'sundaySchool',          label:'Sunday School' },
+  { key:'childrenOffering',      label:'Children Offering' },
+  { key:'holyCommunionOffering', label:'Holy Communion Offering' },
+  { key:'firstFruit',            label:'First Fruit' },
+];
+function satSt(){
+  if(!state.sat) state.sat = { parishName:'', parishCode:'', year:null, month:null, view:null, loaded:null };
+  return state.sat;
+}
+/** Amount due to RCCG from one calcRemittances() result — the same lines Kingdom's Remittances page adds up. */
+function satRemitTotal(rem){
+  return (rem.totalNatl||0) + (rem.totalSeed||0) + (rem.totalArea||0) + (rem.totalPastor||0) + (rem.totalMinisters||0)
+    + (rem.provinceRebate||0) + (rem.crmAddon||0) + (rem.coastline||0) + (rem.insuranceGen||0) + (rem.insuranceMin||0);
+}
+/** Remit per ₦1 of each line. Every rate is linear, so the form can total live without recalculating. */
+async function satLineFactors(rr){
+  const out = {};
+  for(const l of SAT_LINES) out[l.key] = satRemitTotal(await calcRemittances({ [l.key]:1000 }, rr)) / 1000;
+  return out;
+}
+function satLineLabels(settings){
+  let m = settings?.satLineLabels;
+  if(typeof m === 'string'){ try { m = JSON.parse(m); } catch(e){ m = null; } }
+  return (m && typeof m === 'object') ? m : {};
+}
+function satSundayRec(income, date){
+  return (income||[]).find(r=>String(r.date||'').slice(0,10)===date && (!r.source || r.source==='sunday_collection')) || null;
+}
+/**
+ * 'saved' | 'cutoff' (needs the Monthly report and all earlier Sundays) | 'att' (needs that
+ * week's attendance) | 'open'. `sundays` are the period's rows ({date, rec, isCutoff}).
+ */
+function satRowState(s, sundays, attMap, further){
+  if(s.rec) return 'saved';
+  if(s.isCutoff){
+    const earlierIn = sundays.filter(x=>x.date < s.date).every(x=>x.rec);
+    if(!earlierIn || !further?.current?.furtherSubmittedAt) return 'cutoff';
+  }
+  return ['submitted','locked'].includes(attMap?.[s.date]?.status) ? 'open' : 'att';
+}
+const SAT_HINTS = {
+  att:    '⚠️ attendance first',
+  cutoff: '⏳ needs the Monthly report and all earlier Sundays first',
+  open:   'Tap to record',
+};
+
+async function initSatelliteApp(){
+  const st = satSt();
+  const shell = document.getElementById('appShell');
+  if(shell) shell.classList.add('sat-mode');
+  buildSidebar(); buildBottomNav(); updateSidebarUser(); satBuildUserButton();
+  try {
+    const [ctx, settings] = await Promise.all([apiFetch('context'), DB.getSettings()]);
+    st.parishName = String(ctx?.name || settings?.churchName || 'Your parish');
+    st.parishCode = String(ctx?.code || '');
+    // Start on the period that is open for collections now (the attendance page reads state.year/month too).
+    const anchor = getCurrentRemPeriodAnchor(settings, []);
+    state.upcomingPeriodAnchor = anchor;
+    state.year = st.year = anchor.year; state.month = st.month = anchor.month;
+  } catch(e){ satBootError(e); return; }
+  const t = document.querySelector('.sidebar-title'); if(t) t.textContent = st.parishName;
+  const sub = document.querySelector('.sidebar-sub'); if(sub) sub.textContent = 'Parish records';
+  navigate(pageFromPath(), true);
+}
+function satBootError(e){
+  const pc = document.getElementById('pageContent'); if(!pc) return;
+  pc.innerHTML = `<div class="card">
+    <div class="alert alert-danger" style="margin-bottom:14px"><span class="alert-icon">✕</span><span>${esc(e?.message || 'Could not load your parish.')}</span></div>
+    <button class="btn btn-primary" onclick="App.retrySatBoot()">Try again</button>
+    <button class="btn" onclick="App.logout()">Sign out</button>
+  </div>`;
+}
+function retrySatBoot(){ initSatelliteApp(); }
+function satBuildUserButton(){
+  if(document.getElementById('satUserBtn')) return;
+  const right = document.querySelector('.top-bar-right'); if(!right) return;
+  const b = document.createElement('button');
+  b.id = 'satUserBtn'; b.type = 'button'; b.className = 'sat-user-btn';
+  b.setAttribute('onclick', 'App.satUserMenu()');
+  b.textContent = '👤 ' + String(state.user?.name || '').split(' ')[0] + ' ▾';
+  right.appendChild(b);
+}
+function satUserMenu(){
+  const st = satSt();
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">${esc(state.user?.name||'')}</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:14px">${esc(st.parishName)} · Parish Pastor</p>
+    <button class="btn" style="width:100%;margin-bottom:8px" onclick="closeModal();App.showChangePinModal()">🔑 Change my PIN</button>
+    <button class="btn" style="width:100%" onclick="App.logout()">Sign out</button>`);
+}
+
+async function satLoadPeriod(){
+  const st = satSt();
+  const settings = await DB.getSettings();
+  const range = computeRemPeriodDates(settings, [], st.year, st.month);
+  const weeks = attWeeksInPeriod(range.from, range.to);
+  const lastW = weeks[weeks.length-1];
+  const lastWeekEnd = lastW && attCutoffInfoForWeek(settings, lastW.weekEnd)?.periodEnd===range.to ? lastW.weekEnd : null;
+  const [income, attList, further, rr] = await Promise.all([
+    DB.getIncome(),
+    DB.getAttendance(attYmdAdd(range.from,-6), attYmdAdd(range.to,6)),
+    DB.getAttendanceFurther(range.to).catch(()=>null),
+    getRemRates(),
+  ]);
+  const attMap = {};
+  (attList||[]).forEach(r=>{ attMap[r.weekEnd] = r; });
+  const sundays = weeks.map(w=>({ index:w.index, date:w.weekEnd, rec:satSundayRec(income, w.weekEnd), isCutoff:w.weekEnd===lastWeekEnd }));
+  const factors = await satLineFactors(rr);
+  for(const s of sundays){
+    if(!s.rec) continue;
+    s.collected = Number(s.rec.totalCollection||0);
+    s.remit = satRemitTotal(await calcRemittances(s.rec, rr));
+    s.keep = s.collected - s.remit;
+  }
+  const quotaLines = getQuotaLinesForPeriod(getQuotaList(settings), range.from, range.to);
+  const quotas = sumQuotaLines(quotaLines);
+  const remitSoFar = sundays.reduce((a,s)=>a+(s.remit||0), 0);
+  const keepSoFar = sundays.reduce((a,s)=>a+(s.keep||0), 0);
+  const hasCutoff = (()=>{ const c = getRemCutoffDates(settings, st.year); return !!c && Number(c.year)===st.year && Number.isInteger(c.dates[st.month]); })();
+  st.loaded = { settings, range, sundays, attMap, further, factors, labels:satLineLabels(settings), hasCutoff,
+    summary:{ remitSoFar, quotas, toRemit: remitSoFar+quotas, kept: keepSoFar-quotas } };
+}
+async function renderSundayRecords(){
+  await satLoadPeriod();
+  if(state.page !== 'sunday_records') return;
+  satPaint();
+}
+function satPaint(){
+  const pc = document.getElementById('pageContent'); if(!pc) return;
+  const st = satSt();
+  pc.innerHTML = st.view ? satFormHtml() : satListHtml();
+  if(st.view) satFormInput();
+}
+function satListHtml(){
+  const st = satSt(), L = st.loaded;
+  const { from, to } = L.range;
+  const cutoff = L.hasCutoff ? ` (cut-off ${esc(attDayLabel(to))})` : '';
+  const row = s=>{
+    const kind = satRowState(s, L.sundays, L.attMap, L.further);
+    const body = kind==='saved'
+      ? `<div class="sat-row-ok">✅ saved</div>
+         <div class="sat-row-fig"><span>Collected<b>${fmt(s.collected)}</b></span><span>Remit<b>${fmt(s.remit)}</b></span><span>Keep<b>${fmt(s.keep)}</b></span></div>`
+      : `<div class="sat-row-hint sat-hint-${kind}">${SAT_HINTS[kind]}</div>`;
+    return `<button type="button" class="sat-row sat-row-${kind}" onclick="App.satOpen('${s.date}')">
+      <div class="sat-row-d"><b>${esc(attDayLabel(s.date))}</b><small>Week ${s.index}${s.isCutoff?' · cut-off':''}</small></div>
+      <div class="sat-row-b">${body}</div><span class="sat-row-go" aria-hidden="true">›</span></button>`;
+  };
+  const sm = L.summary;
+  return `<div class="att-page sat-page">
+    <div class="att-period"><div class="att-period-row">
+      <button class="att-nav" onclick="App.satShift(-1)" aria-label="Previous period">‹</button>
+      <div class="att-period-title"><h2>${MONTHS[st.month]} ${st.year}</h2>
+        <div class="att-period-sub">${esc(attDayLabel(from,false))} – ${esc(attDayLabel(to,false))}${cutoff}</div></div>
+      <button class="att-nav" onclick="App.satShift(1)" aria-label="Next period">›</button>
+    </div></div>
+    ${L.sundays.length ? L.sundays.map(row).join('') : '<div class="card"><p>No Sundays fall in this period.</p></div>'}
+    <div class="card sat-summary">
+      <div class="status-row"><div class="status-row-label">Collections to remit so far</div><div class="status-row-amt">${fmt(sm.remitSoFar)}</div></div>
+      <div class="status-row"><div class="status-row-label">Monthly quotas (share so far)</div><div class="status-row-amt">${fmt(sm.quotas)}</div></div>
+      <div class="status-row"><div class="status-row-label fw-bold">To remit so far</div><div class="status-row-amt" style="color:var(--primary)">${fmt(sm.toRemit)}</div></div>
+      <div class="status-row"><div class="status-row-label fw-bold">Kept in the parish so far</div><div class="status-row-amt">${fmt(sm.kept)}</div></div>
+    </div>
+  </div>`;
+}
+
+function satDraftKey(date){ return `sat_draft_${satSt().parishCode}_${date}`; }
+function satReadDraft(date){ try { return JSON.parse(localStorage.getItem(satDraftKey(date)) || 'null') || {}; } catch(e){ return {}; } }
+function satWriteDraft(date, vals){ try { localStorage.setItem(satDraftKey(date), JSON.stringify(vals)); } catch(e){} }
+function satClearDraft(date){ try { localStorage.removeItem(satDraftKey(date)); } catch(e){} }
+
+function satFormHtml(){
+  const st = satSt(), L = st.loaded;
+  const s = L.sundays.find(x=>x.date===st.view);
+  if(!s){ st.view = null; return satListHtml(); }
+  const kind = satRowState(s, L.sundays, L.attMap, L.further);
+  const locked = !!s.rec;
+  const vals = locked ? s.rec : satReadDraft(s.date);
+  const hint = kind==='att' || kind==='cutoff'
+    ? `<div class="alert alert-warn sat-hint-box"><span>${SAT_HINTS[kind]}</span> <button type="button" class="btn btn-sm" onclick="App.navigate('attendance')">Go to Attendance →</button></div>` : '';
+  const lines = SAT_LINES.map(l=>{
+    const v = Number(vals[l.key]||0);
+    return `<div class="sat-line"><label class="sat-line-l" for="sat_${l.key}">${esc(L.labels[l.key] || l.label)}</label>
+      <div class="sat-line-in"><input id="sat_${l.key}" class="form-input" type="number" inputmode="decimal" min="0" step="any" placeholder="0" value="${v?v:''}" oninput="App.satFormInput()" />
+      <span class="sat-line-r">Remit <b id="satr_${l.key}">₦0</b></span></div></div>`;
+  }).join('');
+  const who = locked && s.rec.recordedBy
+    ? `<div class="sat-saved-by">Last saved by ${esc(s.rec.recordedBy)}${s.rec.createdAt ? `, ${esc(fmtDate(s.rec.createdAt))} ${esc(fmtTime(s.rec.createdAt))}` : ''}</div>` : '';
+  return `<div class="sat-page sat-form">
+    <button type="button" class="btn btn-sm" onclick="App.satBack()">‹ Back to the list</button>
+    <h2 class="sat-form-title">${esc(ATT_DAY_NAMES[0])} ${esc(fmtDate(s.date))}</h2>
+    ${hint}${who}
+    ${locked ? '<div class="alert alert-success sat-hint-box"><span>✅ This Sunday is saved. To correct a figure, change it below and press <b>Save correction</b>. If the month-end has already been filed, the check message then asks you to press Refresh.</span></div>' : ''}
+    <div class="card">${lines}</div>
+    <div class="card sat-totals">
+      <div><small>Collected</small><b id="sat_tot_c">₦0</b></div>
+      <div><small>Remit</small><b id="sat_tot_r">₦0</b></div>
+      <div><small>Keep</small><b id="sat_tot_k">₦0</b></div>
+    </div>
+    <div class="alert alert-danger" id="satErr" style="display:none"><span class="alert-icon">✕</span><span id="satErrText"></span></div>
+    <button type="button" class="btn btn-primary sat-save" id="satSaveBtn" onclick="App.satSave(this)">${locked ? 'Save correction' : 'Save Sunday record'}</button>
+  </div>`;
+}
+function satReadForm(){
+  const out = {}; let total = 0;
+  SAT_LINES.forEach(l=>{
+    const v = Math.max(0, parseFloat(document.getElementById('sat_'+l.key)?.value) || 0);
+    out[l.key] = Math.round(v*100)/100; total += out[l.key];
+  });
+  return { vals:out, total:Math.round(total*100)/100 };
+}
+function satFormInput(){
+  const st = satSt(); if(!st.loaded || !st.view) return;
+  const { vals, total } = satReadForm();
+  let remit = 0;
+  SAT_LINES.forEach(l=>{
+    const r = vals[l.key] * (st.loaded.factors[l.key]||0);
+    remit += r;
+    const el = document.getElementById('satr_'+l.key); if(el) el.textContent = fmt(r);
+  });
+  const set = (id, n)=>{ const el = document.getElementById(id); if(el) el.textContent = fmt(n); };
+  set('sat_tot_c', total); set('sat_tot_r', remit); set('sat_tot_k', total - remit);
+  if(!st.loaded.sundays.find(x=>x.date===st.view)?.rec) satWriteDraft(st.view, vals);
+}
+function satShowError(msg){
+  const box = document.getElementById('satErr'), t = document.getElementById('satErrText');
+  if(!box || !t) return;
+  t.textContent = msg; box.style.display = 'flex';
+  box.scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+function satOpen(date){ satSt().view = date; satPaint(); window.scrollTo?.(0,0); }
+function satBack(){ satSt().view = null; renderSundayRecords(); }
+function satShift(step){
+  const st = satSt();
+  st.month += step;
+  if(st.month>11){ st.month=0; st.year++; }
+  if(st.month<0){ st.month=11; st.year--; }
+  st.view = null;
+  renderSundayRecords().catch(e=>{ document.getElementById('pageContent').innerHTML = `<div class="card"><div class="alert alert-danger"><span class="alert-icon">✕</span><span>${esc(e.message)}</span></div></div>`; });
+}
+async function satSave(btn){
+  const st = satSt(), date = st.view;
+  if(!date || !st.loaded) return;
+  const { vals, total } = satReadForm();
+  if(!(total > 0)){ satShowError('Please enter at least one amount.'); return; }
+  document.getElementById('satErr').style.display = 'none';
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    const rec = st.loaded.sundays.find(x=>x.date===date)?.rec;
+    // A saved Sunday is corrected in place (the parish database has nothing else hanging off the record).
+    const saved = rec?.id ? await DB.updateIncome(rec.id, { ...vals }) : await DB.addIncome({ date, ...vals, totalCollection: total });
+    satClearDraft(date);
+    st.view = null;
+    await renderSundayRecords();
+    showAlert(rec?.id ? `Sunday record for ${fmtDate(date)} corrected.` : saved?.merged ? `Added to the record already saved for ${fmtDate(date)}.` : `Sunday record for ${fmtDate(date)} saved.`, 'success');
+  } catch(e){
+    restore();
+    satShowError(e.message || 'Could not save. Please try again.');
+  }
+}
+
+// ──────────────────────────────────────────
 // 8. SESSION RESTORE
 // ──────────────────────────────────────────
 (function restoreSession(){
@@ -18064,6 +18389,7 @@ function bindIncomeFormAutosave(){
     // that shipped in the meantime. That is exactly how income.custom_collections came
     // to be absent while the app was already accepting custom collection types.
     // Fire-and-forget: this must never delay or block first paint.
+    if (isSatellite()) { startAppAfterPinCheck(); return; }   // a satellite boots from /api/sat/… only
     apiFetch('init').catch(err => console.warn('init skipped:', err.message));
     DB.getSettings()
       .then(s => { state.rolePermissions = s.rolePermissions || null; startAppAfterPinCheck(); })
@@ -19043,6 +19369,7 @@ async function saveAutomationsConfig(btn){
 // 9. PUBLIC API
 // ──────────────────────────────────────────
 return {
+  satOpen, satBack, satShift, satFormInput, satSave, satUserMenu, retrySatBoot,
   onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
   attShiftPeriod, attOpenWeek, attAddService, attRemoveService, attStep, attConfirmSubmit, attSubmit, attEditWeek,
   attUnlockPrompt, attUnlock, attBackToCollection, refreshIncomeAttendance, incGoToAttendance, incDiscardDraft,
@@ -19118,6 +19445,9 @@ return {
   _authFetch: authFetch,
   _setTestUser: (u) => { state.user = u; },
   _getTestUser: () => state.user,
+  _apiPath: apiPath,
+  _satRowState: satRowState,
+  _satRemitTotal: satRemitTotal,
   _attWeeksInPeriod: attWeeksInPeriod,
   _attWeekEnd: attWeekEnd,
   _attCutoffInfoForWeek: attCutoffInfoForWeek,

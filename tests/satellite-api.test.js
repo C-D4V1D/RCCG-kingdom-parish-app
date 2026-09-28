@@ -136,3 +136,15 @@ test('the box reads a parish with its unchanged requests plus X-Sat-Parish (read
   const admin = await (await call('income', { headers: { ...FINANCE_AUTH_HEADER, 'X-Sat-Parish': '659840' } })).json();
   assert.ok(admin.some(r => r.id === 'K1'));
 });
+
+test('a pastor corrects a saved Sunday in place (amounts replaced, total recomputed)', async () => {
+  const { SAT, call, pastor } = await setup();
+  await call('sat/context', { headers: pastor });
+  await SAT.prepare(`DELETE FROM settings WHERE key='attendanceGateFrom'`).run();
+  const saved = await (await call('sat/income', { method: 'POST', headers: pastor, body: { date: '2026-09-27', membersTithe: 1000, thanksgiving: 500, totalCollection: 1500 } })).json();
+  const r = await call(`sat/income/${saved.id}`, { method: 'PUT', headers: pastor, body: { membersTithe: 1200, thanksgiving: 0 } });
+  assert.equal(r.status, 200);
+  const row = await SAT.prepare(`SELECT members_tithe, thanksgiving, total_collection FROM income WHERE id=?`).bind(saved.id).first();
+  assert.deepEqual([row.members_tithe, row.thanksgiving, row.total_collection], [1200, 0, 1200]);
+  assert.equal((await call(`sat/income/${saved.id}`, { method: 'PUT', headers: pastor, body: { crm: -5 } })).status, 400);
+});
