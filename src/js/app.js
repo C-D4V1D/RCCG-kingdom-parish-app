@@ -18123,6 +18123,120 @@ const AUTOMATION_ROUTING_DEFAULTS = {
     fabian: { telegram: true, email: true }, pastor: { telegram: true, email: true },
   },
 };
+// What each message is, when the box sends it and roughly what it looks like on Telegram (Automations → Message
+// guide). Examples only: the real message fills in the live figures and names, so the wording can differ a little.
+const AUTOMATION_MESSAGE_GUIDE = {
+  memo_forwarded: {
+    what: 'A new memo from the RCCG memo page, sent out to the people ticked here (the PDF comes with it).',
+    when: 'On the days and from the time set under Memo forwarding, as soon as a new memo appears.',
+    sample: '📄 <b>New memo</b>\nRef: RCCG/REG/2026/114 – Special Thanksgiving Service\nDated 12 Oct 2026\n(memo PDF attached)',
+  },
+  memo_error: {
+    what: 'Something stopped a memo going out: it could not be downloaded or sent, or Auto-forward is off and a new memo is waiting for your OK.',
+    when: 'Straight away, when it happens.',
+    sample: '⚠️ <b>New memo found – not forwarded yet</b>\nRef: RCCG/REG/2026/114\nReply in the Church Clerk chat to send it out.',
+  },
+  remittance_check: {
+    what: 'Kingdom Parish month-end report: the app\'s figures compared line by line with the RCCG portal, the attendance result and the buttons to approve or hold. Replies after someone presses a button are this type too.',
+    when: 'Once the last Sunday collection of the period is saved in the app (the month-end run), and again after each button press.',
+    sample: '✅ <b>Kingdom Parish remittance check</b>\nOctober 2026\n\nApp total: ₦1,245,300\nPortal total: <b>₦1,245,300</b>\n✅ Portal matches the app\nAttendance: filed ✅\n\n<b>Next step:</b> Approve in the email to generate the RRR.',
+  },
+  rrr_generated: {
+    what: 'The RRR (Remita payment number) and the amount to pay, once the remittance is approved. The people who pay the RRR also get the ✅ I\'ve paid button under it, so keep this ticked for them.',
+    when: 'Straight after the RRR is generated on the portal.',
+    sample: '🧾 <b>RRR generated – Kingdom Parish</b>\nOctober 2026\nRRR: <b>2515-1524-5138</b>\nAmount: ₦1,245,300\nPay on remita.net before the portal closes.\n[ ✅ I\'ve paid ]',
+  },
+  parish_remittance_check: {
+    what: 'The same check as the "Remittance check report", but for another parish (not Kingdom Parish), for example God is Able Parish. It is done by the Church Clerk AI when you ask it to, not by the month-end run.',
+    when: 'Only when you ask Church Clerk to check another parish.',
+    sample: '⚠️ <b>God is Able Parish remittance check</b>\nOctober 2026\n\nYour figures (total input): ₦412,000\nAmount to remit (portal): <b>₦409,500</b>\n❌ <b>1 difference(s)</b>\n• Week 2: portal ₦98,000 / yours ₦100,500\n\n<b>Next step:</b> tell Church Clerk in chat when to generate the RRR.',
+  },
+  monthly_statement: {
+    what: 'The parish\'s monthly financial statement, emailed out (or held for your OK if Auto-send is off).',
+    when: 'When the statement is due, from the time set under Monthly statement.',
+    sample: '📊 <b>Monthly statement sent</b>\n1 – 30 Sep 2026\nEmailed to the people ticked for it.',
+  },
+  statement_error: {
+    what: 'The monthly statement could not be made or sent, or it is waiting for your OK.',
+    when: 'Straight away, when it happens.',
+    sample: '⚠️ <b>Monthly statement due, not sent yet</b>\n1 – 30 Sep 2026\nReply in the Church Clerk chat to send it.',
+  },
+  attendance_filed: {
+    what: 'The month\'s attendance has been filed on the RCCG portal.',
+    when: 'During the month-end run (straight after the remittance), and again if Refresh attendance is pressed.',
+    sample: '✅ <b>Attendance filed</b>\nKingdom Parish – October 2026\n4 Sundays filed on the portal.',
+  },
+  attendance_error: {
+    what: 'The month-end attendance filing hit a problem: a figure is missing, the portal differs from the app, or the portal refused it.',
+    when: 'During the month-end run, when it happens.',
+    sample: '⚠️ <b>Attendance not filed</b>\nOctober 2026\nThe portal shows 212 for 12 Oct; the app has 215.\nFix it in the app, then press Refresh attendance in the check email.',
+  },
+  source_doc_reminder: {
+    what: 'A reminder that source documents (Admin and Finance) for the month haven\'t been uploaded to the portal yet.',
+    when: 'On the days before the portal closes set under Source-doc reminders, after the time set there.',
+    sample: '📎 <b>Source documents not uploaded yet</b>\nKingdom Parish – October 2026\n• Admin: not uploaded\nThe portal closes on Fri 7 Nov. Send them to the bot.',
+  },
+  weekly_attendance_reminder: {
+    what: 'Bro. Divine\'s weekly list of Sundays whose attendance isn\'t in the app yet, together with any Sunday collection not yet saved.',
+    when: 'Once a week, on the day and after the time set under Weekly attendance reminder (normally Monday).',
+    sample: 'Good morning Bro. Divine,\n\nAttendance not submitted yet for: Sun 12 Oct\n\n⏳ <b>Sunday collection not yet in the app</b>\nPlease record the collection for:\n• Sun 19 Oct\n\nGod bless.',
+  },
+  collection_reminder: {
+    what: 'A reminder that a Sunday collection is still missing from the app. The month-end filing only starts once every Sunday collection of the period is saved.',
+    when: 'The 2nd reminder day (normally Thursday), the cut-off Sunday evening and the Monday after, only while something is missing.',
+    sample: '⏳ <b>Sunday collection not yet in the app (2nd reminder)</b>\nKingdom Parish\nPlease record the collection for:\n• Sun 19 Oct\n\nThe month-end filing can only start once every Sunday\'s collection is in.',
+  },
+  month_close: {
+    what: 'After the RRR: who paid it (confirmed on Remita), the month-close checklist (filed, paid, attendance, source documents, app record, CSR), the warning before the portal closes and the "month complete" note.',
+    when: 'When the payer taps ✅ I\'ve paid or sends /paid (and at the Remita check times), the set number of days before the portal closes if something is still open, and once everything is done.',
+    sample: '✅ <b>October 2026 remittance PAID</b>\nRRR 2515-1524-5138 · ₦1,245,300\nPaid by Bro. Fabian (Admin Officer) (confirmed on Remita, Tue 4 Nov 14:02)\n\n<b>Month-close checklist</b> (portal closes Fri 7 Nov)\n✅ Remittance filed on the portal · RRR 2515-1524-5138\n✅ Paid (Bro. Fabian (Admin Officer))\n✅ Attendance filed\n✅ Source docs, Finance: uploaded\n⚠️ Source docs, Admin: NOT uploaded yet\n⚠️ Payment not yet recorded in the app (Bro. Divine (Accountant))\n\nBro. Divine (Accountant): please record the payment in the app (Remittances).',
+  },
+  weekly_health: {
+    what: 'A weekly summary of how the box is doing: jobs running, disk space, Drive backup and any errors.',
+    when: 'Once a week, on the day and after the time set under Health note.',
+    sample: '🩺 <b>Weekly box health</b>\nAll jobs running ✅\nDisk: 41% used\nDrive backup: 10 min ago\nNo errors this week.',
+  },
+  upload_confirmation: {
+    what: 'The reply to the person who sent a source document to the Telegram bot, saying it was saved.',
+    when: 'Straight after they send it.',
+    sample: '✅ Saved: Finance source document (Kingdom Parish, October 2026).',
+  },
+  upload_fyi: {
+    what: 'A note to the others that someone has uploaded a source document through the bot.',
+    when: 'Straight after an upload.',
+    sample: 'ℹ️ Bro. Divine uploaded a Finance source document for Kingdom Parish, October 2026.',
+  },
+  sunday_note: {
+    what: 'A short Sunday note confirming the day\'s attendance and collection have reached the app.',
+    when: 'Every Sunday after the time set under Sunday note.',
+    sample: '✅ <b>Sunday 12 Oct</b>\nAttendance and collection are in the app. Thank you!',
+  },
+  watchdog_down: {
+    what: 'An alert that the box has gone quiet (it stopped reporting in), sent by the Church Clerk AI after the watchdog wakes it.',
+    when: 'At the daily watchdog check, only if the box hasn\'t reported for hours.',
+    sample: '🔴 <b>Clerk box is down</b>\nNo report from the box for 7 hours.\nPlease check the VM.',
+  },
+  scheduler_fallback: {
+    what: 'Something needed the Church Clerk AI (a new memo, a due statement, a scheduler problem) but the box couldn\'t wake it, so it tells you directly.',
+    when: 'Straight away, when a wake-up fails.',
+    sample: '⚠️ <b>Monthly statement due, not sent yet</b>\n1 – 30 Sep 2026\nChurch Clerk could not be woken. Please open the chat.',
+  },
+};
+function automationsMessageGuideHtml(keys){
+  const list = AUTOMATION_MESSAGE_TYPES.filter(mt=>!keys || keys.includes(mt.key));
+  return list.map(mt=>{
+    const g = AUTOMATION_MESSAGE_GUIDE[mt.key];
+    if(!g) return '';
+    const sample = esc(g.sample).replace(/&lt;(\/?)b&gt;/g, '<$1b>');
+    return `<details class="at-guide-item" id="at-guide-${esc(mt.key)}">
+      <summary>${esc(mt.label)}</summary>
+      <p><b>What it is:</b> ${esc(g.what)}</p>
+      <p><b>When it's sent:</b> ${esc(g.when)}</p>
+      <div class="at-guide-label">Example (Telegram)</div>
+      <div class="at-guide-sample">${sample}</div>
+    </details>`;
+  }).join('');
+}
 const AUTOMATION_MONTH_CLOSE_DEFAULTS = {
   enabled: true, check_times: ['10:00', '14:00', '18:00'], warn_days: 2, complete_message: true,
   items: { source_docs: true, app_record: true, csr: false },
@@ -18478,7 +18592,7 @@ function renderAutomationsSettings(config, isDefault, health){
         <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
         ${AUTOMATION_MESSAGE_TYPES.map(mt=>{
           const r = (config.routing?.[mt.key] || AUTOMATION_ROUTING_DEFAULTS[mt.key])?.[p.key] || {};
-          return `<tr><td>${esc(mt.label)}</td>
+          return `<tr><td>${esc(mt.label)} <a href="#at-guide-${esc(mt.key)}" class="at-guide-link" title="${esc(AUTOMATION_MESSAGE_GUIDE[mt.key]?.what||'')}" onclick="App.openAutomationGuide('${esc(mt.key)}');return false">ⓘ</a></td>
             <td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" ${r.telegram?'checked':''} ${p.telegram_chat_id?'':'title="This person is not connected on Telegram yet"'}></td>
             <td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" data-ch="email" ${r.email?'checked':''}></td>
           </tr>`;
@@ -18521,6 +18635,14 @@ function renderAutomationsSettings(config, isDefault, health){
         ${peopleRows || '<p class="at-note">No one is set up yet.</p>'}
         <button class="btn" onclick="App.addAutomationPerson()">+ Add person</button>
         ${saveBar}
+      </div>
+    </details>
+
+    <details class="at-details" id="atGuide">
+      <summary>Message guide (what each message says)</summary>
+      <div class="at-details-body">
+        <p class="at-note" style="margin-top:0">What each message in the ticks above is, when the box sends it, and an example of how it looks on Telegram (the real one fills in the live names and figures). Tap ⓘ next to a message above to jump here.</p>
+        ${automationsMessageGuideHtml()}
       </div>
     </details>
 
@@ -18671,6 +18793,10 @@ function renderAutomationsAccountantSummary(config){
     if(!r.telegram && !r.email) return '';
     return `<tr><td>${esc(mt.label)}</td><td>${r.telegram?'✓':'—'}</td><td>${r.email?'✓':'—'}</td></tr>`;
   }).filter(Boolean).join('');
+  const mine = AUTOMATION_MESSAGE_TYPES.filter(mt=>{
+    const r = me ? ((config.routing?.[mt.key] || AUTOMATION_ROUTING_DEFAULTS[mt.key])?.[me.key] || {}) : {};
+    return r.telegram || r.email;
+  }).map(mt=>mt.key);
   return `
     <div class="at-section-title">Your notifications</div>
     <p class="at-note">A read-only summary of what the box sends you, and how.</p>
@@ -18680,9 +18806,16 @@ function renderAutomationsAccountantSummary(config){
         <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
         ${rows || '<tr><td colspan="3" style="text-align:center;color:var(--text3)">No notifications are set up for you yet.</td></tr>'}
       </table></div>
+      ${mine.length ? `<div class="at-guide-label" style="margin-top:14px">What these messages are</div>${automationsMessageGuideHtml(mine)}` : ''}
     </div>`;
 }
 
+function openAutomationGuide(key){
+  const box = document.getElementById('atGuide');
+  const item = document.getElementById(`at-guide-${key}`);
+  if(box) box.open = true;
+  if(item){ item.open = true; item.scrollIntoView({ behavior:'smooth', block:'start' }); }
+}
 function addAutomationPerson(){
   const container = document.getElementById('atPeopleRows');
   if(!container) return;
@@ -18917,7 +19050,7 @@ return {
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
   setPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
-  renderAutomations, toggleAutomationCard, addAutomationPerson, deleteAutomationPerson, onRemHandlerBoxClick,
+  renderAutomations, toggleAutomationCard, addAutomationPerson, deleteAutomationPerson, openAutomationGuide, onRemHandlerBoxClick,
   addAutomationParish, deleteAutomationParish, saveAutomationsConfig,
   _countSundaysInRange: countSundaysInRange,
   _buildSundayWeekBounds: buildSundayWeekBounds, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,

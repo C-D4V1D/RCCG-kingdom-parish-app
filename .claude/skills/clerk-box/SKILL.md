@@ -124,7 +124,8 @@ secret `CLERK_WATCHDOG_TOKEN` must equal the box's `/workspace/.secrets/watchdog
   reminders.py) and the bot's `/month`; `/status` and `/refresh` also understand months filed by the month-end run.
   App settings: automations.collection_reminders; routing type `collection_reminder` (app-side default when not saved:
   AUTOMATION_ROUTING_DEFAULTS). When adding a message type or settings block, give it an app-side default like these, or
-  the next Save stores it switched off.
+  the next Save stores it switched off. Also add its AUTOMATION_MESSAGE_GUIDE entry (what, when, example; the page's
+  "Message guide" — tests/automations-guide.test.js fails without it).
 - monthclose-20260930: `tools/monthclose.py` (supervisor runs `tick` each cycle) + `tools/remita-check.cjs` (read-only
   remita.net pay-rrr lookup; status "23" = paid). Payers tap "✅ I've paid" under the RRR Telegram message (send_msg adds it
   for `rrr:` keys) or send `/paid` to the bot; PAID + checklist to everyone once; warning N days before the portal closes;
