@@ -15505,7 +15505,7 @@ async function renderAdmin(){
       <button class="tab ${tab==='backup'?'active':''}" onclick="App.setAdminTab('backup')">Backup & Restore</button>
     </div>
     ${tab==='users'?renderAdminUsers(users):tab==='settings'?renderAdminSettings(settingsForView, currentBudgetPlanForSettings):tab==='quotas'?renderAdminQuotas(settings):tab==='types'?renderAdminIncomeTypes(settings,income):tab==='rates'?renderAdminRates(settings):tab==='perms'?renderAdminPerms(settings):renderAdminBackup()}`;
-  if(tab==='quotas') initQuotaDnd();
+  if(tab==='quotas'){ initQuotaDnd(); initSatQuotaGrid(settings).catch(()=>{}); }
 }
 
 function setAdminTab(t){
@@ -15716,7 +15716,150 @@ function renderAdminQuotas(s){
     <div id="quota-rows-container">${rows}</div>
     <button class="btn" style="margin-top:4px;margin-bottom:12px" onclick="App.addQuotaRow()">➕ Add Quota</button><br/>
     <button class="btn btn-primary" onclick="App.saveQuotas(this)">Save Quotas</button>
+  </div>
+  <div class="card" id="satQuotaCard">
+    <div class="modal-title" style="font-size:15px;margin-bottom:8px">Satellite Monthly Fixed Quotas</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:1rem">The flat monthly amounts each of the Area's other parishes remits, one column per parish. Leave a box empty (or 0) when a parish does not pay that quota. Each parish sees its own amounts on its Sunday records page.</p>
+    <div id="satQuotaBody"><p style="color:var(--text3);font-size:13px">Loading…</p></div>
   </div>`;
+}
+
+// ── Satellite monthly fixed quotas (IT Admin → Monthly Quotas) ─────────
+const KINGDOM_PARISH_CODE = '602757';
+function satParseJson(v, fallback){
+  if(typeof v === 'string'){ try { return JSON.parse(v); } catch(e){ return fallback; } }
+  return v ?? fallback;
+}
+function satAmount(v){
+  const n = Math.round((parseFloat(v) || 0) * 100) / 100;
+  return isFinite(n) && n > 0 ? n : 0;
+}
+/**
+ * settings.satQuotas = { code: [{label, amount, overrides?}] }. `columns` = [{code, amounts:[…per label, same order as
+ * `labels`]}]. Only rows above ₦0 are kept; a row's per-period `overrides` (matched by label) survive, and parishes that
+ * are not in `columns` are passed through untouched.
+ */
+function satBuildQuotas(existing, columns, labels){
+  const out = {};
+  const old = (existing && typeof existing === 'object' && !Array.isArray(existing)) ? existing : {};
+  for(const [code, list] of Object.entries(old)) out[code] = Array.isArray(list) ? list.map(x=>({ ...x })) : [];
+  for(const col of (columns || [])){
+    const code = String(col?.code || '').trim();
+    if(!code) continue;
+    const prev = Array.isArray(old[code]) ? old[code] : [];
+    const used = new Set();
+    const rows = [];
+    (labels || []).forEach((label, i)=>{
+      const amount = satAmount(col.amounts?.[i]);
+      if(!label || !amount) return;
+      const entry = { label, amount };
+      const j = prev.findIndex((q, k)=>!used.has(k) && q && q.label === label);
+      if(j >= 0){
+        used.add(j);
+        const ov = prev[j].overrides;
+        if(ov && typeof ov === 'object' && Object.keys(ov).length) entry.overrides = { ...ov };
+      }
+      rows.push(entry);
+    });
+    out[code] = rows;
+  }
+  return out;
+}
+/** settings.satParishes = [{code, name, active}] from the Automations parish list (Kingdom's own code left out). */
+function satBuildParishes(parishes, existing){
+  const old = new Map((Array.isArray(existing) ? existing : []).filter(x=>x && x.code).map(x=>[String(x.code), x]));
+  const seen = new Set();
+  const out = [];
+  for(const p of (parishes || [])){
+    const code = String(p?.code || '').trim();
+    if(!code || code === KINGDOM_PARISH_CODE || seen.has(code)) continue;
+    seen.add(code);
+    const prev = old.get(code) || {};
+    out.push({ ...prev, code, name: String(p.name || '').trim() || prev.name || code, active: p.active !== false });
+  }
+  return out;
+}
+
+function satQuotaGridHtml(){
+  const g = state.satQuota;
+  if(!g.parishes.length){
+    return `<div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Add the parishes under Automations → Parishes first, then come back here to set their quotas. <button type="button" class="btn btn-sm" style="margin-left:6px" onclick="App.navigate('automations')">Open Automations</button></span></div>`;
+  }
+  if(!g.labels.length){
+    return `<p style="font-size:13px;color:var(--text3)">There are no Kingdom quotas yet. Add them in Monthly Fixed Quotas above (and save), then reload this tab.</p>`;
+  }
+  const head = g.parishes.map(p=>`<th>${esc(p.name || p.code)}<div class="sat-q-code">${esc(p.code)}${p.active===false?' · paused':''}</div></th>`).join('');
+  const rows = g.labels.map((label, i)=>`<tr><td class="sat-q-label">${esc(label)}</td>${g.parishes.map(p=>{
+    const prev = (g.existing[p.code] || []).find(q=>q && q.label === label);
+    return `<td><input type="number" class="form-input sat-quota-in" data-code="${esc(p.code)}" data-i="${i}" min="0" step="any" inputmode="decimal" placeholder="0" value="${prev && Number(prev.amount) > 0 ? esc(String(prev.amount)) : ''}" aria-label="${esc(label)} for ${esc(p.name || p.code)} (₦)" /></td>`;
+  }).join('')}</tr>`).join('');
+  return `<div class="table-wrap"><table class="sat-quota-table">
+      <tr><th>Quota (₦)</th>${head}</tr>${rows}
+    </table></div>
+    <div class="sat-q-actions">
+      <button type="button" class="btn" onclick="App.satQuotaCopyFirst()">Copy first column to all</button>
+      <button type="button" class="btn btn-primary" onclick="App.saveSatQuotas(this)">Save satellite quotas</button>
+    </div>`;
+}
+async function initSatQuotaGrid(settings){
+  if(!document.getElementById('satQuotaBody')) return;
+  let parishes = satParseJson(settings?.satParishes, []);
+  parishes = (Array.isArray(parishes) ? parishes : []).filter(p=>p && p.code && String(p.code) !== KINGDOM_PARISH_CODE)
+    .map(p=>({ code:String(p.code), name:p.name || String(p.code), active:p.active !== false }));
+  if(!parishes.length){
+    // Nothing saved in settings yet: fall back to the parishes listed under Automations.
+    try {
+      const res = await authFetch('/api/automations/config');
+      if(res.ok){
+        const d = await res.json();
+        parishes = (d?.config?.parishes || []).filter(p=>p && p.code && String(p.code) !== KINGDOM_PARISH_CODE)
+          .map(p=>({ code:String(p.code), name:p.name || String(p.code), active:p.active !== false }));
+      }
+    } catch(e){ /* the note below explains what to do */ }
+  }
+  const box = document.getElementById('satQuotaBody');
+  if(!box) return;   // navigated away while loading
+  const existing = satParseJson(settings?.satQuotas, {});
+  state.satQuota = {
+    parishes,
+    labels: getQuotaList(settings).map(q=>String(q.label || '').trim()),
+    existing: (existing && typeof existing === 'object' && !Array.isArray(existing)) ? existing : {},
+  };
+  box.innerHTML = satQuotaGridHtml();
+}
+function satQuotaCopyFirst(){
+  const g = state.satQuota; if(!g || g.parishes.length < 2) return;
+  const first = g.parishes[0].code;
+  const ins = [...document.querySelectorAll('#satQuotaBody .sat-quota-in')];
+  const src = {};
+  ins.filter(el=>el.dataset.code === first).forEach(el=>{ src[el.dataset.i] = el.value; });
+  ins.filter(el=>el.dataset.code !== first).forEach(el=>{ el.value = src[el.dataset.i] ?? ''; });
+  showAlert('Copied. Press Save satellite quotas to keep it.', 'success');
+}
+async function saveSatQuotas(btn=null){
+  if(!requireAdmin()) return;
+  const g = state.satQuota;
+  if(!g || !g.parishes.length) return;
+  const columns = g.parishes.map(p=>({ code:p.code, amounts:g.labels.map(()=>0) }));
+  document.querySelectorAll('#satQuotaBody .sat-quota-in').forEach(el=>{
+    const col = columns.find(c=>c.code === el.dataset.code);
+    if(col) col.amounts[Number(el.dataset.i)] = el.value;
+  });
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    // Read the saved quotas fresh so per-period overrides set elsewhere are not lost.
+    const s = await DB.getSettings();
+    const cur = satParseJson(s.satQuotas, {});
+    const satQuotas = satBuildQuotas(cur, columns, g.labels);
+    await DB.saveSettings({ satQuotas });
+    g.existing = satQuotas;
+    DB.addAudit('sat_quotas_updated', `Satellite monthly quotas updated (${g.parishes.map(p=>p.code).join(', ')})`, state.user?.name);
+    showAlert('Satellite quotas saved. Each parish picks them up on its next visit.', 'success');
+    restore();
+  } catch(err) {
+    restore();
+    showAlert(`Failed to save satellite quotas: ${err.message||'Unknown error'}. Please try again.`, 'danger');
+  }
 }
 
 function renderAdminRates(s){
@@ -18577,6 +18720,72 @@ const AUTOMATION_PEOPLE_DEFAULTS = {
 function automationsPersonField(p, f){
   return p?.[f] !== undefined ? p[f] : AUTOMATION_PEOPLE_DEFAULTS[p?.key]?.[f];
 }
+
+// Satellite parishes (every parish except Kingdom's own). What a parish saved before these settings existed acts like,
+// so the boxes show it and a Save never switches it off or empties who gets copies.
+const AUTOMATION_PARISH_DEFAULTS = { active: true, handler: 'box', copies: ['david'], late_alert: ['david'], portal_login: 'area' };
+function automationsParishField(p, f){
+  return p?.[f] !== undefined ? p[f] : AUTOMATION_PARISH_DEFAULTS[f];
+}
+// A new parish person gets Telegram + email ticked for these messages only (the ones a parish pastor deals with).
+const AUTOMATION_SAT_ROUTING_TYPES = ['remittance_check', 'rrr_generated', 'month_close', 'attendance_filed', 'attendance_error',
+  'source_doc_reminder', 'weekly_attendance_reminder', 'collection_reminder', 'upload_confirmation'];
+const AUTOMATION_BOT_LINK = 'https://t.me/KingdomParishClerkBot?start=inv_';
+function automationsIsSatCode(code){ return !!String(code || '').trim() && String(code).trim() !== KINGDOM_PARISH_CODE; }
+/** {kingdom:[people shown in the main People list], byParish:{code:[people]}} — a person belongs to a parish card only
+ *  while that parish exists in the list; anyone else (including a person whose parish was deleted) stays in People. */
+function automationsSplitPeople(config){
+  const codes = new Set((config?.parishes || []).map(p=>String(p?.code || '').trim()).filter(automationsIsSatCode));
+  const kingdom = [], byParish = {};
+  for(const p of (config?.people || [])){
+    const c = String(p?.parish || '').trim();
+    if(c && codes.has(c)) (byParish[c] = byParish[c] || []).push(p);
+    else kingdom.push(p);
+  }
+  return { kingdom, byParish };
+}
+/** p<code>, then p<code>_2, p<code>_3 … — the first not already taken. */
+function automationsNewPersonKey(code, taken){
+  const base = `p${String(code).trim()}`;
+  if(!taken.has(base)) return base;
+  let n = 2;
+  while(taken.has(`${base}_${n}`)) n++;
+  return `${base}_${n}`;
+}
+function automationsRandomInt(max){
+  const c = globalThis.crypto;
+  if(c?.getRandomValues){
+    const a = new Uint32Array(1);
+    const limit = Math.floor(0x100000000 / max) * max;   // no modulo bias
+    do { c.getRandomValues(a); } while(a[0] >= limit);
+    return a[0] % max;
+  }
+  return Math.floor(Math.random() * max);
+}
+/** A 6-digit PIN that does not start with 0 (so it survives being typed into a spreadsheet or chat). */
+function automationsRandomPin(){ return String(100000 + automationsRandomInt(900000)); }
+/** 10 characters from a-z0-9, for a Telegram invite link. */
+function automationsInviteCode(){
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let s = '';
+  for(let i = 0; i < 10; i++) s += chars[automationsRandomInt(chars.length)];
+  return s;
+}
+/** RSA-OAEP (SHA-256) encrypt in the browser with the box's public key (base64 SPKI); returns base64 ciphertext. */
+async function automationsSealPassword(publicKeyB64, password){
+  const subtle = globalThis.crypto?.subtle;
+  if(!subtle) throw new Error('This browser cannot encrypt the password.');
+  const raw = atob(String(publicKeyB64).replace(/\s+/g, ''));
+  const der = new Uint8Array(raw.length);
+  for(let i = 0; i < raw.length; i++) der[i] = raw.charCodeAt(i);
+  const key = await subtle.importKey('spki', der, { name:'RSA-OAEP', hash:'SHA-256' }, false, ['encrypt']);
+  const enc = new Uint8Array(await subtle.encrypt({ name:'RSA-OAEP' }, key, new TextEncoder().encode(String(password))));
+  let bin = '';
+  for(let i = 0; i < enc.length; i++) bin += String.fromCharCode(enc[i]);
+  return btoa(bin);
+}
+/** The box's own health object (the health route wraps it as {last_ping, health}); tolerates the bare object too. */
+function automationsBoxHealth(h){ return (h && typeof h === 'object' ? (h.health && typeof h.health === 'object' ? h.health : h) : {}) || {}; }
 const AUTOMATION_COLLECTION_REMINDER_DEFAULTS = { enabled: true, second_day: 'thu', time: '10:00', cutoff_evening: '20:00', after_days: 5 };
 const AUTOMATION_DASHBOARD_CARDS = [
   { key:'memo',                  icon:'📨', label:'Memo forwarding' },
@@ -18727,6 +18936,10 @@ async function renderAutomations(){
     state.automations.config = configData.config;
     state.automations.configVersion = configData.config_version;
     state.automations.isDefault = !!configData.is_default;
+    // Which parish-pastor logins exist (so a person whose login was deleted elsewhere shows "Create login" again).
+    try { state.automations.satUsers = (await DB.getUsers()).filter(u=>u.role === 'satellite'); }
+    catch(e){ state.automations.satUsers = null; }
+    state.automations.areaLoaded = false;
     settingsEl.innerHTML = renderAutomationsSettings(configData.config, configData.is_default, healthData);
   } else {
     settingsEl.innerHTML = renderAutomationsAccountantSummary(configData.config);
@@ -18888,9 +19101,151 @@ function onRemHandlerBoxClick(ev){
   return true;
 }
 
+// One routing table (Message × Telegram/Email) — the same component for Kingdom people and parish people.
+// routingFor(mt) returns {telegram,email} for a message type; withGuide adds the ⓘ link to the Message guide.
+function automationsRoutingTableHtml(routingFor, tgConnected, withGuide){
+  return `<div class="table-wrap"><table class="at-routing-table">
+        <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
+        ${AUTOMATION_MESSAGE_TYPES.map(mt=>{
+          const r = routingFor(mt) || {};
+          const guide = withGuide ? ` <a href="#at-guide-${esc(mt.key)}" class="at-guide-link" title="${esc(AUTOMATION_MESSAGE_GUIDE[mt.key]?.what||'')}" onclick="App.openAutomationGuide('${esc(mt.key)}');return false">ⓘ</a>` : '';
+          return `<tr><td>${esc(mt.label)}${guide}</td>
+            <td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" ${r.telegram?'checked':''} ${tgConnected?'':'title="This person is not connected on Telegram yet"'}></td>
+            <td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" data-ch="email" ${r.email?'checked':''}></td>
+          </tr>`;
+        }).join('')}
+      </table></div>`;
+}
+
+// "App login" cell of a parish person: create / reset / remove the pastor's sign-in.
+function automationsLoginHtml(userId, users){
+  const linked = !!userId && (users == null || users.some(u=>u.id === userId));
+  if(linked){
+    return `<span class="at-status-ok">App login ✓</span>
+      <button type="button" class="btn btn-sm" onclick="App.atResetPin(this)">Reset PIN</button>
+      <button type="button" class="btn btn-sm btn-danger" onclick="App.atRemoveLogin(this)">Remove login</button>`;
+  }
+  return `<button type="button" class="btn btn-sm" onclick="App.atCreateLogin(this)">Create login</button>
+    <span class="at-note" style="margin:0">${userId ? 'The saved login no longer exists. ' : ''}Gives them their own sign-in to this app.</span>`;
+}
+function automationsTelegramHtml(connected){
+  if(connected) return `<span class="at-status-ok">Telegram connected ✓</span>`;
+  return `<button type="button" class="btn btn-sm" onclick="App.atCopyInvite(this)">Copy invite link</button>
+    <span class="at-note" style="margin:0">Send it to them; when they open it and tap Start, the box connects them.</span>`;
+}
+function automationsPicksHtml(field, selected, people){
+  if(!people.length) return '<span class="at-note" style="margin:0">No people yet.</span>';
+  return people.map(x=>`<label class="at-day-chip"><input type="checkbox" class="at-par-pick" data-field="${esc(field)}" data-key="${esc(x.key)}" ${selected.includes(x.key)?'checked':''}> ${esc(x.name || x.key)}</label>`).join('');
+}
+/** A person that belongs to a satellite parish (shown inside that parish's card). */
+function automationsSatPersonHtml(p, routingFor, box, users){
+  const connected = !!p.telegram_chat_id || !!box?.satellite_links?.[p.key];
+  return `<div class="at-subcard at-par-person" data-person-key="${esc(p.key)}" data-app-user-id="${esc(p.app_user_id||'')}" data-tg-invite="${esc(p.tg_invite||'')}">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Name</label><input class="form-input at-p-name" value="${esc(p.name||'')}" onchange="App.atRefreshPicks()"></div>
+        <div class="form-group"><label class="form-label">Email</label><input class="form-input at-p-email" value="${esc(p.email||'')}" placeholder="No email"></div>
+        <div class="form-group"><label class="form-label">Telegram chat ID (optional)</label><input class="form-input at-p-tg" value="${esc(p.telegram_chat_id||'')}" placeholder="Not connected"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Title (used in messages)</label><input class="form-input at-p-title" value="${esc(p.title||'')}" placeholder="e.g. Pastor"></div>
+        <div class="form-group"><label class="form-label">Called in messages</label><input class="form-input at-p-called" value="${esc(p.called||'')}" placeholder="e.g. Pastor Tunde"></div>
+      </div>
+      <div class="form-row" style="margin:6px 0 10px">
+        <label class="at-inline-check"><input type="checkbox" class="at-p-approves" ${p.approves_rrr?'checked':''}> Approves RRR</label>
+        <label class="at-inline-check"><input type="checkbox" class="at-p-pays" ${p.pays_rrr?'checked':''}> Pays RRR</label>
+        <label class="at-inline-check"><input type="checkbox" class="at-p-bot" ${p.can_upload?'checked':''}> Can use the Telegram bot</label>
+      </div>
+      <div class="at-p-line"><span class="at-p-line-l">App login</span><span class="at-p-login">${automationsLoginHtml(p.app_user_id, users)}</span></div>
+      <div class="at-p-line"><span class="at-p-line-l">Telegram</span><span class="at-p-telegram">${automationsTelegramHtml(connected)}</span></div>
+      <details class="at-details at-details-inner">
+        <summary>Messages this person gets</summary>
+        <div class="at-details-body">${automationsRoutingTableHtml(routingFor, !!p.telegram_chat_id, false)}</div>
+      </details>
+      <button type="button" class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationPerson(this)">Remove person</button>
+    </div>`;
+}
+/** Everyone in the config with a name, for the Copies / Late-alert pick lists. */
+function automationsPickPeople(config){
+  return (config?.people || []).map(x=>({ key:x.key, name:x.name || x.key }));
+}
+function automationsParishCardHtml(p, i, ctx){
+  const { config, box, users } = ctx;
+  const code = String(p.code || '').trim();
+  const isSat = code !== KINGDOM_PARISH_CODE;
+  const flags = `<div class="at-day-chips">
+        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="source_docs" ${p.source_docs?'checked':''}> Source documents</label>
+        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="attendance" ${p.attendance?'checked':''}> Attendance</label>
+        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="remittance" ${p.remittance?'checked':''}> Remittance</label>
+        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="statement" ${p.statement?'checked':''}> Statement</label>
+      </div>`;
+  const people = isSat ? (automationsSplitPeople(config).byParish[code] || []) : [];
+  // The code can be edited until a pastor has an app login (that login is tied to the code).
+  const locked = people.some(x=>x.app_user_id);
+  const head = `<div class="form-row">
+        <div class="form-group"><label class="form-label">Parish code</label><input class="form-input at-par-code" value="${esc(code)}" ${locked?'readonly title="A pastor of this parish has an app login tied to this code"':''}></div>
+        <div class="form-group"><label class="form-label">Name</label><input class="form-input at-par-name" value="${esc(p.name||'')}"></div>
+      </div>`;
+  const del = `<button class="btn btn-sm btn-danger" style="margin-top:12px" onclick="App.deleteAutomationParish(this)">Delete parish</button>`;
+  if(!isSat){
+    return `<div class="at-subcard at-par-card" data-parish-idx="${i}" data-orig-code="${esc(code)}">${head}${flags}${del}</div>`;
+  }
+  const routingOfPerson = (x)=>(mt)=>(config.routing?.[mt.key] || AUTOMATION_ROUTING_DEFAULTS[mt.key])?.[x.key];
+  const pick = automationsPickPeople(config);
+  const copies = automationsParishField(p, 'copies'), late = automationsParishField(p, 'late_alert');
+  const own = automationsParishField(p, 'portal_login') === 'own';
+  const publicKey = box?.box_public_key || '';
+  const sealedAt = p.portal_password_sealed && p.portal_password_set_at ? automationsTimeAgo(p.portal_password_set_at) : null;
+  const handler = automationsParishField(p, 'handler') === 'clerk_ai' ? 'clerk_ai' : 'box';
+  return `<div class="at-subcard at-par-card" data-parish-idx="${i}" data-orig-code="${esc(code)}" data-pw-sealed="${esc(p.portal_password_sealed||'')}" data-pw-set-at="${esc(p.portal_password_set_at||'')}">
+      ${head}${flags}
+      <div class="at-toggle-row" style="margin-top:10px">
+        <div><div class="at-toggle-label">Active</div><div class="at-subtitle">Switch off to pause this parish: its pastor cannot sign in to the app.</div></div>
+        <label class="at-switch"><input type="checkbox" class="at-par-active" ${automationsParishField(p,'active')!==false?'checked':''}><span class="at-switch-track"></span></label>
+      </div>
+      <div class="form-group" style="margin-top:8px"><label class="form-label">Month-end run by</label>
+        <select class="form-select at-par-handler"><option value="box" ${handler==='box'?'selected':''}>Box (default)</option><option value="clerk_ai" ${handler==='clerk_ai'?'selected':''}>Clerk AI</option></select></div>
+
+      <div class="at-par-sub-title">Pastor &amp; people of this parish</div>
+      <div class="at-par-people">${people.map(x=>automationsSatPersonHtml(x, routingOfPerson(x), box, users)).join('')}</div>
+      <div class="at-par-addform">
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">Name</label><input class="form-input at-new-name" placeholder="e.g. Tunde Adeyemi"></div>
+          <div class="form-group"><label class="form-label">Title</label><input class="form-input at-new-title" placeholder="e.g. Pastor"></div>
+          <div class="form-group"><label class="form-label">Called in messages</label><input class="form-input at-new-called" placeholder="e.g. Pastor Tunde"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">Email</label><input class="form-input at-new-email" placeholder="name@example.com"></div>
+          <div class="form-group"><label class="form-label">Telegram chat ID (optional)</label><input class="form-input at-new-tg" inputmode="numeric" placeholder="Digits only"></div>
+        </div>
+        <button type="button" class="btn btn-sm" onclick="App.atAddParishPerson(this)">+ Add person</button>
+      </div>
+
+      <div class="at-par-sub-title">Copies</div>
+      <div class="at-subtitle" style="margin:0 0 4px">Who else gets copies of this parish's check, RRR, paid and month-close messages.</div>
+      <div class="at-day-chips at-par-picks" data-field="copies">${automationsPicksHtml('copies', copies, pick)}</div>
+
+      <div class="at-par-sub-title">Late parish alert</div>
+      <div class="at-subtitle" style="margin:0 0 4px">Told when this parish is 5 or more days late.</div>
+      <div class="at-day-chips at-par-picks" data-field="late_alert">${automationsPicksHtml('late_alert', late, pick)}</div>
+
+      <div class="at-par-sub-title">RCCG portal login</div>
+      <div class="form-group"><select class="form-select at-par-plogin" onchange="App.atPortalToggle(this)"><option value="area" ${own?'':'selected'}>Area account (ours)</option><option value="own" ${own?'selected':''}>Parish's own account</option></select></div>
+      <div class="at-par-own" style="${own?'':'display:none'}">
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">Portal username</label><input class="form-input at-par-pusername" autocomplete="off" value="${esc(p.portal_username||'')}"></div>
+          <div class="form-group"><label class="form-label">Portal password</label><input type="password" class="form-input at-par-pw" autocomplete="new-password" placeholder="${publicKey?'Type a new password to change it':'Not available yet'}" ${publicKey?'':'disabled'}></div>
+        </div>
+        <div class="at-subtitle at-par-pwstatus">${publicKey ? (sealedAt ? `A password is saved (locked so nobody can read it), set ${esc(sealedAt)}.` : 'No password saved yet.') : 'Available after the next box update.'}
+          ${publicKey && p.portal_password_sealed ? ` <button type="button" class="btn btn-sm" onclick="App.atClearPortalPw(this)">Clear saved password</button>` : ''}</div>
+        <div class="at-subtitle">The password is locked in your browser with the box's key before it is saved, so it is never stored readable. Press Save changes to store it.</div>
+      </div>
+      ${del}
+    </div>`;
+}
+
 function renderAutomationsSettings(config, isDefault, health){
-  const people = config.people || [];
   const parishes = config.parishes || [];
+  const kingdomPeople = automationsSplitPeople(config).kingdom;
   const a = config.automations || {};
   const memo = a.memo || {}, stmt = a.statement || {};
   const sdr = a.source_doc_reminders || {}, war = a.weekly_attendance_reminder || {}, sup = a.supervisor || {};
@@ -18898,11 +19253,12 @@ function renderAutomationsSettings(config, isDefault, health){
   const cr = { ...AUTOMATION_COLLECTION_REMINDER_DEFAULTS, ...(a.collection_reminders || {}) };
   const sun = a.sunday_note || {}, health_ = a.health_note || {}, upl = a.upload_bot || {};
 
-  const peopleRows = people.map((p, i)=>{
+  const routingOf = (p)=>(mt)=>(config.routing?.[mt.key] || AUTOMATION_ROUTING_DEFAULTS[mt.key])?.[p.key];
+  const peopleRows = kingdomPeople.map((p, i)=>{
     const key = esc(p.key || `person_${i}`);
     return `<div class="at-subcard" data-person-key="${key}">
       <div class="form-row">
-        <div class="form-group"><label class="form-label">Name</label><input class="form-input at-p-name" value="${esc(p.name||'')}"></div>
+        <div class="form-group"><label class="form-label">Name</label><input class="form-input at-p-name" value="${esc(p.name||'')}" onchange="App.atRefreshPicks()"></div>
         <div class="form-group"><label class="form-label">Telegram chat ID</label><input class="form-input at-p-tg" value="${esc(p.telegram_chat_id||'')}" placeholder="Not connected"></div>
         <div class="form-group"><label class="form-label">Email</label><input class="form-input at-p-email" value="${esc(p.email||'')}" placeholder="No email"></div>
       </div>
@@ -18914,34 +19270,13 @@ function renderAutomationsSettings(config, isDefault, health){
         <label class="at-inline-check"><input type="checkbox" class="at-p-pays" ${automationsPersonField(p,'pays_rrr')?'checked':''}> Pays the RRR ("I've paid" button, /paid)</label>
         <label class="at-inline-check"><input type="checkbox" class="at-p-bot" ${p.can_upload?'checked':''}> Can use the Telegram bot</label>
       </div>
-      <div class="table-wrap"><table class="at-routing-table">
-        <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
-        ${AUTOMATION_MESSAGE_TYPES.map(mt=>{
-          const r = (config.routing?.[mt.key] || AUTOMATION_ROUTING_DEFAULTS[mt.key])?.[p.key] || {};
-          return `<tr><td>${esc(mt.label)} <a href="#at-guide-${esc(mt.key)}" class="at-guide-link" title="${esc(AUTOMATION_MESSAGE_GUIDE[mt.key]?.what||'')}" onclick="App.openAutomationGuide('${esc(mt.key)}');return false">ⓘ</a></td>
-            <td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" ${r.telegram?'checked':''} ${p.telegram_chat_id?'':'title="This person is not connected on Telegram yet"'}></td>
-            <td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" data-ch="email" ${r.email?'checked':''}></td>
-          </tr>`;
-        }).join('')}
-      </table></div>
+      ${automationsRoutingTableHtml(routingOf(p), !!p.telegram_chat_id, true)}
       <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationPerson(this)">Delete person</button>
     </div>`;
   }).join('');
 
-  const parishRows = parishes.map((p, i)=>`
-    <div class="at-subcard" data-parish-idx="${i}">
-      <div class="form-row">
-        <div class="form-group"><label class="form-label">Parish code</label><input class="form-input at-par-code" value="${esc(p.code||'')}"></div>
-        <div class="form-group"><label class="form-label">Name</label><input class="form-input at-par-name" value="${esc(p.name||'')}"></div>
-      </div>
-      <div class="at-day-chips">
-        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="source_docs" ${p.source_docs?'checked':''}> Source documents</label>
-        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="attendance" ${p.attendance?'checked':''}> Attendance</label>
-        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="remittance" ${p.remittance?'checked':''}> Remittance</label>
-        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="statement" ${p.statement?'checked':''}> Statement</label>
-      </div>
-      <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationParish(this)">Delete parish</button>
-    </div>`).join('');
+  const ctx = { config, box: automationsBoxHealth(health), users: state.automations?.satUsers ?? null };
+  const parishRows = parishes.map((p, i)=>automationsParishCardHtml(p, i, ctx)).join('');
 
   const saveBar = `<div class="at-save-bar">
       <button class="btn btn-primary" onclick="App.saveAutomationsConfig(this)">Save changes</button>
@@ -18956,7 +19291,7 @@ function renderAutomationsSettings(config, isDefault, health){
     <div id="atSaveErrors"></div>
 
     <details class="at-details" open>
-      <summary>People (${people.length})</summary>
+      <summary>People (${kingdomPeople.length})</summary>
       <div class="at-details-body" id="atPeopleRows">
         ${peopleRows || '<p class="at-note">No one is set up yet.</p>'}
         <button class="btn" onclick="App.addAutomationPerson()">+ Add person</button>
@@ -18972,12 +19307,18 @@ function renderAutomationsSettings(config, isDefault, health){
       </div>
     </details>
 
-    <details class="at-details">
+    <details class="at-details" id="atParishes" ontoggle="App.atParishesToggle(this)">
       <summary>Parishes (${parishes.length})</summary>
-      <div class="at-details-body" id="atParishRows">
-        ${parishRows || '<p class="at-note">No parishes are set up yet.</p>'}
-        <button class="btn" onclick="App.addAutomationParish()">+ Add parish</button>
-        ${saveBar}
+      <div class="at-details-body">
+        <div id="atAreaOverview" class="at-area">
+          <div class="at-par-sub-title">Area overview <span class="at-par-sub-hint">this remittance period</span></div>
+          <div id="atAreaBody"><p class="at-note">Loading…</p></div>
+        </div>
+        <div id="atParishRows">
+          ${parishRows || '<p class="at-note">No parishes are set up yet.</p>'}
+          <button class="btn at-par-add" onclick="App.addAutomationParish()">+ Add parish</button>
+          ${saveBar}
+        </div>
       </div>
     </details>
 
@@ -19168,7 +19509,7 @@ function addAutomationPerson(){
   div.dataset.personKey = key;
   div.innerHTML = `
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Name</label><input class="form-input at-p-name" value=""></div>
+      <div class="form-group"><label class="form-label">Name</label><input class="form-input at-p-name" value="" onchange="App.atRefreshPicks()"></div>
       <div class="form-group"><label class="form-label">Telegram chat ID</label><input class="form-input at-p-tg" value="" placeholder="Not connected"></div>
       <div class="form-group"><label class="form-label">Email</label><input class="form-input at-p-email" value="" placeholder="No email"></div>
     </div>
@@ -19185,41 +19526,260 @@ function addAutomationPerson(){
       ${AUTOMATION_MESSAGE_TYPES.map(mt=>`<tr><td>${esc(mt.label)}</td><td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}"></td><td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" data-ch="email"></td></tr>`).join('')}
     </table></div>
     <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationPerson(this)">Delete person</button>`;
-  container.insertBefore(div, container.querySelector('button'));
+  // Before the "+ Add person" button (a direct child; the first button in the container is a card's Delete button).
+  container.insertBefore(div, [...container.children].find(el=>el.tagName === 'BUTTON') || null);
+  atRefreshPicks();
 }
 function deleteAutomationPerson(btn){
   const row = btn.closest('.at-subcard');
   if(!row) return;
-  if(!confirm('Remove this person? They will stop receiving any notifications from the box.')) return;
+  const linked = row.dataset.appUserId ? ' Their app login is not deleted; use Remove login first if they should not sign in any more.' : '';
+  if(!confirm(`Remove this person? They will stop receiving any notifications from the box.${linked}`)) return;
   row.remove();
+  atRefreshPicks();
 }
 function addAutomationParish(){
   const container = document.getElementById('atParishRows');
   if(!container) return;
-  const idx = container.querySelectorAll('.at-subcard').length;
-  const div = document.createElement('div');
-  div.className = 'at-subcard';
-  div.dataset.parishIdx = String(idx);
-  div.innerHTML = `
-    <div class="form-row">
-      <div class="form-group"><label class="form-label">Parish code</label><input class="form-input at-par-code" value=""></div>
-      <div class="form-group"><label class="form-label">Name</label><input class="form-input at-par-name" value=""></div>
-    </div>
-    <div class="at-day-chips">
-      <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="source_docs"> Source documents</label>
-      <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="attendance"> Attendance</label>
-      <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="remittance"> Remittance</label>
-      <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="statement"> Statement</label>
-    </div>
-    <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationParish(this)">Delete parish</button>`;
-  container.insertBefore(div, container.querySelector('button'));
+  const idx = container.querySelectorAll('.at-par-card').length;
+  const A = state.automations || {};
+  const wrap = document.createElement('div');
+  wrap.innerHTML = automationsParishCardHtml(
+    { code:'', name:'', source_docs:false, attendance:false, remittance:false, statement:false }, idx,
+    { config: automationsLiveConfig(), box: automationsBoxHealth(A.health), users: A.satUsers ?? null });
+  const div = wrap.firstElementChild;
+  container.insertBefore(div, container.querySelector('.at-par-add') || null);
 }
 function deleteAutomationParish(btn){
-  const row = btn.closest('.at-subcard');
+  const row = btn.closest('.at-par-card');
   if(!row) return;
-  if(!confirm('Remove this parish from tracking?')) return;
+  const n = row.querySelectorAll('.at-par-person').length;
+  const logins = row.querySelectorAll('.at-par-person[data-app-user-id]:not([data-app-user-id=""])').length;
+  const extra = n ? ` The ${n} person${n===1?'':'s'} listed in it will be removed too${logins ? ' (their app logins are not deleted: remove those first if needed)' : ''}.` : '';
+  if(!confirm(`Remove this parish from tracking?${extra}`)) return;
   row.remove();
+  atRefreshPicks();
 }
+
+// ── Parish cards: people, logins, Telegram invites, pick lists, portal password, overview ──
+/** The config as it stands on screen right now (people/parishes/routing), for building new cards. */
+function automationsLiveConfig(){
+  const base = state.automations?.config || {};
+  return { ...base, people: (base.people || []).slice(), parishes: (base.parishes || []).slice() };
+}
+function atCard(el){ return el?.closest?.('.at-par-card') || null; }
+function atCardCode(card){ return (card?.querySelector('.at-par-code')?.value || '').trim(); }
+/** Re-draw the Copies / Late-alert pick lists from the people on screen, keeping what is ticked. */
+function atRefreshPicks(){
+  const people = [];
+  document.querySelectorAll('#atPeopleRows .at-subcard, #atParishRows .at-par-person').forEach(row=>{
+    const key = row.dataset.personKey;
+    if(key) people.push({ key, name: row.querySelector('.at-p-name')?.value.trim() || '' });
+  });
+  document.querySelectorAll('#atParishRows .at-par-picks').forEach(box=>{
+    const field = box.dataset.field;
+    const on = [...box.querySelectorAll('.at-par-pick:checked')].map(cb=>cb.dataset.key);
+    box.innerHTML = automationsPicksHtml(field, on, people);
+  });
+}
+function atPortalToggle(sel){
+  const own = atCard(sel)?.querySelector('.at-par-own');
+  if(own) own.style.display = sel.value === 'own' ? '' : 'none';
+}
+function atClearPortalPw(btn){
+  const card = atCard(btn); if(!card) return;
+  card.dataset.pwSealed = ''; card.dataset.pwSetAt = '';
+  const st = card.querySelector('.at-par-pwstatus');
+  if(st) st.textContent = 'The saved password will be removed when you press Save changes.';
+}
+async function atCopyText(text){
+  try { await navigator.clipboard.writeText(text); return true; } catch(e){ return false; }
+}
+function atCopyInvite(btn){
+  const row = btn.closest('.at-par-person'); if(!row) return;
+  let code = row.dataset.tgInvite;
+  if(!code){ code = automationsInviteCode(); row.dataset.tgInvite = code; }
+  const url = AUTOMATION_BOT_LINK + code;
+  atCopyText(url).then(ok=>{
+    showAlert(ok ? 'Invite link copied. Send it to them, and press Save changes so the box knows this invite.'
+                 : `Could not copy automatically. Send them this link, then press Save changes: ${url}`, ok ? 'success' : 'warn');
+  });
+}
+function atShowPin(name, pin, isReset){
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">${isReset ? 'New PIN' : 'Login created'}</div>
+    <p style="font-size:14px;margin-bottom:10px">PIN for <b>${esc(name)}</b>:</p>
+    <div id="atPinValue" style="font-size:32px;font-weight:800;letter-spacing:6px;text-align:center;margin:8px 0 14px">${esc(pin)}</div>
+    <p style="font-size:13px;color:var(--text2)">Send it to them on WhatsApp. They choose their own PIN the first time they sign in. This PIN is shown only now.</p>
+    <p style="font-size:12px;color:var(--text3);margin-top:8px">Press <b>Save changes</b> on this page as well so the app remembers the login.</p>
+    <div class="modal-footer"><button class="btn" onclick="App.atCopyPin(this)">Copy PIN</button><button class="btn btn-primary" onclick="closeModal()">Done</button></div>`);
+}
+async function atCopyPin(btn){
+  const ok = await atCopyText(document.getElementById('atPinValue')?.textContent || '');
+  if(btn) btn.textContent = ok ? 'Copied ✓' : 'Copy failed: select the PIN and copy it';
+}
+function atRedrawLogin(row){
+  const box = row.querySelector('.at-p-login');
+  if(box) box.innerHTML = automationsLoginHtml(row.dataset.appUserId, state.automations?.satUsers ?? null);
+}
+async function atCreateLogin(btn){
+  const row = btn.closest('.at-par-person'); if(!row) return;
+  const name = row.querySelector('.at-p-name')?.value.trim() || '';
+  const email = row.querySelector('.at-p-email')?.value.trim() || '';
+  const code = atCardCode(atCard(row));
+  if(!name){ showAlert('Type the person\'s name first.', 'danger'); return; }
+  if(!/^\d{4,8}$/.test(code)){ showAlert('Type the parish code (4 to 8 digits) at the top of this parish first.', 'danger'); return; }
+  const pin = automationsRandomPin();
+  const restore = setBtnLoading(btn, 'Creating…');
+  try {
+    const body = { name, role:'satellite', pin, parishCode:code, mustChangePin:true };
+    if(email) body.email = email;
+    const u = await DB.addUser(body);
+    if(!u?.id) throw new Error('The server did not return the new login.');
+    row.dataset.appUserId = u.id;
+    const list = state.automations?.satUsers;
+    if(Array.isArray(list)) list.push({ id:u.id, name, role:'satellite', email, parishCode:code });
+    atRedrawLogin(row);
+    atShowPin(name, pin, false);
+  } catch(e){
+    restore();
+    showAlert(`Could not create the login: ${e.message || 'Unknown error'}`, 'danger');
+  }
+}
+async function atResetPin(btn){
+  const row = btn.closest('.at-par-person'); if(!row) return;
+  const name = row.querySelector('.at-p-name')?.value.trim() || 'this person';
+  if(!confirm(`Give ${name} a new PIN? Their old PIN stops working.`)) return;
+  const pin = automationsRandomPin();
+  const restore = setBtnLoading(btn, 'Resetting…');
+  try {
+    await DB.updateUser(row.dataset.appUserId, { pin, mustChangePin:true });
+    restore();
+    atShowPin(name, pin, true);
+  } catch(e){
+    restore();
+    showAlert(`Could not reset the PIN: ${e.message || 'Unknown error'}`, 'danger');
+  }
+}
+async function atRemoveLogin(btn){
+  const row = btn.closest('.at-par-person'); if(!row) return;
+  const name = row.querySelector('.at-p-name')?.value.trim() || 'this person';
+  if(!confirm(`Remove ${name}'s app login? They will no longer be able to sign in.`)) return;
+  const id = row.dataset.appUserId;
+  const restore = setBtnLoading(btn, 'Removing…');
+  try {
+    await DB.deleteUser(id);
+    row.dataset.appUserId = '';
+    if(Array.isArray(state.automations?.satUsers)) state.automations.satUsers = state.automations.satUsers.filter(u=>u.id !== id);
+    atRedrawLogin(row);
+    showAlert('Login removed. Press Save changes so the app forgets it.', 'success');
+  } catch(e){
+    restore();
+    showAlert(`Could not remove the login: ${e.message || 'Unknown error'}`, 'danger');
+  }
+}
+function atAddParishPerson(btn){
+  const card = atCard(btn); if(!card) return;
+  const code = atCardCode(card);
+  if(!/^\d{4,8}$/.test(code)){ showAlert('Type the parish code (4 to 8 digits) at the top of this parish first.', 'danger'); return; }
+  const val = (sel)=>card.querySelector(sel)?.value.trim() || '';
+  const name = val('.at-new-name'), tg = val('.at-new-tg');
+  if(!name){ showAlert('Type the person\'s name first.', 'danger'); return; }
+  if(tg && !/^\d+$/.test(tg)){ showAlert('A Telegram chat ID is digits only. Leave it empty to use the invite link instead.', 'danger'); return; }
+  const taken = new Set((state.automations?.config?.people || []).map(x=>x.key));
+  document.querySelectorAll('[data-person-key]').forEach(r=>taken.add(r.dataset.personKey));
+  const person = { key: automationsNewPersonKey(code, taken), name, title: val('.at-new-title'), called: val('.at-new-called'),
+    email: val('.at-new-email') || null, telegram_chat_id: tg || null, can_upload: true, pays_rrr: false, approves_rrr: false, parish: code };
+  const routingFor = (mt)=>AUTOMATION_SAT_ROUTING_TYPES.includes(mt.key) ? { telegram:true, email:true } : {};
+  const wrap = document.createElement('div');
+  wrap.innerHTML = automationsSatPersonHtml(person, routingFor, automationsBoxHealth(state.automations?.health), state.automations?.satUsers ?? null);
+  card.querySelector('.at-par-people')?.appendChild(wrap.firstElementChild);
+  card.querySelectorAll('.at-new-name,.at-new-title,.at-new-called,.at-new-email,.at-new-tg').forEach(i=>{ i.value = ''; });
+  atRefreshPicks();
+}
+/** Encrypt any newly typed portal password (in the browser, with the box's public key) before the config is collected. */
+async function automationsSealPending(){
+  const key = automationsBoxHealth(state.automations?.health).box_public_key;
+  for(const card of document.querySelectorAll('#atParishRows .at-par-card')){
+    const input = card.querySelector('.at-par-pw');
+    if(!input || !input.value) continue;
+    if(!key) throw new Error('The box has not published its key yet, so the portal password cannot be saved. Available after the next box update.');
+    try {
+      card.dataset.pwSealed = await automationsSealPassword(key, input.value);
+    } catch(e){
+      throw new Error(`Could not lock the portal password (${e.message || 'encryption failed'}). Nothing was saved.`);
+    }
+    card.dataset.pwSetAt = new Date().toISOString();
+    input.value = '';
+    const st = card.querySelector('.at-par-pwstatus');
+    if(st) st.textContent = 'Password locked and ready. It is stored when the save finishes.';
+  }
+}
+
+// Area overview (top of the Parishes section): this remittance period, one row per satellite parish.
+function atParishesToggle(el){
+  if(!el?.open || state.automations?.areaLoaded) return;
+  atLoadArea();
+}
+function atAreaCell(v){
+  if(v === undefined || v === null || v === '' || v === false) return '—';
+  if(v === true) return '✅';
+  return esc(String(v));
+}
+async function atLoadArea(){
+  const A = state.automations; if(!A) return;
+  const body = document.getElementById('atAreaBody'); if(!body) return;
+  const parishes = [];
+  document.querySelectorAll('#atParishRows .at-par-card').forEach(card=>{
+    const code = atCardCode(card);
+    if(automationsIsSatCode(code)) parishes.push({ code, name: card.querySelector('.at-par-name')?.value.trim() || code, active: card.querySelector('.at-par-active')?.checked !== false });
+  });
+  if(!parishes.length){ body.innerHTML = '<p class="at-note">No satellite parishes yet. Add them below.</p>'; return; }
+  A.areaLoaded = true;
+  const run = A.areaRun = (A.areaRun || 0) + 1;
+  body.innerHTML = '<p class="at-note">Loading…</p>';
+  let settings, range, weeks;
+  try {
+    settings = await DB.getSettings();
+    const anchor = getCurrentRemPeriodAnchor(settings, []);
+    range = computeRemPeriodDates(settings, [], anchor.year, anchor.month);
+    weeks = attWeeksInPeriod(range.from, range.to);
+  } catch(e){
+    A.areaLoaded = false;
+    body.innerHTML = '<p class="at-note">Could not work out the current period. Try again.</p>';
+    return;
+  }
+  const boxSat = automationsBoxHealth(A.health).satellites || {};
+  const q = encodeURIComponent;
+  const rows = await Promise.all(parishes.map(async pr=>{
+    const c = q(pr.code);
+    try {
+      const [income, att, further] = await Promise.all([
+        apiFetch(`sat/income?parish=${c}`),
+        apiFetch(`sat/attendance?parish=${c}&from=${q(attYmdAdd(range.from,-6))}&to=${q(attYmdAdd(range.to,6))}`),
+        apiFetch(`sat/attendance-further?parish=${c}&end=${q(range.to)}`).catch(()=>null),
+      ]);
+      const saved = weeks.filter(w=>satSundayRec(income, w.weekEnd)).length;
+      const filed = weeks.filter(w=>['submitted','locked'].includes((att||[]).find(r=>r.weekEnd === w.weekEnd)?.status)).length;
+      return { pr, ok:true, saved, filed, report: !!further?.current?.furtherSubmittedAt, hasFurther: further !== null };
+    } catch(e){ return { pr, ok:false }; }
+  }));
+  if(state.page !== 'automations' || A.areaRun !== run || !document.getElementById('atAreaBody')) return;
+  const total = weeks.length;
+  const trs = rows.map(r=>{
+    const h = boxSat[r.pr.code] || null;
+    const name = `${esc(r.pr.name)}${r.pr.active ? '' : ' <span class="at-tag-amber">paused</span>'}`;
+    if(!r.ok) return `<tr><td>${name}</td><td colspan="6" class="at-area-bad">not reachable</td></tr>`;
+    return `<tr><td>${name}</td><td>${r.saved}/${total}</td><td>${r.filed}/${total}</td><td>${r.hasFurther ? (r.report ? '✅' : '—') : '—'}</td>
+      <td>${atAreaCell(h?.month_end)}</td><td>${atAreaCell(h?.rrr)}</td><td>${atAreaCell(h?.paid)}</td></tr>`;
+  }).join('');
+  body.innerHTML = `<div class="table-wrap"><table class="at-summary-table at-area-table">
+      <tr><th>Parish</th><th>Sundays saved</th><th>Attendance weeks</th><th>Monthly report</th><th>Month-end</th><th>RRR</th><th>Paid</th></tr>${trs}
+    </table></div>
+    <div class="at-subtitle">${esc(attDayLabel(range.from,false))} – ${esc(attDayLabel(range.to,false))} · ${total} Sunday${total===1?'':'s'}. Attendance counts weeks submitted or locked. <button type="button" class="btn btn-sm" onclick="App.atReloadArea()">Refresh</button></div>`;
+}
+function atReloadArea(){ if(state.automations) state.automations.areaLoaded = false; atLoadArea(); }
 
 // Walk the whole settings DOM and rebuild the full config object — every section's
 // Save button calls this, since PUT /config always replaces the entire config.
@@ -19227,15 +19787,19 @@ function collectAutomationsConfig(){
   const base = state.automations?.config || {};
   const config = JSON.parse(JSON.stringify(base));
 
-  // People + their routing
+  // People + their routing. Kingdom's people are listed under People; a satellite parish's people sit inside that
+  // parish's card and are read from there. Both go into config.people (saved together, one routing table).
   const people = [];
   const routing = {};
+  const keyMap = {};   // key on screen -> saved key (a new Kingdom person's key is made from the name)
   AUTOMATION_MESSAGE_TYPES.forEach(mt=>{ routing[mt.key] = {}; });
-  document.querySelectorAll('#atPeopleRows .at-subcard').forEach(row=>{
+  const readPerson = (row, parishCode)=>{
     const existingKey = row.dataset.personKey;
     const name = row.querySelector('.at-p-name')?.value.trim() || '';
     const existing = (base.people||[]).find(p=>p.key===existingKey);
-    let key = existing ? existing.key : slugifyAutomationKey(name || existingKey);
+    // A new parish person keeps the key made when they were added (p<code>), so a same-named Kingdom person can't clash.
+    let key = existing ? existing.key : (parishCode && /^[a-z][a-z0-9_]{0,31}$/.test(existingKey||'') ? existingKey : slugifyAutomationKey(name || existingKey));
+    keyMap[existingKey] = key;
     const tg = row.querySelector('.at-p-tg')?.value.trim() || '';
     const email = row.querySelector('.at-p-email')?.value.trim() || '';
     const botBox = row.querySelector('.at-p-bot'), paysBox = row.querySelector('.at-p-pays');
@@ -19253,6 +19817,16 @@ function collectAutomationsConfig(){
       called: row.querySelector('.at-p-called')?.value.trim() || '',
       pays_rrr: paysBox ? paysBox.checked : !!automationsPersonField(existing || { key }, 'pays_rrr'),
     };
+    // Parish people: which parish, who approves, and the login / Telegram invite made on this page.
+    if(parishCode) person.parish = parishCode;
+    const approves = row.querySelector('.at-p-approves');
+    if(approves) person.approves_rrr = approves.checked;
+    if(row.dataset.appUserId !== undefined){
+      if(row.dataset.appUserId) person.app_user_id = row.dataset.appUserId; else delete person.app_user_id;
+    }
+    if(row.dataset.tgInvite !== undefined){
+      if(row.dataset.tgInvite) person.tg_invite = row.dataset.tgInvite; else delete person.tg_invite;
+    }
     people.push(person);
     row.querySelectorAll('.at-route').forEach(cb=>{
       const mtKey = cb.dataset.mt;
@@ -19260,18 +19834,47 @@ function collectAutomationsConfig(){
       if(!routing[mtKey][key]) routing[mtKey][key] = { telegram:false, email:false };
       routing[mtKey][key][ch] = cb.checked;
     });
+  };
+  document.querySelectorAll('#atPeopleRows .at-subcard').forEach(row=>readPerson(row, ''));
+  const cards = [...document.querySelectorAll('#atParishRows .at-par-card')];
+  cards.forEach(card=>{
+    const code = (card.querySelector('.at-par-code')?.value || '').trim();
+    card.querySelectorAll('.at-par-person').forEach(row=>readPerson(row, code));
   });
   config.people = people;
   config.routing = routing;
+  const savedKeys = new Set(people.map(x=>x.key));
 
-  // Parishes
+  // Parishes (satellite ones also carry status, handler, copies, late alert and portal login)
   const parishes = [];
-  document.querySelectorAll('#atParishRows .at-subcard').forEach(row=>{
-    const code = row.querySelector('.at-par-code')?.value.trim() || '';
-    const name = row.querySelector('.at-par-name')?.value.trim() || '';
+  cards.forEach(card=>{
+    const code = card.querySelector('.at-par-code')?.value.trim() || '';
+    const name = card.querySelector('.at-par-name')?.value.trim() || '';
+    const orig = card.dataset.origCode || '';
+    const existing = (base.parishes||[]).find(p=>String(p.code)===(orig || code));
     const flags = {};
-    row.querySelectorAll('.at-par-flag').forEach(cb=>{ flags[cb.dataset.flag] = cb.checked; });
-    parishes.push({ code, name, source_docs:!!flags.source_docs, attendance:!!flags.attendance, remittance:!!flags.remittance, statement:!!flags.statement });
+    card.querySelectorAll('.at-par-flag').forEach(cb=>{ flags[cb.dataset.flag] = cb.checked; });
+    const parish = { ...(existing || {}), code, name, source_docs:!!flags.source_docs, attendance:!!flags.attendance, remittance:!!flags.remittance, statement:!!flags.statement };
+    if(automationsIsSatCode(code) && card.querySelector('.at-par-active')){
+      const picks = (field)=>[...card.querySelectorAll(`.at-par-pick[data-field="${field}"]:checked`)]
+        .map(cb=>keyMap[cb.dataset.key] || cb.dataset.key).filter(k=>savedKeys.has(k));
+      parish.active = card.querySelector('.at-par-active').checked;
+      parish.handler = card.querySelector('.at-par-handler')?.value === 'clerk_ai' ? 'clerk_ai' : 'box';
+      parish.copies = picks('copies');
+      parish.late_alert = picks('late_alert');
+      if(card.querySelector('.at-par-plogin')?.value === 'own'){
+        parish.portal_login = 'own';
+        parish.portal_username = card.querySelector('.at-par-pusername')?.value.trim() || '';
+        if(card.dataset.pwSealed){
+          parish.portal_password_sealed = card.dataset.pwSealed;
+          parish.portal_password_set_at = card.dataset.pwSetAt || new Date().toISOString();
+        } else { delete parish.portal_password_sealed; delete parish.portal_password_set_at; }
+      } else {
+        parish.portal_login = 'area';
+        delete parish.portal_username; delete parish.portal_password_sealed; delete parish.portal_password_set_at;
+      }
+    }
+    parishes.push(parish);
   });
   config.parishes = parishes;
 
@@ -19328,6 +19931,17 @@ function slugifyAutomationKey(name){
   return slug.slice(0,32);
 }
 
+/** Keep Kingdom's settings.satParishes ([{code,name,active}]) in step with the Automations parishes. */
+async function syncSatParishesSetting(config){
+  const s = await DB.getSettings();
+  const cur = satParseJson(s.satParishes, []);
+  const next = satBuildParishes(config.parishes, cur);
+  // Never wipe a saved list just because none is in the config yet.
+  if(!next.length && Array.isArray(cur) && cur.length) return;
+  if(JSON.stringify(next) === JSON.stringify(Array.isArray(cur) ? cur : [])) return;
+  await DB.saveSettings({ satParishes: next });
+}
+
 async function saveAutomationsConfig(btn){
   if(state.automations?.saving) return;
   state.automations.saving = true;
@@ -19336,6 +19950,7 @@ async function saveAutomationsConfig(btn){
   const errBox = document.getElementById('atSaveErrors');
   if(errBox) errBox.innerHTML = '';
   try{
+    await automationsSealPending();   // portal passwords are locked in the browser before anything is sent
     const config = collectAutomationsConfig();
     const res = await authFetch('/api/automations/config', {
       method:'PUT',
@@ -19347,7 +19962,11 @@ async function saveAutomationsConfig(btn){
       state.automations.configVersion = data.config_version;
       state.automations.config = config;
       state.automations.isDefault = false;
-      showAlert('Saved. The box will pick up the change within 5 minutes.', 'success');
+      // The app itself needs the parish list too (parish name, and refusing a paused parish's pastor).
+      let listErr = null;
+      try { await syncSatParishesSetting(config); } catch(e){ listErr = e; }
+      if(listErr) showAlert(`Saved for the box, but the app's own parish list could not be updated (${listErr.message || 'unknown error'}). Press Save changes again.`, 'danger');
+      else showAlert('Saved. The box will pick up the change within 5 minutes.', 'success');
     } else if(res.status === 409){
       showAlert('Someone else saved a change just before you did. Reloading the latest settings — please make your change again.', 'danger');
       await renderAutomations();
@@ -19358,7 +19977,7 @@ async function saveAutomationsConfig(btn){
       showAlert(data.error || 'Could not save changes. Please try again.', 'danger');
     }
   }catch(e){
-    showAlert('Could not reach the server. Check your connection and try again.', 'danger');
+    showAlert(e?.message && !(e instanceof TypeError) ? e.message : 'Could not reach the server. Check your connection and try again.', 'danger');
   } finally {
     state.automations.saving = false;
     if(btn){ btn.disabled = false; btn.textContent = origText || 'Save changes'; }
@@ -19396,6 +20015,11 @@ return {
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
   renderAutomations, toggleAutomationCard, addAutomationPerson, deleteAutomationPerson, openAutomationGuide, onRemHandlerBoxClick,
   addAutomationParish, deleteAutomationParish, saveAutomationsConfig,
+  atRefreshPicks, atPortalToggle, atClearPortalPw, atCopyInvite, atCopyPin, atCreateLogin, atResetPin, atRemoveLogin, atAddParishPerson, atParishesToggle, atReloadArea,
+  satQuotaCopyFirst, saveSatQuotas,
+  _satBuildQuotas: satBuildQuotas, _satBuildParishes: satBuildParishes, _automationsSplitPeople: automationsSplitPeople,
+  _automationsNewPersonKey: automationsNewPersonKey, _automationsRandomPin: automationsRandomPin, _automationsInviteCode: automationsInviteCode,
+  _automationsSealPassword: automationsSealPassword, _renderAutomationsSettings: renderAutomationsSettings, _AUTOMATION_SAT_ROUTING_TYPES: AUTOMATION_SAT_ROUTING_TYPES, _AUTOMATION_MESSAGE_TYPES: AUTOMATION_MESSAGE_TYPES,
   _countSundaysInRange: countSundaysInRange,
   _buildSundayWeekBounds: buildSundayWeekBounds, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
   _quotaPeriodKey: quotaPeriodKey,
