@@ -112,21 +112,21 @@ export const DEFAULT_CONFIG = {
   },
   // Month-end filing (remittance + attendance on the RCCG portal, check email, Generate RRR).
   // handler: who runs it — "clerk_ai" (the Clerk AI routine, as before) or "box" (the Clerk box scripts).
-  // lines: app income category -> RCCG portal weekly line, or NOT_REMITTED for money that stays in the parish.
+  // lines: app income category -> RCCG portal weekly line (names exactly as the box's remit_match.py), or NOT_REMITTED for money that stays in the parish.
   // A category with money in it but no line here makes the box hold the filing and ask for one.
   remittance: {
     handler: "clerk_ai",
     lines: {
       membersTithe: "General Tithe",
       ministersTithe: "Ministers Tithe",
-      thanksgiving: "THANKSGIVING",
-      slo: "SUNDAY LOVE OFFERING",
+      thanksgiving: "Thanksgiving",
+      slo: "Sunday Love Offering",
       crm: "CRM",
-      workersOffering: "GOSPEL FUND",
-      sundaySchool: "SUNDAY SCHOOL",
-      childrenOffering: "CHILDREN OFFERING",
-      holyCommunionOffering: "HOLY COMMUNION OFFERING",
-      firstFruit: "FIRST FRUIT",
+      workersOffering: "Gospel Fund",
+      sundaySchool: "Sunday School",
+      childrenOffering: "Children Offering",
+      holyCommunionOffering: "Holy Communion Offering",
+      firstFruit: "First Fruit",
     },
   },
 };
