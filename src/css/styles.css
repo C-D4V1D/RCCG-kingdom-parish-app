@@ -748,6 +748,12 @@ tr:hover td{background:var(--surface)}
 .at-empty-card{background:var(--surface);border:1px dashed var(--border2);border-radius:var(--rl);padding:20px;text-align:center;color:var(--text3);font-size:13px}
 .at-section-title{font-size:16px;font-weight:800;color:var(--text);margin:20px 0 4px}
 .at-note{font-size:12px;color:var(--text3);margin-bottom:12px}
+.at-guide-link{text-decoration:none;color:var(--text3);font-size:12px;margin-left:2px}
+.at-guide-item{border-top:1px solid var(--border);padding:8px 0}
+.at-guide-item summary{cursor:pointer;font-weight:600;font-size:14px}
+.at-guide-item p{font-size:13px;margin:6px 0}
+.at-guide-label{font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px}
+.at-guide-sample{white-space:pre-wrap;font-size:13px;line-height:1.45;background:var(--bg2,rgba(127,127,127,.08));border-radius:10px;padding:10px 12px;max-width:460px;border:1px solid var(--border)}
 .at-default-note{background:var(--amber-light);color:var(--amber);border-radius:var(--r);padding:8px 12px;font-size:12px;font-weight:600;margin-bottom:12px}
 .at-subcard{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:12px;margin-bottom:10px}
 .at-subcard-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
