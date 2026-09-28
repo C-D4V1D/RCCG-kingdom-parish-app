@@ -287,7 +287,9 @@ def apply(old):
         tmp = SCHED_CONFIG + ".tmp"; json.dump(sc, open(tmp, "w"), indent=1); os.replace(tmp, SCHED_CONFIG)
     bot = lambda c: json.dumps([(c or {}).get("people"), (c or {}).get("parishes"), ((c or {}).get("automations") or {}).get("upload_bot")], sort_keys=True)
     if bot(old) != bot(new):
-        subprocess.run(["bash", "/workspace/telegram/srcdoc/ensure_running.sh", "--restart"], capture_output=True, timeout=120)
+        # detached: the restart can take minutes (it waits for an upload to finish) and must never hold up the supervisor
+        subprocess.Popen(["bash", "/workspace/telegram/srcdoc/ensure_running.sh", "--restart"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def sync(quiet=True):

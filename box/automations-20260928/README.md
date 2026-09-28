@@ -24,3 +24,11 @@ If that ends with `CHECK OK`, run `bash install.sh`.
 - **Backup:** every original file is copied to `/workspace/backups/automations-20260928/` first.
 - **Timing:** it refuses to run between 07:25 and 09:05, when the statement and memo checks run.
 - **Undo:** `bash /workspace/backups/automations-20260928/undo.sh`
+
+## Update: clerkcfg.py fix (2026-09-28)
+
+Boxes installed before this fix: the upload-bot restart after a settings change now runs in the background instead of holding up the supervisor for up to 2 minutes. To apply it:
+
+```bash
+cd /workspace/updates/automations-20260928 && curl -fsSLO "https://raw.githubusercontent.com/C-D4V1D/RCCG-kingdom-parish-app/main/box/automations-20260928/clerkcfg.py" && curl -fsSLO "https://raw.githubusercontent.com/C-D4V1D/RCCG-kingdom-parish-app/main/box/automations-20260928/SHA256SUMS" && sha256sum -c --ignore-missing SHA256SUMS && install -m 755 clerkcfg.py /workspace/tools/clerkcfg.py && echo UPDATED
+```
