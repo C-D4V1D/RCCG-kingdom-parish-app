@@ -134,7 +134,7 @@ test('public routes still work with no sign-in (report-share POST+GET, login opt
   assert.equal(fetched.status, 200, 'share links still open');
   const opts = await readJson(await call(DB, 'auth/options'));
   assert.ok(opts.length >= 7);
-  for (const o of opts) assert.deepEqual(Object.keys(o).sort(), ['id', 'name', 'role'], 'no emails on the public list');
+  for (const o of opts) assert.deepEqual(Object.keys(o).sort(), ['id', 'name', 'parishCode', 'role'], 'no emails on the public list (the parish code picks the satellite login group)');
   assert.equal((await call(DB, 'kpsc-login-options')).status, 200);
   assert.equal((await call(DB, 'kpsc-policy/summary')).status, 200);
   assert.equal((await call(DB, 'partnership-public')).status, 200);
