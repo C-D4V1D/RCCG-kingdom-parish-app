@@ -916,6 +916,8 @@ const DB = {
 
   getChurchBankIngestLog()     { return apiFetch('church-bank-ingest-log'); },
   getBankBalanceSnapshot()     { return apiFetch('bank-balance-snapshot'); },
+  getPortalBankBalance()       { return apiFetch('bank-portal-balance'); },
+  requestPortalBankBalanceRefresh() { return apiFetch('bank-portal-balance/refresh','POST'); },
 
   getNotifications()           { return apiFetch('notifications'); },
   addNotification(title,body,type='info'){
@@ -4041,7 +4043,7 @@ async function renderDashboard(){
   // Derived from settings, which loadDashboardData has already cached — no fetch.
   // satellite-funds is not part of the dashboard batch payload; fetched in parallel
   // here so calcChurchBalance below never has to self-fetch it (cached 60s either way).
-  const [remRatesDash, allSatFundsDash] = await Promise.all([getRemRates(), DB.getSatelliteFunds()]);
+  const [remRatesDash, allSatFundsDash, dashPortalBalance] = await Promise.all([getRemRates(), DB.getSatelliteFunds(), fetchPortalBankBalanceQuiet()]);
   const settings = settingsDash;
   // Budget contract-v2 section 6: the first visit (Budget or Dashboard) on or after day 3
   // past the previous period's cut-off creates that period's plan automatically. Kicked
@@ -4950,6 +4952,7 @@ async function renderDashboard(){
             <span><span style="display:inline-block;width:8px;height:8px;background:#185FA5;border-radius:50%;margin-right:8px"></span><span style="text-decoration:underline dotted #185FA5;text-underline-offset:3px">Bank</span></span>
             <span style="font-weight:600">${fmt(churchBal.bankBalance)}</span>
           </a>
+          ${renderPortalBalanceBlock(dashPortalBalance, churchBal.bankBalance)}
           <a onclick="App.showCashPoolModal()" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between">
             <span><span style="display:inline-block;width:8px;height:8px;background:${churchBal.cashDeficit>0?'var(--danger)':'#BA7517'};border-radius:50%;margin-right:8px"></span>${churchBal.cashDeficit>0?`<span style="color:var(--danger);font-weight:600;text-decoration:underline dotted var(--danger);text-underline-offset:3px">Cash with Accountant ⚠ Owes</span>`:`<span style="text-decoration:underline dotted #BA7517;text-underline-offset:3px">Cash with Accountant</span>`}</span>
             <span style="font-weight:600;color:${churchBal.cashDeficit>0?'var(--danger)':'inherit'}">${churchBal.cashDeficit>0?'−'+fmt(churchBal.cashDeficit):fmt(churchBal.cashWithAccountant)}</span>
@@ -12342,6 +12345,7 @@ async function renderBank(){
     renderPageErrorState({ pageId: 'bank', pageTitle: 'Bank Account', pageSub: monthLabel(), failed: _bankFailed });
     return;
   }
+  const bankPortalBalance = await fetchPortalBankBalanceQuiet();
   const [allCashTx, allExpenses, allIncome, allRemittances, periodRange, _bankRatesData, allSatFundsRB] = _bankSettled.map(r => r.value);
   const remRates = _bankRatesData.rates || DEFAULT_REMITTANCE_RATES;
   const tab = state.bankTab||'overview';
@@ -12518,6 +12522,7 @@ async function renderBank(){
         <div class="kpi-icon" style="background:#E6F1FB">🏦</div>
         <div class="kpi-label">Bank Balance</div>
         <div class="kpi-val" style="color:${bankBalance<0?'var(--danger)':'var(--primary)'}">${fmt(bankBalance)}</div>
+        ${renderPortalBalanceBlock(bankPortalBalance, bankBalance)}
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">📥</div>
@@ -12926,6 +12931,54 @@ async function ackChurchBankIngestAttention(lastActivityAt){
   s.church_email_ingest_ack_at = lastActivityAt || '';
   await DB.saveSettings(s);
   loadBankEmailIngestCard();
+}
+
+// The real bank balance, fetched from the RCCG portal by the Clerk box (twice daily, or on
+// demand via Refresh / the Telegram bot). Same block on the Dashboard (under the Bank line)
+// and the Bank page (inside the Bank Balance tile) — one renderer, two call sites, visible to
+// everyone who can already see that page (no role restriction on viewing).
+function renderPortalBalanceBlock(portal, appBalance){
+  const notChecked = !portal || portal.balance === null || portal.balance === undefined;
+  const checkedAt = !notChecked && portal.checked_at ? `${fmtDate(portal.checked_at)} ${fmtTime(portal.checked_at)}` : '';
+  if(notChecked){
+    return `<div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);font-size:11.5px;color:var(--text3);display:flex;justify-content:space-between;align-items:center">
+      <span>Real Balance: not checked yet</span>
+      <button onclick="App.refreshPortalBankBalance(this)" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
+    </div>`;
+  }
+  const diff = appBalance - portal.balance;
+  const behind = diff < 0;
+  const aligned = Math.abs(diff) < 1;
+  return `<div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);font-size:11.5px">
+    <div style="display:flex;justify-content:space-between;align-items:center;color:var(--text2)">
+      <span>Real Balance</span><span style="font-weight:600">${fmt(portal.balance)}</span>
+    </div>
+    <div style="margin-top:2px;color:${aligned?'var(--success)':(behind?'var(--danger)':'var(--amber)')}">
+      ${aligned ? '✓ Matches the app' : `⚠ App is ${fmt(Math.abs(diff))} ${behind?'behind':'ahead of'} the real balance`}
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;color:var(--text3);margin-top:4px">
+      <span>${checkedAt?`Checked ${checkedAt}`:''}</span>
+      <button onclick="App.refreshPortalBankBalance(this)" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
+    </div>
+  </div>`;
+}
+
+async function refreshPortalBankBalance(btn){
+  const restore = btn ? setBtnLoading(btn, 'Requesting…') : null;
+  try {
+    await DB.requestPortalBankBalanceRefresh();
+    showAlert('Refresh requested — the box will check the portal and update this shortly.', 'success');
+  } catch(e){
+    showAlert(`Could not request a refresh: ${e.message}`, 'danger');
+  } finally {
+    if(restore) restore();
+  }
+}
+
+// Best-effort fetch — the Dashboard/Bank page must never fail to render just because the box
+// hasn't reported a balance yet or the Worker is briefly unreachable.
+async function fetchPortalBankBalanceQuiet(){
+  try { return await DB.getPortalBankBalance(); } catch { return { balance: null, checked_at: null }; }
 }
 
 function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups=0){
@@ -19057,6 +19110,7 @@ return {
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, onExpAmountChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
+  refreshPortalBankBalance,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showExpenseCategoryTransactions, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,

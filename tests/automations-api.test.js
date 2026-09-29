@@ -229,3 +229,36 @@ test('automations: Worker rejecting the app key (401) becomes 502, not a sign-ou
     assert.match(data.error, /did not accept this app's key/);
   } finally { restore(); }
 });
+
+// The real bank balance card (Dashboard + Bank page): unlike /api/automations above, this is
+// ordinary business data, not box administration — every Finance role must be able to read it
+// and press Refresh, viewer included.
+test('bank-portal-balance: any Finance role, including viewer, can GET the real balance', async () => {
+  const restore = stubFetch(() => jsonResponse(200, { balance: 123957.0, checked_at: '2026-09-29T06:02:00Z' }));
+  try {
+    for (const role of ['viewer', 'treasurer', 'it_admin']) {
+      const token = await financeToken({ role });
+      const res = await onRequest({ request: req('bank-portal-balance', { headers: bearer(token) }), env: baseEnv });
+      assert.equal(res.status, 200, `role ${role} should be able to read the balance`);
+      const data = await readJson(res);
+      assert.equal(data.balance, 123957.0);
+    }
+    assert.equal(fetchCalls[0].url, `${WATCHDOG_URL}/bank-balance`);
+    assert.equal(fetchCalls[0].init.headers['x-watchdog-token'], WATCHDOG_TOKEN);
+  } finally { restore(); }
+});
+
+test('bank-portal-balance/refresh: any Finance role, including viewer, can trigger a refresh', async () => {
+  const restore = stubFetch(() => jsonResponse(200, { ok: true, id: 'ev-1' }));
+  try {
+    for (const role of ['viewer', 'treasurer', 'it_admin']) {
+      const token = await financeToken({ role });
+      const res = await onRequest({ request: req('bank-portal-balance/refresh', { method: 'POST', headers: bearer(token) }), env: baseEnv });
+      assert.equal(res.status, 200, `role ${role} should be able to refresh`);
+    }
+    assert.equal(fetchCalls[0].url, `${WATCHDOG_URL}/events`);
+    const sentEvent = JSON.parse(fetchCalls[0].init.body);
+    assert.equal(sentEvent.event, 'bank_balance_refresh_requested');
+    assert.equal(fetchCalls[0].init.headers['x-watchdog-token'], WATCHDOG_TOKEN);
+  } finally { restore(); }
+});

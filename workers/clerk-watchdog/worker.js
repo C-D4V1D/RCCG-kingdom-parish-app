@@ -90,6 +90,26 @@ export default {
       return json({ last_ping: p ? new Date(+p).toISOString() : null, health: h ? JSON.parse(h) : null });
     }
 
+    // Real church bank balance, fetched from the RCCG portal by the box (twice daily, or on
+    // demand via the /events mailbox + Telegram /balance). Kept separate from /health, which is
+    // operational status for the Automations tab — this is business data the Dashboard/Bank
+    // pages read directly, open to any signed-in Finance user (see functions/api/[[route]].js).
+    if (req.method === "POST" && url.pathname === "/bank-balance") {
+      const raw = await req.text();
+      if (new TextEncoder().encode(raw).length > MAX_EVENT_BYTES) return json({ error: "payload too large" }, 413);
+      let b;
+      try { b = JSON.parse(raw); } catch { return json({ error: "invalid JSON" }, 400); }
+      const balance = Number(b?.balance);
+      if (!Number.isFinite(balance)) return json({ error: "balance must be a number" }, 400);
+      await env.KV.put("bank_balance", JSON.stringify({ balance, checked_at: new Date().toISOString() }));
+      return json({ ok: true });
+    }
+
+    if (req.method === "GET" && url.pathname === "/bank-balance") {
+      const v = await env.KV.get("bank_balance");
+      return json(v ? JSON.parse(v) : { balance: null, checked_at: null });
+    }
+
     if (req.method === "GET" && url.pathname === "/config") {
       const [c, v] = await Promise.all(["config", "config_version"].map((k) => env.KV.get(k)));
       return json({ config_version: +(v || 0), config: c ? JSON.parse(c) : DEFAULT_CONFIG, is_default: !c });

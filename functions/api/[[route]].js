@@ -351,7 +351,11 @@ function classifyApiRoute(route, param, method) {
 function financeRoleDenied(user, route, param, method) {
   if (method === 'GET') return null;
   if (user.role === 'viewer') {
-    const allowed = (route === 'change-pin') || (route === 'audit' && method === 'POST' && !param);
+    // bank-portal-balance/refresh: not accounting, just asks the box to check the RCCG
+    // portal again — deliberately open to every role that can see the Dashboard/Bank
+    // page, viewer included (see the Real Balance feature note).
+    const allowed = (route === 'change-pin') || (route === 'audit' && method === 'POST' && !param)
+      || (route === 'bank-portal-balance' && param === 'refresh');
     if (!allowed) return finAuthErr('forbidden', 403, 'Your role (viewer) is read-only.');
   }
   if (route === 'users' && user.role !== 'it_admin') {
@@ -2102,6 +2106,22 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
     }
     if (route === 'bank-balance-snapshot' && method === 'GET') {
       return await getLatestBankBalanceSnapshot(DB);
+    }
+    // Real church bank balance from the RCCG portal (fetched by the Clerk box). Open to any
+    // signed-in Finance user — not role-gated, unlike the /api/automations proxy below, since
+    // this is ordinary Dashboard/Bank page data, not box administration.
+    if (route === 'bank-portal-balance' && !param && method === 'GET') {
+      const { errorResponse, data } = await callClerkWatchdog(env, '/bank-balance');
+      if (errorResponse) return errorResponse;
+      return ok(data);
+    }
+    if (route === 'bank-portal-balance' && param === 'refresh' && method === 'POST') {
+      const { errorResponse, data } = await callClerkWatchdog(env, '/events', {
+        method: 'POST',
+        body: { event: 'bank_balance_refresh_requested', requested_by: authz?.user?.name || authz?.user?.id || '' },
+      });
+      if (errorResponse) return errorResponse;
+      return ok({ ok: true, id: data?.id });
     }
     if (route === 'kpsc-finance-share' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
