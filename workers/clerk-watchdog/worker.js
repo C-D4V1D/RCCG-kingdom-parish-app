@@ -99,7 +99,12 @@ export default {
       if (new TextEncoder().encode(raw).length > MAX_EVENT_BYTES) return json({ error: "payload too large" }, 413);
       let b;
       try { b = JSON.parse(raw); } catch { return json({ error: "invalid JSON" }, 400); }
-      const balance = Number(b?.balance);
+      // Number(null) and Number('') are both 0 — reject a missing/blank reading explicitly so a
+      // failed portal check can never silently overwrite a real balance with ₦0.
+      if (b?.balance === null || b?.balance === undefined || b?.balance === "") {
+        return json({ error: "balance must be a number" }, 400);
+      }
+      const balance = Number(b.balance);
       if (!Number.isFinite(balance)) return json({ error: "balance must be a number" }, 400);
       await env.KV.put("bank_balance", JSON.stringify({ balance, checked_at: new Date().toISOString() }));
       return json({ ok: true });

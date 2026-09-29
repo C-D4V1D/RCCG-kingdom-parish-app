@@ -231,12 +231,15 @@ test('automations: Worker rejecting the app key (401) becomes 502, not a sign-ou
 });
 
 // The real bank balance card (Dashboard + Bank page): unlike /api/automations above, this is
-// ordinary business data, not box administration — every Finance role must be able to read it
-// and press Refresh, viewer included.
-test('bank-portal-balance: any Finance role, including viewer, can GET the real balance', async () => {
+// ordinary business data, not box administration — every role that can actually see the
+// Dashboard or Bank page must be able to read it and press Refresh, viewer included. But it
+// must NOT be reachable by an attendance-only sign-in (usher/admin_assistant) or a satellite
+// parish session (that's Kingdom Parish's own bank balance, never theirs) just because they
+// hold a valid Finance token — the browser hiding the button is not enough on its own.
+test('bank-portal-balance: roles that can see Dashboard/Bank can GET the real balance', async () => {
   const restore = stubFetch(() => jsonResponse(200, { balance: 123957.0, checked_at: '2026-09-29T06:02:00Z' }));
   try {
-    for (const role of ['viewer', 'treasurer', 'it_admin']) {
+    for (const role of ['viewer', 'accountant', 'pastor', 'signatory', 'admin_officer', 'it_admin']) {
       const token = await financeToken({ role });
       const res = await onRequest({ request: req('bank-portal-balance', { headers: bearer(token) }), env: baseEnv });
       assert.equal(res.status, 200, `role ${role} should be able to read the balance`);
@@ -248,10 +251,24 @@ test('bank-portal-balance: any Finance role, including viewer, can GET the real 
   } finally { restore(); }
 });
 
-test('bank-portal-balance/refresh: any Finance role, including viewer, can trigger a refresh', async () => {
+test('bank-portal-balance: attendance-only and satellite roles are refused, even with a valid token', async () => {
+  const restore = stubFetch(() => jsonResponse(200, { balance: 123957.0, checked_at: '2026-09-29T06:02:00Z' }));
+  try {
+    for (const role of ['usher', 'admin_assistant', 'satellite']) {
+      const token = await financeToken({ role });
+      const res = await onRequest({ request: req('bank-portal-balance', { headers: bearer(token) }), env: baseEnv });
+      assert.equal(res.status, 403, `role ${role} must not be able to read Kingdom Parish's bank balance`);
+      const refresh = await onRequest({ request: req('bank-portal-balance/refresh', { method: 'POST', headers: bearer(token) }), env: baseEnv });
+      assert.equal(refresh.status, 403, `role ${role} must not be able to trigger a refresh either`);
+    }
+    assert.equal(fetchCalls.length, 0, 'the Worker must never be called for a refused role');
+  } finally { restore(); }
+});
+
+test('bank-portal-balance/refresh: roles that can see Dashboard/Bank can trigger a refresh', async () => {
   const restore = stubFetch(() => jsonResponse(200, { ok: true, id: 'ev-1' }));
   try {
-    for (const role of ['viewer', 'treasurer', 'it_admin']) {
+    for (const role of ['viewer', 'accountant', 'it_admin']) {
       const token = await financeToken({ role });
       const res = await onRequest({ request: req('bank-portal-balance/refresh', { method: 'POST', headers: bearer(token) }), env: baseEnv });
       assert.equal(res.status, 200, `role ${role} should be able to refresh`);

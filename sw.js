@@ -1,9 +1,4 @@
 // build:5cd3188e0e
-<<<<<<< HEAD
-// build:1a0896a59f
-=======
-// build:fb43593fc6
->>>>>>> origin/main
 const CACHE = 'kpadmin-v35';
 const SHELL = [
   '/',

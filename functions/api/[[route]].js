@@ -792,6 +792,24 @@ function newMonthDueInfo({ year, month, dayOfMonth, lastPeriod = '', graceDays =
   };
 }
 
+// Mirrors PERMISSIONS/ACCESS_RULES.pages.{dashboard,bank} on the client (src/js/app.js) — the
+// real bank balance is sensitive enough that it must not rely on the browser alone hiding the
+// button. usher/admin_assistant/satellite default to attendance-only and must never see it; a
+// satellite session in particular must never see Kingdom Parish's own bank balance.
+const DEFAULT_ROLE_PERMISSIONS_FOR_BALANCE = {
+  pastor: ['dashboard'], accountant: ['dashboard', 'bank'], admin_officer: ['dashboard'],
+  signatory: ['dashboard', 'bank'], viewer: ['dashboard'],
+  usher: [], admin_assistant: [], satellite: [],
+};
+async function canSeeRealBankBalance(DB, role) {
+  if (role === 'it_admin') return true;
+  if (role === 'satellite') return false; // Kingdom's balance is never a satellite parish's data
+  let custom = null;
+  try { custom = JSON.parse((await getSettingValue(DB, 'rolePermissions')) || 'null'); } catch { custom = null; }
+  const perms = (custom && custom[role]) || DEFAULT_ROLE_PERMISSIONS_FOR_BALANCE[role] || [];
+  return perms.includes('dashboard') || perms.includes('bank');
+}
+
 /**
  * Read one settings row as a trimmed string ('' when absent).
  * Best-effort: a read that blows up must not take the whole cron run with it —
@@ -2285,18 +2303,26 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
     if (route === 'bank-balance-snapshot' && method === 'GET') {
       return await getLatestBankBalanceSnapshot(DB);
     }
-    // Real church bank balance from the RCCG portal (fetched by the Clerk box). Open to any
-    // signed-in Finance user — not role-gated, unlike the /api/automations proxy below, since
-    // this is ordinary Dashboard/Bank page data, not box administration.
+    // Real church bank balance from the RCCG portal (fetched by the Clerk box). Not role-gated
+    // like the /api/automations proxy below (this is ordinary Dashboard/Bank data, not box
+    // administration) — but it IS gated to roles that can actually see the Dashboard or Bank
+    // page, same as the browser: an attendance-only sign-in (usher/admin_assistant) or a
+    // satellite parish session must never be able to fetch it by calling the API directly.
     if (route === 'bank-portal-balance' && !param && method === 'GET') {
+      if (!(await canSeeRealBankBalance(DB, authz?.finance?.role))) {
+        return err('You do not have permission to view the bank balance.', 403);
+      }
       const { errorResponse, data } = await callClerkWatchdog(env, '/bank-balance');
       if (errorResponse) return errorResponse;
       return ok(data);
     }
     if (route === 'bank-portal-balance' && param === 'refresh' && method === 'POST') {
+      if (!(await canSeeRealBankBalance(DB, authz?.finance?.role))) {
+        return err('You do not have permission to view the bank balance.', 403);
+      }
       const { errorResponse, data } = await callClerkWatchdog(env, '/events', {
         method: 'POST',
-        body: { event: 'bank_balance_refresh_requested', requested_by: authz?.user?.name || authz?.user?.id || '' },
+        body: { event: 'bank_balance_refresh_requested', requested_by: authz?.finance?.name || authz?.finance?.id || '' },
       });
       if (errorResponse) return errorResponse;
       return ok({ ok: true, id: data?.id });

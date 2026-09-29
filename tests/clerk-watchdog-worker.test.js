@@ -380,6 +380,19 @@ test('POST /bank-balance rejects a non-numeric balance and needs the token', asy
   assert.equal(unauth.status, 401);
 });
 
+test('POST /bank-balance rejects a missing/null/blank balance rather than silently storing ₦0', async () => {
+  const env = createEnv();
+  // Seed a real, valid balance first...
+  await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 123957.0 } }), env);
+  // ...then confirm a failed portal check (no figure, or an empty/null one) can never overwrite it.
+  for (const bad of [{}, { balance: null }, { balance: '' }]) {
+    const res = await worker.fetch(req('/bank-balance', { method: 'POST', body: bad }), env);
+    assert.equal(res.status, 400, `body ${JSON.stringify(bad)} must be rejected`);
+  }
+  const get = await readJson(await worker.fetch(req('/bank-balance'), env));
+  assert.equal(get.balance, 123957.0, 'the last valid balance must still be the one stored');
+});
+
 test('bank_balance_refresh_requested travels through the generic /events mailbox', async () => {
   const env = createEnv();
   const post = await readJson(await worker.fetch(req('/events', { method: 'POST', body: { event: 'bank_balance_refresh_requested', requested_by: 'David' } }), env));
