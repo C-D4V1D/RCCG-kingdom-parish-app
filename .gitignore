@@ -37,3 +37,4 @@ scripts/demo/demo.sqlite*
 scripts/demo/.shots/
 
 .claude/settings.local.json
+__pycache__/
