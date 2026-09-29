@@ -143,6 +143,24 @@ Verify the live code with the Cloudflare connector (`workers_get_worker_code cle
 - cleanup-20260928 removed the hourly attendance polling: `att-watch.py` is no longer started and the scheduler's
   sched_config.json always has `"attendance": false`. Attendance is filed only by the month-end run (and Refresh attendance).
 
+## Satellite parishes (parishes-20261003)
+
+- App: each satellite parish (659840, 597445, 761516) has its own D1 (`SAT_<code>` in wrangler.toml); `/api/sat/<route>`
+  runs Kingdom's handlers on it. Role `satellite` + `users.parish_code` (pastor login: Sunday records + Attendance only).
+  The box reads a parish with its automation key + header `X-Sat-Parish: <code>` (`sat-fetch.cjs` adds it to node scripts).
+  A parish's cut-off collection signal carries `satellite:true, parish` and always goes to the box (Clerk AI only if silent).
+- Config: `people[].parish` marks a parish's people; `parishes[]` for satellites add `active, handler, copies, late_alert,
+  portal_login (area|own), portal_username, portal_password_sealed` (RSA-OAEP-256 with the box key from health).
+  `clerkcfg.people()` is Kingdom's people only (a pastor never gets Kingdom messages); `all_people()` is everyone, with
+  bot-linked chat ids from `/workspace/state/satlinks.json` merged in.
+- Box: `satmonthend.py` (monthend.py dispatches `satellite` signals to it) runs Kingdom's month-end in
+  `/workspace/rccg-sat/<code>/{remit,att}` (localized copies of the scripts, refreshed each run); buttons are bot callbacks
+  `mend|<code>|<month>|generate_rrr|refresh` and `paid|<month>|<code>`. `satclose.py` = monthclose per parish
+  (state `state/monthclose-<code>.json`), `satinfo.py` = reminders (Kingdom's timings) + health, `satbot.py` = the bot for
+  parish people (`/start inv_<invite>` links them; uploads fixed to their parish; /month /status /paid /help).
+- Not done yet: using a parish's own portal login (the password is stored sealed; portal-api `login()` still uses the Area
+  account).
+
 ## Known open items
 
 - The repo is public and `workers/clerk-watchdog/config.js` contains people's emails and Telegram chat ids. The owner
